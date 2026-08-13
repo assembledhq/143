@@ -49,7 +49,7 @@ Return every previously identified P0, P1, P2, and P3 code issue in `findings`; 
 
 For `description_assessments`, return exactly one assessment for each required key below, with no extra keys:
 {{- range .DescriptionRequirements}}
-- {{.Key}}: {{.Prompt}}
+- {{.Key}} (evidence kind: {{.EvidenceKind}}): {{.Prompt}}
 {{- else}}
 - none; return an empty array
 {{- end}}
@@ -61,6 +61,6 @@ If an assessment uses `evidence_basis="image"`, `evidence_ids` must contain one 
 - none
 {{- end}}
 For every non-image basis, `evidence_ids` must be empty. Use `not_applicable` and `missing` bases only with their matching statuses.
-Visual-evidence requirements may use only `image`, `preview_link`, or `repository` when satisfied; text in the pull-request description or diff alone is insufficient.
+Requirements marked with evidence kind `visual` may use only `image`, `preview_link`, or `repository` when satisfied; text in the pull-request description or diff alone is insufficient.
 
 Preserve the evidence from your previous answer while applying the current decision contract. Set `approval_recommended=false` only for a P0/P1 finding, a missing description assessment, a true structured blocker boolean, or a valid explicit `human_review_reasons` entry.

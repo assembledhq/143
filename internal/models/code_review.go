@@ -457,8 +457,29 @@ type CodeReviewDescriptionRequirement struct {
 	Title         string                             `json:"title"`
 	Prompt        string                             `json:"prompt"`
 	Required      bool                               `json:"required"`
+	EvidenceKind  CodeReviewDescriptionEvidenceKind  `json:"evidence_kind,omitempty"`
 	Applicability string                             `json:"applicability,omitempty"`
 	AppliesWhen   CodeReviewDescriptionApplicability `json:"applies_when,omitempty"`
+}
+
+// CodeReviewDescriptionEvidenceKind is an explicit policy contract for the
+// evidence classes that may satisfy one description requirement. General
+// requirements may use any supported basis; visual requirements require an
+// image, preview link, or repository-native visual artifact.
+type CodeReviewDescriptionEvidenceKind string
+
+const (
+	CodeReviewDescriptionEvidenceKindGeneral CodeReviewDescriptionEvidenceKind = "general"
+	CodeReviewDescriptionEvidenceKindVisual  CodeReviewDescriptionEvidenceKind = "visual"
+)
+
+func (k CodeReviewDescriptionEvidenceKind) Validate() error {
+	switch k {
+	case CodeReviewDescriptionEvidenceKindGeneral, CodeReviewDescriptionEvidenceKindVisual:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodeReviewDescriptionEvidenceKind: %q", k)
+	}
 }
 
 type CodeReviewDescriptionPolicy struct {
@@ -560,11 +581,12 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 		ReviewInstructions:      "",
 		AutomatedApprovalPolicy: DefaultCodeReviewAutomatedApprovalPolicy,
 		DescriptionPolicy: CodeReviewDescriptionPolicy{Requirements: []CodeReviewDescriptionRequirement{
-			{Key: "description", Title: "Understandable description", Required: true, Prompt: "Explain what is changing and why clearly enough for a reviewer to understand the intent."},
+			{Key: "description", Title: "Understandable description", Required: true, EvidenceKind: CodeReviewDescriptionEvidenceKindGeneral, Prompt: "Explain what is changing and why clearly enough for a reviewer to understand the intent."},
 			{
 				Key:           "testing",
 				Title:         "Testing evidence",
 				Required:      true,
+				EvidenceKind:  CodeReviewDescriptionEvidenceKindGeneral,
 				Applicability: "nontrivial",
 				AppliesWhen: CodeReviewDescriptionApplicability{
 					Kind:            CodeReviewDescriptionApplicabilityNontrivial,
@@ -577,6 +599,7 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 				Key:           "ui_evidence",
 				Title:         "Screenshots or preview link",
 				Required:      true,
+				EvidenceKind:  CodeReviewDescriptionEvidenceKindVisual,
 				Applicability: "paths",
 				AppliesWhen: CodeReviewDescriptionApplicability{
 					Kind: CodeReviewDescriptionApplicabilityPaths,
@@ -696,6 +719,12 @@ func normalizeCodeReviewDescriptionPolicy(policy CodeReviewDescriptionPolicy) Co
 	// normalizing its elements to avoid mutating a caller's shared backing array.
 	policy.Requirements = append([]CodeReviewDescriptionRequirement(nil), policy.Requirements...)
 	for i := range policy.Requirements {
+		if policy.Requirements[i].EvidenceKind == "" {
+			policy.Requirements[i].EvidenceKind = CodeReviewDescriptionEvidenceKindGeneral
+			if strings.EqualFold(strings.TrimSpace(policy.Requirements[i].Key), "ui_evidence") {
+				policy.Requirements[i].EvidenceKind = CodeReviewDescriptionEvidenceKindVisual
+			}
+		}
 		appliesWhen := &policy.Requirements[i].AppliesWhen
 		switch string(appliesWhen.Kind) {
 		case "frontend_or_ui_visible":
@@ -747,6 +776,9 @@ func (c CodeReviewPolicyConfig) Validate() error {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "semantic_dedupe_cooldown_seconds must be between 60 and 86400")
 	}
 	for _, requirement := range c.DescriptionPolicy.Requirements {
+		if err := requirement.EvidenceKind.Validate(); err != nil {
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldDescriptionPolicy, err.Error())
+		}
 		if err := requirement.AppliesWhen.Validate(); err != nil {
 			return codeReviewPolicyFieldError(CodeReviewPolicyFieldDescriptionPolicy, err.Error())
 		}

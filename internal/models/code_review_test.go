@@ -129,11 +129,43 @@ func TestCodeReviewVisualEvidenceSnapshotCanonicalHash(t *testing.T) {
 	untrustedCopy := mutableCopy
 	untrustedCopy.Evidence = append([]CodeReviewVisualEvidence(nil), mutableCopy.Evidence...)
 	untrustedCopy.Evidence[0].Source.AltText = "edited captured caption"
+	overflowCopy := mutableCopy
+	overflowCopy.Overflow = true
+	overflowCopy.OmittedSourceCount = 1
 
 	require.NotEmpty(t, base.CanonicalHash(), "canonical visual-evidence hash should be available for a valid snapshot")
 	require.Equal(t, base.CanonicalHash(), mutableCopy.CanonicalHash(), "canonical visual-evidence hash should exclude mutable first-party URLs and capture timing")
 	require.NotEqual(t, base.CanonicalHash(), contentCopy.CanonicalHash(), "canonical visual-evidence hash should change when captured image content changes")
 	require.NotEqual(t, base.CanonicalHash(), untrustedCopy.CanonicalHash(), "canonical visual-evidence hash should change when captured untrusted context changes")
+	require.NotEqual(t, base.CanonicalHash(), overflowCopy.CanonicalHash(), "canonical visual-evidence hash should change when source provenance is omitted")
+}
+
+func TestCodeReviewDescriptionEvidenceKindValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		kind      CodeReviewDescriptionEvidenceKind
+		expectErr bool
+	}{
+		{name: "general", kind: CodeReviewDescriptionEvidenceKindGeneral},
+		{name: "visual", kind: CodeReviewDescriptionEvidenceKindVisual},
+		{name: "empty", kind: "", expectErr: true},
+		{name: "unknown", kind: "screenshot", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.kind.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "invalid description evidence kind should be rejected")
+				return
+			}
+			require.NoError(t, err, "supported description evidence kind should validate")
+		})
+	}
 }
 
 func TestCodeReviewDescriptionEvidenceBasisValidate(t *testing.T) {
@@ -261,7 +293,27 @@ func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	require.Equal(t, []ReasoningEffort{ReasoningEffortHigh, ReasoningEffortHigh}, config.AgentRoster.ReviewerReasoningEfforts, "each default reviewer should use high reasoning")
 	require.Equal(t, OpenCodeModelGPT55, *config.AgentRoster.OrchestratorModel, "default roster should pin the orchestrator model")
 	require.Equal(t, ReasoningEffortHigh, config.AgentRoster.ReasoningEffort, "code review orchestrator should default to high reasoning")
+	require.Equal(t, CodeReviewDescriptionEvidenceKindGeneral, config.DescriptionPolicy.Requirements[0].EvidenceKind, "description requirement should accept general evidence by default")
+	require.Equal(t, CodeReviewDescriptionEvidenceKindGeneral, config.DescriptionPolicy.Requirements[1].EvidenceKind, "testing requirement should accept general evidence by default")
+	require.Equal(t, CodeReviewDescriptionEvidenceKindVisual, config.DescriptionPolicy.Requirements[2].EvidenceKind, "UI requirement should explicitly require visual evidence")
 	require.NoError(t, config.Validate(), "default code review policy should be valid")
+}
+
+func TestResolveCodeReviewPolicyConfigDefaultsLegacyDescriptionEvidenceKind(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultCodeReviewPolicyConfig()
+	config.DescriptionPolicy.Requirements[0].EvidenceKind = ""
+	config.DescriptionPolicy.Requirements[2].EvidenceKind = ""
+	config.DescriptionPolicy.Requirements = append(config.DescriptionPolicy.Requirements, CodeReviewDescriptionRequirement{
+		Key: "custom_screenshot_copy", Title: "Screenshot narrative", Required: true,
+	})
+
+	resolved := ResolveCodeReviewPolicyConfig(&config)
+
+	require.Equal(t, CodeReviewDescriptionEvidenceKindGeneral, resolved.DescriptionPolicy.Requirements[0].EvidenceKind, "legacy general requirements should remain general")
+	require.Equal(t, CodeReviewDescriptionEvidenceKindVisual, resolved.DescriptionPolicy.Requirements[2].EvidenceKind, "legacy built-in UI requirement should preserve its visual contract")
+	require.Equal(t, CodeReviewDescriptionEvidenceKindGeneral, resolved.DescriptionPolicy.Requirements[3].EvidenceKind, "custom requirements should not become visual from prose keywords")
 }
 
 func TestResolveCodeReviewPolicyConfigDefaultsLegacyRosterReasoning(t *testing.T) {
@@ -390,6 +442,9 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 		}},
 		{name: "rejects invalid UTF-8", mutate: func(c *CodeReviewPolicyConfig) { c.ReviewInstructions = string([]byte{0xff}) }, expectErr: true},
 		{name: "rejects invalid UTF-8 approval policy", mutate: func(c *CodeReviewPolicyConfig) { c.AutomatedApprovalPolicy = string([]byte{0xff}) }, expectErr: true},
+		{name: "rejects invalid description evidence kind", mutate: func(c *CodeReviewPolicyConfig) {
+			c.DescriptionPolicy.Requirements[0].EvidenceKind = "screenshot"
+		}, expectErr: true},
 		{name: "rejects zero inline comments", mutate: func(c *CodeReviewPolicyConfig) { c.InlineCommentLimit = 0 }, expectErr: true},
 		{name: "rejects too many inline comments", mutate: func(c *CodeReviewPolicyConfig) { c.InlineCommentLimit = 11 }, expectErr: true},
 		{name: "rejects too short semantic cooldown", mutate: func(c *CodeReviewPolicyConfig) { c.RiskPolicy.SemanticDedupeCooldownSeconds = 59 }, expectErr: true},

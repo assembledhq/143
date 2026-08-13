@@ -11,6 +11,10 @@ import (
 	"github.com/google/uuid"
 )
 
+// CodeReviewVisualEvidenceMaxImages is the shared assessment-wide bound for
+// retained provenance records and materialized image attachments.
+const CodeReviewVisualEvidenceMaxImages = 32
+
 // CodeReviewEvidenceSurface identifies the GitHub surface that displayed an
 // image when a code review captured its immutable evidence snapshot.
 type CodeReviewEvidenceSurface string
@@ -147,6 +151,7 @@ type CodeReviewVisualEvidenceDiscovery struct {
 	PullRequestNumber int                              `json:"pull_request_number"`
 	HeadSHA           string                           `json:"head_sha"`
 	CapturedAt        time.Time                        `json:"captured_at"`
+	SourceCount       int                              `json:"source_count"`
 	Sources           []CodeReviewVisualEvidenceSource `json:"sources"`
 }
 
@@ -172,15 +177,16 @@ type CodeReviewVisualEvidence struct {
 // CodeReviewVisualEvidenceSnapshot is the immutable manifest shared by every
 // reviewer and the orchestrator in one assessment.
 type CodeReviewVisualEvidenceSnapshot struct {
-	Version           int                        `json:"version"`
-	RepositoryID      uuid.UUID                  `json:"repository_id"`
-	Repository        string                     `json:"repository"`
-	PullRequestNumber int                        `json:"pull_request_number"`
-	HeadSHA           string                     `json:"head_sha"`
-	CapturedAt        time.Time                  `json:"captured_at"`
-	Complete          bool                       `json:"complete"`
-	Overflow          bool                       `json:"overflow"`
-	Evidence          []CodeReviewVisualEvidence `json:"evidence"`
+	Version            int                        `json:"version"`
+	RepositoryID       uuid.UUID                  `json:"repository_id"`
+	Repository         string                     `json:"repository"`
+	PullRequestNumber  int                        `json:"pull_request_number"`
+	HeadSHA            string                     `json:"head_sha"`
+	CapturedAt         time.Time                  `json:"captured_at"`
+	Complete           bool                       `json:"complete"`
+	Overflow           bool                       `json:"overflow"`
+	OmittedSourceCount int                        `json:"omitted_source_count,omitempty"`
+	Evidence           []CodeReviewVisualEvidence `json:"evidence"`
 }
 
 // CanonicalHash binds a description assessment to immutable evidence identity
@@ -212,19 +218,21 @@ func (s CodeReviewVisualEvidenceSnapshot) CanonicalHash() string {
 		DuplicateOfEvidenceID string                              `json:"duplicate_of_evidence_id,omitempty"`
 	}
 	type canonicalSnapshot struct {
-		Version           int                 `json:"version"`
-		RepositoryID      uuid.UUID           `json:"repository_id"`
-		Repository        string              `json:"repository"`
-		PullRequestNumber int                 `json:"pull_request_number"`
-		HeadSHA           string              `json:"head_sha"`
-		Complete          bool                `json:"complete"`
-		Overflow          bool                `json:"overflow"`
-		Evidence          []canonicalEvidence `json:"evidence"`
+		Version            int                 `json:"version"`
+		RepositoryID       uuid.UUID           `json:"repository_id"`
+		Repository         string              `json:"repository"`
+		PullRequestNumber  int                 `json:"pull_request_number"`
+		HeadSHA            string              `json:"head_sha"`
+		Complete           bool                `json:"complete"`
+		Overflow           bool                `json:"overflow"`
+		OmittedSourceCount int                 `json:"omitted_source_count,omitempty"`
+		Evidence           []canonicalEvidence `json:"evidence"`
 	}
 	canonical := canonicalSnapshot{
 		Version: s.Version, RepositoryID: s.RepositoryID, Repository: s.Repository, PullRequestNumber: s.PullRequestNumber,
 		HeadSHA: strings.ToLower(strings.TrimSpace(s.HeadSHA)), Complete: s.Complete, Overflow: s.Overflow,
-		Evidence: make([]canonicalEvidence, 0, len(s.Evidence)),
+		OmittedSourceCount: s.OmittedSourceCount,
+		Evidence:           make([]canonicalEvidence, 0, len(s.Evidence)),
 	}
 	for _, evidence := range s.Evidence {
 		canonical.Evidence = append(canonical.Evidence, canonicalEvidence{

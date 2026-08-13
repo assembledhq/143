@@ -32,11 +32,18 @@ Human-authored discussion conclusions and review decisions remain excluded as
 risk signals; only the captured visual content and its bounded provenance are
 evidence.
 
-Image presence alone does not satisfy a requirement. The orchestrator must
-identify a relevant, current image that demonstrates the changed experience.
-An image-backed `satisfied` assessment must cite one or more valid evidence
-IDs. Preview links and repository-native visual evidence may still satisfy the
-requirement when the assessment explains that basis without an image ID.
+Each description requirement has an explicit `evidence_kind` of `general` or
+`visual`. The backend never infers that contract from the key, title, prompt, or
+other prose. For compatibility, only the legacy built-in `ui_evidence` key is
+normalized to `visual` when an older stored policy omits the field; every other
+omitted value normalizes to `general`.
+
+Image presence alone does not satisfy a visual requirement. The orchestrator
+must identify a relevant, current image that demonstrates the changed
+experience. An image-backed `satisfied` assessment must cite one or more valid
+evidence IDs. Preview links and repository-native visual evidence may still
+satisfy the requirement when the assessment explains that basis without an
+image ID.
 
 Each assessment captures one immutable evidence snapshot for its head SHA.
 Every configured reviewer and the orchestrator receive the same ordered
@@ -98,7 +105,13 @@ organization. The existing single-resource response adds:
 ```json
 {
   "data": {
-    "visual_evidence": { "version": 1, "complete": true, "evidence": [] },
+    "visual_evidence": {
+      "version": 1,
+      "complete": true,
+      "overflow": true,
+      "omitted_source_count": 4,
+      "evidence": []
+    },
     "cited_visual_evidence_ids": ["ve_..."]
   }
 }
@@ -116,7 +129,7 @@ SSE contract change.
 The persisted snapshot includes:
 
 - version, repository identity, PR number, head SHA, capture time, completeness,
-  and overflow state;
+  overflow state, and aggregate omitted-source count;
 - a deterministic evidence ID and source ID;
 - surface, provider object, source URL, author, author association, timestamps,
   and image position;
@@ -174,10 +187,13 @@ passing active vector content to agents. Enforce:
 - three redirects; and
 - three transient attempts with bounded backoff.
 
-All human images are eligible. When limits are exceeded, retain the first 32 in
-deterministic order and mark later sources `over_limit`. An inaccessible or
-oversized image is recorded but cannot satisfy evidence. An individual bad
-outside-contributor image must not fail or deny an otherwise complete review.
+All human images are eligible. Discovery retains provenance for at most the
+first 32 images in deterministic order across all surfaces. Later sources are
+represented only by `omitted_source_count`; their URLs, captions, authors, and
+other per-image metadata are not persisted, prompted, or returned by the API.
+An inaccessible or oversized retained image is recorded but cannot satisfy
+evidence. An individual bad outside-contributor image must not fail or deny an
+otherwise complete review.
 A failure to list an entire supported GitHub surface makes the snapshot
 incomplete and fails the review operationally after normal retries; the bot
 must never approve from a silently partial snapshot.
@@ -191,12 +207,14 @@ discussion. The existing prompt-injection hard-risk signal applies to visual
 content and its textual context.
 
 The orchestrator receives a `<visual_evidence_manifest>` containing stable IDs
-and provenance. Structured description assessments gain `evidence_basis` and
-`evidence_ids`. The backend rejects unknown, repeated, or unavailable IDs. An
-image-backed `satisfied` assessment without a valid ID is invalid for approval;
-a visual-evidence requirement can otherwise use only a preview link or
-repository-native visual basis. Text in the description or diff can satisfy
-other description requirements but cannot masquerade as visual evidence.
+and retained provenance plus an aggregate omitted-source count. Structured
+description policy requirements carry `evidence_kind`; assessments carry
+`evidence_basis` and `evidence_ids`. The backend rejects unknown, repeated, or
+unavailable IDs. An image-backed `satisfied` assessment without a valid ID is
+invalid for approval; a requirement explicitly marked `visual` can otherwise
+use only a preview link or repository-native visual basis. Text in the
+description or diff can satisfy `general` requirements but cannot satisfy a
+`visual` requirement.
 
 The worker captures or restores the snapshot after authoritative PR/head sync
 and before reviewer fan-out. It passes every available first-party URL through
@@ -205,10 +223,12 @@ provider wiring is an operational failure, not a silent text-only fallback.
 
 ## Product And Operations
 
-The code review Evidence view gains a Visual evidence section with thumbnail,
-evidence ID, surface, author, source link, time, status/failure, and whether the
-orchestrator cited it. User-facing copy calls the rule a PR evidence requirement
-while preserving the existing machine reason code `description_failed` for API
+The policy editor exposes each description requirement's evidence type. The
+code review Evidence view gains a Visual evidence section with thumbnail,
+evidence ID, surface, author, source link, time, status/failure, whether the
+orchestrator cited it, and an aggregate count when additional sources were
+omitted. User-facing copy calls the rule a PR evidence requirement while
+preserving the existing machine reason code `description_failed` for API
 compatibility.
 
 Metrics cover discovered, fetched, deduplicated, unavailable, unsupported, and
@@ -233,7 +253,9 @@ launches when the complete path lands:
 3. worker attachment fan-out, prompt and structured-output contracts,
    validation, input hashing, and failure semantics;
 4. evidence API/UI, user-facing docs, architecture reconciliation, and launch
-   verification.
+   verification; and
+5. launch hardening for the global retained-provenance bound and explicit
+   description-requirement evidence kinds.
 
 Before deployment, verify public and private repositories, every supported
 surface, an outside contributor, bot exclusion, duplicate images, inaccessible

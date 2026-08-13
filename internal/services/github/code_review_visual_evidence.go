@@ -79,7 +79,8 @@ func (s *PRService) DiscoverCodeReviewVisualEvidence(ctx context.Context, orgID,
 	owner, repo := splitRepo(repository.FullName)
 
 	var details githubVisualEvidencePullRequest
-	var issueComments, reviews, reviewComments []githubVisualEvidenceContent
+	var issueComments, reviews, reviewComments []models.CodeReviewVisualEvidenceSource
+	var issueCommentCount, reviewCount, reviewCommentCount int
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number)
@@ -94,29 +95,32 @@ func (s *PRService) DiscoverCodeReviewVisualEvidence(ctx context.Context, orgID,
 	})
 	group.Go(func() error {
 		path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number)
-		items, requestErr := s.listCodeReviewVisualEvidenceContent(groupCtx, token, path)
+		items, count, requestErr := s.listCodeReviewVisualEvidenceSources(groupCtx, token, path, models.CodeReviewEvidenceSurfaceIssueComment)
 		if requestErr != nil {
 			return fmt.Errorf("list pull request issue comments for visual evidence: %w", requestErr)
 		}
 		issueComments = items
+		issueCommentCount = count
 		return nil
 	})
 	group.Go(func() error {
 		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, repo, number)
-		items, requestErr := s.listCodeReviewVisualEvidenceContent(groupCtx, token, path)
+		items, count, requestErr := s.listCodeReviewVisualEvidenceSources(groupCtx, token, path, models.CodeReviewEvidenceSurfaceReviewBody)
 		if requestErr != nil {
 			return fmt.Errorf("list pull request reviews for visual evidence: %w", requestErr)
 		}
 		reviews = items
+		reviewCount = count
 		return nil
 	})
 	group.Go(func() error {
 		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/comments", owner, repo, number)
-		items, requestErr := s.listCodeReviewVisualEvidenceContent(groupCtx, token, path)
+		items, count, requestErr := s.listCodeReviewVisualEvidenceSources(groupCtx, token, path, models.CodeReviewEvidenceSurfaceReviewComment)
 		if requestErr != nil {
 			return fmt.Errorf("list pull request review comments for visual evidence: %w", requestErr)
 		}
 		reviewComments = items
+		reviewCommentCount = count
 		return nil
 	})
 	if err := group.Wait(); err != nil {
@@ -133,7 +137,7 @@ func (s *PRService) DiscoverCodeReviewVisualEvidence(ctx context.Context, orgID,
 		descriptionAuthor = codeReviewEvidenceAuthorType(details.User.Type)
 		descriptionLogin = strings.TrimSpace(details.User.Login)
 	}
-	sources = append(sources, visualEvidenceSourcesFromHTML(visualEvidenceSourceMetadata{
+	descriptionSources, descriptionSourceCount := visualEvidenceSourcesFromHTMLBounded(visualEvidenceSourceMetadata{
 		Surface:          models.CodeReviewEvidenceSurfaceDescription,
 		ProviderObjectID: strconv.Itoa(details.Number),
 		SourceURL:        details.HTMLURL,
@@ -141,10 +145,11 @@ func (s *PRService) DiscoverCodeReviewVisualEvidence(ctx context.Context, orgID,
 		AuthorType:       descriptionAuthor,
 		CreatedAt:        details.CreatedAt,
 		UpdatedAt:        details.UpdatedAt,
-	}, details.BodyHTML)...)
-	sources = append(sources, visualEvidenceSourcesFromDiscussion(models.CodeReviewEvidenceSurfaceIssueComment, issueComments)...)
-	sources = append(sources, visualEvidenceSourcesFromDiscussion(models.CodeReviewEvidenceSurfaceReviewBody, reviews)...)
-	sources = append(sources, visualEvidenceSourcesFromDiscussion(models.CodeReviewEvidenceSurfaceReviewComment, reviewComments)...)
+	}, details.BodyHTML, models.CodeReviewVisualEvidenceMaxImages)
+	sources = appendBoundedVisualEvidenceSources(sources, descriptionSources, models.CodeReviewVisualEvidenceMaxImages)
+	sources = appendBoundedVisualEvidenceSources(sources, issueComments, models.CodeReviewVisualEvidenceMaxImages)
+	sources = appendBoundedVisualEvidenceSources(sources, reviews, models.CodeReviewVisualEvidenceMaxImages)
+	sources = appendBoundedVisualEvidenceSources(sources, reviewComments, models.CodeReviewVisualEvidenceMaxImages)
 
 	return models.CodeReviewVisualEvidenceDiscovery{
 		Version:           codeReviewVisualEvidenceDiscoveryVersion,
@@ -153,12 +158,14 @@ func (s *PRService) DiscoverCodeReviewVisualEvidence(ctx context.Context, orgID,
 		PullRequestNumber: number,
 		HeadSHA:           details.Head.SHA,
 		CapturedAt:        time.Now().UTC(),
+		SourceCount:       descriptionSourceCount + issueCommentCount + reviewCount + reviewCommentCount,
 		Sources:           sources,
 	}, nil
 }
 
-func (s *PRService) listCodeReviewVisualEvidenceContent(ctx context.Context, token, basePath string) ([]githubVisualEvidenceContent, error) {
-	items := make([]githubVisualEvidenceContent, 0)
+func (s *PRService) listCodeReviewVisualEvidenceSources(ctx context.Context, token, basePath string, surface models.CodeReviewEvidenceSurface) ([]models.CodeReviewVisualEvidenceSource, int, error) {
+	retained := make([]models.CodeReviewVisualEvidenceSource, 0, models.CodeReviewVisualEvidenceMaxImages)
+	total := 0
 	for page := 1; ; page++ {
 		separator := "?"
 		if strings.Contains(basePath, "?") {
@@ -167,40 +174,67 @@ func (s *PRService) listCodeReviewVisualEvidenceContent(ctx context.Context, tok
 		path := fmt.Sprintf("%s%sper_page=%d&page=%d", basePath, separator, githubVisualEvidencePageSize, page)
 		body, err := s.doGitHubRequestWithAccept(ctx, token, http.MethodGet, path, nil, githubFullJSONMediaType)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		var pageItems []githubVisualEvidenceContent
 		if err := json.Unmarshal(body, &pageItems); err != nil {
-			return nil, fmt.Errorf("decode GitHub visual evidence page %d: %w", page, err)
+			return nil, 0, fmt.Errorf("decode GitHub visual evidence page %d: %w", page, err)
 		}
-		items = append(items, pageItems...)
+		pageSources, pageSourceCount := visualEvidenceSourcesFromDiscussionBounded(surface, pageItems, models.CodeReviewVisualEvidenceMaxImages)
+		total += pageSourceCount
+		retained = append(retained, pageSources...)
+		sort.SliceStable(retained, func(i, j int) bool { return visualEvidenceSourceLess(retained[i], retained[j]) })
+		if len(retained) > models.CodeReviewVisualEvidenceMaxImages {
+			retained = retained[:models.CodeReviewVisualEvidenceMaxImages]
+		}
 		if len(pageItems) < githubVisualEvidencePageSize {
 			break
 		}
 	}
-	sort.SliceStable(items, func(i, j int) bool {
-		iTime := visualEvidenceContentTime(items[i])
-		jTime := visualEvidenceContentTime(items[j])
-		if !iTime.Equal(jTime) {
-			return iTime.Before(jTime)
-		}
-		return items[i].ID < items[j].ID
-	})
-	return items, nil
+	return retained, total, nil
 }
 
-func visualEvidenceContentTime(content githubVisualEvidenceContent) time.Time {
-	if content.CreatedAt != nil {
-		return *content.CreatedAt
+func appendBoundedVisualEvidenceSources(destination, sources []models.CodeReviewVisualEvidenceSource, limit int) []models.CodeReviewVisualEvidenceSource {
+	remaining := limit - len(destination)
+	if remaining <= 0 {
+		return destination
 	}
-	if content.SubmittedAt != nil {
-		return *content.SubmittedAt
+	if len(sources) < remaining {
+		remaining = len(sources)
+	}
+	return append(destination, sources[:remaining]...)
+}
+
+func visualEvidenceSourceLess(left, right models.CodeReviewVisualEvidenceSource) bool {
+	leftTime := visualEvidenceSourceTime(left)
+	rightTime := visualEvidenceSourceTime(right)
+	if !leftTime.Equal(rightTime) {
+		return leftTime.Before(rightTime)
+	}
+	leftID, leftErr := strconv.ParseInt(left.ProviderObjectID, 10, 64)
+	rightID, rightErr := strconv.ParseInt(right.ProviderObjectID, 10, 64)
+	if leftErr == nil && rightErr == nil && leftID != rightID {
+		return leftID < rightID
+	}
+	if left.ProviderObjectID != right.ProviderObjectID {
+		return left.ProviderObjectID < right.ProviderObjectID
+	}
+	return left.ImageIndex < right.ImageIndex
+}
+
+func visualEvidenceSourceTime(source models.CodeReviewVisualEvidenceSource) time.Time {
+	if source.CreatedAt != nil {
+		return *source.CreatedAt
+	}
+	if source.UpdatedAt != nil {
+		return *source.UpdatedAt
 	}
 	return time.Time{}
 }
 
-func visualEvidenceSourcesFromDiscussion(surface models.CodeReviewEvidenceSurface, content []githubVisualEvidenceContent) []models.CodeReviewVisualEvidenceSource {
+func visualEvidenceSourcesFromDiscussionBounded(surface models.CodeReviewEvidenceSurface, content []githubVisualEvidenceContent, limit int) ([]models.CodeReviewVisualEvidenceSource, int) {
 	sources := make([]models.CodeReviewVisualEvidenceSource, 0)
+	total := 0
 	for _, item := range content {
 		if item.User == nil {
 			continue
@@ -213,7 +247,7 @@ func visualEvidenceSourcesFromDiscussion(surface models.CodeReviewEvidenceSurfac
 		if createdAt == nil {
 			createdAt = item.SubmittedAt
 		}
-		sources = append(sources, visualEvidenceSourcesFromHTML(visualEvidenceSourceMetadata{
+		itemSources, itemSourceCount := visualEvidenceSourcesFromHTMLBounded(visualEvidenceSourceMetadata{
 			Surface:           surface,
 			ProviderObjectID:  strconv.FormatInt(item.ID, 10),
 			SourceURL:         item.HTMLURL,
@@ -222,9 +256,15 @@ func visualEvidenceSourcesFromDiscussion(surface models.CodeReviewEvidenceSurfac
 			AuthorAssociation: strings.TrimSpace(item.AuthorAssociation),
 			CreatedAt:         createdAt,
 			UpdatedAt:         item.UpdatedAt,
-		}, item.BodyHTML)...)
+		}, item.BodyHTML, limit)
+		total += itemSourceCount
+		sources = append(sources, itemSources...)
+		sort.SliceStable(sources, func(i, j int) bool { return visualEvidenceSourceLess(sources[i], sources[j]) })
+		if len(sources) > limit {
+			sources = sources[:limit]
+		}
 	}
-	return sources
+	return sources, total
 }
 
 type visualEvidenceSourceMetadata struct {
@@ -239,32 +279,43 @@ type visualEvidenceSourceMetadata struct {
 }
 
 func visualEvidenceSourcesFromHTML(metadata visualEvidenceSourceMetadata, renderedHTML string) []models.CodeReviewVisualEvidenceSource {
+	sources, _ := visualEvidenceSourcesFromHTMLBounded(metadata, renderedHTML, int(^uint(0)>>1))
+	return sources
+}
+
+func visualEvidenceSourcesFromHTMLBounded(metadata visualEvidenceSourceMetadata, renderedHTML string, limit int) ([]models.CodeReviewVisualEvidenceSource, int) {
 	fragment, err := html.ParseFragment(strings.NewReader(renderedHTML), &html.Node{Type: html.ElementNode, Data: "div", DataAtom: atom.Div})
 	if err != nil {
-		return nil
+		return nil, 0
+	}
+	if limit < 0 {
+		limit = 0
 	}
 	sources := make([]models.CodeReviewVisualEvidenceSource, 0)
+	imageCount := 0
 	var walk func(*html.Node)
 	walk = func(node *html.Node) {
 		if node.Type == html.ElementNode && node.Data == "img" {
 			if imageURL := renderedImageURL(node); imageURL != "" {
-				imageIndex := len(sources) + 1
-				sources = append(sources, models.CodeReviewVisualEvidenceSource{
-					SourceID:          codeReviewVisualEvidenceSourceID(metadata.Surface, metadata.ProviderObjectID, imageIndex, imageURL),
-					Surface:           metadata.Surface,
-					ProviderObjectID:  metadata.ProviderObjectID,
-					SourceURL:         strings.TrimSpace(metadata.SourceURL),
-					AuthorLogin:       metadata.AuthorLogin,
-					AuthorType:        metadata.AuthorType,
-					AuthorAssociation: metadata.AuthorAssociation,
-					CreatedAt:         metadata.CreatedAt,
-					UpdatedAt:         metadata.UpdatedAt,
-					ImageIndex:        imageIndex,
-					ImageURL:          imageURL,
-					AltText:           boundedVisualEvidenceText(htmlAttribute(node, "alt")),
-					ContextText:       visualEvidenceContext(node),
-					Untrusted:         true,
-				})
+				imageCount++
+				if len(sources) < limit {
+					sources = append(sources, models.CodeReviewVisualEvidenceSource{
+						SourceID:          codeReviewVisualEvidenceSourceID(metadata.Surface, metadata.ProviderObjectID, imageCount, imageURL),
+						Surface:           metadata.Surface,
+						ProviderObjectID:  metadata.ProviderObjectID,
+						SourceURL:         strings.TrimSpace(metadata.SourceURL),
+						AuthorLogin:       metadata.AuthorLogin,
+						AuthorType:        metadata.AuthorType,
+						AuthorAssociation: metadata.AuthorAssociation,
+						CreatedAt:         metadata.CreatedAt,
+						UpdatedAt:         metadata.UpdatedAt,
+						ImageIndex:        imageCount,
+						ImageURL:          imageURL,
+						AltText:           boundedVisualEvidenceText(htmlAttribute(node, "alt")),
+						ContextText:       visualEvidenceContext(node),
+						Untrusted:         true,
+					})
+				}
 			}
 		}
 		for child := node.FirstChild; child != nil; child = child.NextSibling {
@@ -274,7 +325,7 @@ func visualEvidenceSourcesFromHTML(metadata visualEvidenceSourceMetadata, render
 	for _, node := range fragment {
 		walk(node)
 	}
-	return sources
+	return sources, imageCount
 }
 
 func renderedImageURL(node *html.Node) string {
