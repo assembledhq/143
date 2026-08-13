@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -27,9 +28,17 @@ const (
 	defaultSandboxCapacityCountTimeout   = 2 * time.Second
 	defaultSandboxPressureCleanupTimeout = 5 * time.Second
 	defaultSharedSandboxAdmissionTimeout = 10 * time.Second
-	defaultSharedSandboxReservationTTL   = 15 * time.Minute
-	defaultSharedSandboxReleaseRetryMin  = 100 * time.Millisecond
-	defaultSharedSandboxReleaseRetryMax  = time.Second
+	// Non-job (preview) leases have no renewal path, so they keep a long
+	// conservative TTL that outlives slow image pulls.
+	defaultSharedSandboxReservationTTL = 15 * time.Minute
+	// Job-backed leases are renewed by the job-lease heartbeat (~20s) in
+	// internal/db, so a short TTL only ever fences attempts whose process
+	// died. A replacement attempt blocked on a stale lease therefore waits
+	// minutes, not the preview TTL. Must stay in sync with
+	// sandboxCapacityJobLeaseRenewalTTL in internal/db.
+	defaultSharedSandboxJobReservationTTL = 2 * time.Minute
+	defaultSharedSandboxReleaseRetryMin   = 100 * time.Millisecond
+	defaultSharedSandboxReleaseRetryMax   = time.Second
 )
 
 // LiveSandboxCounter counts live sandbox containers on the local machine.
@@ -289,6 +298,10 @@ func (g *SandboxCapacityGate) acquireSharedReservation(
 		defer countCancel()
 		return g.counter.CountLiveSandboxes(boundedCountCtx)
 	}
+	leaseTTL := defaultSharedSandboxReservationTTL
+	if req.JobID != nil {
+		leaseTTL = defaultSharedSandboxJobReservationTTL
+	}
 	reservationID, live, total, acquired, err := g.sharedReservations.ReserveSandboxCapacity(
 		reservationCtx,
 		g.nodeID,
@@ -297,10 +310,21 @@ func (g *SandboxCapacityGate) acquireSharedReservation(
 		req.WorkloadClass,
 		countLiveSandboxes,
 		effectiveMax,
-		time.Now().Add(defaultSharedSandboxReservationTTL),
+		time.Now().Add(leaseTTL),
 	)
 	cancel()
 	if err != nil {
+		var attemptConflict *db.SandboxCapacityAttemptConflictError
+		if errors.As(err, &attemptConflict) {
+			// An expected fencing condition, not a coordination failure: a
+			// prior attempt's lease is still live and the caller will wait for
+			// its persisted deadline. Skip the alerting signal so it keeps
+			// meaning "the shared fence itself is broken".
+			g.logCapacity(req, live, g.ReservedCount()).
+				Time("prior_attempt_lease_expires_at", attemptConflict.ExpiresAt).
+				Msg("prior attempt still holds the shared sandbox lease; deferring admission")
+			return nil, false, fmt.Errorf("%w: reserve shared sandbox capacity: %w", ErrSandboxCapacity, err)
+		}
 		wrapped := fmt.Errorf("%w: %w: reserve shared sandbox capacity: %w", ErrSandboxCapacity, ErrSandboxCapacityCoordination, err)
 		g.logCapacity(req, live, g.ReservedCount()).
 			Bool("sandbox_capacity_coordination_failure", true).

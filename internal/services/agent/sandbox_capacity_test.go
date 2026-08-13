@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
@@ -32,6 +33,7 @@ type fakeSharedSandboxCapacityStore struct {
 	workloadClass models.SandboxWorkloadClass
 	live          int
 	effectiveMax  int
+	expiresAt     time.Time
 	releasedNode  string
 	releasedID    uuid.UUID
 	releasedToken *uuid.UUID
@@ -62,12 +64,13 @@ func (contextWaitingSharedSandboxCapacityStore) ReleaseSandboxCapacity(context.C
 	return nil
 }
 
-func (f *fakeSharedSandboxCapacityStore) ReserveSandboxCapacity(ctx context.Context, _ string, jobID, jobLockToken *uuid.UUID, workloadClass models.SandboxWorkloadClass, countLiveSandboxes func(context.Context) (int, error), effectiveMax int, _ time.Time) (uuid.UUID, int, int, bool, error) {
+func (f *fakeSharedSandboxCapacityStore) ReserveSandboxCapacity(ctx context.Context, _ string, jobID, jobLockToken *uuid.UUID, workloadClass models.SandboxWorkloadClass, countLiveSandboxes func(context.Context) (int, error), effectiveMax int, expiresAt time.Time) (uuid.UUID, int, int, bool, error) {
 	f.reserveCalls.Add(1)
 	f.jobID = jobID
 	f.jobLockToken = jobLockToken
 	f.workloadClass = workloadClass
 	f.effectiveMax = effectiveMax
+	f.expiresAt = expiresAt
 	if f.err != nil {
 		return uuid.Nil, 0, f.total, false, f.err
 	}
@@ -348,6 +351,75 @@ func TestSandboxCapacityGate_AcquireFailsClosedWhenSharedReservationFails(t *tes
 	require.Nil(t, reservation, "failed shared reservations should not reserve local capacity")
 	require.Contains(t, logs.String(), `"sandbox_capacity_coordination_failure":true`, "coordination failures should emit an alertable structured signal")
 	require.Contains(t, logs.String(), `"shared_admission_timeout":10000`, "coordination failures should report the configured admission budget in milliseconds")
+}
+
+func TestSandboxCapacityGate_JobBackedLeaseUsesShortRenewableTTL(t *testing.T) {
+	t.Parallel()
+
+	jobID, lockToken := uuid.New(), uuid.New()
+	shared := &fakeSharedSandboxCapacityStore{reservationID: uuid.New(), total: 1, acquired: true}
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:            &fakeLiveSandboxCounter{},
+		SharedReservations: shared,
+		MaxActive:          2,
+		NodeID:             "worker-1",
+		Logger:             zerolog.Nop(),
+	})
+
+	before := time.Now()
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "continue_session", JobID: &jobID, JobLockToken: &lockToken})
+	require.NoError(t, err, "job-backed admission should acquire a shared lease")
+	defer reservation.Release()
+
+	ttl := shared.expiresAt.Sub(before)
+	require.Greater(t, ttl, time.Minute, "job-backed lease should keep a TTL comfortably above the ~20s renewal cadence")
+	require.LessOrEqual(t, ttl, 3*time.Minute, "job-backed lease must stay short so a dead attempt fences its replacement for minutes, not the preview TTL")
+}
+
+func TestSandboxCapacityGate_PreviewLeaseKeepsConservativeTTL(t *testing.T) {
+	t.Parallel()
+
+	shared := &fakeSharedSandboxCapacityStore{reservationID: uuid.New(), total: 1, acquired: true}
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:            &fakeLiveSandboxCounter{},
+		SharedReservations: shared,
+		MaxActive:          2,
+		NodeID:             "worker-1",
+		Logger:             zerolog.Nop(),
+	})
+
+	before := time.Now()
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "branch_preview"})
+	require.NoError(t, err, "preview admission should acquire a shared lease")
+	defer reservation.Release()
+
+	require.Greater(t, shared.expiresAt.Sub(before), 10*time.Minute, "preview leases have no renewal path and must keep the long conservative TTL")
+}
+
+func TestSandboxCapacityGate_AttemptConflictSkipsCoordinationSignal(t *testing.T) {
+	t.Parallel()
+
+	jobID, lockToken := uuid.New(), uuid.New()
+	conflict := &db.SandboxCapacityAttemptConflictError{ExpiresAt: time.Now().Add(90 * time.Second)}
+	shared := &fakeSharedSandboxCapacityStore{err: conflict}
+	var logs bytes.Buffer
+	gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+		Counter:            &fakeLiveSandboxCounter{},
+		SharedReservations: shared,
+		MaxActive:          2,
+		NodeID:             "worker-1",
+		Logger:             zerolog.New(&logs),
+	})
+
+	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "continue_session", JobID: &jobID, JobLockToken: &lockToken})
+
+	require.Nil(t, reservation, "a fenced prior attempt must block admission")
+	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "the conflict should keep the conservative capacity sentinel for retry policy")
+	require.NotErrorIs(t, err, agent.ErrSandboxCapacityCoordination, "an expected fencing condition is not a coordination failure")
+	var conflictErr *db.SandboxCapacityAttemptConflictError
+	require.ErrorAs(t, err, &conflictErr, "the caller must still see the conflict deadline to wait on it")
+	require.Equal(t, conflict.ExpiresAt, conflictErr.ExpiresAt, "the persisted deadline must survive the wrap")
+	require.NotContains(t, logs.String(), "sandbox_capacity_coordination_failure", "attempt conflicts must not fire the coordination alert signal")
 }
 
 func TestSandboxCapacityGate_SnapshotSeparatesSandboxTurnReservations(t *testing.T) {

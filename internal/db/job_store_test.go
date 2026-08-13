@@ -1073,6 +1073,12 @@ func TestJobStore_RenewLease(t *testing.T) {
 				mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+[\\s\\S]*sandbox_slot_reserved_until = CASE[\\s\\S]*sandbox_session.container_id IS NOT NULL[\\s\\S]*ELSE now\\(\\) \\+").
 					WithArgs(int(leaseDuration.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
 					WillReturnRows(pgxmock.NewRows([]string{"lease_expires_at"}).AddRow(time.Now().Add(leaseDuration)))
+				// A successful renewal also keeps the job-backed shared
+				// final-admission lease fresh so its short TTL only fences
+				// dead attempts.
+				mock.ExpectExec(`(?s)UPDATE sandbox_capacity_reservations.*SET expires_at = GREATEST\(expires_at, now\(\) \+.*job_id = @job_id.*job_lock_token = @lock_token`).
+					WithArgs(int(sandboxCapacityJobLeaseRenewalTTL.Seconds()), uuid.MustParse("11111111-1111-1111-1111-111111111111"), lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
 			wantActive: true,
 		},

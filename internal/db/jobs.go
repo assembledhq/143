@@ -797,6 +797,13 @@ const (
 	sandboxRoutingTerminalProbeAge = 8 * time.Minute
 	sandboxFailedNodeExclusionTTL  = time.Minute
 	maxClaimAdmissionSkips         = 16
+	// sandboxCapacityJobLeaseRenewalTTL matches the job-backed shared
+	// final-admission lease TTL used at acquisition in
+	// internal/services/agent. Job-lease renewal (every ~20s) keeps a live
+	// attempt's lease fresh, so expiry only fences attempts whose process
+	// died, and a replacement attempt waits at most this long for the stale
+	// lease instead of a long static TTL.
+	sandboxCapacityJobLeaseRenewalTTL = 2 * time.Minute
 )
 
 type SandboxRoutingReason string
@@ -2488,7 +2495,27 @@ func (s *JobStore) RenewLeaseForSessionExecutor(ctx context.Context, orgID, jobI
 	if err != nil {
 		return nil, false, fmt.Errorf("renew session executor job lease: %w", err)
 	}
+	s.renewSandboxCapacityLease(ctx, jobID, lockToken)
 	return &models.Job{ID: jobID, LockToken: &lockToken, LeaseExpiresAt: &leaseExpiresAt}, true, nil
+}
+
+// renewSandboxCapacityLease keeps the shared final-admission lease for a live
+// job attempt fresh so its short TTL only ever fences dead processes. Failures
+// are deliberately swallowed: the job-lease renewal that precedes this call
+// already proved attempt ownership, the next renewal retries within seconds,
+// and an expired lease costs at most one bounded over-admission on the host —
+// far cheaper than failing the job's own lease renewal.
+// lint:allow-no-orgid reason="fenced by globally unique job id and claim token; extends the cross-org job-lease renewal path"
+func (s *JobStore) renewSandboxCapacityLease(ctx context.Context, jobID, lockToken uuid.UUID) {
+	_, _ = s.db.Exec(ctx, `
+		UPDATE sandbox_capacity_reservations
+		SET expires_at = GREATEST(expires_at, now() + (@ttl_seconds * interval '1 second'))
+		WHERE job_id = @job_id
+		  AND job_lock_token = @lock_token`, pgx.NamedArgs{
+		"job_id":      jobID,
+		"lock_token":  lockToken,
+		"ttl_seconds": int(sandboxCapacityJobLeaseRenewalTTL.Seconds()),
+	})
 }
 
 // RenewLease extends the lease for a running job owned by the provided fencing
@@ -2548,6 +2575,7 @@ func (s *JobStore) RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, l
 	if err != nil {
 		return nil, false, fmt.Errorf("renew job lease: %w", err)
 	}
+	s.renewSandboxCapacityLease(ctx, jobID, lockToken)
 	return &models.Job{ID: jobID, LockToken: &lockToken, LeaseExpiresAt: &leaseExpiresAt}, true, nil
 }
 

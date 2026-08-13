@@ -207,8 +207,11 @@ func sandboxCapacityAttemptConflictRetry(err error) (*RetryableError, bool) {
 	// reservation is still alive. Wait directly for its persisted deadline so
 	// the queue does not repeatedly launch replacement executors before the
 	// conflict can clear. The reservation expiry is the bounded terminal
-	// condition, so it replaces the generic eight-minute retry window. Keep the
-	// existing target: changing workers cannot resolve a job-global conflict.
+	// condition, so it replaces the generic eight-minute retry window; live
+	// attempts renew their lease on the job-lease heartbeat, so this deadline
+	// only fences dead processes and stays short. Admission cleanup already
+	// released this attempt's durable placement, so the job re-routes fresh
+	// once the wait elapses.
 	retryAfter := time.Until(conflictErr.ExpiresAt) + sandboxAttemptConflictRetryBuffer
 	if retryAfter < sandboxLockContentionRetryDelay {
 		retryAfter = sandboxLockContentionRetryDelay

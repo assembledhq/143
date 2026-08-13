@@ -194,9 +194,13 @@ interval without permanently pinning work if a dispatcher dies. At final
 admission, the main worker, isolated session executors, and preview paths use
 the same per-node advisory lock to atomically compare the current Docker count,
 durable job reservations, and shared final-admission leases before inserting a
-15-minute shared lease. Cross-process coordination has a 10-second bound while
-the Docker inspection inside the lock keeps its shorter two-second bound. The
-queue claim token fences each job-backed lease: admission transactionally
+shared lease. Job-backed leases carry a two-minute TTL and are renewed by the
+job-lease heartbeat (~20 seconds), so expiry only ever fences an attempt whose
+process died and a blocked replacement waits minutes, not a long static TTL.
+Preview leases have no renewal path and keep a conservative 15-minute TTL that
+outlives slow image pulls. Cross-process coordination has a 10-second bound
+while the Docker inspection inside the lock keeps its shorter two-second bound.
+The queue claim token fences each job-backed lease: admission transactionally
 validates the current owner, a replacement attempt waits for a live prior lease
 instead of sharing it, and release can delete only the acquiring attempt's row.
 The lease is released under the same per-node admission lock as soon as sandbox
@@ -204,7 +208,8 @@ creation or hydration finishes. Transient release failures retry within the
 shared coordination budget; the TTL bounds leaks if a process dies or the
 database remains unavailable. Admission coordination failures emit the
 structured `sandbox_capacity_coordination_failure` signal and timeout value for
-alerting. After successful creation or hydration, a fenced executor also clears
+alerting; a replacement attempt deferred by a prior attempt's live lease is an
+expected fencing condition and intentionally does not emit that signal. After successful creation or hydration, a fenced executor also clears
 its durable routing reservation. A worker-local startup failure instead records
 the failed physical capacity-node identity in the job payload and atomically
 reserves another host when one is available. Every later routing pass honors
