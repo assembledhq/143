@@ -51,7 +51,7 @@ type testRuntimeStatusSandboxTurnCounter struct {
 	err   error
 }
 
-func (c testRuntimeStatusSandboxTurnCounter) CountActiveSandboxTurnsByOrg(context.Context, uuid.UUID) (int, error) {
+func (c testRuntimeStatusSandboxTurnCounter) CountAdmittedSandboxTurnsByOrg(context.Context, uuid.UUID) (int, error) {
 	return c.count, c.err
 }
 

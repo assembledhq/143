@@ -39,7 +39,7 @@ type RuntimeStatusSessionCounter interface {
 }
 
 type RuntimeStatusSandboxTurnCounter interface {
-	CountActiveSandboxTurnsByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
+	CountAdmittedSandboxTurnsByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
 }
 
 type RuntimeStatusPreviewCounter interface {
@@ -227,7 +227,7 @@ func (h *SettingsHandler) GetRuntimeStatus(w http.ResponseWriter, r *http.Reques
 	}
 	activeSandboxTurns := activeAgentRuns
 	if h.sandboxTurns != nil {
-		activeSandboxTurns, err = h.sandboxTurns.CountActiveSandboxTurnsByOrg(r.Context(), orgID)
+		activeSandboxTurns, err = h.sandboxTurns.CountAdmittedSandboxTurnsByOrg(r.Context(), orgID)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "RUNTIME_STATUS_FAILED", "failed to count active sandbox turns", err)
 			return

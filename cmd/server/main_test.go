@@ -454,6 +454,7 @@ func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
 	require.Equal(t, 0, metadata["sandbox_turn_reserved_count"], "worker metadata should distinguish reservations already represented by routed jobs")
 	require.Equal(t, 4, metadata["max_active_sandboxes"], "worker metadata should expose the per-machine sandbox cap")
 	require.Equal(t, 0, metadata["interactive_reserved_sandbox_slots"], "worker metadata should expose capacity reserved from code-review workloads")
+	require.Equal(t, "worker-1", metadata["sandbox_capacity_node_id"], "worker metadata should expose its host-stable sandbox admission identity")
 }
 
 // TestMainStartupReconcilesSocketsBeforeWorkers guards the sandbox-auth socket

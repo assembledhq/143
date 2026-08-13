@@ -10811,7 +10811,7 @@ func TestSandboxTurnCapacityRetryTargetQuicklyReservesAlternateWorker(t *testing
 		WithArgs("worker-with-space").
 		WillReturnRows(pgxmock.NewRows([]string{"locked"}).AddRow(true))
 	mock.ExpectQuery(`(?s)SELECT.*FROM nodes n.*WHERE n.id =`).
-		WithArgs(jobID, "worker-with-space", pgxmock.AnyArg()).
+		WithArgs("worker-with-space", pgxmock.AnyArg(), jobID).
 		WillReturnRows(pgxmock.NewRows([]string{"live", "local_reserved", "sandbox_turn_local_reserved", "max_active", "interactive_reserved", "pending_durable_reserved", "running_durable_reserved", "shared_turn_reserved", "shared_non_turn_reserved"}).AddRow(1, 0, 0, 4, 1, 0, 0, 0, 0))
 	mock.ExpectExec(`(?s)UPDATE jobs.*sandbox_slot_reserved_until =`).
 		WithArgs(models.SandboxWorkloadClassInteractive, "worker-with-space", pgxmock.AnyArg(), jobID, models.JobStatusRunning, lockToken).
@@ -10824,7 +10824,7 @@ func TestSandboxTurnCapacityRetryTargetQuicklyReservesAlternateWorker(t *testing
 	require.NotNil(t, targetNodeID, "capacity retry should return the atomically reserved alternate worker")
 	require.Equal(t, "worker-with-space", *targetNodeID, "capacity retry should exclude the full worker")
 	require.False(t, clearTargetNodeID, "capacity retry should preserve the new target reservation")
-	require.Equal(t, sandboxAlternateWorkerRetryDelay, retryAfter, "capacity retry should use the short alternate-worker handoff delay")
+	require.Equal(t, sandboxAlternateWorkerRetryDelay, retryAfter, "capacity retry should make an atomically reserved alternate-worker handoff immediately runnable")
 	require.Less(t, retryAfter, sandboxCapacityRetryDelay, "alternate-worker handoff should remain faster than a full-fleet retry")
 	require.NoError(t, mock.ExpectationsWereMet(), "alternate selection and reservation should commit before the quick retry")
 }

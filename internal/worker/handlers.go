@@ -45,7 +45,7 @@ import (
 
 const (
 	sandboxCapacityRetryDelay        = 10 * time.Second
-	sandboxAlternateWorkerRetryDelay = time.Second
+	sandboxAlternateWorkerRetryDelay = time.Duration(0)
 	sandboxOrgLimitRetryDelay        = 5 * time.Second
 	sandboxLockContentionRetryDelay  = 500 * time.Millisecond
 )
@@ -170,10 +170,9 @@ func sandboxTurnCapacityRetryTarget(ctx context.Context, stores *Stores, logger 
 			Str("excluded_node_id", excludeNodeID).
 			Str("routing_reason", string(result.Reason)).
 			Msg("quickly routing sandbox capacity retry to reserved worker slot")
-		// The reservation makes the handoff atomic, but worker heartbeat load can
-		// lag the authoritative local capacity gate. A small delay prevents a job
-		// from hot-looping between workers while that metadata converges, while
-		// remaining well below the full-fleet backoff.
+		// The durable reservation makes the handoff atomic. Requeue immediately
+		// so RetryWithLease publishes a cross-worker wake-up; retain the longer
+		// delay only when the authoritative routing pass finds no capacity.
 		return result.TargetNodeID, false, sandboxAlternateWorkerRetryDelay
 	}
 	logger.Info().

@@ -65,8 +65,11 @@ errors remain unchanged: `400 INVALID_JSON` or `400 INVALID_SETTINGS`.
 
 Worker capacity reservation is an internal queue/heartbeat contract, not a
 public API. Heartbeat metadata adds
-`interactive_reserved_sandbox_slots` and `sandbox_turn_reserved_count`; no SSE
-or external event payload changes.
+`sandbox_capacity_node_id`, `interactive_reserved_sandbox_slots`, and
+`sandbox_turn_reserved_count`; no SSE or external event payload changes.
+Runtime status counts both running turns and pending turns holding a live
+durable reservation, while final post-claim admission retains its running-only
+count.
 
 ## Admission and routing
 
@@ -90,6 +93,9 @@ Before normal queue claim, a dispatcher transaction:
 Unbound sandbox jobs cannot be claimed before this routing step. Dispatchers
 prefer interactive work at equal queue priority and continue routing after a
 capacity deferral, so an older org-limited review cannot monopolize each poll.
+If a selected job has malformed settings or another deterministic routing
+error, a savepoint rolls back only that routing attempt, records the error, and
+durably moves that job behind other due work instead of stopping fleet dispatch.
 
 Existing sandbox affinity remains authoritative and is only released through
 the existing dead/draining-worker recovery path. Claiming any affinity-bound
@@ -104,12 +110,12 @@ deadlocks and keeps runtime-settings writes independent of a long claim scan.
 
 If a worker's authoritative local gate still rejects a fresh sandbox, the
 running job immediately performs the same atomic reservation against an
-alternate worker. A successful alternate reservation retries after one second,
-which avoids hot handoff loops while heartbeat metadata catches up. The
-existing 10-second delay is retained only when no fleet slot is available.
+alternate worker. A successful alternate reservation becomes runnable
+immediately and publishes the normal cross-worker wake-up. The existing
+10-second delay is retained only when no fleet slot is available.
 The shared org limit uses a shorter policy retry, while advisory-lock contention
-leaves the job immediately runnable so another dispatcher can retry without
-pretending the fleet is full.
+uses a 500-millisecond floor so another dispatcher can retry promptly without
+pretending the fleet is full or creating a tight loop.
 
 If fresh workers exist but none advertises usable `max_active_sandboxes`
 metadata, the router does not treat the fleet as saturated for eight minutes.
@@ -153,7 +159,8 @@ pool. The shared local admission layer remains the authoritative final fence
 after claim.
 
 Worker heartbeats publish
-`interactive_reserved_sandbox_slots` and `sandbox_turn_reserved_count`
+`sandbox_capacity_node_id`, `interactive_reserved_sandbox_slots`, and
+`sandbox_turn_reserved_count`
 alongside live, total local-reserved, and max sandbox counts. The router treats
 pending durable reservations as additional load, but overlaps running durable
 reservations with the heartbeat's sandbox-turn reservation subtype using the
@@ -176,6 +183,11 @@ creation or hydration finishes. Transient release failures retry within the
 shared coordination budget; the TTL bounds leaks if a process dies or the
 database remains unavailable. A fenced executor also clears its durable
 routing reservation after creation or hydration.
+
+The capacity node ID identifies the physical Docker host, not a deploy
+generation. Blue/green worker generations keep distinct routing node IDs but
+share this host-stable identity for advisory locks and reservation accounting,
+so an overlapping rollout cannot present one daemon as multiple capacity pools.
 
 Pressure cleanup runs only when the worker is physically full. A code-review
 request rejected solely because it reached the interactive reserve boundary

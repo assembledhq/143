@@ -205,7 +205,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 			SharedReservations:  db.NewSandboxCapacityReservationStore(pool),
 			MaxActive:           maxActiveSandboxes,
 			InteractiveReserved: cfg.WorkerInteractiveReservedSandboxes,
-			NodeID:              cfg.NodeID,
+			NodeID:              cfg.EffectiveWorkerCapacityNodeID(),
 			Logger:              logger,
 		})
 		oldShutdown := shutdown

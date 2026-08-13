@@ -241,6 +241,14 @@ func (w *Worker) poll(ctx context.Context) {
 				event.Str("target_node_id", *result.TargetNodeID)
 			}
 			event.Msg("sandbox job routing evaluated")
+			if result.RoutingError != "" {
+				w.logger.Error().
+					Str("job_id", result.JobID.String()).
+					Str("workload_class", string(result.WorkloadClass)).
+					Str("routing_reason", string(result.Reason)).
+					Str("routing_error", result.RoutingError).
+					Msg("sandbox job routing failed; deferred only the affected job")
+			}
 			if result.Reason == db.SandboxRoutingReasonMetadataFallback {
 				w.logger.Warn().
 					Str("job_id", result.JobID.String()).

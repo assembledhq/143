@@ -1955,17 +1955,18 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   }
 
   start_worker_generation() {
-    local node_id="$1" host_port="$2" base_url="$3" project="$4"
+    local node_id="$1" host_port="$2" base_url="$3" project="$4" capacity_node_id="$5"
     local cid
 
     echo "Starting worker generation node_id=$node_id port=$host_port project=$project..."
     NODE_ID="$node_id" \
+      WORKER_CAPACITY_NODE_ID="$capacity_node_id" \
       WORKER_HOST_PORT="$host_port" \
       PREVIEW_INTERNAL_BASE_URL="$base_url" \
       IMAGE_TAG="$IMAGE_TAG" \
       docker compose -p "$project" -f "$COMPOSE_FILE" up -d --no-deps "$HEALTH_SERVICE"
 
-    cid="$(NODE_ID="$node_id" WORKER_HOST_PORT="$host_port" PREVIEW_INTERNAL_BASE_URL="$base_url" IMAGE_TAG="$IMAGE_TAG" docker compose -p "$project" -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
+    cid="$(NODE_ID="$node_id" WORKER_CAPACITY_NODE_ID="$capacity_node_id" WORKER_HOST_PORT="$host_port" PREVIEW_INTERNAL_BASE_URL="$base_url" IMAGE_TAG="$IMAGE_TAG" docker compose -p "$project" -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
     if [ -z "$cid" ]; then
       echo "ERROR: could not find new worker generation container"
       return 1
@@ -2146,7 +2147,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     fi
 
     STARTED_WORKER_CID=""
-    start_worker_generation "$node_id" "$host_port" "$base_url" "$project"
+    start_worker_generation "$node_id" "$host_port" "$base_url" "$project" "$base_node_id"
     new_cid="$STARTED_WORKER_CID"
     if ! wait_worker_db_heartbeat "$node_id" "${WORKER_BLUE_GREEN_DB_HEARTBEAT_TIMEOUT_SECONDS:-120}"; then
       echo "Rolling back worker generation ${new_cid:0:12} after DB heartbeat readiness failure..."
