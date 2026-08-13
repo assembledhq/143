@@ -10786,6 +10786,48 @@ func TestRunAgentHandler_SandboxCapacityRetries(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestRunAgentHandler_SandboxCapacityAttemptConflictWaitsOnCurrentTarget(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusPending, 0, nil, nil)...,
+			),
+		)
+
+	conflictExpiresAt := time.Now().Add(10 * time.Minute)
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(ctx context.Context, run *models.Session) error {
+			return fmt.Errorf("shared admission: %w: %w", agent.ErrSandboxCapacity, &db.SandboxCapacityAttemptConflictError{ExpiresAt: conflictExpiresAt})
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(jobctx.WithWorkerNodeID(context.Background(), "worker-current"), "run_agent", payload)
+
+	require.Error(t, err, "run_agent should retry while a stale attempt reservation is live")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "attempt conflicts should be returned as retryable errors")
+	require.ErrorIs(t, retryable.Err, db.ErrSandboxCapacityAttemptConflict, "retry should preserve the attempt-conflict sentinel")
+	require.True(t, retryable.BypassMaxRetryDuration, "attempt-conflict retries should outlive the shorter generic retry window")
+	require.NotNil(t, retryable.RetryAfter, "attempt-conflict retries should wait for the stale lease deadline")
+	require.Greater(t, *retryable.RetryAfter, 9*time.Minute, "attempt-conflict retries should avoid relaunching executors before the stale lease expires")
+	require.LessOrEqual(t, *retryable.RetryAfter, 10*time.Minute+sandboxAttemptConflictRetryBuffer, "attempt-conflict retries should resume immediately after the stale lease expires")
+	require.Nil(t, retryable.TargetNodeID, "job-global attempt conflicts should not retarget another worker")
+	require.False(t, retryable.ClearTargetNodeID, "job-global attempt conflicts should preserve the current worker target")
+	require.NoError(t, mock.ExpectationsWereMet(), "attempt-conflict retry should not query fleet routing")
+}
+
 func TestSandboxTurnCapacityRetryTargetQuicklyReservesAlternateWorker(t *testing.T) {
 	t.Parallel()
 
@@ -12397,6 +12439,49 @@ func TestContinueSessionHandler_SandboxCapacityRetries(t *testing.T) {
 	require.False(t, retryable.ClearTargetNodeID, "sandbox capacity retries should not clear the target pin when a replacement worker is selected")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_SandboxCapacityAttemptConflictWaitsOnCurrentTarget(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+			),
+		)
+
+	conflictExpiresAt := time.Now().Add(10 * time.Minute)
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("shared admission: %w: %w", agent.ErrSandboxCapacity, &db.SandboxCapacityAttemptConflictError{ExpiresAt: conflictExpiresAt})
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(jobctx.WithWorkerNodeID(context.Background(), "worker-current"), "continue_session", payload)
+
+	require.Error(t, err, "continue_session should retry while a stale attempt reservation is live")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "attempt conflicts should be returned as retryable errors")
+	require.ErrorIs(t, retryable.Err, db.ErrSandboxCapacityAttemptConflict, "retry should preserve the attempt-conflict sentinel")
+	require.True(t, retryable.BypassMaxRetryDuration, "attempt-conflict retries should outlive the shorter generic retry window")
+	require.NotNil(t, retryable.RetryAfter, "attempt-conflict retries should wait for the stale lease deadline")
+	require.Greater(t, *retryable.RetryAfter, 9*time.Minute, "attempt-conflict retries should avoid relaunching executors before the stale lease expires")
+	require.LessOrEqual(t, *retryable.RetryAfter, 10*time.Minute+sandboxAttemptConflictRetryBuffer, "attempt-conflict retries should resume immediately after the stale lease expires")
+	require.Nil(t, retryable.TargetNodeID, "job-global attempt conflicts should not retarget another worker")
+	require.False(t, retryable.ClearTargetNodeID, "job-global attempt conflicts should preserve the current worker target")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "attempt-conflict retry should not query fleet routing")
 }
 
 func TestContinueSessionHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAvailable(t *testing.T) {

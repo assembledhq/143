@@ -44,10 +44,11 @@ import (
 )
 
 const (
-	sandboxCapacityRetryDelay        = db.SandboxFleetRetryDelay
-	sandboxAlternateWorkerRetryDelay = time.Duration(0)
-	sandboxOrgLimitRetryDelay        = db.SandboxOrgLimitRetryDelay
-	sandboxLockContentionRetryDelay  = 500 * time.Millisecond
+	sandboxCapacityRetryDelay         = db.SandboxFleetRetryDelay
+	sandboxAlternateWorkerRetryDelay  = time.Duration(0)
+	sandboxOrgLimitRetryDelay         = db.SandboxOrgLimitRetryDelay
+	sandboxLockContentionRetryDelay   = 500 * time.Millisecond
+	sandboxAttemptConflictRetryBuffer = time.Second
 )
 const previewCapacityRetryDelay = 5 * time.Second
 const previewStartupInterruptedRetryDelay = 2 * time.Second
@@ -191,6 +192,28 @@ func sandboxTurnRoutingRetryDelay(reason db.SandboxRoutingReason) time.Duration 
 	default:
 		return sandboxCapacityRetryDelay
 	}
+}
+
+func sandboxCapacityAttemptConflictRetry(err error) (*RetryableError, bool) {
+	var conflictErr *db.SandboxCapacityAttemptConflictError
+	if !errors.As(err, &conflictErr) {
+		return nil, false
+	}
+	// A reclaimed job can reach final admission while the old, fenced attempt's
+	// reservation is still alive. Wait directly for its persisted deadline so
+	// the queue does not repeatedly launch replacement executors before the
+	// conflict can clear. The reservation expiry is the bounded terminal
+	// condition, so it replaces the generic eight-minute retry window. Keep the
+	// existing target: changing workers cannot resolve a job-global conflict.
+	retryAfter := time.Until(conflictErr.ExpiresAt) + sandboxAttemptConflictRetryBuffer
+	if retryAfter < sandboxLockContentionRetryDelay {
+		retryAfter = sandboxLockContentionRetryDelay
+	}
+	return &RetryableError{
+		Err:                    err,
+		RetryAfter:             &retryAfter,
+		BypassMaxRetryDuration: true,
+	}, true
 }
 
 func sandboxCapacityRetryTarget(ctx context.Context, stores *Stores, logger zerolog.Logger) (*string, bool) {
@@ -8359,6 +8382,14 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			runErr = services.Orchestrator.RunAgent(jobCtx, &run)
 		}
 		if err := runErr; err != nil {
+			if retryable, ok := sandboxCapacityAttemptConflictRetry(err); ok {
+				logger.Info().
+					Str("session_id", runID.String()).
+					Dur("retry_after", *retryable.RetryAfter).
+					Err(err).
+					Msg("prior sandbox capacity attempt still owns a live reservation; waiting for its lease deadline")
+				return retryable
+			}
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, logger)
 				registerSandboxCapacityDeadLetter(ctx, stores, services, logger, run, run.PrimaryThreadID, "run_agent")
@@ -9868,6 +9899,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Msg("sandbox turn concurrency reached; retrying continue_session")
 				retryAfter := sandboxOrgLimitRetryDelay
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
+			}
+			if retryable, ok := sandboxCapacityAttemptConflictRetry(err); ok {
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Dur("retry_after", *retryable.RetryAfter).
+					Err(err).
+					Msg("prior sandbox capacity attempt still owns a live reservation; waiting for its lease deadline")
+				return retryable
 			}
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, logger)
