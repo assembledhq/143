@@ -170,9 +170,11 @@ self-hosted worker remains usable for code review.
 
 `max_concurrent_runs` is the single organization limit for interactive and
 code-review turns. The router and affinity-aware claim path serialize this
-decision per organization and count both workload classes in the same active
-pool. The shared local admission layer remains the authoritative final fence
-after claim.
+decision per organization and count admitted sandbox-producing jobs from both
+workload classes in the same active pool. This is deliberately a turn/job
+limit, not a distinct-session limit: concurrent threads that can each exercise
+the shared sandbox draw independently from the fence. The shared local
+admission layer remains the authoritative final fence after claim.
 
 Worker heartbeats publish
 `sandbox_capacity_node_id`, `interactive_reserved_sandbox_slots`, and
@@ -197,8 +199,10 @@ the Docker inspection inside the lock keeps its shorter two-second bound. The
 lease is released under the same per-node admission lock as soon as sandbox
 creation or hydration finishes. Transient release failures retry within the
 shared coordination budget; the TTL bounds leaks if a process dies or the
-database remains unavailable. A fenced executor also clears its durable
-routing reservation after creation or hydration.
+database remains unavailable. Admission coordination failures emit the
+structured `sandbox_capacity_coordination_failure` signal and timeout value for
+alerting. A fenced executor also clears its durable routing reservation after
+creation or hydration.
 
 The capacity node ID identifies the physical Docker host, not a deploy
 generation. Blue/green worker generations keep distinct routing node IDs but
