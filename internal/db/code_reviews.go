@@ -2351,6 +2351,21 @@ func (s *CodeReviewStore) ListPromptRecords(ctx context.Context, orgID, sessionI
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewPromptRecord])
 }
 
+func (s *CodeReviewStore) GetPromptRecordByKey(ctx context.Context, orgID uuid.UUID, recordKey string) (models.CodeReviewPromptRecord, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewPromptRecordColumns+`
+		FROM code_review_prompt_records
+		WHERE org_id = @org_id
+		  AND record_key = @record_key`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"record_key": recordKey,
+	})
+	if err != nil {
+		return models.CodeReviewPromptRecord{}, fmt.Errorf("get code review prompt record by key: %w", err)
+	}
+	return collectOneCodeReviewPromptRecord(rows)
+}
+
 func (s *CodeReviewStore) CreateFinding(ctx context.Context, finding *models.CodeReviewFinding) error {
 	return s.upsertFinding(ctx, finding, false)
 }

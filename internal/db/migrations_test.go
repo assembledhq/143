@@ -1699,6 +1699,26 @@ func TestRenameLegacyOutputTermsMigrationPinsNamespaceContracts(t *testing.T) {
 // each down file must undo its own up on a fresh database (where those
 // migrations create the new names directly) while still working on a database
 // that migration 280 expanded and then contracted back to the legacy names.
+func TestCodeReviewVisualEvidencePromptRoleMigrationPreservesRollbackAuditRows(t *testing.T) {
+	t.Parallel()
+
+	upBody, err := os.ReadFile("../../migrations/000286_code_review_visual_evidence_prompt_role.up.sql")
+	require.NoError(t, err, "test should read the visual-evidence prompt-role migration")
+	upSQL := string(upBody)
+	require.Contains(t, upSQL, "'visual_evidence'", "migration should admit immutable visual-evidence manifest records")
+	require.Equal(t, 2, strings.Count(upSQL, "'visual_evidence'"), "migration should widen both synchronized prompt tables")
+	require.Contains(t, upSQL, "chk_code_review_prompt_records_role", "migration should replace the existing prompt role constraint")
+	require.Contains(t, upSQL, "to_regclass('code_review_prompt_artifacts')", "migration should detect installations still draining the legacy prompt table")
+	require.Contains(t, upSQL, "chk_code_review_prompt_artifacts_role", "migration should widen the synchronized legacy prompt role constraint")
+
+	downBody, err := os.ReadFile("../../migrations/000286_code_review_visual_evidence_prompt_role.down.sql")
+	require.NoError(t, err, "test should read the visual-evidence prompt-role rollback")
+	downSQL := string(downBody)
+	require.Contains(t, downSQL, ")) NOT VALID", "rollback should preserve historical visual-evidence rows while narrowing new writes")
+	require.NotContains(t, downSQL, "'visual_evidence'", "rollback write contract should return to the prior prompt roles")
+	require.Contains(t, downSQL, "chk_code_review_prompt_artifacts_role", "rollback should narrow the synchronized legacy prompt role constraint")
+}
+
 func TestRenamedOutputTermMigrationsInvertThemselves(t *testing.T) {
 	t.Parallel()
 

@@ -53,6 +53,12 @@ func TestCodeReviewEnumsValidate(t *testing.T) {
 		{name: "finding confidence invalid", validate: CodeReviewFindingConfidence("bogus").Validate, expectErr: true},
 		{name: "description applicability nontrivial", validate: CodeReviewDescriptionApplicabilityNontrivial.Validate},
 		{name: "description applicability invalid", validate: CodeReviewDescriptionApplicabilityKind("bogus").Validate, expectErr: true},
+		{name: "visual evidence surface description", validate: CodeReviewEvidenceSurfaceDescription.Validate},
+		{name: "visual evidence surface invalid", validate: CodeReviewEvidenceSurface("bogus").Validate, expectErr: true},
+		{name: "visual evidence author user", validate: CodeReviewEvidenceAuthorTypeUser.Validate},
+		{name: "visual evidence author invalid", validate: CodeReviewEvidenceAuthorType("bogus").Validate, expectErr: true},
+		{name: "visual evidence fetch available", validate: CodeReviewVisualEvidenceFetchStatusAvailable.Validate},
+		{name: "visual evidence fetch invalid", validate: CodeReviewVisualEvidenceFetchStatus("bogus").Validate, expectErr: true},
 	}
 
 	for _, tt := range tests {
@@ -65,6 +71,31 @@ func TestCodeReviewEnumsValidate(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "valid code review enum values should be accepted")
+		})
+	}
+}
+
+func TestCodeReviewEvidenceAuthorTypeIsHuman(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		authorType CodeReviewEvidenceAuthorType
+		expected   bool
+	}{
+		{name: "GitHub user", authorType: CodeReviewEvidenceAuthorTypeUser, expected: true},
+		{name: "GitHub mannequin", authorType: CodeReviewEvidenceAuthorTypeMannequin, expected: true},
+		{name: "GitHub bot", authorType: CodeReviewEvidenceAuthorTypeBot, expected: false},
+		{name: "GitHub app", authorType: CodeReviewEvidenceAuthorTypeApp, expected: false},
+		{name: "GitHub organization", authorType: CodeReviewEvidenceAuthorTypeOrganization, expected: false},
+		{name: "deleted or unknown actor", authorType: CodeReviewEvidenceAuthorTypeUnknown, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, tt.authorType.IsHuman(), "author classification should admit only human GitHub actor types")
 		})
 	}
 }
