@@ -3268,7 +3268,7 @@ describe("CodeReviewsPage", () => {
 
     expect(screen.getByRole("button", { name: "Add required check" })).toBeInTheDocument();
 
-    const eligibleAuthorsEditor = screen.getByText("Eligible GitHub authors").closest("section");
+    const eligibleAuthorsEditor = screen.getByText("Eligible GitHub authors").closest('[data-slot="card"]');
     expect(eligibleAuthorsEditor).not.toBeNull();
     const eligibleUserRow = within(eligibleAuthorsEditor as HTMLElement).getByText("anya").parentElement;
     const eligibleTeamRow = within(eligibleAuthorsEditor as HTMLElement).getByText("acme/platform").parentElement;

@@ -3666,7 +3666,7 @@ function PolicyStringListEditor({
   };
 
   return (
-    <section className="rounded-md border border-border bg-background">
+    <Card className="gap-0">
       <div className="space-y-1 p-4">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-1.5">
@@ -3714,7 +3714,7 @@ function PolicyStringListEditor({
           </Button>
         </div>
       </div>
-    </section>
+    </Card>
   );
 }
 
@@ -3775,7 +3775,7 @@ function EligibleGitHubAuthorsEditor({
   };
 
   return (
-    <section className={cn("rounded-md border border-border bg-background", className)}>
+    <Card className={cn("gap-0", className)}>
       <div className="space-y-1 p-4">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-1.5">
@@ -3852,7 +3852,7 @@ function EligibleGitHubAuthorsEditor({
           </DisabledTooltip>
         </div>
       </div>
-    </section>
+    </Card>
   );
 }
 
