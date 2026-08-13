@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -14,6 +15,7 @@ import {
   ClipboardCheck,
   FileSearch,
   Github,
+  Image as ImageIcon,
   MessageSquareText,
   Plus,
   PowerOff,
@@ -61,7 +63,7 @@ import { ALL_CODE_REVIEW_REASONS, CODE_REVIEW_REASON_CODES, codeReviewReasonDesc
 import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
 import { useResourceSSE } from "@/lib/use-resource-sse";
 import { pollMs } from "@/lib/poll-intervals";
-import { cn } from "@/lib/utils";
+import { cn, safeExternalUrl } from "@/lib/utils";
 import { useAutosave, type UseAutosaveResult } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
@@ -4526,6 +4528,8 @@ function CodeReviewEvidenceSheet({
   const findings = evidence?.findings ?? [];
   const records = evidence?.prompt_records ?? evidence?.prompt_artifacts ?? [];
   const reasonCodes = evidence?.risk_reason_codes ?? [];
+  const visualEvidence = evidence?.visual_evidence?.evidence ?? [];
+  const citedVisualEvidenceIDs = useMemo(() => new Set(evidence?.cited_visual_evidence_ids ?? []), [evidence?.cited_visual_evidence_ids]);
   const approvalReasons = review ? whyNotApprovedReasons(review) : [];
   const disputesQuery = useInfiniteQuery({
     queryKey: queryKeys.codeReviews.disputes(review?.session_id ?? ""),
@@ -4639,10 +4643,11 @@ function CodeReviewEvidenceSheet({
           ) : null}
           {evidence ? (
             <>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 <EvidenceMetric label="Agents" value={agentResults.length} />
                 <EvidenceMetric label="Findings" value={findings.length} />
                 <EvidenceMetric label="Prompts" value={records.length} />
+                <EvidenceMetric label="Images" value={visualEvidence.length} />
               </div>
 
               {canFileDisputes && review?.status === "completed" && review.decision ? (
@@ -4734,6 +4739,61 @@ function CodeReviewEvidenceSheet({
                   ) : null}
                 </section>
               ) : null}
+
+              <section className="space-y-3">
+                <EvidenceSectionHeader title="Visual evidence" empty={visualEvidence.length === 0} />
+                {visualEvidence.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">No images were captured from the pull request description or human discussion.</div>
+                ) : (
+                  <>
+                    <div className="text-xs leading-5 text-muted-foreground">
+                      Images and their captions are untrusted pull-request content. A cited badge means the orchestrator used that image in a description-policy assessment.
+                    </div>
+                    <div className="space-y-3">
+                      {visualEvidence.map((item) => (
+                        <Card key={item.evidence_id}>
+                          <CardContent className="flex gap-3 p-3">
+                            <div className="flex size-24 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-muted/40">
+                              {item.status === "available" && item.stored_url ? (
+                                <Image
+                                  src={item.stored_url}
+                                  alt={`Captured visual evidence ${item.evidence_id}`}
+                                  width={item.width ?? 96}
+                                  height={item.height ?? 96}
+                                  unoptimized
+                                  loading="lazy"
+                                  referrerPolicy="no-referrer"
+                                  className="size-full object-contain"
+                                />
+                              ) : (
+                                <ImageIcon aria-hidden="true" className="size-6 text-muted-foreground" />
+                              )}
+                            </div>
+                            <div className="min-w-0 flex-1 space-y-2">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <div className="font-mono text-xs text-foreground">{item.evidence_id}</div>
+                                <Badge variant="outline">{visualEvidenceSurfaceLabel(item.source.surface)}</Badge>
+                                <StatusLabel label={visualEvidenceStatusLabel(item.status)} tone={visualEvidenceStatusTone(item.status)} />
+                                {citedVisualEvidenceIDs.has(item.evidence_id) ? <Badge variant="secondary">Cited</Badge> : null}
+                              </div>
+                              <div className="text-xs leading-5 text-muted-foreground">
+                                {item.source.author_login ? `@${item.source.author_login}` : "Pull request author"}
+                                {item.source.created_at || item.source.updated_at ? ` · ${formatDate(item.source.created_at ?? item.source.updated_at ?? "")}` : ""}
+                                {item.width && item.height ? ` · ${item.width}×${item.height}` : ""}
+                              </div>
+                              <div className="flex flex-wrap items-center gap-3 text-xs">
+                                <VisualEvidenceSourceLink sourceURL={item.source.source_url} />
+                                {item.duplicate_of_evidence_id ? <span className="text-muted-foreground">Duplicate of {item.duplicate_of_evidence_id}</span> : null}
+                              </div>
+                              {item.failure_reason ? <div className="text-xs leading-5 text-muted-foreground">{item.failure_reason}</div> : null}
+                            </div>
+                          </CardContent>
+                        </Card>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </section>
 
               <section className="space-y-3">
                 <EvidenceSectionHeader title="Agent results" empty={agentResults.length === 0} />
@@ -4891,6 +4951,49 @@ function EvidenceSectionHeader({ title, empty }: { title: string; empty: boolean
       {empty ? <div className="text-xs text-muted-foreground">None</div> : null}
     </div>
   );
+}
+
+function VisualEvidenceSourceLink({ sourceURL }: { sourceURL: string }) {
+  const href = safeExternalUrl(sourceURL);
+  return href ? <ExternalLink href={href}>View source</ExternalLink> : null;
+}
+
+function visualEvidenceSurfaceLabel(surface: "description" | "issue_comment" | "review_body" | "review_comment"): string {
+  switch (surface) {
+    case "description":
+      return "PR description";
+    case "issue_comment":
+      return "PR comment";
+    case "review_body":
+      return "Review body";
+    case "review_comment":
+      return "Review comment";
+  }
+}
+
+function visualEvidenceStatusLabel(status: "available" | "unavailable" | "unsupported" | "over_limit"): string {
+  switch (status) {
+    case "available":
+      return "Available";
+    case "unavailable":
+      return "Unavailable";
+    case "unsupported":
+      return "Unsupported";
+    case "over_limit":
+      return "Over limit";
+  }
+}
+
+function visualEvidenceStatusTone(status: "available" | "unavailable" | "unsupported" | "over_limit"): ComponentProps<typeof StatusLabel>["tone"] {
+  switch (status) {
+    case "available":
+      return "success";
+    case "unavailable":
+      return "destructive";
+    case "unsupported":
+    case "over_limit":
+      return "warning";
+  }
 }
 
 function formatEvidenceJSON(value: unknown): string {

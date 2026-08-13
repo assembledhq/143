@@ -15,6 +15,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
@@ -2827,8 +2828,41 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 		if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusCompleted, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
 			return fmt.Errorf("mark orchestrator completed: %w", err)
 		}
+		for _, satisfaction := range codeReviewVisualEvidenceSatisfactions(synthesis, visualEvidence) {
+			metrics.RecordCodeReviewVisualEvidenceSatisfaction(ctx, string(satisfaction.Basis), satisfaction.Surface)
+		}
 	}
 	return nil
+}
+
+type codeReviewVisualEvidenceSatisfaction struct {
+	Basis   models.CodeReviewDescriptionEvidenceBasis
+	Surface string
+}
+
+func codeReviewVisualEvidenceSatisfactions(synthesis codeReviewOrchestratorSynthesis, visualEvidence models.CodeReviewVisualEvidenceSnapshot) []codeReviewVisualEvidenceSatisfaction {
+	byID := make(map[string]models.CodeReviewVisualEvidence, len(visualEvidence.Evidence))
+	for _, evidence := range visualEvidence.Evidence {
+		byID[evidence.EvidenceID] = evidence
+	}
+	satisfactions := make([]codeReviewVisualEvidenceSatisfaction, 0)
+	for _, assessment := range synthesis.DescriptionAssessments {
+		if assessment.Status != codeReviewDescriptionAssessmentSatisfied {
+			continue
+		}
+		switch assessment.EvidenceBasis {
+		case models.CodeReviewDescriptionEvidenceBasisImage:
+			for _, evidenceID := range assessment.EvidenceIDs {
+				if evidence, exists := byID[strings.TrimSpace(evidenceID)]; exists {
+					satisfactions = append(satisfactions, codeReviewVisualEvidenceSatisfaction{Basis: assessment.EvidenceBasis, Surface: string(evidence.Source.Surface)})
+				}
+			}
+		case models.CodeReviewDescriptionEvidenceBasisPreviewLink,
+			models.CodeReviewDescriptionEvidenceBasisRepository:
+			satisfactions = append(satisfactions, codeReviewVisualEvidenceSatisfaction{Basis: assessment.EvidenceBasis, Surface: "none"})
+		}
+	}
+	return satisfactions
 }
 
 func codeReviewOrchestratorTerminal(results []models.CodeReviewAgentResult) bool {

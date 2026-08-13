@@ -460,6 +460,54 @@ export interface CodeReviewPromptRecord {
   created_at: string;
 }
 
+export type CodeReviewVisualEvidenceSurface = "description" | "issue_comment" | "review_body" | "review_comment";
+export type CodeReviewVisualEvidenceStatus = "available" | "unavailable" | "unsupported" | "over_limit";
+
+export interface CodeReviewVisualEvidenceSource {
+  source_id: string;
+  surface: CodeReviewVisualEvidenceSurface;
+  provider_object_id: string;
+  source_url: string;
+  author_login?: string;
+  author_type: "User" | "Mannequin" | "Bot" | "App" | "Organization" | "Unknown";
+  author_association?: string;
+  created_at?: string;
+  updated_at?: string;
+  image_index: number;
+  image_url: string;
+  alt_text?: string;
+  context_text?: string;
+  untrusted: true;
+}
+
+export interface CodeReviewVisualEvidenceItem {
+  evidence_id: string;
+  source: CodeReviewVisualEvidenceSource;
+  original_url: string;
+  storage_key?: string;
+  stored_url?: string;
+  content_sha256?: string;
+  content_type?: string;
+  byte_size?: number;
+  width?: number;
+  height?: number;
+  status: CodeReviewVisualEvidenceStatus;
+  duplicate_of_evidence_id?: string;
+  failure_reason?: string;
+}
+
+export interface CodeReviewVisualEvidenceSnapshot {
+  version: number;
+  repository_id: string;
+  repository: string;
+  pull_request_number: number;
+  head_sha: string;
+  captured_at: string;
+  complete: boolean;
+  overflow: boolean;
+  evidence: CodeReviewVisualEvidenceItem[];
+}
+
 export interface CodeReviewEvidence {
   agent_results: CodeReviewAgentResult[];
   findings: CodeReviewFinding[];
@@ -467,6 +515,8 @@ export interface CodeReviewEvidence {
   /** @deprecated Compatibility with API instances still draining during rollout. */
   prompt_artifacts?: CodeReviewPromptRecord[];
   risk_reason_codes?: string[];
+  visual_evidence?: CodeReviewVisualEvidenceSnapshot;
+  cited_visual_evidence_ids?: string[];
 }
 
 export type CodeReviewDisputeDirection = "should_have_approved" | "should_not_have_approved";

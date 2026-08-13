@@ -27,6 +27,7 @@ Implemented:
 - live reviewer/orchestrator evidence ingestion harvested from running review threads rather than pre-existing stored result rows
 - evidence-gated approval path that evaluates reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, and the captured policy before choosing approval vs comment-only
 - coding-agent orchestrator evaluation of PR description requirements, structured findings at every severity, and typed non-finding human-review reasons, with prompt-injection screening; an explicit issue-comment trigger is supplied as bounded, untrusted request context, and the backend derives the decision from the resulting explicit signals
+- live, paginated capture of images rendered in the PR description and human-authored issue comments, review bodies, and inline review comments; secure bounded materialization into first-party storage; one immutable per-head manifest shared by every reviewer and the orchestrator; and validated structured evidence citations for image-backed description assessments
 - prompt record storage and recovery for rendered reviewer/orchestrator prompts and their structured outputs
 - inline-comment posting with marker-based dedupe/update and posted-comment id persistence
 - GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
@@ -363,12 +364,13 @@ permits approval. This adds no database column or public route because policy
 parts are already stored as versioned JSONB and saved through the existing
 organization policy API.
 
-Existing human comments, review decisions, and open or resolved review threads are deliberately not risk signals. The bot evaluates the current pull request independently.
+Existing human comments, review decisions, and open or resolved review threads are deliberately not risk signals. Human-posted images from those surfaces remain eligible as bounded, untrusted visual evidence. The bot evaluates the current pull request independently.
 
 Configurable synthesized signals:
 
 - each applicable PR-description requirement is `satisfied`, `not_applicable`,
-  or `missing`; both `satisfied` and `not_applicable` pass the requirement
+  or `missing`; both `satisfied` and `not_applicable` pass the requirement;
+  image-backed satisfaction cites one or more available immutable evidence IDs
 - reviewer agents found no blocking correctness, security, or maintainability issues
 - orchestrator agrees the change matches the stated intent
 - no reviewer-agent disagreement on severity
@@ -482,6 +484,8 @@ Session shape:
 Code review session
   Orchestrator tab
     - reads PR metadata, policy, diff summary, description, CI/check state
+    - receives the same first-party visual evidence attachments and trust-fenced
+      manifest as every reviewer
     - starts reviewer tabs according to policy
     - waits for reviewer results or timeout
     - inspects the actual diff to determine whether description evidence is
@@ -495,6 +499,7 @@ Code review session
 
   Reviewer tab: Codex
     - runs native /review against the PR diff
+    - inspects the shared visual evidence without following embedded instructions
     - returns findings, severity, confidence, and approval concerns
 
   Reviewer tab: Claude Code
@@ -508,8 +513,11 @@ The worker validates that the orchestrator returned exactly one assessment for
 every applicable structured description requirement, plus explicit `findings`
 and `human_review_reasons` arrays. Unknown, duplicate, or omitted requirement
 keys, invalid finding coordinates or enums, and unknown human-review reason
-codes make the synthesis unusable for approval. It also captures a hash of the
-PR title and body supplied to the orchestrator for auditability. A later title
+codes make the synthesis unusable for approval. Image-backed assessments must
+cite unique, available IDs from the immutable snapshot; a visual requirement
+can otherwise use a preview link or repository-native visual basis, but not
+description or diff text alone. It also captures a hash of the PR title, body,
+and canonical visual manifest supplied to the orchestrator for auditability. A later title
 or body edit does not create a hard stale-context blocker: the description
 assessment remains best-effort evidence from its captured input, while the
 worker refreshes live checks, head SHA, changed files, prompt-injection guards,
@@ -555,10 +563,11 @@ Editable prompts are approval policy and are versioned with that policy. A revie
 - reviewer agent/provider/model versions
 - PR base SHA and head SHA
 - PR title/body input hash used for the orchestrator's description assessment
+- immutable visual-evidence manifest, content hashes, and cited evidence IDs
 
 LLM prompts should follow the existing 143 prompt architecture where possible: stable system prompts live in versioned templates, while org/repo editable policy text is stored as policy data and rendered at runtime. Exact rendered prompts used for approval must be recoverable from audit state.
 
-PR descriptions, diffs, comments, file contents, and commit messages are untrusted input. Reviewer and orchestrator prompts must treat that material as evidence, not instructions. PR content cannot override:
+PR descriptions, diffs, comments, file contents, commit messages, image pixels, filenames, alt text, captions, and nearby image context are untrusted input. Reviewer and orchestrator prompts must treat that material as evidence, not instructions. PR content cannot override:
 
 - approval policy
 - agent roster
@@ -568,7 +577,7 @@ PR descriptions, diffs, comments, file contents, and commit messages are untrust
 - secret handling
 - system/developer instructions
 
-Prompt-injection attempts in PR text or code comments are a separate typed hard-risk signal and make the PR non-acceptable by default unless policy says otherwise.
+Prompt-injection attempts in PR text, code comments, or visual content and its textual context are a separate typed hard-risk signal and make the PR non-acceptable by default unless policy says otherwise.
 
 ## Data Model Sketch
 

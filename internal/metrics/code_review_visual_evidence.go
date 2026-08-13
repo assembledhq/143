@@ -13,6 +13,7 @@ var (
 	codeReviewVisualEvidence     struct {
 		captures      otelmetric.Int64Counter
 		images        otelmetric.Int64Counter
+		satisfactions otelmetric.Int64Counter
 		bytes         otelmetric.Int64Histogram
 		fetchDuration otelmetric.Float64Histogram
 	}
@@ -29,6 +30,10 @@ func initCodeReviewVisualEvidenceMetrics() {
 		if imagesErr == nil {
 			codeReviewVisualEvidence.images = images
 		}
+		satisfactions, satisfactionsErr := meter.Int64Counter("code_review.visual_evidence.satisfactions", otelmetric.WithUnit("{satisfaction}"))
+		if satisfactionsErr == nil {
+			codeReviewVisualEvidence.satisfactions = satisfactions
+		}
 		bytesHistogram, bytesErr := meter.Int64Histogram("code_review.visual_evidence.image_bytes", otelmetric.WithUnit("By"))
 		if bytesErr == nil {
 			codeReviewVisualEvidence.bytes = bytesHistogram
@@ -38,6 +43,18 @@ func initCodeReviewVisualEvidenceMetrics() {
 			codeReviewVisualEvidence.fetchDuration = fetchDuration
 		}
 	})
+}
+
+// RecordCodeReviewVisualEvidenceSatisfaction records the bounded evidence
+// class and GitHub surface used by a validated description assessment.
+func RecordCodeReviewVisualEvidenceSatisfaction(ctx context.Context, basis, surface string) {
+	initCodeReviewVisualEvidenceMetrics()
+	if codeReviewVisualEvidence.satisfactions == nil {
+		return
+	}
+	codeReviewVisualEvidence.satisfactions.Add(ctx, 1, otelmetric.WithAttributes(
+		attrString("basis", basis), attrString("surface", surface),
+	))
 }
 
 // RecordCodeReviewVisualEvidenceCapture records bounded manifest-level state.
@@ -59,10 +76,11 @@ func RecordCodeReviewVisualEvidenceCapture(ctx context.Context, discovered, pers
 
 // RecordCodeReviewVisualEvidenceImage records one manifest item's bounded
 // outcome without emitting its URL, author, caption, or tenant identifiers.
-func RecordCodeReviewVisualEvidenceImage(ctx context.Context, surface, status, hostClass string, byteSize int64, durationSeconds float64) {
+func RecordCodeReviewVisualEvidenceImage(ctx context.Context, surface, status, hostClass string, byteSize int64, durationSeconds float64, fetched, deduplicated bool) {
 	initCodeReviewVisualEvidenceMetrics()
 	attributes := otelmetric.WithAttributes(
 		attrString("surface", surface), attrString("status", status), attrString("host_class", hostClass),
+		attrString("fetched", boolMetricValue(fetched)), attrString("deduplicated", boolMetricValue(deduplicated)),
 	)
 	if codeReviewVisualEvidence.images != nil {
 		codeReviewVisualEvidence.images.Add(ctx, 1, attributes)

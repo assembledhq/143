@@ -1,6 +1,6 @@
 # Design: Code Review Visual Evidence
 
-> **Status:** In progress | **Last reviewed:** 2026-08-12
+> **Status:** Implemented | **Last reviewed:** 2026-08-12
 >
 > **Depends on:** [../overall.md](../overall.md), [../implemented/112-code-reviewer-bot-auto-approval.md](../implemented/112-code-reviewer-bot-auto-approval.md)
 
@@ -75,6 +75,41 @@ Shared data types live in `internal/models` so the GitHub and worker packages
 can exchange the discovery and materialized manifests without a package cycle.
 The worker depends on a dedicated evidence provider rather than widening the
 general PR publication interface.
+
+## Database Contract
+
+No new table is introduced. The immutable snapshot uses the existing
+tenant-scoped `code_review_prompt_records` table with `role =
+visual_evidence`, a unique `(org_id, record_key)` checkpoint, the bounded audit
+summary in `content`, and the versioned snapshot JSON in `metadata`. Migration
+000286 widens `chk_code_review_prompt_records_role` to accept
+`visual_evidence`; during the legacy naming compatibility window it widens the
+equivalent `code_review_prompt_artifacts` constraint as well. The rollback
+restores the prior write constraint as `NOT VALID` so already-captured audit
+records remain readable.
+
+## API Contract
+
+`GET /api/v1/code-reviews/{session_id}/evidence` remains the read-only evidence
+route. It requires an authenticated active-organization membership with the
+`admin`, `builder`, `member`, or `viewer` role and scopes every lookup to that
+organization. The existing single-resource response adds:
+
+```json
+{
+  "data": {
+    "visual_evidence": { "version": 1, "complete": true, "evidence": [] },
+    "cited_visual_evidence_ids": ["ve_..."]
+  }
+}
+```
+
+`visual_evidence` is absent for historical assessments without a snapshot.
+The cited ID list is derived only from a completed, backend-validated
+orchestrator synthesis and contains known snapshot IDs in stable assessment
+order. A corrupt or ambiguous stored snapshot returns HTTP 500 with
+`CODE_REVIEW_VISUAL_EVIDENCE_LOAD_FAILED`. There is no request-body, query, or
+SSE contract change.
 
 ## Immutable Manifest
 
