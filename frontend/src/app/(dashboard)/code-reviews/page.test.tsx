@@ -117,6 +117,7 @@ const policy: CodeReviewResolvedPolicy = {
       blocked_path_patterns: ["migrations/**"],
       required_checks: ["lint", "test"],
       eligible_authors: ["anya"],
+      eligible_author_teams: ["acme/platform"],
       require_up_to_date: false,
       allow_forks: false,
     },
@@ -2602,7 +2603,7 @@ describe("CodeReviewsPage", () => {
       "Allowed path patterns",
       "Blocked path patterns",
       "Required checks",
-      "Eligible authors",
+      "Eligible GitHub authors",
       "Reviewer models",
       "Add reviewer model",
       "Reviewer 1 model",
@@ -3266,6 +3267,75 @@ describe("CodeReviewsPage", () => {
     expect(within(requiredChecksEditor as HTMLElement).getByText("test")).toBeInTheDocument();
 
     expect(screen.getByRole("button", { name: "Add required check" })).toBeInTheDocument();
+
+    const eligibleAuthorsEditor = screen.getByText("Eligible GitHub authors").closest("section");
+    expect(eligibleAuthorsEditor).not.toBeNull();
+    const eligibleUserRow = within(eligibleAuthorsEditor as HTMLElement).getByText("anya").parentElement;
+    const eligibleTeamRow = within(eligibleAuthorsEditor as HTMLElement).getByText("acme/platform").parentElement;
+    expect(eligibleUserRow).not.toBeNull();
+    expect(eligibleTeamRow).not.toBeNull();
+    expect(within(eligibleUserRow as HTMLElement).getByText("User")).toBeInTheDocument();
+    expect(within(eligibleTeamRow as HTMLElement).getByText("Team")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "GitHub author type" }));
+    await user.click(await screen.findByRole("option", { name: "Team" }));
+    const eligibleAuthorInput = screen.getByRole("textbox", { name: "Eligible GitHub author" });
+    expect(eligibleAuthorInput).toHaveAttribute("placeholder", "Organization/team-slug");
+    await user.type(eligibleAuthorInput, "acme/security-reviewers{enter}");
+
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            eligible_authors: ["anya"],
+            eligible_author_teams: ["acme/platform", "acme/security-reviewers"],
+          }),
+        }),
+        "manual",
+      );
+    });
+    expect(await screen.findByText("acme/security-reviewers")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Remove user anya" }));
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            eligible_authors: [],
+            eligible_author_teams: ["acme/platform", "acme/security-reviewers"],
+          }),
+        }),
+        "manual",
+      );
+    });
+    expect(screen.queryByText("anya")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Remove team acme/platform" }));
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            eligible_authors: [],
+            eligible_author_teams: ["acme/security-reviewers"],
+          }),
+        }),
+        "manual",
+      );
+    });
+    await user.click(screen.getByRole("button", { name: "Remove team acme/security-reviewers" }));
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            eligible_authors: [],
+            eligible_author_teams: [],
+          }),
+        }),
+        "manual",
+      );
+    });
+    expect(screen.getByText("No author whitelist configured. Any author is eligible.")).toBeInTheDocument();
+    expect(within(eligibleAuthorsEditor as HTMLElement).getByText("0 entries")).toBeInTheDocument();
   });
 
   it("saves code review timeout in seconds from the selected unit", async () => {

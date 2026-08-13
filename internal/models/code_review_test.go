@@ -294,6 +294,13 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 		{name: "rejects too many inline comments", mutate: func(c *CodeReviewPolicyConfig) { c.InlineCommentLimit = 11 }, expectErr: true},
 		{name: "rejects too short semantic cooldown", mutate: func(c *CodeReviewPolicyConfig) { c.RiskPolicy.SemanticDedupeCooldownSeconds = 59 }, expectErr: true},
 		{name: "rejects too long semantic cooldown", mutate: func(c *CodeReviewPolicyConfig) { c.RiskPolicy.SemanticDedupeCooldownSeconds = 86401 }, expectErr: true},
+		{name: "accepts qualified eligible author team", mutate: func(c *CodeReviewPolicyConfig) {
+			c.RiskPolicy.EligibleAuthorTeams = []string{"acme/platform-reviewers"}
+		}},
+		{name: "rejects unqualified eligible author team", mutate: func(c *CodeReviewPolicyConfig) { c.RiskPolicy.EligibleAuthorTeams = []string{"platform-reviewers"} }, expectErr: true},
+		{name: "rejects malformed eligible author team", mutate: func(c *CodeReviewPolicyConfig) {
+			c.RiskPolicy.EligibleAuthorTeams = []string{"acme/platform/reviewers"}
+		}, expectErr: true},
 		{name: "rejects no reviewers", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = nil }, expectErr: true},
 		{name: "rejects unsupported reviewer", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = []AgentType{AgentTypePMAgent} }, expectErr: true},
 		{name: "rejects reviewer model count mismatch", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.ReviewerModels = []string{DefaultCodexModel} }, expectErr: true},
@@ -484,6 +491,40 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				AuthorClass:       "human",
 			},
 			expected: codeReviewRiskEvaluationForTest(),
+		},
+		{
+			name: "allows active member of configured GitHub team",
+			mutate: func(c *CodeReviewPolicyConfig) {
+				c.RiskPolicy.EligibleAuthorTeams = []string{"acme/platform"}
+			},
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				LinesChanged:      20,
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Author:            "sam",
+				AuthorClass:       "human",
+				AuthorTeams:       []string{"ACME/PLATFORM"},
+			},
+			expected: codeReviewRiskEvaluationForTest(),
+		},
+		{
+			name: "blocks author outside configured GitHub teams",
+			mutate: func(c *CodeReviewPolicyConfig) {
+				c.RiskPolicy.EligibleAuthorTeams = []string{"acme/platform"}
+			},
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				LinesChanged:      20,
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Author:            "sam",
+				AuthorClass:       "human",
+				AuthorTeams:       []string{"acme/security"},
+			},
+			expected: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonAuthorIneligible},
+			),
 		},
 		{
 			name: "blocks synthesized reviewer risk signals",

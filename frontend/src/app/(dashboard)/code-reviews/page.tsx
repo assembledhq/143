@@ -21,6 +21,7 @@ import {
   Settings2,
   SquareArrowOutUpRight,
   Trash2,
+  UserRound,
   Users,
 } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
@@ -2565,18 +2566,17 @@ function AdvancedPolicySettings({
                   })
                 }
                       />
-                      <PolicyStringListEditor
-                        label="Eligible authors"
-                        description="Authors allowed by this policy. Leave empty to allow any author."
-                        placeholder="Add GitHub handle or author"
-                        emptyText="Any author is eligible."
-                        serverValue={config?.risk_policy.eligible_authors ?? []}
+                      <EligibleGitHubAuthorsEditor
+                        className="lg:col-span-2"
+                        serverUsers={config?.risk_policy.eligible_authors ?? []}
+                        serverTeams={config?.risk_policy.eligible_author_teams ?? []}
                         disabled={!config}
-                onCommitItems={(items) =>
-                  commitPolicy((next) => {
-                    next.risk_policy.eligible_authors = items;
-                  })
-                }
+                        onCommitItems={({ users, teams }) =>
+                          commitPolicy((next) => {
+                            next.risk_policy.eligible_authors = users;
+                            next.risk_policy.eligible_author_teams = teams;
+                          })
+                        }
                       />
                     </div>
                   </FineTuningSection>
@@ -3712,6 +3712,144 @@ function PolicyStringListEditor({
             <Plus className="h-4 w-4" />
             {addLabel}
           </Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+type EligibleGitHubAuthorKind = "user" | "team";
+
+function EligibleGitHubAuthorsEditor({
+  className,
+  serverUsers,
+  serverTeams,
+  disabled,
+  onCommitItems,
+}: {
+  className?: string;
+  serverUsers: string[];
+  serverTeams: string[];
+  disabled?: boolean;
+  onCommitItems: (items: { users: string[]; teams: string[] }) => void;
+}) {
+  const [kind, setKind] = useState<EligibleGitHubAuthorKind>("user");
+  const [draft, setDraft] = useState("");
+  const users = normalizeListItems(serverUsers);
+  const teams = normalizeListItems(serverTeams);
+  const entries = [
+    ...users.map((value) => ({ kind: "user" as const, value })),
+    ...teams.map((value) => ({ kind: "team" as const, value })),
+  ];
+  const countLabel = `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`;
+  const addDisabled = disabled || !draft.trim();
+  const addDisabledReason = disabled ? "Wait for the policy to load." : "Enter a GitHub username or team.";
+
+  const addEntry = () => {
+    const value = draft.trim();
+    if (!value) return;
+    const currentItems = kind === "user" ? users : teams;
+    if (currentItems.some((item) => item.toLowerCase() === value.toLowerCase())) {
+      setDraft("");
+      return;
+    }
+    onCommitItems(
+      kind === "user"
+        ? { users: [...users, value], teams }
+        : { users, teams: [...teams, value] },
+    );
+    setDraft("");
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    addEntry();
+  };
+
+  const removeEntry = (entryKind: EligibleGitHubAuthorKind, value: string) => {
+    onCommitItems({
+      users: entryKind === "user" ? users.filter((item) => item !== value) : users,
+      teams: entryKind === "team" ? teams.filter((item) => item !== value) : teams,
+    });
+  };
+
+  return (
+    <section className={cn("rounded-md border border-border bg-background", className)}>
+      <div className="space-y-1 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-1.5">
+            <Label htmlFor="eligible-github-author-input" className="text-sm font-medium text-foreground">
+              Eligible GitHub authors
+            </Label>
+            <SettingInfoTooltip
+              label="Eligible GitHub authors"
+              description="The reviewer may auto-approve when the author matches any listed user or is an active member of any listed team. Leave empty to allow any author. Team membership is checked live before approval."
+            />
+          </div>
+          <Badge variant="outline" className="shrink-0 text-xs">
+            {countLabel}
+          </Badge>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Allow automated approval for any matching user or active team member. Leave empty to allow all authors.
+        </p>
+      </div>
+      <div className="divide-y divide-border border-t border-border">
+        {entries.length === 0 ? (
+          <div className="px-4 py-3 text-xs text-muted-foreground">No author whitelist configured. Any author is eligible.</div>
+        ) : (
+          entries.map((entry) => {
+            const EntryIcon = entry.kind === "user" ? UserRound : Users;
+            const typeLabel = entry.kind === "user" ? "User" : "Team";
+            return (
+              <div key={`${entry.kind}:${entry.value}`} className="flex min-h-10 items-center gap-3 px-4 py-2">
+                <EntryIcon className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                <span className="min-w-0 flex-1 truncate text-sm text-foreground">{entry.value}</span>
+                <Badge variant="outline" className="shrink-0 text-xs">
+                  {typeLabel}
+                </Badge>
+                <DisabledTooltip disabled={!!disabled} content="Wait for the policy to load.">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    disabled={disabled}
+                    aria-label={`Remove ${entry.kind} ${entry.value}`}
+                    onClick={() => removeEntry(entry.kind, entry.value)}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </DisabledTooltip>
+              </div>
+            );
+          })
+        )}
+        <div className="grid gap-2 p-3 sm:grid-cols-[8rem_1fr_auto]">
+          <Select value={kind} disabled={disabled} onValueChange={(value) => setKind(value as EligibleGitHubAuthorKind)}>
+            <SelectTrigger aria-label="GitHub author type">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="user">User</SelectItem>
+              <SelectItem value="team">Team</SelectItem>
+            </SelectContent>
+          </Select>
+          <Input
+            id="eligible-github-author-input"
+            value={draft}
+            disabled={disabled}
+            placeholder={kind === "user" ? "GitHub username" : "Organization/team-slug"}
+            aria-label="Eligible GitHub author"
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+          <DisabledTooltip disabled={!!addDisabled} content={addDisabledReason}>
+            <Button type="button" variant="outline" disabled={addDisabled} onClick={addEntry}>
+              <Plus className="h-4 w-4" />
+              Add author
+            </Button>
+          </DisabledTooltip>
         </div>
       </div>
     </section>

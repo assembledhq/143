@@ -3502,6 +3502,206 @@ func TestCodeReviewStableDeterministicRiskIncludesSensitivePaths(t *testing.T) {
 		"sensitive-path matches are decided by the assessed commit, so they publish with the other stable path rules")
 }
 
+type codeReviewTeamMembershipGitHubStub struct {
+	active bool
+	err    error
+	calls  []string
+}
+
+func (s *codeReviewTeamMembershipGitHubStub) GetInstallationToken(context.Context, int64) (string, error) {
+	return "token", nil
+}
+
+func (s *codeReviewTeamMembershipGitHubStub) IsActiveTeamMember(_ context.Context, installationID int64, organization, teamSlug, username string) (bool, error) {
+	s.calls = append(s.calls, fmt.Sprintf("%d:%s/%s:%s", installationID, organization, teamSlug, username))
+	return s.active, s.err
+}
+
+func TestLoadCodeReviewAuthorTeams(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		author          string
+		eligibleAuthors []string
+		teamActive      bool
+		teamErr         error
+		expectRepo      bool
+		expectedTeams   []string
+		expectedCalls   []string
+		expectErr       bool
+	}{
+		{
+			name:            "skips provider lookup for explicitly eligible username",
+			author:          "anya",
+			eligibleAuthors: []string{"anya"},
+		},
+		{
+			name:          "returns matching active team",
+			author:        "sam",
+			teamActive:    true,
+			expectRepo:    true,
+			expectedTeams: []string{"acme/platform-reviewers"},
+			expectedCalls: []string{"42:acme/platform-reviewers:sam"},
+		},
+		{
+			name:          "returns no team for inactive member",
+			author:        "sam",
+			expectRepo:    true,
+			expectedCalls: []string{"42:acme/platform-reviewers:sam"},
+		},
+		{
+			name:          "returns lookup errors so approval fails closed",
+			author:        "sam",
+			teamErr:       errors.New("github unavailable"),
+			expectRepo:    true,
+			expectedCalls: []string{"42:acme/platform-reviewers:sam"},
+			expectErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize for author team lookup")
+			defer mock.Close()
+			orgID := uuid.New()
+			repositoryID := uuid.New()
+			if tt.expectRepo {
+				now := time.Now().UTC()
+				mock.ExpectQuery("(?s)FROM repositories.*WHERE id = @id AND org_id = @org_id").
+					WithArgs(pgx.NamedArgs{"id": repositoryID, "org_id": orgID}).
+					WillReturnRows(pgxmock.NewRows(workerRepositoryColumns()).AddRow(
+						repositoryID, orgID, uuid.New(), int64(143), "acme/widget", "main", false, nil, nil,
+						"https://github.com/acme/widget.git", int64(42), models.RepositoryStatusActive, nil, nil, []byte(`{}`), now, now,
+					))
+			}
+			github := &codeReviewTeamMembershipGitHubStub{active: tt.teamActive, err: tt.teamErr}
+			policy := models.DefaultCodeReviewPolicyConfig()
+			policy.RiskPolicy.EligibleAuthors = tt.eligibleAuthors
+			policy.RiskPolicy.EligibleAuthorTeams = []string{"acme/platform-reviewers"}
+
+			actual, err := loadCodeReviewAuthorTeams(
+				context.Background(),
+				&Stores{Repositories: db.NewRepositoryStore(mock)},
+				&Services{GitHub: github},
+				policy,
+				runCodeReviewPayload{OrgID: orgID, RepositoryID: repositoryID, PullRequestAuthor: tt.author},
+				models.PullRequest{AuthoredBy: models.GitIdentitySourceUser},
+			)
+			if tt.expectErr {
+				require.Error(t, err, "author team lookup should propagate provider failures")
+			} else {
+				require.NoError(t, err, "author team lookup should complete")
+				require.Equal(t, tt.expectedTeams, actual, "author team lookup should return the matching configured team")
+			}
+			require.Equal(t, tt.expectedCalls, github.calls, "author team lookup should make only the required GitHub membership calls")
+			require.NoError(t, mock.ExpectationsWereMet(), "author team lookup should satisfy repository expectations")
+		})
+	}
+}
+
+func TestResolveCodeReviewAuthorTeamsClassifiesGitHubFailures(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000143")
+	retryAfterHint := 117 * time.Second
+	expectedRetryAfter := *githubRateLimitRetryAfter(&retryAfterHint, sessionID.String())
+	tests := []struct {
+		name            string
+		status          int
+		body            string
+		header          http.Header
+		expectRetryable bool
+		expectFatal     bool
+	}{
+		{
+			name:            "preserves GitHub rate limit policy",
+			status:          http.StatusTooManyRequests,
+			header:          http.Header{"Retry-After": []string{"117"}},
+			expectRetryable: true,
+		},
+		{
+			name:        "treats missing GitHub permission as persistent",
+			status:      http.StatusForbidden,
+			body:        `{"message":"Resource not accessible by integration"}`,
+			expectFatal: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize for classified author team lookup")
+			defer mock.Close()
+			orgID := uuid.New()
+			repositoryID := uuid.New()
+			now := time.Now().UTC()
+			mock.ExpectQuery("(?s)FROM repositories.*WHERE id = @id AND org_id = @org_id").
+				WithArgs(pgx.NamedArgs{"id": repositoryID, "org_id": orgID}).
+				WillReturnRows(pgxmock.NewRows(workerRepositoryColumns()).AddRow(
+					repositoryID, orgID, uuid.New(), int64(143), "acme/widget", "main", false, nil, nil,
+					"https://github.com/acme/widget.git", int64(42), models.RepositoryStatusActive, nil, nil, []byte(`{}`), now, now,
+				))
+			upstreamErr := &ghservice.GitHubAPIError{
+				Method:     http.MethodGet,
+				Path:       "/orgs/acme/teams/platform-reviewers/memberships/sam",
+				StatusCode: tt.status,
+				Body:       []byte(tt.body),
+				Header:     tt.header,
+			}
+			github := &codeReviewTeamMembershipGitHubStub{err: upstreamErr}
+			policy := models.DefaultCodeReviewPolicyConfig()
+			policy.RiskPolicy.EligibleAuthorTeams = []string{"acme/platform-reviewers"}
+
+			actual, err := resolveCodeReviewAuthorTeams(
+				context.Background(),
+				&Stores{Repositories: db.NewRepositoryStore(mock)},
+				&Services{GitHub: github},
+				policy,
+				runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, RepositoryID: repositoryID, PullRequestAuthor: "sam"},
+				models.PullRequest{AuthoredBy: models.GitIdentitySourceUser},
+			)
+
+			require.Nil(t, actual, "failed author team resolution should not return partial membership evidence")
+			var retryable *RetryableError
+			require.Equal(t, tt.expectRetryable, errors.As(err, &retryable), "GitHub team failure should receive the expected retry classification")
+			var fatal *FatalError
+			require.Equal(t, tt.expectFatal, errors.As(err, &fatal), "persistent GitHub team failure should receive the expected fatal classification")
+			if tt.expectRetryable {
+				require.False(t, retryable.ConsumeAttempt, "rate-limit retries should preserve the job attempt budget")
+				require.NotNil(t, retryable.RetryAfter, "rate-limit retries should preserve an explicit delay")
+				require.Equal(t, expectedRetryAfter, *retryable.RetryAfter, "rate-limit retries should honor GitHub's delay plus stable jitter")
+				require.NotNil(t, retryable.MaxRetryDuration, "rate-limit retries should use the extended bounded window")
+				require.Equal(t, githubRateLimitMaxRetryDuration, *retryable.MaxRetryDuration, "rate-limit retries should survive GitHub's reset interval")
+			}
+			require.Equal(t, []string{"42:acme/platform-reviewers:sam"}, github.calls, "classified lookup should call only the configured team")
+			require.NoError(t, mock.ExpectationsWereMet(), "classified lookup should satisfy repository expectations")
+		})
+	}
+}
+
+func TestCodeReviewStableDeterministicRiskDefersTeamMembershipGate(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	policy.RiskPolicy.EligibleAuthorTeams = []string{"acme/platform-reviewers"}
+
+	actual := codeReviewStableDeterministicRisk(
+		policy,
+		runCodeReviewPayload{PullRequestAuthor: "sam"},
+		models.PullRequest{AuthoredBy: models.GitIdentitySourceUser},
+		[]codereview.PullRequestFile{{Filename: "internal/api.go", Additions: 2}},
+		true,
+	)
+
+	require.Equal(t, models.CodeReviewRiskEvaluation{Acceptable: true}, actual, "live GitHub team membership should be rechecked at the final decision instead of treated as a stable early-stop blocker")
+}
+
 func TestCodeReviewCanStopBeforeAgentFanout(t *testing.T) {
 	t.Parallel()
 

@@ -175,6 +175,55 @@ func TestService_ListOrgMembers_ReturnsBodyCloseError(t *testing.T) {
 	require.Nil(t, members, "ListOrgMembers should not return members when response cleanup fails")
 }
 
+func TestService_IsActiveTeamMember(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		expected   bool
+		expectErr  bool
+	}{
+		{name: "returns true for active membership", statusCode: http.StatusOK, body: `{"state":"active"}`, expected: true},
+		{name: "returns false for pending membership", statusCode: http.StatusOK, body: `{"state":"pending"}`},
+		{name: "returns false for missing membership", statusCode: http.StatusNotFound, body: `{}`},
+		{name: "returns provider errors", statusCode: http.StatusForbidden, body: `{"message":"forbidden"}`, expectErr: true},
+		{name: "returns decode errors", statusCode: http.StatusOK, body: `{`, expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc := &Service{
+				httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					require.Equal(t, http.MethodGet, req.Method, "team membership lookup should use GET")
+					require.Equal(t, "/orgs/acme/teams/platform-reviewers/memberships/octocat", req.URL.Path, "team membership lookup should target the qualified team and author")
+					require.Equal(t, "Bearer cached-token", req.Header.Get("Authorization"), "team membership lookup should use the installation token")
+					return &http.Response{
+						StatusCode: tt.statusCode,
+						Body:       io.NopCloser(strings.NewReader(tt.body)),
+						Header:     make(http.Header),
+					}, nil
+				})},
+				apiBaseURL: "https://api.github.test",
+				cache: map[int64]*cachedToken{
+					42: {Token: "cached-token", ExpiresAt: time.Now().Add(30 * time.Minute)},
+				},
+			}
+
+			actual, err := svc.IsActiveTeamMember(context.Background(), 42, "acme", "platform-reviewers", "octocat")
+			if tt.expectErr {
+				require.Error(t, err, "team membership lookup should return the provider or decode error")
+				return
+			}
+			require.NoError(t, err, "team membership lookup should succeed for a valid GitHub response")
+			require.Equal(t, tt.expected, actual, "team membership lookup should report only active memberships")
+		})
+	}
+}
+
 func TestService_GetInstallationToken_UsesCache(t *testing.T) {
 	t.Parallel()
 

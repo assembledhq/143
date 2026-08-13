@@ -1,6 +1,6 @@
 # Design: 143.dev
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-08-04
+> **Status:** Partially Implemented | **Last reviewed:** 2026-08-12
 
 143.dev is shared coding-agent infrastructure for engineering teams. It turns production errors, issue-tracker work, PR feedback, automations, and human requests into repo-scoped coding sessions that run in isolated sandboxes, produce reviewable diffs, launch previews, and publish branches or pull requests through the team's normal GitHub workflow.
 
@@ -21,7 +21,7 @@ The public homepage positions 143 as shared coding-agent infrastructure for engi
 - **Project** is the higher-level planning surface for human-authored multi-step work. Projects group related tasks and can feed sessions over time.
 - **Preview** is a temporary isolated web runtime for a session or branch. It is addressed by a preview origin, controlled by backend state, and backed by a worker-owned sandbox/runtime.
 - **Branch or PR** is the published result. 143 creates branches and PRs through GitHub while preserving repository templates, keeping PR descriptions concise and problem-first, and leaving repository-native CI/CD as the validation source of truth.
-- **Code review** is a post-PR review session started by explicit reviewer-bot request or future policy triggers. One organization-wide versioned policy separates optional reviewer instructions, automated-approval guidance, and deterministic safeguards across every repository. The orchestrator emits structured findings and typed non-code human-review reasons; the backend treats P0/P1 findings as blocking and P2/P3 findings as advisory, preventing hidden model vetoes. Reviews store policy version, PR/head SHA metadata, reviewer-agent evidence, findings, risk decision, rendered prompt records, and GitHub review output so decisions remain auditable.
+- **Code review** is a post-PR review session started by explicit reviewer-bot request or future policy triggers. One organization-wide versioned policy separates optional reviewer instructions, automated-approval guidance, and deterministic safeguards across every repository, including an optional PR-author whitelist of GitHub usernames and active members of qualified GitHub teams. The orchestrator emits structured findings and typed non-code human-review reasons; the backend treats P0/P1 findings as blocking and P2/P3 findings as advisory, preventing hidden model vetoes. Reviews store policy version, PR/head SHA metadata, reviewer-agent evidence, findings, risk decision, rendered prompt records, and GitHub review output so decisions remain auditable.
 
 ## Core Flow
 

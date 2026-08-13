@@ -478,6 +478,7 @@ type CodeReviewRiskPolicy struct {
 	RequireUpToDate               bool     `json:"require_up_to_date"`
 	AllowForks                    bool     `json:"allow_forks"`
 	EligibleAuthors               []string `json:"eligible_authors,omitempty"`
+	EligibleAuthorTeams           []string `json:"eligible_author_teams,omitempty"`
 	RequiredChecks                []string `json:"required_checks,omitempty"`
 }
 
@@ -665,6 +666,9 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	if len(config.RiskPolicy.EligibleAuthors) > 0 {
 		defaults.RiskPolicy.EligibleAuthors = config.RiskPolicy.EligibleAuthors
 	}
+	if len(config.RiskPolicy.EligibleAuthorTeams) > 0 {
+		defaults.RiskPolicy.EligibleAuthorTeams = config.RiskPolicy.EligibleAuthorTeams
+	}
 	if len(config.RiskPolicy.RequiredChecks) > 0 {
 		defaults.RiskPolicy.RequiredChecks = config.RiskPolicy.RequiredChecks
 	}
@@ -745,6 +749,11 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	for _, requirement := range c.DescriptionPolicy.Requirements {
 		if err := requirement.AppliesWhen.Validate(); err != nil {
 			return codeReviewPolicyFieldError(CodeReviewPolicyFieldDescriptionPolicy, err.Error())
+		}
+	}
+	for _, team := range c.RiskPolicy.EligibleAuthorTeams {
+		if !validCodeReviewGitHubTeam(team) {
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "eligible_author_teams entries must use organization/team-slug")
 		}
 	}
 	if len(c.AgentRoster.Reviewers) == 0 {
@@ -1160,6 +1169,7 @@ type CodeReviewRiskInput struct {
 	UpToDate              bool
 	Author                string
 	AuthorClass           string
+	AuthorTeams           []string
 	FromFork              bool
 	BlockingFindings      int
 	ReviewerDisagreement  bool
@@ -1456,7 +1466,9 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	if input.FromFork && !policy.RiskPolicy.AllowForks {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonForkIneligible})
 	}
-	if len(policy.RiskPolicy.EligibleAuthors) > 0 && !codeReviewAuthorAllowed(input.Author, input.AuthorClass, policy.RiskPolicy.EligibleAuthors) {
+	if (len(policy.RiskPolicy.EligibleAuthors) > 0 || len(policy.RiskPolicy.EligibleAuthorTeams) > 0) &&
+		!CodeReviewAuthorAllowed(input.Author, input.AuthorClass, policy.RiskPolicy.EligibleAuthors) &&
+		!codeReviewAuthorTeamAllowed(input.AuthorTeams, policy.RiskPolicy.EligibleAuthorTeams) {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonAuthorIneligible})
 	}
 	if input.BlockingFindings > 0 {
@@ -1496,7 +1508,9 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	return risk
 }
 
-func codeReviewAuthorAllowed(author, authorClass string, allowed []string) bool {
+// CodeReviewAuthorAllowed reports whether a PR author matches an explicit
+// username or one of the legacy author-class entries in eligible_authors.
+func CodeReviewAuthorAllowed(author, authorClass string, allowed []string) bool {
 	author = strings.TrimSpace(author)
 	authorClass = strings.ToLower(strings.TrimSpace(authorClass))
 	for _, item := range allowed {
@@ -1524,6 +1538,33 @@ func codeReviewAuthorAllowed(author, authorClass string, allowed []string) bool 
 		}
 	}
 	return false
+}
+
+func codeReviewAuthorTeamAllowed(authorTeams, allowedTeams []string) bool {
+	for _, authorTeam := range authorTeams {
+		authorTeam = strings.TrimSpace(authorTeam)
+		for _, allowedTeam := range allowedTeams {
+			if strings.EqualFold(authorTeam, strings.TrimSpace(allowedTeam)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func validCodeReviewGitHubTeam(value string) bool {
+	organization, team, found := strings.Cut(strings.TrimSpace(value), "/")
+	if !found || strings.TrimSpace(organization) == "" || strings.TrimSpace(team) == "" || strings.Contains(team, "/") {
+		return false
+	}
+	for _, part := range []string{organization, team} {
+		for _, r := range part {
+			if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '-' && r != '_' && r != '.' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func CodeReviewFindingSeverityRank(severity CodeReviewFindingSeverity) int {

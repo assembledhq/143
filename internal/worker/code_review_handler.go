@@ -36,6 +36,7 @@ type runCodeReviewPayload struct {
 	HeadSHA                 string                              `json:"head_sha"`
 	FromFork                bool                                `json:"from_fork"`
 	PullRequestAuthor       string                              `json:"pull_request_author,omitempty"`
+	PullRequestAuthorTeams  []string                            `json:"-"`
 	OutputKey               string                              `json:"review_output_key"`
 	RequestedReviewerLogin  string                              `json:"requested_reviewer_login,omitempty"`
 	RequestedTeamSlug       string                              `json:"requested_team_slug,omitempty"`
@@ -350,6 +351,13 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		changedFiles, changedFilesAvailable, err = loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
 		if err != nil {
 			return fmt.Errorf("reload code review changed files before decision: %w", err)
+		}
+		// Team membership can change while reviewer agents run. Recheck it
+		// immediately before the final decision instead of treating the
+		// synthesis-time lookup as captured, immutable policy evidence.
+		job.PullRequestAuthorTeams, err = resolveCodeReviewAuthorTeams(ctx, stores, services, policy.Config(), job, pr)
+		if err != nil {
+			return err
 		}
 		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
 			Policy:                policy.Config(),
@@ -1580,6 +1588,7 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		UpToDate:             codeReviewUpToDate(health),
 		Author:               codeReviewAuthor(job, pr),
 		AuthorClass:          codeReviewAuthorClass(pr),
+		AuthorTeams:          job.PullRequestAuthorTeams,
 		FromFork:             job.FromFork,
 		ContextFetchFailed:   health == nil,
 		HeadSHAChanged:       codeReviewHeadChanged(job.HeadSHA, pr, health),
@@ -2364,6 +2373,10 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 		}
 		return stores.CodeReviews.CreateAgentResult(ctx, result)
 	}
+	job.PullRequestAuthorTeams, err = resolveCodeReviewAuthorTeams(ctx, stores, services, cfg, job, pr)
+	if err != nil {
+		return err
+	}
 	rootKey := codeReviewPromptRecordRoot(metadata, job)
 	recordKey := fmt.Sprintf("%s/orchestrator-%s", rootKey, agentType)
 	promptText := codeReviewOrchestratorPrompt(job, pr, health, cfg, policy.Version, metadata.BaseSHA, changedFiles, agentResults, findings)
@@ -2728,6 +2741,10 @@ type codeReviewRequestedReviewerRemover interface {
 	RemoveRequestedReviewers(ctx context.Context, req codereviewsvc.RequestedReviewersRequest) error
 }
 
+type codeReviewAuthorTeamMembershipChecker interface {
+	IsActiveTeamMember(ctx context.Context, installationID int64, orgLogin, teamSlug, username string) (bool, error)
+}
+
 type liveCodeReviewOutcomeInput struct {
 	Policy                models.CodeReviewPolicyConfig
 	Job                   runCodeReviewPayload
@@ -2761,10 +2778,16 @@ func codeReviewStableDeterministicRisk(policy models.CodeReviewPolicyConfig, job
 		UpToDate:              true,
 		Author:                codeReviewAuthor(job, pr),
 		AuthorClass:           codeReviewAuthorClass(pr),
+		AuthorTeams:           job.PullRequestAuthorTeams,
 		FromFork:              job.FromFork,
 	})
 	stable := models.CodeReviewRiskEvaluation{Acceptable: true}
 	for _, reason := range evaluated.ReasonDetails {
+		// Explicit usernames are stable for the captured policy, but GitHub team
+		// membership is live provider state and is rechecked before approval.
+		if reason.Code == models.CodeReviewRiskReasonAuthorIneligible && len(policy.RiskPolicy.EligibleAuthorTeams) > 0 {
+			continue
+		}
 		if models.IsCodeReviewStableDeterministicRiskReason(reason.Code) {
 			stable.AddReason(reason)
 		}
@@ -2868,6 +2891,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		UpToDate:              codeReviewUpToDate(input.Health),
 		Author:                codeReviewAuthor(input.Job, input.PullRequest),
 		AuthorClass:           codeReviewAuthorClass(input.PullRequest),
+		AuthorTeams:           input.Job.PullRequestAuthorTeams,
 		FromFork:              input.Job.FromFork,
 		ContextFetchFailed:    input.Health == nil || !input.ChangedFilesAvailable,
 		HeadSHAChanged:        codeReviewHeadChanged(input.Job.HeadSHA, input.PullRequest, input.Health),
@@ -3455,6 +3479,83 @@ func codeReviewAuthorClass(pr models.PullRequest) string {
 	default:
 		return ""
 	}
+}
+
+func loadCodeReviewAuthorTeams(
+	ctx context.Context,
+	stores *Stores,
+	services *Services,
+	policy models.CodeReviewPolicyConfig,
+	job runCodeReviewPayload,
+	pr models.PullRequest,
+) ([]string, error) {
+	policy = models.ResolveCodeReviewPolicyConfig(&policy)
+	if len(policy.RiskPolicy.EligibleAuthorTeams) == 0 {
+		return nil, nil
+	}
+	author := codeReviewAuthor(job, pr)
+	if author == "" || models.CodeReviewAuthorAllowed(author, codeReviewAuthorClass(pr), policy.RiskPolicy.EligibleAuthors) {
+		return nil, nil
+	}
+	if stores == nil || stores.Repositories == nil {
+		return nil, fmt.Errorf("repository store unavailable")
+	}
+	repository, err := stores.Repositories.GetByID(ctx, job.OrgID, job.RepositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("load repository for author team lookup: %w", err)
+	}
+	owner, _, found := strings.Cut(strings.TrimSpace(repository.FullName), "/")
+	if !found || strings.TrimSpace(owner) == "" {
+		return nil, fmt.Errorf("repository %q has no GitHub organization owner", repository.FullName)
+	}
+	if repository.InstallationID <= 0 {
+		return nil, fmt.Errorf("repository %q has no GitHub installation", repository.FullName)
+	}
+
+	relevantTeams := make([]string, 0, len(policy.RiskPolicy.EligibleAuthorTeams))
+	for _, teamRef := range policy.RiskPolicy.EligibleAuthorTeams {
+		organization, teamSlug, ok := strings.Cut(strings.TrimSpace(teamRef), "/")
+		if !ok || strings.TrimSpace(teamSlug) == "" || !strings.EqualFold(strings.TrimSpace(organization), owner) {
+			continue
+		}
+		relevantTeams = append(relevantTeams, strings.TrimSpace(teamRef))
+	}
+	if len(relevantTeams) == 0 {
+		return nil, nil
+	}
+	if services == nil || services.GitHub == nil {
+		return nil, fmt.Errorf("GitHub service unavailable")
+	}
+	checker, ok := services.GitHub.(codeReviewAuthorTeamMembershipChecker)
+	if !ok {
+		return nil, fmt.Errorf("GitHub team membership lookup unavailable")
+	}
+	for _, teamRef := range relevantTeams {
+		organization, teamSlug, _ := strings.Cut(teamRef, "/")
+		active, err := checker.IsActiveTeamMember(ctx, repository.InstallationID, organization, teamSlug, author)
+		if err != nil {
+			return nil, fmt.Errorf("check @%s membership for %s: %w", teamRef, author, err)
+		}
+		if active {
+			return []string{teamRef}, nil
+		}
+	}
+	return nil, nil
+}
+
+func resolveCodeReviewAuthorTeams(
+	ctx context.Context,
+	stores *Stores,
+	services *Services,
+	policy models.CodeReviewPolicyConfig,
+	job runCodeReviewPayload,
+	pr models.PullRequest,
+) ([]string, error) {
+	teams, err := loadCodeReviewAuthorTeams(ctx, stores, services, policy, job, pr)
+	if err != nil {
+		return nil, classifyGitHubJobError(fmt.Errorf("verify code review author team eligibility: %w", err), job.SessionID.String())
+	}
+	return teams, nil
 }
 
 func ensureCodeReviewInlineSelection(ctx context.Context, store *db.CodeReviewStore, job runCodeReviewPayload, findings []models.CodeReviewFinding, changedFiles []codereviewsvc.PullRequestFile, limit int) error {

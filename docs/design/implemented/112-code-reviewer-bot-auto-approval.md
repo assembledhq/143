@@ -1,6 +1,6 @@
 # Design: Code Reviewer Bot And Acceptable-Risk Auto-Approval
 
-> **Status:** Implemented | **Last reviewed:** 2026-08-02
+> **Status:** Implemented | **Last reviewed:** 2026-08-12
 >
 > **Depends on:** [../overall.md](../overall.md), [78-review-agent-loops.md](78-review-agent-loops.md), [61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)
 
@@ -292,7 +292,8 @@ Core settings:
 - Configure CI/check prerequisites for approval.
 - Configure path, size, and author constraints.
 - Configure inline comment cap, default 4 and max 10.
-- Configure whether human-authored, 143-authored, or all PRs are eligible.
+- Configure whether named GitHub users, active members of qualified GitHub
+  teams, legacy author classes, or all PR authors are eligible.
 
 Repository overrides should inherit from org defaults. Policy should be versioned insert-only like other settings where history matters, because approval decisions need later auditability.
 
@@ -350,7 +351,17 @@ Configurable deterministic signals:
 - no migrations, auth, billing, permissions, crypto, infra, dependency lockfile, or generated output surprises
 - CI/checks are green or not required by policy
 - branch is mergeable and up to date according to policy
-- author is in an eligible role or team
+- author is explicitly eligible or is an active member of an eligible GitHub team
+
+The persisted `risk_policy` JSON supports `eligible_authors` and
+`eligible_author_teams`. Team entries use `organization/team-slug`. If both
+lists are empty, author identity does not restrict approval. Once either list
+has an entry, the two lists form one OR-based whitelist. Team membership is
+resolved through the repository's GitHub App installation and checked again
+immediately before approval; an unavailable or unauthorized lookup never
+permits approval. This adds no database column or public route because policy
+parts are already stored as versioned JSONB and saved through the existing
+organization policy API.
 
 Existing human comments, review decisions, and open or resolved review threads are deliberately not risk signals. The bot evaluates the current pull request independently.
 
