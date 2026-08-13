@@ -28,6 +28,8 @@ const (
 	defaultSandboxPressureCleanupTimeout = 5 * time.Second
 	defaultSharedSandboxAdmissionTimeout = 10 * time.Second
 	defaultSharedSandboxReservationTTL   = 15 * time.Minute
+	defaultSharedSandboxReleaseRetryMin  = 100 * time.Millisecond
+	defaultSharedSandboxReleaseRetryMax  = time.Second
 )
 
 // LiveSandboxCounter counts live sandbox containers on the local machine.
@@ -39,7 +41,7 @@ type LiveSandboxCounter interface {
 // share one worker node and Docker daemon.
 type SharedSandboxCapacityStore interface {
 	ReserveSandboxCapacity(ctx context.Context, nodeID string, jobID *uuid.UUID, workloadClass models.SandboxWorkloadClass, countLiveSandboxes func(context.Context) (int, error), effectiveMax int, expiresAt time.Time) (reservationID uuid.UUID, liveSandboxes, total int, acquired bool, err error)
-	ReleaseSandboxCapacity(ctx context.Context, reservationID uuid.UUID) error
+	ReleaseSandboxCapacity(ctx context.Context, nodeID string, reservationID uuid.UUID) error
 }
 
 // SandboxPressureCleaner performs a best-effort local cleanup pass when a
@@ -440,9 +442,14 @@ func (r *SandboxCapacityReservation) Release() {
 		r.gate.mu.Unlock()
 
 		if r.sharedReservationID != uuid.Nil && r.gate.sharedReservations != nil {
-			releaseCtx, cancel := context.WithTimeout(context.Background(), defaultSandboxCapacityCountTimeout)
+			// Release takes the same per-node database lock as admission. Give it
+			// the full coordination budget rather than the shorter Docker-count
+			// budget so a concurrent admission can finish first, and retry
+			// transient database failures within that budget so a one-off blip
+			// does not strand the slot until the lease TTL expires.
+			releaseCtx, cancel := context.WithTimeout(context.Background(), r.gate.sharedAdmissionTimeout)
 			defer cancel()
-			if err := r.gate.sharedReservations.ReleaseSandboxCapacity(releaseCtx, r.sharedReservationID); err != nil {
+			if err := r.releaseSharedReservation(releaseCtx); err != nil {
 				r.gate.logger.Warn().Err(err).
 					Str("node_id", r.gate.nodeID).
 					Str("reservation_id", r.sharedReservationID.String()).
@@ -450,4 +457,21 @@ func (r *SandboxCapacityReservation) Release() {
 			}
 		}
 	})
+}
+
+func (r *SandboxCapacityReservation) releaseSharedReservation(ctx context.Context) error {
+	delay := defaultSharedSandboxReleaseRetryMin
+	for {
+		err := r.gate.sharedReservations.ReleaseSandboxCapacity(ctx, r.gate.nodeID, r.sharedReservationID)
+		if err == nil {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, defaultSharedSandboxReleaseRetryMax)
+	}
 }

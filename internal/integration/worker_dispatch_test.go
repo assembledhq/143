@@ -77,7 +77,28 @@ func TestIntegration_SharedSandboxAdmissionDeduplicatesCurrentRoutingReservation
 	require.False(t, otherAcquired, "independent admission should not exceed the worker limit")
 	require.Equal(t, uuid.Nil, otherReservationID, "rejected admission should not persist another lease")
 	require.Equal(t, 1, blockedTotal, "shared and durable reservations for the admitted job should remain deduplicated")
-	require.NoError(t, capacityStore.ReleaseSandboxCapacity(ctx, reservationID), "test should release its shared admission lease")
+	lockTx, err := pool.Begin(ctx)
+	require.NoError(t, err, "test should open a competing node-admission transaction")
+	defer func() { _ = lockTx.Rollback(ctx) }()
+	_, err = lockTx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 143))`, nodeID)
+	require.NoError(t, err, "test should hold the worker admission lock")
+
+	releaseDone := make(chan error, 1)
+	go func() {
+		releaseDone <- capacityStore.ReleaseSandboxCapacity(ctx, nodeID, reservationID)
+	}()
+	select {
+	case releaseErr := <-releaseDone:
+		require.Failf(t, "shared capacity release should wait for admission lock", "release returned early: %v", releaseErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+	require.NoError(t, lockTx.Commit(ctx), "test should release the competing worker admission lock")
+	require.NoError(t, <-releaseDone, "shared capacity release should complete after acquiring the admission lock")
+
+	var remainingReservations int
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM sandbox_capacity_reservations WHERE id = $1`, reservationID).Scan(&remainingReservations)
+	require.NoError(t, err, "test should inspect the released shared reservation")
+	require.Equal(t, 0, remainingReservations, "shared capacity release should delete its lease after the admission lock is available")
 }
 
 // TestIntegration_CodeReviewJobsUseFleetCapacityAndPreserveInteractiveReserve

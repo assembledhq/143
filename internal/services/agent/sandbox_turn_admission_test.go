@@ -56,7 +56,7 @@ func (s *sandboxAdmissionSharedCapacityStore) ReserveSandboxCapacity(
 	return uuid.New(), live, live + 1, true, nil
 }
 
-func (*sandboxAdmissionSharedCapacityStore) ReleaseSandboxCapacity(context.Context, uuid.UUID) error {
+func (*sandboxAdmissionSharedCapacityStore) ReleaseSandboxCapacity(context.Context, string, uuid.UUID) error {
 	return nil
 }
 
