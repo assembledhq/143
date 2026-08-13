@@ -171,8 +171,10 @@ the same per-node advisory lock to atomically compare the current Docker count,
 durable job reservations, and shared final-admission leases before inserting a
 15-minute shared lease. Cross-process coordination has a 10-second bound while
 the Docker inspection inside the lock keeps its shorter two-second bound. The
-lease is released as soon as sandbox creation or hydration finishes; its TTL
-bounds leaks if a process dies. A fenced executor also clears its durable
+lease is released under the same per-node admission lock as soon as sandbox
+creation or hydration finishes. Transient release failures retry within the
+shared coordination budget; the TTL bounds leaks if a process dies or the
+database remains unavailable. A fenced executor also clears its durable
 routing reservation after creation or hydration.
 
 Pressure cleanup runs only when the worker is physically full. A code-review

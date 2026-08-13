@@ -134,16 +134,36 @@ func (s *SandboxCapacityReservationStore) ReserveSandboxCapacity(
 }
 
 // ReleaseSandboxCapacity removes a final-admission lease once sandbox creation
-// either completes or aborts.
+// either completes or aborts. Release takes the same per-node advisory lock as
+// admission so a new admission cannot observe the container before it appears
+// in Docker while simultaneously missing the lease that protected its start.
 // lint:allow-no-orgid reason="reservation id is globally unique and release runs before tenant context may be available"
-func (s *SandboxCapacityReservationStore) ReleaseSandboxCapacity(ctx context.Context, reservationID uuid.UUID) error {
+func (s *SandboxCapacityReservationStore) ReleaseSandboxCapacity(ctx context.Context, nodeID string, reservationID uuid.UUID) error {
 	if s == nil || s.db == nil || reservationID == uuid.Nil {
 		return nil
 	}
-	if _, err := s.db.Exec(ctx, `
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin shared sandbox capacity release: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(@node_id, 143))`, pgx.NamedArgs{
+		"node_id": nodeID,
+	}); err != nil {
+		return fmt.Errorf("lock sandbox capacity release for worker %s: %w", nodeID, err)
+	}
+	if _, err := tx.Exec(ctx, `
 		DELETE FROM sandbox_capacity_reservations
-		WHERE id = $1`, reservationID); err != nil {
+		WHERE id = @reservation_id
+		  AND node_id = @node_id`, pgx.NamedArgs{
+		"node_id":        nodeID,
+		"reservation_id": reservationID,
+	}); err != nil {
 		return fmt.Errorf("release shared sandbox capacity reservation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit shared sandbox capacity release: %w", err)
 	}
 	return nil
 }

@@ -10844,6 +10844,30 @@ func TestSandboxTurnCapacityRetryTargetClearsPinWhenFencingTokenIsMissing(t *tes
 	require.NoError(t, mock.ExpectationsWereMet(), "missing fencing token should be detected before any database routing call")
 }
 
+func TestSandboxTurnRoutingRetryDelay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		reason   db.SandboxRoutingReason
+		expected time.Duration
+	}{
+		{name: "lock contention has a positive retry floor", reason: db.SandboxRoutingReasonLockContention, expected: sandboxLockContentionRetryDelay},
+		{name: "organization limit uses policy retry", reason: db.SandboxRoutingReasonOrgLimit, expected: sandboxOrgLimitRetryDelay},
+		{name: "fleet saturation keeps full retry", reason: db.SandboxRoutingReasonFleetCapacity, expected: sandboxCapacityRetryDelay},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			retryAfter := sandboxTurnRoutingRetryDelay(tt.reason)
+			require.Equal(t, tt.expected, retryAfter, "routing reason should map to the expected bounded retry delay")
+			require.Positive(t, retryAfter, "every routing retry should yield instead of immediately waking the same job")
+		})
+	}
+}
+
 func TestRunAgentHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAvailable(t *testing.T) {
 	t.Parallel()
 
@@ -12124,13 +12148,14 @@ func TestContinueSessionHandler_CancelsAssociatedThreadForPendingSessionCancella
 	require.NoError(t, mock.ExpectationsWereMet(), "session, matching thread, and cancel request should finalize in one transaction")
 }
 
-func TestContinueSessionHandler_PreservesCancellationForLiveSiblingTurn(t *testing.T) {
+func TestContinueSessionHandler_PreservesCancellationForLiveSiblingTurnAndFinalizesQueuedThread(t *testing.T) {
 	t.Parallel()
 
 	stores, mock := newTestStores(t)
 	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
 
-	orgID, sessionID, issueID, currentJobID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	orgID, sessionID, threadID, issueID, currentJobID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
@@ -12150,16 +12175,23 @@ func TestContinueSessionHandler_PreservesCancellationForLiveSiblingTurn(t *testi
 		WithArgs(orgID, currentJobID, sessionID.String()).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 	mock.ExpectRollback()
+	threadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(threadID, orgID).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(threadRow...))
+	mock.ExpectExec("UPDATE session_threads SET status = @status").
+		WithArgs(models.ThreadStatusCancelled, threadID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	orch := &orchestratorServiceStub{}
 	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
-	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","capacity_waited":true,"capacity_cleanup":true}`)
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `","capacity_waited":true,"capacity_cleanup":true}`)
 	ctx := jobctx.WithJobID(context.Background(), currentJobID)
 
 	err := handler(ctx, "continue_session", payload)
-	require.NoError(t, err, "queued cleanup should stop without stealing a live sibling turn's cancellation")
+	require.NoError(t, err, "queued cleanup should stop without stealing a live sibling turn's cancellation and finalize its own thread")
 	require.Equal(t, 0, orch.continueSessionCalls, "cancellation cleanup must not reach the orchestrator")
-	require.NoError(t, mock.ExpectationsWereMet(), "live sibling should retain the undelivered session cancellation request")
+	require.NoError(t, mock.ExpectationsWereMet(), "live sibling should retain the undelivered session cancellation while the consumed job's thread is cancelled")
 }
 
 func TestContinueSessionHandler_StopsCleanupAfterCancellationWasConsumed(t *testing.T) {

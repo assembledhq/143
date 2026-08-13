@@ -47,6 +47,7 @@ const (
 	sandboxCapacityRetryDelay        = 10 * time.Second
 	sandboxAlternateWorkerRetryDelay = time.Second
 	sandboxOrgLimitRetryDelay        = 5 * time.Second
+	sandboxLockContentionRetryDelay  = 500 * time.Millisecond
 )
 const previewCapacityRetryDelay = 5 * time.Second
 const previewStartupInterruptedRetryDelay = 2 * time.Second
@@ -179,13 +180,18 @@ func sandboxTurnCapacityRetryTarget(ctx context.Context, stores *Stores, logger 
 		Str("excluded_node_id", excludeNodeID).
 		Str("routing_reason", string(result.Reason)).
 		Msg("no alternate worker slot reserved; clearing retry target pin")
-	if result.Reason == db.SandboxRoutingReasonLockContention {
-		return nil, true, 0
+	return nil, true, sandboxTurnRoutingRetryDelay(result.Reason)
+}
+
+func sandboxTurnRoutingRetryDelay(reason db.SandboxRoutingReason) time.Duration {
+	switch reason {
+	case db.SandboxRoutingReasonLockContention:
+		return sandboxLockContentionRetryDelay
+	case db.SandboxRoutingReasonOrgLimit:
+		return sandboxOrgLimitRetryDelay
+	default:
+		return sandboxCapacityRetryDelay
 	}
-	if result.Reason == db.SandboxRoutingReasonOrgLimit {
-		return nil, true, sandboxOrgLimitRetryDelay
-	}
-	return nil, true, sandboxCapacityRetryDelay
 }
 
 func sandboxCapacityRetryTarget(ctx context.Context, stores *Stores, logger zerolog.Logger) (*string, bool) {
@@ -10341,9 +10347,28 @@ func shouldStopContinueSessionForDurableState(
 	if err != nil {
 		return false, err
 	}
-	if cancelled && stores.SessionThreads != nil {
+	if stores.SessionThreads != nil {
 		for _, cancelledThreadID := range cancelledThreadIDs {
 			stores.SessionThreads.PublishRuntimeUpdate(ctx, orgID, cancelledThreadID)
+		}
+	}
+	if !cancelled && hasThread && stores.SessionThreads != nil {
+		// A live sibling keeps ownership of the session-scoped cancellation,
+		// but this claimed continuation is about to be consumed. Finalize its
+		// distinct queued thread so it cannot remain active without a backing
+		// job while the sibling delivers the cancel signal.
+		thread, loadErr := stores.SessionThreads.GetByID(ctx, orgID, threadID)
+		if loadErr != nil {
+			return false, fmt.Errorf("reload queued session thread during sibling cancellation: %w", loadErr)
+		}
+		if thread.SessionID != sessionID {
+			return false, fmt.Errorf("session thread %s does not belong to session %s", threadID, sessionID)
+		}
+		switch thread.Status {
+		case models.ThreadStatusPending, models.ThreadStatusRunning, models.ThreadStatusAwaitingInput:
+			if updateErr := stores.SessionThreads.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusCancelled); updateErr != nil {
+				return false, fmt.Errorf("cancel queued session thread while sibling owns session cancellation: %w", updateErr)
+			}
 		}
 	}
 	// If another cancellation consumer won the race after the durable read,

@@ -143,12 +143,18 @@ func TestSandboxCapacityReservationStore_ReleaseSandboxCapacity(t *testing.T) {
 	defer mock.Close()
 
 	reservationID := uuid.New()
-	mock.ExpectExec(`(?s)DELETE FROM sandbox_capacity_reservations.*WHERE id = \$1`).
-		WithArgs(reservationID).
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
+		WithArgs("worker-1").
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectExec(`(?s)DELETE FROM sandbox_capacity_reservations.*WHERE id = @reservation_id.*AND node_id = @node_id`).
+		WithArgs(reservationID, "worker-1").
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+	mock.ExpectCommit()
+	mock.ExpectRollback()
 
-	err = NewSandboxCapacityReservationStore(mock).ReleaseSandboxCapacity(context.Background(), reservationID)
+	err = NewSandboxCapacityReservationStore(mock).ReleaseSandboxCapacity(context.Background(), "worker-1", reservationID)
 
 	require.NoError(t, err, "shared capacity release should delete the reservation")
-	require.NoError(t, mock.ExpectationsWereMet(), "shared capacity release should target the exact reservation")
+	require.NoError(t, mock.ExpectationsWereMet(), "shared capacity release should hold the worker admission lock and target the exact reservation")
 }
