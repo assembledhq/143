@@ -22,6 +22,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/auth"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/metrics"
@@ -3090,14 +3091,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if capacityReservation != nil {
 		capacityReservation.Release()
 	}
-	o.releaseSandboxRoutingReservation(ctx, log)
 	if err != nil {
+		// Creation failed before this worker published a sandbox. Clear both the
+		// durable slot and its worker target so the retry can choose a healthy
+		// node instead of remaining pinned to the node-local failure.
+		o.clearFailedFreshSandboxRoutingPlacement(ctx, log)
 		if sandboxCfg.AuthSocketPath != "" {
 			o.closeSandboxAuth(run.ID, log)
 		}
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)
 	}
+	o.releaseSandboxRoutingReservation(ctx, log)
 	sandbox.Env = cloneStringMap(sandboxCfg.Env)
 	// Record the turn hold so a concurrent StartPreview can attach to this
 	// container (same ID, same filesystem) instead of hydrating a duplicate.
@@ -4621,8 +4626,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if capacityReservation != nil {
 			capacityReservation.Release()
 		}
-		o.releaseSandboxRoutingReservation(ctx, log)
 		if err != nil {
+			// Hydration failed before a sandbox was attached to the session. Drop
+			// the pre-claim target along with its slot so a retry can reroute.
+			o.clearFailedFreshSandboxRoutingPlacement(ctx, log)
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox hydrate failed during continue_session")
 			o.cleanupContinueSessionStartupFailure(
@@ -4638,13 +4645,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			)
 			return fmt.Errorf("hydrate sandbox: %w", err)
 		}
+		o.releaseSandboxRoutingReservation(ctx, log)
 	default:
 		sandbox, err = o.provider.Create(ctx, sandboxCfg)
 		if capacityReservation != nil {
 			capacityReservation.Release()
 		}
-		o.releaseSandboxRoutingReservation(ctx, log)
 		if err != nil {
+			// Creation failed before this worker established affinity. Clear the
+			// fenced placement so the generic retry can use another worker.
+			o.clearFailedFreshSandboxRoutingPlacement(ctx, log)
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox creation failed during continue_session")
 			o.cleanupContinueSessionStartupFailure(
@@ -4660,6 +4670,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			)
 			return fmt.Errorf("create sandbox: %w", err)
 		}
+		o.releaseSandboxRoutingReservation(ctx, log)
 	}
 	sandbox.Env = cloneStringMap(sandboxCfg.Env)
 	// Re-populate sandbox.Metadata["base_commit_sha"] from the DB so that
@@ -5504,7 +5515,7 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 		log.Warn().Err(err).Msg("failed to fetch messages for post-turn queue drain")
 		return
 	}
-	terminalCodeReviewThreads := o.terminalCodeReviewThreadsForDrain(ctx, session, log)
+	nonDrainableCodeReviewThreads := o.nonDrainableCodeReviewThreadsForDrain(ctx, session, log)
 	var queued *models.SessionMessage
 	for i := range messages {
 		m := messages[i]
@@ -5519,12 +5530,12 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 			continue
 		}
 		if m.ThreadID != nil {
-			if terminalThread, terminal := terminalCodeReviewThreads[*m.ThreadID]; terminal {
+			if nonDrainableThread, nonDrainable := nonDrainableCodeReviewThreads[*m.ThreadID]; nonDrainable {
 				log.Info().
-					Str("thread_id", terminalThread.ID.String()).
+					Str("thread_id", nonDrainableThread.ID.String()).
 					Int64("message_id", m.ID).
-					Str("thread_status", string(terminalThread.Status)).
-					Msg("skipping queued message for terminal code review thread")
+					Str("thread_status", string(nonDrainableThread.Status)).
+					Msg("skipping queued message for non-drainable code review thread")
 				continue
 			}
 		}
@@ -5588,33 +5599,38 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 	}
 }
 
-func (o *Orchestrator) terminalCodeReviewThreadsForDrain(ctx context.Context, session *models.Session, log zerolog.Logger) map[uuid.UUID]models.SessionThread {
-	terminal := make(map[uuid.UUID]models.SessionThread)
+func (o *Orchestrator) nonDrainableCodeReviewThreadsForDrain(ctx context.Context, session *models.Session, log zerolog.Logger) map[uuid.UUID]models.SessionThread {
+	nonDrainable := make(map[uuid.UUID]models.SessionThread)
 	if session == nil || session.Origin != models.SessionOriginCodeReview || o.sessionThreads == nil {
-		return terminal
+		return nonDrainable
 	}
 	lister, ok := o.sessionThreads.(sessionThreadDrainLister)
 	if !ok {
 		log.Warn().Msg("session thread store does not support batched code review queue-drain lookup")
-		return terminal
+		return nonDrainable
 	}
 	threads, err := lister.ListBySessionWithOptions(ctx, session.OrgID, session.ID, true)
 	if err != nil {
 		log.Warn().Err(err).
 			Str("session_id", session.ID.String()).
 			Msg("failed to list code review threads during queue drain")
-		return terminal
+		return nonDrainable
 	}
 	for _, thread := range threads {
 		if thread.ExecutionMode != models.ThreadExecutionModeReview || thread.FilesystemMode != models.ThreadFilesystemModeReadOnly {
 			continue
 		}
 		switch thread.Status {
-		case models.ThreadStatusCompleted, models.ThreadStatusFailed, models.ThreadStatusCancelled:
-			terminal[thread.ID] = thread
+		case models.ThreadStatusPending,
+			models.ThreadStatusRunning,
+			models.ThreadStatusAwaitingInput,
+			models.ThreadStatusCompleted,
+			models.ThreadStatusFailed,
+			models.ThreadStatusCancelled:
+			nonDrainable[thread.ID] = thread
 		}
 	}
-	return terminal
+	return nonDrainable
 }
 
 func (o *Orchestrator) admitNextQueuedThread(ctx context.Context, session *models.Session, log zerolog.Logger) {
@@ -5663,16 +5679,15 @@ func (o *Orchestrator) enqueueContinueSessionTurn(ctx context.Context, session *
 	if o == nil || o.jobs == nil || session == nil {
 		return uuid.Nil, fmt.Errorf("enqueue continue session turn: dependencies are not configured")
 	}
-	targetNodeID := models.SessionWorkerTarget(session)
-	workloadClass := models.SandboxWorkloadClassForSession(session)
-	if workloadClass == models.SandboxWorkloadClassCodeReview {
+	enqueueOpts := db.ContinueSessionEnqueueOpts(session, payload, dedupeKey)
+	if enqueueOpts.WorkloadClass == models.SandboxWorkloadClassCodeReview {
 		classified, ok := o.jobs.(workloadClassJobStore)
 		if !ok {
 			return uuid.Nil, fmt.Errorf("enqueue code-review continuation: job store does not support workload classes")
 		}
-		return classified.EnqueueWithTargetAndWorkload(ctx, session.OrgID, "agent", "continue_session", payload, 5, dedupeKey, targetNodeID, workloadClass)
+		return classified.EnqueueWithTargetAndWorkload(ctx, session.OrgID, enqueueOpts.Queue, enqueueOpts.JobType, enqueueOpts.Payload, enqueueOpts.Priority, enqueueOpts.DedupeKey, enqueueOpts.TargetNodeID, enqueueOpts.WorkloadClass)
 	}
-	return o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, dedupeKey, targetNodeID)
+	return o.jobs.EnqueueWithTarget(ctx, session.OrgID, enqueueOpts.Queue, enqueueOpts.JobType, enqueueOpts.Payload, enqueueOpts.Priority, enqueueOpts.DedupeKey, enqueueOpts.TargetNodeID)
 }
 
 // drainAcceptableStatus returns true for session states that can absorb

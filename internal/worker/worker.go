@@ -130,6 +130,11 @@ type sandboxJobRouter interface {
 // the pass immediately because no later sandbox job can be placed either.
 const maxSandboxRoutingDecisionsPerPoll = 16
 
+// Delayed wake-ups are an optimization for the short capacity retry paths.
+// Longer generic backoffs rely on the durable database poll instead of keeping
+// a worker and notifier alive for the full retry window.
+const maxScheduledRetryWakeDelay = db.SandboxFleetRetryDelay
+
 // maxRetryableDuration is the maximum wall-clock time a retryable job is
 // allowed to keep retrying before being dead-lettered. This prevents jobs
 // from retrying indefinitely (e.g. when stuck behind a concurrency limit).
@@ -176,8 +181,10 @@ func (w *Worker) SetJobNotifier(notifier *cache.JobNotifier) {
 }
 
 func New(pool db.DBTX, logger zerolog.Logger, nodeID string) *Worker {
+	jobStore := db.NewJobStore(pool)
+	jobStore.SetLogger(logger)
 	return &Worker{
-		jobs:                      db.NewJobStore(pool),
+		jobs:                      jobStore,
 		logger:                    logger,
 		nodeID:                    nodeID,
 		handlers:                  make(map[string]JobHandler),
@@ -241,6 +248,14 @@ func (w *Worker) poll(ctx context.Context) {
 				event.Str("target_node_id", *result.TargetNodeID)
 			}
 			event.Msg("sandbox job routing evaluated")
+			if result.RoutingError != "" {
+				w.logger.Error().
+					Str("job_id", result.JobID.String()).
+					Str("workload_class", string(result.WorkloadClass)).
+					Str("routing_reason", string(result.Reason)).
+					Str("routing_error", result.RoutingError).
+					Msg("sandbox job routing failed; deferred only the affected job")
+			}
 			if result.Reason == db.SandboxRoutingReasonMetadataFallback {
 				w.logger.Warn().
 					Str("job_id", result.JobID.String()).
@@ -569,7 +584,30 @@ func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UU
 	}
 	if backoff <= 0 {
 		w.notifyRunnableJob(ctx, jobID)
+		return
 	}
+	if backoff <= maxScheduledRetryWakeDelay {
+		w.scheduleRunnableJobNotification(ctx, jobID, backoff)
+	}
+}
+
+func (w *Worker) scheduleRunnableJobNotification(ctx context.Context, jobID uuid.UUID, delay time.Duration) {
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		wakeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		w.notifyRunnableJob(wakeCtx, jobID)
+		w.Wake()
+	}()
 }
 
 func (w *Worker) notifyRunnableJob(ctx context.Context, jobID uuid.UUID) {

@@ -39,7 +39,8 @@ type RuntimeStatusSessionCounter interface {
 }
 
 type RuntimeStatusSandboxTurnCounter interface {
-	CountActiveSandboxTurnsByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
+	CountAdmittedSandboxTurnsByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
+	IsSessionWaitingForSandboxCapacity(ctx context.Context, orgID, sessionID uuid.UUID, maxConcurrentRuns int) (bool, error)
 }
 
 type RuntimeStatusPreviewCounter interface {
@@ -84,6 +85,7 @@ type runtimeStatusCapacityResponse struct {
 	State                  string `json:"state"`
 	ActiveAgentRuns        int    `json:"active_agent_runs"`
 	ActiveSandboxTurns     int    `json:"active_sandbox_turns"`
+	SessionWaitingCapacity *bool  `json:"session_waiting_for_capacity,omitempty"`
 	MaxConcurrentAgentRuns int    `json:"max_concurrent_agent_runs"`
 	ActivePreviews         int    `json:"active_previews"`
 	MaxPreviewsPerUser     int    `json:"max_previews_per_user"`
@@ -211,6 +213,15 @@ func (h *SettingsHandler) GetRuntimeStatus(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusInternalServerError, "INVALID_SETTINGS", "failed to parse organization settings", err)
 		return
 	}
+	var requestedSessionID *uuid.UUID
+	if rawSessionID := strings.TrimSpace(r.URL.Query().Get("session_id")); rawSessionID != "" {
+		sessionID, parseErr := uuid.Parse(rawSessionID)
+		if parseErr != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_SESSION_ID", "session_id must be a valid UUID", parseErr)
+			return
+		}
+		requestedSessionID = &sessionID
+	}
 
 	status, _, availabilityErr := h.staticEgressAvailability(r.Context(), false)
 	if availabilityErr != nil {
@@ -226,11 +237,20 @@ func (h *SettingsHandler) GetRuntimeStatus(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	activeSandboxTurns := activeAgentRuns
+	var sessionWaitingCapacity *bool
 	if h.sandboxTurns != nil {
-		activeSandboxTurns, err = h.sandboxTurns.CountActiveSandboxTurnsByOrg(r.Context(), orgID)
+		activeSandboxTurns, err = h.sandboxTurns.CountAdmittedSandboxTurnsByOrg(r.Context(), orgID)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "RUNTIME_STATUS_FAILED", "failed to count active sandbox turns", err)
 			return
+		}
+		if requestedSessionID != nil {
+			waiting, waitErr := h.sandboxTurns.IsSessionWaitingForSandboxCapacity(r.Context(), orgID, *requestedSessionID, settings.MaxConcurrentRuns)
+			if waitErr != nil {
+				writeError(w, r, http.StatusInternalServerError, "RUNTIME_STATUS_FAILED", "failed to inspect session capacity wait", waitErr)
+				return
+			}
+			sessionWaitingCapacity = &waiting
 		}
 	}
 
@@ -258,6 +278,7 @@ func (h *SettingsHandler) GetRuntimeStatus(w http.ResponseWriter, r *http.Reques
 			State:                  capacityState,
 			ActiveAgentRuns:        activeAgentRuns,
 			ActiveSandboxTurns:     activeSandboxTurns,
+			SessionWaitingCapacity: sessionWaitingCapacity,
 			MaxConcurrentAgentRuns: settings.MaxConcurrentRuns,
 			ActivePreviews:         activePreviews,
 			MaxPreviewsPerUser:     settings.PreviewMaxPreviewsPerUser,

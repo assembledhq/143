@@ -322,9 +322,10 @@ func main() {
 			maxActiveSandboxes := resolveWorkerMaxActiveSandboxes(cfg.WorkerProcessCount, cfg.WorkerMaxActiveSandboxes)
 			sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
 				Counter:             sandboxExec,
+				SharedReservations:  db.NewSandboxCapacityReservationStore(pool),
 				MaxActive:           maxActiveSandboxes,
 				InteractiveReserved: cfg.WorkerInteractiveReservedSandboxes,
-				NodeID:              cfg.NodeID,
+				NodeID:              cfg.EffectiveWorkerCapacityNodeID(),
 				Logger:              logger,
 			})
 			logger.Info().
@@ -1110,6 +1111,7 @@ func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, 
 			metadata["sandbox_turn_reserved_count"] = snapshot.SandboxTurnReserved
 			metadata["max_active_sandboxes"] = snapshot.MaxActive
 			metadata["interactive_reserved_sandbox_slots"] = snapshot.InteractiveReserved
+			metadata["sandbox_capacity_node_id"] = sandboxCapacity.CapacityNodeID()
 			if snapshot.CountError != "" {
 				metadata["live_sandbox_count_error"] = snapshot.CountError
 			}

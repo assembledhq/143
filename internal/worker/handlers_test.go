@@ -10786,6 +10786,48 @@ func TestRunAgentHandler_SandboxCapacityRetries(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestRunAgentHandler_SandboxCapacityAttemptConflictWaitsOnCurrentTarget(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(runID, issueID, orgID, models.SessionStatusPending, 0, nil, nil)...,
+			),
+		)
+
+	conflictExpiresAt := time.Now().Add(10 * time.Minute)
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(ctx context.Context, run *models.Session) error {
+			return fmt.Errorf("shared admission: %w: %w", agent.ErrSandboxCapacity, &db.SandboxCapacityAttemptConflictError{ExpiresAt: conflictExpiresAt})
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(jobctx.WithWorkerNodeID(context.Background(), "worker-current"), "run_agent", payload)
+
+	require.Error(t, err, "run_agent should retry while a stale attempt reservation is live")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "attempt conflicts should be returned as retryable errors")
+	require.ErrorIs(t, retryable.Err, db.ErrSandboxCapacityAttemptConflict, "retry should preserve the attempt-conflict sentinel")
+	require.True(t, retryable.BypassMaxRetryDuration, "attempt-conflict retries should outlive the shorter generic retry window")
+	require.NotNil(t, retryable.RetryAfter, "attempt-conflict retries should wait for the stale lease deadline")
+	require.Greater(t, *retryable.RetryAfter, 9*time.Minute, "attempt-conflict retries should avoid relaunching executors before the stale lease expires")
+	require.LessOrEqual(t, *retryable.RetryAfter, 10*time.Minute+sandboxAttemptConflictRetryBuffer, "attempt-conflict retries should resume immediately after the stale lease expires")
+	require.Nil(t, retryable.TargetNodeID, "job-global attempt conflicts should not retarget another worker")
+	require.False(t, retryable.ClearTargetNodeID, "job-global attempt conflicts should preserve the current worker target")
+	require.NoError(t, mock.ExpectationsWereMet(), "attempt-conflict retry should not query fleet routing")
+}
+
 func TestSandboxTurnCapacityRetryTargetQuicklyReservesAlternateWorker(t *testing.T) {
 	t.Parallel()
 
@@ -10804,15 +10846,15 @@ func TestSandboxTurnCapacityRetryTargetQuicklyReservesAlternateWorker(t *testing
 	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
 		WithArgs(orgID, jobID).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
+	mock.ExpectQuery(`(?s)WITH excluded_capacity_nodes AS.*candidate_nodes AS.*raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+		WithArgs(jobID, orgID, pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-with-space"))
 	mock.ExpectQuery(`SELECT pg_try_advisory_xact_lock`).
 		WithArgs("worker-with-space").
 		WillReturnRows(pgxmock.NewRows([]string{"locked"}).AddRow(true))
 	mock.ExpectQuery(`(?s)SELECT.*FROM nodes n.*WHERE n.id =`).
-		WithArgs(jobID, "worker-with-space", pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"live", "local_reserved", "sandbox_turn_local_reserved", "max_active", "interactive_reserved", "pending_durable_reserved", "running_durable_reserved"}).AddRow(1, 0, 0, 4, 1, 0, 0))
+		WithArgs("worker-with-space", pgxmock.AnyArg(), jobID).
+		WillReturnRows(pgxmock.NewRows([]string{"live", "local_reserved", "sandbox_turn_local_reserved", "max_active", "interactive_reserved", "pending_durable_reserved", "running_durable_reserved", "shared_turn_reserved", "shared_non_turn_reserved"}).AddRow(1, 0, 0, 4, 1, 0, 0, 0, 0))
 	mock.ExpectExec(`(?s)UPDATE jobs.*sandbox_slot_reserved_until =`).
 		WithArgs(models.SandboxWorkloadClassInteractive, "worker-with-space", pgxmock.AnyArg(), jobID, models.JobStatusRunning, lockToken).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -10824,7 +10866,7 @@ func TestSandboxTurnCapacityRetryTargetQuicklyReservesAlternateWorker(t *testing
 	require.NotNil(t, targetNodeID, "capacity retry should return the atomically reserved alternate worker")
 	require.Equal(t, "worker-with-space", *targetNodeID, "capacity retry should exclude the full worker")
 	require.False(t, clearTargetNodeID, "capacity retry should preserve the new target reservation")
-	require.Equal(t, sandboxAlternateWorkerRetryDelay, retryAfter, "capacity retry should use the short alternate-worker handoff delay")
+	require.Equal(t, sandboxAlternateWorkerRetryDelay, retryAfter, "capacity retry should make an atomically reserved alternate-worker handoff immediately runnable")
 	require.Less(t, retryAfter, sandboxCapacityRetryDelay, "alternate-worker handoff should remain faster than a full-fleet retry")
 	require.NoError(t, mock.ExpectationsWereMet(), "alternate selection and reservation should commit before the quick retry")
 }
@@ -10842,6 +10884,30 @@ func TestSandboxTurnCapacityRetryTargetClearsPinWhenFencingTokenIsMissing(t *tes
 	require.True(t, clearTargetNodeID, "routing failure should clear the current target so another worker can claim the retry")
 	require.Equal(t, sandboxCapacityRetryDelay, retryAfter, "routing failure should use fleet backoff instead of a tight retry loop")
 	require.NoError(t, mock.ExpectationsWereMet(), "missing fencing token should be detected before any database routing call")
+}
+
+func TestSandboxTurnRoutingRetryDelay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		reason   db.SandboxRoutingReason
+		expected time.Duration
+	}{
+		{name: "lock contention has a positive retry floor", reason: db.SandboxRoutingReasonLockContention, expected: sandboxLockContentionRetryDelay},
+		{name: "organization limit uses policy retry", reason: db.SandboxRoutingReasonOrgLimit, expected: sandboxOrgLimitRetryDelay},
+		{name: "fleet saturation keeps full retry", reason: db.SandboxRoutingReasonFleetCapacity, expected: sandboxCapacityRetryDelay},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			retryAfter := sandboxTurnRoutingRetryDelay(tt.reason)
+			require.Equal(t, tt.expected, retryAfter, "routing reason should map to the expected bounded retry delay")
+			require.Positive(t, retryAfter, "every routing retry should yield instead of immediately waking the same job")
+		})
+	}
 }
 
 func TestRunAgentHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAvailable(t *testing.T) {
@@ -12039,14 +12105,14 @@ func TestContinueSessionHandler_StopsCapacityRetryAfterTerminalOrCancel(t *testi
 				mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs j.*j\.id <> @current_job_id.*capacity_cleanup`).
 					WithArgs(orgID, uuid.Nil, sessionID.String()).
 					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
-				mock.ExpectExec(`(?s)UPDATE session_cancel_requests.*SET delivered_at = now\(\).*delivered_at IS NULL`).
-					WithArgs(orgID, sessionID).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectQuery(`(?s)UPDATE sessions SET status = @status, completed_at = now\(\).*RETURNING`).
+				mock.ExpectQuery(`(?s)UPDATE sessions.*status = @status.*status IN \('pending', 'running', 'idle', 'awaiting_input', 'needs_human_guidance'\).*RETURNING`).
 					WithArgs(string(models.SessionStatusCancelled), sessionID, orgID).
 					WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
 						workerSessionRow(sessionID, issueID, orgID, models.SessionStatusCancelled, 2, nil, nil)...,
 					))
+				mock.ExpectExec(`(?s)UPDATE session_cancel_requests.*SET delivered_at = now\(\).*delivered_at IS NULL`).
+					WithArgs(orgID, sessionID).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectExec(`(?s)UPDATE jobs.*status = 'cancelled'.*id = ANY\(@sibling_job_ids\).*job_type = 'continue_session'.*payload->>'session_id' = @session_id`).
 					WithArgs(orgID, []uuid.UUID{siblingJobID}, sessionID.String()).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -12099,14 +12165,14 @@ func TestContinueSessionHandler_CancelsAssociatedThreadForPendingSessionCancella
 	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs j.*j\.id <> @current_job_id.*capacity_cleanup`).
 		WithArgs(orgID, uuid.Nil, sessionID.String()).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
-	mock.ExpectExec(`(?s)UPDATE session_cancel_requests.*SET delivered_at = now\(\).*delivered_at IS NULL`).
-		WithArgs(orgID, sessionID).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectQuery(`(?s)UPDATE sessions SET status = @status, completed_at = now\(\).*RETURNING`).
+	mock.ExpectQuery(`(?s)UPDATE sessions.*status = @status.*status IN \('pending', 'running', 'idle', 'awaiting_input', 'needs_human_guidance'\).*RETURNING`).
 		WithArgs(string(models.SessionStatusCancelled), sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
 			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusCancelled, 2, nil, nil)...,
 		))
+	mock.ExpectExec(`(?s)UPDATE session_cancel_requests.*SET delivered_at = now\(\).*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec(`(?s)UPDATE jobs.*status = 'cancelled'.*id = ANY\(@sibling_job_ids\).*job_type = 'continue_session'.*payload->>'session_id' = @session_id`).
 		WithArgs(orgID, []uuid.UUID{siblingJobID}, sessionID.String()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -12126,13 +12192,14 @@ func TestContinueSessionHandler_CancelsAssociatedThreadForPendingSessionCancella
 	require.NoError(t, mock.ExpectationsWereMet(), "session, matching thread, and cancel request should finalize in one transaction")
 }
 
-func TestContinueSessionHandler_PreservesCancellationForLiveSiblingTurn(t *testing.T) {
+func TestContinueSessionHandler_PreservesCancellationForLiveSiblingTurnAndFinalizesQueuedThread(t *testing.T) {
 	t.Parallel()
 
 	stores, mock := newTestStores(t)
 	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
 
-	orgID, sessionID, issueID, currentJobID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	orgID, sessionID, threadID, issueID, currentJobID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
@@ -12152,16 +12219,23 @@ func TestContinueSessionHandler_PreservesCancellationForLiveSiblingTurn(t *testi
 		WithArgs(orgID, currentJobID, sessionID.String()).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 	mock.ExpectRollback()
+	threadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(threadID, orgID).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(threadRow...))
+	mock.ExpectExec("UPDATE session_threads SET status = @status").
+		WithArgs(models.ThreadStatusCancelled, threadID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	orch := &orchestratorServiceStub{}
 	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
-	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","capacity_waited":true,"capacity_cleanup":true}`)
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `","capacity_waited":true,"capacity_cleanup":true}`)
 	ctx := jobctx.WithJobID(context.Background(), currentJobID)
 
 	err := handler(ctx, "continue_session", payload)
-	require.NoError(t, err, "queued cleanup should stop without stealing a live sibling turn's cancellation")
+	require.NoError(t, err, "queued cleanup should stop without stealing a live sibling turn's cancellation and finalize its own thread")
 	require.Equal(t, 0, orch.continueSessionCalls, "cancellation cleanup must not reach the orchestrator")
-	require.NoError(t, mock.ExpectationsWereMet(), "live sibling should retain the undelivered session cancellation request")
+	require.NoError(t, mock.ExpectationsWereMet(), "live sibling should retain the undelivered session cancellation while the consumed job's thread is cancelled")
 }
 
 func TestContinueSessionHandler_StopsCleanupAfterCancellationWasConsumed(t *testing.T) {
@@ -12369,6 +12443,49 @@ func TestContinueSessionHandler_SandboxCapacityRetries(t *testing.T) {
 	require.False(t, retryable.ClearTargetNodeID, "sandbox capacity retries should not clear the target pin when a replacement worker is selected")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_SandboxCapacityAttemptConflictWaitsOnCurrentTarget(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+			),
+		)
+
+	conflictExpiresAt := time.Now().Add(10 * time.Minute)
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("shared admission: %w: %w", agent.ErrSandboxCapacity, &db.SandboxCapacityAttemptConflictError{ExpiresAt: conflictExpiresAt})
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(jobctx.WithWorkerNodeID(context.Background(), "worker-current"), "continue_session", payload)
+
+	require.Error(t, err, "continue_session should retry while a stale attempt reservation is live")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "attempt conflicts should be returned as retryable errors")
+	require.ErrorIs(t, retryable.Err, db.ErrSandboxCapacityAttemptConflict, "retry should preserve the attempt-conflict sentinel")
+	require.True(t, retryable.BypassMaxRetryDuration, "attempt-conflict retries should outlive the shorter generic retry window")
+	require.NotNil(t, retryable.RetryAfter, "attempt-conflict retries should wait for the stale lease deadline")
+	require.Greater(t, *retryable.RetryAfter, 9*time.Minute, "attempt-conflict retries should avoid relaunching executors before the stale lease expires")
+	require.LessOrEqual(t, *retryable.RetryAfter, 10*time.Minute+sandboxAttemptConflictRetryBuffer, "attempt-conflict retries should resume immediately after the stale lease expires")
+	require.Nil(t, retryable.TargetNodeID, "job-global attempt conflicts should not retarget another worker")
+	require.False(t, retryable.ClearTargetNodeID, "job-global attempt conflicts should preserve the current worker target")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "attempt-conflict retry should not query fleet routing")
 }
 
 func TestContinueSessionHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAvailable(t *testing.T) {

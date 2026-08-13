@@ -141,16 +141,6 @@ func (t *dbTx) EnqueueContinue(ctx context.Context, orgID, sessionID uuid.UUID, 
 		payload["thread_id"] = threadID.String()
 	}
 	dedupeKey := db.ContinueSessionDedupeKey(scopeID)
-	enqueueOpts := db.EnqueueOpts{
-		Queue:        "agent",
-		JobType:      "continue_session",
-		Payload:      payload,
-		Priority:     5,
-		DedupeKey:    &dedupeKey,
-		TargetNodeID: models.SessionWorkerTarget(target),
-	}
-	if models.SandboxWorkloadClassForSession(target) == models.SandboxWorkloadClassCodeReview {
-		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
-	}
+	enqueueOpts := db.ContinueSessionEnqueueOpts(target, payload, &dedupeKey)
 	return t.jobs.EnqueueInTxWithOpts(ctx, t.tx, orgID, enqueueOpts)
 }

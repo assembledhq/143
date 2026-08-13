@@ -1,6 +1,6 @@
 # Design: Database Schema
 
-> **Status:** Implemented | **Last reviewed:** 2026-08-10
+> **Status:** Implemented | **Last reviewed:** 2026-08-12
 
 This document defines the PostgreSQL schema for 143.dev. All entities flow through the pipeline: ingestion -> prioritization -> agent run -> validation -> PR -> deploy -> observation.
 
@@ -1079,7 +1079,7 @@ Durable, database-backed async work queue for the full pipeline (`ingest_webhook
 | queue | text | queue name (`ingestion`, `prioritization`, `agent`, `validation`, `pr`, `observability`) |
 | job_type | text | e.g. `ingest_webhook`, `run_agent`, `open_pr` |
 | workload_class | text | sandbox admission class: `interactive` or `code_review`; defaults to `interactive` |
-| payload | jsonb | typed job input payload |
+| payload | jsonb | typed job input payload; sandbox retries may add `failed_sandbox_capacity_node_ids` and `failed_sandbox_capacity_node_exclusion_until` runtime routing metadata |
 | priority | int | higher number = higher priority (default 0) |
 | status | text | `pending`, `running`, `succeeded`, `failed`, `cancelled`, `dead_letter` |
 | attempts | int | attempts made so far |
@@ -1100,9 +1100,40 @@ Durable, database-backed async work queue for the full pipeline (`ingest_webhook
 - `(queue, status, run_at, priority DESC)` — queue-specific workers
 - `(org_id, created_at DESC)` — org job history
 - `(locked_by_node_id, locked_at)` — dead-worker recovery
-- `(priority DESC, (CASE WHEN workload_class = 'interactive' THEN 0 ELSE 1 END), created_at ASC, run_at)` partial for pending `run_agent`/`continue_session` — capacity-aware sandbox routing and interactive-first ordering
+- `(priority DESC, (CASE WHEN workload_class = 'interactive' THEN 0 ELSE 1 END), run_at ASC, created_at ASC)` partial for pending `run_agent`/`continue_session` — capacity-aware sandbox routing and interactive-first ordering
 - `(org_id, status)` partial for pending/running `run_agent`/`continue_session` — shared organization sandbox-turn admission counts
 - `(queue, dedupe_key)` unique where `dedupe_key IS NOT NULL AND status IN ('pending', 'running')` — in-flight dedupe
+
+### `sandbox_capacity_reservations`
+
+Short-lived final-admission leases shared by every process using one worker's
+Docker host. This is cluster runtime state rather than tenant data, so it has no
+`org_id`. It intentionally has no foreign keys to the hot `nodes` or `jobs`
+tables; expired leases stop affecting admission and cleanup removes them when
+that worker next admits work.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| node_id | text | stable physical-host capacity ID shared by worker generations using one Docker daemon |
+| job_id | uuid | nullable job identity; null for non-job consumers such as previews |
+| job_lock_token | uuid | nullable queue-claim fencing token; required with `job_id` for job-backed leases |
+| workload_class | text | `interactive` or `code_review` |
+| expires_at | timestamptz | lease expiry used for crash recovery |
+| created_at | timestamptz | |
+
+**Indexes:**
+- `(job_id)` unique where `job_id IS NOT NULL` — one final-admission lease per job
+- `(node_id, expires_at)` — active worker lease count and expiry cleanup
+
+**Constraints and triggers:**
+- `chk_sandbox_capacity_reservations_job_attempt` — `job_id` and `job_lock_token` must either both be set or both be null; added `NOT VALID` so unmatched pre-migration leases can expire naturally while new writes are enforced
+- `trg_sandbox_capacity_require_attempt_token` — rejects tokenless job-backed inserts before legacy `ON CONFLICT` handling can reuse a fenced lease during rolling deploys
+
+Job-backed acquisition verifies that the supplied lock token still owns the
+running queue attempt. A replacement attempt cannot reuse a prior attempt's
+live lease, and release matches both reservation identity and lock token so a
+late stale owner cannot delete its replacement's lease.
 
 ### `nodes`
 

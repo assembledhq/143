@@ -252,7 +252,8 @@ describe('SessionDetailPage session states', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: pendingSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/settings/runtime/status', () => {
+      http.get('/api/v1/settings/runtime/status', ({ request }) => {
+        expect(new URL(request.url).searchParams.get('session_id')).toBe(pendingSession.id);
         return HttpResponse.json({
           data: {
             static_egress: { available: true, enabled: false },
@@ -260,6 +261,7 @@ describe('SessionDetailPage session states', () => {
               state: 'limited',
               active_agent_runs: 1,
               active_sandbox_turns: 2,
+              session_waiting_for_capacity: true,
               max_concurrent_agent_runs: 2,
               active_previews: 0,
               max_previews_per_user: 5,
@@ -320,6 +322,43 @@ describe('SessionDetailPage session states', () => {
 
     expect(await screen.findByText('Waiting for capacity')).toBeInTheDocument();
     expect(await screen.findByText('Your organization is already at its max concurrency limit of 2 active runs.')).toBeInTheDocument();
+  });
+
+  it("shows setup when the aggregate includes this session's own admitted reservation", async () => {
+    const pendingSession: Session = {
+      ...mockSessions[0],
+      status: 'pending',
+      completed_at: undefined,
+      current_turn: 0,
+      sandbox_state: 'none',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: pendingSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/settings/runtime/status', () => {
+        return HttpResponse.json({
+          data: {
+            static_egress: { available: true, enabled: false },
+            capacity: {
+              state: 'limited',
+              active_agent_runs: 0,
+              active_sandbox_turns: 1,
+              session_waiting_for_capacity: false,
+              max_concurrent_agent_runs: 1,
+              active_previews: 0,
+              max_previews_per_user: 5,
+            },
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={pendingSession.id} />);
+
+    expect(await screen.findByText('Setting up environment')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting for capacity')).not.toBeInTheDocument();
   });
 
   it('shows the environment setup message for a pending session when the org is below its concurrency limit', async () => {

@@ -1,6 +1,6 @@
 # Design: Workload-aware sandbox routing
 
-> **Status:** Implemented | **Last reviewed:** 2026-08-10
+> **Status:** Implemented | **Last reviewed:** 2026-08-12
 
 ## Problem
 
@@ -45,20 +45,36 @@ interactive-first workload class, and FIFO dispatch.
 and running sandbox turns.
 Because `jobs` is hot and migrations are transactional, production pre-builds
 both indexes concurrently; the migration uses `IF NOT EXISTS` and a short lock
-timeout as the rollout-safe fallback. No new table is introduced;
-`jobs.org_id` remains the tenant boundary.
+timeout as the rollout-safe fallback.
+
+Migration `000289_shared_sandbox_capacity_reservations` adds the ephemeral,
+worker-scoped `sandbox_capacity_reservations` table for final-admission leases
+shared by every process using the same Docker host. These leases are not
+tenant-owned data and therefore intentionally have no `org_id`. As ephemeral
+runtime state, they avoid foreign keys to the hot `nodes` and `jobs` tables so
+the rollout does not lock queue writes; `expires_at` bounds their admission
+effect and worker-local cleanup removes expired rows. A partial unique index
+ensures at most one final-admission lease exists for a job.
 
 ## API contract
 
 No new route or setting is introduced. The existing authenticated settings
 APIs expose `max_concurrent_runs`, and the Runtime settings page describes it as
-the shared limit for interactive and code-review turns. Existing settings
-errors remain unchanged: `400 INVALID_JSON` or `400 INVALID_SETTINGS`.
+the shared limit for interactive and code-review turns. The runtime-status
+route accepts an optional tenant-scoped `session_id` query parameter and then
+returns `capacity.session_waiting_for_capacity`; this distinguishes a pending
+session blocked by other admitted turns from one whose own reservation is
+already included in the aggregate count. A malformed identifier returns
+`400 INVALID_SESSION_ID`. Existing settings errors remain unchanged:
+`400 INVALID_JSON` or `400 INVALID_SETTINGS`.
 
 Worker capacity reservation is an internal queue/heartbeat contract, not a
 public API. Heartbeat metadata adds
-`interactive_reserved_sandbox_slots` and `sandbox_turn_reserved_count`; no SSE
-or external event payload changes.
+`sandbox_capacity_node_id`, `interactive_reserved_sandbox_slots`, and
+`sandbox_turn_reserved_count`; no SSE or external event payload changes.
+Runtime status counts both running turns and pending turns holding a live
+durable reservation, while final post-claim admission retains its running-only
+count.
 
 ## Admission and routing
 
@@ -75,13 +91,16 @@ Before normal queue claim, a dispatcher transaction:
    code-review turns against `max_concurrent_runs`;
 3. chooses a fresh active worker from heartbeat capacity metadata;
 4. obtains a transaction-scoped advisory lock for that worker and rechecks its
-   live, local-reserved, and durable-reserved counts without counting the same
-   running sandbox-turn reservation twice;
+   live, local-reserved, durable-reserved, and shared final-admission counts
+   without counting the same job reservation twice;
 5. persists the target worker and expiring reservation atomically.
 
 Unbound sandbox jobs cannot be claimed before this routing step. Dispatchers
 prefer interactive work at equal queue priority and continue routing after a
 capacity deferral, so an older org-limited review cannot monopolize each poll.
+If a selected job has malformed settings or another deterministic routing
+error, a savepoint rolls back only that routing attempt, records the error, and
+durably moves that job behind other due work instead of stopping fleet dispatch.
 
 Existing sandbox affinity remains authoritative and is only released through
 the existing dead/draining-worker recovery path. Claiming any affinity-bound
@@ -93,14 +112,18 @@ work can be considered. Each candidate is handled in its own transaction, so
 committing an org-limit deferral releases that organization's row lock before
 the dispatcher examines another tenant. This prevents cross-org lock-order
 deadlocks and keeps runtime-settings writes independent of a long claim scan.
+The claim path also wraps sandbox-specific workload resolution and admission in
+a per-candidate savepoint. A malformed tenant setting therefore records and
+defers only that job; unrelated job types remain claimable on the worker.
 
 If a worker's authoritative local gate still rejects a fresh sandbox, the
 running job immediately performs the same atomic reservation against an
-alternate worker. A successful alternate reservation retries with zero delay.
-The existing 10-second delay is retained only when no fleet slot is available.
+alternate worker. A successful alternate reservation becomes runnable
+immediately and publishes the normal cross-worker wake-up. The existing
+10-second delay is retained only when no fleet slot is available.
 The shared org limit uses a shorter policy retry, while advisory-lock contention
-leaves the job immediately runnable so another dispatcher can retry without
-pretending the fleet is full.
+uses a 500-millisecond floor so another dispatcher can retry promptly without
+pretending the fleet is full or creating a tight loop.
 
 If fresh workers exist but none advertises usable `max_active_sandboxes`
 metadata, the router does not treat the fleet as saturated for eight minutes.
@@ -126,8 +149,16 @@ Accepted `continue_session` work waiting on an org turn limit is a durable user
 input, not a generic transient dependency. It retries on the short admission
 cadence without consuming attempts or the generic eight-minute retry window;
 session/thread terminal-state checks remain the independent termination path.
+Compatibility placements for an initial `run_agent` preserve the job creation
+time as their terminal-probe deadline even when claim-time org admission
+repeatedly defers them, so an older worker heartbeat format cannot leave the
+job pending forever.
 After any successful requeue, the worker publishes the queue wake-up only once
-the pending transition (including a new target) has committed.
+the pending transition (including a new target) has committed. Immediately
+runnable work publishes at commit; retry delays up to ten seconds arm a
+best-effort, worker-lifecycle-bound wake-up for `run_at`. Longer generic
+backoffs and process exits rely on the normal database poll, avoiding detached
+timers that outlive the worker.
 
 ## Capacity isolation
 
@@ -139,24 +170,53 @@ self-hosted worker remains usable for code review.
 
 `max_concurrent_runs` is the single organization limit for interactive and
 code-review turns. The router and affinity-aware claim path serialize this
-decision per organization and count both workload classes in the same active
-pool. The shared local admission layer remains the authoritative final fence
-after claim.
+decision per organization and count admitted sandbox-producing jobs from both
+workload classes in the same active pool. This is deliberately a turn/job
+limit, not a distinct-session limit: concurrent threads that can each exercise
+the shared sandbox draw independently from the fence. The shared local
+admission layer remains the authoritative final fence after claim.
 
 Worker heartbeats publish
-`interactive_reserved_sandbox_slots` and `sandbox_turn_reserved_count`
+`sandbox_capacity_node_id`, `interactive_reserved_sandbox_slots`, and
+`sandbox_turn_reserved_count`
 alongside live, total local-reserved, and max sandbox counts. The router treats
 pending durable reservations as additional load, but overlaps running durable
 reservations with the heartbeat's sandbox-turn reservation subtype using the
 larger count. Non-turn local reservations, such as preview startup, remain
-additive. This prevents one admitted turn from appearing as both a local and a
-durable reservation while preserving independent capacity consumers.
+additive. It also counts unexpired shared final-admission leases, deduplicated
+against durable reservations for the same job and overlapped with the matching
+heartbeat reservation subtype. This prevents one admitted turn or preview from
+appearing twice while preserving independent capacity consumers running in
+other processes.
 
-Durable reservations expire after 30 seconds, bridging the heartbeat interval
-without permanently pinning work if a dispatcher dies. A fenced executor
-clears its durable reservation as soon as sandbox creation or hydration
-finishes, avoiding double-counting the reservation and live container for the
-remainder of the TTL.
+Durable routing reservations expire after 30 seconds, bridging the heartbeat
+interval without permanently pinning work if a dispatcher dies. At final
+admission, the main worker, isolated session executors, and preview paths use
+the same per-node advisory lock to atomically compare the current Docker count,
+durable job reservations, and shared final-admission leases before inserting a
+15-minute shared lease. Cross-process coordination has a 10-second bound while
+the Docker inspection inside the lock keeps its shorter two-second bound. The
+queue claim token fences each job-backed lease: admission transactionally
+validates the current owner, a replacement attempt waits for a live prior lease
+instead of sharing it, and release can delete only the acquiring attempt's row.
+The lease is released under the same per-node admission lock as soon as sandbox
+creation or hydration finishes. Transient release failures retry within the
+shared coordination budget; the TTL bounds leaks if a process dies or the
+database remains unavailable. Admission coordination failures emit the
+structured `sandbox_capacity_coordination_failure` signal and timeout value for
+alerting. After successful creation or hydration, a fenced executor also clears
+its durable routing reservation. A worker-local startup failure instead records
+the failed physical capacity-node identity in the job payload and atomically
+reserves another host when one is available. Every later routing pass honors
+the accumulated exclusions for a one-minute recovery window, so ordinary job
+retries cannot bounce back to a broken host or its blue/green sibling
+generation while a transiently failed host can eventually rejoin a small
+fleet.
+
+The capacity node ID identifies the physical Docker host, not a deploy
+generation. Blue/green worker generations keep distinct routing node IDs but
+share this host-stable identity for advisory locks and reservation accounting,
+so an overlapping rollout cannot present one daemon as multiple capacity pools.
 
 Pressure cleanup runs only when the worker is physically full. A code-review
 request rejected solely because it reached the interactive reserve boundary

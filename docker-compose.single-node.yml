@@ -74,6 +74,7 @@ services:
       FRONTEND_URL: ${FRONTEND_URL:?set FRONTEND_URL in .env.single-node}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?set CORS_ALLOWED_ORIGINS in .env.single-node}
       NODE_ID: ${NODE_ID:-single-node}
+      WORKER_CAPACITY_NODE_ID: ${WORKER_CAPACITY_NODE_ID:-${NODE_ID:-single-node}}
       NODE_REGION: ${NODE_REGION:-single-node}
       PREVIEW_INTERNAL_BASE_URL: http://api:8080
       PREVIEW_ORIGIN_TEMPLATE: ${PREVIEW_ORIGIN_TEMPLATE:?set PREVIEW_ORIGIN_TEMPLATE in .env.single-node}

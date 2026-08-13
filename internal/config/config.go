@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -38,11 +39,15 @@ type Config struct {
 	SessionSecret           string        `env:"SESSION_SECRET"` // #nosec G117 -- env config field
 	PreviewRPCSecrets       []string      `env:"PREVIEW_RPC_SECRETS"   envSeparator:","`
 	NodeID                  string        `env:"NODE_ID"`
-	NodeRegion              string        `env:"NODE_REGION"`
-	BaseURL                 string        `env:"BASE_URL"              envDefault:"http://localhost:8080"`
-	FrontendURL             string        `env:"FRONTEND_URL"`
-	CORSAllowedOrigins      []string      `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
-	Mode                    string        `env:"MODE"                  envDefault:"all"`
+	// WorkerCapacityNodeID is stable for every blue/green worker generation
+	// sharing one Docker daemon. It scopes host-level sandbox admission locks
+	// independently from the generation-specific NodeID used for job ownership.
+	WorkerCapacityNodeID string   `env:"WORKER_CAPACITY_NODE_ID"`
+	NodeRegion           string   `env:"NODE_REGION"`
+	BaseURL              string   `env:"BASE_URL"              envDefault:"http://localhost:8080"`
+	FrontendURL          string   `env:"FRONTEND_URL"`
+	CORSAllowedOrigins   []string `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
+	Mode                 string   `env:"MODE"                  envDefault:"all"`
 	// DemoMode tells the server it is running a dogfood preview with seeded
 	// data and no real GitHub App. Enables a credential banner on the login
 	// page and short-circuits GitHub client construction.
@@ -373,6 +378,27 @@ type Config struct {
 	RedisMasterName string `env:"REDIS_MASTER_NAME"`
 	RedisPassword   string `env:"REDIS_PASSWORD"`
 	RedisPoolSize   int    `env:"REDIS_POOL_SIZE" envDefault:"0"`
+}
+
+var workerGenerationNodeIDPattern = regexp.MustCompile(`^(.*)-g[0-9]{14}-[A-Za-z0-9._-]+$`)
+
+// EffectiveWorkerCapacityNodeID returns the physical-host identity used for
+// sandbox admission. Normalize both explicit configuration and the NODE_ID
+// fallback because compose-style defaults may copy a generation-scoped node ID
+// into WORKER_CAPACITY_NODE_ID before the process starts.
+func (c Config) EffectiveWorkerCapacityNodeID() string {
+	if configured := strings.TrimSpace(c.WorkerCapacityNodeID); configured != "" {
+		return normalizeWorkerCapacityNodeID(configured)
+	}
+	return normalizeWorkerCapacityNodeID(c.NodeID)
+}
+
+func normalizeWorkerCapacityNodeID(value string) string {
+	nodeID := strings.TrimSpace(value)
+	if matches := workerGenerationNodeIDPattern.FindStringSubmatch(nodeID); len(matches) == 2 {
+		return matches[1]
+	}
+	return nodeID
 }
 
 // ResolvePreviewDependencyCacheLocalDir normalizes the optional worker-local

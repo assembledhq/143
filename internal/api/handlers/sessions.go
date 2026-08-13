@@ -2302,17 +2302,7 @@ func (h *SessionHandler) retrySessionFromCheckpoint(w http.ResponseWriter, r *ht
 		"thread_id":  claimedThread.ID.String(),
 		"org_id":     orgID.String(),
 	}
-	enqueueOpts := db.EnqueueOpts{
-		Queue:        "agent",
-		JobType:      "continue_session",
-		Payload:      payload,
-		Priority:     5,
-		DedupeKey:    &dedupeKey,
-		TargetNodeID: models.SessionWorkerTarget(&claimedSession),
-	}
-	if models.SandboxWorkloadClassForSession(&claimedSession) == models.SandboxWorkloadClassCodeReview {
-		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
-	}
+	enqueueOpts := db.ContinueSessionEnqueueOpts(&claimedSession, payload, &dedupeKey)
 	if _, err := h.jobStore.EnqueueWithOpts(r.Context(), orgID, enqueueOpts); err != nil {
 		h.revertCheckpointRetry(r.Context(), orgID, sessionID, claimedThread.ID, targetThread.Status)
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue session continuation job", err)
@@ -4280,17 +4270,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	if humanInputRequestID != nil {
 		payload["human_input_request_id"] = humanInputRequestID.String()
 	}
-	enqueueOpts := db.EnqueueOpts{
-		Queue:        "agent",
-		JobType:      "continue_session",
-		Payload:      payload,
-		Priority:     5,
-		DedupeKey:    &dedupeKey,
-		TargetNodeID: models.SessionWorkerTarget(&session),
-	}
-	if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
-		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
-	}
+	enqueueOpts := db.ContinueSessionEnqueueOpts(&session, payload, &dedupeKey)
 	if _, err := h.jobStore.EnqueueInTxWithOpts(r.Context(), tx, orgID, enqueueOpts); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job", err)
 		return
