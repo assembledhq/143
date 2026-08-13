@@ -887,6 +887,7 @@ func TestConfig_EffectiveWorkerCapacityNodeID(t *testing.T) {
 		expected   string
 	}{
 		{name: "explicit physical host identity wins", configured: "worker-host-a", nodeID: "worker-host-a-g20260813001234-deadbeef", expected: "worker-host-a"},
+		{name: "compose copied generation id is normalized", configured: "worker-host-a-g20260813001234-deadbeef", nodeID: "worker-host-a-g20260813001234-deadbeef", expected: "worker-host-a"},
 		{name: "blue green generation suffix falls back to physical host", nodeID: "worker-host-a-g20260813001234-deadbeef", expected: "worker-host-a"},
 		{name: "ordinary node id remains unchanged", nodeID: "single-node", expected: "single-node"},
 	}

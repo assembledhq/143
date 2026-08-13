@@ -251,6 +251,12 @@ func prepareSandboxWorkloadRoutingOnConn(ctx context.Context, conn migrationPrep
 	if _, err := conn.Exec(ctx, `SET lock_timeout = '0'`); err != nil {
 		return fmt.Errorf("reset lock timeout before concurrent indexes: %w", err)
 	}
+	// Concurrent builds may legitimately outlive the normal request timeout,
+	// but they still need a finite ceiling so a deploy cannot hang forever on a
+	// stalled snapshot or storage failure.
+	if _, err := conn.Exec(ctx, `SET statement_timeout = '30min'`); err != nil {
+		return fmt.Errorf("set statement timeout before concurrent indexes: %w", err)
+	}
 
 	for _, index := range sandboxRoutingConcurrentIndexes {
 		var invalid bool
@@ -272,6 +278,9 @@ func prepareSandboxWorkloadRoutingOnConn(ctx context.Context, conn migrationPrep
 		if _, err := conn.Exec(ctx, index.createSQL); err != nil {
 			return fmt.Errorf("create concurrent index %s: %w", index.name, err)
 		}
+	}
+	if _, err := conn.Exec(ctx, `SET statement_timeout = '0'`); err != nil {
+		return fmt.Errorf("reset statement timeout after concurrent indexes: %w", err)
 	}
 
 	// Build the partial active-turn index before the one-time classification

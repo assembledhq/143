@@ -74,6 +74,8 @@ func TestPrepareSandboxWorkloadRoutingOnConn(t *testing.T) {
 					WillReturnResult(pgxmock.NewResult("ALTER TABLE", 0))
 				mock.ExpectExec(`SET lock_timeout = '0'`).
 					WillReturnResult(pgxmock.NewResult("SET", 0))
+				mock.ExpectExec(`SET statement_timeout = '30min'`).
+					WillReturnResult(pgxmock.NewResult("SET", 0))
 				for _, index := range sandboxRoutingConcurrentIndexes {
 					invalid := tt.invalidIndexes[index.name]
 					mock.ExpectQuery(`(?s)SELECT EXISTS.*pg_index.*NOT i\.indisvalid`).
@@ -86,6 +88,8 @@ func TestPrepareSandboxWorkloadRoutingOnConn(t *testing.T) {
 					mock.ExpectExec(`(?s)CREATE INDEX CONCURRENTLY IF NOT EXISTS ` + index.name).
 						WillReturnResult(pgxmock.NewResult("CREATE INDEX", 0))
 				}
+				mock.ExpectExec(`SET statement_timeout = '0'`).
+					WillReturnResult(pgxmock.NewResult("SET", 0))
 				mock.ExpectExec(`SET lock_timeout = '5s'`).
 					WillReturnResult(pgxmock.NewResult("SET", 0))
 				mock.ExpectExec(`(?s)WITH active_sandbox_jobs AS MATERIALIZED.*j\.status IN \('pending', 'running'\).*UPDATE jobs j.*JOIN sessions s.*s\.id = active\.session_id.*s\.origin = 'code_review'`).

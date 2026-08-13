@@ -10804,8 +10804,8 @@ func TestSandboxTurnCapacityRetryTargetQuicklyReservesAlternateWorker(t *testing
 	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
 		WithArgs(orgID, jobID).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`(?s)WITH candidate_nodes AS.*raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
+	mock.ExpectQuery(`(?s)WITH excluded_capacity_nodes AS.*candidate_nodes AS.*raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+		WithArgs(jobID, orgID, pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-with-space"))
 	mock.ExpectQuery(`SELECT pg_try_advisory_xact_lock`).
 		WithArgs("worker-with-space").
@@ -12061,14 +12061,14 @@ func TestContinueSessionHandler_StopsCapacityRetryAfterTerminalOrCancel(t *testi
 				mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs j.*j\.id <> @current_job_id.*capacity_cleanup`).
 					WithArgs(orgID, uuid.Nil, sessionID.String()).
 					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
-				mock.ExpectExec(`(?s)UPDATE session_cancel_requests.*SET delivered_at = now\(\).*delivered_at IS NULL`).
-					WithArgs(orgID, sessionID).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				mock.ExpectQuery(`(?s)UPDATE sessions SET status = @status, completed_at = now\(\).*RETURNING`).
+				mock.ExpectQuery(`(?s)UPDATE sessions.*status = @status.*status IN \('pending', 'running', 'idle', 'awaiting_input', 'needs_human_guidance'\).*RETURNING`).
 					WithArgs(string(models.SessionStatusCancelled), sessionID, orgID).
 					WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
 						workerSessionRow(sessionID, issueID, orgID, models.SessionStatusCancelled, 2, nil, nil)...,
 					))
+				mock.ExpectExec(`(?s)UPDATE session_cancel_requests.*SET delivered_at = now\(\).*delivered_at IS NULL`).
+					WithArgs(orgID, sessionID).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectExec(`(?s)UPDATE jobs.*status = 'cancelled'.*id = ANY\(@sibling_job_ids\).*job_type = 'continue_session'.*payload->>'session_id' = @session_id`).
 					WithArgs(orgID, []uuid.UUID{siblingJobID}, sessionID.String()).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -12121,14 +12121,14 @@ func TestContinueSessionHandler_CancelsAssociatedThreadForPendingSessionCancella
 	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs j.*j\.id <> @current_job_id.*capacity_cleanup`).
 		WithArgs(orgID, uuid.Nil, sessionID.String()).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
-	mock.ExpectExec(`(?s)UPDATE session_cancel_requests.*SET delivered_at = now\(\).*delivered_at IS NULL`).
-		WithArgs(orgID, sessionID).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectQuery(`(?s)UPDATE sessions SET status = @status, completed_at = now\(\).*RETURNING`).
+	mock.ExpectQuery(`(?s)UPDATE sessions.*status = @status.*status IN \('pending', 'running', 'idle', 'awaiting_input', 'needs_human_guidance'\).*RETURNING`).
 		WithArgs(string(models.SessionStatusCancelled), sessionID, orgID).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
 			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusCancelled, 2, nil, nil)...,
 		))
+	mock.ExpectExec(`(?s)UPDATE session_cancel_requests.*SET delivered_at = now\(\).*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec(`(?s)UPDATE jobs.*status = 'cancelled'.*id = ANY\(@sibling_job_ids\).*job_type = 'continue_session'.*payload->>'session_id' = @session_id`).
 		WithArgs(orgID, []uuid.UUID{siblingJobID}, sessionID.String()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))

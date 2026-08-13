@@ -199,13 +199,19 @@ the Docker inspection inside the lock keeps its shorter two-second bound. The
 queue claim token fences each job-backed lease: admission transactionally
 validates the current owner, a replacement attempt waits for a live prior lease
 instead of sharing it, and release can delete only the acquiring attempt's row.
-lease is released under the same per-node admission lock as soon as sandbox
+The lease is released under the same per-node admission lock as soon as sandbox
 creation or hydration finishes. Transient release failures retry within the
 shared coordination budget; the TTL bounds leaks if a process dies or the
 database remains unavailable. Admission coordination failures emit the
 structured `sandbox_capacity_coordination_failure` signal and timeout value for
-alerting. A fenced executor also clears its durable routing reservation after
-creation or hydration.
+alerting. After successful creation or hydration, a fenced executor also clears
+its durable routing reservation. A worker-local startup failure instead records
+the failed physical capacity-node identity in the job payload and atomically
+reserves another host when one is available. Every later routing pass honors
+the accumulated exclusions for a one-minute recovery window, so ordinary job
+retries cannot bounce back to a broken host or its blue/green sibling
+generation while a transiently failed host can eventually rejoin a small
+fleet.
 
 The capacity node ID identifies the physical Docker host, not a deploy
 generation. Blue/green worker generations keep distinct routing node IDs but

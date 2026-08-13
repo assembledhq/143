@@ -383,13 +383,18 @@ type Config struct {
 var workerGenerationNodeIDPattern = regexp.MustCompile(`^(.*)-g[0-9]{14}-[A-Za-z0-9._-]+$`)
 
 // EffectiveWorkerCapacityNodeID returns the physical-host identity used for
-// sandbox admission. Explicit configuration wins; the generation suffix
-// fallback keeps older worker env files safe during rollout.
+// sandbox admission. Normalize both explicit configuration and the NODE_ID
+// fallback because compose-style defaults may copy a generation-scoped node ID
+// into WORKER_CAPACITY_NODE_ID before the process starts.
 func (c Config) EffectiveWorkerCapacityNodeID() string {
 	if configured := strings.TrimSpace(c.WorkerCapacityNodeID); configured != "" {
-		return configured
+		return normalizeWorkerCapacityNodeID(configured)
 	}
-	nodeID := strings.TrimSpace(c.NodeID)
+	return normalizeWorkerCapacityNodeID(c.NodeID)
+}
+
+func normalizeWorkerCapacityNodeID(value string) string {
+	nodeID := strings.TrimSpace(value)
 	if matches := workerGenerationNodeIDPattern.FindStringSubmatch(nodeID); len(matches) == 2 {
 		return matches[1]
 	}

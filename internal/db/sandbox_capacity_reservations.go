@@ -17,6 +17,11 @@ type SandboxCapacityReservationStore struct {
 	db TxStarter
 }
 
+// ErrSandboxCapacityAttemptConflict means a replacement executor reached final
+// admission while the prior fenced attempt still owns a live reservation. It
+// is a coordination condition, not evidence that the physical fleet is full.
+var ErrSandboxCapacityAttemptConflict = errors.New("prior sandbox capacity job attempt still owns a live reservation")
+
 func NewSandboxCapacityReservationStore(db TxStarter) *SandboxCapacityReservationStore {
 	return &SandboxCapacityReservationStore{db: db}
 }
@@ -164,7 +169,13 @@ func (s *SandboxCapacityReservationStore) ReserveSandboxCapacity(
 			return uuid.Nil, liveSandboxes, total, false, fmt.Errorf("inspect prior sandbox capacity job attempt: %w", err)
 		}
 	}
-	if conflictingJobAttempt || effectiveMax <= 0 || total >= effectiveMax {
+	if conflictingJobAttempt {
+		if err := tx.Commit(ctx); err != nil {
+			return uuid.Nil, liveSandboxes, total, false, fmt.Errorf("commit conflicting sandbox capacity attempt: %w", err)
+		}
+		return uuid.Nil, liveSandboxes, total, false, ErrSandboxCapacityAttemptConflict
+	}
+	if effectiveMax <= 0 || total >= effectiveMax {
 		if err := tx.Commit(ctx); err != nil {
 			return uuid.Nil, liveSandboxes, total, false, fmt.Errorf("commit rejected sandbox capacity reservation: %w", err)
 		}

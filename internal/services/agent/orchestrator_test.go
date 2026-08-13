@@ -1271,6 +1271,12 @@ type mockJobStore struct {
 	clearedPlacementJobID          uuid.UUID
 	clearedPlacementLockToken      uuid.UUID
 	clearSandboxPlacementCalls     int
+	reserveRetryJobID              uuid.UUID
+	reserveRetryLockToken          uuid.UUID
+	reserveRetryExcludedNodeID     string
+	reserveSandboxRetryCalls       int
+	reserveRetryResult             *db.SandboxRoutingResult
+	reserveRetryErr                error
 }
 
 func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
@@ -1325,6 +1331,26 @@ func (m *mockJobStore) ClearSandboxRoutingPlacementWithLease(_ context.Context, 
 	m.clearedPlacementLockToken = lockToken
 	m.clearSandboxPlacementCalls++
 	return true, nil
+}
+
+func (m *mockJobStore) ReserveSandboxSlotForRetry(_ context.Context, jobID, lockToken uuid.UUID, excludeNodeID string) (*db.SandboxRoutingResult, error) {
+	return m.RerouteSandboxAfterStartupFailure(context.Background(), jobID, lockToken, excludeNodeID)
+}
+
+func (m *mockJobStore) RerouteSandboxAfterStartupFailure(_ context.Context, jobID, lockToken uuid.UUID, excludeNodeID string) (*db.SandboxRoutingResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reserveRetryJobID = jobID
+	m.reserveRetryLockToken = lockToken
+	m.reserveRetryExcludedNodeID = excludeNodeID
+	m.reserveSandboxRetryCalls++
+	if m.reserveRetryErr != nil {
+		return nil, m.reserveRetryErr
+	}
+	if m.reserveRetryResult != nil {
+		return m.reserveRetryResult, nil
+	}
+	return &db.SandboxRoutingResult{Reason: db.SandboxRoutingReasonFleetCapacity}, nil
 }
 
 func (m *mockJobStore) getEnqueued() []string {
@@ -4316,7 +4342,7 @@ func TestRunAgent_SandboxCleanupOnCreateFailure(t *testing.T) {
 	}
 
 	jobID, lockToken := uuid.New(), uuid.New()
-	ctx := jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), lockToken)
+	ctx := jobctx.WithWorkerNodeID(jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), lockToken), "worker-a")
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(ctx, run)
 	require.Error(t, err)
@@ -4334,10 +4360,12 @@ func TestRunAgent_SandboxCleanupOnCreateFailure(t *testing.T) {
 		}
 	}
 	require.True(t, foundFailed)
-	require.Equal(t, 1, d.jobs.clearSandboxPlacementCalls, "sandbox creation failure should clear the durable worker placement")
-	require.Equal(t, jobID, d.jobs.clearedPlacementJobID, "placement cleanup should target the current job")
-	require.Equal(t, lockToken, d.jobs.clearedPlacementLockToken, "placement cleanup should be fenced to the current attempt")
+	require.Equal(t, 1, d.jobs.reserveSandboxRetryCalls, "sandbox creation failure should atomically reroute the durable placement")
+	require.Equal(t, jobID, d.jobs.reserveRetryJobID, "rerouting should target the current job")
+	require.Equal(t, lockToken, d.jobs.reserveRetryLockToken, "rerouting should be fenced to the current attempt")
+	require.Equal(t, "worker-a", d.jobs.reserveRetryExcludedNodeID, "rerouting should exclude the failed worker capacity node")
 	require.Equal(t, 0, d.jobs.releaseSandboxReservationCalls, "failed creation should not clear only the slot and leave worker affinity behind")
+	require.Equal(t, 0, d.jobs.clearSandboxPlacementCalls, "successful atomic rerouting should not need the compatibility clearing fallback")
 }
 
 func TestRunAgent_SandboxCleanupOnCloneFailure(t *testing.T) {
@@ -8511,7 +8539,7 @@ func TestContinueSession_AuthSocketClosedOnHydrateFailure(t *testing.T) {
 	}
 
 	jobID, lockToken := uuid.New(), uuid.New()
-	ctx := jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), lockToken)
+	ctx := jobctx.WithWorkerNodeID(jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), lockToken), "worker-a")
 	orch := buildOrchestrator(d)
 	err := orch.ContinueSession(ctx, session, nil)
 	require.Error(t, err, "ContinueSession should propagate the hydrate failure")
@@ -8519,10 +8547,12 @@ func TestContinueSession_AuthSocketClosedOnHydrateFailure(t *testing.T) {
 
 	require.Equal(t, 1, authStub.listenCalls, "auth socket must be opened before hydrate")
 	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when hydrate fails after the listener was opened")
-	require.Equal(t, 1, d.jobs.clearSandboxPlacementCalls, "hydrate failure should clear the durable worker placement")
-	require.Equal(t, jobID, d.jobs.clearedPlacementJobID, "hydrate cleanup should target the current job")
-	require.Equal(t, lockToken, d.jobs.clearedPlacementLockToken, "hydrate cleanup should be fenced to the current attempt")
+	require.Equal(t, 1, d.jobs.reserveSandboxRetryCalls, "hydrate failure should atomically reroute the durable placement")
+	require.Equal(t, jobID, d.jobs.reserveRetryJobID, "hydrate rerouting should target the current job")
+	require.Equal(t, lockToken, d.jobs.reserveRetryLockToken, "hydrate rerouting should be fenced to the current attempt")
+	require.Equal(t, "worker-a", d.jobs.reserveRetryExcludedNodeID, "hydrate rerouting should exclude the failed worker capacity node")
 	require.Equal(t, 0, d.jobs.releaseSandboxReservationCalls, "failed hydration should not retain worker affinity by clearing only its slot")
+	require.Equal(t, 0, d.jobs.clearSandboxPlacementCalls, "successful atomic rerouting should not need the compatibility clearing fallback")
 }
 
 func TestContinueSession_CreateFailureClearsRoutingPlacement(t *testing.T) {
@@ -8542,15 +8572,20 @@ func TestContinueSession_CreateFailureClearsRoutingPlacement(t *testing.T) {
 	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
 		return nil, errors.New("worker disk full")
 	}
+	d.jobs.reserveRetryErr = errors.New("routing unavailable")
 
 	jobID, lockToken := uuid.New(), uuid.New()
-	ctx := jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), lockToken)
+	ctx := jobctx.WithWorkerNodeID(jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), lockToken), "worker-a")
 	err := buildOrchestrator(d).ContinueSession(ctx, session, nil)
 
 	require.ErrorContains(t, err, "create sandbox", "ContinueSession should propagate the worker-local creation failure")
-	require.Equal(t, 1, d.jobs.clearSandboxPlacementCalls, "creation failure should clear the durable worker placement")
-	require.Equal(t, jobID, d.jobs.clearedPlacementJobID, "creation cleanup should target the current job")
-	require.Equal(t, lockToken, d.jobs.clearedPlacementLockToken, "creation cleanup should be fenced to the current attempt")
+	require.Equal(t, 1, d.jobs.reserveSandboxRetryCalls, "creation failure should first try to atomically reserve an alternate placement")
+	require.Equal(t, jobID, d.jobs.reserveRetryJobID, "alternate routing should target the current job")
+	require.Equal(t, lockToken, d.jobs.reserveRetryLockToken, "alternate routing should be fenced to the current attempt")
+	require.Equal(t, "worker-a", d.jobs.reserveRetryExcludedNodeID, "alternate routing should exclude the failed worker capacity node")
+	require.Equal(t, 1, d.jobs.clearSandboxPlacementCalls, "routing failure should fall back to clearing the stale worker placement")
+	require.Equal(t, jobID, d.jobs.clearedPlacementJobID, "fallback cleanup should target the current job")
+	require.Equal(t, lockToken, d.jobs.clearedPlacementLockToken, "fallback cleanup should be fenced to the current attempt")
 	require.Equal(t, 0, d.jobs.releaseSandboxReservationCalls, "failed creation should not retain worker affinity by clearing only its slot")
 }
 

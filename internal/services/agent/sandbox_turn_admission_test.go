@@ -96,12 +96,14 @@ func TestAdmitSandboxTurnAppliesSharedOrgLimit(t *testing.T) {
 		name      string
 		origin    models.SessionOrigin
 		active    int
+		jobType   string
 		expectErr bool
 	}{
-		{name: "allows claimed interactive turn at the shared limit", origin: models.SessionOriginManual, active: 2},
-		{name: "rejects interactive turn beyond the shared limit", origin: models.SessionOriginManual, active: 3, expectErr: true},
-		{name: "allows claimed code-review turn at the shared limit", origin: models.SessionOriginCodeReview, active: 2},
-		{name: "rejects code-review turn beyond the shared limit", origin: models.SessionOriginCodeReview, active: 3, expectErr: true},
+		{name: "allows claimed interactive turn at the shared limit", origin: models.SessionOriginManual, active: 2, jobType: "continue_session"},
+		{name: "rejects interactive turn beyond the shared limit", origin: models.SessionOriginManual, active: 3, jobType: "continue_session", expectErr: true},
+		{name: "allows claimed code-review turn at the shared limit", origin: models.SessionOriginCodeReview, active: 2, jobType: "continue_session"},
+		{name: "rejects code-review turn beyond the shared limit", origin: models.SessionOriginCodeReview, active: 3, jobType: "continue_session", expectErr: true},
+		{name: "does not credit a non-sandbox job context", origin: models.SessionOriginManual, active: 2, jobType: "unrelated_job", expectErr: true},
 	}
 
 	for _, tt := range tests {
@@ -119,7 +121,7 @@ func TestAdmitSandboxTurnAppliesSharedOrgLimit(t *testing.T) {
 				ID:     uuid.New(),
 				OrgID:  orgID,
 				Origin: tt.origin,
-			}, "continue_session", false, false)
+			}, tt.jobType, false, false)
 
 			if tt.expectErr {
 				require.ErrorIs(t, err, ErrSandboxTurnConcurrency, "turn above the shared org limit should wait without consuming an attempt")

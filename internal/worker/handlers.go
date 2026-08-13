@@ -6262,17 +6262,7 @@ func enqueueSlackSessionContinuationMessage(ctx context.Context, stores *Stores,
 		"session_id": session.ID.String(),
 		"thread_id":  thread.ID.String(),
 	}
-	enqueueOpts := db.EnqueueOpts{
-		Queue:        "agent",
-		JobType:      "continue_session",
-		Payload:      payload,
-		Priority:     5,
-		DedupeKey:    &dedupeKey,
-		TargetNodeID: models.SessionWorkerTarget(&session),
-	}
-	if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
-		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
-	}
+	enqueueOpts := db.ContinueSessionEnqueueOpts(&session, payload, &dedupeKey)
 	_, err = stores.Jobs.EnqueueWithOpts(ctx, orgID, enqueueOpts)
 	return err
 }
@@ -6691,17 +6681,7 @@ func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *
 	if req.ThreadID != nil {
 		payload["thread_id"] = req.ThreadID.String()
 	}
-	enqueueOpts := db.EnqueueOpts{
-		Queue:        "agent",
-		JobType:      "continue_session",
-		Payload:      payload,
-		Priority:     5,
-		DedupeKey:    &dedupeKey,
-		TargetNodeID: models.SessionWorkerTarget(&session),
-	}
-	if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
-		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
-	}
+	enqueueOpts := db.ContinueSessionEnqueueOpts(&session, payload, &dedupeKey)
 	_, err = stores.Jobs.EnqueueWithOpts(ctx, orgID, enqueueOpts)
 	return err
 }

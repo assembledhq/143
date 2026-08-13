@@ -25,10 +25,11 @@ func TestSandboxCapacityReservationStore_ReserveSandboxCapacity(t *testing.T) {
 		expectInsert     bool
 		expectedTotal    int
 		expectedAcquired bool
+		expectConflict   bool
 	}{
 		{name: "reserves below shared capacity", reserved: 1, effectiveMax: 3, expectInsert: true, expectedTotal: 3, expectedAcquired: true},
 		{name: "rejects at shared capacity", reserved: 2, effectiveMax: 3, expectedTotal: 3},
-		{name: "waits for prior job attempt lease", reserved: 1, effectiveMax: 3, conflicting: true, expectedTotal: 2},
+		{name: "reports prior job attempt lease as coordination", reserved: 1, effectiveMax: 3, conflicting: true, expectedTotal: 2, expectConflict: true},
 	}
 
 	for _, tt := range tests {
@@ -74,7 +75,11 @@ func TestSandboxCapacityReservationStore_ReserveSandboxCapacity(t *testing.T) {
 				func(context.Context) (int, error) { return 1, nil }, tt.effectiveMax, expiresAt,
 			)
 
-			require.NoError(t, err, "shared capacity reservation should complete")
+			if tt.expectConflict {
+				require.ErrorIs(t, err, ErrSandboxCapacityAttemptConflict, "replacement attempt should report stale-attempt coordination separately from fleet saturation")
+			} else {
+				require.NoError(t, err, "shared capacity reservation should complete")
+			}
 			require.Equal(t, 1, live, "shared capacity reservation should report the live Docker count")
 			require.Equal(t, tt.expectedTotal, total, "shared capacity reservation should report the combined live and reserved load")
 			require.Equal(t, tt.expectedAcquired, acquired, "shared capacity reservation should enforce the effective worker limit")

@@ -22,6 +22,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/auth"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/metrics"
@@ -5677,16 +5678,15 @@ func (o *Orchestrator) enqueueContinueSessionTurn(ctx context.Context, session *
 	if o == nil || o.jobs == nil || session == nil {
 		return uuid.Nil, fmt.Errorf("enqueue continue session turn: dependencies are not configured")
 	}
-	targetNodeID := models.SessionWorkerTarget(session)
-	workloadClass := models.SandboxWorkloadClassForSession(session)
-	if workloadClass == models.SandboxWorkloadClassCodeReview {
+	enqueueOpts := db.ContinueSessionEnqueueOpts(session, payload, dedupeKey)
+	if enqueueOpts.WorkloadClass == models.SandboxWorkloadClassCodeReview {
 		classified, ok := o.jobs.(workloadClassJobStore)
 		if !ok {
 			return uuid.Nil, fmt.Errorf("enqueue code-review continuation: job store does not support workload classes")
 		}
-		return classified.EnqueueWithTargetAndWorkload(ctx, session.OrgID, "agent", "continue_session", payload, 5, dedupeKey, targetNodeID, workloadClass)
+		return classified.EnqueueWithTargetAndWorkload(ctx, session.OrgID, enqueueOpts.Queue, enqueueOpts.JobType, enqueueOpts.Payload, enqueueOpts.Priority, enqueueOpts.DedupeKey, enqueueOpts.TargetNodeID, enqueueOpts.WorkloadClass)
 	}
-	return o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, dedupeKey, targetNodeID)
+	return o.jobs.EnqueueWithTarget(ctx, session.OrgID, enqueueOpts.Queue, enqueueOpts.JobType, enqueueOpts.Payload, enqueueOpts.Priority, enqueueOpts.DedupeKey, enqueueOpts.TargetNodeID)
 }
 
 // drainAcceptableStatus returns true for session states that can absorb

@@ -175,7 +175,7 @@ func TestIntegration_SharedSandboxAdmissionFencesReclaimedJobAttempt(t *testing.
 		ctx, replacementNodeID, &jobID, &secondLockToken, models.SandboxWorkloadClassInteractive,
 		func(context.Context) (int, error) { return 0, nil }, 3, time.Now().Add(time.Minute),
 	)
-	require.NoError(t, err, "replacement attempt should receive a serialized capacity decision")
+	require.ErrorIs(t, err, db.ErrSandboxCapacityAttemptConflict, "replacement attempt should distinguish stale-attempt coordination from physical capacity saturation")
 	require.False(t, replacementAcquired, "replacement attempt must wait for the stale attempt's live reservation on another worker")
 	require.Equal(t, 0, blockedTotal, "another worker's lease is a fencing conflict rather than local capacity load")
 
@@ -207,19 +207,31 @@ func TestIntegration_SharedSandboxAdmissionFencesReclaimedJobAttempt(t *testing.
 	require.NoError(t, capacityStore.ReleaseSandboxCapacity(ctx, replacementNodeID, secondReservationID, &secondLockToken), "replacement attempt should release its own reservation")
 }
 
-// TestIntegration_FailedFreshSandboxClearsTargetWithoutDurableSlot verifies
-// the failure cleanup used by compatibility and terminal-probe placements.
-// Those jobs intentionally have a target without sandbox_slot_reserved_until,
-// but a node-local create failure must still make the retry fleet-routable.
+// TestIntegration_FailedFreshSandboxReroutesOffPhysicalHost verifies the
+// failure cleanup used by compatibility and terminal-probe placements. Those
+// jobs intentionally have a target without sandbox_slot_reserved_until, but a
+// node-local create failure must reserve an alternate while excluding every
+// blue/green generation that shares the failed Docker host.
 //
 // This test cannot run in parallel because the integration suite shares one
 // database and setup truncates queue state between tests.
-func TestIntegration_FailedFreshSandboxClearsTargetWithoutDurableSlot(t *testing.T) {
+func TestIntegration_FailedFreshSandboxReroutesOffPhysicalHost(t *testing.T) {
 	pool := setup(t)
 	ctx := context.Background()
 	orgID := seedOrg(t, pool)
-	nodeID := "failed-create-worker-" + orgID.String()[:8]
-	seedWorkerNode(t, pool, nodeID)
+	failedCapacityNodeID := "failed-create-worker-" + orgID.String()[:8]
+	failedNodeID := failedCapacityNodeID + "-g20260813000101-blue"
+	failedSiblingNodeID := failedCapacityNodeID + "-g20260813000202-green"
+	healthyNodeID := "healthy-create-worker-" + orgID.String()[:8]
+	for _, nodeID := range []string{failedNodeID, failedSiblingNodeID, healthyNodeID} {
+		seedWorkerNode(t, pool, nodeID)
+		setWorkerSandboxCapacity(t, pool, nodeID, 2)
+	}
+	_, err := pool.Exec(ctx, `
+		UPDATE nodes
+		SET metadata = metadata || jsonb_build_object('sandbox_capacity_node_id', $2::text)
+		WHERE id = $1`, failedSiblingNodeID, failedCapacityNodeID)
+	require.NoError(t, err, "sibling worker generation should advertise the failed physical-host identity")
 	session := seedSession(t, pool, orgID, sessionOpts{Status: models.SessionStatusPending})
 
 	jobStore := db.NewJobStore(pool)
@@ -241,27 +253,84 @@ func TestIntegration_FailedFreshSandboxClearsTargetWithoutDurableSlot(t *testing
 			locked_by_node_id = $2,
 			run_owner_id = $2,
 			lease_expires_at = now() + interval '1 minute'
-		WHERE org_id = $1 AND id = $4`, orgID, nodeID, lockToken, jobID)
+		WHERE org_id = $1 AND id = $4`, orgID, failedNodeID, lockToken, jobID)
 	require.NoError(t, err, "test should create a running terminal-probe-style placement")
 
 	staleCleared, err := jobStore.ClearSandboxRoutingPlacementWithLease(ctx, jobID, uuid.New())
 	require.NoError(t, err, "stale-attempt cleanup should be a harmless no-op")
 	require.False(t, staleCleared, "stale attempt must not clear the current worker placement")
 
-	cleared, err := jobStore.ClearSandboxRoutingPlacementWithLease(ctx, jobID, lockToken)
-	require.NoError(t, err, "fresh sandbox failure cleanup should succeed")
-	require.True(t, cleared, "current attempt should clear its placement even when no durable slot remains")
+	routed, err := jobStore.RerouteSandboxAfterStartupFailure(ctx, jobID, lockToken, failedNodeID)
+	require.NoError(t, err, "fresh sandbox failure cleanup should reserve an alternate worker")
+	require.NotNil(t, routed, "fresh sandbox failure cleanup should return a routing decision")
+	require.NotNil(t, routed.TargetNodeID, "healthy alternate capacity should be reserved immediately")
+	require.Equal(t, healthyNodeID, *routed.TargetNodeID, "retry must exclude every generation on the failed physical host")
 
-	var clearedRows int
+	var reservedRows int
 	err = pool.QueryRow(ctx, `
 		SELECT COUNT(*)
 		FROM jobs
 		WHERE org_id = $1
 		  AND id = $2
-		  AND target_node_id IS NULL
-		  AND sandbox_slot_reserved_until IS NULL`, orgID, jobID).Scan(&clearedRows)
-	require.NoError(t, err, "test should inspect the failed job placement")
-	require.Equal(t, 1, clearedRows, "failed fresh sandbox should become eligible for fleet routing")
+		  AND target_node_id = $3
+		  AND sandbox_slot_reserved_until > now()`, orgID, jobID, healthyNodeID).Scan(&reservedRows)
+	require.NoError(t, err, "test should inspect the replacement worker placement")
+	require.Equal(t, 1, reservedRows, "failed fresh sandbox should atomically hold the healthy alternate slot")
+	var failedCapacityNodeIDs []string
+	err = pool.QueryRow(ctx, `
+		SELECT payload->'failed_sandbox_capacity_node_ids'
+		FROM jobs
+		WHERE org_id = $1 AND id = $2`, orgID, jobID).Scan(&failedCapacityNodeIDs)
+	require.NoError(t, err, "test should inspect durable failed-host exclusions")
+	require.Equal(t, []string{failedCapacityNodeID}, failedCapacityNodeIDs, "retry should persist the failed physical host for later routing passes")
+	var exclusionUntil time.Time
+	err = pool.QueryRow(ctx, `
+		SELECT (payload->>'failed_sandbox_capacity_node_exclusion_until')::timestamptz
+		FROM jobs
+		WHERE org_id = $1 AND id = $2`, orgID, jobID).Scan(&exclusionUntil)
+	require.NoError(t, err, "test should inspect the failed-host exclusion deadline")
+	require.True(t, exclusionUntil.After(time.Now()), "failed-host exclusion should survive immediate retry routing")
+
+	// When the only healthy alternate is temporarily unavailable, the fenced
+	// failure write must retain its physical-host exclusion for the later fleet
+	// routing pass instead of falling back to either failed generation.
+	_, err = pool.Exec(ctx, `UPDATE nodes SET status = 'draining' WHERE id = $1`, healthyNodeID)
+	require.NoError(t, err, "test should temporarily remove the healthy alternate")
+	queuedSession := seedSession(t, pool, orgID, sessionOpts{Status: models.SessionStatusPending})
+	queuedJobID, err := jobStore.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:         "agent",
+		JobType:       "run_agent",
+		Payload:       map[string]string{"session_id": queuedSession.ID.String(), "org_id": orgID.String()},
+		Priority:      5,
+		WorkloadClass: models.SandboxWorkloadClassInteractive,
+	})
+	require.NoError(t, err, "capacity-wait sandbox job should enqueue")
+	queuedLockToken := uuid.New()
+	_, err = pool.Exec(ctx, `
+		UPDATE jobs
+		SET status = 'running', target_node_id = $2, sandbox_slot_reserved_until = NULL,
+			lock_token = $3, locked_by_node_id = $2, run_owner_id = $2,
+			lease_expires_at = now() + interval '1 minute'
+		WHERE org_id = $1 AND id = $4`, orgID, failedSiblingNodeID, queuedLockToken, queuedJobID)
+	require.NoError(t, err, "test should create a second failed startup attempt")
+
+	waitingRoute, err := jobStore.RerouteSandboxAfterStartupFailure(ctx, queuedJobID, queuedLockToken, failedSiblingNodeID)
+	require.NoError(t, err, "failed startup should persist its exclusion even with no immediate alternate")
+	require.Nil(t, waitingRoute.TargetNodeID, "genuinely unavailable alternate capacity should clear worker affinity")
+	_, err = pool.Exec(ctx, `
+		UPDATE jobs
+		SET status = 'pending', run_at = now(), lock_token = NULL,
+			locked_by_node_id = NULL, run_owner_id = NULL, lease_expires_at = NULL
+		WHERE org_id = $1 AND id = $2`, orgID, queuedJobID)
+	require.NoError(t, err, "test should simulate the worker's fenced retry write")
+	_, err = pool.Exec(ctx, `UPDATE nodes SET status = 'active', last_heartbeat_at = now() WHERE id = $1`, healthyNodeID)
+	require.NoError(t, err, "test should restore the healthy alternate")
+
+	laterRoute, err := jobStore.RouteNextSandboxJob(ctx)
+	require.NoError(t, err, "later routing pass should honor the durable failed-host exclusion")
+	require.NotNil(t, laterRoute, "later routing should inspect the waiting sandbox job")
+	require.NotNil(t, laterRoute.TargetNodeID, "newly available healthy capacity should be reserved")
+	require.Equal(t, healthyNodeID, *laterRoute.TargetNodeID, "later routing must not return to either generation on the failed physical host")
 }
 
 // TestIntegration_BlueGreenGenerationsSharePhysicalHostCapacity verifies that
@@ -471,6 +540,52 @@ func TestIntegration_SessionCapacityStatusExcludesOwnReservation(t *testing.T) {
 	waiting, err := store.IsSessionWaitingForSandboxCapacity(ctx, orgID, waitingSession.ID, 1)
 	require.NoError(t, err, "queued session capacity lookup should succeed")
 	require.True(t, waiting, "a queued session should report waiting when another admitted turn consumes the organization limit")
+}
+
+// TestIntegration_ClaimSkipsSaturatedOrgBacklog verifies that one tenant's
+// affinity-bound sandbox burst cannot consume the bounded claim scan and hide
+// ordinary runnable work. One deferral excludes only that tenant's sandbox
+// jobs for the rest of the pass; non-sandbox work from the same tenant remains
+// eligible.
+//
+// This test cannot run in parallel because the integration suite shares one
+// database and setup truncates queue state between tests.
+func TestIntegration_ClaimSkipsSaturatedOrgBacklog(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	orgID := seedOrg(t, pool)
+	_, err := pool.Exec(ctx, `UPDATE organizations SET settings = jsonb_set(settings, '{max_concurrent_runs}', '1'::jsonb, true) WHERE id = $1`, orgID)
+	require.NoError(t, err, "test organization should enforce one shared sandbox turn")
+	nodeID := "backlog-worker-" + orgID.String()[:8]
+	seedWorkerNode(t, pool, nodeID)
+	store := db.NewJobStore(pool)
+
+	blockerID, err := store.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue: "agent", JobType: "run_agent", Payload: map[string]string{"org_id": orgID.String()},
+		Priority: 5, TargetNodeID: &nodeID,
+	})
+	require.NoError(t, err, "blocking sandbox turn should enqueue")
+	_, err = pool.Exec(ctx, `
+		UPDATE jobs
+		SET status = 'running', lock_token = $3, locked_by_node_id = $2,
+			run_owner_id = $2, lease_expires_at = now() + interval '1 minute'
+		WHERE org_id = $1 AND id = $4`, orgID, nodeID, uuid.New(), blockerID)
+	require.NoError(t, err, "test should consume the organization sandbox turn")
+
+	for i := 0; i < 20; i++ {
+		_, err = store.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+			Queue: "agent", JobType: "run_agent", Payload: map[string]string{"org_id": orgID.String()},
+			Priority: 5, TargetNodeID: &nodeID,
+		})
+		require.NoError(t, err, "saturated sandbox backlog job should enqueue")
+	}
+	ordinaryJobID, err := store.Enqueue(ctx, orgID, "agent", "ordinary_maintenance", map[string]string{"org_id": orgID.String()}, 5, nil)
+	require.NoError(t, err, "ordinary work should enqueue behind the sandbox backlog")
+
+	claimed, err := store.ClaimNextRunnable(ctx, nodeID, nodeID, uuid.New(), time.Minute)
+	require.NoError(t, err, "claim pass should skip the saturated tenant sandbox backlog")
+	require.NotNil(t, claimed, "ordinary work should remain visible within the bounded claim pass")
+	require.Equal(t, ordinaryJobID, claimed.ID, "claim should reach non-sandbox work after one tenant-level sandbox deferral")
 }
 
 // TestIntegration_CodeReviewJobsUseFleetCapacityAndPreserveInteractiveReserve

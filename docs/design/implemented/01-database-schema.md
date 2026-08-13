@@ -1079,7 +1079,7 @@ Durable, database-backed async work queue for the full pipeline (`ingest_webhook
 | queue | text | queue name (`ingestion`, `prioritization`, `agent`, `validation`, `pr`, `observability`) |
 | job_type | text | e.g. `ingest_webhook`, `run_agent`, `open_pr` |
 | workload_class | text | sandbox admission class: `interactive` or `code_review`; defaults to `interactive` |
-| payload | jsonb | typed job input payload |
+| payload | jsonb | typed job input payload; sandbox retries may add `failed_sandbox_capacity_node_ids` and `failed_sandbox_capacity_node_exclusion_until` runtime routing metadata |
 | priority | int | higher number = higher priority (default 0) |
 | status | text | `pending`, `running`, `succeeded`, `failed`, `cancelled`, `dead_letter` |
 | attempts | int | attempts made so far |

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -35,6 +36,10 @@ type failedFreshSandboxRoutingPlacementReleaser interface {
 	ClearSandboxRoutingPlacementWithLease(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error)
 }
 
+type failedFreshSandboxRetryRouter interface {
+	RerouteSandboxAfterStartupFailure(ctx context.Context, jobID, lockToken uuid.UUID, failedNodeID string) (*db.SandboxRoutingResult, error)
+}
+
 // admitSandboxTurn is the shared admission boundary for RunAgent and
 // ContinueSession. Every workload draws from the same organization turn limit;
 // workload class only affects worker placement and reserved interactive
@@ -54,7 +59,7 @@ func (o *Orchestrator) admitSandboxTurn(
 	if err := workloadClass.Validate(); err != nil {
 		return nil, fmt.Errorf("admit sandbox turn: %w", err)
 	}
-	if err := o.checkSharedTurnConcurrency(ctx, session.OrgID, excludeCurrentRunningSession); err != nil {
+	if err := o.checkSharedTurnConcurrency(ctx, session.OrgID, purpose, excludeCurrentRunningSession); err != nil {
 		o.releaseRejectedSandboxRoutingPlacement(ctx, o.logger)
 		return nil, err
 	}
@@ -85,7 +90,7 @@ func (o *Orchestrator) admitSandboxTurn(
 	return reservation, nil
 }
 
-func (o *Orchestrator) checkSharedTurnConcurrency(ctx context.Context, orgID uuid.UUID, excludeCurrentRunning bool) error {
+func (o *Orchestrator) checkSharedTurnConcurrency(ctx context.Context, orgID uuid.UUID, jobType string, excludeCurrentRunning bool) error {
 	if o.orgs == nil {
 		return o.checkConcurrency(ctx, orgID, excludeCurrentRunning)
 	}
@@ -105,7 +110,8 @@ func (o *Orchestrator) checkSharedTurnConcurrency(ctx context.Context, orgID uui
 	if err != nil {
 		return err
 	}
-	_, currentJobIncluded := jobctx.JobIDFromContext(ctx)
+	_, hasCurrentJob := jobctx.JobIDFromContext(ctx)
+	currentJobIncluded := hasCurrentJob && (jobType == "run_agent" || jobType == "continue_session")
 	// The shared job counter identifies the current claimed turn directly, so
 	// its greater-than comparison supersedes the legacy session-row
 	// excludeCurrentRunning adjustment used by the fallbacks above.
@@ -159,19 +165,35 @@ func (o *Orchestrator) releaseRejectedSandboxRoutingPlacement(ctx context.Contex
 	}
 }
 
-// clearFailedFreshSandboxRoutingPlacement removes worker affinity after a
-// create or hydrate failure. Unlike admission rejection cleanup, this is
-// unconditional on sandbox_slot_reserved_until: compatibility/terminal-probe
-// placements have a target without a durable slot, and a renewal may also have
-// cleared the slot before the provider reports its failure.
+// clearFailedFreshSandboxRoutingPlacement atomically reserves an alternate
+// worker after a create or hydrate failure while excluding every generation
+// on the failed physical capacity node. If no alternate has capacity, routing
+// clears affinity so a later fleet pass can retry. The simpler fenced clearer
+// remains a compatibility fallback for test or alternate JobStore adapters.
 func (o *Orchestrator) clearFailedFreshSandboxRoutingPlacement(ctx context.Context, log zerolog.Logger) {
-	releaser, ok := o.jobs.(failedFreshSandboxRoutingPlacementReleaser)
-	if !ok {
-		return
-	}
 	jobID, hasJobID := jobctx.JobIDFromContext(ctx)
 	lockToken, hasLockToken := jobctx.LockTokenFromContext(ctx)
 	if !hasJobID || !hasLockToken {
+		return
+	}
+	if router, ok := o.jobs.(failedFreshSandboxRetryRouter); ok {
+		failedNodeID, _ := jobctx.WorkerNodeIDFromContext(ctx)
+		routingCtx, routingCancel := context.WithTimeout(context.WithoutCancel(ctx), sandboxRoutingCleanupTimeout)
+		result, err := router.RerouteSandboxAfterStartupFailure(routingCtx, jobID, lockToken, failedNodeID)
+		routingCancel()
+		if err == nil {
+			event := log.Debug().Str("job_id", jobID.String()).Str("failed_node_id", failedNodeID)
+			if result != nil && result.TargetNodeID != nil {
+				event.Str("target_node_id", *result.TargetNodeID).Msg("reserved alternate worker after fresh sandbox failure")
+			} else {
+				event.Msg("cleared sandbox routing placement after no alternate worker was available")
+			}
+			return
+		}
+		log.Warn().Err(err).Str("job_id", jobID.String()).Str("failed_node_id", failedNodeID).Msg("failed to reserve alternate worker after fresh sandbox failure; falling back to clearing placement")
+	}
+	releaser, ok := o.jobs.(failedFreshSandboxRoutingPlacementReleaser)
+	if !ok {
 		return
 	}
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sandboxRoutingCleanupTimeout)

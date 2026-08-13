@@ -83,6 +83,33 @@ func ContinueSessionDedupeKey(scopeID uuid.UUID) string {
 	return "continue_session:" + scopeID.String()
 }
 
+// ContinueSessionEnqueueOpts is the canonical scheduling policy for every
+// continuation turn. Callers provide the payload and dedupe scope, while this
+// helper keeps queue, priority, worker affinity, and workload classification
+// consistent across API, integration, and worker-originated resumes.
+//
+// A nil session deliberately produces an unpinned interactive fallback for
+// paths that accept input while the authoritative session lookup is
+// temporarily unavailable.
+func ContinueSessionEnqueueOpts(session *models.Session, payload any, dedupeKey *string) EnqueueOpts {
+	opts := EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      payload,
+		Priority:     5,
+		DedupeKey:    dedupeKey,
+		TargetNodeID: models.SessionWorkerTarget(session),
+	}
+	if session == nil {
+		// The fallback must be explicit because the authoritative classification
+		// could not be loaded; routing will repair it from the session row later.
+		opts.WorkloadClass = models.SandboxWorkloadClassInteractive
+	} else if models.SandboxWorkloadClassForSession(session) == models.SandboxWorkloadClassCodeReview {
+		opts.WorkloadClass = models.SandboxWorkloadClassCodeReview
+	}
+	return opts
+}
+
 type JobStore struct {
 	db       DBTX
 	notifier *cache.JobNotifier
@@ -766,6 +793,7 @@ const (
 	SandboxOrgLimitRetryDelay      = 5 * time.Second
 	sandboxRoutingErrorRetryDelay  = 10 * time.Second
 	sandboxRoutingTerminalProbeAge = 8 * time.Minute
+	sandboxFailedNodeExclusionTTL  = time.Minute
 	maxClaimAdmissionSkips         = 16
 )
 
@@ -876,7 +904,7 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 		return s.deferSandboxRoutingJobError(ctx, tx, job, err)
 	}
 
-	result, err := reserveSandboxSlotForLockedJob(ctx, tx, job, "")
+	result, err := reserveSandboxSlotForLockedJob(ctx, tx, job, nil)
 	if err != nil {
 		return s.deferSandboxRoutingJobError(ctx, tx, job, err)
 	}
@@ -908,7 +936,7 @@ func (s *JobStore) RouteNextSandboxJob(ctx context.Context) (*SandboxRoutingResu
 			}
 		}
 		if fallbackReason != "" {
-			targetNodeID, fallbackErr := selectSandboxRoutingFallbackNode(ctx, tx)
+			targetNodeID, fallbackErr := selectSandboxRoutingFallbackNode(ctx, tx, job.ID, job.OrgID, nil)
 			if fallbackErr != nil && !errors.Is(fallbackErr, pgx.ErrNoRows) {
 				return s.deferSandboxRoutingJobError(ctx, tx, job, fallbackErr)
 			}
@@ -1047,6 +1075,20 @@ func sandboxCapacityMetadataConfigured(ctx context.Context, tx pgx.Tx) (bool, er
 // preserves the target and reservation selected here.
 // lint:allow-no-orgid reason="worker retry routes a globally identified job across worker nodes"
 func (s *JobStore) ReserveSandboxSlotForRetry(ctx context.Context, jobID, lockToken uuid.UUID, excludeNodeID string) (*SandboxRoutingResult, error) {
+	return s.reserveSandboxSlotForRunningAttempt(ctx, jobID, lockToken, excludeNodeID, false)
+}
+
+// RerouteSandboxAfterStartupFailure records the failed physical capacity node
+// and atomically reserves a healthy alternate for the same running attempt.
+// Persisting a bounded exclusion on the job keeps ordinary retries off that
+// Docker host when no alternate is immediately available without permanently
+// removing a recovered host from a small fleet.
+// lint:allow-no-orgid reason="fenced worker retry routes a globally identified job across worker nodes"
+func (s *JobStore) RerouteSandboxAfterStartupFailure(ctx context.Context, jobID, lockToken uuid.UUID, failedNodeID string) (*SandboxRoutingResult, error) {
+	return s.reserveSandboxSlotForRunningAttempt(ctx, jobID, lockToken, failedNodeID, true)
+}
+
+func (s *JobStore) reserveSandboxSlotForRunningAttempt(ctx context.Context, jobID, lockToken uuid.UUID, excludeNodeID string, persistExclusion bool) (*SandboxRoutingResult, error) {
 	txStarter, ok := s.db.(TxStarter)
 	if !ok {
 		return nil, fmt.Errorf("job store does not support sandbox routing transactions")
@@ -1085,8 +1127,63 @@ func (s *JobStore) ReserveSandboxSlotForRetry(ctx context.Context, jobID, lockTo
 	if err := resolveSandboxRoutingWorkloadClass(ctx, tx, &job); err != nil {
 		return nil, err
 	}
+	if persistExclusion {
+		if excludeNodeID == "" {
+			return nil, fmt.Errorf("record failed sandbox startup worker: node id is empty")
+		}
+		var failedCapacityNodeID string
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(
+				(
+					SELECT COALESCE(
+						NULLIF(metadata->>'sandbox_capacity_node_id', ''),
+						regexp_replace(id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
+					)
+					FROM nodes
+					WHERE id = @node_id
+				),
+				regexp_replace(@node_id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
+			)`, pgx.NamedArgs{"node_id": excludeNodeID}).Scan(&failedCapacityNodeID); err != nil {
+			return nil, fmt.Errorf("resolve failed sandbox capacity node %s: %w", excludeNodeID, err)
+		}
+		resultTag, err := tx.Exec(ctx, `
+			UPDATE jobs
+			SET payload = jsonb_set(
+					CASE
+						WHEN COALESCE(payload->'failed_sandbox_capacity_node_ids', '[]'::jsonb) ? @capacity_node_id THEN payload
+						ELSE jsonb_set(
+							payload,
+							'{failed_sandbox_capacity_node_ids}',
+							COALESCE(payload->'failed_sandbox_capacity_node_ids', '[]'::jsonb) || to_jsonb(@capacity_node_id::text),
+							true
+						)
+					END,
+					'{failed_sandbox_capacity_node_exclusion_until}',
+					to_jsonb(now() + (@exclusion_seconds * interval '1 second')),
+					true
+				),
+				updated_at = now()
+			WHERE id = @job_id
+			  AND status = 'running'
+			  AND lock_token = @lock_token`, pgx.NamedArgs{
+			"capacity_node_id":  failedCapacityNodeID,
+			"exclusion_seconds": int(sandboxFailedNodeExclusionTTL.Seconds()),
+			"job_id":            job.ID,
+			"lock_token":        lockToken,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("record failed sandbox capacity node: %w", err)
+		}
+		if resultTag.RowsAffected() != 1 {
+			return nil, fmt.Errorf("record failed sandbox capacity node: job %s lease changed", job.ID)
+		}
+	}
 
-	result, err := reserveSandboxSlotForLockedJob(ctx, tx, job, excludeNodeID)
+	excludedNodeIDs := []string{}
+	if excludeNodeID != "" {
+		excludedNodeIDs = append(excludedNodeIDs, excludeNodeID)
+	}
+	result, err := reserveSandboxSlotForLockedJob(ctx, tx, job, excludedNodeIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1117,7 +1214,7 @@ func (s *JobStore) ReserveSandboxSlotForRetry(ctx context.Context, jobID, lockTo
 	return result, nil
 }
 
-func reserveSandboxSlotForLockedJob(ctx context.Context, tx pgx.Tx, job sandboxRoutingJob, excludeNodeID string) (*SandboxRoutingResult, error) {
+func reserveSandboxSlotForLockedJob(ctx context.Context, tx pgx.Tx, job sandboxRoutingJob, excludedNodeIDs []string) (*SandboxRoutingResult, error) {
 	result := &SandboxRoutingResult{
 		JobID:         job.ID,
 		WorkloadClass: job.WorkloadClass,
@@ -1136,13 +1233,9 @@ func reserveSandboxSlotForLockedJob(ctx context.Context, tx pgx.Tx, job sandboxR
 		return result, nil
 	}
 
-	excludedNodeIDs := []string{}
-	if excludeNodeID != "" {
-		excludedNodeIDs = append(excludedNodeIDs, excludeNodeID)
-	}
 	lockContended := false
 	for {
-		candidate, err := selectSandboxRoutingCandidate(ctx, tx, job.WorkloadClass, excludedNodeIDs)
+		candidate, err := selectSandboxRoutingCandidate(ctx, tx, job.ID, job.OrgID, job.WorkloadClass, excludedNodeIDs)
 		if errors.Is(err, pgx.ErrNoRows) {
 			if lockContended {
 				result.Reason = SandboxRoutingReasonLockContention
@@ -1434,20 +1527,56 @@ func markSandboxCancellationCleanup(ctx context.Context, tx pgx.Tx, job sandboxR
 }
 
 // lint:allow-no-orgid reason="terminal capacity probe selects a fresh worker across organizations"
-func selectSandboxRoutingFallbackNode(ctx context.Context, tx pgx.Tx) (string, error) {
+func selectSandboxRoutingFallbackNode(ctx context.Context, tx pgx.Tx, jobID, orgID uuid.UUID, excludedNodeIDs []string) (string, error) {
 	var nodeID string
 	err := tx.QueryRow(ctx, `
+		WITH excluded_capacity_nodes AS (
+			SELECT jsonb_array_elements_text(COALESCE(j.payload->'failed_sandbox_capacity_node_ids', '[]'::jsonb)) AS capacity_node_id
+			FROM jobs j
+			WHERE j.id = @job_id
+			  AND j.org_id = @org_id
+			  AND COALESCE((j.payload->>'failed_sandbox_capacity_node_exclusion_until')::timestamptz, '-infinity'::timestamptz) > now()
+			UNION
+			SELECT COALESCE(
+				(
+					SELECT COALESCE(
+						NULLIF(excluded_node.metadata->>'sandbox_capacity_node_id', ''),
+						regexp_replace(excluded_node.id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
+					)
+					FROM nodes excluded_node
+					WHERE excluded_node.id = excluded_id
+				),
+				regexp_replace(excluded_id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
+			)
+			FROM unnest(@excluded_node_ids::text[]) excluded_id
+		),
+		candidate_nodes AS (
+			SELECT n.*,
+				COALESCE(
+					NULLIF(n.metadata->>'sandbox_capacity_node_id', ''),
+					regexp_replace(n.id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
+				) AS capacity_node_id
+			FROM nodes n
+			WHERE n.mode IN ('worker', 'all')
+			  AND n.status = 'active'
+			  AND n.last_heartbeat_at >= @dead_before
+		)
 		SELECT n.id
-		FROM nodes n
-		WHERE n.mode IN ('worker', 'all')
-		  AND n.status = 'active'
-		  AND n.last_heartbeat_at >= @dead_before
+		FROM candidate_nodes n
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM excluded_capacity_nodes excluded
+			WHERE excluded.capacity_node_id = n.capacity_node_id
+		)
 		ORDER BY
 			COALESCE(NULLIF(n.metadata->>'active_job_count', '')::int, 0) ASC,
 			n.last_heartbeat_at DESC,
 			n.id ASC
 		LIMIT 1`, pgx.NamedArgs{
-		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
+		"dead_before":       time.Now().Add(-nodeDeadHeartbeatThreshold),
+		"excluded_node_ids": excludedNodeIDs,
+		"job_id":            jobID,
+		"org_id":            orgID,
 	}).Scan(&nodeID)
 	if err != nil {
 		return "", fmt.Errorf("select worker for terminal sandbox capacity probe: %w", err)
@@ -1456,10 +1585,30 @@ func selectSandboxRoutingFallbackNode(ctx context.Context, tx pgx.Tx) (string, e
 }
 
 // lint:allow-no-orgid reason="worker capacity routing intentionally aggregates reservations across organizations"
-func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass models.SandboxWorkloadClass, excludedNodeIDs []string) (string, error) {
+func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, jobID, orgID uuid.UUID, workloadClass models.SandboxWorkloadClass, excludedNodeIDs []string) (string, error) {
 	var nodeID string
 	err := tx.QueryRow(ctx, `
-		WITH candidate_nodes AS (
+		WITH excluded_capacity_nodes AS (
+			SELECT jsonb_array_elements_text(COALESCE(j.payload->'failed_sandbox_capacity_node_ids', '[]'::jsonb)) AS capacity_node_id
+			FROM jobs j
+			WHERE j.id = @job_id
+			  AND j.org_id = @org_id
+			  AND COALESCE((j.payload->>'failed_sandbox_capacity_node_exclusion_until')::timestamptz, '-infinity'::timestamptz) > now()
+			UNION
+			SELECT COALESCE(
+				(
+					SELECT COALESCE(
+						NULLIF(excluded_node.metadata->>'sandbox_capacity_node_id', ''),
+						regexp_replace(excluded_node.id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
+					)
+					FROM nodes excluded_node
+					WHERE excluded_node.id = excluded_id
+				),
+				regexp_replace(excluded_id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
+			)
+			FROM unnest(@excluded_node_ids::text[]) excluded_id
+		),
+		candidate_nodes AS (
 			SELECT n.*,
 				COALESCE(
 					NULLIF(n.metadata->>'sandbox_capacity_node_id', ''),
@@ -1470,7 +1619,14 @@ func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass
 			  AND n.status = 'active'
 			  AND n.last_heartbeat_at >= @dead_before
 			  AND COALESCE(n.metadata->>'live_sandbox_count_error', '') = ''
-			  AND NOT (n.id = ANY(@excluded_node_ids::text[]))
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM excluded_capacity_nodes excluded
+				WHERE excluded.capacity_node_id = COALESCE(
+					NULLIF(n.metadata->>'sandbox_capacity_node_id', ''),
+					regexp_replace(n.id, '-g[0-9]{14}-[A-Za-z0-9._-]+$', '')
+				)
+			  )
 		),
 		raw_load AS (
 			SELECT
@@ -1494,6 +1650,7 @@ func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass
 						) = n.capacity_node_id
 					  AND reserved_job.sandbox_slot_reserved_until > now()
 					  AND reserved_job.status = 'pending'
+					  AND reserved_job.id <> @job_id
 				) AS pending_durable_reservations,
 				(
 					SELECT COUNT(*)
@@ -1505,6 +1662,7 @@ func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass
 						) = n.capacity_node_id
 					  AND reserved_job.sandbox_slot_reserved_until > now()
 					  AND reserved_job.status = 'running'
+					  AND reserved_job.id <> @job_id
 				) AS running_durable_reservations,
 				(
 					SELECT COUNT(*)
@@ -1562,6 +1720,8 @@ func selectSandboxRoutingCandidate(ctx context.Context, tx pgx.Tx, workloadClass
 		LIMIT 1`, pgx.NamedArgs{
 		"dead_before":       time.Now().Add(-nodeDeadHeartbeatThreshold),
 		"excluded_node_ids": excludedNodeIDs,
+		"job_id":            jobID,
+		"org_id":            orgID,
 		"workload_class":    workloadClass,
 	}).Scan(&nodeID)
 	if err != nil {
@@ -1734,7 +1894,7 @@ func (s *JobStore) IsSessionWaitingForSandboxCapacity(ctx context.Context, orgID
 			  AND waiting_job.payload->>'capacity_cleanup' IS DISTINCT FROM 'true'
 			  AND NOT (
 				waiting_job.job_type = 'run_agent'
-				AND waiting_job.retry_window_started_at = waiting_job.created_at
+				AND waiting_job.retry_window_started_at IS NOT DISTINCT FROM waiting_job.created_at
 				AND waiting_job.created_at <= now() - (@terminal_probe_seconds * interval '1 second')
 			  )
 			  AND (
@@ -1840,8 +2000,9 @@ type jobExecer interface {
 // turn starves until the node dies; the claimer hydrates from the snapshot.
 // lint:allow-no-orgid reason="worker queue consumer scans cross-org jobs by design"
 func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
+	excludedSandboxOrgIDs := []uuid.UUID{}
 	for attempt := 0; attempt < maxClaimAdmissionSkips; attempt++ {
-		job, deferred, err := s.claimNextRunnableAttempt(ctx, nodeID, ownerID, lockToken, leaseDuration)
+		job, deferred, err := s.claimNextRunnableAttempt(ctx, nodeID, ownerID, lockToken, leaseDuration, &excludedSandboxOrgIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -1856,7 +2017,7 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 // particular, an org-limit deferral commits before the next candidate is
 // examined, so organization row locks can never accumulate in cross-org scan
 // order and deadlock another dispatcher or a settings update.
-func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error) {
+func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration, excludedSandboxOrgIDs *[]uuid.UUID) (*models.Job, bool, error) {
 	txStarter, ok := s.db.(TxStarter)
 	if !ok {
 		return nil, false, fmt.Errorf("job store does not support claim transactions")
@@ -1892,6 +2053,10 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 			WHERE j.status = 'pending' AND j.run_at <= now()
 			  AND (j.job_type NOT IN ('run_agent', 'continue_session') OR j.target_node_id IS NOT NULL)
 			  AND (
+				j.job_type NOT IN ('run_agent', 'continue_session')
+				OR NOT (j.org_id = ANY(@excluded_sandbox_org_ids::uuid[]))
+			  )
+			  AND (
 			    j.target_node_id IS NULL
 			    OR j.target_node_id = @node_id
 			    OR (d.id IS NOT NULL AND j.sandbox_slot_reserved_until IS NULL)
@@ -1910,8 +2075,9 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 				j.created_at ASC
 			FOR UPDATE OF j SKIP LOCKED
 			LIMIT 1`, pgx.NamedArgs{
-		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
-		"node_id":     nodeID,
+		"dead_before":              time.Now().Add(-nodeDeadHeartbeatThreshold),
+		"excluded_sandbox_org_ids": *excludedSandboxOrgIDs,
+		"node_id":                  nodeID,
 	}).Scan(
 		&candidate.ID,
 		&candidate.OrgID,
@@ -2013,6 +2179,7 @@ func (s *JobStore) claimNextRunnableAttempt(ctx context.Context, nodeID, ownerID
 				if err := tx.Commit(ctx); err != nil {
 					return nil, false, fmt.Errorf("commit sandbox org-limit deferral: %w", err)
 				}
+				*excludedSandboxOrgIDs = append(*excludedSandboxOrgIDs, candidate.OrgID)
 				return nil, true, nil
 			}
 		}

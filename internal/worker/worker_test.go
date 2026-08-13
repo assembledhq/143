@@ -355,7 +355,7 @@ func TestWorker_Poll(t *testing.T) {
 				t.Helper()
 				mock.ExpectBegin()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS").
-					WithArgs(pgxmock.AnyArg(), "test-node").
+					WithArgs(pgxmock.AnyArg(), "test-node", []uuid.UUID{}).
 					WillReturnError(pgx.ErrNoRows)
 				mock.ExpectRollback()
 			},
@@ -693,7 +693,7 @@ func TestWorker_Poll(t *testing.T) {
 				now := time.Now()
 				mock.ExpectBegin()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS").
-					WithArgs(pgxmock.AnyArg(), "test-node").
+					WithArgs(pgxmock.AnyArg(), "test-node", []uuid.UUID{}).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
 						AddRow(jobID, orgID, "missing_token", nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, now))
 				mock.ExpectQuery("UPDATE jobs j").
@@ -1175,7 +1175,7 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 	for range 5 {
 		mock.ExpectBegin()
 		mock.ExpectQuery("WITH unavailable_target_nodes AS").
-			WithArgs(pgxmock.AnyArg(), "test-node").
+			WithArgs(pgxmock.AnyArg(), "test-node", []uuid.UUID{}).
 			WillReturnError(pgx.ErrNoRows)
 		mock.ExpectRollback()
 	}
@@ -1371,7 +1371,7 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 	}
 	mock.ExpectBegin()
 	mock.ExpectQuery("WITH unavailable_target_nodes AS").
-		WithArgs(pgxmock.AnyArg(), "test-node").
+		WithArgs(pgxmock.AnyArg(), "test-node", []uuid.UUID{}).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
 			AddRow(jobID, orgID, jobType, nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, createdAt))
 	if jobType == "run_agent" || jobType == "continue_session" {
