@@ -930,20 +930,20 @@ func (h *EvalHandler) StartRun(w http.ResponseWriter, r *http.Request) {
 		"eval_run_id": run.ID.String(),
 		"org_id":      orgID.String(),
 	}
-	queue := "eval"
-	jobType := "run_eval"
 	var dedupeKey *string
-	var enqueuePayload any = payload
 	if session != nil {
-		queue = "agent"
-		jobType = "run_agent"
 		runAgentDedupeKey := db.RunAgentDedupeKey(session.ID)
 		dedupeKey = &runAgentDedupeKey
-		enqueuePayload = db.RunAgentPayload(session)
 	}
-	jobID, err := txJobStore.Enqueue(ctx, orgID, queue, jobType, enqueuePayload, 5, dedupeKey)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue eval run", err)
+	var jobID uuid.UUID
+	var enqueueErr error
+	if session != nil {
+		jobID, enqueueErr = txJobStore.EnqueueWithOpts(ctx, orgID, db.RunAgentEnqueueOpts(session, 5, dedupeKey))
+	} else {
+		jobID, enqueueErr = txJobStore.Enqueue(ctx, orgID, "eval", "run_eval", payload, 5, dedupeKey)
+	}
+	if enqueueErr != nil {
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue eval run", enqueueErr)
 		return
 	}
 
@@ -1222,8 +1222,6 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			queue := "eval"
-			jobType := "run_eval"
 			enqueuePayload := any(map[string]string{
 				"eval_run_id": run.ID.String(),
 				"org_id":      orgID.String(),
@@ -1231,14 +1229,17 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 			})
 			var dedupeKey *string
 			if session != nil {
-				queue = "agent"
-				jobType = "run_agent"
 				runAgentDedupeKey := db.RunAgentDedupeKey(session.ID)
 				dedupeKey = &runAgentDedupeKey
-				enqueuePayload = db.RunAgentPayload(session)
 			}
-			if _, err := txJobStore.Enqueue(ctx, orgID, queue, jobType, enqueuePayload, 5, dedupeKey); err != nil {
-				writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue eval run", err)
+			var enqueueErr error
+			if session != nil {
+				_, enqueueErr = txJobStore.EnqueueWithOpts(ctx, orgID, db.RunAgentEnqueueOpts(session, 5, dedupeKey))
+			} else {
+				_, enqueueErr = txJobStore.Enqueue(ctx, orgID, "eval", "run_eval", enqueuePayload, 5, dedupeKey)
+			}
+			if enqueueErr != nil {
+				writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue eval run", enqueueErr)
 				return
 			}
 		}
@@ -1568,7 +1569,7 @@ func (h *EvalHandler) bootstrapSessionBacked(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	dedupeKey := db.RunAgentDedupeKey(session.ID)
-	if _, err := txJobStore.Enqueue(ctx, orgID, "agent", "run_agent", db.RunAgentPayload(session), 5, &dedupeKey); err != nil {
+	if _, err := txJobStore.EnqueueWithOpts(ctx, orgID, db.RunAgentEnqueueOpts(session, 5, &dedupeKey)); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue eval bootstrap session", err)
 		return
 	}

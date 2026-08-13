@@ -46,6 +46,15 @@ type testRuntimeStatusSessionCounter struct {
 	err   error
 }
 
+type testRuntimeStatusSandboxTurnCounter struct {
+	count int
+	err   error
+}
+
+func (c testRuntimeStatusSandboxTurnCounter) CountActiveSandboxTurnsByOrg(context.Context, uuid.UUID) (int, error) {
+	return c.count, c.err
+}
+
 func (c testRuntimeStatusSessionCounter) CountRunningByOrg(context.Context, uuid.UUID) (int, error) {
 	return c.count, c.err
 }
@@ -231,6 +240,7 @@ func TestSettingsHandler_GetRuntimeStatus(t *testing.T) {
 		testRuntimeStatusSessionCounter{count: 2},
 		testRuntimeStatusPreviewCounter{count: 3},
 	)
+	handler.SetRuntimeStatusSandboxTurnCounter(testRuntimeStatusSandboxTurnCounter{count: 4})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/runtime/status", nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -239,7 +249,7 @@ func TestSettingsHandler_GetRuntimeStatus(t *testing.T) {
 	handler.GetRuntimeStatus(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "runtime status should return success")
 	require.Contains(t, w.Body.String(), `"static_egress":{"available":true,"enabled":true,"public_ip":"203.0.113.10"}`, "runtime status should include sanitized static egress state")
-	require.Contains(t, w.Body.String(), `"capacity":{"state":"normal","active_agent_runs":2,"max_concurrent_agent_runs":5,"active_previews":3,"max_previews_per_user":4}`, "runtime status should include sanitized capacity counts")
+	require.Contains(t, w.Body.String(), `"capacity":{"state":"normal","active_agent_runs":2,"active_sandbox_turns":4,"max_concurrent_agent_runs":5,"active_previews":3,"max_previews_per_user":4}`, "runtime status should report both session activity and the shared sandbox-turn admission count")
 	require.NotContains(t, w.Body.String(), "static_egress_unavailable_reason", "runtime status must not expose backend diagnostics")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

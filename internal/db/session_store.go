@@ -1239,6 +1239,177 @@ func (s *SessionStore) ConsumeCancelRequest(ctx context.Context, orgID, sessionI
 	return tag.RowsAffected() == 1, nil
 }
 
+// HasPendingCancelRequest reports whether cancellation has been requested but
+// not yet delivered to a live runtime. Capacity retries use this durable check
+// so a queued continuation cannot outlive a user's cancellation request.
+func (s *SessionStore) HasPendingCancelRequest(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	var pending bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM session_cancel_requests
+			WHERE org_id = @org_id
+			  AND session_id = @session_id
+			  AND delivered_at IS NULL
+		)`, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).Scan(&pending)
+	if err != nil {
+		return false, fmt.Errorf("check pending session cancel request: %w", err)
+	}
+	return pending, nil
+}
+
+// CancelPendingCapacityWait atomically consumes a pending cancellation,
+// finalizes the session, and cancels every queued continuation and active
+// thread for that session. The current cleanup job remains running so its
+// worker retains fenced ownership through the final successful return.
+func (s *SessionStore) CancelPendingCapacityWait(ctx context.Context, orgID, sessionID, currentJobID uuid.UUID) (bool, []uuid.UUID, error) {
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return false, nil, fmt.Errorf("begin capacity-wait cancellation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Routers lock a pending job before they lock its organization. Follow that
+	// same order for every sibling we may cancel so cancellation cannot deadlock
+	// a concurrent routing transaction. Once these rows and then the organization
+	// are locked, none of the captured siblings can become running underneath the
+	// live-turn check below.
+	siblingRows, err := tx.Query(ctx, `
+		SELECT id
+		FROM jobs
+		WHERE org_id = @org_id
+		  AND id <> @current_job_id
+		  AND job_type = 'continue_session'
+		  AND status = 'pending'
+		  AND payload->>'session_id' = @session_id
+		ORDER BY id
+		FOR UPDATE`, pgx.NamedArgs{
+		"current_job_id": currentJobID,
+		"org_id":         orgID,
+		"session_id":     sessionID.String(),
+	})
+	if err != nil {
+		return false, nil, fmt.Errorf("lock queued sibling continuations: %w", err)
+	}
+	queuedSiblingJobIDs, err := pgx.CollectRows(siblingRows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return false, nil, fmt.Errorf("collect queued sibling continuations: %w", err)
+	}
+
+	// Admission takes the same organization lock before a sandbox job becomes
+	// running. Holding it here prevents a new sibling turn from starting between
+	// the live-turn check and cancellation consumption.
+	var lockedOrgID uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		SELECT id
+		FROM organizations
+		WHERE id = @org_id
+		FOR NO KEY UPDATE`, pgx.NamedArgs{"org_id": orgID}).Scan(&lockedOrgID); err != nil {
+		return false, nil, fmt.Errorf("lock organization for capacity-wait cancellation: %w", err)
+	}
+
+	var liveSiblingTurn bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM jobs j
+			WHERE j.org_id = @org_id
+			  AND j.id <> @current_job_id
+			  AND j.job_type IN ('run_agent', 'continue_session')
+			  AND j.status = 'running'
+			  AND j.lease_expires_at > now()
+			  AND j.payload->>'session_id' = @session_id
+			  AND COALESCE(j.payload->>'capacity_cleanup', 'false') <> 'true'
+		)`, pgx.NamedArgs{
+		"current_job_id": currentJobID,
+		"org_id":         orgID,
+		"session_id":     sessionID.String(),
+	}).Scan(&liveSiblingTurn); err != nil {
+		return false, nil, fmt.Errorf("inspect live sibling before capacity-wait cancellation: %w", err)
+	}
+	if liveSiblingTurn {
+		// The live turn or its targeted cancel_session job owns delivery. Leave
+		// delivered_at untouched so this queued cleanup cannot steal the signal.
+		return false, nil, nil
+	}
+
+	consumeResult, err := tx.Exec(ctx, `
+		UPDATE session_cancel_requests
+		SET delivered_at = now()
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND delivered_at IS NULL`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return false, nil, fmt.Errorf("consume capacity-wait cancellation: %w", err)
+	}
+	if consumeResult.RowsAffected() == 0 {
+		return false, nil, nil
+	}
+
+	session, err := s.updateStatusRow(ctx, tx, orgID, sessionID, models.SessionStatusCancelled)
+	if err != nil {
+		return false, nil, fmt.Errorf("cancel session while waiting for capacity: %w", err)
+	}
+
+	if len(queuedSiblingJobIDs) > 0 {
+		cancelResult, err := tx.Exec(ctx, `
+			UPDATE jobs
+			SET status = 'cancelled',
+				last_error = 'session cancelled while waiting for sandbox capacity',
+				completed_at = now(),
+				target_node_id = NULL,
+				sandbox_slot_reserved_until = NULL,
+				retry_window_started_at = NULL,
+				updated_at = now()
+			WHERE org_id = @org_id
+			  AND id = ANY(@sibling_job_ids)
+			  AND job_type = 'continue_session'
+			  AND status = 'pending'
+			  AND payload->>'session_id' = @session_id`, pgx.NamedArgs{
+			"org_id":          orgID,
+			"session_id":      sessionID.String(),
+			"sibling_job_ids": queuedSiblingJobIDs,
+		})
+		if err != nil {
+			return false, nil, fmt.Errorf("cancel queued sibling continuations: %w", err)
+		}
+		if cancelResult.RowsAffected() != int64(len(queuedSiblingJobIDs)) {
+			return false, nil, fmt.Errorf("cancel queued sibling continuations: locked sibling set changed")
+		}
+	}
+
+	threadRows, err := tx.Query(ctx, `
+		UPDATE session_threads
+		SET status = @status,
+			completed_at = now(),
+			cancel_requested_at = COALESCE(cancel_requested_at, now())
+		WHERE session_id = @session_id
+		  AND org_id = @org_id
+		  AND archived_at IS NULL
+		  AND status IN ('pending', 'running', 'awaiting_input')
+		RETURNING id`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+		"status":     models.ThreadStatusCancelled,
+	})
+	if err != nil {
+		return false, nil, fmt.Errorf("cancel active session threads while waiting for capacity: %w", err)
+	}
+	cancelledThreadIDs, err := pgx.CollectRows(threadRows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return false, nil, fmt.Errorf("collect cancelled session threads: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, nil, fmt.Errorf("commit capacity-wait cancellation: %w", err)
+	}
+	s.publishStatus(ctx, &session)
+	return true, cancelledThreadIDs, nil
+}
+
 func (s *SessionStore) RecordRuntimeProgress(ctx context.Context, orgID, sessionID uuid.UUID, progressType models.RuntimeProgressType, strength models.RuntimeProgressStrength, observedAt time.Time) error {
 	query := `
 		UPDATE sessions

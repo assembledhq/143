@@ -18,6 +18,7 @@ const (
 	lockTokenKey
 	deadTargetNodeKey
 	jobCreatedAtKey
+	jobRetryWindowStartedAtKey
 	jobIDKey
 	ownerKindKey
 	workerNodeIDKey
@@ -96,6 +97,19 @@ func WithJobCreatedAt(ctx context.Context, t time.Time) context.Context {
 
 func JobCreatedAtFromContext(ctx context.Context) (time.Time, bool) {
 	t, ok := ctx.Value(jobCreatedAtKey).(time.Time)
+	return t, ok && !t.IsZero()
+}
+
+// WithJobRetryWindowStartedAt records when the current job first began a
+// bounded retry or routing-capacity wait. Handlers use this to recheck durable
+// cancellation state before resuming work that may have been queued for some
+// time.
+func WithJobRetryWindowStartedAt(ctx context.Context, t time.Time) context.Context {
+	return context.WithValue(ctx, jobRetryWindowStartedAtKey, t)
+}
+
+func JobRetryWindowStartedAtFromContext(ctx context.Context) (time.Time, bool) {
+	t, ok := ctx.Value(jobRetryWindowStartedAtKey).(time.Time)
 	return t, ok && !t.IsZero()
 }
 

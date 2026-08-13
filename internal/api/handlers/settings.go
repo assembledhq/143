@@ -38,6 +38,10 @@ type RuntimeStatusSessionCounter interface {
 	CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
 }
 
+type RuntimeStatusSandboxTurnCounter interface {
+	CountActiveSandboxTurnsByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
+}
+
 type RuntimeStatusPreviewCounter interface {
 	CountActivePreviewsByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
 }
@@ -51,6 +55,7 @@ type SettingsHandler struct {
 	staticEgress StaticEgressStatus
 	workers      StaticEgressWorkerChecker
 	sessions     RuntimeStatusSessionCounter
+	sandboxTurns RuntimeStatusSandboxTurnCounter
 	previews     RuntimeStatusPreviewCounter
 }
 
@@ -78,6 +83,7 @@ type runtimeStatusStaticEgressResponse struct {
 type runtimeStatusCapacityResponse struct {
 	State                  string `json:"state"`
 	ActiveAgentRuns        int    `json:"active_agent_runs"`
+	ActiveSandboxTurns     int    `json:"active_sandbox_turns"`
 	MaxConcurrentAgentRuns int    `json:"max_concurrent_agent_runs"`
 	ActivePreviews         int    `json:"active_previews"`
 	MaxPreviewsPerUser     int    `json:"max_previews_per_user"`
@@ -120,6 +126,10 @@ func (h *SettingsHandler) SetStaticEgressWorkerChecker(workers StaticEgressWorke
 func (h *SettingsHandler) SetRuntimeStatusCounters(sessions RuntimeStatusSessionCounter, previews RuntimeStatusPreviewCounter) {
 	h.sessions = sessions
 	h.previews = previews
+}
+
+func (h *SettingsHandler) SetRuntimeStatusSandboxTurnCounter(sandboxTurns RuntimeStatusSandboxTurnCounter) {
+	h.sandboxTurns = sandboxTurns
 }
 
 func NewSettingsHandler(orgStore *db.OrganizationStore, llmDefaults map[string]string) *SettingsHandler {
@@ -215,6 +225,14 @@ func (h *SettingsHandler) GetRuntimeStatus(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
+	activeSandboxTurns := activeAgentRuns
+	if h.sandboxTurns != nil {
+		activeSandboxTurns, err = h.sandboxTurns.CountActiveSandboxTurnsByOrg(r.Context(), orgID)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "RUNTIME_STATUS_FAILED", "failed to count active sandbox turns", err)
+			return
+		}
+	}
 
 	activePreviews := 0
 	if h.previews != nil {
@@ -226,7 +244,7 @@ func (h *SettingsHandler) GetRuntimeStatus(w http.ResponseWriter, r *http.Reques
 	}
 
 	capacityState := "normal"
-	if activeAgentRuns >= settings.MaxConcurrentRuns || activePreviews >= settings.PreviewMaxPreviewsPerUser {
+	if activeSandboxTurns >= settings.MaxConcurrentRuns || activePreviews >= settings.PreviewMaxPreviewsPerUser {
 		capacityState = "limited"
 	}
 
@@ -239,6 +257,7 @@ func (h *SettingsHandler) GetRuntimeStatus(w http.ResponseWriter, r *http.Reques
 		Capacity: runtimeStatusCapacityResponse{
 			State:                  capacityState,
 			ActiveAgentRuns:        activeAgentRuns,
+			ActiveSandboxTurns:     activeSandboxTurns,
 			MaxConcurrentAgentRuns: settings.MaxConcurrentRuns,
 			ActivePreviews:         activePreviews,
 			MaxPreviewsPerUser:     settings.PreviewMaxPreviewsPerUser,

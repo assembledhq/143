@@ -115,6 +115,7 @@ describe("RuntimeSettingsPage", () => {
         capacity: {
           state: "limited",
           active_agent_runs: 4,
+          active_sandbox_turns: 4,
           max_concurrent_agent_runs: 5,
           active_previews: 3,
           max_previews_per_user: 7,
@@ -214,6 +215,43 @@ describe("RuntimeSettingsPage", () => {
     expect(screen.getByLabelText("Maximum session length")).toHaveValue(60);
   });
 
+  it("mirrors the backend medium-org default for the shared concurrency limit", async () => {
+    settingsGetMock.mockResolvedValueOnce({
+      data: {
+        id: "org-1",
+        name: "Test Org",
+        settings: {},
+        created_at: "2026-05-01T12:00:00Z",
+        updated_at: "2026-05-01T12:00:00Z",
+      },
+    });
+
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    expect(await screen.findByText("3 concurrent")).toBeInTheDocument();
+    expect(screen.getByLabelText("Concurrent agent runs")).toHaveValue(3);
+    expect(
+      screen.queryByLabelText("Concurrent code-review turns"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("mirrors the backend large-org default for the shared concurrency limit", async () => {
+    settingsGetMock.mockResolvedValueOnce({
+      data: {
+        id: "org-1",
+        name: "Large Org",
+        settings: { org_size: "large" },
+        created_at: "2026-05-01T12:00:00Z",
+        updated_at: "2026-05-01T12:00:00Z",
+      },
+    });
+
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    expect(await screen.findByText("15 concurrent")).toBeInTheDocument();
+    expect(screen.getByLabelText("Concurrent agent runs")).toHaveValue(15);
+  });
+
   it("uses concise visible helper copy with question mark tooltips for caveats", async () => {
     renderWithProviders(<RuntimeSettingsPage />);
 
@@ -230,7 +268,7 @@ describe("RuntimeSettingsPage", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Limit simultaneous coding-agent turns across the organization.",
+        "Limit simultaneous interactive and code-review turns across the organization.",
       ),
     ).toBeInTheDocument();
     expect(
@@ -501,6 +539,15 @@ describe("RuntimeSettingsPage", () => {
   });
 
   it("uses the current setting value when stepping an empty numeric field", async () => {
+    settingsUpdateMock.mockResolvedValueOnce({
+      data: {
+        id: "org-1",
+        name: "Test Org",
+        settings: { max_concurrent_runs: 6 },
+        created_at: "2026-05-01T12:00:00Z",
+        updated_at: "2026-05-06T15:30:00Z",
+      },
+    });
     renderWithProviders(<RuntimeSettingsPage />);
 
     const user = userEvent.setup();

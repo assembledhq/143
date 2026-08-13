@@ -2111,8 +2111,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	// rows for the same session — the second insert would race the first at
 	// AcquireTurnHold and surface "sandbox race" to the user.
 	dedupeKey := db.RunAgentDedupeKey(run.ID)
-	payload := db.RunAgentPayload(run)
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
+	if _, err := h.jobStore.EnqueueWithOpts(r.Context(), orgID, db.RunAgentEnqueueOpts(run, 5, &dedupeKey)); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue agent run job", err)
 		return
 	}
@@ -2189,6 +2188,14 @@ func (h *SessionHandler) retrySessionStartOver(w http.ResponseWriter, r *http.Re
 		}
 		return
 	}
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		if undoErr := h.runStore.UndoResetForRetry(r.Context(), orgID, sessionID, "Retry failed: could not load session scheduling policy", ""); undoErr != nil {
+			h.logger.Error().Err(undoErr).Str("session_id", sessionID.String()).Msg("failed to undo retry reset after session reload failure")
+		}
+		writeError(w, r, http.StatusInternalServerError, "FETCH_FAILED", "failed to fetch updated session", err)
+		return
+	}
 
 	// Re-enqueue the run_agent job. If this fails, roll back the session status
 	// so it doesn't get stuck in pending with no job to pick it up. Dedupe by
@@ -2197,11 +2204,7 @@ func (h *SessionHandler) retrySessionStartOver(w http.ResponseWriter, r *http.Re
 	// only covers pending|running, so legitimate retries after the prior job
 	// reaches a terminal state still go through.
 	dedupeKey := db.RunAgentDedupeKey(sessionID)
-	payload := map[string]string{
-		"session_id": sessionID.String(),
-		"org_id":     orgID.String(),
-	}
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
+	if _, err := h.jobStore.EnqueueWithOpts(r.Context(), orgID, db.RunAgentEnqueueOpts(&session, 5, &dedupeKey)); err != nil {
 		if undoErr := h.runStore.UndoResetForRetry(r.Context(), orgID, sessionID, "Retry failed: could not enqueue job", ""); undoErr != nil {
 			h.logger.Error().Err(undoErr).Str("session_id", sessionID.String()).Msg("failed to undo retry reset after enqueue failure")
 		}
@@ -2209,12 +2212,6 @@ func (h *SessionHandler) retrySessionStartOver(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Fetch the updated session to return.
-	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "FETCH_FAILED", "failed to fetch updated session", err)
-		return
-	}
 	h.enrichSessionLinks(r.Context(), orgID, &session)
 
 	sessionIDStr := sessionID.String()
@@ -2305,7 +2302,18 @@ func (h *SessionHandler) retrySessionFromCheckpoint(w http.ResponseWriter, r *ht
 		"thread_id":  claimedThread.ID.String(),
 		"org_id":     orgID.String(),
 	}
-	if _, err := h.jobStore.EnqueueWithTarget(r.Context(), orgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(&claimedSession)); err != nil {
+	enqueueOpts := db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      payload,
+		Priority:     5,
+		DedupeKey:    &dedupeKey,
+		TargetNodeID: models.SessionWorkerTarget(&claimedSession),
+	}
+	if models.SandboxWorkloadClassForSession(&claimedSession) == models.SandboxWorkloadClassCodeReview {
+		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
+	}
+	if _, err := h.jobStore.EnqueueWithOpts(r.Context(), orgID, enqueueOpts); err != nil {
 		h.revertCheckpointRetry(r.Context(), orgID, sessionID, claimedThread.ID, targetThread.Status)
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue session continuation job", err)
 		return
@@ -4272,14 +4280,18 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	if humanInputRequestID != nil {
 		payload["human_input_request_id"] = humanInputRequestID.String()
 	}
-	if _, err := h.jobStore.EnqueueInTxWithOpts(r.Context(), tx, orgID, db.EnqueueOpts{
+	enqueueOpts := db.EnqueueOpts{
 		Queue:        "agent",
 		JobType:      "continue_session",
 		Payload:      payload,
 		Priority:     5,
 		DedupeKey:    &dedupeKey,
 		TargetNodeID: models.SessionWorkerTarget(&session),
-	}); err != nil {
+	}
+	if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
+		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
+	}
+	if _, err := h.jobStore.EnqueueInTxWithOpts(r.Context(), tx, orgID, enqueueOpts); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job", err)
 		return
 	}
@@ -5101,8 +5113,7 @@ func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, or
 	}
 
 	dedupeKey := db.RunAgentDedupeKey(session.ID)
-	payload := db.RunAgentPayload(session)
-	if _, err := h.jobStore.Enqueue(r.Context(), orgID, "agent", "run_agent", payload, 5, &dedupeKey); err != nil {
+	if _, err := h.jobStore.EnqueueWithOpts(r.Context(), orgID, db.RunAgentEnqueueOpts(session, 5, &dedupeKey)); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue manual session", err)
 		return
 	}

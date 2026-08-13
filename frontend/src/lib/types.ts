@@ -2194,6 +2194,7 @@ export interface Memory {
 
 export interface OrgSettings {
   max_concurrent_runs?: number;
+  org_size?: "small" | "medium" | "large" | "enterprise";
   max_session_duration_seconds?: number;
   preview_max_previews_per_user?: number;
   preview_auto_pool_max_active?: number;
@@ -2341,6 +2342,7 @@ export interface RuntimeSettingsStatus {
   capacity: {
     state: "normal" | "limited";
     active_agent_runs: number;
+    active_sandbox_turns?: number;
     max_concurrent_agent_runs: number;
     active_previews: number;
     max_previews_per_user: number;

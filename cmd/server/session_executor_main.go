@@ -201,10 +201,11 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		)
 		maxActiveSandboxes := resolveWorkerMaxActiveSandboxes(cfg.WorkerProcessCount, cfg.WorkerMaxActiveSandboxes)
 		sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
-			Counter:   sandboxExec,
-			MaxActive: maxActiveSandboxes,
-			NodeID:    cfg.NodeID,
-			Logger:    logger,
+			Counter:             sandboxExec,
+			MaxActive:           maxActiveSandboxes,
+			InteractiveReserved: cfg.WorkerInteractiveReservedSandboxes,
+			NodeID:              cfg.NodeID,
+			Logger:              logger,
 		})
 		oldShutdown := shutdown
 		shutdown = func() {

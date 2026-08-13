@@ -13,8 +13,163 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/worker"
 )
+
+// TestIntegration_CodeReviewJobsUseFleetCapacityAndPreserveInteractiveReserve
+// uses the real queue and Postgres locking path to exercise a mixed-version
+// code-review burst. It intentionally enqueues review jobs with the legacy
+// default workload class; routing must recover code_review from session origin,
+// spread reviews across workers, defer only when review-eligible capacity is
+// genuinely full, and still admit an interactive job into the reserved lane.
+//
+// This test cannot run in parallel because the integration suite shares one
+// database and setup truncates queue state between tests.
+func TestIntegration_CodeReviewJobsUseFleetCapacityAndPreserveInteractiveReserve(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	orgID := seedOrg(t, pool)
+	_, err := pool.Exec(ctx, `
+		UPDATE organizations
+		SET settings = '{"max_concurrent_runs": 4}'::jsonb
+		WHERE id = $1`, orgID)
+	require.NoError(t, err, "test org should allow all three routed reservations")
+
+	nodeIDs := []string{
+		"review-worker-a-" + orgID.String()[:8],
+		"review-worker-b-" + orgID.String()[:8],
+	}
+	for _, nodeID := range nodeIDs {
+		seedWorkerNode(t, pool, nodeID)
+		setWorkerSandboxCapacity(t, pool, nodeID, 2)
+		_, err := pool.Exec(ctx, `
+			UPDATE nodes
+			SET metadata = metadata || '{"interactive_reserved_sandbox_slots": 1}'::jsonb
+			WHERE id = $1`, nodeID)
+		require.NoError(t, err, "worker should advertise one interactive-only sandbox slot")
+	}
+
+	store := db.NewJobStore(pool)
+	reviewJobIDs := make([]uuid.UUID, 0, 3)
+	for range 3 {
+		session := seedSession(t, pool, orgID, sessionOpts{
+			Status: models.SessionStatusPending,
+			Origin: models.SessionOriginCodeReview,
+		})
+		jobID, err := store.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+			Queue:    "agent",
+			JobType:  "run_agent",
+			Payload:  map[string]string{"session_id": session.ID.String(), "org_id": orgID.String()},
+			Priority: 5,
+			// Empty is deliberate: it simulates a job written by the binary
+			// version immediately before workload_class was introduced.
+		})
+		require.NoError(t, err, "legacy code-review job should enqueue")
+		reviewJobIDs = append(reviewJobIDs, jobID)
+	}
+
+	placements := make([]*db.SandboxRoutingResult, 0, 2)
+	for i := 0; i < 2; i++ {
+		result, err := store.RouteNextSandboxJob(ctx)
+		require.NoError(t, err, "code-review routing should reserve available fleet capacity")
+		require.NotNil(t, result, "routing should select a pending review job")
+		require.Equal(t, models.SandboxWorkloadClassCodeReview, result.WorkloadClass, "session origin should repair the legacy workload class")
+		require.Equal(t, db.SandboxRoutingReasonReserved, result.Reason, "review should be immediately reserved while a review-eligible slot exists")
+		require.NotNil(t, result.TargetNodeID, "reserved review should have a target worker")
+		placements = append(placements, result)
+	}
+	require.NotEqual(t, *placements[0].TargetNodeID, *placements[1].TargetNodeID, "review burst should spread across the two review-eligible worker slots")
+
+	fullResult, err := store.RouteNextSandboxJob(ctx)
+	require.NoError(t, err, "full review fleet should produce a bounded deferral")
+	require.NotNil(t, fullResult, "routing should report the deferred third review")
+	require.Equal(t, db.SandboxRoutingReasonFleetCapacity, fullResult.Reason, "third review should wait because only interactive-reserved capacity remains")
+	require.True(t, fullResult.Deferred, "third review should receive the genuine-fleet-full delay")
+	require.Nil(t, fullResult.TargetNodeID, "deferred review should not retain a stale worker target")
+
+	interactiveSession := seedSession(t, pool, orgID, sessionOpts{Status: models.SessionStatusPending})
+	interactiveJobID, err := store.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:         "agent",
+		JobType:       "run_agent",
+		Payload:       map[string]string{"session_id": interactiveSession.ID.String(), "org_id": orgID.String()},
+		Priority:      5,
+		WorkloadClass: models.SandboxWorkloadClassInteractive,
+	})
+	require.NoError(t, err, "interactive job should enqueue during the review burst")
+
+	interactiveResult, err := store.RouteNextSandboxJob(ctx)
+	require.NoError(t, err, "interactive job should route into capacity reserved from reviews")
+	require.NotNil(t, interactiveResult, "routing should select the interactive job")
+	require.Equal(t, interactiveJobID, interactiveResult.JobID, "interactive-first routing should select the newly queued user turn")
+	require.Equal(t, db.SandboxRoutingReasonReserved, interactiveResult.Reason, "interactive reserve should remain usable while reviews are saturated")
+	require.NotNil(t, interactiveResult.TargetNodeID, "interactive job should receive a worker target")
+
+	claimedInteractive, err := store.ClaimNextRunnable(ctx, *interactiveResult.TargetNodeID, *interactiveResult.TargetNodeID, uuid.New(), 2*time.Minute)
+	require.NoError(t, err, "target worker should claim the interactive job")
+	require.NotNil(t, claimedInteractive, "interactive job should transition from reserved to running")
+	require.Equal(t, interactiveJobID, claimedInteractive.ID, "interactive-first claim should run the interactive job before the colocated review")
+
+	var reservationBefore time.Time
+	err = pool.QueryRow(ctx, `SELECT sandbox_slot_reserved_until FROM jobs WHERE id = $1`, claimedInteractive.ID).Scan(&reservationBefore)
+	require.NoError(t, err, "running interactive reservation should remain durable until sandbox admission")
+	_, renewed, err := store.RenewLease(ctx, claimedInteractive.ID, *claimedInteractive.LockToken, 3*time.Minute)
+	require.NoError(t, err, "worker lease renewal should succeed")
+	require.True(t, renewed, "worker should retain fenced ownership during sandbox startup")
+	var reservationAfter time.Time
+	err = pool.QueryRow(ctx, `SELECT sandbox_slot_reserved_until FROM jobs WHERE id = $1`, claimedInteractive.ID).Scan(&reservationAfter)
+	require.NoError(t, err, "renewed reservation should remain queryable")
+	require.True(t, reservationAfter.After(reservationBefore), "job lease heartbeat should extend the durable sandbox reservation")
+
+	for _, jobID := range reviewJobIDs[:2] {
+		var workloadClass string
+		err := pool.QueryRow(ctx, `SELECT workload_class FROM jobs WHERE id = $1`, jobID).Scan(&workloadClass)
+		require.NoError(t, err, "routed review workload class should be persisted")
+		require.Equal(t, string(models.SandboxWorkloadClassCodeReview), workloadClass, "mixed-version review job should no longer consume interactive placement policy")
+	}
+}
+
+// A worker that advertises capacity but cannot currently measure its live
+// sandbox count is not a legacy worker. Routing must wait for healthy telemetry
+// instead of bypassing capacity controls through the compatibility fallback.
+//
+// This test cannot run in parallel because the integration suite shares one
+// database and setup truncates queue state between tests.
+func TestIntegration_ConfiguredWorkerWithLiveCountErrorDefersSandboxRouting(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	orgID := seedOrg(t, pool)
+	session := seedSession(t, pool, orgID, sessionOpts{Status: models.SessionStatusPending})
+
+	nodeID := "unhealthy-count-worker-" + orgID.String()[:8]
+	seedWorkerNode(t, pool, nodeID)
+	setWorkerSandboxCapacity(t, pool, nodeID, 2)
+	_, err := pool.Exec(ctx, `
+		UPDATE nodes
+		SET metadata = metadata || jsonb_build_object(
+			'live_sandbox_count_error', 'container runtime unavailable'
+		)
+		WHERE id = $1`, nodeID)
+	require.NoError(t, err, "worker should advertise a temporary live-count failure")
+
+	store := db.NewJobStore(pool)
+	jobID, err := store.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:         "agent",
+		JobType:       "run_agent",
+		Payload:       map[string]string{"session_id": session.ID.String(), "org_id": orgID.String()},
+		Priority:      5,
+		WorkloadClass: models.SandboxWorkloadClassInteractive,
+	})
+	require.NoError(t, err, "interactive sandbox job should enqueue")
+
+	result, err := store.RouteNextSandboxJob(ctx)
+	require.NoError(t, err, "routing should safely handle unhealthy live-count telemetry")
+	require.NotNil(t, result, "routing should report its capacity decision")
+	require.Equal(t, jobID, result.JobID, "routing should evaluate the queued sandbox job")
+	require.Equal(t, db.SandboxRoutingReasonFleetCapacity, result.Reason, "configured but unhealthy capacity metadata should be treated as temporarily unavailable capacity")
+	require.True(t, result.Deferred, "routing should defer until a trustworthy live count is available")
+	require.Nil(t, result.TargetNodeID, "routing should not pin work through the compatibility fallback")
+}
 
 // TestIntegration_WorkerDispatch_PicksUpAndCallsHandler closes the loop on
 // the queue → worker → handler seam. The session-side tests upstream prove
@@ -72,7 +227,9 @@ func TestIntegration_WorkerDispatch_PicksUpAndCallsHandler(t *testing.T) {
 	received := make(chan recvJob, 1)
 	nodeID := "test-node-" + jobID.String()[:8]
 	seedWorkerNode(t, pool, nodeID)
+	setWorkerSandboxCapacity(t, pool, nodeID, 1)
 	w := worker.New(pool, zerolog.Nop(), nodeID)
+	w.EnableSandboxRouting()
 	w.Register("continue_session", func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		received <- recvJob{JobType: jobType, Payload: payload}
 		return nil

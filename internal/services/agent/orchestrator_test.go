@@ -1256,12 +1256,15 @@ func (m *mockSessionStore) UpdatePRCreationState(_ context.Context, _, _ uuid.UU
 
 // mockJobStore implements agent.JobStore.
 type mockJobStore struct {
-	mu               sync.Mutex
-	enqueued         []string // job types
-	payloads         map[string]any
-	targets          map[string]*string // jobType -> last-seen TargetNodeID
-	oldestPendingAge time.Duration
-	hasPendingAge    bool
+	mu                             sync.Mutex
+	enqueued                       []string // job types
+	payloads                       map[string]any
+	targets                        map[string]*string // jobType -> last-seen TargetNodeID
+	oldestPendingAge               time.Duration
+	hasPendingAge                  bool
+	releasedReservationJobID       uuid.UUID
+	releasedReservationLockToken   uuid.UUID
+	releaseSandboxReservationCalls int
 }
 
 func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
@@ -1289,6 +1292,15 @@ func (m *mockJobStore) OldestPendingSessionJobAge(ctx context.Context) (time.Dur
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.oldestPendingAge, m.hasPendingAge, nil
+}
+
+func (m *mockJobStore) ReleaseSandboxSlotReservationWithLease(_ context.Context, jobID, lockToken uuid.UUID) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.releasedReservationJobID = jobID
+	m.releasedReservationLockToken = lockToken
+	m.releaseSandboxReservationCalls++
+	return true, nil
 }
 
 func (m *mockJobStore) getEnqueued() []string {
@@ -1865,7 +1877,7 @@ func TestRunAgent_RateLimitRetriesWithFallbackCredential(t *testing.T) {
 
 	firstCredID := uuid.New()
 	secondCredID := uuid.New()
-	resetAt := time.Now().UTC().Add(time.Hour)
+	resetAt := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
 	d := defaultDeps()
 	d.adapter = &mockAgentAdapter{name: models.AgentTypeAmp}
 	codingCreds := &mockCodingCredentialProvider{
@@ -5664,9 +5676,14 @@ func TestContinueSession_RepairedSlashCommandsOnReusePath(t *testing.T) {
 		}, nil
 	}
 
+	jobID, lockToken := uuid.New(), uuid.New()
+	ctx := jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), lockToken)
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session, nil)
+	err := orch.ContinueSession(ctx, session, nil)
 	require.NoError(t, err, "ContinueSession should succeed on the reuse path when slash commands need repair")
+	require.Equal(t, 1, d.jobs.releaseSandboxReservationCalls, "reusing an existing sandbox should release the durable routing reservation")
+	require.Equal(t, jobID, d.jobs.releasedReservationJobID, "routing reservation release should be fenced to the current job")
+	require.Equal(t, lockToken, d.jobs.releasedReservationLockToken, "routing reservation release should use the current attempt token")
 }
 
 // TestContinueSession_ReusePathClearsStaleOrphanWhenContainerDead verifies the

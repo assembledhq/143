@@ -64,6 +64,7 @@ import {
   MIN_PREVIEW_MAX_PREVIEWS_PER_USER,
   MIN_SESSION_DURATION_MINUTES,
   clampNumber,
+  defaultMaxConcurrentRunsForOrgSize,
 } from "@/lib/settings-constants";
 import type {
   Organization,
@@ -73,7 +74,6 @@ import type {
 } from "@/lib/types";
 
 const DEFAULT_EXECUTION_SETTINGS = {
-  max_concurrent_runs: 5,
   max_session_duration_seconds: 60 * 60,
 };
 
@@ -362,7 +362,7 @@ function RuntimeSummary() {
 
   const maxConcurrentRuns =
     settings.max_concurrent_runs ??
-    DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
+    defaultMaxConcurrentRunsForOrgSize(settings.org_size);
   const maxPreviewsPerUser =
     settings.preview_max_previews_per_user ??
     DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER;
@@ -627,7 +627,7 @@ function CapacityLimitsSection() {
   const settings = getSettings(settingsResponse);
   const maxConcurrentRuns =
     settings.max_concurrent_runs ??
-    DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
+    defaultMaxConcurrentRunsForOrgSize(settings.org_size);
   const maxPreviewsPerUser =
     settings.preview_max_previews_per_user ??
     DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER;
@@ -661,9 +661,9 @@ function CapacityLimitsSection() {
           <SettingRow
             id="max-concurrent-runs"
             label="Concurrent agent runs"
-            description="Limit simultaneous coding-agent turns across the organization."
+            description="Limit simultaneous interactive and code-review turns across the organization."
             helper={`Range ${MIN_CONCURRENT_RUNS}-${MAX_CONCURRENT_RUNS}`}
-            tooltip="This protects shared runtime capacity. Users can still queue additional work."
+            tooltip="Interactive sessions and code reviews share this limit. Users can still queue additional work."
           >
             <BoundedNumberInput
               id="max-concurrent-runs"

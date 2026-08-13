@@ -46,7 +46,7 @@ type startSessionMessageStore interface {
 }
 
 type startSessionJobStore interface {
-	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+	EnqueueWithOpts(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error)
 }
 
 type sessionStartWritebacker interface {
@@ -108,7 +108,7 @@ func (s *SessionStarter) StartSession(ctx context.Context, input StartSessionInp
 		TokenMode:         models.DefaultSessionTokenMode,
 		TriggeredByUserID: input.UserID,
 		Title:             &title,
-		ExecutionBrief:        &title,
+		ExecutionBrief:    &title,
 		TargetBranch:      input.BaseBranch,
 		RepositoryID:      &input.RepositoryID,
 	}
@@ -176,7 +176,7 @@ func (s *SessionStarter) StartSession(ctx context.Context, input StartSessionInp
 		}
 	}
 	dedupeKey := db.RunAgentDedupeKey(session.ID)
-	if _, err := s.jobs.Enqueue(ctx, input.OrgID, "agent", "run_agent", db.RunAgentPayload(session), 5, &dedupeKey); err != nil {
+	if _, err := s.jobs.EnqueueWithOpts(ctx, input.OrgID, db.RunAgentEnqueueOpts(session, 5, &dedupeKey)); err != nil {
 		return models.Session{}, fmt.Errorf("enqueue PagerDuty incident session: %w", err)
 	}
 	if s.writebacker != nil {

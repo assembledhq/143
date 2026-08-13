@@ -89,6 +89,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				require.Equal(t, 1, jobs.enqueueCalls, "service should enqueue the code review worker job")
 				require.Equal(t, models.JobTypeRunCodeReview, jobs.jobType, "service should use the code review job type")
 				require.Equal(t, codeReviewJobMaxAttempts, jobs.opts.MaxAttempts, "code review jobs should get the extended retry budget")
+				require.Equal(t, models.SandboxWorkloadClassCodeReview, jobs.opts.WorkloadClass, "code review parent jobs should retain the workload class for observability")
 				require.NotEmpty(t, jobs.dedupeKey, "service should dedupe by stable output key")
 				require.Contains(t, metadata.created.ReviewOutputKey, ":review-request:", "delivery-backed review should use policy-independent request identity")
 				require.True(t, jobs.payload.FromFork, "service should carry fork source evidence into worker payload")

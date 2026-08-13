@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
@@ -35,10 +36,11 @@ type RetryableError struct {
 	// grow across repeated attempts. Leave false for capacity/dependency gates
 	// that should not spend the job's normal attempt budget.
 	ConsumeAttempt bool
-	// BypassMaxRetryDuration lets narrowly-scoped self-healing retries run even
-	// when the job row is older than maxRetryableDuration. Use this only when a
-	// successful retry is expected immediately after the current attempt repaired
-	// durable state, not for capacity/backlog gates.
+	// BypassMaxRetryDuration lets durable user work wait on a terminal condition
+	// that is checked on every retry (for example, a continuation waiting for its
+	// org turn limit), and lets narrowly-scoped self-healing retries survive an
+	// old job row. Do not use it for an unbounded dependency wait with no separate
+	// cancellation or terminal-state check.
 	BypassMaxRetryDuration bool
 	// MaxRetryDuration overrides the default retry window for a bounded external
 	// wait. Unlike BypassMaxRetryDuration, the job is still guaranteed to
@@ -115,6 +117,19 @@ type targetRetryLeaseStore interface {
 	RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error)
 }
 
+type retryJobNotifier interface {
+	Notify(ctx context.Context, id uuid.UUID)
+}
+
+type sandboxJobRouter interface {
+	RouteNextSandboxJob(ctx context.Context) (*db.SandboxRoutingResult, error)
+}
+
+// Keep per-poll routing bounded while allowing an organization-limited head
+// candidate to move aside for another tenant. Fleet-capacity deferrals stop
+// the pass immediately because no later sandbox job can be placed either.
+const maxSandboxRoutingDecisionsPerPoll = 16
+
 // maxRetryableDuration is the maximum wall-clock time a retryable job is
 // allowed to keep retrying before being dead-lettered. This prevents jobs
 // from retrying indefinitely (e.g. when stuck behind a concurrency limit).
@@ -124,6 +139,7 @@ var defaultMaxLongRunningJobDuration = time.Duration(models.MaxAbsoluteRuntimeCe
 
 type Worker struct {
 	jobs          jobLeaseStore
+	sandboxRouter sandboxJobRouter
 	logger        zerolog.Logger
 	nodeID        string
 	handlers      map[string]JobHandler
@@ -139,6 +155,24 @@ type Worker struct {
 	draining           atomic.Bool
 	activeJobs         atomic.Int32
 	activeRunAgentJobs atomic.Int32
+}
+
+// EnableSandboxRouting turns on the capacity-aware pre-claim routing pass.
+// Keeping this explicit lets lightweight workers and unit tests use the core
+// queue consumer without requiring the cluster routing schema.
+func (w *Worker) EnableSandboxRouting() {
+	if router, ok := w.jobs.(sandboxJobRouter); ok {
+		w.sandboxRouter = router
+	}
+}
+
+// SetJobNotifier wires the process-wide queue wake-up publisher into the
+// worker's private JobStore. Enqueue paths use the shared store from server
+// wiring, but routing and retry transitions are written through this store.
+func (w *Worker) SetJobNotifier(notifier *cache.JobNotifier) {
+	if store, ok := w.jobs.(*db.JobStore); ok {
+		store.SetNotifier(notifier)
+	}
 }
 
 func New(pool db.DBTX, logger zerolog.Logger, nodeID string) *Worker {
@@ -188,6 +222,43 @@ func (w *Worker) poll(ctx context.Context) {
 	if w.draining.Load() {
 		return
 	}
+	if w.sandboxRouter != nil {
+		for decision := 0; decision < maxSandboxRoutingDecisionsPerPoll; decision++ {
+			result, err := w.sandboxRouter.RouteNextSandboxJob(ctx)
+			if err != nil {
+				w.logger.Error().Err(err).Msg("failed to route pending sandbox job")
+				break
+			}
+			if result == nil {
+				break
+			}
+			event := w.logger.Info().
+				Str("job_id", result.JobID.String()).
+				Str("workload_class", string(result.WorkloadClass)).
+				Str("routing_reason", string(result.Reason)).
+				Bool("deferred", result.Deferred)
+			if result.TargetNodeID != nil {
+				event.Str("target_node_id", *result.TargetNodeID)
+			}
+			event.Msg("sandbox job routing evaluated")
+			if result.Reason == db.SandboxRoutingReasonMetadataFallback {
+				w.logger.Warn().
+					Str("job_id", result.JobID.String()).
+					Str("target_node_id", stringValue(result.TargetNodeID)).
+					Msg("fleet has no usable sandbox capacity metadata; routing through compatibility fallback")
+			}
+			if !result.Deferred {
+				break
+			}
+			// An interactive fleet-capacity miss means every usable slot is
+			// occupied. A code-review miss may only mean that the review share is
+			// full while interactive-reserved capacity remains, so keep scanning
+			// the bounded batch for a later interactive job.
+			if result.Reason == db.SandboxRoutingReasonFleetCapacity && result.WorkloadClass == models.SandboxWorkloadClassInteractive {
+				break
+			}
+		}
+	}
 
 	lockToken := uuid.New()
 	job, err := w.jobs.ClaimNextRunnable(ctx, w.nodeID, w.nodeID, lockToken, w.leaseDuration)
@@ -227,6 +298,9 @@ func (w *Worker) poll(ctx context.Context) {
 	handlerCtx = jobctx.WithLockToken(handlerCtx, *job.LockToken)
 	handlerCtx = jobctx.WithOwnerKind(handlerCtx, string(job.OwnerKind))
 	handlerCtx = jobctx.WithJobCreatedAt(handlerCtx, job.CreatedAt)
+	if job.RetryWindowStartedAt != nil {
+		handlerCtx = jobctx.WithJobRetryWindowStartedAt(handlerCtx, *job.RetryWindowStartedAt)
+	}
 	handlerCtx = jobctx.WithWorkerNodeID(handlerCtx, w.nodeID)
 	if job.TargetNodeID != nil && *job.TargetNodeID != "" && *job.TargetNodeID != w.nodeID {
 		handlerCtx = jobctx.WithDeadTargetNode(handlerCtx, *job.TargetNodeID)
@@ -322,6 +396,11 @@ func ensureRetryWindowStartedAt(ctx context.Context, store retryWindowLeaseStore
 	if job == nil {
 		return time.Time{}, false, errors.New("ensure retry window start: job is nil")
 	}
+	// The default retry budget remains anchored to job creation. Sandbox
+	// routing also uses the durable marker for its bounded capacity probe and
+	// may reset that marker after an org-limit wait; letting it override the
+	// default here would allow alternating capacity states to extend an
+	// unrelated handler retry window indefinitely.
 	if retryable == nil || retryable.MaxRetryDuration == nil || retryable.BypassMaxRetryDuration {
 		return job.CreatedAt, true, nil
 	}
@@ -486,6 +565,16 @@ func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UU
 	}
 	if !ok {
 		w.logger.Warn().Str("job_id", jobID.String()).Msg("lost ownership before scheduling job retry")
+		return
+	}
+	if backoff <= 0 {
+		w.notifyRunnableJob(ctx, jobID)
+	}
+}
+
+func (w *Worker) notifyRunnableJob(ctx context.Context, jobID uuid.UUID) {
+	if notifier, supportsNotify := w.jobs.(retryJobNotifier); supportsNotify {
+		notifier.Notify(context.WithoutCancel(ctx), jobID)
 	}
 }
 

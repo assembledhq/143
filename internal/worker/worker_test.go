@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -23,11 +24,45 @@ type wakeTestStore struct {
 	claims atomic.Int32
 }
 
+type routingTestStore struct {
+	wakeTestStore
+	results       []*db.SandboxRoutingResult
+	calls         atomic.Int32
+	notifiedJobID uuid.UUID
+}
+
+func (s *routingTestStore) RouteNextSandboxJob(context.Context) (*db.SandboxRoutingResult, error) {
+	call := int(s.calls.Add(1)) - 1
+	if call >= len(s.results) {
+		return nil, nil
+	}
+	return s.results[call], nil
+}
+
+func (s *routingTestStore) Notify(_ context.Context, jobID uuid.UUID) {
+	s.notifiedJobID = jobID
+}
+
 type retryWindowLeaseStoreStub struct {
 	startedAt time.Time
 	ok        bool
 	err       error
 	calls     int
+}
+
+type retryNotifyStore struct {
+	wakeTestStore
+	retriedJobID  uuid.UUID
+	notifiedJobID uuid.UUID
+}
+
+func (s *retryNotifyStore) RetryWithLease(_ context.Context, jobID, _ uuid.UUID, _ string, _ time.Time) (bool, error) {
+	s.retriedJobID = jobID
+	return true, nil
+}
+
+func (s *retryNotifyStore) Notify(_ context.Context, jobID uuid.UUID) {
+	s.notifiedJobID = jobID
 }
 
 func (s *retryWindowLeaseStoreStub) EnsureRetryWindowStartedAtWithLease(context.Context, uuid.UUID, uuid.UUID, time.Time) (time.Time, bool, error) {
@@ -87,6 +122,39 @@ func TestRetryableError(t *testing.T) {
 
 	require.Equal(t, "capacity reached", retryable.Error(), "Error should return the wrapped error message")
 	require.ErrorIs(t, retryable.Unwrap(), cause, "Unwrap should expose the wrapped error")
+}
+
+func TestWorker_RetryNotifiesOnlyAfterJobBecomesImmediatelyRunnable(t *testing.T) {
+	t.Parallel()
+
+	zeroDelay := time.Duration(0)
+	tests := []struct {
+		name             string
+		override         *time.Duration
+		expectedNotified bool
+	}{
+		{name: "immediate retry wakes workers", override: &zeroDelay, expectedNotified: true},
+		{name: "delayed retry waits for polling", expectedNotified: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &retryNotifyStore{}
+			w := &Worker{jobs: store, logger: zerolog.Nop()}
+			jobID := uuid.New()
+
+			w.retryJobWithDelay(context.Background(), jobID, uuid.New(), "capacity moved", 1, false, tt.override, nil, false)
+
+			require.Equal(t, jobID, store.retriedJobID, "retry should first persist the pending job transition")
+			if tt.expectedNotified {
+				require.Equal(t, jobID, store.notifiedJobID, "an immediately runnable retry should wake workers")
+			} else {
+				require.Equal(t, uuid.Nil, store.notifiedJobID, "a delayed retry should not wake the fleet before run_at")
+			}
+		})
+	}
 }
 
 func TestRetryableDurationExceeded(t *testing.T) {
@@ -171,6 +239,14 @@ func TestEnsureRetryWindowStartedAt(t *testing.T) {
 			expectedOK:    true,
 		},
 		{
+			name:          "default retry remains anchored to creation despite a capacity marker",
+			job:           &models.Job{CreatedAt: createdAt, RetryWindowStartedAt: &persistedStart},
+			retryable:     &RetryableError{Err: errors.New("sandbox capacity reached")},
+			store:         &retryWindowLeaseStoreStub{},
+			expectedStart: createdAt,
+			expectedOK:    true,
+		},
+		{
 			name:          "new bounded retry gets a durable window independent of job age",
 			job:           &models.Job{ID: uuid.New(), LockToken: &lockToken, CreatedAt: createdAt},
 			retryable:     &RetryableError{Err: errors.New("rate limited"), MaxRetryDuration: &customWindow},
@@ -241,9 +317,11 @@ func TestWorker_Poll(t *testing.T) {
 			name: "no pending jobs returns cleanly",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
+				mock.ExpectBegin()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS").
-					WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+					WithArgs(pgxmock.AnyArg(), "test-node").
 					WillReturnError(pgx.ErrNoRows)
+				mock.ExpectRollback()
 			},
 		},
 		{
@@ -577,17 +655,24 @@ func TestWorker_Poll(t *testing.T) {
 				jobID := uuid.New()
 				orgID := uuid.New()
 				now := time.Now()
+				mock.ExpectBegin()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS").
-					WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+					WithArgs(pgxmock.AnyArg(), "test-node").
+					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
+						AddRow(jobID, orgID, "missing_token", nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, now))
+				mock.ExpectQuery("UPDATE jobs j").
+					WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds()), jobID).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-						"dedupe_key", "target_node_id", "retry_window_started_at", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "workload_class", "target_node_id", "sandbox_slot_reserved_until", "retry_window_started_at", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "missing_token", json.RawMessage(`{}`), 5, "running",
-						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", string(models.JobOwnerKindWorker), nil, nil, nil, nil, now, now, nil,
+						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", string(models.JobOwnerKindWorker), nil, nil, models.SandboxWorkloadClassInteractive, nil, nil, nil, now, now, nil,
 					))
+				mock.ExpectCommit()
+				mock.ExpectRollback()
 			},
 		},
 	}
@@ -684,6 +769,114 @@ func TestWorker_Start_WakeTriggersPoll(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("worker should stop promptly after context cancellation")
 	}
+}
+
+func TestWorkerPollContinuesRoutingAfterOrgCapacityDeferral(t *testing.T) {
+	t.Parallel()
+
+	store := &routingTestStore{results: []*db.SandboxRoutingResult{
+		{
+			JobID:         uuid.New(),
+			WorkloadClass: models.SandboxWorkloadClassCodeReview,
+			Deferred:      true,
+			Reason:        db.SandboxRoutingReasonOrgLimit,
+		},
+		nil,
+	}}
+	w := &Worker{
+		jobs:          store,
+		sandboxRouter: store,
+		logger:        zerolog.Nop(),
+		nodeID:        "test-node",
+		handlers:      map[string]JobHandler{},
+		leaseDuration: defaultLeaseDuration,
+	}
+
+	w.poll(context.Background())
+
+	require.Equal(t, int32(2), store.calls.Load(), "an organization-limited job should move aside so another tenant can be routed")
+	require.Equal(t, int32(1), store.claims.Load(), "the worker should still attempt a normal claim after bounded routing work")
+}
+
+func TestWorkerPollStopsRoutingAfterFleetCapacityDeferral(t *testing.T) {
+	t.Parallel()
+
+	store := &routingTestStore{results: []*db.SandboxRoutingResult{
+		{
+			JobID:         uuid.New(),
+			WorkloadClass: models.SandboxWorkloadClassInteractive,
+			Deferred:      true,
+			Reason:        db.SandboxRoutingReasonFleetCapacity,
+		},
+		nil,
+	}}
+	w := &Worker{
+		jobs:          store,
+		sandboxRouter: store,
+		logger:        zerolog.Nop(),
+		nodeID:        "test-node",
+		handlers:      map[string]JobHandler{},
+		leaseDuration: defaultLeaseDuration,
+	}
+
+	w.poll(context.Background())
+
+	require.Equal(t, int32(1), store.calls.Load(), "interactive fleet saturation should stop the routing batch after one decision")
+	require.Equal(t, int32(1), store.claims.Load(), "the worker should give unrelated queue work a claim opportunity after fleet saturation")
+}
+
+func TestWorkerPollContinuesRoutingAfterCodeReviewCapacityDeferral(t *testing.T) {
+	t.Parallel()
+
+	store := &routingTestStore{results: []*db.SandboxRoutingResult{
+		{
+			JobID:         uuid.New(),
+			WorkloadClass: models.SandboxWorkloadClassCodeReview,
+			Deferred:      true,
+			Reason:        db.SandboxRoutingReasonFleetCapacity,
+		},
+		nil,
+	}}
+	w := &Worker{
+		jobs:          store,
+		sandboxRouter: store,
+		logger:        zerolog.Nop(),
+		nodeID:        "test-node",
+		handlers:      map[string]JobHandler{},
+		leaseDuration: defaultLeaseDuration,
+	}
+
+	w.poll(context.Background())
+
+	require.Equal(t, int32(2), store.calls.Load(), "review-only saturation should keep scanning for work that can use interactive-reserved capacity")
+	require.Equal(t, int32(1), store.claims.Load(), "the worker should still attempt a normal claim after the bounded routing pass")
+}
+
+func TestWorkerPollDoesNotRepublishRoutingNotification(t *testing.T) {
+	t.Parallel()
+
+	jobID := uuid.New()
+	store := &routingTestStore{results: []*db.SandboxRoutingResult{
+		{
+			JobID:         jobID,
+			WorkloadClass: models.SandboxWorkloadClassCodeReview,
+			TargetNodeID:  ptr("alternate-worker"),
+			Reason:        db.SandboxRoutingReasonReserved,
+		},
+	}}
+	w := &Worker{
+		jobs:          store,
+		sandboxRouter: store,
+		logger:        zerolog.Nop(),
+		nodeID:        "test-node",
+		handlers:      map[string]JobHandler{},
+		leaseDuration: defaultLeaseDuration,
+	}
+
+	w.poll(context.Background())
+
+	require.Equal(t, uuid.Nil, store.notifiedJobID, "worker should not republish the queue wake-up already emitted by the routing store")
+	require.Equal(t, int32(1), store.claims.Load(), "the routing worker should still attempt a claim in case it owns the reservation")
 }
 
 func TestWorker_Wake_DropsDuplicateSignalsWhenBufferFull(t *testing.T) {
@@ -837,6 +1030,9 @@ func TestWorker_Poll_LostLeaseSkipsTerminalWrite(t *testing.T) {
 	mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
 		WithArgs(int(defaultLeaseDuration.Seconds()), jobID, lockToken).
 		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery("WITH target AS").
+		WithArgs(jobID, lockToken, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(0)))
 
 	w.poll(context.Background())
 
@@ -941,9 +1137,11 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 	w.pollInterval = 10 * time.Millisecond
 	mock.MatchExpectationsInOrder(false)
 	for range 5 {
+		mock.ExpectBegin()
 		mock.ExpectQuery("WITH unavailable_target_nodes AS").
-			WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+			WithArgs(pgxmock.AnyArg(), "test-node").
 			WillReturnError(pgx.ErrNoRows)
+		mock.ExpectRollback()
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
@@ -1135,16 +1333,31 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 	if targetNodeID != nil {
 		target = *targetNodeID
 	}
+	mock.ExpectBegin()
 	mock.ExpectQuery("WITH unavailable_target_nodes AS").
-		WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+		WithArgs(pgxmock.AnyArg(), "test-node").
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
+			AddRow(jobID, orgID, jobType, nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, createdAt))
+	if jobType == "run_agent" || jobType == "continue_session" {
+		mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR NO KEY UPDATE`).
+			WithArgs(orgID).
+			WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":3}`)))
+		mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
+			WithArgs(orgID, jobID).
+			WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	}
+	mock.ExpectQuery("UPDATE jobs j").
+		WithArgs("test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds()), jobID).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 			"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 			"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-			"dedupe_key", "target_node_id", "retry_window_started_at", "created_at", "updated_at", "completed_at",
+			"dedupe_key", "workload_class", "target_node_id", "sandbox_slot_reserved_until", "retry_window_started_at", "created_at", "updated_at", "completed_at",
 		}).AddRow(
 			jobID, orgID, "default", jobType, payload, 5, "running",
 			attempts, maxAttempts, createdAt, "test-node", createdAt, createdAt.Add(defaultLeaseDuration),
-			lockToken.String(), "test-node", string(models.JobOwnerKindWorker), nil, nil, target, nil, createdAt, createdAt, nil,
+			lockToken.String(), "test-node", string(models.JobOwnerKindWorker), nil, nil, models.SandboxWorkloadClassInteractive, target, nil, nil, createdAt, createdAt, nil,
 		))
+	mock.ExpectCommit()
+	mock.ExpectRollback()
 }

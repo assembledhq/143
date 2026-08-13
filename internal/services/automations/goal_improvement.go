@@ -600,7 +600,7 @@ func (s *GoalImprovementService) startDeepImprovementFromInput(ctx context.Conte
 		TokenMode:          models.SessionTokenModeLow,
 		TriggeredByUserID:  in.CreatedBy,
 		Title:              &title,
-		ExecutionBrief:         &prompt,
+		ExecutionBrief:     &prompt,
 		RepositoryID:       in.RepositoryID,
 		TargetBranch:       in.TargetBranch,
 		ModelOverride:      in.ModelOverride,
@@ -617,7 +617,7 @@ func (s *GoalImprovementService) startDeepImprovementFromInput(ctx context.Conte
 		return models.AutomationGoalImprovement{}, err
 	}
 	dedupeKey := db.RunAgentDedupeKey(session.ID)
-	if _, err := txJobs.Enqueue(ctx, in.OrgID, "agent", "run_agent", db.RunAgentPayload(session), 5, &dedupeKey); err != nil {
+	if _, err := txJobs.EnqueueWithOpts(ctx, in.OrgID, db.RunAgentEnqueueOpts(session, 5, &dedupeKey)); err != nil {
 		return models.AutomationGoalImprovement{}, fmt.Errorf("enqueue deep goal improvement session: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

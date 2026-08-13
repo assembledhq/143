@@ -905,14 +905,18 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	if answeredHumanInput != nil {
 		payload["human_input_request_id"] = answeredHumanInput.ID.String()
 	}
-	if _, err := s.jobStore.EnqueueWithOpts(ctx, input.OrgID, db.EnqueueOpts{
+	enqueueOpts := db.EnqueueOpts{
 		Queue:        "agent",
 		JobType:      "continue_session",
 		Payload:      payload,
 		Priority:     5,
 		DedupeKey:    &dedupeKey,
 		TargetNodeID: models.SessionWorkerTarget(&claimedSession),
-	}); err != nil {
+	}
+	if models.SandboxWorkloadClassForSession(&claimedSession) == models.SandboxWorkloadClassCodeReview {
+		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
+	}
+	if _, err := s.jobStore.EnqueueWithOpts(ctx, input.OrgID, enqueueOpts); err != nil {
 		// Note: we do NOT roll back the resolved comments or answered
 		// question here. The message has been committed and is durably in
 		// the timeline; the orchestrator will retry the enqueue on the next

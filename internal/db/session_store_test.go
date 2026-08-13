@@ -93,6 +93,148 @@ func TestSessionStore_GetByIDScansPRPushErrorCode(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionStore_HasPendingCancelRequest(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		pending   bool
+		expectErr bool
+	}{
+		{name: "reports pending request", pending: true},
+		{name: "reports no pending request"},
+		{name: "returns query failure", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create session cancel mock")
+			defer mock.Close()
+
+			orgID, sessionID := uuid.New(), uuid.New()
+			expectation := mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*org_id = @org_id.*session_id = @session_id.*delivered_at IS NULL`).
+				WithArgs(orgID, sessionID)
+			if tt.expectErr {
+				expectation.WillReturnError(errors.New("cancel state unavailable"))
+			} else {
+				expectation.WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.pending))
+			}
+
+			pending, err := NewSessionStore(mock).HasPendingCancelRequest(context.Background(), orgID, sessionID)
+			if tt.expectErr {
+				require.Error(t, err, "pending cancellation lookup should return database failures")
+			} else {
+				require.NoError(t, err, "pending cancellation lookup should complete")
+			}
+			require.Equal(t, tt.pending, pending, "pending cancellation lookup should return the exact durable state")
+			require.NoError(t, mock.ExpectationsWereMet(), "pending cancellation lookup should stay tenant scoped")
+		})
+	}
+}
+
+func TestSessionStore_CancelPendingCapacityWait(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		pendingCancel      bool
+		liveSibling        bool
+		queuedSiblingCount int
+		activeThreadCount  int
+		expectedCancelled  bool
+	}{
+		{name: "no pending cancellation"},
+		{name: "cancels session without thread", pendingCancel: true, expectedCancelled: true},
+		{name: "atomically cancels queued siblings and all active threads", pendingCancel: true, queuedSiblingCount: 3, activeThreadCount: 2, expectedCancelled: true},
+		{name: "preserves cancellation for live sibling turn", pendingCancel: true, liveSibling: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create session cancellation mock")
+			defer mock.Close()
+
+			orgID, sessionID, issueID, currentJobID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			queuedSiblingJobIDs := make([]uuid.UUID, tt.queuedSiblingCount)
+			for i := range queuedSiblingJobIDs {
+				queuedSiblingJobIDs[i] = uuid.New()
+			}
+			var cancelledThreadIDs []uuid.UUID
+			if tt.pendingCancel {
+				cancelledThreadIDs = make([]uuid.UUID, tt.activeThreadCount)
+				for i := range cancelledThreadIDs {
+					cancelledThreadIDs[i] = uuid.New()
+				}
+			}
+
+			mock.ExpectBegin()
+			siblingRows := pgxmock.NewRows([]string{"id"})
+			for _, queuedSiblingJobID := range queuedSiblingJobIDs {
+				siblingRows.AddRow(queuedSiblingJobID)
+			}
+			mock.ExpectQuery(`(?s)SELECT id.*FROM jobs.*org_id = @org_id.*id <> @current_job_id.*job_type = 'continue_session'.*status = 'pending'.*payload->>'session_id' = @session_id.*FOR UPDATE`).
+				WithArgs(orgID, currentJobID, sessionID.String()).
+				WillReturnRows(siblingRows)
+			mock.ExpectQuery(`(?s)SELECT id.*FROM organizations.*id = @org_id.*FOR NO KEY UPDATE`).
+				WithArgs(orgID).
+				WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(orgID))
+			mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs j.*j\.org_id = @org_id.*j\.id <> @current_job_id.*j\.status = 'running'.*j\.lease_expires_at > now\(\).*j\.payload->>'session_id' = @session_id.*capacity_cleanup`).
+				WithArgs(orgID, currentJobID, sessionID.String()).
+				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.liveSibling))
+			if tt.liveSibling {
+				mock.ExpectRollback()
+				cancelled, actualThreadIDs, err := NewSessionStore(mock).CancelPendingCapacityWait(context.Background(), orgID, sessionID, currentJobID)
+				require.NoError(t, err, "live sibling check should complete")
+				require.False(t, cancelled, "queued cleanup must not consume a live turn's cancellation")
+				require.Empty(t, actualThreadIDs, "queued cleanup must not finalize threads while a live turn owns cancellation")
+				require.NoError(t, mock.ExpectationsWereMet(), "live sibling should leave cancellation delivery untouched")
+				return
+			}
+			consumeResult := int64(0)
+			if tt.pendingCancel {
+				consumeResult = 1
+			}
+			mock.ExpectExec(`(?s)UPDATE session_cancel_requests.*SET delivered_at = now\(\).*org_id = @org_id.*session_id = @session_id.*delivered_at IS NULL`).
+				WithArgs(orgID, sessionID).
+				WillReturnResult(pgxmock.NewResult("UPDATE", consumeResult))
+			if tt.pendingCancel {
+				now := time.Now()
+				sessionRow := newAgentSessionRow(sessionID, issueID, orgID, now)
+				setSessionTestColumnValue(sessionRow, "status", string(models.SessionStatusCancelled))
+				mock.ExpectQuery(`(?s)UPDATE sessions SET status = @status, completed_at = now\(\).*id = @id AND org_id = @org_id.*RETURNING`).
+					WithArgs(string(models.SessionStatusCancelled), sessionID, orgID).
+					WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(sessionRow...))
+				if len(queuedSiblingJobIDs) > 0 {
+					mock.ExpectExec(`(?s)UPDATE jobs.*status = 'cancelled'.*id = ANY\(@sibling_job_ids\).*job_type = 'continue_session'.*status = 'pending'.*payload->>'session_id' = @session_id`).
+						WithArgs(orgID, queuedSiblingJobIDs, sessionID.String()).
+						WillReturnResult(pgxmock.NewResult("UPDATE", int64(len(queuedSiblingJobIDs))))
+				}
+				threadRows := pgxmock.NewRows([]string{"id"})
+				for _, cancelledThreadID := range cancelledThreadIDs {
+					threadRows.AddRow(cancelledThreadID)
+				}
+				mock.ExpectQuery(`(?s)UPDATE session_threads.*status = @status.*session_id = @session_id.*org_id = @org_id.*status IN \('pending', 'running', 'awaiting_input'\).*RETURNING id`).
+					WithArgs(models.ThreadStatusCancelled, sessionID, orgID).
+					WillReturnRows(threadRows)
+				mock.ExpectCommit()
+			}
+			mock.ExpectRollback()
+
+			cancelled, actualThreadIDs, err := NewSessionStore(mock).CancelPendingCapacityWait(context.Background(), orgID, sessionID, currentJobID)
+			require.NoError(t, err, "capacity-wait cancellation should complete atomically")
+			require.Equal(t, tt.expectedCancelled, cancelled, "result should report whether a pending cancellation was consumed")
+			require.Equal(t, cancelledThreadIDs, actualThreadIDs, "result should return every active thread cancelled in the transaction")
+			require.NoError(t, mock.ExpectationsWereMet(), "capacity-wait cancellation should scope every write by organization and session")
+		})
+	}
+}
+
 func claimForResumeQueryPattern() string {
 	return `UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+` +
 		sqlFragmentPattern(sessionResumeRuntimeResetAssignments) +
@@ -1259,9 +1401,9 @@ func TestSessionStore_CountRunningByOrg(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
 
 	count, err := store.CountRunningByOrg(context.Background(), orgID)
-	require.NoError(t, err)
-	require.Equal(t, 3, count)
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "running session count should succeed")
+	require.Equal(t, 3, count, "running session count should include every origin")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_ListByIDs_Empty(t *testing.T) {

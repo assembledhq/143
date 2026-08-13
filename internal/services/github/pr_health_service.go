@@ -1815,14 +1815,18 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	if threadID != nil {
 		payload["thread_id"] = threadID.String()
 	}
-	if _, err := s.jobs.EnqueueInTxWithOpts(ctx, tx, pr.OrgID, db.EnqueueOpts{
+	enqueueOpts := db.EnqueueOpts{
 		Queue:        "agent",
 		JobType:      "continue_session",
 		Payload:      payload,
 		Priority:     5,
 		DedupeKey:    &continueDedupeKey,
 		TargetNodeID: models.SessionWorkerTarget(&claimed),
-	}); err != nil {
+	}
+	if models.SandboxWorkloadClassForSession(&claimed) == models.SandboxWorkloadClassCodeReview {
+		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
+	}
+	if _, err := s.jobs.EnqueueInTxWithOpts(ctx, tx, pr.OrgID, enqueueOpts); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
