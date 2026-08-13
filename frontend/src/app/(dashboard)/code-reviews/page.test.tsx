@@ -3334,7 +3334,7 @@ describe("CodeReviewsPage", () => {
         "manual",
       );
     });
-    expect(screen.getByText("No author whitelist configured. Any author is eligible.")).toBeInTheDocument();
+    expect(screen.getByText("No author allowlist configured. Any author is eligible.")).toBeInTheDocument();
     expect(within(eligibleAuthorsEditor as HTMLElement).getByText("0 entries")).toBeInTheDocument();
   });
 

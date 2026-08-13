@@ -3797,7 +3797,7 @@ function EligibleGitHubAuthorsEditor({
       </div>
       <div className="divide-y divide-border border-t border-border">
         {entries.length === 0 ? (
-          <div className="px-4 py-3 text-xs text-muted-foreground">No author whitelist configured. Any author is eligible.</div>
+          <div className="px-4 py-3 text-xs text-muted-foreground">No author allowlist configured. Any author is eligible.</div>
         ) : (
           entries.map((entry) => {
             const EntryIcon = entry.kind === "user" ? UserRound : Users;
