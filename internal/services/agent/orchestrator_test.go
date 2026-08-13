@@ -1265,6 +1265,12 @@ type mockJobStore struct {
 	releasedReservationJobID       uuid.UUID
 	releasedReservationLockToken   uuid.UUID
 	releaseSandboxReservationCalls int
+	releasedPlacementJobID         uuid.UUID
+	releasedPlacementLockToken     uuid.UUID
+	releaseSandboxPlacementCalls   int
+	clearedPlacementJobID          uuid.UUID
+	clearedPlacementLockToken      uuid.UUID
+	clearSandboxPlacementCalls     int
 }
 
 func (m *mockJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
@@ -1300,6 +1306,24 @@ func (m *mockJobStore) ReleaseSandboxSlotReservationWithLease(_ context.Context,
 	m.releasedReservationJobID = jobID
 	m.releasedReservationLockToken = lockToken
 	m.releaseSandboxReservationCalls++
+	return true, nil
+}
+
+func (m *mockJobStore) ReleaseSandboxRoutingPlacementWithLease(_ context.Context, jobID, lockToken uuid.UUID) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.releasedPlacementJobID = jobID
+	m.releasedPlacementLockToken = lockToken
+	m.releaseSandboxPlacementCalls++
+	return true, nil
+}
+
+func (m *mockJobStore) ClearSandboxRoutingPlacementWithLease(_ context.Context, jobID, lockToken uuid.UUID) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clearedPlacementJobID = jobID
+	m.clearedPlacementLockToken = lockToken
+	m.clearSandboxPlacementCalls++
 	return true, nil
 }
 
@@ -4291,8 +4315,10 @@ func TestRunAgent_SandboxCleanupOnCreateFailure(t *testing.T) {
 		return nil, errors.New("docker daemon not running")
 	}
 
+	jobID, lockToken := uuid.New(), uuid.New()
+	ctx := jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), lockToken)
 	orch := buildOrchestrator(d)
-	err := orch.RunAgent(context.Background(), run)
+	err := orch.RunAgent(ctx, run)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "create sandbox")
 
@@ -4308,6 +4334,10 @@ func TestRunAgent_SandboxCleanupOnCreateFailure(t *testing.T) {
 		}
 	}
 	require.True(t, foundFailed)
+	require.Equal(t, 1, d.jobs.clearSandboxPlacementCalls, "sandbox creation failure should clear the durable worker placement")
+	require.Equal(t, jobID, d.jobs.clearedPlacementJobID, "placement cleanup should target the current job")
+	require.Equal(t, lockToken, d.jobs.clearedPlacementLockToken, "placement cleanup should be fenced to the current attempt")
+	require.Equal(t, 0, d.jobs.releaseSandboxReservationCalls, "failed creation should not clear only the slot and leave worker affinity behind")
 }
 
 func TestRunAgent_SandboxCleanupOnCloneFailure(t *testing.T) {
@@ -8480,13 +8510,48 @@ func TestContinueSession_AuthSocketClosedOnHydrateFailure(t *testing.T) {
 		return hydrateErr
 	}
 
+	jobID, lockToken := uuid.New(), uuid.New()
+	ctx := jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), lockToken)
 	orch := buildOrchestrator(d)
-	err := orch.ContinueSession(context.Background(), session, nil)
+	err := orch.ContinueSession(ctx, session, nil)
 	require.Error(t, err, "ContinueSession should propagate the hydrate failure")
 	require.Contains(t, err.Error(), "hydrate sandbox", "ContinueSession should surface the hydrate failure")
 
 	require.Equal(t, 1, authStub.listenCalls, "auth socket must be opened before hydrate")
 	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when hydrate fails after the listener was opened")
+	require.Equal(t, 1, d.jobs.clearSandboxPlacementCalls, "hydrate failure should clear the durable worker placement")
+	require.Equal(t, jobID, d.jobs.clearedPlacementJobID, "hydrate cleanup should target the current job")
+	require.Equal(t, lockToken, d.jobs.clearedPlacementLockToken, "hydrate cleanup should be fenced to the current attempt")
+	require.Equal(t, 0, d.jobs.releaseSandboxReservationCalls, "failed hydration should not retain worker affinity by clearing only its slot")
+}
+
+func TestContinueSession_CreateFailureClearsRoutingPlacement(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "retry me"},
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		return nil, errors.New("worker disk full")
+	}
+
+	jobID, lockToken := uuid.New(), uuid.New()
+	ctx := jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), lockToken)
+	err := buildOrchestrator(d).ContinueSession(ctx, session, nil)
+
+	require.ErrorContains(t, err, "create sandbox", "ContinueSession should propagate the worker-local creation failure")
+	require.Equal(t, 1, d.jobs.clearSandboxPlacementCalls, "creation failure should clear the durable worker placement")
+	require.Equal(t, jobID, d.jobs.clearedPlacementJobID, "creation cleanup should target the current job")
+	require.Equal(t, lockToken, d.jobs.clearedPlacementLockToken, "creation cleanup should be fenced to the current attempt")
+	require.Equal(t, 0, d.jobs.releaseSandboxReservationCalls, "failed creation should not retain worker affinity by clearing only its slot")
 }
 
 func TestContinueSession_HydrateFailureCleanupUsesDetachedContext(t *testing.T) {

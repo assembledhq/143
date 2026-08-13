@@ -31,6 +31,10 @@ type sandboxRoutingPlacementReleaser interface {
 	ReleaseSandboxRoutingPlacementWithLease(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error)
 }
 
+type failedFreshSandboxRoutingPlacementReleaser interface {
+	ClearSandboxRoutingPlacementWithLease(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error)
+}
+
 // admitSandboxTurn is the shared admission boundary for RunAgent and
 // ContinueSession. Every workload draws from the same organization turn limit;
 // workload class only affects worker placement and reserved interactive
@@ -152,5 +156,32 @@ func (o *Orchestrator) releaseRejectedSandboxRoutingPlacement(ctx context.Contex
 	}
 	if released {
 		log.Debug().Str("job_id", jobID.String()).Msg("released rejected sandbox routing placement")
+	}
+}
+
+// clearFailedFreshSandboxRoutingPlacement removes worker affinity after a
+// create or hydrate failure. Unlike admission rejection cleanup, this is
+// unconditional on sandbox_slot_reserved_until: compatibility/terminal-probe
+// placements have a target without a durable slot, and a renewal may also have
+// cleared the slot before the provider reports its failure.
+func (o *Orchestrator) clearFailedFreshSandboxRoutingPlacement(ctx context.Context, log zerolog.Logger) {
+	releaser, ok := o.jobs.(failedFreshSandboxRoutingPlacementReleaser)
+	if !ok {
+		return
+	}
+	jobID, hasJobID := jobctx.JobIDFromContext(ctx)
+	lockToken, hasLockToken := jobctx.LockTokenFromContext(ctx)
+	if !hasJobID || !hasLockToken {
+		return
+	}
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sandboxRoutingCleanupTimeout)
+	defer cancel()
+	released, err := releaser.ClearSandboxRoutingPlacementWithLease(releaseCtx, jobID, lockToken)
+	if err != nil {
+		log.Warn().Err(err).Str("job_id", jobID.String()).Msg("failed to clear sandbox routing placement after fresh sandbox failure")
+		return
+	}
+	if released {
+		log.Debug().Str("job_id", jobID.String()).Msg("cleared sandbox routing placement after fresh sandbox failure")
 	}
 }

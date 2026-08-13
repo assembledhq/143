@@ -2281,6 +2281,24 @@ func TestJobStore_ReleaseSandboxRoutingPlacementWithLease(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "placement release should clear the target only for a durable reservation owned by the current lease")
 }
 
+func TestJobStore_ClearSandboxRoutingPlacementWithLease(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	jobID, lockToken := uuid.New(), uuid.New()
+	mock.ExpectExec(`(?s)UPDATE jobs.*target_node_id = NULL.*sandbox_slot_reserved_until = NULL.*lock_token = \$2`).
+		WithArgs(jobID, lockToken).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	cleared, err := NewJobStore(mock).ClearSandboxRoutingPlacementWithLease(context.Background(), jobID, lockToken)
+	require.NoError(t, err, "fenced fresh-sandbox failure cleanup should succeed")
+	require.True(t, cleared, "matching running job lease should clear worker affinity even without a durable slot")
+	require.NoError(t, mock.ExpectationsWereMet(), "fresh-sandbox failure cleanup should require the current fencing token")
+}
+
 func TestJobStore_ReserveSandboxSlotForRetryRequiresCurrentLease(t *testing.T) {
 	t.Parallel()
 

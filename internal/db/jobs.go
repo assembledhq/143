@@ -1803,6 +1803,28 @@ func (s *JobStore) ReleaseSandboxRoutingPlacementWithLease(ctx context.Context, 
 	return result.RowsAffected() == 1, nil
 }
 
+// ClearSandboxRoutingPlacementWithLease clears worker affinity when a fresh
+// sandbox create or hydrate attempt fails. Unlike admission-rejection cleanup,
+// this also clears compatibility and terminal-probe placements that have a
+// target without sandbox_slot_reserved_until. Callers must use it only after a
+// fresh-sandbox failure, never for an existing-sandbox affinity turn.
+// lint:allow-no-orgid reason="fenced worker cleanup addresses a globally unique job id"
+func (s *JobStore) ClearSandboxRoutingPlacementWithLease(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error) {
+	result, err := s.db.Exec(ctx, `
+		UPDATE jobs
+		SET target_node_id = NULL,
+			sandbox_slot_reserved_until = NULL,
+			updated_at = now()
+		WHERE id = $1
+		  AND status = 'running'
+		  AND lock_token = $2
+		  AND (target_node_id IS NOT NULL OR sandbox_slot_reserved_until IS NOT NULL)`, jobID, lockToken)
+	if err != nil {
+		return false, fmt.Errorf("clear sandbox routing placement with lease: %w", err)
+	}
+	return result.RowsAffected() == 1, nil
+}
+
 type jobExecer interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 }

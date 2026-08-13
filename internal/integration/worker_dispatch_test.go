@@ -207,6 +207,63 @@ func TestIntegration_SharedSandboxAdmissionFencesReclaimedJobAttempt(t *testing.
 	require.NoError(t, capacityStore.ReleaseSandboxCapacity(ctx, replacementNodeID, secondReservationID, &secondLockToken), "replacement attempt should release its own reservation")
 }
 
+// TestIntegration_FailedFreshSandboxClearsTargetWithoutDurableSlot verifies
+// the failure cleanup used by compatibility and terminal-probe placements.
+// Those jobs intentionally have a target without sandbox_slot_reserved_until,
+// but a node-local create failure must still make the retry fleet-routable.
+//
+// This test cannot run in parallel because the integration suite shares one
+// database and setup truncates queue state between tests.
+func TestIntegration_FailedFreshSandboxClearsTargetWithoutDurableSlot(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	orgID := seedOrg(t, pool)
+	nodeID := "failed-create-worker-" + orgID.String()[:8]
+	seedWorkerNode(t, pool, nodeID)
+	session := seedSession(t, pool, orgID, sessionOpts{Status: models.SessionStatusPending})
+
+	jobStore := db.NewJobStore(pool)
+	jobID, err := jobStore.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:         "agent",
+		JobType:       "run_agent",
+		Payload:       map[string]string{"session_id": session.ID.String(), "org_id": orgID.String()},
+		Priority:      5,
+		WorkloadClass: models.SandboxWorkloadClassInteractive,
+	})
+	require.NoError(t, err, "fresh sandbox job should enqueue")
+	lockToken := uuid.New()
+	_, err = pool.Exec(ctx, `
+		UPDATE jobs
+		SET status = 'running',
+			target_node_id = $2,
+			sandbox_slot_reserved_until = NULL,
+			lock_token = $3,
+			locked_by_node_id = $2,
+			run_owner_id = $2,
+			lease_expires_at = now() + interval '1 minute'
+		WHERE org_id = $1 AND id = $4`, orgID, nodeID, lockToken, jobID)
+	require.NoError(t, err, "test should create a running terminal-probe-style placement")
+
+	staleCleared, err := jobStore.ClearSandboxRoutingPlacementWithLease(ctx, jobID, uuid.New())
+	require.NoError(t, err, "stale-attempt cleanup should be a harmless no-op")
+	require.False(t, staleCleared, "stale attempt must not clear the current worker placement")
+
+	cleared, err := jobStore.ClearSandboxRoutingPlacementWithLease(ctx, jobID, lockToken)
+	require.NoError(t, err, "fresh sandbox failure cleanup should succeed")
+	require.True(t, cleared, "current attempt should clear its placement even when no durable slot remains")
+
+	var clearedRows int
+	err = pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM jobs
+		WHERE org_id = $1
+		  AND id = $2
+		  AND target_node_id IS NULL
+		  AND sandbox_slot_reserved_until IS NULL`, orgID, jobID).Scan(&clearedRows)
+	require.NoError(t, err, "test should inspect the failed job placement")
+	require.Equal(t, 1, clearedRows, "failed fresh sandbox should become eligible for fleet routing")
+}
+
 // TestIntegration_BlueGreenGenerationsSharePhysicalHostCapacity verifies that
 // generation-specific routing IDs cannot make one Docker daemon look like two
 // independent capacity pools during a rolling deploy.

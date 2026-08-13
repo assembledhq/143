@@ -3090,14 +3090,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if capacityReservation != nil {
 		capacityReservation.Release()
 	}
-	o.releaseSandboxRoutingReservation(ctx, log)
 	if err != nil {
+		// Creation failed before this worker published a sandbox. Clear both the
+		// durable slot and its worker target so the retry can choose a healthy
+		// node instead of remaining pinned to the node-local failure.
+		o.clearFailedFreshSandboxRoutingPlacement(ctx, log)
 		if sandboxCfg.AuthSocketPath != "" {
 			o.closeSandboxAuth(run.ID, log)
 		}
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)
 	}
+	o.releaseSandboxRoutingReservation(ctx, log)
 	sandbox.Env = cloneStringMap(sandboxCfg.Env)
 	// Record the turn hold so a concurrent StartPreview can attach to this
 	// container (same ID, same filesystem) instead of hydrating a duplicate.
@@ -4621,8 +4625,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if capacityReservation != nil {
 			capacityReservation.Release()
 		}
-		o.releaseSandboxRoutingReservation(ctx, log)
 		if err != nil {
+			// Hydration failed before a sandbox was attached to the session. Drop
+			// the pre-claim target along with its slot so a retry can reroute.
+			o.clearFailedFreshSandboxRoutingPlacement(ctx, log)
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox hydrate failed during continue_session")
 			o.cleanupContinueSessionStartupFailure(
@@ -4638,13 +4644,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			)
 			return fmt.Errorf("hydrate sandbox: %w", err)
 		}
+		o.releaseSandboxRoutingReservation(ctx, log)
 	default:
 		sandbox, err = o.provider.Create(ctx, sandboxCfg)
 		if capacityReservation != nil {
 			capacityReservation.Release()
 		}
-		o.releaseSandboxRoutingReservation(ctx, log)
 		if err != nil {
+			// Creation failed before this worker established affinity. Clear the
+			// fenced placement so the generic retry can use another worker.
+			o.clearFailedFreshSandboxRoutingPlacement(ctx, log)
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox creation failed during continue_session")
 			o.cleanupContinueSessionStartupFailure(
@@ -4660,6 +4669,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			)
 			return fmt.Errorf("create sandbox: %w", err)
 		}
+		o.releaseSandboxRoutingReservation(ctx, log)
 	}
 	sandbox.Env = cloneStringMap(sandboxCfg.Env)
 	// Re-populate sandbox.Metadata["base_commit_sha"] from the DB so that

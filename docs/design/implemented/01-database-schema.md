@@ -1117,6 +1117,7 @@ that worker next admits work.
 | id | uuid | PK |
 | node_id | text | stable physical-host capacity ID shared by worker generations using one Docker daemon |
 | job_id | uuid | nullable job identity; null for non-job consumers such as previews |
+| job_lock_token | uuid | nullable queue-claim fencing token; required with `job_id` for job-backed leases |
 | workload_class | text | `interactive` or `code_review` |
 | expires_at | timestamptz | lease expiry used for crash recovery |
 | created_at | timestamptz | |
@@ -1124,6 +1125,15 @@ that worker next admits work.
 **Indexes:**
 - `(job_id)` unique where `job_id IS NOT NULL` — one final-admission lease per job
 - `(node_id, expires_at)` — active worker lease count and expiry cleanup
+
+**Constraints and triggers:**
+- `chk_sandbox_capacity_reservations_job_attempt` — `job_id` and `job_lock_token` must either both be set or both be null; added `NOT VALID` so unmatched pre-migration leases can expire naturally while new writes are enforced
+- `trg_sandbox_capacity_require_attempt_token` — rejects tokenless job-backed inserts before legacy `ON CONFLICT` handling can reuse a fenced lease during rolling deploys
+
+Job-backed acquisition verifies that the supplied lock token still owns the
+running queue attempt. A replacement attempt cannot reuse a prior attempt's
+live lease, and release matches both reservation identity and lock token so a
+late stale owner cannot delete its replacement's lease.
 
 ### `nodes`
 
