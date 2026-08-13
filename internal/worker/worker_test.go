@@ -136,7 +136,7 @@ func TestRetryableError(t *testing.T) {
 	require.ErrorIs(t, retryable.Unwrap(), cause, "Unwrap should expose the wrapped error")
 }
 
-func TestWorker_RetryNotifiesOnlyAfterJobBecomesImmediatelyRunnable(t *testing.T) {
+func TestWorker_RetryNotifiesWhenJobBecomesRunnable(t *testing.T) {
 	t.Parallel()
 
 	zeroDelay := time.Duration(0)
