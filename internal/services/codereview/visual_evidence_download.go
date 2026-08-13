@@ -212,10 +212,6 @@ func (d *visualEvidenceDownloader) fetchAttempt(ctx context.Context, rawURL, tok
 	}
 }
 
-func unavailableVisualEvidenceResult(reason string) visualEvidenceFetchResult {
-	return visualEvidenceFetchResult{status: models.CodeReviewVisualEvidenceFetchStatusUnavailable, failureReason: reason, hostClass: "unknown"}
-}
-
 func validateVisualEvidenceURL(raw string) (*url.URL, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || !parsed.IsAbs() || !strings.EqualFold(parsed.Scheme, "https") || parsed.Hostname() == "" || parsed.User != nil {
