@@ -3281,20 +3281,22 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("option", { name: "Team" }));
     const eligibleAuthorInput = screen.getByRole("textbox", { name: "Eligible GitHub author" });
     expect(eligibleAuthorInput).toHaveAttribute("placeholder", "Organization/team-slug");
-    await user.type(eligibleAuthorInput, "acme/security-reviewers{enter}");
+    await user.click(eligibleAuthorInput);
+    await user.paste("acme/security-reviewers\nacme/release-managers\nacme/security-reviewers");
 
     await waitFor(() => {
       expect(policyUpdates).toHaveBeenLastCalledWith(
         expect.objectContaining({
           risk_policy: expect.objectContaining({
             eligible_authors: ["anya"],
-            eligible_author_teams: ["acme/platform", "acme/security-reviewers"],
+            eligible_author_teams: ["acme/platform", "acme/security-reviewers", "acme/release-managers"],
           }),
         }),
         "manual",
       );
     });
     expect(await screen.findByText("acme/security-reviewers")).toBeInTheDocument();
+    expect(screen.getByText("acme/release-managers")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Remove user anya" }));
     await waitFor(() => {
@@ -3302,7 +3304,7 @@ describe("CodeReviewsPage", () => {
         expect.objectContaining({
           risk_policy: expect.objectContaining({
             eligible_authors: [],
-            eligible_author_teams: ["acme/platform", "acme/security-reviewers"],
+            eligible_author_teams: ["acme/platform", "acme/security-reviewers", "acme/release-managers"],
           }),
         }),
         "manual",
@@ -3316,7 +3318,7 @@ describe("CodeReviewsPage", () => {
         expect.objectContaining({
           risk_policy: expect.objectContaining({
             eligible_authors: [],
-            eligible_author_teams: ["acme/security-reviewers"],
+            eligible_author_teams: ["acme/security-reviewers", "acme/release-managers"],
           }),
         }),
         "manual",
@@ -3328,13 +3330,25 @@ describe("CodeReviewsPage", () => {
         expect.objectContaining({
           risk_policy: expect.objectContaining({
             eligible_authors: [],
+            eligible_author_teams: ["acme/release-managers"],
+          }),
+        }),
+        "manual",
+      );
+    });
+    await user.click(screen.getByRole("button", { name: "Remove team acme/release-managers" }));
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            eligible_authors: [],
             eligible_author_teams: [],
           }),
         }),
         "manual",
       );
     });
-    expect(screen.getByText("No author whitelist configured. Any author is eligible.")).toBeInTheDocument();
+    expect(screen.getByText("No eligible authors configured. Any author is eligible.")).toBeInTheDocument();
     expect(within(eligibleAuthorsEditor as HTMLElement).getByText("0 entries")).toBeInTheDocument();
   });
 

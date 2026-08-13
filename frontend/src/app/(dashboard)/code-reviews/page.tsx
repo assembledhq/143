@@ -3745,26 +3745,38 @@ function EligibleGitHubAuthorsEditor({
   const addDisabled = disabled || !draft.trim();
   const addDisabledReason = disabled ? "Wait for the policy to load." : "Enter a GitHub username or team.";
 
-  const addEntry = () => {
-    const value = draft.trim();
-    if (!value) return;
+  const addEntries = (rawItems: string[]) => {
     const currentItems = kind === "user" ? users : teams;
-    if (currentItems.some((item) => item.toLowerCase() === value.toLowerCase())) {
-      setDraft("");
-      return;
+    const seen = new Set(currentItems.map((item) => item.toLowerCase()));
+    const nextItems = [...currentItems];
+    for (const rawItem of rawItems) {
+      const value = rawItem.trim();
+      if (!value || seen.has(value.toLowerCase())) continue;
+      seen.add(value.toLowerCase());
+      nextItems.push(value);
     }
+    setDraft("");
+    if (nextItems.length === currentItems.length) return;
     onCommitItems(
       kind === "user"
-        ? { users: [...users, value], teams }
-        : { users, teams: [...teams, value] },
+        ? { users: nextItems, teams }
+        : { users, teams: nextItems },
     );
-    setDraft("");
   };
+
+  const addEntry = () => addEntries([draft]);
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
     addEntry();
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLInputElement>) => {
+    const text = event.clipboardData.getData("text");
+    if (!text.includes("\n")) return;
+    event.preventDefault();
+    addEntries(text.split(/\r?\n/));
   };
 
   const removeEntry = (entryKind: EligibleGitHubAuthorKind, value: string) => {
@@ -3797,7 +3809,7 @@ function EligibleGitHubAuthorsEditor({
       </div>
       <div className="divide-y divide-border border-t border-border">
         {entries.length === 0 ? (
-          <div className="px-4 py-3 text-xs text-muted-foreground">No author whitelist configured. Any author is eligible.</div>
+          <div className="px-4 py-3 text-xs text-muted-foreground">No eligible authors configured. Any author is eligible.</div>
         ) : (
           entries.map((entry) => {
             const EntryIcon = entry.kind === "user" ? UserRound : Users;
@@ -3843,6 +3855,7 @@ function EligibleGitHubAuthorsEditor({
             aria-label="Eligible GitHub author"
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
           />
           <DisabledTooltip disabled={!!addDisabled} content={addDisabledReason}>
             <Button type="button" variant="outline" disabled={addDisabled} onClick={addEntry}>
