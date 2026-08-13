@@ -142,7 +142,10 @@ input, not a generic transient dependency. It retries on the short admission
 cadence without consuming attempts or the generic eight-minute retry window;
 session/thread terminal-state checks remain the independent termination path.
 After any successful requeue, the worker publishes the queue wake-up only once
-the pending transition (including a new target) has committed.
+the pending transition (including a new target) has committed. Immediately
+runnable work publishes at commit; positive-delay retries arm a best-effort
+wake-up for `run_at`, with the normal database poll remaining the recovery path
+if that worker process exits first.
 
 ## Capacity isolation
 
