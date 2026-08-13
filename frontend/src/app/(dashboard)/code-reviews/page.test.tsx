@@ -3281,6 +3281,7 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("option", { name: "Team" }));
     const eligibleAuthorInput = screen.getByRole("textbox", { name: "Eligible GitHub author" });
     expect(eligibleAuthorInput).toHaveAttribute("placeholder", "Organization/team-slug");
+    expect(screen.getByRole("button", { name: "Add team" })).toBeInTheDocument();
     await user.type(eligibleAuthorInput, "acme/security-reviewers{enter}");
 
     await waitFor(() => {

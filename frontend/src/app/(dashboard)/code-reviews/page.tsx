@@ -3743,7 +3743,8 @@ function EligibleGitHubAuthorsEditor({
   ];
   const countLabel = `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`;
   const addDisabled = disabled || !draft.trim();
-  const addDisabledReason = disabled ? "Wait for the policy to load." : "Enter a GitHub username or team.";
+  const entryTypeLabel = kind === "user" ? "user" : "team";
+  const addDisabledReason = disabled ? "Wait for the policy to load." : `Enter a GitHub ${entryTypeLabel}.`;
 
   const addEntry = () => {
     const value = draft.trim();
@@ -3847,7 +3848,7 @@ function EligibleGitHubAuthorsEditor({
           <DisabledTooltip disabled={!!addDisabled} content={addDisabledReason}>
             <Button type="button" variant="outline" disabled={addDisabled} onClick={addEntry}>
               <Plus className="h-4 w-4" />
-              Add author
+              Add {entryTypeLabel}
             </Button>
           </DisabledTooltip>
         </div>
