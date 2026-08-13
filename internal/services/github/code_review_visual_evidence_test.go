@@ -205,6 +205,7 @@ func TestVisualEvidenceSourcesFromHTML(t *testing.T) {
 		Surface: models.CodeReviewEvidenceSurfaceIssueComment, ProviderObjectID: "99", AuthorLogin: "human", AuthorType: models.CodeReviewEvidenceAuthorTypeUser,
 	}
 	longContext := strings.Repeat("é", maxVisualEvidenceContextRunes+20)
+	longAlt := strings.Repeat("a", maxVisualEvidenceContextRunes+20)
 	tests := []struct {
 		name     string
 		html     string
@@ -225,8 +226,8 @@ func TestVisualEvidenceSourcesFromHTML(t *testing.T) {
 		},
 		{
 			name:     "bounds untrusted context by runes",
-			html:     `<p>` + longContext + `<img src="https://example.com/long.png"></p>`,
-			expected: []models.CodeReviewVisualEvidenceSource{{SourceID: codeReviewVisualEvidenceSourceID(metadata.Surface, "99", 1, "https://example.com/long.png"), Surface: metadata.Surface, ProviderObjectID: "99", AuthorLogin: "human", AuthorType: models.CodeReviewEvidenceAuthorTypeUser, ImageIndex: 1, ImageURL: "https://example.com/long.png", ContextText: strings.Repeat("é", maxVisualEvidenceContextRunes), Untrusted: true}},
+			html:     `<p>` + longContext + `<img src="https://example.com/long.png" alt="` + longAlt + `"></p>`,
+			expected: []models.CodeReviewVisualEvidenceSource{{SourceID: codeReviewVisualEvidenceSourceID(metadata.Surface, "99", 1, "https://example.com/long.png"), Surface: metadata.Surface, ProviderObjectID: "99", AuthorLogin: "human", AuthorType: models.CodeReviewEvidenceAuthorTypeUser, ImageIndex: 1, ImageURL: "https://example.com/long.png", AltText: strings.Repeat("a", maxVisualEvidenceContextRunes), ContextText: strings.Repeat("é", maxVisualEvidenceContextRunes), Untrusted: true}},
 		},
 		{name: "ignores images without a source", html: `<p><img alt="missing"></p>`, expected: []models.CodeReviewVisualEvidenceSource{}},
 	}
