@@ -2909,6 +2909,11 @@ describe("CodeReviewsPage", () => {
     ]) {
       expect(within(sheet).getByRole("button", { name: `About ${label}` })).toBeInTheDocument();
     }
+    const evidenceTypeInfo = within(sheet).getByRole("button", { name: "About Evidence type" });
+    await user.hover(evidenceTypeInfo);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      /human discussion, a preview link, or a repository-native visual artifact/i,
+    );
 
     await user.click(screen.getByRole("combobox", { name: "Requirement evidence type" }));
     await user.click(await screen.findByRole("option", { name: "Visual evidence" }));

@@ -3,6 +3,7 @@ package codereview
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -633,9 +634,10 @@ func TestInspectVisualEvidenceImage(t *testing.T) {
 		{name: "PNG", data: encodeVisualEvidencePNG(t, 3, 2), contentType: "image/png", width: 3, height: 2},
 		{name: "JPEG", data: jpegBuffer.Bytes(), contentType: "image/jpeg", width: 3, height: 2},
 		{name: "GIF", data: gifBuffer.Bytes(), contentType: "image/gif", width: 3, height: 2},
-		{name: "WebP VP8X", data: visualEvidenceVP8X(3, 2), contentType: "image/webp", width: 3, height: 2},
+		{name: "WebP", data: decodeVisualEvidenceWebP(t), contentType: "image/webp", width: 3, height: 2},
 		{name: "SVG rejected", data: []byte(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`), expectErr: true},
 		{name: "malformed PNG rejected", data: []byte("\x89PNG\r\n\x1a\ntruncated"), expectErr: true},
+		{name: "header-only WebP rejected", data: visualEvidenceVP8X(3, 2), expectErr: true},
 	}
 
 	for _, tt := range tests {
@@ -703,5 +705,13 @@ func visualEvidenceVP8X(width, height int) []byte {
 	height--
 	data[24], data[25], data[26] = byte(width), byte(width>>8), byte(width>>16)
 	data[27], data[28], data[29] = byte(height), byte(height>>8), byte(height>>16)
+	return data
+}
+
+func decodeVisualEvidenceWebP(t *testing.T) []byte {
+	t.Helper()
+
+	data, err := base64.StdEncoding.DecodeString("UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoDAAIAAgA0JaACdLoB+AADsAD+8Oj3/yC5YXXI1/8gP+QH/ID/+PIAAAA=")
+	require.NoError(t, err, "WebP fixture should decode")
 	return data
 }

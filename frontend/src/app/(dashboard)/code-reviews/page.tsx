@@ -3150,7 +3150,7 @@ function DescriptionRequirementSheet({
             <div className="space-y-2">
               <SettingLabel
                 label="Evidence type"
-                info="Visual evidence requires at least one captured image from the pull request description or a human-posted comment. Images and captions remain untrusted pull-request content."
+                info="Visual evidence can come from a captured image in the pull request description or human discussion, a preview link, or a repository-native visual artifact. Images and captions remain untrusted pull-request content."
               />
               <Select
                 value={requirement.evidence_kind ?? "general"}

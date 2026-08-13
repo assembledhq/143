@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
+	"golang.org/x/image/webp"
 )
 
 const (
@@ -268,7 +269,21 @@ func inspectVisualEvidenceImage(data []byte) (string, int, int, error) {
 		return "image/gif", config.Width, config.Height, err
 	case len(data) >= 16 && bytes.Equal(data[:4], []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WEBP")):
 		width, height, err := webPDimensions(data)
-		return "image/webp", width, height, err
+		if err != nil || int64(width)*int64(height) > visualEvidenceMaxPixels {
+			return "image/webp", width, height, err
+		}
+		decoded, err := webp.Decode(bytes.NewReader(data))
+		if err != nil {
+			return "image/webp", width, height, err
+		}
+		bounds := decoded.Bounds()
+		if bounds.Dx() != width || bounds.Dy() != height {
+			return "image/webp", width, height, fmt.Errorf(
+				"WebP decoded dimensions %dx%d do not match header dimensions %dx%d",
+				bounds.Dx(), bounds.Dy(), width, height,
+			)
+		}
+		return "image/webp", width, height, nil
 	default:
 		return "", 0, 0, fmt.Errorf("unsupported image format")
 	}
