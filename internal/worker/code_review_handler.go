@@ -1678,22 +1678,43 @@ func codeReviewDescriptionInputHash(pr models.PullRequest, visualEvidence models
 }
 
 func codeReviewVisualEvidenceImages(snapshot models.CodeReviewVisualEvidenceSnapshot) []string {
-	images := make([]string, 0, len(snapshot.Evidence))
-	for _, evidence := range snapshot.Evidence {
-		if evidence.Status == models.CodeReviewVisualEvidenceFetchStatusAvailable && strings.TrimSpace(evidence.StoredURL) != "" {
-			images = append(images, evidence.StoredURL)
-		}
-	}
+	images, _ := codeReviewVisualEvidenceAttachments(snapshot)
 	return images
+}
+
+func codeReviewVisualEvidenceAttachments(snapshot models.CodeReviewVisualEvidenceSnapshot) ([]string, []int) {
+	images := make([]string, 0, len(snapshot.Evidence))
+	attachmentIndexes := make([]int, len(snapshot.Evidence))
+	indexesByContent := make(map[string]int, len(snapshot.Evidence))
+	for index, evidence := range snapshot.Evidence {
+		storedURL := strings.TrimSpace(evidence.StoredURL)
+		if evidence.Status != models.CodeReviewVisualEvidenceFetchStatusAvailable || storedURL == "" {
+			continue
+		}
+		contentKey := strings.ToLower(strings.TrimSpace(evidence.ContentSHA256))
+		if contentKey == "" {
+			// Valid persisted snapshots always carry a content hash. Retain a
+			// deterministic fallback for legacy fixtures and draining binaries.
+			contentKey = "stored-url:" + storedURL
+		} else {
+			contentKey = "sha256:" + contentKey
+		}
+		if attachmentIndex, exists := indexesByContent[contentKey]; exists {
+			attachmentIndexes[index] = attachmentIndex
+			continue
+		}
+		images = append(images, storedURL)
+		attachmentIndex := len(images)
+		indexesByContent[contentKey] = attachmentIndex
+		attachmentIndexes[index] = attachmentIndex
+	}
+	return images, attachmentIndexes
 }
 
 func codeReviewVisualEvidenceForPrompt(snapshot models.CodeReviewVisualEvidenceSnapshot) []prompts.CodeReviewVisualEvidencePromptData {
 	entries := make([]prompts.CodeReviewVisualEvidencePromptData, 0, len(snapshot.Evidence))
-	attachmentIndex := 0
-	for _, evidence := range snapshot.Evidence {
-		if evidence.Status == models.CodeReviewVisualEvidenceFetchStatusAvailable && strings.TrimSpace(evidence.StoredURL) != "" {
-			attachmentIndex++
-		}
+	_, attachmentIndexes := codeReviewVisualEvidenceAttachments(snapshot)
+	for index, evidence := range snapshot.Evidence {
 		observedAt := ""
 		if evidence.Source.CreatedAt != nil {
 			observedAt = evidence.Source.CreatedAt.UTC().Format(time.RFC3339)
@@ -1706,16 +1727,13 @@ func codeReviewVisualEvidenceForPrompt(snapshot models.CodeReviewVisualEvidenceS
 			SourceURL:             evidence.Source.SourceURL,
 			Author:                evidence.Source.AuthorLogin,
 			ObservedAt:            observedAt,
-			AttachmentIndex:       attachmentIndex,
+			AttachmentIndex:       attachmentIndexes[index],
 			AltText:               evidence.Source.AltText,
 			ContextText:           evidence.Source.ContextText,
 			Status:                string(evidence.Status),
 			DuplicateOfEvidenceID: evidence.DuplicateOfEvidenceID,
 			FailureReason:         evidence.FailureReason,
 		})
-		if evidence.Status != models.CodeReviewVisualEvidenceFetchStatusAvailable {
-			entries[len(entries)-1].AttachmentIndex = 0
-		}
 	}
 	return entries
 }

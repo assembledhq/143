@@ -1,6 +1,6 @@
 # Design: Code Review Visual Evidence
 
-> **Status:** Implemented | **Last reviewed:** 2026-08-12
+> **Status:** Implemented | **Last reviewed:** 2026-08-14
 >
 > **Depends on:** [../overall.md](../overall.md), [../implemented/112-code-reviewer-bot-auto-approval.md](../implemented/112-code-reviewer-bot-auto-approval.md)
 
@@ -47,8 +47,15 @@ image ID.
 
 Each assessment captures one immutable evidence snapshot for its head SHA.
 Every configured reviewer and the orchestrator receive the same ordered
-manifest and first-party image attachments. Later edits require an explicit
-rerequest; they do not mutate an assessment already in progress.
+manifest and the same first-party image attachments. The manifest preserves
+every retained provenance occurrence, while attachment fan-out sends each
+unique SHA-256 content hash once in first-seen order. Duplicate provenance
+entries retain their evidence IDs and reuse the canonical image's one-based
+attachment index. Later edits require an explicit rerequest; they do not mutate
+an assessment already in progress.
+
+This projection behavior requires no database-schema or public API changes;
+persisted snapshots and evidence response shapes remain unchanged.
 
 ## Architecture
 
@@ -191,6 +198,8 @@ All human images are eligible. Discovery retains provenance for at most the
 first 32 images in deterministic order across all surfaces. Later sources are
 represented only by `omitted_source_count`; their URLs, captions, authors, and
 other per-image metadata are not persisted, prompted, or returned by the API.
+Materialization deduplicates retained image bytes by SHA-256, and agent-message
+projection attaches each unique hash once without collapsing its provenance.
 An inaccessible or oversized retained image is recorded but cannot satisfy
 evidence. An individual bad outside-contributor image must not fail or deny an
 otherwise complete review.
