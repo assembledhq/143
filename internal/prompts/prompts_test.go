@@ -574,6 +574,8 @@ func TestCodeReviewPolicyPromptComposition(t *testing.T) {
 			require.Contains(t, orchestrator, "Screenshots are not required for non-visible or comment-only changes.", "orchestrator should receive the trusted description rubric")
 			require.Contains(t, orchestrator, "Evidence kind: visual", "orchestrator should receive the explicit evidence contract")
 			require.Contains(t, orchestrator, "A requirement marked with evidence kind `visual`", "orchestrator should not infer visual requirements from prose")
+			require.Contains(t, orchestrator, "Judge currentness by whether the image still accurately represents the rendered state relevant to the diff", "orchestrator should evaluate visual freshness from the material diff rather than image age")
+			require.Contains(t, orchestrator, "Do not require a new image merely because the pull-request head changed.", "orchestrator should allow representative evidence to survive later commits")
 			require.Contains(t, orchestrator, `"approval_recommended": false`, "orchestrator output contract should include a valid JSON approval recommendation example")
 			require.Contains(t, orchestrator, `"description_assessments":`, "orchestrator output contract should include structured description assessments")
 			require.Contains(t, orchestrator, "the review fails if any top-level key above is absent", "orchestrator output contract should explicitly reject omitted schema fields")
@@ -641,6 +643,8 @@ func TestCodeReviewOrchestratorRepairPrompt(t *testing.T) {
 	require.Contains(t, result, `"findings":`, "repair prompt should preserve findings at every priority")
 	require.Contains(t, result, `"human_review_reasons":`, "repair prompt should require explicit human-review reasons")
 	require.Contains(t, result, "testing (evidence kind: general): Explain how the change was tested.", "repair prompt should enumerate every required description assessment and its evidence contract")
+	require.Contains(t, result, "Judge visual-evidence currentness by whether an image still accurately represents the rendered state relevant to the diff", "repair prompt should preserve representative-image reuse semantics")
+	require.Contains(t, result, "Do not require a new image merely because the pull-request head changed.", "repair prompt should not make a new head invalidate existing visual evidence")
 }
 
 func TestCodeReviewOrchestratorPromptEscapesUntrustedRequestContext(t *testing.T) {

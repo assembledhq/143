@@ -614,7 +614,7 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 						"**/*.css",
 					},
 				},
-				Prompt: "Include screenshots or a preview link for frontend or UI-visible changes.",
+				Prompt: "Include screenshots or a preview link for frontend or UI-visible changes. Existing screenshots are acceptable when they still accurately represent the affected UI or workflow. Do not require a new screenshot merely because the pull request head changed. Require updated visual evidence only when the diff materially changes the rendered state shown by the existing evidence. Treat small changes that do not materially alter rendered output, non-visible changes, test-only changes, refactors, and unrelated changes as not applicable.",
 			},
 		}},
 		RiskPolicy: CodeReviewRiskPolicy{

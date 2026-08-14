@@ -296,6 +296,8 @@ func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	require.Equal(t, CodeReviewDescriptionEvidenceKindGeneral, config.DescriptionPolicy.Requirements[0].EvidenceKind, "description requirement should accept general evidence by default")
 	require.Equal(t, CodeReviewDescriptionEvidenceKindGeneral, config.DescriptionPolicy.Requirements[1].EvidenceKind, "testing requirement should accept general evidence by default")
 	require.Equal(t, CodeReviewDescriptionEvidenceKindVisual, config.DescriptionPolicy.Requirements[2].EvidenceKind, "UI requirement should explicitly require visual evidence")
+	require.Contains(t, config.DescriptionPolicy.Requirements[2].Prompt, "Existing screenshots are acceptable when they still accurately represent the affected UI or workflow.", "default UI evidence policy should allow representative screenshots to survive later commits")
+	require.Contains(t, config.DescriptionPolicy.Requirements[2].Prompt, "Do not require a new screenshot merely because the pull request head changed.", "default UI evidence policy should not equate a new head with stale visual evidence")
 	require.NoError(t, config.Validate(), "default code review policy should be valid")
 }
 
