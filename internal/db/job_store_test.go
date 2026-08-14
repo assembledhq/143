@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -1146,6 +1147,32 @@ func TestJobStore_RenewLease(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestJobStore_RenewSandboxCapacityLease_LogsFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	jobID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	lockToken := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	mock.ExpectExec(`(?s)UPDATE sandbox_capacity_reservations.*SET expires_at = GREATEST\(expires_at, now\(\) \+.*job_id = @job_id.*job_lock_token = @lock_token`).
+		WithArgs(int(sandboxCapacityJobLeaseRenewalTTL.Seconds()), jobID, lockToken).
+		WillReturnError(errors.New("renewal failed"))
+
+	var logOutput bytes.Buffer
+	store := NewJobStore(mock)
+	store.SetLogger(zerolog.New(&logOutput))
+	store.renewSandboxCapacityLease(context.Background(), jobID, lockToken)
+
+	require.Equal(t,
+		"{\"level\":\"warn\",\"error\":\"renewal failed\",\"job_id\":\"11111111-1111-1111-1111-111111111111\",\"message\":\"failed to renew sandbox capacity lease\"}\n",
+		logOutput.String(),
+		"capacity lease renewal failures should emit a structured warning without failing the job lease",
+	)
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestJobStore_RenewLease_GuardsSessionJobsAgainstTerminalSessions(t *testing.T) {

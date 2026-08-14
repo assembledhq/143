@@ -173,7 +173,7 @@ func (s *JobStore) SetNotifier(notifier *cache.JobNotifier) {
 	s.notifier = notifier
 }
 
-// SetLogger injects the structured logger used for best-effort notifier failures.
+// SetLogger injects the structured logger used for best-effort store failures.
 // lint:allow-no-orgid reason="process-wide dependency injection for store logging"
 func (s *JobStore) SetLogger(logger zerolog.Logger) {
 	s.logger = logger
@@ -2501,13 +2501,13 @@ func (s *JobStore) RenewLeaseForSessionExecutor(ctx context.Context, orgID, jobI
 
 // renewSandboxCapacityLease keeps the shared final-admission lease for a live
 // job attempt fresh so its short TTL only ever fences dead processes. Failures
-// are deliberately swallowed: the job-lease renewal that precedes this call
-// already proved attempt ownership, the next renewal retries within seconds,
-// and an expired lease costs at most one bounded over-admission on the host —
-// far cheaper than failing the job's own lease renewal.
+// remain best-effort because the job-lease renewal that precedes this call
+// already proved attempt ownership and the next renewal retries within seconds.
+// Log failures so repeated renewal problems and any bounded over-admission can
+// be diagnosed without failing the job's own lease renewal.
 // lint:allow-no-orgid reason="fenced by globally unique job id and claim token; extends the cross-org job-lease renewal path"
 func (s *JobStore) renewSandboxCapacityLease(ctx context.Context, jobID, lockToken uuid.UUID) {
-	_, _ = s.db.Exec(ctx, `
+	_, err := s.db.Exec(ctx, `
 		UPDATE sandbox_capacity_reservations
 		SET expires_at = GREATEST(expires_at, now() + (@ttl_seconds * interval '1 second'))
 		WHERE job_id = @job_id
@@ -2516,6 +2516,12 @@ func (s *JobStore) renewSandboxCapacityLease(ctx context.Context, jobID, lockTok
 		"lock_token":  lockToken,
 		"ttl_seconds": int(sandboxCapacityJobLeaseRenewalTTL.Seconds()),
 	})
+	if err != nil {
+		s.logger.Warn().
+			Err(err).
+			Str("job_id", jobID.String()).
+			Msg("failed to renew sandbox capacity lease")
+	}
 }
 
 // RenewLease extends the lease for a running job owned by the provided fencing
