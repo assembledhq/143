@@ -270,6 +270,13 @@ func TestVisualEvidenceSourcesFromHTML(t *testing.T) {
 			expected: []models.CodeReviewVisualEvidenceSource{{SourceID: codeReviewVisualEvidenceSourceID(metadata.Surface, "99", 1, "https://example.com/large.webp"), Surface: metadata.Surface, ProviderObjectID: "99", AuthorLogin: "human", AuthorType: models.CodeReviewEvidenceAuthorTypeUser, ImageIndex: 1, ImageURL: "https://example.com/large.webp", AltText: "responsive", Untrusted: true}},
 		},
 		{
+			name: "ignores Graphite stack icons without consuming image positions",
+			html: `<ul><li><a href="https://app.graphite.com/github/pr/acme/repo/42"><img src="https://camo.githubusercontent.com/graphite" data-canonical-src="https://static.graphite.dev/graphite-32x32-black.png" alt="Graphite" width="10px" height="10px"></a></li></ul>` +
+				`<img src="https://static.graphite.dev/graphite-32x32-black.png" alt="Graphite">` +
+				`<img src="https://example.com/screenshot.png" alt="Screenshot">`,
+			expected: []models.CodeReviewVisualEvidenceSource{{SourceID: codeReviewVisualEvidenceSourceID(metadata.Surface, "99", 1, "https://example.com/screenshot.png"), Surface: metadata.Surface, ProviderObjectID: "99", AuthorLogin: "human", AuthorType: models.CodeReviewEvidenceAuthorTypeUser, ImageIndex: 1, ImageURL: "https://example.com/screenshot.png", AltText: "Screenshot", Untrusted: true}},
+		},
+		{
 			name:     "bounds untrusted context by runes",
 			html:     `<p>` + longContext + `<img src="https://example.com/long.png" alt="` + longAlt + `"></p>`,
 			expected: []models.CodeReviewVisualEvidenceSource{{SourceID: codeReviewVisualEvidenceSourceID(metadata.Surface, "99", 1, "https://example.com/long.png"), Surface: metadata.Surface, ProviderObjectID: "99", AuthorLogin: "human", AuthorType: models.CodeReviewEvidenceAuthorTypeUser, ImageIndex: 1, ImageURL: "https://example.com/long.png", AltText: strings.Repeat("a", maxVisualEvidenceContextRunes), ContextText: strings.Repeat("é", maxVisualEvidenceContextRunes), Untrusted: true}},

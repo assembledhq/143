@@ -28,6 +28,10 @@ The description is in scope regardless of the PR author's GitHub actor type.
 Discussion images are in scope only when GitHub classifies the author as a
 `User` or `Mannequin`, including outside contributors. Exclude `Bot`, `App`,
 `Organization`, deleted/unknown actors, and therefore 143-authored output.
+Exclude the exact Graphite stack-navigation logo asset as decorative integration
+chrome even when Graphite updates the stack comment under a human user's
+identity. This exclusion happens before retained-source counting, so repeated
+stack icons neither enter provenance nor consume the assessment image limit.
 Human-authored discussion conclusions and review decisions remain excluded as
 risk signals; only the captured visual content and its bounded provenance are
 evidence.
@@ -194,10 +198,11 @@ passing active vector content to agents. Enforce:
 - three redirects; and
 - three transient attempts with bounded backoff.
 
-All human images are eligible. Discovery retains provenance for at most the
-first 32 images in deterministic order across all surfaces. Later sources are
-represented only by `omitted_source_count`; their URLs, captions, authors, and
-other per-image metadata are not persisted, prompted, or returned by the API.
+All human images except explicitly recognized decorative integration chrome are
+eligible. Discovery retains provenance for at most the first 32 images in
+deterministic order across all surfaces. Later sources are represented only by
+`omitted_source_count`; their URLs, captions, authors, and other per-image
+metadata are not persisted, prompted, or returned by the API.
 Materialization deduplicates retained image bytes by SHA-256, and agent-message
 projection attaches each unique hash once without collapsing its provenance.
 An inaccessible or oversized retained image is recorded but cannot satisfy
