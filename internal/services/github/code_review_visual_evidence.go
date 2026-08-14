@@ -295,7 +295,7 @@ func visualEvidenceSourcesFromHTMLBounded(metadata visualEvidenceSourceMetadata,
 	imageCount := 0
 	var walk func(*html.Node)
 	walk = func(node *html.Node) {
-		if node.Type == html.ElementNode && node.Data == "img" {
+		if node.Type == html.ElementNode && node.Data == "img" && !isDecorativeGraphiteImage(node) {
 			if imageURL := renderedImageURL(node); imageURL != "" {
 				imageCount++
 				if len(sources) < limit {
@@ -326,6 +326,19 @@ func visualEvidenceSourcesFromHTMLBounded(metadata visualEvidenceSourceMetadata,
 		walk(node)
 	}
 	return sources, imageCount
+}
+
+func isDecorativeGraphiteImage(node *html.Node) bool {
+	for _, candidate := range []string{htmlAttribute(node, "data-canonical-src"), htmlAttribute(node, "src")} {
+		parsed, err := url.Parse(strings.TrimSpace(candidate))
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(parsed.Hostname(), "static.graphite.dev") && parsed.EscapedPath() == "/graphite-32x32-black.png" {
+			return true
+		}
+	}
+	return false
 }
 
 func renderedImageURL(node *html.Node) string {
