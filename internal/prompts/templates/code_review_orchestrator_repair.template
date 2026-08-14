@@ -62,5 +62,6 @@ If an assessment uses `evidence_basis="image"`, `evidence_ids` must contain one 
 {{- end}}
 For every non-image basis, `evidence_ids` must be empty. Use `not_applicable` and `missing` bases only with their matching statuses.
 Requirements marked with evidence kind `visual` may use only `image`, `preview_link`, or `repository` when satisfied; text in the pull-request description or diff alone is insufficient.
+Judge visual-evidence currentness by whether an image still accurately represents the rendered state relevant to the diff, not by its timestamp or whether it predates the latest commit or assessment. Do not require a new image merely because the pull-request head changed. Existing images remain usable when the diff does not materially change the state they depict, and trusted rubric exemptions for non-material, non-visible, test-only, refactoring, or unrelated changes should produce `not_applicable`.
 
 Preserve the evidence from your previous answer while applying the current decision contract. Set `approval_recommended=false` only for a P0/P1 finding, a missing description assessment, a true structured blocker boolean, or a valid explicit `human_review_reasons` entry.
