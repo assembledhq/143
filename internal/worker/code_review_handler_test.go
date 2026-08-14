@@ -1261,7 +1261,7 @@ func TestCodeReviewVisualEvidencePromptProjection(t *testing.T) {
 				Surface: models.CodeReviewEvidenceSurfaceDescription, SourceURL: "https://github.com/acme/repo/pull/42",
 				AuthorLogin: "author", CreatedAt: &createdAt, AltText: "before", ContextText: "settings page", Untrusted: true,
 			},
-			StoredURL: "/api/v1/uploads/files/org/code-review-evidence/session/one.png", Status: models.CodeReviewVisualEvidenceFetchStatusAvailable,
+			StoredURL: "/api/v1/uploads/files/org/code-review-evidence/session/one.png", ContentSHA256: strings.Repeat("a", 64), Status: models.CodeReviewVisualEvidenceFetchStatusAvailable,
 		},
 		{
 			EvidenceID: "ve_missing", Source: models.CodeReviewVisualEvidenceSource{
@@ -1273,7 +1273,7 @@ func TestCodeReviewVisualEvidencePromptProjection(t *testing.T) {
 			EvidenceID: "ve_comment", Source: models.CodeReviewVisualEvidenceSource{
 				Surface: models.CodeReviewEvidenceSurfaceIssueComment, SourceURL: "https://github.com/acme/repo/pull/42#issuecomment-1", AuthorLogin: "human", Untrusted: true,
 			},
-			StoredURL: "/api/v1/uploads/files/org/code-review-evidence/session/two.png", Status: models.CodeReviewVisualEvidenceFetchStatusAvailable,
+			StoredURL: "/api/v1/uploads/files/org/code-review-evidence/session/two.png", ContentSHA256: strings.Repeat("b", 64), Status: models.CodeReviewVisualEvidenceFetchStatusAvailable,
 		},
 	}}
 
@@ -1302,6 +1302,52 @@ func TestCodeReviewVisualEvidencePromptProjection(t *testing.T) {
 	require.Equal(t, commands, input.Commands, "reviewer message should retain native command metadata")
 	require.Equal(t, codeReviewVisualEvidenceImages(snapshot), input.Images, "every agent message should receive the same ordered first-party images")
 	require.Equal(t, models.SessionMessageSourceAgentTool, input.MessageSource, "visual evidence should enter the thread through the system agent-tool source")
+}
+
+func TestCodeReviewVisualEvidencePromptProjectionDeduplicatesContentHashes(t *testing.T) {
+	t.Parallel()
+
+	const graphiteCopies = 30
+	screenshotURL := "/api/v1/uploads/files/org/code-review-evidence/session/screenshot.png"
+	graphiteURL := "/api/v1/uploads/files/org/code-review-evidence/session/graphite.png"
+	screenshotHash := strings.Repeat("a", 64)
+	graphiteHash := strings.Repeat("b", 64)
+	firstGraphiteID := "ve_graphite_00"
+	snapshot := models.CodeReviewVisualEvidenceSnapshot{Evidence: []models.CodeReviewVisualEvidence{{
+		EvidenceID: "ve_screenshot",
+		Source: models.CodeReviewVisualEvidenceSource{
+			Surface: models.CodeReviewEvidenceSurfaceDescription, AltText: "Screenshot", Untrusted: true,
+		},
+		StoredURL: screenshotURL, ContentSHA256: screenshotHash, Status: models.CodeReviewVisualEvidenceFetchStatusAvailable,
+	}}}
+	for index := 0; index < graphiteCopies; index++ {
+		storedURL := graphiteURL
+		if index == graphiteCopies-1 {
+			storedURL = "/api/v1/uploads/files/org/code-review-evidence/session/graphite-alias.png"
+		}
+		evidence := models.CodeReviewVisualEvidence{
+			EvidenceID: fmt.Sprintf("ve_graphite_%02d", index),
+			Source: models.CodeReviewVisualEvidenceSource{
+				Surface: models.CodeReviewEvidenceSurfaceIssueComment, AltText: "Graphite", Untrusted: true,
+			},
+			StoredURL: storedURL, ContentSHA256: graphiteHash, Status: models.CodeReviewVisualEvidenceFetchStatusAvailable,
+		}
+		if index > 0 {
+			evidence.DuplicateOfEvidenceID = firstGraphiteID
+		}
+		snapshot.Evidence = append(snapshot.Evidence, evidence)
+	}
+
+	images := codeReviewVisualEvidenceImages(snapshot)
+	projected := codeReviewVisualEvidenceForPrompt(snapshot)
+
+	require.Equal(t, []string{screenshotURL, graphiteURL}, images, "agent attachments should contain each content hash exactly once in first-seen order")
+	require.Len(t, projected, graphiteCopies+1, "the prompt manifest should preserve every provenance record")
+	require.Equal(t, 1, projected[0].AttachmentIndex, "the screenshot provenance should map to the first unique attachment")
+	for index := 1; index < len(projected); index++ {
+		require.Equal(t, 2, projected[index].AttachmentIndex, "every Graphite provenance record should reuse the canonical attachment index")
+	}
+	require.Len(t, codeReviewAvailableVisualEvidenceForPrompt(snapshot), graphiteCopies+1, "duplicate provenance should remain available for evidence citation")
 }
 
 func TestCaptureCodeReviewVisualEvidence(t *testing.T) {
