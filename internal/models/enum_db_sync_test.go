@@ -269,6 +269,9 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		"jobs_workload_class": toStrings(
 			SandboxWorkloadClassInteractive, SandboxWorkloadClassCodeReview,
 		),
+		"sandbox_capacity_reservations_workload_class": toStrings(
+			SandboxWorkloadClassInteractive, SandboxWorkloadClassCodeReview,
+		),
 	}
 
 	for _, c := range constraints {

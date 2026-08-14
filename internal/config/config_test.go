@@ -876,3 +876,28 @@ func TestPreviewOriginHostIsLocal(t *testing.T) {
 		})
 	}
 }
+
+func TestConfig_EffectiveWorkerCapacityNodeID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		configured string
+		nodeID     string
+		expected   string
+	}{
+		{name: "explicit physical host identity wins", configured: "worker-host-a", nodeID: "worker-host-a-g20260813001234-deadbeef", expected: "worker-host-a"},
+		{name: "compose copied generation id is normalized", configured: "worker-host-a-g20260813001234-deadbeef", nodeID: "worker-host-a-g20260813001234-deadbeef", expected: "worker-host-a"},
+		{name: "blue green generation suffix falls back to physical host", nodeID: "worker-host-a-g20260813001234-deadbeef", expected: "worker-host-a"},
+		{name: "ordinary node id remains unchanged", nodeID: "single-node", expected: "single-node"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := Config{NodeID: tt.nodeID, WorkerCapacityNodeID: tt.configured}
+			require.Equal(t, tt.expected, cfg.EffectiveWorkerCapacityNodeID(), "capacity identity should remain stable across deploy generations")
+		})
+	}
+}

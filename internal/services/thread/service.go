@@ -905,17 +905,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	if answeredHumanInput != nil {
 		payload["human_input_request_id"] = answeredHumanInput.ID.String()
 	}
-	enqueueOpts := db.EnqueueOpts{
-		Queue:        "agent",
-		JobType:      "continue_session",
-		Payload:      payload,
-		Priority:     5,
-		DedupeKey:    &dedupeKey,
-		TargetNodeID: models.SessionWorkerTarget(&claimedSession),
-	}
-	if models.SandboxWorkloadClassForSession(&claimedSession) == models.SandboxWorkloadClassCodeReview {
-		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
-	}
+	enqueueOpts := db.ContinueSessionEnqueueOpts(&claimedSession, payload, &dedupeKey)
 	if _, err := s.jobStore.EnqueueWithOpts(ctx, input.OrgID, enqueueOpts); err != nil {
 		// Note: we do NOT roll back the resolved comments or answered
 		// question here. The message has been committed and is durably in

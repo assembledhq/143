@@ -858,7 +858,9 @@ export const api = {
     updateAgentCapabilityPolicy: (capabilities: import('./types').AgentCapabilityGrant[]) =>
       patch<import('./types').SingleResponse<import('./types').AgentCapabilityPolicyResponse>>('/api/v1/settings/agent/capabilities', { capabilities }),
     getNetworkStatus: () => get<import('./types').SingleResponse<import('./types').NetworkSettingsStatus>>('/api/v1/settings/network'),
-    getRuntimeStatus: () => get<import('./types').SingleResponse<import('./types').RuntimeSettingsStatus>>('/api/v1/settings/runtime/status'),
+    getRuntimeStatus: (sessionId?: string) => get<import('./types').SingleResponse<import('./types').RuntimeSettingsStatus>>(
+      `/api/v1/settings/runtime/status${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`,
+    ),
     getLLMDefaults: () => get<{ data: Record<string, string> }>('/api/v1/settings/llm-defaults'),
     getLLMModels: () => get<{ data: Record<string, string[]> }>('/api/v1/settings/llm-models'),
     getOpenCodeModels: () =>

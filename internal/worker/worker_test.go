@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -52,17 +53,28 @@ type retryWindowLeaseStoreStub struct {
 
 type retryNotifyStore struct {
 	wakeTestStore
+	mu            sync.Mutex
 	retriedJobID  uuid.UUID
 	notifiedJobID uuid.UUID
 }
 
 func (s *retryNotifyStore) RetryWithLease(_ context.Context, jobID, _ uuid.UUID, _ string, _ time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.retriedJobID = jobID
 	return true, nil
 }
 
 func (s *retryNotifyStore) Notify(_ context.Context, jobID uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.notifiedJobID = jobID
+}
+
+func (s *retryNotifyStore) retryState() (uuid.UUID, uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.retriedJobID, s.notifiedJobID
 }
 
 func (s *retryWindowLeaseStoreStub) EnsureRetryWindowStartedAtWithLease(context.Context, uuid.UUID, uuid.UUID, time.Time) (time.Time, bool, error) {
@@ -124,17 +136,18 @@ func TestRetryableError(t *testing.T) {
 	require.ErrorIs(t, retryable.Unwrap(), cause, "Unwrap should expose the wrapped error")
 }
 
-func TestWorker_RetryNotifiesOnlyAfterJobBecomesImmediatelyRunnable(t *testing.T) {
+func TestWorker_RetryNotifiesWhenJobBecomesRunnable(t *testing.T) {
 	t.Parallel()
 
 	zeroDelay := time.Duration(0)
+	shortDelay := 20 * time.Millisecond
 	tests := []struct {
-		name             string
-		override         *time.Duration
-		expectedNotified bool
+		name      string
+		override  *time.Duration
+		immediate bool
 	}{
-		{name: "immediate retry wakes workers", override: &zeroDelay, expectedNotified: true},
-		{name: "delayed retry waits for polling", expectedNotified: false},
+		{name: "immediate retry wakes workers", override: &zeroDelay, immediate: true},
+		{name: "delayed retry wakes workers when due", override: &shortDelay},
 	}
 
 	for _, tt := range tests {
@@ -142,19 +155,42 @@ func TestWorker_RetryNotifiesOnlyAfterJobBecomesImmediatelyRunnable(t *testing.T
 			t.Parallel()
 
 			store := &retryNotifyStore{}
-			w := &Worker{jobs: store, logger: zerolog.Nop()}
+			w := &Worker{jobs: store, logger: zerolog.Nop(), wakeCh: make(chan struct{}, 1)}
 			jobID := uuid.New()
 
 			w.retryJobWithDelay(context.Background(), jobID, uuid.New(), "capacity moved", 1, false, tt.override, nil, false)
 
-			require.Equal(t, jobID, store.retriedJobID, "retry should first persist the pending job transition")
-			if tt.expectedNotified {
-				require.Equal(t, jobID, store.notifiedJobID, "an immediately runnable retry should wake workers")
+			retriedJobID, notifiedJobID := store.retryState()
+			require.Equal(t, jobID, retriedJobID, "retry should first persist the pending job transition")
+			if tt.immediate {
+				require.Equal(t, jobID, notifiedJobID, "an immediately runnable retry should wake workers")
 			} else {
-				require.Equal(t, uuid.Nil, store.notifiedJobID, "a delayed retry should not wake the fleet before run_at")
+				require.Equal(t, uuid.Nil, notifiedJobID, "a delayed retry should not wake the fleet before run_at")
+				require.Eventually(t, func() bool {
+					_, notifiedJobID = store.retryState()
+					return notifiedJobID == jobID && len(w.wakeCh) == 1
+				}, time.Second, 5*time.Millisecond, "a delayed retry should publish and wake the local worker when run_at arrives")
 			}
 		})
 	}
+}
+
+func TestWorker_DelayedRetryWakeStopsWithWorkerContext(t *testing.T) {
+	t.Parallel()
+
+	delay := 20 * time.Millisecond
+	store := &retryNotifyStore{}
+	w := &Worker{jobs: store, logger: zerolog.Nop(), wakeCh: make(chan struct{}, 1)}
+	jobID := uuid.New()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	w.retryJobWithDelay(ctx, jobID, uuid.New(), "capacity moved", 1, false, &delay, nil, false)
+	cancel()
+
+	require.Never(t, func() bool {
+		_, notifiedJobID := store.retryState()
+		return notifiedJobID != uuid.Nil || len(w.wakeCh) != 0
+	}, 100*time.Millisecond, 5*time.Millisecond, "worker shutdown should cancel delayed retry wake-ups")
 }
 
 func TestRetryableDurationExceeded(t *testing.T) {
@@ -319,7 +355,7 @@ func TestWorker_Poll(t *testing.T) {
 				t.Helper()
 				mock.ExpectBegin()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS").
-					WithArgs(pgxmock.AnyArg(), "test-node").
+					WithArgs(pgxmock.AnyArg(), "test-node", []uuid.UUID{}).
 					WillReturnError(pgx.ErrNoRows)
 				mock.ExpectRollback()
 			},
@@ -657,7 +693,7 @@ func TestWorker_Poll(t *testing.T) {
 				now := time.Now()
 				mock.ExpectBegin()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS").
-					WithArgs(pgxmock.AnyArg(), "test-node").
+					WithArgs(pgxmock.AnyArg(), "test-node", []uuid.UUID{}).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
 						AddRow(jobID, orgID, "missing_token", nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, now))
 				mock.ExpectQuery("UPDATE jobs j").
@@ -1139,7 +1175,7 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 	for range 5 {
 		mock.ExpectBegin()
 		mock.ExpectQuery("WITH unavailable_target_nodes AS").
-			WithArgs(pgxmock.AnyArg(), "test-node").
+			WithArgs(pgxmock.AnyArg(), "test-node", []uuid.UUID{}).
 			WillReturnError(pgx.ErrNoRows)
 		mock.ExpectRollback()
 	}
@@ -1335,10 +1371,12 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 	}
 	mock.ExpectBegin()
 	mock.ExpectQuery("WITH unavailable_target_nodes AS").
-		WithArgs(pgxmock.AnyArg(), "test-node").
+		WithArgs(pgxmock.AnyArg(), "test-node", []uuid.UUID{}).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
 			AddRow(jobID, orgID, jobType, nil, models.SandboxWorkloadClassInteractive, models.JobStatusPending, nil, createdAt))
 	if jobType == "run_agent" || jobType == "continue_session" {
+		mock.ExpectExec(`SAVEPOINT sandbox_claim_candidate`).
+			WillReturnResult(pgxmock.NewResult("SAVEPOINT", 0))
 		mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR NO KEY UPDATE`).
 			WithArgs(orgID).
 			WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":3}`)))

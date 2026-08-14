@@ -948,6 +948,8 @@ func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 
 	require.Contains(t, deploy, "deploy_worker_blue_green", "worker deploy should use a blue/green generation rollout")
 	require.Contains(t, deploy, "start_worker_generation", "worker deploy should start the new generation before draining old containers")
+	require.Contains(t, deploy, `WORKER_CAPACITY_NODE_ID="$capacity_node_id"`, "overlapping worker generations should share a physical-host sandbox capacity identity")
+	require.Contains(t, deploy, `start_worker_generation "$node_id" "$host_port" "$base_url" "$project" "$base_node_id"`, "worker rollout should pass the stable base node id into the generation capacity fence")
 	require.Contains(t, deploy, `preflight_node_id="$(first_running_worker_node_id "$old_containers" || true)"`, "worker deploy preflight should use the existing worker node id instead of the host's physical hostname")
 	require.Contains(t, deploy, `--node-id "$preflight_node_id"`, "worker deploy preflight should load status by node id")
 	require.Contains(t, deploy, `wait_worker_db_heartbeat "$node_id"`, "worker deploy should verify the green generation has registered a fresh DB heartbeat before draining blue")

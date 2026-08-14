@@ -36,7 +36,8 @@ Use these settings as the deployment contract for a self-hosted 143 environment.
 
 ## Workers
 
-<ConfigField name="NODE_ID" type="string" description="Stable node identifier used for worker heartbeats and preview routing." />
+<ConfigField name="NODE_ID" type="string" description="Worker routing identifier used for heartbeats, job ownership, and preview routing. Blue/green deployments assign a generation-specific value." />
+<ConfigField name="WORKER_CAPACITY_NODE_ID" type="string" description="Stable physical-host identifier shared by worker generations that use the same Docker daemon. Defaults to NODE_ID outside blue/green deployments." />
 <ConfigField name="WORKER_PROCESS_COUNT" type="integer" description="Worker loops per host." />
 <ConfigField name="WORKER_MAX_ACTIVE_SANDBOXES" type="integer" description="Maximum live sandboxes on a worker host." />
 <ConfigField name="WORKER_INTERACTIVE_RESERVED_SANDBOXES" type="integer" description="Sandbox slots per worker reserved from code-review work for interactive sessions. Defaults to 1 and is clamped for single-slot workers." />

@@ -7,8 +7,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -16,14 +18,39 @@ import (
 // more sandbox container right now. Callers should treat it as transient.
 var ErrSandboxCapacity = errors.New("sandbox capacity reached")
 
+// ErrSandboxCapacityCoordination distinguishes a retry caused by the shared
+// admission fence being unavailable from a normal at-capacity rejection.
+// Coordination failures also wrap ErrSandboxCapacity so worker retry policy
+// remains conservative and does not consume the job attempt.
+var ErrSandboxCapacityCoordination = errors.New("sandbox capacity coordination unavailable")
+
 const (
 	defaultSandboxCapacityCountTimeout   = 2 * time.Second
 	defaultSandboxPressureCleanupTimeout = 5 * time.Second
+	defaultSharedSandboxAdmissionTimeout = 10 * time.Second
+	// Non-job (preview) leases have no renewal path, so they keep a long
+	// conservative TTL that outlives slow image pulls.
+	defaultSharedSandboxReservationTTL = 15 * time.Minute
+	// Job-backed leases are renewed by the job-lease heartbeat (~20s) in
+	// internal/db, so a short TTL only ever fences attempts whose process
+	// died. A replacement attempt blocked on a stale lease therefore waits
+	// minutes, not the preview TTL. Must stay in sync with
+	// sandboxCapacityJobLeaseRenewalTTL in internal/db.
+	defaultSharedSandboxJobReservationTTL = 2 * time.Minute
+	defaultSharedSandboxReleaseRetryMin   = 100 * time.Millisecond
+	defaultSharedSandboxReleaseRetryMax   = time.Second
 )
 
 // LiveSandboxCounter counts live sandbox containers on the local machine.
 type LiveSandboxCounter interface {
 	CountLiveSandboxes(ctx context.Context) (int, error)
+}
+
+// SharedSandboxCapacityStore coordinates final admission across processes that
+// share one worker node and Docker daemon.
+type SharedSandboxCapacityStore interface {
+	ReserveSandboxCapacity(ctx context.Context, nodeID string, jobID, jobLockToken *uuid.UUID, workloadClass models.SandboxWorkloadClass, countLiveSandboxes func(context.Context) (int, error), effectiveMax int, expiresAt time.Time) (reservationID uuid.UUID, liveSandboxes, total int, acquired bool, err error)
+	ReleaseSandboxCapacity(ctx context.Context, nodeID string, reservationID uuid.UUID, jobLockToken *uuid.UUID) error
 }
 
 // SandboxPressureCleaner performs a best-effort local cleanup pass when a
@@ -34,11 +61,16 @@ type SandboxPressureCleaner interface {
 
 // SandboxCapacityGateConfig configures local sandbox admission control.
 type SandboxCapacityGateConfig struct {
-	Counter                LiveSandboxCounter
+	Counter LiveSandboxCounter
+	// SharedReservations is required in production so every process on the
+	// worker uses the same final fence. A nil value retains the in-process path
+	// for isolated embedders and unit tests that do not have Postgres.
+	SharedReservations     SharedSandboxCapacityStore
 	PressureCleaner        SandboxPressureCleaner
 	MaxActive              int
 	InteractiveReserved    int
 	CountTimeout           time.Duration
+	SharedAdmissionTimeout time.Duration
 	PressureCleanupTimeout time.Duration
 	NodeID                 string
 	Logger                 zerolog.Logger
@@ -49,6 +81,8 @@ type SandboxCapacityRequest struct {
 	Purpose       string
 	SessionID     string
 	OrgID         string
+	JobID         *uuid.UUID
+	JobLockToken  *uuid.UUID
 	WorkloadClass models.SandboxWorkloadClass
 }
 
@@ -65,14 +99,16 @@ type SandboxCapacitySnapshot struct {
 // SandboxCapacityGate gates new local sandbox creation against the current
 // live Docker count plus in-flight reservations.
 type SandboxCapacityGate struct {
-	counter             LiveSandboxCounter
-	cleaner             SandboxPressureCleaner
-	maxActive           int
-	interactiveReserved int
-	countTTL            time.Duration
-	cleanTTL            time.Duration
-	nodeID              string
-	logger              zerolog.Logger
+	counter                LiveSandboxCounter
+	sharedReservations     SharedSandboxCapacityStore
+	cleaner                SandboxPressureCleaner
+	maxActive              int
+	interactiveReserved    int
+	countTTL               time.Duration
+	sharedAdmissionTimeout time.Duration
+	cleanTTL               time.Duration
+	nodeID                 string
+	logger                 zerolog.Logger
 
 	mu                  sync.Mutex
 	reserved            int
@@ -87,19 +123,25 @@ func NewSandboxCapacityGate(cfg SandboxCapacityGateConfig) *SandboxCapacityGate 
 	if countTTL <= 0 {
 		countTTL = defaultSandboxCapacityCountTimeout
 	}
+	sharedAdmissionTimeout := cfg.SharedAdmissionTimeout
+	if sharedAdmissionTimeout <= 0 {
+		sharedAdmissionTimeout = defaultSharedSandboxAdmissionTimeout
+	}
 	cleanTTL := cfg.PressureCleanupTimeout
 	if cleanTTL <= 0 {
 		cleanTTL = defaultSandboxPressureCleanupTimeout
 	}
 	return &SandboxCapacityGate{
-		counter:             cfg.Counter,
-		cleaner:             cfg.PressureCleaner,
-		maxActive:           cfg.MaxActive,
-		interactiveReserved: clampInteractiveSandboxReserve(cfg.MaxActive, cfg.InteractiveReserved),
-		countTTL:            countTTL,
-		cleanTTL:            cleanTTL,
-		nodeID:              cfg.NodeID,
-		logger:              cfg.Logger,
+		counter:                cfg.Counter,
+		sharedReservations:     cfg.SharedReservations,
+		cleaner:                cfg.PressureCleaner,
+		maxActive:              cfg.MaxActive,
+		interactiveReserved:    clampInteractiveSandboxReserve(cfg.MaxActive, cfg.InteractiveReserved),
+		countTTL:               countTTL,
+		sharedAdmissionTimeout: sharedAdmissionTimeout,
+		cleanTTL:               cleanTTL,
+		nodeID:                 cfg.NodeID,
+		logger:                 cfg.Logger,
 	}
 }
 
@@ -118,6 +160,15 @@ func (g *SandboxCapacityGate) InteractiveReserved() int {
 		return 0
 	}
 	return g.interactiveReserved
+}
+
+// CapacityNodeID returns the physical-host identity used by the shared
+// admission fence. Multiple worker generations on one Docker host share it.
+func (g *SandboxCapacityGate) CapacityNodeID() string {
+	if g == nil {
+		return ""
+	}
+	return g.nodeID
 }
 
 // SetPressureCleaner installs or replaces the cleanup hook used when a worker
@@ -161,6 +212,22 @@ func (g *SandboxCapacityGate) Acquire(ctx context.Context, req SandboxCapacityRe
 		return nil, err
 	}
 
+	effectiveMax := g.maxActive
+	if req.WorkloadClass == models.SandboxWorkloadClassCodeReview {
+		effectiveMax -= g.interactiveReserved
+	}
+	if g.sharedReservations != nil {
+		cleanedForPressure := false
+		for {
+			reservation, retry, err := g.acquireSharedReservation(ctx, req, effectiveMax, cleanedForPressure)
+			if retry {
+				cleanedForPressure = true
+				continue
+			}
+			return reservation, err
+		}
+	}
+
 	cleanedForPressure := false
 	for {
 		g.mu.Lock()
@@ -181,14 +248,10 @@ func (g *SandboxCapacityGate) Acquire(ctx context.Context, req SandboxCapacityRe
 		}
 
 		total := live + g.reserved
-		effectiveMax := g.maxActive
-		if req.WorkloadClass == models.SandboxWorkloadClassCodeReview {
-			effectiveMax -= g.interactiveReserved
-		}
 		if total >= effectiveMax {
 			reserved := g.reserved
 			cleaner := g.cleaner
-			physicallyFull := total >= g.maxActive
+			physicallyFull := live >= g.maxActive
 			g.mu.Unlock()
 			if physicallyFull && !cleanedForPressure && cleaner != nil {
 				cleanedForPressure = true
@@ -217,6 +280,96 @@ func (g *SandboxCapacityGate) Acquire(ctx context.Context, req SandboxCapacityRe
 		g.logCapacity(req, live, reserved).Msg("sandbox capacity reserved")
 		return &SandboxCapacityReservation{gate: g, sandboxTurn: sandboxTurnReservation}, nil
 	}
+}
+
+func (g *SandboxCapacityGate) acquireSharedReservation(
+	ctx context.Context,
+	req SandboxCapacityRequest,
+	effectiveMax int,
+	cleanedForPressure bool,
+) (*SandboxCapacityReservation, bool, error) {
+	// The cross-process transaction may wait behind another admission's node
+	// lock, so it needs a wider budget than one Docker count. Keep the actual
+	// container-runtime call bounded by countTTL once this admission owns the
+	// shared lock.
+	reservationCtx, cancel := context.WithTimeout(ctx, g.sharedAdmissionTimeout)
+	countLiveSandboxes := func(countCtx context.Context) (int, error) {
+		boundedCountCtx, countCancel := context.WithTimeout(countCtx, g.countTTL)
+		defer countCancel()
+		return g.counter.CountLiveSandboxes(boundedCountCtx)
+	}
+	leaseTTL := defaultSharedSandboxReservationTTL
+	if req.JobID != nil {
+		leaseTTL = defaultSharedSandboxJobReservationTTL
+	}
+	reservationID, live, total, acquired, err := g.sharedReservations.ReserveSandboxCapacity(
+		reservationCtx,
+		g.nodeID,
+		req.JobID,
+		req.JobLockToken,
+		req.WorkloadClass,
+		countLiveSandboxes,
+		effectiveMax,
+		time.Now().Add(leaseTTL),
+	)
+	cancel()
+	if err != nil {
+		var attemptConflict *db.SandboxCapacityAttemptConflictError
+		if errors.As(err, &attemptConflict) {
+			// An expected fencing condition, not a coordination failure: a
+			// prior attempt's lease is still live and the caller will wait for
+			// its persisted deadline. Skip the alerting signal so it keeps
+			// meaning "the shared fence itself is broken".
+			g.logCapacity(req, live, g.ReservedCount()).
+				Time("prior_attempt_lease_expires_at", attemptConflict.ExpiresAt).
+				Msg("prior attempt still holds the shared sandbox lease; deferring admission")
+			return nil, false, fmt.Errorf("%w: reserve shared sandbox capacity: %w", ErrSandboxCapacity, err)
+		}
+		wrapped := fmt.Errorf("%w: %w: reserve shared sandbox capacity: %w", ErrSandboxCapacity, ErrSandboxCapacityCoordination, err)
+		g.logCapacity(req, live, g.ReservedCount()).
+			Bool("sandbox_capacity_coordination_failure", true).
+			Dur("shared_admission_timeout", g.sharedAdmissionTimeout).
+			Err(err).
+			Msg("failed to reserve shared sandbox capacity; rejecting sandbox admission")
+		return nil, false, wrapped
+	}
+	if !acquired {
+		g.mu.Lock()
+		cleaner := g.cleaner
+		g.mu.Unlock()
+		physicallyFull := live >= g.maxActive
+		if physicallyFull && !cleanedForPressure && cleaner != nil {
+			cleanCtx, cleanCancel := context.WithTimeout(ctx, g.cleanTTL)
+			cleanErr := cleaner.ReapForCapacity(cleanCtx, time.Now())
+			cleanCancel()
+			if cleanErr != nil {
+				g.logCapacity(req, live, g.ReservedCount()).Err(cleanErr).Msg("sandbox pressure cleanup failed before shared admission retry")
+			} else {
+				g.logCapacity(req, live, g.ReservedCount()).Msg("sandbox pressure cleanup completed before shared admission retry")
+			}
+			return nil, true, nil
+		}
+		capacityErr := fmt.Errorf("%w: %d/%d sandboxes active or reserved for %s workload", ErrSandboxCapacity, total, effectiveMax, req.WorkloadClass)
+		g.logCapacity(req, live, g.ReservedCount()).Msg("shared sandbox capacity reached; rejecting sandbox admission")
+		return nil, false, capacityErr
+	}
+
+	g.mu.Lock()
+	g.reserved++
+	sandboxTurnReservation := isSandboxTurnCapacityPurpose(req.Purpose)
+	if sandboxTurnReservation {
+		g.sandboxTurnReserved++
+	}
+	reserved := g.reserved
+	g.mu.Unlock()
+
+	g.logCapacity(req, live, reserved).Msg("shared sandbox capacity reserved")
+	return &SandboxCapacityReservation{
+		gate:                g,
+		sandboxTurn:         sandboxTurnReservation,
+		sharedReservationID: reservationID,
+		jobLockToken:        req.JobLockToken,
+	}, false, nil
 }
 
 // Snapshot returns a best-effort point-in-time capacity view for metadata.
@@ -306,9 +459,11 @@ func (g *SandboxCapacityGate) HasSpeculativeHeadroom(ctx context.Context, minFre
 
 // SandboxCapacityReservation releases a previously acquired slot.
 type SandboxCapacityReservation struct {
-	gate        *SandboxCapacityGate
-	sandboxTurn bool
-	once        sync.Once
+	gate                *SandboxCapacityGate
+	sandboxTurn         bool
+	sharedReservationID uuid.UUID
+	jobLockToken        *uuid.UUID
+	once                sync.Once
 }
 
 // Release returns the reservation to the gate. It is safe to call repeatedly.
@@ -318,7 +473,6 @@ func (r *SandboxCapacityReservation) Release() {
 	}
 	r.once.Do(func() {
 		r.gate.mu.Lock()
-		defer r.gate.mu.Unlock()
 		if r.gate.reserved > 0 {
 			r.gate.reserved--
 		}
@@ -326,5 +480,39 @@ func (r *SandboxCapacityReservation) Release() {
 			r.gate.sandboxTurnReserved--
 		}
 		r.gate.releaseGeneration++
+		r.gate.mu.Unlock()
+
+		if r.sharedReservationID != uuid.Nil && r.gate.sharedReservations != nil {
+			// Release takes the same per-node database lock as admission. Give it
+			// the full coordination budget rather than the shorter Docker-count
+			// budget so a concurrent admission can finish first, and retry
+			// transient database failures within that budget so a one-off blip
+			// does not strand the slot until the lease TTL expires.
+			releaseCtx, cancel := context.WithTimeout(context.Background(), r.gate.sharedAdmissionTimeout)
+			defer cancel()
+			if err := r.releaseSharedReservation(releaseCtx); err != nil {
+				r.gate.logger.Warn().Err(err).
+					Str("node_id", r.gate.nodeID).
+					Str("reservation_id", r.sharedReservationID.String()).
+					Msg("failed to release shared sandbox capacity reservation")
+			}
+		}
 	})
+}
+
+func (r *SandboxCapacityReservation) releaseSharedReservation(ctx context.Context) error {
+	delay := defaultSharedSandboxReleaseRetryMin
+	for {
+		err := r.gate.sharedReservations.ReleaseSandboxCapacity(ctx, r.gate.nodeID, r.sharedReservationID, r.jobLockToken)
+		if err == nil {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, defaultSharedSandboxReleaseRetryMax)
+	}
 }

@@ -433,17 +433,7 @@ func (s *PullRequestFeedbackStore) QueueContinuation(ctx context.Context, orgID,
 	}
 	payload := map[string]any{"org_id": orgID.String(), "session_id": batch.SessionID.String(), "thread_id": threadID.String(), "queued_message_id": strconv.FormatInt(message.ID, 10), "feedback_batch_id": batch.ID.String(), "pull_request_id": batch.PullRequestID.String(), "pull_request_number": pullRequestNumber, "head_sha": batch.ExpectedHeadSHA, "workspace_mode": models.PRFeedbackWorkspaceModePRHeadReconstruction, "structured_prompt": structuredPrompt}
 	dedupeKey := "continue_pr_feedback:" + batch.ID.String()
-	enqueueOpts := EnqueueOpts{
-		Queue:        "agent",
-		JobType:      "continue_session",
-		Payload:      payload,
-		Priority:     5,
-		DedupeKey:    &dedupeKey,
-		TargetNodeID: models.SessionWorkerTarget(&session),
-	}
-	if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
-		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
-	}
+	enqueueOpts := ContinueSessionEnqueueOpts(&session, payload, &dedupeKey)
 	jobID, err := s.jobs.EnqueueInTxWithOpts(ctx, tx, orgID, enqueueOpts)
 	if err != nil {
 		return nil, fmt.Errorf("enqueue PR feedback continuation: %w", err)

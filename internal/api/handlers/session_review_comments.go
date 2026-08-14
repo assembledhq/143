@@ -434,17 +434,7 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 			"session_id": sessionID.String(),
 			"org_id":     orgID.String(),
 		}
-		enqueueOpts := db.EnqueueOpts{
-			Queue:        "agent",
-			JobType:      "continue_session",
-			Payload:      payload,
-			Priority:     5,
-			DedupeKey:    &dedupeKey,
-			TargetNodeID: models.SessionWorkerTarget(&session),
-		}
-		if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
-			enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
-		}
+		enqueueOpts := db.ContinueSessionEnqueueOpts(&session, payload, &dedupeKey)
 		if _, err := h.jobStore.EnqueueWithOpts(r.Context(), orgID, enqueueOpts); err != nil {
 			// Delete the orphaned message and revert session status.
 			if msg.ID != 0 {

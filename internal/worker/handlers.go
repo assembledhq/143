@@ -44,9 +44,11 @@ import (
 )
 
 const (
-	sandboxCapacityRetryDelay        = 10 * time.Second
-	sandboxAlternateWorkerRetryDelay = time.Duration(0)
-	sandboxOrgLimitRetryDelay        = 5 * time.Second
+	sandboxCapacityRetryDelay         = db.SandboxFleetRetryDelay
+	sandboxAlternateWorkerRetryDelay  = time.Duration(0)
+	sandboxOrgLimitRetryDelay         = db.SandboxOrgLimitRetryDelay
+	sandboxLockContentionRetryDelay   = 500 * time.Millisecond
+	sandboxAttemptConflictRetryBuffer = time.Second
 )
 const previewCapacityRetryDelay = 5 * time.Second
 const previewStartupInterruptedRetryDelay = 2 * time.Second
@@ -173,23 +175,52 @@ func sandboxTurnCapacityRetryTarget(ctx context.Context, stores *Stores, logger 
 			Str("excluded_node_id", excludeNodeID).
 			Str("routing_reason", string(result.Reason)).
 			Msg("quickly routing sandbox capacity retry to reserved worker slot")
-		// The reservation makes the handoff atomic, but worker heartbeat load can
-		// lag the authoritative local capacity gate. A small delay prevents a job
-		// from hot-looping between workers while that metadata converges, while
-		// remaining well below the full-fleet backoff.
+		// The durable reservation makes the handoff atomic. Requeue immediately
+		// so RetryWithLease publishes a cross-worker wake-up; retain the longer
+		// delay only when the authoritative routing pass finds no capacity.
 		return result.TargetNodeID, false, sandboxAlternateWorkerRetryDelay
 	}
 	logger.Info().
 		Str("excluded_node_id", excludeNodeID).
 		Str("routing_reason", string(result.Reason)).
 		Msg("no alternate worker slot reserved; clearing retry target pin")
-	if result.Reason == db.SandboxRoutingReasonLockContention {
-		return nil, true, 0
+	return nil, true, sandboxTurnRoutingRetryDelay(result.Reason)
+}
+
+func sandboxTurnRoutingRetryDelay(reason db.SandboxRoutingReason) time.Duration {
+	switch reason {
+	case db.SandboxRoutingReasonLockContention:
+		return sandboxLockContentionRetryDelay
+	case db.SandboxRoutingReasonOrgLimit:
+		return sandboxOrgLimitRetryDelay
+	default:
+		return sandboxCapacityRetryDelay
 	}
-	if result.Reason == db.SandboxRoutingReasonOrgLimit {
-		return nil, true, sandboxOrgLimitRetryDelay
+}
+
+func sandboxCapacityAttemptConflictRetry(err error) (*RetryableError, bool) {
+	var conflictErr *db.SandboxCapacityAttemptConflictError
+	if !errors.As(err, &conflictErr) {
+		return nil, false
 	}
-	return nil, true, sandboxCapacityRetryDelay
+	// A reclaimed job can reach final admission while the old, fenced attempt's
+	// reservation is still alive. Wait directly for its persisted deadline so
+	// the queue does not repeatedly launch replacement executors before the
+	// conflict can clear. The reservation expiry is the bounded terminal
+	// condition, so it replaces the generic eight-minute retry window; live
+	// attempts renew their lease on the job-lease heartbeat, so this deadline
+	// only fences dead processes and stays short. Admission cleanup already
+	// released this attempt's durable placement, so the job re-routes fresh
+	// once the wait elapses.
+	retryAfter := time.Until(conflictErr.ExpiresAt) + sandboxAttemptConflictRetryBuffer
+	if retryAfter < sandboxLockContentionRetryDelay {
+		retryAfter = sandboxLockContentionRetryDelay
+	}
+	return &RetryableError{
+		Err:                    err,
+		RetryAfter:             &retryAfter,
+		BypassMaxRetryDuration: true,
+	}, true
 }
 
 func sandboxCapacityRetryTarget(ctx context.Context, stores *Stores, logger zerolog.Logger) (*string, bool) {
@@ -6261,17 +6292,7 @@ func enqueueSlackSessionContinuationMessage(ctx context.Context, stores *Stores,
 		"session_id": session.ID.String(),
 		"thread_id":  thread.ID.String(),
 	}
-	enqueueOpts := db.EnqueueOpts{
-		Queue:        "agent",
-		JobType:      "continue_session",
-		Payload:      payload,
-		Priority:     5,
-		DedupeKey:    &dedupeKey,
-		TargetNodeID: models.SessionWorkerTarget(&session),
-	}
-	if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
-		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
-	}
+	enqueueOpts := db.ContinueSessionEnqueueOpts(&session, payload, &dedupeKey)
 	_, err = stores.Jobs.EnqueueWithOpts(ctx, orgID, enqueueOpts)
 	return err
 }
@@ -6690,17 +6711,7 @@ func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *
 	if req.ThreadID != nil {
 		payload["thread_id"] = req.ThreadID.String()
 	}
-	enqueueOpts := db.EnqueueOpts{
-		Queue:        "agent",
-		JobType:      "continue_session",
-		Payload:      payload,
-		Priority:     5,
-		DedupeKey:    &dedupeKey,
-		TargetNodeID: models.SessionWorkerTarget(&session),
-	}
-	if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
-		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
-	}
+	enqueueOpts := db.ContinueSessionEnqueueOpts(&session, payload, &dedupeKey)
 	_, err = stores.Jobs.EnqueueWithOpts(ctx, orgID, enqueueOpts)
 	return err
 }
@@ -8378,6 +8389,14 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			runErr = services.Orchestrator.RunAgent(jobCtx, &run)
 		}
 		if err := runErr; err != nil {
+			if retryable, ok := sandboxCapacityAttemptConflictRetry(err); ok {
+				logger.Info().
+					Str("session_id", runID.String()).
+					Dur("retry_after", *retryable.RetryAfter).
+					Err(err).
+					Msg("prior sandbox capacity attempt still owns a live reservation; waiting for its lease deadline")
+				return retryable
+			}
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, logger)
 				registerSandboxCapacityDeadLetter(ctx, stores, services, logger, run, run.PrimaryThreadID, "run_agent")
@@ -9910,6 +9929,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				retryAfter := sandboxOrgLimitRetryDelay
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
 			}
+			if retryable, ok := sandboxCapacityAttemptConflictRetry(err); ok {
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Dur("retry_after", *retryable.RetryAfter).
+					Err(err).
+					Msg("prior sandbox capacity attempt still owns a live reservation; waiting for its lease deadline")
+				return retryable
+			}
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, logger)
 				var capacityThreadID *uuid.UUID
@@ -10382,9 +10409,28 @@ func shouldStopContinueSessionForDurableState(
 	if err != nil {
 		return false, err
 	}
-	if cancelled && stores.SessionThreads != nil {
+	if stores.SessionThreads != nil {
 		for _, cancelledThreadID := range cancelledThreadIDs {
 			stores.SessionThreads.PublishRuntimeUpdate(ctx, orgID, cancelledThreadID)
+		}
+	}
+	if !cancelled && hasThread && stores.SessionThreads != nil {
+		// A live sibling keeps ownership of the session-scoped cancellation,
+		// but this claimed continuation is about to be consumed. Finalize its
+		// distinct queued thread so it cannot remain active without a backing
+		// job while the sibling delivers the cancel signal.
+		thread, loadErr := stores.SessionThreads.GetByID(ctx, orgID, threadID)
+		if loadErr != nil {
+			return false, fmt.Errorf("reload queued session thread during sibling cancellation: %w", loadErr)
+		}
+		if thread.SessionID != sessionID {
+			return false, fmt.Errorf("session thread %s does not belong to session %s", threadID, sessionID)
+		}
+		switch thread.Status {
+		case models.ThreadStatusPending, models.ThreadStatusRunning, models.ThreadStatusAwaitingInput:
+			if updateErr := stores.SessionThreads.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusCancelled); updateErr != nil {
+				return false, fmt.Errorf("cancel queued session thread while sibling owns session cancellation: %w", updateErr)
+			}
 		}
 	}
 	// If another cancellation consumer won the race after the durable read,

@@ -1333,6 +1333,36 @@ func (s *SessionStore) CancelPendingCapacityWait(ctx context.Context, orgID, ses
 		return false, nil, nil
 	}
 
+	// Fence the session lifecycle before consuming the durable request. A
+	// concurrent completion may win while this cleanup waits for job/org locks;
+	// terminal state is authoritative and must never be overwritten by a late
+	// capacity-wait cancellation.
+	rows, err := tx.Query(ctx, `
+		UPDATE sessions
+		SET status = @status,
+			completed_at = now(),
+			last_activity_at = now()
+		WHERE id = @session_id
+		  AND org_id = @org_id
+		  AND deleted_at IS NULL
+		  AND status IN ('pending', 'running', 'idle', 'awaiting_input', 'needs_human_guidance')
+		RETURNING `+sessionSelectColumns, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+		"status":     string(models.SessionStatusCancelled),
+	})
+	if err != nil {
+		return false, nil, fmt.Errorf("cancel active session while waiting for capacity: %w", err)
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil, nil
+	}
+	if err != nil {
+		return false, nil, fmt.Errorf("collect capacity-wait cancelled session: %w", err)
+	}
+	hydrateSessionPolicy(&session)
+
 	consumeResult, err := tx.Exec(ctx, `
 		UPDATE session_cancel_requests
 		SET delivered_at = now()
@@ -1347,11 +1377,6 @@ func (s *SessionStore) CancelPendingCapacityWait(ctx context.Context, orgID, ses
 	}
 	if consumeResult.RowsAffected() == 0 {
 		return false, nil, nil
-	}
-
-	session, err := s.updateStatusRow(ctx, tx, orgID, sessionID, models.SessionStatusCancelled)
-	if err != nil {
-		return false, nil, fmt.Errorf("cancel session while waiting for capacity: %w", err)
 	}
 
 	if len(queuedSiblingJobIDs) > 0 {
