@@ -23,6 +23,45 @@ import (
 	"github.com/assembledhq/143/internal/services/mcp"
 )
 
+func TestPreviewSchemas(t *testing.T) {
+	t.Parallel()
+
+	extra := map[string]mcp.SchemaProperty{
+		"wait": {Type: "boolean", Description: "Wait until ready"},
+	}
+	tests := []struct {
+		name     string
+		build    func(map[string]mcp.SchemaProperty) mcp.ToolSchema
+		expected mcp.ToolSchema
+	}{
+		{
+			name:  "session target",
+			build: previewSessionSchema,
+			expected: mcp.ToolSchema{Type: "object", Properties: map[string]mcp.SchemaProperty{
+				"session_id": {Type: "string", Description: "Session ID whose active preview should be targeted"},
+				"wait":       {Type: "boolean", Description: "Wait until ready"},
+			}},
+		},
+		{
+			name:  "session or preview target",
+			build: previewTargetSchema,
+			expected: mcp.ToolSchema{Type: "object", Properties: map[string]mcp.SchemaProperty{
+				"session_id": {Type: "string", Description: "Session ID whose active preview should be targeted"},
+				"preview_id": {Type: "string", Description: "Preview ID to target directly"},
+				"wait":       {Type: "boolean", Description: "Wait until ready"},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, tt.build(extra), "schema should preserve target and extra properties")
+		})
+	}
+}
+
 func TestPreviewToolExecutor_WaitSessionReadyReportsPhaseChanges(t *testing.T) {
 	t.Parallel()
 

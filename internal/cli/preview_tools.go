@@ -178,19 +178,22 @@ func (e *previewToolExecutor) tools() []mcp.Tool {
 }
 
 func previewSessionSchema(extra map[string]mcp.SchemaProperty) mcp.ToolSchema {
-	props := map[string]mcp.SchemaProperty{
+	return previewSchema(map[string]mcp.SchemaProperty{
 		"session_id": {Type: "string", Description: "Session ID whose active preview should be targeted"},
-	}
-	for k, v := range extra {
-		props[k] = v
-	}
-	return mcp.ToolSchema{Type: "object", Properties: props}
+	}, extra)
 }
 
 func previewTargetSchema(extra map[string]mcp.SchemaProperty) mcp.ToolSchema {
-	props := map[string]mcp.SchemaProperty{
+	return previewSchema(map[string]mcp.SchemaProperty{
 		"session_id": {Type: "string", Description: "Session ID whose active preview should be targeted"},
 		"preview_id": {Type: "string", Description: "Preview ID to target directly"},
+	}, extra)
+}
+
+func previewSchema(target, extra map[string]mcp.SchemaProperty) mcp.ToolSchema {
+	props := make(map[string]mcp.SchemaProperty, len(target)+len(extra))
+	for k, v := range target {
+		props[k] = v
 	}
 	for k, v := range extra {
 		props[k] = v
