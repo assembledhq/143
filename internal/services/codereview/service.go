@@ -594,6 +594,13 @@ func (s *Service) handleExplicitReviewRequest(
 	changeKey string,
 ) (ReviewRequestedResult, error) {
 	input.RequestContext = normalizeReviewRequestContext(input.RequestContext)
+	approved, err := s.metadata.HasApprovedByPullRequest(ctx, input.OrgID, input.PullRequestID)
+	if err != nil {
+		return ReviewRequestedResult{}, fmt.Errorf("check prior code review approval before explicit rerequest: %w", err)
+	}
+	if approved {
+		return ReviewRequestedResult{IgnoredReason: "already_approved", TriggerSource: source}, nil
+	}
 	deliveryID := strings.TrimSpace(input.DeliveryID)
 	if deliveryID == "" {
 		s.logger.Warn().
@@ -683,7 +690,7 @@ func (s *Service) QueueReviewChanged(ctx context.Context, input ReviewChangedInp
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("check prior code review approval before queueing reassessment: %w", err)
 	}
-	if approved && !input.ExplicitRequest {
+	if approved {
 		return ReviewRequestedResult{IgnoredReason: "already_approved"}, nil
 	}
 	latest, err := s.metadata.GetLatestByPullRequest(ctx, input.OrgID, input.PullRequestID)
@@ -750,7 +757,7 @@ func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedIn
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("check prior code review approval before reassessment: %w", err)
 	}
-	if approved && !input.ExplicitRequest {
+	if approved {
 		return ReviewRequestedResult{IgnoredReason: "already_approved"}, nil
 	}
 	latest, err := s.metadata.GetLatestByPullRequest(ctx, input.OrgID, input.PullRequestID)

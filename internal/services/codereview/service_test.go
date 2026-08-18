@@ -39,7 +39,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 			},
 		},
 		{
-			name: "starts a fresh explicit review while preserving a prior approval",
+			name: "ignores an explicit rerequest after approval",
 			input: newReviewRequestedInput(func(in *ReviewRequestedInput) {
 				in.DeliveryID = "delivery-after-approval"
 			}),
@@ -56,15 +56,12 @@ func TestService_HandleReviewRequested(t *testing.T) {
 					ReviewOutputKey: "approved-output", GitHubReviewID: &reviewID, GitHubReviewURL: &reviewURL,
 				}
 			},
-			expected: func(t *testing.T, result ReviewRequestedResult, _ *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
-				require.True(t, result.Processed, "explicit rerequest should be accepted after approval")
-				require.False(t, result.Reused, "new delivery should create a distinct post-approval assessment")
-				require.Equal(t, 1, sessions.createCalls, "approved rerequest should create a new session")
-				require.Equal(t, 1, jobs.enqueueCalls, "approved rerequest should enqueue new review work")
-				require.Equal(t, metadata.latest.GitHubReviewID, jobs.payload.ExistingGitHubReviewID, "rerequest should retain the approved GitHub review instead of replacing it")
-				require.Equal(t, metadata.latest.Decision, jobs.payload.PreviousReviewDecision, "rerequest should preserve the prior approval in visible review history")
-				require.Equal(t, metadata.latest.CompletedAt, jobs.payload.PreviousReviewDecidedAt, "rerequest should preserve when the prior approval completed")
-				require.Equal(t, metadata.latest.FinalReviewBody, jobs.payload.PreviousReviewBody, "rerequest should preserve the prior approval body")
+			expected: func(t *testing.T, result ReviewRequestedResult, _ *policyStub, _ *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.False(t, result.Processed, "explicit rerequest should not run after approval")
+				require.Equal(t, "already_approved", result.IgnoredReason, "ignored rerequest should preserve the final approval")
+				require.Equal(t, models.CodeReviewTriggerSourceAppReviewer, result.TriggerSource, "ignored rerequest should retain its matched trigger source")
+				require.Equal(t, 0, sessions.createCalls, "approved rerequest should not create a new session")
+				require.Equal(t, 0, jobs.enqueueCalls, "approved rerequest should not enqueue review work")
 			},
 		},
 		{
@@ -752,7 +749,7 @@ func TestService_HandleReviewChanged(t *testing.T) {
 			},
 		},
 		{
-			name:              "runs an explicit request even when another assessment advanced first",
+			name:              "stops an explicit request when another assessment approved first",
 			usePriorSessionID: true,
 			setup: func(metadata *metadataStub, sessions *sessionStub) {
 				reviewID := int64(143)
@@ -775,16 +772,11 @@ func TestService_HandleReviewChanged(t *testing.T) {
 				input.ChangeKey = explicitReviewRequestChangeKey(input.GitHubDeliveryID)
 				input.ChangeReason = explicitReviewRequestChangeReason
 			},
-			expected: func(t *testing.T, result ReviewRequestedResult, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
-				require.True(t, result.Processed, "explicit request should retain its own assessment intent")
-				require.False(t, result.Reused, "different explicit delivery should create a distinct assessment")
-				require.Equal(t, 1, sessions.createCalls, "explicit request should create a session after the intervening assessment")
-				require.Equal(t, 1, jobs.enqueueCalls, "explicit request should enqueue its review work")
-				require.Equal(t, models.CodeReviewTriggerSourceTeamReviewer, metadata.created.TriggerSource, "explicit request should preserve its current trigger source")
-				require.Contains(t, jobs.payload.OutputKey, ":review-request:", "explicit delivery should retain its policy-independent identity")
-				require.Equal(t, "143-code-reviewer", jobs.payload.RequestedTeamSlug, "explicit request should carry team cleanup context into the worker")
-				require.Equal(t, metadata.latest.GitHubReviewID, jobs.payload.ExistingGitHubReviewID, "explicit request should update the persistent GitHub review")
-				require.Equal(t, metadata.latest.Decision, jobs.payload.PreviousReviewDecision, "explicit request should retain the prior approval as history")
+			expected: func(t *testing.T, result ReviewRequestedResult, _ *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.False(t, result.Processed, "explicit request should stop after an intervening approval")
+				require.Equal(t, "already_approved", result.IgnoredReason, "stopped explicit request should preserve the final approval")
+				require.Equal(t, 0, sessions.createCalls, "stopped explicit request should not create a session")
+				require.Equal(t, 0, jobs.enqueueCalls, "stopped explicit request should not enqueue review work")
 			},
 		},
 		{
@@ -914,13 +906,13 @@ func TestService_QueueReviewChanged(t *testing.T) {
 			expectedWhy: "already_approved",
 		},
 		{
-			name: "queues an explicit rerequest after approval",
+			name: "does not queue an explicit rerequest after approval",
 			setup: func(metadata *metadataStub) {
 				metadata.approved = true
 				metadata.latest = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusCompleted}
 			},
-			explicit:      true,
-			expectedQueue: true,
+			explicit:    true,
+			expectedWhy: "already_approved",
 		},
 	}
 
