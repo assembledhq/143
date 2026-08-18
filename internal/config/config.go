@@ -73,6 +73,10 @@ type Config struct {
 	// this worker node. 0 derives from the final WorkerProcessCount; values >0
 	// are explicit per-node caps.
 	WorkerMaxActiveSandboxes int `env:"WORKER_MAX_ACTIVE_SANDBOXES" envDefault:"0"`
+	// WorkerInteractiveReservedSandboxes keeps this many local sandbox slots
+	// unavailable to code-review work so interactive sessions retain a lane
+	// during review bursts. The effective value is clamped below MaxActive.
+	WorkerInteractiveReservedSandboxes int `env:"WORKER_INTERACTIVE_RESERVED_SANDBOXES" envDefault:"1"`
 	// SessionExecutorImage is the server image used for executor containers.
 	// Production worker compose defaults this to the same 143-server tag as
 	// the worker so executor code and worker dispatcher code roll together.
@@ -421,6 +425,9 @@ func Load() *Config {
 	}
 	if cfg.WorkerMaxActiveSandboxes < 0 {
 		cfg.WorkerMaxActiveSandboxes = 0
+	}
+	if cfg.WorkerInteractiveReservedSandboxes < 0 {
+		cfg.WorkerInteractiveReservedSandboxes = 0
 	}
 	// These three normalizers deliberately differ. The reassessment ceiling
 	// treats a non-positive value as "unbounded", so a misconfigured 0 would

@@ -3739,6 +3739,99 @@ func TestRunAgentHandler_LinearPrepareStateFailedDeadLetters(t *testing.T) {
 	require.Equal(t, 0, orch.runAgentCalls, "orchestrator must not run after the prepare path failed")
 }
 
+// workerSessionRowCreatedAt mirrors workerSessionRow but pins created_at so
+// tests can put a session past the eight-minute concurrency deadline.
+func workerSessionRowCreatedAt(sessionID, issueID, orgID uuid.UUID, status models.SessionStatus, createdAt time.Time) []any {
+	row := workerSessionRow(sessionID, issueID, orgID, status, 0, nil, nil)
+	for i, col := range workerSessionColumns {
+		if col == "created_at" {
+			row[i] = createdAt
+		}
+	}
+	return row
+}
+
+// TestRunAgentHandler_ConcurrencyDeadlineWaitsWhileCodeReviewHoldsSlots locks
+// the shared-limit contract: an interactive session past the eight-minute
+// pending deadline must keep waiting (the UI advertises it will start
+// automatically) while a code-review turn holds one of the org's shared
+// slots, instead of terminally failing.
+func TestRunAgentHandler_ConcurrencyDeadlineWaitsWhileCodeReviewHoldsSlots(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRowCreatedAt(runID, issueID, orgID, models.SessionStatusPending, time.Now().Add(-10*time.Minute))...,
+		))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs.*workload_class = @workload_class`).
+		WithArgs(orgID, models.SandboxWorkloadClassCodeReview).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(context.Context, *models.Session) error {
+			return fmt.Errorf("turns full: %w", agent.ErrSandboxTurnConcurrency)
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "the deadline must defer, not fail, while a review holds a shared slot")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxTurnConcurrency, "retry should preserve the org-capacity sentinel")
+	require.True(t, retryable.BypassMaxRetryDuration, "the review-blocked wait must not dead-letter under the generic retry window")
+	require.NotNil(t, retryable.RetryAfter, "the review-blocked wait should use the admission cadence")
+	require.Equal(t, sandboxOrgLimitRetryDelay, *retryable.RetryAfter, "the review-blocked wait should poll at the org-limit cadence")
+	require.NoError(t, mock.ExpectationsWereMet(), "the deadline check should consult admitted code-review turns")
+}
+
+// TestRunAgentHandler_ConcurrencyDeadlineFailsWithoutCodeReviewTurns locks
+// the other half of the deadline contract: with no code-review turn holding
+// a slot, the pre-existing eight-minute terminal failure still applies.
+func TestRunAgentHandler_ConcurrencyDeadlineFailsWithoutCodeReviewTurns(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRowCreatedAt(runID, issueID, orgID, models.SessionStatusPending, time.Now().Add(-10*time.Minute))...,
+		))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs.*workload_class = @workload_class`).
+		WithArgs(orgID, models.SandboxWorkloadClassCodeReview).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+	// The terminal path then performs best-effort session updates and Slack
+	// notification lookups; the handler ignores their errors, so the strict
+	// mock can let them fail while the test asserts the FatalError below.
+
+	orch := &orchestratorServiceStub{
+		runAgentFn: func(context.Context, *models.Session) error {
+			return fmt.Errorf("turns full: %w", agent.ErrSandboxTurnConcurrency)
+		},
+	}
+	handler := newRunAgentHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "run_agent", payload)
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "without review turns the deadline must still terminally fail the session")
+	require.NoError(t, mock.ExpectationsWereMet(), "the deadline check should consult admitted code-review turns before failing")
+}
+
 func TestLinearJobHandlers(t *testing.T) {
 	t.Parallel()
 
@@ -10786,6 +10879,64 @@ func TestRunAgentHandler_SandboxCapacityRetries(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSandboxTurnCapacityRetryTargetQuicklyReservesAlternateWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	jobID, orgID, lockToken := uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT j.id, j.org_id,.*effective_workload_class.*j.status,.*j.created_at.*FROM jobs j.*j.status = 'running'.*j.lock_token =`).
+		WithArgs(jobID, lockToken).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "job_type", "session_id", "workload_class", "status", "retry_window_started_at", "created_at"}).
+			AddRow(jobID, orgID, "run_agent", nil, models.SandboxWorkloadClassInteractive, models.JobStatusRunning, nil, time.Now()))
+	mock.ExpectQuery(`(?s)SELECT settings.*FROM organizations.*FOR NO KEY UPDATE`).
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow([]byte(`{"max_concurrent_runs":3}`)))
+	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\).*FROM jobs.*id <>.*job_type IN`).
+		WithArgs(orgID, jobID).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`(?s)WITH raw_load AS.*candidate_load AS.*SELECT id.*FROM candidate_load`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassInteractive).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-with-space"))
+	mock.ExpectQuery(`SELECT pg_try_advisory_xact_lock`).
+		WithArgs("worker-with-space").
+		WillReturnRows(pgxmock.NewRows([]string{"locked"}).AddRow(true))
+	mock.ExpectQuery(`(?s)SELECT.*FROM nodes n.*WHERE n.id =`).
+		WithArgs(jobID, "worker-with-space", pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"live", "local_reserved", "sandbox_turn_local_reserved", "max_active", "interactive_reserved", "pending_durable_reserved", "running_durable_reserved"}).AddRow(1, 0, 0, 4, 1, 0, 0))
+	mock.ExpectExec(`(?s)UPDATE jobs.*sandbox_slot_reserved_until =`).
+		WithArgs(models.SandboxWorkloadClassInteractive, "worker-with-space", pgxmock.AnyArg(), jobID, models.JobStatusRunning, lockToken).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+	mock.ExpectRollback()
+
+	ctx := jobctx.WithLockToken(jobctx.WithJobID(jobctx.WithWorkerNodeID(context.Background(), "worker-full"), jobID), lockToken)
+	targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, zerolog.Nop())
+	require.NotNil(t, targetNodeID, "capacity retry should return the atomically reserved alternate worker")
+	require.Equal(t, "worker-with-space", *targetNodeID, "capacity retry should exclude the full worker")
+	require.False(t, clearTargetNodeID, "capacity retry should preserve the new target reservation")
+	require.Equal(t, sandboxAlternateWorkerRetryDelay, retryAfter, "capacity retry should use the short alternate-worker handoff delay")
+	require.Less(t, retryAfter, sandboxCapacityRetryDelay, "alternate-worker handoff should remain faster than a full-fleet retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "alternate selection and reservation should commit before the quick retry")
+}
+
+func TestSandboxTurnCapacityRetryTargetClearsPinWhenFencingTokenIsMissing(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	ctx := jobctx.WithJobID(context.Background(), uuid.New())
+	targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, zerolog.Nop())
+
+	require.Nil(t, targetNodeID, "routing failure should not preserve an unverified worker target")
+	require.True(t, clearTargetNodeID, "routing failure should clear the current target so another worker can claim the retry")
+	require.Equal(t, sandboxCapacityRetryDelay, retryAfter, "routing failure should use fleet backoff instead of a tight retry loop")
+	require.NoError(t, mock.ExpectationsWereMet(), "missing fencing token should be detected before any database routing call")
+}
+
 func TestRunAgentHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAvailable(t *testing.T) {
 	t.Parallel()
 
@@ -11889,6 +12040,384 @@ func TestContinueSessionHandler_WrapsSnapshotPendingAsRetryable(t *testing.T) {
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before bailing")
 }
 
+func TestContinueSessionHandler_PreservesContinuationWhileWaitingForOrgCapacity(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID, sessionID, issueID := uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+		))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+		))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(context.Context, *models.Session, *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("review turns full: %w", agent.ErrSandboxTurnConcurrency)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "org-capacity wait should remain retryable")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxTurnConcurrency, "retry should preserve the org-capacity sentinel")
+	require.True(t, retryable.BypassMaxRetryDuration, "an accepted continuation should not dead-letter under the generic eight-minute retry window")
+	require.NotNil(t, retryable.RetryAfter, "org-capacity wait should use an explicit policy delay")
+	require.Equal(t, sandboxOrgLimitRetryDelay, *retryable.RetryAfter, "org-capacity wait should poll at the review admission cadence")
+	require.NoError(t, mock.ExpectationsWereMet(), "continuation capacity wait should only reload the tenant-scoped session")
+}
+
+func TestContinueSessionHandler_StopsCapacityRetryAfterTerminalOrCancel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		reloadedStatus   models.SessionStatus
+		pendingCancel    bool
+		expectCancelRead bool
+	}{
+		{
+			name:           "session became non-resumable terminal",
+			reloadedStatus: models.SessionStatusSkipped,
+		},
+		{
+			name:             "session has pending cancellation",
+			reloadedStatus:   models.SessionStatusRunning,
+			pendingCancel:    true,
+			expectCancelRead: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			stores, mock := newTestStores(t)
+			defer mock.Close()
+
+			orgID, sessionID, issueID, siblingJobID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			mock.ExpectQuery("SELECT .* FROM sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+					workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+				))
+			mock.ExpectQuery("SELECT .* FROM sessions").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+					workerSessionRow(sessionID, issueID, orgID, tt.reloadedStatus, 2, nil, nil)...,
+				))
+			if tt.expectCancelRead {
+				mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+					WithArgs(orgID, sessionID).
+					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.pendingCancel))
+				mock.ExpectBegin()
+				mock.ExpectQuery(`(?s)SELECT id.*FROM jobs.*org_id = @org_id.*id <> @current_job_id.*job_type = 'continue_session'.*status = 'pending'.*payload->>'session_id' = @session_id.*FOR UPDATE`).
+					WithArgs(orgID, uuid.Nil, sessionID.String()).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(siblingJobID))
+				mock.ExpectQuery(`(?s)SELECT id.*FROM organizations.*id = @org_id.*FOR NO KEY UPDATE`).
+					WithArgs(orgID).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(orgID))
+				mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs j.*j\.id <> @current_job_id.*capacity_cleanup`).
+					WithArgs(orgID, uuid.Nil, sessionID.String()).
+					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+				mock.ExpectExec(`(?s)UPDATE session_cancel_requests.*SET delivered_at = now\(\).*delivered_at IS NULL`).
+					WithArgs(orgID, sessionID).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectQuery(`(?s)UPDATE sessions SET status = @status, completed_at = now\(\).*RETURNING`).
+					WithArgs(string(models.SessionStatusCancelled), sessionID, orgID).
+					WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+						workerSessionRow(sessionID, issueID, orgID, models.SessionStatusCancelled, 2, nil, nil)...,
+					))
+				mock.ExpectExec(`(?s)UPDATE jobs.*status = 'cancelled'.*id = ANY\(@sibling_job_ids\).*job_type = 'continue_session'.*payload->>'session_id' = @session_id`).
+					WithArgs(orgID, []uuid.UUID{siblingJobID}, sessionID.String()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectQuery(`(?s)UPDATE session_threads.*status = @status.*session_id = @session_id.*org_id = @org_id.*RETURNING id`).
+					WithArgs(models.ThreadStatusCancelled, sessionID, orgID).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}))
+				mock.ExpectCommit()
+				mock.ExpectRollback()
+			}
+
+			orch := &orchestratorServiceStub{
+				continueSessionFn: func(context.Context, *models.Session, *agent.ContinueSessionOptions) error {
+					return fmt.Errorf("turns full: %w", agent.ErrSandboxTurnConcurrency)
+				},
+			}
+			handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+			payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+			err := handler(context.Background(), "continue_session", payload)
+			require.NoError(t, err, "terminal or cancelled capacity wait should stop instead of bypassing the retry deadline")
+			require.Equal(t, 1, orch.continueSessionCalls, "handler should observe the final admission rejection before rechecking durable state")
+			require.NoError(t, mock.ExpectationsWereMet(), "capacity retry should reload terminal and cancellation state")
+		})
+	}
+}
+
+func TestContinueSessionHandler_CancelsAssociatedThreadForPendingSessionCancellation(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID, sessionID, threadID, issueID, siblingJobID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+		))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT id.*FROM jobs.*org_id = @org_id.*id <> @current_job_id.*job_type = 'continue_session'.*status = 'pending'.*payload->>'session_id' = @session_id.*FOR UPDATE`).
+		WithArgs(orgID, uuid.Nil, sessionID.String()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(siblingJobID))
+	mock.ExpectQuery(`(?s)SELECT id.*FROM organizations.*id = @org_id.*FOR NO KEY UPDATE`).
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(orgID))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs j.*j\.id <> @current_job_id.*capacity_cleanup`).
+		WithArgs(orgID, uuid.Nil, sessionID.String()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectExec(`(?s)UPDATE session_cancel_requests.*SET delivered_at = now\(\).*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery(`(?s)UPDATE sessions SET status = @status, completed_at = now\(\).*RETURNING`).
+		WithArgs(string(models.SessionStatusCancelled), sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusCancelled, 2, nil, nil)...,
+		))
+	mock.ExpectExec(`(?s)UPDATE jobs.*status = 'cancelled'.*id = ANY\(@sibling_job_ids\).*job_type = 'continue_session'.*payload->>'session_id' = @session_id`).
+		WithArgs(orgID, []uuid.UUID{siblingJobID}, sessionID.String()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery(`(?s)UPDATE session_threads.*status = @status.*session_id = @session_id.*org_id = @org_id.*RETURNING id`).
+		WithArgs(models.ThreadStatusCancelled, sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(threadID))
+	mock.ExpectCommit()
+	mock.ExpectRollback()
+
+	orch := &orchestratorServiceStub{}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `","capacity_waited":true}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.NoError(t, err, "pending session cancellation should stop capacity-waited thread work")
+	require.Equal(t, 0, orch.continueSessionCalls, "cancelled session and thread should not reach the orchestrator")
+	require.NoError(t, mock.ExpectationsWereMet(), "session, matching thread, and cancel request should finalize in one transaction")
+}
+
+func TestContinueSessionHandler_PreservesCancellationForLiveSiblingTurn(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID, sessionID, issueID, currentJobID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+		))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)SELECT id.*FROM jobs.*org_id = @org_id.*id <> @current_job_id.*job_type = 'continue_session'.*status = 'pending'.*payload->>'session_id' = @session_id.*FOR UPDATE`).
+		WithArgs(orgID, currentJobID, sessionID.String()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(`(?s)SELECT id.*FROM organizations.*id = @org_id.*FOR NO KEY UPDATE`).
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(orgID))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM jobs j.*j\.id <> @current_job_id.*capacity_cleanup`).
+		WithArgs(orgID, currentJobID, sessionID.String()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+	mock.ExpectRollback()
+
+	orch := &orchestratorServiceStub{}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","capacity_waited":true,"capacity_cleanup":true}`)
+	ctx := jobctx.WithJobID(context.Background(), currentJobID)
+
+	err := handler(ctx, "continue_session", payload)
+	require.NoError(t, err, "queued cleanup should stop without stealing a live sibling turn's cancellation")
+	require.Equal(t, 0, orch.continueSessionCalls, "cancellation cleanup must not reach the orchestrator")
+	require.NoError(t, mock.ExpectationsWereMet(), "live sibling should retain the undelivered session cancellation request")
+}
+
+func TestContinueSessionHandler_StopsCleanupAfterCancellationWasConsumed(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID, sessionID, issueID := uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+		))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+
+	orch := &orchestratorServiceStub{}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","capacity_waited":true,"capacity_cleanup":true}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.NoError(t, err, "persisted cleanup marker should stop work after a live turn consumed cancellation")
+	require.Equal(t, 0, orch.continueSessionCalls, "consumed cancellation must not let the older queued continuation run")
+	require.NoError(t, mock.ExpectationsWereMet(), "consumed cancellation cleanup should stop after the tenant-scoped request check")
+}
+
+func TestShouldStopContinueSessionForDurableStatePreservesResumableStatuses(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range models.ResumableSessionStatuses {
+		status := status
+		t.Run(string(status), func(t *testing.T) {
+			t.Parallel()
+
+			stores, mock := newTestStores(t)
+			defer mock.Close()
+
+			orgID, sessionID := uuid.New(), uuid.New()
+			mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+				WithArgs(orgID, sessionID).
+				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+
+			stop, err := shouldStopContinueSessionForDurableState(context.Background(), stores, models.Session{
+				ID:     sessionID,
+				OrgID:  orgID,
+				Status: status,
+			}, uuid.Nil, false, false)
+			require.NoError(t, err, "durable continuation state should load successfully")
+			require.False(t, stop, "an accepted continuation should remain runnable from every resumable session status")
+			require.NoError(t, mock.ExpectationsWereMet(), "resumable-state checks should remain tenant scoped and cancellation aware")
+		})
+	}
+}
+
+func TestContinueSessionHandler_FinalizesThreadBeforeStoppingCapacityCleanup(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID, sessionID, threadID, issueID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	sessionRow := workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)
+	requestedAt := time.Now().Add(-time.Minute)
+	threadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)
+	threadRow[26] = &requestedAt
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(threadRow...))
+	mock.ExpectExec("UPDATE session_threads SET status = @status").
+		WithArgs(models.ThreadStatusCancelled, threadID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	orch := &orchestratorServiceStub{}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `","capacity_waited":true,"capacity_cleanup":true}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.NoError(t, err, "capacity cleanup should finalize a requested thread cancellation before stopping")
+	require.Equal(t, 0, orch.continueSessionCalls, "cancelled capacity-cleanup work must not reach the orchestrator")
+	require.NoError(t, mock.ExpectationsWereMet(), "cleanup should revalidate tenant-scoped durable state and finalize the thread")
+}
+
+// TestContinueSessionHandler_FinalizesActiveThreadWhenSiblingConsumedCancel
+// locks the sibling-race contract: when routing marked a queued continuation
+// for capacity cleanup but a live sibling consumed the session-scoped cancel
+// before this job ran, consuming the job must still finalize its distinct
+// queued thread — otherwise the thread stays active with no backing job.
+func TestContinueSessionHandler_FinalizesActiveThreadWhenSiblingConsumedCancel(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID, sessionID, threadID, issueID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	sessionRow := workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)
+	// The thread is still plain running: no cancelled status and no
+	// cancel_requested_at marker — the sibling consumed the session-scoped
+	// request without touching this queued thread.
+	threadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(threadRow...))
+	mock.ExpectExec("UPDATE session_threads SET status = @status").
+		WithArgs(models.ThreadStatusCancelled, threadID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	orch := &orchestratorServiceStub{}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `","capacity_waited":true,"capacity_cleanup":true}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.NoError(t, err, "capacity cleanup should stop cleanly after finalizing the orphaned thread")
+	require.Equal(t, 0, orch.continueSessionCalls, "capacity-cleanup work must not reach the orchestrator")
+	require.NoError(t, mock.ExpectationsWereMet(), "cleanup must cancel the still-active queued thread before consuming the job")
+}
+
+func TestShouldStopContinueSessionForDurableStateRejectsThreadFromAnotherSession(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID, sessionID, otherSessionID, threadID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	requestedAt := time.Now().Add(-time.Minute)
+	threadRow := workerSessionThreadRow(threadID, otherSessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)
+	threadRow[26] = &requestedAt
+	mock.ExpectQuery(`(?s)SELECT EXISTS.*FROM session_cancel_requests.*delivered_at IS NULL`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(threadID, orgID).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(threadRow...))
+
+	stop, err := shouldStopContinueSessionForDurableState(context.Background(), stores, models.Session{
+		ID:     sessionID,
+		OrgID:  orgID,
+		Status: models.SessionStatusRunning,
+	}, threadID, true, false)
+	require.Error(t, err, "cross-session thread payload should be rejected")
+	require.False(t, stop, "cross-session thread payload should not mutate or stop the requested session")
+	require.Contains(t, err.Error(), "does not belong", "error should explain the session-thread ownership mismatch")
+	require.NoError(t, mock.ExpectationsWereMet(), "ownership mismatch should not issue a thread status update")
+}
+
 func TestContinueSessionHandler_PinsWrongNodeRetryToSandboxOwner(t *testing.T) {
 	t.Parallel()
 
@@ -11967,6 +12496,8 @@ func TestContinueSessionHandler_SandboxCapacityRetries(t *testing.T) {
 	require.ErrorAs(t, err, &retryable, "ErrSandboxCapacity must be wrapped as RetryableError so the attempt counter is not consumed")
 	require.NotNil(t, retryable.RetryAfter, "sandbox capacity retries should use a fixed short delay")
 	require.Equal(t, time.Duration(0), *retryable.RetryAfter, "code-review continuations should reroute immediately when another worker has capacity")
+	require.NotNil(t, retryable.MaxRetryDuration, "continuation capacity retries should use the durable fleet-wait window")
+	require.Equal(t, maxRetryableDuration, *retryable.MaxRetryDuration, "continuation capacity retries should preserve the bounded fleet-wait deadline")
 	require.ErrorIs(t, retryable.Err, agent.ErrSandboxCapacity, "the wrapped error must preserve the ErrSandboxCapacity sentinel")
 	require.NotNil(t, retryable.TargetNodeID, "sandbox capacity retries should target a worker that advertises available sandbox capacity")
 	require.Equal(t, "worker-with-space", *retryable.TargetNodeID, "sandbox capacity retries should avoid requeueing onto the full worker when another worker has capacity")
@@ -12010,6 +12541,8 @@ func TestContinueSessionHandler_SandboxCapacityRetriesClearsTargetWhenNoWorkerAv
 	require.ErrorAs(t, err, &retryable, "ErrSandboxCapacity must be wrapped as RetryableError so the attempt counter is not consumed")
 	require.NotNil(t, retryable.RetryAfter, "sandbox capacity retries should use an explicit fleet-full delay")
 	require.Equal(t, 10*time.Second, *retryable.RetryAfter, "sandbox capacity retries should retain the backoff when the fleet is genuinely full")
+	require.NotNil(t, retryable.MaxRetryDuration, "continuation capacity retries should use the durable fleet-wait window")
+	require.Equal(t, maxRetryableDuration, *retryable.MaxRetryDuration, "continuation capacity retries should preserve the bounded fleet-wait deadline")
 	require.Nil(t, retryable.TargetNodeID, "sandbox capacity retries should not pin to a worker when none advertise available capacity")
 	require.True(t, retryable.ClearTargetNodeID, "sandbox capacity retries should clear any stale target pin when no replacement worker is selected")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")

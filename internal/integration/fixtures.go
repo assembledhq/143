@@ -70,6 +70,27 @@ func seedWorkerNode(t *testing.T, pool *pgxpool.Pool, nodeID string) {
 	}
 }
 
+func setWorkerSandboxCapacity(t *testing.T, pool *pgxpool.Pool, nodeID string, maxActive int) {
+	t.Helper()
+	tag, err := pool.Exec(context.Background(), `
+		UPDATE nodes
+		SET metadata = metadata || jsonb_build_object(
+			'live_sandbox_count', 0,
+			'reserved_sandbox_count', 0,
+			'sandbox_turn_reserved_count', 0,
+			'max_active_sandboxes', $1::integer,
+			'interactive_reserved_sandbox_slots', 0,
+			'active_job_count', 0
+		)
+		WHERE id = $2`, maxActive, nodeID)
+	if err != nil {
+		t.Fatalf("set worker sandbox capacity: %v", err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("set worker sandbox capacity: expected to update 1 row, updated %d", tag.RowsAffected())
+	}
+}
+
 // setNodeStatus forces a seeded node into a status (e.g. 'draining') while
 // leaving its heartbeat fresh — the state a rolling deploy leaves behind.
 func setNodeStatus(t *testing.T, pool *pgxpool.Pool, nodeID, status string) {
@@ -131,7 +152,7 @@ func seedSession(t *testing.T, pool *pgxpool.Pool, orgID uuid.UUID, opts session
 		InteractionMode:  opts.Interaction,
 		ValidationPolicy: opts.Validation,
 		Title:            &title,
-		ExecutionBrief:       &title,
+		ExecutionBrief:   &title,
 		RepositoryID:     opts.RepositoryID,
 	}
 	store := db.NewSessionStore(pool)

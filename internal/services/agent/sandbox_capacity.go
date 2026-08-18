@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 // ErrSandboxCapacity is returned when a worker node cannot safely start one
@@ -35,6 +37,7 @@ type SandboxCapacityGateConfig struct {
 	Counter                LiveSandboxCounter
 	PressureCleaner        SandboxPressureCleaner
 	MaxActive              int
+	InteractiveReserved    int
 	CountTimeout           time.Duration
 	PressureCleanupTimeout time.Duration
 	NodeID                 string
@@ -43,32 +46,37 @@ type SandboxCapacityGateConfig struct {
 
 // SandboxCapacityRequest carries tracing fields for an admission attempt.
 type SandboxCapacityRequest struct {
-	Purpose   string
-	SessionID string
-	OrgID     string
+	Purpose       string
+	SessionID     string
+	OrgID         string
+	WorkloadClass models.SandboxWorkloadClass
 }
 
 // SandboxCapacitySnapshot is a best-effort view used in worker heartbeats.
 type SandboxCapacitySnapshot struct {
-	Live       int
-	Reserved   int
-	MaxActive  int
-	CountError string
+	Live                int
+	Reserved            int
+	SandboxTurnReserved int
+	MaxActive           int
+	InteractiveReserved int
+	CountError          string
 }
 
 // SandboxCapacityGate gates new local sandbox creation against the current
 // live Docker count plus in-flight reservations.
 type SandboxCapacityGate struct {
-	counter   LiveSandboxCounter
-	cleaner   SandboxPressureCleaner
-	maxActive int
-	countTTL  time.Duration
-	cleanTTL  time.Duration
-	nodeID    string
-	logger    zerolog.Logger
+	counter             LiveSandboxCounter
+	cleaner             SandboxPressureCleaner
+	maxActive           int
+	interactiveReserved int
+	countTTL            time.Duration
+	cleanTTL            time.Duration
+	nodeID              string
+	logger              zerolog.Logger
 
-	mu       sync.Mutex
-	reserved int
+	mu                  sync.Mutex
+	reserved            int
+	sandboxTurnReserved int
 	// releaseGeneration invalidates live counts taken before a reservation release completes.
 	releaseGeneration uint64
 }
@@ -84,13 +92,14 @@ func NewSandboxCapacityGate(cfg SandboxCapacityGateConfig) *SandboxCapacityGate 
 		cleanTTL = defaultSandboxPressureCleanupTimeout
 	}
 	return &SandboxCapacityGate{
-		counter:   cfg.Counter,
-		cleaner:   cfg.PressureCleaner,
-		maxActive: cfg.MaxActive,
-		countTTL:  countTTL,
-		cleanTTL:  cleanTTL,
-		nodeID:    cfg.NodeID,
-		logger:    cfg.Logger,
+		counter:             cfg.Counter,
+		cleaner:             cfg.PressureCleaner,
+		maxActive:           cfg.MaxActive,
+		interactiveReserved: clampInteractiveSandboxReserve(cfg.MaxActive, cfg.InteractiveReserved),
+		countTTL:            countTTL,
+		cleanTTL:            cleanTTL,
+		nodeID:              cfg.NodeID,
+		logger:              cfg.Logger,
 	}
 }
 
@@ -100,6 +109,15 @@ func (g *SandboxCapacityGate) MaxActive() int {
 		return 0
 	}
 	return g.maxActive
+}
+
+// InteractiveReserved returns the number of slots code-review work may not
+// consume on this worker.
+func (g *SandboxCapacityGate) InteractiveReserved() int {
+	if g == nil {
+		return 0
+	}
+	return g.interactiveReserved
 }
 
 // SetPressureCleaner installs or replaces the cleanup hook used when a worker
@@ -127,6 +145,10 @@ func (g *SandboxCapacityGate) ReservedCount() int {
 func (g *SandboxCapacityGate) Acquire(ctx context.Context, req SandboxCapacityRequest) (*SandboxCapacityReservation, error) {
 	if g == nil {
 		return nil, nil
+	}
+	req.WorkloadClass = normalizedSandboxWorkloadClass(req.WorkloadClass)
+	if err := req.WorkloadClass.Validate(); err != nil {
+		return nil, fmt.Errorf("sandbox capacity workload class: %w", err)
 	}
 	if g.maxActive <= 0 {
 		err := fmt.Errorf("%w: max_active_sandboxes is not configured", ErrSandboxCapacity)
@@ -159,11 +181,16 @@ func (g *SandboxCapacityGate) Acquire(ctx context.Context, req SandboxCapacityRe
 		}
 
 		total := live + g.reserved
-		if total >= g.maxActive {
+		effectiveMax := g.maxActive
+		if req.WorkloadClass == models.SandboxWorkloadClassCodeReview {
+			effectiveMax -= g.interactiveReserved
+		}
+		if total >= effectiveMax {
 			reserved := g.reserved
 			cleaner := g.cleaner
+			physicallyFull := total >= g.maxActive
 			g.mu.Unlock()
-			if !cleanedForPressure && cleaner != nil {
+			if physicallyFull && !cleanedForPressure && cleaner != nil {
 				cleanedForPressure = true
 				cleanCtx, cancel := context.WithTimeout(ctx, g.cleanTTL)
 				cleanErr := cleaner.ReapForCapacity(cleanCtx, time.Now())
@@ -175,16 +202,20 @@ func (g *SandboxCapacityGate) Acquire(ctx context.Context, req SandboxCapacityRe
 				}
 				continue
 			}
-			err := fmt.Errorf("%w: %d/%d sandboxes active or reserved", ErrSandboxCapacity, total, g.maxActive)
+			err := fmt.Errorf("%w: %d/%d sandboxes active or reserved for %s workload", ErrSandboxCapacity, total, effectiveMax, req.WorkloadClass)
 			g.logCapacity(req, live, reserved).Msg("sandbox capacity reached; rejecting sandbox admission")
 			return nil, err
 		}
 		g.reserved++
+		sandboxTurnReservation := isSandboxTurnCapacityPurpose(req.Purpose)
+		if sandboxTurnReservation {
+			g.sandboxTurnReserved++
+		}
 		reserved := g.reserved
 		g.mu.Unlock()
 
 		g.logCapacity(req, live, reserved).Msg("sandbox capacity reserved")
-		return &SandboxCapacityReservation{gate: g}, nil
+		return &SandboxCapacityReservation{gate: g, sandboxTurn: sandboxTurnReservation}, nil
 	}
 }
 
@@ -196,11 +227,14 @@ func (g *SandboxCapacityGate) Snapshot(ctx context.Context) SandboxCapacitySnaps
 
 	g.mu.Lock()
 	reserved := g.reserved
+	sandboxTurnReserved := g.sandboxTurnReserved
 	g.mu.Unlock()
 
 	snapshot := SandboxCapacitySnapshot{
-		Reserved:  reserved,
-		MaxActive: g.maxActive,
+		Reserved:            reserved,
+		SandboxTurnReserved: sandboxTurnReserved,
+		MaxActive:           g.maxActive,
+		InteractiveReserved: g.interactiveReserved,
 	}
 	if g.counter == nil {
 		snapshot.CountError = "live sandbox counter is not configured"
@@ -228,8 +262,30 @@ func (g *SandboxCapacityGate) logCapacity(req SandboxCapacityRequest, live, rese
 		Int("reserved_sandboxes", reserved).
 		Int("max_active_sandboxes", g.maxActive).
 		Str("purpose", req.Purpose).
+		Str("workload_class", string(normalizedSandboxWorkloadClass(req.WorkloadClass))).
 		Str("session_id", req.SessionID).
 		Str("org_id", req.OrgID)
+}
+
+func normalizedSandboxWorkloadClass(class models.SandboxWorkloadClass) models.SandboxWorkloadClass {
+	if class == "" {
+		return models.SandboxWorkloadClassInteractive
+	}
+	return class
+}
+
+func isSandboxTurnCapacityPurpose(purpose string) bool {
+	return purpose == "agent_run" || purpose == "continue_session"
+}
+
+func clampInteractiveSandboxReserve(maxActive, configured int) int {
+	if configured <= 0 || maxActive <= 1 {
+		return 0
+	}
+	if configured >= maxActive {
+		return maxActive - 1
+	}
+	return configured
 }
 
 // HasSpeculativeHeadroom returns true when the worker has at least minFree
@@ -250,8 +306,9 @@ func (g *SandboxCapacityGate) HasSpeculativeHeadroom(ctx context.Context, minFre
 
 // SandboxCapacityReservation releases a previously acquired slot.
 type SandboxCapacityReservation struct {
-	gate *SandboxCapacityGate
-	once sync.Once
+	gate        *SandboxCapacityGate
+	sandboxTurn bool
+	once        sync.Once
 }
 
 // Release returns the reservation to the gate. It is safe to call repeatedly.
@@ -264,6 +321,9 @@ func (r *SandboxCapacityReservation) Release() {
 		defer r.gate.mu.Unlock()
 		if r.gate.reserved > 0 {
 			r.gate.reserved--
+		}
+		if r.sandboxTurn && r.gate.sandboxTurnReserved > 0 {
+			r.gate.sandboxTurnReserved--
 		}
 		r.gate.releaseGeneration++
 	})

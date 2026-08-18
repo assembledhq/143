@@ -1,6 +1,6 @@
 # Design: Database Schema
 
-> **Status:** Implemented | **Last reviewed:** 2026-08-03
+> **Status:** Implemented | **Last reviewed:** 2026-08-10
 
 This document defines the PostgreSQL schema for 143.dev. All entities flow through the pipeline: ingestion -> prioritization -> agent run -> validation -> PR -> deploy -> observation.
 
@@ -1104,6 +1104,7 @@ Durable, database-backed async work queue for the full pipeline (`ingest_webhook
 | org_id | uuid | FK -> organizations |
 | queue | text | queue name (`ingestion`, `prioritization`, `agent`, `validation`, `pr`, `observability`) |
 | job_type | text | e.g. `ingest_webhook`, `run_agent`, `open_pr` |
+| workload_class | text | sandbox admission class: `interactive` or `code_review`; defaults to `interactive` |
 | payload | jsonb | typed job input payload |
 | priority | int | higher number = higher priority (default 0) |
 | status | text | `pending`, `running`, `succeeded`, `failed`, `cancelled`, `dead_letter` |
@@ -1115,6 +1116,7 @@ Durable, database-backed async work queue for the full pipeline (`ingest_webhook
 | last_error | text | latest error message |
 | dedupe_key | text | optional idempotency key for coalescing duplicates |
 | retry_window_started_at | timestamptz | first bounded external retry, preserved across worker restarts |
+| sandbox_slot_reserved_until | timestamptz | nullable expiry for an atomic pre-claim worker sandbox-slot reservation |
 | created_at | timestamptz | |
 | updated_at | timestamptz | |
 | completed_at | timestamptz | nullable |
@@ -1124,6 +1126,8 @@ Durable, database-backed async work queue for the full pipeline (`ingest_webhook
 - `(queue, status, run_at, priority DESC)` — queue-specific workers
 - `(org_id, created_at DESC)` — org job history
 - `(locked_by_node_id, locked_at)` — dead-worker recovery
+- `(priority DESC, (CASE WHEN workload_class = 'interactive' THEN 0 ELSE 1 END), created_at ASC, run_at)` partial for pending `run_agent`/`continue_session` — capacity-aware sandbox routing and interactive-first ordering
+- `(org_id, status)` partial for pending/running `run_agent`/`continue_session` — shared organization sandbox-turn admission counts
 - `(queue, dedupe_key)` unique where `dedupe_key IS NOT NULL AND status IN ('pending', 'running')` — in-flight dedupe
 
 ### `nodes`

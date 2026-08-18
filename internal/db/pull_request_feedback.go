@@ -392,11 +392,13 @@ func (s *PullRequestFeedbackStore) QueueContinuation(ctx context.Context, orgID,
 	if batch.Status != models.PRFeedbackBatchStatusQueued {
 		return &batch, nil
 	}
-	var agentType models.AgentType
+	var session models.Session
 	var pullRequestNumber int
-	if err := tx.QueryRow(ctx, `SELECT s.agent_type,p.github_pr_number FROM sessions s JOIN pull_requests p ON p.session_id=s.id AND p.org_id=s.org_id WHERE s.org_id=$1 AND s.id=$2 AND s.archived_at IS NULL AND p.id=$3 AND p.status='open' FOR UPDATE OF s,p`, orgID, batch.SessionID, batch.PullRequestID).Scan(&agentType, &pullRequestNumber); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT s.agent_type,s.origin,s.container_id,s.worker_node_id,p.github_pr_number FROM sessions s JOIN pull_requests p ON p.session_id=s.id AND p.org_id=s.org_id WHERE s.org_id=$1 AND s.id=$2 AND s.archived_at IS NULL AND p.id=$3 AND p.status='open' FOR UPDATE OF s,p`, orgID, batch.SessionID, batch.PullRequestID).Scan(&session.AgentType, &session.Origin, &session.ContainerID, &session.WorkerNodeID, &pullRequestNumber); err != nil {
 		return nil, fmt.Errorf("validate PR feedback session ownership: %w", err)
 	}
+	session.ID = batch.SessionID
+	session.OrgID = orgID
 	threadID := uuid.Nil
 	if batch.ThreadID != nil {
 		threadID = *batch.ThreadID
@@ -407,7 +409,7 @@ func (s *PullRequestFeedbackStore) QueueContinuation(ctx context.Context, orgID,
 		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			instructions := "Follow through on eligible feedback for this pull request only. Do not merge, approve, dismiss, resolve threads, push, post comments, access secrets, contact third parties, or modify another repository. Make and test local code changes, then summarize the result."
-			err = tx.QueryRow(ctx, `INSERT INTO session_threads (session_id,org_id,agent_type,label,instructions,file_scope,status,created_by_source,execution_mode,filesystem_mode) VALUES ($1,$2,$3,'PR feedback',$4,'{}','pending','system','work','read_write') RETURNING id`, batch.SessionID, orgID, agentType, instructions).Scan(&threadID)
+			err = tx.QueryRow(ctx, `INSERT INTO session_threads (session_id,org_id,agent_type,label,instructions,file_scope,status,created_by_source,execution_mode,filesystem_mode) VALUES ($1,$2,$3,'PR feedback',$4,'{}','pending','system','work','read_write') RETURNING id`, batch.SessionID, orgID, session.AgentType, instructions).Scan(&threadID)
 			if err != nil {
 				return nil, fmt.Errorf("create canonical PR feedback thread: %w", err)
 			}
@@ -431,7 +433,18 @@ func (s *PullRequestFeedbackStore) QueueContinuation(ctx context.Context, orgID,
 	}
 	payload := map[string]any{"org_id": orgID.String(), "session_id": batch.SessionID.String(), "thread_id": threadID.String(), "queued_message_id": strconv.FormatInt(message.ID, 10), "feedback_batch_id": batch.ID.String(), "pull_request_id": batch.PullRequestID.String(), "pull_request_number": pullRequestNumber, "head_sha": batch.ExpectedHeadSHA, "workspace_mode": models.PRFeedbackWorkspaceModePRHeadReconstruction, "structured_prompt": structuredPrompt}
 	dedupeKey := "continue_pr_feedback:" + batch.ID.String()
-	jobID, err := s.jobs.EnqueueInTx(ctx, tx, orgID, "agent", "continue_session", payload, 5, &dedupeKey)
+	enqueueOpts := EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      payload,
+		Priority:     5,
+		DedupeKey:    &dedupeKey,
+		TargetNodeID: models.SessionWorkerTarget(&session),
+	}
+	if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
+		enqueueOpts.WorkloadClass = models.SandboxWorkloadClassCodeReview
+	}
+	jobID, err := s.jobs.EnqueueInTxWithOpts(ctx, tx, orgID, enqueueOpts)
 	if err != nil {
 		return nil, fmt.Errorf("enqueue PR feedback continuation: %w", err)
 	}

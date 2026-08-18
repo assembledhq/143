@@ -562,7 +562,7 @@ func enqueueContinueForLinearAgentInTx(ctx context.Context, jobs *db.JobStore, t
 
 func continueLinearAgentEnqueueOpts(orgID uuid.UUID, session models.Session) db.EnqueueOpts {
 	dedupe := db.ContinueSessionDedupeKey(session.ID)
-	return db.EnqueueOpts{
+	opts := db.EnqueueOpts{
 		Queue:   "agent",
 		JobType: "continue_session",
 		Payload: map[string]any{
@@ -573,4 +573,8 @@ func continueLinearAgentEnqueueOpts(orgID uuid.UUID, session models.Session) db.
 		DedupeKey:    &dedupe,
 		TargetNodeID: models.SessionWorkerTarget(&session),
 	}
+	if models.SandboxWorkloadClassForSession(&session) == models.SandboxWorkloadClassCodeReview {
+		opts.WorkloadClass = models.SandboxWorkloadClassCodeReview
+	}
+	return opts
 }

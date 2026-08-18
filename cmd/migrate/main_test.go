@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/golang-migrate/migrate/v4"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,6 +31,195 @@ func (f *fakeDirtyMigrationRepairer) Force(version int) error {
 	f.forceInvoked = true
 	f.forcedTo = version
 	return f.forceErr
+}
+
+func TestPrepareSandboxWorkloadRoutingOnConn(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		schemaReady    bool
+		invalidIndexes map[string]bool
+	}{
+		{
+			name: "skips databases before the prerequisite schema exists",
+		},
+		{
+			name:        "adds columns backfills reviews and creates indexes concurrently",
+			schemaReady: true,
+		},
+		{
+			name:        "rebuilds an invalid interrupted concurrent index",
+			schemaReady: true,
+			invalidIndexes: map[string]bool{
+				"idx_jobs_sandbox_routing": true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create migration preparation mock")
+			defer mock.Close()
+
+			mock.ExpectQuery(`(?s)SELECT to_regclass.*information_schema\.columns`).
+				WillReturnRows(pgxmock.NewRows([]string{"schema_ready"}).AddRow(tt.schemaReady))
+			if tt.schemaReady {
+				mock.ExpectExec(`SET lock_timeout = '5s'`).
+					WillReturnResult(pgxmock.NewResult("SET", 0))
+				mock.ExpectExec(`(?s)ALTER TABLE jobs.*ADD COLUMN IF NOT EXISTS workload_class.*sandbox_slot_reserved_until`).
+					WillReturnResult(pgxmock.NewResult("ALTER TABLE", 0))
+				mock.ExpectExec(`(?s)WITH active_sandbox_jobs AS MATERIALIZED.*j\.status IN \('pending', 'running'\).*UPDATE jobs j.*JOIN sessions s.*s\.id = active\.session_id.*s\.origin = 'code_review'`).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+				mock.ExpectExec(`SET lock_timeout = '0'`).
+					WillReturnResult(pgxmock.NewResult("SET", 0))
+				for _, index := range sandboxRoutingConcurrentIndexes {
+					invalid := tt.invalidIndexes[index.name]
+					mock.ExpectQuery(`(?s)SELECT EXISTS.*pg_index.*NOT i\.indisvalid`).
+						WithArgs(index.name).
+						WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(invalid))
+					if invalid {
+						mock.ExpectExec("DROP INDEX CONCURRENTLY IF EXISTS " + index.name).
+							WillReturnResult(pgxmock.NewResult("DROP INDEX", 0))
+					}
+					mock.ExpectExec(`(?s)CREATE INDEX CONCURRENTLY IF NOT EXISTS ` + index.name).
+						WillReturnResult(pgxmock.NewResult("CREATE INDEX", 0))
+				}
+			}
+
+			err = prepareSandboxWorkloadRoutingOnConn(context.Background(), mock)
+			require.NoError(t, err, "sandbox workload routing preparation should complete")
+			require.NoError(t, mock.ExpectationsWereMet(), "preparation should execute the staged hot-table rollout in order")
+		})
+	}
+}
+
+func TestRepairSandboxWorkloadRoutingDirtyMigration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		repairer      fakeDirtyMigrationRepairer
+		expectRepair  bool
+		expectForce   bool
+		expectedForce int
+		expectError   bool
+	}{
+		{
+			name:          "rewinds dirty routing migration",
+			repairer:      fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion, dirty: true},
+			expectRepair:  true,
+			expectForce:   true,
+			expectedForce: sandboxWorkloadRoutingMigrationVersion - 1,
+		},
+		{
+			name:          "rewinds dirty routing validation migration",
+			repairer:      fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingValidationMigrationVersion, dirty: true},
+			expectRepair:  true,
+			expectForce:   true,
+			expectedForce: sandboxWorkloadRoutingValidationMigrationVersion - 1,
+		},
+		{
+			name:     "leaves clean routing migration unchanged",
+			repairer: fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion},
+		},
+		{
+			name:     "leaves unrelated dirty migration for normal diagnostics",
+			repairer: fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion - 1, dirty: true},
+		},
+		{
+			name:     "allows an empty database",
+			repairer: fakeDirtyMigrationRepairer{versionErr: migrate.ErrNilVersion},
+		},
+		{
+			name:        "returns version inspection failure",
+			repairer:    fakeDirtyMigrationRepairer{versionErr: errors.New("version unavailable")},
+			expectError: true,
+		},
+		{
+			name:          "returns force failure",
+			repairer:      fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion, dirty: true, forceErr: errors.New("force rejected")},
+			expectForce:   true,
+			expectedForce: sandboxWorkloadRoutingMigrationVersion - 1,
+			expectError:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			repairer := tt.repairer
+			repaired, err := repairSandboxWorkloadRoutingDirtyMigration(&repairer)
+			if tt.expectError {
+				require.Error(t, err, "routing migration repair should return the expected failure")
+			} else {
+				require.NoError(t, err, "routing migration repair should complete without error")
+			}
+			require.Equal(t, tt.expectRepair, repaired, "routing migration repair should report whether it rewound an allowlisted routing migration")
+			require.Equal(t, tt.expectForce, repairer.forceInvoked, "routing migration repair should force only an allowlisted routing migration")
+			if tt.expectForce {
+				require.Equal(t, tt.expectedForce, repairer.forcedTo, "routing migration repair should rewind to the prior version")
+			}
+		})
+	}
+}
+
+func TestSandboxWorkloadRoutingPreparationRequired(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		reader    fakeDirtyMigrationRepairer
+		expected  bool
+		expectErr bool
+	}{
+		{
+			name:     "prepares a fresh database",
+			reader:   fakeDirtyMigrationRepairer{versionErr: migrate.ErrNilVersion},
+			expected: true,
+		},
+		{
+			name:     "prepares before routing migration",
+			reader:   fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion - 1},
+			expected: true,
+		},
+		{
+			name:     "allows recovery from dirty routing migration",
+			reader:   fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion, dirty: true},
+			expected: true,
+		},
+		{
+			name:   "skips after routing migration is applied",
+			reader: fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion},
+		},
+		{
+			name:   "skips later migration versions",
+			reader: fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion + 1},
+		},
+		{
+			name:      "returns migration state failures",
+			reader:    fakeDirtyMigrationRepairer{versionErr: errors.New("version unavailable")},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			required, err := sandboxWorkloadRoutingPreparationRequired(&tt.reader)
+			if tt.expectErr {
+				require.Error(t, err, "migration state inspection should return the expected failure")
+			} else {
+				require.NoError(t, err, "migration state inspection should complete")
+			}
+			require.Equal(t, tt.expected, required, "preparation should only run until migration 287 is safely applied")
+		})
+	}
 }
 
 func TestRepairKnownDirtyMigration(t *testing.T) {
@@ -57,6 +248,22 @@ func TestRepairKnownDirtyMigration(t *testing.T) {
 			expectedVersion:  codeReviewDisputesDirtyMigrationVersion,
 			expectedRepaired: true,
 			expectedForce:    codeReviewDisputesDirtyMigrationVersion - 1,
+			expectForce:      true,
+		},
+		{
+			name:             "repairs exact dirty sandbox workload routing migration",
+			repairer:         fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingMigrationVersion, dirty: true},
+			expectedVersion:  sandboxWorkloadRoutingMigrationVersion,
+			expectedRepaired: true,
+			expectedForce:    sandboxWorkloadRoutingMigrationVersion - 1,
+			expectForce:      true,
+		},
+		{
+			name:             "repairs exact dirty sandbox workload routing validation migration",
+			repairer:         fakeDirtyMigrationRepairer{version: sandboxWorkloadRoutingValidationMigrationVersion, dirty: true},
+			expectedVersion:  sandboxWorkloadRoutingValidationMigrationVersion,
+			expectedRepaired: true,
+			expectedForce:    sandboxWorkloadRoutingValidationMigrationVersion - 1,
 			expectForce:      true,
 		},
 		{
@@ -253,6 +460,33 @@ func TestMigrationsDoNotUseConcurrentIndexes(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestSandboxWorkloadRoutingMigrationIsStagedForHotTable(t *testing.T) {
+	t.Parallel()
+
+	shapeBody, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000287_sandbox_workload_routing.up.sql"))
+	require.NoError(t, err, "sandbox routing shape migration should be readable")
+	shapeSQL := string(shapeBody)
+	lockTimeoutAt := strings.Index(shapeSQL, "SET LOCAL lock_timeout")
+	alterJobsAt := strings.Index(shapeSQL, "ALTER TABLE jobs")
+	require.GreaterOrEqual(t, lockTimeoutAt, 0, "shape migration should install a lock timeout")
+	require.GreaterOrEqual(t, alterJobsAt, 0, "shape migration should alter the jobs table")
+	require.Less(t, lockTimeoutAt, alterJobsAt, "lock timeout should be installed before the first jobs-table DDL")
+	require.Contains(t, shapeSQL, "ADD COLUMN IF NOT EXISTS workload_class", "shape migration should tolerate columns preinstalled by migrate up")
+	require.Contains(t, shapeSQL, "s.origin = 'code_review'", "shape migration should preserve active code-review classification")
+	require.Contains(t, shapeSQL, "WITH active_sandbox_jobs AS MATERIALIZED", "backfill should first restrict the hot jobs-table driving set")
+	require.Contains(t, shapeSQL, "THEN (j.payload->>'session_id')::uuid", "backfill should guard and cast the payload value instead of casting the indexed sessions key")
+	require.Contains(t, shapeSQL, "s.id = active.session_id", "backfill should preserve the indexed UUID session lookup")
+	require.NotContains(t, shapeSQL, "s.id::text", "backfill must not cast away the sessions primary-key index")
+	require.Contains(t, shapeSQL, "run_at ASC,\n        created_at ASC", "routing index should preserve the durable deferral order before FIFO tie-breaking")
+	require.NotContains(t, shapeSQL, "VALIDATE CONSTRAINT chk_jobs_workload_class", "shape migration should not retain its table lock while validating existing rows")
+
+	validationBody, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000288_validate_sandbox_workload_routing.up.sql"))
+	require.NoError(t, err, "sandbox routing validation migration should be readable")
+	validationSQL := string(validationBody)
+	require.Contains(t, validationSQL, "SET LOCAL lock_timeout", "validation should have a bounded lock acquisition")
+	require.Contains(t, validationSQL, "VALIDATE CONSTRAINT chk_jobs_workload_class", "validation should run in its own migration transaction")
 }
 
 func TestRenumberedPreviewResourceMigrationIsReplaySafe(t *testing.T) {

@@ -128,15 +128,16 @@ func TestJobStore_HandoffToSessionExecutorWithLease(t *testing.T) {
 	orgID := uuid.New()
 	lockToken := uuid.New()
 	executorID := uuid.New()
+	leaseDuration := 75 * time.Second
 
-	mock.ExpectExec("UPDATE jobs\\s+SET owner_kind = 'session_executor'").
-		WithArgs(executorID.String(), orgID, jobID, lockToken).
+	mock.ExpectExec("UPDATE jobs\\s+SET owner_kind = 'session_executor'[\\s\\S]+lease_expires_at = now\\(\\) \\+[\\s\\S]+sandbox_slot_reserved_until = CASE").
+		WithArgs(executorID.String(), orgID, jobID, lockToken, int(leaseDuration.Seconds())).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	ok, err := store.HandoffToSessionExecutorWithLease(context.Background(), orgID, jobID, lockToken, executorID)
+	ok, err := store.HandoffToSessionExecutorWithLease(context.Background(), orgID, jobID, lockToken, executorID, leaseDuration)
 	require.NoError(t, err, "HandoffToSessionExecutorWithLease should update the job owner")
 	require.True(t, ok, "HandoffToSessionExecutorWithLease should report that the fenced update landed")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	require.NoError(t, mock.ExpectationsWereMet(), "handoff should renew both the job lease and any durable sandbox reservation")
 }
 
 func TestJobStore_RenewLeaseForSessionExecutorFencesOwner(t *testing.T) {
@@ -153,7 +154,7 @@ func TestJobStore_RenewLeaseForSessionExecutorFencesOwner(t *testing.T) {
 	executorID := uuid.New()
 	leaseExpiresAt := time.Now().Add(time.Minute)
 
-	mock.ExpectQuery("UPDATE jobs\\s+SET lease_expires_at").
+	mock.ExpectQuery("UPDATE jobs\\s+SET lease_expires_at[\\s\\S]*sandbox_slot_reserved_until = CASE[\\s\\S]*sandbox_session.container_id IS NOT NULL[\\s\\S]*ELSE now\\(\\) \\+").
 		WithArgs(pgx.NamedArgs{
 			"lease_seconds": int(time.Minute.Seconds()),
 			"org_id":        orgID,
@@ -196,7 +197,7 @@ func TestJobStore_RenewLeaseForSessionExecutor_TerminalizesTerminalSessionJob(t 
 	lockToken := uuid.New()
 	executorID := uuid.New()
 
-	mock.ExpectQuery("UPDATE jobs\\s+SET lease_expires_at").
+	mock.ExpectQuery("UPDATE jobs\\s+SET lease_expires_at[\\s\\S]*sandbox_slot_reserved_until = CASE[\\s\\S]*sandbox_session.container_id IS NOT NULL[\\s\\S]*ELSE now\\(\\) \\+").
 		WithArgs(pgx.NamedArgs{
 			"lease_seconds": int(time.Minute.Seconds()),
 			"org_id":        orgID,
@@ -533,11 +534,11 @@ func TestJobStore_GetRunningForSessionExecutor(t *testing.T) {
 			"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 			"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 			"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-			"dedupe_key", "target_node_id", "retry_window_started_at", "created_at", "updated_at", "completed_at",
+			"dedupe_key", "workload_class", "target_node_id", "sandbox_slot_reserved_until", "retry_window_started_at", "created_at", "updated_at", "completed_at",
 		}).AddRow(
 			jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
 			1, 3, now, "worker-1", now, now.Add(time.Minute), lockToken.String(), executorID.String(), "session_executor", nil,
-			nil, nil, nil, now, now, nil,
+			nil, models.SandboxWorkloadClassInteractive, nil, nil, nil, now, now, nil,
 		))
 
 	job, ok, err := store.GetRunningForSessionExecutor(context.Background(), orgID, jobID, lockToken, executorID)

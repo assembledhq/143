@@ -14,6 +14,21 @@
 export const MIN_CONCURRENT_RUNS = 1;
 export const MAX_CONCURRENT_RUNS = 25;
 
+export function defaultMaxConcurrentRunsForOrgSize(
+  orgSize?: "small" | "medium" | "large" | "enterprise",
+): number {
+  switch (orgSize) {
+    case "small":
+      return 2;
+    case "large":
+      return 15;
+    case "enterprise":
+      return 25;
+    default:
+      return 3;
+  }
+}
+
 export const MIN_SESSION_DURATION_MINUTES = 2;
 export const MAX_SESSION_DURATION_MINUTES = 120;
 

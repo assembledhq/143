@@ -1325,6 +1325,27 @@ func TestService_SendMessage(t *testing.T) {
 			},
 		},
 		{
+			name: "code review continuation preserves workload class",
+			input: SendMessageInput{
+				SessionID: sessionID,
+				OrgID:     orgID,
+				ThreadID:  threadID,
+				Message:   "review this change",
+			},
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
+				}
+				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Origin: models.SessionOriginCodeReview, Status: models.SessionStatusRunning}, nil
+				}
+				deps.jobStore.enqueueWithOptsFn = func(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+					require.Equal(t, models.SandboxWorkloadClassCodeReview, opts.WorkloadClass, "code-review reviewer and orchestrator turns should use code-review admission")
+					return uuid.New(), nil
+				}
+			},
+		},
+		{
 			name: "success with continuation dedupe override",
 			input: SendMessageInput{
 				SessionID: sessionID,
@@ -2023,6 +2044,50 @@ func TestService_SendMessage(t *testing.T) {
 	}
 }
 
+func TestService_EnqueueThreadContinuationFallsBackWhenSessionRoutingIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		configureSvc func(*Service, *testDeps)
+	}{
+		{
+			name: "session store is not configured",
+			configureSvc: func(svc *Service, _ *testDeps) {
+				svc.sessionStore = nil
+			},
+		},
+		{
+			name: "session lookup fails",
+			configureSvc: func(_ *Service, deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(context.Context, uuid.UUID, uuid.UUID) (models.Session, error) {
+					return models.Session{}, errors.New("database unavailable")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, deps := newTestService(t)
+			tt.configureSvc(svc, deps)
+			orgID, sessionID, threadID := uuid.New(), uuid.New(), uuid.New()
+			deps.jobStore.enqueueWithOptsFn = func(_ context.Context, gotOrgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+				require.Equal(t, orgID, gotOrgID, "fallback enqueue should preserve tenant scope")
+				require.Equal(t, "continue_session", opts.JobType, "fallback should preserve the accepted continuation")
+				require.Nil(t, opts.TargetNodeID, "fallback should let fleet routing select an available worker")
+				require.Equal(t, models.SandboxWorkloadClassInteractive, opts.WorkloadClass, "fallback should protect interactive capacity conservatively")
+				return uuid.New(), nil
+			}
+
+			err := svc.enqueueThreadContinuation(context.Background(), orgID, sessionID, threadID)
+			require.NoError(t, err, "routing enrichment failure should not drop an accepted thread continuation")
+		})
+	}
+}
+
 func TestService_SendMessage_ProactiveOwnerLossRecoveryForSiblingQueue(t *testing.T) {
 	t.Parallel()
 
@@ -2397,6 +2462,17 @@ func TestService_RetryInboxEntryEnqueuesContinuationWhenRuntimeIsGone(t *testing
 	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 		return models.SessionThread{ID: threadID, OrgID: orgID, SessionID: sessionID, Status: models.ThreadStatusRunning}, nil
 	}
+	containerID := "review-container"
+	workerNodeID := "worker-review"
+	deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+		return models.Session{
+			ID:           sessionID,
+			OrgID:        orgID,
+			Origin:       models.SessionOriginCodeReview,
+			ContainerID:  &containerID,
+			WorkerNodeID: &workerNodeID,
+		}, nil
+	}
 	var enqueued []db.EnqueueOpts
 	deps.jobStore.enqueueWithOptsFn = func(_ context.Context, gotOrgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
 		require.Equal(t, orgID, gotOrgID, "retry continuation should be scoped to the org")
@@ -2410,6 +2486,8 @@ func TestService_RetryInboxEntryEnqueuesContinuationWhenRuntimeIsGone(t *testing
 	require.Equal(t, []bool{true}, deps.inboxStore.retryAllowUnknownCalls, "explicit replay consent should be forwarded to the store")
 	require.Len(t, enqueued, 1, "RetryInboxEntry should enqueue a thread continuation when there is no active runtime")
 	require.Equal(t, "continue_session", enqueued[0].JobType, "RetryInboxEntry should resume the tab when live delivery is impossible")
+	require.Equal(t, models.SandboxWorkloadClassCodeReview, enqueued[0].WorkloadClass, "RetryInboxEntry should preserve code-review admission for reviewer and orchestrator tabs")
+	require.Equal(t, &workerNodeID, enqueued[0].TargetNodeID, "RetryInboxEntry should pin a live code-review sandbox to its owning worker")
 	payload, ok := enqueued[0].Payload.(map[string]string)
 	require.True(t, ok, "continuation payload should be string keyed")
 	require.Equal(t, threadID.String(), payload["thread_id"], "continuation payload should address the retried thread")

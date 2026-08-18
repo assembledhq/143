@@ -1115,31 +1115,40 @@ const (
 
 // Job represents an async work queue item.
 type Job struct {
-	ID             uuid.UUID       `db:"id" json:"id"`
-	OrgID          uuid.UUID       `db:"org_id" json:"org_id"`
-	Queue          string          `db:"queue" json:"queue"`
-	JobType        string          `db:"job_type" json:"job_type"`
-	Payload        json.RawMessage `db:"payload" json:"payload"`
-	Priority       int             `db:"priority" json:"priority"`
-	Status         JobStatus       `db:"status" json:"status"`
-	Attempts       int             `db:"attempts" json:"attempts"`
-	MaxAttempts    int             `db:"max_attempts" json:"max_attempts"`
-	RunAt          time.Time       `db:"run_at" json:"run_at"`
-	LockedByNodeID *string         `db:"locked_by_node_id" json:"locked_by_node_id,omitempty"`
-	LockedAt       *time.Time      `db:"locked_at" json:"locked_at,omitempty"`
-	LeaseExpiresAt *time.Time      `db:"lease_expires_at" json:"lease_expires_at,omitempty"`
-	LockToken      *uuid.UUID      `db:"lock_token" json:"lock_token,omitempty"`
-	RunOwnerID     *string         `db:"run_owner_id" json:"run_owner_id,omitempty"`
-	OwnerKind      JobOwnerKind    `db:"owner_kind" json:"owner_kind"`
-	LastError      *string         `db:"last_error" json:"last_error,omitempty"`
-	DedupeKey      *string         `db:"dedupe_key" json:"dedupe_key,omitempty"`
+	ID             uuid.UUID            `db:"id" json:"id"`
+	OrgID          uuid.UUID            `db:"org_id" json:"org_id"`
+	Queue          string               `db:"queue" json:"queue"`
+	JobType        string               `db:"job_type" json:"job_type"`
+	Payload        json.RawMessage      `db:"payload" json:"payload"`
+	Priority       int                  `db:"priority" json:"priority"`
+	Status         JobStatus            `db:"status" json:"status"`
+	Attempts       int                  `db:"attempts" json:"attempts"`
+	MaxAttempts    int                  `db:"max_attempts" json:"max_attempts"`
+	RunAt          time.Time            `db:"run_at" json:"run_at"`
+	LockedByNodeID *string              `db:"locked_by_node_id" json:"locked_by_node_id,omitempty"`
+	LockedAt       *time.Time           `db:"locked_at" json:"locked_at,omitempty"`
+	LeaseExpiresAt *time.Time           `db:"lease_expires_at" json:"lease_expires_at,omitempty"`
+	LockToken      *uuid.UUID           `db:"lock_token" json:"lock_token,omitempty"`
+	RunOwnerID     *string              `db:"run_owner_id" json:"run_owner_id,omitempty"`
+	OwnerKind      JobOwnerKind         `db:"owner_kind" json:"owner_kind"`
+	LastError      *string              `db:"last_error" json:"last_error,omitempty"`
+	DedupeKey      *string              `db:"dedupe_key" json:"dedupe_key,omitempty"`
+	WorkloadClass  SandboxWorkloadClass `db:"workload_class" json:"workload_class"`
 	// TargetNodeID, when set, restricts the job to be claimed by this
 	// specific worker node. Used for sandbox-bound jobs (continue_session,
 	// open_pr, run_agent for resume) where the work must execute on the same
-	// docker daemon as the session's recorded container_id. NULL means any
-	// worker can claim. A pinned job becomes claimable by any worker if its
-	// target node is marked dead in the `nodes` table (starvation safety).
+	// docker daemon as the session's recorded container_id, and for routed
+	// placements holding a SandboxSlotReservedUntil reservation. NULL means
+	// any worker can claim. An affinity pin (no reservation) becomes
+	// claimable by any worker if its target node is marked dead in the
+	// `nodes` table (starvation safety); a reserved placement is instead
+	// recovered by re-routing once its reservation expires.
 	TargetNodeID *string `db:"target_node_id" json:"target_node_id,omitempty"`
+	// SandboxSlotReservedUntil is the durable, expiring reservation made when
+	// an unbound sandbox job is assigned to TargetNodeID. It closes the race
+	// between stale worker heartbeats and concurrent dispatchers; the local
+	// capacity gate remains authoritative when execution actually starts.
+	SandboxSlotReservedUntil *time.Time `db:"sandbox_slot_reserved_until" json:"sandbox_slot_reserved_until,omitempty"`
 	// RetryWindowStartedAt records the first bounded external retry for this job.
 	// It is set once under the job's fencing token so retry limits survive worker
 	// restarts without counting unrelated queue or execution time.

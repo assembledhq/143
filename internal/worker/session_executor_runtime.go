@@ -141,6 +141,9 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 	handlerCtx = jobctx.WithLockToken(handlerCtx, executor.LockToken)
 	handlerCtx = jobctx.WithOwnerKind(handlerCtx, string(models.JobOwnerKindSessionExecutor))
 	handlerCtx = jobctx.WithJobCreatedAt(handlerCtx, job.CreatedAt)
+	if job.RetryWindowStartedAt != nil {
+		handlerCtx = jobctx.WithJobRetryWindowStartedAt(handlerCtx, *job.RetryWindowStartedAt)
+	}
 	handlerCtx = jobctx.WithWorkerNodeID(handlerCtx, executor.HostNodeID)
 	if job.TargetNodeID != nil && *job.TargetNodeID != "" && *job.TargetNodeID != executor.HostNodeID {
 		handlerCtx = jobctx.WithDeadTargetNode(handlerCtx, *job.TargetNodeID)
@@ -465,6 +468,12 @@ func (r *SessionExecutorRuntime) retryJob(ctx context.Context, executor models.S
 	}
 	if !ok {
 		r.loggerPtr().Warn().Str("job_id", job.ID.String()).Msg("lost ownership before scheduling session executor job retry")
+		return
+	}
+	if backoff <= 0 {
+		if notifier, supportsNotify := r.Jobs.(retryJobNotifier); supportsNotify {
+			notifier.Notify(context.WithoutCancel(ctx), job.ID)
+		}
 	}
 }
 

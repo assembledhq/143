@@ -9948,14 +9948,21 @@ func TestSessionHandler_RetrySession_StartOverUsesRunAgent(t *testing.T) {
 	mock.ExpectExec("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	sessionRow := retrySessionRow(sessionID, orgID, models.SessionStatusPending, nil, nil, models.SandboxStateNone, nil, now)
+	for i, column := range sessionColumns {
+		if column == "origin" {
+			sessionRow[i] = models.SessionOriginCodeReview
+			break
+		}
+	}
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(sessionRow...))
 
 	var jobPayload []byte
 	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingArg(&jobPayload), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingArg(&jobPayload), pgxmock.AnyArg(), pgxmock.AnyArg(), models.SandboxWorkloadClassCodeReview).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-	mock.ExpectQuery("SELECT .+ FROM sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(sessionID, orgID, models.SessionStatusPending, nil, nil, models.SandboxStateNone, nil, now)...))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", strings.NewReader(`{"mode":"start_over"}`))
 	rctx := chi.NewRouteContext()

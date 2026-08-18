@@ -742,6 +742,10 @@ type JobStore interface {
 	QueueChangesetPRCreation(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, queue string, payload any, priority int) (uuid.UUID, bool, error)
 }
 
+type workloadClassJobStore interface {
+	EnqueueWithTargetAndWorkload(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string, targetNodeID *string, workloadClass models.SandboxWorkloadClass) (uuid.UUID, error)
+}
+
 // UsageRecorder tracks container lifecycle events for billing.
 type UsageRecorder interface {
 	ContainerStarted(ctx context.Context, orgID, sessionID uuid.UUID, sandbox *Sandbox, cfg SandboxConfig, startedAt time.Time) uuid.UUID
@@ -2800,26 +2804,19 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		Str("org_id", run.OrgID.String()).
 		Logger()
 
-	// 1. Concurrency check.
-	if err := o.checkConcurrency(ctx, run.OrgID, models.SessionStatus(run.Status) == models.SessionStatusRunning); err != nil {
-		log.Info().Err(err).Msg("concurrency limit reached, run stays pending")
-		return err
+	// 1. Apply shared workload admission and reserve a fresh local sandbox.
+	capacityReservation, admissionErr := o.admitSandboxTurn(
+		ctx,
+		run,
+		"agent_run",
+		true,
+		models.SessionStatus(run.Status) == models.SessionStatusRunning,
+	)
+	if admissionErr != nil {
+		log.Info().Err(admissionErr).Msg("sandbox turn admission rejected, run stays pending")
+		return admissionErr
 	}
-
-	var capacityReservation *SandboxCapacityReservation
-	if o.sandboxCapacity != nil {
-		var capErr error
-		capacityReservation, capErr = o.sandboxCapacity.Acquire(ctx, SandboxCapacityRequest{
-			Purpose:   "agent_run",
-			SessionID: run.ID.String(),
-			OrgID:     run.OrgID.String(),
-		})
-		if capErr != nil {
-			log.Info().Err(capErr).Msg("sandbox capacity reached, run stays pending")
-			return capErr
-		}
-		defer capacityReservation.Release()
-	}
+	defer capacityReservation.Release()
 
 	var primaryThreadID *uuid.UUID
 
@@ -3093,6 +3090,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if capacityReservation != nil {
 		capacityReservation.Release()
 	}
+	o.releaseSandboxRoutingReservation(ctx, log)
 	if err != nil {
 		if sandboxCfg.AuthSocketPath != "" {
 			o.closeSandboxAuth(run.ID, log)
@@ -3972,20 +3970,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
 
-	var capacityReservation *SandboxCapacityReservation
-	if !reusedExisting && o.sandboxCapacity != nil {
-		var capErr error
-		capacityReservation, capErr = o.sandboxCapacity.Acquire(ctx, SandboxCapacityRequest{
-			Purpose:   "continue_session",
-			SessionID: session.ID.String(),
-			OrgID:     session.OrgID.String(),
-		})
-		if capErr != nil {
-			log.Info().Err(capErr).Msg("sandbox capacity reached, continue_session stays pending")
-			return capErr
-		}
-		defer capacityReservation.Release()
+	capacityReservation, admissionErr := o.admitSandboxTurn(
+		ctx,
+		session,
+		"continue_session",
+		!reusedExisting,
+		models.SessionStatus(session.Status) == models.SessionStatusRunning,
+	)
+	if admissionErr != nil {
+		log.Info().Err(admissionErr).Msg("sandbox turn admission rejected, continue_session stays pending")
+		return admissionErr
 	}
+	defer capacityReservation.Release()
 
 	// 1. Capture wall-clock start locally; BeginRuntime persists the same
 	// instant while atomically transitioning the session row to running.
@@ -4615,12 +4611,17 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			OrgID:     sandboxCfg.OrgID,
 			Purpose:   sandboxCfg.Purpose,
 		}
+		if capacityReservation != nil {
+			capacityReservation.Release()
+		}
+		o.releaseSandboxRoutingReservation(ctx, log)
 		log.Info().Str("container_id", sandbox.ID).Msg("reusing existing sandbox container (preview is holding it)")
 	case hasSnapshot:
 		sandbox, err = HydrateSandboxFromSnapshot(ctx, o.provider, o.snapshots, *session.SnapshotKey, sandboxCfg)
 		if capacityReservation != nil {
 			capacityReservation.Release()
 		}
+		o.releaseSandboxRoutingReservation(ctx, log)
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox hydrate failed during continue_session")
@@ -4642,6 +4643,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if capacityReservation != nil {
 			capacityReservation.Release()
 		}
+		o.releaseSandboxRoutingReservation(ctx, log)
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox creation failed during continue_session")
@@ -5575,7 +5577,7 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 		payload["thread_id"] = queuedThreadID.String()
 	}
 	dedupeKey := continueSessionDrainDedupeKey(session.ID, processedMessageID)
-	if _, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session)); err != nil {
+	if _, err := o.enqueueContinueSessionTurn(ctx, session, payload, &dedupeKey); err != nil {
 		log.Warn().Err(err).Msg("failed to enqueue continue_session for queued messages")
 		return
 	}
@@ -5645,7 +5647,7 @@ func (o *Orchestrator) admitNextQueuedThread(ctx context.Context, session *model
 		"org_id":     current.OrgID.String(),
 	}
 	dedupeKey := continueSessionDedupeKey(thread.ID)
-	if _, err := o.jobs.EnqueueWithTarget(ctx, current.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(&current)); err != nil {
+	if _, err := o.enqueueContinueSessionTurn(ctx, &current, payload, &dedupeKey); err != nil {
 		log.Warn().Err(err).
 			Str("thread_id", thread.ID.String()).
 			Msg("failed to enqueue queued sibling thread after slot opened")
@@ -5655,6 +5657,22 @@ func (o *Orchestrator) admitNextQueuedThread(ctx context.Context, session *model
 				Msg("failed to revert queued sibling thread after enqueue failure")
 		}
 	}
+}
+
+func (o *Orchestrator) enqueueContinueSessionTurn(ctx context.Context, session *models.Session, payload any, dedupeKey *string) (uuid.UUID, error) {
+	if o == nil || o.jobs == nil || session == nil {
+		return uuid.Nil, fmt.Errorf("enqueue continue session turn: dependencies are not configured")
+	}
+	targetNodeID := models.SessionWorkerTarget(session)
+	workloadClass := models.SandboxWorkloadClassForSession(session)
+	if workloadClass == models.SandboxWorkloadClassCodeReview {
+		classified, ok := o.jobs.(workloadClassJobStore)
+		if !ok {
+			return uuid.Nil, fmt.Errorf("enqueue code-review continuation: job store does not support workload classes")
+		}
+		return classified.EnqueueWithTargetAndWorkload(ctx, session.OrgID, "agent", "continue_session", payload, 5, dedupeKey, targetNodeID, workloadClass)
+	}
+	return o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, dedupeKey, targetNodeID)
 }
 
 // drainAcceptableStatus returns true for session states that can absorb
@@ -6239,7 +6257,7 @@ func manualSessionReferences(issue *models.Issue) []models.SessionInputReference
 func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID, excludeCurrentRunning bool) error {
 	count, err := o.sessions.CountRunningByOrg(ctx, orgID)
 	if err != nil {
-		return fmt.Errorf("count running runs: %w", err)
+		return fmt.Errorf("count running sessions: %w", err)
 	}
 	if excludeCurrentRunning && count > 0 {
 		count--

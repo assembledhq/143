@@ -551,6 +551,11 @@ func providerHostsLLMModel(byProvider map[string][]string, provider, model strin
 }
 
 func ValidateSettingsModels(settings OrgSettings) error {
+	// Zero means "use the org-size default" (ParseOrgSettings fills it in); a
+	// negative value would reject every interactive and code-review turn.
+	if settings.MaxConcurrentRuns < 0 {
+		return fmt.Errorf("max_concurrent_runs must be zero (use the default) or positive")
+	}
 	if settings.PreviewMaxPreviewsPerUser != 0 && (settings.PreviewMaxPreviewsPerUser < MinPreviewMaxPreviewsPerUser || settings.PreviewMaxPreviewsPerUser > MaxPreviewMaxPreviewsPerUser) {
 		return fmt.Errorf("preview_max_previews_per_user must be between %d and %d", MinPreviewMaxPreviewsPerUser, MaxPreviewMaxPreviewsPerUser)
 	}

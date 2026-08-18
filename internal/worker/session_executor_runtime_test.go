@@ -94,6 +94,7 @@ type executorRuntimeJobStoreStub struct {
 	targetRetryNodeID *string
 	deadLetterCalls   int
 	renewCalls        int
+	notifiedJobID     uuid.UUID
 }
 
 func (s *executorRuntimeJobStoreStub) GetRunningForSessionExecutor(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) (*models.Job, bool, error) {
@@ -159,8 +160,47 @@ func (s *executorRuntimeJobStoreStub) DeadLetterWithLease(context.Context, uuid.
 	return true, nil
 }
 
+func (s *executorRuntimeJobStoreStub) Notify(_ context.Context, jobID uuid.UUID) {
+	s.notifiedJobID = jobID
+}
+
 func ptr[T any](v T) *T {
 	return &v
+}
+
+func TestSessionExecutorRuntime_RetryNotifiesOnlyWhenImmediatelyRunnable(t *testing.T) {
+	t.Parallel()
+
+	zeroDelay := time.Duration(0)
+	tests := []struct {
+		name             string
+		override         *time.Duration
+		expectedNotified bool
+	}{
+		{name: "immediate retry wakes workers", override: &zeroDelay, expectedNotified: true},
+		{name: "delayed retry waits for polling", expectedNotified: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			jobID := uuid.New()
+			store := &executorRuntimeJobStoreStub{}
+			runtime := &SessionExecutorRuntime{Jobs: store, Logger: zerolog.Nop()}
+			executor := models.SessionExecutor{LockToken: uuid.New()}
+			job := &models.Job{ID: jobID, Attempts: 1}
+
+			runtime.retryJob(context.Background(), executor, job, "capacity moved", false, tt.override, nil, false)
+
+			require.Equal(t, 1, store.retryCalls, "executor retry should persist the pending job transition")
+			if tt.expectedNotified {
+				require.Equal(t, jobID, store.notifiedJobID, "an immediately runnable executor retry should wake workers")
+			} else {
+				require.Equal(t, uuid.Nil, store.notifiedJobID, "a delayed executor retry should not wake the fleet before run_at")
+			}
+		})
+	}
 }
 
 func TestSessionExecutorRuntime_RefusesStaleLockToken(t *testing.T) {

@@ -265,6 +265,10 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 			CodeReviewDisputeAuthorizationRerun, CodeReviewDisputeAuthorizationQueueInfluence,
 			CodeReviewDisputeAuthorizationAdminPromotion,
 		),
+		// job_enums.go
+		"jobs_workload_class": toStrings(
+			SandboxWorkloadClassInteractive, SandboxWorkloadClassCodeReview,
+		),
 	}
 
 	for _, c := range constraints {
