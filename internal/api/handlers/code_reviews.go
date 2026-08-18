@@ -53,6 +53,12 @@ type codeReviewDisputeService interface {
 	Adjudicate(ctx context.Context, orgID, disputeID, userID uuid.UUID, update models.CodeReviewDisputeAdjudicationUpdate) (models.CodeReviewDispute, error)
 }
 
+type codeReviewPolicyHistoryService interface {
+	List(ctx context.Context, orgID uuid.UUID, beforeVersion *int, limit int) (codereviewsvc.CodeReviewPolicyHistoryPage, error)
+	Compare(ctx context.Context, orgID, newerID, olderID uuid.UUID) (models.CodeReviewPolicyComparison, error)
+	Restore(ctx context.Context, orgID, policyID, userID uuid.UUID, expectedVersion int) (models.CodeReviewPolicyRestoreResult, error)
+}
+
 type codeReviewListCursor struct {
 	ID        uuid.UUID             `json:"id"`
 	CreatedAt time.Time             `json:"created_at"`
@@ -216,14 +222,15 @@ func applyCodeReviewSortCursor(filters *db.CodeReviewListFilters, sort *codeRevi
 }
 
 type CodeReviewHandler struct {
-	store        *db.CodeReviewStore
-	repos        *db.RepositoryStore
-	triggerSetup *codereviewsvc.GitHubTriggerSetupService
-	streams      *cache.CodeReviewStreams
-	audit        *db.AuditEmitter
-	memberships  codeReviewMembershipStore
-	retryService codeReviewRetryService
-	disputes     codeReviewDisputeService
+	store         *db.CodeReviewStore
+	repos         *db.RepositoryStore
+	triggerSetup  *codereviewsvc.GitHubTriggerSetupService
+	streams       *cache.CodeReviewStreams
+	audit         *db.AuditEmitter
+	memberships   codeReviewMembershipStore
+	retryService  codeReviewRetryService
+	disputes      codeReviewDisputeService
+	policyHistory codeReviewPolicyHistoryService
 }
 
 func (h *CodeReviewHandler) SetAuditEmitter(audit *db.AuditEmitter) { h.audit = audit }
@@ -246,6 +253,14 @@ func (h *CodeReviewHandler) SetMembershipStore(store codeReviewMembershipStore) 
 
 func (h *CodeReviewHandler) SetRetryService(service codeReviewRetryService) {
 	h.retryService = service
+}
+
+func (h *CodeReviewHandler) SetPolicyHistoryService(service *codereviewsvc.PolicyHistoryService) {
+	if service == nil {
+		h.policyHistory = nil
+		return
+	}
+	h.policyHistory = service
 }
 
 // SetDisputeService takes the concrete service so a nil pointer stays a nil
@@ -875,6 +890,121 @@ func (h *CodeReviewHandler) GetPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewResolvedPolicy]{Data: resolved})
+}
+
+func (h *CodeReviewHandler) ListPolicyVersions(w http.ResponseWriter, r *http.Request) {
+	if h.policyHistory == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "CODE_REVIEW_POLICY_HISTORY_UNAVAILABLE", "code review policy history is unavailable")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	limit := queryInt(r, "limit", 15)
+	if limit <= 0 || limit > 50 {
+		limit = 15
+	}
+	var beforeVersion *int
+	if rawCursor := strings.TrimSpace(r.URL.Query().Get("cursor")); rawCursor != "" {
+		parsed, err := strconv.Atoi(rawCursor)
+		if err != nil || parsed <= 0 {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "cursor must be a positive policy version")
+			return
+		}
+		beforeVersion = &parsed
+	}
+	page, err := h.policyHistory.List(r.Context(), orgID, beforeVersion, limit)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_HISTORY_LOAD_FAILED", "failed to load code review policy history", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.CodeReviewPolicyVersionSummary]{
+		Data: page.Versions,
+		Meta: models.PaginationMeta{NextCursor: page.NextCursor},
+	})
+}
+
+func (h *CodeReviewHandler) ComparePolicyVersions(w http.ResponseWriter, r *http.Request) {
+	if h.policyHistory == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "CODE_REVIEW_POLICY_HISTORY_UNAVAILABLE", "code review policy history is unavailable")
+		return
+	}
+	newerID, err := uuid.Parse(strings.TrimSpace(r.URL.Query().Get("newer_id")))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_NEWER_POLICY_ID", "newer_id must be a valid policy ID")
+		return
+	}
+	olderID, err := uuid.Parse(strings.TrimSpace(r.URL.Query().Get("older_id")))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_OLDER_POLICY_ID", "older_id must be a valid policy ID")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	comparison, err := h.policyHistory.Compare(r.Context(), orgID, newerID, olderID)
+	if err != nil {
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			writeError(w, r, http.StatusNotFound, "CODE_REVIEW_POLICY_VERSION_NOT_FOUND", "code review policy version not found")
+		case errors.Is(err, codereviewsvc.ErrCodeReviewPolicyComparisonOrder):
+			writeError(w, r, http.StatusBadRequest, "INVALID_POLICY_COMPARISON", "newer_id must identify a newer policy version", err)
+		default:
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_COMPARE_FAILED", "failed to compare code review policy versions", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewPolicyComparison]{Data: comparison})
+}
+
+func (h *CodeReviewHandler) RestorePolicyVersion(w http.ResponseWriter, r *http.Request) {
+	if h.policyHistory == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "CODE_REVIEW_POLICY_HISTORY_UNAVAILABLE", "code review policy history is unavailable")
+		return
+	}
+	policyID, err := uuid.Parse(chi.URLParam(r, "policy_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_POLICY_ID", "invalid policy ID")
+		return
+	}
+	var req struct {
+		ExpectedVersion *int `json:"expected_version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if req.ExpectedVersion == nil || *req.ExpectedVersion <= 0 {
+		writeError(w, r, http.StatusBadRequest, "EXPECTED_VERSION_REQUIRED", "expected_version must be the active policy version")
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	result, err := h.policyHistory.Restore(r.Context(), orgID, policyID, user.ID, *req.ExpectedVersion)
+	if err != nil {
+		var conflict *codereviewsvc.CodeReviewPolicyRestoreConflictError
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			writeError(w, r, http.StatusNotFound, "CODE_REVIEW_POLICY_VERSION_NOT_FOUND", "code review policy version not found")
+		case errors.Is(err, codereviewsvc.ErrCodeReviewPolicyAlreadyActive):
+			writeError(w, r, http.StatusConflict, "CODE_REVIEW_POLICY_ALREADY_ACTIVE", "the selected policy version is already active", err)
+		case errors.As(err, &conflict):
+			writeErrorWithDetails(w, r, http.StatusConflict, "CODE_REVIEW_POLICY_VERSION_CONFLICT", "the policy changed before the restore completed", map[string]int{"current_version": conflict.CurrentVersion}, err)
+		default:
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_RESTORE_FAILED", "failed to restore code review policy version", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewPolicyRestoreResult]{Data: result})
+	resourceID := result.Policy.ID.String()
+	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{
+		"source":                  "restore",
+		"version":                 result.Policy.Version,
+		"expected_version":        *req.ExpectedVersion,
+		"restored_from_policy_id": result.RestoredFrom.ID,
+		"restored_from_version":   result.RestoredFrom.Version,
+	})
+	emitUserAudit(h.audit, r, models.AuditActionCodeReviewPolicyRestored, models.AuditResourceCodeReviewPolicy, &resourceID, details)
 }
 
 func (h *CodeReviewHandler) PutPolicy(w http.ResponseWriter, r *http.Request) {

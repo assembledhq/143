@@ -355,6 +355,36 @@ func TestAuditLogStore_List(t *testing.T) {
 	}
 }
 
+func TestAuditLogStore_ListLatestByResourceIDsScopesAndBatches(t *testing.T) {
+	t.Parallel()
+
+	orgID, userID := uuid.New(), uuid.New()
+	resourceIDs := []string{uuid.NewString(), uuid.NewString()}
+	resourceID := resourceIDs[0]
+	actorName := "Former Admin"
+	now := time.Date(2026, 8, 18, 18, 0, 0, 0, time.UTC)
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("(?s)SELECT DISTINCT ON .a.resource_id..+FROM audit_logs a.+LEFT JOIN users u ON u.id = a.user_id.+WHERE a.org_id = .+a.resource_type = .+a.resource_id = ANY").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(append(newAuditLogColumns(), "actor_name")).AddRow(
+			int64(11), orgID, models.AuditActorUser, userID.String(), &userID,
+			models.AuditActionCodeReviewPolicyUpdated, models.AuditResourceCodeReviewPolicy, &resourceID,
+			json.RawMessage(`{"source":"manual"}`), nil, nil, nil, nil, nil, now, &actorName,
+		))
+
+	entries, err := NewAuditLogStore(mock).ListLatestByResourceIDs(context.Background(), orgID, models.AuditResourceCodeReviewPolicy, resourceIDs)
+
+	require.NoError(t, err, "batching latest audit metadata should succeed")
+	require.Len(t, entries, 1, "the store should return the newest event for resources with audit history")
+	require.Equal(t, resourceID, *entries[0].ResourceID, "the audit entry should remain associated with its policy version")
+	require.Equal(t, orgID, entries[0].OrgID, "the query should preserve organization scope")
+	require.Equal(t, &actorName, entries[0].ActorName, "the query should resolve the actor even when membership pagination would omit them")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestAuditLogStore_DeleteExpired(t *testing.T) {
 	t.Parallel()
 

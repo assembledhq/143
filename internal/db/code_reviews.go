@@ -320,6 +320,44 @@ func (s *CodeReviewStore) GetPolicyByID(ctx context.Context, orgID, policyID uui
 	return collectOneCodeReviewPolicy(rows)
 }
 
+// ListPolicyVersions returns organization-scoped policy snapshots newest first.
+// beforeVersion is an exclusive cursor; callers may request one extra row to
+// compute the final visible row's diff against its predecessor without an N+1.
+func (s *CodeReviewStore) ListPolicyVersions(ctx context.Context, orgID uuid.UUID, beforeVersion *int, limit int) ([]models.CodeReviewPolicyRecord, error) {
+	if limit <= 0 || limit > 51 {
+		limit = 16
+	}
+	query := `
+		SELECT ` + codeReviewPolicyColumns + `
+		FROM code_review_policies
+		WHERE org_id = @org_id
+		  AND repository_id IS NULL`
+	args := pgx.NamedArgs{"org_id": orgID}
+	if beforeVersion != nil {
+		query += ` AND version < @before_version`
+		args["before_version"] = *beforeVersion
+	}
+	query += fmt.Sprintf(` ORDER BY version DESC LIMIT %d`, limit)
+
+	rows, err := s.db.Query(ctx, query, args)
+	if err != nil {
+		return nil, fmt.Errorf("query code review policy versions: %w", err)
+	}
+	defer rows.Close()
+	result := make([]models.CodeReviewPolicyRecord, 0, limit)
+	for rows.Next() {
+		record, scanErr := scanCodeReviewPolicy(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan code review policy version: %w", scanErr)
+		}
+		result = append(result, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate code review policy versions: %w", err)
+	}
+	return result, nil
+}
+
 // ErrCodeReviewPolicyVersionConflict is returned by SavePolicyExpectingVersion
 // when the active policy version no longer matches the caller's expectation —
 // someone else (human or agent) saved a newer version first.

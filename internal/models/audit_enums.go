@@ -157,6 +157,7 @@ const (
 	AuditActionPreviewScreenshotCaptured    AuditAction = "preview.screenshot_captured"
 	AuditActionCodeReviewPolicyUpdated      AuditAction = "code_review_policy.updated"
 	AuditActionCodeReviewPolicyReset        AuditAction = "code_review_policy.reset"
+	AuditActionCodeReviewPolicyRestored     AuditAction = "code_review_policy.restored"
 	AuditActionCodeReviewRetried            AuditAction = "code_review.retried"
 	AuditActionCodeReviewDisputeFiled       AuditAction = "code_review_dispute.filed"
 	AuditActionCodeReviewDisputeReassessed  AuditAction = "code_review_dispute.reassessed"
@@ -235,7 +236,7 @@ func (a AuditAction) Validate() error {
 		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,
 		AuditActionPreviewSecretBundleRevealed, AuditActionPreviewSecretBundleResolved, AuditActionPreviewSecretBundleFailed,
 		AuditActionPreviewPolicyUpdated, AuditActionPreviewToolInvoked, AuditActionPreviewUpdated, AuditActionPreviewScreenshotCaptured,
-		AuditActionCodeReviewPolicyUpdated, AuditActionCodeReviewPolicyReset, AuditActionCodeReviewRetried,
+		AuditActionCodeReviewPolicyUpdated, AuditActionCodeReviewPolicyReset, AuditActionCodeReviewPolicyRestored, AuditActionCodeReviewRetried,
 		AuditActionCodeReviewDisputeFiled, AuditActionCodeReviewDisputeReassessed, AuditActionCodeReviewDisputeAdjudicated,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionAuthCLILogin, AuditActionAuthCLILogout,

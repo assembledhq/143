@@ -47,11 +47,12 @@ import type {
   CodeReviewListItem,
   CodeReviewPolicyConfig,
   CodeReviewPolicyRecord,
+  CodeReviewPolicyComparison,
+  CodeReviewPolicyVersionSummary,
   CodeReviewResolvedPolicy,
   CodeReviewStats,
   CodeReviewPromptExamplesResponse,
   GitHubRepositoryClaimCandidate,
-  AuditLog,
   ListResponse,
   OpenCodeModelInfo,
   Repository,
@@ -462,6 +463,9 @@ function mockCodeReviewBaseHandlers(
       HttpResponse.json({
         data: { ...policy, config: currentConfig },
       } satisfies SingleResponse<CodeReviewResolvedPolicy>),
+    ),
+    http.get("/api/v1/code-review-policies/versions", () =>
+      HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<CodeReviewPolicyVersionSummary>),
     ),
     http.put("/api/v1/code-review-policies", async ({ request }) => {
       const body = (await request.json()) as { config: CodeReviewPolicyConfig; source?: string };
@@ -2489,7 +2493,7 @@ describe("CodeReviewsPage", () => {
     expect(screen.queryByRole("button", { name: "Retry review" })).not.toBeInTheDocument();
   });
 
-  it("shows who changed the review policy over time", async () => {
+  it("shows who changed the review policy and the exact changes", async () => {
     const user = userEvent.setup();
     const members: User[] = [
       {
@@ -2509,42 +2513,68 @@ describe("CodeReviewsPage", () => {
         created_at: "2026-01-02T00:00:00Z",
       },
     ];
-    const entries: AuditLog[] = [
+    const versions: CodeReviewPolicyVersionSummary[] = [
       {
-        id: 2,
-        org_id: "org-1",
-        actor_type: "user",
-        actor_id: "user-1",
-        user_id: "user-1",
-        action: "code_review_policy.updated",
-        resource_type: "code_review_policy",
-        resource_id: "policy-2",
-        details: { source: "manual", version: 2 },
+        id: "policy-2",
+        version: 2,
+        active: true,
+        previous_policy_id: "policy-1",
+        previous_policy_version: 1,
+        summary: "Review instructions edited",
+        changed_fields: [{ path: "review_instructions", label: "Review instructions", kind: "text" }],
         created_at: "2026-06-26T12:05:00Z",
+        audit: {
+          id: 2,
+          actor_type: "user",
+          actor_id: "user-1",
+          actor_name: "Alice Smith",
+          user_id: "user-1",
+          source: "manual",
+          reason: "Clarify test expectations",
+          ip_address: "10.0.0.1/32",
+          created_at: "2026-06-26T12:05:00Z",
+        },
       },
       {
-        id: 1,
-        org_id: "org-1",
-        actor_type: "user",
-        actor_id: "user-2",
-        user_id: "user-2",
-        action: "code_review_policy.updated",
-        resource_type: "code_review_policy",
-        resource_id: "policy-1",
-        details: { source: "example", version: 1 },
+        id: "policy-1",
+        version: 1,
+        active: false,
+        summary: "Initial organization policy created",
+        changed_fields: [],
         created_at: "2026-06-25T09:00:00Z",
+        audit: {
+          id: 1,
+          actor_type: "user",
+          actor_id: "user-2",
+          actor_name: "Bob Chen",
+          user_id: "user-2",
+          source: "example",
+          created_at: "2026-06-25T09:00:00Z",
+        },
       },
     ];
+    const comparison: CodeReviewPolicyComparison = {
+      newer: versions[0],
+      older: versions[1],
+      changes: [{
+        path: "review_instructions",
+        label: "Review instructions",
+        kind: "text",
+        before: "Review changed code.",
+        after: "Review changed code.\nRequire focused tests.",
+      }],
+    };
     mockCodeReviewBaseHandlers();
     server.use(
       http.get("/api/v1/team/members", () =>
         HttpResponse.json({ data: members, meta: {} } satisfies ListResponse<User>),
       ),
-      http.get("/api/v1/audit-logs", ({ request }) => {
-        const url = new URL(request.url);
-        const data = url.searchParams.get("limit") === "1" ? entries.slice(0, 1) : entries;
-        return HttpResponse.json({ data, meta: {} } satisfies ListResponse<AuditLog>);
-      }),
+      http.get("/api/v1/code-review-policies/versions", () =>
+        HttpResponse.json({ data: versions, meta: {} } satisfies ListResponse<CodeReviewPolicyVersionSummary>),
+      ),
+      http.get("/api/v1/code-review-policies/compare", () =>
+        HttpResponse.json({ data: comparison } satisfies SingleResponse<CodeReviewPolicyComparison>),
+      ),
     );
 
     renderWithProviders(<CodeReviewsPage />);
@@ -2555,9 +2585,12 @@ describe("CodeReviewsPage", () => {
     await user.click(historyTrigger);
 
     const history = await screen.findByRole("dialog", { name: "Review policy history" });
-    expect(within(history).getByText("Alice Smith")).toBeInTheDocument();
-    expect(within(history).getByText("Bob Chen")).toBeInTheDocument();
-    expect(within(history).getAllByText("updated review policy")).toHaveLength(2);
+    expect(within(history).getByText(/Latest change: Review instructions edited/)).toBeInTheDocument();
+    expect(within(history).getByText(/Alice Smith.*Clarify test expectations/)).toBeInTheDocument();
+    expect(within(history).getByText(/Bob Chen.*Applied an example/)).toBeInTheDocument();
+    expect(await within(history).findByText("Require focused tests.")).toBeInTheDocument();
+    await user.click(within(history).getByRole("button", { name: "Details" }));
+    expect(within(history).getByText("10.0.0.1/32")).toBeInTheDocument();
   });
 
   it("exposes accessible policy guidance and the compact GitHub management disclosure", async () => {

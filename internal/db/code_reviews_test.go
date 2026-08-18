@@ -173,6 +173,37 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewStore_ListPolicyVersionsScopesAndPaginatesHistory(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	now := time.Date(2026, 8, 18, 18, 0, 0, 0, time.UTC)
+	beforeVersion := 9
+	config := models.DefaultCodeReviewPolicyConfig()
+	descriptionPolicy, riskPolicy, agentRoster := mustCodeReviewPolicyJSON(t, config)
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("(?s)FROM code_review_policies.+WHERE org_id = .+repository_id IS NULL.+version < .+ORDER BY version DESC LIMIT 2").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "before_version": beforeVersion}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
+			"review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster",
+			"inline_comment_limit", "created_by_user_id", "created_at",
+		}).AddRow(uuid.New(), orgID, nil, false, 8, config.Enabled, config.ApprovalMode,
+			config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster,
+			config.InlineCommentLimit, nil, now))
+
+	versions, err := NewCodeReviewStore(mock).ListPolicyVersions(context.Background(), orgID, &beforeVersion, 2)
+
+	require.NoError(t, err, "listing policy versions should succeed")
+	require.Len(t, versions, 1, "listing should return the matching historical version")
+	require.Equal(t, 8, versions[0].Version, "listing should preserve the stored policy version")
+	require.Equal(t, orgID, versions[0].OrgID, "listing should return only the requested organization")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCodeReviewStore_RunWithGitHubPublicationLock(t *testing.T) {
 	t.Parallel()
 

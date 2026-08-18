@@ -61,6 +61,10 @@ func TestCodeReviewEnumsValidate(t *testing.T) {
 		{name: "visual evidence author invalid", validate: CodeReviewEvidenceAuthorType("bogus").Validate, expectErr: true},
 		{name: "visual evidence fetch available", validate: CodeReviewVisualEvidenceFetchStatusAvailable.Validate},
 		{name: "visual evidence fetch invalid", validate: CodeReviewVisualEvidenceFetchStatus("bogus").Validate, expectErr: true},
+		{name: "policy change kind value", validate: CodeReviewPolicyChangeKindValue.Validate},
+		{name: "policy change kind text", validate: CodeReviewPolicyChangeKindText.Validate},
+		{name: "policy change kind list", validate: CodeReviewPolicyChangeKindList.Validate},
+		{name: "policy change kind invalid", validate: CodeReviewPolicyChangeKind("bogus").Validate, expectErr: true},
 	}
 
 	for _, tt := range tests {
