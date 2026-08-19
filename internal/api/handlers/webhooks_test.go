@@ -860,6 +860,52 @@ func TestWebhook_ReassessesRequestedCodeReviewAfterNewCommits(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "pull request mirror refresh should be org-scoped")
 }
 
+func TestWebhook_DoesNotReassessApprovedCodeReviewAfterNewCommits(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repositoryID := uuid.New()
+	pullRequestID := uuid.New()
+	policyID := uuid.New()
+	headSHA := "new-head-sha"
+	baseSHA := "base-sha"
+	metadata := &codeReviewWebhookMetadataStore{
+		approved: true,
+		latest: models.CodeReviewSessionMetadata{
+			ID: uuid.New(), SessionID: uuid.New(), RepositoryID: repositoryID,
+			PullRequestID: pullRequestID, PolicyID: policyID, HeadSHA: "approved-head-sha",
+			TriggerSource: models.CodeReviewTriggerSourceTeamReviewer,
+			Status:        models.CodeReviewSessionStatusCompleted, ReviewOutputKey: "approved-output",
+		},
+	}
+	jobs := &codeReviewWebhookJobStore{jobID: uuid.New()}
+	codeReviews := codereviewsvc.NewService(
+		&codeReviewWebhookPolicyStore{policyID: policyID, config: models.DefaultCodeReviewPolicyConfig()},
+		metadata,
+		&codeReviewWebhookSessionStore{},
+		jobs,
+		zerolog.Nop(),
+		codereviewsvc.Config{},
+	)
+	handler := &WebhookHandler{codeReviews: codeReviews}
+	event := codeReviewReassessmentWebhook{Action: "synchronize"}
+
+	err := handler.reassessCodeReviewTarget(
+		context.Background(),
+		db.GitHubRepoOwner{OrgID: orgID, RepositoryID: repositoryID, FullName: "assembledhq/143", Status: "active"},
+		"pull_request",
+		event,
+		models.PullRequest{
+			ID: pullRequestID, OrgID: orgID, GitHubRepo: "assembledhq/143", GitHubPRNumber: 42,
+			GitHubPRURL: "https://github.com/assembledhq/143/pull/42", Title: "Changed after approval",
+			HeadSHA: &headSHA, BaseSHA: &baseSHA,
+		},
+	)
+
+	require.NoError(t, err, "approved synchronize event should be handled without error")
+	require.Empty(t, jobs.reassessmentPayloads, "new commits after approval should not enqueue automatic reviewer work")
+}
+
 func TestCodeReviewMaterialChangeKey(t *testing.T) {
 	t.Parallel()
 
@@ -1851,6 +1897,7 @@ type codeReviewWebhookMetadataStore struct {
 	latest    models.CodeReviewSessionMetadata
 	created   models.CodeReviewSessionMetadata
 	submitted models.CodeReviewSessionMetadata
+	approved  bool
 }
 
 func (s *codeReviewWebhookMetadataStore) CreateSessionMetadata(_ context.Context, metadata *models.CodeReviewSessionMetadata) error {
@@ -1889,7 +1936,7 @@ func (s *codeReviewWebhookMetadataStore) GetLatestSubmittedByPullRequest(context
 }
 
 func (s *codeReviewWebhookMetadataStore) HasApprovedByPullRequest(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
-	return false, nil
+	return s.approved, nil
 }
 
 func (s *codeReviewWebhookMetadataStore) FailReview(context.Context, uuid.UUID, uuid.UUID, string) (models.CodeReviewSessionMetadata, error) {

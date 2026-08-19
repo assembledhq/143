@@ -39,7 +39,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 			},
 		},
 		{
-			name: "ignores an explicit rerequest after approval",
+			name: "starts an explicit rerequest after approval",
 			input: newReviewRequestedInput(func(in *ReviewRequestedInput) {
 				in.DeliveryID = "delivery-after-approval"
 			}),
@@ -56,12 +56,12 @@ func TestService_HandleReviewRequested(t *testing.T) {
 					ReviewOutputKey: "approved-output", GitHubReviewID: &reviewID, GitHubReviewURL: &reviewURL,
 				}
 			},
-			expected: func(t *testing.T, result ReviewRequestedResult, _ *policyStub, _ *metadataStub, sessions *sessionStub, jobs *jobStub) {
-				require.False(t, result.Processed, "explicit rerequest should not run after approval")
-				require.Equal(t, "already_approved", result.IgnoredReason, "ignored rerequest should preserve the final approval")
-				require.Equal(t, models.CodeReviewTriggerSourceAppReviewer, result.TriggerSource, "ignored rerequest should retain its matched trigger source")
-				require.Equal(t, 0, sessions.createCalls, "approved rerequest should not create a new session")
-				require.Equal(t, 0, jobs.enqueueCalls, "approved rerequest should not enqueue review work")
+			expected: func(t *testing.T, result ReviewRequestedResult, _ *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "explicit rerequest should run after automatic monitoring has stopped")
+				require.Equal(t, models.CodeReviewTriggerSourceAppReviewer, result.TriggerSource, "rerequest should retain its matched trigger source")
+				require.Equal(t, 1, sessions.createCalls, "approved rerequest should create a new session")
+				require.Equal(t, 1, jobs.enqueueCalls, "approved rerequest should enqueue review work")
+				require.Equal(t, metadata.latest.GitHubReviewID, jobs.payload.ExistingGitHubReviewID, "rerequest should retain the earlier GitHub review identity")
 			},
 		},
 		{
@@ -749,7 +749,7 @@ func TestService_HandleReviewChanged(t *testing.T) {
 			},
 		},
 		{
-			name:              "stops an explicit request when another assessment approved first",
+			name:              "starts an explicit request when another assessment approved first",
 			usePriorSessionID: true,
 			setup: func(metadata *metadataStub, sessions *sessionStub) {
 				reviewID := int64(143)
@@ -773,10 +773,9 @@ func TestService_HandleReviewChanged(t *testing.T) {
 				input.ChangeReason = explicitReviewRequestChangeReason
 			},
 			expected: func(t *testing.T, result ReviewRequestedResult, _ *metadataStub, sessions *sessionStub, jobs *jobStub) {
-				require.False(t, result.Processed, "explicit request should stop after an intervening approval")
-				require.Equal(t, "already_approved", result.IgnoredReason, "stopped explicit request should preserve the final approval")
-				require.Equal(t, 0, sessions.createCalls, "stopped explicit request should not create a session")
-				require.Equal(t, 0, jobs.enqueueCalls, "stopped explicit request should not enqueue review work")
+				require.True(t, result.Processed, "explicit request should remain admitted after an intervening approval")
+				require.Equal(t, 1, sessions.createCalls, "explicit request should create a new session")
+				require.Equal(t, 1, jobs.enqueueCalls, "explicit request should enqueue review work")
 			},
 		},
 		{
@@ -906,13 +905,13 @@ func TestService_QueueReviewChanged(t *testing.T) {
 			expectedWhy: "already_approved",
 		},
 		{
-			name: "does not queue an explicit rerequest after approval",
+			name: "queues an explicit rerequest after approval",
 			setup: func(metadata *metadataStub) {
 				metadata.approved = true
 				metadata.latest = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusCompleted}
 			},
-			explicit:    true,
-			expectedWhy: "already_approved",
+			explicit:      true,
+			expectedQueue: true,
 		},
 	}
 

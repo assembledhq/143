@@ -1,6 +1,6 @@
 # Design: Code Reviewer Bot And Acceptable-Risk Auto-Approval
 
-> **Status:** Implemented | **Last reviewed:** 2026-08-12
+> **Status:** Implemented | **Last reviewed:** 2026-08-19
 >
 > **Depends on:** [../overall.md](../overall.md), [78-review-agent-loops.md](78-review-agent-loops.md), [61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)
 
@@ -21,7 +21,7 @@ Implemented:
 - typed Go models and `pgx` stores for policies, review metadata, agent evidence, and findings
 - deterministic acceptable-risk evaluator, final-review body rendering, and inline finding selection helpers
 - GitHub `review_requested` and PR issue-comment mention webhook adapters for configured bot reviewer identities, including authoritative PR snapshot loading and local mirror creation for human-authored PRs
-- event-driven reassessment after the initial reviewer request when the PR head changes, with a 60-second quiet window that coalesces rapid pushes onto the newest head, plus delivery-keyed explicit rerequests that can reassess the same head immediately after a non-approval; durable follow-up jobs serialize requests behind active work and a terminal stop applies once 143 approves, while PR metadata, readiness, human reviews/comments/threads, checks, and commit statuses continue to synchronize without starting reviewer sessions
+- event-driven reassessment after the initial reviewer request when the PR head changes, with a 60-second quiet window that coalesces rapid pushes onto the newest head until 143 approves the PR; delivery-keyed reviewer-picker requests and configured-team mentions can explicitly reassess the latest head even after approval, durable follow-up jobs serialize requests behind active work, and an in-flight assessment becomes stale if its captured head changes
 - service-layer code review request orchestration that resolves/materializes policy, marks stale older heads, reuses running sessions, creates normal code-review sessions, and enqueues `run_code_review`
 - `run_code_review` worker handler that loads the captured policy version, fans out read-only reviewer threads running native `/review`, synthesizes via an orchestrator thread, records agent results, submits a GitHub review when the worker has GitHub credentials, and stores the GitHub review id/url
 - live reviewer/orchestrator evidence ingestion harvested from running review threads rather than pre-existing stored result rows
@@ -129,12 +129,14 @@ Else:
 Replace the rolling PR comment with the result
         |
         v
-Until approval, later commits automatically rerun the assessment, and a new
-explicit reviewer request reruns it even at the same head. A triggering comment
-is included only in orchestrator synthesis as untrusted guidance. Both update
-the existing formal-review marker and rolling PR comment. Equivalent webhook
-deliveries are idempotent; other webhook activity only synchronizes PR state.
-Approval is final.
+Until approval, later commits automatically rerun the assessment. If the head
+moves during a review, that attempt becomes stale and cannot approve while a
+latest-head reassessment is queued. A new explicit reviewer request reruns the
+latest head, including at the same head or after a prior approval. A triggering
+comment is included only in orchestrator synthesis as untrusted guidance. Both
+automatic and explicit reruns update the existing formal-review marker and
+rolling PR comment, and equivalent webhook deliveries are idempotent. Approval
+ends automatic commit monitoring but does not disable explicit requests.
 ```
 
 Reviewer assignment should be explicit in v1. Auto-running can come later after teams trust the signal.
@@ -446,13 +448,13 @@ Automatic commit reassessments use the PR head SHA and captured policy as their 
 
 Rules:
 
-- Redelivery of the same GitHub `review_requested` event reuses the assessment keyed to that delivery ID even if head or policy state changed afterward. A genuinely new explicit request after a non-approval creates a distinct assessment even for the same PR head SHA. If the original attempt never reached the durable worker queue, redelivery creates one immutable replacement attempt under the same delivery identity.
+- Redelivery of the same GitHub `review_requested` event reuses the assessment keyed to that delivery ID even if head or policy state changed afterward. A genuinely new explicit request creates a distinct assessment even for the same PR head SHA or after a prior approval. If the original attempt never reached the durable worker queue, redelivery creates one immutable replacement attempt under the same delivery identity.
 - A created PR issue comment that mentions the configured reviewer team follows the same explicit-request lifecycle. The comment ID provides a stable fallback identity when delivery metadata is unavailable, and the request context is bounded before it enters durable session/job state.
 - If a new explicit request arrives while a review is already running for the same PR head SHA, retain a durable starter job until the active assessment finishes, then create the requested assessment. The request carries reviewer/team identity through the worker so GitHub assignment cleanup still occurs.
 - After the first explicit reviewer request, new commits automatically enqueue a fresh assessment until 143 approves. Human review submissions/edits/dismissals, ordinary issue and inline review comment changes, review thread changes, PR title/description edits, readiness changes, completed checks, and commit-status updates do not enqueue reviewer sessions; the exception is a newly created PR conversation comment that explicitly mentions the configured reviewer team.
 - Automatic new-commit reassessments schedule their durable starter after a 60-second quiet window. Each distinct head receives a delivery-idempotent job; when an older starter observes that GitHub has already advanced again, it queues the newest head behind a fresh quiet window and exits without starting obsolete reviewer work. Explicit rerequests and dispute-driven reassessments bypass this delay.
 - If new commits arrive while agents are running, retain a durable starter job until the older assessment finishes. The active worker also queues a latest-head starter after its live refresh as a fallback for a delayed or missed webhook, then marks the old commit assessment superseded. Re-read mutable PR metadata and check gates immediately before every final recommendation so an assessment for an older commit cannot approve. Title or description edits alone do not invalidate otherwise usable coding-agent evidence or queue a new session; their captured description evaluation is best effort, while live deterministic gates still apply.
-- A submitted 143 approval is monotonic for the PR. Later webhook changes and explicit reviewer rerequests are ignored so automation never dismisses or contradicts an approval that has already occurred.
+- A submitted 143 approval is the terminal gate for automatic commit reassessment. Later code changes are synchronized but do not enqueue or start reviewer work. A genuinely new explicit reviewer request may still start another assessment, and that assessment does not automatically dismiss the earlier GitHub approval.
 - Reassessments update the rolling PR comment in place so the PR has one current visible 143 recommendation. The automatic quiet window does not publish a new running-state comment. Once the replacement session is queued or running, the comment identifies the current head, preserves the previous completed verdict with its assessed head, and links to the active session; completion replaces that provisional presentation with the new verdict. Backing 143 sessions remain immutable audit history.
 - The original formal review carries the latest visible result until each reassessment updates the rolling comment, then returns to marker-only. When a previously non-approved result becomes acceptable, update the rolling comment and submit a separate, marker-only formal GitHub approval for the current head. Editing a submitted review body alone never represents a review-state transition.
 - New-commit webhook deliveries are keyed by the PR head SHA, while explicit requests are keyed by GitHub delivery ID, so equivalent deliveries reuse the same assessment without collapsing distinct user requests.

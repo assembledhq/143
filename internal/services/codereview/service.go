@@ -594,13 +594,8 @@ func (s *Service) handleExplicitReviewRequest(
 	changeKey string,
 ) (ReviewRequestedResult, error) {
 	input.RequestContext = normalizeReviewRequestContext(input.RequestContext)
-	approved, err := s.metadata.HasApprovedByPullRequest(ctx, input.OrgID, input.PullRequestID)
-	if err != nil {
-		return ReviewRequestedResult{}, fmt.Errorf("check prior code review approval before explicit rerequest: %w", err)
-	}
-	if approved {
-		return ReviewRequestedResult{IgnoredReason: "already_approved", TriggerSource: source}, nil
-	}
+	// A reviewer-picker request or configured-team mention is intentional even
+	// after approval; approval is only the terminal gate for automatic changes.
 	deliveryID := strings.TrimSpace(input.DeliveryID)
 	if deliveryID == "" {
 		s.logger.Warn().
@@ -690,7 +685,7 @@ func (s *Service) QueueReviewChanged(ctx context.Context, input ReviewChangedInp
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("check prior code review approval before queueing reassessment: %w", err)
 	}
-	if approved {
+	if approved && !input.ExplicitRequest {
 		return ReviewRequestedResult{IgnoredReason: "already_approved"}, nil
 	}
 	latest, err := s.metadata.GetLatestByPullRequest(ctx, input.OrgID, input.PullRequestID)
@@ -740,7 +735,8 @@ func (s *Service) reassessmentDebounce() time.Duration {
 // HandleReviewChanged recomputes the recommendation for a PR that previously
 // requested 143 Code Reviewer. PRs without review history are intentionally
 // ignored so ordinary repository webhook traffic does not become always-on
-// code review.
+// code review. Automatic reassessment stops after the reviewer approves the PR,
+// while explicit requests may intentionally start another assessment.
 func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedInput) (ReviewRequestedResult, error) {
 	if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil || input.PullRequestID == uuid.Nil {
 		return ReviewRequestedResult{}, fmt.Errorf("org_id, repository_id, and pull_request_id are required")
@@ -757,7 +753,7 @@ func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedIn
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("check prior code review approval before reassessment: %w", err)
 	}
-	if approved {
+	if approved && !input.ExplicitRequest {
 		return ReviewRequestedResult{IgnoredReason: "already_approved"}, nil
 	}
 	latest, err := s.metadata.GetLatestByPullRequest(ctx, input.OrgID, input.PullRequestID)
