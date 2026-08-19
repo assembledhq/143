@@ -377,6 +377,21 @@ export const api = {
     retry: (sessionId: string) =>
       post<import('./types').SingleResponse<import('./types').CodeReviewRetryResult>>(`/api/v1/code-reviews/${sessionId}/retry`),
     getPolicy: () => get<import('./types').SingleResponse<import('./types').CodeReviewResolvedPolicy>>('/api/v1/code-review-policies'),
+    listPolicyVersions: (params?: { limit?: number; cursor?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').CodeReviewPolicyVersionSummary>>(`/api/v1/code-review-policies/versions${qs ? `?${qs}` : ''}`);
+    },
+    comparePolicyVersions: (newerId: string, olderId: string) => {
+      const searchParams = new URLSearchParams({ newer_id: newerId, older_id: olderId });
+      return get<import('./types').SingleResponse<import('./types').CodeReviewPolicyComparison>>(`/api/v1/code-review-policies/compare?${searchParams.toString()}`);
+    },
+    restorePolicyVersion: (policyId: string, expectedVersion: number) =>
+      post<import('./types').SingleResponse<import('./types').CodeReviewPolicyRestoreResult>>(`/api/v1/code-review-policies/versions/${policyId}/restore`, {
+        expected_version: expectedVersion,
+      }),
     getGitHubTrigger: (repositoryId: string) =>
       get<import('./types').SingleResponse<import('./types').CodeReviewGitHubTriggerResponse>>(
         `/api/v1/code-review-github-trigger?repository_id=${encodeURIComponent(repositoryId)}`,

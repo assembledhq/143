@@ -30,3 +30,11 @@ type AuditLog struct {
 	ProjectID    *uuid.UUID        `db:"project_id" json:"project_id,omitempty"`
 	CreatedAt    time.Time         `db:"created_at" json:"created_at"`
 }
+
+// AuditLogWithActorName enriches an audit entry with the current display name
+// for user actors. The left join used to populate ActorName also covers users
+// who no longer hold an organization membership.
+type AuditLogWithActorName struct {
+	AuditLog
+	ActorName *string `db:"actor_name" json:"actor_name,omitempty"`
+}

@@ -219,6 +219,44 @@ func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters Audit
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.AuditLog])
 }
 
+// ListLatestByResourceIDs returns the newest audit event for each requested
+// resource in one query. This supports version-history surfaces without an N+1
+// lookup for actor and request metadata.
+func (s *AuditLogStore) ListLatestByResourceIDs(ctx context.Context, orgID uuid.UUID, resourceType models.AuditResourceType, resourceIDs []string) ([]models.AuditLogWithActorName, error) {
+	if len(resourceIDs) == 0 {
+		return []models.AuditLogWithActorName{}, nil
+	}
+	if err := resourceType.Validate(); err != nil {
+		return nil, err
+	}
+	query := `
+		SELECT DISTINCT ON (a.resource_id)
+		       a.id, a.org_id, a.actor_type, a.actor_id, a.user_id,
+		       a.action, a.resource_type, a.resource_id,
+		       a.details, a.request_id, a.ip_address, a.user_agent,
+		       a.session_id, a.project_id, a.created_at,
+		       u.name AS actor_name
+		FROM audit_logs a
+		LEFT JOIN users u ON u.id = a.user_id
+		WHERE a.org_id = @org_id
+		  AND a.resource_type = @resource_type
+		  AND a.resource_id = ANY(@resource_ids)
+		ORDER BY a.resource_id, a.created_at DESC, a.id DESC`
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":        orgID,
+		"resource_type": resourceType,
+		"resource_ids":  resourceIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query latest audit logs by resource IDs: %w", err)
+	}
+	entries, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.AuditLogWithActorName])
+	if err != nil {
+		return nil, fmt.Errorf("scan latest audit logs by resource IDs: %w", err)
+	}
+	return entries, nil
+}
+
 // GetByID returns a single audit log entry by ID, scoped to an organization.
 func (s *AuditLogStore) GetByID(ctx context.Context, orgID uuid.UUID, id int64) (*models.AuditLog, error) {
 	query := `

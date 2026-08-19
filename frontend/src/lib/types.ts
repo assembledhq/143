@@ -232,6 +232,59 @@ export interface CodeReviewResolvedPolicy {
   policy?: CodeReviewPolicyRecord;
 }
 
+export type CodeReviewPolicyChangeKind = "value" | "text" | "list";
+
+export interface CodeReviewPolicyChangedField {
+  path: string;
+  label: string;
+  kind: CodeReviewPolicyChangeKind;
+}
+
+export interface CodeReviewPolicyFieldChange extends CodeReviewPolicyChangedField {
+  before: unknown;
+  after: unknown;
+}
+
+export interface CodeReviewPolicyVersionAudit {
+  id: number;
+  actor_type: AuditActorType;
+  actor_id: string;
+  actor_name?: string;
+  user_id?: string;
+  source?: string;
+  reason?: string;
+  tool_name?: string;
+  request_id?: string;
+  ip_address?: string;
+  user_agent?: string;
+  session_id?: string;
+  created_at: string;
+}
+
+export interface CodeReviewPolicyVersionSummary {
+  id: string;
+  version: number;
+  active: boolean;
+  created_by_user_id?: string;
+  created_at: string;
+  previous_policy_id?: string;
+  previous_policy_version?: number;
+  summary: string;
+  changed_fields: CodeReviewPolicyChangedField[];
+  audit?: CodeReviewPolicyVersionAudit;
+}
+
+export interface CodeReviewPolicyComparison {
+  newer: CodeReviewPolicyVersionSummary;
+  older: CodeReviewPolicyVersionSummary;
+  changes: CodeReviewPolicyFieldChange[];
+}
+
+export interface CodeReviewPolicyRestoreResult {
+  policy: CodeReviewPolicyRecord;
+  restored_from: CodeReviewPolicyRecord;
+}
+
 export type CodeReviewGitHubTriggerStatus =
   | "unconfigured"
   | "ready"

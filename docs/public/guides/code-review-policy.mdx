@@ -121,6 +121,14 @@ Policy changes apply to new reviews in every repository. There are no repository
 
 Policy history remains insert-only. Reviews already in progress continue using the policy version captured when they started.
 
+## Inspect and restore policy changes
+
+Organization admins can open **Policy** and select the **Last activity** footer to inspect saved policy history. The history panel summarizes each change in policy language, identifies who made it and when, and expands to show exact before-and-after values. Text guidance uses a line diff, list settings show added and removed entries, and other settings show the previous and new values. Use the version selectors to compare any two loaded versions; load older history when the version you need is not yet listed.
+
+The latest entry stays in the history so its change can be compared with the preceding version. Request, session, IP, user-agent, and tool metadata is available under **Details** when that information was captured.
+
+To return to an earlier configuration, expand that historical entry and select **Restore as new version**. Restore never rewrites or deletes history: it copies the earlier configuration into a new latest version. If someone changes the policy after the confirmation opens, the restore stops and asks you to review the newer policy before trying again.
+
 ## Recover from validation or save failures
 
 Autosave status appears beside prompt editors. If a save fails, the local prompt remains visible so you can correct or retry it. Invalid advanced settings open the relevant controls and display the backend field error without including prompt contents in logs or analytics.

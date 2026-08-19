@@ -71,9 +71,9 @@ import { useOpenCodeAvailability, type OpenCodeModelAvailability } from "@/hooks
 import { useAuth } from "@/hooks/use-auth";
 import { DEFAULT_TIME_RANGE, parseTimeRange, timeRangeBounds, timeRangeRefreshDelayMs, type TimeRangeFilter } from "@/lib/time-range";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
-import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
 import { GitHubReviewerConnectionSheet } from "@/components/code-review/github-reviewer-connection-sheet";
+import { CodeReviewPolicyHistory } from "@/components/code-review/policy-history";
 import { SortableTableHeader } from "@/components/sortable-table-header";
 import {
   ALL_OUTCOMES,
@@ -1048,6 +1048,7 @@ export default function CodeReviewsPage() {
       }
       setInvalidPolicyField(null);
       void queryClient.invalidateQueries({ queryKey: ["audit-logs"] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.policyVersions });
     },
   });
   const readLatestConfig = (): CodeReviewPolicyConfig | null =>
@@ -1749,7 +1750,7 @@ export default function CodeReviewsPage() {
                   ) : null}
                 </div>
               </SectionGroup>
-            <AuditLogTrigger filters={{ resource_type: "code_review_policy" }} title="Review policy history" variant="footer" />
+            <CodeReviewPolicyHistory />
             </SectionGroup>
             <CodeReviewPromptExampleDialog
               selection={promptExample}

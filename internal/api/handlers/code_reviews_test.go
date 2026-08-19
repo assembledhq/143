@@ -416,6 +416,109 @@ func marshalCodeReviewPolicyPartsForHandlerTest(t *testing.T, config models.Code
 	return encoded[0], encoded[1], encoded[2]
 }
 
+type codeReviewPolicyHistoryHandlerStub struct {
+	page          codereviewsvc.CodeReviewPolicyHistoryPage
+	comparison    models.CodeReviewPolicyComparison
+	restoreResult models.CodeReviewPolicyRestoreResult
+	err           error
+	beforeVersion *int
+	limit         int
+	restoreUserID uuid.UUID
+	restorePolicy uuid.UUID
+	expected      int
+}
+
+func (s *codeReviewPolicyHistoryHandlerStub) List(_ context.Context, _ uuid.UUID, beforeVersion *int, limit int) (codereviewsvc.CodeReviewPolicyHistoryPage, error) {
+	s.beforeVersion, s.limit = beforeVersion, limit
+	return s.page, s.err
+}
+
+func (s *codeReviewPolicyHistoryHandlerStub) Compare(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.CodeReviewPolicyComparison, error) {
+	return s.comparison, s.err
+}
+
+func (s *codeReviewPolicyHistoryHandlerStub) Restore(_ context.Context, _ uuid.UUID, policyID, userID uuid.UUID, expectedVersion int) (models.CodeReviewPolicyRestoreResult, error) {
+	s.restorePolicy, s.restoreUserID, s.expected = policyID, userID, expectedVersion
+	return s.restoreResult, s.err
+}
+
+func TestCodeReviewHandler_ListPolicyVersionsReturnsSummariesAndCursor(t *testing.T) {
+	t.Parallel()
+
+	version := models.CodeReviewPolicyVersionSummary{ID: uuid.New(), Version: 8, Active: true, Summary: "Review instructions edited"}
+	service := &codeReviewPolicyHistoryHandlerStub{page: codereviewsvc.CodeReviewPolicyHistoryPage{Versions: []models.CodeReviewPolicyVersionSummary{version}, NextCursor: "8"}}
+	handler := NewCodeReviewHandler(nil, nil)
+	handler.policyHistory = service
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-review-policies/versions?cursor=9&limit=1", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	rr := httptest.NewRecorder()
+
+	handler.ListPolicyVersions(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "policy history should return a successful response")
+	var response models.ListResponse[models.CodeReviewPolicyVersionSummary]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "policy history response should be valid JSON")
+	require.Equal(t, []models.CodeReviewPolicyVersionSummary{version}, response.Data, "policy history should return the service summaries")
+	require.Equal(t, "8", response.Meta.NextCursor, "policy history should return the next version cursor")
+	require.Equal(t, 9, *service.beforeVersion, "the numeric cursor should be passed to the service")
+	require.Equal(t, 1, service.limit, "the requested page size should be passed to the service")
+}
+
+func TestCodeReviewHandler_RestorePolicyVersionUsesExpectedVersionAndActor(t *testing.T) {
+	t.Parallel()
+
+	orgID, userID, policyID := uuid.New(), uuid.New(), uuid.New()
+	result := models.CodeReviewPolicyRestoreResult{
+		Policy:       models.CodeReviewPolicyRecord{ID: uuid.New(), OrgID: orgID, Version: 9, Active: true},
+		RestoredFrom: models.CodeReviewPolicyRecord{ID: policyID, OrgID: orgID, Version: 4},
+	}
+	service := &codeReviewPolicyHistoryHandlerStub{restoreResult: result}
+	handler := NewCodeReviewHandler(nil, nil)
+	handler.policyHistory = service
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/code-review-policies/versions/"+policyID.String()+"/restore", strings.NewReader(`{"expected_version":8}`))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleAdmin})
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("policy_id", policyID.String())
+	req = req.WithContext(context.WithValue(ctx, chi.RouteCtxKey, routeCtx))
+	rr := httptest.NewRecorder()
+
+	handler.RestorePolicyVersion(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "restoring a historical policy should succeed")
+	require.Equal(t, policyID, service.restorePolicy, "the selected historical policy should be restored")
+	require.Equal(t, userID, service.restoreUserID, "the restore should be attributed to the authenticated user")
+	require.Equal(t, 8, service.expected, "the restore should use the caller's active version guard")
+}
+
+func TestCodeReviewHandler_RestorePolicyVersionMapsValidationError(t *testing.T) {
+	t.Parallel()
+
+	orgID, userID, policyID := uuid.New(), uuid.New(), uuid.New()
+	service := &codeReviewPolicyHistoryHandlerStub{err: &models.CodeReviewPolicyValidationError{
+		Field:   "agent_roster.reviewers",
+		Message: "agent is no longer supported",
+	}}
+	handler := NewCodeReviewHandler(nil, nil)
+	handler.policyHistory = service
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/code-review-policies/versions/"+policyID.String()+"/restore", strings.NewReader(`{"expected_version":8}`))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleAdmin})
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("policy_id", policyID.String())
+	req = req.WithContext(context.WithValue(ctx, chi.RouteCtxKey, routeCtx))
+	rr := httptest.NewRecorder()
+
+	handler.RestorePolicyVersion(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "an obsolete historical policy should return a validation response")
+	var response models.ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "restore validation response should be valid JSON")
+	require.Equal(t, "CODE_REVIEW_POLICY_RESTORE_INVALID", response.Error.Code, "restore validation should use a specific error code")
+	require.Equal(t, "the selected policy version is no longer valid", response.Error.Message, "restore validation should explain that the historical version is invalid")
+	require.Equal(t, map[string]any{"field": "agent_roster.reviewers"}, response.Error.Details, "restore validation should identify the invalid field")
+}
+
 func TestCodeReviewHandler_SetupGitHubTriggerMapsMissingUserAuth(t *testing.T) {
 	t.Parallel()
 

@@ -906,6 +906,75 @@ type CodeReviewResolvedPolicy struct {
 	Policy *CodeReviewPolicyRecord `json:"policy,omitempty"`
 }
 
+type CodeReviewPolicyChangeKind string
+
+const (
+	CodeReviewPolicyChangeKindValue CodeReviewPolicyChangeKind = "value"
+	CodeReviewPolicyChangeKindText  CodeReviewPolicyChangeKind = "text"
+	CodeReviewPolicyChangeKindList  CodeReviewPolicyChangeKind = "list"
+)
+
+func (k CodeReviewPolicyChangeKind) Validate() error {
+	switch k {
+	case CodeReviewPolicyChangeKindValue, CodeReviewPolicyChangeKindText, CodeReviewPolicyChangeKindList:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodeReviewPolicyChangeKind: %q", k)
+	}
+}
+
+type CodeReviewPolicyChangedField struct {
+	Path  string                     `json:"path"`
+	Label string                     `json:"label"`
+	Kind  CodeReviewPolicyChangeKind `json:"kind"`
+}
+
+type CodeReviewPolicyFieldChange struct {
+	CodeReviewPolicyChangedField
+	Before any `json:"before"`
+	After  any `json:"after"`
+}
+
+type CodeReviewPolicyVersionAudit struct {
+	ID        int64          `json:"id"`
+	ActorType AuditActorType `json:"actor_type"`
+	ActorID   string         `json:"actor_id"`
+	ActorName string         `json:"actor_name,omitempty"`
+	UserID    *uuid.UUID     `json:"user_id,omitempty"`
+	Source    string         `json:"source,omitempty"`
+	Reason    string         `json:"reason,omitempty"`
+	ToolName  string         `json:"tool_name,omitempty"`
+	RequestID *string        `json:"request_id,omitempty"`
+	IPAddress string         `json:"ip_address,omitempty"`
+	UserAgent *string        `json:"user_agent,omitempty"`
+	SessionID *uuid.UUID     `json:"session_id,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
+type CodeReviewPolicyVersionSummary struct {
+	ID                    uuid.UUID                      `json:"id"`
+	Version               int                            `json:"version"`
+	Active                bool                           `json:"active"`
+	CreatedByUserID       *uuid.UUID                     `json:"created_by_user_id,omitempty"`
+	CreatedAt             time.Time                      `json:"created_at"`
+	PreviousPolicyID      *uuid.UUID                     `json:"previous_policy_id,omitempty"`
+	PreviousPolicyVersion *int                           `json:"previous_policy_version,omitempty"`
+	Summary               string                         `json:"summary"`
+	ChangedFields         []CodeReviewPolicyChangedField `json:"changed_fields"`
+	Audit                 *CodeReviewPolicyVersionAudit  `json:"audit,omitempty"`
+}
+
+type CodeReviewPolicyComparison struct {
+	Newer   CodeReviewPolicyVersionSummary `json:"newer"`
+	Older   CodeReviewPolicyVersionSummary `json:"older"`
+	Changes []CodeReviewPolicyFieldChange  `json:"changes"`
+}
+
+type CodeReviewPolicyRestoreResult struct {
+	Policy       CodeReviewPolicyRecord `json:"policy"`
+	RestoredFrom CodeReviewPolicyRecord `json:"restored_from"`
+}
+
 const (
 	CodeReviewPolicyFieldEnabled                 = "enabled"
 	CodeReviewPolicyFieldApprovalMode            = "approval_mode"

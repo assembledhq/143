@@ -98,11 +98,16 @@ describe('AuditLogEntry', () => {
           entry={makeEntry({ id: 3, action: 'code_review_policy.reset', resource_type: 'code_review_policy' })}
           members={mockMembers}
         />
+        <AuditLogEntry
+          entry={makeEntry({ id: 4, action: 'code_review_policy.restored', resource_type: 'code_review_policy' })}
+          members={mockMembers}
+        />
       </>
     );
 
     expect(screen.getByText('updated review policy')).toBeInTheDocument();
     expect(screen.getByText('reset review policy')).toBeInTheDocument();
+    expect(screen.getByText('restored review policy')).toBeInTheDocument();
   });
 
   it('labels auto-join audit actions without assuming a domain source', () => {

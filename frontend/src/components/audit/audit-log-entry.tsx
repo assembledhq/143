@@ -58,6 +58,7 @@ const actionLabels: Record<string, string> = {
   "credential.deleted": "deleted credential",
   "code_review_policy.updated": "updated review policy",
   "code_review_policy.reset": "reset review policy",
+  "code_review_policy.restored": "restored review policy",
   "auth.login": "logged in",
   "auth.logout": "logged out",
   "auth.register": "registered",
