@@ -246,6 +246,7 @@ export function CodeReviewPolicyHistory() {
                       comparisonNewerVersion={expanded && selectionIsValid ? selectedNewer?.version : undefined}
                       comparisonLoading={expanded && canCompare && comparisonQuery.isLoading}
                       comparisonError={expanded && canCompare && comparisonQuery.isError}
+                      onRetryComparison={() => void comparisonQuery.refetch()}
                       onToggle={() => expanded ? setExpandedVersionIDOverride(null) : selectVersion(version)}
                       onRestore={() => setRestoreTarget(version)}
                       restorePending={restoreMutation.isPending && restoreMutation.variables?.id === version.id}
@@ -337,6 +338,7 @@ function PolicyVersionCard({
   comparisonNewerVersion,
   comparisonLoading,
   comparisonError,
+  onRetryComparison,
   onToggle,
   onRestore,
   restorePending,
@@ -349,6 +351,7 @@ function PolicyVersionCard({
   comparisonNewerVersion?: number;
   comparisonLoading: boolean;
   comparisonError: boolean;
+  onRetryComparison: () => void;
   onToggle: () => void;
   onRestore: () => void;
   restorePending: boolean;
@@ -389,7 +392,13 @@ function PolicyVersionCard({
                 Changes from version {comparisonOlderVersion ?? version.previous_policy_version} to version {comparisonNewerVersion ?? version.version}
               </p>
               {comparisonLoading ? <p className="text-sm text-muted-foreground">Loading exact changes…</p> : null}
-              {comparisonError ? <ErrorNotice title="Changes could not be loaded" description="Close this version and try again." /> : null}
+              {comparisonError ? (
+                <ErrorNotice
+                  title="Changes could not be loaded"
+                  description="Retry to load the exact changes between these versions."
+                  action={{ label: "Retry", onClick: onRetryComparison }}
+                />
+              ) : null}
               {comparison ? <PolicyDiff changes={comparison.changes} /> : null}
             </div>
           ) : (

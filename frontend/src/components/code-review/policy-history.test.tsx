@@ -209,4 +209,35 @@ describe("CodeReviewPolicyHistory", () => {
     await user.click(within(history).getByRole("button", { name: "Retry" }));
     expect(await within(history).findByText(/Latest change: Review instructions edited/)).toBeInTheDocument();
   });
+
+  it("retries a failed policy comparison", async () => {
+    const user = userEvent.setup();
+    mocks.comparePolicyVersions
+      .mockRejectedValueOnce(new Error("comparison unavailable"))
+      .mockResolvedValueOnce({
+        data: {
+          newer: versions[0],
+          older: versions[1],
+          changes: [{
+            path: "review_instructions",
+            label: "Review instructions",
+            kind: "text",
+            before: "Review changed code.",
+            after: "Review changed code.\nRequire focused tests.",
+          }],
+        },
+      });
+
+    renderWithProviders(<CodeReviewPolicyHistory />);
+
+    await user.click(await screen.findByRole("button", { name: /Last activity:.*Alice Smith/ }));
+    const history = await screen.findByRole("dialog", { name: "Review policy history" });
+    const comparisonError = await within(history).findByRole("alert");
+    expect(comparisonError).toHaveTextContent("Changes could not be loaded");
+
+    await user.click(within(comparisonError).getByRole("button", { name: "Retry" }));
+
+    expect(await within(history).findByText("Require focused tests.")).toBeInTheDocument();
+    expect(mocks.comparePolicyVersions).toHaveBeenCalledTimes(2);
+  });
 });

@@ -491,6 +491,34 @@ func TestCodeReviewHandler_RestorePolicyVersionUsesExpectedVersionAndActor(t *te
 	require.Equal(t, 8, service.expected, "the restore should use the caller's active version guard")
 }
 
+func TestCodeReviewHandler_RestorePolicyVersionMapsValidationError(t *testing.T) {
+	t.Parallel()
+
+	orgID, userID, policyID := uuid.New(), uuid.New(), uuid.New()
+	service := &codeReviewPolicyHistoryHandlerStub{err: &models.CodeReviewPolicyValidationError{
+		Field:   "agent_roster.reviewers",
+		Message: "agent is no longer supported",
+	}}
+	handler := NewCodeReviewHandler(nil, nil)
+	handler.policyHistory = service
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/code-review-policies/versions/"+policyID.String()+"/restore", strings.NewReader(`{"expected_version":8}`))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleAdmin})
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("policy_id", policyID.String())
+	req = req.WithContext(context.WithValue(ctx, chi.RouteCtxKey, routeCtx))
+	rr := httptest.NewRecorder()
+
+	handler.RestorePolicyVersion(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "an obsolete historical policy should return a validation response")
+	var response models.ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "restore validation response should be valid JSON")
+	require.Equal(t, "CODE_REVIEW_POLICY_RESTORE_INVALID", response.Error.Code, "restore validation should use a specific error code")
+	require.Equal(t, "the selected policy version is no longer valid", response.Error.Message, "restore validation should explain that the historical version is invalid")
+	require.Equal(t, map[string]any{"field": "agent_roster.reviewers"}, response.Error.Details, "restore validation should identify the invalid field")
+}
+
 func TestCodeReviewHandler_SetupGitHubTriggerMapsMissingUserAuth(t *testing.T) {
 	t.Parallel()
 

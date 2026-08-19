@@ -983,6 +983,7 @@ func (h *CodeReviewHandler) RestorePolicyVersion(w http.ResponseWriter, r *http.
 	result, err := h.policyHistory.Restore(r.Context(), orgID, policyID, user.ID, *req.ExpectedVersion)
 	if err != nil {
 		var conflict *codereviewsvc.CodeReviewPolicyRestoreConflictError
+		var validationErr *models.CodeReviewPolicyValidationError
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			writeError(w, r, http.StatusNotFound, "CODE_REVIEW_POLICY_VERSION_NOT_FOUND", "code review policy version not found")
@@ -990,6 +991,8 @@ func (h *CodeReviewHandler) RestorePolicyVersion(w http.ResponseWriter, r *http.
 			writeError(w, r, http.StatusConflict, "CODE_REVIEW_POLICY_ALREADY_ACTIVE", "the selected policy version is already active", err)
 		case errors.As(err, &conflict):
 			writeErrorWithDetails(w, r, http.StatusConflict, "CODE_REVIEW_POLICY_VERSION_CONFLICT", "the policy changed before the restore completed", map[string]int{"current_version": conflict.CurrentVersion}, err)
+		case errors.As(err, &validationErr):
+			writeErrorWithDetails(w, r, http.StatusBadRequest, "CODE_REVIEW_POLICY_RESTORE_INVALID", "the selected policy version is no longer valid", map[string]string{"field": validationErr.Field}, err)
 		default:
 			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_RESTORE_FAILED", "failed to restore code review policy version", err)
 		}
