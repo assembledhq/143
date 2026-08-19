@@ -263,15 +263,20 @@ func TestNewRouter_WiresCodeReviewTriggerConfig(t *testing.T) {
 	aliasConfig := strings.Index(string(source), `AliasLogins:       cfg.CodeReviewAliasLogins`)
 	teamConfig := strings.Index(string(source), `TeamSlugs:         cfg.CodeReviewTeamSlugs`)
 	setService := strings.Index(string(source), `webhookHandler.SetCodeReviewService(codeReviewSvc, pullRequestStore)`)
+	threadServiceConstruction := strings.Index(string(source), `threadSvc := threadservice.NewService`)
+	setThreadCanceller := strings.Index(string(source), `codeReviewSvc.SetThreadCanceller(threadSvc)`)
 
 	require.NotEqual(t, -1, appReviewerConfig, "router should pass configured app reviewer logins into the code review service")
 	require.NotEqual(t, -1, aliasConfig, "router should pass configured alias reviewer logins into the code review service")
 	require.NotEqual(t, -1, teamConfig, "router should pass configured team slugs into the code review service")
 	require.NotEqual(t, -1, setService, "router should wire the code review service into GitHub webhooks")
+	require.NotEqual(t, -1, threadServiceConstruction, "router should construct the thread service used to cancel superseded reviews")
+	require.NotEqual(t, -1, setThreadCanceller, "router should wire superseded review cancellation into the code review service")
 	require.Greater(t, appReviewerConfig, serviceConstruction, "code review app reviewer config should be part of service construction")
 	require.Greater(t, aliasConfig, serviceConstruction, "code review alias config should be part of service construction")
 	require.Greater(t, teamConfig, serviceConstruction, "code review team config should be part of service construction")
 	require.Greater(t, setService, teamConfig, "webhook handler should receive the configured service")
+	require.Greater(t, setThreadCanceller, threadServiceConstruction, "code review cancellation should use the configured thread service")
 }
 
 func TestNewRouter_MountsCodeReviewGitHubTriggerSetupAsAdminOnly(t *testing.T) {

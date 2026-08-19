@@ -374,6 +374,26 @@ func (s *ThreadInboxStore) MarkDeadLetter(ctx context.Context, orgID, threadID, 
 	return entry, nil
 }
 
+// DeadLetterPendingByThread terminalizes all unacknowledged input for a
+// cancelled thread. It is intentionally batched so cancellation cannot leave
+// queued messages that the terminal thread will never consume.
+func (s *ThreadInboxStore) DeadLetterPendingByThread(ctx context.Context, orgID, threadID uuid.UUID, reason string) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE thread_inbox_entries
+		SET delivery_state = 'dead_letter',
+			last_error = NULLIF($3, ''),
+			owner_node_id = NULL,
+			runtime_id = NULL,
+			updated_at = now()
+		WHERE org_id = $1
+		  AND thread_id = $2
+		  AND delivery_state IN ('pending', 'delivering', 'delivered', 'unknown_delivery')`, orgID, threadID, reason)
+	if err != nil {
+		return 0, fmt.Errorf("dead-letter cancelled thread inbox: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (s *ThreadInboxStore) MarkDeliveryFailed(ctx context.Context, orgID, threadID, runtimeID, entryID uuid.UUID, reason string, maxAttempts int) (models.ThreadInboxEntry, error) {
 	if maxAttempts <= 0 {
 		maxAttempts = DefaultThreadInboxMaxDeliveryAttempts

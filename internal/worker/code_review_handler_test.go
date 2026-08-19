@@ -5095,6 +5095,40 @@ func newCodeReviewMetadataRows() *pgxmock.Rows {
 	})
 }
 
+func TestCancelActiveCodeReviewThreads_InterruptsStaleReviewThreads(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 0, nil, nil)
+	setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
+	mock.ExpectQuery("(?s)SELECT .*FROM sessions.*id = ANY\\(@ids\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+
+	threadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)
+	cancelRequestedAt := time.Now().UTC()
+	setWorkerSessionThreadColumn(threadRow, "cancel_requested_at", &cancelRequestedAt)
+	mock.ExpectQuery("(?s)UPDATE session_threads.*SET cancel_requested_at.*status IN").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(newSessionThreadRows().AddRow(threadRow...))
+
+	orch := &orchestratorServiceStub{cancelThreadResult: true}
+	err := cancelActiveCodeReviewThreads(context.Background(), stores, &Services{Orchestrator: orch}, zerolog.Nop(), runCodeReviewPayload{
+		OrgID:     orgID,
+		SessionID: sessionID,
+	})
+
+	require.NoError(t, err, "stale review fallback should cancel active reviewer threads")
+	require.Equal(t, []uuid.UUID{threadID}, orch.cancelThreadIDs, "stale review fallback should interrupt the active thread")
+	require.NoError(t, mock.ExpectationsWereMet(), "stale review fallback should persist cancellation before interrupting the runtime")
+}
+
 func newSessionThreadRows() *pgxmock.Rows {
 	return pgxmock.NewRows([]string{
 		"id", "session_id", "org_id", "agent_type", "model_override", "reasoning_effort",

@@ -95,29 +95,37 @@ func (s *SessionExecutorStore) CreateStarting(ctx context.Context, orgID uuid.UU
 	return id, nil
 }
 
-func (s *SessionExecutorStore) HeartbeatWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, leaseDuration time.Duration) (bool, models.DrainIntent, error) {
+func (s *SessionExecutorStore) HeartbeatWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, leaseDuration time.Duration) (bool, models.DrainIntent, bool, error) {
 	var drainIntent string
+	var threadCancelRequested bool
 	err := s.db.QueryRow(ctx, `
-		UPDATE session_executors
+		UPDATE session_executors se
 		SET heartbeat_at = now(),
 			lease_expires_at = now() + ($4 * interval '1 second'),
 			updated_at = now()
-		WHERE org_id = $1
-		  AND id = $2
-		  AND lock_token = $3
-		  AND status IN ('starting', 'running', 'draining')
-		RETURNING drain_intent`, orgID, executorID, lockToken, int(leaseDuration.Seconds())).Scan(&drainIntent)
+		WHERE se.org_id = $1
+		  AND se.id = $2
+		  AND se.lock_token = $3
+		  AND se.status IN ('starting', 'running', 'draining')
+		RETURNING se.drain_intent,
+			EXISTS (
+				SELECT 1
+				FROM session_threads st
+				WHERE st.org_id = se.org_id
+				  AND st.id = se.thread_id
+				  AND (st.cancel_requested_at IS NOT NULL OR st.status = 'cancelled')
+			)`, orgID, executorID, lockToken, int(leaseDuration.Seconds())).Scan(&drainIntent, &threadCancelRequested)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, models.DrainIntentNone, nil
+		return false, models.DrainIntentNone, false, nil
 	}
 	if err != nil {
-		return false, models.DrainIntentNone, fmt.Errorf("heartbeat session executor: %w", err)
+		return false, models.DrainIntentNone, false, fmt.Errorf("heartbeat session executor: %w", err)
 	}
 	intent := models.DrainIntent(drainIntent)
 	if intent == "" {
 		intent = models.DrainIntentNone
 	}
-	return true, intent, nil
+	return true, intent, threadCancelRequested, nil
 }
 
 // GetByID loads an executor by its globally unique id during executor boot,

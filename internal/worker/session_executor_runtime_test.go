@@ -24,6 +24,7 @@ type executorRuntimeExecutorStoreStub struct {
 	getSequence               []models.SessionExecutor
 	getErr                    error
 	heartbeatIntent           models.DrainIntent
+	heartbeatThreadCancel     bool
 	markRunningOK             bool
 	terminalStatus            models.SessionExecutorStatus
 	terminalToken             uuid.UUID
@@ -50,11 +51,11 @@ func (s *executorRuntimeExecutorStoreStub) MarkRunningWithLease(context.Context,
 	return s.markRunningOK, nil
 }
 
-func (s *executorRuntimeExecutorStoreStub) HeartbeatWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Duration) (bool, models.DrainIntent, error) {
+func (s *executorRuntimeExecutorStoreStub) HeartbeatWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Duration) (bool, models.DrainIntent, bool, error) {
 	if s.heartbeatIntent == "" {
-		return true, models.DrainIntentNone, nil
+		return true, models.DrainIntentNone, s.heartbeatThreadCancel, nil
 	}
-	return true, s.heartbeatIntent, nil
+	return true, s.heartbeatIntent, s.heartbeatThreadCancel, nil
 }
 
 func (s *executorRuntimeExecutorStoreStub) MarkDrainingWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
@@ -741,6 +742,70 @@ func TestSessionExecutorRuntime_DeployBudgetExpiredRequestsTypedSystemStopAndReq
 	require.Equal(t, 1, jobs.retryCalls, "deploy budget expiry should retry the original turn")
 	require.Equal(t, 0, jobs.succeededCalls, "deploy budget expiry should not mark the job succeeded")
 	require.Equal(t, models.SessionExecutorStatusRequeued, executors.terminalStatus, "deploy budget expiry should requeue the executor")
+}
+
+func TestSessionExecutorRuntime_DurableThreadCancellationStopsOwnedHandler(t *testing.T) {
+	t.Parallel()
+
+	executorID := uuid.New()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	var handlerCause error
+	executors := &executorRuntimeExecutorStoreStub{
+		executor: models.SessionExecutor{
+			ID:        executorID,
+			OrgID:     orgID,
+			SessionID: sessionID,
+			ThreadID:  &threadID,
+			JobID:     jobID,
+			JobType:   "continue_session",
+			LockToken: lockToken,
+			Status:    models.SessionExecutorStatusStarting,
+		},
+		heartbeatThreadCancel: true,
+		markRunningOK:         true,
+	}
+	jobs := &executorRuntimeJobStoreStub{
+		active: true,
+		job: &models.Job{
+			ID:          jobID,
+			OrgID:       orgID,
+			JobType:     "continue_session",
+			Payload:     json.RawMessage(`{}`),
+			Status:      "running",
+			Attempts:    1,
+			MaxAttempts: 3,
+			LockToken:   &lockToken,
+			CreatedAt:   time.Now(),
+		},
+	}
+	orch := &orchestratorServiceStub{cancelThreadResult: true}
+	runtime := &SessionExecutorRuntime{
+		Executors:         executors,
+		Jobs:              jobs,
+		Services:          &Services{Orchestrator: orch},
+		HeartbeatInterval: time.Millisecond,
+		Handlers: map[string]JobHandler{
+			"continue_session": func(ctx context.Context, _ string, _ json.RawMessage) error {
+				<-ctx.Done()
+				handlerCause = context.Cause(ctx)
+				return &FatalError{Err: handlerCause}
+			},
+		},
+		Logger: zerolog.Nop(),
+	}
+
+	err := runtime.Run(context.Background(), executorID)
+
+	require.NoError(t, err, "durably cancelled executor work should finish without retrying")
+	require.ErrorIs(t, handlerCause, agent.ErrUserCancelCause, "executor cancellation should preserve user-cancel semantics")
+	require.Equal(t, 1, orch.cancelThreadCalls, "executor should interrupt its local thread registry")
+	require.Equal(t, threadID, orch.cancelThreadID, "executor should target the thread that it owns")
+	require.Equal(t, 1, jobs.deadLetterCalls, "cancelled continuation should be terminalized instead of retried")
+	require.Equal(t, 0, jobs.retryCalls, "cancelled continuation should not start another attempt")
 }
 
 func TestSessionExecutorRuntime_DrainRequestsTypedSystemStopAndRequeues(t *testing.T) {

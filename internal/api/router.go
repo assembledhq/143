@@ -557,6 +557,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if threadCanceller != nil {
 		threadSvc.SetCanceller(threadCanceller)
 	}
+	codeReviewSvc.SetThreadCanceller(threadSvc)
 	threadSvc.SetOwnerLossOrchestrator(ownerloss.NewService(
 		sessionStore,
 		db.NewSessionExecutorStore(pool),

@@ -28,6 +28,7 @@ import (
 	"github.com/assembledhq/143/internal/services/codexauth"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
+	threadservice "github.com/assembledhq/143/internal/services/thread"
 	"github.com/assembledhq/143/internal/worker"
 )
 
@@ -243,6 +244,8 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	evalBootstrapStore := db.NewEvalBootstrapStore(pool)
 	orgSettingsCache := agent.NewOrgSettingsCache(agent.DefaultOrgSettingsCacheTTL)
 
+	cancelRegistry := agent.NewCancelRegistry(logger)
+	threadCancelRegistry := agent.NewThreadCancelRegistry(logger)
 	services := buildServices(
 		cfg,
 		pool,
@@ -269,8 +272,8 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		evalBootstrapStore,
 		snapshotStore,
 		billingMetrics,
-		agent.NewCancelRegistry(logger),
-		agent.NewThreadCancelRegistry(logger),
+		cancelRegistry,
+		threadCancelRegistry,
 		orgSettingsCache,
 		sandboxCapacity,
 		redisClient,
@@ -293,6 +296,9 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		},
 	)
 	codeReviewLifecycle.SetReviewStatusCommentJobs(jobStore)
+	threadSvc := threadservice.NewService(sessionThreadStore, sessionStore, sessionMessageStore, sessionLogStore, jobStore, logger)
+	threadSvc.SetCanceller(threadCancelRegistry)
+	codeReviewLifecycle.SetThreadCanceller(threadSvc)
 	services.CodeReviewLifecycle = codeReviewLifecycle
 
 	stores := buildSessionExecutorStores(sessionExecutorStoreDeps{
@@ -447,6 +453,7 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 		GitHubInstallations: db.NewGitHubInstallationStore(pool),
 		SessionMessages:     deps.SessionMessages,
 		SessionThreads:      deps.SessionThreads,
+		ThreadInbox:         db.NewThreadInboxStore(pool),
 		HumanInputRequests:  db.NewSessionHumanInputRequestStore(pool),
 		ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 		SandboxHolders:      db.NewSessionSandboxHolderStore(pool),

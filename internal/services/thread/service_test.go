@@ -20,16 +20,17 @@ import (
 // --- Mock stores ---
 
 type mockThreadStore struct {
-	createFn           func(ctx context.Context, t *models.SessionThread, max int) error
-	getByIDFn          func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
-	listBySessionFn    func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
-	archiveFn          func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
-	claimIdleFn        func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
-	claimForResumeFn   func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
-	updateFn           func(ctx context.Context, t *models.SessionThread) error
-	updateStatusFn     func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
-	incrementPendingFn func(ctx context.Context, orgID, threadID uuid.UUID) error
-	pendingCalls       []uuid.UUID
+	createFn            func(ctx context.Context, t *models.SessionThread, max int) error
+	getByIDFn           func(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
+	listBySessionFn     func(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error)
+	archiveFn           func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	claimIdleFn         func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	claimForResumeFn    func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
+	updateFn            func(ctx context.Context, t *models.SessionThread) error
+	updateStatusFn      func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
+	incrementPendingFn  func(ctx context.Context, orgID, threadID uuid.UUID) error
+	markSessionCancelFn func(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) ([]models.SessionThread, error)
+	pendingCalls        []uuid.UUID
 }
 
 func (m *mockThreadStore) Create(ctx context.Context, t *models.SessionThread, max int) error {
@@ -100,8 +101,16 @@ func (m *mockThreadStore) MarkCancelRequested(ctx context.Context, orgID, thread
 	return nil
 }
 
+func (m *mockThreadStore) MarkCancelRequestedBySessions(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) ([]models.SessionThread, error) {
+	if m.markSessionCancelFn != nil {
+		return m.markSessionCancelFn(ctx, orgID, sessionIDs)
+	}
+	return []models.SessionThread{}, nil
+}
+
 type mockSessionStore struct {
 	getByIDFn        func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	listByIDsFn      func(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) ([]models.Session, error)
 	claimIdleFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimForResumeFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
@@ -113,6 +122,17 @@ func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UU
 		return m.getByIDFn(ctx, orgID, sessionID)
 	}
 	return models.Session{}, fmt.Errorf("not found")
+}
+
+func (m *mockSessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) ([]models.Session, error) {
+	if m.listByIDsFn != nil {
+		return m.listByIDsFn(ctx, orgID, sessionIDs)
+	}
+	sessions := make([]models.Session, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		sessions = append(sessions, models.Session{ID: sessionID, OrgID: orgID})
+	}
+	return sessions, nil
 }
 
 func (m *mockSessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {

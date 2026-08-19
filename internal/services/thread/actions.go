@@ -2,8 +2,10 @@ package thread
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -60,6 +62,75 @@ func (s *Service) CancelThread(ctx context.Context, orgID, sessionID, threadID u
 		return models.SessionThread{}, fmt.Errorf("reload thread: %w", err)
 	}
 	return updated, nil
+}
+
+// CancelActiveThreads requests cancellation for all active threads in the
+// selected sessions. Session and thread state are loaded in batches. At most
+// one worker job is queued for each owning worker node.
+func (s *Service) CancelActiveThreads(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) (int, error) {
+	sessionIDs = uniqueSortedUUIDs(sessionIDs)
+	if len(sessionIDs) == 0 {
+		return 0, nil
+	}
+	sessions, err := s.sessionStore.ListByIDs(ctx, orgID, sessionIDs)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
+	}
+	if len(sessions) != len(sessionIDs) {
+		return 0, ErrSessionNotFound
+	}
+	sessionsByID := make(map[uuid.UUID]models.Session, len(sessions))
+	for _, session := range sessions {
+		sessionsByID[session.ID] = session
+	}
+
+	threads, err := s.threadStore.MarkCancelRequestedBySessions(ctx, orgID, sessionIDs)
+	if err != nil {
+		return 0, fmt.Errorf("mark active threads for cancellation: %w", err)
+	}
+	if len(threads) == 0 {
+		return 0, nil
+	}
+
+	type remoteCancellationBatch struct {
+		targetNodeID *string
+		sessionIDs   []uuid.UUID
+		threadIDs    []uuid.UUID
+	}
+	remoteByTarget := make(map[string]*remoteCancellationBatch)
+	for _, thread := range threads {
+		if s.canceller != nil && s.canceller.CancelThread(thread.ID) {
+			continue
+		}
+		session, ok := sessionsByID[thread.SessionID]
+		if !ok {
+			return len(threads), fmt.Errorf("%w: cancellation returned thread %s for unknown session %s", ErrSessionNotFound, thread.ID, thread.SessionID)
+		}
+		targetNodeID := models.SessionWorkerTarget(&session)
+		targetKey := ""
+		if targetNodeID != nil {
+			targetKey = *targetNodeID
+		}
+		batch := remoteByTarget[targetKey]
+		if batch == nil {
+			batch = &remoteCancellationBatch{targetNodeID: targetNodeID}
+			remoteByTarget[targetKey] = batch
+		}
+		batch.sessionIDs = append(batch.sessionIDs, thread.SessionID)
+		batch.threadIDs = append(batch.threadIDs, thread.ID)
+	}
+	targetKeys := make([]string, 0, len(remoteByTarget))
+	for targetKey := range remoteByTarget {
+		targetKeys = append(targetKeys, targetKey)
+	}
+	sort.Strings(targetKeys)
+	for _, targetKey := range targetKeys {
+		batch := remoteByTarget[targetKey]
+		if err := s.enqueueCancelThreads(ctx, orgID, batch.targetNodeID, uniqueSortedUUIDs(batch.sessionIDs), batch.threadIDs); err != nil {
+			return len(threads), fmt.Errorf("enqueue active thread cancellation: %w", err)
+		}
+	}
+	return len(threads), nil
 }
 
 // ListFileEvents returns the raw file-event timeline for a session. Used by
@@ -173,6 +244,60 @@ func (s *Service) enqueueCancelThread(ctx context.Context, orgID, sessionID, thr
 		TargetNodeID: targetNodeID,
 	})
 	return err
+}
+
+func (s *Service) enqueueCancelThreads(ctx context.Context, orgID uuid.UUID, targetNodeID *string, sessionIDs, threadIDs []uuid.UUID) error {
+	if s.jobStore == nil || len(threadIDs) == 0 {
+		return nil
+	}
+	threadIDs = uniqueSortedUUIDs(threadIDs)
+	encodedThreadIDs := make([]string, 0, len(threadIDs))
+	for _, threadID := range threadIDs {
+		encodedThreadIDs = append(encodedThreadIDs, threadID.String())
+	}
+	sessionIDs = uniqueSortedUUIDs(sessionIDs)
+	encodedSessionIDs := make([]string, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		encodedSessionIDs = append(encodedSessionIDs, sessionID.String())
+	}
+	digest := sha256.Sum256([]byte(strings.Join(encodedThreadIDs, ",")))
+	dedupeKey := fmt.Sprintf("%s:batch:%x", cancelThreadJobType, digest[:8])
+	payload := map[string]any{
+		"session_ids": encodedSessionIDs,
+		"thread_ids":  encodedThreadIDs,
+		"org_id":      orgID.String(),
+	}
+	if len(encodedSessionIDs) == 1 {
+		payload["session_id"] = encodedSessionIDs[0]
+	}
+	_, err := s.jobStore.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
+		Queue:        deliverThreadInboxQueue,
+		JobType:      cancelThreadJobType,
+		Payload:      payload,
+		Priority:     9,
+		DedupeKey:    &dedupeKey,
+		TargetNodeID: targetNodeID,
+	})
+	return err
+}
+
+func uniqueSortedUUIDs(ids []uuid.UUID) []uuid.UUID {
+	seen := make(map[uuid.UUID]struct{}, len(ids))
+	unique := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if id == uuid.Nil {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	sort.Slice(unique, func(i, j int) bool {
+		return unique[i].String() < unique[j].String()
+	})
+	return unique
 }
 
 func (s *Service) enqueueThreadContinuation(ctx context.Context, orgID, sessionID, threadID uuid.UUID) error {

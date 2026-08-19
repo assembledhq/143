@@ -98,6 +98,10 @@ func (m *mockThreadStore) MarkCancelRequested(ctx context.Context, orgID, thread
 	return nil
 }
 
+func (m *mockThreadStore) MarkCancelRequestedBySessions(context.Context, uuid.UUID, []uuid.UUID) ([]models.SessionThread, error) {
+	return []models.SessionThread{}, nil
+}
+
 type mockSessionStoreForThread struct {
 	getByIDFn        func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimIdleFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
@@ -110,6 +114,14 @@ func (m *mockSessionStoreForThread) GetByID(ctx context.Context, orgID, sessionI
 		return m.getByIDFn(ctx, orgID, sessionID)
 	}
 	return models.Session{}, fmt.Errorf("not found")
+}
+
+func (m *mockSessionStoreForThread) ListByIDs(_ context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) ([]models.Session, error) {
+	sessions := make([]models.Session, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		sessions = append(sessions, models.Session{ID: sessionID, OrgID: orgID})
+	}
+	return sessions, nil
 }
 
 func (m *mockSessionStoreForThread) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {

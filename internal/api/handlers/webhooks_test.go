@@ -1951,8 +1951,8 @@ func (s *codeReviewWebhookMetadataStore) MarkSupersededBy(context.Context, uuid.
 	return models.CodeReviewSessionMetadata{}, nil
 }
 
-func (s *codeReviewWebhookMetadataStore) MarkStaleForPullRequestExceptHead(context.Context, uuid.UUID, uuid.UUID, string, *uuid.UUID) (int64, error) {
-	return 0, nil
+func (s *codeReviewWebhookMetadataStore) MarkStaleForPullRequestExceptHead(context.Context, uuid.UUID, uuid.UUID, string, *uuid.UUID) ([]models.CodeReviewSessionMetadata, error) {
+	return []models.CodeReviewSessionMetadata{}, nil
 }
 
 type codeReviewWebhookSessionStore struct {

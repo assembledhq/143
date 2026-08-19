@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -27,12 +28,13 @@ func (m *mockFileEventStore) ListBySession(ctx context.Context, orgID, sessionID
 }
 
 type mockCanceller struct {
-	calls []uuid.UUID
+	calls  []uuid.UUID
+	reject bool
 }
 
 func (m *mockCanceller) CancelThread(threadID uuid.UUID) bool {
 	m.calls = append(m.calls, threadID)
-	return true
+	return !m.reject
 }
 
 // markCancelTracker captures whether MarkCancelRequested was called and which
@@ -184,6 +186,140 @@ func TestService_CancelThread_NoCanceller(t *testing.T) {
 	// lands so a worker bounce can pick it up.
 	_, err := svc.CancelThread(context.Background(), orgID, sessionID, threadID)
 	require.NoError(t, err, "CancelThread should succeed even without a registry — the timestamp is the durable signal")
+}
+
+func TestService_CancelActiveThreads(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		remote           bool
+		activeThreads    []models.SessionThread
+		expectedCount    int
+		expectedSignals  []uuid.UUID
+		expectedJobCount int
+	}{
+		{name: "signals all active local threads", activeThreads: makeActiveReviewThreads(), expectedCount: 2, expectedSignals: reviewThreadIDs(), expectedJobCount: 0},
+		{name: "queues one batch for remote threads", remote: true, activeThreads: makeActiveReviewThreads(), expectedCount: 2, expectedSignals: reviewThreadIDs(), expectedJobCount: 1},
+		{name: "does nothing when no threads are active", activeThreads: []models.SessionThread{}, expectedCount: 0, expectedSignals: []uuid.UUID{}, expectedJobCount: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.MustParse("00000000-0000-0000-0000-000000000143")
+			sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000144")
+			workerNodeID := "worker-1"
+			containerID := "container-1"
+			svc, deps := newTestService(t)
+			deps.sessionStore.listByIDsFn = func(_ context.Context, gotOrgID uuid.UUID, gotSessionIDs []uuid.UUID) ([]models.Session, error) {
+				require.Equal(t, orgID, gotOrgID, "session lookup should use the review organization")
+				require.Equal(t, []uuid.UUID{sessionID}, gotSessionIDs, "session lookup should use the stale review session")
+				return []models.Session{{ID: sessionID, OrgID: orgID, WorkerNodeID: &workerNodeID, ContainerID: &containerID}}, nil
+			}
+			deps.threadStore.markSessionCancelFn = func(_ context.Context, gotOrgID uuid.UUID, gotSessionIDs []uuid.UUID) ([]models.SessionThread, error) {
+				require.Equal(t, orgID, gotOrgID, "batch cancellation should use the review organization")
+				require.Equal(t, []uuid.UUID{sessionID}, gotSessionIDs, "batch cancellation should use the stale review session")
+				threads := append([]models.SessionThread(nil), tt.activeThreads...)
+				for i := range threads {
+					threads[i].OrgID = orgID
+					threads[i].SessionID = sessionID
+				}
+				return threads, nil
+			}
+			var jobs []db.EnqueueOpts
+			deps.jobStore.enqueueWithOptsFn = func(_ context.Context, gotOrgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+				require.Equal(t, orgID, gotOrgID, "remote cancellation should use the review organization")
+				jobs = append(jobs, opts)
+				return uuid.New(), nil
+			}
+			canceller := &mockCanceller{calls: []uuid.UUID{}, reject: tt.remote}
+			svc.SetCanceller(canceller)
+
+			count, err := svc.CancelActiveThreads(context.Background(), orgID, []uuid.UUID{sessionID})
+
+			require.NoError(t, err, "active review thread cancellation should succeed")
+			require.Equal(t, tt.expectedCount, count, "cancellation should report each active thread")
+			require.Equal(t, tt.expectedSignals, canceller.calls, "cancellation should signal each active thread once")
+			require.Len(t, jobs, tt.expectedJobCount, "remote threads should use one batch cancellation job")
+			if tt.expectedJobCount == 0 {
+				return
+			}
+			require.Equal(t, cancelThreadJobType, jobs[0].JobType, "remote cancellation should use the existing worker job")
+			require.Equal(t, 9, jobs[0].Priority, "remote cancellation should have high priority")
+			require.Equal(t, &workerNodeID, jobs[0].TargetNodeID, "remote cancellation should target the session worker")
+			require.Equal(t, map[string]any{
+				"session_id":  sessionID.String(),
+				"session_ids": []string{sessionID.String()},
+				"thread_ids":  []string{reviewThreadIDs()[0].String(), reviewThreadIDs()[1].String()},
+				"org_id":      orgID.String(),
+			}, jobs[0].Payload, "remote cancellation should include all active thread IDs")
+		})
+	}
+}
+
+func TestService_CancelActiveThreadsBatchesSupersededSessionsByWorker(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("00000000-0000-0000-0000-000000000150")
+	firstSessionID := uuid.MustParse("00000000-0000-0000-0000-000000000151")
+	secondSessionID := uuid.MustParse("00000000-0000-0000-0000-000000000152")
+	firstThreadID := uuid.MustParse("00000000-0000-0000-0000-000000000153")
+	secondThreadID := uuid.MustParse("00000000-0000-0000-0000-000000000154")
+	workerNodeID := "worker-1"
+	containerID := "container-1"
+	svc, deps := newTestService(t)
+	deps.sessionStore.listByIDsFn = func(_ context.Context, gotOrgID uuid.UUID, gotSessionIDs []uuid.UUID) ([]models.Session, error) {
+		require.Equal(t, orgID, gotOrgID, "session batch lookup should remain organization scoped")
+		require.Equal(t, []uuid.UUID{firstSessionID, secondSessionID}, gotSessionIDs, "session batch lookup should include every superseded review")
+		return []models.Session{
+			{ID: firstSessionID, OrgID: orgID, WorkerNodeID: &workerNodeID, ContainerID: &containerID},
+			{ID: secondSessionID, OrgID: orgID, WorkerNodeID: &workerNodeID, ContainerID: &containerID},
+		}, nil
+	}
+	deps.threadStore.markSessionCancelFn = func(_ context.Context, gotOrgID uuid.UUID, gotSessionIDs []uuid.UUID) ([]models.SessionThread, error) {
+		require.Equal(t, orgID, gotOrgID, "thread batch update should remain organization scoped")
+		require.Equal(t, []uuid.UUID{firstSessionID, secondSessionID}, gotSessionIDs, "thread batch update should include every superseded review")
+		return []models.SessionThread{
+			{ID: firstThreadID, OrgID: orgID, SessionID: firstSessionID, Status: models.ThreadStatusRunning},
+			{ID: secondThreadID, OrgID: orgID, SessionID: secondSessionID, Status: models.ThreadStatusPending},
+		}, nil
+	}
+	var jobs []db.EnqueueOpts
+	deps.jobStore.enqueueWithOptsFn = func(_ context.Context, gotOrgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+		require.Equal(t, orgID, gotOrgID, "worker cancellation job should remain organization scoped")
+		jobs = append(jobs, opts)
+		return uuid.New(), nil
+	}
+	svc.SetCanceller(&mockCanceller{reject: true})
+
+	count, err := svc.CancelActiveThreads(context.Background(), orgID, []uuid.UUID{secondSessionID, firstSessionID})
+
+	require.NoError(t, err, "multi-review cancellation should succeed")
+	require.Equal(t, 2, count, "multi-review cancellation should report every active thread")
+	require.Len(t, jobs, 1, "sessions on the same worker should use one cancellation job")
+	require.Equal(t, &workerNodeID, jobs[0].TargetNodeID, "cancellation job should target the owning worker")
+	require.Equal(t, map[string]any{
+		"session_ids": []string{firstSessionID.String(), secondSessionID.String()},
+		"thread_ids":  []string{firstThreadID.String(), secondThreadID.String()},
+		"org_id":      orgID.String(),
+	}, jobs[0].Payload, "worker cancellation job should contain every superseded session and thread")
+}
+
+func reviewThreadIDs() []uuid.UUID {
+	return []uuid.UUID{
+		uuid.MustParse("00000000-0000-0000-0000-000000000145"),
+		uuid.MustParse("00000000-0000-0000-0000-000000000146"),
+	}
+}
+
+func makeActiveReviewThreads() []models.SessionThread {
+	ids := reviewThreadIDs()
+	return []models.SessionThread{
+		{ID: ids[0], Status: models.ThreadStatusRunning},
+		{ID: ids[1], Status: models.ThreadStatusPending},
+	}
 }
 
 // ----------------------------------------------------------------------------

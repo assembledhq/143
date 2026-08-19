@@ -3332,6 +3332,7 @@ type orchestratorServiceStub struct {
 	stopSessionFn        func(sessionID uuid.UUID, reason agent.StopReason) bool
 	cancelThreadCalls    int
 	cancelThreadID       uuid.UUID
+	cancelThreadIDs      []uuid.UUID
 	cancelThreadResult   bool
 	deliverThreadCalls   int
 	deliverThreadOrgID   uuid.UUID
@@ -3466,6 +3467,7 @@ func (s *orchestratorServiceStub) RequestSessionStopByID(sessionID uuid.UUID, re
 func (s *orchestratorServiceStub) CancelThreadByID(threadID uuid.UUID) bool {
 	s.cancelThreadCalls++
 	s.cancelThreadID = threadID
+	s.cancelThreadIDs = append(s.cancelThreadIDs, threadID)
 	return s.cancelThreadResult
 }
 
@@ -3497,6 +3499,27 @@ func TestCancelSessionHandler_InterruptsLocalOrchestratorSession(t *testing.T) {
 	require.NoError(t, err, "cancel_session should succeed when the local orchestrator accepts the cancel")
 	require.Equal(t, 1, orch.cancelSessionCalls, "cancel_session should call the orchestrator once")
 	require.Equal(t, sessionID, orch.cancelSessionID, "cancel_session should target the payload session")
+}
+
+func TestCancelThreadHandler_InterruptsBatchOfLocalThreads(t *testing.T) {
+	t.Parallel()
+
+	threadIDs := []uuid.UUID{uuid.New(), uuid.New()}
+	orgID := uuid.New()
+	sessionIDs := []uuid.UUID{uuid.New(), uuid.New()}
+	orch := &orchestratorServiceStub{cancelThreadResult: true}
+	handler := newCancelThreadHandler(nil, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload, err := json.Marshal(map[string]any{
+		"session_ids": []string{sessionIDs[0].String(), sessionIDs[1].String()},
+		"thread_ids":  []string{threadIDs[0].String(), threadIDs[1].String()},
+		"org_id":      orgID.String(),
+	})
+	require.NoError(t, err, "batch cancel payload should marshal")
+
+	err = handler(context.Background(), "cancel_thread", payload)
+
+	require.NoError(t, err, "cancel_thread should accept a batch of thread IDs")
+	require.Equal(t, threadIDs, orch.cancelThreadIDs, "cancel_thread should interrupt each requested thread")
 }
 
 func TestCancelSessionHandler_ConsumesDeliveredCancelWithDetachedContext(t *testing.T) {
@@ -3659,6 +3682,16 @@ func setWorkerSessionColumnValue(row []any, column string, value any) {
 		}
 	}
 	panic("unknown worker session column: " + column)
+}
+
+func setWorkerSessionThreadColumn(row []any, name string, value any) {
+	for index, column := range workerSessionThreadColumns {
+		if column == name {
+			row[index] = value
+			return
+		}
+	}
+	panic("unknown worker session thread column: " + name)
 }
 
 // TestRunAgentHandler_LinearPrepareStateGatesTurnOne locks the design 62
@@ -12358,7 +12391,6 @@ func TestContinueSessionHandler_WrapsSiblingSandboxRaceAsRetryable(t *testing.T)
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
 			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
 		))
-
 	orch := &orchestratorServiceStub{
 		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
 			require.NotNil(t, opts, "thread sibling race should preserve thread execution options")
@@ -12455,6 +12487,26 @@ func TestContinueSessionHandler_DeadLettersThreadCancelledDuringWorkspaceWait(t 
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
 			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
 		))
+	cancelledThreadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusCancelled)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(cancelledThreadRow...))
+	mock.ExpectExec("UPDATE session_threads SET pending_message_count = 0").
+		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("SELECT .* FROM session_threads.*session_id = @session_id").
+		WithArgs(pgx.NamedArgs{"session_id": sessionID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(cancelledThreadRow...))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+		))
+	mock.ExpectQuery("UPDATE sessions SET status = @status").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID, "status": string(models.SessionStatusIdle)}).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+		))
 
 	orch := &orchestratorServiceStub{
 		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
@@ -12474,6 +12526,68 @@ func TestContinueSessionHandler_DeadLettersThreadCancelledDuringWorkspaceWait(t 
 	require.ErrorIs(t, fatal.Err, agent.ErrThreadCancelledBeforeWorkspaceReady, "fatal error should preserve the workspace-wait cancellation sentinel")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before dead-lettering the cancelled turn")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_SkipsThreadWithDurableCancellationRequest(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+	stores.ThreadInbox = db.NewThreadInboxStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	cancelRequestedAt := time.Now().UTC()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+		))
+	threadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusPending)
+	setWorkerSessionThreadColumn(threadRow, "cancel_requested_at", &cancelRequestedAt)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(threadRow...))
+	mock.ExpectExec("UPDATE session_threads SET status = @status, completed_at = now").
+		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID, "status": models.ThreadStatusCancelled}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE thread_inbox_entries[\\s\\S]+delivery_state = 'dead_letter'").
+		WithArgs(orgID, threadID, "thread cancelled before continuation").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_threads SET pending_message_count = 0").
+		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	cancelledThreadRow := append([]any(nil), threadRow...)
+	setWorkerSessionThreadColumn(cancelledThreadRow, "status", models.ThreadStatusCancelled)
+	mock.ExpectQuery("SELECT .* FROM session_threads.*session_id = @session_id").
+		WithArgs(pgx.NamedArgs{"session_id": sessionID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(cancelledThreadRow...))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+		))
+	mock.ExpectQuery("UPDATE sessions SET status = @status").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID, "status": string(models.SessionStatusIdle)}).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+		))
+
+	orch := &orchestratorServiceStub{}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "durably cancelled thread should dead-letter before model execution")
+	require.ErrorIs(t, fatal.Err, agent.ErrThreadCancelledBeforeWorkspaceReady, "cancelled thread should preserve the cancellation sentinel")
+	require.Equal(t, 0, orch.continueSessionCalls, "durably cancelled thread should not start the model")
+	require.NoError(t, mock.ExpectationsWereMet(), "preflight cancellation should persist the terminal thread state")
 }
 
 func TestContinueSessionHandler_DeadLettersRecordedCodeReviewThreadFailure(t *testing.T) {
@@ -12700,6 +12814,11 @@ func TestContinueSessionHandler_DoesNotResetThreadAfterUserCancel(t *testing.T) 
 				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
 			),
 		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)...,
+		))
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(

@@ -34,7 +34,7 @@ type MetadataStore interface {
 	FailReview(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error)
 	FailReviewWithStatus(ctx context.Context, orgID uuid.UUID, params db.FailCodeReviewParams) (models.CodeReviewSessionMetadata, error)
 	MarkSupersededBy(ctx context.Context, orgID, sessionID, replacementSessionID uuid.UUID) (models.CodeReviewSessionMetadata, error)
-	MarkStaleForPullRequestExceptHead(ctx context.Context, orgID, pullRequestID uuid.UUID, currentHeadSHA string, supersededBySessionID *uuid.UUID) (int64, error)
+	MarkStaleForPullRequestExceptHead(ctx context.Context, orgID, pullRequestID uuid.UUID, currentHeadSHA string, supersededBySessionID *uuid.UUID) ([]models.CodeReviewSessionMetadata, error)
 }
 
 type PullRequestStore interface {
@@ -58,6 +58,10 @@ type JobStore interface {
 	HasActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (bool, error)
 }
 
+type ReviewThreadCanceller interface {
+	CancelActiveThreads(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) (int, error)
+}
+
 const (
 	codeReviewJobMaxAttempts          = 8
 	codeReviewJobEnqueueGracePeriod   = time.Minute
@@ -79,6 +83,7 @@ type Service struct {
 	triggers          GitHubTriggerStore
 	pullRequests      PullRequestStore
 	pullRequestSyncer PullRequestSyncer
+	threadCanceller   ReviewThreadCanceller
 	logger            zerolog.Logger
 	cfg               Config
 }
@@ -265,6 +270,12 @@ func (s *Service) SetGitHubTriggerStore(triggers GitHubTriggerStore) {
 func (s *Service) SetRetryDependencies(pullRequests PullRequestStore, syncer PullRequestSyncer) {
 	s.pullRequests = pullRequests
 	s.pullRequestSyncer = syncer
+}
+
+// SetThreadCanceller enables immediate cancellation of reviewer and
+// orchestrator threads when a new pull request head supersedes their review.
+func (s *Service) SetThreadCanceller(canceller ReviewThreadCanceller) {
+	s.threadCanceller = canceller
 }
 
 // SetReviewStatusCommentJobs enables asynchronous, best-effort PR status
@@ -669,8 +680,8 @@ func (s *Service) handleExplicitReviewRequest(
 
 // QueueReviewChanged durably records a pass-relevant webhook change. Automatic
 // head changes wait for a quiet window; explicit requests remain immediate.
-// The starter job also waits for any older assessment to finish, so a change
-// cannot be acknowledged and then lost merely because reviewer agents are active.
+// After the replacement job is durable, automatic head changes mark older
+// assessments stale and stop their agent threads immediately.
 func (s *Service) QueueReviewChanged(ctx context.Context, input ReviewChangedInput) (ReviewRequestedResult, error) {
 	if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil || input.PullRequestID == uuid.Nil {
 		return ReviewRequestedResult{}, fmt.Errorf("org_id, repository_id, and pull_request_id are required")
@@ -722,7 +733,48 @@ func (s *Service) QueueReviewChanged(ctx context.Context, input ReviewChangedInp
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("enqueue code review reassessment starter: %w", err)
 	}
-	return ReviewRequestedResult{Processed: true, JobID: jobID}, nil
+	result := ReviewRequestedResult{Processed: true, JobID: jobID}
+	if input.ExplicitRequest {
+		return result, nil
+	}
+	superseded, err := s.metadata.MarkStaleForPullRequestExceptHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA, nil)
+	if err != nil {
+		return result, fmt.Errorf("mark superseded code reviews stale: %w", err)
+	}
+	if s.threadCanceller == nil {
+		return result, nil
+	}
+	supersededSessionIDs := make([]uuid.UUID, 0, len(superseded))
+	seenSessionIDs := make(map[uuid.UUID]struct{}, len(superseded))
+	for _, review := range superseded {
+		if review.SessionID == uuid.Nil {
+			continue
+		}
+		if _, exists := seenSessionIDs[review.SessionID]; exists {
+			continue
+		}
+		seenSessionIDs[review.SessionID] = struct{}{}
+		supersededSessionIDs = append(supersededSessionIDs, review.SessionID)
+	}
+	if len(supersededSessionIDs) == 0 {
+		return result, nil
+	}
+	cancelled, cancelErr := s.threadCanceller.CancelActiveThreads(ctx, input.OrgID, supersededSessionIDs)
+	if cancelErr != nil {
+		return result, fmt.Errorf("cancel superseded code review threads: %w", cancelErr)
+	}
+	encodedSessionIDs := make([]string, 0, len(supersededSessionIDs))
+	for _, sessionID := range supersededSessionIDs {
+		encodedSessionIDs = append(encodedSessionIDs, sessionID.String())
+	}
+	s.logger.Info().
+		Str("org_id", input.OrgID.String()).
+		Str("pull_request_id", input.PullRequestID.String()).
+		Strs("session_ids", encodedSessionIDs).
+		Str("current_head", input.HeadSHA).
+		Int("threads_cancelled", cancelled).
+		Msg("cancelled superseded code review")
+	return result, nil
 }
 
 func (s *Service) reassessmentDebounce() time.Duration {

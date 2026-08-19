@@ -228,14 +228,15 @@ func TestSessionExecutorStore_HeartbeatWithLease(t *testing.T) {
 	executorID := uuid.New()
 	lockToken := uuid.New()
 
-	mock.ExpectQuery("UPDATE session_executors[\\s\\S]+RETURNING drain_intent").
+	mock.ExpectQuery("UPDATE session_executors[\\s\\S]+RETURNING se.drain_intent[\\s\\S]+session_threads").
 		WithArgs(orgID, executorID, lockToken, int((2 * time.Minute).Seconds())).
-		WillReturnRows(pgxmock.NewRows([]string{"drain_intent"}).AddRow("none"))
+		WillReturnRows(pgxmock.NewRows([]string{"drain_intent", "thread_cancel_requested"}).AddRow("none", true))
 
-	ok, intent, err := store.HeartbeatWithLease(context.Background(), orgID, executorID, lockToken, 2*time.Minute)
+	ok, intent, threadCancelRequested, err := store.HeartbeatWithLease(context.Background(), orgID, executorID, lockToken, 2*time.Minute)
 	require.NoError(t, err, "HeartbeatWithLease should persist the executor heartbeat")
 	require.True(t, ok, "HeartbeatWithLease should report that the fenced update landed")
 	require.Equal(t, models.DrainIntentNone, intent, "HeartbeatWithLease should return the current executor drain intent")
+	require.True(t, threadCancelRequested, "HeartbeatWithLease should return the durable thread cancellation state")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
