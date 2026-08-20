@@ -677,6 +677,37 @@ func TestSessionThreadStore_ClaimIdleForSessionClearsCancelRequestedAt(t *testin
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionThreadStore_MarkCancelRequestedBySessions(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	firstThreadID := uuid.New()
+	secondThreadID := uuid.New()
+	now := time.Now().UTC()
+	firstRow := newSessionThreadRow(firstThreadID, sessionID, orgID, "Reviewer 1", now)
+	firstRow[9] = models.ThreadStatusRunning
+	firstRow[26] = &now
+	secondRow := newSessionThreadRow(secondThreadID, sessionID, orgID, "Reviewer 2", now)
+	secondRow[9] = models.ThreadStatusAwaitingInput
+	secondRow[26] = &now
+
+	mock.ExpectQuery("(?s)UPDATE session_threads.*cancel_requested_at = COALESCE.*org_id = @org_id.*session_id = ANY\\(@session_ids\\).*status IN.*RETURNING").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(firstRow...).AddRow(secondRow...))
+
+	threads, err := NewSessionThreadStore(mock).MarkCancelRequestedBySessions(context.Background(), orgID, []uuid.UUID{sessionID})
+
+	require.NoError(t, err, "session cancellation should mark active threads in one statement")
+	require.Equal(t, []uuid.UUID{firstThreadID, secondThreadID}, []uuid.UUID{threads[0].ID, threads[1].ID}, "session cancellation should return each marked thread")
+	require.Equal(t, []*time.Time{&now, &now}, []*time.Time{threads[0].CancelRequestedAt, threads[1].CancelRequestedAt}, "session cancellation should return the durable request time")
+	require.NoError(t, mock.ExpectationsWereMet(), "batch cancellation should remain org and session scoped")
+}
+
 func TestSessionThreadStore_ClaimIdle(t *testing.T) {
 	t.Parallel()
 

@@ -142,6 +142,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 					case models.CodeReviewSessionStatusCompleted:
 						reconcileCodeReviewSessionSuccess(ctx, stores, logger, job)
 					case models.CodeReviewSessionStatusStale:
+						if cancelErr := cancelActiveCodeReviewThreads(ctx, stores, services, logger, job); cancelErr != nil {
+							return cancelErr
+						}
 						reconcileCodeReviewSessionStale(ctx, stores, logger, job)
 					case models.CodeReviewSessionStatusFailed:
 						reason := strings.TrimSpace(stringPtrValue(existing.FailureReason))
@@ -460,6 +463,34 @@ func stopCodeReviewIfParentSessionCancelled(ctx context.Context, stores *Stores,
 	return true, nil
 }
 
+type codeReviewThreadCanceller struct {
+	orchestrator orchestratorService
+}
+
+func (c codeReviewThreadCanceller) CancelThread(threadID uuid.UUID) bool {
+	return c.orchestrator != nil && c.orchestrator.CancelThreadByID(threadID)
+}
+
+func cancelActiveCodeReviewThreads(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload) error {
+	if stores == nil || stores.SessionThreads == nil || stores.Sessions == nil || stores.Jobs == nil {
+		return nil
+	}
+	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	if services != nil && services.Orchestrator != nil {
+		threads.SetCanceller(codeReviewThreadCanceller{orchestrator: services.Orchestrator})
+	}
+	cancelled, err := threads.CancelActiveThreads(ctx, job.OrgID, []uuid.UUID{job.SessionID})
+	if err != nil {
+		return fmt.Errorf("cancel active threads for stale code review: %w", err)
+	}
+	logger.Info().
+		Str("org_id", job.OrgID.String()).
+		Str("session_id", job.SessionID.String()).
+		Int("threads_cancelled", cancelled).
+		Msg("cancelled active threads for stale code review")
+	return nil
+}
+
 func failCodeReviewWithoutReviewerOutput(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, results []models.CodeReviewAgentResult) error {
 	reason := codeReviewNoUsableReviewerOutputReason(results)
 	if _, err := stores.CodeReviews.FailReviewWithStatus(ctx, job.OrgID, db.FailCodeReviewParams{
@@ -731,7 +762,7 @@ func supersedeCodeReviewForChangedHead(
 		return err
 	}
 
-	if _, err := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, reason); err != nil {
+	if _, err := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, reason); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("mark changed-head code review superseded: %w", err)
 	}
 	reconcileCodeReviewSessionStale(ctx, stores, logger, job)

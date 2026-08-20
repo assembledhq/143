@@ -643,6 +643,7 @@ type Stores struct {
 	GitHubInstallations *db.GitHubInstallationStore
 	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
 	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
+	ThreadInbox         *db.ThreadInboxStore    // nil-safe: settles queued input when a thread is cancelled
 	HumanInputRequests  *db.SessionHumanInputRequestStore
 	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
 	SandboxHolders      *db.SessionSandboxHolderStore   // nil-safe: snapshot quiescence for shared sandbox thread runtimes
@@ -9332,9 +9333,11 @@ func newCancelThreadHandler(stores *Stores, services *Services, logger zerolog.L
 			return &FatalError{Err: fmt.Errorf("orchestrator is not configured")}
 		}
 		var input struct {
-			SessionID string `json:"session_id"`
-			ThreadID  string `json:"thread_id"`
-			OrgID     string `json:"org_id"`
+			SessionID  string   `json:"session_id"`
+			SessionIDs []string `json:"session_ids"`
+			ThreadID   string   `json:"thread_id"`
+			ThreadIDs  []string `json:"thread_ids"`
+			OrgID      string   `json:"org_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal cancel_thread payload: %w", err)
@@ -9343,21 +9346,38 @@ func newCancelThreadHandler(stores *Stores, services *Services, logger zerolog.L
 		if err != nil {
 			return fmt.Errorf("parse org ID: %w", err)
 		}
-		sessionID, err := uuid.Parse(input.SessionID)
-		if err != nil {
-			return fmt.Errorf("parse session ID: %w", err)
+		rawSessionIDs := append([]string(nil), input.SessionIDs...)
+		if strings.TrimSpace(input.SessionID) != "" {
+			rawSessionIDs = append(rawSessionIDs, input.SessionID)
 		}
-		threadID, err := uuid.Parse(input.ThreadID)
-		if err != nil {
-			return fmt.Errorf("parse thread ID: %w", err)
+		if len(rawSessionIDs) == 0 {
+			return fmt.Errorf("cancel_thread payload requires session_id or session_ids")
 		}
-		accepted := services.Orchestrator.CancelThreadByID(threadID)
-		if !accepted {
-			logger.Warn().
-				Str("session_id", sessionID.String()).
-				Str("thread_id", threadID.String()).
-				Str("org_id", orgID.String()).
-				Msg("cancel_thread job found no live local cancel registry entry")
+		for _, rawSessionID := range rawSessionIDs {
+			if _, err := uuid.Parse(rawSessionID); err != nil {
+				return fmt.Errorf("parse session ID: %w", err)
+			}
+		}
+		rawThreadIDs := append([]string(nil), input.ThreadIDs...)
+		if strings.TrimSpace(input.ThreadID) != "" {
+			rawThreadIDs = append(rawThreadIDs, input.ThreadID)
+		}
+		if len(rawThreadIDs) == 0 {
+			return fmt.Errorf("cancel_thread payload requires thread_id or thread_ids")
+		}
+		for _, rawThreadID := range rawThreadIDs {
+			threadID, err := uuid.Parse(rawThreadID)
+			if err != nil {
+				return fmt.Errorf("parse thread ID: %w", err)
+			}
+			accepted := services.Orchestrator.CancelThreadByID(threadID)
+			if !accepted {
+				logger.Warn().
+					Strs("session_ids", rawSessionIDs).
+					Str("thread_id", threadID.String()).
+					Str("org_id", orgID.String()).
+					Msg("cancel_thread job found no live local cancel registry entry")
+			}
 		}
 		return nil
 	}
@@ -9457,6 +9477,81 @@ func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgI
 		return nil, nil
 	}
 	return &request.ID, nil
+}
+
+func finalizeCancelledThreadBeforeContinuation(
+	ctx context.Context,
+	stores *Stores,
+	logger zerolog.Logger,
+	orgID, sessionID uuid.UUID,
+	thread models.SessionThread,
+) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+
+	if thread.Status != models.ThreadStatusCancelled {
+		if err := stores.SessionThreads.UpdateStatus(cleanupCtx, orgID, thread.ID, models.ThreadStatusCancelled); err != nil {
+			return fmt.Errorf("mark cancelled thread before continuation: %w", err)
+		}
+	}
+	if stores.ThreadInbox != nil {
+		if _, err := stores.ThreadInbox.DeadLetterPendingByThread(cleanupCtx, orgID, thread.ID, "thread cancelled before continuation"); err != nil {
+			return err
+		}
+	}
+	if err := stores.SessionThreads.ClearPendingMessages(cleanupCtx, orgID, thread.ID); err != nil {
+		return fmt.Errorf("clear pending messages for cancelled thread: %w", err)
+	}
+
+	threads, err := stores.SessionThreads.ListBySession(cleanupCtx, orgID, sessionID)
+	if err != nil {
+		return fmt.Errorf("list sibling threads after cancellation: %w", err)
+	}
+	for _, sibling := range threads {
+		if sibling.ID == thread.ID {
+			continue
+		}
+		switch sibling.Status {
+		case models.ThreadStatusPending, models.ThreadStatusRunning, models.ThreadStatusAwaitingInput:
+			return nil
+		}
+	}
+
+	session, err := stores.Sessions.GetByID(cleanupCtx, orgID, sessionID)
+	if err != nil {
+		return fmt.Errorf("reload parent session after thread cancellation: %w", err)
+	}
+	if session.Status == models.SessionStatusRunning {
+		if err := stores.Sessions.UpdateStatus(cleanupCtx, orgID, sessionID, models.SessionStatusIdle); err != nil {
+			return fmt.Errorf("return parent session to idle after thread cancellation: %w", err)
+		}
+		logger.Info().
+			Str("session_id", sessionID.String()).
+			Str("thread_id", thread.ID.String()).
+			Msg("returned parent session to idle after its last active thread was cancelled")
+	}
+	return nil
+}
+
+func finalizeThreadCancellationIfRequested(
+	ctx context.Context,
+	stores *Stores,
+	logger zerolog.Logger,
+	orgID, sessionID, threadID uuid.UUID,
+) (bool, error) {
+	lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	thread, err := stores.SessionThreads.GetByID(lookupCtx, orgID, threadID)
+	if err != nil {
+		return false, fmt.Errorf("reload thread cancellation state: %w", err)
+	}
+	if thread.CancelRequestedAt == nil && thread.Status != models.ThreadStatusCancelled {
+		return false, nil
+	}
+	if err := finalizeCancelledThreadBeforeContinuation(lookupCtx, stores, logger, orgID, sessionID, thread); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // continue_session handler continues a multi-turn session with a follow-up message.
@@ -9650,6 +9745,16 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				if thread.SessionID != sessionID {
 					return fmt.Errorf("session thread %s does not belong to session %s", threadID, sessionID)
 				}
+				if thread.CancelRequestedAt != nil || thread.Status == models.ThreadStatusCancelled {
+					if finalizeErr := finalizeCancelledThreadBeforeContinuation(ctx, stores, logger, orgID, sessionID, thread); finalizeErr != nil {
+						return finalizeErr
+					}
+					logger.Info().
+						Str("session_id", sessionID.String()).
+						Str("thread_id", threadID.String()).
+						Msg("skipping thread continuation after durable cancellation request")
+					return &FatalError{Err: fmt.Errorf("%w: thread %s", agent.ErrThreadCancelledBeforeWorkspaceReady, threadID)}
+				}
 				threadTurnBefore = thread.CurrentTurn
 
 				// Phase 2: stamp the thread-start checkpoint before the first
@@ -9770,6 +9875,23 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		}
 
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
+			cancellationError := errors.Is(err, agent.ErrSessionCancelled) ||
+				errors.Is(err, agent.ErrThreadCancelledBeforeWorkspaceReady) ||
+				errors.Is(context.Cause(jobCtx), agent.ErrUserCancelCause)
+			if hasThread && cancellationError {
+				cancelled, cancelErr := finalizeThreadCancellationIfRequested(ctx, stores, logger, orgID, sessionID, threadID)
+				if cancelErr != nil {
+					return cancelErr
+				}
+				if cancelled {
+					logger.Info().
+						Str("session_id", sessionID.String()).
+						Str("thread_id", threadID.String()).
+						Err(err).
+						Msg("stopped thread continuation after durable cancellation request")
+					return &FatalError{Err: fmt.Errorf("%w: thread %s", agent.ErrThreadCancelledBeforeWorkspaceReady, threadID)}
+				}
+			}
 			if errors.Is(err, agent.ErrSandboxCapacity) {
 				targetNodeID, clearTargetNodeID, retryAfter := sandboxTurnCapacityRetryTarget(ctx, stores, logger)
 				var capacityThreadID *uuid.UUID

@@ -180,6 +180,27 @@ func TestThreadInboxStore_MarkDeadLetter(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestThreadInboxStore_DeadLetterPendingByThread(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	threadID := uuid.New()
+	reason := "thread cancelled before continuation"
+	mock.ExpectExec("UPDATE thread_inbox_entries[\\s\\S]+delivery_state = 'dead_letter'[\\s\\S]+org_id = \\$1[\\s\\S]+thread_id = \\$2[\\s\\S]+delivery_state IN").
+		WithArgs(orgID, threadID, reason).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 3))
+
+	count, err := NewThreadInboxStore(mock).DeadLetterPendingByThread(context.Background(), orgID, threadID, reason)
+
+	require.NoError(t, err, "cancelled thread inbox should be terminalized")
+	require.Equal(t, int64(3), count, "all unacknowledged entries should be terminalized")
+	require.NoError(t, mock.ExpectationsWereMet(), "inbox cancellation should remain thread and organization scoped")
+}
+
 func TestThreadInboxStore_ListRecoverableByThread(t *testing.T) {
 	t.Parallel()
 

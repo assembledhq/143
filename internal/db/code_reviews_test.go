@@ -702,6 +702,15 @@ func codeReviewMetadataRowsForTest() *pgxmock.Rows {
 	})
 }
 
+func codeReviewStaleMetadataRowForTest(orgID, pullRequestID, sessionID uuid.UUID, headSHA string, now time.Time) []any {
+	return []any{
+		uuid.New(), orgID, sessionID, uuid.New(), pullRequestID, uuid.New(),
+		"base", headSHA, false, models.CodeReviewTriggerSourceAppReviewer,
+		models.CodeReviewSessionStatusStale, nil, nil, nil, nil, nil, false,
+		nil, nil, true, nil, "output-" + sessionID.String(), nil, nil, nil, nil, nil, &now, now,
+	}
+}
+
 // TestCodeReviewStore_CompleteReviewPublishesUpdate verifies the store fans a
 // lifecycle event out to the org-scoped SSE stream after a status transition,
 // so the live code reviews list refreshes. miniredis-backed, mirroring the
@@ -879,17 +888,22 @@ func TestCodeReviewStore_MarkStaleForPullRequestExceptHeadPublishesUpdate(t *tes
 	require.NoError(t, err, "subscribe should succeed against miniredis")
 	defer sub.Close()
 
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
+	now := time.Now().UTC()
+	firstSessionID := uuid.New()
+	secondSessionID := uuid.New()
+	mock.ExpectQuery(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+		WillReturnRows(codeReviewMetadataRowsForTest().
+			AddRow(codeReviewStaleMetadataRowForTest(orgID, pullRequestID, firstSessionID, "old-head-1", now)...).
+			AddRow(codeReviewStaleMetadataRowForTest(orgID, pullRequestID, secondSessionID, "old-head-2", now)...))
 
 	store := NewCodeReviewStore(mock)
 	store.SetStreams(streams)
 	store.SetLogger(zerolog.Nop())
 
-	affected, err := store.MarkStaleForPullRequestExceptHead(context.Background(), orgID, pullRequestID, "newhead", nil)
+	stale, err := store.MarkStaleForPullRequestExceptHead(context.Background(), orgID, pullRequestID, "newhead", nil)
 	require.NoError(t, err, "MarkStaleForPullRequestExceptHead should run the batch update")
-	require.Equal(t, int64(2), affected, "MarkStaleForPullRequestExceptHead should report rows affected")
+	require.Equal(t, []uuid.UUID{firstSessionID, secondSessionID}, []uuid.UUID{stale[0].SessionID, stale[1].SessionID}, "stale transition should return each superseded review session")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 
 	require.Eventually(t, func() bool {
@@ -920,17 +934,17 @@ func TestCodeReviewStore_MarkStaleForPullRequestExceptHeadSkipsPublishWhenNoRows
 	require.NoError(t, err, "subscribe should succeed against miniredis")
 	defer sub.Close()
 
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
+	mock.ExpectQuery(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+		WillReturnRows(codeReviewMetadataRowsForTest())
 
 	store := NewCodeReviewStore(mock)
 	store.SetStreams(streams)
 	store.SetLogger(zerolog.Nop())
 
-	affected, err := store.MarkStaleForPullRequestExceptHead(context.Background(), orgID, pullRequestID, "newhead", nil)
+	stale, err := store.MarkStaleForPullRequestExceptHead(context.Background(), orgID, pullRequestID, "newhead", nil)
 	require.NoError(t, err, "MarkStaleForPullRequestExceptHead should run the batch update")
-	require.Equal(t, int64(0), affected, "no rows should be affected")
+	require.Empty(t, stale, "no review sessions should become stale")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 
 	require.Never(t, func() bool {
@@ -1114,14 +1128,19 @@ func TestCodeReviewStore_MarkStaleForPullRequestExceptHead(t *testing.T) {
 	defer mock.Close()
 
 	supersededBy := uuid.New()
-	mock.ExpectExec("UPDATE code_review_session_metadata").
+	now := time.Now().UTC()
+	firstSessionID := uuid.New()
+	secondSessionID := uuid.New()
+	mock.ExpectQuery("UPDATE code_review_session_metadata").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+		WillReturnRows(codeReviewMetadataRowsForTest().
+			AddRow(codeReviewStaleMetadataRowForTest(orgID, prID, firstSessionID, "head-old-1", now)...).
+			AddRow(codeReviewStaleMetadataRowForTest(orgID, prID, secondSessionID, "head-old-2", now)...))
 
-	count, err := NewCodeReviewStore(mock).MarkStaleForPullRequestExceptHead(context.Background(), orgID, prID, "head-new", &supersededBy)
+	stale, err := NewCodeReviewStore(mock).MarkStaleForPullRequestExceptHead(context.Background(), orgID, prID, "head-new", &supersededBy)
 
 	require.NoError(t, err, "MarkStaleForPullRequestExceptHead should stale older queued/running reviews")
-	require.Equal(t, int64(2), count, "MarkStaleForPullRequestExceptHead should return affected row count")
+	require.Equal(t, []uuid.UUID{firstSessionID, secondSessionID}, []uuid.UUID{stale[0].SessionID, stale[1].SessionID}, "MarkStaleForPullRequestExceptHead should return affected review sessions")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

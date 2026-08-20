@@ -71,6 +71,7 @@ const (
 // session.
 type SessionStore interface {
 	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+	ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uuid.UUID) ([]models.Session, error)
 	ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
@@ -105,6 +106,7 @@ type ThreadStore interface {
 	UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 	IncrementPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error
 	MarkCancelRequested(ctx context.Context, orgID, threadID uuid.UUID) error
+	MarkCancelRequestedBySessions(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) ([]models.SessionThread, error)
 }
 
 // FileEventStore defines the operations the thread service needs for

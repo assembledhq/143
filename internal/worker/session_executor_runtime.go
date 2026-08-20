@@ -24,7 +24,7 @@ var (
 type executorRuntimeExecutorStore interface {
 	GetByID(ctx context.Context, executorID uuid.UUID) (models.SessionExecutor, error)
 	MarkRunningWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, leaseDuration time.Duration) (bool, error)
-	HeartbeatWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, leaseDuration time.Duration) (bool, models.DrainIntent, error)
+	HeartbeatWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, leaseDuration time.Duration) (bool, models.DrainIntent, bool, error)
 	MarkDrainingWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID) (bool, error)
 	MarkHumanInputCheckpointByJob(ctx context.Context, orgID, jobID, lockToken uuid.UUID) (bool, error)
 	MarkTerminalWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, status models.SessionExecutorStatus, exitCode *int, lastError string) (bool, error)
@@ -145,7 +145,7 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 	if job.TargetNodeID != nil && *job.TargetNodeID != "" && *job.TargetNodeID != executor.HostNodeID {
 		handlerCtx = jobctx.WithDeadTargetNode(handlerCtx, *job.TargetNodeID)
 	}
-	handlerCtx, cancelHandler := context.WithCancel(handlerCtx)
+	handlerCtx, cancelHandler := context.WithCancelCause(handlerCtx)
 
 	var lostOwnership atomic.Bool
 	var drainHandled atomic.Bool
@@ -163,7 +163,7 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 		Msg("session executor processing job")
 
 	runErr := handler(handlerCtx, job.JobType, job.Payload)
-	cancelHandler()
+	cancelHandler(nil)
 	wg.Wait()
 	if ctx.Err() != nil {
 		<-drainDone
@@ -250,7 +250,7 @@ func (r *SessionExecutorRuntime) handlerFor(jobType string) (JobHandler, bool) {
 	}
 }
 
-func (r *SessionExecutorRuntime) startOwnershipLoops(ctx context.Context, wg *sync.WaitGroup, executor models.SessionExecutor, job *models.Job, leaseDuration time.Duration, lostOwnership *atomic.Bool, drainHandled *atomic.Bool, cancel context.CancelFunc) {
+func (r *SessionExecutorRuntime) startOwnershipLoops(ctx context.Context, wg *sync.WaitGroup, executor models.SessionExecutor, job *models.Job, leaseDuration time.Duration, lostOwnership *atomic.Bool, drainHandled *atomic.Bool, cancel context.CancelCauseFunc) {
 	if r.HeartbeatInterval > 0 {
 		wg.Add(1)
 		go func() {
@@ -267,7 +267,7 @@ func (r *SessionExecutorRuntime) startOwnershipLoops(ctx context.Context, wg *sy
 	}
 }
 
-func (r *SessionExecutorRuntime) heartbeatLoop(ctx context.Context, executor models.SessionExecutor, leaseDuration time.Duration, lostOwnership *atomic.Bool, drainHandled *atomic.Bool, cancel context.CancelFunc) {
+func (r *SessionExecutorRuntime) heartbeatLoop(ctx context.Context, executor models.SessionExecutor, leaseDuration time.Duration, lostOwnership *atomic.Bool, drainHandled *atomic.Bool, cancel context.CancelCauseFunc) {
 	ticker := time.NewTicker(r.HeartbeatInterval)
 	defer ticker.Stop()
 	budgetStopRequested := false
@@ -276,14 +276,29 @@ func (r *SessionExecutorRuntime) heartbeatLoop(ctx context.Context, executor mod
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ok, drainIntent, err := r.Executors.HeartbeatWithLease(ctx, executor.OrgID, executor.ID, executor.LockToken, leaseDuration)
+			ok, drainIntent, threadCancelRequested, err := r.Executors.HeartbeatWithLease(ctx, executor.OrgID, executor.ID, executor.LockToken, leaseDuration)
 			if err != nil {
 				r.loggerPtr().Warn().Err(err).Str("executor_id", executor.ID.String()).Msg("failed to heartbeat session executor")
 				continue
 			}
 			if !ok {
 				lostOwnership.Store(true)
-				cancel()
+				cancel(ErrExecutorLostLease)
+				return
+			}
+			if threadCancelRequested {
+				accepted := false
+				threadID := ""
+				if executor.ThreadID != nil && *executor.ThreadID != uuid.Nil && r.Services != nil && r.Services.Orchestrator != nil {
+					threadID = executor.ThreadID.String()
+					accepted = r.Services.Orchestrator.CancelThreadByID(*executor.ThreadID)
+				}
+				r.loggerPtr().Info().
+					Str("executor_id", executor.ID.String()).
+					Str("thread_id", threadID).
+					Bool("registry_cancel_accepted", accepted).
+					Msg("session executor observed durable thread cancellation request")
+				cancel(agent.ErrUserCancelCause)
 				return
 			}
 			if budgetStopRequested {
@@ -297,7 +312,7 @@ func (r *SessionExecutorRuntime) heartbeatLoop(ctx context.Context, executor mod
 						Str("executor_id", executor.ID.String()).
 						Str("session_id", executor.SessionID.String()).
 						Msg("deploy budget expired but orchestrator service is unavailable")
-					cancel()
+					cancel(agent.ErrDeployBudgetExpiredCause)
 					return
 				}
 				if !r.Services.Orchestrator.RequestSessionStopByID(executor.SessionID, agent.StopReasonDeployBudgetExpired) {
@@ -305,7 +320,7 @@ func (r *SessionExecutorRuntime) heartbeatLoop(ctx context.Context, executor mod
 						Str("executor_id", executor.ID.String()).
 						Str("session_id", executor.SessionID.String()).
 						Msg("deploy budget expired but session stop request was not accepted")
-					cancel()
+					cancel(agent.ErrDeployBudgetExpiredCause)
 					return
 				}
 				r.loggerPtr().Info().
@@ -317,7 +332,7 @@ func (r *SessionExecutorRuntime) heartbeatLoop(ctx context.Context, executor mod
 	}
 }
 
-func (r *SessionExecutorRuntime) renewLoop(ctx context.Context, executor models.SessionExecutor, job *models.Job, leaseDuration time.Duration, lostOwnership *atomic.Bool, cancel context.CancelFunc) {
+func (r *SessionExecutorRuntime) renewLoop(ctx context.Context, executor models.SessionExecutor, job *models.Job, leaseDuration time.Duration, lostOwnership *atomic.Bool, cancel context.CancelCauseFunc) {
 	ticker := time.NewTicker(r.RenewInterval)
 	defer ticker.Stop()
 	for {
@@ -332,7 +347,7 @@ func (r *SessionExecutorRuntime) renewLoop(ctx context.Context, executor models.
 			}
 			if !ok {
 				lostOwnership.Store(true)
-				cancel()
+				cancel(ErrExecutorLostLease)
 				return
 			}
 		}

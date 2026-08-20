@@ -502,6 +502,7 @@ func main() {
 			GitHubInstallations: db.NewGitHubInstallationStore(pool),
 			SessionMessages:     sessionMessageStore,
 			SessionThreads:      sessionThreadStore,
+			ThreadInbox:         db.NewThreadInboxStore(pool),
 			HumanInputRequests:  sessionHumanInputStore,
 			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 			SandboxHolders:      db.NewSessionSandboxHolderStore(pool),
@@ -1637,6 +1638,7 @@ func buildServices(
 		jobStore,
 		logger,
 	)
+	threadSvc.SetCanceller(threadCancelRegistry)
 	threadSvc.SetOwnerLossOrchestrator(ownerloss.NewService(
 		sessionStore,
 		db.NewSessionExecutorStore(pool),
@@ -1782,6 +1784,7 @@ func buildServices(
 		},
 	)
 	codeReviewLifecycle.SetReviewStatusCommentJobs(jobStore)
+	codeReviewLifecycle.SetThreadCanceller(threadSvc)
 	codeReviewVisualEvidence := codereviewsvc.NewVisualEvidenceService(
 		prService,
 		codeReviewLifecycleStore,

@@ -933,6 +933,34 @@ func (s *SessionThreadStore) MarkCancelRequested(ctx context.Context, orgID, thr
 	return err
 }
 
+// MarkCancelRequestedBySessions records one durable cancellation request for
+// every active thread in the selected sessions and returns the exact threads
+// that matched. The single statement prevents a supersede operation from doing
+// one database round trip per review or reviewer thread.
+func (s *SessionThreadStore) MarkCancelRequestedBySessions(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) ([]models.SessionThread, error) {
+	if len(sessionIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, `
+		UPDATE session_threads
+		SET cancel_requested_at = COALESCE(cancel_requested_at, now())
+		WHERE org_id = @org_id
+		  AND session_id = ANY(@session_ids)
+		  AND status IN ('pending', 'running', 'awaiting_input')
+		RETURNING `+sessionThreadSelectColumns,
+		pgx.NamedArgs{"org_id": orgID, "session_ids": sessionIDs},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("mark session threads cancel requested: %w", err)
+	}
+	defer rows.Close()
+	threads, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionThread])
+	if err != nil {
+		return nil, fmt.Errorf("collect cancelled session threads: %w", err)
+	}
+	return threads, nil
+}
+
 // UpdateTurnComplete sets the thread to idle and persists turn metadata.
 // COALESCE on diff: see UpdateResult above.
 func (s *SessionThreadStore) UpdateTurnComplete(ctx context.Context, orgID, threadID uuid.UUID, turn int, result *models.SessionResult, agentSessionID string) error {

@@ -1030,8 +1030,8 @@ func (s *CodeReviewStore) SetProvisionalReviewBody(ctx context.Context, orgID, s
 	return metadata, nil
 }
 
-func (s *CodeReviewStore) MarkStaleForPullRequestExceptHead(ctx context.Context, orgID, pullRequestID uuid.UUID, currentHeadSHA string, supersededBySessionID *uuid.UUID) (int64, error) {
-	tag, err := s.db.Exec(ctx, `
+func (s *CodeReviewStore) MarkStaleForPullRequestExceptHead(ctx context.Context, orgID, pullRequestID uuid.UUID, currentHeadSHA string, supersededBySessionID *uuid.UUID) ([]models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
 		UPDATE code_review_session_metadata
 		SET status = 'stale',
 		    stale = true,
@@ -1046,23 +1046,28 @@ func (s *CodeReviewStore) MarkStaleForPullRequestExceptHead(ctx context.Context,
 		WHERE org_id = @org_id
 		  AND pull_request_id = @pull_request_id
 		  AND head_sha <> @current_head_sha
-		  AND status IN ('queued', 'running')`, pgx.NamedArgs{
+		  AND status IN ('queued', 'running')
+		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
 		"org_id":                   orgID,
 		"pull_request_id":          pullRequestID,
 		"current_head_sha":         currentHeadSHA,
 		"superseded_by_session_id": supersededBySessionID,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("mark stale code reviews: %w", err)
+		return nil, fmt.Errorf("mark stale code reviews: %w", err)
 	}
-	affected := tag.RowsAffected()
-	if affected > 0 {
+	defer rows.Close()
+	metadata, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewSessionMetadata])
+	if err != nil {
+		return nil, fmt.Errorf("collect stale code reviews: %w", err)
+	}
+	if len(metadata) > 0 {
 		// Batch update touches multiple rows; publish one org-scoped signal so
 		// the list refreshes. SessionID is left zero — the frontend refetches
 		// the whole list rather than reading individual fields off the event.
 		s.publishUpdated(ctx, models.CodeReviewSessionMetadata{OrgID: orgID, Status: models.CodeReviewSessionStatusStale})
 	}
-	return affected, nil
+	return metadata, nil
 }
 
 func (s *CodeReviewStore) MarkStale(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error) {
