@@ -204,7 +204,7 @@ func (h *WebhookHandler) handleCodeReviewMentioned(w http.ResponseWriter, r *htt
 	if !matched {
 		return true, false
 	}
-	humanComment := !codeReviewCommentIsMachineAuthored(event.Comment.PerformedViaGitHubApp, event.Comment.User.Type, event.Sender.Type)
+	humanComment := !h.codeReviewCommentIsAutomated(event.Comment.PerformedViaGitHubApp, event.Comment.User.Type, event.Sender.Type)
 	if !humanComment {
 		return true, false
 	}
@@ -410,19 +410,23 @@ func codeReviewSourceVersion(updatedAt *time.Time, body string) int64 {
 	return version
 }
 
-// codeReviewCommentIsMachineAuthored reports whether a comment came from an app
-// or bot rather than a person. Dispute intake, the mention trust gate, and the
-// inline reply path all need the same answer, so they share this one.
-func codeReviewCommentIsMachineAuthored(performedViaGitHubApp *ghservice.FeedbackGitHubAppIdentity, authorType, senderType string) bool {
-	return performedViaGitHubApp != nil ||
-		strings.EqualFold(strings.TrimSpace(authorType), "bot") ||
-		strings.EqualFold(strings.TrimSpace(senderType), "bot")
+// codeReviewCommentIsAutomated rejects bot-attributed comments and comments
+// performed by our own app. A third-party GitHub App may use a user access
+// token to act on behalf of a person; GitHub attributes those comments to the
+// user while retaining performed_via_github_app as provenance. Treating that
+// marker alone as automation would incorrectly reject clients such as Graphite.
+func (h *WebhookHandler) codeReviewCommentIsAutomated(performedViaGitHubApp *ghservice.FeedbackGitHubAppIdentity, authorType, senderType string) bool {
+	if strings.EqualFold(strings.TrimSpace(authorType), "bot") ||
+		strings.EqualFold(strings.TrimSpace(senderType), "bot") {
+		return true
+	}
+	return performedViaGitHubApp != nil &&
+		h.cfg != nil &&
+		h.cfg.GitHubAppID != 0 &&
+		performedViaGitHubApp.ID == h.cfg.GitHubAppID
 }
 
 func codeReviewMentionAuthorTrusted(event ghservice.IssueCommentEvent) bool {
-	if codeReviewCommentIsMachineAuthored(event.Comment.PerformedViaGitHubApp, event.Comment.User.Type, event.Sender.Type) {
-		return false
-	}
 	switch strings.ToUpper(strings.TrimSpace(event.Comment.AuthorAssociation)) {
 	case "OWNER", "MEMBER", "COLLABORATOR":
 		return true
@@ -872,7 +876,7 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 // feedback ingestion, so failing the delivery would drop the comment from the
 // feedback record entirely.
 func (h *WebhookHandler) handleCodeReviewInlineDispute(r *http.Request, event ghservice.PullRequestReviewCommentEvent, owner db.GitHubRepoOwner) bool {
-	if codeReviewCommentIsMachineAuthored(event.Comment.PerformedViaGitHubApp, event.Comment.User.Type, event.Sender.Type) {
+	if h.codeReviewCommentIsAutomated(event.Comment.PerformedViaGitHubApp, event.Comment.User.Type, event.Sender.Type) {
 		return false
 	}
 	pr, err := h.pullRequests.GetByOrgRepoAndNumber(r.Context(), owner.OrgID, event.Repository.FullName, event.PullRequest.Number)

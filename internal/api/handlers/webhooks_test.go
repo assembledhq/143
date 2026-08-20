@@ -48,6 +48,52 @@ func TestCodeReviewCommentSourceVersion(t *testing.T) {
 	require.NotEqual(t, originalVersion, codeReviewCommentSourceVersion(edited), "distinct bodies should retain separate immutable versions even when GitHub timestamps match")
 }
 
+func TestWebhook_CodeReviewCommentIsAutomated(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                  string
+		performedViaGitHubApp *ghservice.FeedbackGitHubAppIdentity
+		authorType            string
+		senderType            string
+		expected              bool
+	}{
+		{name: "native user", authorType: "User", senderType: "User"},
+		{
+			name:                  "Graphite acting on behalf of user",
+			performedViaGitHubApp: &ghservice.FeedbackGitHubAppIdentity{ID: 158384, Slug: "graphite-app"},
+			authorType:            "User",
+			senderType:            "User",
+		},
+		{
+			name:                  "another app acting on behalf of user",
+			performedViaGitHubApp: &ghservice.FeedbackGitHubAppIdentity{ID: 424242, Slug: "review-client"},
+			authorType:            "User",
+			senderType:            "User",
+		},
+		{name: "bot-attributed comment", authorType: "Bot", senderType: "User", expected: true},
+		{name: "bot sender", authorType: "User", senderType: "Bot", expected: true},
+		{
+			name:                  "own app acting on behalf of user",
+			performedViaGitHubApp: &ghservice.FeedbackGitHubAppIdentity{ID: 143, Slug: "143-dev"},
+			authorType:            "User",
+			senderType:            "User",
+			expected:              true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := &WebhookHandler{cfg: &config.Config{GitHubAppID: 143}}
+			actual := handler.codeReviewCommentIsAutomated(tt.performedViaGitHubApp, tt.authorType, tt.senderType)
+
+			require.Equal(t, tt.expected, actual, "automation classification should follow the attributed actor and own-app provenance")
+		})
+	}
+}
+
 func (r *webhookAutomationEventRecorder) TriggerGitHubEvent(_ context.Context, req automationevents.GitHubEventTriggerRequest) error {
 	r.calls = append(r.calls, req)
 	return nil
@@ -1064,98 +1110,122 @@ func (s *codeReviewPullRequestLoaderStub) GetCodeReviewPullRequestSnapshot(_ con
 func TestWebhook_HandleCodeReviewMentionedStartsContextualReview(t *testing.T) {
 	t.Parallel()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should initialize")
-	defer mock.Close()
-
-	orgID := uuid.New()
-	repoID := uuid.New()
-	prID := uuid.New()
-	policyID := uuid.New()
-	now := time.Now().UTC()
-	commentBody := "@assembledhq/143-code-reviewer Review again. This doesn't need a screenshot; it only changes when the behavior appears."
-	remote := ghservice.CodeReviewPullRequestSnapshot{
-		Number:      54903,
-		HTMLURL:     "https://github.com/assembledhq/assembled/pull/54903",
-		Title:       "Fix Slack notification fallback",
-		Body:        "Restore notification rows when Slack auth is unavailable.",
-		State:       "open",
-		AuthorLogin: "assembled-author",
-		HeadSHA:     "fresh-head",
-		HeadRef:     "fix/slack-fallback",
-		BaseSHA:     "fresh-base",
-	}
-	loader := &codeReviewPullRequestLoaderStub{snapshot: remote}
-	policies := &codeReviewWebhookPolicyStore{policyID: policyID, config: models.DefaultCodeReviewPolicyConfig()}
-	metadata := &codeReviewWebhookMetadataStore{}
-	sessions := &codeReviewWebhookSessionStore{}
-	jobs := &codeReviewWebhookJobStore{jobID: uuid.New()}
-	codeReviews := codereviewsvc.NewService(policies, metadata, sessions, jobs, zerolog.Nop(), codereviewsvc.Config{
-		TeamSlugs: []string{"143-code-reviewer"},
-	})
-	handler := &WebhookHandler{
-		pullRequests:  db.NewPullRequestStore(mock),
-		codeReviews:   codeReviews,
-		codeReviewPRs: loader,
+	tests := []struct {
+		name                  string
+		performedViaGitHubApp *ghservice.FeedbackGitHubAppIdentity
+	}{
+		{name: "native GitHub user"},
+		{
+			name:                  "Graphite acting on behalf of user",
+			performedViaGitHubApp: &ghservice.FeedbackGitHubAppIdentity{ID: 158384, Slug: "graphite-app"},
+		},
+		{
+			name:                  "another GitHub App acting on behalf of user",
+			performedViaGitHubApp: &ghservice.FeedbackGitHubAppIdentity{ID: 424242, Slug: "review-client"},
+		},
 	}
 
-	staleBody := "old body"
-	staleHead := "old-head"
-	staleRef := "old-ref"
-	staleBase := "old-base"
-	mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/assembled", "github_pr_number": 54903}).
-		WillReturnRows(pgxmock.NewRows(codeReviewWebhookPullRequestColumns()).AddRow(
-			prID, nil, orgID, 54903, remote.HTMLURL, "assembledhq/assembled",
-			"Old title", &staleBody, "open", "pending", "user", "", &staleHead, &staleRef, &staleBase,
-			"unknown", false, 0, false, nil, int64(0),
-			models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil,
-			nil, now, now,
-		))
-	mock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url[\\s\\S]*body = @body[\\s\\S]*head_sha = @head_sha[\\s\\S]*base_sha = @base_sha").
-		WithArgs(pgx.NamedArgs{
-			"id":            prID,
-			"org_id":        orgID,
-			"github_pr_url": remote.HTMLURL,
-			"title":         remote.Title,
-			"body":          stringPointerArg{value: remote.Body},
-			"head_sha":      stringPointerArg{value: remote.HeadSHA},
-			"head_ref":      stringPointerArg{value: remote.HeadRef},
-			"base_sha":      stringPointerArg{value: remote.BaseSHA},
-			"merge_state":   models.PullRequestMergeStateUnknown,
-		}).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	var event ghservice.IssueCommentEvent
-	event.Action = "created"
-	event.DeliveryID = "delivery-comment-54903"
-	event.Repository.FullName = "assembledhq/assembled"
-	event.Issue.Number = 54903
-	event.Issue.PullRequest = &struct{}{}
-	event.Comment.ID = 5124237355
-	event.Comment.Body = commentBody
-	event.Comment.HTMLURL = "https://github.com/assembledhq/assembled/pull/54903#issuecomment-5124237355"
-	event.Comment.User.Login = "assembled-matthew"
-	event.Comment.User.Type = "User"
-	event.Comment.AuthorAssociation = "MEMBER"
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
-	rr := httptest.NewRecorder()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
 
-	ok, captured := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
-		OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
-	})
+			orgID := uuid.New()
+			repoID := uuid.New()
+			prID := uuid.New()
+			policyID := uuid.New()
+			now := time.Now().UTC()
+			commentBody := "@assembledhq/143-code-reviewer Review again. This doesn't need a screenshot; it only changes when the behavior appears."
+			remote := ghservice.CodeReviewPullRequestSnapshot{
+				Number:      54903,
+				HTMLURL:     "https://github.com/assembledhq/assembled/pull/54903",
+				Title:       "Fix Slack notification fallback",
+				Body:        "Restore notification rows when Slack auth is unavailable.",
+				State:       "open",
+				AuthorLogin: "assembled-author",
+				HeadSHA:     "fresh-head",
+				HeadRef:     "fix/slack-fallback",
+				BaseSHA:     "fresh-base",
+			}
+			loader := &codeReviewPullRequestLoaderStub{snapshot: remote}
+			policies := &codeReviewWebhookPolicyStore{policyID: policyID, config: models.DefaultCodeReviewPolicyConfig()}
+			metadata := &codeReviewWebhookMetadataStore{}
+			sessions := &codeReviewWebhookSessionStore{}
+			jobs := &codeReviewWebhookJobStore{jobID: uuid.New()}
+			codeReviews := codereviewsvc.NewService(policies, metadata, sessions, jobs, zerolog.Nop(), codereviewsvc.Config{
+				TeamSlugs: []string{"143-code-reviewer"},
+			})
+			handler := &WebhookHandler{
+				cfg:           &config.Config{GitHubAppID: 143},
+				pullRequests:  db.NewPullRequestStore(mock),
+				codeReviews:   codeReviews,
+				codeReviewPRs: loader,
+			}
 
-	require.True(t, ok, "configured team mention should be processed: %s", rr.Body.String())
-	require.False(t, captured, "ordinary review request should not be captured as a dispute")
-	require.Equal(t, orgID, loader.orgID, "handler should scope the GitHub snapshot to the owning organization")
-	require.Equal(t, repoID, loader.repositoryID, "handler should load the configured repository")
-	require.Equal(t, 54903, loader.number, "handler should load the commented pull request")
-	require.Equal(t, prID, jobs.payload.PullRequestID, "review job should target the mirrored pull request")
-	require.Equal(t, remote.HeadSHA, jobs.payload.HeadSHA, "review job should use the current GitHub head")
-	require.NotNil(t, jobs.payload.RequestContext, "review job should carry the triggering comment")
-	require.Equal(t, commentBody, jobs.payload.RequestContext.Body, "orchestrator context should preserve the human clarification")
-	require.Equal(t, "assembled-matthew", jobs.payload.RequestContext.AuthorLogin, "orchestrator context should preserve the requester")
-	require.NoError(t, mock.ExpectationsWereMet(), "comment trigger should use org-scoped mirror reads and writes")
+			staleBody := "old body"
+			staleHead := "old-head"
+			staleRef := "old-ref"
+			staleBase := "old-base"
+			mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/assembled", "github_pr_number": 54903}).
+				WillReturnRows(pgxmock.NewRows(codeReviewWebhookPullRequestColumns()).AddRow(
+					prID, nil, orgID, 54903, remote.HTMLURL, "assembledhq/assembled",
+					"Old title", &staleBody, "open", "pending", "user", "", &staleHead, &staleRef, &staleBase,
+					"unknown", false, 0, false, nil, int64(0),
+					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil,
+					nil, now, now,
+				))
+			mock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url[\\s\\S]*body = @body[\\s\\S]*head_sha = @head_sha[\\s\\S]*base_sha = @base_sha").
+				WithArgs(pgx.NamedArgs{
+					"id":            prID,
+					"org_id":        orgID,
+					"github_pr_url": remote.HTMLURL,
+					"title":         remote.Title,
+					"body":          stringPointerArg{value: remote.Body},
+					"head_sha":      stringPointerArg{value: remote.HeadSHA},
+					"head_ref":      stringPointerArg{value: remote.HeadRef},
+					"base_sha":      stringPointerArg{value: remote.BaseSHA},
+					"merge_state":   models.PullRequestMergeStateUnknown,
+				}).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+			var event ghservice.IssueCommentEvent
+			event.Action = "created"
+			event.DeliveryID = "delivery-comment-54903"
+			event.Repository.FullName = "assembledhq/assembled"
+			event.Issue.Number = 54903
+			event.Issue.PullRequest = &struct{}{}
+			event.Comment.ID = 5124237355
+			event.Comment.Body = commentBody
+			event.Comment.HTMLURL = "https://github.com/assembledhq/assembled/pull/54903#issuecomment-5124237355"
+			event.Comment.User.Login = "assembled-matthew"
+			event.Comment.User.Type = "User"
+			event.Comment.AuthorAssociation = "MEMBER"
+			event.Comment.PerformedViaGitHubApp = tt.performedViaGitHubApp
+			event.Sender.Type = "User"
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
+			rr := httptest.NewRecorder()
+
+			ok, captured := handler.handleCodeReviewMentioned(rr, req, event, db.GitHubRepoOwner{
+				OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
+			})
+
+			require.True(t, ok, "configured team mention should be processed: %s", rr.Body.String())
+			require.False(t, captured, "ordinary review request should not be captured as a dispute")
+			require.Equal(t, orgID, loader.orgID, "handler should scope the GitHub snapshot to the owning organization")
+			require.Equal(t, repoID, loader.repositoryID, "handler should load the configured repository")
+			require.Equal(t, 54903, loader.number, "handler should load the commented pull request")
+			require.Equal(t, prID, jobs.payload.PullRequestID, "review job should target the mirrored pull request")
+			require.Equal(t, remote.HeadSHA, jobs.payload.HeadSHA, "review job should use the current GitHub head")
+			require.NotNil(t, jobs.payload.RequestContext, "review job should carry the triggering comment")
+			require.Equal(t, commentBody, jobs.payload.RequestContext.Body, "orchestrator context should preserve the human clarification")
+			require.Equal(t, "assembled-matthew", jobs.payload.RequestContext.AuthorLogin, "orchestrator context should preserve the requester")
+			require.NoError(t, mock.ExpectationsWereMet(), "comment trigger should use org-scoped mirror reads and writes")
+		})
+	}
 }
 
 func TestWebhook_HandleCodeReviewMentionedIgnoresUnconfiguredTeamBeforeGitHubLoad(t *testing.T) {
@@ -1291,11 +1361,20 @@ func TestWebhook_HandleCodeReviewInlineDisputeDefersMeaningToTriage(t *testing.T
 	repoID := uuid.New()
 	rootID := int64(778899)
 	tests := []struct {
-		name string
-		body string
+		name                  string
+		body                  string
+		performedViaGitHubApp *ghservice.FeedbackGitHubAppIdentity
 	}{
-		{name: "actionable reply is classified asynchronously", body: "Good catch, please apply that rename."},
-		{name: "acknowledgement is classified asynchronously", body: "Thanks, fixing now."},
+		{
+			name:                  "Graphite user reply is classified asynchronously",
+			body:                  "Good catch, please apply that rename.",
+			performedViaGitHubApp: &ghservice.FeedbackGitHubAppIdentity{ID: 158384, Slug: "graphite-app"},
+		},
+		{
+			name:                  "another app-assisted user reply is classified asynchronously",
+			body:                  "Thanks, fixing now.",
+			performedViaGitHubApp: &ghservice.FeedbackGitHubAppIdentity{ID: 424242, Slug: "review-client"},
+		},
 		{name: "objection is classified asynchronously", body: "I disagree, the helper already handles nil."},
 		{name: "question is classified asynchronously", body: "Why is this flagged as sensitive?"},
 	}
@@ -1313,6 +1392,7 @@ func TestWebhook_HandleCodeReviewInlineDisputeDefersMeaningToTriage(t *testing.T
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/assembled", "github_pr_number": 54903}).
 				WillReturnError(pgx.ErrNoRows)
 			handler := &WebhookHandler{
+				cfg:                &config.Config{GitHubAppID: 143},
 				pullRequests:       db.NewPullRequestStore(mock),
 				codeReviewDisputes: codereviewsvc.NewDisputeService(nil, nil, nil, nil, nil, "", zerolog.Nop()),
 			}
@@ -1326,6 +1406,8 @@ func TestWebhook_HandleCodeReviewInlineDisputeDefersMeaningToTriage(t *testing.T
 			event.Comment.User.Login = "assembled-matthew"
 			event.Comment.User.Type = "User"
 			event.Comment.AuthorAssociation = "MEMBER"
+			event.Comment.PerformedViaGitHubApp = tt.performedViaGitHubApp
+			event.Sender.Type = "User"
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
 
 			captured := handler.handleCodeReviewInlineDispute(req, event, db.GitHubRepoOwner{
@@ -1506,20 +1588,27 @@ func TestWebhook_HandleCodeReviewMentionedIgnoresEditedNonDisputeBeforeGitHubLoa
 	require.Empty(t, rr.Body.String(), "an ignored edit should not write an error response")
 }
 
-func TestWebhook_HandleCodeReviewMentionedCapturesEveryHumanPostDecisionMention(t *testing.T) {
+func TestWebhook_HandleCodeReviewMentionedCapturesEveryUserAttributedPostDecisionMention(t *testing.T) {
 	t.Parallel()
 
-	comments := []string{
-		"@assembledhq/143-code-reviewer while this affects EKS, it is a minimal established server timeout change. can you check again",
-		"@assembledhq/143-code-reviewer this is adding security tightening; SAML and magic-link usage is low enough that this is only a security improvement",
-		"@assembledhq/143-code-reviewer while this technically touches OAuth code, it only fixes the mutex error path and follows a standard Go pattern",
-		"@assembledhq/143-code-reviewer I don't believe this is a sensitive change judgment; this is only minor security hardening",
-		"@assembledhq/143-code-reviewer can you re-review this?",
-		"@assembledhq/143-code-reviewer thanks",
+	tests := []struct {
+		name                  string
+		comment               string
+		performedViaGitHubApp *ghservice.FeedbackGitHubAppIdentity
+	}{
+		{name: "explains infrastructure scope", comment: "@assembledhq/143-code-reviewer while this affects EKS, it is a minimal established server timeout change. can you check again"},
+		{name: "explains authentication scope", comment: "@assembledhq/143-code-reviewer this is adding security tightening; SAML and magic-link usage is low enough that this is only a security improvement"},
+		{name: "explains OAuth scope", comment: "@assembledhq/143-code-reviewer while this technically touches OAuth code, it only fixes the mutex error path and follows a standard Go pattern"},
+		{name: "challenges sensitive classification", comment: "@assembledhq/143-code-reviewer I don't believe this is a sensitive change judgment; this is only minor security hardening"},
+		{
+			name:                  "Graphite user asks for another review",
+			comment:               "@assembledhq/143-code-reviewer I added screenshots to the PR, can you check and evaluate again",
+			performedViaGitHubApp: &ghservice.FeedbackGitHubAppIdentity{ID: 158384, Slug: "graphite-app"},
+		},
+		{name: "acknowledges review", comment: "@assembledhq/143-code-reviewer thanks"},
 	}
-	for _, comment := range comments {
-		comment := comment
-		t.Run(comment, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
 			mock, err := pgxmock.NewPool()
@@ -1574,6 +1663,7 @@ func TestWebhook_HandleCodeReviewMentionedCapturesEveryHumanPostDecisionMention(
 				zerolog.Nop(),
 			)
 			handler := &WebhookHandler{
+				cfg:         &config.Config{GitHubAppID: 143},
 				codeReviews: codeReviews, codeReviewPRs: loader,
 				pullRequests: db.NewPullRequestStore(mock), codeReviewDisputes: disputeService,
 			}
@@ -1607,11 +1697,13 @@ func TestWebhook_HandleCodeReviewMentionedCapturesEveryHumanPostDecisionMention(
 			event.Issue.Number = 55422
 			event.Issue.PullRequest = &struct{}{}
 			event.Comment.ID = commentID
-			event.Comment.Body = comment
+			event.Comment.Body = tt.comment
 			event.Comment.HTMLURL = remote.HTMLURL + "#issuecomment-5196810672"
 			event.Comment.User.Login = "assembled-matthew"
 			event.Comment.User.Type = "User"
 			event.Comment.AuthorAssociation = "MEMBER"
+			event.Comment.PerformedViaGitHubApp = tt.performedViaGitHubApp
+			event.Sender.Type = "User"
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", nil)
 			rr := httptest.NewRecorder()
 
@@ -1620,10 +1712,10 @@ func TestWebhook_HandleCodeReviewMentionedCapturesEveryHumanPostDecisionMention(
 			})
 
 			require.True(t, ok, "post-decision mention capture should not fail the webhook: %s", rr.Body.String())
-			require.True(t, captured, "every human mention after a completed decision should enter durable LLM triage")
+			require.True(t, captured, "every user-attributed mention after a completed decision should enter durable LLM triage")
 			require.Equal(t, uuid.Nil, jobs.payload.SessionID, "webhook wording must not directly start a new code review")
 			require.Len(t, disputeStore.created, 1, "the comment should produce exactly one durable intake row")
-			require.Equal(t, comment, disputeStore.created[0].Body, "the complete comment should be retained as untrusted classification evidence")
+			require.Equal(t, tt.comment, disputeStore.created[0].Body, "the complete comment should be retained as untrusted classification evidence")
 			var signals map[string]any
 			require.NoError(t, json.Unmarshal(disputeStore.created[0].QueueSignals, &signals), "intake queue signals should be valid JSON")
 			require.Equal(t, true, signals["review_request_allowed"], "a trusted new comment may be returned to the normal review path after classification")
@@ -1632,7 +1724,7 @@ func TestWebhook_HandleCodeReviewMentionedCapturesEveryHumanPostDecisionMention(
 	}
 }
 
-func TestWebhook_HandleCodeReviewMentionedRejectsUntrustedAuthorsBeforeGitHubLoad(t *testing.T) {
+func TestWebhook_HandleCodeReviewMentionedRejectsAutomatedOrUntrustedAuthorsBeforeGitHubLoad(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -1649,17 +1741,23 @@ func TestWebhook_HandleCodeReviewMentionedRejectsUntrustedAuthorsBeforeGitHubLoa
 			senderType:        "User",
 		},
 		{
-			name:              "bot commenter",
+			name:              "bot-attributed commenter",
 			authorAssociation: "MEMBER",
 			authorType:        "Bot",
+			senderType:        "User",
+		},
+		{
+			name:              "bot sender",
+			authorAssociation: "MEMBER",
+			authorType:        "User",
 			senderType:        "Bot",
 		},
 		{
-			name:                  "GitHub App commenter",
+			name:                  "143 app acting on behalf of a user",
 			authorAssociation:     "MEMBER",
 			authorType:            "User",
 			senderType:            "User",
-			performedViaGitHubApp: &ghservice.FeedbackGitHubAppIdentity{ID: 143, Slug: "review-helper"},
+			performedViaGitHubApp: &ghservice.FeedbackGitHubAppIdentity{ID: 143, Slug: "143-dev"},
 		},
 	}
 	for _, tt := range tests {
@@ -1678,6 +1776,7 @@ func TestWebhook_HandleCodeReviewMentionedRejectsUntrustedAuthorsBeforeGitHubLoa
 				codereviewsvc.Config{TeamSlugs: []string{"143-code-reviewer"}},
 			)
 			handler := &WebhookHandler{
+				cfg:           &config.Config{GitHubAppID: 143},
 				codeReviews:   codeReviews,
 				codeReviewPRs: loader,
 			}
@@ -1697,9 +1796,9 @@ func TestWebhook_HandleCodeReviewMentionedRejectsUntrustedAuthorsBeforeGitHubLoa
 				OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/assembled", Status: "active",
 			})
 
-			require.True(t, ok, "untrusted mention should be ignored without failing the webhook")
-			require.False(t, captured, "untrusted mention without dispute intake should not suppress ordinary feedback")
-			require.Equal(t, 0, loader.number, "untrusted mention should not spend a GitHub API request")
+			require.True(t, ok, "ineligible mention should be ignored without failing the webhook")
+			require.False(t, captured, "ineligible mention without dispute intake should not suppress ordinary feedback")
+			require.Equal(t, 0, loader.number, "ineligible mention should not spend a GitHub API request")
 			require.Empty(t, rr.Body.String(), "ignored mention should not write an error response")
 		})
 	}
