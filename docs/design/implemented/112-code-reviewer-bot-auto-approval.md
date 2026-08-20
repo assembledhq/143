@@ -150,7 +150,7 @@ Primary interaction:
 - A 143 admin creates or repairs the `143-code-reviewer` GitHub team from the Code reviews configuration page.
 - 143 grants that team read access to the selected repository and stores the team slug as the repo's active trigger.
 - A user requests `@org/143-code-reviewer` as a team reviewer on a PR.
-- Alternatively, a repository owner, organization member, or collaborator mentions `@org/143-code-reviewer` in a PR conversation comment; this starts a fresh review and carries that comment into orchestrator synthesis as escaped, untrusted context. External users, bots, and GitHub Apps cannot start reviews through comments.
+- Alternatively, a repository owner, organization member, or collaborator mentions `@org/143-code-reviewer` in a PR conversation comment; this starts a fresh review and carries that comment into orchestrator synthesis as escaped, untrusted context. User-attributed comments remain eligible when a third-party GitHub App, such as Graphite, acts on the user's behalf. External users, bot-attributed comments, and comments performed by 143's own GitHub App cannot start reviews through comments.
 - 143 asynchronously creates or refreshes one PR conversation comment that links to the running review session.
 - The bot submits a formal GitHub review for approval state and a configurable number of inline comments on changed lines. Its body keeps the visible result as a fallback until the rolling comment update succeeds, then becomes marker-only; it does not publish a commit status.
 - The rolling conversation comment is replaced with the visible result, and later review passes reuse the same comment.
