@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
@@ -24,19 +22,7 @@ type CodeReviewStreams struct {
 
 type CodeReviewSubscription struct {
 	C <-chan models.CodeReviewUpdatedEvent
-
-	ch     chan models.CodeReviewUpdatedEvent
-	cancel context.CancelFunc
-	pubsub *redis.PubSub
-
-	mu          sync.Mutex
-	closeReason string
-}
-
-func (s *CodeReviewSubscription) setCloseReason(reason string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.closeReason = reason
+	*jsonStreamSubscription
 }
 
 func NewCodeReviewStreams(client *Client, logger zerolog.Logger) *CodeReviewStreams {
@@ -75,77 +61,25 @@ func (s *CodeReviewStreams) Subscribe(orgID uuid.UUID) (*CodeReviewSubscription,
 	if s == nil || s.client == nil {
 		return nil, errors.New("redis unavailable")
 	}
-	if !s.client.Available() {
-		return nil, errors.New("redis unavailable")
+	ch, state, err := subscribeJSONStream[models.CodeReviewUpdatedEvent](s.client, s.logger, codeReviewStreamChannel(orgID), "subscribe code review stream", "failed to decode code review update event")
+	if err != nil {
+		return nil, err
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	pubsub := s.client.raw().Subscribe(ctx, codeReviewStreamChannel(orgID))
-	if _, err := pubsub.Receive(ctx); err != nil {
-		cancel()
-		_ = pubsub.Close()
-		return nil, fmt.Errorf("subscribe code review stream: %w", err)
-	}
-
-	sub := &CodeReviewSubscription{
-		ch:     make(chan models.CodeReviewUpdatedEvent, 32),
-		C:      nil,
-		cancel: cancel,
-		pubsub: pubsub,
-	}
-	sub.C = sub.ch
-
-	go func() {
-		defer close(sub.ch)
-		defer cancel()
-
-		for msg := range pubsub.Channel() {
-			var event models.CodeReviewUpdatedEvent
-			if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
-				s.logger.Warn().Err(err).Str("channel", msg.Channel).Msg("failed to decode code review update event")
-				continue
-			}
-
-			select {
-			case sub.ch <- event:
-			case <-ctx.Done():
-				sub.setCloseReason(ctx.Err().Error())
-				return
-			}
-		}
-
-		if err := ctx.Err(); err != nil {
-			sub.setCloseReason(err.Error())
-			return
-		}
-		sub.setCloseReason("subscription closed")
-	}()
-
-	return sub, nil
+	return &CodeReviewSubscription{C: ch, jsonStreamSubscription: state}, nil
 }
 
 func (s *CodeReviewSubscription) Close() {
 	if s == nil {
 		return
 	}
-	if s.cancel != nil {
-		s.cancel()
-	}
-	if s.pubsub != nil {
-		_ = s.pubsub.Close()
-	}
+	s.jsonStreamSubscription.close()
 }
 
 func (s *CodeReviewSubscription) CloseReason() string {
 	if s == nil {
 		return "subscription closed"
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closeReason == "" {
-		return "subscription closed"
-	}
-	return s.closeReason
+	return s.jsonStreamSubscription.reason()
 }
 
 func codeReviewStreamChannel(orgID uuid.UUID) string {
