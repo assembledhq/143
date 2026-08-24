@@ -56,6 +56,7 @@ const FORM_STATE_KEYS = [
   "triggerAuthors",
   "triggerBaseBranches",
   "triggerFeedbackTypes",
+  "triggerLabels",
   "triggerPaths",
   "triggerReviewStates",
 ].sort();
@@ -77,6 +78,7 @@ function populatedDraft(overrides: Partial<AutomationFormState> = {}): Automatio
     triggerBaseBranches: "main",
     triggerAuthors: "dependabot[bot]",
     triggerPaths: "src/",
+    triggerLabels: "frontend",
     triggerFeedbackTypes: "Inline review comment",
     triggerReviewStates: "changes_requested",
     pagerDutyEnabled: true,
@@ -211,6 +213,7 @@ describe("automation-draft storage", () => {
         triggerBaseBranches: "",
         triggerAuthors: "",
         triggerPaths: "",
+        triggerLabels: "",
         triggerFeedbackTypes: "",
         triggerReviewStates: "",
         pagerDutyEnabled: false,

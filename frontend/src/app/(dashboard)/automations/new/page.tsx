@@ -274,6 +274,7 @@ export default function NewAutomationPage() {
     triggerBaseBranches,
     triggerAuthors,
     triggerPaths,
+    triggerLabels,
     triggerFeedbackTypes,
     triggerReviewStates,
     pagerDutyEnabled,
@@ -490,6 +491,7 @@ export default function NewAutomationPage() {
       triggerBaseBranches: "",
       triggerAuthors: "",
       triggerPaths: "",
+      triggerLabels: "",
       triggerFeedbackTypes: "",
       triggerReviewStates: "",
       pagerDutyEnabled: false,
@@ -546,6 +548,7 @@ export default function NewAutomationPage() {
       base_branches: commaList(triggerBaseBranches),
       authors: commaList(triggerAuthors),
       paths: commaList(triggerPaths),
+      labels: commaList(triggerLabels),
       feedback_types: commaList(triggerFeedbackTypes),
       review_states: commaList(triggerReviewStates),
     }),
@@ -553,6 +556,7 @@ export default function NewAutomationPage() {
       triggerAuthors,
       triggerBaseBranches,
       triggerFeedbackTypes,
+      triggerLabels,
       triggerPaths,
       triggerReviewStates,
     ],
@@ -1313,6 +1317,17 @@ export default function NewAutomationPage() {
                             />
                           </div>
                           <div className="space-y-1.5">
+                            <Label htmlFor="trigger-labels">PR labels</Label>
+                            <Input
+                              id="trigger-labels"
+                              value={triggerLabels}
+                              onChange={(e) =>
+                                setFormField("triggerLabels", e.target.value)
+                              }
+                              placeholder="frontend, backend"
+                            />
+                          </div>
+                          <div className="space-y-1.5">
                             <Label htmlFor="trigger-feedback-types">
                               Feedback types
                             </Label>
@@ -1325,7 +1340,7 @@ export default function NewAutomationPage() {
                               placeholder="Inline review comment"
                             />
                           </div>
-                          <div className="space-y-1.5 sm:col-span-2">
+                          <div className="space-y-1.5">
                             <Label htmlFor="trigger-review-states">
                               Review states
                             </Label>

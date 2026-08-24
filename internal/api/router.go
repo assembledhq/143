@@ -740,6 +740,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if prService != nil {
 		githubAutomationTriggerer := automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, pool, logger)
 		githubAutomationTriggerer.SetCapabilityResolver(agentCapabilitySvc)
+		githubAutomationTriggerer.SetLabelResolver(prService)
 		prService.SetAutomationEventTriggerer(githubAutomationTriggerer)
 		prService.SetSessionMessageStore(sessionMessageStore)
 		prService.SetSessionThreadStore(sessionThreadStore)
