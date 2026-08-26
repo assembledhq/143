@@ -590,15 +590,26 @@ func groupedCodeReviewFindings(findings []CodeReviewFinding) []string {
 			continue
 		}
 		prefix := string(finding.Severity)
+		if finding.Confidence.Validate() == nil {
+			prefix = fmt.Sprintf("%s (%s confidence)", prefix, finding.Confidence)
+		}
+		formatted := prefix + ": "
 		if finding.Path != nil && strings.TrimSpace(*finding.Path) != "" {
 			coordinate := codeReviewUntrustedMarkdownInline(*finding.Path)
 			if finding.StartLine != nil && *finding.StartLine > 0 {
-				coordinate = fmt.Sprintf("%s:%d", coordinate, *finding.StartLine)
+				if finding.EndLine != nil && *finding.EndLine > *finding.StartLine {
+					coordinate = fmt.Sprintf("%s:%d-%d", coordinate, *finding.StartLine, *finding.EndLine)
+				} else {
+					coordinate = fmt.Sprintf("%s:%d", coordinate, *finding.StartLine)
+				}
 			}
-			out = append(out, fmt.Sprintf("%s: %s - %s", prefix, coordinate, summary))
-			continue
+			formatted += coordinate + " - "
 		}
-		out = append(out, fmt.Sprintf("%s: %s", prefix, summary))
+		formatted += summary
+		if detail := codeReviewUntrustedMarkdownInline(finding.Body); detail != "" {
+			formatted += "\n  - Details: " + detail
+		}
+		out = append(out, formatted)
 	}
 	if len(findings) > len(sorted) {
 		out = append(out, fmt.Sprintf("%d additional findings are available in the review session", len(findings)-len(sorted)))
