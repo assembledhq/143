@@ -1730,7 +1730,7 @@ func TestHarvestCodeReviewReviewerResultsPreservesCompletedOutputAfterDeadline(t
 				stringPtr("internal/db/users.go"), intPtr(42), intPtr(42), "Missing org filter",
 				"This query can read another org's rows.", false, nil, now))
 	mock.ExpectQuery("UPDATE code_review_agent_results").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(models.CodeReviewAgentResultStatusCompleted, &rawReview, completedReviewerResultArg{expectedCompletedAt: &completedAt}, orgID, resultID).
 		WillReturnRows(newCodeReviewAgentResultRows().
 			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusCompleted, &rawReview, updatedState, now))
 
@@ -2393,7 +2393,7 @@ func TestHarvestCodeReviewOrchestratorResultPreservesCompletedOutputAfterDeadlin
 	err = harvestCodeReviewOrchestratorResult(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
 		OrgID:     orgID,
 		SessionID: sessionID,
-	}, policy, models.CodeReviewSessionMetadata{CreatedAt: reviewStartedAt}, []codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}}, models.CodeReviewVisualEvidenceSnapshot{})
+	}, policy, []codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}}, models.CodeReviewVisualEvidenceSnapshot{})
 
 	require.NoError(t, err, "a completed orchestrator output should be harvested even when the worker resumes after the deadline")
 	require.NoError(t, mock.ExpectationsWereMet(), "orchestrator harvest should preserve terminal output and findings instead of replacing them with a timeout")
@@ -2457,8 +2457,12 @@ func TestHarvestCodeReviewAgentResultRejectsTerminalOutputAfterDeadline(t *testi
 						&reviewStartedAt, &now, reviewStartedAt, models.ThreadCreatedBySourceSystem, nil, nil,
 						nil, 0.25, 0, nil, "", nil, "", "", json.RawMessage(`[]`),
 						models.ThreadExecutionModeReview, models.ThreadFilesystemModeReadOnly))
+			var structuredArg any = completedOrchestratorResultArg{expectedError: tt.expectedRaw, expectedCompletedAt: &now}
+			if tt.role == models.CodeReviewAgentRoleReviewer {
+				structuredArg = completedReviewerResultArg{expectedError: tt.expectedRaw, expectedCompletedAt: &now}
+			}
 			mock.ExpectQuery("UPDATE code_review_agent_results").
-				WithArgs(models.CodeReviewAgentResultStatusTimedOut, &tt.expectedRaw, pgxmock.AnyArg(), orgID, resultID).
+				WithArgs(models.CodeReviewAgentResultStatusTimedOut, &tt.expectedRaw, structuredArg, orgID, resultID).
 				WillReturnRows(newCodeReviewAgentResultRows().
 					AddRow(resultID, orgID, sessionID, "codex", nil, tt.role, models.CodeReviewAgentResultStatusTimedOut, &tt.expectedRaw, structuredResult, now))
 
@@ -2472,13 +2476,287 @@ func TestHarvestCodeReviewAgentResultRejectsTerminalOutputAfterDeadline(t *testi
 			if tt.role == models.CodeReviewAgentRoleReviewer {
 				err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), job, policy, metadata, nil)
 			} else {
-				err = harvestCodeReviewOrchestratorResult(context.Background(), stores, nil, zerolog.Nop(), job, policy, metadata, nil, models.CodeReviewVisualEvidenceSnapshot{})
+				err = harvestCodeReviewOrchestratorResult(context.Background(), stores, nil, zerolog.Nop(), job, policy, nil, models.CodeReviewVisualEvidenceSnapshot{})
 			}
 
 			require.NoError(t, err, "late terminal output should be classified as timed out")
 			require.NoError(t, mock.ExpectationsWereMet(), "late terminal output should not be harvested after the configured deadline")
 		})
 	}
+}
+
+func TestHarvestCodeReviewReviewerResultsPersistsTerminalEvidence(t *testing.T) {
+	t.Parallel()
+
+	_, invalidThreadIDErr := uuid.Parse("not-a-uuid")
+	tests := []struct {
+		name             string
+		structuredResult json.RawMessage
+		expectedRaw      string
+		preserveRaw      bool
+	}{
+		{
+			name: "missing thread id",
+			structuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+				ReviewerKey: codeReviewReviewerKey(0, models.AgentTypeCodex),
+			}),
+			expectedRaw: "reviewer result is missing its thread id",
+		},
+		{
+			name:             "malformed structured result",
+			structuredResult: json.RawMessage(`{`),
+			expectedRaw:      "reviewer result has a malformed structured result",
+			preserveRaw:      true,
+		},
+		{
+			name: "invalid thread id",
+			structuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+				ReviewerKey: codeReviewReviewerKey(0, models.AgentTypeCodex),
+				ThreadID:    "not-a-uuid",
+			}),
+			expectedRaw: "reviewer result has an invalid thread id: " + invalidThreadIDErr.Error(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			resultID := uuid.New()
+			now := time.Now().UTC()
+			mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+				WillReturnRows(newCodeReviewAgentResultRows().
+					AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusRunning, nil, tt.structuredResult, now))
+			var structuredArg any = completedReviewerResultArg{expectedError: tt.expectedRaw}
+			if tt.preserveRaw {
+				structuredArg = preservedJSONArg{expected: tt.structuredResult}
+			}
+			mock.ExpectQuery("UPDATE code_review_agent_results").
+				WithArgs(models.CodeReviewAgentResultStatusFailed, &tt.expectedRaw, structuredArg, orgID, resultID).
+				WillReturnRows(newCodeReviewAgentResultRows().
+					AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusFailed, &tt.expectedRaw, tt.structuredResult, now))
+
+			stores := &Stores{CodeReviews: db.NewCodeReviewStore(mock)}
+			err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
+				OrgID:     orgID,
+				SessionID: sessionID,
+			}, codeReviewPolicyRecordForTest(models.DefaultCodeReviewPolicyConfig()), models.CodeReviewSessionMetadata{CreatedAt: now}, nil)
+
+			require.NoError(t, err, "malformed reviewer results should become terminal without losing diagnostic evidence")
+			require.NoError(t, mock.ExpectationsWereMet(), "malformed reviewer result update should preserve raw evidence or persist terminal timing")
+		})
+	}
+}
+
+func TestHarvestCodeReviewOrchestratorResultPersistsTerminalEvidence(t *testing.T) {
+	t.Parallel()
+
+	_, invalidThreadIDErr := uuid.Parse("not-a-uuid")
+	tests := []struct {
+		name             string
+		structuredResult json.RawMessage
+		expectedRaw      string
+		preserveRaw      bool
+	}{
+		{
+			name:             "missing thread id",
+			structuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{}),
+			expectedRaw:      "orchestrator result is missing its thread id",
+		},
+		{
+			name:             "malformed structured result",
+			structuredResult: json.RawMessage(`{`),
+			expectedRaw:      "orchestrator result has a malformed structured result",
+			preserveRaw:      true,
+		},
+		{
+			name: "invalid thread id",
+			structuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+				ThreadID: "not-a-uuid",
+			}),
+			expectedRaw: "orchestrator result has an invalid thread id: " + invalidThreadIDErr.Error(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			resultID := uuid.New()
+			now := time.Now().UTC()
+			mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+				WillReturnRows(newCodeReviewAgentResultRows().
+					AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusRunning, nil, tt.structuredResult, now))
+			var structuredArg any = completedOrchestratorResultArg{expectedError: tt.expectedRaw}
+			if tt.preserveRaw {
+				structuredArg = preservedJSONArg{expected: tt.structuredResult}
+			}
+			mock.ExpectQuery("UPDATE code_review_agent_results").
+				WithArgs(models.CodeReviewAgentResultStatusFailed, &tt.expectedRaw, structuredArg, orgID, resultID).
+				WillReturnRows(newCodeReviewAgentResultRows().
+					AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusFailed, &tt.expectedRaw, tt.structuredResult, now))
+
+			stores := &Stores{CodeReviews: db.NewCodeReviewStore(mock)}
+			err = harvestCodeReviewOrchestratorResult(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
+				OrgID:     orgID,
+				SessionID: sessionID,
+			}, codeReviewPolicyRecordForTest(models.DefaultCodeReviewPolicyConfig()), nil, models.CodeReviewVisualEvidenceSnapshot{})
+
+			require.NoError(t, err, "malformed orchestrator results should become terminal without losing diagnostic evidence")
+			require.NoError(t, mock.ExpectationsWereMet(), "malformed orchestrator result update should preserve raw evidence or persist terminal timing")
+		})
+	}
+}
+
+func TestHarvestCodeReviewOrchestratorResultClassifiesFailedThreadOutput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		status models.ThreadStatus
+	}{
+		{name: "failed thread", status: models.ThreadStatusFailed},
+		{name: "cancelled thread", status: models.ThreadStatusCancelled},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			threadID := uuid.New()
+			resultID := uuid.New()
+			now := time.Now().UTC()
+			completedAt := now.Add(-10 * time.Minute)
+			failure := "orchestrator execution failed"
+			state := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{ThreadID: threadID.String()})
+			mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+				WillReturnRows(newCodeReviewAgentResultRows().
+					AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusRunning, nil, state, now.Add(-20*time.Minute)))
+			mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
+				WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
+				WillReturnRows(newSessionThreadRows().
+					AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, nil,
+						"Main", nil, []string{"internal/worker/code_review_handler.go"}, tt.status,
+						nil, 1, &completedAt, nil, nil, &failure, stringPtr("provider_error"),
+						&now, &completedAt, now.Add(-20*time.Minute), models.ThreadCreatedBySourceSystem, nil, nil,
+						nil, 0.25, 0, nil, "", nil, "", "", json.RawMessage(`[]`),
+						models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite))
+			mock.ExpectQuery("(?s)SELECT .*FROM session_messages").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
+				WillReturnRows(newSessionMessageRows())
+			mock.ExpectQuery("UPDATE code_review_agent_results").
+				WithArgs(models.CodeReviewAgentResultStatusFailed, &failure, completedOrchestratorResultArg{expectedError: failure, expectedCompletedAt: &completedAt}, orgID, resultID).
+				WillReturnRows(newCodeReviewAgentResultRows().
+					AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusFailed, &failure, state, now))
+
+			stores := &Stores{
+				CodeReviews:     db.NewCodeReviewStore(mock),
+				SessionThreads:  db.NewSessionThreadStore(mock),
+				SessionMessages: db.NewSessionMessageStore(mock),
+			}
+			err = harvestCodeReviewOrchestratorResult(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
+				OrgID:     orgID,
+				SessionID: sessionID,
+			}, codeReviewPolicyRecordForTest(models.DefaultCodeReviewPolicyConfig()), nil, models.CodeReviewVisualEvidenceSnapshot{})
+
+			require.NoError(t, err, "failed orchestrator threads should persist durable terminal timing")
+			require.NoError(t, mock.ExpectationsWereMet(), "orchestrator failure classification should use the thread completion time")
+		})
+	}
+}
+
+type preservedJSONArg struct {
+	expected json.RawMessage
+}
+
+func (matcher preservedJSONArg) Match(value any) bool {
+	switch typed := value.(type) {
+	case json.RawMessage:
+		return string(typed) == string(matcher.expected)
+	case []byte:
+		return string(typed) == string(matcher.expected)
+	case string:
+		return typed == string(matcher.expected)
+	default:
+		return false
+	}
+}
+
+type completedReviewerResultArg struct {
+	expectedError       string
+	expectedCompletedAt *time.Time
+}
+
+func (matcher completedReviewerResultArg) Match(value any) bool {
+	var raw json.RawMessage
+	switch typed := value.(type) {
+	case json.RawMessage:
+		raw = typed
+	case []byte:
+		raw = typed
+	case string:
+		raw = json.RawMessage(typed)
+	default:
+		return false
+	}
+	state, ok := parseCodeReviewReviewerStructuredResult(raw)
+	if !ok || state.Error != matcher.expectedError {
+		return false
+	}
+	completedAt, err := time.Parse(time.RFC3339, state.CompletedAt)
+	if err != nil {
+		return false
+	}
+	return matcher.expectedCompletedAt == nil || completedAt.Equal(matcher.expectedCompletedAt.UTC().Truncate(time.Second))
+}
+
+type completedOrchestratorResultArg struct {
+	expectedError       string
+	expectedCompletedAt *time.Time
+}
+
+func (matcher completedOrchestratorResultArg) Match(value any) bool {
+	var raw json.RawMessage
+	switch typed := value.(type) {
+	case json.RawMessage:
+		raw = typed
+	case []byte:
+		raw = typed
+	case string:
+		raw = json.RawMessage(typed)
+	default:
+		return false
+	}
+	state, ok := parseCodeReviewOrchestratorStructuredResult(raw)
+	if !ok || state.Error != matcher.expectedError {
+		return false
+	}
+	completedAt, err := time.Parse(time.RFC3339, state.CompletedAt)
+	if err != nil {
+		return false
+	}
+	return matcher.expectedCompletedAt == nil || completedAt.Equal(matcher.expectedCompletedAt.UTC().Truncate(time.Second))
 }
 
 type validatedOrchestratorResultArg struct{}
@@ -3050,7 +3328,7 @@ func TestHarvestCodeReviewOrchestratorResultRejectsMalformedSynthesis(t *testing
 	err = harvestCodeReviewOrchestratorResult(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
 		OrgID:     orgID,
 		SessionID: sessionID,
-	}, policy, models.CodeReviewSessionMetadata{CreatedAt: now}, []codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}}, models.CodeReviewVisualEvidenceSnapshot{})
+	}, policy, []codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}}, models.CodeReviewVisualEvidenceSnapshot{})
 
 	require.NoError(t, err, "orchestrator harvest should record malformed synthesis as an agent failure")
 	require.NoError(t, mock.ExpectationsWereMet(), "malformed synthesis should be retained as raw output and never marked completed")
@@ -3182,7 +3460,6 @@ func TestCodeReviewInFlightAgentPhaseFromState(t *testing.T) {
 func TestCodeReviewInFlightAgentPhaseRejectsInvalidContext(t *testing.T) {
 	t.Parallel()
 
-	now := time.Now().UTC()
 	reviewedHead := "reviewed-head"
 	differentHead := "different-head"
 	policy := models.DefaultCodeReviewPolicyConfig()
@@ -3193,16 +3470,10 @@ func TestCodeReviewInFlightAgentPhaseRejectsInvalidContext(t *testing.T) {
 		metadata models.CodeReviewSessionMetadata
 	}{
 		{
-			name:     "reviewer timeout falls through",
-			job:      runCodeReviewPayload{HeadSHA: reviewedHead},
-			pr:       models.PullRequest{HeadSHA: &reviewedHead},
-			metadata: models.CodeReviewSessionMetadata{CreatedAt: now.Add(-time.Hour)},
-		},
-		{
 			name:     "persisted head mismatch falls through",
 			job:      runCodeReviewPayload{HeadSHA: reviewedHead},
 			pr:       models.PullRequest{HeadSHA: &differentHead},
-			metadata: models.CodeReviewSessionMetadata{CreatedAt: now},
+			metadata: models.CodeReviewSessionMetadata{CreatedAt: time.Now().UTC()},
 		},
 	}
 
@@ -3223,6 +3494,192 @@ func TestCodeReviewInFlightAgentPhaseRejectsInvalidContext(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "invalid context should not query durable agent state")
 		})
 	}
+}
+
+func TestCodeReviewInFlightAgentPhaseKeepsActiveOrchestratorAfterReviewerDeadline(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	resultID := uuid.New()
+	now := time.Now().UTC()
+	reviewedHead := "reviewed-head"
+	resultState := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{ThreadID: threadID.String()})
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusRunning, nil, resultState, now.Add(-10*time.Minute)))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newSessionThreadRows().
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, nil,
+				"Main", nil, []string{"internal/worker/code_review_handler.go"}, models.ThreadStatusRunning,
+				nil, 1, nil, nil, nil, nil, nil,
+				&now, nil, now.Add(-10*time.Minute), models.ThreadCreatedBySourceSystem, nil, nil,
+				nil, 0.25, 0, nil, "", nil, "", "", json.RawMessage(`[]`),
+				models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite))
+
+	phase, err := codeReviewInFlightAgentPhase(context.Background(), &Stores{
+		CodeReviews:    db.NewCodeReviewStore(mock),
+		SessionThreads: db.NewSessionThreadStore(mock),
+	}, runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, HeadSHA: reviewedHead}, models.PullRequest{HeadSHA: &reviewedHead}, models.DefaultCodeReviewPolicyConfig(), models.CodeReviewSessionMetadata{CreatedAt: now.Add(-time.Hour)})
+
+	require.NoError(t, err, "active orchestrator phase should be resolved from durable state")
+	require.Equal(t, codeReviewAgentPhaseOrchestrator, phase, "active orchestrator should retain the fast path after the reviewer deadline")
+	require.NoError(t, mock.ExpectationsWereMet(), "phase detection should inspect the active orchestrator result and thread")
+}
+
+func TestCodeReviewInFlightAgentPhaseTimedOut(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	now := time.Now().UTC().Truncate(time.Second)
+	tests := []struct {
+		name     string
+		metadata models.CodeReviewSessionMetadata
+		results  []models.CodeReviewAgentResult
+		phase    codeReviewAgentPhase
+		expected bool
+	}{
+		{
+			name:     "expired reviewer window falls through to harvest",
+			metadata: models.CodeReviewSessionMetadata{CreatedAt: now.Add(-time.Hour)},
+			phase:    codeReviewAgentPhaseReviewers,
+			expected: true,
+		},
+		{
+			name:     "active reviewer window keeps fast path",
+			metadata: models.CodeReviewSessionMetadata{CreatedAt: now.Add(-10 * time.Minute)},
+			phase:    codeReviewAgentPhaseReviewers,
+		},
+		{
+			name:     "active orchestrator keeps fast path after reviewer deadline",
+			metadata: models.CodeReviewSessionMetadata{CreatedAt: now.Add(-time.Hour)},
+			results: []models.CodeReviewAgentResult{{
+				Role:      models.CodeReviewAgentRoleOrchestrator,
+				Status:    models.CodeReviewAgentResultStatusRunning,
+				CreatedAt: now.Add(-10 * time.Minute),
+			}},
+			phase: codeReviewAgentPhaseOrchestrator,
+		},
+		{
+			name:     "expired orchestrator window falls through to harvest",
+			metadata: models.CodeReviewSessionMetadata{CreatedAt: now.Add(-2 * time.Hour)},
+			results: []models.CodeReviewAgentResult{{
+				Role:      models.CodeReviewAgentRoleOrchestrator,
+				Status:    models.CodeReviewAgentResultStatusRunning,
+				CreatedAt: now.Add(-time.Hour),
+			}},
+			phase:    codeReviewAgentPhaseOrchestrator,
+			expected: true,
+		},
+		{
+			name:     "orchestrator phase without result falls through safely",
+			metadata: models.CodeReviewSessionMetadata{CreatedAt: now.Add(-time.Hour)},
+			phase:    codeReviewAgentPhaseOrchestrator,
+			expected: true,
+		},
+		{
+			name:     "no in-flight phase has no deadline",
+			metadata: models.CodeReviewSessionMetadata{CreatedAt: now.Add(-time.Hour)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := codeReviewInFlightAgentPhaseTimedOut(now, policy, tt.metadata, tt.results, tt.phase)
+
+			require.Equal(t, tt.expected, actual, "in-flight fast path should use the active agent phase deadline")
+		})
+	}
+}
+
+func TestCodeReviewOrchestratorDispatchDeadline(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	assessmentStartedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	reviewerResult := func(status models.CodeReviewAgentResultStatus, createdAt time.Time, completedAt string) models.CodeReviewAgentResult {
+		return models.CodeReviewAgentResult{
+			Role:      models.CodeReviewAgentRoleReviewer,
+			Status:    status,
+			CreatedAt: createdAt,
+			StructuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+				CompletedAt: completedAt,
+			}),
+		}
+	}
+	tests := []struct {
+		name     string
+		results  []models.CodeReviewAgentResult
+		expected time.Time
+	}{
+		{
+			name: "starts after latest terminal reviewer completion",
+			results: []models.CodeReviewAgentResult{
+				reviewerResult(models.CodeReviewAgentResultStatusCompleted, assessmentStartedAt, assessmentStartedAt.Add(20*time.Minute).Format(time.RFC3339)),
+				reviewerResult(models.CodeReviewAgentResultStatusCompleted, assessmentStartedAt, assessmentStartedAt.Add(50*time.Minute).Format(time.RFC3339)),
+				reviewerResult(models.CodeReviewAgentResultStatusRunning, assessmentStartedAt, assessmentStartedAt.Add(55*time.Minute).Format(time.RFC3339)),
+				{Role: models.CodeReviewAgentRoleOrchestrator, Status: models.CodeReviewAgentResultStatusCompleted, StructuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{CompletedAt: assessmentStartedAt.Add(59 * time.Minute).Format(time.RFC3339)})},
+			},
+			expected: assessmentStartedAt.Add(80 * time.Minute),
+		},
+		{
+			name: "starts after timed out reviewer terminal transition",
+			results: []models.CodeReviewAgentResult{
+				reviewerResult(models.CodeReviewAgentResultStatusCompleted, assessmentStartedAt, assessmentStartedAt.Add(5*time.Minute).Format(time.RFC3339)),
+				reviewerResult(models.CodeReviewAgentResultStatusTimedOut, assessmentStartedAt, assessmentStartedAt.Add(30*time.Minute).Format(time.RFC3339)),
+			},
+			expected: assessmentStartedAt.Add(60 * time.Minute),
+		},
+		{
+			name: "ignores missing and malformed completion timestamps",
+			results: []models.CodeReviewAgentResult{
+				reviewerResult(models.CodeReviewAgentResultStatusCompleted, assessmentStartedAt, assessmentStartedAt.Add(25*time.Minute).Format(time.RFC3339)),
+				reviewerResult(models.CodeReviewAgentResultStatusFailed, assessmentStartedAt.Add(29*time.Minute), ""),
+				reviewerResult(models.CodeReviewAgentResultStatusFailed, assessmentStartedAt.Add(30*time.Minute), "not-a-timestamp"),
+				{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusFailed, CreatedAt: assessmentStartedAt.Add(30 * time.Minute), StructuredResult: json.RawMessage(`{`)},
+			},
+			expected: assessmentStartedAt.Add(55 * time.Minute),
+		},
+		{
+			name: "falls back to assessment start for legacy results without completion timestamps",
+			results: []models.CodeReviewAgentResult{
+				reviewerResult(models.CodeReviewAgentResultStatusFailed, assessmentStartedAt.Add(30*time.Minute), ""),
+			},
+			expected: assessmentStartedAt.Add(30 * time.Minute),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			metadata := models.CodeReviewSessionMetadata{CreatedAt: assessmentStartedAt}
+			deadline := codeReviewOrchestratorDispatchDeadline(policy, metadata, tt.results)
+
+			require.Equal(t, tt.expected, deadline, "orchestrator dispatch should derive its stable deadline from persisted timestamps")
+		})
+	}
+}
+
+func TestCodeReviewOrchestratorResultDeadlineStartsAtDispatch(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	orchestratorStartedAt := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
+	result := models.CodeReviewAgentResult{CreatedAt: orchestratorStartedAt}
+
+	deadline := codeReviewOrchestratorResultDeadline(policy, result)
+
+	require.Equal(t, orchestratorStartedAt.Add(30*time.Minute), deadline, "running synthesis should receive the configured timeout from orchestrator dispatch")
 }
 
 func TestCodeReviewReviewerExecutionFailed(t *testing.T) {
@@ -4183,6 +4640,45 @@ func TestCodeReviewThreadCompletedByDeadline(t *testing.T) {
 			actual := codeReviewThreadCompletedByDeadline(tt.thread, deadline)
 
 			require.Equal(t, tt.expected, actual, "deadline check should accept only terminal threads with an on-time persisted completion")
+		})
+	}
+}
+
+func TestCodeReviewThreadCompletionTime(t *testing.T) {
+	t.Parallel()
+
+	staleCompletion := time.Date(2026, time.July, 26, 12, 30, 0, 0, time.UTC)
+	tests := []struct {
+		name            string
+		thread          models.SessionThread
+		preservesStored bool
+	}{
+		{
+			name:            "preserves terminal thread completion time",
+			thread:          models.SessionThread{Status: models.ThreadStatusCompleted, CompletedAt: &staleCompletion},
+			preservesStored: true,
+		},
+		{
+			name:   "ignores stale completion time on running thread",
+			thread: models.SessionThread{Status: models.ThreadStatusRunning, CompletedAt: &staleCompletion},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			before := time.Now().UTC()
+			actual := codeReviewThreadCompletionTime(tt.thread)
+			after := time.Now().UTC()
+
+			if tt.preservesStored {
+				require.Equal(t, staleCompletion, actual, "terminal threads should preserve their durable completion time")
+				return
+			}
+			require.False(t, actual.Before(before), "in-flight threads should use a current completion time instead of stale persisted state")
+			require.False(t, actual.After(after), "in-flight thread completion fallback should be captured during evaluation")
+			require.NotEqual(t, staleCompletion, actual, "in-flight threads should not reuse a prior turn completion time")
 		})
 	}
 }

@@ -313,7 +313,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if err := ensureCodeReviewOrchestratorThread(ctx, stores, services, logger, job, pr, health, policy, metadata, changedFiles, agentResults, findings, visualEvidence); err != nil {
 				return err
 			}
-			if err := harvestCodeReviewOrchestratorResult(ctx, stores, services, logger, job, policy, metadata, changedFiles, visualEvidence); err != nil {
+			if err := harvestCodeReviewOrchestratorResult(ctx, stores, services, logger, job, policy, changedFiles, visualEvidence); err != nil {
 				return err
 			}
 			agentResults, err = stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
@@ -1077,7 +1077,10 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 				ReviewerIndex:   idx,
 				ThreadID:        thread.ID.String(),
 				PromptRecordKey: recordKey,
+				NativeReview:    codeReviewAgentHasBuiltinReviewCommand(agentType),
+				ReadOnly:        true,
 				Error:           raw,
+				CompletedAt:     time.Now().UTC().Format(time.RFC3339),
 			})); updateErr != nil {
 				logger.Warn().Err(updateErr).
 					Str("session_id", job.SessionID.String()).
@@ -1205,9 +1208,18 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 			continue
 		}
 		state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
-		if !ok || strings.TrimSpace(state.ThreadID) == "" {
-			raw := "reviewer result is missing its thread id"
+		if !ok {
+			raw := "reviewer result has a malformed structured result"
 			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, result.StructuredResult); err != nil {
+				return fmt.Errorf("mark malformed reviewer result failed: %w", err)
+			}
+			continue
+		}
+		if strings.TrimSpace(state.ThreadID) == "" {
+			raw := "reviewer result is missing its thread id"
+			state.Error = raw
+			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
 				return fmt.Errorf("mark malformed reviewer result failed: %w", err)
 			}
 			continue
@@ -1215,7 +1227,9 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 		threadID, err := uuid.Parse(state.ThreadID)
 		if err != nil {
 			raw := "reviewer result has an invalid thread id: " + err.Error()
-			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, result.StructuredResult); err != nil {
+			state.Error = raw
+			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
 				return fmt.Errorf("mark invalid reviewer result failed: %w", err)
 			}
 			continue
@@ -1231,9 +1245,11 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 		if timedOut && !codeReviewThreadCompletedByDeadline(thread, deadline) {
 			raw := "reviewer did not produce a completed turn before the review deadline"
 			state.Error = raw
+			completedAt := codeReviewThreadCompletionTime(thread)
 			if codeReviewThreadStillRunning(thread.Status) {
 				if cancelledThread, cancelErr := cancelCodeReviewThread(ctx, stores, logger, job, threadID); cancelErr == nil {
 					state.CostCents = cancelledThread.CostCents
+					completedAt = codeReviewThreadCompletionTime(cancelledThread)
 				} else {
 					logger.Warn().Err(cancelErr).
 						Str("session_id", job.SessionID.String()).
@@ -1241,6 +1257,7 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 						Msg("failed to cancel timed-out code review reviewer thread")
 				}
 			}
+			state.CompletedAt = completedAt.Format(time.RFC3339)
 			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusTimedOut, &raw, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
 				return fmt.Errorf("mark reviewer timed out: %w", err)
 			}
@@ -1276,7 +1293,7 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 				failure = raw
 			}
 			state.Error = failure
-			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+			state.CompletedAt = codeReviewThreadCompletionTime(thread).Format(time.RFC3339)
 			rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleReviewer, result.AgentProvider, raw)
 			if err != nil {
 				return err
@@ -1301,7 +1318,7 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 					raw = "reviewer thread produced workspace changes without persisted assistant output"
 				}
 				state.Error = raw
-				state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+				state.CompletedAt = codeReviewThreadCompletionTime(thread).Format(time.RFC3339)
 				rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleReviewer, result.AgentProvider, raw)
 				if err != nil {
 					return err
@@ -1323,7 +1340,7 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 			}
 		}
 		state.FindingCount = len(findings)
-		state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+		state.CompletedAt = codeReviewThreadCompletionTime(thread).Format(time.RFC3339)
 		rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleReviewer, result.AgentProvider, raw)
 		if err != nil {
 			return err
@@ -2334,7 +2351,7 @@ func codeReviewInFlightAgentPhase(ctx context.Context, stores *Stores, job runCo
 	if stores == nil || stores.CodeReviews == nil || stores.SessionThreads == nil {
 		return codeReviewAgentPhaseNone, nil
 	}
-	if codeReviewHeadChanged(job.HeadSHA, pr, nil) || codeReviewReviewTimedOut(policy, metadata) {
+	if codeReviewHeadChanged(job.HeadSHA, pr, nil) {
 		return codeReviewAgentPhaseNone, nil
 	}
 	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
@@ -2355,7 +2372,26 @@ func codeReviewInFlightAgentPhase(ctx context.Context, stores *Stores, job runCo
 	if err != nil {
 		return codeReviewAgentPhaseNone, fmt.Errorf("list code review threads for in-flight check: %w", err)
 	}
-	return codeReviewInFlightAgentPhaseFromState(policy, results, threads), nil
+	phase := codeReviewInFlightAgentPhaseFromState(policy, results, threads)
+	if codeReviewInFlightAgentPhaseTimedOut(time.Now(), policy, metadata, results, phase) {
+		return codeReviewAgentPhaseNone, nil
+	}
+	return phase, nil
+}
+
+func codeReviewInFlightAgentPhaseTimedOut(now time.Time, policy models.CodeReviewPolicyConfig, metadata models.CodeReviewSessionMetadata, results []models.CodeReviewAgentResult, phase codeReviewAgentPhase) bool {
+	switch phase {
+	case codeReviewAgentPhaseReviewers:
+		return now.After(codeReviewReviewDeadline(policy, metadata))
+	case codeReviewAgentPhaseOrchestrator:
+		for _, result := range results {
+			if result.Role == models.CodeReviewAgentRoleOrchestrator && !codeReviewReviewerResultTerminal(result.Status) {
+				return now.After(codeReviewOrchestratorResultDeadline(policy, result))
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func codeReviewInFlightAgentPhaseFromState(policy models.CodeReviewPolicyConfig, results []models.CodeReviewAgentResult, threads []models.SessionThread) codeReviewAgentPhase {
@@ -2418,17 +2454,50 @@ func codeReviewReviewTimedOut(policy models.CodeReviewPolicyConfig, metadata mod
 }
 
 func codeReviewReviewDeadline(policy models.CodeReviewPolicyConfig, metadata models.CodeReviewSessionMetadata) time.Time {
+	return codeReviewAgentDeadline(policy, metadata.CreatedAt)
+}
+
+func codeReviewOrchestratorDispatchDeadline(policy models.CodeReviewPolicyConfig, metadata models.CodeReviewSessionMetadata, results []models.CodeReviewAgentResult) time.Time {
+	startedAt := metadata.CreatedAt
+	for _, result := range results {
+		if result.Role != models.CodeReviewAgentRoleReviewer || !codeReviewReviewerResultTerminal(result.Status) {
+			continue
+		}
+		state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
+		if !ok {
+			continue
+		}
+		completedAt, err := time.Parse(time.RFC3339, state.CompletedAt)
+		if err == nil && completedAt.After(startedAt) {
+			startedAt = completedAt
+		}
+	}
+	return codeReviewAgentDeadline(policy, startedAt)
+}
+
+func codeReviewOrchestratorResultDeadline(policy models.CodeReviewPolicyConfig, result models.CodeReviewAgentResult) time.Time {
+	return codeReviewAgentDeadline(policy, result.CreatedAt)
+}
+
+func codeReviewAgentDeadline(policy models.CodeReviewPolicyConfig, startedAt time.Time) time.Time {
 	timeout := time.Duration(policy.AgentRoster.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 30 * time.Minute
 	}
-	return metadata.CreatedAt.Add(timeout)
+	return startedAt.Add(timeout)
 }
 
 func codeReviewThreadCompletedByDeadline(thread models.SessionThread, deadline time.Time) bool {
 	return !codeReviewThreadStillRunning(thread.Status) &&
 		thread.CompletedAt != nil &&
 		!thread.CompletedAt.After(deadline)
+}
+
+func codeReviewThreadCompletionTime(thread models.SessionThread) time.Time {
+	if !codeReviewThreadStillRunning(thread.Status) && thread.CompletedAt != nil {
+		return thread.CompletedAt.UTC()
+	}
+	return time.Now().UTC()
 }
 
 func codeReviewThreadStillRunning(status models.ThreadStatus) bool {
@@ -2533,7 +2602,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 			Msg("skipped unavailable code review orchestrator")
 		return nil
 	}
-	if codeReviewReviewTimedOut(cfg, metadata) {
+	if time.Now().After(codeReviewOrchestratorDispatchDeadline(cfg, metadata, agentResults)) {
 		raw := "orchestrator timed out before the worker could start the orchestrator thread"
 		result := &models.CodeReviewAgentResult{
 			OrgID:         job.OrgID,
@@ -2679,6 +2748,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 				PromptRecordKey:      recordKey,
 				DescriptionInputHash: descriptionInputHash,
 				Error:                raw,
+				CompletedAt:          time.Now().UTC().Format(time.RFC3339),
 			}),
 		}
 		if createErr := stores.CodeReviews.CreateAgentResult(ctx, failed); createErr != nil {
@@ -2721,22 +2791,29 @@ func codeReviewReasoningEffortsEqual(left, right *models.ReasoningEffort) bool {
 	return *left == *right
 }
 
-func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) error {
+func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) error {
 	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
 	if err != nil {
 		return fmt.Errorf("list code review orchestrator results for harvest: %w", err)
 	}
-	deadline := codeReviewReviewDeadline(policy.Config(), metadata)
-	timedOut := time.Now().After(deadline)
 	changedPaths := codeReviewChangedPaths(changedFiles)
 	for _, result := range results {
 		if result.Role != models.CodeReviewAgentRoleOrchestrator || codeReviewReviewerResultTerminal(result.Status) {
 			continue
 		}
 		state, ok := parseCodeReviewOrchestratorStructuredResult(result.StructuredResult)
-		if !ok || strings.TrimSpace(state.ThreadID) == "" {
-			raw := "orchestrator result is missing its thread id"
+		if !ok {
+			raw := "orchestrator result has a malformed structured result"
 			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, result.StructuredResult); err != nil {
+				return fmt.Errorf("mark malformed orchestrator result failed: %w", err)
+			}
+			continue
+		}
+		if strings.TrimSpace(state.ThreadID) == "" {
+			raw := "orchestrator result is missing its thread id"
+			state.Error = raw
+			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
 				return fmt.Errorf("mark malformed orchestrator result failed: %w", err)
 			}
 			continue
@@ -2744,7 +2821,9 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 		threadID, err := uuid.Parse(state.ThreadID)
 		if err != nil {
 			raw := "orchestrator result has an invalid thread id: " + err.Error()
-			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, result.StructuredResult); err != nil {
+			state.Error = raw
+			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
 				return fmt.Errorf("mark invalid orchestrator result failed: %w", err)
 			}
 			continue
@@ -2753,6 +2832,8 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 		if err != nil {
 			return fmt.Errorf("load code review orchestrator thread: %w", err)
 		}
+		deadline := codeReviewOrchestratorResultDeadline(policy.Config(), result)
+		timedOut := time.Now().After(deadline)
 		state.CostCents = thread.CostCents
 		state = codeReviewOrchestratorObserveRepairCompletion(state, thread.CurrentTurn)
 		// A terminal synthesis is useful evidence even when a delayed job resume
@@ -2760,13 +2841,16 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 		if timedOut && !codeReviewThreadCompletedByDeadline(thread, deadline) {
 			raw := "orchestrator did not produce a completed turn before the review deadline"
 			state.Error = raw
+			completedAt := codeReviewThreadCompletionTime(thread)
 			if codeReviewThreadStillRunning(thread.Status) {
 				if cancelledThread, cancelErr := cancelCodeReviewThread(ctx, stores, logger, job, threadID); cancelErr == nil {
 					state.CostCents = cancelledThread.CostCents
+					completedAt = codeReviewThreadCompletionTime(cancelledThread)
 				} else {
 					logger.Warn().Err(cancelErr).Str("thread_id", threadID.String()).Msg("failed to cancel timed-out code review orchestrator thread")
 				}
 			}
+			state.CompletedAt = completedAt.Format(time.RFC3339)
 			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusTimedOut, &raw, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
 				return fmt.Errorf("mark orchestrator timed out: %w", err)
 			}
@@ -2799,6 +2883,7 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 					raw = "orchestrator thread did not complete successfully"
 				}
 				state.Error = raw
+				state.CompletedAt = codeReviewThreadCompletionTime(thread).Format(time.RFC3339)
 				rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
 				if err != nil {
 					return err
@@ -2845,7 +2930,7 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			state.Synthesis = codeReviewOrchestratorSynthesis{}
 			state.SynthesisValidated = false
 			state.Error = "invalid orchestrator synthesis: " + synthesisErr.Error()
-			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+			state.CompletedAt = codeReviewThreadCompletionTime(thread).Format(time.RFC3339)
 			rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, combinedRaw)
 			if err != nil {
 				return err
@@ -2867,7 +2952,7 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 		if findingCount > state.FindingCount {
 			state.FindingCount = findingCount
 		}
-		state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+		state.CompletedAt = codeReviewThreadCompletionTime(thread).Format(time.RFC3339)
 		state.Error = ""
 		rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, combinedRaw)
 		if err != nil {
