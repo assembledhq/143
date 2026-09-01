@@ -808,6 +808,45 @@ func decodeSessionCursor(cursor string) (time.Time, uuid.UUID, error) {
 	return t, id, nil
 }
 
+type sessionScopeFilters struct {
+	repositoryID       uuid.UUID
+	triggeredByUserID  uuid.UUID
+	triggeredByUserIDs []uuid.UUID
+}
+
+type sessionScopeFilterError struct {
+	code    string
+	message string
+}
+
+func parseSessionScopeFilters(r *http.Request) (sessionScopeFilters, *sessionScopeFilterError) {
+	var filters sessionScopeFilters
+
+	if raw := r.URL.Query().Get("repository_id"); raw != "" {
+		repositoryID, err := uuid.Parse(raw)
+		if err != nil {
+			return filters, &sessionScopeFilterError{code: "INVALID_REPOSITORY_ID", message: "invalid repository_id"}
+		}
+		filters.repositoryID = repositoryID
+	}
+
+	if _, ok := r.URL.Query()["triggered_by_user_ids"]; ok {
+		userIDs, err := parseUUIDList(r.URL.Query().Get("triggered_by_user_ids"))
+		if err != nil {
+			return filters, &sessionScopeFilterError{code: "INVALID_USER_ID", message: "invalid triggered_by_user_ids"}
+		}
+		filters.triggeredByUserIDs = userIDs
+	} else if raw := r.URL.Query().Get("triggered_by_user_id"); raw != "" {
+		userID, err := uuid.Parse(raw)
+		if err != nil {
+			return filters, &sessionScopeFilterError{code: "INVALID_USER_ID", message: "invalid triggered_by_user_id"}
+		}
+		filters.triggeredByUserID = userID
+	}
+
+	return filters, nil
+}
+
 func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
@@ -865,31 +904,14 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 		filters.CreatedBefore = parsed
 	}
 
-	if repoIDStr := r.URL.Query().Get("repository_id"); repoIDStr != "" {
-		repoID, err := uuid.Parse(repoIDStr)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
-			return
-		}
-		filters.RepositoryID = repoID
+	scopeFilters, filterErr := parseSessionScopeFilters(r)
+	if filterErr != nil {
+		writeError(w, r, http.StatusBadRequest, filterErr.code, filterErr.message)
+		return
 	}
-
-	if _, ok := r.URL.Query()["triggered_by_user_ids"]; ok {
-		userIDsStr := r.URL.Query().Get("triggered_by_user_ids")
-		userIDs, err := parseUUIDList(userIDsStr)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_ids")
-			return
-		}
-		filters.TriggeredByUserIDs = userIDs
-	} else if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
-		userID, err := uuid.Parse(userIDStr)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_id")
-			return
-		}
-		filters.TriggeredByUserID = userID
-	}
+	filters.RepositoryID = scopeFilters.repositoryID
+	filters.TriggeredByUserID = scopeFilters.triggeredByUserID
+	filters.TriggeredByUserIDs = scopeFilters.triggeredByUserIDs
 
 	runs, err := h.runStore.ListByOrg(r.Context(), orgID, filters)
 	if err != nil {
@@ -962,31 +984,14 @@ func (h *SessionHandler) Counts(w http.ResponseWriter, r *http.Request) {
 
 	filters := db.SessionCountsFilters{}
 
-	if repoIDStr := r.URL.Query().Get("repository_id"); repoIDStr != "" {
-		repoID, err := uuid.Parse(repoIDStr)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
-			return
-		}
-		filters.RepositoryID = repoID
+	scopeFilters, filterErr := parseSessionScopeFilters(r)
+	if filterErr != nil {
+		writeError(w, r, http.StatusBadRequest, filterErr.code, filterErr.message)
+		return
 	}
-
-	if _, ok := r.URL.Query()["triggered_by_user_ids"]; ok {
-		userIDsStr := r.URL.Query().Get("triggered_by_user_ids")
-		userIDs, err := parseUUIDList(userIDsStr)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_ids")
-			return
-		}
-		filters.TriggeredByUserIDs = userIDs
-	} else if userIDStr := r.URL.Query().Get("triggered_by_user_id"); userIDStr != "" {
-		userID, err := uuid.Parse(userIDStr)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_USER_ID", "invalid triggered_by_user_id")
-			return
-		}
-		filters.TriggeredByUserID = userID
-	}
+	filters.RepositoryID = scopeFilters.repositoryID
+	filters.TriggeredByUserID = scopeFilters.triggeredByUserID
+	filters.TriggeredByUserIDs = scopeFilters.triggeredByUserIDs
 
 	counts, err := h.runStore.CountsByOrg(r.Context(), orgID, filters)
 	if err != nil {

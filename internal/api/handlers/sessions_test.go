@@ -1110,6 +1110,83 @@ func expectIssueSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now ti
 	mock.ExpectCommit()
 }
 
+func TestParseSessionScopeFilters(t *testing.T) {
+	t.Parallel()
+
+	repositoryID := uuid.New()
+	userID := uuid.New()
+	otherUserID := uuid.New()
+	tests := []struct {
+		name            string
+		query           string
+		expected        sessionScopeFilters
+		expectedErrCode string
+		expectedErrMsg  string
+	}{
+		{
+			name:  "returns zero values without filters",
+			query: "",
+		},
+		{
+			name:  "parses repository and singular user",
+			query: "repository_id=" + repositoryID.String() + "&triggered_by_user_id=" + userID.String(),
+			expected: sessionScopeFilters{
+				repositoryID:      repositoryID,
+				triggeredByUserID: userID,
+			},
+		},
+		{
+			name:  "parses and deduplicates plural users",
+			query: "triggered_by_user_ids=" + userID.String() + "," + otherUserID.String() + "," + userID.String(),
+			expected: sessionScopeFilters{
+				triggeredByUserIDs: []uuid.UUID{userID, otherUserID},
+			},
+		},
+		{
+			name:  "plural users take precedence over singular user",
+			query: "triggered_by_user_ids=" + otherUserID.String() + "&triggered_by_user_id=" + userID.String(),
+			expected: sessionScopeFilters{
+				triggeredByUserIDs: []uuid.UUID{otherUserID},
+			},
+		},
+		{
+			name:            "rejects invalid repository",
+			query:           "repository_id=invalid",
+			expectedErrCode: "INVALID_REPOSITORY_ID",
+			expectedErrMsg:  "invalid repository_id",
+		},
+		{
+			name:            "rejects invalid singular user",
+			query:           "triggered_by_user_id=invalid",
+			expectedErrCode: "INVALID_USER_ID",
+			expectedErrMsg:  "invalid triggered_by_user_id",
+		},
+		{
+			name:            "rejects explicitly empty plural users instead of falling back",
+			query:           "triggered_by_user_ids=&triggered_by_user_id=" + userID.String(),
+			expectedErrCode: "INVALID_USER_ID",
+			expectedErrMsg:  "invalid triggered_by_user_ids",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?"+tt.query, nil)
+			actual, actualErr := parseSessionScopeFilters(req)
+			if tt.expectedErrCode != "" {
+				require.NotNil(t, actualErr, "invalid filters should return an error")
+				require.Equal(t, tt.expectedErrCode, actualErr.code, "error should preserve the API error code")
+				require.Equal(t, tt.expectedErrMsg, actualErr.message, "error should preserve the API error message")
+				return
+			}
+			require.Nil(t, actualErr, "valid filters should not return an error")
+			require.Equal(t, tt.expected, actual, "parser should preserve the session scope filters")
+		})
+	}
+}
+
 func TestSessionHandler_List(t *testing.T) {
 	t.Parallel()
 
