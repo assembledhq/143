@@ -823,8 +823,18 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	)
 	inboxAppendedInTx := false
 	var inboxEntry *models.ThreadInboxEntry
-	if resolvingComments || answerPendingQuestion || answerPendingHumanInput || (s.inboxStore != nil && s.txStarter != nil) {
-		resolvedComments, answeredQuestion, answeredHumanInput, inboxEntry, err = s.createMessageInTx(ctx, msg, input, claimedSession, answerPendingQuestion, answerPendingHumanInput, s.inboxStore != nil)
+	appendInboxInTx := s.inboxStore != nil && s.txStarter != nil
+	if resolvingComments || answerPendingQuestion || answerPendingHumanInput || appendInboxInTx {
+		resolvedComments, answeredQuestion, answeredHumanInput, inboxEntry, err = s.createMessageInTx(
+			ctx,
+			msg,
+			input,
+			claimedSession,
+			answerPendingQuestion,
+			answerPendingHumanInput,
+			appendInboxInTx,
+			queueOnly && appendInboxInTx,
+		)
 		inboxAppendedInTx = err == nil && s.inboxStore != nil
 	} else {
 		err = s.createMessage(ctx, s.messageStore, msg)
@@ -840,6 +850,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		var notInSession *db.ErrReviewCommentsNotInSession
 		if errors.As(err, &notInSession) {
 			return nil, err
+		}
+		if queueOnly && errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrThreadNotFound
 		}
 		return nil, fmt.Errorf("create message: %w", err)
 	}
@@ -858,10 +871,14 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	// continue_session — the in-flight job will drain the queue when it
 	// finishes (see ContinueSession's post-turn drain).
 	if queueOnly {
-		if incErr := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); incErr != nil {
-			s.logger.Warn().Err(incErr).
-				Str("thread_id", input.ThreadID.String()).
-				Msg("failed to increment pending_message_count for queued message")
+		if !appendInboxInTx {
+			if incErr := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); incErr != nil {
+				s.logger.Warn().Err(incErr).
+					Str("thread_id", input.ThreadID.String()).
+					Msg("failed to increment pending_message_count for queued message")
+			} else {
+				s.recoverLostOwnerAfterQueuedSend(ctx, input.OrgID, input.SessionID, input.ThreadID)
+			}
 		} else {
 			s.recoverLostOwnerAfterQueuedSend(ctx, input.OrgID, input.SessionID, input.ThreadID)
 		}
@@ -1037,7 +1054,7 @@ func (s *Service) createQueuedMessage(ctx context.Context, msg *models.SessionMe
 	if !answerPendingQuestion {
 		return nil, nil, s.createMessage(ctx, s.messageStore, msg)
 	}
-	_, answeredQuestion, _, _, err := s.createMessageInTx(ctx, msg, input, models.Session{}, true, false, false)
+	_, answeredQuestion, _, _, err := s.createMessageInTx(ctx, msg, input, models.Session{}, true, false, false, false)
 	return answeredQuestion, nil, err
 }
 
@@ -1403,6 +1420,7 @@ func (s *Service) createMessageInTx(
 	answerPendingQuestion bool,
 	answerPendingHumanInput bool,
 	appendInbox bool,
+	incrementPending bool,
 ) ([]models.SessionReviewComment, *models.SessionQuestion, *models.HumanInputRequest, *models.ThreadInboxEntry, error) {
 	if s.txStarter == nil {
 		return nil, nil, nil, nil, fmt.Errorf("tx starter not configured")
@@ -1489,6 +1507,12 @@ func (s *Service) createMessageInTx(
 		inboxEntry, err = s.appendInboxForMessageWithStore(ctx, txInboxStore, input, msg)
 		if err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("append inbox entry: %w", err)
+		}
+	}
+	if incrementPending {
+		txThreadStore := db.NewSessionThreadStore(tx)
+		if err := txThreadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("increment queued message count: %w", err)
 		}
 	}
 

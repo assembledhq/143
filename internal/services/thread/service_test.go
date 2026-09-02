@@ -2311,6 +2311,93 @@ func TestService_SendMessage_RunningThreadEnqueuesLiveInboxDelivery(t *testing.T
 	require.Nil(t, enqueued[0].TargetNodeID, "live delivery job should let the runtime registry route to the current owner")
 }
 
+func TestService_SendMessage_QueueOnlyWithTxCommitsInboxAndPendingCountAtomically(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	userID := uuid.New()
+	now := time.Now().UTC()
+	threadInboxColumns := []string{
+		"id", "org_id", "session_id", "thread_id", "sequence_no", "message_id", "client_message_id",
+		"entry_type", "payload", "delivery_state", "delivery_attempts",
+		"last_error", "owner_node_id", "runtime_id", "accepted_at",
+		"delivered_at", "acked_at", "applied_at", "created_at", "updated_at",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(456), now))
+	mock.ExpectQuery(`WITH locked_thread AS[\s\S]*archived_at IS NULL[\s\S]*FOR UPDATE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(threadInboxColumns).AddRow(
+			uuid.New(), orgID, sessionID, threadID, int64(3), int64(456), "message:456",
+			models.ThreadInboxEntryTypeUserMessage, json.RawMessage(`{"content":"keep going","message_id":456,"plan_mode":false,"turn_number":5}`),
+			models.ThreadInboxDeliveryStatePending, 0,
+			nil, nil, nil, now, nil, nil, nil, now, now,
+		))
+	mock.ExpectExec(`UPDATE session_threads[\s\S]*pending_message_count = pending_message_count \+ 1[\s\S]*archived_at IS NULL`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	svc, deps := newTestService(t)
+	svc.SetThreadInboxStore(deps.inboxStore, mock)
+	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{}, fmt.Errorf("thread is already running")
+	}
+	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{
+			ID:          threadID,
+			SessionID:   sessionID,
+			OrgID:       orgID,
+			CurrentTurn: 3,
+			Status:      models.ThreadStatusRunning,
+		}, nil
+	}
+	var enqueued []db.EnqueueOpts
+	deps.jobStore.enqueueWithOptsFn = func(_ context.Context, gotOrgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+		require.Equal(t, orgID, gotOrgID, "live delivery enqueue should stay org scoped")
+		enqueued = append(enqueued, opts)
+		return uuid.New(), nil
+	}
+
+	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		UserID:    &userID,
+		Message:   "keep going",
+	})
+
+	require.NoError(t, err, "queue-only send should succeed when the transactional admission path commits")
+	require.NotNil(t, result, "queue-only send should return the accepted message")
+	require.Equal(t, "keep going", result.Message.Content, "queue-only send should preserve the submitted message content")
+	require.NotNil(t, result.Message.UserID, "queue-only send should preserve user attribution")
+	require.Equal(t, userID, *result.Message.UserID, "queue-only send should preserve the submitting user")
+	require.Equal(t, 5, result.Message.TurnNumber, "queue-only send should target the turn after the in-flight one")
+	require.NotNil(t, result.InboxEntry, "queue-only send should return the durable inbox entry")
+	require.Equal(t, models.ThreadInboxDeliveryStatePending, result.DeliveryState, "queue-only send should report a pending durable inbox delivery state")
+	expectedDedupeKey := "deliver_thread_inbox:" + threadID.String()
+	require.Equal(t, []db.EnqueueOpts{{
+		Queue:     "agent",
+		JobType:   "deliver_thread_inbox",
+		Payload:   map[string]string{"org_id": orgID.String(), "session_id": sessionID.String(), "thread_id": threadID.String()},
+		Priority:  7,
+		DedupeKey: &expectedDedupeKey,
+	}}, enqueued, "queue-only send should enqueue the exact live-delivery job after the transaction commits")
+	require.Empty(t, deps.threadStore.pendingCalls, "queue-only transactional admission should not call the non-transactional thread store increment path")
+	require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
+}
+
 func TestService_SendMessage_LiveInboxDeliveryEnqueueFailureDoesNotRejectAcceptedMessage(t *testing.T) {
 	t.Parallel()
 
@@ -2355,6 +2442,182 @@ func TestService_SendMessage_LiveInboxDeliveryEnqueueFailureDoesNotRejectAccepte
 	require.NotNil(t, result, "SendMessage should return the accepted message despite notification failure")
 	require.Len(t, deps.inboxStore.appendCalls, 1, "SendMessage should keep durable inbox state for later recovery")
 	require.Equal(t, []uuid.UUID{threadID}, deps.threadStore.pendingCalls, "SendMessage should still reflect queued input in pending counts")
+}
+
+func TestService_SendMessage_QueueOnlyWithTxReturnsNotFoundWhenArchiveWinsAtInboxAdmission(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now().UTC()
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(42), now))
+	mock.ExpectQuery(`WITH locked_thread AS[\s\S]*archived_at IS NULL[\s\S]*FOR UPDATE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "thread_id", "sequence_no", "message_id", "client_message_id",
+			"entry_type", "payload", "delivery_state", "delivery_attempts",
+			"last_error", "owner_node_id", "runtime_id", "accepted_at",
+			"delivered_at", "acked_at", "applied_at", "created_at", "updated_at",
+		}))
+	mock.ExpectRollback()
+
+	svc, deps := newTestService(t)
+	svc.SetThreadInboxStore(deps.inboxStore, mock)
+	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{}, fmt.Errorf("thread is already running")
+	}
+	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{
+			ID:          threadID,
+			SessionID:   sessionID,
+			OrgID:       orgID,
+			CurrentTurn: 1,
+			Status:      models.ThreadStatusRunning,
+		}, nil
+	}
+
+	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		Message:   "queue after archive race",
+	})
+
+	require.Nil(t, result, "queue-only send should not return a partial result when the transactional admission path rolls back")
+	require.ErrorIs(t, err, ErrThreadNotFound, "queue-only send should surface archive-guard rejection as not found")
+	require.Empty(t, deps.threadStore.pendingCalls, "queue-only transactional rollback should not call the non-transactional increment path")
+	require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
+}
+
+func TestService_SendMessage_QueueOnlyWithTxRollsBackOnPendingCountWriteFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now().UTC()
+	threadInboxColumns := []string{
+		"id", "org_id", "session_id", "thread_id", "sequence_no", "message_id", "client_message_id",
+		"entry_type", "payload", "delivery_state", "delivery_attempts",
+		"last_error", "owner_node_id", "runtime_id", "accepted_at",
+		"delivered_at", "acked_at", "applied_at", "created_at", "updated_at",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(43), now))
+	mock.ExpectQuery(`WITH locked_thread AS[\s\S]*archived_at IS NULL[\s\S]*FOR UPDATE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(threadInboxColumns).AddRow(
+			uuid.New(), orgID, sessionID, threadID, int64(1), int64(43), "message:43",
+			models.ThreadInboxEntryTypeUserMessage, json.RawMessage(`{"message_id":43}`),
+			models.ThreadInboxDeliveryStatePending, 0,
+			nil, nil, nil, now, nil, nil, nil, now, now,
+		))
+	mock.ExpectExec(`UPDATE session_threads[\s\S]*pending_message_count = pending_message_count \+ 1[\s\S]*archived_at IS NULL`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(fmt.Errorf("write failed"))
+	mock.ExpectRollback()
+
+	svc, deps := newTestService(t)
+	svc.SetThreadInboxStore(deps.inboxStore, mock)
+	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{}, fmt.Errorf("thread is already running")
+	}
+	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{
+			ID:          threadID,
+			SessionID:   sessionID,
+			OrgID:       orgID,
+			CurrentTurn: 1,
+			Status:      models.ThreadStatusRunning,
+		}, nil
+	}
+
+	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		Message:   "queue after counter failure",
+	})
+
+	require.Nil(t, result, "queue-only send should not return a partial result when the pending count write fails")
+	require.EqualError(t, err, "create message: increment queued message count: write failed", "queue-only send should surface the transactional pending-count failure")
+	require.Empty(t, deps.threadStore.pendingCalls, "queue-only transactional rollback should not call the non-transactional increment path")
+	require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
+}
+
+func TestService_SendMessage_WithTxInboxDoesNotIncrementPendingForNormalSend(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now().UTC()
+	threadInboxColumns := []string{
+		"id", "org_id", "session_id", "thread_id", "sequence_no", "message_id", "client_message_id",
+		"entry_type", "payload", "delivery_state", "delivery_attempts",
+		"last_error", "owner_node_id", "runtime_id", "accepted_at",
+		"delivered_at", "acked_at", "applied_at", "created_at", "updated_at",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(123), now))
+	mock.ExpectQuery(`WITH locked_thread AS[\s\S]*archived_at IS NULL[\s\S]*FOR UPDATE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(threadInboxColumns).AddRow(
+			uuid.New(), orgID, sessionID, threadID, int64(1), int64(123), "message:123",
+			models.ThreadInboxEntryTypeUserMessage, json.RawMessage(`{"content":"continue","message_id":123,"plan_mode":false,"turn_number":3}`),
+			models.ThreadInboxDeliveryStatePending, 0,
+			nil, nil, nil, now, nil, nil, nil, now, now,
+		))
+	mock.ExpectCommit()
+
+	svc, deps := newTestService(t)
+	svc.SetThreadInboxStore(deps.inboxStore, mock)
+	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 2, Status: models.ThreadStatusRunning}, nil
+	}
+	deps.jobStore.enqueueFn = func(_ context.Context, _ uuid.UUID, _, _ string, _ any, _ int, _ *string) (uuid.UUID, error) {
+		return uuid.New(), nil
+	}
+
+	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		Message:   "continue",
+	})
+
+	require.NoError(t, err, "normal send should still succeed with transactional inbox wiring")
+	require.NotNil(t, result, "normal send should return a result")
+	require.Empty(t, deps.threadStore.pendingCalls, "normal send should not increment pending messages")
+	require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
 }
 
 func TestService_ListRecoverableInboxEntries(t *testing.T) {

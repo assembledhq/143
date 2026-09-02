@@ -5136,6 +5136,8 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 	defer mock.Close()
 	stores.SessionThreads = db.NewSessionThreadStore(mock)
 	stores.SessionMessages = db.NewSessionMessageStore(mock)
+	stores.ThreadInbox = db.NewThreadInboxStore(mock)
+	stores.ThreadSendTx = mock
 	stores.PullRequests = db.NewPullRequestStore(mock)
 
 	orgID := uuid.New()
@@ -5150,6 +5152,12 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 	runningRow := workerSessionRowWithStatus(completedRow, models.SessionStatusRunning)
 	completedThreadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusCompleted)
 	runningThreadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)
+	threadInboxColumns := []string{
+		"id", "org_id", "session_id", "thread_id", "sequence_no", "message_id", "client_message_id",
+		"entry_type", "payload", "delivery_state", "delivery_attempts",
+		"last_error", "owner_node_id", "runtime_id", "accepted_at",
+		"delivered_at", "acked_at", "applied_at", "created_at", "updated_at",
+	}
 	var capturedMessage string
 
 	mock.ExpectQuery("SELECT .* FROM sessions").
@@ -5181,27 +5189,72 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 	mock.ExpectQuery(`(?s)SELECT.*FROM pull_requests.*WHERE session_id.*org_id`).
 		WithArgs(workerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(workerPullRequestRow(prID, sessionID, orgID, repo, headRef, now)...))
+	mock.ExpectQuery(`SELECT .* FROM thread_inbox_entries`).
+		WithArgs(orgID, threadID, "push-reconcile:"+sessionID.String()+":0").
+		WillReturnRows(pgxmock.NewRows(threadInboxColumns))
+	mock.ExpectQuery(`SELECT count\(\*\)\s+FROM thread_inbox_entries\s+WHERE org_id = \$1\s+AND thread_id = \$2`).
+		WithArgs(orgID, threadID).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`SELECT count\(\*\)\s+FROM thread_inbox_entries\s+WHERE org_id = \$1\s+AND session_id = \$2`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery(`(?s)WITH locked_threads AS.*UPDATE session_threads.*RETURNING`).
-		WithArgs(workerAnyArgs(5)...).
+		WithArgs(pgx.NamedArgs{
+			"id":                 threadID,
+			"org_id":             orgID,
+			"session_id":         sessionID,
+			"max_running":        models.MaxRunningThreadsPerSession,
+			"claimable_statuses": []string{string(models.ThreadStatusIdle)},
+		}).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns))
 	mock.ExpectQuery(`(?s)SELECT\s+COALESCE`).
-		WithArgs(workerAnyArgs(3)...).
+		WithArgs(pgx.NamedArgs{
+			"id":         threadID,
+			"org_id":     orgID,
+			"session_id": sessionID,
+		}).
 		WillReturnRows(pgxmock.NewRows([]string{"target_status", "sibling_active"}).AddRow(string(models.ThreadStatusCompleted), 0))
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(workerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(completedThreadRow...))
 	mock.ExpectQuery(`(?s)WITH locked_threads AS.*UPDATE session_threads.*RETURNING`).
-		WithArgs(workerAnyArgs(5)...).
+		WithArgs(pgx.NamedArgs{
+			"id":          threadID,
+			"org_id":      orgID,
+			"session_id":  sessionID,
+			"max_running": models.MaxRunningThreadsPerSession,
+			"claimable_statuses": []string{
+				string(models.ThreadStatusCompleted),
+				string(models.ThreadStatusFailed),
+				string(models.ThreadStatusCancelled),
+				string(models.ThreadStatusAwaitingInput),
+			},
+		}).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(runningThreadRow...))
 	mock.ExpectQuery(`(?s)UPDATE sessions.*status = 'running'.*status = 'idle'.*RETURNING`).
-		WithArgs(workerAnyArgs(2)...).
+		WithArgs(pgx.NamedArgs{
+			"id":     sessionID,
+			"org_id": orgID,
+		}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(workerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...))
 	mock.ExpectQuery(`(?s)UPDATE sessions.*status = 'running'.*status = ANY\(@statuses\).*RETURNING`).
-		WithArgs(workerAnyArgs(3)...).
+		WithArgs(pgx.NamedArgs{
+			"id":     sessionID,
+			"org_id": orgID,
+			"statuses": []string{
+				string(models.SessionStatusCompleted),
+				string(models.SessionStatusPRCreated),
+				string(models.SessionStatusFailed),
+				string(models.SessionStatusCancelled),
+				string(models.SessionStatusAwaitingInput),
+				string(models.SessionStatusNeedsHumanGuidance),
+			},
+		}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(runningRow...))
+	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO session_messages").
 		WithArgs(
 			sessionID,
@@ -5218,6 +5271,15 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 			models.SessionMessageSourceAgentTool,
 		).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1001), now))
+	mock.ExpectQuery(`WITH locked_thread AS[\s\S]*archived_at IS NULL[\s\S]*FOR UPDATE`).
+		WithArgs(workerAnyArgs(7)...).
+		WillReturnRows(pgxmock.NewRows(threadInboxColumns).AddRow(
+			uuid.New(), orgID, sessionID, threadID, int64(1), int64(1001), "push-reconcile:"+sessionID.String()+":0",
+			models.ThreadInboxEntryTypeUserMessage, json.RawMessage(`{"message_id":1001}`),
+			models.ThreadInboxDeliveryStatePending, 0,
+			nil, nil, nil, now, nil, nil, nil, now, now,
+		))
+	mock.ExpectCommit()
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(
 			orgID,

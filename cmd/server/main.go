@@ -503,6 +503,7 @@ func main() {
 			SessionMessages:     sessionMessageStore,
 			SessionThreads:      sessionThreadStore,
 			ThreadInbox:         db.NewThreadInboxStore(pool),
+			ThreadSendTx:        pool,
 			HumanInputRequests:  sessionHumanInputStore,
 			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 			SandboxHolders:      db.NewSessionSandboxHolderStore(pool),

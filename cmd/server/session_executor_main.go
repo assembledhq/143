@@ -454,6 +454,7 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 		SessionMessages:     deps.SessionMessages,
 		SessionThreads:      deps.SessionThreads,
 		ThreadInbox:         db.NewThreadInboxStore(pool),
+		ThreadSendTx:        pool,
 		HumanInputRequests:  db.NewSessionHumanInputRequestStore(pool),
 		ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 		SandboxHolders:      db.NewSessionSandboxHolderStore(pool),
