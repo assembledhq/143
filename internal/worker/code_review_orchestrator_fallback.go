@@ -270,8 +270,10 @@ func codeReviewFallbackArchivalPriority(thread models.SessionThread, states map[
 		thread.PendingMessageCount > 0 {
 		return codeReviewFallbackThreadPriorityUnavailable, false
 	}
+	// Dispatch failures can leave an idle thread with a terminal persisted result.
+	// The result and pending-work guards still apply before reclaiming its slot.
 	switch thread.Status {
-	case models.ThreadStatusCompleted, models.ThreadStatusFailed, models.ThreadStatusCancelled:
+	case models.ThreadStatusIdle, models.ThreadStatusCompleted, models.ThreadStatusFailed, models.ThreadStatusCancelled:
 	default:
 		return codeReviewFallbackThreadPriorityUnavailable, false
 	}

@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	threadsvc "github.com/assembledhq/143/internal/services/thread"
@@ -197,6 +198,104 @@ func TestEnsureCodeReviewFallbackThreadPreservesReviewerRankIdentity(t *testing.
 			require.NotNil(t, localStub.input, "a later duplicate reviewer rank should create a distinct thread when a safe slot is reclaimed")
 			require.Equal(t, tt.input.Label, actual.Label, "a later duplicate reviewer rank should preserve its own immutable rank label")
 			require.Equal(t, tt.expectArchiveID, localStub.archiveID, "a later duplicate reviewer rank should reclaim at most one eligible persisted reviewer slot")
+		})
+	}
+}
+
+func TestEnsureCodeReviewFallbackThreadReclaimsIdleReviewer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                string
+		resultStatuses      []models.CodeReviewAgentResultStatus
+		readOnlyViolation   bool
+		pendingMessageCount int
+		expectCreate        bool
+	}{
+		{
+			name:           "failed dispatch releases a slot for the fourth ranked model",
+			resultStatuses: []models.CodeReviewAgentResultStatus{models.CodeReviewAgentResultStatusFailed},
+			expectCreate:   true,
+		},
+		{
+			name:              "read-only violation without output releases a slot for the fourth ranked model",
+			resultStatuses:    []models.CodeReviewAgentResultStatus{models.CodeReviewAgentResultStatusCompleted},
+			readOnlyViolation: true,
+			expectCreate:      true,
+		},
+		{
+			name:                "idle reviewer with queued messages keeps its slot",
+			resultStatuses:      []models.CodeReviewAgentResultStatus{models.CodeReviewAgentResultStatusFailed},
+			pendingMessageCount: 1,
+		},
+		{
+			name:           "idle reviewer awaiting dispatch keeps its slot",
+			resultStatuses: []models.CodeReviewAgentResultStatus{models.CodeReviewAgentResultStatusQueued},
+		},
+		{
+			name:           "idle reviewer with both terminal and pending attempts keeps its slot",
+			resultStatuses: []models.CodeReviewAgentResultStatus{models.CodeReviewAgentResultStatusFailed, models.CodeReviewAgentResultStatusQueued},
+		},
+		{
+			name: "idle reviewer without a persisted result keeps its slot",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID, sessionID, primaryThreadID, idleReviewerID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			existing := []models.SessionThread{
+				{ID: primaryThreadID, OrgID: orgID, SessionID: sessionID, AgentType: models.AgentTypeCodex, Label: "Main", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusIdle},
+				{ID: idleReviewerID, OrgID: orgID, SessionID: sessionID, AgentType: models.AgentTypeCodex, Label: codeReviewReviewerThreadLabel(0, models.AgentTypeCodex, false), CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusIdle, PendingMessageCount: tt.pendingMessageCount},
+				{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, AgentType: models.AgentTypeClaudeCode, Label: codeReviewReviewerThreadLabel(1, models.AgentTypeClaudeCode, false), CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusRunning},
+				{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, AgentType: models.AgentTypeCodex, Label: codeReviewReviewerThreadLabel(2, models.AgentTypeCodex, false), CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusRunning},
+			}
+			var results []models.CodeReviewAgentResult
+			for _, status := range tt.resultStatuses {
+				results = append(results, models.CodeReviewAgentResult{
+					AgentProvider: string(models.AgentTypeCodex),
+					Role:          models.CodeReviewAgentRoleReviewer,
+					Status:        status,
+					StructuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+						ReviewerKey:       codeReviewReviewerKey(0, models.AgentTypeCodex),
+						ThreadID:          idleReviewerID.String(),
+						ReadOnly:          true,
+						ReadOnlyViolation: tt.readOnlyViolation,
+						Error:             "reviewer failed without usable output",
+						CompletedAt:       time.Now().UTC().Format(time.RFC3339),
+					}),
+				})
+			}
+			input := threadsvc.CreateThreadInput{
+				OrgID: orgID, SessionID: sessionID, AgentType: string(models.AgentTypeClaudeCode), Model: models.DefaultClaudeCodeModel,
+				Label: codeReviewReviewerThreadLabel(3, models.AgentTypeClaudeCode, true), CreatedBySource: models.ThreadCreatedBySourceSystem,
+				ExecutionMode: models.ThreadExecutionModeReview, FilesystemMode: models.ThreadFilesystemModeReadOnly,
+			}
+			expected := models.SessionThread{
+				ID: uuid.New(), OrgID: orgID, SessionID: sessionID, AgentType: models.AgentTypeClaudeCode, ModelOverride: stringPtr(input.Model),
+				Label: input.Label, CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusIdle,
+				ExecutionMode: models.ThreadExecutionModeReview, FilesystemMode: models.ThreadFilesystemModeReadOnly,
+			}
+			stub := &codeReviewFallbackThreadStub{existing: append([]models.SessionThread(nil), existing...), created: &expected}
+
+			actual, err := ensureCodeReviewFallbackThread(context.Background(), stub, input, primaryThreadID, results)
+			if !tt.expectCreate {
+				require.ErrorIs(t, err, errCodeReviewFallbackCapacityExhausted, "pending or unpersisted reviewer work must prevent reclamation")
+				require.Nil(t, actual, "an unsafe slot must not produce a fallback thread")
+				require.Nil(t, stub.input, "capacity exhaustion must not dispatch a later rank")
+				require.Equal(t, uuid.Nil, stub.archiveID, "an unsafe idle reviewer must not be archived")
+				require.Equal(t, existing, stub.existing, "all threads must remain intact when reclamation is unsafe")
+				return
+			}
+			require.NoError(t, err, "a terminal idle attempt should free a slot despite three configured reviewers")
+			require.Equal(t, &expected, actual, "the next ranked model should receive a fresh review thread")
+			require.Equal(t, &input, stub.input, "the replacement should preserve the selected model and review restrictions")
+			require.Equal(t, idleReviewerID, stub.archiveID, "only the terminal idle reviewer should be reclaimed")
+			require.NotNil(t, stub.existing[1].ArchivedAt, "the failed attempt's thread should remain archived as evidence")
+			existing[1].ArchivedAt = stub.existing[1].ArchivedAt
+			require.Equal(t, append(existing, expected), stub.existing, "the primary and running peer threads must remain unchanged")
+			require.Equal(t, models.MaxThreadsPerSession, codeReviewVisibleThreadCount(stub.existing), "replacement must stay within the visible thread limit")
 		})
 	}
 }
