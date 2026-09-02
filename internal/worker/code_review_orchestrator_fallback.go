@@ -129,29 +129,7 @@ func ensureCodeReviewFallbackOrchestratorThread(ctx context.Context, threads cod
 	// A used thread's provider is immutable. Keep each failed attempt intact,
 	// and recover the next thread if dispatch succeeded before result storage.
 	label := fmt.Sprintf("Code review synthesis: %s (fallback %d)", selection.AgentType, attempt)
-	existing, err := threads.ListThreads(ctx, job.OrgID, job.SessionID)
-	if err != nil {
-		return nil, fmt.Errorf("list code review fallback threads: %w", err)
-	}
-	for _, thread := range existing {
-		if thread.Label == label && thread.CreatedBySource == models.ThreadCreatedBySourceSystem &&
-			thread.AgentType == selection.AgentType && codeReviewAgentModelsEqual(thread.ModelOverride, selection.AgentModel) {
-			return &thread, nil
-		}
-	}
-	if codeReviewVisibleThreadCount(existing) >= models.MaxThreadsPerSession {
-		candidate := codeReviewFallbackArchivalCandidate(existing, results, primaryThreadID)
-		if candidate == nil {
-			return nil, errCodeReviewFallbackCapacityExhausted
-		}
-		if _, err := threads.ArchiveThread(ctx, job.OrgID, job.SessionID, candidate.ID); err != nil {
-			if codeReviewFallbackCapacityRace(err) {
-				return nil, errCodeReviewFallbackCapacityExhausted
-			}
-			return nil, fmt.Errorf("archive code review fallback slot: %w", err)
-		}
-	}
-	thread, err := threads.CreateThread(ctx, threadsvc.CreateThreadInput{
+	return ensureCodeReviewFallbackThread(ctx, threads, threadsvc.CreateThreadInput{
 		SessionID:       job.SessionID,
 		OrgID:           job.OrgID,
 		AgentType:       string(selection.AgentType),
@@ -162,12 +140,38 @@ func ensureCodeReviewFallbackOrchestratorThread(ctx context.Context, threads cod
 		ExecutionMode:   models.ThreadExecutionModeReview,
 		FilesystemMode:  models.ThreadFilesystemModeReadOnly,
 		CreatedBySource: models.ThreadCreatedBySourceSystem,
-	})
+	}, primaryThreadID, results)
+}
+
+func ensureCodeReviewFallbackThread(ctx context.Context, threads codeReviewFallbackThreadService, input threadsvc.CreateThreadInput, primaryThreadID uuid.UUID, results []models.CodeReviewAgentResult) (*models.SessionThread, error) {
+	existing, err := threads.ListThreads(ctx, input.OrgID, input.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list code review fallback threads: %w", err)
+	}
+	for _, thread := range existing {
+		if thread.Label == input.Label && thread.CreatedBySource == models.ThreadCreatedBySourceSystem &&
+			string(thread.AgentType) == input.AgentType && codeReviewAgentModelsEqual(thread.ModelOverride, &input.Model) {
+			return &thread, nil
+		}
+	}
+	if codeReviewVisibleThreadCount(existing) >= models.MaxThreadsPerSession {
+		candidate := codeReviewFallbackArchivalCandidate(existing, results, primaryThreadID)
+		if candidate == nil {
+			return nil, errCodeReviewFallbackCapacityExhausted
+		}
+		if _, err := threads.ArchiveThread(ctx, input.OrgID, input.SessionID, candidate.ID); err != nil {
+			if codeReviewFallbackCapacityRace(err) {
+				return nil, errCodeReviewFallbackCapacityExhausted
+			}
+			return nil, fmt.Errorf("archive code review fallback slot: %w", err)
+		}
+	}
+	thread, err := threads.CreateThread(ctx, input)
 	if err != nil {
 		if errors.Is(err, db.ErrThreadLimitReached) {
 			return nil, errCodeReviewFallbackCapacityExhausted
 		}
-		return nil, fmt.Errorf("create code review fallback orchestrator thread: %w", err)
+		return nil, fmt.Errorf("create code review fallback thread: %w", err)
 	}
 	return thread, nil
 }

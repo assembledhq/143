@@ -339,6 +339,7 @@ var codeReviewPolicyFieldLabels = map[string]string{
 	"risk_policy.eligible_author_teams":            "Eligible author teams",
 	"risk_policy.required_checks":                  "Required checks",
 	"agent_roster.reviewers":                       "Reviewers",
+	"agent_roster.reviewer_count":                  "Number of reviewers",
 	"agent_roster.orchestrator":                    "Orchestrator",
 	"agent_roster.reviewer_models":                 "Reviewer models",
 	"agent_roster.reviewer_reasoning_efforts":      "Reviewer reasoning",

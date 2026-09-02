@@ -1709,7 +1709,7 @@ func TestHarvestCodeReviewReviewerResultsPreservesCompletedOutputAfterDeadline(t
 		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 		WillReturnRows(newSessionThreadRows().
 			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, nil,
-				"Code review: codex", nil, []string{"internal/db/users.go"}, models.ThreadStatusCompleted,
+				"Code review: codex (1)", nil, []string{"internal/db/users.go"}, models.ThreadStatusCompleted,
 				nil, 1, &completedAt, nil, &rawDiff, nil, nil,
 				&reviewStartedAt, &completedAt, reviewStartedAt, models.ThreadCreatedBySourceSystem, nil, nil,
 				nil, 0.25, 0, nil, "", nil, "", "", json.RawMessage(`[]`),
@@ -1779,7 +1779,7 @@ func TestHarvestCodeReviewReviewerResultsCompletesIdleReadOnlyViolationWithoutAs
 		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 		WillReturnRows(newSessionThreadRows().
 			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, nil,
-				"Code review: codex", nil, []string{"internal/db/users.go"}, models.ThreadStatusIdle,
+				"Code review: codex (1)", nil, []string{"internal/db/users.go"}, models.ThreadStatusIdle,
 				nil, 1, &now, nil, &rawDiff, &failure, stringPtr("read_only_violation"),
 				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
 				nil, 0.25, 0, nil, "", nil, "", "", json.RawMessage(`[]`),
@@ -1871,7 +1871,7 @@ func TestHarvestCodeReviewReviewerResultsClassifiesFailedThreadOutput(t *testing
 				WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 				WillReturnRows(newSessionThreadRows().
 					AddRow(threadID, sessionID, orgID, models.AgentTypeClaudeCode, nil, nil,
-						"Code review: claude_code", nil, []string{"internal/db/users.go"}, models.ThreadStatusFailed,
+						"Code review: claude_code (2)", nil, []string{"internal/db/users.go"}, models.ThreadStatusFailed,
 						nil, 1, &now, nil, nil, &tt.failure, &tt.failureCategory,
 						&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
 						nil, 0.0, 0, nil, "", nil, "", "", json.RawMessage(`[]`),
@@ -3736,7 +3736,7 @@ func TestCodeReviewReviewerExecutionFailed(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			require.Equal(t, tt.expected, codeReviewReviewerExecutionFailed(policy, tt.results), "review execution should fail only when every configured reviewer is terminal without usable output")
+			require.Equal(t, tt.expected, codeReviewReviewerExecutionFailed(policy, tt.results, false), "review execution should fail only when every configured reviewer is terminal without usable output")
 		})
 	}
 }
@@ -3992,7 +3992,7 @@ func TestResolveCodeReviewReviewerAvailability(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			actual, err := resolveCodeReviewReviewerAvailability(context.Background(), tt.services, uuid.New(), cfg)
+			actual, err := resolveCodeReviewReviewerAvailability(context.Background(), tt.services, uuid.New(), cfg, nil, false)
 			if tt.expectErr {
 				require.Error(t, err, "availability resolution should propagate lookup failures")
 				return
