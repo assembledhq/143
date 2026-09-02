@@ -3338,7 +3338,7 @@ function AgentRosterControls({
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <SettingLabel
             label="Number of reviewers"
@@ -3371,7 +3371,7 @@ function AgentRosterControls({
       </div>
 
       <div className="space-y-3">
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <SettingLabel
               label="Ranked reviewer models"
