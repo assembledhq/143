@@ -272,7 +272,7 @@ func (s *SessionThreadStore) CountBySession(ctx context.Context, orgID, sessionI
 func (s *SessionThreadStore) Archive(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error) {
 	query := `
 		WITH visible_threads AS (
-			SELECT id, status
+			SELECT id, status, pending_message_count
 			FROM session_threads
 			WHERE session_id = @session_id
 			  AND org_id = @org_id
@@ -289,6 +289,7 @@ func (s *SessionThreadStore) Archive(ctx context.Context, orgID, sessionID, thre
 		  AND org_id = @org_id
 		  AND archived_at IS NULL
 		  AND (SELECT count FROM visible_count) > 1
+		  AND COALESCE((SELECT pending_message_count FROM visible_threads WHERE id = @id), 0) = 0
 		  AND (SELECT status FROM visible_threads WHERE id = @id) NOT IN ('pending', 'running', 'awaiting_input')
 		RETURNING ` + sessionThreadSelectColumns
 
@@ -896,14 +897,20 @@ func (s *SessionThreadStore) AddCost(ctx context.Context, orgID, threadID uuid.U
 // that is currently busy with another turn. The composer reads this counter
 // to render a "queued (N)" affordance.
 func (s *SessionThreadStore) IncrementPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error {
-	_, err := s.db.Exec(ctx,
-		`UPDATE session_threads SET pending_message_count = pending_message_count + 1 WHERE id = @id AND org_id = @org_id`,
+	tag, err := s.db.Exec(ctx,
+		`UPDATE session_threads
+		 SET pending_message_count = pending_message_count + 1
+		 WHERE id = @id AND org_id = @org_id AND archived_at IS NULL`,
 		pgx.NamedArgs{"id": threadID, "org_id": orgID},
 	)
-	if err == nil {
-		s.publishThreadInboxByID(ctx, orgID, threadID, models.SessionStreamEventThreadInboxQueued)
+	if err != nil {
+		return err
 	}
-	return err
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	s.publishThreadInboxByID(ctx, orgID, threadID, models.SessionStreamEventThreadInboxQueued)
+	return nil
 }
 
 // ClearPendingMessages resets the queued-message counter when a turn drains

@@ -1107,6 +1107,34 @@ func TestService_ArchiveThread(t *testing.T) {
 			},
 			expectErr: ErrThreadActive,
 		},
+		{
+			name: "rejects archiving a thread with queued work",
+			setupDeps: func(deps *testDeps) {
+				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+					return models.Session{ID: sessionID, OrgID: orgID, Status: "running"}, nil
+				}
+				deps.threadStore.archiveFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, pgx.ErrNoRows
+				}
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:                  threadID,
+						SessionID:           sessionID,
+						OrgID:               orgID,
+						Status:              models.ThreadStatusCompleted,
+						PendingMessageCount: 1,
+						Label:               "Queued tab",
+					}, nil
+				}
+				deps.threadStore.listBySessionFn = func(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
+					return []models.SessionThread{
+						{ID: uuid.New(), SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusCompleted, Label: "Main tab"},
+						{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusCompleted, PendingMessageCount: 1, Label: "Queued tab"},
+					}, nil
+				}
+			},
+			expectErr: ErrThreadActive,
+		},
 	}
 
 	for _, tt := range tests {
@@ -2548,6 +2576,105 @@ func TestService_QueueMessageWaitingForSlot_DoesNotAnswerHumanInputRequest(t *te
 	require.Nil(t, result.AnsweredHumanInput, "queue path should not mark human input answered before a resume job can carry the request id")
 	require.NotNil(t, created, "queue path should still create the user message")
 	require.Equal(t, []uuid.UUID{threadID}, deps.threadStore.pendingCalls, "queue path should increment pending message count")
+}
+
+func TestService_QueueMessageWaitingForSlot_ReturnsNotFoundWhenArchiveWinsBeforeInboxAppend(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	svc, deps := newTestService(t)
+	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{
+			ID:          threadID,
+			SessionID:   sessionID,
+			OrgID:       orgID,
+			CurrentTurn: 4,
+			Status:      models.ThreadStatusCompleted,
+		}, nil
+	}
+	deps.messageStore.createFn = func(_ context.Context, msg *models.SessionMessage) error {
+		msg.ID = 99
+		return nil
+	}
+	deps.inboxStore.appendFn = func(_ context.Context, _ uuid.UUID, _ db.AppendThreadInboxEntryParams) (models.ThreadInboxEntry, error) {
+		return models.ThreadInboxEntry{}, pgx.ErrNoRows
+	}
+	svc.SetThreadInboxStore(deps.inboxStore)
+
+	result, err := svc.queueMessageWaitingForSlot(context.Background(), SendMessageInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		Message:   "resume after sibling frees a slot",
+	})
+
+	require.Nil(t, result, "archive-win queue admission should not return a partial result")
+	require.ErrorIs(t, err, ErrThreadNotFound, "archive-win queue admission should surface the archived thread as not found")
+	require.Empty(t, deps.threadStore.pendingCalls, "archive-win queue admission should not increment the queued counter after append rejection")
+}
+
+func TestService_QueueMessageWaitingForSlot_RollsBackTxWhenArchiveWinsBeforePendingIncrement(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now().UTC()
+	threadInboxColumns := []string{
+		"id", "org_id", "session_id", "thread_id", "sequence_no", "message_id", "client_message_id",
+		"entry_type", "payload", "delivery_state", "delivery_attempts",
+		"last_error", "owner_node_id", "runtime_id", "accepted_at",
+		"delivered_at", "acked_at", "applied_at", "created_at", "updated_at",
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(42), now))
+	mock.ExpectQuery(`WITH locked_thread AS[\s\S]*archived_at IS NULL[\s\S]*FOR UPDATE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(threadInboxColumns).AddRow(
+			uuid.New(), orgID, sessionID, threadID, int64(1), int64(42), "message:42",
+			models.ThreadInboxEntryTypeUserMessage, json.RawMessage(`{"message_id":42}`),
+			models.ThreadInboxDeliveryStatePending, 0,
+			nil, nil, nil, now, nil, nil, nil, now, now,
+		))
+	mock.ExpectExec(`UPDATE session_threads[\s\S]*pending_message_count = pending_message_count \+ 1[\s\S]*archived_at IS NULL`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectRollback()
+
+	svc, deps := newTestService(t)
+	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{
+			ID:          threadID,
+			SessionID:   sessionID,
+			OrgID:       orgID,
+			CurrentTurn: 1,
+			Status:      models.ThreadStatusIdle,
+		}, nil
+	}
+	svc.SetThreadInboxStore(deps.inboxStore, mock)
+
+	result, err := svc.queueMessageWaitingForSlot(context.Background(), SendMessageInput{
+		SessionID: sessionID,
+		OrgID:     orgID,
+		ThreadID:  threadID,
+		Message:   "queue after archive race",
+	})
+
+	require.Nil(t, result, "transactional archive-win queue admission should not return a partial result")
+	require.ErrorIs(t, err, ErrThreadNotFound, "transactional archive-win queue admission should surface the archived thread as not found")
+	require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
 }
 
 // TestService_SendMessage_ResumesAcrossAllResumableStatuses pins the

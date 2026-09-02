@@ -2057,7 +2057,8 @@ func codeReviewOrchestratorSynthesisFromResults(results []models.CodeReviewAgent
 }
 
 func codeReviewOrchestratorEvidence(results []models.CodeReviewAgentResult) (present, usable bool) {
-	for _, result := range results {
+	for i := len(results) - 1; i >= 0; i-- {
+		result := results[i]
 		if result.Role != models.CodeReviewAgentRoleOrchestrator {
 			continue
 		}
@@ -2078,7 +2079,8 @@ func codeReviewOrchestratorOperationalSummary(results []models.CodeReviewAgentRe
 		return ""
 	}
 
-	for _, result := range results {
+	for i := len(results) - 1; i >= 0; i-- {
+		result := results[i]
 		if result.Role != models.CodeReviewAgentRoleOrchestrator {
 			continue
 		}
@@ -2091,8 +2093,8 @@ func codeReviewOrchestratorOperationalSummary(results []models.CodeReviewAgentRe
 			if detail == "" && result.RawOutput != nil {
 				detail = strings.ToLower(strings.TrimSpace(*result.RawOutput))
 			}
-			if strings.Contains(detail, "no authenticated coding agent") {
-				return "143 could not run the final synthesis because no authenticated orchestrator was available. The automated review is incomplete; this is a configuration issue, not a code-quality finding."
+			if summary := codeReviewOrchestratorUnavailableSummary(detail); summary != "" {
+				return summary
 			}
 			if strings.Contains(detail, "synthesis") || strings.Contains(detail, "required field") || strings.Contains(detail, "valid json") {
 				return "143 received reviewer output, but the final synthesis did not match the required response format. The automated review is incomplete; this is not a code-quality finding."
@@ -2106,6 +2108,19 @@ func codeReviewOrchestratorOperationalSummary(results []models.CodeReviewAgentRe
 	}
 
 	return "143 could not complete the final synthesis because the orchestration step did not return a usable result. The automated review is incomplete; this is not a code-quality finding."
+}
+
+func codeReviewOrchestratorUnavailableSummary(detail string) string {
+	switch {
+	case strings.Contains(detail, "no authenticated coding agent"):
+		return "143 could not run the final synthesis because no authenticated orchestrator was available. The automated review is incomplete; this is a configuration issue, not a code-quality finding."
+	case strings.Contains(detail, "no configured coding agent has available authentication and model capacity"):
+		return "143 could not run the final synthesis because no configured orchestrator currently had both authentication and model capacity available. The automated review is incomplete; this is an operational availability issue, not a code-quality finding."
+	case strings.Contains(detail, codeReviewOrchestratorFallbackCapacityUnavailableMessage):
+		return "143 could not complete the final synthesis because no fallback thread slot was safely available. The automated review is incomplete; this is an operational availability issue, not a code-quality finding."
+	default:
+		return ""
+	}
 }
 
 func codeReviewRiskReasonsContain(reasons []models.CodeReviewRiskReason, expected models.CodeReviewRiskReasonCode) bool {
@@ -2682,8 +2697,35 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	var threadID uuid.UUID
 	dispatch := true
 	if attempt > 0 {
-		thread, err := ensureCodeReviewFallbackOrchestratorThread(ctx, threads, job, selection, attempt, codeReviewChangedPaths(changedFiles))
+		primaryThreadID, err := primaryThreadIDForSession(ctx, stores, session)
 		if err != nil {
+			return fmt.Errorf("resolve code review primary thread before fallback dispatch: %w", err)
+		}
+		thread, err := ensureCodeReviewFallbackOrchestratorThread(ctx, threads, job, selection, attempt, codeReviewChangedPaths(changedFiles), primaryThreadID, agentResults)
+		if err != nil {
+			if errors.Is(err, errCodeReviewFallbackCapacityExhausted) {
+				raw := codeReviewOrchestratorFallbackCapacityUnavailableMessage
+				result := &models.CodeReviewAgentResult{
+					OrgID:         job.OrgID,
+					SessionID:     job.SessionID,
+					AgentProvider: string(agentType),
+					AgentModel:    agentModel,
+					Role:          models.CodeReviewAgentRoleOrchestrator,
+					Status:        models.CodeReviewAgentResultStatusFailed,
+					RawOutput:     &raw,
+					StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+						Error:       raw,
+						CompletedAt: time.Now().UTC().Format(time.RFC3339),
+					}),
+				}
+				if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
+					return fmt.Errorf("create exhausted code review orchestrator fallback result: %w", err)
+				}
+				logger.Warn().Str("session_id", job.SessionID.String()).Int("fallback", attempt).
+					Str("orchestrator", string(agentType)).Str("model", stringPtrValue(agentModel)).
+					Msg("skipped code review fallback orchestrator because no thread slot was safely available")
+				return nil
+			}
 			return err
 		}
 		threadID = thread.ID

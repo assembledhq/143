@@ -584,7 +584,7 @@ func (s *Service) ArchiveThread(ctx context.Context, orgID, sessionID, threadID 
 			if target.ArchivedAt != nil {
 				return models.SessionThread{}, ErrThreadNotFound
 			}
-			if isActiveStatus(target.Status) {
+			if isActiveStatus(target.Status) || target.PendingMessageCount > 0 {
 				return models.SessionThread{}, ErrThreadActive
 			}
 
@@ -985,6 +985,9 @@ func (s *Service) queueMessageWaitingForSlot(ctx context.Context, input SendMess
 	if s.txStarter != nil && s.inboxStore != nil {
 		answeredQuestion, answeredHumanInput, inboxEntry, err = s.createQueuedMessageAndInboxInTx(ctx, msg, input, thread.Status)
 		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, ErrThreadNotFound
+			}
 			return nil, fmt.Errorf("create queued message: %w", err)
 		}
 	} else {
@@ -994,9 +997,15 @@ func (s *Service) queueMessageWaitingForSlot(ctx context.Context, input SendMess
 		}
 		inboxEntry, err = s.appendInboxForMessage(ctx, input, msg)
 		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, ErrThreadNotFound
+			}
 			return nil, fmt.Errorf("append queued inbox entry: %w", err)
 		}
 		if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, ErrThreadNotFound
+			}
 			return nil, fmt.Errorf("increment queued message count: %w", err)
 		}
 	}

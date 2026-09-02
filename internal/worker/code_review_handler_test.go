@@ -4201,6 +4201,39 @@ func TestCodeReviewOrchestratorOperationalSummary(t *testing.T) {
 			expected: "143 could not run the final synthesis because no authenticated orchestrator was available. The automated review is incomplete; this is a configuration issue, not a code-quality finding.",
 		},
 		{
+			name: "explains orchestrator availability exhaustion",
+			results: []models.CodeReviewAgentResult{{
+				Role:   models.CodeReviewAgentRoleOrchestrator,
+				Status: models.CodeReviewAgentResultStatusFailed,
+				StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+					Error: "orchestrator skipped because no configured coding agent has available authentication and model capacity",
+				}),
+			}},
+			reasons:  invalidSynthesis,
+			expected: "143 could not run the final synthesis because no configured orchestrator currently had both authentication and model capacity available. The automated review is incomplete; this is an operational availability issue, not a code-quality finding.",
+		},
+		{
+			name: "uses the latest orchestrator failure when fallback capacity is exhausted after a primary capacity failure",
+			results: []models.CodeReviewAgentResult{
+				{
+					Role:   models.CodeReviewAgentRoleOrchestrator,
+					Status: models.CodeReviewAgentResultStatusFailed,
+					StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+						Error: codeReviewCapacityFailureForTest,
+					}),
+				},
+				{
+					Role:   models.CodeReviewAgentRoleOrchestrator,
+					Status: models.CodeReviewAgentResultStatusFailed,
+					StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+						Error: codeReviewOrchestratorFallbackCapacityUnavailableMessage,
+					}),
+				},
+			},
+			reasons:  invalidSynthesis,
+			expected: "143 could not complete the final synthesis because no fallback thread slot was safely available. The automated review is incomplete; this is an operational availability issue, not a code-quality finding.",
+		},
+		{
 			name:     "explains a missing orchestrator result",
 			reasons:  invalidSynthesis,
 			expected: "143 could not complete the final synthesis because the orchestration step did not return a usable result. The automated review is incomplete; this is not a code-quality finding.",
@@ -4216,6 +4249,89 @@ func TestCodeReviewOrchestratorOperationalSummary(t *testing.T) {
 			require.Equal(t, tt.expected, actual, "operational summary should safely explain why automated synthesis is incomplete")
 		})
 	}
+}
+
+func TestEnsureCodeReviewOrchestratorThreadUnavailableSummaryUsesPersistedAvailabilityFailure(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.CodeReviews = db.NewCodeReviewStore(mock)
+
+	job := runCodeReviewPayload{OrgID: uuid.New(), SessionID: uuid.New()}
+	policy := codeReviewPolicyRecordForTest(models.DefaultCodeReviewPolicyConfig())
+	raw := "orchestrator skipped because no configured coding agent has available authentication and model capacity"
+	now := time.Now().UTC()
+	resultID := uuid.New()
+	expectedAgentType := policy.Config().AgentRoster.Orchestrator
+	expectedModel := codeReviewOrchestratorAgentModel(policy.Config())
+	var persistedRaw *string
+	var persistedStructured json.RawMessage
+	mock.ExpectQuery("INSERT INTO code_review_agent_results").
+		WithArgs(job.OrgID, job.SessionID, string(expectedAgentType), expectedModel, models.CodeReviewAgentRoleOrchestrator,
+			models.CodeReviewAgentResultStatusFailed, codeReviewFallbackArg(func(value any) bool {
+				text, ok := value.(*string)
+				persistedRaw = text
+				return ok && text != nil && *text == raw
+			}), codeReviewFallbackArg(func(value any) bool {
+				encoded, ok := value.(json.RawMessage)
+				persistedStructured = encoded
+				if !ok {
+					return false
+				}
+				state, ok := parseCodeReviewOrchestratorStructuredResult(encoded)
+				return ok && state.Error == raw && state.CompletedAt != ""
+			})).
+		WillReturnRows(newCodeReviewAgentResultRows().AddRow(
+			resultID, job.OrgID, job.SessionID, string(expectedAgentType), expectedModel,
+			models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusFailed, &raw,
+			marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+				Error:       raw,
+				CompletedAt: now.Format(time.RFC3339),
+			}), now,
+		))
+
+	err := ensureCodeReviewOrchestratorThread(
+		context.Background(),
+		stores,
+		&Services{CodingAgents: codeReviewAgentAvailabilityStub{available: map[models.AgentType]bool{}}},
+		zerolog.Nop(),
+		job,
+		models.PullRequest{},
+		nil,
+		policy,
+		models.CodeReviewSessionMetadata{},
+		nil,
+		nil,
+		nil,
+		models.CodeReviewVisualEvidenceSnapshot{},
+	)
+
+	require.NoError(t, err, "unavailable orchestrator selection should persist a terminal failure instead of raising a worker error")
+	require.NoError(t, mock.ExpectationsWereMet(), "unavailable orchestrator selection should save the availability failure result")
+	require.NotNil(t, persistedRaw, "unavailable orchestrator selection should persist the concrete raw failure output")
+	require.NotEmpty(t, persistedStructured, "unavailable orchestrator selection should persist the concrete structured failure payload")
+
+	summary := codeReviewOrchestratorOperationalSummary(
+		[]models.CodeReviewAgentResult{{
+			ID:               resultID,
+			OrgID:            job.OrgID,
+			SessionID:        job.SessionID,
+			AgentProvider:    string(expectedAgentType),
+			AgentModel:       expectedModel,
+			Role:             models.CodeReviewAgentRoleOrchestrator,
+			Status:           models.CodeReviewAgentResultStatusFailed,
+			RawOutput:        persistedRaw,
+			StructuredResult: persistedStructured,
+		}},
+		[]models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonOrchestratorSynthesisInvalid}},
+	)
+
+	require.Equal(t,
+		"143 could not run the final synthesis because no configured orchestrator currently had both authentication and model capacity available. The automated review is incomplete; this is an operational availability issue, not a code-quality finding.",
+		summary,
+		"operational summary should explain the actual persisted no-available-orchestrator failure",
+	)
 }
 
 func TestCodeReviewOrchestratorAgentModel(t *testing.T) {

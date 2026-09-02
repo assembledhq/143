@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -261,11 +262,14 @@ func (codeReviewCapacityStateArg) Match(value any) bool {
 }
 
 type codeReviewFallbackThreadStub struct {
-	existing  []models.SessionThread
-	created   *models.SessionThread
-	input     *threadsvc.CreateThreadInput
-	listErr   error
-	createErr error
+	existing   []models.SessionThread
+	created    *models.SessionThread
+	archived   *models.SessionThread
+	input      *threadsvc.CreateThreadInput
+	archiveID  uuid.UUID
+	listErr    error
+	archiveErr error
+	createErr  error
 }
 
 func (s *codeReviewFallbackThreadStub) ListThreads(context.Context, uuid.UUID, uuid.UUID) ([]models.SessionThread, error) {
@@ -274,56 +278,354 @@ func (s *codeReviewFallbackThreadStub) ListThreads(context.Context, uuid.UUID, u
 
 func (s *codeReviewFallbackThreadStub) CreateThread(_ context.Context, input threadsvc.CreateThreadInput) (*models.SessionThread, error) {
 	s.input = &input
-	return s.created, s.createErr
+	if s.createErr != nil {
+		return nil, s.createErr
+	}
+	if codeReviewVisibleThreadCount(s.existing) >= models.MaxThreadsPerSession {
+		return nil, db.ErrThreadLimitReached
+	}
+	if s.created != nil {
+		created := *s.created
+		s.existing = append(s.existing, created)
+		return &created, nil
+	}
+	created := models.SessionThread{
+		ID:              uuid.New(),
+		SessionID:       input.SessionID,
+		OrgID:           input.OrgID,
+		AgentType:       models.AgentType(input.AgentType),
+		ModelOverride:   stringPtr(input.Model),
+		ReasoningEffort: input.ReasoningEffort,
+		Label:           input.Label,
+		FileScope:       append([]string(nil), input.FileScope...),
+		Status:          models.ThreadStatusIdle,
+		CreatedBySource: input.CreatedBySource,
+		ExecutionMode:   input.ExecutionMode,
+		FilesystemMode:  input.FilesystemMode,
+	}
+	s.existing = append(s.existing, created)
+	return &created, nil
+}
+
+func (s *codeReviewFallbackThreadStub) ArchiveThread(_ context.Context, _, _, threadID uuid.UUID) (models.SessionThread, error) {
+	s.archiveID = threadID
+	if s.archiveErr != nil {
+		return models.SessionThread{}, s.archiveErr
+	}
+	for i := range s.existing {
+		if s.existing[i].ID != threadID {
+			continue
+		}
+		now := time.Now().UTC()
+		s.existing[i].ArchivedAt = &now
+		if s.archived != nil {
+			archived := *s.archived
+			archived.ID = threadID
+			return archived, nil
+		}
+		return s.existing[i], nil
+	}
+	return models.SessionThread{}, threadsvc.ErrThreadNotFound
+}
+
+func codeReviewTerminalReviewerResultForThread(threadID uuid.UUID, agentType models.AgentType, model string) models.CodeReviewAgentResult {
+	return models.CodeReviewAgentResult{
+		AgentProvider: string(agentType),
+		AgentModel:    stringPtr(model),
+		Role:          models.CodeReviewAgentRoleReviewer,
+		Status:        models.CodeReviewAgentResultStatusCompleted,
+		StructuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+			ThreadID:    threadID.String(),
+			CompletedAt: time.Now().UTC().Format(time.RFC3339),
+		}),
+	}
+}
+
+func codeReviewOrchestratorResultForThread(threadID uuid.UUID, agentType models.AgentType, model string, status models.CodeReviewAgentResultStatus) models.CodeReviewAgentResult {
+	result := codeReviewFailedModelForTest(agentType, model, models.CodeReviewAgentRoleOrchestrator)
+	result.Status = status
+	result.StructuredResult = marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+		ThreadID:    threadID.String(),
+		Error:       stringPtrValue(result.RawOutput),
+		CompletedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	if status != models.CodeReviewAgentResultStatusFailed {
+		result.RawOutput = nil
+	}
+	return result
 }
 
 func TestEnsureCodeReviewFallbackOrchestratorThread(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		existing  bool
-		status    models.ThreadStatus
-		listErr   error
-		createErr error
+		name            string
+		attempt         int
+		existingThreads func(job runCodeReviewPayload, selection codeReviewOrchestratorSelection) []models.SessionThread
+		results         func(threads []models.SessionThread) []models.CodeReviewAgentResult
+		primaryThreadID func(threads []models.SessionThread) uuid.UUID
+		listErr         error
+		archiveErr      error
+		createErr       error
+		expectArchiveID func(threads []models.SessionThread) uuid.UUID
+		expectErrIs     error
+		expectCreate    bool
+		expectReuse     bool
 	}{
-		{name: "creates a separate synthesis thread"},
-		{name: "reuses idle fallback after a claim race", existing: true, status: models.ThreadStatusIdle},
-		{name: "recovers running fallback after result write failure", existing: true, status: models.ThreadStatusRunning},
-		{name: "recovers completed fallback without rerunning", existing: true, status: models.ThreadStatusCompleted},
-		{name: "recovers failed fallback without retrying model", existing: true, status: models.ThreadStatusFailed},
-		{name: "propagates list failure", listErr: errors.New("list failed")},
-		{name: "propagates create failure", createErr: errors.New("create failed")},
+		{
+			name:         "creates a separate synthesis thread below the visible-thread limit",
+			expectCreate: true,
+		},
+		{
+			name: "reuses deterministic fallback before reclaiming any slot",
+			existingThreads: func(job runCodeReviewPayload, selection codeReviewOrchestratorSelection) []models.SessionThread {
+				return []models.SessionThread{{
+					ID:              uuid.New(),
+					OrgID:           job.OrgID,
+					SessionID:       job.SessionID,
+					AgentType:       selection.AgentType,
+					ModelOverride:   selection.AgentModel,
+					Label:           "Code review synthesis: claude_code (fallback 1)",
+					CreatedBySource: models.ThreadCreatedBySourceSystem,
+					Status:          models.ThreadStatusCompleted,
+				}}
+			},
+			expectReuse: true,
+		},
+		{
+			name: "archives one persisted terminal reviewer to make room for the first fallback",
+			existingThreads: func(job runCodeReviewPayload, selection codeReviewOrchestratorSelection) []models.SessionThread {
+				return []models.SessionThread{
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeCodex, Label: "Main", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusIdle},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeCodex, Label: "Reviewer 1", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeClaudeCode, Label: "Reviewer 2", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeOpenCode, Label: "Reviewer 3", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+				}
+			},
+			results: func(threads []models.SessionThread) []models.CodeReviewAgentResult {
+				return []models.CodeReviewAgentResult{
+					codeReviewTerminalReviewerResultForThread(threads[1].ID, models.AgentTypeCodex, models.DefaultCodexModel),
+					codeReviewTerminalReviewerResultForThread(threads[2].ID, models.AgentTypeClaudeCode, models.DefaultClaudeCodeModel),
+					codeReviewTerminalReviewerResultForThread(threads[3].ID, models.AgentTypeOpenCode, models.OpenCodeModelGPT55),
+				}
+			},
+			primaryThreadID: func(threads []models.SessionThread) uuid.UUID { return threads[0].ID },
+			expectArchiveID: func(threads []models.SessionThread) uuid.UUID { return threads[1].ID },
+			expectCreate:    true,
+		},
+		{
+			name:    "archives a failed prior fallback before touching reviewer evidence on the second fallback",
+			attempt: 2,
+			existingThreads: func(job runCodeReviewPayload, selection codeReviewOrchestratorSelection) []models.SessionThread {
+				return []models.SessionThread{
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeCodex, Label: "Main", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusIdle},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeCodex, Label: "Reviewer 1", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeClaudeCode, Label: "Reviewer 2", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeClaudeCode, ModelOverride: selection.AgentModel, Label: "Code review synthesis: claude_code (fallback 1)", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusFailed},
+				}
+			},
+			results: func(threads []models.SessionThread) []models.CodeReviewAgentResult {
+				return []models.CodeReviewAgentResult{
+					codeReviewTerminalReviewerResultForThread(threads[1].ID, models.AgentTypeCodex, models.DefaultCodexModel),
+					codeReviewTerminalReviewerResultForThread(threads[2].ID, models.AgentTypeClaudeCode, models.DefaultClaudeCodeModel),
+					codeReviewOrchestratorResultForThread(threads[3].ID, models.AgentTypeClaudeCode, models.DefaultClaudeCodeModel, models.CodeReviewAgentResultStatusFailed),
+				}
+			},
+			primaryThreadID: func(threads []models.SessionThread) uuid.UUID { return threads[0].ID },
+			expectArchiveID: func(threads []models.SessionThread) uuid.UUID { return threads[3].ID },
+			expectCreate:    true,
+		},
+		{
+			name: "leaves Main, active, user-created, and unpersisted threads untouched when no safe archival slot exists",
+			existingThreads: func(job runCodeReviewPayload, selection codeReviewOrchestratorSelection) []models.SessionThread {
+				return []models.SessionThread{
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeCodex, Label: "Main", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeCodex, Label: "Reviewer 1", CreatedBySource: models.ThreadCreatedBySourceUser, Status: models.ThreadStatusCompleted},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeClaudeCode, Label: "Reviewer 2", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeOpenCode, Label: "Reviewer 3", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusRunning},
+				}
+			},
+			results: func(threads []models.SessionThread) []models.CodeReviewAgentResult {
+				duplicateRunning := codeReviewTerminalReviewerResultForThread(threads[2].ID, models.AgentTypeClaudeCode, models.DefaultClaudeCodeModel)
+				duplicateRunning.Status = models.CodeReviewAgentResultStatusRunning
+				duplicateRunning.StructuredResult = marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+					ThreadID: threads[2].ID.String(),
+				})
+				return []models.CodeReviewAgentResult{
+					codeReviewTerminalReviewerResultForThread(threads[0].ID, models.AgentTypeCodex, models.DefaultCodexModel),
+					codeReviewTerminalReviewerResultForThread(threads[1].ID, models.AgentTypeCodex, models.DefaultCodexModel),
+					codeReviewTerminalReviewerResultForThread(threads[2].ID, models.AgentTypeClaudeCode, models.DefaultClaudeCodeModel),
+					duplicateRunning,
+					codeReviewTerminalReviewerResultForThread(threads[3].ID, models.AgentTypeOpenCode, models.OpenCodeModelGPT55),
+				}
+			},
+			primaryThreadID: func(threads []models.SessionThread) uuid.UUID { return threads[0].ID },
+			expectErrIs:     errCodeReviewFallbackCapacityExhausted,
+		},
+		{
+			name: "protects terminal threads with pending queued follow-up work",
+			existingThreads: func(job runCodeReviewPayload, selection codeReviewOrchestratorSelection) []models.SessionThread {
+				return []models.SessionThread{
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeCodex, Label: "Main", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusIdle},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeCodex, Label: "Reviewer 1", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted, PendingMessageCount: 1},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeClaudeCode, Label: "Reviewer 2", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeOpenCode, Label: "Reviewer 3", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+				}
+			},
+			results: func(threads []models.SessionThread) []models.CodeReviewAgentResult {
+				return []models.CodeReviewAgentResult{
+					codeReviewTerminalReviewerResultForThread(threads[1].ID, models.AgentTypeCodex, models.DefaultCodexModel),
+					codeReviewTerminalReviewerResultForThread(threads[2].ID, models.AgentTypeClaudeCode, models.DefaultClaudeCodeModel),
+					codeReviewTerminalReviewerResultForThread(threads[3].ID, models.AgentTypeOpenCode, models.OpenCodeModelGPT55),
+				}
+			},
+			primaryThreadID: func(threads []models.SessionThread) uuid.UUID { return threads[0].ID },
+			expectArchiveID: func(threads []models.SessionThread) uuid.UUID { return threads[2].ID },
+			expectCreate:    true,
+		},
+		{
+			name: "gracefully treats an archive race as exhausted fallback capacity",
+			existingThreads: func(job runCodeReviewPayload, selection codeReviewOrchestratorSelection) []models.SessionThread {
+				return []models.SessionThread{
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeCodex, Label: "Main", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusIdle},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeCodex, Label: "Reviewer 1", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeClaudeCode, Label: "Reviewer 2", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+					{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeOpenCode, Label: "Reviewer 3", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+				}
+			},
+			results: func(threads []models.SessionThread) []models.CodeReviewAgentResult {
+				return []models.CodeReviewAgentResult{codeReviewTerminalReviewerResultForThread(threads[1].ID, models.AgentTypeCodex, models.DefaultCodexModel)}
+			},
+			primaryThreadID: func(threads []models.SessionThread) uuid.UUID { return threads[0].ID },
+			archiveErr:      threadsvc.ErrThreadActive,
+			expectArchiveID: func(threads []models.SessionThread) uuid.UUID { return threads[1].ID },
+			expectErrIs:     errCodeReviewFallbackCapacityExhausted,
+		},
+		{
+			name:         "gracefully treats a create limit race as exhausted fallback capacity",
+			createErr:    db.ErrThreadLimitReached,
+			expectErrIs:  errCodeReviewFallbackCapacityExhausted,
+			expectCreate: true,
+		},
+		{name: "propagates list failure", listErr: errors.New("list failed"), expectErrIs: errors.New("list failed")},
+		{name: "propagates create failure", createErr: errors.New("create failed"), expectErrIs: errors.New("create failed"), expectCreate: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			job := runCodeReviewPayload{OrgID: uuid.New(), SessionID: uuid.New()}
 			selection := codeReviewOrchestratorSelection{AgentType: models.AgentTypeClaudeCode, AgentModel: stringPtr(models.DefaultClaudeCodeModel), ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortMax), Available: true}
-			thread := models.SessionThread{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: selection.AgentType, ModelOverride: selection.AgentModel,
-				Label: "Code review synthesis: claude_code (fallback 1)", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: tt.status}
-			stub := &codeReviewFallbackThreadStub{created: &thread, listErr: tt.listErr, createErr: tt.createErr}
-			if tt.existing {
-				stub.existing = []models.SessionThread{thread}
+			thread := models.SessionThread{
+				ID:              uuid.New(),
+				OrgID:           job.OrgID,
+				SessionID:       job.SessionID,
+				AgentType:       selection.AgentType,
+				ModelOverride:   selection.AgentModel,
+				Label:           "Code review synthesis: claude_code (fallback 1)",
+				CreatedBySource: models.ThreadCreatedBySourceSystem,
+				Status:          models.ThreadStatusIdle,
 			}
-			actual, err := ensureCodeReviewFallbackOrchestratorThread(context.Background(), stub, job, selection, 1, []string{"handler.go"})
-			if tt.listErr != nil || tt.createErr != nil {
-				require.Error(t, err, "thread storage errors should propagate for worker retry")
+			attempt := tt.attempt
+			if attempt == 0 {
+				attempt = 1
+			}
+			thread.Label = fmt.Sprintf("Code review synthesis: claude_code (fallback %d)", attempt)
+			stub := &codeReviewFallbackThreadStub{created: &thread, archived: &models.SessionThread{}, listErr: tt.listErr, archiveErr: tt.archiveErr, createErr: tt.createErr}
+			if tt.existingThreads != nil {
+				stub.existing = tt.existingThreads(job, selection)
+			}
+			var results []models.CodeReviewAgentResult
+			if tt.results != nil {
+				results = tt.results(stub.existing)
+			}
+			primaryThreadID := uuid.Nil
+			if tt.primaryThreadID != nil {
+				primaryThreadID = tt.primaryThreadID(stub.existing)
+			}
+			actual, err := ensureCodeReviewFallbackOrchestratorThread(context.Background(), stub, job, selection, attempt, []string{"handler.go"}, primaryThreadID, results)
+			if tt.expectErrIs != nil {
+				if tt.expectErrIs == errCodeReviewFallbackCapacityExhausted {
+					require.ErrorIs(t, err, errCodeReviewFallbackCapacityExhausted, "fallback slot exhaustion should stop retries without bubbling a worker infrastructure error")
+				} else {
+					require.ErrorContains(t, err, tt.expectErrIs.Error(), "unexpected storage failures should still propagate")
+				}
+				require.Nil(t, actual, "failed fallback allocation should not return a thread")
+				if tt.expectCreate {
+					require.NotNil(t, stub.input, "creation races should still capture the attempted thread input")
+				} else {
+					require.Nil(t, stub.input, "failed fallback allocation should not create a new thread input")
+				}
+				if tt.expectArchiveID == nil {
+					require.Equal(t, uuid.Nil, stub.archiveID, "protected threads should not be archived")
+				}
 				return
 			}
 			require.NoError(t, err, "fallback thread should be available")
-			require.Equal(t, &thread, actual, "fallback should preserve the selected thread and its execution state")
-			if tt.existing {
+			if tt.expectReuse {
+				require.Equal(t, &stub.existing[0], actual, "fallback should reuse the deterministic thread that already exists for this provider and attempt")
 				require.Nil(t, stub.input, "retrying the controller must reuse its existing fallback thread")
 			} else {
+				require.Equal(t, &thread, actual, "fallback should preserve the newly created thread and its execution state")
+				if tt.expectCreate {
+					require.NotNil(t, stub.input, "fallback creation should use the selected model on a new thread")
+				}
 				require.Equal(t, &threadsvc.CreateThreadInput{
 					SessionID: job.SessionID, OrgID: job.OrgID, AgentType: string(selection.AgentType), Model: *selection.AgentModel,
 					ReasoningEffort: selection.ReasoningEffort, Label: thread.Label, FileScope: []string{"handler.go"},
 					ExecutionMode: models.ThreadExecutionModeReview, FilesystemMode: models.ThreadFilesystemModeReadOnly, CreatedBySource: models.ThreadCreatedBySourceSystem,
 				}, stub.input, "fallback should preserve model settings and use a fresh read-only synthesis thread")
 			}
+			if tt.expectArchiveID != nil {
+				require.Equal(t, tt.expectArchiveID(stub.existing), stub.archiveID, "fallback should reclaim exactly one eligible persisted terminal thread when the visible-thread cap is full")
+			} else {
+				require.Equal(t, uuid.Nil, stub.archiveID, "fallback creation should not archive any thread unless the visible-thread cap requires it")
+			}
 		})
 	}
+}
+
+func TestEnsureCodeReviewFallbackOrchestratorThreadSequentialAttemptsStayWithinVisibleLimit(t *testing.T) {
+	t.Parallel()
+
+	job := runCodeReviewPayload{OrgID: uuid.New(), SessionID: uuid.New()}
+	primaryThreadID := uuid.New()
+	firstSelection := codeReviewOrchestratorSelection{AgentType: models.AgentTypeClaudeCode, AgentModel: stringPtr(models.DefaultClaudeCodeModel), ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortMax), Available: true}
+	secondSelection := codeReviewOrchestratorSelection{AgentType: models.AgentTypeCodex, AgentModel: stringPtr(models.CodexModelGPT55), ReasoningEffort: reasoningEffortPtr(models.ReasoningEffortMedium), Available: true}
+	stub := &codeReviewFallbackThreadStub{
+		existing: []models.SessionThread{
+			{ID: primaryThreadID, OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeCodex, Label: "Main", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusIdle},
+			{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeCodex, Label: "Reviewer 1", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+			{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeClaudeCode, Label: "Reviewer 2", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+			{ID: uuid.New(), OrgID: job.OrgID, SessionID: job.SessionID, AgentType: models.AgentTypeOpenCode, Label: "Reviewer 3", CreatedBySource: models.ThreadCreatedBySourceSystem, Status: models.ThreadStatusCompleted},
+		},
+	}
+	firstResults := []models.CodeReviewAgentResult{
+		codeReviewTerminalReviewerResultForThread(stub.existing[1].ID, models.AgentTypeCodex, models.DefaultCodexModel),
+		codeReviewTerminalReviewerResultForThread(stub.existing[2].ID, models.AgentTypeClaudeCode, models.DefaultClaudeCodeModel),
+		codeReviewTerminalReviewerResultForThread(stub.existing[3].ID, models.AgentTypeOpenCode, models.OpenCodeModelGPT55),
+	}
+
+	firstFallback, err := ensureCodeReviewFallbackOrchestratorThread(context.Background(), stub, job, firstSelection, 1, []string{"handler.go"}, primaryThreadID, firstResults)
+	require.NoError(t, err, "first fallback should reclaim one reviewer slot and create a fallback thread")
+	require.Equal(t, models.MaxThreadsPerSession, codeReviewVisibleThreadCount(stub.existing), "first fallback should keep the visible thread count within the session cap")
+
+	firstFallback.Status = models.ThreadStatusFailed
+	for i := range stub.existing {
+		if stub.existing[i].ID == firstFallback.ID {
+			stub.existing[i].Status = models.ThreadStatusFailed
+			break
+		}
+	}
+	secondResults := append(append([]models.CodeReviewAgentResult{}, firstResults...), codeReviewOrchestratorResultForThread(firstFallback.ID, firstSelection.AgentType, models.DefaultClaudeCodeModel, models.CodeReviewAgentResultStatusFailed))
+
+	secondFallback, err := ensureCodeReviewFallbackOrchestratorThread(context.Background(), stub, job, secondSelection, 2, []string{"handler.go"}, primaryThreadID, secondResults)
+	require.NoError(t, err, "second fallback should archive the failed prior fallback before creating the next one")
+	require.Equal(t, firstFallback.ID, stub.archiveID, "second fallback should reclaim the failed prior fallback before touching persisted reviewer evidence")
+	require.NotEqual(t, firstFallback.ID, secondFallback.ID, "second fallback should use a new deterministic thread after archiving the failed prior fallback")
+	require.Equal(t, models.MaxThreadsPerSession, codeReviewVisibleThreadCount(stub.existing), "sequential fallback attempts should never exceed the visible thread cap")
+	quorum, failures := codeReviewReviewerEvidence(secondResults)
+	require.Equal(t, 3, quorum, "sequential fallback attempts should preserve the original completed reviewer quorum")
+	require.Equal(t, 0, failures, "sequential fallback attempts should not convert persisted reviewer evidence into failures")
 }
 
 func TestEnsureCodeReviewOrchestratorFallbackStops(t *testing.T) {
@@ -404,15 +706,21 @@ func TestCodeReviewOrchestratorFallbackRecoversAndCompletes(t *testing.T) {
 			AddRow(uuid.New(), orgID, sessionID, recordKey, "orchestrator", "claude_code", "captured", json.RawMessage(`{}`), now))
 	sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 0, nil, nil)
 	setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
-	for range 2 {
-		mock.ExpectQuery("(?s)SELECT .*FROM sessions").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
-	}
+	mock.ExpectQuery("(?s)SELECT .*FROM sessions").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mainThreadID := uuid.New()
+	mainThreadRow := workerSessionThreadRow(mainThreadID, sessionID, orgID, models.AgentTypeCodex, stringPtr(models.DefaultCodexModel), models.ThreadStatusIdle)
+	setWorkerSessionThreadColumn(mainThreadRow, "label", "Main")
+	setWorkerSessionThreadColumn(mainThreadRow, "created_by_source", models.ThreadCreatedBySourceSystem)
 	threadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeClaudeCode, stringPtr(models.DefaultClaudeCodeModel), models.ThreadStatusRunning)
 	setWorkerSessionThreadColumn(threadRow, "label", "Code review synthesis: claude_code (fallback 1)")
 	setWorkerSessionThreadColumn(threadRow, "created_by_source", models.ThreadCreatedBySourceSystem)
 	setWorkerSessionThreadColumn(threadRow, "execution_mode", models.ThreadExecutionModeReview)
 	setWorkerSessionThreadColumn(threadRow, "filesystem_mode", models.ThreadFilesystemModeReadOnly)
+	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newSessionThreadRows().AddRow(mainThreadRow...).AddRow(threadRow...))
+	mock.ExpectQuery("(?s)SELECT .*FROM sessions").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
 	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 		WillReturnRows(newSessionThreadRows().AddRow(threadRow...))
 	var runningState json.RawMessage
