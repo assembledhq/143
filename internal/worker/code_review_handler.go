@@ -320,6 +320,15 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if err != nil {
 				return fmt.Errorf("list synthesized code review agent results: %w", err)
 			}
+			if codeReviewOrchestratorNeedsFallback(agentResults) {
+				if err := ensureCodeReviewOrchestratorThread(ctx, stores, services, logger, job, pr, health, policy, metadata, changedFiles, agentResults, findings, visualEvidence); err != nil {
+					return err
+				}
+				agentResults, err = stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
+				if err != nil {
+					return fmt.Errorf("list fallback code review agent results: %w", err)
+				}
+			}
 			if !codeReviewOrchestratorTerminal(agentResults) {
 				return codeReviewWaitingForOrchestrator(policy.Config())
 			}
@@ -1136,41 +1145,24 @@ func resolveCodeReviewReviewerAvailability(ctx context.Context, services *Servic
 	return selections, nil
 }
 
-func resolveCodeReviewOrchestratorAvailability(ctx context.Context, services *Services, orgID uuid.UUID, cfg models.CodeReviewPolicyConfig) (codeReviewOrchestratorSelection, error) {
-	configured := codeReviewOrchestratorSelection{
-		AgentType:       cfg.AgentRoster.Orchestrator,
-		AgentModel:      codeReviewOrchestratorAgentModel(cfg),
-		ReasoningEffort: reasoningEffortPtr(cfg.AgentRoster.ReasoningEffort),
-		Available:       true,
-	}
-	if services == nil || services.CodingAgents == nil {
-		return configured, nil
-	}
-
-	available, err := services.CodingAgents.IsAgentAvailable(ctx, orgID, nil, configured.AgentType, stringPtrValue(configured.AgentModel))
-	if err != nil {
-		return codeReviewOrchestratorSelection{}, fmt.Errorf("resolve code review orchestrator %s availability: %w", configured.AgentType, err)
-	}
-	if available {
-		return configured, nil
-	}
-
-	for idx, agentType := range cfg.AgentRoster.Reviewers {
-		agentModel := codeReviewReviewerAgentModel(cfg, idx, agentType)
-		available, err := services.CodingAgents.IsAgentAvailable(ctx, orgID, nil, agentType, stringPtrValue(agentModel))
-		if err != nil {
-			return codeReviewOrchestratorSelection{}, fmt.Errorf("resolve code review orchestrator fallback %s availability: %w", agentType, err)
+func resolveCodeReviewOrchestratorAvailability(ctx context.Context, services *Services, orgID uuid.UUID, cfg models.CodeReviewPolicyConfig, results []models.CodeReviewAgentResult) (codeReviewOrchestratorSelection, error) {
+	candidates := codeReviewOrchestratorCandidates(cfg)
+	for _, candidate := range candidates {
+		if codeReviewOrchestratorCandidateExhausted(candidate, results) {
+			continue
 		}
-		if available {
-			return codeReviewOrchestratorSelection{
-				AgentType:       agentType,
-				AgentModel:      agentModel,
-				ReasoningEffort: reasoningEffortPtr(cfg.AgentRoster.ReviewerReasoningEffort(idx)),
-				Available:       true,
-			}, nil
+		if services != nil && services.CodingAgents != nil {
+			available, err := services.CodingAgents.IsAgentAvailable(ctx, orgID, nil, candidate.AgentType, stringPtrValue(candidate.AgentModel))
+			if err != nil {
+				return codeReviewOrchestratorSelection{}, fmt.Errorf("resolve code review orchestrator %s availability: %w", candidate.AgentType, err)
+			}
+			if !available {
+				continue
+			}
 		}
+		return candidate, nil
 	}
-
+	configured := candidates[0]
 	configured.Available = false
 	return configured, nil
 }
@@ -2401,12 +2393,14 @@ func codeReviewInFlightAgentPhaseFromState(policy models.CodeReviewPolicyConfig,
 	}
 
 	orchestratorResults := make([]models.CodeReviewAgentResult, 0, 1)
+	hasOrchestrator := false
 	for _, result := range results {
 		if result.Role != models.CodeReviewAgentRoleOrchestrator {
 			continue
 		}
+		hasOrchestrator = true
 		if codeReviewReviewerResultTerminal(result.Status) {
-			return codeReviewAgentPhaseNone
+			continue
 		}
 		orchestratorResults = append(orchestratorResults, result)
 	}
@@ -2420,6 +2414,9 @@ func codeReviewInFlightAgentPhaseFromState(policy models.CodeReviewPolicyConfig,
 			}
 		}
 		return codeReviewAgentPhaseOrchestrator
+	}
+	if hasOrchestrator {
+		return codeReviewAgentPhaseNone
 	}
 
 	byKey := codeReviewReviewerResultsByKey(results)
@@ -2566,13 +2563,12 @@ func codeReviewWaitingForReviewers(policy models.CodeReviewPolicyConfig) error {
 }
 
 func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot) error {
-	for _, result := range agentResults {
-		if result.Role == models.CodeReviewAgentRoleOrchestrator {
-			return nil
-		}
-	}
 	cfg := policy.Config()
-	selection, err := resolveCodeReviewOrchestratorAvailability(ctx, services, job.OrgID, cfg)
+	attempt := codeReviewOrchestratorAttemptCount(agentResults)
+	if attempt > 0 && (!codeReviewOrchestratorNeedsFallback(agentResults) || time.Now().After(codeReviewOrchestratorDispatchDeadline(cfg, metadata, agentResults))) {
+		return nil
+	}
+	selection, err := resolveCodeReviewOrchestratorAvailability(ctx, services, job.OrgID, cfg, agentResults)
 	if err != nil {
 		return err
 	}
@@ -2580,7 +2576,12 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	agentModel := selection.AgentModel
 	reasoningEffort := selection.ReasoningEffort
 	if !selection.Available {
-		raw := "orchestrator skipped because no authenticated coding agent is configured"
+		if attempt > 0 {
+			logger.Warn().Str("session_id", job.SessionID.String()).Int("attempts", attempt).
+				Msg("code review orchestrator fallback models exhausted")
+			return nil
+		}
+		raw := "orchestrator skipped because no configured coding agent has available authentication and model capacity"
 		result := &models.CodeReviewAgentResult{
 			OrgID:         job.OrgID,
 			SessionID:     job.SessionID,
@@ -2625,6 +2626,9 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	}
 	rootKey := codeReviewPromptRecordRoot(metadata, job)
 	recordKey := fmt.Sprintf("%s/orchestrator-%s", rootKey, agentType)
+	if attempt > 0 {
+		recordKey = fmt.Sprintf("%s/orchestrator-fallback-%02d-%s", rootKey, attempt, agentType)
+	}
 	promptText := codeReviewOrchestratorPrompt(job, pr, health, cfg, policy.Version, metadata.BaseSHA, changedFiles, agentResults, findings, visualEvidence)
 	descriptionInputHash := codeReviewDescriptionInputHash(pr, visualEvidence)
 	if err := storeCodeReviewPromptRecord(ctx, stores, models.CodeReviewPromptRecord{
@@ -2645,11 +2649,8 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 		return err
 	}
 	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
-	// Run the orchestrator on the session's primary ("Main") thread rather than
-	// spinning up a dedicated tab. The primary thread starts with the policy's
-	// configured orchestrator and is retargeted below when only a reviewer agent
-	// is authenticated. The reviewers keep their own read-only tabs; only the
-	// final synthesis is folded back onto the main thread.
+	// The first synthesis uses Main. Runtime fallbacks use separate threads
+	// because an agent's provider cannot be edited after its first turn.
 	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
 	if err != nil {
 		return fmt.Errorf("load code review session for orchestrator: %w", err)
@@ -2678,84 +2679,101 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 		}
 	}
 
-	threadID, err := primaryThreadIDForSession(ctx, stores, session)
-	if err != nil {
-		return fmt.Errorf("resolve code review primary thread for orchestrator: %w", err)
-	}
-	primaryThread, err := stores.SessionThreads.GetByID(ctx, job.OrgID, threadID)
-	if err != nil {
-		return fmt.Errorf("load code review primary thread for orchestrator: %w", err)
-	}
-	if primaryThread.AgentType != agentType ||
-		!codeReviewAgentModelsEqual(primaryThread.ModelOverride, agentModel) ||
-		!codeReviewReasoningEffortsEqual(primaryThread.ReasoningEffort, reasoningEffort) {
-		model := ""
-		if agentModel != nil {
-			model = *agentModel
+	var threadID uuid.UUID
+	dispatch := true
+	if attempt > 0 {
+		thread, err := ensureCodeReviewFallbackOrchestratorThread(ctx, threads, job, selection, attempt, codeReviewChangedPaths(changedFiles))
+		if err != nil {
+			return err
 		}
-		_, updateErr := threads.UpdateThread(ctx, threadsvc.UpdateThreadInput{
-			SessionID:       job.SessionID,
-			OrgID:           job.OrgID,
-			ThreadID:        threadID,
-			AgentType:       string(agentType),
-			Model:           &model,
-			ReasoningEffort: reasoningEffort,
-			Label:           primaryThread.Label,
-		})
-		if updateErr != nil {
-			return fmt.Errorf("retarget code review primary thread to available orchestrator %s: %w", agentType, updateErr)
+		threadID = thread.ID
+		// A poll may recover an already dispatched fallback whose result write
+		// failed. Harvest that turn instead of sending the synthesis twice.
+		dispatch = thread.Status == models.ThreadStatusIdle && thread.CurrentTurn == 0
+		logger.Warn().Str("session_id", job.SessionID.String()).Str("thread_id", threadID.String()).
+			Str("orchestrator", string(agentType)).Str("model", stringPtrValue(agentModel)).Int("fallback", attempt).
+			Msg("using fallback code review orchestrator after model availability failure")
+	} else {
+		threadID, err = primaryThreadIDForSession(ctx, stores, session)
+		if err != nil {
+			return fmt.Errorf("resolve code review primary thread for orchestrator: %w", err)
 		}
-		logger.Info().
-			Str("session_id", job.SessionID.String()).
-			Str("thread_id", threadID.String()).
-			Str("orchestrator", string(agentType)).
-			Msg("retargeted code review primary thread to available orchestrator")
+		primaryThread, err := stores.SessionThreads.GetByID(ctx, job.OrgID, threadID)
+		if err != nil {
+			return fmt.Errorf("load code review primary thread for orchestrator: %w", err)
+		}
+		if primaryThread.AgentType != agentType ||
+			!codeReviewAgentModelsEqual(primaryThread.ModelOverride, agentModel) ||
+			!codeReviewReasoningEffortsEqual(primaryThread.ReasoningEffort, reasoningEffort) {
+			model := ""
+			if agentModel != nil {
+				model = *agentModel
+			}
+			_, updateErr := threads.UpdateThread(ctx, threadsvc.UpdateThreadInput{
+				SessionID:       job.SessionID,
+				OrgID:           job.OrgID,
+				ThreadID:        threadID,
+				AgentType:       string(agentType),
+				Model:           &model,
+				ReasoningEffort: reasoningEffort,
+				Label:           primaryThread.Label,
+			})
+			if updateErr != nil {
+				return fmt.Errorf("retarget code review primary thread to available orchestrator %s: %w", agentType, updateErr)
+			}
+			logger.Info().
+				Str("session_id", job.SessionID.String()).
+				Str("thread_id", threadID.String()).
+				Str("orchestrator", string(agentType)).
+				Msg("retargeted code review primary thread to available orchestrator")
+		}
 	}
 	structured := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
 		ThreadID:             threadID.String(),
 		PromptRecordKey:      recordKey,
 		DescriptionInputHash: descriptionInputHash,
-		ReadOnly:             false,
+		ReadOnly:             attempt > 0,
 	})
 	// The orchestrator agent result is created only once the thread is actually
 	// dispatched. A transient claim race leaves no result behind, so the next
 	// run_code_review poll re-enters this function cleanly and retries.
-	if _, err := threads.SendMessage(ctx, codeReviewAgentMessageInput(job, threadID, promptText, nil, visualEvidence)); err != nil {
-		// Transient: the session was momentarily non-resumable despite the reset
-		// above (e.g. re-parked by a sibling's sandbox-node retry between the
-		// reset and the claim). Don't record a permanent orchestrator failure —
-		// let run_code_review re-poll so synthesis dispatches once the session
-		// settles. The orchestrator runs on the Main thread, so there is no
-		// transient tab to clean up, and no agent result exists yet, so the next
-		// pass re-enters this function cleanly.
-		if errors.Is(err, threadsvc.ErrSessionNotResumable) {
-			logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("code review session was not resumable for orchestrator dispatch; retrying")
-			return codeReviewWaitingForOrchestrator(cfg)
+	if dispatch {
+		if _, err := threads.SendMessage(ctx, codeReviewAgentMessageInput(job, threadID, promptText, nil, visualEvidence)); err != nil {
+			// Transient: the session was momentarily non-resumable despite the reset
+			// above (e.g. re-parked by a sibling's sandbox-node retry between the
+			// reset and the claim). Don't record a permanent orchestrator failure —
+			// let run_code_review re-poll so synthesis dispatches once the session
+			// settles. No result exists yet; the next pass reuses Main or the
+			// deterministically named fallback thread.
+			if errors.Is(err, threadsvc.ErrSessionNotResumable) {
+				logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("code review session was not resumable for orchestrator dispatch; retrying")
+				return codeReviewWaitingForOrchestrator(cfg)
+			}
+			// Permanent failure: record a terminal orchestrator result so the review
+			// can finish in a degraded state instead of looping forever.
+			raw := err.Error()
+			failed := &models.CodeReviewAgentResult{
+				OrgID:         job.OrgID,
+				SessionID:     job.SessionID,
+				AgentProvider: string(agentType),
+				AgentModel:    agentModel,
+				Role:          models.CodeReviewAgentRoleOrchestrator,
+				Status:        models.CodeReviewAgentResultStatusFailed,
+				RawOutput:     &raw,
+				StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+					ThreadID:             threadID.String(),
+					PromptRecordKey:      recordKey,
+					DescriptionInputHash: descriptionInputHash,
+					Error:                raw,
+					CompletedAt:          time.Now().UTC().Format(time.RFC3339),
+				}),
+			}
+			if createErr := stores.CodeReviews.CreateAgentResult(ctx, failed); createErr != nil {
+				return fmt.Errorf("create failed code review orchestrator result: %w", createErr)
+			}
+			logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to start code review orchestrator thread")
+			return nil
 		}
-		// Permanent failure: record a terminal orchestrator result so the review
-		// can finish in a degraded state instead of looping forever.
-		raw := err.Error()
-		failed := &models.CodeReviewAgentResult{
-			OrgID:         job.OrgID,
-			SessionID:     job.SessionID,
-			AgentProvider: string(agentType),
-			AgentModel:    agentModel,
-			Role:          models.CodeReviewAgentRoleOrchestrator,
-			Status:        models.CodeReviewAgentResultStatusFailed,
-			RawOutput:     &raw,
-			StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
-				ThreadID:             threadID.String(),
-				PromptRecordKey:      recordKey,
-				DescriptionInputHash: descriptionInputHash,
-				Error:                raw,
-				CompletedAt:          time.Now().UTC().Format(time.RFC3339),
-			}),
-		}
-		if createErr := stores.CodeReviews.CreateAgentResult(ctx, failed); createErr != nil {
-			return fmt.Errorf("create failed code review orchestrator result: %w", createErr)
-		}
-		logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to start code review orchestrator thread")
-		return nil
 	}
 	result := &models.CodeReviewAgentResult{
 		OrgID:            job.OrgID,
@@ -2875,6 +2893,32 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 		raw, ok, err := latestAssistantMessageForThread(ctx, stores, job.OrgID, threadID)
 		if err != nil {
 			return err
+		}
+		if thread.Status == models.ThreadStatusFailed &&
+			(codeReviewModelUnavailable(stringPtrValue(thread.FailureExplanation)) || codeReviewModelUnavailable(raw)) {
+			// Capacity/rate-limit output is a runtime failure, not malformed
+			// synthesis. Preserve it and let another model run rather than asking
+			// the same unavailable model to repair its JSON.
+			failure := strings.TrimSpace(stringPtrValue(thread.FailureExplanation))
+			if !codeReviewModelUnavailable(failure) {
+				failure = raw
+			}
+			if !ok {
+				raw = failure
+			}
+			state.Error = failure
+			state.Synthesis = codeReviewOrchestratorSynthesis{}
+			state.SynthesisValidated = false
+			state.CompletedAt = codeReviewThreadCompletionTime(thread).Format(time.RFC3339)
+			rawOutput, rawRecordKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
+			if err != nil {
+				return err
+			}
+			state.RawRecordKey = rawRecordKey
+			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
+				return fmt.Errorf("record unavailable code review orchestrator model: %w", err)
+			}
+			continue
 		}
 		if !ok {
 			if thread.Status == models.ThreadStatusFailed || thread.Status == models.ThreadStatusCancelled {
@@ -3002,12 +3046,17 @@ func codeReviewVisualEvidenceSatisfactions(synthesis codeReviewOrchestratorSynth
 }
 
 func codeReviewOrchestratorTerminal(results []models.CodeReviewAgentResult) bool {
+	found := false
 	for _, result := range results {
-		if result.Role == models.CodeReviewAgentRoleOrchestrator && codeReviewReviewerResultTerminal(result.Status) {
-			return true
+		if result.Role != models.CodeReviewAgentRoleOrchestrator {
+			continue
+		}
+		found = true
+		if !codeReviewReviewerResultTerminal(result.Status) {
+			return false
 		}
 	}
-	return false
+	return found
 }
 
 func codeReviewWaitingForOrchestrator(policy models.CodeReviewPolicyConfig) error {

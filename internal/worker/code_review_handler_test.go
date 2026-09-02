@@ -4124,7 +4124,7 @@ func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
 			if tt.configure != nil {
 				tt.configure(&testConfig)
 			}
-			actual, err := resolveCodeReviewOrchestratorAvailability(context.Background(), tt.services, uuid.New(), testConfig)
+			actual, err := resolveCodeReviewOrchestratorAvailability(context.Background(), tt.services, uuid.New(), testConfig, nil)
 			if tt.expectErr {
 				require.Error(t, err, "orchestrator availability resolution should propagate lookup failures")
 				return
