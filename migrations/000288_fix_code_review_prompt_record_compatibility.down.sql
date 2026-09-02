@@ -1,0 +1,3 @@
+-- Intentionally no-op: both worker generations require the repaired trigger.
+-- Rolling back this repair must not restore prompt-upsert failures or remove
+-- synchronization. Migration 000280 owns the compatibility function's teardown.
