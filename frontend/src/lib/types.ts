@@ -204,6 +204,7 @@ export interface CodeReviewPolicyConfig {
   };
   agent_roster: {
     reviewers: string[];
+    reviewer_count?: number;
     orchestrator: string;
     reviewer_models?: string[];
     reviewer_reasoning_efforts?: ("low" | "medium" | "high" | "xhigh" | "max")[];

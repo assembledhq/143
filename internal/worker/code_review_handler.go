@@ -298,13 +298,14 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if err != nil {
 				return fmt.Errorf("list harvested code review findings: %w", err)
 			}
-			if !codeReviewReviewerRosterTerminal(policy.Config(), agentResults) {
+			reviewTimedOut := codeReviewReviewTimedOut(policy.Config(), metadata)
+			if !codeReviewReviewerRosterTerminal(policy.Config(), agentResults, reviewTimedOut) {
 				return codeReviewWaitingForReviewers(policy.Config())
 			}
 			if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
 				return err
 			}
-			if codeReviewReviewerExecutionFailed(policy.Config(), agentResults) {
+			if codeReviewReviewerExecutionFailed(policy.Config(), agentResults, reviewTimedOut) {
 				return failCodeReviewWithoutReviewerOutput(ctx, stores, services, logger, job, pr, agentResults)
 			}
 			if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseSynthesizing); err != nil {
@@ -969,7 +970,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
 	fileScope := codeReviewChangedPaths(changedFiles)
 	timedOutBeforeStart := codeReviewReviewTimedOut(cfg, metadata)
-	selections, err := resolveCodeReviewReviewerAvailability(ctx, services, job.OrgID, cfg)
+	selections, err := resolveCodeReviewReviewerAvailability(ctx, services, job.OrgID, cfg, results, timedOutBeforeStart)
 	if err != nil {
 		return err
 	}
@@ -990,28 +991,6 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 				Str("session_id", job.SessionID.String()).
 				Str("reviewer", string(agentType)).
 				Msg("skipped unavailable code review reviewer")
-			continue
-		}
-		if timedOutBeforeStart {
-			raw := "reviewer timed out before the worker could start the reviewer thread"
-			result := &models.CodeReviewAgentResult{
-				OrgID:         job.OrgID,
-				SessionID:     job.SessionID,
-				AgentProvider: string(agentType),
-				AgentModel:    agentModel,
-				Role:          models.CodeReviewAgentRoleReviewer,
-				Status:        models.CodeReviewAgentResultStatusTimedOut,
-				RawOutput:     &raw,
-				StructuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
-					ReviewerKey:   key,
-					ReviewerIndex: idx,
-					Error:         raw,
-					CompletedAt:   time.Now().UTC().Format(time.RFC3339),
-				}),
-			}
-			if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
-				return fmt.Errorf("create timed-out code review reviewer result: %w", err)
-			}
 			continue
 		}
 		promptText := codeReviewReviewerPrompt(job, pr, cfg, policy.Version, metadata.BaseSHA, changedFiles, visualEvidence)
@@ -1038,19 +1017,28 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 		if err := stores.CodeReviews.CreatePromptRecord(ctx, record); err != nil {
 			return fmt.Errorf("create reviewer prompt record: %w", err)
 		}
-		thread, err := threads.CreateThread(ctx, threadsvc.CreateThreadInput{
+		fallback := idx >= cfg.AgentRoster.EffectiveReviewerCount()
+		label := codeReviewReviewerThreadLabel(idx, agentType, fallback)
+		thread, err := ensureCodeReviewReviewerThread(ctx, stores, threads, threadsvc.CreateThreadInput{
 			SessionID:       job.SessionID,
 			OrgID:           job.OrgID,
 			AgentType:       string(agentType),
 			Model:           stringPtrValue(agentModel),
 			ReasoningEffort: reasoningEffortPtr(cfg.AgentRoster.ReviewerReasoningEffort(idx)),
-			Label:           codeReviewReviewerThreadLabel(agentType),
+			Label:           label,
 			FileScope:       fileScope,
 			ExecutionMode:   models.ThreadExecutionModeReview,
 			FilesystemMode:  models.ThreadFilesystemModeReadOnly,
 			CreatedBySource: models.ThreadCreatedBySourceSystem,
-		})
+		}, fallback, results)
 		if err != nil {
+			if errors.Is(err, errCodeReviewFallbackCapacityExhausted) {
+				result := failedCodeReviewReviewerResult(job, idx, agentType, agentModel, models.CodeReviewAgentResultStatusFailed, codeReviewReviewerCapacityUnavailableMessage, false)
+				if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
+					return fmt.Errorf("record exhausted code review reviewer capacity: %w", err)
+				}
+				continue
+			}
 			return fmt.Errorf("create code review reviewer thread: %w", err)
 		}
 		structured := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
@@ -1073,6 +1061,9 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 		if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
 			return fmt.Errorf("create code review reviewer result: %w", err)
 		}
+		if thread.Status != models.ThreadStatusIdle || thread.CurrentTurn > 0 {
+			continue
+		}
 		if _, err := threads.SendMessage(ctx, codeReviewAgentMessageInput(
 			job,
 			thread.ID,
@@ -1091,11 +1082,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 				Error:           raw,
 				CompletedAt:     time.Now().UTC().Format(time.RFC3339),
 			})); updateErr != nil {
-				logger.Warn().Err(updateErr).
-					Str("session_id", job.SessionID.String()).
-					Str("thread_id", thread.ID.String()).
-					Str("reviewer", string(agentType)).
-					Msg("failed to record failed code review reviewer result")
+				return fmt.Errorf("record failed code review reviewer dispatch: %w", updateErr)
 			}
 			logger.Warn().Err(err).
 				Str("session_id", job.SessionID.String()).
@@ -1124,27 +1111,6 @@ type codeReviewOrchestratorSelection struct {
 	Available       bool
 }
 
-func resolveCodeReviewReviewerAvailability(ctx context.Context, services *Services, orgID uuid.UUID, cfg models.CodeReviewPolicyConfig) ([]codeReviewReviewerSelection, error) {
-	reviewers := cfg.AgentRoster.Reviewers
-	selections := make([]codeReviewReviewerSelection, 0, len(reviewers))
-	for idx, agentType := range reviewers {
-		available := true
-		if services != nil && services.CodingAgents != nil {
-			var err error
-			available, err = services.CodingAgents.IsAgentAvailable(ctx, orgID, nil, agentType, stringPtrValue(codeReviewReviewerAgentModel(cfg, idx, agentType)))
-			if err != nil {
-				return nil, fmt.Errorf("resolve code review reviewer %s availability: %w", agentType, err)
-			}
-		}
-		selections = append(selections, codeReviewReviewerSelection{
-			Index:     idx,
-			AgentType: agentType,
-			Available: available,
-		})
-	}
-	return selections, nil
-}
-
 func resolveCodeReviewOrchestratorAvailability(ctx context.Context, services *Services, orgID uuid.UUID, cfg models.CodeReviewPolicyConfig, results []models.CodeReviewAgentResult) (codeReviewOrchestratorSelection, error) {
 	candidates := codeReviewOrchestratorCandidates(cfg)
 	for _, candidate := range candidates {
@@ -1169,22 +1135,7 @@ func resolveCodeReviewOrchestratorAvailability(ctx context.Context, services *Se
 
 func unavailableCodeReviewReviewerResult(job runCodeReviewPayload, index int, agentType models.AgentType, agentModel *string) *models.CodeReviewAgentResult {
 	raw := fmt.Sprintf("reviewer skipped because %s authentication is not configured", agentType)
-	return &models.CodeReviewAgentResult{
-		OrgID:         job.OrgID,
-		SessionID:     job.SessionID,
-		AgentProvider: string(agentType),
-		AgentModel:    agentModel,
-		Role:          models.CodeReviewAgentRoleReviewer,
-		Status:        models.CodeReviewAgentResultStatusFailed,
-		RawOutput:     &raw,
-		StructuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
-			ReviewerKey:   codeReviewReviewerKey(index, agentType),
-			ReviewerIndex: index,
-			Unavailable:   true,
-			Error:         raw,
-			CompletedAt:   time.Now().UTC().Format(time.RFC3339),
-		}),
-	}
+	return failedCodeReviewReviewerResult(job, index, agentType, agentModel, models.CodeReviewAgentResultStatusFailed, raw, true)
 }
 
 func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) error {
@@ -1380,12 +1331,15 @@ func codeReviewReviewerKey(index int, agentType models.AgentType) string {
 	return fmt.Sprintf("%02d:%s", index, agentType)
 }
 
-func codeReviewReviewerThreadLabel(agentType models.AgentType) string {
+func codeReviewReviewerThreadLabel(index int, agentType models.AgentType, fallback bool) string {
 	label := strings.TrimSpace(string(agentType))
 	if label == "" {
 		label = "reviewer"
 	}
-	return "Code review: " + label
+	if fallback {
+		return fmt.Sprintf("Code review: %s (fallback %d)", label, index+1)
+	}
+	return fmt.Sprintf("Code review: %s (%d)", label, index+1)
 }
 
 func codeReviewAgentHasBuiltinReviewCommand(agentType models.AgentType) bool {
@@ -2438,11 +2392,15 @@ func codeReviewInFlightAgentPhaseFromState(policy models.CodeReviewPolicyConfig,
 	if len(policy.AgentRoster.Reviewers) == 0 {
 		return codeReviewAgentPhaseNone
 	}
+	filled := codeReviewReviewerSlotsFilled(policy, results)
 	waiting := false
 	for idx, agentType := range policy.AgentRoster.Reviewers {
 		result, found := byKey[codeReviewReviewerKey(idx, agentType)]
 		if !found {
-			return codeReviewAgentPhaseNone
+			if filled < policy.AgentRoster.EffectiveReviewerCount() {
+				return codeReviewAgentPhaseNone
+			}
+			continue
 		}
 		if codeReviewReviewerResultTerminal(result.Status) {
 			continue
@@ -2534,19 +2492,34 @@ func latestAssistantMessageForThread(ctx context.Context, stores *Stores, orgID,
 	return "", false, nil
 }
 
-func codeReviewReviewerRosterTerminal(policy models.CodeReviewPolicyConfig, results []models.CodeReviewAgentResult) bool {
+func codeReviewReviewerRosterTerminal(policy models.CodeReviewPolicyConfig, results []models.CodeReviewAgentResult, timedOut bool) bool {
 	byKey := codeReviewReviewerResultsByKey(results)
+	untried := false
+	completed := 0
 	for idx, agentType := range policy.AgentRoster.Reviewers {
 		result, ok := byKey[codeReviewReviewerKey(idx, agentType)]
-		if !ok || !codeReviewReviewerResultTerminal(result.Status) {
+		if !ok {
+			untried = true
+			continue
+		}
+		if !codeReviewReviewerResultTerminal(result.Status) {
 			return false
 		}
+		if codeReviewReviewerResultHasUsableOutput(result) {
+			completed++
+		}
 	}
-	return true
+	if completed >= policy.AgentRoster.EffectiveReviewerCount() {
+		return true
+	}
+	if timedOut {
+		return true
+	}
+	return !untried
 }
 
-func codeReviewReviewerExecutionFailed(policy models.CodeReviewPolicyConfig, results []models.CodeReviewAgentResult) bool {
-	if !codeReviewReviewerRosterTerminal(policy, results) {
+func codeReviewReviewerExecutionFailed(policy models.CodeReviewPolicyConfig, results []models.CodeReviewAgentResult, timedOut bool) bool {
+	if !codeReviewReviewerRosterTerminal(policy, results, timedOut) {
 		return false
 	}
 	return !codeReviewHasUsableReviewerOutput(results)
@@ -3243,7 +3216,7 @@ func completeCodeReviewAfterStableDeterministicFailure(
 		Str("org_id", job.OrgID.String()).
 		Str("session_id", job.SessionID.String()).
 		Bool("github_submitted", submitted).
-		Int("reviewer_runs_avoided", len(policy.AgentRoster.Reviewers)+1).
+		Int("reviewer_runs_avoided", policy.AgentRoster.EffectiveReviewerCount()+1).
 		Msg("completed code review after stable deterministic failure")
 	reconcileCodeReviewSessionSuccess(ctx, stores, logger, job)
 	enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")

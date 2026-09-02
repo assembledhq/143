@@ -507,10 +507,13 @@ const (
 	DefaultCodeReviewSemanticDedupeCooldownSeconds = 15 * 60
 	MinCodeReviewSemanticDedupeCooldownSeconds     = 60
 	MaxCodeReviewSemanticDedupeCooldownSeconds     = 24 * 60 * 60
+	MaxCodeReviewReviewers                         = MaxThreadsPerSession - 1
+	MaxCodeReviewReviewerModels                    = 10
 )
 
 type CodeReviewAgentRoster struct {
 	Reviewers                []AgentType       `json:"reviewers"`
+	ReviewerCount            int               `json:"reviewer_count,omitempty"`
 	Orchestrator             AgentType         `json:"orchestrator"`
 	ReviewerModels           []string          `json:"reviewer_models,omitempty"`
 	ReviewerReasoningEfforts []ReasoningEffort `json:"reviewer_reasoning_efforts,omitempty"`
@@ -519,6 +522,15 @@ type CodeReviewAgentRoster struct {
 	DisagreementBlocks       bool              `json:"disagreement_blocks"`
 	RequireReviewerQuorum    int               `json:"require_reviewer_quorum"`
 	TimeoutSeconds           int               `json:"timeout_seconds"`
+}
+
+// EffectiveReviewerCount returns the requested count, falling back to the full
+// roster for policies saved before reviewer_count was introduced.
+func (r CodeReviewAgentRoster) EffectiveReviewerCount() int {
+	if r.ReviewerCount != 0 {
+		return r.ReviewerCount
+	}
+	return len(r.Reviewers)
 }
 
 // ReviewerReasoningEffort returns the explicit effort for one reviewer. The
@@ -630,6 +642,7 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 		},
 		AgentRoster: CodeReviewAgentRoster{
 			Reviewers:                []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
+			ReviewerCount:            2,
 			Orchestrator:             AgentTypeOpenCode,
 			ReviewerModels:           []string{DefaultCodexModel, DefaultClaudeCodeModel},
 			ReviewerReasoningEfforts: []ReasoningEffort{ReasoningEffortHigh, ReasoningEffortHigh},
@@ -697,6 +710,7 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	}
 	if len(config.AgentRoster.Reviewers) > 0 {
 		defaults.AgentRoster = config.AgentRoster
+		defaults.AgentRoster.ReviewerCount = config.AgentRoster.EffectiveReviewerCount()
 		if defaults.AgentRoster.ReasoningEffort == "" {
 			defaults.AgentRoster.ReasoningEffort = ReasoningEffortHigh
 		}
@@ -791,8 +805,15 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	if len(c.AgentRoster.Reviewers) == 0 {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "at least one reviewer agent is required")
 	}
+	if len(c.AgentRoster.Reviewers) > MaxCodeReviewReviewerModels {
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("at most %d ranked reviewer models are allowed", MaxCodeReviewReviewerModels))
+	}
+	reviewerCount := c.AgentRoster.EffectiveReviewerCount()
+	if reviewerCount < 1 || reviewerCount > MaxCodeReviewReviewers || reviewerCount > len(c.AgentRoster.Reviewers) {
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("reviewer_count must be between 1 and %d and cannot exceed the number of ranked models", MaxCodeReviewReviewers))
+	}
 	if len(c.AgentRoster.ReviewerReasoningEfforts) > 0 && len(c.AgentRoster.ReviewerReasoningEfforts) != len(c.AgentRoster.Reviewers) {
-		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "reviewer_reasoning_efforts must match reviewer count")
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "reviewer_reasoning_efforts must match the number of ranked models")
 	}
 	for idx, agentType := range c.AgentRoster.Reviewers {
 		if err := agentType.Validate(); err != nil {
@@ -813,7 +834,7 @@ func (c CodeReviewPolicyConfig) Validate() error {
 		}
 	}
 	if len(c.AgentRoster.ReviewerModels) > 0 && len(c.AgentRoster.ReviewerModels) != len(c.AgentRoster.Reviewers) {
-		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "reviewer_models must match reviewer count")
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "reviewer_models must match the number of ranked models")
 	}
 	for idx, model := range c.AgentRoster.ReviewerModels {
 		model = strings.TrimSpace(model)
@@ -841,7 +862,7 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	if c.AgentRoster.Orchestrator.SupportsReasoningEffort() && !c.AgentRoster.Orchestrator.SupportsReasoningEffortLevel(c.AgentRoster.ReasoningEffort) {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("reasoning effort %q is not supported by orchestrator %q", c.AgentRoster.ReasoningEffort, c.AgentRoster.Orchestrator))
 	}
-	if c.AgentRoster.RequireReviewerQuorum < 1 || c.AgentRoster.RequireReviewerQuorum > len(c.AgentRoster.Reviewers) {
+	if c.AgentRoster.RequireReviewerQuorum < 1 || c.AgentRoster.RequireReviewerQuorum > reviewerCount {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "require_reviewer_quorum must be between 1 and reviewer count")
 	}
 	if c.AgentRoster.TimeoutSeconds < 60 {
