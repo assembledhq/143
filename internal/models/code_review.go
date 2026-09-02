@@ -524,7 +524,8 @@ type CodeReviewAgentRoster struct {
 	TimeoutSeconds           int               `json:"timeout_seconds"`
 }
 
-// Policies saved before reviewer_count ran every model in the roster.
+// EffectiveReviewerCount returns the requested count, falling back to the full
+// roster for policies saved before reviewer_count was introduced.
 func (r CodeReviewAgentRoster) EffectiveReviewerCount() int {
 	if r.ReviewerCount != 0 {
 		return r.ReviewerCount
