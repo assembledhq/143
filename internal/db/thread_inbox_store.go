@@ -85,6 +85,7 @@ func (s *ThreadInboxStore) AppendForMessage(ctx context.Context, orgID uuid.UUID
 			WHERE org_id = @org_id
 			  AND session_id = @session_id
 			  AND id = @thread_id
+			  AND archived_at IS NULL
 			FOR UPDATE
 		), next_sequence AS (
 			SELECT COALESCE(MAX(sequence_no), 0) + 1 AS sequence_no

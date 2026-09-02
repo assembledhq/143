@@ -644,6 +644,7 @@ type Stores struct {
 	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
 	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
 	ThreadInbox         *db.ThreadInboxStore    // nil-safe: settles queued input when a thread is cancelled
+	ThreadSendTx        db.TxStarter            // nil-safe: enables atomic queued thread-message admission
 	HumanInputRequests  *db.SessionHumanInputRequestStore
 	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
 	SandboxHolders      *db.SessionSandboxHolderStore   // nil-safe: snapshot quiescence for shared sandbox thread runtimes
@@ -12754,6 +12755,9 @@ func enqueuePRPushReconciliation(ctx context.Context, stores *Stores, logger zer
 	clientMessageID := fmt.Sprintf("push-reconcile:%s:%d", run.ID, revision)
 	dedupeKey := fmt.Sprintf("continue_session_push_reconcile:%s:%d", run.ID, revision)
 	threadService := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	if stores.ThreadInbox != nil && stores.ThreadSendTx != nil {
+		threadService.SetThreadInboxStore(stores.ThreadInbox, stores.ThreadSendTx)
+	}
 	_, err = threadService.SendMessage(ctx, threadsvc.SendMessageInput{
 		SessionID:                     run.ID,
 		OrgID:                         run.OrgID,

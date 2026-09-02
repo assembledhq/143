@@ -504,6 +504,27 @@ func TestSessionThreadStore_Archive(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionThreadStore_ArchiveRejectsQueuedWork(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionThreadStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	mock.ExpectQuery(`WITH visible_threads AS[\s\S]*pending_message_count[\s\S]*FOR UPDATE[\s\S]*pending_message_count FROM visible_threads WHERE id = @id[\s\S]*RETURNING`).
+		WithArgs(anyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
+
+	_, err = store.Archive(context.Background(), orgID, sessionID, threadID)
+	require.ErrorIs(t, err, pgx.ErrNoRows, "Archive should refuse a thread once the locked row shows queued work")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionThreadStore_UpdateStatus(t *testing.T) {
 	t.Parallel()
 
@@ -561,6 +582,52 @@ func TestSessionThreadStore_UpdateStatus(t *testing.T) {
 				require.Error(t, err, "UpdateStatus should return an error when no rows affected")
 			} else {
 				require.NoError(t, err, "UpdateStatus should not return an error")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionThreadStore_IncrementPendingMessages(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		rowsAffected int64
+		expectErr    error
+	}{
+		{
+			name:         "increments visible thread",
+			rowsAffected: 1,
+		},
+		{
+			name:         "rejects archived or missing thread",
+			rowsAffected: 0,
+			expectErr:    pgx.ErrNoRows,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionThreadStore(mock)
+			orgID := uuid.New()
+			threadID := uuid.New()
+
+			mock.ExpectExec(`UPDATE session_threads[\s\S]*pending_message_count = pending_message_count \+ 1[\s\S]*archived_at IS NULL`).
+				WithArgs(anyArgs(2)...).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+
+			err = store.IncrementPendingMessages(context.Background(), orgID, threadID)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "IncrementPendingMessages should reject archived or missing threads")
+			} else {
+				require.NoError(t, err, "IncrementPendingMessages should succeed for visible threads")
 			}
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
