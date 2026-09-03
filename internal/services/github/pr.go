@@ -4946,6 +4946,46 @@ func (s *PRService) findPRPreviewComment(ctx context.Context, token, owner, repo
 	return nil, "", nil
 }
 
+func (s *PRService) CodeReviewIssueCommentBodies(ctx context.Context, orgID, repositoryID uuid.UUID, number int) ([]string, error) {
+	if s == nil || s.repos == nil {
+		return nil, fmt.Errorf("repository store is unavailable")
+	}
+	if orgID == uuid.Nil || repositoryID == uuid.Nil || number <= 0 {
+		return nil, fmt.Errorf("org_id, repository_id, and positive pull request number are required")
+	}
+
+	repository, err := s.repos.GetByID(ctx, orgID, repositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("load repository for issue comments: %w", err)
+	}
+	token, err := s.getInstallationTokenForRepo(ctx, orgID, &repository)
+	if err != nil {
+		return nil, fmt.Errorf("load installation token for issue comments: %w", err)
+	}
+	owner, repo := splitRepo(repository.FullName)
+
+	const maxPages = 50
+	var bodies []string
+	for page := 1; page <= maxPages; page++ {
+		path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100&page=%d", owner, repo, number, page)
+		resp, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, fmt.Errorf("list issue comments: %w", err)
+		}
+		var comments []githubIssueComment
+		if err := json.Unmarshal(resp, &comments); err != nil {
+			return nil, fmt.Errorf("decode issue comments: %w", err)
+		}
+		for _, comment := range comments {
+			bodies = append(bodies, comment.Body)
+		}
+		if len(comments) < 100 {
+			break
+		}
+	}
+	return bodies, nil
+}
+
 func (s *PRService) createIssueComment(ctx context.Context, token, owner, repo string, prNumber int, body string) (int64, error) {
 	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, prNumber)
 	resp, err := s.doGitHubRequest(ctx, token, http.MethodPost, path, map[string]string{"body": body})

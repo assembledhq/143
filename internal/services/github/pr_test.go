@@ -385,6 +385,49 @@ func TestGetCodeReviewPullRequestSnapshot(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "snapshot loader should use an org-scoped repository lookup")
 }
 
+func TestCodeReviewIssueCommentBodies(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/repos/assembledhq/assembled/issues/54903/comments", r.URL.Path, "issue comment loader should request the tagged issue comments")
+		require.Equal(t, "per_page=100&page=1", r.URL.RawQuery, "issue comment loader should paginate")
+		require.Equal(t, "token installation-token", r.Header.Get("Authorization"), "issue comment loader should use the repository installation token")
+		_, err := fmt.Fprint(w, `[{"id":1,"body":"A DB migration was added in this PR."}]`)
+		require.NoError(t, err, "GitHub test response should be written")
+	}))
+	t.Cleanup(server.Close)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	orgID := uuid.New()
+	repositoryID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+	mock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgx.NamedArgs{"id": repositoryID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repositoryID, orgID, integrationID, int64(1001), "assembledhq/assembled", "main",
+			false, nil, nil, "https://github.com/assembledhq/assembled.git", int64(456), "active",
+			nil, nil, []byte(`{}`), now, now,
+		))
+	svc := &PRService{
+		tokenProvider: &Service{cache: map[int64]*cachedToken{
+			456: {Token: "installation-token", ExpiresAt: time.Now().Add(time.Hour)},
+		}},
+		repos:      db.NewRepositoryStore(mock),
+		logger:     zerolog.Nop(),
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+	}
+
+	bodies, err := svc.CodeReviewIssueCommentBodies(context.Background(), orgID, repositoryID, 54903)
+
+	require.NoError(t, err, "issue comment loader should return comment bodies")
+	require.Equal(t, []string{"A DB migration was added in this PR."}, bodies, "issue comment loader should preserve bodies")
+	require.NoError(t, mock.ExpectationsWereMet(), "issue comment loader should use an org-scoped repository lookup")
+}
+
 func TestFormatPRTitle(t *testing.T) {
 	t.Parallel()
 

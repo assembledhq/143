@@ -661,6 +661,70 @@ func TestCodeReviewSubmitDecision(t *testing.T) {
 	}
 }
 
+type codeReviewIssueCommentStub struct {
+	stubPRService
+	bodies []string
+	err    error
+}
+
+func (s *codeReviewIssueCommentStub) CodeReviewIssueCommentBodies(ctx context.Context, orgID, repositoryID uuid.UUID, number int) ([]string, error) {
+	return s.bodies, s.err
+}
+
+func TestCodeReviewPullRequestHasDBMigrationMessage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		pr       models.PullRequest
+		job      runCodeReviewPayload
+		services *Services
+		expected bool
+	}{
+		{
+			name:     "detects marker in PR body",
+			pr:       models.PullRequest{Body: stringPtr("A DB migration was added in this PR. Please follow instructions.")},
+			expected: true,
+		},
+		{
+			name: "detects marker in review request context body",
+			job: runCodeReviewPayload{
+				RequestContext: &codereview.ReviewRequestContext{Body: "a db migration was added in this pr"},
+			},
+			expected: true,
+		},
+		{
+			name:     "detects marker in issue comments",
+			pr:       models.PullRequest{GitHubPRNumber: 42},
+			job:      runCodeReviewPayload{RepositoryID: uuid.MustParse("11111111-1111-1111-1111-111111111111")},
+			services: &Services{PR: &codeReviewIssueCommentStub{bodies: []string{"A DB migration was added in this PR."}}},
+			expected: true,
+		},
+		{
+			name:     "returns false when marker is absent",
+			pr:       models.PullRequest{Body: stringPtr("Routine refactor.")},
+			services: &Services{PR: &codeReviewIssueCommentStub{bodies: []string{"Looks good."}}},
+			expected: false,
+		},
+		{
+			name:     "returns false when comment listing fails",
+			pr:       models.PullRequest{GitHubPRNumber: 42},
+			services: &Services{PR: &codeReviewIssueCommentStub{err: errors.New("github unavailable")}},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := codeReviewPullRequestHasDBMigrationMessage(context.Background(), tt.services, tt.pr, tt.job)
+
+			require.Equal(t, tt.expected, actual, "DB migration message detection should match expected")
+		})
+	}
+}
+
 func TestSubmitCodeReviewToGitHubUsesPublicationLock(t *testing.T) {
 	t.Parallel()
 
