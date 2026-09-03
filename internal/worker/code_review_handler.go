@@ -58,6 +58,41 @@ const codeReviewOrchestratorHumanReviewReasonLimit = 10
 const codeReviewOrchestratorFindingSummaryLimit = 500
 const codeReviewOrchestratorFindingBodyLimit = 2_000
 const codeReviewOrchestratorHumanReviewSummaryLimit = 500
+const codeReviewDBMigrationMessageMarker = "A DB migration was added in this PR"
+
+type codeReviewIssueCommentLister interface {
+	CodeReviewIssueCommentBodies(ctx context.Context, orgID, repositoryID uuid.UUID, number int) ([]string, error)
+}
+
+func codeReviewTextContainsDBMigrationMessage(text string) bool {
+	return strings.Contains(strings.ToLower(text), strings.ToLower(codeReviewDBMigrationMessageMarker))
+}
+
+func codeReviewPullRequestHasDBMigrationMessage(ctx context.Context, services *Services, pr models.PullRequest, job runCodeReviewPayload) bool {
+	if codeReviewTextContainsDBMigrationMessage(stringPtrValue(pr.Body)) {
+		return true
+	}
+	if job.RequestContext != nil && codeReviewTextContainsDBMigrationMessage(job.RequestContext.Body) {
+		return true
+	}
+	if services == nil || services.PR == nil {
+		return false
+	}
+	lister, ok := services.PR.(codeReviewIssueCommentLister)
+	if !ok {
+		return false
+	}
+	bodies, err := lister.CodeReviewIssueCommentBodies(ctx, job.OrgID, job.RepositoryID, pr.GitHubPRNumber)
+	if err != nil {
+		return false
+	}
+	for _, body := range bodies {
+		if codeReviewTextContainsDBMigrationMessage(body) {
+			return true
+		}
+	}
+	return false
+}
 
 type codeReviewDescriptionEvaluation struct {
 	Passed               bool
@@ -379,20 +414,22 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return err
 		}
+		dbMigrationMessageFound := codeReviewPullRequestHasDBMigrationMessage(ctx, services, pr, job)
 		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
-			Policy:                policy.Config(),
-			Job:                   job,
-			SessionURL:            codeReviewSessionURL(services.FrontendURL, job.SessionID),
-			PolicySettingsURL:     codeReviewPolicySettingsURL(services.FrontendURL),
-			PullRequest:           pr,
-			Health:                health,
-			AgentResults:          agentResults,
-			Findings:              findings,
-			ChangedFiles:          changedFiles,
-			ChangedFilesAvailable: changedFilesAvailable,
-			OrchestratorSynthesis: codeReviewOrchestratorSynthesisFromResults(agentResults),
-			VisualEvidence:        visualEvidence,
-			AssessedAt:            time.Now().UTC(),
+			Policy:                  policy.Config(),
+			Job:                     job,
+			SessionURL:              codeReviewSessionURL(services.FrontendURL, job.SessionID),
+			PolicySettingsURL:       codeReviewPolicySettingsURL(services.FrontendURL),
+			PullRequest:             pr,
+			Health:                  health,
+			AgentResults:            agentResults,
+			Findings:                findings,
+			ChangedFiles:            changedFiles,
+			ChangedFilesAvailable:   changedFilesAvailable,
+			OrchestratorSynthesis:   codeReviewOrchestratorSynthesisFromResults(agentResults),
+			VisualEvidence:          visualEvidence,
+			DBMigrationMessageFound: dbMigrationMessageFound,
+			AssessedAt:              time.Now().UTC(),
 		})
 		if err := ensureCodeReviewInlineSelection(ctx, stores.CodeReviews, job, findings, changedFiles, policy.Config().InlineCommentLimit); err != nil {
 			return fmt.Errorf("select code review inline findings: %w", err)
@@ -3101,19 +3138,20 @@ type codeReviewAuthorTeamMembershipChecker interface {
 }
 
 type liveCodeReviewOutcomeInput struct {
-	Policy                models.CodeReviewPolicyConfig
-	Job                   runCodeReviewPayload
-	SessionURL            string
-	PolicySettingsURL     string
-	PullRequest           models.PullRequest
-	Health                *models.PullRequestHealthResponse
-	AgentResults          []models.CodeReviewAgentResult
-	Findings              []models.CodeReviewFinding
-	ChangedFiles          []codereviewsvc.PullRequestFile
-	ChangedFilesAvailable bool
-	OrchestratorSynthesis codeReviewOrchestratorSynthesis
-	VisualEvidence        models.CodeReviewVisualEvidenceSnapshot
-	AssessedAt            time.Time
+	Policy                  models.CodeReviewPolicyConfig
+	Job                     runCodeReviewPayload
+	SessionURL              string
+	PolicySettingsURL       string
+	PullRequest             models.PullRequest
+	Health                  *models.PullRequestHealthResponse
+	AgentResults            []models.CodeReviewAgentResult
+	Findings                []models.CodeReviewFinding
+	ChangedFiles            []codereviewsvc.PullRequestFile
+	ChangedFilesAvailable   bool
+	OrchestratorSynthesis   codeReviewOrchestratorSynthesis
+	VisualEvidence          models.CodeReviewVisualEvidenceSnapshot
+	DBMigrationMessageFound bool
+	AssessedAt              time.Time
 }
 
 func codeReviewStableDeterministicRisk(policy models.CodeReviewPolicyConfig, job runCodeReviewPayload, pr models.PullRequest, changedFiles []codereviewsvc.PullRequestFile, changedFilesAvailable bool) models.CodeReviewRiskEvaluation {
@@ -3238,24 +3276,25 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		descriptionEvaluationValid = descriptionErr == nil
 	}
 	risk := models.EvaluateCodeReviewRisk(policy, models.CodeReviewRiskInput{
-		FilesChanged:          len(input.ChangedFiles),
-		LinesChanged:          codeReviewLinesChanged(input.ChangedFiles),
-		ChangedPaths:          codeReviewChangedPaths(input.ChangedFiles),
-		ChecksPassing:         codeReviewChecksPassing(policy, input.Health),
-		RequiredChecksPassing: codeReviewRequiredChecksPassing(policy, input.Health),
-		DescriptionPassed:     !orchestratorSynthesisUsable || (descriptionEvaluationValid && descriptionEvaluation.Passed),
-		UpToDate:              codeReviewUpToDate(input.Health),
-		Author:                codeReviewAuthor(input.Job, input.PullRequest),
-		AuthorClass:           codeReviewAuthorClass(input.PullRequest),
-		AuthorTeams:           input.Job.PullRequestAuthorTeams,
-		FromFork:              input.Job.FromFork,
-		ContextFetchFailed:    input.Health == nil || !input.ChangedFilesAvailable,
-		HeadSHAChanged:        codeReviewHeadChanged(input.Job.HeadSHA, input.PullRequest, input.Health),
-		BlockingFindings:      blockingFindings,
-		ReviewerDisagreement:  input.OrchestratorSynthesis.ReviewerDisagreement,
-		ScopeMismatch:         input.OrchestratorSynthesis.ScopeMismatch,
-		UnresolvedUncertainty: input.OrchestratorSynthesis.UnresolvedUncertainty,
-		PromptInjectionFound:  codeReviewPromptInjectionLikely(stringPtrValue(input.PullRequest.Body), input.Job.RequestContext) || codeReviewVisualEvidencePromptInjectionLikely(input.VisualEvidence) || input.OrchestratorSynthesis.PromptInjectionDetected,
+		FilesChanged:            len(input.ChangedFiles),
+		LinesChanged:            codeReviewLinesChanged(input.ChangedFiles),
+		ChangedPaths:            codeReviewChangedPaths(input.ChangedFiles),
+		ChecksPassing:           codeReviewChecksPassing(policy, input.Health),
+		RequiredChecksPassing:   codeReviewRequiredChecksPassing(policy, input.Health),
+		DescriptionPassed:       !orchestratorSynthesisUsable || (descriptionEvaluationValid && descriptionEvaluation.Passed),
+		UpToDate:                codeReviewUpToDate(input.Health),
+		Author:                  codeReviewAuthor(input.Job, input.PullRequest),
+		AuthorClass:             codeReviewAuthorClass(input.PullRequest),
+		AuthorTeams:             input.Job.PullRequestAuthorTeams,
+		FromFork:                input.Job.FromFork,
+		ContextFetchFailed:      input.Health == nil || !input.ChangedFilesAvailable,
+		HeadSHAChanged:          codeReviewHeadChanged(input.Job.HeadSHA, input.PullRequest, input.Health),
+		BlockingFindings:        blockingFindings,
+		ReviewerDisagreement:    input.OrchestratorSynthesis.ReviewerDisagreement,
+		ScopeMismatch:           input.OrchestratorSynthesis.ScopeMismatch,
+		UnresolvedUncertainty:   input.OrchestratorSynthesis.UnresolvedUncertainty,
+		PromptInjectionFound:    codeReviewPromptInjectionLikely(stringPtrValue(input.PullRequest.Body), input.Job.RequestContext) || codeReviewVisualEvidencePromptInjectionLikely(input.VisualEvidence) || input.OrchestratorSynthesis.PromptInjectionDetected,
+		DBMigrationMessageFound: input.DBMigrationMessageFound,
 	})
 	if reviewerQuorum < requiredReviewerQuorum {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: requiredReviewerQuorum})
