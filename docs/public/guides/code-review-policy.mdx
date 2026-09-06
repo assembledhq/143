@@ -12,7 +12,7 @@ tags:
 llm_summary: One organization-wide code review policy separates optional reviewer instructions from automated approval policy and deterministic safeguards; comment-only is the safe default.
 ---
 
-Start with comment-only reviews and no additional instructions. Each configured reviewer uses its native `/review` behavior, while the platform keeps the review read-only and records the policy version used for the run.
+Start with comment-only reviews and no additional instructions. Each selected reviewer uses its native `/review` behavior, while the platform keeps the review read-only and records the policy version used for the run.
 
 ## Choose review behavior
 
@@ -109,7 +109,15 @@ Use the report to tune policy deliberately:
 
 Use a prompt example when it matches your intent. Previewing and applying an example replaces only its corresponding prompt; it never changes enablement, outcome, reviewers, paths, thresholds, or safety gates.
 
-Under **Safeguards → Reviewers & agents**, choose a reasoning level beside each reviewer model. Reviewers can use different levels in the same run. The default is **High**, and the available choices follow the agent selected in that row. Configure the orchestrator's reasoning separately beside its model.
+## Choose reviewers and fallbacks
+
+Under **Safeguards → Reviewers & agents**, set **Number of reviewers** to one, two, or three. Then arrange **Ranked reviewer models** in order of preference with the up and down controls. Use **Add model** to keep up to ten choices in the list; adding a model does not increase the number of reviewers that run.
+
+143 starts enough available models from the top of the list to fill the requested reviewer count. If a model is unavailable or an attempt fails to produce a usable review, the next choice replaces it. For example, two reviewers with four ranked models start the first two available choices and keep the other two as fallbacks. A completed review with blocking findings still counts as a review and does not trigger a replacement.
+
+Choose a reasoning level beside each model. The default is **High**, and the available choices follow the agent selected in that row. Moving a model preserves its reasoning level. Configure the orchestrator's reasoning separately beside its model.
+
+All reviewer attempts share the configured timeout. Unused fallbacks remain idle, and failed attempts remain in the review evidence. **Reviewer quorum** in **Approval criteria** remains a separate approval safeguard and cannot exceed the requested reviewer count. Lowering that count lowers quorum when needed. Existing policies keep their previous reviewer count until you change it.
 
 ## Apply one policy everywhere
 

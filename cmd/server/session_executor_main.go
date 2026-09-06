@@ -427,7 +427,6 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 	}
 	deps.CodeReviews.SetJobStore(deps.Jobs)
 	return &worker.Stores{
-		TxStarter:           pool,
 		Issues:              deps.Issues,
 		Sessions:            deps.Sessions,
 		SessionChangesets:   db.NewSessionChangesetStore(pool),
@@ -455,6 +454,7 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 		SessionMessages:     deps.SessionMessages,
 		SessionThreads:      deps.SessionThreads,
 		ThreadInbox:         db.NewThreadInboxStore(pool),
+		ThreadSendTx:        pool,
 		HumanInputRequests:  db.NewSessionHumanInputRequestStore(pool),
 		ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 		SandboxHolders:      db.NewSessionSandboxHolderStore(pool),

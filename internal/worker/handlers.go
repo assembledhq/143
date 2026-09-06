@@ -617,7 +617,6 @@ func hasServiceHandlersDependencies(services *Services) bool {
 
 // Stores holds all the database stores needed by job handlers.
 type Stores struct {
-	TxStarter           db.TxStarter
 	Issues              *db.IssueStore
 	Sessions            *db.SessionStore
 	SessionChangesets   *db.SessionChangesetStore
@@ -645,6 +644,7 @@ type Stores struct {
 	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
 	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
 	ThreadInbox         *db.ThreadInboxStore    // nil-safe: settles queued input when a thread is cancelled
+	ThreadSendTx        db.TxStarter            // nil-safe: enables atomic queued thread-message admission
 	HumanInputRequests  *db.SessionHumanInputRequestStore
 	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
 	SandboxHolders      *db.SessionSandboxHolderStore   // nil-safe: snapshot quiescence for shared sandbox thread runtimes
@@ -684,8 +684,8 @@ func newWorkerThreadService(stores *Stores, logger zerolog.Logger) *threadsvc.Se
 	}
 	service := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
 	if stores.ThreadInbox != nil {
-		if stores.TxStarter != nil {
-			service.SetThreadInboxStore(stores.ThreadInbox, stores.TxStarter)
+		if stores.ThreadSendTx != nil {
+			service.SetThreadInboxStore(stores.ThreadInbox, stores.ThreadSendTx)
 		} else {
 			service.SetThreadInboxStore(stores.ThreadInbox)
 		}

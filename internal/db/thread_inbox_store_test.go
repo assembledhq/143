@@ -59,6 +59,35 @@ func TestThreadInboxStore_AppendForMessage(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestThreadInboxStore_AppendForMessageRejectsArchivedThread(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	payload := json.RawMessage(`{"message_id":42}`)
+
+	mock.ExpectQuery(`WITH locked_thread AS[\s\S]*archived_at IS NULL[\s\S]*FOR UPDATE`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(threadInboxEntryTestColumns))
+
+	store := NewThreadInboxStore(mock)
+	_, err = store.AppendForMessage(context.Background(), orgID, AppendThreadInboxEntryParams{
+		SessionID: sessionID,
+		ThreadID:  threadID,
+		MessageID: 42,
+		EntryType: models.ThreadInboxEntryTypeUserMessage,
+		Payload:   payload,
+	})
+
+	require.ErrorIs(t, err, pgx.ErrNoRows, "AppendForMessage should reject archived threads after taking the lock")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestThreadInboxStore_MarkDeliveredForEntry(t *testing.T) {
 	t.Parallel()
 

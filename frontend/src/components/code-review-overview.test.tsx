@@ -144,7 +144,7 @@ describe("TimeRangePicker", () => {
     setDesktopMatch(false);
     const user = userEvent.setup();
     const onValueChange = vi.fn();
-    const start = subDays(new Date(), 12);
+    const start = addDays(startOfMonth(subDays(new Date(), 30)), 4);
     render(<TimeRangePicker label="Time window" value="30d" onValueChange={onValueChange} />);
 
     await user.click(screen.getByRole("button", { name: "Time window" }));
@@ -164,7 +164,7 @@ describe("TimeRangePicker", () => {
     setDesktopMatch(desktop);
     const user = userEvent.setup();
     const onValueChange = vi.fn();
-    const start = subDays(new Date(), 12);
+    const start = addDays(startOfMonth(subDays(new Date(), 30)), 4);
     render(<TimeRangePicker label="Time window" value="30d" onValueChange={onValueChange} />);
 
     await user.click(screen.getByRole("button", { name: "Time window" }));
@@ -186,7 +186,7 @@ describe("TimeRangePicker", () => {
   it("keeps the picker open and the draft intact when the viewport crosses the breakpoint", async () => {
     setDesktopMatch(false);
     const user = userEvent.setup();
-    const start = subDays(new Date(), 12);
+    const start = addDays(startOfMonth(subDays(new Date(), 30)), 4);
     render(<TimeRangePicker label="Time window" value="30d" onValueChange={vi.fn()} />);
 
     await user.click(screen.getByRole("button", { name: "Time window" }));

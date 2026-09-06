@@ -476,7 +476,6 @@ func main() {
 		workerCodeReviewDisputeStore.SetJobStore(jobStore)
 		workerCodeReviewInsightStore := db.NewCodeReviewInsightStore(pool)
 		stores := &worker.Stores{
-			TxStarter:           pool,
 			Issues:              issueStore,
 			Users:               db.NewUserStore(pool),
 			Sessions:            sessionStore,
@@ -504,6 +503,7 @@ func main() {
 			SessionMessages:     sessionMessageStore,
 			SessionThreads:      sessionThreadStore,
 			ThreadInbox:         db.NewThreadInboxStore(pool),
+			ThreadSendTx:        pool,
 			HumanInputRequests:  sessionHumanInputStore,
 			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 			SandboxHolders:      db.NewSessionSandboxHolderStore(pool),

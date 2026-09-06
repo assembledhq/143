@@ -2712,11 +2712,11 @@ describe("CodeReviewsPage", () => {
       "Blocked path patterns",
       "Required checks",
       "Eligible GitHub authors",
-      "Reviewer models",
-      "Add reviewer model",
+      "Number of reviewers",
+      "Ranked reviewer models",
       "Reviewer 1 model",
       "Reviewer 2 model",
-      "Reasoning level",
+      "Reviewer 1 reasoning level",
       "Orchestrator model",
     ]) {
       expect(screen.getByRole("button", { name: `About ${label}` })).toBeInTheDocument();
@@ -2996,6 +2996,116 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("radio", { name: /^Approve acceptable PRs/i })).toBeChecked();
   });
 
+  it("saves reviewer count independently of ranked models and bounds quorum", async () => {
+    const user = userEvent.setup();
+    const rankedConfig: CodeReviewPolicyConfig = {
+      ...policy.config,
+      approval_mode: "approve_acceptable",
+      agent_roster: {
+        ...policy.config.agent_roster,
+        reviewer_count: 2,
+        reviewers: ["codex", "claude_code", "codex", "claude_code"],
+        reviewer_models: ["gpt-5.4", "claude-sonnet-4-6", "gpt-5.4", "claude-opus-4-6"],
+        reviewer_reasoning_efforts: ["high", "max", "low", "high"],
+      },
+    };
+    const state = mockCodeReviewBaseHandlers(githubTriggerReady, undefined, rankedConfig);
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
+
+    expect(screen.getByText(/Approval requires 2 of 2 reviewers/)).toBeInTheDocument();
+    expect(screen.getByText("3. Fallback model")).toBeInTheDocument();
+    await user.click(screen.getByRole("combobox", { name: "Number of reviewers" }));
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["1", "2", "3"]);
+    await user.click(screen.getByRole("option", { name: "1" }));
+
+    await waitFor(() => {
+      expect(state.getCurrentConfig().agent_roster).toEqual({
+        ...rankedConfig.agent_roster,
+        reviewer_count: 1,
+        require_reviewer_quorum: 1,
+      });
+    });
+    expect(screen.getByText(/Approval requires 1 of 1 reviewer/)).toBeInTheDocument();
+    expect(screen.getByText("2. Fallback model")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
+    const quorum = screen.getByRole("spinbutton", { name: "Reviewer quorum" });
+    expect(quorum).toHaveAttribute("max", "1");
+    await user.clear(quorum);
+    await user.type(quorum, "3");
+    await user.tab();
+    await waitFor(() => expect(quorum).toHaveValue(1));
+    expect(state.getCurrentConfig().agent_roster.require_reviewer_quorum).toBe(1);
+  });
+
+  it("reorders ranked models with their provider and reasoning level", async () => {
+    const user = userEvent.setup();
+    const rankedConfig: CodeReviewPolicyConfig = {
+      ...policy.config,
+      agent_roster: {
+        ...policy.config.agent_roster,
+        reviewer_count: 1,
+        require_reviewer_quorum: 1,
+        reviewer_reasoning_efforts: ["xhigh", "max"],
+      },
+    };
+    const state = mockCodeReviewBaseHandlers(githubTriggerReady, undefined, rankedConfig);
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
+    expect(screen.getByRole("button", { name: "Move reviewer 1 up" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Move reviewer 2 down" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "Move reviewer 2 up" }));
+    await waitFor(() => {
+      expect(state.getCurrentConfig().agent_roster).toEqual({
+        ...rankedConfig.agent_roster,
+        reviewers: ["claude_code", "codex"],
+        reviewer_models: ["claude-sonnet-4-6", "gpt-5.4"],
+        reviewer_reasoning_efforts: ["max", "xhigh"],
+      });
+    });
+    expect(screen.getByRole("combobox", { name: "Reviewer 1 reasoning level" })).toHaveTextContent("Max");
+    await user.click(screen.getByRole("button", { name: "Move reviewer 1 down" }));
+    await waitFor(() => expect(state.getCurrentConfig().agent_roster).toEqual(rankedConfig.agent_roster));
+  });
+
+  it("adds fallback models beyond three without increasing a legacy reviewer count", async () => {
+    const user = userEvent.setup();
+    const state = mockCodeReviewBaseHandlers();
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
+    expect(screen.getByRole("combobox", { name: "Number of reviewers" })).toHaveTextContent("2");
+
+    for (let count = 3; count <= 10; count++) {
+      await user.click(screen.getByRole("button", { name: "Add model" }));
+      await waitFor(() => {
+        expect(state.getCurrentConfig().agent_roster.reviewers).toEqual([
+          ...policy.config.agent_roster.reviewers,
+          ...Array.from({ length: count - 2 }, () => "claude_code"),
+        ]);
+        expect(state.getCurrentConfig().agent_roster.reviewer_count).toBe(2);
+        expect(state.getCurrentConfig().agent_roster.require_reviewer_quorum).toBe(2);
+      });
+    }
+    expect(screen.getByRole("button", { name: "Add model" })).toBeDisabled();
+    expect(screen.getByText("10. Fallback model")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Remove reviewer 1" }));
+    await waitFor(() => expect(state.getCurrentConfig().agent_roster.reviewers).toEqual([
+      ...Array.from({ length: 9 }, () => "claude_code"),
+    ]));
+    expect(state.getCurrentConfig().agent_roster.reviewer_count).toBe(2);
+    expect(state.getCurrentConfig().agent_roster.require_reviewer_quorum).toBe(2);
+    expect(screen.getByRole("button", { name: "Add model" })).toBeEnabled();
+  });
+
   it("saves independent reasoning levels for each reviewer", async () => {
     const user = userEvent.setup();
     const state = mockCodeReviewBaseHandlers();
@@ -3023,7 +3133,10 @@ describe("CodeReviewsPage", () => {
       expect(state.getCurrentConfig().agent_roster.reviewers).toEqual(["claude_code"]);
       expect(state.getCurrentConfig().agent_roster.reviewer_models).toEqual(["claude-sonnet-4-6"]);
       expect(state.getCurrentConfig().agent_roster.reviewer_reasoning_efforts).toEqual(["max"]);
+      expect(state.getCurrentConfig().agent_roster.reviewer_count).toBe(1);
+      expect(state.getCurrentConfig().agent_roster.require_reviewer_quorum).toBe(1);
     });
+    expect(screen.getByRole("button", { name: "Remove reviewer 1" })).toBeDisabled();
   });
 
   it("supports max reasoning for Claude-only rosters and normalizes it when Codex is selected", async () => {

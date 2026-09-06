@@ -11,6 +11,7 @@ import {
   ChartNoAxesColumnIncreasing,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   CircleHelp,
   ClipboardCheck,
   FileSearch,
@@ -146,7 +147,8 @@ const CODE_REVIEW_PAGE_SIZE = 50;
 const CODE_REVIEW_SEARCH_DEBOUNCE_MS = 300;
 const CODE_REVIEW_TIME_WINDOW_REFRESH_MS = 60_000;
 const MAX_BROWSER_TIMEOUT_MS = 2_147_000_000;
-const MAX_REVIEWER_MODELS = 3;
+const MAX_REVIEWERS = 3;
+const MAX_REVIEWER_MODELS = 10;
 const CODE_REVIEW_REASONING_OPTIONS = [
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
@@ -496,6 +498,10 @@ function ensureReviewerModels(config: CodeReviewPolicyConfig, modelGroups: Agent
     if (configured && modelBelongsToAgent(agent, configured)) return configured;
     return defaultModelForAgent(agent, modelGroups);
   });
+}
+
+function effectiveReviewerCount(config: CodeReviewPolicyConfig): number {
+  return config.agent_roster.reviewer_count || config.agent_roster.reviewers.length;
 }
 
 type CodeReviewReasoningEffort = NonNullable<CodeReviewPolicyConfig["agent_roster"]["reasoning_effort"]>;
@@ -2411,7 +2417,7 @@ function AdvancedPolicySettings({
                         label="Reviewer quorum"
                         serverValue={config?.agent_roster.require_reviewer_quorum}
                         min={1}
-                        max={Math.max(1, config?.agent_roster.reviewers.length ?? 1)}
+                        max={config ? effectiveReviewerCount(config) : 1}
                         disabled={!config}
                         autosave={autosave}
                 buildPatch={(value) =>
@@ -2683,7 +2689,7 @@ function PolicySummary({ config }: { config: CodeReviewPolicyConfig | null }) {
   }
 
   const outcome = policyOutcome(config);
-  const reviewers = config.agent_roster.reviewers.length;
+  const reviewers = effectiveReviewerCount(config);
   const quorum = config.agent_roster.require_reviewer_quorum;
   let summary: string;
   if (outcome === "disabled") {
@@ -3305,31 +3311,78 @@ function AgentRosterControls({
   commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void) => void;
 }) {
   const reviewers = config?.agent_roster.reviewers ?? [];
+  const reviewerCount = config ? effectiveReviewerCount(config) : 1;
   const reviewerModels = config ? ensureReviewerModels(config, modelGroups) : [];
   const reviewerReasoningEfforts = config ? ensureReviewerReasoningEfforts(config) : [];
-  const canAddReviewer = Boolean(config) && reviewers.length < MAX_REVIEWER_MODELS && modelGroups.length > 0;
+  const canAddReviewer = Boolean(config) && !disabled && reviewers.length < MAX_REVIEWER_MODELS && modelGroups.length > 0;
   const fallbackGroup = modelGroups[0];
   const orchestratorModel =
     config?.agent_roster.orchestrator_model && modelBelongsToAgent(config.agent_roster.orchestrator, config.agent_roster.orchestrator_model)
       ? config.agent_roster.orchestrator_model
       : defaultModelForAgent(config?.agent_roster.orchestrator ?? "", modelGroups);
 
+  function moveReviewer(index: number, direction: -1 | 1) {
+    commitPolicy((next) => {
+      const target = index + direction;
+      const reviewers = next.agent_roster.reviewers;
+      if (target < 0 || target >= reviewers.length) return;
+      const models = ensureReviewerModels(next, modelGroups);
+      const efforts = ensureReviewerReasoningEfforts(next);
+      const order = reviewers.map((_, i) => i === index ? target : i === target ? index : i);
+      next.agent_roster.reviewer_count = effectiveReviewerCount(next);
+      next.agent_roster.reviewers = order.map((i) => reviewers[i]);
+      next.agent_roster.reviewer_models = order.map((i) => models[i]);
+      next.agent_roster.reviewer_reasoning_efforts = order.map((i) => efforts[i]);
+    });
+  }
+
   return (
     <div className="space-y-5">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <SettingLabel
+            label="Number of reviewers"
+            info="Sets how many independent reviews to collect, from one to three. Adding fallback models does not increase this count. Lowering it also lowers quorum when necessary."
+          />
+          <p className="mt-1 text-xs text-muted-foreground">Each code review runs this many reviewers. Quorum stays in Approval criteria.</p>
+        </div>
+        <Select
+          value={String(reviewerCount)}
+          disabled={disabled || !config}
+          onValueChange={(value) =>
+            commitPolicy((next) => {
+              const count = Number(value);
+              next.agent_roster.reviewer_count = count;
+              next.agent_roster.require_reviewer_quorum = Math.min(next.agent_roster.require_reviewer_quorum, count);
+            })
+          }
+        >
+          <DisabledTooltip disabled={disabled || !config} content="Policy editing is unavailable.">
+            <SelectTrigger aria-label="Number of reviewers" className="w-20">
+              <SelectValue />
+            </SelectTrigger>
+          </DisabledTooltip>
+          <SelectContent>
+            {Array.from({ length: Math.min(MAX_REVIEWERS, Math.max(1, reviewers.length)) }, (_, index) => index + 1).map((count) => (
+              <SelectItem key={count} value={String(count)}>{count}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
       <div className="space-y-3">
-        <div className="grid items-end gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,14rem)_auto]">
+        <div className="flex items-center justify-between gap-3">
           <div>
             <SettingLabel
-              label="Reviewer models"
-              info="Selects one to three agents that independently review each pull request. At least one is required; the built-in roster remains until changed, and removing one may lower the maximum valid quorum."
+              label="Ranked reviewer models"
+              info="Tries models in rank order until the requested number of reviews is collected. Configure up to ten choices, each with its own reasoning level. All attempts share the review timeout."
             />
-            <p className="mt-1 text-xs text-muted-foreground">Run one to three independent reviewers. Quorum stays in Approval criteria.</p>
+            <p className="mt-1 text-xs text-muted-foreground">The first choices run in parallel. Later choices replace unavailable or failed reviewers.</p>
           </div>
-          <SettingLabel
-            label="Reasoning level"
-            info="Sets reasoning independently for each reviewer. Available levels follow the agent selected in that row; High is the default."
-          />
-          <div className="flex items-center gap-1.5">
+          <DisabledTooltip
+            disabled={!canAddReviewer}
+            content={disabled || !config ? "Policy editing is unavailable." : modelGroups.length === 0 ? "Connect a coding agent to add models." : `You can rank up to ${MAX_REVIEWER_MODELS} models.`}
+          >
             <Button
               type="button"
               size="sm"
@@ -3340,6 +3393,7 @@ function AgentRosterControls({
                   if (!fallbackGroup || next.agent_roster.reviewers.length >= MAX_REVIEWER_MODELS) return;
                   const reviewerModels = ensureReviewerModels(next, modelGroups);
                   const reasoningEfforts = ensureReviewerReasoningEfforts(next);
+                  next.agent_roster.reviewer_count = effectiveReviewerCount(next);
                   next.agent_roster.reviewers = [...next.agent_roster.reviewers, fallbackGroup.key];
                   next.agent_roster.reviewer_models = [...reviewerModels, fallbackGroup.models[0] ?? ""];
                   next.agent_roster.reviewer_reasoning_efforts = [...reasoningEfforts, normalizeReasoningEffortForAgent(fallbackGroup.key, "high")];
@@ -3347,74 +3401,92 @@ function AgentRosterControls({
               }
             >
               <Plus className="mr-2 h-4 w-4" />
-              Add
+              Add model
             </Button>
-            <SettingInfoTooltip
-              label="Add reviewer model"
-              description="Adds another independent reviewer agent, up to three. Automatic approval still requires the configured reviewer quorum."
-            />
-          </div>
+          </DisabledTooltip>
         </div>
 
         <div className="space-y-2">
           {reviewers.map((agent, index) => (
-            <div key={`${agent}-${index}`} className="grid gap-2 rounded-md border border-border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,14rem)_auto]">
-              <AgentModelSelect
-                ariaLabel={`Reviewer ${index + 1} model`}
-                infoDescription="Chooses the agent and model for this independent review slot. Each slot must have a selection; the current resolved default remains until changed and contributes to quorum and disagreement handling."
-                value={selectionValue(agent, reviewerModels[index] ?? defaultModelForAgent(agent, modelGroups))}
-                modelGroups={modelGroups}
-                openCodeAvailability={openCodeAvailability}
-                currentAgent={agent}
-                currentModel={reviewerModels[index]}
-                disabled={disabled}
-                onValueChange={(value) =>
-                  commitPolicy((next) => {
-                    const selection = parseSelectionValue(value);
-                    const reviewerModels = ensureReviewerModels(next, modelGroups);
-                    const reasoningEfforts = ensureReviewerReasoningEfforts(next);
-                    next.agent_roster.reviewers[index] = selection.agent;
-                    reviewerModels[index] = selection.model;
-                    reasoningEfforts[index] = normalizeReasoningEffortForAgent(selection.agent, reasoningEfforts[index]);
-                    next.agent_roster.reviewer_models = reviewerModels;
-                    next.agent_roster.reviewer_reasoning_efforts = reasoningEfforts;
-                  })
-                }
-              />
-              <ReasoningEffortSelect
-                ariaLabel={`Reviewer ${index + 1} reasoning level`}
-                agent={agent}
-                value={reviewerReasoningEfforts[index] ?? "high"}
-                disabled={disabled}
-                infoDescription="Sets the reasoning effort for this reviewer only. The available levels depend on the agent selected in this row."
-                onValueChange={(value) =>
-                  commitPolicy((next) => {
-                    const reasoningEfforts = ensureReviewerReasoningEfforts(next);
-                    reasoningEfforts[index] = value;
-                    next.agent_roster.reviewer_reasoning_efforts = reasoningEfforts;
-                  })
-                }
-              />
-              <Button
-                type="button"
-                size="icon"
-                variant="ghost"
-                aria-label={`Remove reviewer ${index + 1}`}
-                disabled={disabled || reviewers.length <= 1}
-                onClick={() =>
-                  commitPolicy((next) => {
-                    const reviewerModels = ensureReviewerModels(next, modelGroups);
-                    const reasoningEfforts = ensureReviewerReasoningEfforts(next);
-                    next.agent_roster.reviewers = next.agent_roster.reviewers.filter((_, i) => i !== index);
-                    next.agent_roster.reviewer_models = reviewerModels.filter((_, i) => i !== index);
-                    next.agent_roster.reviewer_reasoning_efforts = reasoningEfforts.filter((_, i) => i !== index);
-                    next.agent_roster.require_reviewer_quorum = Math.min(next.agent_roster.require_reviewer_quorum, Math.max(1, next.agent_roster.reviewers.length));
-                  })
-                }
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            </div>
+            <Card key={`${agent}-${index}`}>
+              <CardContent className="grid items-end gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_minmax(8rem,11rem)_auto]">
+                <div className="min-w-0 space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">{index + 1}. {index < reviewerCount ? "Preferred model" : "Fallback model"}</Label>
+                  <AgentModelSelect
+                    ariaLabel={`Reviewer ${index + 1} model`}
+                    infoDescription="Chooses the agent and model at this rank. Later choices run only when earlier choices cannot provide enough usable reviews. Findings that block approval still count as a completed review."
+                    value={selectionValue(agent, reviewerModels[index] ?? defaultModelForAgent(agent, modelGroups))}
+                    modelGroups={modelGroups}
+                    openCodeAvailability={openCodeAvailability}
+                    currentAgent={agent}
+                    currentModel={reviewerModels[index]}
+                    disabled={disabled}
+                    onValueChange={(value) =>
+                      commitPolicy((next) => {
+                        const selection = parseSelectionValue(value);
+                        const reviewerModels = ensureReviewerModels(next, modelGroups);
+                        const reasoningEfforts = ensureReviewerReasoningEfforts(next);
+                        next.agent_roster.reviewers = next.agent_roster.reviewers.map((agent, i) => i === index ? selection.agent : agent);
+                        next.agent_roster.reviewer_models = reviewerModels.map((model, i) => i === index ? selection.model : model);
+                        next.agent_roster.reviewer_reasoning_efforts = reasoningEfforts.map((effort, i) => i === index ? normalizeReasoningEffortForAgent(selection.agent, effort) : effort);
+                      })
+                    }
+                  />
+                </div>
+                <div className="min-w-0 space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Reasoning level</Label>
+                  <ReasoningEffortSelect
+                    ariaLabel={`Reviewer ${index + 1} reasoning level`}
+                    agent={agent}
+                    value={reviewerReasoningEfforts[index] ?? "high"}
+                    disabled={disabled}
+                    infoDescription="Sets the reasoning effort for this reviewer only. The available levels depend on the agent selected in this row."
+                    onValueChange={(value) =>
+                      commitPolicy((next) => {
+                        next.agent_roster.reviewer_reasoning_efforts = ensureReviewerReasoningEfforts(next).map((effort, i) => i === index ? value : effort);
+                      })
+                    }
+                  />
+                </div>
+                <div className="flex items-center gap-1">
+                  <ReviewerModelAction
+                    label={`Move reviewer ${index + 1} up`}
+                    disabled={disabled || index === 0}
+                    disabledReason={disabled ? "Policy editing is unavailable." : "This model is already first."}
+                    onClick={() => moveReviewer(index, -1)}
+                  >
+                    <ChevronUp className="h-4 w-4" />
+                  </ReviewerModelAction>
+                  <ReviewerModelAction
+                    label={`Move reviewer ${index + 1} down`}
+                    disabled={disabled || index === reviewers.length - 1}
+                    disabledReason={disabled ? "Policy editing is unavailable." : "This model is already last."}
+                    onClick={() => moveReviewer(index, 1)}
+                  >
+                    <ChevronDown className="h-4 w-4" />
+                  </ReviewerModelAction>
+                  <ReviewerModelAction
+                    label={`Remove reviewer ${index + 1}`}
+                    disabled={disabled || reviewers.length <= 1}
+                    disabledReason={disabled ? "Policy editing is unavailable." : "At least one reviewer model is required."}
+                    onClick={() =>
+                      commitPolicy((next) => {
+                        const reviewerModels = ensureReviewerModels(next, modelGroups);
+                        const reasoningEfforts = ensureReviewerReasoningEfforts(next);
+                        const count = Math.min(effectiveReviewerCount(next), next.agent_roster.reviewers.length - 1);
+                        next.agent_roster.reviewer_count = count;
+                        next.agent_roster.reviewers = next.agent_roster.reviewers.filter((_, i) => i !== index);
+                        next.agent_roster.reviewer_models = reviewerModels.filter((_, i) => i !== index);
+                        next.agent_roster.reviewer_reasoning_efforts = reasoningEfforts.filter((_, i) => i !== index);
+                        next.agent_roster.require_reviewer_quorum = Math.min(next.agent_roster.require_reviewer_quorum, count);
+                      })
+                    }
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </ReviewerModelAction>
+                </div>
+              </CardContent>
+            </Card>
           ))}
         </div>
       </div>
@@ -3461,6 +3533,29 @@ function AgentRosterControls({
         </div>
       </div>
     </div>
+  );
+}
+
+function ReviewerModelAction({ label, disabled, disabledReason, onClick, children }: {
+  label: string;
+  disabled?: boolean;
+  disabledReason: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <DisabledTooltip disabled={disabled} content={disabledReason}>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button type="button" size="icon" variant="ghost" aria-label={label} disabled={disabled} onClick={onClick}>
+              {children}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{label}</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </DisabledTooltip>
   );
 }
 
