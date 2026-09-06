@@ -5502,6 +5502,27 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 		log.Warn().Err(err).Msg("failed to fetch messages for post-turn queue drain")
 		return
 	}
+	// The durable inbox is the primary delivery signal, but legacy and
+	// worker-owned sends may predate (or have missed) their inbox entry. A final
+	// assistant response in the same thread turn is conclusive evidence that the
+	// user message was already consumed. Track the latest response ID so a
+	// malformed user row appended after a response with the same turn number is
+	// not incorrectly treated as answered.
+	type threadTurnKey struct {
+		threadID   uuid.UUID
+		turnNumber int
+	}
+	answeredThreadTurns := make(map[threadTurnKey]int64)
+	for i := range messages {
+		m := messages[i]
+		if m.Role != models.MessageRoleAssistant || m.ThreadID == nil {
+			continue
+		}
+		key := threadTurnKey{threadID: *m.ThreadID, turnNumber: m.TurnNumber}
+		if m.ID > answeredThreadTurns[key] {
+			answeredThreadTurns[key] = m.ID
+		}
+	}
 	terminalCodeReviewThreads := o.terminalCodeReviewThreadsForDrain(ctx, session, log)
 	var queued *models.SessionMessage
 	for i := range messages {
@@ -5517,6 +5538,16 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 			continue
 		}
 		if m.ThreadID != nil {
+			key := threadTurnKey{threadID: *m.ThreadID, turnNumber: m.TurnNumber}
+			if assistantMessageID := answeredThreadTurns[key]; assistantMessageID > m.ID {
+				log.Info().
+					Str("thread_id", m.ThreadID.String()).
+					Int("turn_number", m.TurnNumber).
+					Int64("message_id", m.ID).
+					Int64("assistant_message_id", assistantMessageID).
+					Msg("skipping already-answered message during queue drain")
+				continue
+			}
 			if terminalThread, terminal := terminalCodeReviewThreads[*m.ThreadID]; terminal {
 				log.Info().
 					Str("thread_id", terminalThread.ID.String()).
@@ -5574,12 +5605,25 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 	if queuedThreadID != nil {
 		payload["thread_id"] = queuedThreadID.String()
 	}
-	dedupeKey := continueSessionDrainDedupeKey(session.ID, processedMessageID)
-	if _, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session)); err != nil {
+	// A sibling thread uses its ordinary continuation key so this enqueue
+	// collapses with a job that is already pending/running for that thread. The
+	// just-completed thread cannot reuse that key because its current worker job
+	// is still running until this function returns, so scope that drain to the
+	// queued message instead.
+	dedupeKey := continueSessionDrainDedupeKey(session.ID, queued.ID)
+	if queuedThreadID != nil && (threadID == nil || *queuedThreadID != *threadID) {
+		dedupeKey = continueSessionDedupeKey(*queuedThreadID)
+	}
+	jobID, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session))
+	if err != nil {
 		log.Warn().Err(err).Msg("failed to enqueue continue_session for queued messages")
 		return
 	}
-	if queuedThreadID != nil && o.sessionThreads != nil {
+	// A nil ID means the enqueue deduplicated against an already-active job.
+	// That job may still fail before consuming this message, so preserve the
+	// pending counter as its recovery signal. The caller that inserted the
+	// winning job is responsible for clearing the counter.
+	if jobID != uuid.Nil && queuedThreadID != nil && o.sessionThreads != nil {
 		if err := o.sessionThreads.ClearPendingMessages(ctx, session.OrgID, *queuedThreadID); err != nil {
 			log.Warn().Err(err).Str("thread_id", queuedThreadID.String()).Msg("failed to clear pending_message_count after drain")
 		}
@@ -5681,11 +5725,11 @@ func continueSessionDedupeKey(sessionID uuid.UUID) string {
 }
 
 // continueSessionDrainDedupeKey intentionally differs from
-// continueSessionDedupeKey because drainQueuedMessages runs while the current
-// continue_session job is still in status='running'. Reusing the active key
-// would hit the jobs dedupe index and turn the enqueue into a no-op.
-func continueSessionDrainDedupeKey(sessionID uuid.UUID, processedMessageID int64) string {
-	return fmt.Sprintf("continue_session_drain:%s:%d", sessionID.String(), processedMessageID)
+// continueSessionDedupeKey because a same-thread drain runs while the current
+// continue_session job is still in status='running'. Scoping the key to the
+// queued message also collapses concurrent attempts to schedule that work.
+func continueSessionDrainDedupeKey(sessionID uuid.UUID, queuedMessageID int64) string {
+	return fmt.Sprintf("continue_session_drain:%s:%d", sessionID.String(), queuedMessageID)
 }
 
 // setupFreshSandbox clones the session's repository into the sandbox when no

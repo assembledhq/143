@@ -475,7 +475,7 @@ func cancelActiveCodeReviewThreads(ctx context.Context, stores *Stores, services
 	if stores == nil || stores.SessionThreads == nil || stores.Sessions == nil || stores.Jobs == nil {
 		return nil
 	}
-	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	threads := newWorkerThreadService(stores, logger)
 	if services != nil && services.Orchestrator != nil {
 		threads.SetCanceller(codeReviewThreadCanceller{orchestrator: services.Orchestrator})
 	}
@@ -957,7 +957,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 			return fmt.Errorf("set code review prompt record key: %w", err)
 		}
 	}
-	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	threads := newWorkerThreadService(stores, logger)
 	fileScope := codeReviewChangedPaths(changedFiles)
 	timedOutBeforeStart := codeReviewReviewTimedOut(cfg, metadata)
 	selections, err := resolveCodeReviewReviewerAvailability(ctx, services, job.OrgID, cfg)
@@ -1554,7 +1554,7 @@ func cancelCodeReviewThread(ctx context.Context, stores *Stores, logger zerolog.
 	if stores == nil || stores.SessionThreads == nil {
 		return models.SessionThread{}, fmt.Errorf("session thread store is required")
 	}
-	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	threads := newWorkerThreadService(stores, logger)
 	return threads.CancelThread(ctx, job.OrgID, job.SessionID, threadID)
 }
 
@@ -2575,7 +2575,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	}); err != nil {
 		return err
 	}
-	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	threads := newWorkerThreadService(stores, logger)
 	// Run the orchestrator on the session's primary ("Main") thread rather than
 	// spinning up a dedicated tab. The primary thread starts with the policy's
 	// configured orchestrator and is retargeted below when only a reviewer agent
@@ -2816,7 +2816,7 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			_, synthesisErr = codeReviewDescriptionEvaluationFromSynthesis(policy.Config(), changedFiles, synthesis, visualEvidence)
 		}
 		if synthesisErr != nil {
-			threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+			threads := newWorkerThreadService(stores, logger)
 			repairHandled, repairStarted, repairErr := requestCodeReviewOrchestratorSynthesisRepair(
 				ctx,
 				stores,

@@ -140,8 +140,9 @@ func (s *drainStubSessions) ContainerHoldState(context.Context, uuid.UUID, uuid.
 // drainStubJobs records every continue_session enqueue so tests can assert
 // whether the drain fired and inspect the payload.
 type drainStubJobs struct {
-	enqueues []drainStubEnqueue
-	err      error
+	enqueues     []drainStubEnqueue
+	err          error
+	deduplicated bool
 }
 
 type drainStubEnqueue struct {
@@ -188,6 +189,9 @@ func (j *drainStubJobs) EnqueueWithTarget(_ context.Context, _ uuid.UUID, queue,
 		dedupeKey:    key,
 		targetNodeID: target,
 	})
+	if j.deduplicated {
+		return uuid.Nil, nil
+	}
 	return uuid.New(), nil
 }
 
@@ -363,7 +367,7 @@ func TestDrainQueuedMessages_EnqueuesForSessionScope(t *testing.T) {
 	require.Len(t, jobs.enqueues, 1, "drain must enqueue continue_session when a newer user message exists")
 	require.Equal(t, "agent", jobs.enqueues[0].queue)
 	require.Equal(t, "continue_session", jobs.enqueues[0].jobType)
-	require.Equal(t, continueSessionDrainDedupeKey(sessionID, processed.ID), jobs.enqueues[0].dedupeKey,
+	require.Equal(t, continueSessionDrainDedupeKey(sessionID, 6), jobs.enqueues[0].dedupeKey,
 		"drain must not reuse the active continue_session dedupe key while that job is still running")
 	payload, ok := jobs.enqueues[0].payload.(map[string]string)
 	require.True(t, ok, "payload should be string-keyed")
@@ -388,7 +392,7 @@ func TestDrainQueuedMessagesAfterProcessedID_EnqueuesInitialRunQueuedPrompt(t *t
 	o.drainQueuedMessagesAfterProcessedID(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, 0, nil, zerolog.Nop())
 
 	require.Len(t, jobs.enqueues, 1, "initial run drain should enqueue continue_session for a prompted message appended while run_agent was active")
-	require.Equal(t, continueSessionDrainDedupeKey(sessionID, 0), jobs.enqueues[0].dedupeKey, "initial run drain should use a drain-specific dedupe key")
+	require.Equal(t, continueSessionDrainDedupeKey(sessionID, 6), jobs.enqueues[0].dedupeKey, "initial run drain should use the queued message in its drain-specific dedupe key")
 	payload, ok := jobs.enqueues[0].payload.(map[string]string)
 	require.True(t, ok, "initial run drain payload should be string-keyed")
 	require.Equal(t, sessionID.String(), payload["session_id"], "initial run drain payload should target the original session")
@@ -437,7 +441,7 @@ func TestDrainQueuedMessages_LinearPromptedRunningSessionContract(t *testing.T) 
 	require.Len(t, jobs.enqueues, 1, "drain must enqueue continue_session for a Linear-agent-appended running-session prompt; otherwise follow-up @143 mentions are stranded")
 	require.Equal(t, "agent", jobs.enqueues[0].queue, "drain must enqueue on the agent queue so the worker picks it up")
 	require.Equal(t, "continue_session", jobs.enqueues[0].jobType)
-	require.Equal(t, continueSessionDrainDedupeKey(sessionID, processedID), jobs.enqueues[0].dedupeKey, "drain must use the drain-specific dedupe key — reusing the active continue_session key would collide with the still-running job")
+	require.Equal(t, continueSessionDrainDedupeKey(sessionID, linearAppended.ID), jobs.enqueues[0].dedupeKey, "drain must use the queued message in its drain-specific dedupe key")
 }
 
 func TestDrainQueuedMessages_ThreadScopeDrainsQueuedSiblingThread(t *testing.T) {
@@ -464,6 +468,32 @@ func TestDrainQueuedMessages_ThreadScopeDrainsQueuedSiblingThread(t *testing.T) 
 	require.Len(t, jobs.enqueues, 1, "thread-scope drain must enqueue continue_session for a queued sibling thread")
 	payload := jobs.enqueues[0].payload.(map[string]string)
 	require.Equal(t, threadB.String(), payload["thread_id"], "thread-scope drain must target the queued sibling thread")
+	require.Equal(t, continueSessionDedupeKey(threadB), jobs.enqueues[0].dedupeKey, "sibling drain must collapse with an existing continuation for the target thread")
+}
+
+func TestDrainQueuedMessages_ThreadScopeSkipsAnsweredSiblingTurn(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadA := uuid.New()
+	threadB := uuid.New()
+	processed := &models.SessionMessage{ID: 5, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &threadA, TurnNumber: 1}
+
+	messages := &drainStubMessages{messages: []models.SessionMessage{
+		*processed,
+		{ID: 6, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &threadB, TurnNumber: 1, Content: "review this change"},
+		{ID: 7, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleAssistant, ThreadID: &threadB, TurnNumber: 1, Content: "review complete"},
+	}}
+	sessions := &drainStubSessions{session: models.Session{Status: models.SessionStatusIdle}}
+	jobs := &drainStubJobs{}
+	threads := &drainStubThreads{}
+	o := newDrainOrchestrator(messages, sessions, jobs, threads)
+
+	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, &threadA, zerolog.Nop())
+
+	require.Empty(t, jobs.enqueues, "drain must not replay a sibling user turn that already has an assistant response")
+	require.Empty(t, threads.clearedThreadIDs, "skipping an answered turn must not mutate the sibling pending counter")
 }
 
 func TestDrainQueuedMessages_SkipsTerminalCodeReviewReviewerThread(t *testing.T) {
@@ -529,6 +559,7 @@ func TestDrainQueuedMessages_ThreadScopeClearsAndEnqueues(t *testing.T) {
 	require.Len(t, jobs.enqueues, 1, "thread-scope drain must enqueue continue_session")
 	payload := jobs.enqueues[0].payload.(map[string]string)
 	require.Equal(t, threadA.String(), payload["thread_id"], "thread-scope drain must propagate thread_id")
+	require.Equal(t, continueSessionDrainDedupeKey(sessionID, 6), jobs.enqueues[0].dedupeKey, "same-thread drain must use the queued message because the current continuation key is still active")
 }
 
 func TestDrainQueuedMessages_ClearsPendingOnlyAfterEnqueueSucceeds(t *testing.T) {
@@ -551,6 +582,30 @@ func TestDrainQueuedMessages_ClearsPendingOnlyAfterEnqueueSucceeds(t *testing.T)
 	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, &threadID, zerolog.Nop())
 
 	require.Empty(t, threads.clearedThreadIDs, "pending_message_count must remain until the resume job is durably enqueued")
+}
+
+func TestDrainQueuedMessages_PreservesPendingWhenEnqueueDeduplicates(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadA := uuid.New()
+	threadB := uuid.New()
+	processed := &models.SessionMessage{ID: 5, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &threadA}
+
+	messages := &drainStubMessages{messages: []models.SessionMessage{
+		*processed,
+		{ID: 6, OrgID: orgID, SessionID: sessionID, Role: models.MessageRoleUser, ThreadID: &threadB, Content: "queued sibling message"},
+	}}
+	sessions := &drainStubSessions{session: models.Session{Status: models.SessionStatusIdle}}
+	jobs := &drainStubJobs{deduplicated: true}
+	threads := &drainStubThreads{}
+	o := newDrainOrchestrator(messages, sessions, jobs, threads)
+
+	o.drainQueuedMessages(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, processed, &threadA, zerolog.Nop())
+
+	require.Len(t, jobs.enqueues, 1, "drain should attempt to enqueue the queued sibling message")
+	require.Empty(t, threads.clearedThreadIDs, "a dedupe no-op must preserve pending_message_count for recovery if the active job fails")
 }
 
 func TestDrainQueuedMessages_ThreadScopeCarriesQueuedMessageForHumanInputAnswer(t *testing.T) {

@@ -476,6 +476,7 @@ func main() {
 		workerCodeReviewDisputeStore.SetJobStore(jobStore)
 		workerCodeReviewInsightStore := db.NewCodeReviewInsightStore(pool)
 		stores := &worker.Stores{
+			TxStarter:           pool,
 			Issues:              issueStore,
 			Users:               db.NewUserStore(pool),
 			Sessions:            sessionStore,
