@@ -673,6 +673,26 @@ type Stores struct {
 	SessionAttributions *db.SessionAttributionStore
 }
 
+// newWorkerThreadService keeps worker-owned thread message paths on the same
+// durable inbox contract as API-owned sends. Without this wiring, a worker can
+// persist a session_messages row without the matching inbox entry, leaving a
+// sibling turn's post-run drain unable to tell that the message is already in
+// flight or consumed.
+func newWorkerThreadService(stores *Stores, logger zerolog.Logger) *threadsvc.Service {
+	if stores == nil {
+		return threadsvc.NewService(nil, nil, nil, nil, nil, logger)
+	}
+	service := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	if stores.ThreadInbox != nil {
+		if stores.ThreadSendTx != nil {
+			service.SetThreadInboxStore(stores.ThreadInbox, stores.ThreadSendTx)
+		} else {
+			service.SetThreadInboxStore(stores.ThreadInbox)
+		}
+	}
+	return service
+}
+
 func ensureSessionSnapshotQuiescent(ctx context.Context, stores *Stores, run models.Session) error {
 	if run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
 		return &RetryableError{Err: agent.ErrSnapshotPending}
@@ -12754,10 +12774,7 @@ func enqueuePRPushReconciliation(ctx context.Context, stores *Stores, logger zer
 	}
 	clientMessageID := fmt.Sprintf("push-reconcile:%s:%d", run.ID, revision)
 	dedupeKey := fmt.Sprintf("continue_session_push_reconcile:%s:%d", run.ID, revision)
-	threadService := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
-	if stores.ThreadInbox != nil && stores.ThreadSendTx != nil {
-		threadService.SetThreadInboxStore(stores.ThreadInbox, stores.ThreadSendTx)
-	}
+	threadService := newWorkerThreadService(stores, logger)
 	_, err = threadService.SendMessage(ctx, threadsvc.SendMessageInput{
 		SessionID:                     run.ID,
 		OrgID:                         run.OrgID,

@@ -485,7 +485,7 @@ func cancelActiveCodeReviewThreads(ctx context.Context, stores *Stores, services
 	if stores == nil || stores.SessionThreads == nil || stores.Sessions == nil || stores.Jobs == nil {
 		return nil
 	}
-	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	threads := newWorkerThreadService(stores, logger)
 	if services != nil && services.Orchestrator != nil {
 		threads.SetCanceller(codeReviewThreadCanceller{orchestrator: services.Orchestrator})
 	}
@@ -967,7 +967,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 			return fmt.Errorf("set code review prompt record key: %w", err)
 		}
 	}
-	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	threads := newWorkerThreadService(stores, logger)
 	fileScope := codeReviewChangedPaths(changedFiles)
 	timedOutBeforeStart := codeReviewReviewTimedOut(cfg, metadata)
 	selections, err := resolveCodeReviewReviewerAvailability(ctx, services, job.OrgID, cfg, results, timedOutBeforeStart)
@@ -1517,7 +1517,7 @@ func cancelCodeReviewThread(ctx context.Context, stores *Stores, logger zerolog.
 	if stores == nil || stores.SessionThreads == nil {
 		return models.SessionThread{}, fmt.Errorf("session thread store is required")
 	}
-	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	threads := newWorkerThreadService(stores, logger)
 	return threads.CancelThread(ctx, job.OrgID, job.SessionID, threadID)
 }
 
@@ -2636,7 +2636,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	}); err != nil {
 		return err
 	}
-	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	threads := newWorkerThreadService(stores, logger)
 	// The first synthesis uses Main. Runtime fallbacks use separate threads
 	// because an agent's provider cannot be edited after its first turn.
 	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
@@ -2960,7 +2960,7 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			_, synthesisErr = codeReviewDescriptionEvaluationFromSynthesis(policy.Config(), changedFiles, synthesis, visualEvidence)
 		}
 		if synthesisErr != nil {
-			threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+			threads := newWorkerThreadService(stores, logger)
 			repairHandled, repairStarted, repairErr := requestCodeReviewOrchestratorSynthesisRepair(
 				ctx,
 				stores,
