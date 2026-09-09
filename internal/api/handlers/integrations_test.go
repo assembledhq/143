@@ -23,6 +23,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
@@ -4130,46 +4131,66 @@ func (f *fakeGitHubOrgAutoJoinService) ListOrgMembers(_ context.Context, _ int64
 	return nil, nil
 }
 
-func TestIntegrationHandler_ListGitHubOrgAutoJoin_PermissionGranted(t *testing.T) {
+func TestIntegrationHandler_ListGitHubOrgAutoJoin_Permissions(t *testing.T) {
 	t.Parallel()
+	tests := []struct {
+		name       string
+		permission string
+		expected   string
+	}{
+		{name: "read", permission: "read", expected: "granted"},
+		{name: "write", permission: "write", expected: "granted"},
+		{name: "none", permission: "none", expected: "missing"},
+		{name: "absent", permission: "", expected: "missing"},
+		{name: "unknown", permission: "unknown", expected: "missing"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should initialize")
-	defer mock.Close()
+			orgID := uuid.New()
+			accountType := "Organization"
+			now := time.Now().UTC()
 
-	orgID := uuid.New()
-	accountType := "Organization"
-	now := time.Now().UTC()
+			mock.ExpectQuery("FROM github_installation_org_links").
+				WithArgs(orgID).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"installation_id", "account_login", "account_type", "auto_join_enabled", "roster_synced_at", "captured_by_other_org",
+				}).AddRow(int64(12345), "acme", &accountType, true, &now, false))
 
-	mock.ExpectQuery("FROM github_installation_org_links").
-		WithArgs(orgID).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"installation_id", "account_login", "account_type", "auto_join_enabled", "roster_synced_at", "captured_by_other_org",
-		}).AddRow(int64(12345), "acme", &accountType, true, &now, false))
+			details := ghapp.InstallationDetails{}
+			details.Account.Login = "acme"
+			details.Account.Type = "Organization"
+			details.Permissions.Members = tt.permission
 
-	details := ghapp.InstallationDetails{}
-	details.Account.Login = "acme"
-	details.Account.Type = "Organization"
-	details.Permissions.Members = "read"
+			handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
+			handler.githubInstallations = db.NewGitHubInstallationStore(mock)
+			handler.githubOrgAutoJoin = &fakeGitHubOrgAutoJoinService{details: details}
 
-	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
-	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
-	handler.githubOrgAutoJoin = &fakeGitHubOrgAutoJoinService{details: details}
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/team/github-orgs", nil)
+			req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+			w := httptest.NewRecorder()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/team/github-orgs", nil)
-	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
-	w := httptest.NewRecorder()
+			handler.ListGitHubOrgAutoJoin(w, req)
 
-	handler.ListGitHubOrgAutoJoin(w, req)
-
-	require.Equal(t, http.StatusOK, w.Code, "list should return 200")
-	var resp githubOrgAutoJoinResponse
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response should decode")
-	require.Len(t, resp.GitHubOrgs, 1, "should return one org row")
-	require.Equal(t, int64(12345), resp.GitHubOrgs[0].InstallationID)
-	require.Equal(t, "granted", resp.GitHubOrgs[0].MembersPermission, "should report granted when members permission is 'read'")
-	require.True(t, resp.GitHubOrgs[0].AutoJoinEnabled)
-	require.NoError(t, mock.ExpectationsWereMet())
+			require.Equal(t, http.StatusOK, w.Code, "list should return 200")
+			var resp githubOrgAutoJoinResponse
+			require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response should decode")
+			require.Equal(t, githubOrgAutoJoinResponse{GitHubOrgs: []githubOrgAutoJoinRow{{
+				InstallationID:    12345,
+				AccountLogin:      "acme",
+				AccountType:       &accountType,
+				AutoJoinEnabled:   true,
+				MembersPermission: tt.expected,
+				RosterSyncedAt:    &now,
+				SettingsURL:       "https://github.com/organizations/acme/settings/installations/12345",
+			}}}, resp, "list should report the installation and its effective members permission")
+			require.NoError(t, mock.ExpectationsWereMet(), "list should query only the current organization's installations")
+		})
+	}
 }
 
 func TestIntegrationHandler_UpdateGitHubOrgAutoJoin_DisableSuccess(t *testing.T) {
@@ -4213,56 +4234,90 @@ func TestIntegrationHandler_UpdateGitHubOrgAutoJoin_DisableSuccess(t *testing.T)
 	require.NoError(t, mock.ExpectationsWereMet(), "disable must clear the roster")
 }
 
-func TestIntegrationHandler_UpdateGitHubOrgAutoJoin_EnableMissingPermission(t *testing.T) {
+func TestIntegrationHandler_UpdateGitHubOrgAutoJoin_EnablePermissions(t *testing.T) {
 	t.Parallel()
+	tests := []struct {
+		name         string
+		permission   string
+		expectedCode int
+	}{
+		{name: "read", permission: "read", expectedCode: http.StatusOK},
+		{name: "write", permission: "write", expectedCode: http.StatusOK},
+		{name: "none", permission: "none", expectedCode: http.StatusPreconditionFailed},
+		{name: "absent", permission: "", expectedCode: http.StatusPreconditionFailed},
+		{name: "unknown", permission: "unknown", expectedCode: http.StatusPreconditionFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should initialize")
-	defer mock.Close()
+			orgID := uuid.New()
+			linkID := uuid.New()
+			now := time.Now().UTC()
+			accountType := "Organization"
 
-	orgID := uuid.New()
-	linkID := uuid.New()
-	now := time.Now().UTC()
-	accountType := "Organization"
+			// GetOrgLink.
+			mock.ExpectQuery("SELECT l.id, l.org_id").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "auto_join_enabled", "created_at", "updated_at",
+				}).AddRow(linkID, orgID, nil, int64(12345), "acme", nil, "active", false, now, now))
 
-	// GetOrgLink.
-	mock.ExpectQuery("SELECT l.id, l.org_id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "auto_join_enabled", "created_at", "updated_at",
-		}).AddRow(linkID, orgID, nil, int64(12345), "acme", nil, "active", false, now, now))
+			// GetByInstallationID.
+			mock.ExpectQuery("SELECT installation_id, account_id").
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"installation_id", "account_id", "account_login", "account_type", "repository_selection", "status", "roster_synced_at", "created_at", "updated_at",
+				}).AddRow(int64(12345), int64(99), "acme", &accountType, nil, "active", nil, now, now))
 
-	// GetByInstallationID.
-	mock.ExpectQuery("SELECT installation_id, account_id").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"installation_id", "account_id", "account_login", "account_type", "repository_selection", "status", "roster_synced_at", "created_at", "updated_at",
-		}).AddRow(int64(12345), int64(99), "acme", &accountType, nil, "active", nil, now, now))
+			if tt.expectedCode == http.StatusOK {
+				mock.ExpectQuery("UPDATE github_installation_org_links").
+					WithArgs(pgx.NamedArgs{"org_id": orgID, "installation_id": int64(12345), "enabled": true}).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "auto_join_enabled", "created_at", "updated_at",
+					}).AddRow(linkID, orgID, nil, int64(12345), "acme", nil, "active", true, now, now))
+			}
 
-	// GetInstallationDetails returns members permission as "none" (not yet approved).
-	details := ghapp.InstallationDetails{}
-	details.Account.Login = "acme"
-	details.Account.Type = "Organization"
-	details.Permissions.Members = "none"
+			// GitHub returns the granted installation permission level.
+			details := ghapp.InstallationDetails{}
+			details.Account.Login = "acme"
+			details.Account.Type = "Organization"
+			details.Permissions.Members = tt.permission
 
-	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
-	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
-	handler.githubOrgAutoJoin = &fakeGitHubOrgAutoJoinService{details: details}
+			handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
+			handler.githubInstallations = db.NewGitHubInstallationStore(mock)
+			handler.githubOrgAutoJoin = &fakeGitHubOrgAutoJoinService{details: details}
 
-	body := `{"auto_join_enabled":true}`
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/team/github-orgs/12345", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("installation_id", "12345")
-	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
-	w := httptest.NewRecorder()
+			body := `{"auto_join_enabled":true}`
+			req := httptest.NewRequest(http.MethodPatch, "/api/v1/team/github-orgs/12345", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("installation_id", "12345")
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+			w := httptest.NewRecorder()
 
-	handler.UpdateGitHubOrgAutoJoin(w, req)
+			handler.UpdateGitHubOrgAutoJoin(w, req)
 
-	require.Equal(t, http.StatusPreconditionFailed, w.Code, "missing members permission should return 412")
-	require.Contains(t, w.Body.String(), "MEMBERS_PERMISSION_MISSING", "response should name the missing permission error")
-	require.NoError(t, mock.ExpectationsWereMet())
+			require.Equal(t, tt.expectedCode, w.Code, "enable should accept only members read or write permission")
+			if tt.expectedCode == http.StatusOK {
+				var resp struct {
+					Data models.GitHubInstallationOrgLink `json:"data"`
+				}
+				require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "enabled org link should decode")
+				require.Equal(t, models.GitHubInstallationOrgLink{
+					ID: linkID, OrgID: orgID, InstallationID: 12345, AccountLogin: "acme",
+					Status: "active", AutoJoinEnabled: true, CreatedAt: now, UpdatedAt: now,
+				}, resp.Data, "enable should return the updated link for this organization")
+			} else {
+				require.Contains(t, w.Body.String(), "MEMBERS_PERMISSION_MISSING", "insufficient permission should explain the failure")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "only permitted installations should update the organization link")
+		})
+	}
 }
 
 func TestIntegrationHandler_UpdateGitHubOrgAutoJoin_EnableNotAnOrganization(t *testing.T) {
