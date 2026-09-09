@@ -1343,7 +1343,7 @@ func (h *IntegrationHandler) ListGitHubOrgAutoJoin(w http.ResponseWriter, r *htt
 			wg.Add(1)
 			go func(idx int, installationID int64) {
 				defer wg.Done()
-				if details, err := h.githubOrgAutoJoin.GetInstallationDetails(r.Context(), installationID); err == nil && details.Permissions.Members == "read" {
+				if details, err := h.githubOrgAutoJoin.GetInstallationDetails(r.Context(), installationID); err == nil && (details.Permissions.Members == "read" || details.Permissions.Members == "write") {
 					mu.Lock()
 					permissions[idx] = "granted"
 					mu.Unlock()
@@ -1462,7 +1462,7 @@ func (h *IntegrationHandler) tryEnableGitHubOrgAutoJoin(ctx context.Context, org
 		accountLogin = details.Account.Login
 	}
 	result.settingsURL = githubInstallationSettingsURL(accountLogin, installationID)
-	if details.Permissions.Members != "read" {
+	if details.Permissions.Members != "read" && details.Permissions.Members != "write" {
 		result.err = errGitHubOrgMembersPermissionMissing
 		return result
 	}
