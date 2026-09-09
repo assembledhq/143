@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -242,6 +243,64 @@ func TestAutomationGoalImprovementStore_StateTransitionsAreOrgScoped(t *testing.
 			defer mock.Close()
 			store := NewAutomationGoalImprovementStore(mock)
 			tt.run(t, store, mock, uuid.New(), uuid.New(), uuid.New())
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestAutomationGoalImprovementStore_TerminalStateErrors(t *testing.T) {
+	t.Parallel()
+
+	dbErr := errors.New("database unavailable")
+	tests := []struct {
+		name          string
+		expectedError string
+		run           func(store *AutomationGoalImprovementStore, orgID, targetID uuid.UUID) error
+	}{
+		{
+			name:          "fail by improvement id",
+			expectedError: "fail automation goal improvement: database unavailable",
+			run: func(store *AutomationGoalImprovementStore, orgID, targetID uuid.UUID) error {
+				return store.Fail(context.Background(), orgID, targetID, "failed")
+			},
+		},
+		{
+			name:          "cancel by improvement id",
+			expectedError: "cancel automation goal improvement: database unavailable",
+			run: func(store *AutomationGoalImprovementStore, orgID, targetID uuid.UUID) error {
+				return store.Cancel(context.Background(), orgID, targetID, "canceled")
+			},
+		},
+		{
+			name:          "fail by analysis session",
+			expectedError: "fail automation goal improvement by analysis session: database unavailable",
+			run: func(store *AutomationGoalImprovementStore, orgID, targetID uuid.UUID) error {
+				return store.FailByAnalysisSession(context.Background(), orgID, targetID, "failed")
+			},
+		},
+		{
+			name:          "cancel by analysis session",
+			expectedError: "cancel automation goal improvement by analysis session: database unavailable",
+			run: func(store *AutomationGoalImprovementStore, orgID, targetID uuid.UUID) error {
+				return store.CancelByAnalysisSession(context.Background(), orgID, targetID, "canceled")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "mock pool should be created")
+			defer mock.Close()
+			mock.ExpectExec(`UPDATE automation_goal_improvements`).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnError(dbErr)
+
+			err = tt.run(NewAutomationGoalImprovementStore(mock), uuid.New(), uuid.New())
+			require.EqualError(t, err, tt.expectedError, "terminal transition should preserve its operation-specific error context")
+			require.ErrorIs(t, err, dbErr, "terminal transition should preserve the database error in its error chain")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

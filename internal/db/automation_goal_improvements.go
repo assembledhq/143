@@ -215,33 +215,25 @@ func (s *AutomationGoalImprovementStore) Complete(ctx context.Context, orgID, im
 }
 
 func (s *AutomationGoalImprovementStore) Fail(ctx context.Context, orgID, improvementID uuid.UUID, errorMessage string) error {
-	_, err := s.db.Exec(ctx, `UPDATE automation_goal_improvements
-		SET status = @status, error_message = @error_message, updated_at = now()
-		WHERE id = @id AND org_id = @org_id AND status IN ('pending', 'running')`,
-		pgx.NamedArgs{
-			"status":        models.AutomationGoalImprovementStatusFailed,
-			"error_message": errorMessage,
-			"id":            improvementID,
-			"org_id":        orgID,
-		})
-	if err != nil {
-		return fmt.Errorf("fail automation goal improvement: %w", err)
-	}
-	return nil
+	return s.finish(ctx, orgID, improvementID, models.AutomationGoalImprovementStatusFailed, errorMessage, "fail automation goal improvement")
 }
 
 func (s *AutomationGoalImprovementStore) Cancel(ctx context.Context, orgID, improvementID uuid.UUID, errorMessage string) error {
+	return s.finish(ctx, orgID, improvementID, models.AutomationGoalImprovementStatusCanceled, errorMessage, "cancel automation goal improvement")
+}
+
+func (s *AutomationGoalImprovementStore) finish(ctx context.Context, orgID, improvementID uuid.UUID, status models.AutomationGoalImprovementStatus, errorMessage, operation string) error {
 	_, err := s.db.Exec(ctx, `UPDATE automation_goal_improvements
 		SET status = @status, error_message = @error_message, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND status IN ('pending', 'running')`,
 		pgx.NamedArgs{
-			"status":        models.AutomationGoalImprovementStatusCanceled,
+			"status":        status,
 			"error_message": errorMessage,
 			"id":            improvementID,
 			"org_id":        orgID,
 		})
 	if err != nil {
-		return fmt.Errorf("cancel automation goal improvement: %w", err)
+		return fmt.Errorf("%s: %w", operation, err)
 	}
 	return nil
 }
@@ -266,25 +258,14 @@ func (s *AutomationGoalImprovementStore) ExpireDrafts(ctx context.Context, orgID
 }
 
 func (s *AutomationGoalImprovementStore) FailByAnalysisSession(ctx context.Context, orgID, sessionID uuid.UUID, errorMessage string) error {
-	_, err := s.db.Exec(ctx, `UPDATE automation_goal_improvements
-		SET status = @status, error_message = @error_message, updated_at = now()
-		WHERE org_id = @org_id
-			AND analysis_session_id = @analysis_session_id
-			AND mode = 'deep'
-			AND status IN ('pending', 'running')`,
-		pgx.NamedArgs{
-			"status":              models.AutomationGoalImprovementStatusFailed,
-			"error_message":       errorMessage,
-			"org_id":              orgID,
-			"analysis_session_id": sessionID,
-		})
-	if err != nil {
-		return fmt.Errorf("fail automation goal improvement by analysis session: %w", err)
-	}
-	return nil
+	return s.finishByAnalysisSession(ctx, orgID, sessionID, models.AutomationGoalImprovementStatusFailed, errorMessage, "fail automation goal improvement by analysis session")
 }
 
 func (s *AutomationGoalImprovementStore) CancelByAnalysisSession(ctx context.Context, orgID, sessionID uuid.UUID, errorMessage string) error {
+	return s.finishByAnalysisSession(ctx, orgID, sessionID, models.AutomationGoalImprovementStatusCanceled, errorMessage, "cancel automation goal improvement by analysis session")
+}
+
+func (s *AutomationGoalImprovementStore) finishByAnalysisSession(ctx context.Context, orgID, sessionID uuid.UUID, status models.AutomationGoalImprovementStatus, errorMessage, operation string) error {
 	_, err := s.db.Exec(ctx, `UPDATE automation_goal_improvements
 		SET status = @status, error_message = @error_message, updated_at = now()
 		WHERE org_id = @org_id
@@ -292,13 +273,13 @@ func (s *AutomationGoalImprovementStore) CancelByAnalysisSession(ctx context.Con
 			AND mode = 'deep'
 			AND status IN ('pending', 'running')`,
 		pgx.NamedArgs{
-			"status":              models.AutomationGoalImprovementStatusCanceled,
+			"status":              status,
 			"error_message":       errorMessage,
 			"org_id":              orgID,
 			"analysis_session_id": sessionID,
 		})
 	if err != nil {
-		return fmt.Errorf("cancel automation goal improvement by analysis session: %w", err)
+		return fmt.Errorf("%s: %w", operation, err)
 	}
 	return nil
 }
