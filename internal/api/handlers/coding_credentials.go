@@ -21,6 +21,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/codingcredentials"
 )
 
 // codingCredentialStore is the narrow surface this handler depends on. Defined
@@ -46,11 +47,55 @@ type codingAuthOrgStore interface {
 	MergeCodingAgentDefaults(ctx context.Context, orgID uuid.UUID, agent models.AgentType, defaults map[string]string) error
 }
 
+type codingCredentialRateLimitChecker interface {
+	Check(context.Context, models.Scope, uuid.UUID) error
+}
+
 // CodingCredentialHandler exposes the unified API.
 type CodingCredentialHandler struct {
-	store       codingCredentialStore
-	orgStore    codingAuthOrgStore
-	invalidator OrgSettingsInvalidator
+	store            codingCredentialStore
+	orgStore         codingAuthOrgStore
+	invalidator      OrgSettingsInvalidator
+	rateLimitChecker codingCredentialRateLimitChecker
+}
+
+func (h *CodingCredentialHandler) SetRateLimitChecker(checker codingCredentialRateLimitChecker) {
+	h.rateLimitChecker = checker
+}
+
+// CheckRateLimit handles POST /api/v1/coding-credentials/{id}/check-rate-limit.
+func (h *CodingCredentialHandler) CheckRateLimit(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	scope, scopeName, err := h.resolveScopeFromQuery(r, orgID, true)
+	if err != nil || scopeName == "resolved" {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "a writable credential scope is required")
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid credential ID")
+		return
+	}
+	if h.rateLimitChecker == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "CHECK_UNAVAILABLE", "rate-limit checks are unavailable")
+		return
+	}
+	if err := h.rateLimitChecker.Check(r.Context(), scope, id); err != nil {
+		switch {
+		case errors.Is(err, codingcredentials.ErrUnsupported), errors.Is(err, codingcredentials.ErrInactive):
+			writeError(w, r, http.StatusBadRequest, "CHECK_UNSUPPORTED", err.Error())
+		case errors.Is(err, codingcredentials.ErrUsageUnauthorized):
+			writeError(w, r, http.StatusBadGateway, "CHECK_UNAUTHORIZED", codingcredentials.ErrUsageUnauthorized.Error())
+		case errors.Is(err, codingcredentials.ErrUnavailable):
+			writeError(w, r, http.StatusBadGateway, "CHECK_FAILED", codingcredentials.ErrUnavailable.Error(), err)
+		case errors.Is(err, db.ErrRateLimitCheckStale):
+			writeError(w, r, http.StatusConflict, "CHECK_STALE", err.Error())
+		default:
+			h.handleStoreError(w, r, err, "CHECK_FAILED")
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // NewCodingCredentialHandler constructs the handler.

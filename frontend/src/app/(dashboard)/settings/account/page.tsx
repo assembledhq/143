@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
+import { CheckAuthRateLimit } from "@/components/check-auth-rate-limit";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Plus, PowerOff, ShieldCheck, type LucideIcon } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
@@ -165,6 +166,7 @@ function CredentialList({
               <div className="text-xs text-muted-foreground">{row.usage_note}</div>
             </div>
           ) : null}
+          {!readOnly ? <CheckAuthRateLimit row={row} /> : null}
           {!readOnly && onDelete ? (
             <Button variant="ghost" size="sm" onClick={() => onDelete(row.id)}>
               <PowerOff className="mr-2 h-4 w-4" />
@@ -205,6 +207,7 @@ function CredentialList({
                 </TableCell>
                 <TableCell>
                   <Badge variant="outline">{statusLabel(row.status)}</Badge>
+                  {!readOnly ? <CheckAuthRateLimit row={row} /> : null}
                 </TableCell>
                 {!readOnly ? (
                   <TableCell className="text-right">

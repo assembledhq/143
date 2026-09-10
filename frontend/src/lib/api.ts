@@ -892,6 +892,8 @@ export const api = {
   // userCredentials + codingAuths surface, whose endpoints now return
   // 410 Gone. See docs/design/future/65-unified-coding-credentials.md.
   codingCredentials: {
+    checkRateLimit: (id: string, scope: 'org' | 'personal') =>
+      post<void>(`/api/v1/coding-credentials/${encodeURIComponent(id)}/check-rate-limit?scope=${scope}`),
     list: (scope: 'org' | 'personal' | 'resolved' = 'personal') =>
       get<import('./types').ListResponse<import('./types').CodingCredentialSummary>>(
         `/api/v1/coding-credentials?scope=${scope}`,

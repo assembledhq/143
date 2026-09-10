@@ -5,6 +5,7 @@ import { GripVertical, KeyRound, MoveUp, MoveDown, Pencil } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/empty-state";
+import { CheckAuthRateLimit } from "@/components/check-auth-rate-limit";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AGENTS_BY_KEY } from "@/lib/agents";
 import { cn } from "@/lib/utils";
@@ -143,6 +144,7 @@ export function CodingAuthStack({
                 <div className="text-xs font-medium text-muted-foreground">Notes</div>
                 {row.usage_note ? <div className="text-xs text-muted-foreground">{row.usage_note}</div> : null}
                 {rateLimitNote(row) ? <div className="text-xs text-muted-foreground">{rateLimitNote(row)}</div> : null}
+                <CheckAuthRateLimit row={row} />
               </div>
             ) : null}
             <div className="flex items-center gap-1">
@@ -261,6 +263,7 @@ export function CodingAuthStack({
                       </Button>
                       {row.usage_note ? <div className="text-xs text-muted-foreground">{row.usage_note}</div> : null}
                       {rateLimitNote(row) ? <div className="text-xs text-muted-foreground">{rateLimitNote(row)}</div> : null}
+                      <CheckAuthRateLimit row={row} />
                     </div>
                   </TableCell>
                   <TableCell>
