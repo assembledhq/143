@@ -70,6 +70,8 @@ func TestAuditAction_Validate(t *testing.T) {
 		{name: "preview.updated is valid", value: AuditActionPreviewUpdated},
 		{name: "preview.screenshot_captured is valid", value: AuditActionPreviewScreenshotCaptured},
 		{name: "code review policy restored is valid", value: AuditActionCodeReviewPolicyRestored},
+		{name: "code review request is valid", value: AuditActionCodeReviewRequested},
+		{name: "code review schedule update is valid", value: AuditActionCodeReviewScheduleUpdated},
 		{name: "org.join_token_revealed is valid", value: AuditActionOrgJoinTokenRevealed},
 		{name: "empty is invalid", value: "", expectErr: true},
 		{name: "unknown is invalid", value: "foo.bar", expectErr: true},

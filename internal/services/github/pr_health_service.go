@@ -136,6 +136,7 @@ var (
 )
 
 type gitHubPullRequestDetails struct {
+	Draft          bool       `json:"draft"`
 	Number         int        `json:"number"`
 	HTMLURL        string     `json:"html_url"`
 	Title          string     `json:"title"`

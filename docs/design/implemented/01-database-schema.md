@@ -581,6 +581,35 @@ Results of the validation step for an agent run.
 | created_at | timestamptz | |
 | updated_at | timestamptz | |
 
+### Code review scheduling (migration 000289)
+
+`code_review_policies.scheduling_policy` is JSONB, NOT NULL, default `{}`.
+Presence-aware resolution gives automatic re-review=true, quiet period=60 seconds,
+and minimum interval=0; explicit false and zero remain valid. New policy versions
+store effective values, while historical `{}` marks an older version whose
+restore preserves current scheduling settings.
+
+`code_review_pr_state` has UUID `id`, `org_id`, `repository_id`, and
+`pull_request_id` with parent FKs, unique `(org_id,pull_request_id)`, generation,
+automatic-paused flag, authoritative head/base SHA and base ref, draft flag,
+snapshot/change/wait/start/eligibility/retry timestamps, nullable session/request
+FKs, private pending-input JSONB, checked state/reason strings, and creation/update
+timestamps. A partial due index covers rows with pending input. State and exact
+column contracts are defined in migration 000289 and `models.CodeReviewPRState`.
+
+`code_review_requests` retains org/repository/PR FKs, source kind/identity,
+checked mode, nullable requester FK, immutable input hash, target generation,
+nullable session/retry-source FKs, checked status, and creation time. Unique
+`(org_id,source_kind,source_identity)` protects redelivery; a generation index
+supports resolving joined requests together. The PR state's pending-request FK
+is added after both tables to avoid insertion cycles. Scheduling state is mutable
+operational data; policy versions remain insert-only history.
+
+A transaction advisory lock keyed by org/PR serializes state and request writes,
+session creation, and wake-job changes. No new triggers are installed. These
+additive tables support a capability-gated rollout; see
+[the scheduling implementation record](../code-review-scheduling-and-reuse.md).
+
 ### `code_review_session_metadata`
 
 Durable assessment state for the Code Reviewer bot. Each row belongs to a

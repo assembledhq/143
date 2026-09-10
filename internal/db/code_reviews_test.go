@@ -45,8 +45,8 @@ func TestCodeReviewStore_ResolvePolicyUsesOrganizationPolicy(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 			"review_instructions", "automated_approval_policy",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, nil, true, 3, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
+		}).AddRow(policyID, orgID, nil, true, 3, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now, []byte("{}")))
 
 	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID)
 
@@ -71,7 +71,7 @@ func TestCodeReviewStore_ResolvePolicyUsesDefaultWhenMissing(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 			"review_instructions", "automated_approval_policy",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
 		}))
 
 	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID)
@@ -105,8 +105,8 @@ func TestCodeReviewStore_GetPolicyByID(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 			"review_instructions", "automated_approval_policy",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 2, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
+		}).AddRow(policyID, orgID, &repoID, true, 2, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now, []byte("{}")))
 
 	record, err := NewCodeReviewStore(mock).GetPolicyByID(context.Background(), orgID, policyID)
 
@@ -140,6 +140,7 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	mock.ExpectQuery("SELECT COALESCE").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(4))
+	mock.ExpectQuery("FROM code_review_policies").WithArgs(pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}))
 	mock.ExpectExec("UPDATE code_review_policies").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -147,13 +148,13 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			config.ReviewInstructions, config.AutomatedApprovalPolicy,
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 			"review_instructions", "automated_approval_policy",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, nil, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
+		}).AddRow(policyID, orgID, nil, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now, []byte("{}")))
 	mock.ExpectCommit()
 
 	var logOutput bytes.Buffer
@@ -190,10 +191,10 @@ func TestCodeReviewStore_ListPolicyVersionsScopesAndPaginatesHistory(t *testing.
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 			"review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster",
-			"inline_comment_limit", "created_by_user_id", "created_at",
+			"inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
 		}).AddRow(uuid.New(), orgID, nil, false, 8, config.Enabled, config.ApprovalMode,
 			config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster,
-			config.InlineCommentLimit, nil, now))
+			config.InlineCommentLimit, nil, now, []byte("{}")))
 
 	versions, err := NewCodeReviewStore(mock).ListPolicyVersions(context.Background(), orgID, &beforeVersion, 2)
 
@@ -1355,6 +1356,7 @@ func TestCodeReviewStore_SavePolicyExpectingVersionIncrementsFromCurrent(t *test
 	mock.ExpectQuery("SELECT COALESCE").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(3))
+	mock.ExpectQuery("FROM code_review_policies").WithArgs(pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}))
 	mock.ExpectExec("UPDATE code_review_policies").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -1362,13 +1364,13 @@ func TestCodeReviewStore_SavePolicyExpectingVersionIncrementsFromCurrent(t *test
 		WithArgs(
 			pgxmock.AnyArg(), 4, pgxmock.AnyArg(), pgxmock.AnyArg(),
 			config.ReviewInstructions, config.AutomatedApprovalPolicy,
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 			"review_instructions", "automated_approval_policy",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, nil, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, nil, now))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
+		}).AddRow(policyID, orgID, nil, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, nil, now, []byte("{}")))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(orgID, "feedback", models.JobTypeRankCodeReviewDispute, pgxmock.AnyArg(), 2, pgxmock.AnyArg(), 6).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
