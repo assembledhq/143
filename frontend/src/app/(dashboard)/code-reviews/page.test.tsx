@@ -3074,32 +3074,52 @@ describe("CodeReviewsPage", () => {
     await waitFor(() => expect(state.getCurrentConfig().agent_roster).toEqual(rankedConfig.agent_roster));
   });
 
-  it("adds fallback models beyond three without increasing a legacy reviewer count", async () => {
+  it.each([
+    { name: "adds fallback models beyond three without increasing a legacy reviewer count", initialFallbacks: 0, additions: 2, atLimit: false },
+    { name: "caps fallback models at ten and allows adding again after removal", initialFallbacks: 7, additions: 1, atLimit: true },
+  ])("$name", async ({ initialFallbacks, additions, atLimit }) => {
     const user = userEvent.setup();
-    const state = mockCodeReviewBaseHandlers();
+    // Seed the larger roster directly so the limit test exercises the boundary
+    // without eight repeated autosave/refetch cycles under CI contention.
+    const initialRoster: CodeReviewPolicyConfig["agent_roster"] = {
+      ...policy.config.agent_roster,
+      ...(initialFallbacks > 0 ? { reviewer_count: 2 } : {}),
+      reviewers: [...policy.config.agent_roster.reviewers, ...Array.from({ length: initialFallbacks }, () => "claude_code")],
+      reviewer_models: [...(policy.config.agent_roster.reviewer_models ?? []), ...Array.from({ length: initialFallbacks }, () => "claude-sonnet-4-6")],
+      reviewer_reasoning_efforts: [...(policy.config.agent_roster.reviewer_reasoning_efforts ?? []), ...Array.from({ length: initialFallbacks }, () => "high" as const)],
+    };
+    const state = mockCodeReviewBaseHandlers(githubTriggerReady, undefined, {
+      ...policy.config,
+      agent_roster: initialRoster,
+    });
 
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
     await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
     expect(screen.getByRole("combobox", { name: "Number of reviewers" })).toHaveTextContent("2");
 
-    for (let count = 3; count <= 10; count++) {
+    for (let added = 1; added <= additions; added++) {
       await user.click(screen.getByRole("button", { name: "Add model" }));
       await waitFor(() => {
         expect(state.getCurrentConfig().agent_roster.reviewers).toEqual([
-          ...policy.config.agent_roster.reviewers,
-          ...Array.from({ length: count - 2 }, () => "claude_code"),
+          ...initialRoster.reviewers,
+          ...Array.from({ length: added }, () => "claude_code"),
         ]);
         expect(state.getCurrentConfig().agent_roster.reviewer_count).toBe(2);
         expect(state.getCurrentConfig().agent_roster.require_reviewer_quorum).toBe(2);
       });
     }
-    expect(screen.getByRole("button", { name: "Add model" })).toBeDisabled();
-    expect(screen.getByText("10. Fallback model")).toBeInTheDocument();
+    const finalCount = initialRoster.reviewers.length + additions;
+    if (atLimit) {
+      expect(screen.getByRole("button", { name: "Add model" })).toBeDisabled();
+    } else {
+      expect(screen.getByRole("button", { name: "Add model" })).toBeEnabled();
+    }
+    expect(screen.getByText(`${finalCount}. Fallback model`)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Remove reviewer 1" }));
     await waitFor(() => expect(state.getCurrentConfig().agent_roster.reviewers).toEqual([
-      ...Array.from({ length: 9 }, () => "claude_code"),
+      ...Array.from({ length: finalCount - 1 }, () => "claude_code"),
     ]));
     expect(state.getCurrentConfig().agent_roster.reviewer_count).toBe(2);
     expect(state.getCurrentConfig().agent_roster.require_reviewer_quorum).toBe(2);
