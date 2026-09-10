@@ -1488,6 +1488,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// See docs/design/future/65-unified-coding-credentials.md.
 				r.Post("/api/v1/coding-credentials", codingCredentialHandler.Create)
 				r.Post("/api/v1/coding-credentials/{id}/check-rate-limit", codingCredentialHandler.CheckRateLimit)
+				r.Post("/api/v1/coding-credentials/{id}/retry-rate-limit", codingCredentialHandler.RetryRateLimit)
 				r.Patch("/api/v1/coding-credentials/{id}", codingCredentialHandler.Update)
 				r.Delete("/api/v1/coding-credentials/{id}", codingCredentialHandler.Delete)
 				r.Patch("/api/v1/coding-credentials/{id}/move", codingCredentialHandler.Move)

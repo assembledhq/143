@@ -49,6 +49,7 @@ type codingAuthOrgStore interface {
 
 type codingCredentialRateLimitChecker interface {
 	Check(context.Context, models.Scope, uuid.UUID) error
+	Retry(context.Context, models.Scope, uuid.UUID) error
 }
 
 // CodingCredentialHandler exposes the unified API.
@@ -65,7 +66,15 @@ func (h *CodingCredentialHandler) SetRateLimitChecker(checker codingCredentialRa
 
 // CheckRateLimit handles POST /api/v1/coding-credentials/{id}/check-rate-limit.
 func (h *CodingCredentialHandler) CheckRateLimit(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	h.changeRateLimit(w, r, middleware.OrgIDFromContext(r.Context()), false)
+}
+
+// RetryRateLimit handles POST /api/v1/coding-credentials/{id}/retry-rate-limit.
+func (h *CodingCredentialHandler) RetryRateLimit(w http.ResponseWriter, r *http.Request) {
+	h.changeRateLimit(w, r, middleware.OrgIDFromContext(r.Context()), true)
+}
+
+func (h *CodingCredentialHandler) changeRateLimit(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, retry bool) {
 	scope, scopeName, err := h.resolveScopeFromQuery(r, orgID, true)
 	if err != nil || scopeName == "resolved" {
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "a writable credential scope is required")
@@ -80,9 +89,13 @@ func (h *CodingCredentialHandler) CheckRateLimit(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusServiceUnavailable, "CHECK_UNAVAILABLE", "rate-limit checks are unavailable")
 		return
 	}
-	if err := h.rateLimitChecker.Check(r.Context(), scope, id); err != nil {
+	operation := h.rateLimitChecker.Check
+	if retry {
+		operation = h.rateLimitChecker.Retry
+	}
+	if err := operation(r.Context(), scope, id); err != nil {
 		switch {
-		case errors.Is(err, codingcredentials.ErrUnsupported), errors.Is(err, codingcredentials.ErrInactive):
+		case errors.Is(err, codingcredentials.ErrUnsupported), errors.Is(err, codingcredentials.ErrInactive), errors.Is(err, codingcredentials.ErrRetryUnsupported), errors.Is(err, codingcredentials.ErrSetupTokenUsage):
 			writeError(w, r, http.StatusBadRequest, "CHECK_UNSUPPORTED", err.Error())
 		case errors.Is(err, codingcredentials.ErrUsageUnauthorized):
 			writeError(w, r, http.StatusBadGateway, "CHECK_UNAUTHORIZED", codingcredentials.ErrUsageUnauthorized.Error())
@@ -590,24 +603,26 @@ func summaryFromDecryptedCoding(cred models.DecryptedCodingCredential) models.Co
 	if oc, ok := cred.Config.(models.OpenCodeConfig); ok {
 		provider = oc.NormalizedBackingProvider()
 	}
+	claude, isClaude := cred.Config.(models.AnthropicSubscriptionConfig)
 	return models.CodingCredentialSummary{
-		ID:               cred.ID,
-		OrgID:            cred.OrgID,
-		UserID:           cred.UserID,
-		Scope:            scope,
-		Priority:         cred.Priority,
-		Agent:            agent,
-		AuthType:         authType,
-		Provider:         provider,
-		Label:            coalesce(cred.Label, defaultLabelFor(agent, authType)),
-		Status:           codingStatusFor(cred),
-		UsageNote:        usageNoteFor(cred),
-		LastVerifiedAt:   cred.LastVerifiedAt,
-		RateLimitedUntil: cred.RateLimitedUntil,
-		RateLimitMessage: cred.RateLimitMessage,
-		CreatedBy:        cred.CreatedBy,
-		CreatedAt:        cred.CreatedAt,
-		UpdatedAt:        cred.UpdatedAt,
+		ID:                cred.ID,
+		OrgID:             cred.OrgID,
+		UserID:            cred.UserID,
+		Scope:             scope,
+		Priority:          cred.Priority,
+		Agent:             agent,
+		AuthType:          authType,
+		Provider:          provider,
+		Label:             coalesce(cred.Label, defaultLabelFor(agent, authType)),
+		Status:            codingStatusFor(cred),
+		UsageNote:         usageNoteFor(cred),
+		LastVerifiedAt:    cred.LastVerifiedAt,
+		RateLimitedUntil:  cred.RateLimitedUntil,
+		RateLimitMessage:  cred.RateLimitMessage,
+		CanRetryRateLimit: isClaude && claude.IsSetupToken(),
+		CreatedBy:         cred.CreatedBy,
+		CreatedAt:         cred.CreatedAt,
+		UpdatedAt:         cred.UpdatedAt,
 	}
 }
 

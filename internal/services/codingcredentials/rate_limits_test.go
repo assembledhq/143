@@ -92,7 +92,7 @@ func TestCheck(t *testing.T) {
 	}{
 		{name: "reset clears", cfg: models.OpenAISubscriptionConfig{AccessToken: "test-token"}, httpStatus: 200, body: `{"rate_limit":{"allowed":true,"limit_reached":false}}`, applied: true},
 		{name: "claude oauth", cfg: models.AnthropicSubscriptionConfig{AccessToken: "test-token"}, httpStatus: 200, body: `{"five_hour":{"utilization":0},"seven_day":{"utilization":1}}`, applied: true},
-		{name: "claude setup token", cfg: models.AnthropicSubscriptionConfig{AuthMode: models.AnthropicSubscriptionAuthModeSetupToken, OAuthToken: "test-token"}, httpStatus: 200, body: `{"five_hour":{"utilization":0},"seven_day":{"utilization":1}}`, applied: true},
+		{name: "claude setup token", cfg: models.AnthropicSubscriptionConfig{AuthMode: models.AnthropicSubscriptionAuthModeSetupToken, OAuthToken: "test-token"}, wantErr: ErrSetupTokenUsage},
 		{name: "usage endpoint throttled", cfg: models.OpenAISubscriptionConfig{AccessToken: "test-token"}, httpStatus: 429, wantErr: ErrUnavailable},
 		{name: "expired access token", cfg: models.OpenAISubscriptionConfig{AccessToken: "test-token"}, httpStatus: 401, wantErr: ErrUsageUnauthorized},
 		{name: "provider outage", cfg: models.OpenAISubscriptionConfig{AccessToken: "test-token"}, httpStatus: 503, wantErr: ErrUnavailable},
@@ -136,6 +136,59 @@ func TestCheck(t *testing.T) {
 			require.ErrorIs(t, err, tt.wantErr, "check should return expected outcome")
 			require.Equal(t, scope, store.scope, "lookup must preserve tenant and personal scope")
 			require.Equal(t, tt.applied, store.applied, "only complete successful checks may persist changes")
+		})
+	}
+}
+
+func TestRetry(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                      string
+		cfg                       models.ProviderConfig
+		status                    models.CodingCredentialRowStatus
+		noLimit                   bool
+		getErr, applyErr, wantErr error
+		applied                   bool
+	}{
+		{name: "setup token cooldown", applied: true},
+		{name: "already cleared", noLimit: true},
+		{name: "missing credential", getErr: db.ErrCodingCredentialNotFound, wantErr: db.ErrCodingCredentialNotFound},
+		{name: "disabled credential", status: models.CodingCredentialStatusDisabled, wantErr: ErrInactive},
+		{name: "rejected credential", status: models.CodingCredentialStatusInvalid, wantErr: ErrInactive},
+		{name: "Codex cannot bypass provider check", cfg: models.OpenAISubscriptionConfig{AccessToken: "test-token"}, wantErr: ErrRetryUnsupported},
+		{name: "rotating OAuth cannot bypass provider check", cfg: models.AnthropicSubscriptionConfig{AccessToken: "test-token"}, wantErr: ErrRetryUnsupported},
+		{name: "empty setup token", cfg: models.AnthropicSubscriptionConfig{AuthMode: models.AnthropicSubscriptionAuthModeSetupToken}, wantErr: ErrInactive},
+		{name: "concurrent change", applyErr: db.ErrRateLimitCheckStale, wantErr: db.ErrRateLimitCheckStale, applied: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := tt.cfg
+			if cfg == nil {
+				cfg = models.AnthropicSubscriptionConfig{AuthMode: models.AnthropicSubscriptionAuthModeSetupToken, OAuthToken: "test-token"}
+			}
+			status := tt.status
+			if status == "" {
+				status = models.CodingCredentialStatusActive
+			}
+			until := time.Now().Add(time.Hour)
+			cred := &models.DecryptedCodingCredential{ID: uuid.New(), Provider: cfg.Provider(), Config: cfg, Status: status, RateLimitedUntil: &until}
+			if tt.noLimit {
+				cred.RateLimitedUntil = nil
+			}
+			store := &testStore{cred: cred, getErr: tt.getErr, applyErr: tt.applyErr}
+			svc := New(store)
+			svc.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+				t.Error("manual retry must not contact a provider")
+				return nil, errors.New("unexpected provider call")
+			})
+			userID := uuid.New()
+			scope := models.Scope{OrgID: uuid.New(), UserID: &userID}
+			err := svc.Retry(context.Background(), scope, cred.ID)
+			require.ErrorIs(t, err, tt.wantErr, "retry should enforce eligibility and propagate failures")
+			require.Equal(t, scope, store.scope, "retry must look up only the selected tenant and user scope")
+			require.Equal(t, tt.applied, store.applied, "retry should clear only eligible cooldowns")
+			require.Nil(t, store.limit, "manual retry should clear the cooldown without inventing a new limit")
 		})
 	}
 }

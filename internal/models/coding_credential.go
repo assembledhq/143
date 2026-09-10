@@ -153,24 +153,25 @@ func (c DecryptedCodingCredential) Scope() Scope {
 // of CodingAuth (the existing org-only summary) but adds scope/user_id so
 // the same row component can render personal and org stacks.
 type CodingCredentialSummary struct {
-	ID               uuid.UUID             `json:"id"`
-	OrgID            uuid.UUID             `json:"org_id"`
-	UserID           *uuid.UUID            `json:"user_id,omitempty"`
-	Scope            CodingCredentialScope `json:"scope"` // "org" | "personal"
-	Priority         int                   `json:"priority"`
-	Agent            AgentType             `json:"agent"`
-	AuthType         CodingAuthType        `json:"auth_type"`
-	Provider         ProviderName          `json:"provider"`
-	Label            string                `json:"label"`
-	Status           CodingAuthStatus      `json:"status"`
-	IsDefault        bool                  `json:"is_default"` // first runnable in this scope's stack
-	UsageNote        string                `json:"usage_note,omitempty"`
-	LastVerifiedAt   *time.Time            `json:"last_verified_at,omitempty"`
-	RateLimitedUntil *time.Time            `json:"rate_limited_until,omitempty"`
-	RateLimitMessage *string               `json:"rate_limit_message,omitempty"`
-	CreatedBy        *uuid.UUID            `json:"created_by,omitempty"`
-	CreatedAt        time.Time             `json:"created_at"`
-	UpdatedAt        time.Time             `json:"updated_at"`
+	ID                uuid.UUID             `json:"id"`
+	OrgID             uuid.UUID             `json:"org_id"`
+	UserID            *uuid.UUID            `json:"user_id,omitempty"`
+	Scope             CodingCredentialScope `json:"scope"` // "org" | "personal"
+	Priority          int                   `json:"priority"`
+	Agent             AgentType             `json:"agent"`
+	AuthType          CodingAuthType        `json:"auth_type"`
+	Provider          ProviderName          `json:"provider"`
+	Label             string                `json:"label"`
+	Status            CodingAuthStatus      `json:"status"`
+	IsDefault         bool                  `json:"is_default"` // first runnable in this scope's stack
+	UsageNote         string                `json:"usage_note,omitempty"`
+	LastVerifiedAt    *time.Time            `json:"last_verified_at,omitempty"`
+	RateLimitedUntil  *time.Time            `json:"rate_limited_until,omitempty"`
+	RateLimitMessage  *string               `json:"rate_limit_message,omitempty"`
+	CanRetryRateLimit bool                  `json:"can_retry_rate_limit,omitempty"`
+	CreatedBy         *uuid.UUID            `json:"created_by,omitempty"`
+	CreatedAt         time.Time             `json:"created_at"`
+	UpdatedAt         time.Time             `json:"updated_at"`
 }
 
 // CreateCodingCredentialInput is the API body for POST /coding-credentials
