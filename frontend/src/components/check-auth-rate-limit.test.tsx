@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { QueryClient, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
+import type { ReactNode } from "react";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { api } from "@/lib/api";
@@ -22,6 +23,36 @@ function AuthRow() {
 }
 
 describe("CheckAuthRateLimit", () => {
+  it.each(["org", "personal"] as const)("explains and confirms a setup-token retry for %s auths", async (scope) => {
+    const request = vi.fn();
+    const checkRequest = vi.fn();
+    server.use(
+      http.post("*/api/v1/coding-credentials/auth-1/retry-rate-limit", ({request: req}) => {
+        request(new URL(req.url).searchParams.get("scope"));
+        return new HttpResponse(null, {status: 204});
+      }),
+      http.post("*/api/v1/coding-credentials/auth-1/check-rate-limit", () => {
+        checkRequest();
+        return new HttpResponse(null, {status: 204});
+      }),
+    );
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    renderWithProviders(<CheckAuthRateLimit row={{...row, scope, provider: "anthropic_subscription", can_retry_rate_limit: true}} />, {queryClient: client});
+    expect(screen.queryByText("Check rate limit")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", {name: "Retry auth for Team seat"}));
+    expect(screen.getByRole("alertdialog")).toHaveTextContent("Claude setup tokens cannot read usage.");
+    expect(screen.getByRole("alertdialog")).toHaveTextContent("This does not reset your Claude usage.");
+    expect(request).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", {name: "Cancel"}));
+    expect(request).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", {name: "Retry auth for Team seat"}));
+    await userEvent.click(screen.getByRole("button", {name: "Retry auth"}));
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({queryKey: queryKeys.codingCredentials.all}));
+    expect(request).toHaveBeenCalledExactlyOnceWith(scope);
+    expect(checkRequest).not.toHaveBeenCalled();
+  });
+
   it.each(["org", "personal"] as const)("checks the selected %s credential and refreshes cached scopes", async (scope) => {
     const request = vi.fn();
     server.use(http.post("*/api/v1/coding-credentials/auth-1/check-rate-limit", ({request: req}) => {
@@ -51,12 +82,18 @@ describe("CheckAuthRateLimit", () => {
   });
 
   it("keeps the cooldown and surfaces provider-check errors", async () => {
-    const errorToast = vi.spyOn(toast, "error");
+    const errorToast = vi.spyOn(toast, "custom");
     server.use(http.post("*/api/v1/coding-credentials/auth-1/check-rate-limit", () => HttpResponse.json({error:{code:"CHECK_FAILED",message:"Provider check unavailable"}}, {status:502})));
     renderWithProviders(<CheckAuthRateLimit row={row} />);
     await userEvent.click(screen.getByRole("button", {name:"Check rate limit for Team seat"}));
-    await waitFor(() => expect(errorToast).toHaveBeenCalledWith("Provider check unavailable"));
+    await waitFor(() => expect(errorToast).toHaveBeenCalled());
     expect(screen.getByRole("button", {name:"Check rate limit for Team seat"})).toBeEnabled();
+    const renderer = errorToast.mock.lastCall![0] as (id: string) => ReactNode;
+    renderWithProviders(<>{renderer("error-toast")}</>);
+    expect(screen.getByText("Could not check rate limit")).toBeInTheDocument();
+    expect(screen.getByText("Provider check unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveAttribute("data-slot", "toast-card");
+    expect(screen.getByRole("button", {name: "Dismiss notification"})).toBeInTheDocument();
   });
 
   it("disables repeat checks while the request is pending", async () => {

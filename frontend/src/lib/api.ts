@@ -894,6 +894,8 @@ export const api = {
   codingCredentials: {
     checkRateLimit: (id: string, scope: 'org' | 'personal') =>
       post<void>(`/api/v1/coding-credentials/${encodeURIComponent(id)}/check-rate-limit?scope=${scope}`),
+    retryRateLimit: (id: string, scope: 'org' | 'personal') =>
+      post<void>(`/api/v1/coding-credentials/${encodeURIComponent(id)}/retry-rate-limit?scope=${scope}`),
     list: (scope: 'org' | 'personal' | 'resolved' = 'personal') =>
       get<import('./types').ListResponse<import('./types').CodingCredentialSummary>>(
         `/api/v1/coding-credentials?scope=${scope}`,

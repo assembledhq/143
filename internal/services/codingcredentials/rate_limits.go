@@ -18,6 +18,8 @@ var ErrUnsupported = errors.New("rate-limit checks are available for subscriptio
 var ErrInactive = errors.New("reconnect this auth before checking its rate limit")
 var ErrUsageUnauthorized = errors.New("this auth cannot read provider usage; reconnect with OAuth and check again. The saved rate limit has not changed")
 var ErrUnavailable = errors.New("could not check provider usage; the saved rate limit has not changed")
+var ErrRetryUnsupported = errors.New("manual retry is available only for Claude setup tokens")
+var ErrSetupTokenUsage = errors.New("this Claude setup token cannot read usage; use Retry auth to clear the saved cooldown and let the next session try again")
 
 type Store interface {
 	Get(context.Context, models.Scope, uuid.UUID) (*models.DecryptedCodingCredential, error)
@@ -55,7 +57,7 @@ func (s *Service) Check(ctx context.Context, scope models.Scope, id uuid.UUID) e
 		endpoint = "https://api.anthropic.com/api/oauth/usage"
 		token = cfg.AccessToken
 		if cfg.IsSetupToken() {
-			token = cfg.OAuthToken
+			return ErrSetupTokenUsage
 		}
 	default:
 		return ErrUnsupported
@@ -99,6 +101,30 @@ func (s *Service) Check(ctx context.Context, scope models.Scope, id uuid.UUID) e
 		return err
 	}
 	return s.store.ApplyRateLimitCheck(ctx, scope, cred, limit)
+}
+
+// Retry clears only the saved cooldown for an active Claude setup token. It
+// does not verify provider availability: the next run can record a new limit.
+// ApplyRateLimitCheck guards against concurrent credential or cooldown changes.
+func (s *Service) Retry(ctx context.Context, scope models.Scope, id uuid.UUID) error {
+	cred, err := s.store.Get(ctx, scope, id)
+	if err != nil {
+		return err
+	}
+	if cred.Status != models.CodingCredentialStatusActive {
+		return ErrInactive
+	}
+	cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+	if !ok || !cfg.IsSetupToken() {
+		return ErrRetryUnsupported
+	}
+	if cfg.OAuthToken == "" {
+		return ErrInactive
+	}
+	if cred.RateLimitedUntil == nil {
+		return nil
+	}
+	return s.store.ApplyRateLimitCheck(ctx, scope, cred, nil)
 }
 
 type codexWindow struct {

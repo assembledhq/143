@@ -742,6 +742,7 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 	require.Equal(t, "max", orgRows[0].UsageNote, "subscription usage note should prefer account type")
 	require.Equal(t, models.CodingAuthStatusHealthy, orgRows[4].Status, "setup-token subscription should be healthy")
 	require.Equal(t, "Setup token renews by Jan 15, 2027", orgRows[4].UsageNote, "setup-token usage note should show the stored expiry")
+	require.True(t, orgRows[4].CanRetryRateLimit, "setup tokens should offer manual retry instead of an unsupported usage check")
 	require.Equal(t, "Pi API key", defaultLabelFor(models.AgentTypePi, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover pi")
 	require.Equal(t, "OpenCode API key", defaultLabelFor(models.AgentTypeOpenCode, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover opencode")
 

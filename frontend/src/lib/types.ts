@@ -2750,6 +2750,7 @@ export interface CodingCredentialSummary {
   last_verified_at?: string;
   rate_limited_until?: string;
   rate_limit_message?: string;
+  can_retry_rate_limit?: boolean;
   created_by?: string;
   created_at: string;
   updated_at: string;
