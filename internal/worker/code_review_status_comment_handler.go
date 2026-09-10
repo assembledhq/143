@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/assembledhq/143/internal/db"
@@ -113,7 +114,11 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 			if existingErr != nil {
 				return fmt.Errorf("load durable code review status comment id: %w", existingErr)
 			}
-			body := codeReviewStatusCommentBody(lockedLatest, previousCompleted, codeReviewSessionURL(services.FrontendURL, lockedLatest.SessionID))
+			reviewNowURL := ""
+			if scheduler, ok := services.CodeReviewLifecycle.(codeReviewScheduler); ok && scheduler.SchedulingEnabled() {
+				reviewNowURL = codeReviewNowURL(services.FrontendURL, lockedLatest.SessionID)
+			}
+			body := codeReviewStatusCommentBody(lockedLatest, previousCompleted, codeReviewSessionURL(services.FrontendURL, lockedLatest.SessionID), reviewNowURL)
 			var updateErr error
 			commentID, updateErr = updater.UpsertReviewStatusComment(lockCtx, codereviewsvc.UpsertReviewStatusCommentRequest{
 				InstallationID:    repository.InstallationID,
@@ -161,7 +166,7 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 	}
 }
 
-func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, previousCompleted *models.CodeReviewSessionMetadata, sessionURL string) string {
+func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, previousCompleted *models.CodeReviewSessionMetadata, sessionURL, reviewNowURL string) string {
 	var paragraphs []string
 	switch metadata.Status {
 	case models.CodeReviewSessionStatusCompleted:
@@ -220,7 +225,27 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 		}
 		paragraphs = append(paragraphs, fmt.Sprintf("[%s](%s)", label, sessionURL))
 	}
+	if reviewNowURL != "" && metadata.Status != models.CodeReviewSessionStatusStale {
+		paragraphs = append(paragraphs, fmt.Sprintf("[Review now](%s) · Request review of the latest revision in 143. Existing applicable work may be reused.", reviewNowURL))
+	}
 	return strings.Join(paragraphs, "\n\n")
+}
+
+// This is a read-only destination. The authenticated page requires a separate
+// button click to POST, so GitHub link previews cannot spend review capacity.
+func codeReviewNowURL(frontendURL string, sessionID uuid.UUID) string {
+	if strings.TrimSpace(frontendURL) == "" || sessionID == uuid.Nil {
+		return ""
+	}
+	target, err := url.Parse(strings.TrimRight(strings.TrimSpace(frontendURL), "/"))
+	if err != nil || target.Host == "" || (target.Scheme != "https" && target.Scheme != "http") {
+		return ""
+	}
+	target.Path = strings.TrimRight(target.Path, "/") + "/code-reviews"
+	target.RawPath = ""
+	target.RawQuery = url.Values{"review_now": {sessionID.String()}}.Encode()
+	target.Fragment = ""
+	return target.String()
 }
 
 func enqueueCodeReviewStatusCommentSync(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, stage string) {

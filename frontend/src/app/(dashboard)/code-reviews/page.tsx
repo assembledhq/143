@@ -75,6 +75,7 @@ import { DEFAULT_TIME_RANGE, parseTimeRange, timeRangeBounds, timeRangeRefreshDe
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
 import { GitHubReviewerConnectionSheet } from "@/components/code-review/github-reviewer-connection-sheet";
+import { ReviewNowFromComment } from "@/components/code-review/review-now-from-comment";
 import { ScheduledReviews, ReviewNowButton } from "@/components/code-review/scheduling";
 import { CodeReviewPolicyHistory } from "@/components/code-review/policy-history";
 import { SortableTableHeader } from "@/components/sortable-table-header";
@@ -1366,6 +1367,7 @@ export default function CodeReviewsPage() {
 
   return (
     <ListPage title="Code reviews" description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes.">
+      <ReviewNowFromComment canManage={canRetryReviews} />
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList>
           <TabsTrigger value="reviews">
