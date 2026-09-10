@@ -144,9 +144,9 @@ export function CodingAuthStack({
                 <div className="text-xs font-medium text-muted-foreground">Notes</div>
                 {row.usage_note ? <div className="text-xs text-muted-foreground">{row.usage_note}</div> : null}
                 {rateLimitNote(row) ? <div className="text-xs text-muted-foreground">{rateLimitNote(row)}</div> : null}
-                <CheckAuthRateLimit row={row} />
               </div>
             ) : null}
+            <CheckAuthRateLimit row={row} />
             <div className="flex items-center gap-1">
               <Button
                 type="button"

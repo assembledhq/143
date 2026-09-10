@@ -92,4 +92,28 @@ describe("CodingAuthStack", () => {
     expect(screen.getAllByText("Status").length).toBeGreaterThan(0);
     expect(screen.getAllByText("ChatGPT Plus").length).toBeGreaterThan(0);
   });
+
+  it("renders rate-limit recovery on mobile when the credential has no notes", () => {
+    const rateLimitedRow: CodingCredentialSummary = {
+      ...rows[0],
+      status: "rate_limited",
+      usage_note: undefined,
+      rate_limit_message: undefined,
+      rate_limited_until: undefined,
+    };
+
+    renderWithProviders(
+      <CodingAuthStack
+        rows={[rateLimitedRow]}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onMove={vi.fn()}
+        onReorder={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getAllByRole("button", { name: "Check rate limit for Team seat A" }),
+    ).toHaveLength(2);
+  });
 });
