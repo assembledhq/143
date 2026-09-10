@@ -49,9 +49,11 @@ func (s *Service) Check(ctx context.Context, scope models.Scope, id uuid.UUID) e
 	var endpoint, token string
 	switch cfg := cred.Config.(type) {
 	case models.OpenAISubscriptionConfig:
-		endpoint, token = "https://chatgpt.com/backend-api/wham/usage", cfg.AccessToken
+		endpoint = "https://chatgpt.com/backend-api/wham/usage"
+		token = cfg.AccessToken
 	case models.AnthropicSubscriptionConfig:
-		endpoint, token = "https://api.anthropic.com/api/oauth/usage", cfg.AccessToken
+		endpoint = "https://api.anthropic.com/api/oauth/usage"
+		token = cfg.AccessToken
 		if cfg.IsSetupToken() {
 			token = cfg.OAuthToken
 		}
