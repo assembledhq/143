@@ -700,6 +700,10 @@ func (h *CodeReviewHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	item, err := h.store.GetListItemBySessionID(r.Context(), orgID, sessionID)
 	if err != nil {
+		if errors.Is(err, codereviewsvc.ErrReviewIneligible) {
+			writeScheduleError(w, r, err)
+			return
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, r, http.StatusNotFound, "CODE_REVIEW_NOT_FOUND", "code review not found")
 			return
@@ -839,6 +843,11 @@ func (h *CodeReviewHandler) Retry(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusNotFound, "CODE_REVIEW_NOT_FOUND", "code review not found")
 			return
 		}
+		if errors.Is(err, codereviewsvc.ErrReviewIneligible) {
+			writeScheduleError(w, r, err)
+			return
+		}
+
 		var conflict *codereviewsvc.RetryReviewConflictError
 		if errors.As(err, &conflict) {
 			writeErrorWithDetails(w, r, http.StatusConflict, "CODE_REVIEW_RETRY_CONFLICT", conflict.Message,
@@ -889,6 +898,8 @@ func (h *CodeReviewHandler) GetPolicy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_LOAD_FAILED", "failed to load code review policy", err)
 		return
 	}
+	scheduler, ok := h.retryService.(codeReviewSchedulingService)
+	resolved.Capabilities = map[string]bool{"scheduling": ok && scheduler.SchedulingEnabled()}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewResolvedPolicy]{Data: resolved})
 }
 
@@ -1041,6 +1052,9 @@ func (h *CodeReviewHandler) PutPolicy(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(req.Config, &supplied); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid policy config")
 		return
+	}
+	if raw, present := supplied["scheduling_policy"]; present && string(raw) == "null" {
+		config.SchedulingPolicy = &models.CodeReviewSchedulingPolicy{}
 	}
 	_, reviewInstructionsSupplied := supplied["review_instructions"]
 	_, automatedApprovalPolicySupplied := supplied["automated_approval_policy"]

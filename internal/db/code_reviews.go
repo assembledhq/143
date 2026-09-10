@@ -78,7 +78,7 @@ func (s *CodeReviewStore) publishUpdated(ctx context.Context, metadata models.Co
 }
 
 const codeReviewPolicyColumns = `id, org_id, repository_id, active, version, enabled, approval_mode,
-		review_instructions, automated_approval_policy, description_policy, risk_policy, agent_roster, inline_comment_limit, created_by_user_id, created_at`
+		review_instructions, automated_approval_policy, description_policy, risk_policy, agent_roster, inline_comment_limit, created_by_user_id, created_at, scheduling_policy`
 
 const codeReviewMetadataColumns = `id, org_id, session_id, repository_id, pull_request_id, policy_id,
 	base_sha, head_sha, from_fork, trigger_source, status, phase, status_code, status_message, retry_at,
@@ -364,7 +364,7 @@ func (s *CodeReviewStore) ListPolicyVersions(ctx context.Context, orgID uuid.UUI
 var ErrCodeReviewPolicyVersionConflict = errors.New("code review policy version conflict")
 
 func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, createdByUserID *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
-	return s.savePolicy(ctx, orgID, config, createdByUserID, nil)
+	return s.savePolicy(ctx, orgID, config, createdByUserID, nil, nil)
 }
 
 // SavePolicyExpectingVersion saves a new policy version only if the current
@@ -374,18 +374,14 @@ func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, confi
 // updates use this so a stale agent never silently clobbers a newer human (or
 // agent) edit.
 func (s *CodeReviewStore) SavePolicyExpectingVersion(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, expectedVersion int, createdByUserID *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
-	return s.savePolicy(ctx, orgID, config, createdByUserID, &expectedVersion)
+	return s.savePolicy(ctx, orgID, config, createdByUserID, &expectedVersion, nil)
 }
 
-func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, createdByUserID *uuid.UUID, expectedVersion *int) (models.CodeReviewPolicyRecord, error) {
-	config.ReviewInstructions = strings.TrimSpace(config.ReviewInstructions)
-	config.AutomatedApprovalPolicy = strings.TrimSpace(config.AutomatedApprovalPolicy)
-	if err := config.ValidatePromptFields(); err != nil {
-		return models.CodeReviewPolicyRecord{}, err
-	}
-	config = models.ResolveCodeReviewPolicyConfig(&config)
-	if err := config.Validate(); err != nil {
-		return models.CodeReviewPolicyRecord{}, err
+func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, createdByUserID *uuid.UUID, expectedVersion *int, patch json.RawMessage) (models.CodeReviewPolicyRecord, error) {
+	if patch == nil {
+		if err := config.ValidatePromptFields(); err != nil {
+			return models.CodeReviewPolicyRecord{}, err
+		}
 	}
 	txStarter, ok := s.db.(TxStarter)
 	if !ok {
@@ -417,6 +413,28 @@ func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, confi
 	if expectedVersion != nil && *expectedVersion != currentVersion {
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("%w: active version is %d, expected %d", ErrCodeReviewPolicyVersionConflict, currentVersion, *expectedVersion)
 	}
+	// Preserve scheduling overrides for legacy whole-config writers and restore.
+	current, err := NewCodeReviewStore(tx).ResolvePolicy(ctx, orgID)
+	if err != nil {
+		return models.CodeReviewPolicyRecord{}, err
+	}
+	if patch != nil {
+		config, err = models.ApplyCodeReviewPolicyMergePatch(current.Config, patch)
+		if err != nil {
+			return models.CodeReviewPolicyRecord{}, err
+		}
+	} else if config.SchedulingPolicy == nil {
+		config.SchedulingPolicy = current.Config.SchedulingPolicy
+	}
+	config.ReviewInstructions = strings.TrimSpace(config.ReviewInstructions)
+	config.AutomatedApprovalPolicy = strings.TrimSpace(config.AutomatedApprovalPolicy)
+	if err := config.ValidatePromptFields(); err != nil {
+		return models.CodeReviewPolicyRecord{}, err
+	}
+	config = models.ResolveCodeReviewPolicyConfig(&config)
+	if err := config.Validate(); err != nil {
+		return models.CodeReviewPolicyRecord{}, err
+	}
 	version := currentVersion + 1
 	if _, err := tx.Exec(ctx, `
 		UPDATE code_review_policies
@@ -428,6 +446,14 @@ func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, confi
 	}); err != nil {
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("inactivate code review policy: %w", err)
 	}
+	// New rows store effective values explicitly. Historical {} remains
+	// distinguishable from a deliberate reset when restoring a later version.
+	effectiveScheduling := config.SchedulingPolicy.Effective()
+	config.SchedulingPolicy = &models.CodeReviewSchedulingPolicy{AutomaticReReview: &effectiveScheduling.AutomaticReReview, QuietPeriodSeconds: &effectiveScheduling.QuietPeriodSeconds, MinimumIntervalSeconds: &effectiveScheduling.MinimumIntervalSeconds}
+	schedulingPolicy, err := json.Marshal(config.SchedulingPolicy)
+	if err != nil {
+		return models.CodeReviewPolicyRecord{}, err
+	}
 	descriptionPolicy, riskPolicy, agentRoster, err := marshalCodeReviewPolicyParts(config)
 	if err != nil {
 		return models.CodeReviewPolicyRecord{}, err
@@ -435,10 +461,10 @@ func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, confi
 	rows, err := tx.Query(ctx, `
 			INSERT INTO code_review_policies (
 				org_id, repository_id, active, version, enabled, approval_mode, review_instructions, automated_approval_policy, description_policy,
-				risk_policy, agent_roster, inline_comment_limit, created_by_user_id
+				risk_policy, agent_roster, inline_comment_limit, created_by_user_id, scheduling_policy
 			) VALUES (
 				@org_id, NULL, true, @version, @enabled, @approval_mode, @review_instructions, @automated_approval_policy, @description_policy,
-				@risk_policy, @agent_roster, @inline_comment_limit, @created_by_user_id
+				@risk_policy, @agent_roster, @inline_comment_limit, @created_by_user_id, @scheduling_policy
 			)
 			RETURNING `+codeReviewPolicyColumns, pgx.NamedArgs{
 		"org_id":                    orgID,
@@ -447,6 +473,7 @@ func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, confi
 		"approval_mode":             config.ApprovalMode,
 		"review_instructions":       config.ReviewInstructions,
 		"automated_approval_policy": config.AutomatedApprovalPolicy,
+		"scheduling_policy":         schedulingPolicy,
 		"description_policy":        descriptionPolicy,
 		"risk_policy":               riskPolicy,
 		"agent_roster":              agentRoster,
@@ -2652,10 +2679,15 @@ func collectOneCodeReviewGitHubTriggerSetting(rows pgx.Rows) (models.CodeReviewG
 
 func scanCodeReviewPolicy(rows pgx.Rows) (models.CodeReviewPolicyRecord, error) {
 	var record models.CodeReviewPolicyRecord
-	var descriptionPolicy, riskPolicy, agentRoster []byte
+	var descriptionPolicy, riskPolicy, agentRoster, schedulingPolicy []byte
 	if err := rows.Scan(&record.ID, &record.OrgID, &record.RepositoryID, &record.Active, &record.Version, &record.Enabled, &record.ApprovalMode,
-		&record.ReviewInstructions, &record.AutomatedApprovalPolicy, &descriptionPolicy, &riskPolicy, &agentRoster, &record.InlineCommentLimit, &record.CreatedByUserID, &record.CreatedAt); err != nil {
+		&record.ReviewInstructions, &record.AutomatedApprovalPolicy, &descriptionPolicy, &riskPolicy, &agentRoster, &record.InlineCommentLimit, &record.CreatedByUserID, &record.CreatedAt, &schedulingPolicy); err != nil {
 		return models.CodeReviewPolicyRecord{}, err
+	}
+	if string(schedulingPolicy) != "{}" {
+		if err := json.Unmarshal(schedulingPolicy, &record.SchedulingPolicy); err != nil {
+			return models.CodeReviewPolicyRecord{}, fmt.Errorf("decode scheduling policy: %w", err)
+		}
 	}
 	if err := json.Unmarshal(descriptionPolicy, &record.DescriptionPolicy); err != nil {
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("decode code review description policy: %w", err)

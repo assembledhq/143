@@ -1082,8 +1082,8 @@ func TestCodeReviewEventChangesAssessment(t *testing.T) {
 		expected  bool
 	}{
 		{name: "new commits", eventType: "pull_request", action: "synchronize", expected: true},
-		{name: "description edit", eventType: "pull_request", action: "edited", expected: false},
-		{name: "pull request reopened", eventType: "pull_request", action: "reopened", expected: false},
+		{name: "description edit", eventType: "pull_request", action: "edited", expected: true},
+		{name: "pull request reopened", eventType: "pull_request", action: "reopened", expected: true},
 		{name: "human review", eventType: "pull_request_review", action: "submitted", expected: false},
 		{name: "review dismissal", eventType: "pull_request_review", action: "dismissed", expected: false},
 		{name: "inline review creation", eventType: "pull_request_review_comment", action: "created", expected: false},

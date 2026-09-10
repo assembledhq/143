@@ -1,3 +1,4 @@
+import { policyMerge, type PolicyPatch } from "@/lib/code-review-autosave";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { act } from "react";
 import { delay, http, HttpResponse } from "msw";
@@ -464,18 +465,16 @@ function mockCodeReviewBaseHandlers(
         data: { ...policy, config: currentConfig },
       } satisfies SingleResponse<CodeReviewResolvedPolicy>),
     ),
+    http.get("/api/v1/code-review-targets", () => HttpResponse.json({ data: [], meta: {} })),
     http.get("/api/v1/code-review-policies/versions", () =>
       HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<CodeReviewPolicyVersionSummary>),
     ),
-    http.put("/api/v1/code-review-policies", async ({ request }) => {
+    http.patch("/api/v1/code-review-policies", async ({ request }) => {
       const body = (await request.json()) as { config: CodeReviewPolicyConfig; source?: string };
       // Match SavePolicy's canonicalization so invalidation returns the exact
       // prompt value the production backend persists.
-      currentConfig = {
-        ...body.config,
-        review_instructions: body.config.review_instructions.trim(),
-        automated_approval_policy: body.config.automated_approval_policy.trim(),
-      };
+      const merged = policyMerge(currentConfig as unknown as PolicyPatch, body.config as unknown as PolicyPatch) as unknown as CodeReviewPolicyConfig;
+      currentConfig = { ...merged, review_instructions: merged.review_instructions.trim(), automated_approval_policy: merged.automated_approval_policy.trim() };
       onPolicyUpdate?.(currentConfig, body.source);
       return HttpResponse.json({
         data: {
@@ -3334,7 +3333,7 @@ describe("CodeReviewsPage", () => {
   it("retains local prompt text after a failed save", async () => {
     const user = userEvent.setup();
     mockCodeReviewBaseHandlers();
-    server.use(http.put("/api/v1/code-review-policies", () => HttpResponse.json({ error: { code: "SAVE_FAILED", message: "failed" } }, { status: 500 })));
+    server.use(http.patch("/api/v1/code-review-policies", () => HttpResponse.json({ error: { code: "SAVE_FAILED", message: "failed" } }, { status: 500 })));
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
     await user.click(screen.getByRole("button", { name: "Add instructions" }));
@@ -3359,7 +3358,7 @@ describe("CodeReviewsPage", () => {
       { ...policy.config, review_instructions: initialInstructions },
     );
     server.use(
-      http.put("/api/v1/code-review-policies", () => {
+      http.patch("/api/v1/code-review-policies", () => {
         attempts += 1;
         return HttpResponse.json({ error: { code: "SAVE_FAILED", message: "failed" } }, { status: 500 });
       }),
@@ -4318,7 +4317,7 @@ describe("CodeReviewsPage", () => {
   it("opens and focuses the relevant advanced subsection for structured field errors", async () => {
     const user = userEvent.setup();
     mockCodeReviewBaseHandlers();
-    server.use(http.put("/api/v1/code-review-policies", () => HttpResponse.json({ error: { code: "CODE_REVIEW_POLICY_INVALID", message: "invalid code review policy", details: { field: "agent_roster" } } }, { status: 400 })));
+    server.use(http.patch("/api/v1/code-review-policies", () => HttpResponse.json({ error: { code: "CODE_REVIEW_POLICY_INVALID", message: "invalid code review policy", details: { field: "agent_roster" } } }, { status: 400 })));
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: "Policy" }));
     await user.click(screen.getByRole("switch", { name: "Code reviews enabled" }));
@@ -4332,4 +4331,36 @@ describe("CodeReviewsPage", () => {
     expect(notice.parentElement).toBe(screen.getByRole("heading", { level: 3, name: "Safeguards" }).closest("section"));
     expect(notice.compareDocumentPosition(subsection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
+});
+
+it("autosaves scheduling recommendations as a changed-field patch with a version fence", async () => {
+  const user = userEvent.setup();
+  mockCodeReviewBaseHandlers();
+  let current = structuredClone(policy.config);
+  let version = 7;
+  const writes: { config: PolicyPatch; expected_version: number }[] = [];
+  server.use(
+    http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: { ...policy, config: current, policy: { ...current, id: "policy-7", version }, capabilities: { scheduling: true } } })),
+    http.patch("/api/v1/code-review-policies", async ({ request }) => {
+      const body = await request.json() as { config: PolicyPatch; expected_version: number };
+      writes.push(body);
+      current = policyMerge(current as unknown as PolicyPatch, body.config) as unknown as CodeReviewPolicyConfig;
+      version++;
+      return HttpResponse.json({ data: { ...current, id: "policy-7", version } });
+    }),
+  );
+  renderWithProviders(<CodeReviewsPage />);
+  await user.click(await screen.findByRole("tab", { name: "Policy" }));
+  await user.click(screen.getByRole("button", { name: /Review scheduling/i }));
+  expect(screen.getByRole("spinbutton", { name: "Wait after changes value" })).toHaveValue(1);
+  expect(screen.getByRole("spinbutton", { name: "Minimum interval between automatic reviews value" })).toHaveValue(0);
+  await user.click(screen.getByRole("button", { name: "Use 5-minute wait and 15-minute interval" }));
+  await waitFor(() => expect(writes).toHaveLength(1));
+  expect(writes[0].config).toEqual({ scheduling_policy: { quiet_period_seconds: 300, minimum_interval_seconds: 900 } });
+  expect(writes[0].expected_version).toBe(7);
+  await waitFor(() => expect(screen.getByRole("spinbutton", { name: "Wait after changes value" })).toHaveValue(5));
+  await user.click(screen.getByRole("switch", { name: "Automatically re-review changed PRs" }));
+  await waitFor(() => expect(writes).toHaveLength(2));
+  expect(writes[1].config).toEqual({ scheduling_policy: { automatic_re_review: false } });
+  expect(writes[1].expected_version).toBe(8);
 });

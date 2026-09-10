@@ -91,17 +91,18 @@ type schedulerLock interface {
 }
 
 type Scheduler struct {
-	lock           schedulerLock
-	jobs           schedulerJobStore
-	orgs           schedulerOrgStore
-	integrations   schedulerIntegrationStore
-	repos          schedulerRepoStore
-	automations    schedulerAutomationStore    // nil-safe: automation scheduling disabled if nil
-	automationRuns schedulerAutomationRunStore // nil-safe: automation scheduling disabled if nil
-	capabilities   schedulerCapabilityResolver // nil-safe: scheduled automation runs use empty snapshots if nil
-	sessions       schedulerSessionStore       // nil-safe: stranded-pending reaper disabled if nil
-	pool           schedulerTxBeginner         // needed for automation scheduling transactions
-	logger         zerolog.Logger
+	reviewSchedules interface{ RepairMissingWakes(context.Context) error }
+	lock            schedulerLock
+	jobs            schedulerJobStore
+	orgs            schedulerOrgStore
+	integrations    schedulerIntegrationStore
+	repos           schedulerRepoStore
+	automations     schedulerAutomationStore    // nil-safe: automation scheduling disabled if nil
+	automationRuns  schedulerAutomationRunStore // nil-safe: automation scheduling disabled if nil
+	capabilities    schedulerCapabilityResolver // nil-safe: scheduled automation runs use empty snapshots if nil
+	sessions        schedulerSessionStore       // nil-safe: stranded-pending reaper disabled if nil
+	pool            schedulerTxBeginner         // needed for automation scheduling transactions
+	logger          zerolog.Logger
 
 	domainStore    schedulerDomainStore    // nil-safe: verified-domain recheck disabled if nil
 	domainVerifier schedulerDomainVerifier // nil-safe: verified-domain recheck disabled if nil
@@ -226,6 +227,11 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 		}
 	}()
 
+	if s.reviewSchedules != nil {
+		if err := s.reviewSchedules.RepairMissingWakes(ctx); err != nil {
+			s.logger.Warn().Err(err).Msg("repair missing code review schedule wakes")
+		}
+	}
 	orgIDs, err := s.integrations.ListOrgsWithActiveIntegrations(ctx)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("scheduler failed to list orgs with active integrations")
@@ -698,4 +704,9 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 	for _, jobID := range jobIDs {
 		s.jobs.Notify(ctx, jobID)
 	}
+}
+
+// SetCodeReviewScheduleReconciler enables bounded repair of pending review wakes.
+func (s *Scheduler) SetCodeReviewScheduleReconciler(reconciler interface{ RepairMissingWakes(context.Context) error }) {
+	s.reviewSchedules = reconciler
 }

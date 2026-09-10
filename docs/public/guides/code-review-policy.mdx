@@ -30,9 +30,9 @@ Every reviewer and the orchestrator receive the same immutable image snapshot fo
 
 Existing screenshots remain valid across later commits when they still accurately represent the affected UI or workflow. 143 evaluates currentness from whether the diff materially changes the rendered state shown by the image, not from the image timestamp or the fact that the pull-request head changed. The default UI-evidence rubric treats small changes that do not materially alter rendered output, non-visible changes, test-only changes, refactors, and unrelated changes as not applicable. Updated screenshots are required only when the existing evidence no longer represents the changed experience.
 
-Open the review's **Evidence** panel to see captured thumbnails, source surface and author, status, failure details, and which images the orchestrator cited. 143 retains per-image provenance for the first 32 images across the description and human discussion; the panel reports only an aggregate omitted count for any later images. Inaccessible, unsupported, or oversized retained images remain visible as provenance but cannot satisfy a requirement. A review uses the snapshot taken when that assessment began; request 143 again if description or comment edits on the same commit should be evaluated in a new assessment.
+Open the review's **Evidence** panel to see captured thumbnails, source surface and author, status, failure details, and which images the orchestrator cited. 143 retains per-image provenance for the first 32 images across the description and human discussion; the panel reports only an aggregate omitted count for any later images. Inaccessible, unsupported, or oversized retained images remain visible as provenance but cannot satisfy a requirement. A review uses the snapshot taken when that assessment began; later description or comment edits are not retroactively included. Same-head **Review now** can reuse an existing assessment and does not guarantee a fresh evidence snapshot.
 
-An explicit new reviewer request is different: every genuinely new request starts a distinct assessment, including after a prior approval or when the commit SHA has not changed. Use this when you want description-only edits to receive a fresh coding-agent assessment or deliberately want another review after automatic monitoring has stopped. GitHub webhook redeliveries reuse the assessment created for the original delivery even if policy or commit state changes later; if the first attempt never reached the worker queue, redelivery retries it safely. A new request received while reviewer agents are active waits durably for that work to finish before starting. The existing rolling PR comment is updated in place and identifies the latest assessed commit and time, while the Code reviews page retains each assessment as audit history.
+Where durable review scheduling is enabled, an explicit reviewer request ensures review of the current revision and joins or reuses existing applicable work. A new request with different review context, or following a deterministic early stop, can still require another assessment. In installations using the legacy scheduler, each genuinely new explicit request starts a distinct assessment, even on the same commit. Redelivery of an existing request keeps its original identity. The Code reviews page retains executed assessments as audit history.
 
 When a review starts, 143 asynchronously posts a best-effort PR conversation comment with a link to the running session. When the session finishes, that same comment is updated with the result. During a reassessment, the rolling comment keeps the previous completed verdict visible, labels the commit it assessed, and links to the new running session until the replacement result is ready; stable blockers found for the active commit appear alongside that prior verdict. Later review passes reuse the same comment, so the PR keeps one current visible 143 summary instead of accumulating one per commit. Formal GitHub reviews remain marker-only except for approval state and inline findings. To keep review noise low, 143 posts inline findings only for P0 and P1 issues. The rolling summary groups policy thresholds, review findings, and decisions that need human judgment; platform review failures appear separately from code risk, and a single blocker is identified against the assessed commit. P2 and P3 observations remain advisory: they do not affect approval or create line comments, but their details are available in a collapsed section and in the linked 143 review evidence.
 
@@ -49,11 +49,45 @@ installation immediately before approving. If membership cannot be verified,
 
 Pushing code does not start another assessment after 143 submits an approval. A later explicit reviewer request can run a new assessment, but 143 does not dismiss the earlier GitHub approval automatically.
 
+## Schedule automatic reviews
+
+When durable scheduling is enabled for your installation, admins can open
+**Policy → Safeguards → Review scheduling** to configure:
+
+- **Automatically re-review changed PRs**: monitor PRs that have already been requested for review.
+- **Wait after changes**: wait for pushes to settle before automatic review starts.
+- **Minimum interval between automatic reviews**: space reviews from the first actual reviewer start, including an explicitly requested review.
+
+Both timing requirements must be satisfied. Repeated delivery of the same
+revision does not restart the wait. Existing settings default to a one-minute
+wait and no additional minimum interval; **Use 5-minute wait and 15-minute
+interval** applies those values explicitly. These controls autosave for the
+organization. The **Dispute reassessment cooldown** is separate and applies to
+repeated objections.
+
+The **Scheduled reviews** section shows pending work before a session exists,
+including draft, paused, active-review, and GitHub availability waits. Its queue
+is separate from the executed review activity filters. Members and admins can
+pause or resume automatic monitoring for a pending PR.
+
+**Review now** bypasses the two timing delays and an automatic-monitoring pause.
+It still requires an open, ready PR and an enabled review policy. It waits for
+active work and can reuse a completed assessment of the same head and base under
+the current policy. It does not resume automatic monitoring or guarantee a
+second assessment for every click. Draft and closed PRs cannot start new review
+work. Historical approval still stops automatic re-review; use an explicit
+request when another review is needed after approval.
+
+Content reuse across rebases or restacks, review-specific usage budgets, reserved
+interactive capacity, and forced fresh review are not part of this scheduling
+release. Scheduling controls appear only after the installation enables this
+capability.
+
 ## Challenge a review decision
 
 Organization admins and members can open a completed review's **Evidence** panel and select **Ask for reconsideration** for a non-approval or **Report an unsafe approval** for an approval. Explain what the review missed and, when available, select the policy reasons you are contesting. The original decision and evidence remain immutable while the panel shows the dispute's intake, reassessment, escalation, and adjudication timeline.
 
-On GitHub, every user-attributed mention of the configured reviewer after a completed decision, plus replies in 143's inline finding threads, is classified from the full comment by the review triage model. This includes comments submitted through a third-party GitHub App acting on the user's behalf, such as Graphite; bot-attributed comments and comments from 143's own app are excluded. There are no disagreement keywords or punctuation rules to remember. A bare request to review again returns to the normal reviewer workflow and uses the rolling review comment for status; objections, questions, and chatter follow their corresponding dispute routes. In Phase 1A, a trusted pull request author can trigger a reassessment of the latest pull request revision when another run could help; other maintainers and outside contributors are still recorded and answered, but cannot spend organization compute on a dispute reassessment automatically. Semantically unchanged objections within the policy's **Reassessment cooldown** are deduplicated with a clear response. Admins can tune that cooldown under the policy's advanced approval criteria.
+On GitHub, every user-attributed mention of the configured reviewer after a completed decision, plus replies in 143's inline finding threads, is classified from the full comment by the review triage model. This includes comments submitted through a third-party GitHub App acting on the user's behalf, such as Graphite; bot-attributed comments and comments from 143's own app are excluded. There are no disagreement keywords or punctuation rules to remember. A bare request to review again returns to the normal reviewer workflow and uses the rolling review comment for status; objections, questions, and chatter follow their corresponding dispute routes. In Phase 1A, a trusted pull request author can trigger a reassessment of the latest pull request revision when another run could help; other maintainers and outside contributors are still recorded and answered, but cannot spend organization compute on a dispute reassessment automatically. Semantically unchanged objections within the policy's **Dispute reassessment cooldown** are deduplicated with a clear response. Admins can tune that cooldown under the policy's advanced approval criteria.
 
 Unsafe-approval reports do not reverse an existing GitHub approval or automatically rerun the reviewer. They enter the policy-owner list for human judgment. Admins use the **Disputes** tab to uphold, reject, or request more context; only an upheld dispute is evidence that policy should change. An admin can also promote an untrusted captured report from the review's Evidence timeline when its provenance has been checked.
 

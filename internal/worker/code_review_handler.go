@@ -203,6 +203,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 		}
 		if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
+			if errors.Is(syncErr, errCodeReviewSchedulingSuperseded) {
+				return nil
+			}
 			return syncErr
 		}
 		pr, err = stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
@@ -265,6 +268,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		if !stableRisk.Acceptable && stopAfterDeterministicFailure {
 			if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
+				if errors.Is(syncErr, errCodeReviewSchedulingSuperseded) {
+					return nil
+				}
 				return syncErr
 			}
 			pr, err = stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
@@ -355,6 +361,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("set code review GitHub sync phase: %w", err)
 		}
 		if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
+			if errors.Is(syncErr, errCodeReviewSchedulingSuperseded) {
+				return nil
+			}
 			return syncErr
 		}
 		pr, err = stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
@@ -730,7 +739,25 @@ func codeReviewDeadLetterReason(err error) string {
 	return reason
 }
 
+var errCodeReviewSchedulingSuperseded = errors.New("review scheduling target changed")
+
+type codeReviewExecutionValidator interface {
+	ValidateScheduledExecution(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error)
+}
+
 func syncCodeReviewPullRequestState(ctx context.Context, services *Services, logger zerolog.Logger, job runCodeReviewPayload) error {
+	if services != nil {
+		if validator, ok := services.CodeReviewLifecycle.(codeReviewExecutionValidator); ok {
+			valid, err := validator.ValidateScheduledExecution(ctx, job.OrgID, job.PullRequestID, job.SessionID)
+			if err != nil {
+				return classifyGitHubJobError(err, job.SessionID.String())
+			}
+			if !valid {
+				return errCodeReviewSchedulingSuperseded
+			}
+		}
+	}
+
 	if services == nil || services.PR == nil {
 		return nil
 	}

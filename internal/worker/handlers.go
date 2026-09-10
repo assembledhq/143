@@ -465,6 +465,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register(models.JobTypeSyncCodeReviewStatusComment, newSyncCodeReviewStatusCommentHandler(stores, services, logger))
 		if services != nil && services.CodeReviewLifecycle != nil {
 			w.Register(models.JobTypeStartCodeReviewReassessment, newStartCodeReviewReassessmentHandler(stores, services, logger))
+			w.Register(models.JobTypeReconcileCodeReviewSchedule, newCodeReviewScheduleHandler(services))
 		}
 	}
 	if stores != nil && stores.CodeReviewDisputes != nil && services != nil && services.CodeReviewDisputes != nil {

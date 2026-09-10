@@ -75,6 +75,7 @@ const (
 var githubTeamMentionPattern = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])@([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)/([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)`)
 
 type Service struct {
+	scheduling        *schedulingDependencies
 	policies          PolicyStore
 	metadata          MetadataStore
 	sessions          SessionStore
@@ -290,6 +291,9 @@ func (s *Service) SetReviewStatusCommentJobs(jobs JobStore) {
 // requests converge through startReview's deterministic retry output key, then
 // compare-and-set the old row's supersession link to that winner.
 func (s *Service) RetryReview(ctx context.Context, input RetryReviewInput) (RetryReviewResult, error) {
+	if s.SchedulingEnabled() {
+		return s.retryScheduledReview(ctx, input)
+	}
 	if input.OrgID == uuid.Nil || input.SessionID == uuid.Nil {
 		return RetryReviewResult{}, fmt.Errorf("org_id and session_id are required")
 	}
@@ -604,6 +608,9 @@ func (s *Service) handleExplicitReviewRequest(
 	changeReason string,
 	changeKey string,
 ) (ReviewRequestedResult, error) {
+	if s.SchedulingEnabled() {
+		return s.scheduleReview(ctx, ReviewChangedInput{OrgID: input.OrgID, RepositoryID: input.RepositoryID, PullRequestID: input.PullRequestID, ExplicitRequest: true, GitHubDeliveryID: input.DeliveryID, RequestContext: normalizeReviewRequestContext(input.RequestContext), RequestedReviewerLogin: input.RequestedLogin, RequestedTeamSlug: input.RequestedTeam, TriggerSource: source, ChangeReason: changeReason}, models.CodeReviewReviewNow, false, nil)
+	}
 	input.RequestContext = normalizeReviewRequestContext(input.RequestContext)
 	// A reviewer-picker request or configured-team mention is intentional even
 	// after approval; approval is only the terminal gate for automatic changes.
@@ -683,6 +690,13 @@ func (s *Service) handleExplicitReviewRequest(
 // After the replacement job is durable, automatic head changes mark older
 // assessments stale and stop their agent threads immediately.
 func (s *Service) QueueReviewChanged(ctx context.Context, input ReviewChangedInput) (ReviewRequestedResult, error) {
+	if s.SchedulingEnabled() && input.TriggeringDisputeID == nil && input.ReviewRequestDisputeID == nil {
+		mode := models.CodeReviewEnsureCurrent
+		if input.ExplicitRequest {
+			mode = models.CodeReviewReviewNow
+		}
+		return s.scheduleReview(ctx, input, mode, input.TriggeringDisputeID != nil, nil)
+	}
 	if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil || input.PullRequestID == uuid.Nil {
 		return ReviewRequestedResult{}, fmt.Errorf("org_id, repository_id, and pull_request_id are required")
 	}
@@ -790,6 +804,9 @@ func (s *Service) reassessmentDebounce() time.Duration {
 // code review. Automatic reassessment stops after the reviewer approves the PR,
 // while explicit requests may intentionally start another assessment.
 func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedInput) (ReviewRequestedResult, error) {
+	if s.SchedulingEnabled() {
+		return s.handleSerializedReviewChanged(ctx, input)
+	}
 	if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil || input.PullRequestID == uuid.Nil {
 		return ReviewRequestedResult{}, fmt.Errorf("org_id, repository_id, and pull_request_id are required")
 	}

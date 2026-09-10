@@ -158,6 +158,8 @@ const (
 	AuditActionCodeReviewPolicyUpdated      AuditAction = "code_review_policy.updated"
 	AuditActionCodeReviewPolicyReset        AuditAction = "code_review_policy.reset"
 	AuditActionCodeReviewPolicyRestored     AuditAction = "code_review_policy.restored"
+	AuditActionCodeReviewRequested          AuditAction = "code_review.requested"
+	AuditActionCodeReviewScheduleUpdated    AuditAction = "code_review_schedule.updated"
 	AuditActionCodeReviewRetried            AuditAction = "code_review.retried"
 	AuditActionCodeReviewDisputeFiled       AuditAction = "code_review_dispute.filed"
 	AuditActionCodeReviewDisputeReassessed  AuditAction = "code_review_dispute.reassessed"
@@ -236,7 +238,7 @@ func (a AuditAction) Validate() error {
 		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,
 		AuditActionPreviewSecretBundleRevealed, AuditActionPreviewSecretBundleResolved, AuditActionPreviewSecretBundleFailed,
 		AuditActionPreviewPolicyUpdated, AuditActionPreviewToolInvoked, AuditActionPreviewUpdated, AuditActionPreviewScreenshotCaptured,
-		AuditActionCodeReviewPolicyUpdated, AuditActionCodeReviewPolicyReset, AuditActionCodeReviewPolicyRestored, AuditActionCodeReviewRetried,
+		AuditActionCodeReviewPolicyUpdated, AuditActionCodeReviewPolicyReset, AuditActionCodeReviewPolicyRestored, AuditActionCodeReviewRetried, AuditActionCodeReviewRequested, AuditActionCodeReviewScheduleUpdated,
 		AuditActionCodeReviewDisputeFiled, AuditActionCodeReviewDisputeReassessed, AuditActionCodeReviewDisputeAdjudicated,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionAuthCLILogin, AuditActionAuthCLILogout,

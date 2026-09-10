@@ -179,6 +179,7 @@ export interface CodeReviewDescriptionRequirement {
 }
 
 export interface CodeReviewPolicyConfig {
+  scheduling_policy?: { automatic_re_review?: boolean; quiet_period_seconds?: number; minimum_interval_seconds?: number };
   enabled: boolean;
   approval_mode: CodeReviewApprovalMode;
   review_instructions: string;
@@ -228,6 +229,7 @@ export interface CodeReviewPolicyRecord extends CodeReviewPolicyConfig {
 }
 
 export interface CodeReviewResolvedPolicy {
+  capabilities?: { scheduling?: boolean };
   config: CodeReviewPolicyConfig;
   source: "default" | "organization" | "repository" | string;
   policy?: CodeReviewPolicyRecord;
@@ -3855,4 +3857,15 @@ export interface AutomationBulkFixupFailure {
 export interface AutomationBulkResponse {
   affected: string[];
   fixup_failures: AutomationBulkFixupFailure[];
+}
+
+export interface CodeReviewSchedule {
+ id: string; pull_request_id: string; repository_id: string;
+ state: "idle" | "waiting" | "running" | "covered" | "paused" | "closed";
+ wait_reason: string; automatic_paused: boolean; is_draft: boolean;
+ head_sha: string; eligible_at: string | null; retry_at: string | null;
+ first_pending_at: string | null; active_session_id: string | null;
+}
+export interface CodeReviewScheduledTarget {
+ schedule: CodeReviewSchedule; title: string; github_pr_url: string; github_pr_number: number; github_repo: string;
 }
