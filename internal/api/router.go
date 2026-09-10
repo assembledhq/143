@@ -36,6 +36,7 @@ import (
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/assembledhq/143/internal/services/codingcredentials"
 	"github.com/assembledhq/143/internal/services/domains"
 	"github.com/assembledhq/143/internal/services/email"
 	ghservice "github.com/assembledhq/143/internal/services/github"
@@ -671,6 +672,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
 	// Unified coding-credentials handler — see docs/design/future/65-unified-coding-credentials.md.
 	codingCredentialHandler := handlers.NewCodingCredentialHandler(codingCredentialStore, orgStore)
+	codingCredentialHandler.SetRateLimitChecker(codingcredentials.New(codingCredentialStore))
 	var emailSender email.Sender
 	if cfg.SMTPHost != "" && cfg.SMTPFrom != "" {
 		emailSender = email.NewSMTPSender(email.SMTPConfig{
@@ -1485,6 +1487,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// reorder the org stack.
 				// See docs/design/future/65-unified-coding-credentials.md.
 				r.Post("/api/v1/coding-credentials", codingCredentialHandler.Create)
+				r.Post("/api/v1/coding-credentials/{id}/check-rate-limit", codingCredentialHandler.CheckRateLimit)
 				r.Patch("/api/v1/coding-credentials/{id}", codingCredentialHandler.Update)
 				r.Delete("/api/v1/coding-credentials/{id}", codingCredentialHandler.Delete)
 				r.Patch("/api/v1/coding-credentials/{id}/move", codingCredentialHandler.Move)

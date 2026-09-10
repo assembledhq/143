@@ -52,6 +52,8 @@ var ErrCodingCredentialNotFound = errors.New("coding credential not found")
 // decide whether to retry) can errors.Is on this sentinel.
 var ErrAllCredentialsShed = errors.New("all eligible coding credentials are currently shed")
 
+var ErrRateLimitCheckStale = errors.New("auth changed while checking rate limits; check again")
+
 // ErrCodingCredentialLabelTaken is returned when a row already exists at
 // (org_id, user_id, provider, label) and is not eligible to be overwritten
 // (i.e. it is active or invalid). The embedded ExistingStatus tells the
@@ -230,6 +232,44 @@ func (s *CodingCredentialStore) ClearRateLimitedForScope(ctx context.Context, sc
 	}
 	s.invalidate(scope, provider)
 	return nil
+}
+
+// ApplyRateLimitCheck updates only the runtime cooldown, provided neither the
+// config nor the observed limit changed during the provider request.
+func (s *CodingCredentialStore) ApplyRateLimitCheck(ctx context.Context, scope models.Scope, checked *models.DecryptedCodingCredential, limit *models.CodingCredentialRateLimit) error {
+	if err := s.withScopedConfigTx(ctx, scope, checked.ID, func(tx pgx.Tx, current codingCredentialConfigSnapshot, runtime codingCredentialRuntimeSnapshot) error {
+		if current.VersionID != checked.VersionID || runtime.Status != models.CodingCredentialStatusActive ||
+			!sameOptionalTime(runtime.RateLimitedObservedAt, checked.RateLimitedObservedAt) ||
+			!sameOptionalTime(runtime.RateLimitedUntil, checked.RateLimitedUntil) {
+			return ErrRateLimitCheckStale
+		}
+		runtime.RateLimitedUntil = nil
+		runtime.RateLimitedObservedAt = nil
+		runtime.RateLimitMessage = nil
+		if limit != nil {
+			observedAt := s.clock()
+			runtime.RateLimitedUntil = &limit.Until
+			runtime.RateLimitedObservedAt = &observedAt
+			runtime.RateLimitMessage = &limit.Message
+		}
+		return s.insertRuntimeVersionTx(ctx, tx, scope, checked.ID, runtime)
+	}); err != nil {
+		return err
+	}
+	if limit == nil {
+		s.health.clear(checked.ID)
+	} else {
+		s.health.shed(checked.ID)
+	}
+	s.invalidate(scope, checked.Provider)
+	return nil
+}
+
+func sameOptionalTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
 }
 
 // MarkVerifiedForScope records a successful runtime verification without
