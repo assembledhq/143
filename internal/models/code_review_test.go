@@ -753,6 +753,35 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: 607, Limit: 300},
 			),
 		},
+		{
+			name: "blocks application schema changes",
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				LinesChanged:      20,
+				ChangedPaths:      []string{"gocode/postgresdb/application_schema.go"},
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Author:            "devin",
+			},
+			expected: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonApplicationSchema, Subject: "gocode/postgresdb/application_schema.go"},
+			),
+		},
+		{
+			name: "blocks DB migration message",
+			input: CodeReviewRiskInput{
+				FilesChanged:            1,
+				LinesChanged:            20,
+				ChangedPaths:            []string{"internal/db/users.go"},
+				ChecksPassing:           true,
+				DescriptionPassed:       true,
+				Author:                  "devin",
+				DBMigrationMessageFound: true,
+			},
+			expected: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonDatabaseMigration},
+			),
+		},
 	}
 
 	for _, tt := range tests {
@@ -817,6 +846,8 @@ func TestCodeReviewRiskReasonCodeValidate(t *testing.T) {
 		CodeReviewRiskReasonOperationalRisk,
 		CodeReviewRiskReasonSensitiveChange,
 		CodeReviewRiskReasonPolicyRequirement,
+		CodeReviewRiskReasonApplicationSchema,
+		CodeReviewRiskReasonDatabaseMigration,
 	}
 	tests := make([]struct {
 		name      string
@@ -889,6 +920,8 @@ func TestCodeReviewRiskReasonMessage(t *testing.T) {
 		{name: "operational risk", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonOperationalRisk, Subject: "requires a coordinated rollout"}, expected: "human review is required for operational-risk judgment: requires a coordinated rollout"},
 		{name: "sensitive change", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonSensitiveChange, Subject: "changes production data access"}, expected: "human review is required for sensitive-change judgment: changes production data access"},
 		{name: "policy requirement", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonPolicyRequirement, Subject: "requires domain-owner signoff"}, expected: "human review is required for an automated approval policy requirement: requires domain-owner signoff"},
+		{name: "application schema", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonApplicationSchema, Subject: "gocode/postgresdb/application_schema.go"}, expected: "application schema file changed: gocode/postgresdb/application_schema.go"},
+		{name: "database migration", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonDatabaseMigration}, expected: "this migration adheres to the correct syntax, style, etc... Request a human reviewer to ensure adherence to the migration protocol"},
 	}
 
 	for _, tt := range tests {

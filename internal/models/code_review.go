@@ -1284,24 +1284,25 @@ func CodeReviewAutomatedApprovalExamples() []CodeReviewAutomatedApprovalExampleO
 }
 
 type CodeReviewRiskInput struct {
-	FilesChanged          int
-	LinesChanged          int
-	ChangedPaths          []string
-	ChecksPassing         bool
-	RequiredChecksPassing map[string]bool
-	DescriptionPassed     bool
-	UpToDate              bool
-	Author                string
-	AuthorClass           string
-	AuthorTeams           []string
-	FromFork              bool
-	BlockingFindings      int
-	ReviewerDisagreement  bool
-	ScopeMismatch         bool
-	UnresolvedUncertainty bool
-	PromptInjectionFound  bool
-	ContextFetchFailed    bool
-	HeadSHAChanged        bool
+	FilesChanged            int
+	LinesChanged            int
+	ChangedPaths            []string
+	ChecksPassing           bool
+	RequiredChecksPassing   map[string]bool
+	DescriptionPassed       bool
+	UpToDate                bool
+	Author                  string
+	AuthorClass             string
+	AuthorTeams             []string
+	FromFork                bool
+	BlockingFindings        int
+	ReviewerDisagreement    bool
+	ScopeMismatch           bool
+	UnresolvedUncertainty   bool
+	PromptInjectionFound    bool
+	ContextFetchFailed      bool
+	HeadSHAChanged          bool
+	DBMigrationMessageFound bool
 }
 
 type CodeReviewRiskReasonCode string
@@ -1329,6 +1330,8 @@ const (
 	CodeReviewRiskReasonSensitivePath         CodeReviewRiskReasonCode = "sensitive_path"
 	CodeReviewRiskReasonPathOutsideScope      CodeReviewRiskReasonCode = "path_outside_scope"
 	CodeReviewRiskReasonBlockedPath           CodeReviewRiskReasonCode = "blocked_path"
+	CodeReviewRiskReasonApplicationSchema     CodeReviewRiskReasonCode = "application_schema"
+	CodeReviewRiskReasonDatabaseMigration     CodeReviewRiskReasonCode = "database_migration"
 	// Retained so historical decisions remain renderable; new evaluations do not emit these reasons.
 	CodeReviewRiskReasonPolicyPathChanged            CodeReviewRiskReasonCode = "policy_path_changed"
 	CodeReviewRiskReasonExcludedCategory             CodeReviewRiskReasonCode = "excluded_category"
@@ -1381,7 +1384,9 @@ func (c CodeReviewRiskReasonCode) Validate() error {
 		CodeReviewRiskReasonOwnership,
 		CodeReviewRiskReasonOperationalRisk,
 		CodeReviewRiskReasonSensitiveChange,
-		CodeReviewRiskReasonPolicyRequirement:
+		CodeReviewRiskReasonPolicyRequirement,
+		CodeReviewRiskReasonApplicationSchema,
+		CodeReviewRiskReasonDatabaseMigration:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewRiskReasonCode: %q", c)
@@ -1402,6 +1407,7 @@ var codeReviewStableDeterministicRiskReasonCodes = []CodeReviewRiskReasonCode{
 	CodeReviewRiskReasonBlockedPath,
 	CodeReviewRiskReasonPathOutsideScope,
 	CodeReviewRiskReasonSensitivePath,
+	CodeReviewRiskReasonApplicationSchema,
 	CodeReviewRiskReasonForkIneligible,
 	CodeReviewRiskReasonAuthorIneligible,
 }
@@ -1476,6 +1482,10 @@ func (r CodeReviewRiskReason) Message() string {
 		return "path is outside allowed policy scope: " + r.Subject
 	case CodeReviewRiskReasonBlockedPath:
 		return "blocked path changed: " + r.Subject
+	case CodeReviewRiskReasonApplicationSchema:
+		return "application schema file changed: " + r.Subject
+	case CodeReviewRiskReasonDatabaseMigration:
+		return "this migration adheres to the correct syntax, style, etc... Request a human reviewer to ensure adherence to the migration protocol"
 	case CodeReviewRiskReasonPolicyPathChanged:
 		return "code review policy/config path changed: " + r.Subject
 	case CodeReviewRiskReasonExcludedCategory:
@@ -1629,6 +1639,14 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 			risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonBlockedPath, Subject: path})
 		}
 	}
+	for _, path := range input.ChangedPaths {
+		if codeReviewPathIsApplicationSchema(path) {
+			risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonApplicationSchema, Subject: path})
+		}
+	}
+	if input.DBMigrationMessageFound {
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonDatabaseMigration})
+	}
 	return risk
 }
 
@@ -1747,6 +1765,23 @@ func matchesAnyCodeReviewPath(path string, patterns []string) bool {
 			continue
 		}
 		if codeReviewPathPatternMatches(pattern, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func codeReviewPathIsApplicationSchema(path string) bool {
+	path = normalizeCodeReviewPath(path)
+	for _, fragment := range []string{
+		"application_schema",
+		"application_indexes",
+		"cached_metrics_schema",
+		"raw_schema",
+		"raw_indexes",
+		"/migrations/",
+	} {
+		if strings.Contains(path, fragment) {
 			return true
 		}
 	}
