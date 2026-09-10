@@ -4519,6 +4519,8 @@ type PullRequestHead struct {
 // CodeReviewPullRequestSnapshot is the current GitHub state needed by code
 // review entry points that cannot safely rely on the asynchronous PR mirror.
 type CodeReviewPullRequestSnapshot struct {
+	IsDraft     bool
+	BaseRef     string
 	Number      int
 	HTMLURL     string
 	Title       string
@@ -4564,6 +4566,8 @@ func (s *PRService) GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID,
 		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("pull request head SHA is missing")
 	}
 	return CodeReviewPullRequestSnapshot{
+		IsDraft:     details.Draft,
+		BaseRef:     details.Base.Ref,
 		Number:      details.Number,
 		HTMLURL:     details.HTMLURL,
 		Title:       details.Title,

@@ -409,6 +409,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	codeReviewSvc.SetGitHubTriggerStore(codeReviewStore)
 	if prService != nil {
 		codeReviewSvc.SetRetryDependencies(pullRequestStore, prService)
+		if cfg.CodeReviewSchedulingEnabled {
+			codeReviewSvc.SetScheduling(db.NewCodeReviewScheduleStore(pool), prService)
+			codeReviewSvc.SetSchedulingStreams(codeReviewStreams)
+		}
 	}
 	codeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
 	codeReviewDisputeStore.SetJobStore(jobStore)
@@ -1348,6 +1352,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/code-reviews/{id}", codeReviewHandler.Get)
 				r.Get("/api/v1/code-reviews/{id}/evidence", codeReviewHandler.Evidence)
 				r.Get("/api/v1/code-review-policies", codeReviewHandler.GetPolicy)
+				r.Get("/api/v1/code-review-targets", codeReviewHandler.ListPendingSchedules)
+				r.Get("/api/v1/pull-requests/{id}/code-review", codeReviewHandler.GetSchedule)
 				r.Get("/api/v1/code-review-github-trigger", codeReviewHandler.GetGitHubTrigger)
 				r.Get("/api/v1/code-review-github-triggers", codeReviewHandler.ListGitHubTriggers)
 
@@ -1647,6 +1653,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 				r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
 				r.Post("/api/v1/code-reviews/{id}/retry", codeReviewHandler.Retry)
+				r.Post("/api/v1/pull-requests/{id}/code-review/requests", codeReviewHandler.RequestReviewNow)
+				r.Patch("/api/v1/pull-requests/{id}/code-review", codeReviewHandler.PauseSchedule)
 				r.Post("/api/v1/code-reviews/{id}/disputes", codeReviewHandler.CreateDispute)
 				r.Get("/api/v1/code-reviews/{id}/disputes", codeReviewHandler.ListSessionDisputes)
 				r.Post("/api/v1/code-review-disputes/{id}/escalate", codeReviewHandler.EscalateDispute)
@@ -1737,6 +1745,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/code-review-policies/compare", codeReviewHandler.ComparePolicyVersions)
 				r.Post("/api/v1/code-review-policies/versions/{policy_id}/restore", codeReviewHandler.RestorePolicyVersion)
 				r.Put("/api/v1/code-review-policies", codeReviewHandler.PutPolicy)
+				r.Patch("/api/v1/code-review-policies", codeReviewHandler.PatchPolicy)
 				r.Post("/api/v1/code-review-github-trigger/setup", codeReviewHandler.SetupGitHubTrigger)
 				r.Delete("/api/v1/code-review-github-trigger", codeReviewHandler.DeleteGitHubTrigger)
 				r.Post("/api/v1/code-reviews/{id}/agent-results", codeReviewHandler.CreateAgentResult)

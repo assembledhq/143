@@ -371,11 +371,12 @@ func TestCodeReviewHandler_PutPolicyRetainsEachOmittedPromptIndependently(t *tes
 				WithArgs("code_review_policy:" + orgID.String()).
 				WillReturnResult(pgxmock.NewResult("SELECT", 1))
 			mock.ExpectQuery("SELECT COALESCE").WithArgs(pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(2))
+			expectCodeReviewResolvedPolicy(t, mock, orgID, current)
 			mock.ExpectExec("UPDATE code_review_policies").WithArgs(pgxmock.AnyArg()).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			mock.ExpectQuery("INSERT INTO code_review_policies").WithArgs(
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				current.ReviewInstructions, current.AutomatedApprovalPolicy, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			).WillReturnRows(codeReviewPolicyRowsForHandlerTest().AddRow(policyID, orgID, nil, true, 2, requested.Enabled, requested.ApprovalMode, current.ReviewInstructions, current.AutomatedApprovalPolicy, description, risk, roster, requested.InlineCommentLimit, &userID, time.Now().UTC()))
+				current.ReviewInstructions, current.AutomatedApprovalPolicy, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).WillReturnRows(codeReviewPolicyRowsForHandlerTest().AddRow(policyID, orgID, nil, true, 2, requested.Enabled, requested.ApprovalMode, current.ReviewInstructions, current.AutomatedApprovalPolicy, description, risk, roster, requested.InlineCommentLimit, &userID, time.Now().UTC(), []byte("{}")))
 			mock.ExpectCommit()
 			handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
 			req := httptest.NewRequest(http.MethodPut, "/api/v1/code-review-policies", bytes.NewReader(body))
@@ -396,12 +397,12 @@ func expectCodeReviewResolvedPolicy(t *testing.T, mock pgxmock.PgxPoolIface, org
 	t.Helper()
 	description, risk, roster := marshalCodeReviewPolicyPartsForHandlerTest(t, config)
 	mock.ExpectQuery("FROM code_review_policies").WithArgs(pgxmock.AnyArg()).WillReturnRows(
-		codeReviewPolicyRowsForHandlerTest().AddRow(uuid.New(), orgID, nil, true, 1, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, description, risk, roster, config.InlineCommentLimit, nil, time.Now().UTC()),
+		codeReviewPolicyRowsForHandlerTest().AddRow(uuid.New(), orgID, nil, true, 1, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, description, risk, roster, config.InlineCommentLimit, nil, time.Now().UTC(), []byte("{}")),
 	)
 }
 
 func codeReviewPolicyRowsForHandlerTest() *pgxmock.Rows {
-	return pgxmock.NewRows([]string{"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode", "review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at"})
+	return pgxmock.NewRows([]string{"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode", "review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy"})
 }
 
 func marshalCodeReviewPolicyPartsForHandlerTest(t *testing.T, config models.CodeReviewPolicyConfig) ([]byte, []byte, []byte) {

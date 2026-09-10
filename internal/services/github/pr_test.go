@@ -392,6 +392,7 @@ func TestGetCodeReviewPullRequestSnapshot(t *testing.T) {
 			"title": "Fix Slack notification fallback",
 			"body": "Restore rows when auth is unavailable.",
 			"state": "open",
+            "draft": true,
 			"user": {"login": "assembled-author"},
 			"head": {"ref": "fix/slack-fallback", "sha": "head-sha", "repo": {"fork": true}},
 			"base": {"ref": "main", "sha": "base-sha"}
@@ -428,6 +429,8 @@ func TestGetCodeReviewPullRequestSnapshot(t *testing.T) {
 
 	require.NoError(t, err, "snapshot loader should return the current pull request")
 	require.Equal(t, CodeReviewPullRequestSnapshot{
+		IsDraft:     true,
+		BaseRef:     "main",
 		Number:      54903,
 		HTMLURL:     "https://github.com/assembledhq/assembled/pull/54903",
 		Title:       "Fix Slack notification fallback",

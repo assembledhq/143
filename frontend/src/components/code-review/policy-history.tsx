@@ -279,7 +279,7 @@ export function CodeReviewPolicyHistory() {
           <AlertDialogHeader>
             <AlertDialogTitle>Restore version {restoreTarget?.version}?</AlertDialogTitle>
             <AlertDialogDescription>
-              This keeps the existing history and creates a new active version with the settings from version {restoreTarget?.version}.
+              This keeps the existing history and creates a new active version with the settings from version {restoreTarget?.version}. Versions saved before review scheduling was introduced preserve your current scheduling settings.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
