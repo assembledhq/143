@@ -109,6 +109,7 @@ func TestResolve_AppOnly(t *testing.T) {
 	res, err := r.Resolve(context.Background(), run, repo, settings, "")
 	require.NoError(t, err)
 	require.Equal(t, "app-token-123", res.Token)
+	require.Equal(t, int64(1), res.InstallationID, "app resolution should retain the installation that issued the token")
 	require.False(t, res.IsUserToken())
 	require.Equal(t, "app", res.AuthoredBy())
 }
@@ -132,6 +133,7 @@ func TestResolveSandbox_UsesRepositoryBoundAppTokenAndRetainsAttribution(t *test
 	require.NoError(t, err, "sandbox resolution should issue a scoped app token")
 	require.Equal(t, "scoped-app-token", resolution.Token, "sandbox resolution should never return the available user token")
 	require.Equal(t, SourceApp, resolution.Source, "sandbox resolution should always identify the credential as an app token")
+	require.Equal(t, int64(42), resolution.InstallationID, "sandbox resolution should retain the scoped installation identity")
 	require.NotNil(t, resolution.User, "sandbox resolution should retain the triggering user for commit attribution")
 	require.Equal(t, "Alice", resolution.User.Name, "sandbox resolution should attach the expected triggering user")
 	require.Equal(t, []sandboxTokenCall{{installationID: 42, repositoryID: 9876, action: "push"}}, tokens.sandboxCalls, "sandbox resolution should bind the token to the repository and requested action")
@@ -473,6 +475,7 @@ func TestResolve_FallsBackToIntegrationInstallationWhenRepoInstallationIsStale(t
 	res, err := r.Resolve(context.Background(), run, repo, settings, "")
 	require.NoError(t, err, "Resolve should retry against the integration installation_id when the repo's id 404s")
 	require.Equal(t, "fallback-token", res.Token)
+	require.Equal(t, int64(2), res.InstallationID, "Resolve should expose the fallback installation that actually issued the token")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

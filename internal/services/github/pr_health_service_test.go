@@ -29,6 +29,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 )
 
 type repairJobPayloadArg struct {
@@ -224,7 +225,9 @@ func TestPRServiceReconcileSessionPublicationAppliesClosedLifecycle(t *testing.T
 		ReviewGateState: models.SessionPublicationReviewGateNotRequired,
 	}
 
-	err = service.reconcileSessionPublication(context.Background(), publication)
+	ctx := withReconciliationScope(context.Background())
+	reconciliationScopeFromContext(ctx).observe(nil, &ratelimit.Deferral{InstallationID: 123, Kind: ratelimit.KindSecondary})
+	err = service.reconcileSessionPublication(ctx, publication)
 	require.NoError(t, err, "reconciliation should apply the closed PR lifecycle before completing the publication")
 	require.NoError(t, mock.ExpectationsWereMet(), "closed PR recovery should checkpoint local state, apply the terminal transition, and then complete")
 }
@@ -265,6 +268,55 @@ func TestPRServiceReconcileSessionPublicationsRotatesErroredCandidate(t *testing
 	}
 	service.reconcileSessionPublications(context.Background(), orgID, 10)
 	require.NoError(t, mock.ExpectationsWereMet(), "errored reconciliation should advance updated_at through a retryable failure checkpoint")
+}
+
+func TestPRServiceReconcileSessionPublicationsDefersThrottleWithoutMarkingFailed(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID, repositoryID, integrationID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	publication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		State: models.SessionPublicationStateBranchPublished, Source: models.SessionPublicationSourceAutomation,
+		ReviewGateState: models.SessionPublicationReviewGatePassed, GitHubPRNumber: ptrInt(42),
+		JobQueue: models.SessionPublicationJobQueueDefault, RequestPayload: json.RawMessage(`{"org_id":"` + orgID.String() + `"}`),
+		BaseBranch: "main", HeadBranch: "143/session", RequestedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery(`SELECT[\s\S]+FROM session_publications[\s\S]+ORDER BY updated_at`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "updated_before": pgxmock.AnyArg(), "limit": 10}).
+		WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(publication)...))
+	mock.ExpectQuery(`SELECT[\s\S]+FROM pull_requests[\s\S]+changeset_id = @changeset_id`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery("SELECT .+ FROM repositories.+WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": repositoryID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repositoryID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil,
+			"https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
+		))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/repos/assembledhq/143/pulls/42", r.URL.Path, "publication reconciliation should read the checkpointed pull request")
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, writeErr := w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+		require.NoError(t, writeErr, "throttle response should be written")
+	}))
+	t.Cleanup(server.Close)
+
+	tokenProvider := &Service{cache: map[int64]*cachedToken{123: {Token: "install-token", ExpiresAt: now.Add(time.Hour)}}}
+	service := &PRService{
+		tokenProvider: tokenProvider, pullRequests: db.NewPullRequestStore(mock), publications: db.NewSessionPublicationStore(mock),
+		changesets: db.NewSessionChangesetStore(mock), sessions: db.NewSessionStore(mock), repos: db.NewRepositoryStore(mock),
+		baseURL: server.URL, httpClient: server.Client(), logger: zerolog.New(io.Discard),
+	}
+	err = service.reconcileSessionPublications(context.Background(), orgID, 10)
+	require.Error(t, err, "publication throttle should be returned for durable worker retry")
+	require.True(t, ClassifyRetry(err, now).RateLimited, "publication throttle should retain its GitHub classification")
+	require.NoError(t, mock.ExpectationsWereMet(), "throttled publication must not execute a MarkFailed rotation")
 }
 
 func TestValidatedPublicationReplayIntent(t *testing.T) {
@@ -1977,6 +2029,161 @@ func TestPRServiceSyncPullRequestStateIncludesCommitStatuses(t *testing.T) {
 	err = service.SyncPullRequestState(context.Background(), orgID, pullRequestID)
 	require.NoError(t, err, "SyncPullRequestState should preserve CircleCI commit statuses as repairable checks")
 	require.NoError(t, mock.ExpectationsWereMet(), "all status-only sync expectations should be met")
+}
+
+func TestPRServiceSyncPullRequestStateDoesNotProjectIncompleteStatusRead(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, pullRequestID, repoID, integrationID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/assembledhq/143/pulls/42":
+			_, writeErr := w.Write([]byte(`{"number":42,"html_url":"https://github.com/assembledhq/143/pull/42","state":"open","mergeable":true,"mergeable_state":"clean","head":{"ref":"feature","sha":"head-incomplete"},"base":{"ref":"main","sha":"base-incomplete"}}`))
+			require.NoError(t, writeErr, "pull request details should be written")
+		case "/repos/assembledhq/143/commits/head-incomplete/check-runs":
+			_, writeErr := w.Write([]byte(`{"check_runs":[]}`))
+			require.NoError(t, writeErr, "check runs should be written")
+		case "/repos/assembledhq/143/commits/head-incomplete/status":
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, writeErr := w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+			require.NoError(t, writeErr, "commit-status throttle should be written")
+		default:
+			t.Fatalf("incomplete status sync should stop before unexpected GitHub request %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Fix incomplete health", (*string)(nil), "open", "success", "app", "", nil, nil, nil,
+			models.PullRequestMergeStateClean, false, 0, false, &now, int64(4), models.PullRequestMergeWhenReadyStateOff,
+			(*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil,
+			"https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
+		))
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 4)
+	service := &PRService{
+		tokenProvider: &Service{cache: map[int64]*cachedToken{123: {Token: "install-token", ExpiresAt: now.Add(time.Hour)}}},
+		pullRequests:  db.NewPullRequestStore(mock), repos: db.NewRepositoryStore(mock), logger: zerolog.New(io.Discard),
+		baseURL: server.URL, httpClient: server.Client(),
+	}
+
+	err = service.SyncPullRequestState(context.Background(), orgID, pullRequestID)
+	require.Error(t, err, "retryable commit-status failure should make the authoritative health read incomplete")
+	require.True(t, ClassifyRetry(err, now).RateLimited, "incomplete health error should retain throttle classification")
+	require.NoError(t, mock.ExpectationsWereMet(), "incomplete read must not persist a new health projection or freshness marker")
+}
+
+func TestPRServiceSyncPullRequestStateRejectsInterruptedCommitStatusResponses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		statusCode      int
+		responseBody    string
+		retryAfter      string
+		rateLimited     bool
+		expectedRetryAt *time.Time
+	}{
+		{
+			name:         "truncated HTTP 200 with decoded status prefix",
+			statusCode:   http.StatusOK,
+			responseBody: `{"state":"failure","total_count":1,"statuses":[{"context":"existing/ci","state":"failure","target_url":"https://example.com/build","description":"existing status"}]}`,
+		},
+		{
+			name:            "truncated HTTP 429 preserves exact throttle deadline",
+			statusCode:      http.StatusTooManyRequests,
+			responseBody:    `{"message":"API rate limit exceeded"}`,
+			retryAfter:      "90",
+			rateLimited:     true,
+			expectedRetryAt: timePtr(time.Date(2026, time.September, 15, 12, 1, 30, 0, time.UTC)),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create the database mock")
+			t.Cleanup(mock.Close)
+			orgID, pullRequestID, repoID, integrationID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			now := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
+			callerCtx, cancelCaller := context.WithCancel(context.Background())
+			t.Cleanup(cancelCaller)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/assembledhq/143/pulls/42":
+					_, writeErr := w.Write([]byte(`{"number":42,"html_url":"https://github.com/assembledhq/143/pull/42","state":"open","mergeable":true,"mergeable_state":"clean","head":{"ref":"feature","sha":"head-interrupted"},"base":{"ref":"main","sha":"base-interrupted"}}`))
+					require.NoError(t, writeErr, "pull request details should be written")
+				case "/repos/assembledhq/143/commits/head-interrupted/check-runs":
+					_, writeErr := w.Write([]byte(`{"check_runs":[{"id":11,"name":"existing check","status":"completed","conclusion":"success","app":{"slug":"github-actions"}}]}`))
+					require.NoError(t, writeErr, "nonempty check runs should be written before the interrupted status response")
+				case "/repos/assembledhq/143/commits/head-interrupted/status":
+					if tt.retryAfter != "" {
+						w.Header().Set("Retry-After", tt.retryAfter)
+					}
+					w.Header().Set("Content-Length", strconv.Itoa(len(tt.responseBody)+32))
+					w.WriteHeader(tt.statusCode)
+					_, writeErr := w.Write([]byte(tt.responseBody))
+					require.NoError(t, writeErr, "partial commit-status response should be written before the body stalls")
+					flusher, ok := w.(http.Flusher)
+					require.True(t, ok, "test server should support flushing response headers and the partial body")
+					flusher.Flush()
+					<-r.Context().Done()
+				default:
+					t.Fatalf("interrupted status sync should stop before unexpected GitHub request %s", r.URL.Path)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+					pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+					"Preserve existing health", (*string)(nil), "open", "success", "app", "", nil, nil, nil,
+					models.PullRequestMergeStateClean, false, 0, false, &now, int64(4), models.PullRequestMergeWhenReadyStateOff,
+					(*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+				))
+			mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+				WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+					repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil,
+					"https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
+				))
+			expectReserveCheckStateVersion(mock, orgID, pullRequestID, 4)
+			client := server.Client()
+			client.Timeout = 250 * time.Millisecond
+			service := &PRService{
+				tokenProvider: &Service{cache: map[int64]*cachedToken{123: {Token: "install-token", ExpiresAt: time.Now().Add(time.Hour)}}},
+				pullRequests:  db.NewPullRequestStore(mock), repos: db.NewRepositoryStore(mock), logger: zerolog.New(io.Discard),
+				baseURL: server.URL, httpClient: client,
+			}
+
+			err = service.SyncPullRequestState(callerCtx, orgID, pullRequestID)
+			require.Error(t, err, "interrupted commit-status response should make the authoritative health read incomplete")
+			var responseReadErr *GitHubResponseReadError
+			require.True(t, errors.As(err, &responseReadErr), "HTTP client body timeout should retain structured response metadata")
+			require.ErrorIs(t, responseReadErr, context.DeadlineExceeded, "HTTP client body timeout should retain its timeout cause")
+			require.NoError(t, callerCtx.Err(), "HTTP client timeout must not expire or cancel the caller operation context")
+			require.NoError(t, responseReadErr.CallerContextErr, "structured response error should record that the caller context remained active")
+			classification := ClassifyRetry(err, now)
+			require.True(t, classification.Retryable, "interrupted response should use the durable GitHub recovery path")
+			require.Equal(t, tt.rateLimited, classification.RateLimited, "HTTP status and headers should retain throttle classification")
+			require.Equal(t, tt.expectedRetryAt, classification.RetryAt, "interrupted throttle should preserve the exact retry deadline")
+			require.NoError(t, mock.ExpectationsWereMet(), "interrupted response must not replace existing statuses or persist CheckSetComplete")
+		})
+	}
 }
 
 // When GitHub reports a PR closed-and-merged but our DB still has it open, the
@@ -3833,6 +4040,9 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 		mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "before": pgxmock.AnyArg(), "limit": 50}).
 			WillReturnError(errors.New("list failed"))
+		mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*merge_when_ready_state = 'queued'[\\s\\S]*merge_when_ready_state = 'merging'").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "stale_before": pgxmock.AnyArg(), "limit": 50}).
+			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns))
 		err = service.ReconcilePullRequestState(context.Background(), orgID, 50)
 		require.Error(t, err, "ReconcilePullRequestState should return list failures")
 
@@ -3990,6 +4200,79 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 		require.Contains(t, err.Error(), "pull request is not linked to a canonical session", "StartPullRequestRepair should pass failed-check validation before requiring session context")
 		require.NoError(t, mock.ExpectationsWereMet(), "all failed-check repair expectations should be met")
 	})
+}
+
+func TestPRServiceReconcilePullRequestStateRunsDatabaseRecoveryAfterThrottle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		stuckRecoveryErr error
+	}{
+		{name: "reconciles stuck action after throttle"},
+		{name: "joins throttle and stuck action errors", stuckRecoveryErr: errors.New("stuck recovery unavailable")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create the database mock")
+			t.Cleanup(mock.Close)
+			orgID, pullRequestID, sessionID := uuid.New(), uuid.New(), uuid.New()
+			now := time.Now().UTC()
+			retryAt := now.Add(10 * time.Minute)
+			throttle := &ratelimit.Deferral{Kind: ratelimit.KindSecondary, InstallationID: 42, RetryAt: retryAt, Generation: 3}
+
+			mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "before": pgxmock.AnyArg(), "limit": 10}).
+				WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+					pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
+					models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(1), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+				))
+			mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+					pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+					"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
+					models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(1), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+				))
+			mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+				WillReturnError(throttle)
+			mock.ExpectQuery("SELECT s.id[\\s\\S]*FROM session_publish_state").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "stuck_before": pgxmock.AnyArg(), "limit": 10}).
+				WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(sessionID))
+			failQuery := mock.ExpectQuery("WITH updated AS[\\s\\S]*UPDATE session_publish_state").
+				WithArgs(pgx.NamedArgs{
+					"id": sessionID, "org_id": orgID, "err": PublishActionAbandonedMessage,
+					"code": string(models.PRPushErrorCodeGeneric),
+				})
+			if tt.stuckRecoveryErr != nil {
+				failQuery.WillReturnError(tt.stuckRecoveryErr)
+			} else {
+				failQuery.WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusRunning)...))
+			}
+
+			mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*merge_when_ready_state = 'queued'[\\s\\S]*merge_when_ready_state = 'merging'").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "stale_before": pgxmock.AnyArg(), "limit": 10}).
+				WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns))
+
+			service := &PRService{
+				pullRequests: db.NewPullRequestStore(mock), repos: db.NewRepositoryStore(mock),
+				sessions: db.NewSessionStore(mock), logger: zerolog.New(io.Discard),
+			}
+			err = service.ReconcilePullRequestState(context.Background(), orgID, 10)
+			var returnedThrottle *ratelimit.Deferral
+			require.True(t, errors.As(err, &returnedThrottle), "reconciliation should preserve the GitHub throttle")
+			require.Equal(t, retryAt, returnedThrottle.RetryAt, "reconciliation should preserve the exact throttle deadline")
+			if tt.stuckRecoveryErr != nil {
+				require.ErrorIs(t, err, tt.stuckRecoveryErr, "independent database recovery failure should be joined with the throttle")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "throttled sweep should still run database-only stuck-action recovery and skip merge enqueue demand")
+		})
+	}
 }
 
 func TestSelectRepairThreadID(t *testing.T) {

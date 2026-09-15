@@ -45,6 +45,12 @@ type RetryableError struct {
 	// terminate if the dependency does not recover.
 	MaxRetryDuration *time.Duration
 	RetryAfter       *time.Duration
+	// GitHubRetryPolicy selects worker-owned final scheduling after the durable
+	// recovery-window start is known. It is intentionally typed rather than
+	// inferred from error prose or attempts.
+	GitHubRetryPolicy GitHubRetryPolicy
+	GitHubRetryKey    string
+	GitHubRetryAt     *time.Time
 	// TargetNodeID updates jobs.target_node_id when requeueing this retry.
 	// Use this when an unpinned attempt discovers the session's live sandbox
 	// already belongs to a specific worker node.
@@ -54,6 +60,15 @@ type RetryableError struct {
 	// currently advertised, so the scheduler can claim any future free worker.
 	ClearTargetNodeID bool
 }
+
+type GitHubRetryPolicy string
+
+const (
+	GitHubRetryPolicyNone    GitHubRetryPolicy = ""
+	GitHubRetryPolicyBackoff GitHubRetryPolicy = "backoff"
+	GitHubRetryPolicyNoHint  GitHubRetryPolicy = "no_hint"
+	GitHubRetryPolicyExact   GitHubRetryPolicy = "exact"
+)
 
 func (e *RetryableError) Error() string { return e.Err.Error() }
 func (e *RetryableError) Unwrap() error { return e.Err }
@@ -294,6 +309,14 @@ func (w *Worker) poll(ctx context.Context) {
 			w.logger.Warn().Str("job_id", job.ID.String()).Msg("lost ownership before persisting retry window start")
 			return
 		}
+		applyGitHubRetrySchedule(retryable, retryWindowStartedAt, now)
+		// Materialize the ordinary exponential delay before enforcing the
+		// duration bound, so a final transient attempt cannot be scheduled past
+		// the recovery-window deadline merely because it had no explicit hint.
+		if retryable.RetryAfter == nil && retryable.GitHubRetryPolicy == GitHubRetryPolicyBackoff {
+			delay := retryBackoff(job.Attempts)
+			retryable.RetryAfter = &delay
+		}
 		if timedOut, retryWindow := retryableDurationExceeded(retryWindowStartedAt, retryable, now); timedOut {
 			w.logger.Error().Err(err).
 				Str("job_id", job.ID.String()).
@@ -305,7 +328,10 @@ func (w *Worker) poll(ctx context.Context) {
 			return
 		}
 		w.logger.Info().Err(err).Str("job_id", job.ID.String()).Msg("job deferred (retryable)")
-		w.retryJobWithDelay(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, !retryable.ConsumeAttempt, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID)
+		runAt, scheduled := w.retryJobWithDelayAt(ctx, now, job.ID, *job.LockToken, err.Error(), job.Attempts, !retryable.ConsumeAttempt, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID)
+		if scheduled {
+			w.runRetryScheduledHooks(handlerCtx, err, runAt)
+		}
 		return
 	}
 
@@ -450,13 +476,17 @@ func (w *Worker) retryJob(ctx context.Context, jobID, lockToken uuid.UUID, errMs
 }
 
 func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override *time.Duration, targetNodeID *string, clearTargetNodeID bool) {
+	w.retryJobWithDelayAt(ctx, time.Now(), jobID, lockToken, errMsg, attempt, preserveAttempts, override, targetNodeID, clearTargetNodeID)
+}
+
+func (w *Worker) retryJobWithDelayAt(ctx context.Context, now time.Time, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override *time.Duration, targetNodeID *string, clearTargetNodeID bool) (time.Time, bool) {
 	var backoff time.Duration
 	if override != nil {
 		backoff = *override
 	} else {
 		backoff = retryBackoff(attempt)
 	}
-	runAt := time.Now().Add(backoff)
+	runAt := now.Add(backoff).UTC()
 
 	var (
 		ok  bool
@@ -482,11 +512,13 @@ func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UU
 	}
 	if err != nil {
 		w.logger.Warn().Err(err).Str("job_id", jobID.String()).Msg("failed to schedule job retry")
-		return
+		return runAt, false
 	}
 	if !ok {
 		w.logger.Warn().Str("job_id", jobID.String()).Msg("lost ownership before scheduling job retry")
+		return runAt, false
 	}
+	return runAt, true
 }
 
 func (w *Worker) deadLetterJob(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) {
@@ -504,6 +536,12 @@ func (w *Worker) runDeadLetterHooks(handlerCtx context.Context, err error) {
 	hookCtx, cancel := context.WithTimeout(context.WithoutCancel(handlerCtx), 30*time.Second)
 	defer cancel()
 	jobctx.RunDeadLetterHooks(hookCtx, err)
+}
+
+func (w *Worker) runRetryScheduledHooks(handlerCtx context.Context, err error, runAt time.Time) {
+	hookCtx, cancel := context.WithTimeout(context.WithoutCancel(handlerCtx), 30*time.Second)
+	defer cancel()
+	jobctx.RunRetryScheduledHooks(hookCtx, err, runAt)
 }
 
 func retryBackoff(attempt int) time.Duration {

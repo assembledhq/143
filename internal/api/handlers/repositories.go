@@ -11,6 +11,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -268,6 +269,7 @@ func (h *RepositoryHandler) ListBranches(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	r = r.WithContext(githubtelemetry.WithInstallationRequestMetadata(r.Context(), repo.InstallationID, "repository_browser"))
 	token, err := h.prService.GetInstallationToken(r.Context(), repo.InstallationID)
 	if err != nil {
 		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get GitHub token")

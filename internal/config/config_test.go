@@ -41,6 +41,8 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "")
 	t.Setenv("GITHUB_OAUTH_CLIENT_SECRET", "")
 	t.Setenv("GITHUB_APP_ID", "")
+	t.Setenv("GITHUB_RATE_LIMIT_MODE", "")
+	t.Setenv("GITHUB_RATE_LIMIT_INSTALLATION_ALLOWLIST", "")
 	t.Setenv("OPENAI_API_TYPE", "")
 	t.Setenv("OPENROUTER_APP_NAME", "")
 	t.Setenv("CODE_REVIEW_DISPUTE_REASSESSMENTS_ENABLED", "")
@@ -57,6 +59,8 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.Equal(t, "http://localhost:8080", cfg.FrontendURL, "FrontendURL should default to BaseURL")
 	require.Equal(t, []string{"http://localhost:8080"}, cfg.CORSAllowedOrigins, "CORS origins should default to FrontendURL")
 	require.Equal(t, int64(0), cfg.GitHubAppID, "Load should default GitHub app ID to zero")
+	require.Equal(t, "observe", cfg.GitHubRateLimitMode, "Load should default GitHub cooldowns to observation mode")
+	require.Empty(t, cfg.GitHubRateLimitInstallationAllowlist, "Load should default to no installation allowlist")
 	require.Equal(t, "all", cfg.Mode, "Load should default mode to all")
 	require.Equal(t, defaultDemoEmail, cfg.DemoEmail, "Load should default demo email to seeded admin")
 	require.Equal(t, defaultDemoPassword, cfg.DemoPassword, "Load should default demo password to seeded preview password")
@@ -148,6 +152,8 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("PREVIEW_IDLE_TIMEOUT", "45m")
 	t.Setenv("PR_PREVIEW_SURFACES_ENABLED", "false")
 	t.Setenv("GITHUB_APP_ID", "12345")
+	t.Setenv("GITHUB_RATE_LIMIT_MODE", "enforce")
+	t.Setenv("GITHUB_RATE_LIMIT_INSTALLATION_ALLOWLIST", "42,99")
 	t.Setenv("CODE_REVIEW_APP_REVIEWER_LOGINS", "143-code-reviewer,143-reviewer")
 	t.Setenv("CODE_REVIEW_ALIAS_LOGINS", "ai-reviewer,bot-reviewer")
 	t.Setenv("CODE_REVIEW_TEAM_SLUGS", "ai-reviewers,platform-review")
@@ -169,6 +175,8 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	require.Equal(t, "https://app.example.com", cfg.FrontendURL, "Load should read FRONTEND_URL from the environment")
 	require.Equal(t, []string{"https://one.example.com", "https://two.example.com"}, cfg.CORSAllowedOrigins, "Load should split CORS origins from the environment")
 	require.Equal(t, int64(12345), cfg.GitHubAppID, "Load should parse GITHUB_APP_ID from the environment")
+	require.Equal(t, "enforce", cfg.GitHubRateLimitMode, "Load should parse the rollout mode")
+	require.Equal(t, []int64{42, 99}, cfg.GitHubRateLimitInstallationAllowlist, "Load should parse the installation allowlist")
 	require.Equal(t, "worker", cfg.Mode, "Load should read MODE from the environment")
 	require.Equal(t, 4, cfg.WorkerProcessCount, "Load should parse WORKER_PROCESS_COUNT from the environment")
 	require.Equal(t, 7, cfg.WorkerMaxActiveSandboxes, "Load should parse WORKER_MAX_ACTIVE_SANDBOXES from the environment")
@@ -397,6 +405,35 @@ func TestValidateSecrets_DevelopmentAllowsMissing(t *testing.T) {
 
 	cfg := &Config{Env: "development"}
 	require.NoError(t, cfg.ValidateSecrets(), "development env should allow missing secrets")
+}
+
+func TestValidateSecrets_GitHubRateLimitConfiguration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		mode      string
+		allowlist []int64
+		expectErr bool
+	}{
+		{name: "zero value uses observe default", mode: ""},
+		{name: "off is valid", mode: "off"},
+		{name: "observe is valid", mode: "observe"},
+		{name: "enforce with positive allowlist is valid", mode: "enforce", allowlist: []int64{42}},
+		{name: "unknown mode is rejected", mode: "enabled", expectErr: true},
+		{name: "nonpositive installation is rejected", mode: "observe", allowlist: []int64{0}, expectErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := (&Config{Env: "development", GitHubRateLimitMode: tt.mode, GitHubRateLimitInstallationAllowlist: tt.allowlist}).ValidateSecrets()
+			if tt.expectErr {
+				require.Error(t, err, "invalid GitHub rate-limit configuration should fail startup validation")
+				return
+			}
+			require.NoError(t, err, "valid GitHub rate-limit configuration should pass startup validation")
+		})
+	}
 }
 
 func TestValidateSecrets_ProductionMissingSessionSecret(t *testing.T) {

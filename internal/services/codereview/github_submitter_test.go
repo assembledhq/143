@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -207,9 +211,40 @@ func TestGitHubSubmitter_EmitsInstallationTelemetry(t *testing.T) {
 		"github_status_class":    "2xx",
 		"github_result":          "success",
 		"github_rate_limited":    false,
+		"github_caller":          "code_review",
 		"github_repository":      "acme/repo",
 		"github_installation_id": float64(99),
 	}, event, "submitter requests should emit bounded installation-scoped telemetry")
+}
+
+func TestGitHubSubmitterGraphQLDecoderRecoversOversizedSuccessfulProbe(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
+	controller, err := ratelimit.NewController(ratelimit.Config{
+		Mode: ratelimit.ModeEnforce, Environment: "test", AppID: 1, InstallationAllowlist: []int64{42},
+		Logger: zerolog.Nop(), Now: func() time.Time { return now }, Owner: "submitter-graphql",
+	})
+	require.NoError(t, err, "controller should initialize")
+	seed, err := controller.Before(context.Background(), ratelimit.Scope{InstallationID: 42})
+	require.NoError(t, err, "seed request should be admitted")
+	seedResult := controller.Observe(context.Background(), seed, ratelimit.Observation{
+		StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": []string{"1"}},
+	})
+	now = seedResult.Deferral.RetryAt
+	body := `{"data":{"padding":"` + strings.Repeat("x", 1<<20+4096) + `"}}`
+	client := githubtelemetry.NewControlledHTTPClient(time.Second, zerolog.Nop(), controller, "code_review", roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	}))
+	submitter := NewGitHubSubmitter(&tokenStub{token: "token"}, WithGitHubSubmitterHTTPClient(client))
+	ctx := githubtelemetry.WithInstallationRequestMetadata(context.Background(), 42, "code_review")
+
+	actual, err := submitter.doGitHubGraphQL(ctx, "token", "query { viewer { login } }", nil)
+	require.NoError(t, err, "owned decoder should accept the complete oversized successful response")
+	require.Equal(t, body, string(actual), "submitter should preserve the complete oversized response")
+	permit, err := controller.Before(context.Background(), ratelimit.Scope{InstallationID: 42})
+	require.NoError(t, err, "authoritative oversized success should close the recovery episode")
+	require.False(t, permit.Probe, "recovered installation should admit ordinary work")
 }
 
 func TestGitHubSubmitter_SubmitReview(t *testing.T) {
@@ -1090,4 +1125,96 @@ func (s *tokenStub) GitHubAppID() int64 {
 		return s.appID
 	}
 	return 143
+}
+
+func TestGitHubSubmitterRequestErrorsPreserveCallerContext(t *testing.T) {
+	t.Parallel()
+
+	requests := []struct {
+		name string
+		call func(context.Context, *GitHubSubmitter) error
+	}{
+		{
+			name: "REST read",
+			call: func(ctx context.Context, submitter *GitHubSubmitter) error {
+				var target any
+				_, err := submitter.getGitHubJSONPage(ctx, "token", "/repos/acme/repo", &target)
+				return err
+			},
+		},
+		{
+			name: "GraphQL",
+			call: func(ctx context.Context, submitter *GitHubSubmitter) error {
+				_, err := submitter.doGitHubGraphQL(ctx, "token", "query { viewer { login } }", nil)
+				return err
+			},
+		},
+		{
+			name: "REST mutation",
+			call: func(ctx context.Context, submitter *GitHubSubmitter) error {
+				return submitter.updateReviewComment(ctx, "token", "acme", "repo", 123, "updated comment")
+			},
+		},
+	}
+	failures := []struct {
+		name              string
+		clientTimeout     time.Duration
+		callerDeadline    bool
+		cancelCaller      bool
+		expectedCause     error
+		expectedCallerErr error
+		expected          ghservice.RetryClassification
+	}{
+		{
+			name: "caller deadline before headers", callerDeadline: true,
+			expectedCause: context.DeadlineExceeded, expectedCallerErr: context.DeadlineExceeded,
+		},
+		{
+			name: "caller cancellation before headers", cancelCaller: true,
+			expectedCause: context.Canceled, expectedCallerErr: context.Canceled,
+		},
+		{
+			name: "client timeout with live caller", clientTimeout: 10 * time.Millisecond,
+			expectedCause: context.DeadlineExceeded, expected: ghservice.RetryClassification{Retryable: true},
+		},
+	}
+	for _, request := range requests {
+		t.Run(request.name, func(t *testing.T) {
+			t.Parallel()
+			for _, failure := range failures {
+				t.Run(failure.name, func(t *testing.T) {
+					t.Parallel()
+
+					ctx, cancel := context.WithCancel(context.Background())
+					if failure.callerDeadline {
+						cancel()
+						ctx, cancel = context.WithTimeout(context.Background(), 10*time.Millisecond)
+					}
+					t.Cleanup(cancel)
+					client := &http.Client{
+						Timeout: failure.clientTimeout,
+						Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+							if failure.cancelCaller {
+								cancel()
+							}
+							<-req.Context().Done()
+							return nil, req.Context().Err()
+						}),
+					}
+					submitter := NewGitHubSubmitter(&tokenStub{token: "token"}, WithGitHubSubmitterHTTPClient(client))
+
+					err := request.call(ctx, submitter)
+					require.ErrorIs(t, err, failure.expectedCause, "submitter errors should preserve the transport cancellation or deadline cause")
+					var requestErr *ghservice.GitHubRequestError
+					require.ErrorAs(t, err, &requestErr, "submitter HTTP failures should retain caller context provenance before headers")
+					require.Equal(t, failure.expectedCallerErr, requestErr.CallerContextErr, "only caller termination should stop durable recovery")
+					require.Equal(t, failure.expectedCallerErr, ctx.Err(), "client timeout should leave the caller context live")
+					require.Equal(t, failure.expected, ghservice.ClassifyRetry(err, time.Now()), "submitter retry classification should distinguish caller and client timeouts")
+
+					cancel()
+					require.Equal(t, failure.expected, ghservice.ClassifyRetry(fmt.Errorf("recover GitHub submission: %w", err), time.Now()), "later context cleanup and wrapping should preserve the captured timeout provenance")
+				})
+			}
+		})
+	}
 }

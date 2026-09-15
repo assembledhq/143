@@ -22,6 +22,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	githubratelimit "github.com/assembledhq/143/internal/services/github/ratelimit"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
@@ -660,4 +661,74 @@ func (c capturingArgRouterImpl) Match(v any) bool {
 		return false
 	}
 	return true
+}
+
+func TestResolveGitHubRateLimitControllerSharesLocalCooldowns(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, source, destination string }{
+		{name: "API throttle reaches worker", source: "api", destination: "worker"},
+		{name: "worker throttle reaches API", source: "worker", destination: "api"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &config.Config{GitHubRateLimitMode: "enforce", GitHubAppID: 1, Env: "test", GitHubRateLimitInstallationAllowlist: []int64{123, 456}}
+			process, err := ResolveGitHubRateLimitController(cfg, nil, zerolog.Nop(), nil)
+			require.NoError(t, err, "startup controller should construct without Redis")
+			source, err := ResolveGitHubRateLimitController(cfg, nil, zerolog.Nop(), process)
+			require.NoError(t, err, "source graph should reuse its process controller")
+			destination, err := ResolveGitHubRateLimitController(cfg, nil, zerolog.Nop(), process)
+			require.NoError(t, err, "destination graph should reuse its process controller")
+			require.Same(t, source, destination, "API and worker graphs must share local fallback state")
+			ctx := context.Background()
+			permit, err := source.Before(ctx, githubratelimit.Scope{InstallationID: 123, Caller: tt.source})
+			require.NoError(t, err, "first source request should be admitted")
+			observed := source.Observe(ctx, permit, githubratelimit.Observation{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": []string{"300"}}})
+			require.NotNil(t, observed.Deferral, "source throttle should create a cooldown")
+			_, err = destination.Before(ctx, githubratelimit.Scope{InstallationID: 123, Caller: tt.destination})
+			var deferral *githubratelimit.Deferral
+			require.ErrorAs(t, err, &deferral, "other graph should defer immediately without Redis")
+			require.Equal(t, observed.Deferral.RetryAt, deferral.RetryAt, "both graphs should share the exact retained cooldown")
+			_, err = destination.Before(ctx, githubratelimit.Scope{InstallationID: 456, Caller: tt.destination})
+			require.NoError(t, err, "other installations should remain independent")
+		})
+	}
+}
+
+func TestResolveGitHubRateLimitControllerStandaloneConfiguration(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, mode string
+		expected   githubratelimit.Mode
+		wantErr    bool
+	}{
+		{name: "default observation", expected: githubratelimit.ModeObserve},
+		{name: "normalized configuration", mode: " ENFORCE ", expected: githubratelimit.ModeEnforce},
+		{name: "explicit disabled", mode: "off", expected: githubratelimit.ModeOff},
+		{name: "invalid mode", mode: "invalid", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			controller, err := ResolveGitHubRateLimitController(&config.Config{GitHubRateLimitMode: tt.mode}, nil, zerolog.Nop(), nil)
+			if tt.wantErr {
+				require.Error(t, err, "standalone construction should reject invalid policy")
+				return
+			}
+			require.NoError(t, err, "standalone API/worker construction should accept supported policy")
+			require.Equal(t, tt.expected, controller.Mode(), "standalone graphs should use the same default and normalization")
+		})
+	}
+}
+
+func TestNewRouterUsesInjectedGitHubController(t *testing.T) {
+	t.Parallel()
+	controller, err := ResolveGitHubRateLimitController(&config.Config{}, nil, zerolog.Nop(), nil)
+	require.NoError(t, err, "shared controller should initialize")
+	// A graph must not construct a second controller from its config when an
+	// already validated process controller is supplied.
+	cfg := &config.Config{GitHubRateLimitMode: "must-not-be-reconstructed"}
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexauth.NewService(nil, zerolog.Nop()), claudecodeauth.NewService(nil, zerolog.Nop()), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, RouterSharedDependencies{GitHubRateLimitController: controller})
+	require.NoError(t, err, "router should reuse the injected controller without rebuilding policy")
+	require.NotNil(t, router, "shared controller should support ordinary router construction")
 }

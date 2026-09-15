@@ -14,6 +14,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 type evalCandidateRepositoryStore interface {
@@ -57,6 +58,7 @@ func (v *EvalCandidateValidator) ValidateEvalCandidate(ctx context.Context, orgI
 	if !ok || owner == "" || name == "" {
 		return fmt.Errorf("repository full name %q is invalid", repo.FullName)
 	}
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, repo.InstallationID, "eval_candidate_validation")
 	token, err := v.github.GetInstallationToken(ctx, repo.InstallationID)
 	if err != nil {
 		return fmt.Errorf("get GitHub installation token: %w", err)

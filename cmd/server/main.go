@@ -46,6 +46,7 @@ import (
 	"github.com/assembledhq/143/internal/services/domains"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/github/identity"
+	githubratelimit "github.com/assembledhq/143/internal/services/github/ratelimit"
 	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
@@ -390,7 +391,14 @@ func main() {
 	// Closed when the process receives SIGTERM so long-lived handlers (SSE
 	// streams, etc.) can end their loops cleanly during graceful shutdown.
 	shutdownCh := make(chan struct{})
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, threadCancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, sandboxCapacity, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, codingCredentialStore)
+	// One process owns one local fallback/cooldown map, including MODE=all.
+	// Separate API and worker processes still coordinate through shared Redis.
+	githubRateLimitController, err := api.ResolveGitHubRateLimitController(cfg, redisClient, logger, nil)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("invalid GitHub rate-limit controller configuration")
+	}
+
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, threadCancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, sandboxCapacity, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, api.RouterSharedDependencies{CodingCredentialStore: codingCredentialStore, GitHubRateLimitController: githubRateLimitController})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
@@ -541,7 +549,7 @@ func main() {
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore,
 				projectStore, projectTaskStore, integrationStore,
-				sessionMessageStore, automationRunStore, evalBootstrapStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
+				sessionMessageStore, automationRunStore, evalBootstrapStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader, githubRateLimitController)
 			if services != nil {
 				workerPublicationCoordinator := publicationintent.NewCoordinator(
 					stores.Sessions,
@@ -1343,6 +1351,7 @@ func buildServices(
 	redisClient *cache.Client,
 	sessionStreams *cache.SessionStreams,
 	fileReader sandbox.FileReader,
+	sharedGitHubControllers ...*githubratelimit.Controller,
 ) *worker.Services {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey, logger)
@@ -1350,6 +1359,16 @@ func buildServices(
 		logger.Error().Err(err).Msg("failed to initialize GitHub App service — all Phase 3+ services disabled")
 		return nil
 	}
+	var sharedGitHubController *githubratelimit.Controller
+	if len(sharedGitHubControllers) > 0 {
+		sharedGitHubController = sharedGitHubControllers[0]
+	}
+	githubRateLimitController, err := api.ResolveGitHubRateLimitController(cfg, redisClient, logger, sharedGitHubController)
+	if err != nil {
+		logger.Error().Err(err).Msg("invalid GitHub rate-limit controller configuration")
+		return nil
+	}
+	ghSvc.SetRateLimitController(githubRateLimitController, logger)
 
 	// Docker sandbox provider.
 	dockerCli, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
@@ -1596,6 +1615,7 @@ func buildServices(
 		ghSvc, pullRequestStore, sessionStore, issueStore,
 		deployStore, repoStore, jobStore, logger,
 	)
+	prService.SetRateLimitController(githubRateLimitController)
 	workerFeedbackStore := db.NewPullRequestFeedbackStore(pool)
 	workerFeedbackStore.SetJobStore(jobStore)
 	prService.SetPullRequestFeedbackStore(workerFeedbackStore)
@@ -1832,7 +1852,7 @@ func buildServices(
 		GitHub:          ghSvc,
 		CodeReviews: codereviewsvc.NewGitHubSubmitter(
 			ghSvc,
-			codereviewsvc.WithGitHubSubmitterHTTPClient(githubtelemetry.NewHTTPClient(15*time.Second, logger)),
+			codereviewsvc.WithGitHubSubmitterHTTPClient(githubtelemetry.NewControlledHTTPClient(15*time.Second, logger, githubRateLimitController, "code_review")),
 		),
 		CodeReviewLifecycle:        codeReviewLifecycle,
 		CodeReviewDisputes:         codeReviewDisputes,
