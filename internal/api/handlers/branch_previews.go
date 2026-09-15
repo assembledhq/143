@@ -25,6 +25,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/preview"
 )
 
@@ -350,6 +351,7 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_NOT_CONFIGURED", "GitHub is not configured")
 		return
 	}
+	r = r.WithContext(githubtelemetry.WithInstallationRequestMetadata(r.Context(), repo.InstallationID, "branch_preview"))
 	token, tokenErr := h.github.GetInstallationToken(r.Context(), repo.InstallationID)
 	if tokenErr != nil {
 		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get GitHub token", tokenErr)
@@ -560,6 +562,7 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_NOT_CONFIGURED", "GitHub is not configured")
 		return
 	}
+	r = r.WithContext(githubtelemetry.WithInstallationRequestMetadata(r.Context(), repo.InstallationID, "branch_preview"))
 	token, err := h.github.GetInstallationToken(r.Context(), repo.InstallationID)
 	if err != nil {
 		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get GitHub token", err)
@@ -885,6 +888,7 @@ func (h *BranchPreviewHandler) GetConfigOptions(w http.ResponseWriter, r *http.R
 		}
 	}
 	if content == "" {
+		r = r.WithContext(githubtelemetry.WithInstallationRequestMetadata(r.Context(), repo.InstallationID, "branch_preview"))
 		token, tokenErr := h.github.GetInstallationToken(r.Context(), repo.InstallationID)
 		if tokenErr != nil {
 			writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get GitHub token", tokenErr)
@@ -1033,6 +1037,7 @@ func (h *BranchPreviewHandler) StartPreviewForSlack(ctx context.Context, orgID, 
 	if branch == "" {
 		return nil, fmt.Errorf("preview branch is required")
 	}
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, repo.InstallationID, "branch_preview")
 	token, tokenErr := h.github.GetInstallationToken(ctx, repo.InstallationID)
 	if tokenErr != nil {
 		return nil, fmt.Errorf("get GitHub token: %w", tokenErr)
@@ -2151,6 +2156,7 @@ func (h *BranchPreviewHandler) enrichPreviewPolicyConfigReadiness(ctx context.Co
 	if !ok || owner == "" || repoName == "" || strings.TrimSpace(repo.DefaultBranch) == "" {
 		return
 	}
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, repo.InstallationID, "branch_preview")
 	token, err := h.github.GetInstallationToken(ctx, repo.InstallationID)
 	if err != nil {
 		// Transient GitHub error — preserve DB-computed readiness so the
@@ -2477,6 +2483,7 @@ func (h *BranchPreviewHandler) TestPolicyPreview(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusBadRequest, "DEFAULT_BRANCH_MISSING", "repository default branch is missing")
 		return
 	}
+	r = r.WithContext(githubtelemetry.WithInstallationRequestMetadata(r.Context(), repo.InstallationID, "branch_preview"))
 	token, tokenErr := h.github.GetInstallationToken(r.Context(), repo.InstallationID)
 	if tokenErr != nil {
 		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get GitHub token", tokenErr)
@@ -2895,6 +2902,7 @@ func (h *BranchPreviewHandler) resolveLatestTarget(ctx context.Context, orgID, u
 	if h.github == nil {
 		return nil, fmt.Errorf("GitHub is not configured")
 	}
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, repo.InstallationID, "branch_preview")
 	token, err := h.github.GetInstallationToken(ctx, repo.InstallationID)
 	if err != nil {
 		return nil, err

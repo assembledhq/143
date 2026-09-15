@@ -40,6 +40,7 @@ import (
 	"github.com/assembledhq/143/internal/services/domains"
 	"github.com/assembledhq/143/internal/services/email"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	githubratelimit "github.com/assembledhq/143/internal/services/github/ratelimit"
 	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
@@ -75,7 +76,36 @@ func contextFromShutdown(shutdownCh <-chan struct{}) context.Context {
 	return ctx
 }
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, threadCanceller *agent.ThreadCancelRegistry, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, sandboxCapacity *agent.SandboxCapacityGate, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
+// RouterSharedDependencies reuses process-scoped state across the API and worker
+// graphs. Omitting it preserves isolated construction for API-only callers.
+type RouterSharedDependencies struct {
+	CodingCredentialStore     *db.CodingCredentialStore
+	GitHubRateLimitController *githubratelimit.Controller
+}
+
+// ResolveGitHubRateLimitController returns the process controller when one is
+// supplied, or constructs an isolated controller for standalone service graphs.
+func ResolveGitHubRateLimitController(cfg *config.Config, redisClient *cache.Client, logger zerolog.Logger, shared *githubratelimit.Controller) (*githubratelimit.Controller, error) {
+	if shared != nil {
+		return shared, nil
+	}
+	return githubratelimit.NewController(githubratelimit.Config{
+		Mode:        githubratelimit.Mode(strings.ToLower(strings.TrimSpace(cfg.GitHubRateLimitMode))),
+		Environment: cfg.Env, AppID: cfg.GitHubAppID,
+		InstallationAllowlist: cfg.GitHubRateLimitInstallationAllowlist,
+		Cache:                 redisClient, Logger: logger, Owner: cfg.NodeID + ":github",
+	})
+}
+
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, threadCanceller *agent.ThreadCancelRegistry, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, sandboxCapacity *agent.SandboxCapacityGate, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedDependencies ...RouterSharedDependencies) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
+	var shared RouterSharedDependencies
+	if len(sharedDependencies) > 0 {
+		shared = sharedDependencies[0]
+	}
+	githubRateLimitController, err := ResolveGitHubRateLimitController(cfg, redisClient, logger, shared.GitHubRateLimitController)
+	if err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
 	userStore := db.NewUserStore(pool)
@@ -162,7 +192,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
-	codingCredentialStore := resolveRouterCodingCredentialStore(pool, cryptoSvc, sharedCodingCredentialStore...)
+	codingCredentialStore := resolveRouterCodingCredentialStore(pool, cryptoSvc, shared.CodingCredentialStore)
 	previewSecretCrypto := cryptoSvc
 	if cfg.PreviewSecretBundleKEK != "" {
 		var previewSecretErr error
@@ -184,10 +214,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		if err != nil {
 			logger.Warn().Err(err).Msg("failed to initialize GitHub App service, PR webhooks will be disabled")
 		} else {
+			ghSvc.SetRateLimitController(githubRateLimitController, logger)
 			prService = ghservice.NewPRService(
 				ghSvc, pullRequestStore, sessionStore, issueStore,
 				deployStore, repoStore, jobStore, logger,
 			)
+			prService.SetRateLimitController(githubRateLimitController)
 			prService.SetChangesetStore(sessionChangesetStore)
 			prService.SetPublicationStore(sessionPublicationStore)
 			prService.SetAppBaseURL(cfg.FrontendURL)
@@ -247,7 +279,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	integrationOpts := []handlers.IntegrationHandlerOption{
 		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
-		handlers.WithGitHubHTTPClient(githubtelemetry.NewHTTPClient(30*time.Second, logger)),
+		handlers.WithGitHubHTTPClient(githubtelemetry.NewControlledHTTPClient(30*time.Second, logger, githubRateLimitController, "integration_repositories")),
 		handlers.WithGitHubAppSlug(cfg.GitHubAppSlug),
 		handlers.WithGitHubInstallationStore(githubInstallationStore),
 		handlers.WithIntegrationMembershipStore(membershipStore),
@@ -266,6 +298,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey, logger)
 		if err == nil {
+			ghSvc.SetRateLimitController(githubRateLimitController, logger)
 			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
 			authHandler.SetGitHubOrgAutoJoinDeps(githubInstallationStore, ghSvc)
 		}
@@ -685,7 +718,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		logger.Info().Str("smtp_host", cfg.SMTPHost).Msg("SMTP email sender configured")
 	}
 	teamHandler := handlers.NewTeamHandler(userStore, membershipStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
-	teamHandler.SetGitHubHTTPClient(githubtelemetry.NewHTTPClient(10*time.Second, logger))
+	teamHandler.SetGitHubHTTPClient(githubtelemetry.NewControlledHTTPClient(10*time.Second, logger, githubRateLimitController, "team_user_search"))
 	teamHandler.SetRepositoryStore(repoStore)
 	teamHandler.SetCLITokenStore(userCLITokenStore)
 	orgDomainStore := db.NewOrganizationDomainStore(pool)
@@ -700,6 +733,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey, logger)
 		if err == nil {
+			ghSvc.SetRateLimitController(githubRateLimitController, logger)
 			teamHandler.SetGitHubIntegration(integrationStore, ghSvc)
 		}
 	}

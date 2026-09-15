@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +21,9 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	githubratelimit "github.com/assembledhq/143/internal/services/github/ratelimit"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
+	"github.com/rs/zerolog"
 )
 
 // --- mock stores ---
@@ -239,6 +245,37 @@ func TestTeamHandler_GitHubInviteStatus_FallsBackToRepositoryInstallationID(t *t
 	var resp models.SingleResponse[GitHubInviteStatus]
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "github invite status response should decode")
 	require.True(t, resp.Data.Connected, "repo installation id fallback should mark github invite search connected")
+}
+
+func TestTeamHandler_SearchGitHubUsersPublishesFreshThrottleToSharedController(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
+	controller, err := githubratelimit.NewController(githubratelimit.Config{
+		Mode: githubratelimit.ModeEnforce, Environment: "test", AppID: 1, InstallationAllowlist: []int64{123},
+		Logger: zerolog.Nop(), Now: func() time.Time { return now }, Owner: "team-handler",
+	})
+	require.NoError(t, err, "controller should initialize")
+	var outbound atomic.Int32
+	client := githubtelemetry.NewControlledHTTPClient(10*time.Second, zerolog.Nop(), controller, "team_user_search", roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		outbound.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{"Retry-After": []string{"60"}},
+			Body:       io.NopCloser(strings.NewReader(`{"message":"secondary rate limit"}`)),
+		}, nil
+	}))
+	handler := newTeamHandler(nil, nil, nil, nil, nil)
+	handler.SetGitHubHTTPClient(client)
+	ctx := githubtelemetry.WithInstallationRequestMetadata(context.Background(), 123, "team_user_search")
+
+	_, err = handler.searchGitHubUsers(ctx, "installation-token", "octocat")
+	require.Error(t, err, "fresh provider throttle should remain an HTTP failure for the first caller")
+	require.Equal(t, int32(1), outbound.Load(), "first handler call should observe one actual provider response")
+	_, err = handler.searchGitHubUsers(ctx, "installation-token", "octocat")
+	var deferral *githubratelimit.Deferral
+	require.ErrorAs(t, err, &deferral, "subsequent team search should honor the shared cooldown")
+	require.Equal(t, int32(1), outbound.Load(), "shared cooldown should suppress the second outbound team search")
 }
 
 func TestTeamHandler_SetRepositoryStore(t *testing.T) {

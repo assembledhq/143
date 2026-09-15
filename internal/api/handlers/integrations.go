@@ -1607,6 +1607,7 @@ func (h *IntegrationHandler) SyncGitHubRepos(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, config.InstallationID, "integration_repository_sync")
 	token, err := h.githubService.GetInstallationToken(ctx, config.InstallationID)
 	if err != nil {
 		zerolog.Ctx(ctx).Warn().Err(err).Msg("failed to get installation token for sync")
@@ -1647,15 +1648,17 @@ type githubInstallationRepo struct {
 // listInstallationRepos calls the GitHub API to list all repos accessible
 // to the given installation token.
 func (h *IntegrationHandler) listInstallationRepos(ctx context.Context, token string, installationID int64) ([]githubInstallationRepo, error) {
-	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
-		Kind:           githubtelemetry.RequestKindAPI,
-		AuthType:       githubtelemetry.AuthTypeAppInstallation,
-		InstallationID: installationID,
-	})
+	metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+	caller := metadata.Caller
+	if caller == "" {
+		caller = "integration_repositories"
+	}
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, installationID, caller)
 	nextURL := githubAPIURL + "/installation/repositories?per_page=100"
 	var repos []githubInstallationRepo
 	for nextURL != "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, nextURL, nil)
+		requestCtx := githubtelemetry.WithJSONResponseObservation(ctx)
+		req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, nextURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -1677,7 +1680,7 @@ func (h *IntegrationHandler) listInstallationRepos(ctx context.Context, token st
 		var result struct {
 			Repositories []githubInstallationRepo `json:"repositories"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		if err := decodeGitHubJSONResponse(requestCtx, resp.Body, &result); err != nil {
 			if closeErr := resp.Body.Close(); closeErr != nil {
 				return nil, closeErr
 			}
@@ -1719,6 +1722,7 @@ func (h *IntegrationHandler) ListGitHubInstallationRepositories(w http.ResponseW
 		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_APP_NOT_CONFIGURED", "github app is not configured")
 		return
 	}
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, link.InstallationID, "integration_repositories")
 	token, err := h.githubService.GetInstallationToken(ctx, link.InstallationID)
 	if err != nil {
 		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get github installation token", err)
@@ -1812,6 +1816,7 @@ func (h *IntegrationHandler) ClaimGitHubInstallationRepositories(w http.Response
 		return
 	}
 
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, link.InstallationID, "integration_repository_claim")
 	appToken, err := h.githubService.GetInstallationToken(ctx, link.InstallationID)
 	if err != nil {
 		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get github installation token", err)
