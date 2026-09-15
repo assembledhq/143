@@ -33,6 +33,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	automationevents "github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/github/identity"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
@@ -547,11 +548,15 @@ func (s *PRService) invalidateResolver() {
 // SyncSessionTitle) don't need to change. New call sites should use the
 // resolver directly.
 func (s *PRService) getInstallationTokenForRepo(ctx context.Context, orgID uuid.UUID, repo *models.Repository) (string, error) {
-	res, err := s.identityResolver().InstallationTokenForRepo(ctx, orgID, repo, nil)
+	res, err := s.getInstallationResolutionForRepo(ctx, orgID, repo)
 	if err != nil {
 		return "", err
 	}
 	return res.Token, nil
+}
+
+func (s *PRService) getInstallationResolutionForRepo(ctx context.Context, orgID uuid.UUID, repo *models.Repository) (*identity.Resolution, error) {
+	return s.identityResolver().InstallationTokenForRepo(ctx, orgID, repo, nil)
 }
 
 // resolveToken delegates to the shared identity resolver. Kept as a method
@@ -564,6 +569,7 @@ func (s *PRService) resolveToken(ctx context.Context, run *models.Session, repo 
 // validateUserToken checks if a user's GitHub token is still valid by calling GET /user.
 // Returns false if the token is revoked or expired.
 func (s *PRService) validateUserToken(ctx context.Context, token string) bool {
+	ctx = withGitHubUserContext(ctx, "user_token_validation")
 	_, err := s.doGitHubRequest(ctx, token, http.MethodGet, "/user", nil)
 	return err == nil
 }
@@ -587,6 +593,16 @@ func (s *PRService) SetPreviewOriginTemplate(template string) {
 
 func (s *PRService) SetPRPreviewSurfacesEnabled(enabled bool) {
 	s.prPreviewSurfacesEnabled = enabled
+}
+
+// SetRateLimitController wires shared cooldowns while preserving the PR
+// client's existing per-request timeout and resolver client sharing.
+func (s *PRService) SetRateLimitController(controller *ratelimit.Controller) {
+	if s == nil {
+		return
+	}
+	s.httpClient = githubtelemetry.NewControlledHTTPClient(30*time.Second, s.logger, controller, "pr_service")
+	s.invalidateResolver()
 }
 
 func (s *PRService) sessionURL(sessionID uuid.UUID) string {
@@ -1156,6 +1172,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	if err != nil {
 		return nil, fmt.Errorf("resolve token: %w", err)
 	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "pr_publication")
 	token := resolution.Token
 
 	owner, repoName := splitRepo(repo.FullName)
@@ -1551,6 +1568,7 @@ func (s *PRService) CreateBranch(ctx context.Context, run *models.Session, param
 	if err != nil {
 		return nil, fmt.Errorf("resolve token: %w", err)
 	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "branch_publication")
 
 	branchName := formatBranchName(run, issue)
 	commitMsg := formatCommitMessage(run, issue)
@@ -1732,6 +1750,7 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 	if err != nil {
 		return nil, fmt.Errorf("resolve token: %w", err)
 	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "pr_update_push")
 
 	// Use the persisted head_ref captured at PR-creation time. Guarded by the
 	// ErrLegacyPRMissingHeadRef check above, so we know it's set here.
@@ -1912,10 +1931,12 @@ func (s *PRService) SyncSessionTitle(ctx context.Context, session *models.Sessio
 		return nil
 	}
 
-	token, err := s.getInstallationTokenForRepo(ctx, session.OrgID, &repo)
+	resolution, err := s.getInstallationResolutionForRepo(ctx, session.OrgID, &repo)
 	if err != nil {
 		return fmt.Errorf("get installation token: %w", err)
 	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "pr_title_sync")
+	token := resolution.Token
 
 	owner, repoName := splitRepo(pr.GitHubRepo)
 	if err := s.updatePullRequestTitle(ctx, token, owner, repoName, pr.GitHubPRNumber, title); err != nil {
@@ -3313,6 +3334,7 @@ func (s *PRService) reconcileChildPRBasesAfterParentMerge(ctx context.Context, p
 		s.logger.Warn().Err(err).Str("changeset_id", parentPR.ChangesetID.String()).Msg("failed to resolve GitHub token for child PR retarget")
 		return
 	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "stack_retarget")
 	owner, repoName := splitRepo(repo.FullName)
 	for _, child := range changesets {
 		if child.StackedOnChangesetID == nil || *child.StackedOnChangesetID != *parentPR.ChangesetID || child.Status == models.ChangesetStatusMerged || child.Status == models.ChangesetStatusAbandoned {
@@ -3967,11 +3989,13 @@ func (s *PRService) populateGitHubAutomationHead(ctx context.Context, repo *mode
 		s.logger.Warn().Str("repo", repo.FullName).Int("pr_number", req.PullRequestNumber).Msg("cannot resolve pull request head for malformed repository name")
 		return
 	}
-	token, err := s.getInstallationTokenForRepo(ctx, repo.OrgID, repo)
+	resolution, err := s.getInstallationResolutionForRepo(ctx, repo.OrgID, repo)
 	if err != nil {
 		s.logger.Warn().Err(err).Str("repo", repo.FullName).Int("pr_number", req.PullRequestNumber).Msg("failed to get installation token for github automation revision lookup")
 		return
 	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "automation_head")
+	token := resolution.Token
 	head, err := s.GetPullRequestHead(ctx, token, owner, repoName, req.PullRequestNumber)
 	if err != nil {
 		s.logger.Warn().Err(err).Str("repo", repo.FullName).Int("pr_number", req.PullRequestNumber).Msg("failed to resolve pull request head for github automation trigger")
@@ -4060,6 +4084,10 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 
 func (s *PRService) doGitHubRequestWithAccept(ctx context.Context, token, method, path string, body any, accept string) ([]byte, error) {
 	ctx = githubtelemetry.WithRequestMetadata(ctx, s.githubRequestMetadataForToken(ctx, token))
+	jsonResponse := strings.Contains(accept, "json") && !strings.Contains(accept, ".raw") && !strings.Contains(accept, ".diff") && !strings.Contains(accept, ".patch") && !strings.Contains(accept, ".html")
+	if jsonResponse {
+		ctx = githubtelemetry.WithJSONResponseObservation(ctx)
+	}
 	var bodyReader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -4081,15 +4109,29 @@ func (s *PRService) doGitHubRequestWithAccept(ctx context.Context, token, method
 
 	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint from config
 	if err != nil {
-		return nil, err
+		return nil, NewGitHubRequestError(ctx, err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		githubtelemetry.ObserveJSONResponse(ctx, err)
+		return nil, NewGitHubResponseReadError(ctx, method, path, resp, respBody, err)
 	}
-
+	var decodeErr error
+	if jsonResponse {
+		if method == http.MethodHead || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified {
+			decodeErr = ctx.Err()
+			githubtelemetry.ObserveJSONResponse(ctx, decodeErr)
+		} else {
+			if err := githubtelemetry.ValidateJSONResponse(ctx, respBody, nil); err != nil {
+				s.logger.Warn().Err(err).Msg("GitHub response could not prove recovery")
+			}
+			// Typed callers retain their existing decode errors and mutation
+			// semantics; this buffer check only establishes probe recovery.
+			decodeErr = ctx.Err()
+		}
+	}
 	if resp.StatusCode >= 400 {
 		return nil, &GitHubAPIError{
 			Method:     method,
@@ -4099,8 +4141,7 @@ func (s *PRService) doGitHubRequestWithAccept(ctx context.Context, token, method
 			Header:     resp.Header.Clone(),
 		}
 	}
-
-	return respBody, nil
+	return respBody, decodeErr
 }
 
 // doGitHubGraphQL POSTs a GraphQL query to the GitHub GraphQL endpoint and
@@ -4114,6 +4155,7 @@ func (s *PRService) doGitHubRequestWithAccept(ctx context.Context, token, method
 // /api/graphql); revisit this if 143 ever targets a GHES base URL.
 func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, variables map[string]any) ([]byte, error) {
 	ctx = githubtelemetry.WithRequestMetadata(ctx, s.githubRequestMetadataForToken(ctx, token))
+	ctx = githubtelemetry.WithGraphQLResponseObservation(ctx)
 	payload, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
 		return nil, err
@@ -4129,14 +4171,17 @@ func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, va
 
 	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub GraphQL endpoint from config
 	if err != nil {
-		return nil, err
+		return nil, NewGitHubRequestError(ctx, err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		githubtelemetry.ObserveGraphQLResponse(ctx, nil, err)
+		return nil, NewGitHubResponseReadError(ctx, http.MethodPost, "/graphql", resp, respBody, err)
 	}
+	graphQLErrors, decodeErr := ratelimit.DecodeGraphQLErrors(respBody)
+	githubtelemetry.ObserveGraphQLResponse(ctx, graphQLErrors, decodeErr)
 
 	if resp.StatusCode >= 400 {
 		return nil, &GitHubAPIError{
@@ -4147,25 +4192,58 @@ func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, va
 			Header:     resp.Header.Clone(),
 		}
 	}
+	if decodeErr == nil && len(graphQLErrors) > 0 {
+		return nil, &GitHubGraphQLError{Errors: graphQLErrors, Header: resp.Header.Clone()}
+	}
 
 	return respBody, nil
 }
 
 func (s *PRService) githubRequestMetadataForToken(ctx context.Context, token string) githubtelemetry.RequestMetadata {
-	metadata := githubtelemetry.RequestMetadata{
-		Kind:     githubtelemetry.RequestKindAPI,
-		AuthType: githubtelemetry.AuthTypeUser,
+	metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+	if metadata.Kind == "" {
+		metadata.Kind = githubtelemetry.RequestKindAPI
+	}
+	if metadata.AuthType == "" {
+		metadata.AuthType = githubtelemetry.AuthTypeUnknown
 	}
 	if reason, ok := pullRequestSyncReasonAttribute(ctx); ok {
 		metadata.SyncReason = string(reason)
 	}
-	if s != nil && s.tokenProvider != nil {
+	if metadata.AuthType == githubtelemetry.AuthTypeUnknown && s != nil && s.tokenProvider != nil {
 		if installationID, ok := s.tokenProvider.installationIDForToken(token); ok {
 			metadata.AuthType = githubtelemetry.AuthTypeAppInstallation
 			metadata.InstallationID = installationID
 		}
 	}
+	if metadata.AuthType == githubtelemetry.AuthTypeUnknown {
+		metadata.PrincipalUnresolved = true
+	}
 	return metadata
+}
+
+func withGitHubInstallationContext(ctx context.Context, installationID int64, caller string) context.Context {
+	return githubtelemetry.WithInstallationRequestMetadata(ctx, installationID, caller)
+}
+
+func withGitHubUserContext(ctx context.Context, caller string) context.Context {
+	metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+	metadata.Kind = githubtelemetry.RequestKindAPI
+	metadata.AuthType = githubtelemetry.AuthTypeUser
+	metadata.InstallationID = 0
+	metadata.Caller = caller
+	metadata.PrincipalUnresolved = false
+	return githubtelemetry.WithRequestMetadata(ctx, metadata)
+}
+
+func withGitHubResolutionContext(ctx context.Context, resolution *identity.Resolution, installationID int64, caller string) context.Context {
+	if resolution != nil && resolution.Source == identity.SourceApp {
+		if resolution.InstallationID > 0 {
+			installationID = resolution.InstallationID
+		}
+		return withGitHubInstallationContext(ctx, installationID, caller)
+	}
+	return withGitHubUserContext(ctx, caller)
 }
 
 // GitHubAPIError wraps a non-2xx response from the GitHub REST API so callers
@@ -4177,6 +4255,51 @@ type GitHubAPIError struct {
 	StatusCode int
 	Body       []byte
 	Header     http.Header
+}
+
+// GitHubResponseReadError preserves the response metadata that was available
+// before a response body read was interrupted. Retry classification needs the
+// status, provider headers, and controller metadata even when the body is only
+// partial; Err remains unwrap-able so cancellation keeps its terminal meaning.
+type GitHubResponseReadError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Body       []byte
+	Header     http.Header
+	Err        error
+	// CallerContextErr captures only the operation context supplied by the
+	// caller. It remains nil when http.Client.Timeout expires while that caller
+	// is still live, allowing retry classification to distinguish the two.
+	CallerContextErr error
+}
+
+// NewGitHubResponseReadError constructs an interrupted-response error while
+// taking a stable copy of response headers for callers in sibling packages.
+func NewGitHubResponseReadError(ctx context.Context, method, path string, resp *http.Response, body []byte, readErr error) *GitHubResponseReadError {
+	result := &GitHubResponseReadError{Method: method, Path: path, Body: body, Err: readErr}
+	if ctx != nil {
+		result.CallerContextErr = ctx.Err()
+	}
+	if resp != nil {
+		result.StatusCode = resp.StatusCode
+		result.Header = resp.Header.Clone()
+	}
+	return result
+}
+
+func (e *GitHubResponseReadError) Error() string {
+	if e == nil {
+		return "GitHub response body read failed"
+	}
+	return fmt.Sprintf("read GitHub API %s %s response (%d): %v", e.Method, e.Path, e.StatusCode, e.Err)
+}
+
+func (e *GitHubResponseReadError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 func (e *GitHubAPIError) Error() string {
@@ -4421,10 +4544,12 @@ func (s *PRService) GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID,
 	if err != nil {
 		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("load repository for code review mention: %w", err)
 	}
-	token, err := s.getInstallationTokenForRepo(ctx, orgID, &repository)
+	resolution, err := s.getInstallationResolutionForRepo(ctx, orgID, &repository)
 	if err != nil {
 		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("load installation token for code review mention: %w", err)
 	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repository.InstallationID, "code_review_snapshot")
+	token := resolution.Token
 	owner, repo := splitRepo(repository.FullName)
 	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number)
 	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
@@ -4466,10 +4591,12 @@ func (s *PRService) GetCodeReviewOutcomeSnapshot(ctx context.Context, orgID, rep
 	if err != nil {
 		return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("load repository for code review outcome: %w", err)
 	}
-	token, err := s.getInstallationTokenForRepo(ctx, orgID, &repository)
+	resolution, err := s.getInstallationResolutionForRepo(ctx, orgID, &repository)
 	if err != nil {
 		return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("load installation token for code review outcome: %w", err)
 	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repository.InstallationID, "code_review_outcome")
+	token := resolution.Token
 	owner, repo := splitRepo(repository.FullName)
 	// This is a read fence, not a completion timestamp. Reconciliation must
 	// yield to webhook projections that land after the provider read begins.
@@ -4583,10 +4710,12 @@ func (s *PRService) ResolvePullRequestLabels(ctx context.Context, orgID, reposit
 	if !ok || owner == "" || repoName == "" {
 		return nil, fmt.Errorf("malformed repository name %q", repo.FullName)
 	}
-	token, err := s.getInstallationTokenForRepo(ctx, orgID, &repo)
+	resolution, err := s.getInstallationResolutionForRepo(ctx, orgID, &repo)
 	if err != nil {
 		return nil, fmt.Errorf("get installation token for label lookup: %w", err)
 	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "automation_labels")
+	token := resolution.Token
 	head, err := s.GetPullRequestHead(ctx, token, owner, repoName, pullRequestNumber)
 	if err != nil {
 		return nil, fmt.Errorf("get pull request labels: %w", err)
@@ -4733,6 +4862,7 @@ func (s *PRService) SyncPRPreviewSurfaces(ctx context.Context, payload SyncPRPre
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("load pr preview state: %w", err)
 	}
+	ctx = withGitHubInstallationContext(ctx, repo.InstallationID, "pr_preview_surface")
 	token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
 	if err != nil {
 		return fmt.Errorf("get GitHub installation token: %w", err)

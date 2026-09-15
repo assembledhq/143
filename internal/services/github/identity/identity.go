@@ -57,6 +57,10 @@ const (
 type Resolution struct {
 	Token  string
 	Source Source
+	// InstallationID is populated when Source == SourceApp. It is the exact
+	// installation that issued Token, including integration-record fallback
+	// when the repository's recorded installation is stale.
+	InstallationID int64
 	// User is populated when Source == SourceUser. It is also populated when
 	// Source == SourceApp and the resolver was able to look up the human
 	// triggerer of the run, so callers can produce a Co-authored-by trailer
@@ -239,13 +243,13 @@ func (r *Resolver) ResolveSandbox(ctx context.Context, run *models.Session, repo
 		return nil, fmt.Errorf("repository %s has no github_id for sandbox token scoping", repo.FullName)
 	}
 
-	token, err := r.installationTokenWith(ctx, run.OrgID, repo, func(installationID int64) (string, error) {
+	token, installationID, err := r.installationTokenWithIdentity(ctx, run.OrgID, repo, func(installationID int64) (string, error) {
 		return tokens.GetSandboxInstallationToken(ctx, installationID, repo.GitHubID, action)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("get sandbox installation token: %w", err)
 	}
-	resolution := &Resolution{Token: token, Source: SourceApp}
+	resolution := &Resolution{Token: token, Source: SourceApp, InstallationID: installationID}
 	if run.TriggeredByUserID != nil && r.users != nil {
 		if user, userErr := r.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
 			resolution.User = &user
@@ -285,14 +289,16 @@ func (r *Resolver) InstallationTokenForRepo(ctx context.Context, orgID uuid.UUID
 // "get installation token" prefix — wrap when this is the terminal call in a
 // public Resolve path, leave bare when the caller adds its own context.
 func (r *Resolver) installationTokenResolution(ctx context.Context, orgID uuid.UUID, repo *models.Repository, wrapErr bool) (*Resolution, error) {
-	token, err := r.installationToken(ctx, orgID, repo)
+	token, installationID, err := r.installationTokenWithIdentity(ctx, orgID, repo, func(installationID int64) (string, error) {
+		return r.tokens.GetInstallationToken(ctx, installationID)
+	})
 	if err != nil {
 		if wrapErr {
 			return nil, fmt.Errorf("get installation token: %w", err)
 		}
 		return nil, err
 	}
-	return &Resolution{Token: token, Source: SourceApp}, nil
+	return &Resolution{Token: token, Source: SourceApp, InstallationID: installationID}, nil
 }
 
 // installationToken returns an App installation token for repo, falling back
@@ -305,6 +311,11 @@ func (r *Resolver) installationToken(ctx context.Context, orgID uuid.UUID, repo 
 }
 
 func (r *Resolver) installationTokenWith(ctx context.Context, orgID uuid.UUID, repo *models.Repository, issueToken func(int64) (string, error)) (string, error) {
+	token, _, err := r.installationTokenWithIdentity(ctx, orgID, repo, issueToken)
+	return token, err
+}
+
+func (r *Resolver) installationTokenWithIdentity(ctx context.Context, orgID uuid.UUID, repo *models.Repository, issueToken func(int64) (string, error)) (string, int64, error) {
 	tryInstallation := func(installationID int64) (string, error) {
 		if installationID <= 0 {
 			return "", fmt.Errorf("repository %s has no github installation_id", repo.FullName)
@@ -320,36 +331,36 @@ func (r *Resolver) installationTokenWith(ctx context.Context, orgID uuid.UUID, r
 	if repo.InstallationID > 0 {
 		token, err := tryInstallation(repo.InstallationID)
 		if err == nil {
-			return token, nil
+			return token, repo.InstallationID, nil
 		}
 		primaryErr = err
 		if !shouldRetryWithIntegrationInstallation(err) {
-			return "", err
+			return "", 0, err
 		}
 	} else {
 		primaryErr = fmt.Errorf("repository %s has no github installation_id", repo.FullName)
 	}
 
 	if r.integrations == nil || repo.IntegrationID == uuid.Nil {
-		return "", primaryErr
+		return "", 0, primaryErr
 	}
 
 	integration, err := r.integrations.GetByID(ctx, repo.IntegrationID)
 	if err != nil {
-		return "", primaryErr
+		return "", 0, primaryErr
 	}
 
 	fallbackInstallationID, err := integrationInstallationID(&integration)
 	if err != nil {
-		return "", primaryErr
+		return "", 0, primaryErr
 	}
 	if fallbackInstallationID == repo.InstallationID {
-		return "", primaryErr
+		return "", 0, primaryErr
 	}
 
 	token, err := tryInstallation(fallbackInstallationID)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 
 	r.logger.Warn().
@@ -360,7 +371,7 @@ func (r *Resolver) installationTokenWith(ctx context.Context, orgID uuid.UUID, r
 		Int64("fallback_installation_id", fallbackInstallationID).
 		Msg("using GitHub integration installation fallback")
 
-	return token, nil
+	return token, fallbackInstallationID, nil
 }
 
 // shouldRetryWithIntegrationInstallation matches errors that surface as a 404

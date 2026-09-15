@@ -40,6 +40,7 @@ func (s *PRService) PublishCodeReviewDisputeReply(ctx context.Context, req CodeR
 	if body == "" || !strings.Contains(body, prFeedbackHiddenMarker) {
 		return 0, fmt.Errorf("dispute reply must contain the loop-prevention marker")
 	}
+	ctx = withGitHubInstallationContext(ctx, req.InstallationID, "code_review_dispute_reply")
 	token, err := s.GetInstallationToken(ctx, req.InstallationID)
 	if err != nil {
 		return 0, fmt.Errorf("get installation token for dispute reply: %w", err)

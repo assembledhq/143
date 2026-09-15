@@ -94,10 +94,12 @@ func (s *PRService) UpdateSessionPullRequest(
 	if err != nil {
 		return nil, fmt.Errorf("load pull request repository: %w", err)
 	}
-	token, err := s.getInstallationTokenForRepo(ctx, orgID, &repository)
+	resolution, err := s.getInstallationResolutionForRepo(ctx, orgID, &repository)
 	if err != nil {
 		return nil, fmt.Errorf("get installation token for pull request update: %w", err)
 	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repository.InstallationID, "pr_update")
+	token := resolution.Token
 
 	owner, repoName := splitRepo(pr.GitHubRepo)
 	payload := make(map[string]any, 2)

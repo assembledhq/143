@@ -27,6 +27,9 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/github/identity"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
 )
@@ -43,6 +46,60 @@ func (m *mockLLMClient) Complete(_ context.Context, systemPrompt, userPrompt str
 	m.lastSystemPrompt = systemPrompt
 	m.lastUserPrompt = userPrompt
 	return m.response, m.err
+}
+
+func TestGitHubRequestMetadataUsesExplicitInstallationAcrossTokenRotation(t *testing.T) {
+	t.Parallel()
+
+	service := &PRService{tokenProvider: &Service{cache: map[int64]*cachedToken{}}}
+	ctx := withGitHubInstallationContext(context.Background(), 42, "pr_health")
+	for _, token := range []string{"expired-token-not-in-cache", "refreshed-token-not-in-cache"} {
+		metadata := service.githubRequestMetadataForToken(ctx, token)
+		require.Equal(t, githubtelemetry.AuthTypeAppInstallation, metadata.AuthType, "explicit request scope should identify installation auth without reverse token lookup")
+		require.Equal(t, int64(42), metadata.InstallationID, "token rotation should preserve the explicit installation identity")
+		require.Equal(t, "pr_health", metadata.Caller, "explicit request scope should preserve caller attribution")
+		require.False(t, metadata.PrincipalUnresolved, "explicit installation identity should not emit a coverage fault")
+	}
+}
+
+func TestPRServiceGraphQLDecoderPublishesOversizedSuffixThrottle(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
+	controller, err := ratelimit.NewController(ratelimit.Config{
+		Mode: ratelimit.ModeEnforce, Environment: "test", AppID: 1, InstallationAllowlist: []int64{42},
+		Logger: zerolog.Nop(), Now: func() time.Time { return now }, Owner: "pr-graphql",
+	})
+	require.NoError(t, err, "controller should initialize")
+	body := `{"data":{"padding":"` + strings.Repeat("x", 1<<20+4096) + `"},"errors":[{"message":"API rate limit exceeded","extensions":{"code":"RATE_LIMITED"}}]}`
+	outbound := 0
+	client := githubtelemetry.NewControlledHTTPClient(time.Second, zerolog.Nop(), controller, "pr_service", roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		outbound++
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	}))
+	service := &PRService{baseURL: "https://api.github.com", httpClient: client, logger: zerolog.Nop()}
+	ctx := withGitHubInstallationContext(context.Background(), 42, "pr_service")
+
+	_, err = service.doGitHubGraphQL(ctx, "token", "query { viewer { login } }", nil)
+	var graphQLErr *GitHubGraphQLError
+	require.True(t, errors.As(err, &graphQLErr), "owned full-body decoder should surface the structured suffix error")
+	_, err = service.doGitHubGraphQL(ctx, "token", "query { viewer { login } }", nil)
+	var deferral *ratelimit.Deferral
+	require.True(t, errors.As(err, &deferral), "suffix throttle should open the shared installation cooldown")
+	require.Equal(t, 1, outbound, "second GraphQL call should defer before another outbound request")
+}
+
+func TestGitHubRequestMetadataUsesResolvedFallbackInstallation(t *testing.T) {
+	t.Parallel()
+
+	service := &PRService{tokenProvider: &Service{cache: map[int64]*cachedToken{}}}
+	resolution := &identity.Resolution{Token: "fallback-token-not-in-cache", Source: identity.SourceApp, InstallationID: 99}
+	ctx := withGitHubResolutionContext(context.Background(), resolution, 42, "pr_health")
+	metadata := service.githubRequestMetadataForToken(ctx, resolution.Token)
+
+	require.Equal(t, githubtelemetry.AuthTypeAppInstallation, metadata.AuthType, "fallback resolution should remain installation-authenticated")
+	require.Equal(t, int64(99), metadata.InstallationID, "fallback resolution should use the installation that issued the token")
+	require.False(t, metadata.PrincipalUnresolved, "resolved fallback identity should not emit a coverage fault")
 }
 
 type fakeSessionThreadLister struct {
