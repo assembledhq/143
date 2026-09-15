@@ -15,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/workspace"
 	"github.com/go-chi/chi/v5"
@@ -365,6 +366,7 @@ func (h *SessionComposerHandler) ListSessionFileMentions(w http.ResponseWriter, 
 }
 
 func (h *SessionComposerHandler) repositoryTree(ctx context.Context, repo models.Repository, owner, name, branch string) ([]models.RepositoryTreeEntry, error) {
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, repo.InstallationID, "session_composer")
 	cacheKey := repo.ID.String() + ":" + branch
 	now := h.clock()
 
@@ -734,6 +736,7 @@ func projectCommandPathFromName(name, extension string) string {
 }
 
 func (h *SessionComposerHandler) fetchCommandContent(ctx context.Context, repo models.Repository, owner, name, branch, path string) (string, error) {
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, repo.InstallationID, "session_composer")
 	cacheKey := repo.ID.String() + ":" + branch + ":" + path
 	now := h.clock()
 

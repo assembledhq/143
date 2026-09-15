@@ -787,18 +787,14 @@ func (h *TeamHandler) SearchGitHubUsers(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	token, err := h.githubSvc.GetInstallationToken(r.Context(), installationID)
+	githubCtx := githubtelemetry.WithInstallationRequestMetadata(r.Context(), installationID, "team_user_search")
+	token, err := h.githubSvc.GetInstallationToken(githubCtx, installationID)
 	if err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to get github installation token")
 		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to authenticate with github")
 		return
 	}
 
-	githubCtx := githubtelemetry.WithRequestMetadata(r.Context(), githubtelemetry.RequestMetadata{
-		Kind:           githubtelemetry.RequestKindAPI,
-		AuthType:       githubtelemetry.AuthTypeAppInstallation,
-		InstallationID: installationID,
-	})
 	users, err := h.searchGitHubUsers(githubCtx, token, q)
 	if err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Str("query", q).Msg("failed to search github users")
@@ -854,6 +850,7 @@ func (h *TeamHandler) fallbackGitHubInstallationID(ctx context.Context, orgID uu
 // login+avatar pairs. The token is an installation access token; GitHub's
 // search endpoint is available to installation tokens.
 func (h *TeamHandler) searchGitHubUsers(ctx context.Context, token, query string) ([]GitHubUserSuggestion, error) {
+	ctx = githubtelemetry.WithJSONResponseObservation(ctx)
 	params := url.Values{
 		"q":        {query + " in:login type:user"},
 		"per_page": {"10"},
@@ -888,7 +885,7 @@ func (h *TeamHandler) searchGitHubUsers(ctx context.Context, token, query string
 			Type      string `json:"type"`
 		} `json:"items"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeGitHubJSONResponse(ctx, resp.Body, &result); err != nil {
 		return nil, err
 	}
 
