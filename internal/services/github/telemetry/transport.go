@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +14,9 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"github.com/assembledhq/143/internal/metrics"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 )
 
 const (
@@ -26,15 +31,27 @@ const (
 )
 
 type requestMetadataKey struct{}
+type jsonResponseObservationKey struct{}
+type graphQLResponseObservationKey struct{}
+
+type responseObservationState struct {
+	mu            sync.Mutex
+	callback      func([]ratelimit.GraphQLError, error)
+	observed      bool
+	graphQLErrors []ratelimit.GraphQLError
+	decodeErr     error
+}
 
 // RequestMetadata carries bounded dimensions that cannot be derived safely
 // from the HTTP request. It deliberately excludes tokens, query values, and
 // other secrets.
 type RequestMetadata struct {
-	Kind           string
-	AuthType       string
-	InstallationID int64
-	SyncReason     string
+	Kind                string
+	AuthType            string
+	InstallationID      int64
+	SyncReason          string
+	Caller              string
+	PrincipalUnresolved bool
 }
 
 // WithRequestMetadata attaches safe GitHub telemetry dimensions to a request.
@@ -42,83 +59,344 @@ func WithRequestMetadata(ctx context.Context, metadata RequestMetadata) context.
 	return context.WithValue(ctx, requestMetadataKey{}, metadata)
 }
 
+// WithInstallationRequestMetadata records the authenticated provider
+// principal before token acquisition. Callers should prefer this to inferring
+// installation ownership from a short-lived token string.
+func WithInstallationRequestMetadata(ctx context.Context, installationID int64, caller string) context.Context {
+	metadata, _ := RequestMetadataFromContext(ctx)
+	metadata.Kind = RequestKindAPI
+	metadata.AuthType = AuthTypeAppInstallation
+	metadata.InstallationID = installationID
+	metadata.Caller = boundedDimension(caller, 64)
+	metadata.PrincipalUnresolved = false
+	return WithRequestMetadata(ctx, metadata)
+}
+
+func RequestMetadataFromContext(ctx context.Context) (RequestMetadata, bool) {
+	metadata, ok := ctx.Value(requestMetadataKey{}).(RequestMetadata)
+	return metadata, ok
+}
+
+// WithJSONResponseObservation holds probe recovery until an owned JSON decoder
+// reports complete, valid consumption with ObserveJSONResponse.
+func WithJSONResponseObservation(ctx context.Context) context.Context {
+	return context.WithValue(ctx, jsonResponseObservationKey{}, &responseObservationState{})
+}
+
+// ObserveJSONResponse completes the request-scoped handoff after decoding the
+// entire response, including EOF. Decode and read errors cannot prove recovery.
+func ObserveJSONResponse(ctx context.Context, decodeErr error) {
+	state, _ := ctx.Value(jsonResponseObservationKey{}).(*responseObservationState)
+	state.observe(nil, decodeErr)
+}
+
+// ValidateJSONResponse validates a complete buffer already read by an owned
+// caller, then completes its request-scoped observation. A nil target validates
+// JSON syntax without copying the body; non-nil targets use the actual decoder.
+func ValidateJSONResponse(ctx context.Context, body []byte, target any) error {
+	var err error
+	if target != nil {
+		err = json.Unmarshal(body, target)
+	} else if !json.Valid(body) {
+		err = errors.New("invalid GitHub response JSON")
+	}
+	err = errors.Join(err, ctx.Err())
+	ObserveJSONResponse(ctx, err)
+	return err
+}
+
+// WithGraphQLResponseObservation installs one request-scoped handoff between
+// an owned full-body GraphQL decoder and the controlled transport.
+func WithGraphQLResponseObservation(ctx context.Context) context.Context {
+	return context.WithValue(ctx, graphQLResponseObservationKey{}, &responseObservationState{})
+}
+
+// ObserveGraphQLResponse supplies the authoritative result after an owned
+// decoder has inspected the complete GraphQL envelope. The transport retains
+// only a bounded prefix, so this request-scoped handoff covers suffix errors
+// and oversized successful probes without a second unbounded body copy.
+func ObserveGraphQLResponse(ctx context.Context, graphQLErrors []ratelimit.GraphQLError, decodeErr error) {
+	state, _ := ctx.Value(graphQLResponseObservationKey{}).(*responseObservationState)
+	if state == nil {
+		return
+	}
+	state.observe(graphQLErrors, decodeErr)
+}
+
+func (s *responseObservationState) bind(callback func([]ratelimit.GraphQLError, error)) {
+	if s == nil || callback == nil {
+		return
+	}
+	s.mu.Lock()
+	s.callback = callback
+	observed := s.observed
+	graphQLErrors := s.graphQLErrors
+	decodeErr := s.decodeErr
+	s.mu.Unlock()
+	if observed {
+		callback(graphQLErrors, decodeErr)
+	}
+}
+
+func (s *responseObservationState) observe(graphQLErrors []ratelimit.GraphQLError, decodeErr error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.observed {
+		s.mu.Unlock()
+		return
+	}
+	s.observed = true
+	s.graphQLErrors = graphQLErrors
+	s.decodeErr = decodeErr
+	callback := s.callback
+	s.mu.Unlock()
+	if callback != nil {
+		callback(graphQLErrors, decodeErr)
+	}
+}
+
 // NewHTTPClient returns an HTTP client that emits one structured summary per
 // GitHub request. Routes are normalized before logging to keep cardinality
 // bounded; raw query strings and authorization headers are never logged.
 func NewHTTPClient(timeout time.Duration, logger zerolog.Logger) *http.Client {
+	return NewControlledHTTPClient(timeout, logger, nil, "unspecified")
+}
+
+// NewControlledHTTPClient adds installation cooldown coordination to the same
+// transport that owns outbound request telemetry.
+func NewControlledHTTPClient(timeout time.Duration, logger zerolog.Logger, controller *ratelimit.Controller, caller string, baseTransports ...http.RoundTripper) *http.Client {
+	base := http.DefaultTransport
+	if len(baseTransports) > 0 && baseTransports[0] != nil {
+		base = baseTransports[0]
+	}
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &transport{
-			base:   http.DefaultTransport,
-			logger: logger,
-			now:    time.Now,
+			base: base, logger: logger, now: time.Now,
+			controller: controller, caller: boundedDimension(caller, 64),
 		},
 	}
 }
 
 type transport struct {
-	base   http.RoundTripper
-	logger zerolog.Logger
-	now    func() time.Time
+	base       http.RoundTripper
+	logger     zerolog.Logger
+	now        func() time.Time
+	controller *ratelimit.Controller
+	caller     string
 }
 
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	startedAt := t.now()
+	metadata, _ := RequestMetadataFromContext(req.Context())
+	if metadata.Kind == "" {
+		metadata.Kind = requestKindForURL(req.URL)
+	}
+	if metadata.AuthType == "" {
+		metadata.AuthType = AuthTypeUnknown
+	}
+	if metadata.Caller == "" {
+		metadata.Caller = t.caller
+	}
+	metadata.Caller = boundedDimension(metadata.Caller, 64)
+	metadata.SyncReason = boundedDimension(metadata.SyncReason, 64)
+	if metadata.Kind == RequestKindAPI && metadata.AuthType == AuthTypeUnknown {
+		metadata.PrincipalUnresolved = true
+	}
+	req = req.WithContext(WithRequestMetadata(req.Context(), metadata))
+	permit := ratelimit.Permit{}
+	if t.controller != nil && metadata.AuthType == AuthTypeAppInstallation {
+		var err error
+		route, _ := normalizeRoute(req.URL)
+		permit, err = t.controller.Before(req.Context(), ratelimit.Scope{
+			InstallationID: metadata.InstallationID,
+			Caller:         metadata.Caller,
+			Route:          route,
+			SyncReason:     metadata.SyncReason,
+		})
+		if err != nil {
+			if req.Body != nil {
+				if closeErr := req.Body.Close(); closeErr != nil {
+					return nil, errors.Join(err, fmt.Errorf("close locally deferred GitHub request body: %w", closeErr))
+				}
+			}
+			return nil, err
+		}
+	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil || resp == nil || resp.Body == nil {
-		t.logRequest(req, resp, err, nil, startedAt, t.now())
+		if t.controller != nil && metadata.AuthType == AuthTypeAppInstallation {
+			t.controller.Observe(req.Context(), permit, ratelimit.Observation{RequestErr: err})
+		}
+		t.logRequest(req, resp, err, nil, nil, false, startedAt, t.now())
 		return resp, err
 	}
-	resp.Body = &observedResponseBody{
-		ReadCloser: resp.Body,
-		capture:    resp.StatusCode == http.StatusForbidden || req.URL.Path == "/graphql",
-		onClose: func(body []byte) {
-			t.logRequest(req, resp, nil, body, startedAt, t.now())
+	controllerObserved := false
+	if t.controller != nil && metadata.AuthType == AuthTypeAppInstallation {
+		preliminary := ratelimit.ClassifyResponse(ratelimit.ResponseInput{
+			StatusCode: resp.StatusCode,
+			Header:     resp.Header,
+			Now:        t.now(),
+		})
+		// Decisive throttle headers must enter shared state as soon as they
+		// arrive. A bare 403 remains ambiguous until its structured body is
+		// decoded, and HTTP-200 GraphQL responses may carry structured errors.
+		// Successful REST probes must also finish reading the response before
+		// they can prove recovery and admit competing work.
+		recoveringProbe := permit.Probe && ratelimit.IsDefinitiveResponse(resp.StatusCode)
+		canFinishWithoutBody := req.URL.Path != "/graphql" && resp.StatusCode != http.StatusForbidden && !recoveringProbe
+		if preliminary.RateLimited || canFinishWithoutBody {
+			result := t.controller.Observe(req.Context(), permit, ratelimit.Observation{
+				StatusCode: resp.StatusCode,
+				Header:     resp.Header,
+			})
+			controllerObserved = true
+			if t.controller.Mode() == ratelimit.ModeEnforce && result.Classification.RateLimited {
+				if resp.Header == nil {
+					resp.Header = make(http.Header)
+				}
+				ratelimit.AttachInternalRetryMetadata(resp.Header, result.Deferral)
+			}
+		}
+	}
+	decoderState, _ := req.Context().Value(jsonResponseObservationKey{}).(*responseObservationState)
+	if decoderState == nil {
+		decoderState, _ = req.Context().Value(graphQLResponseObservationKey{}).(*responseObservationState)
+	}
+	observedBody := &observedResponseBody{
+		ReadCloser:   resp.Body,
+		capture:      resp.StatusCode == http.StatusForbidden || req.URL.Path == "/graphql" || permit.Probe && resp.StatusCode >= 400,
+		graphQL:      req.URL.Path == "/graphql",
+		awaitDecoded: decoderState != nil,
+		readEOF:      resp.Body == http.NoBody,
+		onClose: func(body []byte, bodyErr, decodeErr error, graphQLErrors []ratelimit.GraphQLError, authoritativeGraphQL bool) {
+			if t.controller != nil && metadata.AuthType == AuthTypeAppInstallation && !controllerObserved {
+				observation := normalizedObservation(resp, body, req.URL.Path == "/graphql", bodyErr, decodeErr, graphQLErrors, authoritativeGraphQL)
+				observation.RequestErr = req.Context().Err()
+				if observation.BodyErr != nil {
+					route, _ := normalizeRoute(req.URL)
+					t.logger.Warn().Err(observation.BodyErr).
+						Int64("github_installation_id", metadata.InstallationID).
+						Str("github_caller", metadata.Caller).
+						Str("github_route", route).
+						Msg("github rate limit observation incomplete")
+				}
+				result := t.controller.Observe(req.Context(), permit, observation)
+				if t.controller.Mode() == ratelimit.ModeEnforce && result.Classification.RateLimited {
+					if resp.Header == nil {
+						resp.Header = make(http.Header)
+					}
+					ratelimit.AttachInternalRetryMetadata(resp.Header, result.Deferral)
+				}
+			}
+			t.logRequest(req, resp, nil, body, graphQLErrors, authoritativeGraphQL, startedAt, t.now())
 		},
+	}
+	resp.Body = observedBody
+	if decoderState != nil {
+		decoderState.bind(observedBody.observeDecoded)
 	}
 	return resp, err
 }
 
-const maxRateLimitResponseBytes = 16 * 1024
+const maxRateLimitResponseBytes = 1 << 20
+
+var (
+	errRateLimitObservationTruncated  = errors.New("GitHub response exceeded rate-limit observation limit")
+	errRateLimitObservationIncomplete = errors.New("GitHub response body closed before EOF")
+)
 
 type observedResponseBody struct {
 	io.ReadCloser
-	capture  bool
-	body     []byte
-	onClose  func([]byte)
-	once     sync.Once
-	closeErr error
+	capture      bool
+	graphQL      bool
+	awaitDecoded bool
+	body         []byte
+	onClose      func([]byte, error, error, []ratelimit.GraphQLError, bool)
+	observeOnce  sync.Once
+	closeOnce    sync.Once
+	closeErr     error
+	readErr      error
+	readEOF      bool
+	drainErr     error
+	truncated    bool
 }
 
 func (b *observedResponseBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
-	if b.capture && len(b.body) < maxRateLimitResponseBytes {
+	if b.capture && n > 0 {
 		remaining := maxRateLimitResponseBytes - len(b.body)
 		captured := n
 		if captured > remaining {
 			captured = remaining
+			b.truncated = true
 		}
-		b.body = append(b.body, p[:captured]...)
+		if captured > 0 {
+			b.body = append(b.body, p[:captured]...)
+		}
+	}
+	if err != nil && err != io.EOF {
+		b.readErr = errors.Join(b.readErr, err)
+		b.observe(false)
+	} else if err == io.EOF {
+		b.readEOF = true
+		if !b.graphQL && !b.awaitDecoded {
+			b.observe(false)
+		}
 	}
 	return n, err
 }
 
 func (b *observedResponseBody) Close() error {
-	b.once.Do(func() {
-		if b.capture && len(b.body) < maxRateLimitResponseBytes {
-			remaining := int64(maxRateLimitResponseBytes - len(b.body))
-			unread, _ := io.ReadAll(io.LimitReader(b.ReadCloser, remaining))
-			b.body = append(b.body, unread...)
-		}
+	b.observe(true)
+	b.closeOnce.Do(func() {
 		b.closeErr = b.ReadCloser.Close()
-		if b.onClose != nil {
-			b.onClose(b.body)
-		}
 	})
-	return b.closeErr
+	return errors.Join(b.drainErr, b.closeErr)
 }
 
-func (t *transport) logRequest(req *http.Request, resp *http.Response, requestErr error, responseBody []byte, startedAt, finishedAt time.Time) {
+func (b *observedResponseBody) observe(drain bool) {
+	b.observeOnce.Do(func() {
+		if drain && b.capture {
+			remaining := maxRateLimitResponseBytes - len(b.body)
+			unread, readErr := io.ReadAll(io.LimitReader(b.ReadCloser, int64(remaining)+1))
+			if len(unread) > remaining {
+				b.truncated = true
+				unread = unread[:remaining]
+			}
+			b.body = append(b.body, unread...)
+			b.drainErr = readErr
+		}
+		if b.onClose != nil {
+			var truncatedErr error
+			if b.truncated {
+				truncatedErr = errRateLimitObservationTruncated
+			}
+			var incompleteErr error
+			if !b.graphQL && (!b.readEOF || b.awaitDecoded) && b.readErr == nil && !b.capture {
+				incompleteErr = errRateLimitObservationIncomplete
+			}
+			b.onClose(b.body, errors.Join(b.readErr, b.drainErr, truncatedErr, incompleteErr), nil, nil, false)
+		}
+	})
+}
+
+func (b *observedResponseBody) observeDecoded(graphQLErrors []ratelimit.GraphQLError, decodeErr error) {
+	b.observeOnce.Do(func() {
+		if b.onClose != nil {
+			body := b.body
+			if b.truncated && decodeErr != nil {
+				// A valid prefix cannot override a full-envelope decoding failure.
+				body = nil
+			}
+			b.onClose(body, errors.Join(b.readErr, b.drainErr), decodeErr, graphQLErrors, true)
+		}
+	})
+}
+
+func (t *transport) logRequest(req *http.Request, resp *http.Response, requestErr error, responseBody []byte, graphQLErrors []ratelimit.GraphQLError, authoritativeGraphQL bool, startedAt, finishedAt time.Time) {
 	metadata, _ := req.Context().Value(requestMetadataKey{}).(RequestMetadata)
 	if metadata.Kind == "" {
 		metadata.Kind = requestKindForURL(req.URL)
@@ -139,7 +417,7 @@ func (t *transport) logRequest(req *http.Request, resp *http.Response, requestEr
 		statusClass = fmt.Sprintf("%dxx", resp.StatusCode/100)
 		result = githubRequestResult(resp.StatusCode)
 		header = resp.Header
-		rateLimited, rateLimitKind = classifyRateLimitResponse(resp, responseBody)
+		rateLimited, rateLimitKind = classifyRateLimitResponse(resp, responseBody, req.URL.Path == "/graphql", graphQLErrors, authoritativeGraphQL)
 		if rateLimited {
 			result = "rate_limited"
 		}
@@ -167,6 +445,20 @@ func (t *transport) logRequest(req *http.Request, resp *http.Response, requestEr
 	}
 	if metadata.SyncReason != "" {
 		event = event.Str("github_sync_reason", metadata.SyncReason)
+	}
+	if metadata.Caller != "" {
+		event = event.Str("github_caller", metadata.Caller)
+	}
+	if t.controller != nil {
+		event = event.Str("github_rate_limit_mode", string(t.controller.Mode()))
+	}
+	if metadata.PrincipalUnresolved {
+		event = event.Bool("github_principal_unresolved", true)
+		mode := string(ratelimit.ModeOff)
+		if t.controller != nil {
+			mode = string(t.controller.Mode())
+		}
+		metrics.RecordGitHubPrincipalUnresolved(req.Context(), metadata.Caller, mode)
 	}
 	if rateLimitKind != "" {
 		event = event.Str("github_rate_limit_kind", rateLimitKind)
@@ -216,6 +508,53 @@ func (t *transport) logRequest(req *http.Request, resp *http.Response, requestEr
 	event.Msg(message)
 }
 
+func normalizedObservation(resp *http.Response, responseBody []byte, graphQL bool, bodyErr, decodeErr error, authoritativeErrors []ratelimit.GraphQLError, authoritativeGraphQL bool) ratelimit.Observation {
+	observation := ratelimit.Observation{StatusCode: resp.StatusCode, Header: resp.Header, BodyErr: bodyErr}
+	if graphQL {
+		observation.GraphQLErrors = authoritativeErrors
+		if !authoritativeGraphQL {
+			observation.GraphQLErrors, decodeErr = ratelimit.DecodeGraphQLErrors(responseBody)
+		}
+		// GitHub may reject the HTTP request before executing GraphQL and
+		// return its REST error envelope. Successful content is never inspected
+		// for message substrings, and structured GraphQL errors take precedence.
+		if resp.StatusCode >= 400 && len(observation.GraphQLErrors) == 0 {
+			if message, ok := responseMessage(responseBody, true); ok {
+				observation.Message = message
+				return observation
+			}
+		}
+		if decodeErr != nil {
+			observation.BodyErr = errors.Join(bodyErr, fmt.Errorf("decode GitHub GraphQL response: %w", decodeErr))
+		}
+		return observation
+	}
+	observation.BodyErr = errors.Join(bodyErr, decodeErr)
+	var validMessage bool
+	observation.Message, validMessage = responseMessage(responseBody, false)
+	if resp.StatusCode >= 400 && !validMessage {
+		observation.BodyErr = errors.Join(observation.BodyErr, errors.New("decode GitHub error response: missing or invalid message envelope"))
+	}
+	return observation
+}
+
+func responseMessage(body []byte, graphQL bool) (string, bool) {
+	var envelope struct {
+		Message *string         `json:"message"`
+		Errors  json.RawMessage `json:"errors"`
+	}
+	if json.Unmarshal(body, &envelope) != nil || envelope.Message == nil {
+		return "", false
+	}
+	if graphQL && len(envelope.Errors) > 0 && string(envelope.Errors) != "null" {
+		var graphQLErrors []json.RawMessage
+		if json.Unmarshal(envelope.Errors, &graphQLErrors) != nil || len(graphQLErrors) > 0 {
+			return "", false
+		}
+	}
+	return *envelope.Message, true
+}
+
 func requestKindForURL(requestURL *url.URL) string {
 	if requestURL != nil && strings.EqualFold(requestURL.Hostname(), "github.com") {
 		return RequestKindOAuth
@@ -236,29 +575,23 @@ func githubRequestResult(statusCode int) string {
 	}
 }
 
-func classifyRateLimitResponse(resp *http.Response, responseBody []byte) (bool, string) {
+func classifyRateLimitResponse(resp *http.Response, responseBody []byte, graphQL bool, authoritativeErrors []ratelimit.GraphQLError, authoritativeGraphQL bool) (bool, string) {
 	if resp == nil {
 		return false, ""
 	}
-	throttleStatus := resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests
-	message := strings.ToLower(strings.TrimSpace(string(responseBody)))
-	bodyRateLimited := strings.Contains(message, "rate limit") || strings.Contains(message, "abuse detection")
-	if !throttleStatus && !bodyRateLimited {
+	observation := normalizedObservation(resp, responseBody, graphQL, nil, nil, authoritativeErrors, authoritativeGraphQL)
+	classification := ratelimit.ClassifyResponse(ratelimit.ResponseInput{
+		StatusCode:    resp.StatusCode,
+		Header:        resp.Header,
+		Message:       observation.Message,
+		GraphQLErrors: observation.GraphQLErrors,
+	})
+	// A successful request that uses the final primary token remains successful
+	// request telemetry. The controller records the resulting episode separately.
+	if (resp.StatusCode >= 200 && resp.StatusCode < 300 || resp.StatusCode == http.StatusNotModified) && len(observation.GraphQLErrors) == 0 {
 		return false, ""
 	}
-	if remaining, ok := headerInt64(resp.Header, "X-RateLimit-Remaining"); ok && remaining == 0 {
-		return true, "primary"
-	}
-	if strings.TrimSpace(resp.Header.Get("Retry-After")) != "" || resp.StatusCode == http.StatusTooManyRequests {
-		return true, "secondary"
-	}
-	if strings.Contains(message, "secondary rate limit") || strings.Contains(message, "abuse detection") {
-		return true, "secondary"
-	}
-	if strings.Contains(message, "rate limit") {
-		return true, "unknown"
-	}
-	return false, ""
+	return classification.RateLimited, string(classification.Kind)
 }
 
 func headerInt64(header http.Header, name string) (int64, bool) {
@@ -290,6 +623,14 @@ func retryAfterSeconds(raw string, now time.Time) (float64, bool) {
 		seconds = 0
 	}
 	return seconds, true
+}
+
+func boundedDimension(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit]
 }
 
 func normalizeRoute(requestURL *url.URL) (string, string) {

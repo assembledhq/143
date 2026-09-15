@@ -72,10 +72,12 @@ func (s *PRService) DiscoverCodeReviewVisualEvidence(ctx context.Context, orgID,
 	if err != nil {
 		return models.CodeReviewVisualEvidenceDiscovery{}, fmt.Errorf("load repository for code review visual evidence: %w", err)
 	}
-	token, err := s.getInstallationTokenForRepo(ctx, orgID, &repository)
+	resolution, err := s.getInstallationResolutionForRepo(ctx, orgID, &repository)
 	if err != nil {
 		return models.CodeReviewVisualEvidenceDiscovery{}, fmt.Errorf("load installation token for code review visual evidence: %w", err)
 	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repository.InstallationID, "code_review_visual_evidence")
+	token := resolution.Token
 	owner, repo := splitRepo(repository.FullName)
 
 	var details githubVisualEvidencePullRequest

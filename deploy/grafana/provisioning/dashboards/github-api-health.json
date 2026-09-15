@@ -333,7 +333,7 @@
       "type": "table",
       "id": 10,
       "title": "Rate-limit sources",
-      "description": "Installations, auth modes, routes, and repositories that actually received rate-limit responses. Limited to the top twenty combinations to keep the table actionable.",
+      "description": "Installations, resources, routes, bounded callers, and sync reasons that actually received rate-limit responses. Locally deferred work is excluded from these request counts.",
       "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
       "gridPos": { "h": 9, "w": 12, "x": 12, "y": 25 },
       "options": { "showHeader": true },
@@ -345,7 +345,7 @@
         {
           "refId": "A",
           "queryType": "stats",
-          "expr": "_msg:\"github api request\" AND github_rate_limited:true | stats by (github_installation_id, github_auth_type, github_rate_limit_kind, github_route, github_repository) count() as rate_limits | sort by (rate_limits desc) | limit 20"
+          "expr": "_msg:\"github api request\" AND github_rate_limited:true | stats by (github_installation_id, github_auth_type, github_rate_limit_resource, github_rate_limit_kind, github_route, github_caller, github_sync_reason) count() as rate_limits | sort by (rate_limits desc) | limit 20"
         }
       ]
     },
@@ -372,6 +372,46 @@
           "queryType": "instant",
           "expr": "_msg:\"github api request\" AND github_rate_limited:true",
           "maxLines": 100
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "id": 12,
+      "title": "Locally deferred requests",
+      "description": "Covered cooldown decisions, split by whether enforcement actually suppressed the call. Observe-mode predictions can be compared with the separately counted outbound request.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 44 },
+      "options": { "showHeader": true },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "displayMode": "auto" } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "stats",
+          "expr": "_msg:\"github request deferred\" | stats by (github_request_suppressed, github_installation_id, github_rate_limit_resource, github_rate_limit_kind, github_route, github_caller, github_sync_reason, github_rate_limit_mode) count() as deferrals | sort by (deferrals desc) | limit 20"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "id": 13,
+      "title": "Principal attribution gaps",
+      "description": "Covered GitHub requests whose authenticated principal was unresolved. Any row blocks enforcement canary expansion until its caller wiring is fixed.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 53 },
+      "options": { "showHeader": true },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "displayMode": "auto" } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "stats",
+          "expr": "_msg:\"github api request\" AND github_principal_unresolved:true | stats by (github_route, github_caller, github_auth_type, github_rate_limit_mode) count() as unresolved_requests | sort by (unresolved_requests desc) | limit 20"
         }
       ]
     }

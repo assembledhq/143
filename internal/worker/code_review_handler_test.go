@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 	threadsvc "github.com/assembledhq/143/internal/services/thread"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -387,7 +389,6 @@ func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *test
 	t.Parallel()
 
 	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000143")
-	fallbackRetryAfter := *githubRateLimitRetryAfter(nil, sessionID.String())
 	secondaryRetryAfterHint := 117 * time.Second
 	secondaryRetryAfter := *githubRateLimitRetryAfter(&secondaryRetryAfterHint, sessionID.String())
 	tests := []struct {
@@ -401,7 +402,7 @@ func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *test
 		expectedRetryAfter time.Duration
 	}{
 		{name: "retries service unavailable", status: http.StatusServiceUnavailable, retryable: true},
-		{name: "retries rate limiting with fallback delay", status: http.StatusTooManyRequests, retryable: true, rateLimited: true, expectedRetryAfter: fallbackRetryAfter},
+		{name: "retries rate limiting with durable no-hint policy", status: http.StatusTooManyRequests, retryable: true, rateLimited: true},
 		{
 			name:               "retries forbidden secondary rate limit using server delay",
 			status:             http.StatusForbidden,
@@ -451,15 +452,14 @@ func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *test
 				if tt.expectedRetryAfter > 0 {
 					require.NotNil(t, retryErr.RetryAfter, "rate-limited response should preserve the upstream retry delay")
 					require.Equal(t, tt.expectedRetryAfter, *retryErr.RetryAfter, "rate-limited response should use the upstream retry delay")
-				} else {
+				} else if !tt.rateLimited {
 					require.Nil(t, retryErr.RetryAfter, "transient GitHub retries without a hint should use exponential backoff")
-				}
-				if tt.rateLimited {
-					require.NotNil(t, retryErr.MaxRetryDuration, "rate limits should use an extended but bounded retry window")
-					require.Equal(t, githubRateLimitMaxRetryDuration, *retryErr.MaxRetryDuration, "rate limits should survive GitHub's normal reset interval")
 				} else {
-					require.Nil(t, retryErr.MaxRetryDuration, "ordinary transient failures should use the standard retry window")
+					require.Nil(t, retryErr.RetryAfter, "no-hint rate limits should be finalized after the durable retry window is established")
+					require.Equal(t, GitHubRetryPolicyNoHint, retryErr.GitHubRetryPolicy, "no-hint rate limits should carry the explicit slot policy")
 				}
+				require.NotNil(t, retryErr.MaxRetryDuration, "all retryable GitHub failures should use the shared bounded recovery window")
+				require.Equal(t, githubRateLimitMaxRetryDuration, *retryErr.MaxRetryDuration, "GitHub failures should survive a normal reset interval without resetting the window")
 			}
 		})
 	}
@@ -565,6 +565,7 @@ func TestRecordCodeReviewAutomaticWaitPersistsRateLimitOnly(t *testing.T) {
 	now := time.Now().UTC()
 	delay := 90 * time.Second
 	message := "GitHub is rate-limited. The review will resume automatically when the limit resets."
+	jobID := uuid.New()
 	phase := models.CodeReviewPhaseWaitingGitHub
 	statusCode := models.CodeReviewStatusCodeGitHubRateLimited
 	retryAt := now.Add(delay)
@@ -579,9 +580,10 @@ func TestRecordCodeReviewAutomaticWaitPersistsRateLimitOnly(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
-	mock.ExpectQuery("UPDATE code_review_session_metadata").
+	mock.ExpectQuery("WITH scheduled_retry AS MATERIALIZED").
 		WithArgs(pgx.NamedArgs{
-			"org_id": orgID, "session_id": sessionID, "retry_at": pgxmock.AnyArg(), "status_message": message,
+			"org_id": orgID, "session_id": sessionID, "job_id": jobID, "retry_at": pgxmock.AnyArg(),
+			"job_error": rateLimitErr.Error(), "status_message": message,
 		}).
 		WillReturnRows(newCodeReviewMetadataRows().AddRow(
 			metadataID, orgID, sessionID, uuid.New(), uuid.New(), uuid.New(),
@@ -593,12 +595,47 @@ func TestRecordCodeReviewAutomaticWaitPersistsRateLimitOnly(t *testing.T) {
 
 	recordCodeReviewAutomaticWait(context.Background(), store, zerolog.Nop(), runCodeReviewPayload{
 		OrgID: orgID, SessionID: sessionID,
-	}, rateLimitErr)
+	}, jobID, rateLimitErr, retryAt)
 	recordCodeReviewAutomaticWait(context.Background(), store, zerolog.Nop(), runCodeReviewPayload{
 		OrgID: orgID, SessionID: sessionID,
-	}, codeReviewWaitingForReviewers(models.DefaultCodeReviewPolicyConfig()))
+	}, jobID, codeReviewWaitingForReviewers(models.DefaultCodeReviewPolicyConfig()), retryAt)
 
 	require.NoError(t, mock.ExpectationsWereMet(), "only a GitHub rate limit should persist an automatic wait")
+}
+
+func TestDelayedCodeReviewRetryHookCannotOverwriteNewerAttempt(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	runAt := time.Date(2026, time.September, 15, 12, 5, 0, 0, time.UTC)
+	handlerErr := &RetryableError{Err: &ghservice.GitHubAPIError{
+		Method: http.MethodGet, Path: "/repos/acme/repo/pulls/42", StatusCode: http.StatusTooManyRequests,
+	}}
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	// Empty rows model the old hook resuming only after the next worker has
+	// claimed or rescheduled the job, so the locked scheduled_retry CTE no
+	// longer matches the old pending transition.
+	mock.ExpectQuery("(?s)WITH scheduled_retry AS MATERIALIZED.*status = 'pending'.*run_at = @retry_at.*last_error = @job_error.*FOR UPDATE.*UPDATE code_review_session_metadata").
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "job_id": jobID, "retry_at": runAt,
+			"job_error":      handlerErr.Error(),
+			"status_message": "GitHub is rate-limited. The review will resume automatically when the limit resets.",
+		}).
+		WillReturnRows(newCodeReviewMetadataRows())
+	store := db.NewCodeReviewStore(mock)
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+	ctx = jobctx.WithJobID(ctx, jobID)
+	registerCodeReviewRetryScheduledWait(ctx, store, zerolog.Nop(), runCodeReviewPayload{OrgID: orgID, SessionID: sessionID})
+
+	// The hook is deliberately held until the modeled newer attempt has
+	// advanced, then released with the obsolete transition's timestamp.
+	jobctx.RunRetryScheduledHooks(ctx, handlerErr, runAt)
+
+	require.NoError(t, mock.ExpectationsWereMet(), "delayed hook should attempt only the atomically fenced update")
 }
 
 func TestCodeReviewTerminalFailureStatus(t *testing.T) {
@@ -617,6 +654,20 @@ func TestCodeReviewTerminalFailureStatus(t *testing.T) {
 				Method: http.MethodGet, Path: "/rate_limit", StatusCode: http.StatusTooManyRequests,
 			}},
 			expectedCode: models.CodeReviewStatusCodeGitHubRateLimited, expectRetry: true, expectedAction: "Retry the review",
+		},
+		{
+			name:           "preserves exhausted controller deferral as rate limited",
+			err:            &RetryableError{Err: &ratelimit.Deferral{Kind: ratelimit.KindSecondary, InstallationID: 42, RetryAt: time.Now().Add(time.Minute)}},
+			expectedCode:   models.CodeReviewStatusCodeGitHubRateLimited,
+			expectRetry:    true,
+			expectedAction: "Retry the review",
+		},
+		{
+			name:           "preserves exhausted transient GitHub failure as unavailable",
+			err:            &RetryableError{Err: &net.DNSError{Err: "temporary resolver failure", IsTemporary: true}},
+			expectedCode:   models.CodeReviewStatusCodeGitHubUnavailable,
+			expectRetry:    true,
+			expectedAction: "Retry the review",
 		},
 		{
 			name:         "keeps non-retryable worker failures terminal",

@@ -13,7 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
@@ -64,11 +67,7 @@ func NewGitHubSubmitter(tokens InstallationTokenProvider, opts ...GitHubSubmitte
 }
 
 func withGitHubInstallationTelemetry(ctx context.Context, installationID int64) context.Context {
-	return githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
-		Kind:           githubtelemetry.RequestKindAPI,
-		AuthType:       githubtelemetry.AuthTypeAppInstallation,
-		InstallationID: installationID,
-	})
+	return githubtelemetry.WithInstallationRequestMetadata(ctx, installationID, "code_review")
 }
 
 type SubmitReviewDecision string
@@ -192,6 +191,7 @@ func (s *GitHubSubmitter) UpsertReviewStatusComment(ctx context.Context, req Ups
 	if body == "" {
 		return 0, fmt.Errorf("status comment body is required")
 	}
+	ctx = withGitHubInstallationTelemetry(ctx, req.InstallationID)
 	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
 	if err != nil {
 		return 0, fmt.Errorf("get installation token: %w", err)
@@ -371,7 +371,7 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 		return SubmitReviewResult{}, fmt.Errorf("marshal review payload: %w", err)
 	}
 	reviewURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), req.PullNumber)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reviewURL, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodPost, reviewURL, bytes.NewReader(body))
 	if err != nil {
 		return SubmitReviewResult{}, fmt.Errorf("create review request: %w", err)
 	}
@@ -381,7 +381,7 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return SubmitReviewResult{}, fmt.Errorf("submit GitHub review: %w", err)
+		return SubmitReviewResult{}, fmt.Errorf("submit GitHub review: %w", ghservice.NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -391,7 +391,7 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 		ID      int64  `json:"id"`
 		HTMLURL string `json:"html_url"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	if err := decodeGitHubJSONResponse(ctx, httpReq, resp, &decoded); err != nil {
 		return SubmitReviewResult{}, fmt.Errorf("decode GitHub review response: %w", err)
 	}
 	result := SubmitReviewResult{ID: decoded.ID, URL: decoded.HTMLURL, Body: visibleReviewBody}
@@ -492,7 +492,7 @@ func (s *GitHubSubmitter) ensureFormalApproval(ctx context.Context, token, owner
 		return fmt.Errorf("marshal formal approval payload: %w", err)
 	}
 	reviewURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), req.PullNumber)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reviewURL, bytes.NewReader(payload))
+	httpReq, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodPost, reviewURL, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("create formal approval request: %w", err)
 	}
@@ -502,12 +502,13 @@ func (s *GitHubSubmitter) ensureFormalApproval(ctx context.Context, token, owner
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("submit formal GitHub approval: %w", err)
+		return fmt.Errorf("submit formal GitHub approval: %w", ghservice.NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("submit formal GitHub approval: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
+	s.observeMutationResponse(ctx, httpReq, resp)
 	return nil
 }
 
@@ -517,7 +518,7 @@ func (s *GitHubSubmitter) updateReviewSummary(ctx context.Context, token, owner,
 		return SubmitReviewResult{}, fmt.Errorf("marshal review summary update: %w", err)
 	}
 	reviewURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews/%d", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), pullNumber, reviewID)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, reviewURL, bytes.NewReader(payload))
+	httpReq, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodPut, reviewURL, bytes.NewReader(payload))
 	if err != nil {
 		return SubmitReviewResult{}, fmt.Errorf("create review summary update request: %w", err)
 	}
@@ -527,7 +528,7 @@ func (s *GitHubSubmitter) updateReviewSummary(ctx context.Context, token, owner,
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return SubmitReviewResult{}, fmt.Errorf("update GitHub review summary: %w", err)
+		return SubmitReviewResult{}, fmt.Errorf("update GitHub review summary: %w", ghservice.NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -537,7 +538,7 @@ func (s *GitHubSubmitter) updateReviewSummary(ctx context.Context, token, owner,
 		ID      int64  `json:"id"`
 		HTMLURL string `json:"html_url"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	if err := decodeGitHubJSONResponse(ctx, httpReq, resp, &decoded); err != nil {
 		return SubmitReviewResult{}, fmt.Errorf("decode GitHub review summary update: %w", err)
 	}
 	if decoded.ID == 0 {
@@ -554,7 +555,7 @@ func (s *GitHubSubmitter) createReviewComment(ctx context.Context, token, owner,
 		return SubmitReviewPostedComment{}, fmt.Errorf("marshal review comment create: %w", err)
 	}
 	commentURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/comments", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), pullNumber)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, commentURL, bytes.NewReader(payload))
+	httpReq, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodPost, commentURL, bytes.NewReader(payload))
 	if err != nil {
 		return SubmitReviewPostedComment{}, fmt.Errorf("create review comment request: %w", err)
 	}
@@ -564,14 +565,14 @@ func (s *GitHubSubmitter) createReviewComment(ctx context.Context, token, owner,
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return SubmitReviewPostedComment{}, fmt.Errorf("create GitHub review comment: %w", err)
+		return SubmitReviewPostedComment{}, fmt.Errorf("create GitHub review comment: %w", ghservice.NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return SubmitReviewPostedComment{}, fmt.Errorf("create GitHub review comment: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
 	var decoded githubReviewCommentItem
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	if err := decodeGitHubJSONResponse(ctx, httpReq, resp, &decoded); err != nil {
 		return SubmitReviewPostedComment{}, fmt.Errorf("decode GitHub review comment response: %w", err)
 	}
 	return SubmitReviewPostedComment{
@@ -605,7 +606,7 @@ func submitReviewHasCommentDedupeKeys(comments []SubmitReviewComment) bool {
 
 func (s *GitHubSubmitter) listReviewComments(ctx context.Context, token, owner, repo string, pullNumber int, reviewID int64) ([]SubmitReviewPostedComment, error) {
 	commentsURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews/%d/comments", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), pullNumber, reviewID)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, commentsURL, nil)
+	httpReq, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodGet, commentsURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create review comments request: %w", err)
 	}
@@ -614,7 +615,7 @@ func (s *GitHubSubmitter) listReviewComments(ctx context.Context, token, owner, 
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("list GitHub review comments: %w", err)
+		return nil, fmt.Errorf("list GitHub review comments: %w", ghservice.NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -626,7 +627,7 @@ func (s *GitHubSubmitter) listReviewComments(ctx context.Context, token, owner, 
 		Line int    `json:"line"`
 		Body string `json:"body"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	if err := decodeGitHubJSONResponse(ctx, httpReq, resp, &decoded); err != nil {
 		return nil, fmt.Errorf("decode GitHub review comments response: %w", err)
 	}
 	comments := make([]SubmitReviewPostedComment, 0, len(decoded))
@@ -691,21 +692,21 @@ func (s *GitHubSubmitter) createIssueComment(ctx context.Context, token, owner, 
 		return 0, fmt.Errorf("marshal review status comment: %w", err)
 	}
 	commentURL := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), pullNumber)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, commentURL, bytes.NewReader(payload))
+	httpReq, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodPost, commentURL, bytes.NewReader(payload))
 	if err != nil {
 		return 0, fmt.Errorf("create review status comment request: %w", err)
 	}
 	setGitHubJSONHeaders(httpReq, token)
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return 0, fmt.Errorf("create GitHub review status comment: %w", err)
+		return 0, fmt.Errorf("create GitHub review status comment: %w", ghservice.NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return 0, fmt.Errorf("create GitHub review status comment: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
 	var comment githubIssueCommentItem
-	if err := json.NewDecoder(resp.Body).Decode(&comment); err != nil {
+	if err := decodeGitHubJSONResponse(ctx, httpReq, resp, &comment); err != nil {
 		return 0, fmt.Errorf("decode GitHub review status comment: %w", err)
 	}
 	if comment.ID == 0 {
@@ -720,19 +721,20 @@ func (s *GitHubSubmitter) updateIssueComment(ctx context.Context, token, owner, 
 		return fmt.Errorf("marshal review status comment update: %w", err)
 	}
 	commentURL := fmt.Sprintf("%s/repos/%s/%s/issues/comments/%d", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), commentID)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPatch, commentURL, bytes.NewReader(payload))
+	httpReq, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodPatch, commentURL, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("create review status comment update request: %w", err)
 	}
 	setGitHubJSONHeaders(httpReq, token)
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("update GitHub review status comment: %w", err)
+		return fmt.Errorf("update GitHub review status comment: %w", ghservice.NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("update GitHub review status comment: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
+	s.observeMutationResponse(ctx, httpReq, resp)
 	return nil
 }
 
@@ -795,7 +797,7 @@ func (s *GitHubSubmitter) updateReviewComment(ctx context.Context, token, owner,
 		return fmt.Errorf("marshal review comment update: %w", err)
 	}
 	commentURL := fmt.Sprintf("%s/repos/%s/%s/pulls/comments/%d", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), commentID)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPatch, commentURL, bytes.NewReader(payload))
+	httpReq, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodPatch, commentURL, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("create review comment update request: %w", err)
 	}
@@ -805,17 +807,18 @@ func (s *GitHubSubmitter) updateReviewComment(ctx context.Context, token, owner,
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("update GitHub review comment: %w", err)
+		return fmt.Errorf("update GitHub review comment: %w", ghservice.NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("update GitHub review comment: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
+	s.observeMutationResponse(ctx, httpReq, resp)
 	return nil
 }
 
 func (s *GitHubSubmitter) getGitHubJSONPage(ctx context.Context, token, path string, target any) (string, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+path, nil)
+	httpReq, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodGet, s.baseURL+path, nil)
 	if err != nil {
 		return "", fmt.Errorf("create GitHub request: %w", err)
 	}
@@ -824,19 +827,20 @@ func (s *GitHubSubmitter) getGitHubJSONPage(ctx context.Context, token, path str
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("GitHub request failed: %w", err)
+		return "", fmt.Errorf("GitHub request failed: %w", ghservice.NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("GitHub request failed: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
-	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+	if err := decodeGitHubJSONResponse(ctx, httpReq, resp, target); err != nil {
 		return "", fmt.Errorf("decode GitHub response: %w", err)
 	}
 	return parseNextGitHubPath(resp.Header.Get("Link")), nil
 }
 
 func (s *GitHubSubmitter) doGitHubGraphQL(ctx context.Context, token, query string, variables map[string]any) ([]byte, error) {
+	ctx = githubtelemetry.WithGraphQLResponseObservation(ctx)
 	payload, err := json.Marshal(map[string]any{"query": query, "variables": variables})
 	if err != nil {
 		return nil, fmt.Errorf("marshal GitHub GraphQL request: %w", err)
@@ -850,15 +854,24 @@ func (s *GitHubSubmitter) doGitHubGraphQL(ctx context.Context, token, query stri
 	httpReq.Header.Set("Content-Type", "application/json")
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("GitHub GraphQL request failed: %w", err)
+		return nil, fmt.Errorf("GitHub GraphQL request failed: %w", ghservice.NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read GitHub GraphQL response: %w", err)
+		githubtelemetry.ObserveGraphQLResponse(ctx, nil, err)
+		return nil, fmt.Errorf("read GitHub GraphQL response: %w", ghservice.NewGitHubResponseReadError(ctx, http.MethodPost, "/graphql", resp, body, err))
 	}
+	graphQLErrors, decodeErr := ratelimit.DecodeGraphQLErrors(body)
+	githubtelemetry.ObserveGraphQLResponse(ctx, graphQLErrors, decodeErr)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("GitHub GraphQL request failed: %w", newGitHubAPIResponseError(httpReq, resp, body))
+	}
+	if decodeErr == nil && len(graphQLErrors) > 0 {
+		return nil, fmt.Errorf("GitHub GraphQL request failed: %w", &ghservice.GitHubGraphQLError{
+			Errors: graphQLErrors,
+			Header: resp.Header.Clone(),
+		})
 	}
 	return body, nil
 }
@@ -1021,7 +1034,7 @@ func (s *GitHubSubmitter) RemoveRequestedReviewers(ctx context.Context, req Requ
 		return fmt.Errorf("marshal requested reviewers payload: %w", err)
 	}
 	requestedURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/requested_reviewers", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), req.PullNumber)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, requestedURL, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodDelete, requestedURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create requested reviewers request: %w", err)
 	}
@@ -1031,12 +1044,13 @@ func (s *GitHubSubmitter) RemoveRequestedReviewers(ctx context.Context, req Requ
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("remove GitHub requested reviewers: %w", err)
+		return fmt.Errorf("remove GitHub requested reviewers: %w", ghservice.NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("remove GitHub requested reviewers: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
+	s.observeMutationResponse(ctx, httpReq, resp)
 	return nil
 }
 
@@ -1165,7 +1179,7 @@ query($owner: String!, $repo: String!, $number: Int!, $threadCursor: String, $re
 }
 
 func (s *GitHubSubmitter) getPullRequestFilesPage(ctx context.Context, token, path string) ([]PullRequestFile, string, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+path, nil)
+	httpReq, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodGet, s.baseURL+path, nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("create pull request files request: %w", err)
 	}
@@ -1174,14 +1188,14 @@ func (s *GitHubSubmitter) getPullRequestFilesPage(ctx context.Context, token, pa
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return nil, "", fmt.Errorf("list GitHub pull request files: %w", err)
+		return nil, "", fmt.Errorf("list GitHub pull request files: %w", ghservice.NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, "", fmt.Errorf("list GitHub pull request files: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
 	var files []PullRequestFile
-	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
+	if err := decodeGitHubJSONResponse(ctx, httpReq, resp, &files); err != nil {
 		return nil, "", fmt.Errorf("decode GitHub pull request files: %w", err)
 	}
 	return files, parseNextGitHubPath(resp.Header.Get("Link")), nil
@@ -1189,11 +1203,55 @@ func (s *GitHubSubmitter) getPullRequestFilesPage(ctx context.Context, token, pa
 
 func readGitHubAPIResponseError(req *http.Request, resp *http.Response) error {
 	errorBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	// Close finishes the transport's bounded error-envelope observation before
+	// copying retry metadata. A limited prefix alone cannot prove recovery.
+	readErr = errors.Join(readErr, resp.Body.Close())
 	apiErr := newGitHubAPIResponseError(req, resp, errorBody)
 	if readErr != nil {
-		return errors.Join(apiErr, fmt.Errorf("read GitHub error response: %w", readErr))
+		ctx := context.Background()
+		method, path := "", ""
+		if req != nil {
+			ctx = req.Context()
+			method = req.Method
+			if req.URL != nil {
+				path = req.URL.Path
+			}
+		}
+		return errors.Join(apiErr, ghservice.NewGitHubResponseReadError(ctx, method, path, resp, errorBody, readErr))
 	}
 	return apiErr
+}
+
+func (s *GitHubSubmitter) observeMutationResponse(ctx context.Context, req *http.Request, resp *http.Response) {
+	if err := decodeGitHubJSONResponse(ctx, req, resp, nil); err != nil {
+		// The successful status already confirms this mutation. Do not replay it
+		// because an unused response body cannot establish cooldown recovery.
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("GitHub mutation response could not prove recovery")
+	}
+}
+
+func decodeGitHubJSONResponse(ctx context.Context, req *http.Request, resp *http.Response, target any) error {
+	observationCtx := ctx
+	if req != nil {
+		observationCtx = req.Context()
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		githubtelemetry.ObserveJSONResponse(observationCtx, readErr)
+		method, path := "", ""
+		if req != nil {
+			method = req.Method
+			if req.URL != nil {
+				path = req.URL.Path
+			}
+		}
+		return ghservice.NewGitHubResponseReadError(ctx, method, path, resp, body, readErr)
+	}
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified || req != nil && req.Method == http.MethodHead {
+		githubtelemetry.ObserveJSONResponse(observationCtx, observationCtx.Err())
+		return observationCtx.Err()
+	}
+	return githubtelemetry.ValidateJSONResponse(observationCtx, body, target)
 }
 
 func newGitHubAPIResponseError(req *http.Request, resp *http.Response, body []byte) *ghservice.GitHubAPIError {

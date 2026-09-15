@@ -175,6 +175,7 @@ func (s *PRService) mergePullRequest(ctx context.Context, orgID, pullRequestID, 
 	if err != nil {
 		return nil, fmt.Errorf("resolve github token: %w", err)
 	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "pr_merge")
 
 	owner, repoName := splitRepo(pr.GitHubRepo)
 	settings, err := s.fetchRepoMergeSettings(ctx, resolution.Token, owner, repoName)

@@ -31,6 +31,7 @@ func (s *PRService) MarkPullRequestReady(ctx context.Context, orgID, pullRequest
 	if err != nil {
 		return fmt.Errorf("load draft repository: %w", err)
 	}
+	ctx = withGitHubInstallationContext(ctx, repo.InstallationID, "draft_ready")
 	token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
 	if err != nil {
 		return fmt.Errorf("get draft repository token: %w", err)

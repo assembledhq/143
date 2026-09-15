@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
@@ -29,6 +30,15 @@ type Service struct {
 	sandboxCache map[sandboxTokenCacheKey]*cachedToken
 	mu           sync.RWMutex
 	tokenGroup   singleflight.Group
+}
+
+// SetRateLimitController wires the shared installation controller into all
+// GitHub App service requests without changing their existing deadlines.
+func (s *Service) SetRateLimitController(controller *ratelimit.Controller, logger zerolog.Logger) {
+	if s == nil {
+		return
+	}
+	s.httpClient = githubtelemetry.NewControlledHTTPClient(10*time.Second, logger, controller, "github_service")
 }
 
 const sharedTokenRequestTimeout = 15 * time.Second
@@ -284,7 +294,7 @@ func (s *Service) exchangeForInstallationTokenRequest(ctx context.Context, jwtTo
 		}
 		body = strings.NewReader(string(encoded))
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+	req, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodPost, url, body)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -296,19 +306,19 @@ func (s *Service) exchangeForInstallationTokenRequest(ctx context.Context, jwtTo
 
 	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint from config
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("request installation token: %w", err)
+		return "", time.Time{}, fmt.Errorf("request installation token: %w", NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
-		return "", time.Time{}, newGitHubAPIResponseError(http.MethodPost, path, resp)
+		return "", time.Time{}, newGitHubAPIResponseError(req.Context(), http.MethodPost, path, resp)
 	}
 
 	var result struct {
 		Token     string    `json:"token"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeGitHubJSONResponse(req.Context(), http.MethodPost, path, resp, &result); err != nil {
 		return "", time.Time{}, fmt.Errorf("decode response: %w", err)
 	}
 
@@ -326,7 +336,7 @@ func (s *Service) GetInstallationDetails(ctx context.Context, installationID int
 		return InstallationDetails{}, err
 	}
 	path := fmt.Sprintf("/app/installations/%d", installationID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.apiURL(path), nil)
+	req, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodGet, s.apiURL(path), nil)
 	if err != nil {
 		return InstallationDetails{}, err
 	}
@@ -335,25 +345,21 @@ func (s *Service) GetInstallationDetails(ctx context.Context, installationID int
 
 	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint from config
 	if err != nil {
-		return InstallationDetails{}, fmt.Errorf("request installation details: %w", err)
+		return InstallationDetails{}, fmt.Errorf("request installation details: %w", NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return InstallationDetails{}, newGitHubAPIResponseError(http.MethodGet, path, resp)
+		return InstallationDetails{}, newGitHubAPIResponseError(req.Context(), http.MethodGet, path, resp)
 	}
 	var result InstallationDetails
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeGitHubJSONResponse(req.Context(), http.MethodGet, path, resp, &result); err != nil {
 		return InstallationDetails{}, fmt.Errorf("decode installation details: %w", err)
 	}
 	return result, nil
 }
 
 func (s *Service) ListOrgMembers(ctx context.Context, installationID int64, orgLogin string) ([]OrgMember, error) {
-	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
-		Kind:           githubtelemetry.RequestKindAPI,
-		AuthType:       githubtelemetry.AuthTypeAppInstallation,
-		InstallationID: installationID,
-	})
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, installationID, "org_members")
 	token, err := s.GetInstallationToken(ctx, installationID)
 	if err != nil {
 		return nil, err
@@ -361,7 +367,7 @@ func (s *Service) ListOrgMembers(ctx context.Context, installationID int64, orgL
 	var members []OrgMember
 	nextPath := fmt.Sprintf("/orgs/%s/members?per_page=100", urlPathEscape(orgLogin))
 	for nextPath != "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.apiURL(nextPath), nil)
+		req, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodGet, s.apiURL(nextPath), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -369,15 +375,25 @@ func (s *Service) ListOrgMembers(ctx context.Context, installationID int64, orgL
 		req.Header.Set("Accept", "application/vnd.github+json")
 		resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint from config
 		if err != nil {
-			return nil, fmt.Errorf("request org members: %w", err)
+			return nil, fmt.Errorf("request org members: %w", NewGitHubRequestError(ctx, err))
 		}
 		body, readErr := io.ReadAll(resp.Body)
+		var page []OrgMember
+		var decodeErr error
+		if readErr != nil {
+			githubtelemetry.ObserveJSONResponse(req.Context(), readErr)
+		} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			decodeErr = githubtelemetry.ValidateJSONResponse(req.Context(), body, &page)
+		} else {
+			decodeErr = githubtelemetry.ValidateJSONResponse(req.Context(), body, nil)
+		}
 		closeErr := resp.Body.Close()
 		if readErr != nil {
+			responseReadErr := error(NewGitHubResponseReadError(ctx, http.MethodGet, nextPath, resp, body, readErr))
 			if closeErr != nil {
-				return nil, fmt.Errorf("read org members response: %w", errors.Join(readErr, closeErr))
+				responseReadErr = errors.Join(responseReadErr, fmt.Errorf("close org members response: %w", closeErr))
 			}
-			return nil, fmt.Errorf("read org members response: %w", readErr)
+			return nil, fmt.Errorf("read org members response: %w", responseReadErr)
 		}
 		if closeErr != nil {
 			return nil, fmt.Errorf("close org members response: %w", closeErr)
@@ -385,9 +401,8 @@ func (s *Service) ListOrgMembers(ctx context.Context, installationID int64, orgL
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return nil, &GitHubAPIError{Method: http.MethodGet, Path: nextPath, StatusCode: resp.StatusCode, Body: body, Header: resp.Header.Clone()}
 		}
-		var page []OrgMember
-		if err := json.Unmarshal(body, &page); err != nil {
-			return nil, fmt.Errorf("decode org members: %w", err)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode org members: %w", decodeErr)
 		}
 		members = append(members, page...)
 		nextPath = parseNextGitHubPath(resp.Header.Get("Link"))
@@ -396,17 +411,13 @@ func (s *Service) ListOrgMembers(ctx context.Context, installationID int64, orgL
 }
 
 func (s *Service) IsActiveOrgMember(ctx context.Context, installationID int64, orgLogin, username string) (bool, error) {
-	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
-		Kind:           githubtelemetry.RequestKindAPI,
-		AuthType:       githubtelemetry.AuthTypeAppInstallation,
-		InstallationID: installationID,
-	})
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, installationID, "org_membership")
 	token, err := s.GetInstallationToken(ctx, installationID)
 	if err != nil {
 		return false, err
 	}
 	path := fmt.Sprintf("/orgs/%s/memberships/%s", urlPathEscape(orgLogin), urlPathEscape(username))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.apiURL(path), nil)
+	req, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodGet, s.apiURL(path), nil)
 	if err != nil {
 		return false, err
 	}
@@ -414,19 +425,19 @@ func (s *Service) IsActiveOrgMember(ctx context.Context, installationID int64, o
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint from config
 	if err != nil {
-		return false, fmt.Errorf("request org membership: %w", err)
+		return false, fmt.Errorf("request org membership: %w", NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return false, newGitHubAPIResponseError(http.MethodGet, path, resp)
+		return false, newGitHubAPIResponseError(req.Context(), http.MethodGet, path, resp)
 	}
 	var result struct {
 		State string `json:"state"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeGitHubJSONResponse(req.Context(), http.MethodGet, path, resp, &result); err != nil {
 		return false, fmt.Errorf("decode org membership: %w", err)
 	}
 	return result.State == "active", nil
@@ -437,17 +448,13 @@ func (s *Service) IsActiveOrgMember(ctx context.Context, installationID int64, o
 // negative result; authorization and provider failures are returned so
 // approval callers can fail closed and retry.
 func (s *Service) IsActiveTeamMember(ctx context.Context, installationID int64, orgLogin, teamSlug, username string) (bool, error) {
-	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
-		Kind:           githubtelemetry.RequestKindAPI,
-		AuthType:       githubtelemetry.AuthTypeAppInstallation,
-		InstallationID: installationID,
-	})
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, installationID, "team_membership")
 	token, err := s.GetInstallationToken(ctx, installationID)
 	if err != nil {
 		return false, err
 	}
 	path := fmt.Sprintf("/orgs/%s/teams/%s/memberships/%s", urlPathEscape(orgLogin), urlPathEscape(teamSlug), urlPathEscape(username))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.apiURL(path), nil)
+	req, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodGet, s.apiURL(path), nil)
 	if err != nil {
 		return false, err
 	}
@@ -455,26 +462,32 @@ func (s *Service) IsActiveTeamMember(ctx context.Context, installationID int64, 
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint from config
 	if err != nil {
-		return false, fmt.Errorf("request team membership: %w", err)
+		return false, fmt.Errorf("request team membership: %w", NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return false, newGitHubAPIResponseError(http.MethodGet, path, resp)
+		return false, newGitHubAPIResponseError(req.Context(), http.MethodGet, path, resp)
 	}
 	var result struct {
 		State string `json:"state"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeGitHubJSONResponse(req.Context(), http.MethodGet, path, resp, &result); err != nil {
 		return false, fmt.Errorf("decode team membership: %w", err)
 	}
 	return result.State == "active", nil
 }
 
-func newGitHubAPIResponseError(method, path string, resp *http.Response) error {
+func newGitHubAPIResponseError(ctx context.Context, method, path string, resp *http.Response) error {
 	body, readErr := io.ReadAll(resp.Body)
+	var decodeErr error
+	if readErr != nil {
+		githubtelemetry.ObserveJSONResponse(ctx, readErr)
+	} else {
+		decodeErr = githubtelemetry.ValidateJSONResponse(ctx, body, nil)
+	}
 	apiErr := &GitHubAPIError{
 		Method:     method,
 		Path:       path,
@@ -483,9 +496,18 @@ func newGitHubAPIResponseError(method, path string, resp *http.Response) error {
 		Header:     resp.Header.Clone(),
 	}
 	if readErr != nil {
-		return errors.Join(apiErr, fmt.Errorf("read GitHub error response: %w", readErr))
+		return errors.Join(apiErr, NewGitHubResponseReadError(ctx, method, path, resp, body, readErr))
 	}
-	return apiErr
+	return errors.Join(apiErr, decodeErr)
+}
+
+func decodeGitHubJSONResponse(ctx context.Context, method, path string, resp *http.Response, target any) error {
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		githubtelemetry.ObserveJSONResponse(ctx, readErr)
+		return NewGitHubResponseReadError(ctx, method, path, resp, body, readErr)
+	}
+	return githubtelemetry.ValidateJSONResponse(ctx, body, target)
 }
 
 func (s *Service) apiURL(path string) string {
