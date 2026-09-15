@@ -571,6 +571,7 @@ func TestCodeReviewStore_SetWaitingForGitHubPersistsOperationalState(t *testing.
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
+	jobID := uuid.New()
 	retryAt := time.Date(2026, 7, 21, 23, 45, 0, 0, time.UTC)
 	lastErrorAt := retryAt.Add(-time.Minute)
 	phase := models.CodeReviewPhaseWaitingGitHub
@@ -579,8 +580,9 @@ func TestCodeReviewStore_SetWaitingForGitHubPersistsOperationalState(t *testing.
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
-	mock.ExpectQuery("(?s)UPDATE code_review_session_metadata.*phase = 'waiting_for_github'.*WHERE org_id = @org_id.*session_id = @session_id").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "retry_at": retryAt, "status_message": message}).
+	jobError := "GitHub rate limited"
+	mock.ExpectQuery("(?s)WITH scheduled_retry AS MATERIALIZED.*FROM jobs.*job_type = 'run_code_review'.*payload->>'session_id'.*status = 'pending'.*run_at = @retry_at.*last_error = @job_error.*FOR UPDATE.*UPDATE code_review_session_metadata.*phase = 'waiting_for_github'.*WHERE org_id = @org_id.*session_id = @session_id.*EXISTS \\(SELECT 1 FROM scheduled_retry\\)").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "job_id": jobID, "retry_at": retryAt, "job_error": jobError, "status_message": message}).
 		WillReturnRows(codeReviewMetadataRowsForTest().AddRow(
 			uuid.New(), orgID, sessionID, uuid.New(), uuid.New(), uuid.New(),
 			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer,
@@ -588,13 +590,36 @@ func TestCodeReviewStore_SetWaitingForGitHubPersistsOperationalState(t *testing.
 			nil, nil, false, nil, "output", nil, nil, nil, nil, nil, nil, retryAt,
 		))
 
-	metadata, err := NewCodeReviewStore(mock).SetWaitingForGitHub(context.Background(), orgID, sessionID, retryAt, message)
+	metadata, err := NewCodeReviewStore(mock).SetWaitingForGitHub(context.Background(), orgID, sessionID, jobID, retryAt, jobError, message)
 
 	require.NoError(t, err, "rate-limit wait should persist")
 	require.Equal(t, &phase, metadata.Phase, "wait should expose the GitHub wait phase")
 	require.Equal(t, &retryAt, metadata.RetryAt, "wait should expose the worker retry time")
 	require.True(t, metadata.RetryableFailure, "wait should remain eligible if automatic retries later exhaust")
 	require.NoError(t, mock.ExpectationsWereMet(), "wait update should stay org and session scoped")
+}
+
+func TestCodeReviewStore_SetWaitingForGitHubRejectsStaleRetryTransition(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	retryAt := time.Date(2026, 9, 15, 12, 5, 0, 0, time.UTC)
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("(?s)WITH scheduled_retry AS MATERIALIZED.*status = 'pending'.*run_at = @retry_at.*FOR UPDATE.*UPDATE code_review_session_metadata").
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "job_id": jobID, "retry_at": retryAt,
+			"job_error": "old throttle", "status_message": "waiting",
+		}).
+		WillReturnRows(codeReviewMetadataRowsForTest())
+
+	_, err = NewCodeReviewStore(mock).SetWaitingForGitHub(context.Background(), orgID, sessionID, jobID, retryAt, "old throttle", "waiting")
+
+	require.ErrorIs(t, err, pgx.ErrNoRows, "a hook delayed past the exact pending transition must not overwrite newer review state")
+	require.NoError(t, mock.ExpectationsWereMet(), "stale wait update should use the atomic job-row fence")
 }
 
 func TestCodeReviewStore_SetProvisionalReviewBody(t *testing.T) {

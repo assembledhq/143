@@ -125,9 +125,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("org_id and session_id are required")
 		}
 		registerCodeReviewDeadLetterReconciliation(ctx, stores, services, logger, job)
-		defer func() {
-			recordCodeReviewAutomaticWait(ctx, stores.CodeReviews, logger, job, handlerErr)
-		}()
+		registerCodeReviewRetryScheduledWait(ctx, stores.CodeReviews, logger, job)
 		metadata, err := stores.CodeReviews.MarkRunning(ctx, job.OrgID, job.SessionID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -642,7 +640,14 @@ func registerCodeReviewDeadLetterReconciliation(ctx context.Context, stores *Sto
 	})
 }
 
-func recordCodeReviewAutomaticWait(ctx context.Context, store *db.CodeReviewStore, logger zerolog.Logger, job runCodeReviewPayload, handlerErr error) {
+func registerCodeReviewRetryScheduledWait(ctx context.Context, store *db.CodeReviewStore, logger zerolog.Logger, job runCodeReviewPayload) {
+	jobID, _ := jobctx.JobIDFromContext(ctx)
+	jobctx.RegisterRetryScheduledHook(ctx, func(hookCtx context.Context, handlerErr error, runAt time.Time) {
+		recordCodeReviewAutomaticWait(hookCtx, store, logger, job, jobID, handlerErr, runAt)
+	})
+}
+
+func recordCodeReviewAutomaticWait(ctx context.Context, store *db.CodeReviewStore, logger zerolog.Logger, job runCodeReviewPayload, jobID uuid.UUID, handlerErr error, retryAt time.Time) {
 	if store == nil || handlerErr == nil {
 		return
 	}
@@ -650,17 +655,8 @@ func recordCodeReviewAutomaticWait(ctx context.Context, store *db.CodeReviewStor
 	if !classification.RateLimited {
 		return
 	}
-	delay := classification.RetryAfter
-	var retryable *RetryableError
-	if errors.As(handlerErr, &retryable) && retryable.RetryAfter != nil {
-		delay = retryable.RetryAfter
-	}
-	if delay == nil {
-		fallback := githubRateLimitMinimumRetryAfter
-		delay = &fallback
-	}
-	retryAt := time.Now().Add(*delay).UTC()
-	if _, err := store.SetWaitingForGitHub(ctx, job.OrgID, job.SessionID, retryAt,
+	retryAt = retryAt.UTC()
+	if _, err := store.SetWaitingForGitHub(ctx, job.OrgID, job.SessionID, jobID, retryAt, handlerErr.Error(),
 		"GitHub is rate-limited. The review will resume automatically when the limit resets."); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		logger.Warn().Err(err).
 			Str("session_id", job.SessionID.String()).

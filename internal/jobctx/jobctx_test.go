@@ -5,12 +5,35 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/jobctx"
 )
+
+func TestRunRetryScheduledHooksUsesExactDurableTimestampOnce(t *testing.T) {
+	t.Parallel()
+
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+	wantErr := errors.New("throttled")
+	wantRunAt := time.Date(2026, time.September, 14, 12, 5, 29, 0, time.UTC)
+	var calls int
+	var gotErr error
+	var gotRunAt time.Time
+	jobctx.RegisterRetryScheduledHook(ctx, func(_ context.Context, err error, runAt time.Time) {
+		calls++
+		gotErr = err
+		gotRunAt = runAt
+	})
+	jobctx.RunRetryScheduledHooks(ctx, wantErr, wantRunAt)
+	jobctx.RunRetryScheduledHooks(ctx, errors.New("later"), wantRunAt.Add(time.Minute))
+
+	require.Equal(t, 1, calls, "retry-scheduled hooks should fire at most once per attempt")
+	require.ErrorIs(t, gotErr, wantErr, "retry-scheduled hook should receive the handler error")
+	require.Equal(t, wantRunAt, gotRunAt, "retry-scheduled hook should receive the exact persisted run_at")
+}
 
 func TestRegisterDeadLetterHook_NoRegistryIsNoop(t *testing.T) {
 	t.Parallel()
