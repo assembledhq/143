@@ -27,10 +27,16 @@ const (
 // a job is dead-lettered, receiving the final error recorded on the job.
 type DeadLetterHook func(ctx context.Context, err error)
 
+// RetryScheduledHook runs only after the lease-owned retry update succeeds.
+// It receives the exact durable run_at selected by the worker.
+type RetryScheduledHook func(ctx context.Context, err error, runAt time.Time)
+
 type hookRegistry struct {
-	mu    sync.Mutex
-	hooks []DeadLetterHook
-	fired bool
+	mu                  sync.Mutex
+	deadLetterHooks     []DeadLetterHook
+	retryScheduledHooks []RetryScheduledHook
+	deadLetterFired     bool
+	retryScheduledFired bool
 }
 
 // WithDeadLetterHooks returns a context carrying a fresh, empty hook
@@ -109,7 +115,19 @@ func RegisterDeadLetterHook(ctx context.Context, hook DeadLetterHook) {
 	}
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
-	reg.hooks = append(reg.hooks, hook)
+	reg.deadLetterHooks = append(reg.deadLetterHooks, hook)
+}
+
+// RegisterRetryScheduledHook queues a hook for successful lease-owned retry
+// scheduling. Direct handler calls without a worker registry are a no-op.
+func RegisterRetryScheduledHook(ctx context.Context, hook RetryScheduledHook) {
+	reg, _ := ctx.Value(hooksKey).(*hookRegistry)
+	if reg == nil || hook == nil {
+		return
+	}
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	reg.retryScheduledHooks = append(reg.retryScheduledHooks, hook)
 }
 
 // RunDeadLetterHooks invokes registered hooks in registration order. Hooks
@@ -121,15 +139,36 @@ func RunDeadLetterHooks(ctx context.Context, err error) {
 		return
 	}
 	reg.mu.Lock()
-	if reg.fired {
+	if reg.deadLetterFired {
 		reg.mu.Unlock()
 		return
 	}
-	reg.fired = true
-	hooks := make([]DeadLetterHook, len(reg.hooks))
-	copy(hooks, reg.hooks)
+	reg.deadLetterFired = true
+	hooks := make([]DeadLetterHook, len(reg.deadLetterHooks))
+	copy(hooks, reg.deadLetterHooks)
 	reg.mu.Unlock()
 	for _, hook := range hooks {
 		hook(ctx, err)
+	}
+}
+
+// RunRetryScheduledHooks invokes registered hooks at most once after the job
+// row has durably accepted the worker's retry timestamp.
+func RunRetryScheduledHooks(ctx context.Context, err error, runAt time.Time) {
+	reg, _ := ctx.Value(hooksKey).(*hookRegistry)
+	if reg == nil {
+		return
+	}
+	reg.mu.Lock()
+	if reg.retryScheduledFired {
+		reg.mu.Unlock()
+		return
+	}
+	reg.retryScheduledFired = true
+	hooks := make([]RetryScheduledHook, len(reg.retryScheduledHooks))
+	copy(hooks, reg.retryScheduledHooks)
+	reg.mu.Unlock()
+	for _, hook := range hooks {
+		hook(ctx, err, runAt)
 	}
 }

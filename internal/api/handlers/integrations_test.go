@@ -20,12 +20,15 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	ghapp "github.com/assembledhq/143/internal/services/github"
+	githubratelimit "github.com/assembledhq/143/internal/services/github/ratelimit"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -2676,53 +2679,100 @@ func TestIntegrationHandler_StartGitHubOAuth_AppSlugSetsStateCookie(t *testing.T
 
 func TestIntegrationHandler_ListInstallationRepos_FollowsPagination(t *testing.T) {
 	t.Parallel()
+	tests := []struct{ name, caller, expectedCaller string }{
+		{name: "default list", expectedCaller: "integration_repositories"},
+		{name: "explicit list", caller: "integration_repositories", expectedCaller: "integration_repositories"},
+		{name: "sync", caller: "integration_repository_sync", expectedCaller: "integration_repository_sync"},
+		{name: "claim", caller: "integration_repository_claim", expectedCaller: "integration_repository_claim"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	requested := make([]string, 0, 2)
-	githubClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requested = append(requested, req.URL.String())
-		switch len(requested) {
-		case 1:
-			require.Equal(t, githubAPIURL+"/installation/repositories?per_page=100", req.URL.String(), "first page should request installation repositories")
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header: http.Header{
-					"Link": []string{`<` + githubAPIURL + `/installation/repositories?per_page=100&page=2>; rel="next"`},
-				},
-				Body: io.NopCloser(strings.NewReader(`{"repositories":[{"id":1,"full_name":"org/one"}]}`)),
-			}, nil
-		case 2:
-			require.Equal(t, githubAPIURL+"/installation/repositories?per_page=100&page=2", req.URL.String(), "second page should follow GitHub Link header")
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{},
-				Body:       io.NopCloser(strings.NewReader(`{"repositories":[{"id":2,"full_name":"org/two"}]}`)),
-			}, nil
-		default:
-			require.Fail(t, "listInstallationRepos should not request more than two pages")
-			return nil, errors.New("unexpected request")
-		}
-	})}
-	handler := NewIntegrationHandler(
-		nil,
-		nil,
-		"",
-		"",
-		"http://localhost:8080",
-		"http://localhost:3000",
-		WithGitHubHTTPClient(githubClient),
-	)
-	handler.client = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-		return nil, errors.New("generic provider client should not handle GitHub requests")
-	})}
+			requested := make([]string, 0, 2)
+			githubClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				requested = append(requested, req.URL.String())
+				metadata, ok := githubtelemetry.RequestMetadataFromContext(req.Context())
+				require.True(t, ok, "every pagination request should retain GitHub metadata")
+				require.Equal(t, tt.expectedCaller, metadata.Caller, "pagination should preserve the originating integration operation")
+				require.Equal(t, int64(123), metadata.InstallationID, "pagination should preserve authenticated installation identity")
+				switch len(requested) {
+				case 1:
+					require.Equal(t, githubAPIURL+"/installation/repositories?per_page=100", req.URL.String(), "first page should request installation repositories")
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header: http.Header{
+							"Link": []string{`<` + githubAPIURL + `/installation/repositories?per_page=100&page=2>; rel="next"`},
+						},
+						Body: io.NopCloser(strings.NewReader(`{"repositories":[{"id":1,"full_name":"org/one"}]}`)),
+					}, nil
+				case 2:
+					require.Equal(t, githubAPIURL+"/installation/repositories?per_page=100&page=2", req.URL.String(), "second page should follow GitHub Link header")
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{},
+						Body:       io.NopCloser(strings.NewReader(`{"repositories":[{"id":2,"full_name":"org/two"}]}`)),
+					}, nil
+				default:
+					require.Fail(t, "listInstallationRepos should not request more than two pages")
+					return nil, errors.New("unexpected request")
+				}
+			})}
+			handler := NewIntegrationHandler(
+				nil,
+				nil,
+				"",
+				"",
+				"http://localhost:8080",
+				"http://localhost:3000",
+				WithGitHubHTTPClient(githubClient),
+			)
+			handler.client = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return nil, errors.New("generic provider client should not handle GitHub requests")
+			})}
 
-	repos, err := handler.listInstallationRepos(context.Background(), "installation-token", 123)
+			ctx := context.Background()
+			if tt.caller != "" {
+				ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, 123, tt.caller)
+			}
+			repos, err := handler.listInstallationRepos(ctx, "installation-token", 123)
 
-	require.NoError(t, err, "listInstallationRepos should read every GitHub page")
-	require.Equal(t, []githubInstallationRepo{
-		{ID: 1, FullName: "org/one"},
-		{ID: 2, FullName: "org/two"},
-	}, repos, "listInstallationRepos should concatenate paginated repositories")
-	require.Len(t, requested, 2, "listInstallationRepos should request exactly two pages")
+			require.NoError(t, err, "listInstallationRepos should read every GitHub page")
+			require.Equal(t, []githubInstallationRepo{
+				{ID: 1, FullName: "org/one"},
+				{ID: 2, FullName: "org/two"},
+			}, repos, "listInstallationRepos should concatenate paginated repositories")
+			require.Len(t, requested, 2, "listInstallationRepos should request exactly two pages")
+		})
+	}
+}
+
+func TestIntegrationHandler_ListInstallationReposHonorsPreexistingCooldown(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.September, 15, 12, 0, 0, 0, time.UTC)
+	controller, err := githubratelimit.NewController(githubratelimit.Config{
+		Mode: githubratelimit.ModeEnforce, Environment: "test", AppID: 1, InstallationAllowlist: []int64{123},
+		Logger: zerolog.Nop(), Now: func() time.Time { return now }, Owner: "integration-handler",
+	})
+	require.NoError(t, err, "controller should initialize")
+	permit, err := controller.Before(context.Background(), githubratelimit.Scope{InstallationID: 123})
+	require.NoError(t, err, "initial request should be admitted")
+	controller.Observe(context.Background(), permit, githubratelimit.Observation{
+		StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": []string{"60"}},
+	})
+
+	var outbound atomic.Int32
+	githubClient := githubtelemetry.NewControlledHTTPClient(30*time.Second, zerolog.Nop(), controller, "integration_repositories", roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		outbound.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"repositories":[]}`))}, nil
+	}))
+	handler := NewIntegrationHandler(nil, nil, "", "", "http://localhost:8080", "http://localhost:3000", WithGitHubHTTPClient(githubClient))
+
+	_, err = handler.listInstallationRepos(context.Background(), "installation-token", 123)
+	var deferral *githubratelimit.Deferral
+	require.ErrorAs(t, err, &deferral, "installation repository pagination should surface the shared controller deferral")
+	require.Zero(t, outbound.Load(), "preexisting cooldown should suppress the handler before any outbound request")
 }
 
 func TestIntegrationHandler_HandleGitHubOAuthCallback_SavesCredentialAndIntegration(t *testing.T) {

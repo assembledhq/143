@@ -8,7 +8,7 @@ SANDBOX_CLI_GO_SOURCES := $(foreach dir,$(SANDBOX_CLI_PACKAGE_DIRS),$(filter-out
 SANDBOX_CLI_EMBED_SOURCES := $(shell GOOS=linux CGO_ENABLED=0 go list -deps -f '{{if .Module}}{{if eq .Module.Path "github.com/assembledhq/143"}}{{range .EmbedFiles}}{{$$.Dir}}/{{.}} {{end}}{{end}}{{end}}' ./cmd/tools 2>/dev/null)
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json go.mod go.sum $(SANDBOX_CLI_PACKAGE_DIRS) $(SANDBOX_CLI_GO_SOURCES) $(SANDBOX_CLI_EMBED_SOURCES)
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down demo-seed-check build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration test-github-rate-limit test-github-rate-limit-redis migrate-up migrate-down demo-seed-check build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -147,6 +147,35 @@ test-main:
 test-integration:
 	INTEGRATION_DATABASE_URL=$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL} \
 	go test -tags=integration -timeout=120s ./internal/integration/...
+
+# Focused, reproducible regression gate for GitHub recovery changes. The race
+# detector covers controller/cache/client concurrency plus focused API caller,
+# worker retry, lease-hook, reconciliation, and terminal-status regressions;
+# vet and server build cover the complete wiring without production config.
+GITHUB_RATE_LIMIT_TEST_DIR ?= $(HOME)/.cache/143-github-rate-limit
+
+test-github-rate-limit: export GOCACHE := $(or $(GOCACHE),$(GITHUB_RATE_LIMIT_TEST_DIR)/go-build-cache)
+test-github-rate-limit: export GOTMPDIR := $(or $(filter-out /tmp /tmp/ /var/tmp /var/tmp/,$(GOTMPDIR)),$(GITHUB_RATE_LIMIT_TEST_DIR)/tmp)
+test-github-rate-limit:
+	mkdir -p "$(GITHUB_RATE_LIMIT_TEST_DIR)" "$(GOCACHE)" "$(GOTMPDIR)"
+	go test -race -count=1 -timeout=180s ./internal/services/github/... ./internal/services/codereview ./internal/cache ./internal/jobctx ./internal/config ./internal/metrics ./internal/api ./internal/api/gateway ./internal/api/middleware ./internal/api/sse ./cmd/server
+	go test -race -count=1 -timeout=180s -run '^(TestEvalCandidateValidator.*|TestBranchPreviewHandler_CreateResolvesBranchHeadAndCreatesTarget|TestBranchPreviewHandler_GetPullRequestUsesStableLinkForNamedConfigTarget|TestBranchPreviewHandler_TestPolicyPreviewStartsDefaultBranchTarget|TestGitHubJSONClientsCompleteProbe|TestIntegrationHandler_ListInstallationReposProbePagination|TestIntegrationHandler_ListInstallationRepos_FollowsPagination|TestIntegrationHandler_ListInstallationReposHonorsPreexistingCooldown|TestIntegrationHandler_ClaimGitHubInstallationRepositories_MapsUniqueOwnershipRaceToConflict|TestRepositoryHandler_ListBranches_.*|TestSessionComposerHandler_ListFileMentions.*|TestSessionComposerHandler_GetSlashCommandDetail_DefaultsToRepoBranch|TestTeamHandler_GitHubInviteStatus_FallsBackToRepositoryInstallationID|TestTeamHandler_GetGitHubInstallationID_FallbackCases|TestTeamHandler_SearchGitHubUsersPublishesFreshThrottleToSharedController)$$' ./internal/api/handlers
+	go test -race -count=1 -timeout=180s -run '^(TestGitHub.*|TestRetryableDurationExceeded|TestRetryScheduledHookRequiresLeaseOwnedUpdate|TestEnsureRetryWindowStartedAt|TestWorkerRetrySchedulingPreservesUnrelatedPolicy|TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures|TestRecordCodeReviewAutomaticWaitPersistsRateLimitOnly|TestDelayedCodeReviewRetryHookCannotOverwriteNewerAttempt|TestCodeReviewTerminalFailureStatus|TestPullRequestReconciliationKeepsDatabaseRecoveryIndependent|TestPullRequestReconciliationPrioritizesThrottleAcrossJoinedGitHubCauses|TestPullRequestReconciliationPreservesThrottleAcrossIndependentCancellation|TestPullRequestReconciliationKeepsCanceledHTTPOperationTerminal|TestSyncPullRequestStateHandlerWaitsForGitHubRateLimit)$$' ./internal/worker
+	go test -race -count=1 -timeout=180s -run '^TestCodeReviewStore_SetWaitingForGitHub' ./internal/db
+	go vet ./internal/services/github/... ./internal/services/codereview ./internal/cache ./internal/db ./internal/jobctx ./internal/worker ./internal/config ./internal/metrics ./internal/api/... ./cmd/server
+	go build -o "$(GITHUB_RATE_LIMIT_TEST_DIR)/143-github-rate-limit-server" ./cmd/server
+	git diff --check
+	@check_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/143-ghrl-index.XXXXXX"); \
+		trap 'rm -rf "$$check_dir"' EXIT INT TERM; \
+		GIT_INDEX_FILE="$$check_dir/index" git read-tree HEAD; \
+		GIT_INDEX_FILE="$$check_dir/index" git add -A; \
+		GIT_INDEX_FILE="$$check_dir/index" git diff --cached --check
+
+# Real standalone + Cluster verification. The harness acquires a checksum-
+# pinned user-space Redis build when no local binaries exist, binds every node
+# to loopback, and fails on missing infrastructure or any skipped test.
+test-github-rate-limit-redis:
+	GITHUB_RATE_LIMIT_TEST_DIR="$(GITHUB_RATE_LIMIT_TEST_DIR)" ./scripts/test-github-rate-limit-redis.sh
 
 migrate-up:
 	go run cmd/migrate/main.go up

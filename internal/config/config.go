@@ -187,6 +187,8 @@ type Config struct {
 	GitHubAppPrivateKey                     string   `env:"GITHUB_APP_PRIVATE_KEY"`
 	GitHubWebhookSecret                     string   `env:"GITHUB_WEBHOOK_SECRET"`
 	GitHubAppSlug                           string   `env:"GITHUB_APP_SLUG"`
+	GitHubRateLimitMode                     string   `env:"GITHUB_RATE_LIMIT_MODE" envDefault:"observe"`
+	GitHubRateLimitInstallationAllowlist    []int64  `env:"GITHUB_RATE_LIMIT_INSTALLATION_ALLOWLIST" envSeparator:","`
 	CodeReviewAppReviewerLogins             []string `env:"CODE_REVIEW_APP_REVIEWER_LOGINS" envSeparator:","`
 	CodeReviewAliasLogins                   []string `env:"CODE_REVIEW_ALIAS_LOGINS"        envSeparator:","`
 	CodeReviewTeamSlugs                     []string `env:"CODE_REVIEW_TEAM_SLUGS"          envSeparator:","`
@@ -685,6 +687,16 @@ func (c *Config) SentryEnvironmentOrDefault() string {
 // ValidateSecrets checks that security-sensitive configuration values meet
 // minimum strength requirements when running in production.
 func (c *Config) ValidateSecrets() error {
+	switch strings.ToLower(strings.TrimSpace(c.GitHubRateLimitMode)) {
+	case "", "off", "observe", "enforce":
+	default:
+		return errors.New("GITHUB_RATE_LIMIT_MODE must be one of off, observe, or enforce")
+	}
+	for _, installationID := range c.GitHubRateLimitInstallationAllowlist {
+		if installationID <= 0 {
+			return errors.New("GITHUB_RATE_LIMIT_INSTALLATION_ALLOWLIST entries must be positive")
+		}
+	}
 	// Retention day validation applies in all environments.
 	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 || c.DataRetentionSlackInboundPayloadDays < 0 || c.DataRetentionSlackInboundPayloadBatch < 0 || c.PreviewDependencyCacheRetentionDays < 0 || c.PreviewDependencyCacheKeepNewestPerRepo < 0 {
 		return errors.New("DATA_RETENTION_* values, PREVIEW_DEPENDENCY_CACHE_RETENTION_DAYS, and PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO values must not be negative")

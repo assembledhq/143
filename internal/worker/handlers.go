@@ -11142,7 +11142,21 @@ func newReconcilePullRequestStateHandler(services *Services, logger zerolog.Logg
 					Msg("periodic reconciliation restarted stranded publication review loops")
 			}
 		}
-		return errors.Join(prErr, reviewErr)
+		combined := errors.Join(prErr, reviewErr)
+		if combined == nil {
+			return nil
+		}
+		if prRetry := githubReconciliationRetryableError(prErr, "reconcile_pull_request_state:"+orgID.String()); prRetry != nil {
+			prRetry.Err = combined
+			return prRetry
+		}
+		if reviewErr != nil {
+			// Database-only recovery remains independently retryable even when a
+			// non-retryable GitHub error occurred in the same invocation. Avoid a
+			// nested FatalError: the worker checks fatal wrappers before retryable ones.
+			return &RetryableError{Err: combined, ConsumeAttempt: true}
+		}
+		return classifyGitHubJobError(prErr, "reconcile_pull_request_state:"+orgID.String())
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	linearservice "github.com/assembledhq/143/internal/services/linear"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
@@ -5879,6 +5880,79 @@ func TestPullRequestReconciliationAlsoRecoversStrandedPublicationReviews(t *test
 	require.Equal(t, orgID, reviews.reconciliations[0].orgID, "periodic recovery should remain tenant scoped")
 	require.Equal(t, 10, reviews.reconciliations[0].limit, "periodic recovery should share the bounded reconciliation batch")
 	require.WithinDuration(t, startedAt.Add(-periodicReviewLoopRecoveryInactiveFor), reviews.reconciliations[0].inactiveBefore, time.Second, "periodic recovery should use the conservative inactivity threshold")
+}
+
+func TestPullRequestReconciliationKeepsDatabaseRecoveryIndependent(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	githubErr := &ghservice.GitHubAPIError{
+		Method: http.MethodGet, Path: "/repos/acme/repo/pulls/42", StatusCode: http.StatusTooManyRequests,
+		Body: []byte(`{"message":"API rate limit exceeded"}`),
+	}
+	databaseErr := errors.New("review-loop database recovery unavailable")
+	reviews := &stubWorkerReviewLoops{reconciliationErr: databaseErr}
+	services := &Services{
+		PR:          &stubPRService{reconcilePullRequestFn: func(context.Context, uuid.UUID, int) error { return githubErr }},
+		ReviewLoops: reviews,
+	}
+	handler := newReconcilePullRequestStateHandler(services, zerolog.Nop())
+	err := handler(context.Background(), "reconcile_pull_request_state", json.RawMessage(`{"org_id":"`+orgID.String()+`","limit":10}`))
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "combined GitHub and database failures should retain a retryable outer contract")
+	var fatal *FatalError
+	require.False(t, errors.As(err, &fatal), "database recovery must not be hidden behind a nested fatal wrapper")
+	require.ErrorIs(t, err, githubErr, "combined retry should preserve the original GitHub throttle")
+	require.ErrorIs(t, err, databaseErr, "combined retry should preserve the independent database failure")
+	require.Len(t, reviews.reconciliations, 1, "database recovery should run even after GitHub reconciliation is throttled")
+}
+
+func TestPullRequestReconciliationPrioritizesThrottleAcrossJoinedGitHubCauses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		githubErr func(transient, throttle error) error
+	}{
+		{name: "transient before throttle", githubErr: func(transient, throttle error) error { return errors.Join(transient, throttle) }},
+		{name: "throttle before transient", githubErr: func(transient, throttle error) error { return errors.Join(throttle, transient) }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			transient := &ghservice.GitHubAPIError{Method: http.MethodGet, Path: "/repos/acme/repo/pulls/42", StatusCode: http.StatusServiceUnavailable}
+			throttle := &ghservice.GitHubAPIError{
+				Method: http.MethodGet, Path: "/repos/acme/repo/status", StatusCode: http.StatusTooManyRequests,
+				Header: http.Header{"Retry-After": []string{"120"}}, Body: []byte(`{"message":"secondary rate limit"}`),
+			}
+			databaseErr := errors.New("review-loop database recovery unavailable")
+			reviews := &stubWorkerReviewLoops{reconciliationErr: databaseErr}
+			joinedGitHub := tt.githubErr(transient, throttle)
+			services := &Services{
+				PR:          &stubPRService{reconcilePullRequestFn: func(context.Context, uuid.UUID, int) error { return joinedGitHub }},
+				ReviewLoops: reviews,
+			}
+
+			err := newReconcilePullRequestStateHandler(services, zerolog.Nop())(
+				context.Background(), "reconcile_pull_request_state", json.RawMessage(`{"org_id":"`+orgID.String()+`","limit":10}`),
+			)
+
+			var retryable *RetryableError
+			require.ErrorAs(t, err, &retryable, "joined reconciliation failures should remain retryable")
+			require.False(t, retryable.ConsumeAttempt, "a throttle anywhere in the GitHub error tree should preserve the attempt")
+			require.NotNil(t, retryable.RetryAfter, "the controlling throttle deadline should be retained")
+			require.GreaterOrEqual(t, *retryable.RetryAfter, 2*time.Minute, "later throttle timing should outrank the earlier transient response")
+			require.LessOrEqual(t, *retryable.RetryAfter, 2*time.Minute+29*time.Second, "only bounded deterministic jitter may extend the provider deadline")
+			require.ErrorIs(t, err, transient, "combined result should preserve the transient GitHub cause")
+			require.ErrorIs(t, err, throttle, "combined result should preserve the throttle GitHub cause")
+			require.ErrorIs(t, err, databaseErr, "combined result should preserve independent database recovery failure")
+			require.Len(t, reviews.reconciliations, 1, "database-only recovery should run exactly once regardless of GitHub cause order")
+		})
+	}
 }
 
 func TestRebuildPullRequestHealthHandlerSkipsAutoRepairAfterNoOp(t *testing.T) {
@@ -13459,4 +13533,77 @@ func TestLegacyEvalRunAgentType(t *testing.T) {
 	require.Equal(t, models.AgentTypeOpenCode, legacyEvalRunAgentType(models.OpenCodeModelGPT54Mini), "OpenCode models should dispatch to the OpenCode adapter")
 	require.Equal(t, models.AgentTypeOpenCode, legacyEvalRunAgentType(models.OpenCodeModelClaudeHaiku45), "OpenCode models should dispatch to the OpenCode adapter")
 	require.Equal(t, models.AgentTypeOpenCode, legacyEvalRunAgentType(models.OpenCodeModelDeepSeekV4Flash), "OpenCode models should dispatch to the OpenCode adapter")
+}
+
+func TestPullRequestReconciliationPreservesThrottleAcrossIndependentCancellation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                       string
+		managed, cancellationFirst bool
+	}{
+		{name: "raw throttle then database cancellation"},
+		{name: "database cancellation then raw throttle", cancellationFirst: true},
+		{name: "managed throttle then database cancellation", managed: true},
+		{name: "database cancellation then managed throttle", managed: true, cancellationFirst: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID := uuid.New()
+			retryAt := time.Now().Add(3 * time.Minute).UTC()
+			var throttle error = &ghservice.GitHubAPIError{StatusCode: http.StatusTooManyRequests}
+			if tt.managed {
+				throttle = &ratelimit.Deferral{InstallationID: 42, RetryAt: retryAt, Kind: ratelimit.KindSecondary, Generation: 3}
+			}
+			databaseErr := fmt.Errorf("repair stuck publication action: %w", context.Canceled)
+			causes := []error{fmt.Errorf("sync pull request: %w", throttle), databaseErr}
+			if tt.cancellationFirst {
+				causes[0], causes[1] = causes[1], causes[0]
+			}
+			joined := errors.Join(causes...)
+			reviews := &stubWorkerReviewLoops{restarted: 1}
+			services := &Services{
+				PR:          &stubPRService{reconcilePullRequestFn: func(context.Context, uuid.UUID, int) error { return joined }},
+				ReviewLoops: reviews,
+			}
+			err := newReconcilePullRequestStateHandler(services, zerolog.Nop())(context.Background(), "reconcile_pull_request_state", json.RawMessage(`{"org_id":"`+orgID.String()+`"}`))
+			var retryable *RetryableError
+			require.ErrorAs(t, err, &retryable, "independent database cancellation must not erase a GitHub throttle")
+			require.False(t, retryable.ConsumeAttempt, "throttle recovery must preserve the attempt")
+			require.ErrorIs(t, err, joined, "worker retry must retain the original joined reconciliation error")
+			require.ErrorIs(t, err, throttle, "worker retry must retain the original throttle")
+			require.ErrorIs(t, err, context.Canceled, "database cancellation should remain visible for diagnostics")
+			var fatal *FatalError
+			require.False(t, errors.As(err, &fatal), "independent cancellation must not turn an API throttle into a fatal job")
+			if tt.managed {
+				require.Equal(t, GitHubRetryPolicyExact, retryable.GitHubRetryPolicy, "controller-managed timing must remain exact")
+				require.Equal(t, &retryAt, retryable.GitHubRetryAt, "controller-managed retry must preserve its deadline without jitter")
+			} else {
+				require.Equal(t, GitHubRetryPolicyNoHint, retryable.GitHubRetryPolicy, "raw no-hint throttles must retain the bounded recovery policy")
+			}
+			require.Len(t, reviews.reconciliations, 1, "independent review recovery should still execute once")
+		})
+	}
+}
+
+func TestPullRequestReconciliationKeepsCanceledHTTPOperationTerminal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		callerErr error
+	}{
+		{name: "caller canceled", callerErr: context.Canceled},
+		{name: "caller deadline expired", callerErr: context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// Even an operation that retained throttle metadata before its caller
+			// cancellation must be classified as one indivisible HTTP failure.
+			requestErr := &ghservice.GitHubRequestError{Err: errors.Join(&ghservice.GitHubAPIError{StatusCode: http.StatusTooManyRequests}, tt.callerErr), CallerContextErr: tt.callerErr}
+			joined := errors.Join(fmt.Errorf("sync pull request: %w", requestErr), errors.New("unrelated database failure"))
+			require.Nil(t, githubReconciliationRetryableError(joined, "canceled-request"), "aggregate classification must not unwrap a canceled HTTP request into independently retryable causes")
+			require.False(t, ghservice.ClassifyRetry(requestErr, time.Now()).Retryable, "ordinary HTTP cancellation semantics must remain terminal")
+		})
+	}
 }

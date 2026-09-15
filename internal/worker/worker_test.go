@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 )
 
 type wakeTestStore struct {
@@ -140,6 +142,56 @@ func TestRetryableDurationExceeded(t *testing.T) {
 			actual, retryWindow := retryableDurationExceeded(tt.retryStartedAt, tt.retryable, now)
 			require.Equal(t, tt.expected, actual, "retry window should make the expected terminal decision")
 			require.Equal(t, tt.expectedWindow, retryWindow, "retry window should report the applied duration")
+		})
+	}
+}
+
+func TestRetryScheduledHookRequiresLeaseOwnedUpdate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		rowsAffected int64
+		expectHook   bool
+	}{
+		{name: "successful lease update publishes exact schedule", rowsAffected: 1, expectHook: true},
+		{name: "lost lease does not publish wait metadata", rowsAffected: 0, expectHook: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create the database mock")
+			t.Cleanup(mock.Close)
+			jobID, lockToken := uuid.New(), uuid.New()
+			now := time.Date(2026, time.September, 14, 12, 0, 0, 0, time.UTC)
+			delay := 5*time.Minute + 29*time.Second
+			mock.ExpectExec("attempts = GREATEST\\(attempts - 1, 0\\)").
+				WithArgs("GitHub rate limited", now.Add(delay), jobID, lockToken).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
+			worker := New(mock, zerolog.Nop(), "worker-test")
+			ctx := jobctx.WithDeadLetterHooks(context.Background())
+			hookCalls := 0
+			var hookRunAt time.Time
+			jobctx.RegisterRetryScheduledHook(ctx, func(_ context.Context, _ error, runAt time.Time) {
+				hookCalls++
+				hookRunAt = runAt
+			})
+
+			runAt, scheduled := worker.retryJobWithDelayAt(ctx, now, jobID, lockToken, "GitHub rate limited", 1, true, &delay, nil, false)
+			if scheduled {
+				worker.runRetryScheduledHooks(ctx, errors.New("GitHub rate limited"), runAt)
+			}
+
+			require.Equal(t, tt.expectHook, scheduled, "lease-owned update should determine whether the retry was durably scheduled")
+			if tt.expectHook {
+				require.Equal(t, 1, hookCalls, "successful durable scheduling should publish wait metadata once")
+				require.Equal(t, now.Add(delay), hookRunAt, "wait metadata should receive the exact durable run_at")
+			} else {
+				require.Zero(t, hookCalls, "lost lease must not publish wait metadata")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "retry scheduling should use the lease-fenced update")
 		})
 	}
 }
@@ -605,6 +657,66 @@ func TestWorker_Poll(t *testing.T) {
 				w.poll(context.Background())
 			}, "poll should not panic")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestWorkerRetrySchedulingPreservesUnrelatedPolicy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		handlerErr       func() *RetryableError
+		createdAt        func(time.Time) time.Time
+		retryWindowStart func(time.Time) *time.Time
+		finalSQL         string
+		consumeAttempt   bool
+	}{
+		{
+			name:       "bare retryable at attempt eight keeps default age-only policy",
+			handlerErr: func() *RetryableError { return &RetryableError{Err: errors.New("unrelated capacity wait")} },
+			createdAt:  func(now time.Time) time.Time { return now.Add(-4*time.Minute - 30*time.Second) },
+			finalSQL:   "attempts = GREATEST\\(attempts - 1, 0\\)",
+		},
+		{
+			name: "hintless transient GitHub retry cannot cross its two hour boundary",
+			handlerErr: func() *RetryableError {
+				return githubRetryableError(&ghservice.GitHubAPIError{StatusCode: http.StatusServiceUnavailable}, "boundary")
+			},
+			createdAt: func(now time.Time) time.Time { return now.Add(-3 * time.Hour) },
+			retryWindowStart: func(now time.Time) *time.Time {
+				startedAt := now.Add(-githubRateLimitMaxRetryDuration + 500*time.Millisecond)
+				return &startedAt
+			},
+			finalSQL:       "UPDATE jobs\\s+SET status = 'dead_letter'",
+			consumeAttempt: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			w, mock := newTestWorker(t)
+			defer mock.Close()
+			now := time.Now()
+			jobID, orgID, lockToken := uuid.New(), uuid.New(), uuid.New()
+			handlerErr := tt.handlerErr()
+			w.Register("policy_job", func(context.Context, string, json.RawMessage) error { return handlerErr })
+			var retryWindowStartedAt *time.Time
+			if tt.retryWindowStart != nil {
+				retryWindowStartedAt = tt.retryWindowStart(now)
+			}
+			expectClaimWithRetryWindow(mock, jobID, orgID, "policy_job", json.RawMessage(`{}`), tt.createdAt(now), now, lockToken, 8, 20, retryWindowStartedAt)
+			if tt.consumeAttempt {
+				mock.ExpectExec(tt.finalSQL).WithArgs(pgxmock.AnyArg(), jobID, lockToken).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			} else {
+				mock.ExpectExec(tt.finalSQL).WithArgs(handlerErr.Error(), pgxmock.AnyArg(), jobID, lockToken).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+
+			w.poll(context.Background())
+
+			require.NoError(t, mock.ExpectationsWereMet(), "worker should preserve the selected retry policy through lease-owned scheduling")
 		})
 	}
 }
@@ -1146,5 +1258,24 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 			jobID, orgID, "default", jobType, payload, 5, "running",
 			attempts, maxAttempts, createdAt, "test-node", createdAt, createdAt.Add(defaultLeaseDuration),
 			lockToken.String(), "test-node", string(models.JobOwnerKindWorker), nil, nil, target, nil, createdAt, createdAt, nil,
+		))
+}
+
+func expectClaimWithRetryWindow(mock pgxmock.PgxPoolIface, jobID, orgID uuid.UUID, jobType string, payload json.RawMessage, createdAt, lockedAt time.Time, lockToken uuid.UUID, attempts, maxAttempts int, retryWindowStartedAt *time.Time) {
+	var durableStart any
+	if retryWindowStartedAt != nil {
+		durableStart = *retryWindowStartedAt
+	}
+	mock.ExpectQuery("WITH unavailable_target_nodes AS").
+		WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "queue", "job_type", "payload", "priority", "status",
+			"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
+			"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
+			"dedupe_key", "target_node_id", "retry_window_started_at", "created_at", "updated_at", "completed_at",
+		}).AddRow(
+			jobID, orgID, "default", jobType, payload, 5, "running",
+			attempts, maxAttempts, lockedAt, "test-node", lockedAt, lockedAt.Add(defaultLeaseDuration),
+			lockToken.String(), "test-node", string(models.JobOwnerKindWorker), nil, nil, nil, durableStart, createdAt, lockedAt, nil,
 		))
 }

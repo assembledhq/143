@@ -956,11 +956,23 @@ func (s *CodeReviewStore) SetOperationalPhase(ctx context.Context, orgID, sessio
 	return metadata, nil
 }
 
-// SetWaitingForGitHub persists an automatic rate-limit wait. The worker owns
-// retry scheduling; retryAt mirrors the delay it returned so the UI can show
-// the same recovery time without offering a competing manual action.
-func (s *CodeReviewStore) SetWaitingForGitHub(ctx context.Context, orgID, sessionID uuid.UUID, retryAt time.Time, message string) (models.CodeReviewSessionMetadata, error) {
+// SetWaitingForGitHub persists an automatic rate-limit wait only while the
+// exact job retry transition is still pending. Locking that row inside the
+// statement prevents a delayed hook from racing a newer claim or reschedule.
+func (s *CodeReviewStore) SetWaitingForGitHub(ctx context.Context, orgID, sessionID, jobID uuid.UUID, retryAt time.Time, jobError, message string) (models.CodeReviewSessionMetadata, error) {
 	rows, err := s.db.Query(ctx, `
+		WITH scheduled_retry AS MATERIALIZED (
+			SELECT id
+			FROM jobs
+			WHERE id = @job_id
+			  AND org_id = @org_id
+			  AND job_type = 'run_code_review'
+			  AND payload->>'session_id' = @session_id::text
+			  AND status = 'pending'
+			  AND run_at = @retry_at
+			  AND last_error = @job_error
+			FOR UPDATE
+		)
 		UPDATE code_review_session_metadata
 		SET phase = 'waiting_for_github',
 		    status_code = 'github_rate_limited',
@@ -971,8 +983,10 @@ func (s *CodeReviewStore) SetWaitingForGitHub(ctx context.Context, orgID, sessio
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
 		  AND status IN ('queued', 'running')
+		  AND EXISTS (SELECT 1 FROM scheduled_retry)
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
-		"org_id": orgID, "session_id": sessionID, "retry_at": retryAt, "status_message": strings.TrimSpace(message),
+		"org_id": orgID, "session_id": sessionID, "job_id": jobID, "retry_at": retryAt,
+		"job_error": jobError, "status_message": strings.TrimSpace(message),
 	})
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("set code review GitHub wait: %w", err)

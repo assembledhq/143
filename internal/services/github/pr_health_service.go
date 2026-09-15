@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +23,8 @@ import (
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/github/identity"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 )
 
 const (
@@ -645,6 +648,7 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	case <-ctx.Done():
 		return ctx.Err()
 	case completed := <-result:
+		reconciliationScopeFromContext(ctx).observe(nil, completed.Err)
 		if completed.Shared {
 			s.logger.Debug().
 				Str("org_id", orgID.String()).
@@ -656,7 +660,13 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	}
 }
 
-func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
+func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) (resultErr error) {
+	var resolution *identity.Resolution
+	scope := reconciliationScopeFromContext(ctx)
+	defer func() {
+		resultErr = reconciliationInstallationFailure(resolution, resultErr)
+		scope.observe(resolution, resultErr)
+	}()
 	pr, err := s.pullRequests.GetByID(ctx, orgID, pullRequestID)
 	if err != nil {
 		return err
@@ -675,10 +685,15 @@ func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequest
 		}
 		return fmt.Errorf("load repository for pull request health sync: %w", err)
 	}
-	token, err := s.getInstallationTokenForRepo(ctx, orgID, &repo)
+	resolution, err = s.getInstallationResolutionForRepo(ctx, orgID, &repo)
 	if err != nil {
 		return fmt.Errorf("load installation token for pull request health sync: %w", err)
 	}
+	if err := scope.deferral(resolution); err != nil {
+		return err
+	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "pr_health")
+	token := resolution.Token
 	checkStateVersion, err := s.pullRequests.ReserveCheckStateVersion(ctx, orgID, pullRequestID)
 	if err != nil {
 		return err
@@ -712,11 +727,11 @@ func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequest
 	}
 	commitStatuses, err := s.listCommitStatusesForRef(ctx, token, owner, repoName, details.Head.SHA)
 	if err != nil {
-		s.logger.Warn().
-			Err(err).
-			Str("pull_request_id", pullRequestID.String()).
-			Str("head_sha", details.Head.SHA).
-			Msg("failed to fetch GitHub commit statuses during pull request health sync")
+		if ClassifyRetry(err, time.Now()).Retryable {
+			return fmt.Errorf("fetch GitHub commit statuses during pull request health sync: %w", err)
+		}
+		s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).
+			Str("head_sha", details.Head.SHA).Msg("failed to fetch GitHub commit statuses during pull request health sync")
 		commitStatuses = nil
 	}
 
@@ -1019,46 +1034,179 @@ func projectedCheckSummaryKey(check models.PullRequestCheckSummary) string {
 	return strings.ToLower(strings.TrimSpace(check.Provider)) + "\x00" + strings.ToLower(strings.TrimSpace(check.Name))
 }
 
-func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error {
-	stale, err := s.pullRequests.ListOpenStaleForHealthSync(ctx, orgID, time.Now().Add(-prHealthStaleAfter), limit)
-	if err != nil {
+// reconciliationGitHubScope suppresses only the authenticated installations
+// already throttled in this bounded sweep. It is shared with coalesced sync
+// goroutines, which can outlive the caller's cancellation.
+type reconciliationGitHubScope struct {
+	mu      sync.Mutex
+	blocked map[int64]error
+}
+
+// A coalesced sync can have a leader outside the current sweep. Preserve the
+// credential that observed a throttle so every waiter can suppress only that
+// installation even in observe mode, where no controller deferral is returned.
+type reconciliationInstallationError struct {
+	err            error
+	installationID int64
+}
+
+func (e *reconciliationInstallationError) Error() string { return e.err.Error() }
+func (e *reconciliationInstallationError) Unwrap() error { return e.err }
+
+func reconciliationInstallationFailure(resolution *identity.Resolution, err error) error {
+	if resolution == nil || resolution.Source != identity.SourceApp || resolution.InstallationID <= 0 || !ClassifyRetry(err, time.Now()).RateLimited {
 		return err
+	}
+	var existing *reconciliationInstallationError
+	if errors.As(err, &existing) {
+		return err
+	}
+	return &reconciliationInstallationError{err: err, installationID: resolution.InstallationID}
+}
+
+type reconciliationGitHubScopeKey struct{}
+
+func withReconciliationScope(ctx context.Context) context.Context {
+	if reconciliationScopeFromContext(ctx) != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, reconciliationGitHubScopeKey{}, &reconciliationGitHubScope{blocked: make(map[int64]error)})
+}
+
+func reconciliationScopeFromContext(ctx context.Context) *reconciliationGitHubScope {
+	scope, _ := ctx.Value(reconciliationGitHubScopeKey{}).(*reconciliationGitHubScope)
+	return scope
+}
+
+func (s *reconciliationGitHubScope) observe(resolution *identity.Resolution, err error) {
+	if s == nil || !ClassifyRetry(err, time.Now()).RateLimited {
+		return
+	}
+	var installationID int64
+	if resolution != nil && resolution.Source == identity.SourceApp {
+		installationID = resolution.InstallationID
+	}
+	var scopedErr *reconciliationInstallationError
+	if errors.As(err, &scopedErr) {
+		installationID = scopedErr.installationID
+	}
+	if deferral, ok := ratelimit.AsDeferral(err); ok && deferral.InstallationID > 0 {
+		installationID = deferral.InstallationID
+	}
+	// Unknown/user credentials must not collapse into an organization-wide
+	// bucket, and a repository's recorded ID may predate token fallback.
+	if installationID <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blocked[installationID] = err
+}
+
+func (s *reconciliationGitHubScope) deferral(resolution *identity.Resolution) error {
+	if s == nil || resolution == nil || resolution.Source != identity.SourceApp || resolution.InstallationID <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.blocked[resolution.InstallationID]
+}
+
+func (s *reconciliationGitHubScope) hasBlockedInstallation() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.blocked) > 0
+}
+
+func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error {
+	ctx = withReconciliationScope(ctx)
+	scope := reconciliationScopeFromContext(ctx)
+	stale, err := s.pullRequests.ListOpenStaleForHealthSync(ctx, orgID, time.Now().Add(-prHealthStaleAfter), limit)
+	var reconciliationErrs []error
+	if err != nil {
+		reconciliationErrs = append(reconciliationErrs, fmt.Errorf("list stale pull requests for reconciliation: %w", err))
 	}
 	for _, pr := range stale {
 		syncCtx := WithPullRequestSyncReason(ctx, PullRequestSyncReasonStaleReconcile)
 		if err := s.SyncPullRequestState(syncCtx, orgID, pr.ID); err != nil {
+			// The shared sync may have originated outside this sweep. Typed
+			// controller deferrals still identify its affected installation.
+			scope.observe(nil, err)
 			if errors.Is(err, ErrPullRequestMergeabilityPending) {
 				s.logger.Debug().Str("pull_request_id", pr.ID.String()).Msg("pull request mergeability is still pending during reconciliation")
 				continue
 			}
 			s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to reconcile pull request health")
+			if ClassifyRetry(err, time.Now()).Retryable {
+				reconciliationErrs = append(reconciliationErrs, fmt.Errorf("reconcile pull request %s: %w", pr.ID, err))
+			}
 		}
+	}
+	// Independent database recovery runs even when GitHub is throttled or a
+	// candidate listing failed. Every candidate list remains bounded by limit.
+	if err := s.reconcileStuckPublishActions(ctx, orgID, limit); err != nil {
+		reconciliationErrs = append(reconciliationErrs, err)
 	}
 	queued, err := s.pullRequests.ListMergeWhenReadyForProcessing(ctx, orgID, time.Now().Add(-mergeWhenReadyMergingStaleAfter), limit)
 	if err != nil {
-		return err
+		reconciliationErrs = append(reconciliationErrs, fmt.Errorf("list merge-when-ready pull requests: %w", err))
 	}
 	for _, pr := range queued {
+		if scope.hasBlockedInstallation() && s.jobs != nil && isMergeWhenReadyProcessable(pr, time.Now()) {
+			repo, err := s.repos.GetByFullName(ctx, orgID, pr.GitHubRepo)
+			if err == nil {
+				err = s.reconciliationRepositoryDeferral(ctx, orgID, &repo)
+			}
+			if err != nil {
+				s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("deferred merge-when-ready reconciliation")
+				reconciliationErrs = append(reconciliationErrs, fmt.Errorf("reconcile merge-when-ready pull request %s: %w", pr.ID, err))
+				continue
+			}
+		}
 		s.enqueueMergeWhenReadyProcessing(ctx, pr)
 	}
-	s.reconcileStuckPublishActions(ctx, orgID, limit)
-	s.reconcileSessionPublications(ctx, orgID, limit)
-	return nil
+	if err := s.reconcileSessionPublications(ctx, orgID, limit); err != nil {
+		reconciliationErrs = append(reconciliationErrs, err)
+	}
+	return errors.Join(reconciliationErrs...)
+}
+
+func (s *PRService) reconciliationRepositoryDeferral(ctx context.Context, orgID uuid.UUID, repo *models.Repository) error {
+	scope := reconciliationScopeFromContext(ctx)
+	resolution, err := s.getInstallationResolutionForRepo(ctx, orgID, repo)
+	if err != nil {
+		scope.observe(nil, err)
+		return err
+	}
+	return scope.deferral(resolution)
 }
 
 const publicationReconcileDelay = 30 * time.Second
 
-func (s *PRService) reconcileSessionPublications(ctx context.Context, orgID uuid.UUID, limit int) {
+func (s *PRService) reconcileSessionPublications(ctx context.Context, orgID uuid.UUID, limit int) error {
+	ctx = withReconciliationScope(ctx)
 	if s.publications == nil || s.pullRequests == nil || s.changesets == nil || s.sessions == nil || s.repos == nil {
-		return
+		return nil
 	}
 	candidates, err := s.publications.ListReconcileCandidates(ctx, orgID, time.Now().Add(-publicationReconcileDelay), limit)
 	if err != nil {
 		s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to list session publication reconciliation candidates")
-		return
+		return err
 	}
+	var reconciliationErrs []error
 	for _, publication := range candidates {
 		if err := s.reconcileSessionPublication(ctx, publication); err != nil {
+			if ClassifyRetry(err, time.Now()).RateLimited {
+				s.logger.Warn().Err(err).
+					Str("publication_id", publication.ID.String()).
+					Str("session_id", publication.SessionID.String()).
+					Msg("deferred session publication reconciliation while GitHub is rate-limited")
+				reconciliationErrs = append(reconciliationErrs, fmt.Errorf("reconcile publication %s: %w", publication.ID, err))
+				continue
+			}
 			metrics.RecordSessionPublicationReconciliation(ctx, "error")
 			metrics.RecordPRPublicationFailure(ctx, false)
 			if markErr := s.publications.MarkFailed(
@@ -1081,11 +1229,18 @@ func (s *PRService) reconcileSessionPublications(ctx context.Context, orgID uuid
 				Str("session_id", publication.SessionID.String()).
 				Str("state", string(publication.State)).
 				Msg("failed to reconcile session publication")
+			if ClassifyRetry(err, time.Now()).Retryable {
+				reconciliationErrs = append(reconciliationErrs, fmt.Errorf("reconcile publication %s: %w", publication.ID, err))
+			}
 		}
 	}
+	return errors.Join(reconciliationErrs...)
 }
 
-func (s *PRService) reconcileSessionPublication(ctx context.Context, publication models.SessionPublication) error {
+func (s *PRService) reconcileSessionPublication(ctx context.Context, publication models.SessionPublication) (resultErr error) {
+	var resolution *identity.Resolution
+	scope := reconciliationScopeFromContext(ctx)
+	defer func() { scope.observe(resolution, resultErr) }()
 	executionSource, err := reconciliationPublicationExecutionSource(publication)
 	if err != nil {
 		return err
@@ -1134,10 +1289,15 @@ func (s *PRService) reconcileSessionPublication(ctx context.Context, publication
 	if err != nil {
 		return fmt.Errorf("load publication repository: %w", err)
 	}
-	token, err := s.getInstallationTokenForRepo(ctx, publication.OrgID, &repo)
+	resolution, err = s.getInstallationResolutionForRepo(ctx, publication.OrgID, &repo)
 	if err != nil {
 		return fmt.Errorf("load publication reconciliation token: %w", err)
 	}
+	if err := scope.deferral(resolution); err != nil {
+		return err
+	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "publication_reconciliation")
+	token := resolution.Token
 	owner, repoName := splitRepo(repo.FullName)
 	prNumber := 0
 	if publication.GitHubPRNumber != nil {
@@ -1298,6 +1458,15 @@ func (s *PRService) completeReconciledSessionPublication(
 }
 
 func (s *PRService) resumeSessionPublicationCreation(ctx context.Context, publication models.SessionPublication) error {
+	if reconciliationScopeFromContext(ctx).hasBlockedInstallation() {
+		repo, err := s.repos.GetByID(ctx, publication.OrgID, publication.RepositoryID)
+		if err != nil {
+			return fmt.Errorf("load resumed publication repository: %w", err)
+		}
+		if err := s.reconciliationRepositoryDeferral(ctx, publication.OrgID, &repo); err != nil {
+			return err
+		}
+	}
 	if s.jobs == nil {
 		return errors.New("publication reconciliation job store is unavailable")
 	}
@@ -1380,25 +1549,28 @@ const stuckPublishActionAfter = 15 * time.Minute
 // mid-action without writing one, leaving the column wedged at 'queued'/
 // 'pushing' with no live backing job. It force-fails those columns so the
 // frontend spinner resolves to a retryable error instead of spinning forever.
-func (s *PRService) reconcileStuckPublishActions(ctx context.Context, orgID uuid.UUID, limit int) {
+func (s *PRService) reconcileStuckPublishActions(ctx context.Context, orgID uuid.UUID, limit int) error {
 	if s.sessions == nil {
-		return
+		return nil
 	}
 	stuck, err := s.sessions.ListStuckPublishActionSessions(ctx, orgID, time.Now().Add(-stuckPublishActionAfter), limit)
 	if err != nil {
 		s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to list stuck publish-action sessions")
-		return
+		return fmt.Errorf("list stuck publish-action sessions: %w", err)
 	}
+	var reconciliationErrs []error
 	for _, sessionID := range stuck {
 		changed, ferr := s.sessions.FailInFlightPublishActions(ctx, orgID, sessionID, PublishActionAbandonedMessage)
 		if ferr != nil {
 			s.logger.Warn().Err(ferr).Str("session_id", sessionID.String()).Msg("failed to reconcile stuck publish action")
+			reconciliationErrs = append(reconciliationErrs, fmt.Errorf("reconcile stuck publish action for session %s: %w", sessionID, ferr))
 			continue
 		}
 		if changed {
 			s.logger.Info().Str("session_id", sessionID.String()).Msg("reconciled stuck PR-level action to failed: no live backing job")
 		}
 	}
+	return errors.Join(reconciliationErrs...)
 }
 
 func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error {
@@ -1410,10 +1582,12 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 	if err != nil {
 		return err
 	}
-	token, err := s.getInstallationTokenForRepo(ctx, orgID, &repo)
+	resolution, err := s.getInstallationResolutionForRepo(ctx, orgID, &repo)
 	if err != nil {
 		return err
 	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "pr_health_enrichment")
+	token := resolution.Token
 	owner, repoName := splitRepo(pr.GitHubRepo)
 	details, err := s.fetchPullRequestDetails(ctx, token, owner, repoName, pr.GitHubPRNumber)
 	if err != nil {
