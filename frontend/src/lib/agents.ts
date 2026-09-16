@@ -51,7 +51,7 @@ export const AGENTS: readonly AgentMeta[] = [
     label: "Codex",
     short: "CX",
     color: "#10a37f",
-    description: "OpenAI Codex (GPT-5 models)",
+    description: "OpenAI Codex (GPT models)",
     providerKey: "openai",
     models: AVAILABLE_CODEX_MODELS,
     envVars: [
