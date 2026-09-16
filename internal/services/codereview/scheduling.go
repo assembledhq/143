@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -234,6 +235,11 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 		if requesterID != nil && (snapshot.State != "open" || snapshot.IsDraft) {
 			return ErrReviewIneligible
 		}
+		if latestErr == nil {
+			if err := adoptLegacyScheduledSession(ctx, tx, state, latest, snapshot.BaseRef, now); err != nil {
+				return err
+			}
+		}
 		changed := state.HeadSHA != snapshot.HeadSHA || state.BaseSHA != snapshot.BaseSHA || state.BaseRef != snapshot.BaseRef
 		if changed || state.LastMaterialChangeAt == nil {
 			state.LastMaterialChangeAt = &now
@@ -361,6 +367,9 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 				return err
 			}
 		}
+		if state.PendingInput == nil {
+			return nil
+		}
 		wake := now
 		if state.EligibleAt != nil {
 			wake = *state.EligibleAt
@@ -400,6 +409,17 @@ func applyScheduleWait(state *models.CodeReviewPRState, policy models.CodeReview
 	state.WaitReason = models.CodeReviewWaitNone
 	state.RetryAt = nil
 	settings := policy.SchedulingPolicy.Effective()
+	// Approval is permanent for automatic admission. Clear the intent before
+	// draft/policy/pause holds can turn it into a perpetual polling loop.
+	if !explicit && approved {
+		state.State = models.CodeReviewSchedulePaused
+		state.WaitReason = models.CodeReviewWaitApproved
+		state.PendingInput = nil
+		state.PendingRequestID = nil
+		state.FirstPendingAt = nil
+		state.EligibleAt = nil
+		return
+	}
 	switch {
 	case state.IsDraft:
 		state.WaitReason = models.CodeReviewWaitDraft
@@ -407,8 +427,6 @@ func applyScheduleWait(state *models.CodeReviewPRState, policy models.CodeReview
 		state.WaitReason = models.CodeReviewWaitPolicy
 	case !explicit && (state.AutomaticPaused || !settings.AutomaticReReview):
 		state.WaitReason = models.CodeReviewWaitPaused
-	case !explicit && approved:
-		state.WaitReason = models.CodeReviewWaitApproved
 	}
 	if state.WaitReason != models.CodeReviewWaitNone {
 		state.State = models.CodeReviewSchedulePaused
@@ -513,6 +531,9 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 			current.LastAgentStartAt = lastStart
 		}
 		applyScheduleWait(current, policy.Config, intent.Input.ExplicitRequest, approved, intent.Mode, now)
+		if current.PendingInput == nil {
+			return finish()
+		}
 		if current.RetryAt != nil {
 			return wait(*current.RetryAt)
 		}
@@ -563,6 +584,11 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 			at := now.Add(5 * time.Minute)
 			current.RetryAt = &at
 			return wait(at)
+		}
+		if !result.Reused {
+			if err := bindScheduledSession(ctx, tx, in.OrgID, result.SessionID, current.Generation); err != nil {
+				return err
+			}
 		}
 		if in.TriggeringDisputeID != nil {
 			if err := db.NewCodeReviewDisputeStore(tx).MarkReassessmentStarted(ctx, in.OrgID, *in.TriggeringDisputeID, result.SessionID); err != nil {
@@ -655,7 +681,10 @@ func (s *Service) retryScheduledReview(ctx context.Context, input RetryReviewInp
 		if err != nil {
 			return err
 		}
-		state.Generation++
+		observeScheduledStart(state, snapshot, s.scheduling.now())
+		if err := bindScheduledSession(ctx, tx, input.OrgID, result.SessionID, state.Generation); err != nil {
+			return err
+		}
 		state.ActiveSessionID = &result.SessionID
 		state.State = models.CodeReviewScheduleRunning
 		_, _, err = db.RecordCodeReviewRequest(ctx, tx, input.OrgID, source.RepositoryID, source.PullRequestID, "retry", identity, models.CodeReviewReviewNow, identity, state.Generation, nil)
@@ -701,8 +730,11 @@ func (s *Service) handleSerializedReviewChanged(ctx context.Context, input Revie
 		if err != nil {
 			return err
 		}
-		if result.SessionID != uuid.Nil {
-			state.Generation++
+		if result.SessionID != uuid.Nil && !result.Reused {
+			observeScheduledStart(state, snapshot, s.scheduling.now())
+			if err := bindScheduledSession(ctx, tx, input.OrgID, result.SessionID, state.Generation); err != nil {
+				return err
+			}
 			state.ActiveSessionID = &result.SessionID
 			state.State = models.CodeReviewScheduleRunning
 		}
@@ -711,9 +743,92 @@ func (s *Service) handleSerializedReviewChanged(ctx context.Context, input Revie
 	return result, err
 }
 
-// ValidateScheduledExecution is the worker freshness fence before fan-out and
-// publication. It also catches draft/base/close transitions whose webhook was
-// delayed or missed, preserving a replacement before stopping the old attempt.
+// schedule_generation is independent of change_key: retries and disputes keep
+// their own identity keys, while every newly allocated scheduled session is
+// bound to the generation that admitted it in the same transaction.
+func bindScheduledSession(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID, generation int64) error {
+	_, err := tx.Exec(ctx, `UPDATE sessions SET revision_context=jsonb_set(COALESCE(revision_context,'{}'::jsonb),'{schedule_generation}',to_jsonb($3::bigint)) WHERE org_id=$1 AND id=$2`, orgID, sessionID, generation)
+	return err
+}
+
+func scheduledSessionGeneration(raw json.RawMessage) (int64, bool, error) {
+	var value struct {
+		Generation json.RawMessage `json:"schedule_generation"`
+		ChangeKey  string          `json:"change_key"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return 0, false, err
+	}
+	if len(value.Generation) != 0 {
+		var generation int64
+		if err := json.Unmarshal(value.Generation, &generation); err != nil {
+			return 0, false, err
+		}
+		if generation < 1 {
+			return 0, false, fmt.Errorf("invalid review schedule generation")
+		}
+		return generation, true, nil
+	}
+	if strings.HasPrefix(value.ChangeKey, "schedule:") {
+		generation, err := strconv.ParseInt(strings.TrimPrefix(value.ChangeKey, "schedule:"), 10, 64)
+		if err != nil || generation < 1 {
+			return 0, false, fmt.Errorf("invalid legacy review schedule generation %q", value.ChangeKey)
+		}
+		return generation, true, nil
+	}
+	return 0, false, nil
+}
+
+func observeScheduledStart(state *models.CodeReviewPRState, snapshot ghservice.CodeReviewPullRequestSnapshot, now time.Time) {
+	state.Generation++
+	if state.LastMaterialChangeAt == nil || state.HeadSHA != snapshot.HeadSHA || state.BaseSHA != snapshot.BaseSHA || state.BaseRef != snapshot.BaseRef {
+		state.LastMaterialChangeAt = &now
+	}
+	state.HeadSHA, state.BaseSHA, state.BaseRef = snapshot.HeadSHA, snapshot.BaseSHA, snapshot.BaseRef
+	state.IsDraft = snapshot.IsDraft
+	state.SnapshotObservedAt = &now
+}
+
+// Adopt only the latest, still-active untagged attempt and never reinterpret a
+// pending forced replacement as its provenance. Bind before any generation
+// advance so old sessions remain fenced even when hashes have not changed.
+func adoptLegacyScheduledSession(ctx context.Context, tx pgx.Tx, state *models.CodeReviewPRState, latest models.CodeReviewSessionMetadata, baseRef string, now time.Time) error {
+	if latest.Status != models.CodeReviewSessionStatusQueued && latest.Status != models.CodeReviewSessionStatusRunning {
+		return nil
+	}
+	session, err := db.NewSessionStore(tx).GetByID(ctx, latest.OrgID, latest.SessionID)
+	if err != nil {
+		return err
+	}
+	_, bound, err := scheduledSessionGeneration(session.RevisionContext)
+	if err != nil || bound {
+		return err
+	}
+	if state.PendingInput != nil {
+		var pending scheduledReviewIntent
+		if err := json.Unmarshal(state.PendingInput, &pending); err != nil {
+			return err
+		}
+		if pending.Force {
+			return nil
+		}
+	}
+	if state.Generation == 0 {
+		// Legacy sessions predate the PR state row. Establish their baseline
+		// before binding; an equivalent first event must not revoke them.
+		state.Generation = 1
+		state.HeadSHA, state.BaseSHA, state.BaseRef = latest.HeadSHA, latest.BaseSHA, baseRef
+		state.LastMaterialChangeAt = &now
+	}
+	if state.HeadSHA != latest.HeadSHA || state.BaseSHA != latest.BaseSHA || (state.ActiveSessionID != nil && *state.ActiveSessionID != latest.SessionID) {
+		return nil
+	}
+	return bindScheduledSession(ctx, tx, latest.OrgID, latest.SessionID, state.Generation)
+}
+
+// ValidateScheduledExecution fences fan-out and publication by both provider
+// revision and persisted admission generation. Revocation is durable because
+// workers deliberately finish their jobs successfully when this returns false.
 func (s *Service) ValidateScheduledExecution(ctx context.Context, orgID, prID, sessionID uuid.UUID) (bool, error) {
 	if !s.SchedulingEnabled() {
 		return true, nil
@@ -722,8 +837,19 @@ func (s *Service) ValidateScheduledExecution(ctx context.Context, orgID, prID, s
 	if err != nil {
 		return false, err
 	}
-	valid := false
+	valid, refreshTarget := false, false
 	err = s.scheduling.store.WithLockedPR(ctx, orgID, metadata.RepositoryID, prID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
+		store := db.NewCodeReviewStore(tx)
+		metadata, err := store.GetBySessionID(ctx, orgID, sessionID)
+		if err != nil {
+			return err
+		}
+		if metadata.PullRequestID != prID {
+			return fmt.Errorf("review session does not belong to pull request")
+		}
+		if metadata.Status == models.CodeReviewSessionStatusStale || metadata.Status == models.CodeReviewSessionStatusCancelled || metadata.Status == models.CodeReviewSessionStatusFailed {
+			return nil
+		}
 		pr, err := db.NewPullRequestStore(tx).GetByID(ctx, orgID, prID)
 		if err != nil {
 			return err
@@ -732,14 +858,56 @@ func (s *Service) ValidateScheduledExecution(ctx context.Context, orgID, prID, s
 		if err != nil {
 			return err
 		}
-		valid = snapshot.State == "open" && !snapshot.IsDraft && snapshot.HeadSHA == metadata.HeadSHA && snapshot.BaseSHA == metadata.BaseSHA
-		return nil
+		latest, err := store.GetLatestByPullRequest(ctx, orgID, prID)
+		if err != nil {
+			return err
+		}
+		if latest.SessionID == sessionID {
+			if err := adoptLegacyScheduledSession(ctx, tx, state, latest, snapshot.BaseRef, s.scheduling.now()); err != nil {
+				return err
+			}
+		}
+		session, err := db.NewSessionStore(tx).GetByID(ctx, orgID, sessionID)
+		if err != nil {
+			return err
+		}
+		generation, bound, err := scheduledSessionGeneration(session.RevisionContext)
+		if err != nil {
+			return err
+		}
+		refreshTarget = snapshot.State != "open" || snapshot.IsDraft || snapshot.HeadSHA != metadata.HeadSHA || snapshot.BaseSHA != metadata.BaseSHA
+		valid = !refreshTarget && bound && generation == state.Generation
+		if !valid && !refreshTarget && (metadata.Status == models.CodeReviewSessionStatusQueued || metadata.Status == models.CodeReviewSessionStatusRunning) {
+			_, err = store.MarkStale(ctx, orgID, sessionID, "review scheduling target superseded")
+		}
+		return err
 	})
 	if err != nil || valid {
 		return valid, err
 	}
-	_, err = s.scheduleReview(ctx, ReviewChangedInput{OrgID: orgID, RepositoryID: metadata.RepositoryID, PullRequestID: prID}, models.CodeReviewEnsureCurrent, false, nil)
-	return false, err
+	if refreshTarget {
+		// Persist replacement intent before revoking the old session. If the
+		// refresh fails, its worker must retry and can still recover the intent.
+		if _, err = s.scheduleReview(ctx, ReviewChangedInput{OrgID: orgID, RepositoryID: metadata.RepositoryID, PullRequestID: prID}, models.CodeReviewEnsureCurrent, false, nil); err != nil {
+			return false, err
+		}
+		err = s.scheduling.store.WithLockedPR(ctx, orgID, metadata.RepositoryID, prID, func(tx pgx.Tx, _ *models.CodeReviewPRState) error {
+			store := db.NewCodeReviewStore(tx)
+			current, err := store.GetBySessionID(ctx, orgID, sessionID)
+			if err != nil {
+				return err
+			}
+			if current.Status != models.CodeReviewSessionStatusQueued && current.Status != models.CodeReviewSessionStatusRunning {
+				return nil
+			}
+			_, err = store.MarkStale(ctx, orgID, sessionID, "review scheduling target superseded")
+			return err
+		})
+		if err != nil {
+			return false, err
+		}
+	}
+	return false, s.cancelStaleScheduledThreads(ctx, orgID, prID)
 }
 
 // Provider outages retain intent with a visible reason and release the worker

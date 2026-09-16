@@ -29,11 +29,17 @@ type schedulingSnapshotFixture struct {
 	sync.Mutex
 	snapshot ghservice.CodeReviewPullRequestSnapshot
 	err      error
+	calls    int
+	failCall int
 }
 
 func (f *schedulingSnapshotFixture) GetCodeReviewPullRequestSnapshot(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewPullRequestSnapshot, error) {
 	f.Lock()
 	defer f.Unlock()
+	f.calls++
+	if f.calls == f.failCall {
+		return ghservice.CodeReviewPullRequestSnapshot{}, fmt.Errorf("snapshot refresh unavailable")
+	}
 	return f.snapshot, f.err
 }
 func (f *schedulingSnapshotFixture) update(fn func(*ghservice.CodeReviewPullRequestSnapshot)) {
@@ -81,6 +87,24 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 	}{
 		{"push burst restart and manual joining", testSchedulingBurst},
 		{"policy patch and historical compatibility", testSchedulingPolicyCompatibility},
+		{"same head context supersession", testSchedulingGenerationFence},
+		{"approved automatic intent terminates", testSchedulingApprovalTerminal},
+		{"legacy generation compatibility", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingGenerationPath(t, p, org, repo, pr, snapshot, "legacy")
+		}},
+		{"legacy change key fence", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingGenerationPath(t, p, org, repo, pr, snapshot, "legacy_key")
+		}},
+		{"untagged pending supersession fence", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingGenerationPath(t, p, org, repo, pr, snapshot, "legacy_pending")
+		}},
+		{"retry generation fence", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingGenerationPath(t, p, org, repo, pr, snapshot, "retry")
+		}},
+		{"dispute generation fence", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingGenerationPath(t, p, org, repo, pr, snapshot, "dispute")
+		}},
+		{"snapshot refresh failure preserves replacement recovery", testSchedulingRefreshRecovery},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -229,4 +253,208 @@ func testSchedulingPolicyCompatibility(t *testing.T, pool *pgxpool.Pool, org, re
 	reset, err := store.PatchPolicy(ctx, org, []byte(`{"scheduling_policy":null}`), restored.Version, nil)
 	require.NoError(t, err, "explicit null resets override")
 	require.Equal(t, models.CodeReviewSchedulingSettings{AutomaticReReview: true, QuietPeriodSeconds: 60}, reset.SchedulingPolicy.Effective(), "reset resolves documented defaults")
+}
+
+// Each fixture owns a distinct tenant, so these lifecycle scenarios run in parallel.
+func schedulingLifecycleService(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) (*Service, func() context.Context, uuid.UUID) {
+	t.Helper()
+	ctx := context.Background()
+	store := db.NewCodeReviewStore(pool)
+	config := models.DefaultCodeReviewPolicyConfig()
+	zero := 0
+	config.SchedulingPolicy = &models.CodeReviewSchedulingPolicy{QuietPeriodSeconds: &zero, MinimumIntervalSeconds: &zero}
+	_, err := store.SavePolicy(ctx, org, config, nil)
+	require.NoError(t, err, "save immediate scheduling policy")
+	service := NewService(store, store, db.NewSessionStore(pool), db.NewJobStore(pool), zerolog.Nop(), Config{})
+	service.SetScheduling(db.NewCodeReviewScheduleStore(pool), snapshot)
+	claim := func() context.Context {
+		token := uuid.New()
+		var id uuid.UUID
+		err := pool.QueryRow(ctx, `UPDATE jobs SET status='running',lock_token=$3,lease_expires_at=now()+interval '5 minutes',attempts=attempts+1 WHERE org_id=$1 AND job_type=$2 AND status='pending' RETURNING id`, org, models.JobTypeReconcileCodeReviewSchedule, token).Scan(&id)
+		require.NoError(t, err, "claim scheduling wake with lease")
+		return jobctx.WithLockToken(jobctx.WithJobID(ctx, id), token)
+	}
+	_, err = service.scheduleReview(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr, ExplicitRequest: true, GitHubDeliveryID: uuid.NewString(), TriggerSource: models.CodeReviewTriggerSourceSlashCommand}, models.CodeReviewReviewNow, false, nil)
+	require.NoError(t, err, "queue initial explicit review")
+	require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "start initial review")
+	metadata, err := store.GetLatestByPullRequest(ctx, org, pr)
+	require.NoError(t, err, "read initial review")
+	return service, claim, metadata.SessionID
+}
+
+func testSchedulingGenerationFence(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+	testSchedulingGenerationPath(t, pool, org, repo, pr, snapshot, "scheduled")
+}
+
+func testSchedulingGenerationPath(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture, path string) {
+	ctx := context.Background()
+	service, claim, sessionID := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
+	switch path {
+	case "legacy":
+		_, err := pool.Exec(ctx, `UPDATE sessions SET revision_context=revision_context-'schedule_generation'-'change_key' WHERE org_id=$1 AND id=$2`, org, sessionID)
+		require.NoError(t, err, "represent untagged legacy session")
+		_, err = pool.Exec(ctx, `DELETE FROM code_review_pr_state WHERE org_id=$1 AND pull_request_id=$2`, org, pr)
+		require.NoError(t, err, "legacy session predates scheduling state")
+	case "legacy_key":
+		_, err := pool.Exec(ctx, `UPDATE sessions SET revision_context=revision_context-'schedule_generation' WHERE org_id=$1 AND id=$2`, org, sessionID)
+		require.NoError(t, err, "represent original schedule change-key provenance")
+	case "retry", "dispute":
+		_, err := pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='failed',retryable_failure=true WHERE org_id=$1 AND session_id=$2`, org, sessionID)
+		require.NoError(t, err, "terminalize source attempt")
+		_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND job_type=$2`, org, models.JobTypeRunCodeReview)
+		require.NoError(t, err, "release source starter")
+		if path == "retry" {
+			_, err = pool.Exec(ctx, `INSERT INTO pull_request_health_current(pull_request_id,org_id,version,head_sha,base_sha,summary_json) VALUES($1,$2,1,$3,$4,'{}')`, pr, org, snapshot.snapshot.HeadSHA, snapshot.snapshot.BaseSHA)
+			require.NoError(t, err, "seed authoritative retry revision")
+			service.SetRetryDependencies(db.NewPullRequestStore(pool), &pullRequestSyncerStub{})
+			result, err := service.RetryReview(ctx, RetryReviewInput{OrgID: org, SessionID: sessionID})
+			require.NoError(t, err, "start actual serialized retry")
+			sessionID = result.SessionID
+		} else {
+			result, err := service.HandleReviewChanged(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr, GitHubRepo: "test/repo", GitHubPRNumber: 17, GitHubPRURL: snapshot.snapshot.HTMLURL, ExplicitRequest: true, ChangeKey: "dispute:test", ChangeReason: "dispute", TriggerSource: models.CodeReviewTriggerSourceSlashCommand})
+			require.NoError(t, err, "start serialized dispute reassessment")
+			sessionID = result.SessionID
+		}
+		require.NotEqual(t, uuid.Nil, sessionID, "alternate admission allocates a session")
+		allowed, err := service.ValidateScheduledExecution(ctx, org, pr, sessionID)
+		require.NoError(t, err, "validate alternate admission before ordinary scheduler observation")
+		require.True(t, allowed, "fresh retry or dispute has generation authority")
+	}
+	// A second equivalent explicit request joins the generation without revoking it.
+	_, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow})
+	require.NoError(t, err, "queue equivalent manual join")
+	allowed, err := service.ValidateScheduledExecution(ctx, org, pr, sessionID)
+	require.NoError(t, err, "validate equivalent join")
+	require.True(t, allowed, "same generation keeps execution authority")
+	_, err = pool.Exec(ctx, `INSERT INTO session_threads(org_id,session_id,agent_type,label,status) VALUES($1,$2,'codex','Code review: generation test','running')`, org, sessionID)
+	require.NoError(t, err, "start old generation reviewer thread")
+	canceller := &schedulingThreadCanceller{pool: pool}
+	service.SetThreadCanceller(canceller)
+	changed := ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr, ExplicitRequest: true, GitHubDeliveryID: uuid.NewString(), TriggerSource: models.CodeReviewTriggerSourceSlashCommand, RequestContext: &ReviewRequestContext{Source: "github_comment", Body: "Please focus on the authorization boundary."}}
+	_, err = service.scheduleReview(ctx, changed, models.CodeReviewReviewNow, false, nil)
+	require.NoError(t, err, "persist changed request context on identical head and base")
+	pending, err := service.GetSchedule(ctx, org, pr)
+	require.NoError(t, err, "read replacement intent before fence")
+	if path == "legacy_pending" {
+		_, err = pool.Exec(ctx, `UPDATE sessions SET revision_context=revision_context-'schedule_generation'-'change_key' WHERE org_id=$1 AND id=$2`, org, sessionID)
+		require.NoError(t, err, "represent upgrade with old untagged session and already advanced generation")
+	}
+	allowed, err = service.ValidateScheduledExecution(ctx, org, pr, sessionID)
+	require.NoError(t, err, "fence superseded same-head session")
+	require.False(t, allowed, "changed context must revoke old generation publication")
+	require.Equal(t, []uuid.UUID{sessionID}, canceller.cancelled, "postcommit cancellation targets only obsolete session")
+	stale, err := db.NewCodeReviewStore(pool).GetBySessionID(ctx, org, sessionID)
+	require.NoError(t, err, "read durably revoked attempt")
+	require.Equal(t, models.CodeReviewSessionStatusStale, stale.Status, "false worker result must durably stale obsolete session")
+	after, err := service.GetSchedule(ctx, org, pr)
+	require.NoError(t, err, "read preserved replacement")
+	require.Equal(t, pending.PendingInput, after.PendingInput, "generation fence preserves replacement request context")
+	require.Equal(t, pending.Generation, after.Generation, "fence cannot invent a newer replacement generation")
+	require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "replacement can start after stale attempt")
+	replacement, err := db.NewCodeReviewStore(pool).GetLatestByPullRequest(ctx, org, pr)
+	require.NoError(t, err, "read replacement session")
+	require.NotEqual(t, sessionID, replacement.SessionID, "changed context creates a new assessment")
+	allowed, err = service.ValidateScheduledExecution(ctx, org, pr, replacement.SessionID)
+	require.NoError(t, err, "validate replacement generation")
+	require.True(t, allowed, "current replacement retains publication authority")
+
+	allowed, err = service.ValidateScheduledExecution(ctx, org, pr, sessionID)
+	require.NoError(t, err, "recheck old worker after replacement starts")
+	require.False(t, allowed, "old worker cannot regain authority after replacement")
+	replacement, err = db.NewCodeReviewStore(pool).GetBySessionID(ctx, org, replacement.SessionID)
+	require.NoError(t, err, "read unaffected replacement")
+	require.Equal(t, models.CodeReviewSessionStatusQueued, replacement.Status, "staling old session must not stale replacement")
+}
+
+func testSchedulingApprovalTerminal(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+	ctx := context.Background()
+	service, claim, sessionID := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
+	_, err := pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='completed',decision='approved',github_review_id=42 WHERE org_id=$1 AND session_id=$2`, org, sessionID)
+	require.NoError(t, err, "complete submitted approval")
+	_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND job_type=$2`, org, models.JobTypeRunCodeReview)
+	require.NoError(t, err, "complete initial starter")
+	snapshot.update(func(s *ghservice.CodeReviewPullRequestSnapshot) {
+		s.HeadSHA = strings.Repeat("c", 40)
+		s.IsDraft = true
+	})
+	require.NoError(t, service.PauseSchedule(ctx, org, pr, true), "also pause automatic scheduling")
+	_, err = db.NewCodeReviewStore(pool).PatchPolicy(ctx, org, []byte(`{"enabled":false}`), 1, nil)
+	require.NoError(t, err, "also disable review policy")
+	_, err = service.QueueReviewChanged(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr})
+	require.NoError(t, err, "automatic push after historical approval")
+	// A pre-existing wake must finish successfully, including after competing holds.
+	require.NoError(t, service.scheduling.store.WithLockedPR(ctx, org, repo, pr, func(tx pgx.Tx, _ *models.CodeReviewPRState) error {
+		return db.UpsertCodeReviewWake(ctx, tx, org, pr, time.Now())
+	}), "represent existing approved-target wake")
+	require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "approved automatic wake finishes")
+	state, err := service.GetSchedule(ctx, org, pr)
+	require.NoError(t, err, "read terminal automatic intent")
+	require.Equal(t, models.CodeReviewWaitApproved, state.WaitReason, "permanent approval takes precedence over transient holds")
+	require.Nil(t, state.PendingInput, "approval discards automatic pending intent")
+	require.Nil(t, state.PendingRequestID, "approval leaves no pending request")
+	require.Nil(t, state.FirstPendingAt, "approval clears pending age")
+	require.Nil(t, state.EligibleAt, "approval clears eligibility timer")
+	require.Nil(t, state.RetryAt, "approval never polls forever")
+	require.NoError(t, service.scheduling.store.RepairMissingWakes(ctx), "repair runs after terminal approval")
+	var active int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE org_id=$1 AND job_type=$2 AND status IN ('pending','running')`, org, models.JobTypeReconcileCodeReviewSchedule).Scan(&active), "count repaired wakes")
+	require.Zero(t, active, "repair cannot recreate automatic approval wake")
+	snapshot.update(func(s *ghservice.CodeReviewPullRequestSnapshot) { s.IsDraft = false })
+	_, err = db.NewCodeReviewStore(pool).PatchPolicy(ctx, org, []byte(`{"enabled":true}`), 2, nil)
+	require.NoError(t, err, "reenable policy for explicit request")
+	_, err = service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow})
+	require.NoError(t, err, "explicit review now remains available after approval")
+	require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "explicit review starts despite approval and automatic pause")
+	latest, err := db.NewCodeReviewStore(pool).GetLatestByPullRequest(ctx, org, pr)
+	require.NoError(t, err, "read explicit replacement")
+	require.NotEqual(t, sessionID, latest.SessionID, "explicit request creates requested latest-head assessment")
+}
+
+// This fixture checks visibility from another connection, proving cancellation
+// happens after durable revocation commits rather than inside its transaction.
+type schedulingThreadCanceller struct {
+	pool      *pgxpool.Pool
+	cancelled []uuid.UUID
+}
+
+func (c *schedulingThreadCanceller) CancelActiveThreads(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) (int, error) {
+	var allStale bool
+	if err := c.pool.QueryRow(ctx, `SELECT bool_and(status='stale') FROM code_review_session_metadata WHERE org_id=$1 AND session_id=ANY($2)`, orgID, sessionIDs).Scan(&allStale); err != nil {
+		return 0, err
+	}
+	if !allStale {
+		return 0, fmt.Errorf("cancellation preceded committed revocation")
+	}
+	tag, err := c.pool.Exec(ctx, `UPDATE session_threads SET status='cancelled' WHERE org_id=$1 AND session_id=ANY($2) AND status IN ('pending','running','awaiting_input')`, orgID, sessionIDs)
+	if err != nil {
+		return 0, err
+	}
+	c.cancelled = append(c.cancelled, sessionIDs...)
+	return int(tag.RowsAffected()), nil
+}
+
+func testSchedulingRefreshRecovery(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+	ctx := context.Background()
+	service, claim, sessionID := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
+	snapshot.Lock()
+	snapshot.snapshot.HeadSHA = strings.Repeat("d", 40)
+	snapshot.failCall = snapshot.calls + 2
+	snapshot.Unlock()
+	allowed, err := service.ValidateScheduledExecution(ctx, org, pr, sessionID)
+	require.Error(t, err, "failed second provider refresh must retry worker")
+	require.False(t, allowed, "provider mismatch never permits publication")
+	old, err := db.NewCodeReviewStore(pool).GetBySessionID(ctx, org, sessionID)
+	require.NoError(t, err, "read source after unavailable refresh")
+	require.Equal(t, models.CodeReviewSessionStatusQueued, old.Status, "source remains recoverable until replacement intent commits")
+	allowed, err = service.ValidateScheduledExecution(ctx, org, pr, sessionID)
+	require.NoError(t, err, "worker retry recovers latest intent")
+	require.False(t, allowed, "obsolete source remains denied")
+	pending, err := service.GetSchedule(ctx, org, pr)
+	require.NoError(t, err, "read recovered target")
+	require.NotNil(t, pending.PendingInput, "replacement must survive failed refresh and worker retry")
+	require.Equal(t, strings.Repeat("d", 40), pending.HeadSHA, "replacement targets current provider head")
+	require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "recovered replacement starts")
+	latest, err := db.NewCodeReviewStore(pool).GetLatestByPullRequest(ctx, org, pr)
+	require.NoError(t, err, "read recovered review")
+	require.NotEqual(t, sessionID, latest.SessionID, "recovery produces replacement review")
 }
