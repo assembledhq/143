@@ -38,7 +38,7 @@ describe("Review now", () => {
   });
   it("explains and disables an ineligible request", async () => {
     enableScheduling();
-    renderWithProviders(<ReviewNowButton prID="pr-1" disabledReason="Mark this PR ready before requesting review." />);
+    renderWithProviders(<ReviewNowButton prID="pr-1" disabledReason="This PR is closed." />);
     expect(await screen.findByRole("button", { name: "Review now" })).toBeDisabled();
   });
 });
@@ -120,5 +120,39 @@ describe("queue pagination", () => {
     await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("No reviews waiting")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+  });
+});
+
+
+describe("draft eligibility", () => {
+  it.each([
+    { name: "open draft", state: "waiting", wait_reason: "quiet_period", enabled: true },
+    { name: "legacy draft hold", state: "paused", wait_reason: "draft", enabled: true },
+    { name: "closed draft", state: "closed", wait_reason: "", enabled: false },
+    { name: "disabled policy", state: "paused", wait_reason: "policy_disabled", enabled: false },
+  ])("preserves Review now eligibility for $name", async ({ state, wait_reason, enabled }) => {
+    enableScheduling();
+    const target = queuedTarget(1);
+    server.use(http.get("*/api/v1/code-review-targets", () => HttpResponse.json({ data: [{ ...target,
+      schedule: { ...target.schedule, is_draft: true, state, wait_reason },
+    }], meta: {} })));
+    const requests: unknown[] = [];
+    server.use(http.post("*/api/v1/pull-requests/:id/code-review/requests", async ({ request }) => {
+      requests.push(await request.json());
+      return HttpResponse.json({ data: { disposition: "queued" } }, { status: 202 });
+    }));
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledReviews enabled canManage />);
+    const queue = within(await screen.findByRole("table", { name: "Review queue" }));
+    const button = await queue.findByRole("button", { name: "Review now" });
+    if (enabled) {
+      expect(button).toBeEnabled();
+      await user.click(button);
+      await waitFor(() => expect(requests).toEqual([{ request_id: expect.any(String), mode: "review_now" }]));
+    } else expect(button).toBeDisabled();
+    if (wait_reason === "draft") {
+      expect(queue.getByText("Review queued")).toBeInTheDocument();
+      expect(queue.queryByText(/PR to be ready/)).not.toBeInTheDocument();
+    }
   });
 });

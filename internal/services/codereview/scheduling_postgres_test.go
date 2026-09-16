@@ -106,6 +106,30 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		run  func(*testing.T, *pgxpool.Pool, uuid.UUID, uuid.UUID, uuid.UUID, *schedulingSnapshotFixture)
 	}{
 		{"push burst restart and manual joining", testSchedulingBurst},
+		{"draft automatic", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDraft(t, p, org, repo, pr, snapshot, "automatic")
+		}},
+		{"draft manual", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDraft(t, p, org, repo, pr, snapshot, "manual")
+		}},
+		{"draft retry", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDraft(t, p, org, repo, pr, snapshot, "retry")
+		}},
+		{"draft dispute", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDraft(t, p, org, repo, pr, snapshot, "dispute")
+		}},
+		{"draft legacy_hold", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDraft(t, p, org, repo, pr, snapshot, "legacy_hold")
+		}},
+		{"draft active_missed", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDraft(t, p, org, repo, pr, snapshot, "active_missed")
+		}},
+		{"draft active_webhook", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDraft(t, p, org, repo, pr, snapshot, "active_webhook")
+		}},
+		{"draft closed", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDraft(t, p, org, repo, pr, snapshot, "closed")
+		}},
 		{"single connection schedule", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testSchedulingSingleConnection(t, p, org, repo, pr, snapshot, "schedule")
 		}},
@@ -263,19 +287,19 @@ func testSchedulingBurst(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UU
 	require.NoError(t, service.ReconcileSchedule(claim(), wake), "manual request reuses completed current-head result")
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM code_review_session_metadata WHERE org_id=$1`, org).Scan(&count), "count after manual joins")
 	require.Equal(t, 1, count, "manual joining must not duplicate an equivalent assessment")
-	// A draft conversion missed by webhooks still prevents worker publication.
+	// A draft conversion missed by webhooks preserves current review authority.
 	_, err = pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='running' WHERE org_id=$1 AND session_id=$2`, org, metadata.SessionID)
 	require.NoError(t, err, "represent active attempt before draft conversion")
 	snapshot.update(func(s *ghservice.CodeReviewPullRequestSnapshot) { s.IsDraft = true })
 	allowed, err := service.ValidateScheduledExecution(ctx, org, pr, metadata.SessionID)
 	require.NoError(t, err, "refresh worker eligibility when webhook was missed")
-	require.False(t, allowed, "draft conversion stops dispatch and publication")
+	require.True(t, allowed, "draft conversion preserves dispatch and publication")
 	held, err = service.GetSchedule(ctx, org, pr)
-	require.NoError(t, err, "read durable draft hold")
-	require.Equal(t, models.CodeReviewWaitDraft, held.WaitReason, "draft retains pending replacement")
+	require.NoError(t, err, "read observed draft status")
+	require.True(t, held.IsDraft, "draft status remains observable without holding review")
 	stale, err := store.GetBySessionID(ctx, org, metadata.SessionID)
 	require.NoError(t, err, "read invalidated active metadata")
-	require.Equal(t, models.CodeReviewSessionStatusStale, stale.Status, "active attempt loses publication authority")
+	require.Equal(t, models.CodeReviewSessionStatusRunning, stale.Status, "draft conversion preserves active attempt authority")
 	snapshot.update(func(s *ghservice.CodeReviewPullRequestSnapshot) { s.State = "closed" })
 	_, err = service.QueueReviewChanged(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr})
 	require.NoError(t, err, "close cancels durable pending work")
@@ -769,4 +793,89 @@ func testSchedulingPreparationFastPaths(t *testing.T, pool *pgxpool.Pool, org, r
 	allowed, err := service.ValidateScheduledExecution(ctx, org, pr, sourceID)
 	require.NoError(t, err, "stale worker revocation needs no fresh provider credentials")
 	require.False(t, allowed, "obsolete worker stays denied during credential outage")
+}
+
+func testSchedulingDraft(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture, scenario string) {
+	ctx := context.Background()
+	service, claim, sourceID := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
+	before, err := service.GetSchedule(ctx, org, pr)
+	require.NoError(t, err, "read pre-draft generation")
+	snapshot.update(func(s *ghservice.CodeReviewPullRequestSnapshot) { s.IsDraft = true })
+	canceller := &schedulingThreadCanceller{pool: pool}
+	service.SetThreadCanceller(canceller)
+	if scenario == "active_missed" || scenario == "active_webhook" {
+		_, err = pool.Exec(ctx, `INSERT INTO session_threads(org_id,session_id,agent_type,label,status) VALUES($1,$2,'codex','Code review: draft transition','running')`, org, sourceID)
+		require.NoError(t, err, "represent active review during draft conversion")
+		if scenario == "active_webhook" {
+			_, err = service.QueueReviewChanged(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr})
+			require.NoError(t, err, "observe draft conversion webhook")
+		}
+		allowed, err := service.ValidateScheduledExecution(ctx, org, pr, sourceID)
+		require.NoError(t, err, "validate current draft review before fanout or publication")
+		require.True(t, allowed, "draft conversion alone must not revoke execution authority")
+		state, err := service.GetSchedule(ctx, org, pr)
+		require.NoError(t, err, "read observed draft state")
+		require.True(t, state.IsDraft, "draft remains observable without acting as a gate")
+		require.Equal(t, before.Generation, state.Generation, "draft conversion does not change review target identity")
+		require.Nil(t, canceller.cancelled, "draft conversion never cancels reviewer threads")
+		active, err := db.NewCodeReviewStore(pool).GetBySessionID(ctx, org, sourceID)
+		require.NoError(t, err, "read unchanged active review")
+		require.Equal(t, models.CodeReviewSessionStatusQueued, active.Status, "draft conversion cannot stale an otherwise current review")
+		return
+	}
+	if scenario == "retry" || scenario == "dispute" {
+		_, err = pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='failed',retryable_failure=true WHERE org_id=$1 AND session_id=$2`, org, sourceID)
+	} else {
+		_, err = pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='completed' WHERE org_id=$1 AND session_id=$2`, org, sourceID)
+		snapshot.update(func(s *ghservice.CodeReviewPullRequestSnapshot) { s.HeadSHA = strings.Repeat("f", 40) })
+	}
+	require.NoError(t, err, "terminalize prior assessment before requesting draft review")
+	_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND job_type=$2`, org, models.JobTypeRunCodeReview)
+	require.NoError(t, err, "finish source starter")
+	switch scenario {
+	case "retry":
+		_, err = service.RetryReview(ctx, RetryReviewInput{OrgID: org, SessionID: sourceID})
+		require.NoError(t, err, "retry failed review while PR is draft")
+	case "dispute":
+		result, err := service.HandleReviewChanged(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr, GitHubRepo: "test/repo", GitHubPRNumber: 17, ExplicitRequest: true, ChangeKey: "dispute:draft", TriggerSource: models.CodeReviewTriggerSourceDisputeReassessment})
+		require.NoError(t, err, "reassess dispute while PR is draft")
+		require.False(t, result.Deferred, "draft does not defer dispute reassessment")
+	case "manual", "closed":
+		userID := uuid.New()
+		_, err = pool.Exec(ctx, `INSERT INTO users(id,org_id,email,name) VALUES($1,$2,$3,'Draft reviewer')`, userID, org, userID.String()+"@example.test")
+		require.NoError(t, err, "seed authorized requester")
+		if scenario == "closed" {
+			snapshot.update(func(s *ghservice.CodeReviewPullRequestSnapshot) { s.State = "closed" })
+		}
+		_, err = service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), RequesterID: &userID, Mode: models.CodeReviewReviewNow})
+		if scenario == "closed" {
+			require.ErrorIs(t, err, ErrReviewIneligible, "closed draft remains ineligible")
+			return
+		}
+		require.NoError(t, err, "authorized Review now accepts an open draft")
+	default:
+		_, err = service.QueueReviewChanged(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr})
+		require.NoError(t, err, "record automatic draft reassessment")
+		if scenario == "legacy_hold" {
+			_, err = pool.Exec(ctx, `UPDATE code_review_pr_state SET state='paused',wait_reason='draft',eligible_at=NULL,retry_at=now()-interval '1 minute' WHERE org_id=$1 AND pull_request_id=$2`, org, pr)
+			require.NoError(t, err, "represent persisted pre-upgrade draft hold")
+			_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND job_type=$2`, org, models.JobTypeReconcileCodeReviewSchedule)
+			require.NoError(t, err, "represent lost legacy draft wake")
+			require.NoError(t, service.scheduling.store.RepairMissingWakes(ctx), "normal repair recovers pending legacy draft hold")
+		}
+	}
+	if scenario != "retry" && scenario != "dispute" {
+		require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "dispatch eligible draft from durable wake")
+	}
+	latest, err := db.NewCodeReviewStore(pool).GetLatestByPullRequest(ctx, org, pr)
+	require.NoError(t, err, "read draft assessment")
+	require.NotEqual(t, sourceID, latest.SessionID, "draft request creates requested replacement")
+	allowed, err := service.ValidateScheduledExecution(ctx, org, pr, latest.SessionID)
+	require.NoError(t, err, "validate new draft review before worker execution")
+	require.True(t, allowed, "draft review can fan out and publish normally")
+	state, err := service.GetSchedule(ctx, org, pr)
+	require.NoError(t, err, "read dispatched draft state")
+	require.True(t, state.IsDraft, "draft observation remains available")
+	require.Equal(t, models.CodeReviewScheduleRunning, state.State, "draft admission has normal running state")
+	require.Equal(t, models.CodeReviewWaitNone, state.WaitReason, "draft leaves no obsolete hold reason")
 }

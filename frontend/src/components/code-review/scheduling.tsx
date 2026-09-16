@@ -44,7 +44,7 @@ export function ReviewNowButton({ prID, disabledReason }: { prID: string; disabl
 }
 const waitLabels: Record<string, string> = {
  quiet_period: "Waiting for changes to settle", minimum_interval: "Waiting for review interval",
- draft: "Waiting for the PR to be ready", manual_pause: "Automatic reviews paused",
+ draft: "Review queued", manual_pause: "Automatic reviews paused",
  policy_disabled: "Review policy disabled", already_approved: "Automatic review stopped after approval",
  active_review: "Waiting for the active review", context_unavailable: "Waiting for GitHub",
 };
@@ -54,7 +54,7 @@ function ScheduleActions({ schedule }: { schedule: CodeReviewSchedule }) {
     mutationFn: () => api.codeReviews.pauseSchedule(schedule.pull_request_id, !schedule.automatic_paused),
     onSuccess: () => { void client.invalidateQueries({ queryKey: scheduleKey }); },
   });
-  const ineligible = schedule.is_draft ? "Mark this PR ready before requesting review." : schedule.state === "closed" ? "This PR is closed." : schedule.wait_reason === "policy_disabled" ? "An administrator must enable the review policy." : undefined;
+  const ineligible = schedule.state === "closed" ? "This PR is closed." : schedule.wait_reason === "policy_disabled" ? "An administrator must enable the review policy." : undefined;
   return <div className="flex flex-wrap items-start gap-2">
     <ReviewNowButton prID={schedule.pull_request_id} disabledReason={ineligible} />
     <DisabledTooltip disabled={pause.isPending} content="Wait for the scheduling change to finish.">

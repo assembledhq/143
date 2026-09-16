@@ -21,7 +21,10 @@ func TestCodeReviewScheduleAdmission(t *testing.T) {
 	}{
 		{name: "automatic waits for cadence", mode: models.CodeReviewEnsureCurrent, reason: models.CodeReviewWaitInterval, state: models.CodeReviewScheduleWaiting, dueMinutes: 15},
 		{name: "review now bypasses timers", mode: models.CodeReviewReviewNow, explicit: true, state: models.CodeReviewScheduleWaiting, dueMinutes: 3},
-		{name: "review now does not bypass draft", mode: models.CodeReviewReviewNow, explicit: true, draft: true, reason: models.CodeReviewWaitDraft, state: models.CodeReviewSchedulePaused},
+		{name: "review now on draft bypasses timers", mode: models.CodeReviewReviewNow, explicit: true, draft: true, state: models.CodeReviewScheduleWaiting, dueMinutes: 3},
+		{name: "automatic draft waits for cadence", mode: models.CodeReviewEnsureCurrent, draft: true, reason: models.CodeReviewWaitInterval, state: models.CodeReviewScheduleWaiting, dueMinutes: 15},
+		{name: "automatic draft respects pause", mode: models.CodeReviewEnsureCurrent, draft: true, paused: true, reason: models.CodeReviewWaitPaused, state: models.CodeReviewSchedulePaused},
+		{name: "draft still requires enabled policy", mode: models.CodeReviewReviewNow, explicit: true, draft: true, disabled: true, reason: models.CodeReviewWaitPolicy, state: models.CodeReviewSchedulePaused},
 		{name: "manual bypasses automatic pause", mode: models.CodeReviewReviewNow, explicit: true, paused: true, state: models.CodeReviewScheduleWaiting, dueMinutes: 3},
 		{name: "automatic respects pause", mode: models.CodeReviewEnsureCurrent, paused: true, reason: models.CodeReviewWaitPaused, state: models.CodeReviewSchedulePaused},
 		{name: "manual respects disabled policy", mode: models.CodeReviewReviewNow, explicit: true, disabled: true, reason: models.CodeReviewWaitPolicy, state: models.CodeReviewSchedulePaused},

@@ -247,7 +247,7 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 		if err != nil {
 			return fmt.Errorf("%w: %w", errScheduleSnapshotUnavailable, err)
 		}
-		if requesterID != nil && (snapshot.State != "open" || snapshot.IsDraft) {
+		if requesterID != nil && snapshot.State != "open" {
 			return ErrReviewIneligible
 		}
 		if latestErr == nil {
@@ -388,9 +388,9 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 		applyScheduleWait(state, policy.Config, input.ExplicitRequest, approved, mode, now)
 		// Revoke obsolete target revisions in the same transaction as replacement
 		// intent. Actual thread cancellation follows commit.
-		if latestErr == nil && (latest.HeadSHA != snapshot.HeadSHA || latest.BaseSHA != snapshot.BaseSHA || baseRefChanged || snapshot.IsDraft) {
+		if latestErr == nil && (latest.HeadSHA != snapshot.HeadSHA || latest.BaseSHA != snapshot.BaseSHA || baseRefChanged) {
 			head := snapshot.HeadSHA
-			if snapshot.IsDraft || latest.BaseSHA != snapshot.BaseSHA || baseRefChanged {
+			if latest.BaseSHA != snapshot.BaseSHA || baseRefChanged {
 				head = ""
 			}
 			_, err := scoped.metadata.MarkStaleForPullRequestExceptHead(ctx, input.OrgID, input.PullRequestID, head, nil)
@@ -441,7 +441,7 @@ func applyScheduleWait(state *models.CodeReviewPRState, policy models.CodeReview
 	state.RetryAt = nil
 	settings := policy.SchedulingPolicy.Effective()
 	// Approval is permanent for automatic admission. Clear the intent before
-	// draft/policy/pause holds can turn it into a perpetual polling loop.
+	// policy/pause holds can turn it into a perpetual polling loop.
 	if !explicit && approved {
 		state.State = models.CodeReviewSchedulePaused
 		state.WaitReason = models.CodeReviewWaitApproved
@@ -452,8 +452,6 @@ func applyScheduleWait(state *models.CodeReviewPRState, policy models.CodeReview
 		return
 	}
 	switch {
-	case state.IsDraft:
-		state.WaitReason = models.CodeReviewWaitDraft
 	case !policy.Enabled:
 		state.WaitReason = models.CodeReviewWaitPolicy
 	case !explicit && (state.AutomaticPaused || !settings.AutomaticReReview):
@@ -703,7 +701,7 @@ func (s *Service) retryScheduledReview(ctx context.Context, input RetryReviewInp
 		if err != nil {
 			return err
 		}
-		if snapshot.IsDraft || snapshot.State != "open" {
+		if snapshot.State != "open" {
 			return ErrReviewIneligible
 		}
 		if snapshot.HeadSHA != source.HeadSHA {
@@ -742,11 +740,6 @@ func (s *Service) handleSerializedReviewChanged(ctx context.Context, input Revie
 		}
 		if snapshot.State != "open" {
 			result.IgnoredReason = "pull_request_closed"
-			return nil
-		}
-		if snapshot.IsDraft {
-			result.Deferred = true
-			result.IgnoredReason = "draft"
 			return nil
 		}
 		active, err := db.HasActiveCodeReview(ctx, tx, input.OrgID, input.PullRequestID, codeReviewJobEnqueueGracePeriod)
@@ -909,8 +902,13 @@ func (s *Service) ValidateScheduledExecution(ctx context.Context, orgID, prID, s
 		if err != nil {
 			return err
 		}
-		refreshTarget = snapshot.State != "open" || snapshot.IsDraft || snapshot.HeadSHA != metadata.HeadSHA || snapshot.BaseSHA != metadata.BaseSHA || snapshot.BaseRef != state.BaseRef
+		refreshTarget = snapshot.State != "open" || snapshot.HeadSHA != metadata.HeadSHA || snapshot.BaseSHA != metadata.BaseSHA || snapshot.BaseRef != state.BaseRef
 		valid = !refreshTarget && bound && generation == state.Generation
+		if valid {
+			now := s.scheduling.now()
+			state.IsDraft = snapshot.IsDraft
+			state.SnapshotObservedAt = &now
+		}
 		if !valid && !refreshTarget && (metadata.Status == models.CodeReviewSessionStatusQueued || metadata.Status == models.CodeReviewSessionStatusRunning) {
 			_, err = store.MarkStale(ctx, orgID, sessionID, "review scheduling target superseded")
 		}

@@ -340,7 +340,7 @@ func (s *Service) retryReview(ctx context.Context, input RetryReviewInput, curre
 	}
 	open := pr.Status == models.PullRequestStatusOpen
 	if currentSnapshot != nil {
-		open = currentSnapshot.State == "open" && !currentSnapshot.IsDraft
+		open = currentSnapshot.State == "open"
 	}
 	if !open {
 		return RetryReviewResult{}, &RetryReviewConflictError{
