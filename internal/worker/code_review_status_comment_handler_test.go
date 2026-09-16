@@ -234,7 +234,9 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 				require.Contains(t, submitter.request.Body, tt.expectedAdditionalBody, "status comment should retain the complete previous verdict during reassessment")
 			}
 			if tt.expectReassessmentHistory {
-				expectedEntry := "- `" + now.Format(time.RFC3339) + "` — **Reassessment started** for `head` — [Follow the review session](https://143.test/sessions/" + sessionID.String() + ")"
+				expectedEntry := "- <relative-time datetime=\"" + now.Format(time.RFC3339) + "\">" +
+					now.Format("Jan 2, 2006 at 3:04 PM MST") +
+					"</relative-time> — **Reassessment started** for `head` — [Follow the review session](https://143.test/sessions/" + sessionID.String() + ")"
 				require.Contains(t, submitter.request.Body, expectedEntry, "reassessment history should identify when the active assessment started and link to its session")
 				require.NotContains(t, submitter.request.Body, "143 Code Reviewer is reassessing this pull request", "reassessment status should appear in history instead of a standalone paragraph")
 				require.NotContains(t, submitter.request.Body, "remains visible until the new review finishes", "reassessment history should replace the redundant visibility explanation")
