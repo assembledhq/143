@@ -248,7 +248,7 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			if tt.schedulingEnabled {
 				require.Contains(t, submitter.request.Body, "[Review now](https://143.test/code-reviews?review_now="+sessionID.String()+")", "enabled worker publishes a usable review action")
 			} else {
-				require.NotContains(t, submitter.request.Body, "[Review now]", "disabled rollout omits the action")
+				require.NotContains(t, submitter.request.Body, "[Review now]", "unavailable scheduling service omits the action")
 			}
 			require.Equal(t, tt.expectedCalls, submitter.calls, "fallback summary should only be hidden after the rolling comment is published")
 			if tt.lockedReviewID != nil {
@@ -357,7 +357,7 @@ func TestCodeReviewStatusCommentReviewNowLink(t *testing.T) {
 		{"failed", models.CodeReviewSessionStatusFailed, true, true},
 		{"cancelled", models.CodeReviewSessionStatusCancelled, true, true},
 		{"superseded", models.CodeReviewSessionStatusStale, true, false},
-		{"rollout disabled", models.CodeReviewSessionStatusCompleted, false, false},
+		{"scheduling service unavailable", models.CodeReviewSessionStatusCompleted, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
