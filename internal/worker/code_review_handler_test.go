@@ -4464,7 +4464,8 @@ func TestCodeReviewStableDeterministicRisk(t *testing.T) {
 
 	policy := models.DefaultCodeReviewPolicyConfig()
 	policy.RiskPolicy.MaxFilesChanged = 1
-	policy.RiskPolicy.MaxLinesChanged = 5
+	policy.RiskPolicy.MaxAdditions = 5
+	policy.RiskPolicy.MaxDeletions = 8
 	policy.RiskPolicy.BlockedPathPatterns = []string{"migrations/**"}
 	policy.RiskPolicy.RequirePassingChecks = true
 	policy.RiskPolicy.RequiredChecks = []string{"tests"}
@@ -4484,8 +4485,20 @@ func TestCodeReviewStableDeterministicRisk(t *testing.T) {
 			},
 			expectedReasonDetails: []models.CodeReviewRiskReason{
 				{Code: models.CodeReviewRiskReasonFilesLimitExceeded, Actual: 2, Limit: 1},
-				{Code: models.CodeReviewRiskReasonLinesLimitExceeded, Actual: 6, Limit: 5},
+				{Code: models.CodeReviewRiskReasonAdditionsLimitExceeded, Actual: 6, Limit: 5},
 				{Code: models.CodeReviewRiskReasonBlockedPath, Subject: "migrations/001.sql"},
+			},
+		},
+		{
+			name:      "counts deletions independently across files",
+			available: true,
+			files: []codereview.PullRequestFile{
+				{Filename: "a.go", Additions: 2, Deletions: 4},
+				{Filename: "b.go", Additions: 3, Deletions: 5},
+			},
+			expectedReasonDetails: []models.CodeReviewRiskReason{
+				{Code: models.CodeReviewRiskReasonFilesLimitExceeded, Actual: 2, Limit: 1},
+				{Code: models.CodeReviewRiskReasonDeletionsLimitExceeded, Actual: 9, Limit: 8},
 			},
 		},
 		{name: "does not publish when changed files are unavailable", available: false, files: []codereview.PullRequestFile{{Filename: "migrations/001.sql", Additions: 10}}},
@@ -5537,7 +5550,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				ChangedFilesAvailable: true,
 			},
 			expected: models.CodeReviewDecisionNeedsHumanReview,
-			reason:   "changed lines 607 exceeds policy limit 300",
+			reason:   "additions 607 exceeds policy limit 300",
 		},
 		{
 			name: "reports satisfied reviewer quorum with complete reviews",
@@ -5617,7 +5630,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			bodyContains: "reviewer quorum 1/1",
 		},
 		{
-			name: "configured line limit applies regardless of filename",
+			name: "configured additions limit applies regardless of filename",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
 				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
@@ -5647,7 +5660,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				ChangedFilesAvailable: true,
 			},
 			expected: models.CodeReviewDecisionNeedsHumanReview,
-			reason:   "changed lines 1200 exceeds policy limit 300",
+			reason:   "additions 1200 exceeds policy limit 300",
 		},
 	}
 

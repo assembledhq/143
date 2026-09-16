@@ -204,7 +204,8 @@ const QUALITY_GATE_DESCRIPTIONS = {
 } as const;
 const NUMBER_POLICY_DESCRIPTIONS: Record<string, string> = {
   "Files changed": "Maximum number of changed files eligible for automatic approval. Reviews still leave comments above this deterministic limit.",
-  "Lines changed": "Maximum total changed lines eligible for automatic approval. Reviews still leave comments above this deterministic limit.",
+  "Additions": "Maximum added lines eligible for automatic approval. Reviews still leave comments above this deterministic limit.",
+  "Deletions": "Maximum deleted lines eligible for automatic approval. Reviews still leave comments above this deterministic limit.",
   "Inline comments": "Maximum inline findings posted to GitHub. Extra findings remain in review evidence; this limit does not make a pull request eligible for approval.",
   "Reviewer quorum": "Minimum configured reviewer agents that must return usable results before automatic approval is eligible. It cannot exceed the reviewer count.",
   "Files changed at least": "Minimum changed-file count that makes this structured PR-description check apply. The default remains in effect until changed.",
@@ -2301,8 +2302,9 @@ function AdvancedPolicySettings({
   const [limitDeepLinkOpen, setLimitDeepLinkOpen] = useState(false);
   useEffect(() => {
     const revealLimitSetting = () => {
-      const settingID = window.location.hash.slice(1);
-      if (settingID !== "policy-max-files-changed" && settingID !== "policy-max-lines-changed") return;
+      const hash = window.location.hash.slice(1);
+      const settingID = hash === "policy-max-lines-changed" ? "policy-max-additions" : hash;
+      if (!["policy-max-files-changed", "policy-max-additions", "policy-max-deletions"].includes(settingID)) return;
       setLimitDeepLinkOpen(true);
       window.setTimeout(() => document.getElementById(settingID)?.scrollIntoView?.({ block: "center" }), 0);
     };
@@ -2346,16 +2348,30 @@ function AdvancedPolicySettings({
                   }
                       />
               </div>
-              <div id="policy-max-lines-changed" className="scroll-mt-24">
+              <div id="policy-max-additions" className="scroll-mt-24">
                       <NumberPolicyInput
-                        label="Lines changed"
-                        serverValue={config?.risk_policy.max_lines_changed}
+                        label="Additions"
+                        serverValue={config?.risk_policy.max_additions}
                         min={1}
                         disabled={!config}
                         autosave={autosave}
                   buildPatch={(value) =>
                     buildConfig((next) => {
-                      next.risk_policy.max_lines_changed = value;
+                      next.risk_policy.max_additions = value;
+                    })
+                  }
+                      />
+              </div>
+              <div id="policy-max-deletions" className="scroll-mt-24">
+                      <NumberPolicyInput
+                        label="Deletions"
+                        serverValue={config?.risk_policy.max_deletions}
+                        min={1}
+                        disabled={!config}
+                        autosave={autosave}
+                  buildPatch={(value) =>
+                    buildConfig((next) => {
+                      next.risk_policy.max_deletions = value;
                     })
                   }
                       />

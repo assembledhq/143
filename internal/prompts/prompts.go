@@ -280,7 +280,8 @@ type CodeReviewReviewerPromptData struct {
 	RequiredReviewerQuorum  int
 	DescriptionRequirements []CodeReviewDescriptionRequirementPromptData
 	MaxFilesChanged         int
-	MaxLinesChanged         int
+	MaxAdditions            int
+	MaxDeletions            int
 	RequirePassingChecks    bool
 	RequireUpToDate         bool
 	AllowForks              bool

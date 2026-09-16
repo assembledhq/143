@@ -288,7 +288,8 @@ func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	require.True(t, config.Enabled, "code reviewer should default enabled so explicit reviewer requests are honored")
 	require.Equal(t, 4, config.InlineCommentLimit, "default inline comment limit should match product design")
 	require.Equal(t, 5, config.RiskPolicy.MaxFilesChanged, "default acceptable-risk file threshold should be conservative")
-	require.Equal(t, 300, config.RiskPolicy.MaxLinesChanged, "default acceptable-risk line threshold should be conservative")
+	require.Equal(t, 300, config.RiskPolicy.MaxAdditions, "default additions threshold should be conservative")
+	require.Equal(t, 300, config.RiskPolicy.MaxDeletions, "default deletions threshold should be conservative")
 	require.False(t, config.RiskPolicy.RequirePassingChecks, "default approval policy should evaluate code without requiring GitHub checks")
 	require.False(t, config.RiskPolicy.ExcludeSensitivePaths, "default approval policy should not block on unconfigured sensitive paths")
 	require.Empty(t, config.RiskPolicy.SensitivePaths, "default approval policy should not assume repository-specific sensitive paths")
@@ -572,7 +573,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			name: "acceptable when every prerequisite passes",
 			input: CodeReviewRiskInput{
 				FilesChanged:      2,
-				LinesChanged:      100,
+				Additions:         100,
 				ChecksPassing:     true,
 				DescriptionPassed: true,
 				UpToDate:          true,
@@ -589,7 +590,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			},
 			input: CodeReviewRiskInput{
 				FilesChanged:         6,
-				LinesChanged:         350,
+				Additions:            350,
 				ChangedPaths:         []string{"internal/auth/session.go"},
 				ChecksPassing:        false,
 				DescriptionPassed:    false,
@@ -599,7 +600,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			},
 			expected: codeReviewRiskEvaluationForTest(
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: 6, Limit: 5},
-				CodeReviewRiskReason{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: 350, Limit: 300},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: 350, Limit: 300},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonChecksFailing},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonDescriptionFailed},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonForkIneligible},
@@ -612,7 +613,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			name: "default ignores failing GitHub checks",
 			input: CodeReviewRiskInput{
 				FilesChanged:      1,
-				LinesChanged:      20,
+				Additions:         20,
 				ChecksPassing:     false,
 				DescriptionPassed: true,
 				Author:            "devin",
@@ -627,7 +628,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			},
 			input: CodeReviewRiskInput{
 				FilesChanged:          1,
-				LinesChanged:          20,
+				Additions:             20,
 				ChecksPassing:         true,
 				RequiredChecksPassing: map[string]bool{"ci/lint": true},
 				DescriptionPassed:     true,
@@ -645,7 +646,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			},
 			input: CodeReviewRiskInput{
 				FilesChanged:      1,
-				LinesChanged:      20,
+				Additions:         20,
 				ChecksPassing:     true,
 				DescriptionPassed: true,
 				Author:            "sam",
@@ -660,7 +661,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			},
 			input: CodeReviewRiskInput{
 				FilesChanged:      1,
-				LinesChanged:      20,
+				Additions:         20,
 				ChecksPassing:     true,
 				DescriptionPassed: true,
 				Author:            "sam",
@@ -676,7 +677,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			},
 			input: CodeReviewRiskInput{
 				FilesChanged:      1,
-				LinesChanged:      20,
+				Additions:         20,
 				ChecksPassing:     true,
 				DescriptionPassed: true,
 				Author:            "sam",
@@ -691,7 +692,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			name: "blocks synthesized reviewer risk signals",
 			input: CodeReviewRiskInput{
 				FilesChanged:          1,
-				LinesChanged:          20,
+				Additions:             20,
 				ChecksPassing:         true,
 				DescriptionPassed:     true,
 				Author:                "devin",
@@ -712,7 +713,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			},
 			input: CodeReviewRiskInput{
 				FilesChanged:      1,
-				LinesChanged:      20,
+				Additions:         20,
 				ChangedPaths:      []string{"internal/api/router.go"},
 				ChecksPassing:     true,
 				DescriptionPassed: true,
@@ -729,7 +730,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			},
 			input: CodeReviewRiskInput{
 				FilesChanged:      1,
-				LinesChanged:      20,
+				Additions:         20,
 				ChangedPaths:      []string{"internal/db/schema/users.go"},
 				ChecksPassing:     true,
 				DescriptionPassed: true,
@@ -743,14 +744,14 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			name: "filename does not alter the configured churn ceiling",
 			input: CodeReviewRiskInput{
 				FilesChanged:      1,
-				LinesChanged:      607,
+				Additions:         607,
 				ChangedPaths:      []string{"docs/design/future/111-session-changesets-and-stacks.md"},
 				ChecksPassing:     true,
 				DescriptionPassed: true,
 				Author:            "devin",
 			},
 			expected: codeReviewRiskEvaluationForTest(
-				CodeReviewRiskReason{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: 607, Limit: 300},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: 607, Limit: 300},
 			),
 		},
 	}

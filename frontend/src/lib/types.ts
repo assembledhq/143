@@ -188,7 +188,8 @@ export interface CodeReviewPolicyConfig {
   };
   risk_policy: {
     max_files_changed: number;
-    max_lines_changed: number;
+    max_additions: number;
+    max_deletions: number;
     semantic_dedupe_cooldown_seconds: number;
     stop_after_deterministic_failure: boolean;
     require_passing_checks: boolean;

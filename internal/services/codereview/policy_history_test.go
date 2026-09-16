@@ -189,3 +189,19 @@ func policyHistoryRecord(orgID uuid.UUID, version int, active bool) models.CodeR
 		CreatedAt: time.Date(2026, 8, 18, version, 0, 0, 0, time.UTC),
 	}
 }
+
+func TestPolicyHistoryIndependentSizeLimits(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	older := policyHistoryRecord(orgID, 2, false)
+	newer := policyHistoryRecord(orgID, 3, true)
+	older.RiskPolicy.MaxAdditions, older.RiskPolicy.MaxDeletions = 300, 300
+	newer.RiskPolicy.MaxAdditions, newer.RiskPolicy.MaxDeletions = 100, 900
+	store := &policyHistoryStoreStub{byID: map[uuid.UUID]models.CodeReviewPolicyRecord{older.ID: older, newer.ID: newer}}
+	comparison, err := NewPolicyHistoryService(store, &policyHistoryAuditStoreStub{}, zerolog.Nop()).Compare(context.Background(), orgID, newer.ID, older.ID)
+	require.NoError(t, err, "independent threshold changes should compare successfully")
+	require.Equal(t, []models.CodeReviewPolicyFieldChange{
+		{CodeReviewPolicyChangedField: models.CodeReviewPolicyChangedField{Path: "risk_policy.max_additions", Label: "Maximum additions", Kind: models.CodeReviewPolicyChangeKindValue}, Before: json.Number("300"), After: json.Number("100")},
+		{CodeReviewPolicyChangedField: models.CodeReviewPolicyChangedField{Path: "risk_policy.max_deletions", Label: "Maximum deletions", Kind: models.CodeReviewPolicyChangeKindValue}, Before: json.Number("300"), After: json.Number("900")},
+	}, comparison.Changes, "history should identify each threshold and its before/after values")
+}

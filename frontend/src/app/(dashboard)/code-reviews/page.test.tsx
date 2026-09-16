@@ -110,7 +110,8 @@ const policy: CodeReviewResolvedPolicy = {
     },
     risk_policy: {
       max_files_changed: 5,
-      max_lines_changed: 300,
+      max_additions: 300,
+      max_deletions: 300,
       semantic_dedupe_cooldown_seconds: 900,
       stop_after_deterministic_failure: false,
       require_passing_checks: true,
@@ -1020,8 +1021,8 @@ describe("CodeReviewsPage", () => {
 
 		renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "policy" } });
 
-		expect(await screen.findByRole("spinbutton", { name: "Lines changed" })).toBeInTheDocument();
-		expect(document.getElementById("policy-max-lines-changed")).not.toBeNull();
+		expect(await screen.findByRole("spinbutton", { name: "Additions" })).toBeInTheDocument();
+		expect(document.getElementById("policy-max-additions")).not.toBeNull();
 	});
 
   it("writes tab navigation to the URL without dropping filters", async () => {
@@ -2703,7 +2704,8 @@ describe("CodeReviewsPage", () => {
     }
     for (const label of [
       "Files changed",
-      "Lines changed",
+      "Additions",
+      "Deletions",
       "Inline comments",
       "Timeout",
       "Reviewer quorum",
@@ -3590,6 +3592,39 @@ describe("CodeReviewsPage", () => {
     });
     expect(screen.getByText("No author whitelist configured. Any author is eligible.")).toBeInTheDocument();
     expect(within(eligibleAuthorsEditor as HTMLElement).getByText("0 entries")).toBeInTheDocument();
+  });
+
+  it("saves independent additions and deletions limits", async () => {
+    const user = userEvent.setup();
+    const state = mockCodeReviewBaseHandlers();
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "policy" } });
+    await user.click(await screen.findByRole("button", { name: /Approval criteria/i }));
+
+    const additions = screen.getByRole("spinbutton", { name: "Additions" });
+    const deletions = screen.getByRole("spinbutton", { name: "Deletions" });
+    expect(additions).toHaveValue(300);
+    expect(deletions).toHaveValue(300);
+    expect(screen.queryByRole("spinbutton", { name: "Lines changed" })).not.toBeInTheDocument();
+    await user.clear(additions);
+    await user.type(additions, "100");
+    await user.tab();
+    await waitFor(() => expect(state.getCurrentConfig().risk_policy).toEqual({
+      ...policy.config.risk_policy, max_additions: 100,
+    }));
+    await user.clear(deletions);
+    await user.type(deletions, "900");
+    await user.tab();
+    await waitFor(() => expect(state.getCurrentConfig().risk_policy).toEqual({
+      ...policy.config.risk_policy, max_additions: 100, max_deletions: 900,
+    }));
+  });
+
+  it.each(["additions", "deletions"])("reveals the %s limit from a review link", async (limit) => {
+    mockCodeReviewBaseHandlers();
+    window.location.hash = `#policy-max-${limit}`;
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "policy" } });
+    expect(await screen.findByRole("spinbutton", { name: limit === "additions" ? "Additions" : "Deletions" })).toBeInTheDocument();
+    expect(document.getElementById(`policy-max-${limit}`)).not.toBeNull();
   });
 
   it("saves code review timeout in seconds from the selected unit", async () => {

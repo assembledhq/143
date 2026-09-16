@@ -340,6 +340,8 @@ Reviewer agents run in isolated read-only review sandboxes at the PR head SHA. T
 
 Acceptable risk is fully configurable by org admins with optional repository overrides. 143 ships conservative defaults, but approval always comes from the active org/repo policy.
 
+Approval size limits use `risk_policy.max_additions` and `risk_policy.max_deletions` independently (positive integers, default 300 each), alongside `max_files_changed`. A count equal to its limit is allowed. Legacy JSON containing `max_lines_changed` initializes both limits to that value; explicitly supplied new fields take precedence. New policy versions serialize only the independent fields. This changes the former combined budget into two separate budgets. New decisions emit `additions_limit_exceeded` and `deletions_limit_exceeded`; historical `lines_limit_exceeded` decisions and settings links remain readable.
+
 Risk evaluation combines deterministic safeguards with coding-agent assessments
 and synthesized review findings. The coding-agent orchestrator supplies
 structured evidence; the backend owns both the approval decision and the final
