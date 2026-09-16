@@ -240,7 +240,8 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 				return err
 			}
 		}
-		changed := state.HeadSHA != snapshot.HeadSHA || state.BaseSHA != snapshot.BaseSHA || state.BaseRef != snapshot.BaseRef
+		baseRefChanged := state.BaseRef != snapshot.BaseRef
+		changed := state.HeadSHA != snapshot.HeadSHA || state.BaseSHA != snapshot.BaseSHA || baseRefChanged
 		if changed || state.LastMaterialChangeAt == nil {
 			state.LastMaterialChangeAt = &now
 			state.Generation++
@@ -285,7 +286,22 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 		if pending.Mode == models.CodeReviewReviewNow {
 			mode = pending.Mode
 		}
-		force = force || pending.Force || (latestErr == nil && latest.HeadSHA == snapshot.HeadSHA && latest.BaseSHA != snapshot.BaseSHA)
+		// Generation binds the complete target, including its base branch.
+		// Historical approval may have cleared the automatic pending intent;
+		// a later explicit request must still not reuse that older target.
+		supersededGeneration := false
+		if latestErr == nil && latest.HeadSHA == snapshot.HeadSHA {
+			previous, err := scoped.sessions.GetByID(ctx, input.OrgID, latest.SessionID)
+			if err != nil {
+				return err
+			}
+			generation, bound, err := scheduledSessionGeneration(previous.RevisionContext)
+			if err != nil {
+				return err
+			}
+			supersededGeneration = bound && generation != state.Generation
+		}
+		force = force || pending.Force || supersededGeneration || (latestErr == nil && latest.HeadSHA == snapshot.HeadSHA && (latest.BaseSHA != snapshot.BaseSHA || baseRefChanged))
 		if input.ExplicitRequest && latestErr == nil && latest.HeadSHA == snapshot.HeadSHA {
 			var hasResults bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM code_review_agent_results WHERE org_id=$1 AND session_id=$2)`, input.OrgID, latest.SessionID).Scan(&hasResults); err != nil {
@@ -314,7 +330,7 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 			}
 			force = force || string(before) != string(after)
 		}
-		if force && !pending.Force && !changed {
+		if force && !pending.Force && !changed && !supersededGeneration {
 			state.Generation++
 		}
 		if requestID != uuid.Nil {
@@ -355,11 +371,11 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 			return err
 		}
 		applyScheduleWait(state, policy.Config, input.ExplicitRequest, approved, mode, now)
-		// SHA cancellation is deliberately retained for Stage 1, after the latest
-		// replacement intent is durable. Actual thread cancellation follows commit.
-		if latestErr == nil && (latest.HeadSHA != snapshot.HeadSHA || latest.BaseSHA != snapshot.BaseSHA || snapshot.IsDraft) {
+		// Revoke obsolete target revisions in the same transaction as replacement
+		// intent. Actual thread cancellation follows commit.
+		if latestErr == nil && (latest.HeadSHA != snapshot.HeadSHA || latest.BaseSHA != snapshot.BaseSHA || baseRefChanged || snapshot.IsDraft) {
 			head := snapshot.HeadSHA
-			if snapshot.IsDraft || latest.BaseSHA != snapshot.BaseSHA {
+			if snapshot.IsDraft || latest.BaseSHA != snapshot.BaseSHA || baseRefChanged {
 				head = ""
 			}
 			_, err := scoped.metadata.MarkStaleForPullRequestExceptHead(ctx, input.OrgID, input.PullRequestID, head, nil)
@@ -875,7 +891,7 @@ func (s *Service) ValidateScheduledExecution(ctx context.Context, orgID, prID, s
 		if err != nil {
 			return err
 		}
-		refreshTarget = snapshot.State != "open" || snapshot.IsDraft || snapshot.HeadSHA != metadata.HeadSHA || snapshot.BaseSHA != metadata.BaseSHA
+		refreshTarget = snapshot.State != "open" || snapshot.IsDraft || snapshot.HeadSHA != metadata.HeadSHA || snapshot.BaseSHA != metadata.BaseSHA || snapshot.BaseRef != state.BaseRef
 		valid = !refreshTarget && bound && generation == state.Generation
 		if !valid && !refreshTarget && (metadata.Status == models.CodeReviewSessionStatusQueued || metadata.Status == models.CodeReviewSessionStatusRunning) {
 			_, err = store.MarkStale(ctx, orgID, sessionID, "review scheduling target superseded")

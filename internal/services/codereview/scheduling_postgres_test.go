@@ -2,6 +2,7 @@ package codereview
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -105,6 +106,24 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 			testSchedulingGenerationPath(t, p, org, repo, pr, snapshot, "dispute")
 		}},
 		{"snapshot refresh failure preserves replacement recovery", testSchedulingRefreshRecovery},
+		{"base ref missed edited event", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingBaseRef(t, p, org, repo, pr, snapshot, "missed")
+		}},
+		{"base ref webhook first", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingBaseRef(t, p, org, repo, pr, snapshot, "webhook")
+		}},
+		{"base ref completed result cannot be reused", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingBaseRef(t, p, org, repo, pr, snapshot, "completed")
+		}},
+		{"base ref explicit after automatic approval stop", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingBaseRef(t, p, org, repo, pr, snapshot, "approved")
+		}},
+		{"base ref unchanged preserves equivalent result", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingBaseRef(t, p, org, repo, pr, snapshot, "unchanged")
+		}},
+		{"base ref provider refresh failure recovers", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingBaseRef(t, p, org, repo, pr, snapshot, "refresh_failure")
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -457,4 +476,98 @@ func testSchedulingRefreshRecovery(t *testing.T, pool *pgxpool.Pool, org, repo, 
 	latest, err := db.NewCodeReviewStore(pool).GetLatestByPullRequest(ctx, org, pr)
 	require.NoError(t, err, "read recovered review")
 	require.NotEqual(t, sessionID, latest.SessionID, "recovery produces replacement review")
+}
+
+func testSchedulingBaseRef(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture, scenario string) {
+	ctx := context.Background()
+	service, claim, oldSessionID := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
+	before, err := service.GetSchedule(ctx, org, pr)
+	require.NoError(t, err, "read original target identity")
+	allowed, err := service.ValidateScheduledExecution(ctx, org, pr, oldSessionID)
+	require.NoError(t, err, "validate original base reference")
+	require.True(t, allowed, "unchanged provider branch keeps execution authority")
+	completed := scenario == "completed" || scenario == "approved" || scenario == "unchanged"
+	canceller := &schedulingThreadCanceller{pool: pool}
+	service.SetThreadCanceller(canceller)
+	if completed {
+		_, err = pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='completed' WHERE org_id=$1 AND session_id=$2`, org, oldSessionID)
+		require.NoError(t, err, "complete assessment on original base branch")
+		_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND job_type=$2`, org, models.JobTypeRunCodeReview)
+		require.NoError(t, err, "finish original worker")
+		if scenario == "approved" {
+			_, err = pool.Exec(ctx, `UPDATE code_review_session_metadata SET decision='approved',github_review_id=42 WHERE org_id=$1 AND session_id=$2`, org, oldSessionID)
+			require.NoError(t, err, "publish historical approval")
+		}
+	} else {
+		_, err = pool.Exec(ctx, `INSERT INTO session_threads(org_id,session_id,agent_type,label,status) VALUES($1,$2,'codex','Code review: base reference test','running')`, org, oldSessionID)
+		require.NoError(t, err, "start reviewer on original base reference")
+	}
+	if scenario != "unchanged" {
+		snapshot.update(func(s *ghservice.CodeReviewPullRequestSnapshot) { s.BaseRef = "release" })
+	}
+	if scenario == "missed" || scenario == "refresh_failure" {
+		if scenario == "refresh_failure" {
+			snapshot.Lock()
+			snapshot.failCall = snapshot.calls + 2
+			snapshot.Unlock()
+			allowed, err = service.ValidateScheduledExecution(ctx, org, pr, oldSessionID)
+			require.Error(t, err, "unavailable replacement refresh must retry the worker")
+			require.False(t, allowed, "retarget never permits publication during provider failure")
+			old, err := db.NewCodeReviewStore(pool).GetBySessionID(ctx, org, oldSessionID)
+			require.NoError(t, err, "read recoverable source attempt")
+			require.Equal(t, models.CodeReviewSessionStatusQueued, old.Status, "failed refresh cannot discard source before replacement commits")
+		}
+		allowed, err = service.ValidateScheduledExecution(ctx, org, pr, oldSessionID)
+		require.NoError(t, err, "detect missed base-only retarget from authoritative snapshot")
+		require.False(t, allowed, "same commit SHAs do not authorize review of another base branch")
+	} else {
+		_, err = service.QueueReviewChanged(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr})
+		require.NoError(t, err, "observe current base reference via webhook")
+		if scenario == "approved" {
+			stopped, err := service.GetSchedule(ctx, org, pr)
+			require.NoError(t, err, "read stopped automatic intent")
+			require.Nil(t, stopped.PendingInput, "approval clears automatic retarget intent")
+			require.Equal(t, "release", stopped.BaseRef, "approval still records current branch")
+			_, err = service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow})
+			require.NoError(t, err, "explicit request after terminal automatic approval hold")
+		}
+		if !completed {
+			allowed, err = service.ValidateScheduledExecution(ctx, org, pr, oldSessionID)
+			require.NoError(t, err, "validate worker after retarget webhook")
+			require.False(t, allowed, "webhook-first retarget revokes original generation")
+		}
+	}
+	pending, err := service.GetSchedule(ctx, org, pr)
+	require.NoError(t, err, "read durable current target")
+	require.Equal(t, before.HeadSHA, pending.HeadSHA, "retarget test holds head commit constant")
+	require.Equal(t, before.BaseSHA, pending.BaseSHA, "retarget test holds base commit constant")
+	if scenario != "unchanged" {
+		require.Equal(t, "release", pending.BaseRef, "replacement tracks retargeted branch")
+		require.Greater(t, pending.Generation, before.Generation, "base reference contributes to generation identity")
+		var intent scheduledReviewIntent
+		require.NoError(t, json.Unmarshal(pending.PendingInput, &intent), "decode replacement intent")
+		require.True(t, intent.Force, "retarget must force reassessment despite identical diff SHAs")
+	} else {
+		require.Equal(t, before.Generation, pending.Generation, "same branch redelivery cannot advance generation")
+	}
+	if !completed {
+		require.Equal(t, []uuid.UUID{oldSessionID}, canceller.cancelled, "retarget cancels only original session after commit")
+	}
+	require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "reconcile target after base reference observation")
+	latest, err := db.NewCodeReviewStore(pool).GetLatestByPullRequest(ctx, org, pr)
+	require.NoError(t, err, "read resulting assessment")
+	if scenario == "unchanged" {
+		require.Equal(t, oldSessionID, latest.SessionID, "equivalent completed assessment remains reusable")
+		return
+	}
+	require.NotEqual(t, oldSessionID, latest.SessionID, "retarget allocates a new assessment instead of old completed result")
+	allowed, err = service.ValidateScheduledExecution(ctx, org, pr, latest.SessionID)
+	require.NoError(t, err, "validate replacement base reference")
+	require.True(t, allowed, "replacement owns current branch and generation")
+	allowed, err = service.ValidateScheduledExecution(ctx, org, pr, oldSessionID)
+	require.NoError(t, err, "recheck old attempt after replacement")
+	require.False(t, allowed, "old assessment cannot regain authority on same SHAs")
+	latest, err = db.NewCodeReviewStore(pool).GetBySessionID(ctx, org, latest.SessionID)
+	require.NoError(t, err, "read replacement after obsolete worker check")
+	require.Equal(t, models.CodeReviewSessionStatusQueued, latest.Status, "old worker cleanup leaves replacement intact")
 }
