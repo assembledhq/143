@@ -40,6 +40,7 @@ var AvailablePiModels = []string{
 }
 
 const (
+	ClaudeCodeModelFable51  = "claude-fable-5-1"
 	ClaudeCodeModelFable5   = "claude-fable-5"
 	ClaudeCodeModelOpus5    = "claude-opus-5"
 	ClaudeCodeModelOpus48   = "claude-opus-4-8"
@@ -52,9 +53,10 @@ const (
 
 const DefaultClaudeCodeModel = ClaudeCodeModelOpus5
 
-var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable5, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
+var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable51, ClaudeCodeModelFable5, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
 
 const (
+	CodexModelGPT6Astra       = "gpt-6-astra"
 	CodexModelGPT56Sol        = "gpt-5.6-sol"
 	CodexModelGPT56SolFast    = "gpt-5.6-sol-fast"
 	CodexModelGPT56Terra      = "gpt-5.6-terra"
@@ -75,6 +77,7 @@ const (
 const DefaultCodexModel = CodexModelGPT56Sol
 
 var AvailableCodexModels = []string{
+	CodexModelGPT6Astra,
 	CodexModelGPT56Sol,
 	CodexModelGPT56SolFast,
 	CodexModelGPT56Terra,

@@ -11,7 +11,7 @@ func TestClaudeCodeModelConstants(t *testing.T) {
 
 	require.Equal(t, ClaudeCodeModelOpus5, DefaultClaudeCodeModel, "DefaultClaudeCodeModel should use Opus 5")
 	require.Equal(t,
-		[]string{ClaudeCodeModelFable5, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45},
+		[]string{ClaudeCodeModelFable51, ClaudeCodeModelFable5, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45},
 		AvailableClaudeCodeModels,
 		"AvailableClaudeCodeModels should be ordered by capability",
 	)
@@ -23,6 +23,7 @@ func TestCodexModelConstants(t *testing.T) {
 	require.Equal(t, CodexModelGPT56Sol, DefaultCodexModel, "DefaultCodexModel should use GPT 5.6 Sol")
 	require.Equal(t,
 		[]string{
+			CodexModelGPT6Astra,
 			CodexModelGPT56Sol,
 			CodexModelGPT56SolFast,
 			CodexModelGPT56Terra,
@@ -136,6 +137,7 @@ func TestCodexRuntimeModel(t *testing.T) {
 		{name: "gpt 5.5 fast maps to gpt 5.5 priority", model: CodexModelGPT55Fast, expected: CodexModelGPT55, priorityTier: true},
 		{name: "gpt 5.4 fast maps to gpt 5.4 priority", model: CodexModelGPT54Fast, expected: CodexModelGPT54, priorityTier: true},
 		{name: "regular gpt 5.6 sol stays unchanged", model: CodexModelGPT56Sol, expected: CodexModelGPT56Sol},
+		{name: "gpt 6 astra stays unchanged", model: "gpt-6-astra", expected: "gpt-6-astra"},
 		{name: "regular gpt 5.5 stays unchanged", model: CodexModelGPT55, expected: CodexModelGPT55},
 		{name: "unknown model stays unchanged", model: "custom-model", expected: "custom-model"},
 	}
@@ -286,6 +288,8 @@ func TestAgentTypeForModel(t *testing.T) {
 	}{
 		{"", ""},
 		{CodexModelGPT56Sol, AgentTypeCodex},
+		{"gpt-6-astra", AgentTypeCodex},
+		{"claude-fable-5-1", AgentTypeClaudeCode},
 		{CodexModelGPT56Luna, AgentTypeCodex},
 		{CodexModelGPT56LunaFast, AgentTypeCodex},
 		{CodexModelGPT54, AgentTypeCodex},
@@ -321,6 +325,19 @@ func TestValidateSettingsModels(t *testing.T) {
 				AgentConfig: AgentEnvConfig{
 					"codex":       {"OPENAI_MODEL": CodexModelGPT53Codex},
 					"claude_code": {"ANTHROPIC_MODEL": ClaudeCodeModelSonnet45},
+				},
+			},
+		},
+		{
+			name: "accepts Astra and Fable 5.1 in agent config and defaults",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"codex":       {"OPENAI_MODEL": "gpt-6-astra"},
+					"claude_code": {"ANTHROPIC_MODEL": "claude-fable-5-1"},
+				},
+				CodingAgentModelDefaults: map[AgentType]string{
+					AgentTypeCodex:      "gpt-6-astra",
+					AgentTypeClaudeCode: "claude-fable-5-1",
 				},
 			},
 		},
