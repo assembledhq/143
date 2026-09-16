@@ -478,7 +478,7 @@ describe("Account settings page", () => {
             name: "Alice Smith",
             role: "admin",
             settings: {
-              coding_agent_model_default: "claude-opus-4-7",
+              coding_agent_model_default: "gpt-6-astra",
             },
             created_at: "2026-01-01T00:00:00Z",
           },
@@ -489,10 +489,10 @@ describe("Account settings page", () => {
     renderWithProviders(<AccountPage />);
 
     await user.click(await screen.findByRole("combobox", { name: "Default coding-agent model" }));
-    await user.click(screen.getByRole("option", { name: "claude-opus-4-7" }));
+    await user.click(screen.getByRole("option", { name: "gpt-6-astra" }));
 
     expect(requestBody).toEqual({
-      coding_agent_model_default: "claude-opus-4-7",
+      coding_agent_model_default: "gpt-6-astra",
     });
   });
 

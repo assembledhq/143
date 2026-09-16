@@ -29,6 +29,7 @@ import { CLISessionsCard } from "@/components/cli-sessions-card";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { CodingAuthDialog } from "@/components/coding-auth-dialog";
 import { EmptyState } from "@/components/empty-state";
+import { ModelOptionGroups } from "@/components/model-option-groups";
 import { OpenCodeCustomModelField } from "@/components/opencode-custom-model-field";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -40,7 +41,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ThemeSelect } from "@/components/theme-select";
 import { useAuth } from "@/hooks/use-auth";
@@ -663,16 +664,7 @@ export default function AccountPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__default__">Default</SelectItem>
-                    {AGENTS.map((agent) => (
-                      <SelectGroup key={agent.key}>
-                        <SelectLabel>{agent.label}</SelectLabel>
-                        {agent.models.map((model) => (
-                          <SelectItem key={model} value={model}>
-                            {model}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    ))}
+                    <ModelOptionGroups modelGroups={AGENTS} selectedModel={effectiveDefaultModel} />
                   </SelectContent>
                 </Select>
               </div>
