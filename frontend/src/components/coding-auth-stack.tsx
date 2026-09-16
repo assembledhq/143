@@ -57,6 +57,7 @@ function rateLimitNote(row: CodingCredentialSummary) {
     return `Available again ${new Date(row.rate_limited_until).toLocaleTimeString([], {
       hour: "numeric",
       minute: "2-digit",
+      timeZoneName: "short",
     })}`;
   }
   return row.rate_limit_message ?? null;
