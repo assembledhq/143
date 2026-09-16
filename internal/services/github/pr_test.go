@@ -7404,3 +7404,62 @@ func TestPRServiceRestoreChildPROpenAfterBaseReconciliationRequiresExpectedHead(
 		})
 	}
 }
+
+func TestPreparedCodeReviewSnapshotUsesReaderContext(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "initialize isolated repository store")
+	defer mock.Close()
+	orgID, repositoryID, integrationID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	mock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgx.NamedArgs{"id": repositoryID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repositoryID, orgID, integrationID, int64(1001), "assembledhq/assembled", "main",
+			false, nil, nil, "https://github.com/assembledhq/assembled.git", int64(456), "active",
+			nil, nil, []byte(`{}`), now, now,
+		))
+	tokens := &Service{cache: map[int64]*cachedToken{456: {Token: "installation-token", ExpiresAt: now.Add(time.Hour)}}}
+	type readerContextKey struct{}
+	prepareCtx, cancelPrepare := context.WithCancel(context.WithValue(context.Background(), readerContextKey{}, "preparation"))
+	defer cancelPrepare()
+	deadline := now.Add(time.Minute)
+	readerCtx, cancelReader := context.WithDeadline(context.WithValue(context.Background(), readerContextKey{}, "reader"), deadline)
+	defer cancelReader()
+	readerCtx = githubtelemetry.WithRequestMetadata(readerCtx, githubtelemetry.RequestMetadata{SyncReason: "test-reader"})
+	service := &PRService{
+		tokenProvider: tokens,
+		repos:         db.NewRepositoryStore(mock),
+		logger:        zerolog.Nop(),
+		baseURL:       "https://api.github.com",
+		httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			require.Equal(t, "reader", req.Context().Value(readerContextKey{}), "request must retain callback context values")
+			actualDeadline, ok := req.Context().Deadline()
+			require.True(t, ok, "request must retain callback deadline")
+			require.Equal(t, deadline, actualDeadline, "request cannot inherit preparation deadline")
+			metadata, ok := githubtelemetry.RequestMetadataFromContext(req.Context())
+			require.True(t, ok, "request must carry resolved authentication metadata")
+			require.Equal(t, githubtelemetry.RequestMetadata{
+				Kind: githubtelemetry.RequestKindAPI, AuthType: githubtelemetry.AuthTypeAppInstallation,
+				InstallationID: 456, Caller: "code_review_snapshot", SyncReason: "test-reader",
+			}, metadata, "captured resolution must augment reader metadata even after token cache eviction")
+			if err := req.Context().Err(); err != nil {
+				return nil, err
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"number":17,"state":"open","head":{"sha":"head"},"base":{"sha":"base","ref":"main"}}`))}, nil
+		})},
+	}
+	read, err := service.PrepareCodeReviewPullRequestSnapshot(prepareCtx, orgID, repositoryID)
+	require.NoError(t, err, "prepare immutable authentication identity")
+	cancelPrepare()
+	tokens.mu.Lock()
+	delete(tokens.cache, 456)
+	tokens.mu.Unlock()
+	snapshot, err := read(readerCtx, 17)
+	require.NoError(t, err, "cancelled preparation must not cancel a fresh reader context")
+	require.Equal(t, "head", snapshot.HeadSHA, "reader returns live snapshot after preparation ends")
+	cancelReader()
+	_, err = read(readerCtx, 17)
+	require.ErrorIs(t, err, context.Canceled, "callback cancellation must propagate through provider request")
+	require.NoError(t, mock.ExpectationsWereMet(), "callback must not reacquire repository context")
+}

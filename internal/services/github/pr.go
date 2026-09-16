@@ -4556,13 +4556,13 @@ func (s *PRService) PrepareCodeReviewPullRequestSnapshot(ctx context.Context, or
 	if err != nil {
 		return nil, fmt.Errorf("load installation token for code review mention: %w", err)
 	}
-	ctx = withGitHubResolutionContext(ctx, resolution, repository.InstallationID, "code_review_snapshot")
 	token := resolution.Token
 	owner, repo := splitRepo(repository.FullName)
 	return func(ctx context.Context, number int) (CodeReviewPullRequestSnapshot, error) {
 		if number <= 0 {
 			return CodeReviewPullRequestSnapshot{}, fmt.Errorf("positive pull request number is required")
 		}
+		ctx = withGitHubResolutionContext(ctx, resolution, repository.InstallationID, "code_review_snapshot")
 		path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number)
 		body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
 		if err != nil {
