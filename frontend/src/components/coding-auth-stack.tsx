@@ -54,7 +54,10 @@ function statusBadgeClass(status: CodingCredentialSummary["status"]) {
 function rateLimitNote(row: CodingCredentialSummary) {
   if (row.status !== "rate_limited") return null;
   if (row.rate_limited_until) {
-    return `Available again ${new Date(row.rate_limited_until).toLocaleTimeString([], {
+    return `Available again ${new Date(row.rate_limited_until).toLocaleString([], {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
       hour: "numeric",
       minute: "2-digit",
       timeZoneName: "short",

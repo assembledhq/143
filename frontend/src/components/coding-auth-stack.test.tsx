@@ -40,13 +40,14 @@ describe("CodingAuthStack", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it.each([
-    { resetAt: "2026-09-16T13:35:00Z", expected: "Available again 9:35 AM EDT" },
-    { resetAt: "2026-12-16T14:35:00Z", expected: "Available again 9:35 AM EST" },
-  ])("shows the local timezone for $resetAt on desktop and mobile", ({ resetAt, expected }) => {
-    const formatTime = Date.prototype.toLocaleTimeString;
+    { resetAt: "2026-09-19T13:35:55Z", expected: "Available again Sep 19, 2026, 9:35 AM EDT" },
+    { resetAt: "2026-12-16T14:35:00Z", expected: "Available again Dec 16, 2026, 9:35 AM EST" },
+    { resetAt: "2026-09-20T01:35:00Z", expected: "Available again Sep 19, 2026, 9:35 PM EDT" },
+  ])("shows the local date, time, and timezone for $resetAt on desktop and mobile", ({ resetAt, expected }) => {
+    const formatTime = Date.prototype.toLocaleString;
     // Keep the displayed result deterministic while exercising the component's
     // formatting options through Intl, including daylight-saving time.
-    vi.spyOn(Date.prototype, "toLocaleTimeString").mockImplementation(function (this: Date, _locales, options) {
+    vi.spyOn(Date.prototype, "toLocaleString").mockImplementation(function (this: Date, _locales, options) {
       return formatTime.call(this, "en-US", { ...options, timeZone: "America/New_York" });
     });
     renderWithProviders(
