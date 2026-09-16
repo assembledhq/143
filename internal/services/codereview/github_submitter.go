@@ -1355,10 +1355,27 @@ func codeReviewHistoryEntries(body string) []string {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "- ") {
-			entries = append(entries, line)
+			entries = append(entries, normalizeCodeReviewHistoryEntry(line))
 		}
 	}
 	return entries
+}
+
+func normalizeCodeReviewHistoryEntry(entry string) string {
+	const timestampPrefix = "- `"
+	if !strings.HasPrefix(entry, timestampPrefix) {
+		return entry
+	}
+	timestampEnd := strings.Index(entry[len(timestampPrefix):], "`")
+	if timestampEnd < 0 {
+		return entry
+	}
+	timestampEnd += len(timestampPrefix)
+	parsed, err := time.Parse(time.RFC3339, entry[len(timestampPrefix):timestampEnd])
+	if err != nil {
+		return entry
+	}
+	return "- " + codeReviewHistoryTime(parsed) + entry[timestampEnd+1:]
 }
 
 func stripCodeReviewHistory(body string) string {
@@ -1386,7 +1403,7 @@ func codeReviewHistoryEntry(decision SubmitReviewDecision, decidedAt time.Time) 
 	if decidedAt.IsZero() || decision.validate() != nil {
 		return ""
 	}
-	return fmt.Sprintf("- `%s` — **%s**", decidedAt.UTC().Format(time.RFC3339), codeReviewDecisionLabel(decision))
+	return fmt.Sprintf("- %s — **%s**", codeReviewHistoryTime(decidedAt), codeReviewDecisionLabel(decision))
 }
 
 func codeReviewReassessmentHistoryEntry(headSHA string, startedAt time.Time, sessionURL string) string {
@@ -1397,11 +1414,20 @@ func codeReviewReassessmentHistoryEntry(headSHA string, startedAt time.Time, ses
 	if len(headSHA) > 7 {
 		headSHA = headSHA[:7]
 	}
-	entry := fmt.Sprintf("- `%s` — **Reassessment started** for `%s`", startedAt.UTC().Format(time.RFC3339), headSHA)
+	entry := fmt.Sprintf("- %s — **Reassessment started** for `%s`", codeReviewHistoryTime(startedAt), headSHA)
 	if sessionURL != "" {
 		entry += " — [Follow the review session](" + sessionURL + ")"
 	}
 	return entry
+}
+
+func codeReviewHistoryTime(value time.Time) string {
+	utc := value.UTC()
+	return fmt.Sprintf(
+		`<relative-time datetime="%s">%s</relative-time>`,
+		utc.Format(time.RFC3339),
+		utc.Format("Jan 2, 2006 at 3:04 PM MST"),
+	)
 }
 
 func codeReviewDecisionLabel(decision SubmitReviewDecision) string {
