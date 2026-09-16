@@ -847,6 +847,7 @@ func main() {
 			logger,
 		)
 		scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
+		scheduler.SetCodeReviewScheduleReconciler(db.NewCodeReviewScheduleStore(pool))
 		scheduler.SetCapabilityResolver(agentcapabilities.NewService(db.NewAgentCapabilityPolicyStore(pool)))
 		scheduler.SetSessionStore(sessionStore)
 		scheduler.SetDomainRecheck(
@@ -1805,6 +1806,8 @@ func buildServices(
 		},
 	)
 	codeReviewLifecycle.SetReviewStatusCommentJobs(jobStore)
+	codeReviewLifecycle.SetScheduling(db.NewCodeReviewScheduleStore(pool), prService)
+	codeReviewLifecycle.SetSchedulingStreams(cache.NewCodeReviewStreams(redisClient, logger))
 	codeReviewLifecycle.SetThreadCanceller(threadSvc)
 	codeReviewVisualEvidence := codereviewsvc.NewVisualEvidenceService(
 		prService,

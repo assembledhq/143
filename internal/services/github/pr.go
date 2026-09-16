@@ -4519,6 +4519,8 @@ type PullRequestHead struct {
 // CodeReviewPullRequestSnapshot is the current GitHub state needed by code
 // review entry points that cannot safely rely on the asynchronous PR mirror.
 type CodeReviewPullRequestSnapshot struct {
+	IsDraft     bool
+	BaseRef     string
 	Number      int
 	HTMLURL     string
 	Title       string
@@ -4531,50 +4533,76 @@ type CodeReviewPullRequestSnapshot struct {
 	FromFork    bool
 }
 
-// GetCodeReviewPullRequestSnapshot loads the authoritative PR revision for
-// issue-comment mentions and dispute reassessments.
-func (s *PRService) GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (CodeReviewPullRequestSnapshot, error) {
+// CodeReviewPullRequestSnapshotReader fetches current provider state without
+// database access. Call it inside the PR lock after preparing identity outside
+// the transaction, so saturated pools cannot deadlock on nested acquisitions.
+type CodeReviewPullRequestSnapshotReader func(context.Context, int) (CodeReviewPullRequestSnapshot, error)
+
+// PrepareCodeReviewPullRequestSnapshot resolves every database-backed dependency,
+// including the integration fallback used for missing/stale installation IDs.
+// The returned reader captures identity and credentials, never a PR snapshot.
+func (s *PRService) PrepareCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID) (CodeReviewPullRequestSnapshotReader, error) {
 	if s == nil || s.repos == nil {
-		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("repository store is unavailable")
+		return nil, fmt.Errorf("repository store is unavailable")
 	}
-	if orgID == uuid.Nil || repositoryID == uuid.Nil || number <= 0 {
-		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("org_id, repository_id, and positive pull request number are required")
+	if orgID == uuid.Nil || repositoryID == uuid.Nil {
+		return nil, fmt.Errorf("org_id and repository_id are required")
 	}
 	repository, err := s.repos.GetByID(ctx, orgID, repositoryID)
 	if err != nil {
-		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("load repository for code review mention: %w", err)
+		return nil, fmt.Errorf("load repository for code review mention: %w", err)
 	}
 	resolution, err := s.getInstallationResolutionForRepo(ctx, orgID, &repository)
 	if err != nil {
-		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("load installation token for code review mention: %w", err)
+		return nil, fmt.Errorf("load installation token for code review mention: %w", err)
 	}
-	ctx = withGitHubResolutionContext(ctx, resolution, repository.InstallationID, "code_review_snapshot")
 	token := resolution.Token
 	owner, repo := splitRepo(repository.FullName)
-	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number)
-	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
-	if err != nil {
-		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("load pull request for code review mention: %w", err)
-	}
-	var details gitHubPullRequestDetails
-	if err := json.Unmarshal(body, &details); err != nil {
-		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("decode pull request for code review mention: %w", err)
-	}
-	if details.Head.SHA == "" {
-		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("pull request head SHA is missing")
-	}
-	return CodeReviewPullRequestSnapshot{
-		Number:      details.Number,
-		HTMLURL:     details.HTMLURL,
-		Title:       details.Title,
-		Body:        details.Body,
-		State:       details.State,
-		AuthorLogin: details.User.Login,
-		HeadSHA:     details.Head.SHA,
-		HeadRef:     details.Head.Ref,
-		BaseSHA:     details.Base.SHA,
-		FromFork:    details.Head.Repo.Fork,
+	return func(ctx context.Context, number int) (CodeReviewPullRequestSnapshot, error) {
+		if number <= 0 {
+			return CodeReviewPullRequestSnapshot{}, fmt.Errorf("positive pull request number is required")
+		}
+		ctx = withGitHubResolutionContext(ctx, resolution, repository.InstallationID, "code_review_snapshot")
+		path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number)
+		body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+		if err != nil {
+			return CodeReviewPullRequestSnapshot{}, fmt.Errorf("load pull request for code review mention: %w", err)
+		}
+		var details gitHubPullRequestDetails
+		if err := json.Unmarshal(body, &details); err != nil {
+			return CodeReviewPullRequestSnapshot{}, fmt.Errorf("decode pull request for code review mention: %w", err)
+		}
+		if details.Head.SHA == "" {
+			return CodeReviewPullRequestSnapshot{}, fmt.Errorf("pull request head SHA is missing")
+		}
+		return CodeReviewPullRequestSnapshot{
+			IsDraft:     details.Draft,
+			BaseRef:     details.Base.Ref,
+			Number:      details.Number,
+			HTMLURL:     details.HTMLURL,
+			Title:       details.Title,
+			Body:        details.Body,
+			State:       details.State,
+			AuthorLogin: details.User.Login,
+			HeadSHA:     details.Head.SHA,
+			HeadRef:     details.Head.Ref,
+			BaseSHA:     details.Base.SHA,
+			FromFork:    details.Head.Repo.Fork,
+		}, nil
 	}, nil
+}
+
+// GetCodeReviewPullRequestSnapshot loads the authoritative PR revision for
+// callers that do not already hold an admission transaction.
+func (s *PRService) GetCodeReviewPullRequestSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (CodeReviewPullRequestSnapshot, error) {
+	if number <= 0 {
+		return CodeReviewPullRequestSnapshot{}, fmt.Errorf("org_id, repository_id, and positive pull request number are required")
+	}
+	read, err := s.PrepareCodeReviewPullRequestSnapshot(ctx, orgID, repositoryID)
+	if err != nil {
+		return CodeReviewPullRequestSnapshot{}, err
+	}
+	return read(ctx, number)
 }
 
 // GetCodeReviewOutcomeSnapshot reads the provider as the repair authority for

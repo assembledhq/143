@@ -37,6 +37,10 @@ func newStartCodeReviewReassessmentHandler(stores *Stores, services *Services, l
 			return fmt.Errorf("code review starter cannot be both a dispute reassessment and an ordinary classified request")
 		}
 		registerCodeReviewStarterDeadLetter(ctx, services, logger, input)
+		if scheduler, ok := services.CodeReviewLifecycle.(codeReviewScheduler); ok && scheduler.SchedulingEnabled() && input.TriggeringDisputeID == nil && input.ReviewRequestDisputeID == nil {
+			_, err := services.CodeReviewLifecycle.QueueReviewChanged(ctx, input)
+			return err
+		}
 		pr, err := stores.PullRequests.GetByID(ctx, input.OrgID, input.PullRequestID)
 		if err != nil {
 			return fmt.Errorf("load current pull request for code review reassessment: %w", err)

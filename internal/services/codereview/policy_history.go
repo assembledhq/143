@@ -372,7 +372,7 @@ func policyFieldLabel(path string) string {
 
 var codeReviewPolicyFieldOrder = []string{
 	"enabled", "approval_mode", "automated_approval_policy", "review_instructions",
-	"description_policy", "risk_policy", "agent_roster", "inline_comment_limit",
+	"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "scheduling_policy",
 }
 
 func policyFieldSortKey(path string) int {

@@ -8,6 +8,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { createParser, parseAsString, parseAsStringLiteral, useQueryState } from "nuqs";
 import {
   AlertTriangle,
+  CalendarClock,
   ChartNoAxesColumnIncreasing,
   ChevronDown,
   ChevronRight,
@@ -74,6 +75,7 @@ import { DEFAULT_TIME_RANGE, parseTimeRange, timeRangeBounds, timeRangeRefreshDe
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
 import { GitHubReviewerConnectionSheet } from "@/components/code-review/github-reviewer-connection-sheet";
+import { ScheduledReviews, ReviewNowButton } from "@/components/code-review/scheduling";
 import { CodeReviewPolicyHistory } from "@/components/code-review/policy-history";
 import { SortableTableHeader } from "@/components/sortable-table-header";
 import {
@@ -86,7 +88,7 @@ import {
   CodeReviewSummaryCards,
   type CodeReviewFilterValues,
 } from "@/components/code-review-overview";
-import { applyCodeReviewPolicyOptimistic, coalesceCodeReviewPolicy } from "@/lib/code-review-autosave";
+import { applyCodeReviewPolicyOptimistic, coalesceCodeReviewPolicy, trackPolicyDraft, policyPatchFor } from "@/lib/code-review-autosave";
 import { getCodingAgentReasoningOptions } from "@/lib/coding-agent-reasoning";
 import { AGENTS_BY_KEY, availableAgentModelGroups, modelOptionLabel, pmUsableResolvedCredentials, type AgentModelGroup } from "@/lib/agents";
 import type {
@@ -114,7 +116,7 @@ import type {
   SingleResponse,
 } from "@/lib/types";
 
-const CODE_REVIEW_TAB_VALUES = ["reviews", "analytics", "disputes", "policy"] as const;
+const CODE_REVIEW_TAB_VALUES = ["reviews", "queue", "analytics", "disputes", "policy"] as const;
 type CodeReviewTab = (typeof CODE_REVIEW_TAB_VALUES)[number];
 const OUTCOME_FILTER_VALUES = [ALL_OUTCOMES, AUTOMATICALLY_APPROVED, COMPLETED_NOT_APPROVED, "needs_human_review", "comment_only", "blocked"] as const;
 type OutcomeFilter = (typeof OUTCOME_FILTER_VALUES)[number];
@@ -392,6 +394,7 @@ function ReviewActions({
   return (
     <div className={cn("flex w-full items-center gap-1 md:w-auto md:justify-end", className)}>
       <EvidenceButton selected={evidenceSelected} onToggleEvidence={onToggleEvidence} />
+      {canRetry ? <ReviewNowButton prID={review.pull_request_id} /> : null}
       {canRetry && reviewCanBeRetried(review) ? (
         <Button className="min-h-11 flex-1 justify-center md:min-h-0 md:flex-none" variant="outline" size="sm" disabled={isRetrying} onClick={onRetry}>
           <RefreshCw className={isRetrying ? "animate-spin" : undefined} />
@@ -842,6 +845,7 @@ export default function CodeReviewsPage() {
   // coalesce bursts into one refetch per window rather than one per event.
   const invalidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onCodeReviewEvent = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ["code-review-schedules"] });
     if (isViewingReviewHistory) {
       setNewReviewsAvailable(true);
       if (activeTab === "reviews") return;
@@ -851,7 +855,7 @@ export default function CodeReviewsPage() {
       invalidateTimerRef.current = null;
       refreshRelativeReviewWindow();
     }, pollMs(CODE_REVIEW_INVALIDATE_COALESCE_MS));
-  }, [activeTab, isViewingReviewHistory, refreshRelativeReviewWindow]);
+  }, [activeTab, isViewingReviewHistory, refreshRelativeReviewWindow, queryClient]);
   useEffect(
     () => () => {
       if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
@@ -1025,10 +1029,14 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.codeReviews.policy,
     mutationFn: async (next: CodeReviewPolicyConfig) => {
       try {
-        return await api.codeReviews.updatePolicy({
-          config: next,
+        const current = queryClient.getQueryData<SingleResponse<CodeReviewResolvedPolicy>>(queryKeys.codeReviews.policy);
+        const saved = await api.codeReviews.patchPolicy({
+          config: policyPatchFor(next),
+          expected_version: current?.data.policy?.version ?? 0,
           source: saveSourceByConfigRef.current.get(next) ?? "manual",
         });
+        queryClient.setQueryData<SingleResponse<CodeReviewResolvedPolicy>>(queryKeys.codeReviews.policy, (previous) => previous ? { ...previous, data: { ...previous.data, policy: saved.data } } : previous);
+        return saved;
       } finally {
         // Refetch the single resolved policy so the optimistic config is
         // reconciled with the newly persisted version.
@@ -1214,7 +1222,7 @@ export default function CodeReviewsPage() {
     if (!base) return null;
     const next = clonePolicy(base);
     mutate(next);
-    return next;
+    return trackPolicyDraft(base, next);
   };
   // Instant commit for toggles/selects/buttons.
   const commitPolicy = (mutate: (next: CodeReviewPolicyConfig) => void, source: CodeReviewPolicyEditSource = "manual") => {
@@ -1364,6 +1372,10 @@ export default function CodeReviewsPage() {
             <ClipboardCheck className="h-4 w-4" />
             Reviews
           </TabsTrigger>
+          <TabsTrigger value="queue">
+            <CalendarClock className="h-4 w-4" />
+            Queue
+          </TabsTrigger>
           <TabsTrigger value="analytics">
             <ChartNoAxesColumnIncreasing className="h-4 w-4" />
             Analytics
@@ -1384,6 +1396,12 @@ export default function CodeReviewsPage() {
             Policy
           </TabsTrigger>
         </TabsList>
+
+        <PageTabContent value="queue">
+          {policyQuery.isPending ? <p role="status" className="text-sm text-muted-foreground">Loading review queue…</p> : policyQuery.isError ? (
+            <ErrorNotice title="Review settings could not be loaded" action={{ label: "Retry", onClick: () => void policyQuery.refetch() }} />
+          ) : <ScheduledReviews canManage={canFileDisputes} enabled={policyQuery.data?.data.capabilities?.scheduling === true} />}
+        </PageTabContent>
 
         <PageTabContent value="reviews">
           <CodeReviewSummaryCards stats={statsQuery.data?.data} isLoading={statsQuery.isLoading} isError={statsQuery.isError} onRetry={() => void statsQuery.refetch()} />
@@ -1670,6 +1688,7 @@ export default function CodeReviewsPage() {
                   invalidPolicyField={invalidPolicyField}
                 />
                 <AdvancedPolicySettings
+                  schedulingEnabled={policyQuery.data?.data.capabilities?.scheduling === true}
                   config={config}
                   autosave={autosave}
                   buildConfig={buildConfig}
@@ -2277,6 +2296,7 @@ function CodeReviewPromptExampleDialog({
 }
 
 type AdvancedPolicySettingsProps = {
+  schedulingEnabled: boolean;
   config: CodeReviewPolicyConfig | null;
   autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
   buildConfig: (mutate: (next: CodeReviewPolicyConfig) => void) => CodeReviewPolicyConfig;
@@ -2289,6 +2309,7 @@ type AdvancedPolicySettingsProps = {
 };
 
 function AdvancedPolicySettings({
+  schedulingEnabled,
   config,
   autosave,
   buildConfig,
@@ -2320,6 +2341,13 @@ function AdvancedPolicySettings({
         ) : null
       }
     >
+                      {schedulingEnabled ? <FineTuningSection title="Review scheduling" summary="Control when automatic reviews run after changes." forceOpen={invalidPolicyField?.startsWith("scheduling_policy") === true}><div className="space-y-3">
+                        <PolicyToggle description="Monitor previously requested PRs when their code changes. Explicit reviews remain available." label="Automatically re-review changed PRs" checked={config?.scheduling_policy?.automatic_re_review ?? true} onCheckedChange={(checked) => commitPolicy((next) => { next.scheduling_policy = { ...next.scheduling_policy, automatic_re_review: checked }; })} />
+                        <DurationInput label="Wait after changes" valueSeconds={config?.scheduling_policy?.quiet_period_seconds ?? 60} minSeconds={0} maxSeconds={3600} defaultUnit="minutes" disabled={!config} onChangeSeconds={(seconds) => commitPolicy((next) => { next.scheduling_policy = { ...next.scheduling_policy, quiet_period_seconds: seconds }; })} />
+                        <DurationInput label="Minimum interval between automatic reviews" valueSeconds={config?.scheduling_policy?.minimum_interval_seconds ?? 0} minSeconds={0} maxSeconds={86400} defaultUnit="minutes" disabled={!config} onChangeSeconds={(seconds) => commitPolicy((next) => { next.scheduling_policy = { ...next.scheduling_policy, minimum_interval_seconds: seconds }; })} />
+                        <p className="text-xs text-muted-foreground">The latest revision waits for both timers. Review now bypasses these delays.</p>
+                        <Button size="sm" variant="outline" onClick={() => commitPolicy((next) => { next.scheduling_policy = { ...next.scheduling_policy, quiet_period_seconds: 300, minimum_interval_seconds: 900 }; })}>Use 5-minute wait and 15-minute interval</Button>
+                      </div></FineTuningSection> : null}
           <FineTuningSection
             title="Approval criteria"
             summary="Set limits for change size, review time, and reviewer agreement."
@@ -2389,11 +2417,12 @@ function AdvancedPolicySettings({
                   })
                 }
                       />
+
                       <DurationInput
-                        label="Reassessment cooldown"
+                        label="Dispute reassessment cooldown"
                         labelAction={
                           <SettingInfoTooltip
-                            label="Reassessment cooldown"
+                            label="Dispute reassessment cooldown"
                             description="Deduplicates semantically unchanged reconsideration requests for the same pull request. It prevents duplicate work without limiting distinct objections."
                           />
                         }

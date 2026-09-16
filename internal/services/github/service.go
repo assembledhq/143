@@ -121,6 +121,11 @@ func NewService(appID int64, privateKeyPEM string, loggers ...zerolog.Logger) (*
 	}, nil
 }
 
+// SetBaseURL overrides the GitHub API base URL (for testing).
+func (s *Service) SetBaseURL(url string) {
+	s.apiBaseURL = url
+}
+
 // GitHubAppID identifies comments and other outputs authored by this app.
 func (s *Service) GitHubAppID() int64 {
 	if s == nil {

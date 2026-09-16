@@ -49,6 +49,9 @@ func (h *WebhookHandler) reassessCodeReviewsForGitHubEvent(ctx context.Context, 
 	if err := json.Unmarshal(body, &event); err != nil {
 		return fmt.Errorf("decode code review reassessment event: %w", err)
 	}
+	if event.Action != "synchronize" && !h.codeReviews.SchedulingEnabled() {
+		return nil
+	}
 	if !codeReviewEventChangesAssessment(eventType, event) || event.Number <= 0 {
 		return nil
 	}
@@ -123,5 +126,12 @@ func codeReviewStringValue(value *string) string {
 }
 
 func codeReviewEventChangesAssessment(eventType string, event codeReviewReassessmentWebhook) bool {
-	return eventType == "pull_request" && event.Action == "synchronize"
+	if eventType != "pull_request" {
+		return false
+	}
+	switch event.Action {
+	case "synchronize", "ready_for_review", "converted_to_draft", "closed", "reopened", "edited":
+		return true
+	}
+	return false
 }

@@ -180,7 +180,9 @@ func (s CodeReviewActivityStatus) Validate() error {
 // individual fields off it (Redis pub/sub is at-most-once and unordered, so the
 // canonical record is whatever the list endpoint returns on invalidation).
 type CodeReviewUpdatedEvent struct {
-	OrgID uuid.UUID `json:"org_id"`
+	PullRequestID   *uuid.UUID              `json:"pull_request_id,omitempty"`
+	SchedulingState CodeReviewScheduleState `json:"scheduling_state,omitempty"`
+	OrgID           uuid.UUID               `json:"org_id"`
 	// SessionID is nil for batch transitions that touch many rows at once
 	// (e.g. marking a PR's prior reviews stale on a new head), which have no
 	// single session. A pointer is required for omitempty to actually fire —
@@ -591,6 +593,7 @@ func (r CodeReviewAgentRoster) ReviewerReasoningEffort(index int) ReasoningEffor
 }
 
 type CodeReviewPolicyConfig struct {
+	SchedulingPolicy        *CodeReviewSchedulingPolicy `json:"scheduling_policy,omitempty"`
 	Enabled                 bool                        `json:"enabled"`
 	ApprovalMode            CodeReviewApprovalMode      `json:"approval_mode"`
 	ReviewInstructions      string                      `json:"review_instructions"`
@@ -714,6 +717,7 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 		defaults.ApprovalMode = config.ApprovalMode
 	}
 	defaults.Enabled = config.Enabled
+	defaults.SchedulingPolicy = config.SchedulingPolicy
 	defaults.ReviewInstructions = strings.TrimSpace(config.ReviewInstructions)
 	if config.AutomatedApprovalPolicy != "" {
 		defaults.AutomatedApprovalPolicy = strings.TrimSpace(config.AutomatedApprovalPolicy)
@@ -818,6 +822,9 @@ func normalizeCodeReviewDescriptionPolicy(policy CodeReviewDescriptionPolicy) Co
 }
 
 func (c CodeReviewPolicyConfig) Validate() error {
+	if err := c.SchedulingPolicy.Validate(); err != nil {
+		return err
+	}
 	if err := c.ApprovalMode.Validate(); err != nil {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldApprovalMode, err.Error())
 	}
@@ -941,6 +948,7 @@ func (c CodeReviewPolicyConfig) ValidatePromptFields() error {
 }
 
 type CodeReviewPolicyRecord struct {
+	SchedulingPolicy        *CodeReviewSchedulingPolicy `db:"-" json:"scheduling_policy,omitempty"`
 	ID                      uuid.UUID                   `db:"id" json:"id"`
 	OrgID                   uuid.UUID                   `db:"org_id" json:"org_id"`
 	RepositoryID            *uuid.UUID                  `db:"repository_id" json:"repository_id,omitempty"`
@@ -960,6 +968,7 @@ type CodeReviewPolicyRecord struct {
 
 func (r CodeReviewPolicyRecord) Config() CodeReviewPolicyConfig {
 	config := CodeReviewPolicyConfig{
+		SchedulingPolicy:        r.SchedulingPolicy,
 		ApprovalMode:            r.ApprovalMode,
 		Enabled:                 r.Enabled,
 		ReviewInstructions:      r.ReviewInstructions,
@@ -973,9 +982,10 @@ func (r CodeReviewPolicyRecord) Config() CodeReviewPolicyConfig {
 }
 
 type CodeReviewResolvedPolicy struct {
-	Config CodeReviewPolicyConfig  `json:"config"`
-	Source string                  `json:"source"`
-	Policy *CodeReviewPolicyRecord `json:"policy,omitempty"`
+	Capabilities map[string]bool         `json:"capabilities,omitempty"`
+	Config       CodeReviewPolicyConfig  `json:"config"`
+	Source       string                  `json:"source"`
+	Policy       *CodeReviewPolicyRecord `json:"policy,omitempty"`
 }
 
 type CodeReviewPolicyChangeKind string

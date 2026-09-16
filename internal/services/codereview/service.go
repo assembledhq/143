@@ -75,6 +75,7 @@ const (
 var githubTeamMentionPattern = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])@([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)/([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)`)
 
 type Service struct {
+	scheduling        *schedulingDependencies
 	policies          PolicyStore
 	metadata          MetadataStore
 	sessions          SessionStore
@@ -290,10 +291,20 @@ func (s *Service) SetReviewStatusCommentJobs(jobs JobStore) {
 // requests converge through startReview's deterministic retry output key, then
 // compare-and-set the old row's supersession link to that winner.
 func (s *Service) RetryReview(ctx context.Context, input RetryReviewInput) (RetryReviewResult, error) {
+	if s.SchedulingEnabled() {
+		return s.retryScheduledReview(ctx, input)
+	}
+	return s.retryReview(ctx, input, nil)
+}
+
+// Scheduled retries already hold a live provider snapshot under the PR lock.
+// Reuse that authority instead of invoking the pool-backed mirror synchronizer
+// from inside the admission transaction. Legacy callers retain their refresh.
+func (s *Service) retryReview(ctx context.Context, input RetryReviewInput, currentSnapshot *ghservice.CodeReviewPullRequestSnapshot) (RetryReviewResult, error) {
 	if input.OrgID == uuid.Nil || input.SessionID == uuid.Nil {
 		return RetryReviewResult{}, fmt.Errorf("org_id and session_id are required")
 	}
-	if s.pullRequests == nil || s.pullRequestSyncer == nil {
+	if s.pullRequests == nil || (currentSnapshot == nil && s.pullRequestSyncer == nil) {
 		return RetryReviewResult{}, fmt.Errorf("code review retry dependencies are unavailable")
 	}
 
@@ -317,24 +328,35 @@ func (s *Service) RetryReview(ctx context.Context, input RetryReviewInput) (Retr
 		return RetryReviewResult{}, err
 	}
 
-	syncCtx := ghservice.WithPullRequestSyncReason(ctx, ghservice.PullRequestSyncReasonCodeReview)
-	if err := s.pullRequestSyncer.SyncPullRequestState(syncCtx, input.OrgID, failed.PullRequestID); err != nil && !errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
-		return RetryReviewResult{}, fmt.Errorf("refresh pull request before code review retry: %w", err)
+	if currentSnapshot == nil {
+		syncCtx := ghservice.WithPullRequestSyncReason(ctx, ghservice.PullRequestSyncReasonCodeReview)
+		if err := s.pullRequestSyncer.SyncPullRequestState(syncCtx, input.OrgID, failed.PullRequestID); err != nil && !errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
+			return RetryReviewResult{}, fmt.Errorf("refresh pull request before code review retry: %w", err)
+		}
 	}
 	pr, err := s.pullRequests.GetByID(ctx, input.OrgID, failed.PullRequestID)
 	if err != nil {
 		return RetryReviewResult{}, fmt.Errorf("load refreshed pull request before code review retry: %w", err)
 	}
-	if pr.Status != models.PullRequestStatusOpen {
+	open := pr.Status == models.PullRequestStatusOpen
+	if currentSnapshot != nil {
+		open = currentSnapshot.State == "open" && !currentSnapshot.IsDraft
+	}
+	if !open {
 		return RetryReviewResult{}, &RetryReviewConflictError{
 			Code: RetryReviewConflictPRClosed, Message: "This pull request is no longer open.",
 		}
 	}
-	health, err := s.pullRequests.GetHealthCurrent(ctx, input.OrgID, failed.PullRequestID)
-	if err != nil {
-		return RetryReviewResult{}, fmt.Errorf("load refreshed pull request head before code review retry: %w", err)
+	var currentHead, currentBase string
+	if currentSnapshot != nil {
+		currentHead, currentBase = strings.TrimSpace(currentSnapshot.HeadSHA), strings.TrimSpace(currentSnapshot.BaseSHA)
+	} else {
+		health, err := s.pullRequests.GetHealthCurrent(ctx, input.OrgID, failed.PullRequestID)
+		if err != nil {
+			return RetryReviewResult{}, fmt.Errorf("load refreshed pull request head before code review retry: %w", err)
+		}
+		currentHead, currentBase = strings.TrimSpace(health.HeadSHA), strings.TrimSpace(health.BaseSHA)
 	}
-	currentHead := strings.TrimSpace(health.HeadSHA)
 	if currentHead == "" || currentHead != strings.TrimSpace(failed.HeadSHA) {
 		return RetryReviewResult{}, &RetryReviewConflictError{
 			Code: RetryReviewConflictHeadChanged, Message: "The pull request head changed; wait for or request a review of the current commit.",
@@ -357,7 +379,7 @@ func (s *Service) RetryReview(ctx context.Context, input RetryReviewInput) (Retr
 		GitHubPRURL:       pr.GitHubPRURL,
 		PullRequestTitle:  pr.Title,
 		PullRequestAuthor: codeReviewRevisionContextString(priorSession.RevisionContext, "pull_request_author"),
-		BaseSHA:           strings.TrimSpace(health.BaseSHA),
+		BaseSHA:           currentBase,
 		HeadSHA:           currentHead,
 		FromFork:          failed.FromFork,
 		RequestedLogin:    codeReviewRevisionContextString(priorSession.RevisionContext, "requested_reviewer_login"),
@@ -604,6 +626,9 @@ func (s *Service) handleExplicitReviewRequest(
 	changeReason string,
 	changeKey string,
 ) (ReviewRequestedResult, error) {
+	if s.SchedulingEnabled() {
+		return s.scheduleReview(ctx, ReviewChangedInput{OrgID: input.OrgID, RepositoryID: input.RepositoryID, PullRequestID: input.PullRequestID, ExplicitRequest: true, GitHubDeliveryID: input.DeliveryID, RequestContext: normalizeReviewRequestContext(input.RequestContext), RequestedReviewerLogin: input.RequestedLogin, RequestedTeamSlug: input.RequestedTeam, TriggerSource: source, ChangeReason: changeReason}, models.CodeReviewReviewNow, false, nil)
+	}
 	input.RequestContext = normalizeReviewRequestContext(input.RequestContext)
 	// A reviewer-picker request or configured-team mention is intentional even
 	// after approval; approval is only the terminal gate for automatic changes.
@@ -683,6 +708,13 @@ func (s *Service) handleExplicitReviewRequest(
 // After the replacement job is durable, automatic head changes mark older
 // assessments stale and stop their agent threads immediately.
 func (s *Service) QueueReviewChanged(ctx context.Context, input ReviewChangedInput) (ReviewRequestedResult, error) {
+	if s.SchedulingEnabled() && input.TriggeringDisputeID == nil && input.ReviewRequestDisputeID == nil {
+		mode := models.CodeReviewEnsureCurrent
+		if input.ExplicitRequest {
+			mode = models.CodeReviewReviewNow
+		}
+		return s.scheduleReview(ctx, input, mode, input.TriggeringDisputeID != nil, nil)
+	}
 	if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil || input.PullRequestID == uuid.Nil {
 		return ReviewRequestedResult{}, fmt.Errorf("org_id, repository_id, and pull_request_id are required")
 	}
@@ -790,6 +822,9 @@ func (s *Service) reassessmentDebounce() time.Duration {
 // code review. Automatic reassessment stops after the reviewer approves the PR,
 // while explicit requests may intentionally start another assessment.
 func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedInput) (ReviewRequestedResult, error) {
+	if s.SchedulingEnabled() {
+		return s.handleSerializedReviewChanged(ctx, input)
+	}
 	if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil || input.PullRequestID == uuid.Nil {
 		return ReviewRequestedResult{}, fmt.Errorf("org_id, repository_id, and pull_request_id are required")
 	}
