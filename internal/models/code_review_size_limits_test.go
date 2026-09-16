@@ -33,7 +33,9 @@ func TestCodeReviewRiskPolicySizeLimitCompatibility(t *testing.T) {
 			require.Equal(t, expected, resolved.RiskPolicy, "legacy limits should carry forward without overriding explicit limits")
 			encoded, err := json.Marshal(resolved.RiskPolicy)
 			require.NoError(t, err, "resolved risk policy should serialize")
-			require.NotContains(t, string(encoded), "max_lines_changed", "new policy versions should only persist independent limits")
+			var roundTrip CodeReviewRiskPolicy
+			require.NoError(t, json.Unmarshal(encoded, &roundTrip), "new workers should decode the compatibility payload")
+			require.Equal(t, resolved.RiskPolicy, ResolveCodeReviewPolicyConfig(&CodeReviewPolicyConfig{RiskPolicy: roundTrip}).RiskPolicy, "the legacy projection must not collapse independent limits on new workers")
 			require.Equal(t, resolved, ResolveCodeReviewPolicyConfig(&resolved), "resolving a policy repeatedly should preserve independent limits")
 		})
 	}
@@ -107,6 +109,50 @@ func TestCodeReviewSizeLimitFeedback(t *testing.T) {
 			require.Equal(t, codeReviewBlockerGroupPolicy, codeReviewRiskReasonBlockerGroup(tt.code), "size blockers belong to policy requirements")
 			require.Equal(t, tt.explanation, humanizeCodeReviewRiskReason(reason, nil), "GitHub feedback should explain the individual measurement")
 			require.Equal(t, tt.explanation+" [View policy setting](https://143.dev/code-reviews?tab=policy#"+tt.fragment+")", codeReviewExplanationWithSettingsLink(tt.explanation, "https://143.dev/code-reviews?tab=policy", tt.code), "feedback should link to the matching control")
+		})
+	}
+}
+
+func TestCodeReviewRiskPolicyLegacySerialization(t *testing.T) {
+	t.Parallel()
+	// This is the old binary's JSON shape. It ignores both independent limits.
+	type legacyRiskPolicy struct {
+		MaxFilesChanged      int  `json:"max_files_changed"`
+		MaxLinesChanged      int  `json:"max_lines_changed"`
+		RequirePassingChecks bool `json:"require_passing_checks"`
+	}
+	tests := []struct {
+		name                                      string
+		additions, deletions, expectedLegacyLimit int
+	}{
+		{"custom limit above default", 1000, 1000, 1000},
+		{"custom limit below default", 100, 100, 100},
+		{"additions are stricter", 100, 900, 100},
+		{"deletions are stricter", 900, 100, 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			policy := DefaultCodeReviewPolicyConfig()
+			policy.RiskPolicy.MaxAdditions, policy.RiskPolicy.MaxDeletions = tt.additions, tt.deletions
+			policy.RiskPolicy.RequirePassingChecks = true
+			encoded, err := json.Marshal(policy.RiskPolicy)
+			require.NoError(t, err, "new policies should serialize for both worker versions")
+			var legacy legacyRiskPolicy
+			require.NoError(t, json.Unmarshal(encoded, &legacy), "an old worker should decode the policy")
+			require.Equal(t, legacyRiskPolicy{MaxFilesChanged: 5, MaxLinesChanged: tt.expectedLegacyLimit, RequirePassingChecks: true}, legacy, "old workers should retain a safe configured limit and unrelated safeguards instead of defaulting to 300")
+			require.LessOrEqual(t, legacy.MaxLinesChanged, tt.additions, "an old worker's combined budget must not exceed the additions limit")
+			require.LessOrEqual(t, legacy.MaxLinesChanged, tt.deletions, "an old worker's combined budget must not exceed the deletions limit")
+
+			var current CodeReviewRiskPolicy
+			require.NoError(t, json.Unmarshal(encoded, &current), "new workers should still decode the payload")
+			require.Equal(t, policy.RiskPolicy, ResolveCodeReviewPolicyConfig(&CodeReviewPolicyConfig{RiskPolicy: current}).RiskPolicy, "new workers should preserve the independent limits and all other effective policy fields")
+
+			// An old API may save the policy during rollback, discarding unknown fields.
+			oldSave, err := json.Marshal(legacy)
+			require.NoError(t, err, "an old API should be able to reserialize its policy")
+			require.NoError(t, json.Unmarshal(oldSave, &current), "new workers should accept an old API's saved policy after rolling forward")
+			require.Equal(t, CodeReviewRiskPolicy{MaxFilesChanged: 5, MaxAdditions: tt.expectedLegacyLimit, MaxDeletions: tt.expectedLegacyLimit, RequirePassingChecks: true}, current, "old saves should roll forward into conservative independent limits")
 		})
 	}
 }

@@ -255,6 +255,11 @@ func codeReviewPolicyConfigMap(config models.CodeReviewPolicyConfig) (map[string
 	if err := decoder.Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode code review policy config for diff: %w", err)
 	}
+	// The legacy limit is derived for old binaries, not an independently edited
+	// setting. Keep history focused on additions and deletions.
+	if riskPolicy, ok := result["risk_policy"].(map[string]any); ok {
+		delete(riskPolicy, "max_lines_changed")
+	}
 	return result, nil
 }
 

@@ -504,6 +504,21 @@ type CodeReviewRiskPolicy struct {
 	RequiredChecks                []string `json:"required_checks,omitempty"`
 }
 
+// MarshalJSON retains a conservative combined budget for old workers during
+// rolling deployments and rollbacks. Using the smaller limit ensures an old
+// worker cannot approve a diff that exceeds either independent size limit.
+// Keep this field while releases using MaxLinesChanged remain rollback targets.
+func (p CodeReviewRiskPolicy) MarshalJSON() ([]byte, error) {
+	type riskPolicy CodeReviewRiskPolicy
+	return json.Marshal(struct {
+		riskPolicy
+		MaxLinesChanged int `json:"max_lines_changed"`
+	}{
+		riskPolicy:      riskPolicy(p),
+		MaxLinesChanged: min(p.MaxAdditions, p.MaxDeletions),
+	})
+}
+
 // UnmarshalJSON carries legacy total-line limits into both independent limits.
 // Explicit additions/deletions take precedence, including in saved snapshots.
 func (p *CodeReviewRiskPolicy) UnmarshalJSON(data []byte) error {
