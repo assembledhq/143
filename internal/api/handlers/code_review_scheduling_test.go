@@ -57,7 +57,7 @@ func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 		{name: "rejects force fresh until capability exists", mode: "force_fresh", status: 409, code: "CODE_REVIEW_CAPABILITY_UNAVAILABLE"},
 		{name: "rejects unknown mode", mode: "surprise", status: 400, code: "CODE_REVIEW_REQUEST_INVALID"},
 		{name: "requires identity", mode: "review_now", anonymous: true, status: 401, code: "UNAUTHORIZED"},
-		{name: "rollout off", mode: "review_now", disabled: true, status: 503, code: "CODE_REVIEW_SCHEDULING_UNAVAILABLE"},
+		{name: "scheduling service unavailable", mode: "review_now", disabled: true, status: 503, code: "CODE_REVIEW_SCHEDULING_UNAVAILABLE"},
 		{name: "draft or closed", mode: "review_now", err: codereviewsvc.ErrReviewIneligible, status: 409, code: "CODE_REVIEW_PR_INELIGIBLE"},
 		{name: "conflicting request identity", mode: "review_now", err: db.ErrCodeReviewRequestConflict, status: 409, code: "CODE_REVIEW_REQUEST_ID_CONFLICT"},
 		{name: "foreign target", mode: "review_now", err: pgx.ErrNoRows, status: 404, code: "CODE_REVIEW_NOT_FOUND"},

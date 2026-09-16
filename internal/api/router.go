@@ -409,10 +409,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	codeReviewSvc.SetGitHubTriggerStore(codeReviewStore)
 	if prService != nil {
 		codeReviewSvc.SetRetryDependencies(pullRequestStore, prService)
-		if cfg.CodeReviewSchedulingEnabled {
-			codeReviewSvc.SetScheduling(db.NewCodeReviewScheduleStore(pool), prService)
-			codeReviewSvc.SetSchedulingStreams(codeReviewStreams)
-		}
+		codeReviewSvc.SetScheduling(db.NewCodeReviewScheduleStore(pool), prService)
+		codeReviewSvc.SetSchedulingStreams(codeReviewStreams)
 	}
 	codeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
 	codeReviewDisputeStore.SetJobStore(jobStore)

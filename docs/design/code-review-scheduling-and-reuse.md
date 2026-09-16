@@ -1,8 +1,8 @@
 # Design: Code Review Scheduling, Reuse, and Usage Controls
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-09-10
+> **Status:** Partially Implemented | **Last reviewed:** 2026-09-16
 
-Stage 1 is implemented locally behind a disabled rollout switch. No production configuration or rollout has changed. The product direction was agreed in discussion; numeric limits below are proposed starting values, not measured capacity recommendations.
+Stage 1 is implemented in PR #2143 and available automatically when the GitHub review service is configured. There is no scheduling rollout flag. No production configuration or deployment has been changed by this work. The product direction was agreed in discussion; numeric limits below are proposed starting values, not measured capacity recommendations.
 
 ## Purpose
 
@@ -81,11 +81,11 @@ TEST_DATABASE_URL=<disposable-postgres-url> go test ./internal/db -run '^TestCod
 CODE_REVIEW_TEST_DATABASE_URL=<disposable-postgres-15-or-newer-url> go test ./internal/services/codereview -run '^TestCodeReviewSchedulingLifecyclePostgres$' -v
 ```
 
-The lifecycle URL's user must be allowed to create databases; the test drops its own database afterward. Frontend tests exercise timing autosave/version fencing, pending rows, capability/permission gating, disabled controls, and retry request identity. The touched Go package suites, Go vet, tenancy/schema lints, 105 focused frontend tests, full frontend typecheck/lint, and the production frontend build passed locally. Native Chrome proof, remote CI, and production savings measurements remain outstanding.
+The lifecycle URL's user must be allowed to create databases; the test drops its own database afterward. Frontend tests exercise timing autosave/version fencing, pending rows, capability/permission gating, disabled controls, and retry request identity. The touched Go package suites, Go vet, tenancy/schema lints, 105 focused frontend tests, full frontend typecheck/lint, and the production frontend build passed locally. Native Chrome screenshots and API evidence are attached to PR #2143. Remote CI and production savings measurements are separate from these local checks.
 
-Deploy the migration first, then compatible API and worker binaries. `CODE_REVIEW_SCHEDULING_ENABLED` defaults false and must be enabled consistently on API and workers only after rollout readiness. It is an operational capability switch; timing values remain versioned settings managed in 143. There is no automatic historical PR backfill or expanded post-approval spending. Existing queued reassessment jobs transfer ordinary intent into the scheduler; dispute jobs retain their provenance and lock admission. Already-created assessments drain through worker freshness checks.
+Deploy the migration first. Pause review ingress and drain or stop old review workers before deploying compatible API and worker binaries together, then resume processing. Scheduling becomes active with the new binaries wherever the GitHub review service is configured; no environment flag is needed. Timing values remain versioned settings managed in 143. There is no automatic historical PR backfill or expanded post-approval spending. Existing queued reassessment jobs transfer ordinary intent into the scheduler; dispute jobs retain their provenance and lock admission. Already-created assessments drain through worker freshness checks.
 
-For rollback, disable the capability consistently and keep the additive schema/data. Pending requests and audit rows remain available for later recovery. Do not use the down migration on a live populated installation: it drops the scheduling/request data and is only exercised as a disposable migration compatibility check. Old workers do not understand the new wake job type; deploy compatible binaries everywhere before enabling the capability. This slice makes no content-reuse, capacity-reserve, or measured savings claim.
+For rollback, pause review ingress and processing and keep the additive schema/data. Pending requests and audit rows remain available for later recovery by compatible binaries. Do not use the down migration on a live populated installation: it drops the scheduling/request data and is only exercised as a disposable migration compatibility check. Old workers do not understand the new wake job type; do not let them consume pending scheduling jobs. Disabling automatic re-review in the organization policy controls automatic spending, but does not make old workers compatible with the new queue. This slice makes no content-reuse, capacity-reserve, or measured savings claim.
 
 ## Investigation Baseline (Before Stage 1)
 
