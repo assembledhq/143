@@ -22,6 +22,7 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 
 	tests := []struct {
 		name                      string
+		schedulingEnabled         bool
 		initialStatus             models.CodeReviewSessionStatus
 		lockedStatus              models.CodeReviewSessionStatus
 		lockedFinalBody           *string
@@ -38,11 +39,12 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 		expectErr                 bool
 	}{
 		{
-			name:          "announces running review with session link",
-			initialStatus: models.CodeReviewSessionStatusRunning,
-			lockedStatus:  models.CodeReviewSessionStatusRunning,
-			expectedBody:  "143 Code Reviewer has started reviewing this pull request.",
-			expectedCalls: []string{"upsert"},
+			name:              "announces running review with session link",
+			schedulingEnabled: true,
+			initialStatus:     models.CodeReviewSessionStatusRunning,
+			lockedStatus:      models.CodeReviewSessionStatusRunning,
+			expectedBody:      "143 Code Reviewer has started reviewing this pull request.",
+			expectedCalls:     []string{"upsert"},
 		},
 		{
 			name:            "publishes durable provisional blockers while review continues",
@@ -216,8 +218,9 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 				Repositories: db.NewRepositoryStore(mock),
 				PullRequests: db.NewPullRequestStore(mock),
 			}, &Services{
-				CodeReviews: submitter,
-				FrontendURL: "https://143.test",
+				CodeReviews:         submitter,
+				CodeReviewLifecycle: &statusCommentSchedulingStub{enabled: tt.schedulingEnabled},
+				FrontendURL:         "https://143.test",
 			}, zerolog.Nop())(context.Background(), models.JobTypeSyncCodeReviewStatusComment, payload)
 
 			if tt.expectErr {
@@ -242,6 +245,11 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 				require.NotContains(t, submitter.request.Body, "remains visible until the new review finishes", "reassessment history should replace the redundant visibility explanation")
 			}
 			require.Contains(t, submitter.request.Body, "https://143.test/sessions/"+sessionID.String(), "status comment should link to the review session")
+			if tt.schedulingEnabled {
+				require.Contains(t, submitter.request.Body, "[Review now](https://143.test/code-reviews?review_now="+sessionID.String()+")", "enabled worker publishes a usable review action")
+			} else {
+				require.NotContains(t, submitter.request.Body, "[Review now]", "unavailable scheduling service omits the action")
+			}
 			require.Equal(t, tt.expectedCalls, submitter.calls, "fallback summary should only be hidden after the rolling comment is published")
 			if tt.lockedReviewID != nil {
 				require.Equal(t, codereviewsvc.HideReviewSummaryRequest{
@@ -334,4 +342,50 @@ func statusCommentStringPtr(value string) *string {
 
 func statusCommentInt64Ptr(value int64) *int64 {
 	return &value
+}
+
+func TestCodeReviewStatusCommentReviewNowLink(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		status  models.CodeReviewSessionStatus
+		enabled bool
+		present bool
+	}{
+		{"running", models.CodeReviewSessionStatusRunning, true, true},
+		{"completed", models.CodeReviewSessionStatusCompleted, true, true},
+		{"failed", models.CodeReviewSessionStatusFailed, true, true},
+		{"cancelled", models.CodeReviewSessionStatusCancelled, true, true},
+		{"superseded", models.CodeReviewSessionStatusStale, true, false},
+		{"scheduling service unavailable", models.CodeReviewSessionStatusCompleted, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sessionID := uuid.MustParse("90d8a47d-d87e-4780-90af-040f5144685a")
+			link := ""
+			if tt.enabled {
+				link = codeReviewNowURL("https://143.test/", sessionID)
+			}
+			body := codeReviewStatusCommentBody(models.CodeReviewSessionMetadata{SessionID: sessionID, Status: tt.status}, nil, "https://143.test/sessions/"+sessionID.String(), link)
+			expected := "[Review now](https://143.test/code-reviews?review_now=" + sessionID.String() + ")"
+			if tt.present {
+				require.Contains(t, body, expected, "rolling comment links to the authenticated confirmation for its source session")
+				require.Contains(t, body, "Existing applicable work may be reused", "link must not promise a forced fresh assessment")
+			} else {
+				require.NotContains(t, body, "[Review now]", "unsupported or superseded comment must not advertise action")
+			}
+			require.NotContains(t, body, "/api/", "comment link never directly invokes a mutation endpoint")
+		})
+	}
+}
+
+type statusCommentSchedulingStub struct {
+	*codeReviewLifecycleStub
+	enabled bool
+}
+
+func (s *statusCommentSchedulingStub) SchedulingEnabled() bool { return s.enabled }
+func (s *statusCommentSchedulingStub) ReconcileSchedule(context.Context, models.CodeReviewScheduleWake) error {
+	panic("comment rendering must not execute review scheduling")
 }
