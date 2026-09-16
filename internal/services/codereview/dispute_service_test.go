@@ -846,3 +846,24 @@ func TestCodeReviewDisputeSemanticHashNormalization(t *testing.T) {
 		})
 	}
 }
+
+func TestIndependentSizeLimitsAreDeterministicPolicySignals(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		code  models.CodeReviewRiskReasonCode
+		label string
+	}{
+		{"additions", models.CodeReviewRiskReasonAdditionsLimitExceeded, "Additions"},
+		{"deletions", models.CodeReviewRiskReasonDeletionsLimitExceeded, "Deletions"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			codes := []models.CodeReviewRiskReasonCode{tt.code}
+			require.True(t, onlyDeterministicReasons(codes), "size-limit objections should route to the policy owner")
+			reply := deterministicPolicySignalReply(codes, []models.CodeReviewRiskReason{{Code: tt.code, Actual: 431, Limit: 300}})
+			require.Equal(t, "This objection concerns deterministic policy: "+tt.label+" limit is 300 (observed 431). Reassessment would apply the same rule, so it was recorded for a policy owner instead.", reply, "reply should identify the independent threshold")
+		})
+	}
+}

@@ -255,6 +255,11 @@ func codeReviewPolicyConfigMap(config models.CodeReviewPolicyConfig) (map[string
 	if err := decoder.Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode code review policy config for diff: %w", err)
 	}
+	// The legacy limit is derived for old binaries, not an independently edited
+	// setting. Keep history focused on additions and deletions.
+	if riskPolicy, ok := result["risk_policy"].(map[string]any); ok {
+		delete(riskPolicy, "max_lines_changed")
+	}
 	return result, nil
 }
 
@@ -325,7 +330,8 @@ var codeReviewPolicyFieldLabels = map[string]string{
 	"automated_approval_policy":                    "Automated approval policy",
 	"description_policy.requirements":              "Description requirements",
 	"risk_policy.max_files_changed":                "Maximum files changed",
-	"risk_policy.max_lines_changed":                "Maximum lines changed",
+	"risk_policy.max_additions":                    "Maximum additions",
+	"risk_policy.max_deletions":                    "Maximum deletions",
 	"risk_policy.semantic_dedupe_cooldown_seconds": "Duplicate review cooldown",
 	"risk_policy.stop_after_deterministic_failure": "Stop after deterministic failure",
 	"risk_policy.require_passing_checks":           "Require passing checks",

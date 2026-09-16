@@ -293,6 +293,8 @@ func codeReviewRiskReasonBlockerGroup(code CodeReviewRiskReasonCode) codeReviewB
 	case CodeReviewRiskReasonReviewerDisabled,
 		CodeReviewRiskReasonFilesLimitExceeded,
 		CodeReviewRiskReasonLinesLimitExceeded,
+		CodeReviewRiskReasonAdditionsLimitExceeded,
+		CodeReviewRiskReasonDeletionsLimitExceeded,
 		CodeReviewRiskReasonChecksFailing,
 		CodeReviewRiskReasonRequiredCheckFailing,
 		CodeReviewRiskReasonDescriptionFailed,
@@ -387,6 +389,10 @@ func codeReviewPolicySettingFragment(code CodeReviewRiskReasonCode) string {
 		return "policy-max-files-changed"
 	case CodeReviewRiskReasonLinesLimitExceeded:
 		return "policy-max-lines-changed"
+	case CodeReviewRiskReasonAdditionsLimitExceeded:
+		return "policy-max-additions"
+	case CodeReviewRiskReasonDeletionsLimitExceeded:
+		return "policy-max-deletions"
 	default:
 		return ""
 	}
@@ -450,6 +456,10 @@ func humanizeCodeReviewRiskReason(reason CodeReviewRiskReason, descriptionIssues
 		return fmt.Sprintf("This change touches %d files; the policy limit is %d.", reason.Actual, reason.Limit)
 	case CodeReviewRiskReasonLinesLimitExceeded:
 		return fmt.Sprintf("This change has %d changed lines; the policy limit is %d.", reason.Actual, reason.Limit)
+	case CodeReviewRiskReasonAdditionsLimitExceeded:
+		return fmt.Sprintf("This change has %d additions; the policy limit is %d.", reason.Actual, reason.Limit)
+	case CodeReviewRiskReasonDeletionsLimitExceeded:
+		return fmt.Sprintf("This change has %d deletions; the policy limit is %d.", reason.Actual, reason.Limit)
 	case CodeReviewRiskReasonChecksFailing:
 		return "Required GitHub checks are not passing."
 	case CodeReviewRiskReasonRequiredCheckFailing:

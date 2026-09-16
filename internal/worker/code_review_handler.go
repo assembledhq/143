@@ -1590,9 +1590,11 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 
 func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot) []models.CodeReviewRiskReason {
 	reviewerQuorum, _ := codeReviewReviewerEvidence(agentResults)
+	additions, deletions := codeReviewLineChanges(changedFiles)
 	risk := models.EvaluateCodeReviewRisk(cfg, models.CodeReviewRiskInput{
 		FilesChanged:          len(changedFiles),
-		LinesChanged:          codeReviewLinesChanged(changedFiles),
+		Additions:             additions,
+		Deletions:             deletions,
 		ChangedPaths:          codeReviewChangedPaths(changedFiles),
 		ChecksPassing:         codeReviewChecksPassing(cfg, health),
 		RequiredChecksPassing: codeReviewRequiredChecksPassing(cfg, health),
@@ -3120,9 +3122,11 @@ func codeReviewStableDeterministicRisk(policy models.CodeReviewPolicyConfig, job
 	for _, check := range policy.RiskPolicy.RequiredChecks {
 		requiredChecksPassing[check] = true
 	}
+	additions, deletions := codeReviewLineChanges(changedFiles)
 	evaluated := models.EvaluateCodeReviewRisk(policy, models.CodeReviewRiskInput{
 		FilesChanged:          len(changedFiles),
-		LinesChanged:          codeReviewLinesChanged(changedFiles),
+		Additions:             additions,
+		Deletions:             deletions,
 		ChangedPaths:          codeReviewChangedPaths(changedFiles),
 		ChecksPassing:         true,
 		RequiredChecksPassing: requiredChecksPassing,
@@ -3233,9 +3237,11 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		descriptionEvaluation, descriptionErr = codeReviewDescriptionEvaluationFromSynthesis(policy, input.ChangedFiles, input.OrchestratorSynthesis, input.VisualEvidence)
 		descriptionEvaluationValid = descriptionErr == nil
 	}
+	additions, deletions := codeReviewLineChanges(input.ChangedFiles)
 	risk := models.EvaluateCodeReviewRisk(policy, models.CodeReviewRiskInput{
 		FilesChanged:          len(input.ChangedFiles),
-		LinesChanged:          codeReviewLinesChanged(input.ChangedFiles),
+		Additions:             additions,
+		Deletions:             deletions,
 		ChangedPaths:          codeReviewChangedPaths(input.ChangedFiles),
 		ChecksPassing:         codeReviewChecksPassing(policy, input.Health),
 		RequiredChecksPassing: codeReviewRequiredChecksPassing(policy, input.Health),

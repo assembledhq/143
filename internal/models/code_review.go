@@ -488,7 +488,8 @@ type CodeReviewDescriptionPolicy struct {
 
 type CodeReviewRiskPolicy struct {
 	MaxFilesChanged               int      `json:"max_files_changed"`
-	MaxLinesChanged               int      `json:"max_lines_changed"`
+	MaxAdditions                  int      `json:"max_additions"`
+	MaxDeletions                  int      `json:"max_deletions"`
 	SemanticDedupeCooldownSeconds int      `json:"semantic_dedupe_cooldown_seconds"`
 	StopAfterDeterministicFailure bool     `json:"stop_after_deterministic_failure"`
 	RequirePassingChecks          bool     `json:"require_passing_checks"`
@@ -501,6 +502,49 @@ type CodeReviewRiskPolicy struct {
 	EligibleAuthors               []string `json:"eligible_authors,omitempty"`
 	EligibleAuthorTeams           []string `json:"eligible_author_teams,omitempty"`
 	RequiredChecks                []string `json:"required_checks,omitempty"`
+}
+
+// MarshalJSON retains a conservative combined budget for old workers during
+// rolling deployments and rollbacks. Using the smaller limit ensures an old
+// worker cannot approve a diff that exceeds either independent size limit.
+// Keep this field while releases using MaxLinesChanged remain rollback targets.
+func (p CodeReviewRiskPolicy) MarshalJSON() ([]byte, error) {
+	type riskPolicy CodeReviewRiskPolicy
+	return json.Marshal(struct {
+		riskPolicy
+		MaxLinesChanged int `json:"max_lines_changed"`
+	}{
+		riskPolicy:      riskPolicy(p),
+		MaxLinesChanged: min(p.MaxAdditions, p.MaxDeletions),
+	})
+}
+
+// UnmarshalJSON carries legacy total-line limits into both independent limits.
+// Explicit additions/deletions take precedence, including in saved snapshots.
+func (p *CodeReviewRiskPolicy) UnmarshalJSON(data []byte) error {
+	type riskPolicy CodeReviewRiskPolicy
+	var decoded struct {
+		riskPolicy
+		MaxLinesChanged *int `json:"max_lines_changed"`
+		MaxAdditions    *int `json:"max_additions"`
+		MaxDeletions    *int `json:"max_deletions"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	result := CodeReviewRiskPolicy(decoded.riskPolicy)
+	if decoded.MaxLinesChanged != nil {
+		result.MaxAdditions = *decoded.MaxLinesChanged
+		result.MaxDeletions = *decoded.MaxLinesChanged
+	}
+	if decoded.MaxAdditions != nil {
+		result.MaxAdditions = *decoded.MaxAdditions
+	}
+	if decoded.MaxDeletions != nil {
+		result.MaxDeletions = *decoded.MaxDeletions
+	}
+	*p = result
+	return nil
 }
 
 const (
@@ -631,7 +675,8 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 		}},
 		RiskPolicy: CodeReviewRiskPolicy{
 			MaxFilesChanged:               5,
-			MaxLinesChanged:               300,
+			MaxAdditions:                  300,
+			MaxDeletions:                  300,
 			SemanticDedupeCooldownSeconds: DefaultCodeReviewSemanticDedupeCooldownSeconds,
 			StopAfterDeterministicFailure: false,
 			RequirePassingChecks:          false,
@@ -679,8 +724,11 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	if config.RiskPolicy.MaxFilesChanged != 0 {
 		defaults.RiskPolicy.MaxFilesChanged = config.RiskPolicy.MaxFilesChanged
 	}
-	if config.RiskPolicy.MaxLinesChanged != 0 {
-		defaults.RiskPolicy.MaxLinesChanged = config.RiskPolicy.MaxLinesChanged
+	if config.RiskPolicy.MaxAdditions != 0 {
+		defaults.RiskPolicy.MaxAdditions = config.RiskPolicy.MaxAdditions
+	}
+	if config.RiskPolicy.MaxDeletions != 0 {
+		defaults.RiskPolicy.MaxDeletions = config.RiskPolicy.MaxDeletions
 	}
 	if config.RiskPolicy.SemanticDedupeCooldownSeconds != 0 {
 		defaults.RiskPolicy.SemanticDedupeCooldownSeconds = config.RiskPolicy.SemanticDedupeCooldownSeconds
@@ -782,8 +830,11 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	if c.RiskPolicy.MaxFilesChanged < 1 {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "max_files_changed must be positive")
 	}
-	if c.RiskPolicy.MaxLinesChanged < 1 {
-		return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "max_lines_changed must be positive")
+	if c.RiskPolicy.MaxAdditions < 1 {
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "max_additions must be positive")
+	}
+	if c.RiskPolicy.MaxDeletions < 1 {
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "max_deletions must be positive")
 	}
 	if c.RiskPolicy.SemanticDedupeCooldownSeconds < MinCodeReviewSemanticDedupeCooldownSeconds ||
 		c.RiskPolicy.SemanticDedupeCooldownSeconds > MaxCodeReviewSemanticDedupeCooldownSeconds {
@@ -1285,7 +1336,8 @@ func CodeReviewAutomatedApprovalExamples() []CodeReviewAutomatedApprovalExampleO
 
 type CodeReviewRiskInput struct {
 	FilesChanged          int
-	LinesChanged          int
+	Additions             int
+	Deletions             int
 	ChangedPaths          []string
 	ChecksPassing         bool
 	RequiredChecksPassing map[string]bool
@@ -1307,17 +1359,20 @@ type CodeReviewRiskInput struct {
 type CodeReviewRiskReasonCode string
 
 const (
-	CodeReviewRiskReasonReviewerDisabled     CodeReviewRiskReasonCode = "reviewer_disabled"
-	CodeReviewRiskReasonContextUnavailable   CodeReviewRiskReasonCode = "context_unavailable"
-	CodeReviewRiskReasonHeadChanged          CodeReviewRiskReasonCode = "head_changed"
-	CodeReviewRiskReasonFilesLimitExceeded   CodeReviewRiskReasonCode = "files_limit_exceeded"
-	CodeReviewRiskReasonLinesLimitExceeded   CodeReviewRiskReasonCode = "lines_limit_exceeded"
-	CodeReviewRiskReasonChecksFailing        CodeReviewRiskReasonCode = "checks_failing"
-	CodeReviewRiskReasonRequiredCheckFailing CodeReviewRiskReasonCode = "required_check_failing"
-	CodeReviewRiskReasonDescriptionFailed    CodeReviewRiskReasonCode = "description_failed"
-	CodeReviewRiskReasonBranchOutOfDate      CodeReviewRiskReasonCode = "branch_out_of_date"
-	CodeReviewRiskReasonForkIneligible       CodeReviewRiskReasonCode = "fork_ineligible"
-	CodeReviewRiskReasonAuthorIneligible     CodeReviewRiskReasonCode = "author_ineligible"
+	CodeReviewRiskReasonReviewerDisabled   CodeReviewRiskReasonCode = "reviewer_disabled"
+	CodeReviewRiskReasonContextUnavailable CodeReviewRiskReasonCode = "context_unavailable"
+	CodeReviewRiskReasonHeadChanged        CodeReviewRiskReasonCode = "head_changed"
+	CodeReviewRiskReasonFilesLimitExceeded CodeReviewRiskReasonCode = "files_limit_exceeded"
+	// Retained for historical decisions; new evaluations use independent limits.
+	CodeReviewRiskReasonLinesLimitExceeded     CodeReviewRiskReasonCode = "lines_limit_exceeded"
+	CodeReviewRiskReasonAdditionsLimitExceeded CodeReviewRiskReasonCode = "additions_limit_exceeded"
+	CodeReviewRiskReasonDeletionsLimitExceeded CodeReviewRiskReasonCode = "deletions_limit_exceeded"
+	CodeReviewRiskReasonChecksFailing          CodeReviewRiskReasonCode = "checks_failing"
+	CodeReviewRiskReasonRequiredCheckFailing   CodeReviewRiskReasonCode = "required_check_failing"
+	CodeReviewRiskReasonDescriptionFailed      CodeReviewRiskReasonCode = "description_failed"
+	CodeReviewRiskReasonBranchOutOfDate        CodeReviewRiskReasonCode = "branch_out_of_date"
+	CodeReviewRiskReasonForkIneligible         CodeReviewRiskReasonCode = "fork_ineligible"
+	CodeReviewRiskReasonAuthorIneligible       CodeReviewRiskReasonCode = "author_ineligible"
 	// CodeReviewRiskReasonUnresolvedHumanReview is retained so historical decisions remain renderable.
 	// New risk evaluations deliberately do not emit it.
 	CodeReviewRiskReasonUnresolvedHumanReview CodeReviewRiskReasonCode = "unresolved_human_review"
@@ -1356,6 +1411,8 @@ func (c CodeReviewRiskReasonCode) Validate() error {
 		CodeReviewRiskReasonHeadChanged,
 		CodeReviewRiskReasonFilesLimitExceeded,
 		CodeReviewRiskReasonLinesLimitExceeded,
+		CodeReviewRiskReasonAdditionsLimitExceeded,
+		CodeReviewRiskReasonDeletionsLimitExceeded,
 		CodeReviewRiskReasonChecksFailing,
 		CodeReviewRiskReasonRequiredCheckFailing,
 		CodeReviewRiskReasonDescriptionFailed,
@@ -1399,6 +1456,8 @@ func (c CodeReviewRiskReasonCode) Validate() error {
 var codeReviewStableDeterministicRiskReasonCodes = []CodeReviewRiskReasonCode{
 	CodeReviewRiskReasonFilesLimitExceeded,
 	CodeReviewRiskReasonLinesLimitExceeded,
+	CodeReviewRiskReasonAdditionsLimitExceeded,
+	CodeReviewRiskReasonDeletionsLimitExceeded,
 	CodeReviewRiskReasonBlockedPath,
 	CodeReviewRiskReasonPathOutsideScope,
 	CodeReviewRiskReasonSensitivePath,
@@ -1446,6 +1505,10 @@ func (r CodeReviewRiskReason) Message() string {
 		return fmt.Sprintf("changed files %d exceeds policy limit %d", r.Actual, r.Limit)
 	case CodeReviewRiskReasonLinesLimitExceeded:
 		return fmt.Sprintf("changed lines %d exceeds policy limit %d", r.Actual, r.Limit)
+	case CodeReviewRiskReasonAdditionsLimitExceeded:
+		return fmt.Sprintf("additions %d exceeds policy limit %d", r.Actual, r.Limit)
+	case CodeReviewRiskReasonDeletionsLimitExceeded:
+		return fmt.Sprintf("deletions %d exceeds policy limit %d", r.Actual, r.Limit)
 	case CodeReviewRiskReasonChecksFailing:
 		return "required GitHub checks are not passing"
 	case CodeReviewRiskReasonRequiredCheckFailing:
@@ -1570,8 +1633,11 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	if input.FilesChanged > policy.RiskPolicy.MaxFilesChanged {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: input.FilesChanged, Limit: policy.RiskPolicy.MaxFilesChanged})
 	}
-	if input.LinesChanged > policy.RiskPolicy.MaxLinesChanged {
-		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: input.LinesChanged, Limit: policy.RiskPolicy.MaxLinesChanged})
+	if input.Additions > policy.RiskPolicy.MaxAdditions {
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: input.Additions, Limit: policy.RiskPolicy.MaxAdditions})
+	}
+	if input.Deletions > policy.RiskPolicy.MaxDeletions {
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonDeletionsLimitExceeded, Actual: input.Deletions, Limit: policy.RiskPolicy.MaxDeletions})
 	}
 	if policy.RiskPolicy.RequirePassingChecks && !input.ChecksPassing {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonChecksFailing})

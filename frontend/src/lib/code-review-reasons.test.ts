@@ -41,3 +41,12 @@ describe("codeReviewReasonDescription", () => {
     expect(codeReviewReasonDescription({ code: "blocked_path", subject: "   " })).toBe("Blocked paths changed");
   });
 });
+
+describe("independent size limits", () => {
+  it.each([
+    ["additions_limit_exceeded", "Additions limit exceeded (301 of 300)"],
+    ["deletions_limit_exceeded", "Deletions limit exceeded (301 of 300)"],
+  ])("describes %s", (code, expected) => {
+    expect(codeReviewReasonDescription({ code, actual: 301, limit: 300 })).toBe(expected);
+  });
+});

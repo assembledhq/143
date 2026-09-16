@@ -687,6 +687,7 @@ func onlyDeterministicReasons(codes []models.CodeReviewRiskReasonCode) bool {
 	for _, code := range codes {
 		switch code {
 		case models.CodeReviewRiskReasonFilesLimitExceeded, models.CodeReviewRiskReasonLinesLimitExceeded,
+			models.CodeReviewRiskReasonAdditionsLimitExceeded, models.CodeReviewRiskReasonDeletionsLimitExceeded,
 			models.CodeReviewRiskReasonForkIneligible, models.CodeReviewRiskReasonAuthorIneligible,
 			models.CodeReviewRiskReasonSensitivePath, models.CodeReviewRiskReasonPathOutsideScope,
 			models.CodeReviewRiskReasonBlockedPath, models.CodeReviewRiskReasonPolicyPathChanged,
@@ -711,6 +712,10 @@ func deterministicPolicySignalReply(codes []models.CodeReviewRiskReasonCode, det
 			labels = append(labels, fmt.Sprintf("Files changed limit is %d (observed %d)", detail.Limit, detail.Actual))
 		case models.CodeReviewRiskReasonLinesLimitExceeded:
 			labels = append(labels, fmt.Sprintf("Lines changed limit is %d (observed %d)", detail.Limit, detail.Actual))
+		case models.CodeReviewRiskReasonAdditionsLimitExceeded:
+			labels = append(labels, fmt.Sprintf("Additions limit is %d (observed %d)", detail.Limit, detail.Actual))
+		case models.CodeReviewRiskReasonDeletionsLimitExceeded:
+			labels = append(labels, fmt.Sprintf("Deletions limit is %d (observed %d)", detail.Limit, detail.Actual))
 		case models.CodeReviewRiskReasonForkIneligible:
 			labels = append(labels, "Allow forks is off")
 		case models.CodeReviewRiskReasonAuthorIneligible:
