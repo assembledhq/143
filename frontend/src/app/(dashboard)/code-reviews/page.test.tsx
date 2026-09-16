@@ -4364,3 +4364,43 @@ it("autosaves scheduling recommendations as a changed-field patch with a version
   expect(writes[1].config).toEqual({ scheduling_policy: { automatic_re_review: false } });
   expect(writes[1].expected_version).toBe(8);
 });
+
+
+it("keeps the queue out of Reviews and opens it from a bookmarkable tab", async () => {
+  mockCodeReviewBaseHandlers();
+  let queueLoads = 0;
+  server.use(
+    http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: { ...policy, capabilities: { scheduling: true } } })),
+    http.get("/api/v1/code-review-targets", () => { queueLoads++; return HttpResponse.json({ data: [], meta: {} }); }),
+  );
+  const queryClient = createTestQueryClient();
+  const onUrlUpdate = vi.fn();
+  const user = userEvent.setup();
+  renderWithProviders(<CodeReviewsPage />, { queryClient, searchParams: { repository: repo.id }, nuqsOnUrlUpdate: onUrlUpdate });
+  await screen.findByRole("heading", { name: "Review activity" });
+  await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+  expect(queueLoads).toBe(0);
+  expect(screen.queryByRole("heading", { name: "Review queue" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Queue" }));
+  expect(await screen.findByText("No reviews waiting")).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Review activity" })).not.toBeInTheDocument();
+  await waitFor(() => {
+    const update = onUrlUpdate.mock.calls.at(-1)?.[0];
+    expect(update?.searchParams.get("tab")).toBe("queue");
+    expect(update?.searchParams.get("repository")).toBe(repo.id);
+  });
+  await user.click(screen.getByRole("tab", { name: "Reviews" }));
+  expect(await screen.findByRole("heading", { name: "Review activity" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Review queue" })).not.toBeInTheDocument();
+});
+
+it("restores the Queue tab from the URL", async () => {
+  mockCodeReviewBaseHandlers();
+  server.use(
+    http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: { ...policy, capabilities: { scheduling: true } } })),
+    http.get("/api/v1/code-review-targets", () => HttpResponse.json({ data: [], meta: {} })),
+  );
+  renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "queue" } });
+  expect(await screen.findByText("No reviews waiting")).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Queue" })).toHaveAttribute("data-state", "active");
+});

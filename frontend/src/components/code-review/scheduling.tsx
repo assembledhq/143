@@ -1,14 +1,20 @@
 "use client";
 
-import { useRef } from "react";
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CalendarClock } from "lucide-react";
+import { EmptyState } from "@/components/empty-state";
+import { ResponsiveResourceList, type ResponsiveResourceListColumn } from "@/components/responsive-resource-list";
+import { SectionGroup } from "@/components/section-group";
+import { StatusLabel } from "@/components/status-label";
+import { ErrorNotice } from "@/components/ui/error-notice";
+import { ExternalLink } from "@/components/ui/external-link";
 import { queryKeys } from "@/lib/query-keys";
 import { api } from "@/lib/api";
 import { pollMs } from "@/lib/poll-intervals";
-import type { CodeReviewSchedule } from "@/lib/types";
+import type { CodeReviewSchedule, CodeReviewScheduledTarget } from "@/lib/types";
 
 const scheduleKey = ["code-review-schedules"];
 export function ReviewNowButton({ prID, disabledReason }: { prID: string; disabledReason?: string }) {
@@ -57,33 +63,67 @@ function ScheduleActions({ schedule }: { schedule: CodeReviewSchedule }) {
     {pause.isError ? <p role="alert" className="text-xs text-destructive">{pause.error.message}</p> : null}
   </div>;
 }
+function QueuePullRequest({ target }: { target: CodeReviewScheduledTarget }) {
+  return <div className="min-w-0 space-y-1">
+    <ExternalLink href={target.github_pr_url} className="text-sm">#{target.github_pr_number} {target.title}</ExternalLink>
+    <p className="text-xs text-muted-foreground">{target.github_repo}</p>
+  </div>;
+}
+
+function QueueWaitReason({ schedule }: { schedule: CodeReviewSchedule }) {
+  return <StatusLabel label={waitLabels[schedule.wait_reason] ?? "Review queued"}
+    tone={schedule.wait_reason === "context_unavailable" ? "warning" : "neutral"}
+    stateKey={schedule.wait_reason || "queued"} />;
+}
+
+function queueTime(value: string | null | undefined) {
+  return value ? new Date(value).toLocaleString() : "—";
+}
+
 export function ScheduledReviews({ canManage, enabled }: { canManage: boolean; enabled: boolean }) {
-  const query = useInfiniteQuery({
-    queryKey: scheduleKey, initialPageParam: "", enabled,
-    queryFn: ({ pageParam }) => api.codeReviews.pendingSchedules(pageParam || undefined),
-    getNextPageParam: (page) => page.meta.next_cursor || undefined,
+  const [cursors, setCursors] = useState([""]);
+  const cursor = cursors[cursors.length - 1];
+  const query = useQuery({
+    queryKey: [...scheduleKey, cursor], enabled,
+    queryFn: () => api.codeReviews.pendingSchedules(cursor || undefined),
     refetchInterval: pollMs(15_000),
   });
-  const targets = query.data?.pages.flatMap((page) => page.data) ?? [];
-  if (!enabled) return null;
-  if (query.isPending) return <p className="text-sm text-muted-foreground">Loading scheduled reviews…</p>;
-  if (query.isError) return <div role="alert"><p className="text-sm text-destructive">Scheduled reviews could not be loaded.</p><Button variant="outline" size="sm" onClick={() => void query.refetch()}>Retry</Button></div>;
-  if (targets.length === 0) return null;
-  return <Card>
-    <CardHeader><CardTitle className="text-sm">Scheduled reviews</CardTitle><p className="text-xs text-muted-foreground">Pending requests across repositories. Review activity filters below apply to executed reviews.</p></CardHeader>
-    <CardContent className="divide-y divide-border">
-      {targets.map((target) => {
-        const s = target.schedule;
-        const due = s.eligible_at;
-        return <div key={s.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
-          <div className="min-w-0 space-y-1"><a className="text-sm font-medium hover:underline" href={target.github_pr_url} target="_blank" rel="noreferrer">{target.github_repo}#{target.github_pr_number}: {target.title}</a>
-            <p className="text-xs text-muted-foreground">{waitLabels[s.wait_reason] ?? "Review queued"}{due ? ` · Eligible ${new Date(due).toLocaleTimeString()}` : ""}</p>
-            {s.first_pending_at ? <p className="text-xs text-muted-foreground">Waiting since {new Date(s.first_pending_at).toLocaleString()}</p> : null}
-          </div>
-          {canManage ? <ScheduleActions schedule={s} /> : null}
-        </div>;
-      })}
-      {query.hasNextPage ? <Button size="sm" variant="outline" onClick={() => void query.fetchNextPage()}>Load more</Button> : null}
-    </CardContent>
-  </Card>;
+  const targets = query.data?.data ?? [];
+  const nextCursor = query.data?.meta.next_cursor;
+  const columns: ResponsiveResourceListColumn<CodeReviewScheduledTarget>[] = [
+    { id: "pr", header: "Pull request", render: (target) => <QueuePullRequest target={target} /> },
+    { id: "reason", header: "Wait reason", render: (target) => <QueueWaitReason schedule={target.schedule} /> },
+    { id: "waiting", header: "Waiting since", className: "text-right", cellClassName: "text-right tabular-nums text-xs text-muted-foreground", render: (target) => queueTime(target.schedule.first_pending_at) },
+    { id: "eligible", header: "Earliest start", className: "text-right", cellClassName: "text-right tabular-nums text-xs text-muted-foreground", render: (target) => queueTime(target.schedule.eligible_at) },
+    ...(canManage ? [{ id: "actions", header: "Actions", render: (target: CodeReviewScheduledTarget) => <ScheduleActions schedule={target.schedule} /> }] : []),
+  ];
+  if (!enabled) return <EmptyState icon={CalendarClock} title="Review queue unavailable" description="The GitHub review service must be configured before reviews can be scheduled." />;
+  return <SectionGroup title="Review queue" description="Pending review requests across repositories. Review now skips timing delays; pause holds automatic reviews for that PR.">
+    {query.isPending ? <p role="status" className="text-sm text-muted-foreground">Loading review queue…</p> : query.isError ? (
+      <ErrorNotice title="Review queue could not be loaded" action={{ label: "Retry", onClick: () => void query.refetch() }} />
+    ) : <ResponsiveResourceList
+      ariaLabel="Review queue" items={targets} getItemKey={(target) => target.schedule.id} columns={columns}
+      emptyState={<EmptyState variant="inline" icon={CalendarClock} title={cursor ? "No pending reviews on this page" : "No reviews waiting"} description={cursor ? "Pending work may have changed. Go back to see earlier requests." : "PRs waiting for an automatic or manual review will appear here."} />}
+      renderMobileItem={(target) => <div className="space-y-3 px-4 py-3.5">
+        <QueuePullRequest target={target} />
+        <QueueWaitReason schedule={target.schedule} />
+        <div className="space-y-1 text-xs text-muted-foreground tabular-nums">
+          <p>Waiting since {queueTime(target.schedule.first_pending_at)}</p>
+          <p>Earliest start {queueTime(target.schedule.eligible_at)}</p>
+        </div>
+        {canManage ? <ScheduleActions schedule={target.schedule} /> : null}
+      </div>}
+    />}
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <p className="text-xs text-muted-foreground tabular-nums">Page {cursors.length} · 25 per page</p>
+      <div className="flex gap-2">
+        <DisabledTooltip disabled={cursors.length === 1 || query.isFetching} content={cursors.length === 1 ? "You are on the first page." : "Wait for the queue to finish loading."}>
+          <Button size="sm" variant="outline" disabled={cursors.length === 1 || query.isFetching} onClick={() => setCursors((previous) => previous.slice(0, -1))}>Previous</Button>
+        </DisabledTooltip>
+        <DisabledTooltip disabled={!nextCursor || query.isFetching || query.isError} content={query.isFetching ? "Wait for the queue to finish loading." : query.isError ? "Retry loading this page first." : "There are no more pending reviews."}>
+          <Button size="sm" variant="outline" disabled={!nextCursor || query.isFetching || query.isError} onClick={() => { if (nextCursor) setCursors((previous) => [...previous, nextCursor]); }}>Next</Button>
+        </DisabledTooltip>
+      </div>
+    </div>
+  </SectionGroup>;
 }

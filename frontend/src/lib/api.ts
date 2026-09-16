@@ -407,7 +407,7 @@ export const api = {
       ),
     deleteGitHubTrigger: (repositoryId: string) =>
       del<void>(`/api/v1/code-review-github-trigger?repository_id=${encodeURIComponent(repositoryId)}`),
-    pendingSchedules: (cursor?: string) => get<import('./types').ListResponse<import('./types').CodeReviewScheduledTarget>>(`/api/v1/code-review-targets${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
+    pendingSchedules: (cursor?: string, limit = 25) => get<import('./types').ListResponse<import('./types').CodeReviewScheduledTarget>>(`/api/v1/code-review-targets?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
     reviewNow: (prID: string, requestID: string) => post<import('./types').SingleResponse<{ disposition: string; schedule: import('./types').CodeReviewSchedule }>>(`/api/v1/pull-requests/${prID}/code-review/requests`, { request_id: requestID, mode: 'review_now' }),
     pauseSchedule: (prID: string, paused: boolean) => request<import('./types').SingleResponse<import('./types').CodeReviewSchedule>>(`/api/v1/pull-requests/${prID}/code-review`, { method: 'PATCH', body: JSON.stringify({ automatic_paused: paused }) }),
     patchPolicy: (body: { config: import('./code-review-autosave').PolicyPatch; expected_version: number; source?: import('./types').CodeReviewPolicyEditSource }) => request<import('./types').SingleResponse<import('./types').CodeReviewPolicyRecord>>('/api/v1/code-review-policies', { method: 'PATCH', body: JSON.stringify(body) }),

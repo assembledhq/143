@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { http, HttpResponse } from "msw";
-import { createTestQueryClient, renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { createTestQueryClient, renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { ReviewNowButton, ScheduledReviews } from "./scheduling";
 
@@ -51,10 +51,74 @@ describe("pending reviews", () => {
       schedule: { id: "state-1", pull_request_id: "pr-1", automatic_paused: true, state: "paused", wait_reason: "manual_pause", first_pending_at: "2026-09-10T10:00:00Z", eligible_at: null },
     }], meta: {} })));
     renderWithProviders(<ScheduledReviews enabled canManage={canManage} />);
-    expect(await screen.findByText("Automatic reviews paused")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Reduce duplicate reviews/ })).toHaveAttribute("href", "https://github.com/acme/api/pull/17");
-    if (canManage) expect(await screen.findByRole("button", { name: "Review now" })).toBeEnabled();
+    const queue = within(await screen.findByRole("table", { name: "Review queue" }));
+    expect(queue.getByText("Automatic reviews paused")).toBeInTheDocument();
+    expect(queue.getByRole("link", { name: /Reduce duplicate reviews/ })).toHaveAttribute("href", "https://github.com/acme/api/pull/17");
+    if (canManage) expect(await queue.findByRole("button", { name: "Review now" })).toBeEnabled();
     else expect(screen.queryByRole("button", { name: "Review now" })).not.toBeInTheDocument();
     expect(screen.queryByText(/session/i)).not.toBeInTheDocument();
+  });
+});
+
+function queuedTarget(index: number) {
+  return {
+    title: `Queued PR ${index}`, github_repo: "acme/api", github_pr_number: index, github_pr_url: `https://github.com/acme/api/pull/${index}`,
+    schedule: { id: `state-${index}`, pull_request_id: `pr-${index}`, automatic_paused: false, state: "waiting", wait_reason: "quiet_period", first_pending_at: "2026-09-10T10:00:00Z", eligible_at: null },
+  };
+}
+
+describe("queue pagination", () => {
+  it("replaces each page instead of accumulating a large queue", async () => {
+    const requests: URLSearchParams[] = [];
+    server.use(http.get("*/api/v1/code-review-targets", ({ request }) => {
+      const params = new URL(request.url).searchParams;
+      requests.push(params);
+      return HttpResponse.json(params.get("cursor")
+        ? { data: [queuedTarget(26)], meta: {} }
+        : { data: Array.from({ length: 25 }, (_, index) => queuedTarget(index + 1)), meta: { next_cursor: "state-25" } });
+    }));
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledReviews enabled canManage={false} />);
+    const firstPage = within(await screen.findByRole("table", { name: "Review queue" }));
+    expect(firstPage.getAllByRole("row")).toHaveLength(26);
+    expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    const secondPage = within(await screen.findByRole("table", { name: "Review queue" }));
+    expect(await secondPage.findByRole("link", { name: "#26 Queued PR 26" })).toBeInTheDocument();
+    expect(secondPage.getAllByRole("row")).toHaveLength(2);
+    expect(screen.queryAllByRole("link", { name: "#1 Queued PR 1" })).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+    expect(screen.getByText("Page 2 · 25 per page")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Previous" }));
+    expect(await within(await screen.findByRole("table", { name: "Review queue" })).findByRole("link", { name: "#1 Queued PR 1" })).toBeInTheDocument();
+    expect(requests.every((params) => params.get("limit") === "25")).toBe(true);
+    expect(requests.some((params) => params.get("cursor") === "state-25")).toBe(true);
+  });
+
+  it("keeps a way back when the next page empties as reviews start", async () => {
+    server.use(http.get("*/api/v1/code-review-targets", ({ request }) => HttpResponse.json(new URL(request.url).searchParams.has("cursor")
+      ? { data: [], meta: {} } : { data: [queuedTarget(1)], meta: { next_cursor: "state-1" } })));
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledReviews enabled canManage={false} />);
+    await screen.findByRole("table", { name: "Review queue" });
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    expect(await screen.findByText("No pending reviews on this page")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Previous" }));
+    expect(await screen.findByRole("table", { name: "Review queue" })).toBeInTheDocument();
+  });
+
+  it("shows an empty queue and recovers from a failed load", async () => {
+    let unavailable = true;
+    server.use(http.get("*/api/v1/code-review-targets", () => unavailable
+      ? HttpResponse.json({ error: { message: "Unavailable" } }, { status: 503 })
+      : HttpResponse.json({ data: [], meta: {} })));
+    const user = userEvent.setup();
+    renderWithProviders(<ScheduledReviews enabled canManage={false} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Review queue could not be loaded");
+    unavailable = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("No reviews waiting")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
   });
 });

@@ -8,6 +8,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { createParser, parseAsString, parseAsStringLiteral, useQueryState } from "nuqs";
 import {
   AlertTriangle,
+  CalendarClock,
   ChartNoAxesColumnIncreasing,
   ChevronDown,
   ChevronRight,
@@ -115,7 +116,7 @@ import type {
   SingleResponse,
 } from "@/lib/types";
 
-const CODE_REVIEW_TAB_VALUES = ["reviews", "analytics", "disputes", "policy"] as const;
+const CODE_REVIEW_TAB_VALUES = ["reviews", "queue", "analytics", "disputes", "policy"] as const;
 type CodeReviewTab = (typeof CODE_REVIEW_TAB_VALUES)[number];
 const OUTCOME_FILTER_VALUES = [ALL_OUTCOMES, AUTOMATICALLY_APPROVED, COMPLETED_NOT_APPROVED, "needs_human_review", "comment_only", "blocked"] as const;
 type OutcomeFilter = (typeof OUTCOME_FILTER_VALUES)[number];
@@ -1370,6 +1371,10 @@ export default function CodeReviewsPage() {
             <ClipboardCheck className="h-4 w-4" />
             Reviews
           </TabsTrigger>
+          <TabsTrigger value="queue">
+            <CalendarClock className="h-4 w-4" />
+            Queue
+          </TabsTrigger>
           <TabsTrigger value="analytics">
             <ChartNoAxesColumnIncreasing className="h-4 w-4" />
             Analytics
@@ -1391,8 +1396,13 @@ export default function CodeReviewsPage() {
           </TabsTrigger>
         </TabsList>
 
+        <PageTabContent value="queue">
+          {policyQuery.isPending ? <p role="status" className="text-sm text-muted-foreground">Loading review queue…</p> : policyQuery.isError ? (
+            <ErrorNotice title="Review settings could not be loaded" action={{ label: "Retry", onClick: () => void policyQuery.refetch() }} />
+          ) : <ScheduledReviews canManage={canFileDisputes} enabled={policyQuery.data?.data.capabilities?.scheduling === true} />}
+        </PageTabContent>
+
         <PageTabContent value="reviews">
-          <ScheduledReviews canManage={canFileDisputes} enabled={policyQuery.data?.data.capabilities?.scheduling === true} />
           <CodeReviewSummaryCards stats={statsQuery.data?.data} isLoading={statsQuery.isLoading} isError={statsQuery.isError} onRetry={() => void statsQuery.refetch()} />
           <CodeReviewFilters
             id="code-review-filters"
