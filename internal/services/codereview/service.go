@@ -294,10 +294,17 @@ func (s *Service) RetryReview(ctx context.Context, input RetryReviewInput) (Retr
 	if s.SchedulingEnabled() {
 		return s.retryScheduledReview(ctx, input)
 	}
+	return s.retryReview(ctx, input, nil)
+}
+
+// Scheduled retries already hold a live provider snapshot under the PR lock.
+// Reuse that authority instead of invoking the pool-backed mirror synchronizer
+// from inside the admission transaction. Legacy callers retain their refresh.
+func (s *Service) retryReview(ctx context.Context, input RetryReviewInput, currentSnapshot *ghservice.CodeReviewPullRequestSnapshot) (RetryReviewResult, error) {
 	if input.OrgID == uuid.Nil || input.SessionID == uuid.Nil {
 		return RetryReviewResult{}, fmt.Errorf("org_id and session_id are required")
 	}
-	if s.pullRequests == nil || s.pullRequestSyncer == nil {
+	if s.pullRequests == nil || (currentSnapshot == nil && s.pullRequestSyncer == nil) {
 		return RetryReviewResult{}, fmt.Errorf("code review retry dependencies are unavailable")
 	}
 
@@ -321,24 +328,35 @@ func (s *Service) RetryReview(ctx context.Context, input RetryReviewInput) (Retr
 		return RetryReviewResult{}, err
 	}
 
-	syncCtx := ghservice.WithPullRequestSyncReason(ctx, ghservice.PullRequestSyncReasonCodeReview)
-	if err := s.pullRequestSyncer.SyncPullRequestState(syncCtx, input.OrgID, failed.PullRequestID); err != nil && !errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
-		return RetryReviewResult{}, fmt.Errorf("refresh pull request before code review retry: %w", err)
+	if currentSnapshot == nil {
+		syncCtx := ghservice.WithPullRequestSyncReason(ctx, ghservice.PullRequestSyncReasonCodeReview)
+		if err := s.pullRequestSyncer.SyncPullRequestState(syncCtx, input.OrgID, failed.PullRequestID); err != nil && !errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
+			return RetryReviewResult{}, fmt.Errorf("refresh pull request before code review retry: %w", err)
+		}
 	}
 	pr, err := s.pullRequests.GetByID(ctx, input.OrgID, failed.PullRequestID)
 	if err != nil {
 		return RetryReviewResult{}, fmt.Errorf("load refreshed pull request before code review retry: %w", err)
 	}
-	if pr.Status != models.PullRequestStatusOpen {
+	open := pr.Status == models.PullRequestStatusOpen
+	if currentSnapshot != nil {
+		open = currentSnapshot.State == "open" && !currentSnapshot.IsDraft
+	}
+	if !open {
 		return RetryReviewResult{}, &RetryReviewConflictError{
 			Code: RetryReviewConflictPRClosed, Message: "This pull request is no longer open.",
 		}
 	}
-	health, err := s.pullRequests.GetHealthCurrent(ctx, input.OrgID, failed.PullRequestID)
-	if err != nil {
-		return RetryReviewResult{}, fmt.Errorf("load refreshed pull request head before code review retry: %w", err)
+	var currentHead, currentBase string
+	if currentSnapshot != nil {
+		currentHead, currentBase = strings.TrimSpace(currentSnapshot.HeadSHA), strings.TrimSpace(currentSnapshot.BaseSHA)
+	} else {
+		health, err := s.pullRequests.GetHealthCurrent(ctx, input.OrgID, failed.PullRequestID)
+		if err != nil {
+			return RetryReviewResult{}, fmt.Errorf("load refreshed pull request head before code review retry: %w", err)
+		}
+		currentHead, currentBase = strings.TrimSpace(health.HeadSHA), strings.TrimSpace(health.BaseSHA)
 	}
-	currentHead := strings.TrimSpace(health.HeadSHA)
 	if currentHead == "" || currentHead != strings.TrimSpace(failed.HeadSHA) {
 		return RetryReviewResult{}, &RetryReviewConflictError{
 			Code: RetryReviewConflictHeadChanged, Message: "The pull request head changed; wait for or request a review of the current commit.",
@@ -361,7 +379,7 @@ func (s *Service) RetryReview(ctx context.Context, input RetryReviewInput) (Retr
 		GitHubPRURL:       pr.GitHubPRURL,
 		PullRequestTitle:  pr.Title,
 		PullRequestAuthor: codeReviewRevisionContextString(priorSession.RevisionContext, "pull_request_author"),
-		BaseSHA:           strings.TrimSpace(health.BaseSHA),
+		BaseSHA:           currentBase,
 		HeadSHA:           currentHead,
 		FromFork:          failed.FromFork,
 		RequestedLogin:    codeReviewRevisionContextString(priorSession.RevisionContext, "requested_reviewer_login"),

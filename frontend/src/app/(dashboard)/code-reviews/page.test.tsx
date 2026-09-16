@@ -4381,6 +4381,12 @@ it("keeps the queue out of Reviews and opens it from a bookmarkable tab", async 
   await waitFor(() => expect(queryClient.isFetching()).toBe(0));
   expect(queueLoads).toBe(0);
   expect(screen.queryByRole("heading", { name: "Review queue" })).not.toBeInTheDocument();
+  // Let the initial debounced search URL write commit before navigating.
+  // NuqsTestingAdapter resets pending writes on rerender, so committing that
+  // update during the Queue click can cancel its URL write while the UI updates.
+  await waitFor(() => {
+    expect(onUrlUpdate.mock.calls.at(-1)?.[0].queryString).toBe(`?repository=${repo.id}`);
+  });
   await user.click(screen.getByRole("tab", { name: "Queue" }));
   expect(await screen.findByText("No reviews waiting")).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "Review activity" })).not.toBeInTheDocument();
@@ -4388,10 +4394,16 @@ it("keeps the queue out of Reviews and opens it from a bookmarkable tab", async 
     const update = onUrlUpdate.mock.calls.at(-1)?.[0];
     expect(update?.searchParams.get("tab")).toBe("queue");
     expect(update?.searchParams.get("repository")).toBe(repo.id);
+    expect(update?.options.history).toBe("push");
   });
   await user.click(screen.getByRole("tab", { name: "Reviews" }));
   expect(await screen.findByRole("heading", { name: "Review activity" })).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "Review queue" })).not.toBeInTheDocument();
+  await waitFor(() => {
+    const update = onUrlUpdate.mock.calls.at(-1)?.[0];
+    expect(update?.searchParams.get("tab")).toBeNull();
+    expect(update?.searchParams.get("repository")).toBe(repo.id);
+  });
 });
 
 it("restores the Queue tab from the URL", async () => {

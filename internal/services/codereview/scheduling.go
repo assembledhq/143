@@ -20,7 +20,7 @@ import (
 )
 
 type scheduleSnapshotter interface {
-	GetCodeReviewPullRequestSnapshot(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewPullRequestSnapshot, error)
+	PrepareCodeReviewPullRequestSnapshot(context.Context, uuid.UUID, uuid.UUID) (ghservice.CodeReviewPullRequestSnapshotReader, error)
 }
 
 type schedulingDependencies struct {
@@ -40,6 +40,20 @@ func (s *Service) SetSchedulingStreams(streams *cache.CodeReviewStreams) {
 
 func (s *Service) SchedulingEnabled() bool {
 	return s.scheduling != nil && s.scheduling.snapshots != nil
+}
+
+// Preparation happens outside the transaction, but its error is returned only
+// when fresh provider data is needed. Recorded replays and terminal workers
+// must keep their existing fast paths during an installation-credential outage.
+func (s *Service) prepareScheduleSnapshot(ctx context.Context, orgID, repositoryID uuid.UUID) ghservice.CodeReviewPullRequestSnapshotReader {
+	read, err := s.scheduling.snapshots.PrepareCodeReviewPullRequestSnapshot(ctx, orgID, repositoryID)
+	if err != nil {
+		cause := fmt.Errorf("%w: %w", errScheduleSnapshotUnavailable, err)
+		return func(context.Context, int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+			return ghservice.CodeReviewPullRequestSnapshot{}, cause
+		}
+	}
+	return read
 }
 
 type scheduledReviewIntent struct {
@@ -165,6 +179,7 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 			return ReviewRequestedResult{}, err
 		}
 	}
+	readSnapshot := s.prepareScheduleSnapshot(ctx, input.OrgID, input.RepositoryID)
 	result := ReviewRequestedResult{Processed: true, Deferred: true}
 	err := s.scheduling.store.WithLockedPR(ctx, input.OrgID, input.RepositoryID, input.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
 		scoped := s.transactionalService(tx)
@@ -228,7 +243,7 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 		if err != nil {
 			return err
 		}
-		snapshot, err := s.scheduling.snapshots.GetCodeReviewPullRequestSnapshot(ctx, input.OrgID, input.RepositoryID, pr.GitHubPRNumber)
+		snapshot, err := readSnapshot(ctx, pr.GitHubPRNumber)
 		if err != nil {
 			return fmt.Errorf("%w: %w", errScheduleSnapshotUnavailable, err)
 		}
@@ -655,6 +670,7 @@ func (s *Service) retryScheduledReview(ctx context.Context, input RetryReviewInp
 	if err != nil {
 		return RetryReviewResult{}, err
 	}
+	readSnapshot := s.prepareScheduleSnapshot(ctx, input.OrgID, source.RepositoryID)
 	var result RetryReviewResult
 	err = s.scheduling.store.WithLockedPR(ctx, input.OrgID, source.RepositoryID, source.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
 		scoped := s.transactionalService(tx)
@@ -683,7 +699,7 @@ func (s *Service) retryScheduledReview(ctx context.Context, input RetryReviewInp
 		if err != nil {
 			return err
 		}
-		snapshot, err := s.scheduling.snapshots.GetCodeReviewPullRequestSnapshot(ctx, input.OrgID, source.RepositoryID, pr.GitHubPRNumber)
+		snapshot, err := readSnapshot(ctx, pr.GitHubPRNumber)
 		if err != nil {
 			return err
 		}
@@ -693,7 +709,7 @@ func (s *Service) retryScheduledReview(ctx context.Context, input RetryReviewInp
 		if snapshot.HeadSHA != source.HeadSHA {
 			return &RetryReviewConflictError{Code: RetryReviewConflictHeadChanged, Message: "Pull request head changed. Request a review of the latest revision."}
 		}
-		result, err = scoped.RetryReview(ctx, input)
+		result, err = scoped.retryReview(ctx, input, &snapshot)
 		if err != nil {
 			return err
 		}
@@ -716,10 +732,11 @@ func (s *Service) retryScheduledReview(ctx context.Context, input RetryReviewInp
 // Disputes keep their individual provenance and dedicated starter jobs. They
 // share the PR admission lock without coalescing distinct objections away.
 func (s *Service) handleSerializedReviewChanged(ctx context.Context, input ReviewChangedInput) (ReviewRequestedResult, error) {
+	readSnapshot := s.prepareScheduleSnapshot(ctx, input.OrgID, input.RepositoryID)
 	var result ReviewRequestedResult
 	err := s.scheduling.store.WithLockedPR(ctx, input.OrgID, input.RepositoryID, input.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
 		scoped := s.transactionalService(tx)
-		snapshot, err := s.scheduling.snapshots.GetCodeReviewPullRequestSnapshot(ctx, input.OrgID, input.RepositoryID, input.GitHubPRNumber)
+		snapshot, err := readSnapshot(ctx, input.GitHubPRNumber)
 		if err != nil {
 			return err
 		}
@@ -853,6 +870,7 @@ func (s *Service) ValidateScheduledExecution(ctx context.Context, orgID, prID, s
 	if err != nil {
 		return false, err
 	}
+	readSnapshot := s.prepareScheduleSnapshot(ctx, orgID, metadata.RepositoryID)
 	valid, refreshTarget := false, false
 	err = s.scheduling.store.WithLockedPR(ctx, orgID, metadata.RepositoryID, prID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
 		store := db.NewCodeReviewStore(tx)
@@ -870,7 +888,7 @@ func (s *Service) ValidateScheduledExecution(ctx context.Context, orgID, prID, s
 		if err != nil {
 			return err
 		}
-		snapshot, err := s.scheduling.snapshots.GetCodeReviewPullRequestSnapshot(ctx, orgID, metadata.RepositoryID, pr.GitHubPRNumber)
+		snapshot, err := readSnapshot(ctx, pr.GitHubPRNumber)
 		if err != nil {
 			return err
 		}

@@ -2,8 +2,14 @@ package codereview
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -28,10 +34,23 @@ import (
 
 type schedulingSnapshotFixture struct {
 	sync.Mutex
-	snapshot ghservice.CodeReviewPullRequestSnapshot
-	err      error
-	calls    int
-	failCall int
+	snapshot   ghservice.CodeReviewPullRequestSnapshot
+	err        error
+	prepareErr error
+	calls      int
+	failCall   int
+}
+
+func (f *schedulingSnapshotFixture) PrepareCodeReviewPullRequestSnapshot(_ context.Context, orgID, repoID uuid.UUID) (ghservice.CodeReviewPullRequestSnapshotReader, error) {
+	f.Lock()
+	err := f.prepareErr
+	f.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, number int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+		return f.GetCodeReviewPullRequestSnapshot(ctx, orgID, repoID, number)
+	}, nil
 }
 
 func (f *schedulingSnapshotFixture) GetCodeReviewPullRequestSnapshot(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewPullRequestSnapshot, error) {
@@ -87,6 +106,23 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		run  func(*testing.T, *pgxpool.Pool, uuid.UUID, uuid.UUID, uuid.UUID, *schedulingSnapshotFixture)
 	}{
 		{"push burst restart and manual joining", testSchedulingBurst},
+		{"single connection schedule", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingSingleConnection(t, p, org, repo, pr, snapshot, "schedule")
+		}},
+		{"single connection retry", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingSingleConnection(t, p, org, repo, pr, snapshot, "retry")
+		}},
+		{"single connection dispute", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingSingleConnection(t, p, org, repo, pr, snapshot, "dispute")
+		}},
+		{"single connection snapshot after lock wait", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingSingleConnection(t, p, org, repo, pr, snapshot, "wait")
+		}},
+		{"snapshot preparation outage preserves pending intent", testSchedulingPreparationRecovery},
+		{"snapshot preparation outage preserves replay and terminal paths", testSchedulingPreparationFastPaths},
+		{"single connection validation", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingSingleConnection(t, p, org, repo, pr, snapshot, "validation")
+		}},
 		{"policy patch and historical compatibility", testSchedulingPolicyCompatibility},
 		{"same head context supersession", testSchedulingGenerationFence},
 		{"approved automatic intent terminates", testSchedulingApprovalTerminal},
@@ -570,4 +606,167 @@ func testSchedulingBaseRef(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.
 	latest, err = db.NewCodeReviewStore(pool).GetBySessionID(ctx, org, latest.SessionID)
 	require.NoError(t, err, "read replacement after obsolete worker check")
 	require.Equal(t, models.CodeReviewSessionStatusQueued, latest.Status, "old worker cleanup leaves replacement intact")
+}
+
+func testSchedulingSingleConnection(t *testing.T, adminPool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture, scenario string) {
+	ctx := context.Background()
+	config := adminPool.Config()
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	require.NoError(t, err, "create realistic saturated one-connection pool")
+	t.Cleanup(pool.Close)
+	service, _, sessionID := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
+	_, err = pool.Exec(ctx, `UPDATE repositories SET installation_id=0 WHERE org_id=$1 AND id=$2`, org, repo)
+	require.NoError(t, err, "require database-backed installation fallback")
+	_, err = pool.Exec(ctx, `UPDATE integrations SET config='{"installation_id":17}' WHERE org_id=$1`, org)
+	require.NoError(t, err, "seed fallback installation identity")
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err, "generate isolated signing key")
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	tokens, err := ghservice.NewService(42, string(keyPEM))
+	require.NoError(t, err, "construct real installation-token provider")
+	tokenReady := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app/installations/17/access_tokens" {
+			require.Equal(t, int32(0), pool.Stat().AcquiredConns(), "all repository and fallback auth database work must finish before lock")
+			tokenReady <- struct{}{}
+			w.WriteHeader(http.StatusCreated)
+			require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"token": "test-installation-token", "expires_at": time.Now().Add(time.Hour)}), "write installation token")
+			return
+		}
+		require.Equal(t, "/repos/test/repo/pulls/17", r.URL.Path, "prepared reader uses captured repository identity")
+		require.Equal(t, "token test-installation-token", r.Header.Get("Authorization"), "prepared reader uses fully resolved installation token")
+		require.Equal(t, int32(1), pool.Stat().AcquiredConns(), "authoritative snapshot must execute inside the admission transaction")
+		probe, err := adminPool.Acquire(r.Context())
+		require.NoError(t, err, "probe PR serialization from independent connection")
+		defer probe.Release()
+		var available bool
+		lock := "code_review_pr:" + org.String() + ":" + pr.String()
+		require.NoError(t, probe.QueryRow(r.Context(), `SELECT pg_try_advisory_lock(hashtextextended($1,0))`, lock).Scan(&available), "probe admission lock")
+		if available {
+			_, err := probe.Exec(r.Context(), `SELECT pg_advisory_unlock(hashtextextended($1,0))`, lock)
+			require.NoError(t, err, "release unexpectedly available lock")
+		}
+		require.False(t, available, "snapshot freshness must remain protected by the PR lock")
+		current, err := snapshot.GetCodeReviewPullRequestSnapshot(r.Context(), org, repo, 17)
+		require.NoError(t, err, "read live provider fixture only after lock acquisition")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"number": 17, "html_url": "https://github.com/test/repo/pull/17", "title": "Scheduling test", "state": "open",
+			"head": map[string]any{"sha": current.HeadSHA, "ref": "feature"},
+			"base": map[string]any{"sha": strings.Repeat("b", 40), "ref": "main"},
+		}), "write authoritative snapshot")
+	}))
+	t.Cleanup(server.Close)
+	tokens.SetBaseURL(server.URL)
+	provider := ghservice.NewPRService(tokens, db.NewPullRequestStore(pool), db.NewSessionStore(pool), nil, nil, db.NewRepositoryStore(pool), db.NewJobStore(pool), zerolog.Nop())
+	provider.SetBaseURL(server.URL)
+	provider.SetIntegrationStore(db.NewIntegrationStore(pool))
+	service.SetScheduling(db.NewCodeReviewScheduleStore(pool), provider)
+	service.SetRetryDependencies(db.NewPullRequestStore(pool), provider)
+	if scenario == "retry" || scenario == "dispute" {
+		_, err = pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='failed',retryable_failure=true WHERE org_id=$1 AND session_id=$2`, org, sessionID)
+		require.NoError(t, err, "terminalize original assessment")
+		_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND job_type=$2`, org, models.JobTypeRunCodeReview)
+		require.NoError(t, err, "release original starter")
+	}
+	// A deadline makes pool re-acquisition fail deterministically instead of
+	// hanging the test suite when the transaction owns the sole connection.
+	bounded, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	switch scenario {
+	case "wait":
+		lockTx, lockErr := adminPool.Begin(ctx)
+		require.NoError(t, lockErr, "hold competing admission transaction")
+		defer func() { _ = lockTx.Rollback(ctx) }()
+		_, lockErr = lockTx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "code_review_pr:"+org.String()+":"+pr.String())
+		require.NoError(t, lockErr, "hold PR lock before preparing next request")
+		done := make(chan error, 1)
+		go func() {
+			_, requestErr := service.RequestScheduledReview(bounded, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow})
+			done <- requestErr
+		}()
+		select {
+		case <-tokenReady:
+		case <-bounded.Done():
+			t.Fatal("identity preparation must complete before waiting for PR lock")
+		}
+		require.Eventually(t, func() bool { return pool.Stat().AcquiredConns() == 1 }, time.Second, time.Millisecond, "request must wait inside admission transaction after preparing identity")
+		snapshot.update(func(s *ghservice.CodeReviewPullRequestSnapshot) { s.HeadSHA = strings.Repeat("c", 40) })
+		require.NoError(t, lockTx.Commit(ctx), "release competing admission lock after provider target changes")
+		err = <-done
+		if err == nil {
+			state, loadErr := service.GetSchedule(ctx, org, pr)
+			require.NoError(t, loadErr, "read target after serialized provider fetch")
+			require.Equal(t, strings.Repeat("c", 40), state.HeadSHA, "provider snapshot must reflect changes made while waiting for lock")
+		}
+	case "schedule":
+		_, err = service.RequestScheduledReview(bounded, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow})
+	case "retry":
+		_, err = service.RetryReview(bounded, RetryReviewInput{OrgID: org, SessionID: sessionID})
+	case "dispute":
+		_, err = service.HandleReviewChanged(bounded, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr, GitHubRepo: "test/repo", GitHubPRNumber: 17, ExplicitRequest: true, ChangeKey: "dispute:pool-test", TriggerSource: models.CodeReviewTriggerSourceSlashCommand})
+	case "validation":
+		var allowed bool
+		allowed, err = service.ValidateScheduledExecution(bounded, org, pr, sessionID)
+		if err == nil {
+			require.True(t, allowed, "fresh current generation remains valid")
+		}
+	}
+	require.NoError(t, err, "scheduling path cannot reacquire its transaction's saturated pool")
+}
+
+func testSchedulingPreparationRecovery(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+	ctx := context.Background()
+	service, claim, _ := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
+	_, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow})
+	require.NoError(t, err, "persist explicit intent before identity outage")
+	before, err := service.GetSchedule(ctx, org, pr)
+	require.NoError(t, err, "read durable pending input")
+	snapshot.Lock()
+	snapshot.prepareErr = fmt.Errorf("installation token unavailable")
+	snapshot.Unlock()
+	require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "preparation errors retain existing provider-outage backoff")
+	held, err := service.GetSchedule(ctx, org, pr)
+	require.NoError(t, err, "read pending outage state")
+	require.Equal(t, before.PendingInput, held.PendingInput, "preparation failure preserves pending request")
+	require.Equal(t, models.CodeReviewWaitContext, held.WaitReason, "preparation failure is reported as unavailable provider context")
+	require.NotNil(t, held.RetryAt, "preparation failure durably reschedules without losing work")
+	snapshot.Lock()
+	snapshot.prepareErr = nil
+	snapshot.Unlock()
+	snapshot.update(func(s *ghservice.CodeReviewPullRequestSnapshot) { s.HeadSHA = strings.Repeat("e", 40) })
+	require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "recovered identity preparation dispatches current replacement")
+	latest, err := db.NewCodeReviewStore(pool).GetLatestByPullRequest(ctx, org, pr)
+	require.NoError(t, err, "read recovery assessment")
+	require.Equal(t, strings.Repeat("e", 40), latest.HeadSHA, "recovery uses authoritative current revision")
+}
+
+func testSchedulingPreparationFastPaths(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+	ctx := context.Background()
+	service, _, sourceID := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
+	request := ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow}
+	original, err := service.RequestScheduledReview(ctx, request)
+	require.NoError(t, err, "record explicit request identity")
+	_, err = pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='failed',retryable_failure=true WHERE org_id=$1 AND session_id=$2`, org, sourceID)
+	require.NoError(t, err, "terminalize retry source")
+	_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND job_type=$2`, org, models.JobTypeRunCodeReview)
+	require.NoError(t, err, "finish retry source starter")
+	retryInput := RetryReviewInput{OrgID: org, SessionID: sourceID}
+	replacement, err := service.RetryReview(ctx, retryInput)
+	require.NoError(t, err, "record successful retry replacement")
+	_, err = pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='stale' WHERE org_id=$1 AND session_id=$2`, org, sourceID)
+	require.NoError(t, err, "represent obsolete worker after retry")
+	snapshot.Lock()
+	snapshot.prepareErr = fmt.Errorf("installation credentials temporarily unavailable")
+	snapshot.Unlock()
+	replay, err := service.RequestScheduledReview(ctx, request)
+	require.NoError(t, err, "duplicate request needs no fresh provider credentials")
+	require.Equal(t, original.RequestID, replay.RequestID, "explicit delivery identity remains stable during outage")
+	require.Equal(t, models.CodeReviewRequestJoined, replay.Disposition, "request replay joins its persisted pending intent")
+	retried, err := service.RetryReview(ctx, retryInput)
+	require.NoError(t, err, "recorded retry needs no fresh provider credentials")
+	require.Equal(t, RetryReviewResult{PreviousSessionID: sourceID, SessionID: replacement.SessionID, MetadataID: replacement.MetadataID}, retried, "retry replay returns persisted replacement without enqueueing a new job")
+	allowed, err := service.ValidateScheduledExecution(ctx, org, pr, sourceID)
+	require.NoError(t, err, "stale worker revocation needs no fresh provider credentials")
+	require.False(t, allowed, "obsolete worker stays denied during credential outage")
 }
