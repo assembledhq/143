@@ -76,7 +76,7 @@ import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
 import { GitHubReviewerConnectionSheet } from "@/components/code-review/github-reviewer-connection-sheet";
 import { ReviewNowFromComment } from "@/components/code-review/review-now-from-comment";
-import { ScheduledReviews, ReviewNowButton } from "@/components/code-review/scheduling";
+import { ScheduledReviews } from "@/components/code-review/scheduling";
 import { CodeReviewPolicyHistory } from "@/components/code-review/policy-history";
 import { SortableTableHeader } from "@/components/sortable-table-header";
 import {
@@ -395,7 +395,6 @@ function ReviewActions({
   return (
     <div className={cn("flex w-full items-center gap-1 md:w-auto md:justify-end", className)}>
       <EvidenceButton selected={evidenceSelected} onToggleEvidence={onToggleEvidence} />
-      {canRetry ? <ReviewNowButton prID={review.pull_request_id} /> : null}
       {canRetry && reviewCanBeRetried(review) ? (
         <Button className="min-h-11 flex-1 justify-center md:min-h-0 md:flex-none" variant="outline" size="sm" disabled={isRetrying} onClick={onRetry}>
           <RefreshCw className={isRetrying ? "animate-spin" : undefined} />

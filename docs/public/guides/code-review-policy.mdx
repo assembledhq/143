@@ -65,19 +65,21 @@ interval** applies those values explicitly. These controls autosave for the
 organization. The **Dispute reassessment cooldown** is separate and applies to
 repeated objections.
 
-The **Queue** tab shows pending work before a session exists, including draft,
+The **Queue** tab shows pending work before a session exists, including timing,
 paused, active-review, and GitHub availability waits. It displays 25 PRs per page
 with Previous and Next controls, separately from the executed activity on the
 **Reviews** tab. Members and admins can pause or resume automatic monitoring
 for a pending PR.
 
 **Review now** bypasses the two timing delays and an automatic-monitoring pause.
-It still requires an open, ready PR and an enabled review policy. It waits for
+It still requires an open PR and an enabled review policy. It waits for
 active work and can reuse a completed assessment of the same head and base under
 the current policy. It does not resume automatic monitoring or guarantee a
-second assessment for every click. Draft and closed PRs cannot start new review
-work. Historical approval still stops automatic re-review; use an explicit
-request when another review is needed after approval.
+second assessment for every click. Draft PRs support automatic reviews, Review
+now, retries, and dispute reassessments under the same scheduling rules.
+Converting a PR to draft does not stop an active review. Closed PRs cannot start
+new review work. Historical approval still stops automatic re-review; use an
+explicit request when another review is needed after approval.
 
 Content reuse across rebases or restacks, review-specific usage budgets, reserved
 interactive capacity, and forced fresh review are not part of this scheduling

@@ -19,13 +19,13 @@ Current delivery unit: Stage 1. Later reuse, resource accounting, and post-appro
 - [x] Presence-aware policy persistence, compatible PATCH/restore, and autosave.
 - [x] Durable PR scheduling state, requests, wake/reconciliation, and lease/race handling.
 - [x] Common admission for webhooks, manual requests, retries, and worker dispatch.
-- [x] Draft/closed/pause transitions, Review now, timing controls, and visible pending work.
+- [x] Draft observations, closed/pause transitions, Review now, timing controls, and visible pending work.
 - [x] Focused behavior tests, real PostgreSQL concurrency/lifecycle proof, and automated UI verification.
-- [x] Adversarial gap audit: cancellation after commit, stranded active metadata, missed draft/base events, duplicate request lineage, and provider outage recovery.
+- [x] Adversarial gap audit: cancellation after commit, stranded active metadata, missed base/close events, duplicate request lineage, and provider outage recovery.
 - [ ] Native Chrome UI proof, remote CI, and pilot rollout.
 
 - [x] Trace current automatic reassessment, explicit requests, cancellation, policy settings, and UI controls.
-- [x] Confirm the desired workflow: review each ready PR; suppress repeated work during pushes and restacks.
+- [x] Confirm the desired workflow: review each open PR, including drafts; suppress repeated work during pushes and restacks.
 - [x] Include UI configuration and per-PR explanations in implementation scope.
 - [x] Draft delivery stages, proposed contracts, rollout gates, and acceptance criteria.
 - [x] Reconcile Claude's review with the implementation and tighten scheduling, reader migration, settings compatibility, and capacity contracts.
@@ -38,7 +38,7 @@ Current delivery unit: Stage 1. Later reuse, resource accounting, and post-appro
 
 ## Decisions and Scope
 
-1. Review every ready PR independently. Do not restrict reviews to the bottom of a stack, automatically replace constituent reviews with a combined review, or infer readiness from a branch-name pattern.
+1. Review every eligible open PR independently, including drafts. Do not restrict reviews to the bottom of a stack, automatically replace constituent reviews with a combined review, or infer readiness from a branch-name pattern.
 2. Keep the existing requirement that review is requested before automatic monitoring starts. Do not turn all repository webhook traffic into automatic review.
 3. Propose a **five-minute quiet window** after the latest meaningful update and a **15-minute minimum interval between automatic review starts per PR**. An explicit first review or **Review now** bypasses timing delays, subject to eligibility and capacity.
 4. Consolidate ordinary equivalent requests. A separate **Force fresh review** action intentionally bypasses content reuse, records a reason, and still respects authorization and resource limits.
@@ -52,7 +52,7 @@ Current delivery unit: Stage 1. Later reuse, resource accounting, and post-appro
 
 Local implementation dated 2026-09-10:
 
-- `internal/services/codereview/scheduling.go` owns authoritative GitHub observations, one durable pending intent per PR, timing, pause/draft/close admission, request identity, and transactional session/job creation. Workers refresh eligibility before reviewer fan-out and publication. Stage 1 remains conservative about changed SHAs and bases.
+- `internal/services/codereview/scheduling.go` owns authoritative GitHub observations, one durable pending intent per PR, timing, pause/close admission and informational draft status, request identity, and transactional session/job creation. Workers refresh eligibility before reviewer fan-out and publication. Stage 1 remains conservative about changed SHAs and bases.
 - Migration `000289_code_review_scheduling` adds scheduling policy JSON and the PR-state/request tables. `internal/db/code_review_scheduling.go` serializes writers with an org/PR advisory lock. Wake completion/rescheduling uses that same lock and worker lease. A bounded cluster sweep repairs lost/dead-lettered wakes and unfinished cancellation after process failure, including closed PRs without pending input.
 - Disputes retain dedicated jobs and separate provenance while acquiring the same PR lock. Failed-attempt retries retain their existing validation and immutable replacement links; request redelivery returns its recorded replacement. Pending work cannot dispatch while another starter or reviewer thread is active; abandoned metadata alone does not block forever.
 - PATCH policy saves use a version fence and merge only changed fields. Legacy PUT/internal writes and historical restore preserve omitted scheduling settings. New policy versions materialize effective scheduling values so an explicit reset remains distinguishable from pre-migration history. Existing organizations retain true/60/0 defaults. Recommended 300/900 values require the admin action in this slice; automatic adoption for first-ever policies is deferred to pilot/GA rollout.
@@ -72,7 +72,7 @@ The pending queue is a deliberate compatibility choice: this slice does not synt
 
 ### Local validation and rollout
 
-Behavior tests cover zero/false/null settings, policy version conflicts and historical restore, quiet/cadence deadlines, ten pushes yielding one final-head assessment, duplicate snapshots, process restart, manual joining/reuse, GitHub outage waits, draft/close invalidation, tenant isolation, concurrent request identity, earlier/later wakes, lost job leases, repair, and draining threads. The lifecycle test creates a disposable database and applies the complete migration chain on PostgreSQL 17; the store tests also exercise migration down/up in an isolated schema.
+Behavior tests cover zero/false/null settings, policy version conflicts and historical restore, quiet/cadence deadlines, ten pushes yielding one final-head assessment, duplicate snapshots, process restart, manual joining/reuse, GitHub outage waits, draft continuity and close invalidation, tenant isolation, concurrent request identity, earlier/later wakes, lost job leases, repair, and draining threads. The lifecycle test creates a disposable database and applies the complete migration chain on PostgreSQL 17; the store tests also exercise migration down/up in an isolated schema.
 
 Run the optional database suites against disposable local infrastructure:
 
@@ -121,8 +121,8 @@ Admission means deciding whether to reuse, defer, or execute a review before cre
 | --- | --- |
 | PR has never been sent to 143 for review | Do not start automatic monitoring merely because it receives a push. |
 | PR is closed or merged | Remove pending work, prevent new dispatch/publication, and stop active work through existing cancellation mechanisms. Preserve history. |
-| PR is draft | Hold new review work. Becoming ready wakes a previously requested review. |
-| Automatic monitoring is paused | Hold automatic requests. An explicit review of an open, ready PR is allowed without resuming later automatic monitoring. |
+| PR is draft | Allow automatic and explicit reviews, retries, dispute reassessments, and publication under the normal safeguards. Draft conversion alone never invalidates active work. |
+| Automatic monitoring is paused | Hold automatic requests. An explicit review of an open PR, including a draft, is allowed without resuming later automatic monitoring. |
 | Push burst | Replace the pending target with the current revision and recompute the quiet deadline. Do not accumulate a queue of obsolete heads. |
 | Equivalent event/request | Return the existing pending/running request or applicable assessment. Redelivery never consumes a fresh-review allowance. |
 | History-only rewrite with proven equivalent context | Reuse completed analysis or let equivalent active analysis finish. Publish only after checking the current target. |
@@ -142,7 +142,7 @@ Stage 1 uses distinct authoritative head/base observations as the conservative d
 
 Add cheap admission/reconciliation inputs for `ready_for_review`, `converted_to_draft`, `closed`, `reopened`, and relevant `edited` events alongside `synchronize`. In Stage 2, base-branch pushes or periodic reconciliation refresh only already-monitored PRs that target that base. Check/status events refresh gates; relevant human description/evidence updates refresh input applicability. None of these events directly launches an agent. Ignore self-authored status churn and do not monitor unrelated PRs.
 
-Keep at most one active assessment and one pending replacement per PR across workers. While classification is incomplete, the old assessment loses authority to publish for the new revision but may continue briefly. Once inequality is established, cancel it; once equivalence is proven, preserve it. A draft/close event or explicit cancellation takes precedence over reuse.
+Keep at most one active assessment and one pending replacement per PR across workers. While classification is incomplete, the old assessment loses authority to publish for the new revision but may continue briefly. Once inequality is established, cancel it; once equivalence is proven, preserve it. A close event or explicit cancellation takes precedence over reuse. Draft status alone does not affect reuse or publication authority.
 
 Use a generation as the version of the PR's desired assessment. A new target or accepted force-fresh intent advances it under the PR lock; equivalent duplicate intent does not. Pending requests do not need an assessment/session yet. When equivalent active work finishes after a history rewrite, persist its immutable source output, release its old active-assessment ownership, and create a reused assessment for the current generation. Do not mutate the old assessment's target or allow both generations to publish. Multiple ordinary/force requests received while work is running share one pending current-target slot; preserve each request and any force-fresh reason, but do not promise a separate execution for every click.
 
@@ -186,7 +186,7 @@ Compute equality deterministically without starting an LLM or a review sandbox. 
 
 These conservative rules catch commit-message amendments, empty commits, and restacks that only rewrite history. A restack that incorporates changed parent code may miss the cache even if the child's own patch is unchanged. Reusing those cases requires dependency-impact analysis and is deferred; do not promise that Stage 2 eliminates all restack reviews.
 
-Use the PR's actual comparison base rather than always comparing with the default branch. A base-ref change invalidates applicability until re-evaluated. The snapshot service must add authoritative draft and base-ref information; its current `CodeReviewPullRequestSnapshot` has state and SHAs but no draft/base-ref fields.
+Use the PR's actual comparison base rather than always comparing with the default branch. A base-ref change invalidates applicability until re-evaluated. The snapshot service supplies authoritative base-ref information and informational draft status alongside state and SHAs.
 
 Separate the code/reviewer contract from the mutable approval gates. Changes only to quiet time, budgets, or policy audit version must not invalidate code analysis. Changes to review instructions, roster, prompts, analysis-relevant approval policy, PR intent, or visual evidence require appropriate reassessment. Stage 2 can conservatively invalidate all analysis-relevant policy changes; finer reuse belongs in Stage 4.
 
@@ -247,12 +247,12 @@ Add `code_review_pr_state` as a mutable operational table:
 - `generation bigint NOT NULL DEFAULT 0`, latest head/base SHAs and base ref as text, `snapshot_observed_at timestamptz`, and `is_draft boolean`.
 - `last_material_change_at`, `first_pending_at`, `last_agent_start_at`, `eligible_at`, and `retry_at` as nullable timestamps.
 - Stage 1: `active_session_id uuid NULL` and `pending_request_id uuid NULL` FKs, with nullable links to avoid insertion cycles. Stage 2 adds `active_assessment_id uuid NULL` only after the assessment table exists, and moves active ownership to that link transactionally.
-- `state text NOT NULL` with checked values `idle`, `waiting`, `running`, `covered`, `paused`, `closed`; nullable typed `wait_reason` (`quiet_period`, `minimum_interval`, `draft`, `manual_pause`, `capacity`, `account_unavailable`, `budget`, `context_unavailable`). Stage 2 adds `post_approval_manual_only` for uncovered content intentionally held without an automatic wake. Stage 1 must not infer `covered` for a new head from an older approval.
+- `state text NOT NULL` with checked values `idle`, `waiting`, `running`, `covered`, `paused`, `closed`; nullable typed `wait_reason` (`quiet_period`, `minimum_interval`, `manual_pause`, `capacity`, `account_unavailable`, `budget`, `context_unavailable`). Stage 2 adds `post_approval_manual_only` for uncovered content intentionally held without an automatic wake. Stage 1 must not infer `covered` for a new head from an older approval.
 - `created_at` and `updated_at` timestamps. This is lifecycle state, so insert-only settings semantics do not apply.
 
 Index due pending rows by `(org_id, eligible_at)` and retryable rows by `(org_id, retry_at)` with appropriate state predicates. A system scheduler's cross-org scan must have the documented lint exemption; tenant store methods remain scoped.
 
-This scheduling row owns the authoritative draft/base-ref observations required by admission; add them to the snapshot DTO and persist them here in Stage 1. Do not assume the existing `PullRequest` mirror contains these fields or independently trust webhook payload order. Serialize authoritative refresh/write under the PR lock, or fence responses so an older in-flight refresh cannot overwrite a newer observation. Admission and publication read the same observation contract.
+This scheduling row persists authoritative base-ref and informational draft observations from the snapshot DTO. Legacy `draft` wait reasons remain readable; normal wake reconciliation and missing-wake repair release those holds without a data migration. Do not assume the existing `PullRequest` mirror contains these fields or independently trust webhook payload order. Serialize authoritative refresh/write under the PR lock, or fence responses so an older in-flight refresh cannot overwrite a newer observation. Admission and publication read the same observation contract.
 
 ### Requests and assessments
 
@@ -298,7 +298,7 @@ All routes below are organization-scoped, use existing authentication/CSRF prote
 
 Capabilities gate both UI and API admission: Stage 1 accepts `ensure_current` and `review_now`; unsupported `force_fresh` returns 409 `CODE_REVIEW_CAPABILITY_UNAVAILABLE`. Assessment fields remain null until Stage 2. Resource-policy writes likewise reject unsupported controls instead of accepting ineffective limits.
 
-Use 202 for durably queued/joined nonterminal requests and 200 for an already available reusable result. Waiting on capacity/budget is an accepted request with visible state, not HTTP 429 or a failed review. Use 400 with existing `CODE_REVIEW_POLICY_INVALID` or new `CODE_REVIEW_REQUEST_INVALID` for invalid input, 403 for insufficient mutation rights, and 404 for inaccessible PRs. Use 409 with `CODE_REVIEW_POLICY_VERSION_CONFLICT`, `CODE_REVIEW_REQUEST_ID_CONFLICT`, or `CODE_REVIEW_PR_INELIGIBLE` for a stale policy version, request-ID reuse with different input, or an ineligible closed/draft/policy-disabled PR. Preserve `{error: {code, message, details}}`. Include current version on a policy conflict; refetch and preserve unsaved fields rather than silently retrying a full overwrite.
+Use 202 for durably queued/joined nonterminal requests and 200 for an already available reusable result. Waiting on capacity/budget is an accepted request with visible state, not HTTP 429 or a failed review. Use 400 with existing `CODE_REVIEW_POLICY_INVALID` or new `CODE_REVIEW_REQUEST_INVALID` for invalid input, 403 for insufficient mutation rights, and 404 for inaccessible PRs. Use 409 with `CODE_REVIEW_POLICY_VERSION_CONFLICT`, `CODE_REVIEW_REQUEST_ID_CONFLICT`, or `CODE_REVIEW_PR_INELIGIBLE` for a stale policy version, request-ID reuse with different input, or an ineligible closed/policy-disabled PR. Preserve `{error: {code, message, details}}`. Include current version on a policy conflict; refetch and preserve unsaved fields rather than silently retrying a full overwrite.
 
 Replace whole-config optimistic replacement and latest-payload-only coalescing in `frontend/src/lib/code-review-autosave.ts`. Accumulate dirty field paths and compose queued edits into an RFC 7386 patch against the last acknowledged config; null must remain an intentional reset, including parent-reset followed by child-edit cases. Serialize saves per policy, take `expected_version` from the last successful server response at dispatch time, and reapply still-unsaved edits over that response. On conflict, refetch and surface conflicting fields; never silently overwrite another tab. Use the same documented default resolver for optimistic display and server responses.
 
@@ -318,7 +318,7 @@ Exit: reproducible queries/fixtures and a documented accounting contract for exe
 
 ### Stage 1 — Durable scheduling and UI controls
 
-Implement policy fields/PATCH concurrency, PR request/state persistence, one pending target, timing decisions with an injected clock, draft/ready/closed/pause transitions, and durable wake/reconciliation. Wire all relevant initial/automatic/manual entry points through common admission, preserving their authorization rules. Add authoritative draft/base-ref snapshot fields. Ship timing controls, renamed dispute cooldown, per-PR wait states, and Review now together.
+Implement policy fields/PATCH concurrency, PR request/state persistence, one pending target, timing decisions with an injected clock, draft observations and closed/pause transitions, and durable wake/reconciliation. Wire all relevant initial/automatic/manual entry points through common admission, preserving their authorization rules. Add authoritative draft/base-ref snapshot fields. Ship timing controls, renamed dispute cooldown, per-PR wait states, and Review now together.
 
 Keep this slice independent: presence-aware scheduling policy and compatible PATCH/autosave, PR state with an active session link, request idempotency, and deadline-aware wake handling. Do not add assessment/resource FKs, fingerprints, reuse publication, or shared capacity enforcement. Resource controls and Force fresh become available only in their respective later stages.
 
@@ -359,7 +359,7 @@ Tests listed here are future implementation requirements; none were run for this
 | Timing | Fake-clock tests for quiet deadline, cadence from actual start, same-snapshot redelivery, newest-target replacement, and explicit timing bypass. |
 | Durable concurrency | PostgreSQL tests race webhook deliveries, manual requests, worker claims, and crashes; prove one active assessment, one pending target, one execution reservation per attempt, and no orphaned enqueue. Mock tests alone do not prove these invariants. |
 | Request intent | Same request UUID/redelivery joins; UUID with different body conflicts; ordinary equivalent requests reuse; force requests preserve their reasons while sharing at most one pending fresh pass; dispute provenance remains enforced. |
-| Readiness | Draft, ready, closed, merged, pause/resume, policy-disabled, and missed-webhook reconciliation paths; no unrequested PR becomes monitored. |
+| Eligibility | Drafts follow normal timing, manual, retry, dispute, and publication rules; draft conversion preserves active work and legacy draft holds recover. Closed, merged, pause/resume, policy-disabled, and missed-webhook paths retain safeguards; no unrequested PR becomes monitored. |
 | Source equality | Amend/empty/history-only restack reuse; parent code changes, base retargets, binary/mode/submodule changes, meaningful whitespace, incomplete files, and unavailable GitHub context do not falsely reuse. |
 | Review contract | Timing/budget edits preserve analysis; relevant instructions/roster/prompt/intent/evidence changes invalidate it; bot status comments do not invalidate themselves. |
 | Publication | Push/policy/evidence change during classification, synthesis, and final publish; stale worker lease; duplicate publisher delivery; explicit commit ID; new-head applicability never inferred from old approval. |
@@ -414,7 +414,7 @@ Migration rollout must define how existing queued jobs acquire or defer to the n
 - Stable deterministic early stop already avoids some fan-out when enabled; this plan must build on it rather than duplicate it or equate an early stop with completed code coverage.
 - Automatic reassessment currently ends after any published approval. Correct current-content coverage can add necessary post-approval work while removing redundant pre-approval work; measure both.
 - Policy saves are whole-config PUTs even though newer settings guidance calls for merge patches. Store-level version conflict support exists and can support safer UI writes.
-- The snapshot used by deferred review entry points lacks draft/base-ref fields required by the proposed readiness/context decisions.
+- Deferred review snapshots now expose base-ref and informational draft status; draft readiness is not an admission or publication requirement.
 - The exec-plan-writer skill references `.agent/PLANS.md` and `docs/AGENTS.md`; neither exists here. This plan follows `docs/design/AGENTS.md`, using `future/` and `Not Started`, and retains the skill's living-document sections.
 
 ## Decision Log
@@ -444,3 +444,5 @@ These are bounded implementation/rollout questions, not reasons to postpone the 
 Stage 1 now has a local implementation and automated database/UI evidence. Content reuse, shared execution admission, interactive reserves, and post-approval activation remain later delivery units with explicit design gates. Native Chrome proof, remote CI, deployment, production measurements, and savings validation remain outstanding.
 
 When implementation proceeds, append measured outcomes and decisions here, update Progress, and move this document according to `docs/design/AGENTS.md`. Do not mark the plan implemented on the strength of local tests alone.
+
+- **Draft review eligibility:** Open draft PRs are eligible for the same review flows as other open PRs. Draft conversion alone does not cancel or stale work; existing draft holds recover through normal durable wake reconciliation.
