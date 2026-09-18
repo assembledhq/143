@@ -444,7 +444,9 @@ secrets-rotate:
 #   provision-worker HOST=<HOST>. EGRESS_SSH_KEY defaults to
 #   ~/.ssh/143-egress or ~/.ssh/143-egress.pem when present, then falls back
 #   to SSH_KEY. The gateway SSH user is auto-detected as root or ubuntu; set
-#   EGRESS_SSH_USER only for unusual images.
+#   EGRESS_SSH_USER only for unusual images. provision-egress also installs
+#   $SECRETS_DIR/deploy/authorized_keys onto that user so make sync-keys works
+#   for the gateway afterwards.
 #
 # To tear down and reprovision an existing node:
 #   make provision-app    HOST=87.99.150.138  REPROVISION=true
@@ -507,6 +509,7 @@ export SSH_USER
 # Auto-detect SSH key: use ~/.ssh/143-deploy if it exists.
 SSH_KEY ?= $(wildcard ~/.ssh/143-deploy)
 EGRESS_SSH_KEY ?= $(or $(wildcard ~/.ssh/143-egress),$(wildcard ~/.ssh/143-egress.pem),$(SSH_KEY))
+export EGRESS_SSH_KEY
 
 # Guard: fail with a helpful message when SSH_KEY is empty.
 define check-ssh-key
@@ -808,13 +811,15 @@ deploy: deploy-fleet
 
 # Sync SSH public keys from $(SECRETS_DIR)/deploy/authorized_keys/*.pub to all fleet nodes.
 # Dry-run by default — shows diff without changing anything.
+# Passes role:host entries through so egress:<ip> uses ubuntu/root + EGRESS_SSH_KEY
+# instead of deploy@ + SSH_KEY.
 # Usage: make sync-keys              (dry run)
 #        make sync-keys APPLY=true   (actually push changes)
 APPLY ?=
 sync-keys:
 	$(check-ssh-key)
 	@$(read-fleet-hosts); \
-	HOSTS="$$(echo "$$FLEET" | tr ',' '\n' | cut -d: -f2 | sort -u)"; \
+	HOSTS="$$(echo "$$FLEET" | tr ',' '\n' | sort -u)"; \
 	if [ -z "$$HOSTS" ]; then \
 		echo "ERROR: No hosts found. Set FLEET_HOSTS or add entries to .env.production.enc."; \
 		exit 1; \

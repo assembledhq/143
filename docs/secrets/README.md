@@ -199,6 +199,10 @@ cd ../143-infra && git add .env.enc && git commit -m "Update secrets"
   .env.production.enc   # encrypted production secrets
   deploy/authorized_keys/
     *.pub               # production SSH public keys synced by make sync-keys
+                        # to deploy@ on fleet nodes and ubuntu@ on the egress gateway
+    143-egress.pub      # AWS/gateway bootstrap public key; installed only on
+                        # the egress host so sync-keys cannot lock out
+                        # ~/.ssh/143-egress.pem
 ```
 
 ### How it works
