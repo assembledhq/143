@@ -99,8 +99,8 @@ The frontend proxies `/api/*` to the Go server automatically.
 | `make deploy-worker` | Deploy worker node(s) |
 | `make deploy-db` | Deploy database node(s) |
 | `make deploy-logging` | Deploy logging node(s) |
-| `make sync-keys` | Dry-run: show what keys would change on all servers |
-| `make sync-keys APPLY=true` | Push SSH public keys from `$SECRETS_DIR/deploy/authorized_keys/` to all servers |
+| `make sync-keys` | Dry-run: show what keys would change on all servers, including the egress gateway |
+| `make sync-keys APPLY=true` | Push SSH public keys from `$SECRETS_DIR/deploy/authorized_keys/` to all servers (deploy@ on fleet nodes, ubuntu@ on egress) |
 | `make logs` | Open Grafana via SSH tunnel on localhost:9999 |
 
 After running `make secrets-setup`, add this to your shell profile (`~/.bash_profile` or `~/.zshrc`):

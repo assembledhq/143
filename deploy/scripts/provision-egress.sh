@@ -4,6 +4,9 @@ set -euo pipefail
 # Wrapper around provision-egress-gateway.sh that reads gateway static egress
 # config from .env.production.enc. This keeps make provision-worker from
 # needing operator-exported STATIC_EGRESS_* values after secrets are edited.
+#
+# After the gateway SSH hop works, this also runs sync-keys.sh against
+# egress:<host> so ubuntu/root gets the same authorized_keys set as the fleet.
 
 HOST="${1:-${HOST:-}}"
 SSH_KEY="${2:-${SSH_KEY:-}}"
@@ -186,6 +189,16 @@ fi
 resolve_remote_user
 REMOTE="$(remote_target)"
 SUDO_PREFIX="$(remote_sudo_prefix)"
+
+# Install the same authorized_keys set used by the rest of the fleet onto the
+# gateway SSH user (ubuntu/root). Do this before WireGuard so operators can
+# still log in if later steps fail. EGRESS_SSH_KEY must have its public half
+# in 143-infra/deploy/authorized_keys/ or sync-keys will refuse to replace.
+echo "--- Syncing authorized keys to $REMOTE ---"
+EGRESS_SSH_USER="$EGRESS_SSH_USER" \
+  EGRESS_SSH_KEY="$SSH_KEY" \
+  SECRETS_DIR="$SECRETS_DIR" \
+  "$SCRIPT_DIR/sync-keys.sh" --apply "$SSH_KEY" "egress:$HOST"
 
 configure_tailscale_if_requested
 

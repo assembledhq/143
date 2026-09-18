@@ -1,6 +1,6 @@
 # Static Egress Gateway
 
-> **Status:** Implemented | **Last reviewed:** 2026-06-30
+> **Status:** Implemented | **Last reviewed:** 2026-09-18
 
 143 keeps Tailscale as the private control-plane overlay for app, worker, db, and Redis routing. Static customer allowlisting uses a separate opt-in data plane so worker host traffic and ordinary sandbox traffic do not inherit a global exit node.
 
@@ -26,7 +26,7 @@
 - A configured `STATIC_EGRESS_PUBLIC_IP` fails closed during worker reconciliation if the WireGuard helper or required gateway/worker tunnel settings are missing.
 - `FLEET_HOSTS` is the worker and gateway source of truth. Add `egress:<host>` for the gateway and `worker:<host>` for every worker.
 - `make provision-worker HOST=<worker-host>` runs `sync-static-egress-secrets.sh --apply`, verifies that `worker:<worker-host>` is present in `FLEET_HOSTS`, preserves existing worker tunnel keys, generates missing keys/addresses for every worker, reloads the egress gateway, then provisions the worker.
-- Gateway SSH credentials are operator-local, not production secrets. `EGRESS_SSH_KEY` auto-detects `~/.ssh/143-egress` or `~/.ssh/143-egress.pem` before falling back to the normal fleet `SSH_KEY`, and `provision-egress.sh` probes `root` then `ubuntu` unless `EGRESS_SSH_USER` is explicitly set.
+- Gateway SSH bootstrap uses an operator-local private key (`EGRESS_SSH_KEY`, auto-detected as `~/.ssh/143-egress` or `~/.ssh/143-egress.pem`, then `SSH_KEY`). `provision-egress.sh` probes `root` then `ubuntu` unless `EGRESS_SSH_USER` is set. After that hop works, `provision-egress` and `make sync-keys` install `$SECRETS_DIR/deploy/authorized_keys/*.pub` onto that user. `143-egress.pub` (the AWS/gateway public key) must live in that directory so replace-style sync cannot lock out the bootstrap key, and is installed only on the gateway — not on fleet `deploy@` hosts. The private key stays operator-local.
 - `STATIC_EGRESS_WORKER_HOSTS` and `STATIC_EGRESS_WORKER_PEERS` are generated values in encrypted production env, not hand-maintained operator inputs.
 - `make provision-egress` can also be run directly and reads gateway host/key/peer config from `.env.production.enc`.
 - The egress gateway SNATs accepted WireGuard traffic to its stable public IPv4 and independently blocks metadata and RFC1918 destinations.
