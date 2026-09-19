@@ -337,17 +337,21 @@ func (s *AutomationRunStore) ClaimAttempt(ctx context.Context, tx pgx.Tx, orgID,
 	return attempt, true, nil
 }
 
-// NextWaiting returns the next run to dispatch for the target: the
-// authoritative push run first, then unresolved push candidates and every
-// other event in arrival order. Ambiguous candidates are never returned;
-// they wait for the lookup or the ambiguity deadline.
+// NextWaiting returns the run that should dispatch next for the target
+// among every admitted run that has not started: the authoritative push
+// run first, then unresolved push candidates and every other event in
+// arrival order. Ambiguous candidates are never returned; they wait for the
+// lookup or the ambiguity deadline. Dispatch consults it under the target
+// lock so an older comment cannot beat a newer push and later arrivals
+// cannot bypass earlier ones.
 func (s *AutomationRunStore) NextWaiting(ctx context.Context, q DBTX, orgID, targetID uuid.UUID) (models.AutomationRun, error) {
 	if q == nil {
 		q = s.db
 	}
 	query := fmt.Sprintf(`SELECT %s FROM automation_runs
 		WHERE org_id = @org_id AND target_id = @target_id
-		  AND status = 'pending' AND dispatch_state = 'waiting'
+		  AND status = 'pending'
+		  AND (dispatch_state = 'waiting' OR dispatch_state IS NULL)
 		  AND head_resolution IS DISTINCT FROM 'ambiguous'
 		ORDER BY
 		  CASE WHEN github_action = 'synchronize' AND head_resolution = 'authoritative' THEN 0 ELSE 1 END,

@@ -21,6 +21,8 @@ import (
 // pending run of a per_target automation into the target's executing turn,
 // or records it as waiting, in one database transaction with a fixed lock
 // order: automation-scoped advisory lock, target row, run row, session.
+// The GitHub lookup runs before the transaction so the transaction never
+// waits on the network or on a second pool connection while it holds locks.
 
 const (
 	// AutomationTurnLimit is the number of turns a generation may run before
@@ -30,18 +32,16 @@ const (
 	// restore from; a larger checkpoint retires the generation.
 	AutomationCheckpointSizeLimit int64 = 2 << 30
 	// automationPendingSnapshotRetry is how long dispatch waits before
-	// re-checking a session whose snapshot upload is still in flight.
+	// re-checking a session whose snapshot upload is still in flight. The
+	// upload either publishes or the stranded-pending reaper clears it; the
+	// job's wait window bounds the total.
 	automationPendingSnapshotRetry = 15 * time.Second
-	// automationPendingSnapshotGrace is how long a pending upload is trusted
-	// before dispatch treats a published key as the checkpoint.
-	automationPendingSnapshotGrace = 3 * time.Minute
-	// automationHeadLookupRetryMin and Max bound the backoff when an
-	// ambiguous push cannot be resolved because the lookup failed: 30 s
-	// doubling to 10 min.
+	// automationHeadLookupRetryMin and Max bound the backoff when a run
+	// needs the lookup and it failed: 30 s doubling to 10 min.
 	automationHeadLookupRetryMin = 30 * time.Second
 	automationHeadLookupRetryMax = 10 * time.Minute
-	// automationLifecycleStaleAfter is how old a stored lifecycle state may
-	// be before creating a new generation revalidates it against GitHub.
+	// automationLifecycleStaleAfter is how old the openness evidence may be
+	// before creating a new generation revalidates it against GitHub.
 	automationLifecycleStaleAfter = time.Hour
 	// automationConfigChangeRetry is the delay before a run re-enters
 	// dispatch after its automation changed underneath it.
@@ -97,14 +97,15 @@ const (
 	// DispatchAlreadyReserved means an earlier attempt reserved the run; the
 	// existing job carries it.
 	DispatchAlreadyReserved DispatchKind = "already_reserved"
-	// DispatchWaiting means the target is busy and the run waits.
+	// DispatchWaiting means the target is busy, or another admitted run has
+	// priority, and the run waits.
 	DispatchWaiting DispatchKind = "waiting"
 	// DispatchTerminalized means the run ended without executing.
 	DispatchTerminalized DispatchKind = "terminalized"
 	// DispatchRetry means the decision could not be made yet (a pending
-	// snapshot, an unresolved head, a changed automation); the caller retries
-	// after RetryAfter without spending the job's attempt budget, for at
-	// most MaxWait.
+	// snapshot, an unresolved head, missing openness evidence, a changed
+	// automation); the caller retries after RetryAfter without spending the
+	// job's attempt budget, within its wait window.
 	DispatchRetry DispatchKind = "retry"
 	// DispatchNotApplicable means the run is not a per-target run; the
 	// caller dispatches it as an ordinary per-run session.
@@ -121,7 +122,6 @@ type DispatchOutcome struct {
 	ContinuationReason *models.AutomationRunContinuationReason
 	OutcomeReason      models.AutomationRunOutcomeReason
 	RetryAfter         time.Duration
-	MaxWait            time.Duration
 	Note               string
 }
 
@@ -171,9 +171,9 @@ func NewTargetDispatcher(txStarter db.TxStarter, automations *db.AutomationStore
 	}
 }
 
-// SetHeadResolver enables the dispatch-time GitHub head lookup. Without it
-// push runs review their delivered head in degraded mode and ambiguous
-// candidates wait for the ambiguity deadline.
+// SetHeadResolver enables the dispatch-time GitHub lookup. Without it push
+// runs review their delivered head in degraded mode, ambiguous candidates
+// and headless runs wait, and a stale lifecycle cannot be revalidated.
 func (d *TargetDispatcher) SetHeadResolver(resolver PullRequestHeadResolver) {
 	d.heads = resolver
 }
@@ -224,6 +224,26 @@ func (d *TargetDispatcher) Applies(in DispatchInput) bool {
 	return in.Run.TargetID != nil
 }
 
+// lookupResult is the dispatch-time GitHub lookup, taken once before the
+// transaction. ok is false when no resolver is configured or the lookup
+// failed; the failure is logged once.
+type lookupResult struct {
+	info PullRequestHeadInfo
+	ok   bool
+}
+
+func (d *TargetDispatcher) lookup(ctx context.Context, orgID, repositoryID uuid.UUID, number int) lookupResult {
+	if d.heads == nil || number <= 0 {
+		return lookupResult{}
+	}
+	info, err := d.heads.ResolvePullRequestHead(ctx, orgID, repositoryID, number)
+	if err != nil {
+		d.logger.Warn().Err(err).Str("org_id", orgID.String()).Int("pull_request_number", number).Msg("automation dispatch head lookup failed")
+		return lookupResult{}
+	}
+	return lookupResult{info: info, ok: info.SHA != ""}
+}
+
 // Dispatch runs the ownership transaction for the run and returns what
 // happened. Any failure rolls back every step and leaves the run pending
 // for the job's retry.
@@ -243,6 +263,7 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 	if repositoryID == nil {
 		return DispatchOutcome{}, errors.New("automation dispatch requires a repository")
 	}
+	current := d.lookup(ctx, orgID, *repositoryID, github.PullRequestNumber)
 
 	tx, err := d.txStarter.Begin(ctx)
 	if err != nil {
@@ -255,10 +276,11 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 		return DispatchOutcome{}, err
 	}
 
-	// The automation row is reread under the advisory lock: a continuity
-	// switch or a configuration change that committed while this run
-	// waited for the lock must not be dispatched from stale input.
-	automation, err := d.automations.GetByID(ctx, orgID, in.Automation.ID)
+	// The automation row is reread under the advisory lock, on the
+	// transaction's own connection: a continuity switch or a configuration
+	// change that committed while this run waited for the lock must not be
+	// dispatched from stale input.
+	automation, err := d.automations.GetByIDInTx(ctx, tx, orgID, in.Automation.ID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return DispatchOutcome{Kind: DispatchNotApplicable, Note: "automation deleted"}, nil
@@ -269,7 +291,7 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 		return DispatchOutcome{Kind: DispatchNotApplicable, Note: "automation is per_run"}, nil
 	}
 	if !automation.UpdatedAt.Equal(in.Automation.UpdatedAt) {
-		return DispatchOutcome{Kind: DispatchRetry, RetryAfter: automationConfigChangeRetry, MaxWait: time.Minute, Note: "automation changed since the run was loaded"}, nil
+		return DispatchOutcome{Kind: DispatchRetry, RetryAfter: automationConfigChangeRetry, Note: "automation changed since the run was loaded"}, nil
 	}
 	expectedUser, err := automationExecutingUser(automation)
 	if err != nil {
@@ -289,15 +311,20 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 		return DispatchOutcome{Kind: DispatchTerminalized, Note: "run is no longer pending"}, nil
 	}
 
-	// Lifecycle revalidation from the stored state; a stale state is
-	// revalidated against GitHub below before a new generation is created.
+	// Lifecycle: the stored gate first, then the lookup's current state,
+	// which closes the target when GitHub says the pull request is done.
 	event := runEvent(run)
 	if !lifecycleAllowsRun(target.LifecycleState, event) {
 		return d.terminalize(ctx, tx, orgID, run.ID, models.AutomationRunOutcomePRClosed, "pull request is no longer open")
 	}
+	if current.ok && current.info.State != "" && current.info.State != "open" {
+		if err := d.targets.SetLifecycle(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleClosed); err != nil {
+			return DispatchOutcome{}, err
+		}
+		return d.terminalize(ctx, tx, orgID, run.ID, models.AutomationRunOutcomePRClosed, "pull request is "+current.info.State)
+	}
 
-	lookup := d.headLookup(ctx, orgID, target.RepositoryID, github.PullRequestNumber)
-	resolved, err := d.resolveHead(ctx, tx, orgID, &target, run, github, lookup)
+	resolved, err := d.resolveHead(ctx, tx, orgID, &target, run, github, current)
 	if err != nil {
 		return DispatchOutcome{}, err
 	}
@@ -309,22 +336,39 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 		if err := tx.Commit(ctx); err != nil {
 			return DispatchOutcome{}, fmt.Errorf("commit automation dispatch wait: %w", err)
 		}
-		return DispatchOutcome{Kind: DispatchRetry, RetryAfter: resolved.retryAfter, MaxWait: automationHeadAmbiguityWindow + automationHeadLookupRetryMax, Note: resolved.note}, nil
+		return DispatchOutcome{Kind: DispatchRetry, RetryAfter: resolved.retryAfter, Note: resolved.note}, nil
 	case resolved.terminal != "":
 		return d.terminalizeWith(ctx, tx, orgID, run.ID, resolved.terminal, resolved.supersededBy, resolved.note)
+	}
+	// Persist the run's own ordering now: if the run has to wait, the
+	// target's ambiguity state is already cleared, and the run must not be
+	// mistaken for an ambiguous candidate on its next dispatch.
+	if resolved.stamp {
+		if err := d.runs.StampHeadResolution(ctx, tx, orgID, run.ID, resolved.epoch, *resolved.resolution); err != nil {
+			return DispatchOutcome{}, err
+		}
 	}
 	github.HeadSHA = resolved.headSHA
 	if resolved.baseBranch != "" {
 		github.BaseBranch = resolved.baseBranch
 	}
 
-	// At most one turn executes per target at a time.
+	// At most one turn executes per target at a time, and the next turn is
+	// chosen by priority under the lock rather than by whichever poll wakes
+	// first.
 	executing, err := d.runs.ExecutingRunForTarget(ctx, tx, orgID, target.ID)
 	if err != nil {
 		return DispatchOutcome{}, err
 	}
 	if executing != nil {
 		return d.wait(ctx, tx, orgID, run.ID, fmt.Sprintf("run %s is executing", executing))
+	}
+	next, err := d.runs.NextWaiting(ctx, tx, orgID, target.ID)
+	if err != nil && !errors.Is(err, db.ErrAutomationRunNotFound) {
+		return DispatchOutcome{}, err
+	}
+	if err == nil && next.ID != run.ID {
+		return d.wait(ctx, tx, orgID, run.ID, fmt.Sprintf("run %s has priority", next.ID))
 	}
 
 	// Continuation decision.
@@ -351,19 +395,27 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 		if err := tx.Commit(ctx); err != nil {
 			return DispatchOutcome{}, fmt.Errorf("commit automation dispatch retry: %w", err)
 		}
-		return DispatchOutcome{Kind: DispatchRetry, RetryAfter: decision.retryAfter, MaxWait: decision.maxWait, Note: decision.note}, nil
+		return DispatchOutcome{Kind: DispatchRetry, RetryAfter: decision.retryAfter, Note: decision.note}, nil
 	case decisionSkip:
 		return d.terminalize(ctx, tx, orgID, run.ID, decision.outcome, decision.note)
 	}
 
-	// A new generation on a target whose lifecycle is unknown or stale is
-	// revalidated against GitHub first.
+	// A new generation needs current openness evidence: a recent
+	// pull_request delivery or a successful lookup. Without either the run
+	// waits rather than opening a conversation on a possibly closed pull
+	// request.
 	if decision.mode == models.AutomationRunContinuationFresh && d.lifecycleStale(target) {
-		if info, ok := lookup(); ok && info.State != "" && info.State != "open" {
-			if err := d.targets.SetLifecycle(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleClosed); err != nil {
+		if !current.ok {
+			if _, err := d.runs.MarkWaiting(ctx, tx, orgID, run.ID); err != nil {
 				return DispatchOutcome{}, err
 			}
-			return d.terminalize(ctx, tx, orgID, run.ID, models.AutomationRunOutcomePRClosed, "pull request is "+info.State)
+			if err := tx.Commit(ctx); err != nil {
+				return DispatchOutcome{}, fmt.Errorf("commit automation dispatch wait: %w", err)
+			}
+			return DispatchOutcome{Kind: DispatchRetry, RetryAfter: headLookupBackoff(d.now(), run), Note: "pull request openness is stale and the lookup is unavailable"}, nil
+		}
+		if err := d.targets.SetLifecycle(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleOpen); err != nil {
+			return DispatchOutcome{}, err
 		}
 	}
 
@@ -381,6 +433,7 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 		turnNumber int
 		jobType    string
 		previous   *string
+		goal       = in.Run.GoalSnapshot
 	)
 	switch decision.mode {
 	case models.AutomationRunContinuationFresh:
@@ -390,6 +443,13 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 		template.TriggeredByUserID = expectedUser
 		template.ModelOverride = automation.ModelOverride
 		template.ReasoningEffort = automation.ReasoningEffort
+		// Interactive sessions complete a turn by advancing the turn counter
+		// and saving the native agent session id on the primary thread,
+		// which the next continued turn resumes from.
+		template.InteractionMode = models.SessionInteractionModeInteractive
+		if template.ExecutionBrief != nil && strings.TrimSpace(*template.ExecutionBrief) != "" {
+			goal = *template.ExecutionBrief
+		}
 		if err := d.sessions.CreateInTx(ctx, tx, &template); err != nil {
 			return DispatchOutcome{}, fmt.Errorf("create per-target session: %w", err)
 		}
@@ -408,7 +468,10 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 		turnNumber = 1
 		jobType = "run_agent"
 	default:
-		claimed, err := d.sessions.ClaimForAutomationTurn(ctx, tx, orgID, generation.SessionID, decision.mode == models.AutomationRunContinuationReconstructed)
+		// decide already established that the sandbox state is usable for
+		// this mode (a checkpoint restore or a rebuild), so a destroyed
+		// sandbox does not block the claim.
+		claimed, err := d.sessions.ClaimForAutomationTurn(ctx, tx, orgID, generation.SessionID, true)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				// The session changed under us (a finishing turn's status
@@ -437,7 +500,7 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 	}
 
 	prompt := AutomationTurnPrompt(AutomationTurnPromptInput{
-		Goal:            in.Run.GoalSnapshot,
+		Goal:            goal,
 		TurnNumber:      turnNumber,
 		Mode:            decision.mode,
 		HeadSHA:         github.HeadSHA,
@@ -584,39 +647,15 @@ func (d *TargetDispatcher) lifecycleStale(target models.AutomationTarget) bool {
 	return target.LifecycleUpdatedAt == nil || d.now().Sub(*target.LifecycleUpdatedAt) > automationLifecycleStaleAfter
 }
 
-// headLookup returns a memoized dispatch-time lookup of the pull request's
-// current head; ok is false when no resolver is configured or the lookup
-// failed, and the failure is logged once.
-func (d *TargetDispatcher) headLookup(ctx context.Context, orgID, repositoryID uuid.UUID, number int) func() (PullRequestHeadInfo, bool) {
-	var (
-		done bool
-		info PullRequestHeadInfo
-		ok   bool
-	)
-	return func() (PullRequestHeadInfo, bool) {
-		if done {
-			return info, ok
-		}
-		done = true
-		if d.heads == nil || number <= 0 {
-			return info, false
-		}
-		resolved, err := d.heads.ResolvePullRequestHead(ctx, orgID, repositoryID, number)
-		if err != nil {
-			d.logger.Warn().Err(err).Str("org_id", orgID.String()).Int("pull_request_number", number).Msg("automation dispatch head lookup failed")
-			return info, false
-		}
-		info, ok = resolved, resolved.SHA != ""
-		return info, ok
-	}
-}
-
-// headResolution is the result of dispatch-time head authority.
+// headResolution is the result of dispatch-time head authority. stamp
+// reports that epoch and resolution differ from the run row and must be
+// persisted before the run can wait.
 type headResolution struct {
 	headSHA      string
 	baseBranch   string
 	epoch        *int
 	resolution   *models.AutomationRunHeadResolution
+	stamp        bool
 	degraded     bool
 	isPush       bool
 	terminal     models.AutomationRunOutcomeReason
@@ -625,78 +664,76 @@ type headResolution struct {
 	note         string
 }
 
-// resolveHead applies the dispatch-time head rules. Push runs look up the
-// current head: a missed newer head is adopted with a new epoch and
-// reviewed; ambiguous candidates resolve to the one at the current head,
-// and when none holds it the dispatching candidate becomes the survivor
-// that reviews it; a failed lookup degrades to the delivered head unless
-// ambiguity is pending, in which case the run waits with backoff.
-// Unresolved candidates (converted by the ambiguity deadline) keep their
-// delivered head and null epoch. Non-push runs keep their delivered head,
-// and one delivered without a head is enriched by the lookup.
-func (d *TargetDispatcher) resolveHead(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, target *models.AutomationTarget, run models.AutomationRun, github automationRunGitHubContext, lookup func() (PullRequestHeadInfo, bool)) (headResolution, error) {
+// resolveHead applies the dispatch-time head rules using the lookup taken
+// before the transaction. Push runs: a missed newer head is adopted with a
+// new epoch, supersedes older waiting pushes, and is reviewed; ambiguous
+// candidates resolve to the one at the current head, and when none holds
+// it the dispatching candidate becomes the survivor that reviews it; a
+// failed lookup degrades to the delivered head unless ambiguity is
+// pending, in which case the run waits with backoff. Unresolved candidates
+// (converted by the ambiguity deadline) keep their delivered head and null
+// epoch. Non-push runs keep their delivered head and take the current base
+// branch when the lookup succeeded; one delivered without a head is
+// enriched by the lookup and waits while it is unavailable.
+func (d *TargetDispatcher) resolveHead(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, target *models.AutomationTarget, run models.AutomationRun, github automationRunGitHubContext, current lookupResult) (headResolution, error) {
 	authoritative := models.AutomationRunHeadAuthoritative
 	isPush := run.GitHubAction != nil && *run.GitHubAction == githubActionSynchronize
 	out := headResolution{headSHA: github.HeadSHA, epoch: run.HeadEpoch, resolution: run.HeadResolution, isPush: isPush}
+	if current.ok {
+		out.baseBranch = current.info.BaseBranch
+	}
 	if run.HeadResolution != nil && *run.HeadResolution == models.AutomationRunHeadUnresolved {
 		// The deadline promised each unresolved candidate its own review at
 		// its delivered head.
 		return out, nil
 	}
 	ambiguousRun := run.HeadResolution != nil && *run.HeadResolution == models.AutomationRunHeadAmbiguous
-	needsLookup := isPush || github.HeadSHA == ""
-	if !needsLookup {
+	headless := github.HeadSHA == ""
+	if !isPush && !headless {
 		return out, nil
 	}
 
-	current, ok := lookup()
-	if !ok {
-		if ambiguousRun || target.HeadResolutionPending {
+	if !current.ok {
+		if ambiguousRun || target.HeadResolutionPending || headless {
 			out.retryAfter = headLookupBackoff(d.now(), run)
-			out.note = "pull request head is ambiguous and the lookup is unavailable"
+			out.note = "pull request head cannot be resolved and the lookup is unavailable"
 			return out, nil
 		}
-		if isPush {
-			out.degraded = true
-		}
+		out.degraded = true
 		return out, nil
 	}
-	if current.State != "" && current.State != "open" {
-		out.terminal = models.AutomationRunOutcomePRClosed
-		out.note = "pull request is " + current.State
-		return out, nil
-	}
-	out.baseBranch = current.BaseBranch
+	head := current.info
 
 	// The current head decides: a missed webhook is adopted with a new
 	// epoch; the same head refreshes the watermark; ambiguous candidates
 	// resolve to the one at the current head.
 	epoch := target.HeadEpoch
 	switch {
-	case target.ObservedHeadSHA == nil || *target.ObservedHeadSHA != current.SHA:
-		adopted, err := d.targets.AdoptHead(ctx, tx, orgID, target.ID, current.SHA, current.UpdatedAt)
+	case target.ObservedHeadSHA == nil || *target.ObservedHeadSHA != head.SHA:
+		adopted, err := d.targets.AdoptHead(ctx, tx, orgID, target.ID, head.SHA, head.UpdatedAt)
 		if err != nil {
 			return out, err
 		}
 		epoch = adopted
-		target.ObservedHeadSHA = &current.SHA
+		target.ObservedHeadSHA = &head.SHA
 		target.HeadEpoch = adopted
 		// A missed newer head supersedes older waiting pushes exactly as a
 		// newer delivery would have at arrival.
 		if _, err := d.runs.SupersedeWaitingPush(ctx, tx, orgID, target.ID, run.ID, adopted); err != nil {
 			return out, err
 		}
-	case current.UpdatedAt != nil && (target.ObservedHeadUpdatedAt == nil || current.UpdatedAt.After(*target.ObservedHeadUpdatedAt)):
-		if err := d.targets.TouchObservedHead(ctx, tx, orgID, target.ID, current.SHA, *current.UpdatedAt); err != nil {
+	case head.UpdatedAt != nil && (target.ObservedHeadUpdatedAt == nil || head.UpdatedAt.After(*target.ObservedHeadUpdatedAt)):
+		if err := d.targets.TouchObservedHead(ctx, tx, orgID, target.ID, head.SHA, *head.UpdatedAt); err != nil {
 			return out, err
 		}
 	}
 	if !isPush {
 		// A non-push run delivered without a head reviews the current head
 		// and joins its epoch.
-		out.headSHA = current.SHA
+		out.headSHA = head.SHA
 		out.epoch = &epoch
 		out.resolution = &authoritative
+		out.stamp = true
 		return out, nil
 	}
 	if target.HeadResolutionPending {
@@ -706,7 +743,7 @@ func (d *TargetDispatcher) resolveHead(ctx context.Context, tx pgx.Tx, orgID uui
 		}
 		survivor := run.ID
 		for _, c := range candidates {
-			if c.HeadSHA == current.SHA {
+			if c.HeadSHA == head.SHA {
 				survivor = c.RunID
 				break
 			}
@@ -736,9 +773,10 @@ func (d *TargetDispatcher) resolveHead(ctx context.Context, tx pgx.Tx, orgID uui
 			return out, nil
 		}
 	}
-	out.headSHA = current.SHA
+	out.headSHA = head.SHA
 	out.epoch = &epoch
 	out.resolution = &authoritative
+	out.stamp = run.HeadEpoch == nil || *run.HeadEpoch != epoch || run.HeadResolution == nil || *run.HeadResolution != authoritative
 	return out, nil
 }
 
@@ -776,7 +814,6 @@ type continuationDecision struct {
 	retireReason *models.AutomationTargetRetiredReason
 	outcome      models.AutomationRunOutcomeReason
 	retryAfter   time.Duration
-	maxWait      time.Duration
 	note         string
 }
 
@@ -831,28 +868,21 @@ func (d *TargetDispatcher) decide(automation models.Automation, template *models
 		return retireDecision(models.AutomationTargetRetiredSnapshotTooLarge)
 	}
 
-	// Readiness of the stored session, from its runtime fields rather than
-	// sandbox_state alone.
+	// Readiness of the stored session. A pending upload is never raced:
+	// the turn retries until the key publishes or the stranded-pending
+	// reaper clears it, bounded by the job's wait window. A container left
+	// running between turns is not a resume source in Stage 1: the turn
+	// restores the checkpoint or rebuilds.
 	if session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
-		pendingSince := d.now()
-		if session.PendingSnapshotSetAt != nil {
-			pendingSince = *session.PendingSnapshotSetAt
-		}
-		if d.now().Sub(pendingSince) < automationPendingSnapshotGrace {
-			return continuationDecision{kind: decisionRetry, retryAfter: automationPendingSnapshotRetry, maxWait: automationPendingSnapshotGrace + automationPendingSnapshotRetry, note: "snapshot upload in flight"}
-		}
-		if session.SnapshotKey == nil || *session.SnapshotKey == "" {
-			// Never race a live publisher: the stranded-pending reaper
-			// clears the key, after which the next attempt rebuilds.
-			return continuationDecision{kind: decisionRetry, retryAfter: automationPendingSnapshotRetry, maxWait: 2 * automationPendingSnapshotGrace, note: "snapshot upload stranded; waiting for the reaper"}
-		}
-	}
-	live := session.ContainerID != nil && *session.ContainerID != "" && session.WorkerNodeID != nil && *session.WorkerNodeID != "" &&
-		session.SandboxState == models.SandboxStateRunning
-	if live {
-		return continuationDecision{kind: decisionProceed, mode: models.AutomationRunContinuationContinued}
+		return continuationDecision{kind: decisionRetry, retryAfter: automationPendingSnapshotRetry, note: "snapshot upload in flight"}
 	}
 	if d.checkpointUsable(session) {
+		if !checkpointCoherent(generation, session) {
+			// A checkpoint published without provenance, or whose provenance
+			// no longer describes the installed key, restores the workspace
+			// but is reviewed as reconstructed context.
+			return reconstructDecision(models.AutomationRunContinuationReasonSnapshotMissing)
+		}
 		return continuationDecision{kind: decisionProceed, mode: models.AutomationRunContinuationContinued}
 	}
 	if session.SandboxState == models.SandboxStateDestroyed {
@@ -879,6 +909,12 @@ func (d *TargetDispatcher) checkpointUsable(session models.Session) bool {
 		}
 	}
 	return true
+}
+
+// checkpointCoherent reports whether the generation's provenance describes
+// the session's installed snapshot key.
+func checkpointCoherent(generation models.AutomationTargetSession, session models.Session) bool {
+	return generation.CheckpointSnapshotKey != nil && session.SnapshotKey != nil && *generation.CheckpointSnapshotKey == *session.SnapshotKey
 }
 
 // automationExecutingUser resolves the identity a per-target turn runs as
@@ -920,16 +956,17 @@ func agentConfigMatches(automation models.Automation, template *models.Session, 
 }
 
 // baselineHead is the delta baseline for a continued or reconstructed turn:
-// the checkpoint's head when the restored checkpoint is the one the
-// generation's provenance describes and native context can resume from it,
-// otherwise the last completed review.
+// the checkpoint's head when the generation's provenance describes the
+// installed snapshot and the primary thread carries the native agent
+// session id the turn resumes from, otherwise the last completed review.
+// Only the thread's id counts: the worker passes the thread and the
+// orchestrator resumes from its agent session id.
 func baselineHead(generation models.AutomationTargetSession, session models.Session, thread models.SessionThread, mode models.AutomationRunContinuationMode) *string {
 	if mode != models.AutomationRunContinuationContinued {
 		return generation.LastReviewedHeadSHA
 	}
-	coherent := generation.CheckpointSnapshotKey != nil && session.SnapshotKey != nil && *generation.CheckpointSnapshotKey == *session.SnapshotKey
-	nativeResume := (thread.AgentSessionID != nil && *thread.AgentSessionID != "") || (session.AgentSessionID != nil && *session.AgentSessionID != "")
-	if coherent && nativeResume && generation.CheckpointHeadSHA != nil {
+	nativeResume := thread.AgentSessionID != nil && *thread.AgentSessionID != ""
+	if checkpointCoherent(generation, session) && nativeResume && generation.CheckpointHeadSHA != nil {
 		return generation.CheckpointHeadSHA
 	}
 	return generation.LastReviewedHeadSHA

@@ -48,7 +48,7 @@ func TestAutomationRunHandler_PerTargetDispatch(t *testing.T) {
 		{name: "reserved runs finish the job", outcome: automationservice.DispatchOutcome{Kind: automationservice.DispatchReserved, JobID: uuid.New(), SessionID: uuid.New(), ThreadID: uuid.New(), ContinuationMode: models.AutomationRunContinuationFresh}},
 		{name: "waiting runs keep the job polling without spending attempts", outcome: automationservice.DispatchOutcome{Kind: automationservice.DispatchWaiting, Note: "target busy"}, wantRetry: true, wantRetryAfter: automationWaitingPollInterval, wantMaxWait: automationWaitingPollWindow},
 		{name: "terminalized runs finish the job", outcome: automationservice.DispatchOutcome{Kind: automationservice.DispatchTerminalized, OutcomeReason: models.AutomationRunOutcomePRClosed}},
-		{name: "undecidable runs retry with the dispatcher's backoff and bound", outcome: automationservice.DispatchOutcome{Kind: automationservice.DispatchRetry, RetryAfter: 15 * time.Second, MaxWait: 3 * time.Minute, Note: "snapshot upload in flight"}, wantRetry: true, wantRetryAfter: 15 * time.Second, wantMaxWait: 3 * time.Minute},
+		{name: "undecidable runs retry with the dispatcher's backoff and bound", outcome: automationservice.DispatchOutcome{Kind: automationservice.DispatchRetry, RetryAfter: 15 * time.Second, Note: "snapshot upload in flight"}, wantRetry: true, wantRetryAfter: 15 * time.Second, wantMaxWait: automationWaitingPollWindow},
 		{name: "dispatch errors surface for the job's retry", err: errors.New("boom"), wantErr: true},
 	}
 

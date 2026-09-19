@@ -184,6 +184,15 @@ func (s *AutomationStore) GetByID(ctx context.Context, orgID, automationID uuid.
 // LockByIDForUpdate returns an automation row locked for the caller's
 // transaction. Use this before making decisions that must serialize against
 // other writers for the same automation, such as max_concurrent checks.
+// GetByIDInTx is GetByID on the caller's transaction connection, for reads
+// that must not borrow a second pool connection while the transaction holds
+// locks.
+func (s *AutomationStore) GetByIDInTx(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID) (models.Automation, error) {
+	query := fmt.Sprintf(`SELECT %s FROM automations
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`, automationColumns)
+	return scanAutomation(tx.QueryRow(ctx, query, pgx.NamedArgs{"id": automationID, "org_id": orgID}))
+}
+
 func (s *AutomationStore) LockByIDForUpdate(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID) (models.Automation, error) {
 	query := fmt.Sprintf(`SELECT %s FROM automations
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL

@@ -117,6 +117,14 @@ func (s *GitHubEventTriggerService) recordTargetArrival(ctx context.Context, tx 
 		}
 		target.LifecycleState = models.AutomationTargetLifecycleMerged
 	}
+	// A pull_request delivery describes the PR's current state, so it
+	// refreshes the openness evidence that dispatch revalidates before
+	// creating a generation.
+	if target.LifecycleState == models.AutomationTargetLifecycleOpen && req.PullRequestAction != "" {
+		if err := s.targets.SetLifecycle(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleOpen); err != nil {
+			return false, err
+		}
+	}
 	arrival := db.AutomationRunArrival{
 		TargetID:             target.ID,
 		GitHubAction:         req.PullRequestAction,
