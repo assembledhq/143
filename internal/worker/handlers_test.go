@@ -11084,6 +11084,7 @@ func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testi
 	sessionRow := workerSessionRow(runID, issueID, orgID, models.SessionStatusRunning, 0, nil, nil)
 	setWorkerSessionColumnValue(sessionRow, "project_task_id", &projectTaskID)
 	setWorkerSessionColumnValue(sessionRow, "automation_run_id", &automationRunID)
+	setWorkerSessionColumnValue(sessionRow, "interaction_mode", string(models.SessionInteractionModeSingleRun))
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -11192,6 +11193,7 @@ func TestRunAgentHandler_SystemInterruptDeadLetterFailsSessionAndThread(t *testi
 	sessionRow := workerSessionRow(runID, issueID, orgID, models.SessionStatusRunning, 0, nil, nil)
 	setWorkerSessionColumnValue(sessionRow, "project_task_id", &projectTaskID)
 	setWorkerSessionColumnValue(sessionRow, "automation_run_id", &automationRunID)
+	setWorkerSessionColumnValue(sessionRow, "interaction_mode", string(models.SessionInteractionModeSingleRun))
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(

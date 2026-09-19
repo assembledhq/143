@@ -829,6 +829,7 @@ type Orchestrator struct {
 	projectTasks               ProjectTaskUpdater               // can be nil
 	automationRuns             AutomationRunUpdater             // can be nil
 	automationGoalImprovements AutomationGoalImprovementUpdater // can be nil
+	automationTurns            AutomationTurnStore              // optional — per-target automation turns (design doc 125)
 	pagerDutyWritebacker       PagerDutySessionWritebacker      // can be nil
 	issues                     IssueStore
 	repositories               RepositoryStore
@@ -1807,33 +1808,48 @@ func (o *Orchestrator) runSandboxGitBootstrap(ctx context.Context, sandbox *Sand
 // command failures are returned because the workspace is not ready for normal
 // sandbox work.
 func PrepareSandboxRepository(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, log zerolog.Logger) error {
-	if provider == nil || sandbox == nil || workDir == "" {
-		return nil
-	}
+	_, err := prepareSandboxRepository(ctx, provider, sandbox, workDir, log, false)
+	return err
+}
+
+// readSandboxRepoConfig reads and parses the repo config at the checkout.
+// A missing, empty, or malformed config is reported as an empty config.
+func readSandboxRepoConfig(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, log zerolog.Logger) repoconfig.Config {
 	cfgPath := path.Join(workDir, repoconfig.ConfigPath)
 	raw, err := provider.ReadFile(ctx, sandbox, cfgPath)
 	if err != nil {
-		if isSandboxFileMissing(err) {
-			return nil
+		if !isSandboxFileMissing(err) {
+			log.Warn().Err(err).Str("path", cfgPath).Msg("could not read repo config; skipping sandbox dependency install")
 		}
-		log.Warn().Err(err).Str("path", cfgPath).Msg("could not read repo config; skipping sandbox dependency install")
-		return nil
+		return repoconfig.Config{}
 	}
 	if len(raw) == 0 {
-		return nil
+		return repoconfig.Config{}
 	}
 	cfg, err := repoconfig.Parse(raw)
 	if err != nil {
 		log.Warn().Err(err).Str("path", cfgPath).Msg("repo config failed to parse; skipping sandbox dependency install")
-		return nil
+		return repoconfig.Config{}
 	}
-	if len(cfg.Dependencies) > 0 {
+	return cfg
+}
+
+// prepareSandboxRepository applies the repo config's sandbox dependencies
+// (unless skipDependencies, when a per-target turn's fingerprint proves the
+// checkpoint's bootstrap still applies) and runs its bootstrap commands. It
+// returns the declared dependencies.
+func prepareSandboxRepository(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, log zerolog.Logger, skipDependencies bool) (map[string]string, error) {
+	if provider == nil || sandbox == nil || workDir == "" {
+		return nil, nil
+	}
+	cfg := readSandboxRepoConfig(ctx, provider, sandbox, workDir, log)
+	if len(cfg.Dependencies) > 0 && !skipDependencies {
 		exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
 			return provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
 		}
 		sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
 	}
-	return runSandboxBootstrapCommands(ctx, provider, sandbox, workDir, cfg.Bootstrap.Commands, log)
+	return cfg.Dependencies, runSandboxBootstrapCommands(ctx, provider, sandbox, workDir, cfg.Bootstrap.Commands, log)
 }
 
 func runSandboxBootstrapCommands(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, commands []string, log zerolog.Logger) error {
@@ -2832,6 +2848,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		Str("org_id", run.OrgID.String()).
 		Logger()
 
+	// A fresh per-target automation turn (design doc 125) carries its run
+	// on the context; validate the attempt before anything is written.
+	var automationTurn *automationTurnState
+	if turnOpts := AutomationTurnFromContext(ctx); turnOpts != nil {
+		turnCtx, state, err := o.beginAutomationTurn(ctx, run, turnOpts)
+		if err != nil {
+			return fmt.Errorf("begin automation turn: %w", err)
+		}
+		ctx = turnCtx
+		automationTurn = state
+	}
+
 	// 1. Concurrency check.
 	if err := o.checkConcurrency(ctx, run.OrgID, models.SessionStatus(run.Status) == models.SessionStatusRunning); err != nil {
 		log.Info().Err(err).Msg("concurrency limit reached, run stays pending")
@@ -3381,17 +3409,27 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 
 		// 8b. Create a working branch so the agent operates on a separate
-		// branch from the start, keeping the base branch clean.
+		// branch from the start, keeping the base branch clean. A per-target
+		// automation turn instead checks out the run's exact head, detached,
+		// with a display-only working branch.
 		workingBranch := designatedWorkingBranch
-		checkoutCmd := fmt.Sprintf("git checkout -b '%s'", shellEscapeSingleQuote(workingBranch))
-		var checkoutOut, checkoutErr bytes.Buffer
-		exitCode, execErr := o.provider.Exec(ctx, sandbox, checkoutCmd, &checkoutOut, &checkoutErr)
-		if execErr != nil || exitCode != 0 {
-			o.failRun(ctx, run, fmt.Sprintf("create working branch: exit=%d err=%v stderr=%s", exitCode, execErr, checkoutErr.String()))
-			if execErr != nil {
-				return fmt.Errorf("create working branch %s: exit=%d err=%w stderr=%s", workingBranch, exitCode, execErr, checkoutErr.String())
+		if automationTurn != nil {
+			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
+			if err := o.prepareAutomationTurnWorkspace(ctx, sandbox, repoURL, token, automationTurn, log); err != nil {
+				return o.failAutomationTurnRunSetup(ctx, run, sandbox, automationTurn, err, log)
 			}
-			return fmt.Errorf("create working branch %s: exit=%d stderr=%s", workingBranch, exitCode, checkoutErr.String())
+			workingBranch = automationTurnWorkingBranch(automationTurn.pullRequestNumber)
+		} else {
+			checkoutCmd := fmt.Sprintf("git checkout -b '%s'", shellEscapeSingleQuote(workingBranch))
+			var checkoutOut, checkoutErr bytes.Buffer
+			exitCode, execErr := o.provider.Exec(ctx, sandbox, checkoutCmd, &checkoutOut, &checkoutErr)
+			if execErr != nil || exitCode != 0 {
+				o.failRun(ctx, run, fmt.Sprintf("create working branch: exit=%d err=%v stderr=%s", exitCode, execErr, checkoutErr.String()))
+				if execErr != nil {
+					return fmt.Errorf("create working branch %s: exit=%d err=%w stderr=%s", workingBranch, exitCode, execErr, checkoutErr.String())
+				}
+				return fmt.Errorf("create working branch %s: exit=%d stderr=%s", workingBranch, exitCode, checkoutErr.String())
+			}
 		}
 		run.WorkingBranch = &workingBranch
 		if dbErr := o.sessions.UpdateWorkingBranch(ctx, run.OrgID, run.ID, workingBranch); dbErr != nil {
@@ -3404,7 +3442,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		// session resume. Skipped when the auth socket isn't bound (legacy
 		// or non-integration path).
 		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-		if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
+		if automationTurn != nil {
+			if err := o.prepareAutomationTurnRepository(ctx, sandbox, sandboxCfg, automationTurn, log); err != nil {
+				o.failRun(ctx, run, fmt.Sprintf("prepare repository: %s", err))
+				return fmt.Errorf("prepare repository: %w", err)
+			}
+			rendered, err := o.renderAutomationTurnPrompt(ctx, sandbox, run, automationTurn, log)
+			if err != nil {
+				o.failRun(ctx, run, fmt.Sprintf("render automation turn prompt: %s", err))
+				return fmt.Errorf("render automation turn prompt: %w", err)
+			}
+			input.UserMessage = rendered
+		} else if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("prepare repository: %s", err))
 			return fmt.Errorf("prepare repository: %w", err)
 		}
@@ -3705,7 +3754,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	} else if snapshotKey != "" {
 		runtimeTracker.Record(models.RuntimeProgressTypeCheckpoint, models.RuntimeProgressStrengthStrong, time.Now().UTC(), "")
 		lockToken, _ := jobctx.LockTokenFromContext(ctx)
-		if _, err := o.sessions.PublishCheckpoint(ctx, run.OrgID, run.ID, lockToken, result.AgentSessionID, snapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(run.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
+		if automationTurn != nil {
+			if _, err := o.publishAutomationCheckpoint(ctx, automationTurn, run, result.AgentSessionID, snapshotKey, models.CheckpointKindTurnComplete, snapshotSize, time.Now().UTC(), models.RuntimeStopReasonNone, true); err != nil {
+				log.Warn().Err(err).Msg("failed to publish checkpoint with provenance")
+			}
+		} else if _, err := o.sessions.PublishCheckpoint(ctx, run.OrgID, run.ID, lockToken, result.AgentSessionID, snapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(run.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata")
 		}
 		o.warmMentionIndexFromSandboxAsync(ctx, run, sandbox, snapshotKey, log)
@@ -3722,7 +3775,21 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if agentSessionID == "" && run.AgentSessionID != nil {
 			agentSessionID = *run.AgentSessionID
 		}
-		if err := o.sessions.UpdateTurnComplete(ctx, run.OrgID, run.ID, turnNumber, runResult, agentSessionID, snapshotKey); err != nil {
+		if automationTurn != nil {
+			automationTurnResultDiff(automationTurn, runResult)
+			if !automationTurn.checkpointPublished {
+				snapshotKey = ""
+			}
+			if err := o.endAutomationAttempt(ctx, automationTurn, run, models.AutomationRunResultTurnCompleted, agentSessionID, func(sessions SessionStore) error {
+				return sessions.UpdateTurnComplete(ctx, run.OrgID, run.ID, turnNumber, runResult, agentSessionID, snapshotKey)
+			}); err != nil {
+				o.cleanupReviewBundle(ctx, runResult, log)
+				return fmt.Errorf("update interactive turn result: %w", err)
+			}
+			if err := o.automationTurns.TagAssistantMessage(ctx, run.OrgID, run.ID, *automationTurn.run.ThreadID, turnNumber, automationTurn.run.ID); err != nil {
+				log.Warn().Err(err).Msg("failed to attribute the assistant message to the automation run")
+			}
+		} else if err := o.sessions.UpdateTurnComplete(ctx, run.OrgID, run.ID, turnNumber, runResult, agentSessionID, snapshotKey); err != nil {
 			o.cleanupReviewBundle(ctx, runResult, log)
 			return fmt.Errorf("update interactive turn result: %w", err)
 		}
@@ -3957,7 +4024,21 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	prHeadReconstruction := prRepairOpts != nil && prRepairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction
 
-	if !prHeadReconstruction && session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
+	// Per-target automation turn (design doc 125): validate the attempt's
+	// identity before anything is written. A reconstructed turn rebuilds
+	// the workspace like PR-head reconstruction does.
+	var automationTurn *automationTurnState
+	if opts != nil && opts.AutomationTurn != nil {
+		turnCtx, state, err := o.beginAutomationTurn(ctx, session, opts.AutomationTurn)
+		if err != nil {
+			return fmt.Errorf("begin automation turn: %w", err)
+		}
+		ctx = turnCtx
+		automationTurn = state
+	}
+	rebuildWorkspace := prHeadReconstruction || automationTurn.reconstructed()
+
+	if !rebuildWorkspace && session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
 		log.Info().Str("pending_snapshot_key", *session.PendingSnapshotKey).Msg("continue_session waiting for post-PR snapshot upload to land")
 		return ErrSnapshotPending
 	}
@@ -3983,11 +4064,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	// Determine whether we can restore from a snapshot or need a fresh start.
-	hasSnapshot := !prHeadReconstruction &&
+	hasSnapshot := !rebuildWorkspace &&
 		session.SnapshotKey != nil && *session.SnapshotKey != "" &&
 		o.snapshots != nil &&
-		session.SandboxState != models.SandboxStateDestroyed
-	if prHeadReconstruction && session.ContainerID != nil && *session.ContainerID != "" {
+		(session.SandboxState != models.SandboxStateDestroyed || automationTurn.continued())
+	if rebuildWorkspace && session.ContainerID != nil && *session.ContainerID != "" {
 		recordedContainerID := *session.ContainerID
 		cleared, clearErr := o.sessions.ClearContainerID(ctx, session.OrgID, session.ID, recordedContainerID)
 		if clearErr != nil {
@@ -4655,9 +4736,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		log.Info().Str("container_id", sandbox.ID).Msg("reusing existing sandbox container (preview is holding it)")
 	case hasSnapshot:
+		restoreStartedAt := time.Now()
 		sandbox, err = HydrateSandboxFromSnapshot(ctx, o.provider, o.snapshots, *session.SnapshotKey, sandboxCfg)
 		if capacityReservation != nil {
 			capacityReservation.Release()
+		}
+		if err == nil && automationTurn != nil {
+			restoreMS := int(time.Since(restoreStartedAt) / time.Millisecond)
+			restoreBytes := session.CheckpointSizeBytes
+			automationTurn.restoreMS = &restoreMS
+			automationTurn.restoreBytes = &restoreBytes
 		}
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
@@ -4984,9 +5072,20 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		if !reusedExisting {
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-			if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
+			if automationTurn != nil {
+				if err := o.prepareAutomationTurnRestoredWorkspace(ctx, session, sandbox, sandboxCfg, automationTurn, log); err != nil {
+					return err
+				}
+			} else if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
 				return fmt.Errorf("prepare repository: %w", err)
 			}
+		}
+		if automationTurn != nil {
+			rendered, err := o.renderAutomationTurnPrompt(ctx, sandbox, session, automationTurn, log)
+			if err != nil {
+				return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("render automation turn prompt: %w", err), log)
+			}
+			userMessage = rendered
 		}
 
 		commands := canonicalCommands(latestMsg, session.AgentType)
@@ -5099,8 +5198,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// reconstruct the prior state.
 		log.Info().Msg("continuing session without snapshot, starting fresh")
 
-		issue, repoFullName, authMode, err := o.setupFreshSandboxForThread(ctx, session, threadID, sandbox, sandboxCfg.Env, log, prRepairOpts)
+		issue, repoFullName, authMode, err := o.setupFreshSandboxForThread(ctx, session, threadID, sandbox, sandboxCfg.Env, log, prRepairOpts, automationTurn)
 		if err != nil {
+			if automationTurn != nil {
+				return o.failAutomationTurnSetup(ctx, session, opts, sandbox, automationTurn, err, log)
+			}
 			if errors.Is(err, ErrStalePullRequestHead) {
 				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, fallbackStatus); revertErr != nil {
 					log.Error().Err(revertErr).Msg("failed to restore session status after stale PR head")
@@ -5116,7 +5218,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return fmt.Errorf("setup fresh sandbox: %w", err)
 		}
 		authBillingMode = authMode
-		if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
+		if automationTurn != nil {
+			if err := o.prepareAutomationTurnRepository(ctx, sandbox, sandboxCfg, automationTurn, log); err != nil {
+				return fmt.Errorf("prepare repository: %w", err)
+			}
+			rendered, err := o.renderAutomationTurnPrompt(ctx, sandbox, session, automationTurn, log)
+			if err != nil {
+				return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("render automation turn prompt: %w", err), log)
+			}
+			userMessage = rendered
+		} else if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
 			return fmt.Errorf("prepare repository: %w", err)
 		}
 
@@ -5127,7 +5238,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			LinkedIssues: linkedIssues,
 			Manual:       session.Origin == models.SessionOriginManual,
 			PromptStyle:  sessionPromptStyle(session),
-			UserMessage:  latestMsg.Content,
+			UserMessage:  userMessage,
 			Attachments:  materializedAttachments,
 			References: func() []models.SessionInputReference {
 				refs := canonicalReferences(latestMsg)
@@ -5482,7 +5593,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if threadScopedExecution {
 			checkpointAgentSessionID = parentAgentSessionID
 		}
-		if _, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, checkpointAgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
+		if automationTurn != nil {
+			if _, err := o.publishAutomationCheckpoint(ctx, automationTurn, session, checkpointAgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, snapshotSize, time.Now().UTC(), models.RuntimeStopReasonNone, true); err != nil {
+				log.Warn().Err(err).Msg("failed to publish checkpoint with provenance after automation turn")
+			}
+		} else if _, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, checkpointAgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata after continue")
 		}
 		o.warmMentionIndexFromSandboxAsync(ctx, session, sandbox, newSnapshotKey, log)
@@ -5500,7 +5615,25 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		snapshotKey = *session.SnapshotKey
 	}
 	runResult := o.buildRunResult(ctx, session, sandbox, result)
-	if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, sessionTurnNumber, runResult, agentSessionID, snapshotKey); err != nil {
+	if automationTurn != nil {
+		// Per-target turn: the previous checkpoint stays installed when this
+		// turn published none, the result marker commits with the status
+		// write, and the assistant message is attributed to the run.
+		automationTurnResultDiff(automationTurn, runResult)
+		automationTurn.nativeContext = prompt != nil && prompt.Continuation && prompt.ResumeSessionID != ""
+		if !automationTurn.checkpointPublished {
+			snapshotKey = ""
+		}
+		if err := o.endAutomationAttempt(ctx, automationTurn, session, models.AutomationRunResultTurnCompleted, agentSessionID, func(sessions SessionStore) error {
+			return sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, sessionTurnNumber, runResult, agentSessionID, snapshotKey)
+		}); err != nil {
+			o.cleanupReviewBundle(ctx, runResult, log)
+			return fmt.Errorf("update turn complete: %w", err)
+		}
+		if err := o.automationTurns.TagAssistantMessage(ctx, session.OrgID, session.ID, *automationTurn.run.ThreadID, messageTurnNumber, automationTurn.run.ID); err != nil {
+			log.Warn().Err(err).Msg("failed to attribute the assistant message to the automation run")
+		}
+	} else if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, sessionTurnNumber, runResult, agentSessionID, snapshotKey); err != nil {
 		o.cleanupReviewBundle(ctx, runResult, log)
 		return fmt.Errorf("update turn complete: %w", err)
 	}
@@ -5776,10 +5909,10 @@ func continueSessionDrainDedupeKey(sessionID uuid.UUID, queuedMessageID int64) s
 // The resolved env is passed in from the caller so auth injection honors the
 // exact credential selection already baked into SandboxConfig.
 func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string, log zerolog.Logger, repairOpts *PRRepairContinueOptions) (models.Issue, string, TokenBillingMode, error) {
-	return o.setupFreshSandboxForThread(ctx, session, session.PrimaryThreadID, sandbox, env, log, repairOpts)
+	return o.setupFreshSandboxForThread(ctx, session, session.PrimaryThreadID, sandbox, env, log, repairOpts, nil)
 }
 
-func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string, log zerolog.Logger, repairOpts *PRRepairContinueOptions) (models.Issue, string, TokenBillingMode, error) {
+func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string, log zerolog.Logger, repairOpts *PRRepairContinueOptions, automationTurn *automationTurnState) (models.Issue, string, TokenBillingMode, error) {
 	var issue models.Issue
 	if session.PrimaryIssueID != nil {
 		fetched, err := o.issues.GetByID(ctx, session.OrgID, *session.PrimaryIssueID)
@@ -5834,7 +5967,15 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 		// depend on this, but running bootstrap here keeps any future git op safe.)
 		o.runSandboxGitBootstrap(ctx, sandbox, sandbox.WorkDir, log)
 		workingBranch := sessionWorkingBranch(session, &issue)
-		if repairOpts != nil && repairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction {
+		if automationTurn != nil {
+			// Per-target turns check out the run's exact head, detached; the
+			// working branch is display only.
+			if err := o.prepareAutomationTurnWorkspace(ctx, sandbox, repo.CloneURL, token, automationTurn, log); err != nil {
+				return models.Issue{}, "", TokenBillingModeUnknown, err
+			}
+			displayBranch := automationTurnWorkingBranch(automationTurn.pullRequestNumber)
+			session.WorkingBranch = &displayBranch
+		} else if repairOpts != nil && repairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction {
 			if err := o.checkoutPullRequestHead(ctx, sandbox, repo.CloneURL, token, workingBranch, repairOpts); err != nil {
 				return models.Issue{}, "", TokenBillingModeUnknown, err
 			}
@@ -6762,7 +6903,21 @@ func (o *Orchestrator) failRunWithResultAndPhaseTerminal(ctx context.Context, ru
 	// publishes a thread-runtime SSE event so any open page flips immediately.
 	o.updatePrimaryThreadTerminal(ctx, run, models.ThreadStatusFailed, result, o.logger)
 	var err error
-	if activityExecution != nil {
+	if automationTurn := automationTurnStateFromContext(ctx); automationTurn != nil && !automationTurn.ended {
+		// Per-target turn: the failed status and the agent_failed marker
+		// commit together; the activity phase closes separately.
+		automationTurnResultDiff(automationTurn, result)
+		agentSessionID := ""
+		if run.AgentSessionID != nil {
+			agentSessionID = *run.AgentSessionID
+		}
+		err = o.endAutomationAttempt(ctx, automationTurn, run, models.AutomationRunResultAgentFailed, agentSessionID, func(sessions SessionStore) error {
+			return sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result)
+		})
+		if err == nil {
+			completeActivityPhaseDetached(activityExecution, phaseStatus, reason, o.logger)
+		}
+	} else if activityExecution != nil {
 		err = activityExecution.persistSessionResultAndComplete(ctx, o.sessions, models.SessionStatusFailed, result, phaseStatus, reason)
 	} else {
 		err = o.sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result)
@@ -8080,8 +8235,11 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 //
 // result may be nil (e.g. when the agent was force-killed and returned an error).
 func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, activityExecution *activityPhaseExecution, log zerolog.Logger) {
-	bgCtx := context.Background()
+	// Detached from cancellation, but keeps the context's values (job lease,
+	// automation turn state).
+	bgCtx := context.WithoutCancel(ctx)
 	lockToken, _ := jobctx.LockTokenFromContext(ctx)
+	automationTurn := automationTurnStateFromContext(ctx)
 
 	// Attempt to snapshot so the session can be continued later.
 	snapshotKey, snapshotSize, snapshotErr := o.snapshotSession(bgCtx, session, sandbox, nil)
@@ -8100,6 +8258,13 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 
 	// If we got a snapshot, return to idle via UpdateTurnComplete so the user
 	// can continue the conversation. Otherwise, mark as cancelled (terminal).
+	if automationTurn != nil {
+		// Per-target turn: a cancelled attempt publishes its checkpoint with
+		// provenance (review incomplete) and ends with a cancelled marker in
+		// the same transaction as the status write.
+		o.endCancelledAutomationTurn(bgCtx, automationTurn, session, agentSessionID, snapshotKey, snapshotSize, turnNumber, activityExecution, log)
+		return
+	}
 	if snapshotKey != "" {
 		checkpointedAt := time.Now().UTC()
 		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, models.RuntimeStopReasonUserCancel); err != nil {
@@ -8151,8 +8316,9 @@ func (o *Orchestrator) handleCancelledSession(ctx context.Context, session *mode
 // cancellation, this path is recoverable: the worker returns a retryable error
 // so the same accepted turn can run again.
 func (o *Orchestrator) handleSystemInterruptedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, fallbackStatus models.SessionStatus, reason StopReason, activityExecution *activityPhaseExecution, log zerolog.Logger) {
-	bgCtx := context.Background()
+	bgCtx := context.WithoutCancel(ctx)
 	lockToken, _ := jobctx.LockTokenFromContext(ctx)
+	automationTurn := automationTurnStateFromContext(ctx)
 	runtimeReason := stopReasonToRuntime(reason)
 	if runtimeReason == models.RuntimeStopReasonNone {
 		runtimeReason = models.RuntimeStopReasonWorkerRecovery
@@ -8176,7 +8342,14 @@ func (o *Orchestrator) handleSystemInterruptedSession(ctx context.Context, sessi
 			agentSessionID = *session.AgentSessionID
 		}
 		checkpointedAt := time.Now().UTC()
-		if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, runtimeReason); err != nil {
+		if automationTurn != nil {
+			// The interrupted attempt's checkpoint carries provenance with the
+			// review marked incomplete; the attempt itself is retried, so no
+			// marker is written here.
+			if _, err := o.publishAutomationCheckpoint(bgCtx, automationTurn, session, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, snapshotSize, checkpointedAt, runtimeReason, false); err != nil {
+				log.Warn().Err(err).Str("runtime_stop_reason", string(runtimeReason)).Msg("failed to publish interrupted automation turn checkpoint with provenance")
+			}
+		} else if _, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, runtimeReason); err != nil {
 			log.Warn().Err(err).Str("runtime_stop_reason", string(runtimeReason)).Msg("failed to publish interrupted-session checkpoint metadata")
 		}
 		if updater, ok := o.sessions.(workspaceSnapshotUpdater); ok {
@@ -8219,7 +8392,8 @@ func (o *Orchestrator) handleSystemInterruptedSession(ctx context.Context, sessi
 }
 
 func (o *Orchestrator) handleHumanInputPause(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, threadID *uuid.UUID, log zerolog.Logger) error {
-	bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	automationTurn := automationTurnStateFromContext(ctx)
+	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 
 	lockToken, _ := jobctx.LockTokenFromContext(ctx)
@@ -8247,7 +8421,13 @@ func (o *Orchestrator) handleHumanInputPause(ctx context.Context, session *model
 	}
 
 	checkpointedAt := time.Now().UTC()
-	published, err := o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, models.RuntimeStopReasonNone)
+	var published bool
+	var err error
+	if automationTurn != nil {
+		published, err = o.publishAutomationCheckpoint(bgCtx, automationTurn, session, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, snapshotSize, checkpointedAt, models.RuntimeStopReasonNone, false)
+	} else {
+		published, err = o.sessions.PublishCheckpoint(bgCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, nil, models.RuntimeStopReasonNone)
+	}
 	if err != nil {
 		wrappedErr := fmt.Errorf("human input checkpoint metadata: %w", err)
 		log.Warn().Err(wrappedErr).Msg("failed to publish human-input checkpoint metadata")
@@ -8258,16 +8438,31 @@ func (o *Orchestrator) handleHumanInputPause(ctx context.Context, session *model
 		log.Warn().Msg(err.Error())
 		return o.failHumanInputPause(bgCtx, session, threadID, err, log)
 	}
-	if err := o.sessions.UpdateSnapshotInfo(bgCtx, session.OrgID, session.ID, agentSessionID, snapshotKey); err != nil {
-		wrappedErr := fmt.Errorf("human input snapshot metadata: %w", err)
-		log.Warn().Err(wrappedErr).Msg("failed to persist human-input snapshot metadata")
-		return o.failHumanInputPause(bgCtx, session, threadID, wrappedErr, log)
-	}
+	if automationTurn != nil {
+		// Per-target turn: the pause ends the attempt with an awaiting_input
+		// marker committed with the status write; the completer retires the
+		// generation so a person can answer in the now-ordinary session.
+		if err := o.endAutomationAttempt(bgCtx, automationTurn, session, models.AutomationRunResultAwaitingInput, agentSessionID, func(sessions SessionStore) error {
+			if err := sessions.UpdateSnapshotInfo(bgCtx, session.OrgID, session.ID, agentSessionID, snapshotKey); err != nil {
+				return fmt.Errorf("human input snapshot metadata: %w", err)
+			}
+			return sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, models.SessionStatusAwaitingInput)
+		}); err != nil {
+			log.Warn().Err(err).Msg("failed to mark automation turn awaiting human input")
+			return o.failHumanInputPause(bgCtx, session, threadID, fmt.Errorf("human input awaiting status: %w", err), log)
+		}
+	} else {
+		if err := o.sessions.UpdateSnapshotInfo(bgCtx, session.OrgID, session.ID, agentSessionID, snapshotKey); err != nil {
+			wrappedErr := fmt.Errorf("human input snapshot metadata: %w", err)
+			log.Warn().Err(wrappedErr).Msg("failed to persist human-input snapshot metadata")
+			return o.failHumanInputPause(bgCtx, session, threadID, wrappedErr, log)
+		}
 
-	if err := o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, models.SessionStatusAwaitingInput); err != nil {
-		log.Warn().Err(err).Msg("failed to mark session awaiting human input")
-		wrappedErr := fmt.Errorf("human input awaiting status: %w", err)
-		return o.failHumanInputPause(bgCtx, session, threadID, wrappedErr, log)
+		if err := o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, models.SessionStatusAwaitingInput); err != nil {
+			log.Warn().Err(err).Msg("failed to mark session awaiting human input")
+			wrappedErr := fmt.Errorf("human input awaiting status: %w", err)
+			return o.failHumanInputPause(bgCtx, session, threadID, wrappedErr, log)
+		}
 	}
 	if threadID != nil && o.sessionThreads != nil {
 		if err := o.sessionThreads.UpdateStatus(bgCtx, session.OrgID, *threadID, models.ThreadStatusAwaitingInput); err != nil {
@@ -8378,7 +8573,13 @@ func (o *Orchestrator) publishBootstrapCheckpoint(ctx context.Context, session *
 	if session.AgentSessionID != nil {
 		agentSessionID = *session.AgentSessionID
 	}
-	published, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindBootstrap, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone)
+	var published bool
+	var err error
+	if automationTurn := automationTurnStateFromContext(ctx); automationTurn != nil {
+		published, err = o.publishAutomationCheckpoint(ctx, automationTurn, session, agentSessionID, snapshotKey, models.CheckpointKindBootstrap, snapshotSize, time.Now().UTC(), models.RuntimeStopReasonNone, false)
+	} else {
+		published, err = o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindBootstrap, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone)
+	}
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to publish bootstrap checkpoint metadata")
 		if ownerKind, ok := jobctx.OwnerKindFromContext(ctx); ok && ownerKind == string(models.JobOwnerKindSessionExecutor) {
@@ -8483,10 +8684,11 @@ func truncateForLog(s string, max int) string {
 }
 
 func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, reason StopReason, activityExecution *activityPhaseExecution, log zerolog.Logger) {
-	checkpointCtx, checkpointCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	checkpointCtx, checkpointCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer checkpointCancel()
 
 	lockToken, _ := jobctx.LockTokenFromContext(ctx)
+	automationTurn := automationTurnStateFromContext(ctx)
 	checkpointedAt := time.Now().UTC()
 	agentSessionID := ""
 	if result != nil && result.AgentSessionID != "" {
@@ -8501,14 +8703,20 @@ func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *
 		errMsg := snapshotErr.Error()
 		checkpointErrText = &errMsg
 	}
-	if snapshotKey != "" || checkpointErrText != nil {
+	if automationTurn != nil && snapshotKey != "" {
+		if _, err := o.publishAutomationCheckpoint(checkpointCtx, automationTurn, session, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, snapshotSize, checkpointedAt, stopReasonToRuntime(reason), false); err != nil {
+			log.Warn().Err(err).Msg("failed to publish graceful-stop checkpoint with provenance")
+		}
+	} else if snapshotKey != "" || checkpointErrText != nil {
 		if _, err := o.sessions.PublishCheckpoint(checkpointCtx, session.OrgID, session.ID, lockToken, agentSessionID, snapshotKey, models.CheckpointKindGracefulStop, checkpointCapabilityForAgent(session.AgentType), snapshotSize, checkpointedAt, checkpointErrText, stopReasonToRuntime(reason)); err != nil {
 			log.Warn().Err(err).Msg("failed to publish graceful-stop checkpoint metadata")
 		}
 	}
 
 	errMsg, explanation, nextSteps := gracefulStopFailure(reason, snapshotKey != "", session.SnapshotKey != nil && *session.SnapshotKey != "")
-	terminalCtx, terminalCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// The terminal write keeps the context's values so a per-target turn's
+	// failure ends its attempt with a marker.
+	terminalCtx, terminalCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer terminalCancel()
 	terminalResult := &models.SessionResult{
 		Error:               strPtr(errMsg),
