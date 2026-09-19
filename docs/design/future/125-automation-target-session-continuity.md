@@ -26,7 +26,7 @@ Today `triggerAutomation` creates an `automation_runs` row per accepted delivery
 
 The primitives to avoid this already exist at the session layer:
 
-- `continue_session` claims a resumable session, restores its snapshot (workspace and agent state directories), and resumes the provider CLI natively when the captured agent session ID is present. Every adapter with `ResumeBySessionID` resume mode does this: Claude Code `--resume`, Codex `exec resume`, OpenCode `--session`, Amp `threads continue`, Pi `--session`. When the ID is missing, the orchestrator embeds bounded transcript history instead. When a native resume attempt fails, the orchestrator retries from the snapshot with embedded history only for a classified pre-execution failure signature (`shouldRetryResumeFromSnapshot`), not for arbitrary failures.
+- `continue_session` claims a resumable session, restores its snapshot (workspace and agent state directories), and resumes the provider CLI natively when the captured agent session ID is present. Every adapter with `ResumeBySessionID` resume mode does this: Claude Code `--resume`, Codex `exec resume`, OpenCode `--session`, Amp `threads continue`, Pi `--session`. When the ID is missing, the orchestrator embeds bounded transcript history instead. When a native resume attempt fails, the orchestrator retries from the snapshot with embedded history when `shouldRetryResumeFromSnapshot` accepts the failure: a continuation with exit code 1, an empty summary, and no returned agent session ID, and then a provider-specific check. Codex and OpenCode match a missing-session error signature; Claude Code currently accepts any failure that passes the generic guards, so a generic startup or authentication failure also falls back.
 - Separately, `CheckpointCapability` ([runtime.go](../../../internal/services/agent/runtime.go)) records whether a restored snapshot is expected to carry native provider state: `full_resume` for Codex, Claude Code, and OpenCode; `filesystem_resume` for Amp and Pi. It does not select the resume path; it describes what a durable checkpoint guarantees after container loss.
 - At the end of a turn the container is destroyed as soon as the turn hold is released, unless a preview or an active `session_sandbox_holders` row holds it, and cleanup succeeds. There is no idle grace. `SANDBOX_GC_GRACE` applies only to orphaned containers that lost their database reference. Automation sessions never have a preview, so their containers are destroyed at turn end.
 - On snapshot failure after a successful turn, the turn still completes and the session keeps its previous snapshot key ([orchestrator.go](../../../internal/services/agent/orchestrator.go), continuation step 9). Any design that stores per-turn head state must account for a completed turn whose checkpoint is the previous turn's.
@@ -45,7 +45,7 @@ Borrowed from doc 76: **session continuity and workspace correctness are separat
 Two further rules keep the replacement protocols honest:
 
 - **Durable evidence, not inference.** A run is complete only when a run-keyed result marker exists. Session status and timestamps are never used to infer that a run finished.
-- **No external writes from per-target turns.** The turn's capability set contains no 143 tool that writes outside the sandbox, so a crashed attempt can be re-executed without replaying side effects.
+- **At-least-once execution with no 143-mediated writes.** The turn's tool allowlist contains no 143 tool that writes outside the sandbox, so re-executing a crashed attempt cannot replay a comment, notification, policy change, or publication. Shell and network effects inside the sandbox remain at-least-once; this design does not claim otherwise.
 
 The run remains the unit of "what happened at this trigger" and carries its own outcome, reason, timing, and usage. The session is the unit of memory.
 
@@ -54,7 +54,7 @@ The run remains the unit of "what happened at this trigger" and carries its own 
 In scope:
 
 - GitHub triggers whose event identifies a pull request: `github.pull_request.opened`, `github.pull_request.updated`, `github.pull_request.ready_for_review`, `github.pull_request.merged`, `github.check_suite.completed`, `github.check_run.completed`, `github.issue_comment.created`, `github.pull_request_review.submitted`, `github.pull_request_review_comment.created`. `github.pull_request.updated` is emitted for the GitHub actions `synchronize`, `edited`, `converted_to_draft`, `reopened`, and `ready_for_review`; the underlying action is preserved on the run because only `synchronize` is a push.
-- Automations whose `publish_policy` is `none`. Continuity in this version is for read-and-report automations such as design-principle reviews. `publish_policy = none` disables 143's automatic PR creation; it is not a read-only sandbox. Per-target turns therefore run with a **restricted capability set**: every capability whose CLI namespace performs writes outside the sandbox is removed (`publishing`, `external_comments`, `slack_notifications`, `automation_management`, `eval_authoring`). Read capabilities (team docs, production diagnostics, Linear and PagerDuty reads) remain. The agent keeps shell and, subject to the organization's sandbox network settings, network access inside the sandbox. Sessions that publish PRs accumulate branch state across turns and need the changeset model; that is deferred.
+- Automations whose `publish_policy` is `none`. Continuity in this version is for read-and-report automations such as design-principle reviews. `publish_policy = none` disables 143's automatic PR creation; it is not a read-only sandbox. Per-target turns therefore run with a **positive tool allowlist** rather than a subtractive one, because the capability filter has grants and bypasses that a subtractive list misses (`code_review_policy` grants `update_policy`; the `capability`, `automation-goal-improvement complete`, and `preview` namespaces bypass the allowlist entirely). The allowlist for per-target turns is exactly: `session-history search|get|messages`, `code-review-history list|get|policy`, `pr-history` reads, `linear list_tasks|get_task|find_related_tasks`, `pagerduty list_incidents|get_incident|list_notes|list_log_entries|get_service|list_oncalls|find_related_incidents`, `notion search_documents|get_document`, `slack search_messages|get_thread`, `logs query|context|fields|stats`, and `capability` self-inspection. `update_policy`, every `automation` action, `eval add`, `pr create`, `slack send`, `linear update_task|create_task`, `pagerduty add_note|create_status_update`, `automation-goal-improvement complete`, and all `preview` actions are denied. The filter is applied when the session's capability snapshot is built and enforced server-side by the internal API on every call; the preview capability is also omitted from the session-scoped token so the preview bypass is closed at the endpoint. The agent keeps shell and, subject to the organization's sandbox network settings, network access inside the sandbox. Sessions that publish PRs accumulate branch state across turns and need the changeset model; that is deferred.
 - All coding adapters. Native resume is attempted for every adapter with a captured agent session ID; the run records whether native context was preserved.
 
 Out of scope for this version:
@@ -108,10 +108,10 @@ While a generation is active, its session is **automation-owned**:
 
 - `sessions.automation_owner_generation_id` is set. The thread service rejects human sends, new threads, and follow-up commands on the session with 409 `SESSION_AUTOMATION_OWNED` and a message pointing at the target's Reset action. Today human sends deliberately proceed when the session is already running and permit sibling threads; that policy is unchanged for ordinary sessions and simply does not apply to owned sessions.
 - Session-level actions that mutate the workspace (previews, PR worktree materialization, split verification) are rejected the same way. Read-only views work.
-- Retirement clears the owner marker in the same transaction. The session then accepts human turns like any other session; the old generation's runs remain attached to it for history.
-- If a per-target turn ends `awaiting_input` or `needs_human_guidance`, the run fails with `outcome_reason = awaiting_input`, the generation is retired with `awaiting_input`, and ownership is released so a person can answer in the now-ordinary session. The next trigger starts a new generation.
+- Generation retirement and workspace ownership release are separate. When no run is executing for the generation and the session holds no turn hold, retirement clears the owner marker in the same transaction. When a run is executing, retirement sets `ownership_release_pending = true` on the generation and leaves the marker in place; the executing run's completion (or its preflight skip) clears the marker after the turn hold has been released and the container is destroyed or held. Until then the session still rejects human mutation with a message that the current turn is finishing. Reset, disable, and close during execution all follow this path.
+- If a per-target turn ends `awaiting_input` or `needs_human_guidance`, the turn has ended, so completion retires the generation with `awaiting_input` and clears the marker immediately; the run fails with `outcome_reason = awaiting_input` and a person can answer in the now-ordinary session. The next trigger starts a new generation.
 
-Because no human turn can run on an owned session, the automation's session claim is the only claim that can hold the session, and the target lock plus the session claim together are an exclusive workspace reservation.
+Because no human turn can run on an owned session, the automation's session claim is the only claim that can hold the session, and the target lock plus the session claim together are an exclusive workspace reservation for the whole attempt, including cleanup.
 
 ## Continuation Decision
 
@@ -128,9 +128,11 @@ Readiness is computed from the session row, its runtime fields, and the generati
 | `pending` | `pending_snapshot_key` set | Retry the job with a 15 s delay for up to 3 minutes; then treat as `checkpoint` if a key was published, else `rebuild` only after the existing stranded-pending-key clearing has run (never race a live publisher) |
 | `rebuild` | No usable checkpoint: missing or reaped snapshot, `sandbox_state = destroyed` with no snapshot, restore failure | PR-head reconstruction in the same session |
 
-Native context is separate. `agent_session_id` present on the primary thread means native resume is attempted; absent means embedded history. If the native attempt fails with the classified pre-execution signature, the orchestrator's existing snapshot-retry path runs the turn with embedded history. Any other failure fails the turn (`agent_failed`); the retry starts a new attempt, which is safe because per-target turns perform no external writes. The run records `native_context = false` whenever embedded history was used.
+Native context is separate. `agent_session_id` present on the primary thread means native resume is attempted; absent means embedded history. If the native attempt fails and `shouldRetryResumeFromSnapshot` accepts the failure, the orchestrator's existing snapshot-retry path runs the turn with embedded history. Stage 1 tightens the Claude Code branch of that predicate to a missing-session signature so that generic startup or authentication failures fail the attempt instead of silently degrading context. Any other failure fails the attempt (`agent_failed`); the retry starts a new attempt, which cannot replay 143-mediated writes. The run records `native_context = false` whenever embedded history was used.
 
-**Checkpoint coherence.** The generation records `checkpoint_head_sha`, the head reviewed by the turn whose checkpoint is the one currently stored, updated only when that turn's checkpoint publication was confirmed. It can lag `last_reviewed_head_sha` when a turn succeeded but its checkpoint upload failed. Native context restored from that checkpoint does not contain the lagging turns, so the delta baseline for a native-resume turn is `checkpoint_head_sha`, and the summaries of successful runs between `checkpoint_head_sha` and `last_reviewed_head_sha` are embedded as data. For embedded-history turns and reconstruction the baseline is `last_reviewed_head_sha` with the same summaries embedded.
+**Checkpoint coherence.** Provenance follows the checkpoint, not the review. Every checkpoint publication for an owned session, whatever its kind (`turn_complete`, `graceful_stop` on cancel, `worker_drain`, `bootstrap`), carries the head that was checked out and the dependency input fingerprint computed at that turn's checkout, and updates the generation's `checkpoint_head_sha`, `checkpoint_dependency_fingerprint`, and `checkpoint_review_complete` (false for any interrupted turn). This is implemented once, in the `PublishCheckpoint` wrapper for owned sessions, so no publication path can replace the stored snapshot without replacing its declared provenance. `last_reviewed_head_sha` is separate and advances only on a completed review.
+
+Consequences for the next turn: the delta baseline for a native-resume turn is `checkpoint_head_sha`, because that is what the restored native context saw; when `checkpoint_review_complete` is false the continuation block says the turn at that head was interrupted and its review is incomplete; the summaries of completed runs between `checkpoint_head_sha` and `last_reviewed_head_sha` are embedded as data. For embedded-history turns and reconstruction the baseline is `last_reviewed_head_sha` with the same summaries embedded. A generation whose provenance is null (a checkpoint published before this design, or a failed provenance write) is treated as reconstructed: fingerprint absent, full-context note, delta from `last_reviewed_head_sha`.
 
 ### Compatibility
 
@@ -178,10 +180,10 @@ One database transaction, lock order fixed:
 1. Upsert and `SELECT ... FOR UPDATE` the `automation_targets` row.
 2. Read the active generation, if any, and evaluate Compatibility. For push runs, resolve the current head (see Head Authority).
 3. If another run is executing for the target (`automation_runs.dispatch_state = executing` for this `target_id`, enforced by a partial unique index), record the run as waiting (`dispatch_state = waiting`, `wait_reason = target_busy`, `wait_started_at = now`) and commit. Push runs supersede older waiting push runs here.
-4. Reserve the run: set `target_id`, `target_generation`, `session_id` (existing or newly created), `continuation_mode`, `continuation_reason`, `previous_head_sha` (the delta baseline), `dispatch_state = executing`, `execution_started_at = now`.
-5. Claim the session and its primary thread with a new store method `ClaimForAutomationTurn(ctx, orgID, sessionID, threadID, allowDestroyed)`. It accepts `idle` plus `ResumableSessionStatuses`, applies the same runtime reset assignments as `ClaimForResume`, permits `sandbox_state = destroyed` only when the action is reconstruct, and claims the primary thread through the thread store's resume or fresh claim as appropriate. Existing `ClaimForResume` is not reused because it excludes `idle` and rejects destroyed sandboxes. On an owned session this claim cannot contend with a human turn.
-6. Insert the visible user message on the primary thread.
-7. Enqueue `continue_session` (or `run_agent` for fresh) with dedupe key `automation_turn:<run_id>`. If the enqueue reports a conflict, look up the existing pending or running job by that dedupe key; accept only if its payload carries this `run_id`, and store that job's ID. Otherwise fail the transaction.
+4. Create the session if the action is fresh. Claim the session and its primary thread with a new store method `ClaimForAutomationTurn(ctx, orgID, sessionID, threadID, allowDestroyed)`. It accepts `idle` plus `ResumableSessionStatuses`, applies the same runtime reset assignments as `ClaimForResume`, permits `sandbox_state = destroyed` only when the action is reconstruct, and claims the primary thread through the thread store's resume or fresh claim as appropriate. Existing `ClaimForResume` is not reused because it excludes `idle` and rejects destroyed sandboxes. On an owned session this claim cannot contend with a human turn.
+5. Insert the visible user message on the primary thread.
+6. Enqueue `continue_session` (or `run_agent` for fresh) with dedupe key `automation_turn:<run_id>` and obtain its job ID. If the enqueue reports a conflict, look up the existing pending or running job by that dedupe key in the same transaction; accept only if its payload carries this `run_id`, and use that job's ID. Otherwise fail the transaction.
+7. Reserve the run in one `UPDATE`: `target_id`, `target_generation`, `session_id`, `job_id`, `continuation_mode`, `continuation_reason`, `previous_head_sha` (the delta baseline), `head_epoch`, `dispatch_state = executing`, `execution_started_at = now`. The executing CHECK requires `session_id`, `job_id`, and `execution_started_at` in the same statement, which is why the job is enqueued before the reservation; PostgreSQL evaluates CHECK constraints per statement, not at commit.
 8. Commit. The job notify fires after commit.
 
 Any failure rolls back every step, leaving the run `pending` for retry. Because the session is automation-owned, the target lock is the only ordering needed between turns.
@@ -190,23 +192,30 @@ Any failure rolls back every step, leaving the run `pending` for retry. Because 
 
 The dedupe key is run-scoped, not thread-scoped. The existing thread key `continue_session:<thread_id>` cannot be used: `EnqueueInTx` returns `uuid.Nil` on conflict with a pending or running job carrying the same key, and the previous turn's job is still running while its completion logic executes, so the next run's enqueue would be silently dropped.
 
-An **attempt** is one execution of the job under one job lease. The job store issues a fresh `lock_token` on every claim and reclaim, and executors already fence terminal writes with it. When the handler starts executing a per-target run it performs an atomic attempt claim:
+An **attempt** is one execution of the job under one job lease. The worker issues a fresh UUID `lock_token` on every job claim; the claim installs it on the job row, and ownership loss resets the job to `pending` with the token cleared. Token inequality alone therefore proves nothing: a paused worker with an old token would still differ from a newer worker's token. The attempt claim validates ownership against the authoritative job row instead, in one transaction that serializes with reclaim because both lock the job row:
 
 ```sql
+BEGIN;
+SELECT 1 FROM jobs
+ WHERE id = @job_id AND org_id = @org_id AND status = 'running'
+   AND lock_token = @lock_token AND lease_expires_at > now()
+ FOR UPDATE;                                  -- zero rows: not the owner; abort
 UPDATE automation_runs
-SET attempt = attempt + 1, attempt_lock_token = @lock_token, attempt_started_at = now()
-WHERE id = @run_id AND org_id = @org_id AND dispatch_state = 'executing' AND job_id = @job_id
-  AND (attempt_lock_token IS NULL OR attempt_lock_token <> @lock_token)
+   SET attempt = attempt + 1, attempt_lock_token = @lock_token, attempt_started_at = now()
+ WHERE id = @run_id AND org_id = @org_id AND dispatch_state = 'executing' AND job_id = @job_id;
+COMMIT;
 ```
 
-The lock token comes from the job context (`jobctx.LockTokenFromContext`). Every later write for the attempt (result marker, completion) carries `@lock_token` and matches zero rows if the run has moved to a newer attempt. A worker that lost its lease cannot complete a run because its token is stale.
+The lock token comes from the job context (`jobctx.LockTokenFromContext`). A worker whose job was reclaimed finds the job `pending` with no token, or `running` under another token, and cannot claim, even in the window before the next worker claims. Every later write for the attempt (result marker, preflight outcome, completion) is fenced twice: `automation_runs.attempt_lock_token = @lock_token`, and an `EXISTS` on the `jobs` row with `status = 'running' AND lock_token = @lock_token AND id = @job_id`, the same pattern `PublishCheckpoint` uses today. A worker that lost its lease can neither claim a new attempt nor write for an old one.
+
+Recovery is authorized separately. A later attempt that finds a result marker for the run's current `attempt` may complete from it under its own live lease without claiming a new attempt. The scheduler's dead-letter path, which holds no lease, may record `retries_exhausted` only when the job row is terminal (`failed` or dead-lettered) and no marker exists.
 
 ### Invariants
 
 Database constraints:
 
 - At most one run with `dispatch_state = executing` per target across generations (partial unique index).
-- `dispatch_state = executing` implies non-null `session_id`, `job_id`, and `execution_started_at` (CHECK).
+- `dispatch_state = executing` implies non-null `session_id`, `job_id`, and `execution_started_at` (CHECK, satisfied by the single reservation statement).
 - A generation row is either active with null retirement fields or retired with both set (CHECK).
 
 Transactional guarantees:
@@ -218,9 +227,9 @@ Transactional guarantees:
 
 The `continue_session` payload carries `automation_run_id` and `target_generation`. On any retry the handler re-reads the run:
 
-- `dispatch_state = executing` with the same `job_id` and no result marker for the current attempt: perform a new attempt claim (new lock token) and re-enter the turn without re-running the ownership transaction. Session status is restored by the existing continuation recovery paths (`idle` and `snapshotted` on startup failure, drain requeue on worker drain). Re-execution is safe because the turn has no external writes.
-- A result marker exists for the run: the turn completed but completion was not recorded; call the completer with the marker's outcome. Completion is idempotent.
-- Job dead-lettered: the completer records `failed` with `outcome_reason = retries_exhausted`, releases the target, and requests a wake.
+- `dispatch_state = executing` with the same `job_id` and no result marker for the current attempt: perform a new attempt claim (validated against the job row) and re-enter the turn without re-running the ownership transaction. Session status is restored by the existing continuation recovery paths (`idle` and `snapshotted` on startup failure, drain requeue on worker drain). Re-execution replays no 143-mediated writes; shell and network effects are at-least-once.
+- A result marker exists for the run's current attempt: the turn ended but completion was not recorded; complete from the marker under the retry's own live lease without claiming a new attempt. Completion is idempotent.
+- Job dead-lettered: the scheduler records `failed` with `outcome_reason = retries_exhausted` only when the job row is terminal and no marker exists, releases the target, and requests a wake.
 
 A retry never waits on its own reservation and never creates another session for the same run.
 
@@ -235,13 +244,14 @@ A separate wait timeout fails waiting runs two hours after `wait_started_at` wit
 
 ## Head Authority
 
-A push run reviews the PR's current head, not the head it was delivered with. Ordering by delivery or `triggered_at` is unsafe: a delayed redelivery for an older head can arrive after a newer push.
+Delivery order and `triggered_at` are unsafe for ordering pushes: a delayed redelivery for an older head can arrive after a newer push. GitHub's `pull_request.updated_at` is a server-side timestamp that advances on every push, so it orders deliveries for one PR regardless of arrival. `PRService` forwards it on the trigger request as `PullRequestUpdatedAt`, and the run stores it.
 
-- **At arrival** (inside the target-locked arrival transaction), a `synchronize` run records its delivered `head_sha`, and `automation_targets.observed_head_sha` is set to it. Older waiting push runs are superseded.
-- **At dispatch** of a push run, the handler fetches the PR's current head and base from GitHub with the installation token, as `PRService` already does for `issue_comment` enrichment. The run's `head_sha` is overwritten with the current head, and `automation_targets.current_head_sha` and `head_epoch` (incremented when the current head changes) are updated. If the lookup fails, the run proceeds in degraded mode with its delivered head, subject to the reachability check, and `outcome_reason` notes `head_lookup_degraded` on completion.
-- **Baseline monotonicity.** Completion advances `last_reviewed_head_sha` only if the reviewed head is not an ancestor of the current value (`git merge-base --is-ancestor <current> <reviewed>` succeeds or the current value is null). A degraded-mode review of an older head never moves the baseline backwards.
+- **Epochs.** `automation_targets` keeps `observed_head_sha`, `observed_head_updated_at`, and `head_epoch`. At arrival of a `synchronize` run, inside the target-locked arrival transaction: if its `updated_at` is newer than `observed_head_updated_at`, the target adopts the delivered head, increments `head_epoch`, and the run is stamped with that epoch; any older waiting push run is superseded. If its `updated_at` is older or equal with a different head, the run is skipped at arrival as `stale_head`; it can never supersede newer work. Divergent force-pushed heads are ordered the same way, because the epoch, not ancestry, decides which is newer.
+- **At dispatch** of a push run, the handler additionally looks up the PR's current head and `updated_at` from GitHub with the installation token, as `PRService` already does for `issue_comment` enrichment. A newer head than observed (a missed webhook) is adopted with a new epoch and the run reviews it. If the lookup fails, the run reviews its delivered head; that is safe because the surviving push run always carries the newest delivered epoch, and the outcome notes `head_lookup_degraded`.
+- **Baseline monotonicity.** Completion advances `last_reviewed_head_sha` and `last_reviewed_epoch` only when the run's `head_epoch` is greater than or equal to `last_reviewed_epoch`. A stale delivery can never advance the baseline; an authoritative force-push review always can, even when the heads share no ancestry.
+- **Delta across a force-push.** When the baseline is not an ancestor of the new head, the delta is computed from `base_sha` and the continuation block states that history was rewritten since the baseline, embedding the previous run summaries as data.
 - **Non-push runs** keep their delivered head. A same-head non-push run executes with an empty code delta.
-- **Duplicates.** A push run whose current head equals `last_reviewed_head_sha` is skipped as `duplicate_head`. No other event kind is deduplicated by head.
+- **Duplicates.** A push run whose head equals `last_reviewed_head_sha` is skipped as `duplicate_head`. No other event kind is deduplicated by head.
 - **Base retarget** is detected at dispatch from the resolved base ref, not from the `edited` action, and retires the generation.
 
 ## Workspace Preparation
@@ -253,7 +263,7 @@ Continuation reuses `ContinueSession` with a new `AutomationTurnContinueOptions`
 For every automation turn in per-target mode:
 
 1. Fetch the run's head commit by SHA: `git fetch origin <head_sha>` (GitHub serves reachable commits by SHA), falling back to `refs/pull/<n>/head` only to populate the local ref. `head_sha` is validated as 40 lowercase hex characters and the PR number as an integer before either is passed to git; nothing from GitHub is interpolated raw.
-2. If the SHA is unreachable, the run is skipped with `outcome_reason = stale_head`. For a push run this can only happen in degraded mode; the head lookup normally guarantees reachability.
+2. If the SHA is unreachable, the run is skipped with `outcome_reason = stale_head` through the executing-preflight path in Completion, because the reservation has already committed. For a push run this means the PR was force-pushed past the newest delivered head before dispatch; the newer push has its own run.
 3. Fetch the base ref and record `base_sha = git merge-base origin/<base_ref> <head_sha>` on the run. This is the baseline for a full review when no previous head is usable.
 4. Check out detached: `git checkout --detach <head_sha>`. Per-target sessions do not maintain a working branch; `sessions.working_branch` is set to `pr/<n>` for display only, and diff collection is disabled for these sessions because `publish_policy = none` makes a session diff meaningless.
 5. Verify `git rev-parse HEAD == head_sha`; a mismatch fails the turn before the agent starts.
@@ -294,7 +304,7 @@ PR-derived text (title, body, comment bodies, review text, file paths, diff cont
 
 ## Waiting and Coalescing
 
-- **Push runs** (`synchronize`): a new push run supersedes any older waiting push run for the same target at arrival, inside the arrival transaction: the older run transitions to `skipped` with `outcome_reason = superseded` and `superseded_by_run_id` set. The surviving push run reviews the current head at dispatch, so which delivery survives does not matter.
+- **Push runs** (`synchronize`): a push run with a newer epoch supersedes any older waiting push run for the same target at arrival, inside the arrival transaction: the older run transitions to `skipped` with `outcome_reason = superseded` and `superseded_by_run_id` set. A push run with an older epoch is skipped at arrival as `stale_head`. The surviving push run therefore always carries the newest delivered head.
 - **All other runs** queue in arrival order and are never superseded.
 - **Dispatch order** when the target frees: the waiting push run first, then the others in arrival order. Each dispatch runs the ownership transaction.
 - **Waiting cap.** At most 10 waiting runs per target; further arrivals fail with `outcome_reason = wait_overflow`.
@@ -314,37 +324,43 @@ Successful `ContinueSession` turns end with the session `idle` and do not call `
 
 ### Result marker
 
-The orchestrator writes a run-keyed result marker in the **same database transaction** as `UpdateTurnComplete` (or the failure status write), fenced by the attempt lock token:
+The orchestrator writes a run-keyed result marker for **every attempt end** (completed, failed, cancelled, awaiting input) in the **same database transaction** as the session status write for that end (`UpdateTurnComplete`, the cancelled-session turn completion, or the failure status write), fenced by the attempt lock token and the job-row `EXISTS`:
 
-`automation_run_results (run_id PK, org_id, attempt, attempt_lock_token, thread_id, turn_number, outcome, checkpoint_key, checkpoint_published, checkpoint_head_sha, native_context, dependency_fingerprint, agent_session_id, recorded_at)`
+`automation_run_results (run_id PK, org_id, attempt, attempt_lock_token, thread_id, turn_number, outcome, review_complete, checkpoint_key, checkpoint_published, checkpoint_head_sha, native_context, dependency_fingerprint, agent_session_id, recorded_at)`
 
-`checkpoint_published` is true only when `PublishCheckpoint` for this turn's snapshot succeeded; a snapshot or publication failure leaves it false and `checkpoint_key` null while `outcome` can still be `turn_completed`. Warm admission (Stage 3) requires `checkpoint_published = true`.
+`checkpoint_published` is true only when `PublishCheckpoint` for a snapshot taken at this attempt's end succeeded, including the `graceful_stop` checkpoint the cancel path publishes; a snapshot or publication failure leaves it false and `checkpoint_key` null while `outcome` can still be `turn_completed`. `review_complete` is true only for `turn_completed`. Warm admission (Stage 3) requires `checkpoint_published = true`.
+
+### Executing preflight outcomes
+
+Some outcomes are discovered after the reservation committed but before the agent starts: an unreachable head (`stale_head`), a lifecycle change since reservation (`pr_closed`), or a failed repository authorization (`repository_unavailable`). These runs are `executing`, so `TerminalizeUnstarted` must not touch them. A fenced `CompleteExecutingPreflight(run_id, attempt_lock_token, outcome)` sets `status` (`skipped` for `stale_head` and `pr_closed`, `failed` for `repository_unavailable`), `dispatch_state = done`, releases the session and thread claims back to `idle` without advancing turn counters, deletes the user message inserted at reservation because no assistant turn happened, writes the wake outbox, and applies any pending ownership release. No result marker is written for a preflight outcome.
 
 ### Automation turn completer
 
 `AutomationTurnCompleter.Complete(run_id, attempt_lock_token)` is called by the worker handlers after the orchestrator returns, and by the retry path when a marker exists. It reads the marker and applies:
 
-| Marker outcome | Run status | `outcome_reason` | Advances `last_reviewed_head_sha` | Updates `checkpoint_head_sha` |
-|----------------|------------|------------------|------------------------------------|-------------------------------|
-| turn completed | `completed` | `turn_completed` | yes, subject to monotonicity | only if `checkpoint_published` |
-| agent failed or exited non-zero | `failed` | `agent_failed` | no | no |
-| cancelled | `failed` | `cancelled` | no | no |
-| awaiting human input | `failed` | `awaiting_input`; generation retired and ownership released | no | no |
-| retries exhausted (no marker, job dead-lettered) | `failed` | `retries_exhausted` | no | no |
+| Marker outcome | Run status | `outcome_reason` | Advances `last_reviewed_head_sha` | Checkpoint provenance |
+|----------------|------------|------------------|------------------------------------|-----------------------|
+| turn completed | `completed` | `turn_completed` | yes, subject to epoch monotonicity | already written at publication |
+| agent failed or exited non-zero | `failed` | `agent_failed` | no | already written at publication, if any |
+| cancelled | `failed` | `cancelled` | no | already written at publication (`review_complete = false`) |
+| awaiting human input | `failed` | `awaiting_input`; generation retired and ownership released | no | already written at publication |
+| retries exhausted (no marker, job dead-lettered) | `failed` | `retries_exhausted` | no | unchanged |
+
+Checkpoint provenance is never written by the completer. It is written by the `PublishCheckpoint` wrapper at publication time (see Checkpoint coherence), so a cancelled or drained turn that replaced the snapshot has already replaced the provenance by the time the completer runs.
 
 For per-target runs, `completed_noop` is not derived from the session diff. A report-only review that finished is `completed`.
 
 ### Fencing and idempotency
 
-Completion updates the run only where `id = run_id AND dispatch_state = executing AND attempt_lock_token = @token`, and updates the generation only where `generation = run.target_generation AND status = active`. A late callback from an earlier attempt or generation matches zero rows and is logged. Calling the completer twice for the same attempt is a no-op after the first success. The completion transaction also sets `dispatch_state = done`, writes the wake outbox, and enqueues the wake job.
+Completion updates the run only where `id = run_id AND dispatch_state = executing AND attempt_lock_token = @token`, with the job-row `EXISTS` fence, and updates the generation only where `generation = run.target_generation`; baseline fields are updated only when the generation is still active, while `turn_count` and `last_run_id` are recorded for a retired generation too. A late callback from an earlier attempt or generation matches zero rows and is logged. Calling the completer twice for the same attempt is a no-op after the first success. The completion transaction also sets `dispatch_state = done`, clears the session owner marker when `ownership_release_pending` is set, writes the wake outbox, and enqueues the wake job.
 
 ### Order of operations at turn end
 
-1. Orchestrator attempts the turn-complete snapshot and its publication (existing).
-2. Orchestrator writes the result marker in the same transaction as `UpdateTurnComplete`.
+1. Orchestrator attempts the end-of-attempt snapshot and its publication (existing). For owned sessions the publication wrapper writes checkpoint provenance in the same statement.
+2. Orchestrator writes the result marker in the same transaction as the session status write for the attempt end.
 3. Stage 3 only: warm hold admission and the usage-event swap, inside the orchestrator's end-of-turn path via `AutomationTurnHooks.BeforeTurnHoldRelease`, only if `checkpoint_published`.
 4. Orchestrator releases the turn hold and destroys or keeps the container (existing).
-5. Worker handler calls the completer: run status, `outcome_reason`, durations, `native_context`, generation counters (`turn_count`, `last_attempted_head_sha`, `last_reviewed_head_sha`, `checkpoint_head_sha`, `checkpoint_dependency_fingerprint`, `last_run_id`, `last_turn_at`), wake outbox and job.
+5. Worker handler calls the completer: run status, `outcome_reason`, durations, `native_context`, generation counters (`turn_count`, `last_attempted_head_sha`, `last_reviewed_head_sha`, `last_reviewed_epoch`, `last_run_id`, `last_turn_at`), pending ownership release, wake outbox and job.
 
 ### Run-local history
 
@@ -358,11 +374,11 @@ Run list and detail responses read status, outcome, timing, and usage from the r
 
 | Event | Executing turn | Waiting runs | Warm hold (Stage 3) | Generation |
 |-------|----------------|--------------|---------------------|------------|
-| Reset (manual) | finishes on old generation; completion fenced; wake requested | re-evaluated against the new generation on wake; execute fresh | released | retired `manual_reset`; ownership released; next dispatch creates `generation + 1` |
-| Continuity set to `per_run` | finishes | dispatched as ordinary per-run sessions | released | all active generations retired `continuity_disabled`; ownership released |
+| Reset (manual) | finishes on old generation; completion fenced; wake requested | re-evaluated against the new generation on wake; execute fresh | released | retired `manual_reset`; ownership released now if idle, else pending until the turn's completion; next dispatch creates `generation + 1` |
+| Continuity set to `per_run` | finishes | dispatched as ordinary per-run sessions | released | all active generations retired `continuity_disabled`; ownership released now or pending as above |
 | Worker kill switch | finishes | dispatched as ordinary per-run sessions | not created; existing holds expire | untouched, so re-enabling continues where it left off |
 | PR merged | finishes; a subscribed `merged` run is dispatched next and executes as the final turn; other waiters skipped `pr_closed` | skipped `pr_closed` except the `merged` run | released after the final turn | retired `pr_merged` after the final turn, or immediately when no `merged` run exists |
-| PR closed without merge | finishes | skipped `pr_closed` | released | retired `pr_closed` |
+| PR closed without merge | finishes | skipped `pr_closed` | released | retired `pr_closed`; ownership released now or pending as above |
 | PR reopened | n/a | n/a | n/a | lifecycle back to `open`; next trigger creates a new generation; the retired row stays |
 | Late event after close (not `reopened`) | n/a | skipped `pr_closed` at arrival | n/a | no new generation |
 | Awaiting input | ends the turn | wake requested; execute fresh | released | retired `awaiting_input`; ownership released |
@@ -391,9 +407,13 @@ No existing sweep expires generic holders and destroys containers; runtime recla
 
 - **Heartbeat.** The reconciler heartbeats every active `automation_warm` holder it owns every 30 seconds by updating `heartbeat_at`.
 - **Expiry.** For each owned holder past `expires_at`: CAS `status = expired` with the lease token, then run the cleanup state machine.
-- **Cleanup state machine** on the holder row, each step idempotent and retried on the next pass until `cleanup_state = done`: `finalized` (`FinalizeContainerDestroy` CAS), `destroyed` (`provider.Destroy`, treating an already-missing container as success), `usage_closed` (close the warm usage event at the destruction time, accepting an already-closed matching event), `done` (clear `container_id`). A crash at any step resumes from the persisted state.
+- **Cleanup state machine** on the holder row. The holder's own `container_id` is never cleared; only the session's reference is. Steps, each idempotent and resumed from the persisted state on the next pass:
+  1. `destroy_authorized`: one transaction runs the session-reference CAS (`FinalizeContainerDestroy` semantics: clear `sessions.container_id` only if it still equals the holder's container and no other active holder or turn hold exists) **and** sets the holder to `destroy_authorized` with `destroy_authorized_at`. Because both writes commit together, a crash cannot leave the reference cleared without the authorization recorded. A false CAS is disambiguated inside the same transaction: if `sessions.container_id` still equals the holder's container, another holder or turn blocks destruction and the holder returns to `expired` for a later pass; if it no longer equals, the reference was cleared by another actor and the holder is marked `done` with `cleanup_note = reference_cleared_elsewhere`, leaving the now-unreferenced container to the ordinary GC.
+  2. `destroyed`: `provider.Destroy` on the holder's container; an already-missing container is success. `destroyed_at` records the provider's acknowledgement time. If the provider returns an ambiguous error, the step retries; after five failures it probes `IsAlive` and, if the container is gone, records `destroyed_at = now()` with `cleanup_note = destruction_time_estimated`.
+  3. `usage_closed`: close the warm usage event at `destroyed_at`, accepting an already-closed matching event.
+  4. `done`.
 - **Eviction.** Pressure GC today reclaims unreferenced containers and, past the 24-hour hard max, referenced containers with no active holder; it cannot preempt a valid warm hold. When admission for a real turn would fail, the capacity gate calls the reconciler's evict path: select the oldest owned `automation_warm` holder by `last_turn_at` whose container has no other active holder, expire it, run the state machine to `destroyed`, recount, and repeat up to the pressure destroy limit. If admission still fails, the turn takes the ordinary admission-failure retry. A container with an active turn is never evicted.
-- **Node loss.** The scheduler marks holders whose `heartbeat_at` is older than two minutes and whose node has no live worker heartbeat as `orphaned`: it closes the warm usage event at the last `heartbeat_at` (an explicit estimation policy, since actual destruction time is unknown), clears `container_id`, and sets `cleanup_state = done`. The container itself is reaped by that node's GC when it returns, or by the hard-max sweep.
+- **Node loss.** The scheduler marks holders whose `heartbeat_at` is older than two minutes and whose node has no live worker heartbeat: holder `status = expired`, `cleanup_state = orphaned`, holder `container_id` retained. It clears the session's reference with the expected-ID guard, closes the warm usage event at the last `heartbeat_at` (an explicit estimation policy, since actual destruction time is unknown), and sets `cleanup_note = node_lost`. `orphaned` is terminal for the scheduler; when the node returns, its reconciler destroys any orphaned holder's container it still finds and moves the holder to `done`. Otherwise the hard-max sweep reaps the container.
 
 ### Node affinity
 
@@ -406,7 +426,7 @@ Interval transitions share one timestamp and are idempotent:
 - Turn end with warm admitted: close the turn usage event at `T` and open the warm event at `T` for the same container, in the `BeforeTurnHoldRelease` step, before the deferred usage stop runs.
 - Deferred `ContainerStopped` then runs. Today it deletes the sampler entry by container ID and calls `RecordStop`, which treats zero updated rows as an error. Both change: the sampler entry is removed only if its event ID matches the event being stopped, and `RecordStop` returns success for an event that is already closed with the same ID (`stopped_at IS NOT NULL`), while still failing for an unknown ID.
 - Reuse: at continuation start, close the warm event at `T2` and open the turn event at `T2`; the holder transitions to `released` and its cleanup state to `done` without destruction.
-- Expiry or eviction: the state machine closes the warm event at actual destruction time. Node loss uses the last heartbeat as described above.
+- Expiry or eviction: the state machine closes the warm event at `destroyed_at`, which is the provider's acknowledged destruction time or the recorded estimate. Node loss uses the last heartbeat as described above.
 
 The usage sampler tracks one active event per container; transitions swap the active event atomically under the tracker's lock. Rollups group by `purpose`, the usage API reports `warm_container_minutes` separately, and peak concurrency counts containers, not events.
 
@@ -457,7 +477,7 @@ CREATE TABLE automation_targets (
                         CHECK (lifecycle_state IN ('open', 'closed', 'merged')),
     lifecycle_updated_at timestamptz,
     observed_head_sha   text,
-    current_head_sha    text,
+    observed_head_updated_at timestamptz,
     head_epoch          integer NOT NULL DEFAULT 0 CHECK (head_epoch >= 0),
     wake_requested_at   timestamptz,
     created_at          timestamptz NOT NULL DEFAULT now(),
@@ -490,10 +510,13 @@ CREATE TABLE automation_target_sessions (
                                         'unsupported_workspace', 'awaiting_input', 'continuity_disabled')),
     retired_at                      timestamptz,
     turn_count                      integer NOT NULL DEFAULT 0 CHECK (turn_count >= 0),
+    ownership_release_pending       boolean NOT NULL DEFAULT false,
     last_attempted_head_sha         text,
     last_reviewed_head_sha          text,
+    last_reviewed_epoch             integer NOT NULL DEFAULT 0 CHECK (last_reviewed_epoch >= 0),
     checkpoint_head_sha             text,
     checkpoint_dependency_fingerprint text,
+    checkpoint_review_complete      boolean,
     last_base_ref                   text,
     last_run_id                     uuid REFERENCES automation_runs(id),
     last_turn_at                    timestamptz,
@@ -523,6 +546,8 @@ ALTER TABLE automation_runs
     ADD COLUMN thread_id uuid,
     ADD COLUMN turn_number integer,
     ADD COLUMN github_action text,
+    ADD COLUMN pull_request_updated_at timestamptz,
+    ADD COLUMN head_epoch integer,
     ADD COLUMN continuation_mode text
         CHECK (continuation_mode IN ('fresh', 'continued', 'reconstructed')),
     ADD COLUMN continuation_reason text CHECK (continuation_reason IN (
@@ -547,6 +572,7 @@ ALTER TABLE automation_runs
         'turn_completed', 'head_lookup_degraded', 'agent_failed', 'cancelled', 'awaiting_input',
         'retries_exhausted', 'stale_head', 'duplicate_head', 'superseded', 'wait_timeout',
         'wait_overflow', 'pr_closed', 'repository_unavailable')),
+    ADD COLUMN head_lookup_degraded boolean NOT NULL DEFAULT false,
     ADD COLUMN worker_node_id text,
     ADD COLUMN restore_snapshot_bytes bigint,
     ADD COLUMN restore_duration_ms integer,
@@ -571,7 +597,7 @@ CREATE INDEX idx_automation_runs_waiting_target
     WHERE dispatch_state = 'waiting';
 ```
 
-Status mapping for unstarted runs: `superseded`, `duplicate_head`, `stale_head`, and `pr_closed` set `status = skipped`; `wait_timeout` and `wait_overflow` set `status = failed`. This mapping is used consistently by the store, the API, and the tests. `restore_snapshot_bytes`, `restore_duration_ms` (container create plus restore, or clone plus bootstrap for fresh runs), `turn_duration_ms` (agent start to agent exit), and `worker_node_id` are recorded per attempt and overwritten by retries; the Stage 3 gate uses `attempt = 1` rows only. `warm_hit` and `warm_skipped_reason` are Stage 3 columns.
+Status mapping: `superseded`, `duplicate_head`, `stale_head`, and `pr_closed` set `status = skipped` whether applied by `TerminalizeUnstarted` or by the executing preflight path; `wait_timeout`, `wait_overflow`, and `repository_unavailable` set `status = failed`. `head_lookup_degraded` is a flag, not an outcome, so a degraded turn still records `turn_completed`. This mapping is used consistently by the store, the API, and the tests. `restore_snapshot_bytes`, `restore_duration_ms` (container create plus restore, or clone plus bootstrap for fresh runs), `turn_duration_ms` (agent start to agent exit), and `worker_node_id` are recorded per attempt and overwritten by retries; the Stage 3 gate uses `attempt = 1` rows only. `warm_hit` and `warm_skipped_reason` are Stage 3 columns.
 
 ### `automation_run_results`
 
@@ -585,6 +611,7 @@ CREATE TABLE automation_run_results (
     turn_number           integer NOT NULL,
     outcome               text NOT NULL CHECK (outcome IN (
                               'turn_completed', 'agent_failed', 'cancelled', 'awaiting_input')),
+    review_complete       boolean NOT NULL DEFAULT false,
     checkpoint_key        text,
     checkpoint_published  boolean NOT NULL DEFAULT false,
     checkpoint_head_sha   text,
@@ -622,10 +649,14 @@ ALTER TABLE session_sandbox_holders
     )),
     ADD COLUMN usage_event_id uuid,
     ADD COLUMN cleanup_state text NOT NULL DEFAULT 'none'
-        CHECK (cleanup_state IN ('none', 'finalized', 'destroyed', 'usage_closed', 'done', 'orphaned'));
+        CHECK (cleanup_state IN ('none', 'destroy_authorized', 'destroyed', 'usage_closed', 'done', 'orphaned')),
+    ADD COLUMN destroy_authorized_at timestamptz,
+    ADD COLUMN destroyed_at timestamptz,
+    ADD COLUMN cleanup_note text
+        CHECK (cleanup_note IN ('reference_cleared_elsewhere', 'destruction_time_estimated', 'node_lost'));
 ```
 
-`models.SessionSandboxHolderKind` gains `automation_warm`.
+`models.SessionSandboxHolderKind` gains `automation_warm`. Holder `status` keeps its existing values; `orphaned` is a cleanup state, not a holder status, and the nonempty `container_id` constraint is preserved because holder container IDs are never cleared.
 
 ### `container_usage_events` and rollups (Stage 3)
 
@@ -649,7 +680,7 @@ Historical rows default to `turn`. `RecordStop` returns success for an already-c
 
 ### Store surface
 
-New store methods, all taking `orgID` first: `AutomationTargetStore.LockOrCreate`, `GetActiveGeneration`, `RetireGeneration`, `InsertGeneration`, `SetLifecycle`, `RequestWake`, `ClearWake`; `AutomationRunStore.ReserveForExecution`, `MarkWaiting`, `SupersedeWaitingPush`, `ClaimAttempt`, `TerminalizeUnstarted`, `CompleteExecuting`, `NextWaiting`, `FailTimedOutWaits`, `ReconcileTargetWakes`; `AutomationRunResultStore.Write`, `GetByRun`; `SessionStore.ClaimForAutomationTurn`, `SetAutomationOwner`, `ClearAutomationOwner`. The only cross-org methods are the Stage 3 per-node warm reconciler's owned-holder listing, which is host-local like the sandbox GC reference listing and carries `lint:allow-no-orgid reason="host-local warm holder sweep"`, and the orphan sweep's dead-node holder listing with the same marker.
+New store methods, all taking `orgID` first: `AutomationTargetStore.LockOrCreate`, `GetActiveGeneration`, `RetireGeneration`, `InsertGeneration`, `SetLifecycle`, `RequestWake`, `ClearWake`; `AutomationRunStore.ReserveForExecution`, `MarkWaiting`, `SupersedeWaitingPush`, `ClaimAttempt` (locks the job row), `TerminalizeUnstarted`, `CompleteExecutingPreflight`, `CompleteExecuting`, `NextWaiting`, `FailTimedOutWaits`, `ReconcileTargetWakes`; `AutomationRunResultStore.Write`, `GetByRun`; `SessionStore.ClaimForAutomationTurn`, `SetAutomationOwner`, `ClearAutomationOwner`, `PublishCheckpointWithProvenance`; Stage 3 `SessionSandboxHolderStore.AuthorizeWarmDestroy` (session CAS and holder update in one transaction). The only cross-org methods are the Stage 3 per-node warm reconciler's owned-holder listing, which is host-local like the sandbox GC reference listing and carries `lint:allow-no-orgid reason="host-local warm holder sweep"`, and the orphan sweep's dead-node holder listing with the same marker.
 
 `implemented/01-database-schema.md` is updated when each migration lands.
 
@@ -680,7 +711,7 @@ The event-trigger mutation endpoints re-run the first rule when triggers change 
 
 ### Session mutation on owned sessions
 
-Thread message sends, thread creation, follow-up commands, preview start, PR worktree materialization, and split verification on a session with `automation_owner_generation_id` set return 409 `SESSION_AUTOMATION_OWNED` with `details.automation_id`, `details.target_id`, and `details.reset_url`. Read routes are unaffected.
+Thread message sends, thread creation, follow-up commands, preview start, PR worktree materialization, and split verification on a session with `automation_owner_generation_id` set return 409 `SESSION_AUTOMATION_OWNED` with `details.automation_id`, `details.target_id`, `details.reset_url`, and `details.release_pending` (true when the generation is already retired and the marker will clear when the current turn finishes). Read routes are unaffected.
 
 ### Organization settings (Stage 3)
 
@@ -697,6 +728,8 @@ Thread message sends, thread creation, follow-up commands, preview start, PR wor
   "target_id": "uuid",
   "target_generation": 2,
   "github_action": "synchronize",
+  "head_epoch": 7,
+  "head_lookup_degraded": false,
   "continuation_mode": "fresh" | "continued" | "reconstructed",
   "continuation_reason": "no_generation",
   "native_context": true,
@@ -763,12 +796,14 @@ No change to the external API in this version.
 - Migrations, models, stores, and validation for the Stage 1 schema above.
 - Session ownership marker and the 409 rejections in the thread service and session handlers.
 - Ownership transaction, `ClaimForAutomationTurn`, run-scoped dispatch identity with conflict lookup, attempt claim, waiting and superseding, executing invariant, retry recognition.
-- Head authority: arrival recording, dispatch-time head lookup, degraded mode, monotonic baseline.
+- Head authority: `PullRequestUpdatedAt` on the trigger request, epoch assignment at arrival, dispatch-time head lookup, degraded mode, epoch-monotonic baseline, force-push delta.
+- Checkpoint provenance in the `PublishCheckpoint` wrapper for owned sessions, covering turn-complete, cancel, drain, and bootstrap publications.
+- Claude Code fallback predicate tightened to a missing-session signature.
 - Orchestrator `AutomationTurnContinueOptions`: fetch by SHA, base SHA, detached checkout, verification, clean tree, dependency input fingerprint scoped to the checkpoint, delta with embedded summaries, reconstruction, timing and node recording, result marker write.
-- `AutomationTurnCompleter` with fencing and idempotency; `TerminalizeUnstarted`; wake outbox and `automation_target_wake` job; reconciliation sweep; legacy hook early return.
+- `AutomationTurnCompleter` with double fencing and idempotency; `CompleteExecutingPreflight`; `TerminalizeUnstarted`; pending ownership release; wake outbox and `automation_target_wake` job; reconciliation sweep; legacy hook early return.
 - Reaper changes: waiting exemption, attempt clock, lease-aware skip, wait timeout.
 - `OnPullRequestClosed` lifecycle notification, `reopened` handling, openness revalidation, generation retirement.
-- Restricted capability filter for per-target turns.
+- Positive tool allowlist for per-target turns, applied at snapshot build time, enforced by the internal API, with the preview capability omitted from the session token.
 - Prompt template with untrusted-data boundaries.
 - Audit and adapt session-to-run consumers: run list and detail queries, Slack session notifications, PagerDuty writeback, session list ownership queries. `GoalImprovementService` and migration 000248 are unchanged.
 - Settings UI fields, run badges, `continuation_reason` and `outcome_reason` in run details.
@@ -816,17 +851,17 @@ Exit: a push within a 15-minute window reuses the container on the owning node a
 |------|-------|
 | Readiness and compatibility | Table-driven unit tests for every readiness state and compatibility row, including kill switch, `sandbox_state = none`, pending snapshot wait, size limit, lifecycle states, and checkpoint-head lag |
 | Ownership | Real PostgreSQL: two workers reserve runs for one target; second waits; failure after claim rolls back the claim and message; executing invariant rejects a second reservation; retry recognizes its own reservation; a human send after the automation transaction commits is rejected with 409 |
-| Dispatch identity and attempts | Follow-up enqueue succeeds while the previous `continue_session` job is still `running`; conflict lookup accepts the same run and rejects a different one; a stale lock token cannot write a result marker or complete the run |
-| Completion evidence | No marker plus dead-lettered job yields `retries_exhausted`; marker present on retry completes without re-execution; crash after `UpdateTurnComplete` and before the completer is recovered from the marker; snapshot failure produces `checkpoint_published = false` and does not advance `checkpoint_head_sha`; legacy hook ignores owned sessions |
+| Dispatch identity and attempts | Follow-up enqueue succeeds while the previous `continue_session` job is still `running`; conflict lookup accepts the same run and rejects a different one; a paused worker whose job was reclaimed cannot claim an attempt before or after the next worker claims; a stale lock token cannot write a result marker, a preflight outcome, or a completion; first dispatch succeeds with the executing CHECK enabled |
+| Completion evidence | No marker plus dead-lettered job yields `retries_exhausted`; marker present on retry completes without re-execution; crash after `UpdateTurnComplete` and before the completer is recovered from the marker; snapshot failure produces `checkpoint_published = false` and leaves provenance unchanged; a cancelled turn that published a `graceful_stop` checkpoint replaces provenance with `review_complete = false`; successful A then interrupted B with different dependency inputs then continuation at C treats the environment as B's and embeds B as interrupted; unreachable SHA after reservation is skipped through the preflight path and releases the claim; legacy hook ignores owned sessions |
 | Waiting and wake | Push supersedes older waiting push at arrival; non-push runs queue and each executes; waiting cap; wait timeout; stuck reaper ignores waiting runs and measures from attempt start; lease-aware skip; `TerminalizeUnstarted` never matches executing runs; wake job dispatches the next waiter; reconciliation repairs a lost wake |
-| Head authority | Delayed older-head delivery after a newer push reviews the current head; degraded mode reviews the delivered head and never moves the baseline backwards; duplicate rule applies only to pushes; `edited` with base change retires |
+| Head authority | H2 waiting then delayed H1 with older `updated_at`: H1 skipped at arrival, H2 reviewed, including with the GitHub lookup failing; divergent force-push with a newer epoch advances the baseline; a stale delivery never advances it; missed webhook adopted at dispatch; duplicate rule applies only to pushes; `edited` with base change retires |
 | Workspace | Fetch by SHA; unreachable SHA skips as `stale_head`; base SHA recorded; detached checkout verified; dirty tree discarded with bounded log; submodules synced; fingerprint change re-runs tool bootstrap; reconstruction treats the fingerprint as absent; delta from the coherent baseline with embedded summaries; full review from base when unavailable |
 | Reconstruction | Missing and destroyed snapshots rebuild in the same session; a live pending publisher is never raced; the reconstructed turn publishes a snapshot back onto the session |
-| Lifecycle | Reset during a running turn; disable; kill switch; merged with and without subscription; unmerged close via `OnPullRequestClosed`; late event after close; reopen; awaiting input releases ownership; agent config and identity changes |
-| Capabilities | Per-target turns receive no publishing, external-comment, Slack, automation-management, or eval-authoring tools; read tools remain |
+| Lifecycle | Reset, disable, and close during a running turn keep rejecting human mutation until that turn's completion clears the marker; idle reset releases immediately; kill switch; merged with and without subscription; unmerged close via `OnPullRequestClosed`; late event after close; reopen; awaiting input releases ownership; agent config and identity changes |
+| Capabilities | The allowlist is exact: `update_policy`, automation actions, eval add, PR create, Slack send, Linear and PagerDuty writes, goal-improvement complete, and preview actions are denied server-side even when the org grants them; read tools remain |
 | Prompt | Rendered snapshot tests for continued, reconstructed, no-history, same-head event, checkpoint-lag, and dependency-changed cases; PR text appears only inside delimited untrusted blocks; SHA and PR number validation rejects malformed input |
 | Run history | Run list and detail read run-local fields; historical rows read the origin link; token usage attributed by `session_messages.automation_run_id` |
-| Warm (Stage 3) | Concurrent admission across generations and executor processes respects every budget; each budget's reason; `0` disables and unset derives; single-slot node gets 0; heartbeat, expiry, and each cleanup step resumes after a crash; eviction order and refusal to evict active turns; orphan sweep on node loss; deferred `ContainerStopped` leaves the swapped warm event in place; usage intervals disjoint and closed once |
+| Warm (Stage 3) | Concurrent admission across generations and executor processes respects every budget; each budget's reason; `0` disables and unset derives; single-slot node gets 0; heartbeat, expiry, and each cleanup step resumes after a crash, including a crash between the session CAS and the holder update (impossible to observe because they commit together) and a crash after destruction before usage closure; false CAS with the reference intact defers, false CAS with the reference gone finishes; eviction order and refusal to evict active turns; orphan sweep on node loss keeps holder identity and the returning node finishes; deferred `ContainerStopped` leaves the swapped warm event in place; usage intervals disjoint and closed once |
 | Frontend | Settings validation messages, owned-session banner, run badges, targets list and pagination, reset confirmation, mobile layout |
 | Tenancy | `lint-stores` and `lint-schema` pass; same-org validation rejects cross-org parents; cross-org target lookups return nothing |
 
@@ -844,7 +879,7 @@ Acceptance measurements before enabling by default for any template: median time
 ## Risks
 
 - **Anchoring on stale context.** A resumed agent may repeat or over-trust earlier findings. The continuation block frames the turn as a delta review and asks for explicit resolution of earlier findings. The turn limit and reset bound drift.
-- **Instructions carried in PR content.** PR text and diffs are untrusted and persist in native provider context across turns. The template marks them as data on every turn, bounds their size, and validates git arguments. Per-target turns carry no 143 tool that writes outside the sandbox, so the remaining authority is shell and whatever network egress the organization's sandbox settings allow. Organizations that enable continuity on public repositories should pair it with restricted egress.
+- **Instructions carried in PR content.** PR text and diffs are untrusted and persist in native provider context across turns. The template marks them as data on every turn, bounds their size, and validates git arguments. Per-target turns carry no 143 tool that writes outside the sandbox, so the remaining authority is shell and whatever network egress the organization's sandbox settings allow, and those effects are at-least-once across retries. Organizations that enable continuity on public repositories should pair it with restricted egress.
 - **Owned sessions surprise people.** A person who opens a per-target session cannot message it. The 409 message and the session banner point at Reset, which hands the session back.
 - **Hidden 1:1 assumptions.** Several paths treat a session and its automation run as one pair. The Stage 1 audit list is the mitigation; tests cover each adapted consumer.
 - **Workspace validity across turns.** A clean tracked tree with stale dependency caches can produce misleading tool output. The checkpoint-scoped fingerprint and the `unsupported_workspace` retirement bound this; project dependency installation stays with the agent, as today.
@@ -874,8 +909,13 @@ Acceptance measurements before enabling by default for any template: median time
 - **2026-09-19 — Warm sandbox is a separate, conditional stage.** Snapshot restore already removes the clone, bootstrap, and cold-read cost, and warm saves no tokens. Stage 3 is gated on Stage 1 data rather than scheduled.
 - **2026-09-19 — Warm holds are best-effort, budgeted, and serialized in the database.** Skipping a hold is free of correctness risk. Advisory locks in fixed order replace row locks and process-local mutexes that cannot serialize across generations or executor processes.
 - **2026-09-19 — Separate target identity from generations.** A placeholder row cannot exist with a non-null `session_id`. `automation_targets` is the lock, lifecycle, and outbox row; generations hang off it.
+- **2026-09-19 — Attempt ownership is validated against the job row, not by token inequality.** Review round 3 showed a paused worker with an old token still differs from the new owner's token. Locking and checking the authoritative job row serializes with reclaim and closes the window before the next claim.
+- **2026-09-19 — Provenance follows the checkpoint.** Review round 3 showed cancellation publishes a `graceful_stop` checkpoint that would replace the snapshot without replacing its declared head. Writing provenance in the publication wrapper makes the two inseparable.
+- **2026-09-19 — Order pushes by GitHub's `updated_at`, not delivery.** Review round 3 showed degraded mode could let a delayed ancestor discharge newer coalesced work. A server-side timestamp orders deliveries without a lookup; epochs replace ancestry for baseline monotonicity so divergent force-pushes advance.
+- **2026-09-19 — Positive tool allowlist.** Review round 3 showed a subtractive list left `update_policy` and three bypassed namespaces reachable.
 
 ## Review History
 
 - **Round 1 (2026-09-19, Codex gpt-6-astra, high effort).** Verdict: request changes. Five factual corrections and fifteen design findings. All folded in.
+- **Round 3 (2026-09-19, Codex gpt-6-astra, high effort).** Verdict: request changes. One blocker (attempt claim accepted any differing token), seven majors (ownership released while a turn ran, degraded head lookup could discharge newer work and the ancestry predicate could not advance across force-pushes, interrupted checkpoints replaced the snapshot without provenance, subtractive capability list missed a policy write and bypassed namespaces, cleanup state machine not restart-safe and orphan transition invalid, executing `stale_head` had no legal terminal transition, reservation order violated the executing CHECK), one minor (fallback predicate described inaccurately). All folded in: job-row-validated attempt claims with double fencing, pending ownership release, `updated_at` epochs with dispatch-time lookup as enrichment only, provenance written at publication for every checkpoint kind, positive allowlist with endpoint enforcement, atomic destroy authorization with retained holder identity and explicit orphan state, executing preflight outcomes, enqueue-before-reserve ordering, accurate fallback description with a Stage 1 tightening.
 - **Round 2 (2026-09-19, Codex gpt-6-astra, high effort).** Verdict: request changes. One blocker (completion inferred from session state; attempt fencing), eight majors (human-turn arbitration, waiter wake-up and closed-target state, head ordering, checkpoint coherence, replay safety, shared budget atomicity, warm cleanup recovery, contradictory terminal transitions), four minors (fingerprint scope and inputs, unspecified fields and FK decisions, TTL simulation without budgets, retirement CHECK). All folded in: result marker and attempt tokens, automation-owned sessions, wake outbox with reconciliation and lifecycle state, current-head dispatch, checkpoint-head coherence, restricted capability set, advisory-lock admission, cleanup state machine and orphan sweep, separate unstarted and executing transitions, checkpoint-scoped fingerprint, `continuation_reason`, `session_messages` attribution, FK policy, budget-aware TTL simulation, explicit retirement CHECK.
