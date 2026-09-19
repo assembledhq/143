@@ -1278,6 +1278,7 @@ type ContinueSessionOptions struct {
 	ResultAgentSessionID *string
 	PRRepair             *PRRepairContinueOptions
 	PRFeedback           *PRFeedbackContinueOptions
+	AutomationTurn       *AutomationTurnContinueOptions
 	HumanInputRequestID  *uuid.UUID
 	QueuedMessageID      *int64
 	ChangesetID          *uuid.UUID
@@ -1307,6 +1308,22 @@ type PRRepairContinueOptions struct {
 	HealthVersion     int64
 	HeadSHA           string
 	WorkspaceMode     models.PullRequestRepairWorkspaceMode
+}
+
+// AutomationTurnContinueOptions identifies a per-target automation turn
+// (design doc 125): one run of a per_target automation continuing the
+// pull request's owned session. The structured prompt is the turn's user
+// message; the visible copy was inserted by the ownership transaction.
+// Workspace preparation at the head SHA, the delta, and the result marker
+// land with the orchestrator turn path.
+type AutomationTurnContinueOptions struct {
+	RunID             uuid.UUID
+	TargetGeneration  int
+	TurnNumber        int
+	PullRequestNumber int
+	HeadSHA           string
+	ContinuationMode  models.AutomationRunContinuationMode
+	StructuredPrompt  string
 }
 
 // PRFeedbackContinueOptions identifies an automatic feedback-follow-through
@@ -4108,6 +4125,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return o.failContinueSessionError(ctx, session, opts, errors.New("PR feedback continuation prompt is empty"), log)
 		}
 		userMessage = opts.PRFeedback.StructuredPrompt
+	}
+	if opts != nil && opts.AutomationTurn != nil {
+		if strings.TrimSpace(opts.AutomationTurn.StructuredPrompt) == "" {
+			return o.failContinueSessionError(ctx, session, opts, errors.New("automation turn prompt is empty"), log)
+		}
+		userMessage = opts.AutomationTurn.StructuredPrompt
 	}
 
 	var humanInputAnswer *HumanInputAnswer

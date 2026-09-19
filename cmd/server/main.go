@@ -517,6 +517,7 @@ func main() {
 			SandboxHolders:      db.NewSessionSandboxHolderStore(pool),
 			Automations:         automationStore,
 			AutomationRuns:      automationRunStore,
+			AutomationTargets:   db.NewAutomationTargetStore(pool),
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			CodeReviews:         codeReviewStore,
 			CodeReviewDisputes:  workerCodeReviewDisputeStore,
@@ -1842,17 +1843,21 @@ func buildServices(
 		codeReviewDisputes.SetPullRequestSnapshotter(prService)
 		codeReviewInsights.SetOutcomeProvider(prService)
 	}
+	automationTargetDispatcher := automations.NewTargetDispatcher(pool, db.NewAutomationTargetStore(pool), automationRunStore, sessionStore, sessionThreadStore, jobStore, logger)
+	automationTargetDispatcher.SetHeadResolver(prService)
+	automationTargetDispatcher.SetMaxSnapshotAge(cfg.SessionMaxSnapshotAge)
 	svc := &worker.Services{
-		Orchestrator:    orchestrator,
-		PR:              prService,
-		Failure:         failureSvc,
-		SandboxProvider: sandboxProvider,
-		ProjectTasks:    projectTaskUpdater,
-		AutomationRuns:  automationRunUpdater,
-		Prioritization:  prioritizationSvc,
-		SlackSummarizer: slackSummarizer,
-		LLM:             llmClient,
-		GitHub:          ghSvc,
+		Orchestrator:      orchestrator,
+		PR:                prService,
+		Failure:           failureSvc,
+		SandboxProvider:   sandboxProvider,
+		ProjectTasks:      projectTaskUpdater,
+		AutomationRuns:    automationRunUpdater,
+		AutomationTargets: automationTargetDispatcher,
+		Prioritization:    prioritizationSvc,
+		SlackSummarizer:   slackSummarizer,
+		LLM:               llmClient,
+		GitHub:            ghSvc,
 		CodeReviews: codereviewsvc.NewGitHubSubmitter(
 			ghSvc,
 			codereviewsvc.WithGitHubSubmitterHTTPClient(githubtelemetry.NewControlledHTTPClient(15*time.Second, logger, githubRateLimitController, "code_review")),

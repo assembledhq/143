@@ -780,6 +780,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		githubAutomationTriggerer := automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, pool, logger)
 		githubAutomationTriggerer.SetCapabilityResolver(agentCapabilitySvc)
 		githubAutomationTriggerer.SetLabelResolver(prService)
+		githubAutomationTriggerer.SetTargetStores(db.NewAutomationTargetStore(pool), automationRunStore)
 		prService.SetAutomationEventTriggerer(githubAutomationTriggerer)
 		prService.SetSessionMessageStore(sessionMessageStore)
 		prService.SetSessionThreadStore(sessionThreadStore)
