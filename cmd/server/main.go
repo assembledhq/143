@@ -1846,6 +1846,7 @@ func buildServices(
 	automationTargetDispatcher := automations.NewTargetDispatcher(pool, automationStore, db.NewAutomationTargetStore(pool), automationRunStore, sessionStore, sessionThreadStore, jobStore, logger)
 	automationTargetDispatcher.SetHeadResolver(prService)
 	automationTargetDispatcher.SetMaxSnapshotAge(cfg.SessionMaxSnapshotAge)
+	orchestrator.SetAutomationTurnStore(automations.NewTurnStore(pool, sessionStore, automationRunStore, db.NewAutomationTargetStore(pool), db.NewAutomationRunResultStore(pool), sessionMessageStore))
 	svc := &worker.Services{
 		Orchestrator:      orchestrator,
 		PR:                prService,

@@ -8270,9 +8270,38 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			OrgID               string `json:"org_id"`
 			ThreadID            string `json:"thread_id"`
 			HumanInputRequestID string `json:"human_input_request_id"`
+			// Per-target automation turn fields, produced by
+			// automationservice.AutomationTurnJobPayload for a fresh
+			// generation's first turn (design doc 125).
+			AutomationRunID   string `json:"automation_run_id"`
+			TargetGeneration  int    `json:"target_generation"`
+			ContinuationMode  string `json:"continuation_mode"`
+			HeadSHA           string `json:"head_sha"`
+			PullRequestNumber int    `json:"pull_request_number"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal run_agent payload: %w", err)
+		}
+		var automationTurn *agent.AutomationTurnContinueOptions
+		if input.AutomationRunID != "" {
+			parsedRunID, parseErr := uuid.Parse(input.AutomationRunID)
+			if parseErr != nil {
+				return fmt.Errorf("parse automation run ID: %w", parseErr)
+			}
+			mode := models.AutomationRunContinuationMode(input.ContinuationMode)
+			if mode == "" {
+				mode = models.AutomationRunContinuationFresh
+			}
+			if err := mode.Validate(); err != nil {
+				return err
+			}
+			automationTurn = &agent.AutomationTurnContinueOptions{
+				RunID:             parsedRunID,
+				TargetGeneration:  input.TargetGeneration,
+				PullRequestNumber: input.PullRequestNumber,
+				HeadSHA:           input.HeadSHA,
+				ContinuationMode:  mode,
+			}
 		}
 
 		orgID, err := parseOrgID(input.OrgID, ctx)
@@ -8337,9 +8366,15 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			return err
 		}
 		// A fresh per-target automation turn executes under an attempt claim
-		// validated against this job's lease (design doc 125).
-		if run.AutomationRunID != nil {
-			owned, claimErr := claimAutomationTurnAttempt(ctx, stores, logger, orgID, *run.AutomationRunID)
+		// validated against this job's lease (design doc 125). The payload's
+		// run is authoritative; the session's origin run is the fallback for
+		// legacy per-run sessions.
+		claimRunID := run.AutomationRunID
+		if automationTurn != nil {
+			claimRunID = &automationTurn.RunID
+		}
+		if claimRunID != nil {
+			owned, claimErr := claimAutomationTurnAttempt(ctx, stores, logger, orgID, *claimRunID)
 			if claimErr != nil {
 				return claimErr
 			}
@@ -8357,6 +8392,9 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		runtimeCeiling := services.Orchestrator.ResolveAbsoluteRuntimeCeiling(ctx, orgID)
 		jobCtx, cancel := context.WithTimeout(ctx, runtimeCeiling+agent.HandlerCleanupBuffer)
 		defer cancel()
+		if automationTurn != nil {
+			jobCtx = agent.WithAutomationTurn(jobCtx, automationTurn)
+		}
 
 		logger.Info().
 			Str("session_id", runID.String()).

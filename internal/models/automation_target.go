@@ -426,3 +426,35 @@ type AutomationRunResult struct {
 	AgentSessionID        *string                    `db:"agent_session_id" json:"-"`
 	RecordedAt            time.Time                  `db:"recorded_at" json:"recorded_at"`
 }
+
+// CheckpointProvenance is what PublishCheckpointWithProvenance records on
+// the owning generation together with the checkpoint it installs on the
+// session (design doc 125, "Checkpoint coherence"): the key, the head the
+// workspace was at, the dependency input fingerprint that applies to that
+// workspace, and whether the turn that produced it completed its review.
+type CheckpointProvenance struct {
+	GenerationID          uuid.UUID
+	HeadSHA               string
+	DependencyFingerprint *string
+	ReviewComplete        bool
+}
+
+// AutomationTurnWorkspace is what workspace preparation records on a run:
+// the merge-base the delta falls back to, the node the turn ran on, and the
+// restore cost when the turn restored a checkpoint.
+type AutomationTurnWorkspace struct {
+	BaseSHA              string
+	WorkerNodeID         string
+	RestoreSnapshotBytes *int64
+	RestoreDurationMS    *int
+}
+
+// AutomationTurnSummary is a completed run's review summary, embedded as
+// data in a later turn's prompt.
+type AutomationTurnSummary struct {
+	RunID       uuid.UUID
+	HeadSHA     string
+	TurnNumber  int
+	Summary     string
+	CompletedAt string
+}

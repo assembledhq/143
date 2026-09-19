@@ -73,6 +73,17 @@ func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Ses
 	if run.AutomationRunID == nil {
 		return nil
 	}
+	// A per-target session's runs (design doc 125) are completed by the
+	// automation turn completer from the result marker, never by the
+	// session's terminal status: the session outlives every run, and its
+	// origin run is only the first turn's. Per-target sessions are the
+	// interactive automation sessions; per-run sessions are single-run.
+	if run.IsInteractive() {
+		h.logger.Debug().
+			Str("automation_run_id", run.AutomationRunID.String()).
+			Msg("per-target automation session; completion is owned by the turn completer")
+		return nil
+	}
 
 	var runStatus models.AutomationRunStatus
 	switch status {

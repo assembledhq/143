@@ -537,14 +537,16 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 	// The visible user message is the transcript's copy of the turn's
 	// prompt. A fresh turn gets one too, so a recovery that continues from
 	// a bootstrap checkpoint finds a user message.
+	runID := in.Run.ID
 	message := &models.SessionMessage{
-		SessionID:  sessionID,
-		OrgID:      orgID,
-		ThreadID:   &threadID,
-		TurnNumber: turnNumber,
-		Role:       models.MessageRoleUser,
-		Content:    prompt,
-		Source:     models.SessionMessageSourceAutomationTurn,
+		SessionID:       sessionID,
+		OrgID:           orgID,
+		ThreadID:        &threadID,
+		TurnNumber:      turnNumber,
+		Role:            models.MessageRoleUser,
+		Content:         prompt,
+		Source:          models.SessionMessageSourceAutomationTurn,
+		AutomationRunID: &runID,
 	}
 	if err := db.NewSessionMessageStore(tx).CreateWithSource(ctx, message); err != nil {
 		return DispatchOutcome{}, fmt.Errorf("insert automation turn message: %w", err)
