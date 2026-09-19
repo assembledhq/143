@@ -258,6 +258,9 @@ type AutomationRunReservation struct {
 	PreviousHeadSHA    *string
 	HeadEpoch          *int
 	HeadResolution     *models.AutomationRunHeadResolution
+	// ResolvedHeadSHA is the head the turn reviews; nil keeps the stored
+	// value (the delivered head when nothing was resolved).
+	ResolvedHeadSHA    *string
 	HeadLookupDegraded bool
 }
 
@@ -295,6 +298,7 @@ func (s *AutomationRunStore) ReserveForExecution(ctx context.Context, tx pgx.Tx,
 		    previous_head_sha = @previous_head_sha,
 		    head_epoch = COALESCE(@head_epoch, head_epoch),
 		    head_resolution = COALESCE(@head_resolution, head_resolution),
+		    resolved_head_sha = COALESCE(@resolved_head_sha, resolved_head_sha),
 		    head_lookup_degraded = @head_lookup_degraded,
 		    updated_at = now()
 		WHERE id = @id AND org_id = @org_id
@@ -314,6 +318,7 @@ func (s *AutomationRunStore) ReserveForExecution(ctx context.Context, tx pgx.Tx,
 			"previous_head_sha":    r.PreviousHeadSHA,
 			"head_epoch":           r.HeadEpoch,
 			"head_resolution":      r.HeadResolution,
+			"resolved_head_sha":    r.ResolvedHeadSHA,
 			"head_lookup_degraded": r.HeadLookupDegraded,
 		})
 	if err != nil {
@@ -431,7 +436,7 @@ func (s *AutomationRunStore) ListAmbiguousPushCandidates(ctx context.Context, q 
 
 // StampHeadResolution records the ordering decided for a run after arrival
 // (a resolved ambiguity or a dispatch-time lookup).
-func (s *AutomationRunStore) StampHeadResolution(ctx context.Context, q DBTX, orgID, runID uuid.UUID, epoch *int, resolution models.AutomationRunHeadResolution) error {
+func (s *AutomationRunStore) StampHeadResolution(ctx context.Context, q DBTX, orgID, runID uuid.UUID, epoch *int, resolution models.AutomationRunHeadResolution, headSHA string) error {
 	if err := resolution.Validate(); err != nil {
 		return err
 	}
@@ -440,9 +445,11 @@ func (s *AutomationRunStore) StampHeadResolution(ctx context.Context, q DBTX, or
 	}
 	tag, err := q.Exec(ctx, `
 		UPDATE automation_runs
-		SET head_epoch = @epoch, head_resolution = @resolution, updated_at = now()
+		SET head_epoch = @epoch, head_resolution = @resolution,
+		    resolved_head_sha = NULLIF(@head_sha, ''),
+		    updated_at = now()
 		WHERE id = @id AND org_id = @org_id`,
-		pgx.NamedArgs{"id": runID, "org_id": orgID, "epoch": epoch, "resolution": resolution})
+		pgx.NamedArgs{"id": runID, "org_id": orgID, "epoch": epoch, "resolution": resolution, "head_sha": headSHA})
 	if err != nil {
 		return fmt.Errorf("stamp automation run head resolution: %w", err)
 	}

@@ -19,7 +19,7 @@ type fakeArrivalTargetStore struct {
 	adopted     []string
 	adoptedAt   []*time.Time
 	lifecycle   []models.AutomationTargetLifecycleState
-	observedAt  []time.Time
+	observedAt  []*time.Time
 	pendingAt   []time.Time
 	touched     []time.Time
 	lockCalls   int
@@ -57,7 +57,7 @@ func (f *fakeArrivalTargetStore) SetLifecycle(_ context.Context, _ db.DBTX, _, _
 	return nil
 }
 
-func (f *fakeArrivalTargetStore) SetLifecycleObserved(_ context.Context, _ db.DBTX, _, _ uuid.UUID, state models.AutomationTargetLifecycleState, observedAt time.Time) error {
+func (f *fakeArrivalTargetStore) SetLifecycleObserved(_ context.Context, _ db.DBTX, _, _ uuid.UUID, state models.AutomationTargetLifecycleState, observedAt *time.Time) error {
 	f.lifecycle = append(f.lifecycle, state)
 	f.observedAt = append(f.observedAt, observedAt)
 	return nil
@@ -234,6 +234,17 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 			wantLifecycle: []models.AutomationTargetLifecycleState{models.AutomationTargetLifecycleOpen, models.AutomationTargetLifecycleOpen},
 		},
 		{
+			name: "reopened delivery without a timestamp reopens the target but leaves the evidence unknown",
+			target: models.AutomationTarget{
+				ID: uuid.New(), LifecycleState: models.AutomationTargetLifecycleClosed,
+			},
+			req: GitHubEventTriggerRequest{
+				Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "reopened", HeadSHA: newer,
+			},
+			wantJob:       true,
+			wantLifecycle: []models.AutomationTargetLifecycleState{models.AutomationTargetLifecycleOpen},
+		},
+		{
 			name:   "merged event marks the target merged and executes as the final turn",
 			target: openTarget(),
 			req: GitHubEventTriggerRequest{
@@ -302,13 +313,9 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 			}
 			require.Equal(t, tt.wantTouched, targets.touched, "same-head deliveries advance the observed timestamp only when newer")
 			require.Equal(t, tt.wantLifecycle, targets.lifecycle, "lifecycle transitions match, including the openness refresh a timestamped pull_request delivery provides")
-			if tt.req.PullRequestUpdatedAt != nil {
-				require.Len(t, targets.observedAt, len(tt.wantLifecycle), "timestamped deliveries stamp every lifecycle write with their own time")
-				for _, observed := range targets.observedAt {
-					require.Equal(t, *tt.req.PullRequestUpdatedAt, observed, "lifecycle evidence carries the delivery's timestamp, not the processing time")
-				}
-			} else {
-				require.Empty(t, targets.observedAt, "a delivery without a timestamp is not openness evidence")
+			require.Len(t, targets.observedAt, len(tt.wantLifecycle), "every lifecycle write goes through the observed variant")
+			for _, observed := range targets.observedAt {
+				require.Equal(t, tt.req.PullRequestUpdatedAt, observed, "lifecycle evidence carries the delivery's timestamp, never the processing time; a missing timestamp leaves the evidence unknown")
 			}
 			if tt.wantJob {
 				require.Len(t, jobs.jobs, 1, "dispatchable run enqueues the automation_run job")

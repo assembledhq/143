@@ -536,3 +536,26 @@ func TestGithubContextFromRun(t *testing.T) {
 	require.Error(t, err, "malformed snapshot is rejected")
 	require.Equal(t, "42", targetKeyForRun(run, got), "target key is the PR number")
 }
+
+func TestTargetChangedSince(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	id := uuid.New()
+	tests := []struct {
+		name   string
+		before models.AutomationTarget
+		after  models.AutomationTarget
+		want   bool
+	}{
+		{name: "unchanged row", before: models.AutomationTarget{ID: id, UpdatedAt: now}, after: models.AutomationTarget{ID: id, UpdatedAt: now}, want: false},
+		{name: "any write moves the version", before: models.AutomationTarget{ID: id, UpdatedAt: now}, after: models.AutomationTarget{ID: id, UpdatedAt: now.Add(time.Microsecond)}, want: true},
+		{name: "a target created after the pre-read counts as changed", before: models.AutomationTarget{}, after: models.AutomationTarget{ID: id, UpdatedAt: now}, want: true},
+		{name: "no target on either side is unchanged", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, targetChangedSince(tt.before, tt.after), "updated_at is the target's mutation version")
+		})
+	}
+}

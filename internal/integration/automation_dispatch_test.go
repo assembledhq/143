@@ -868,9 +868,10 @@ func TestAutomationDispatch_MergedFinalTurn(t *testing.T) {
 }
 
 // TestAutomationDispatch_TurnCompletesWithoutCheckpoint proves the
-// session store's turn completion works without a checkpoint: the turn
-// counter advances and the native agent session id is recorded, the stale
-// key is cleared, and the next turn reconstructs rather than reusing turn 1.
+// session store's turn completion works without a new checkpoint: the turn
+// counter advances and the native agent session id is recorded, the
+// previously published checkpoint is retained, and the next turn is
+// numbered after the counted one.
 func TestAutomationDispatch_TurnCompletesWithoutCheckpoint(t *testing.T) {
 	h := newDispatchHarness(t)
 	ctx := context.Background()
@@ -881,14 +882,14 @@ func TestAutomationDispatch_TurnCompletesWithoutCheckpoint(t *testing.T) {
 	run1 := h.push(t, h1, t0)
 	first := h.dispatch(t, run1, models.AgentTypeCodex)
 	require.Equal(t, automations.DispatchReserved, first.Kind, "first run is reserved")
-	_, err := h.pool.Exec(ctx, `UPDATE sessions SET sandbox_state = 'running', snapshot_key = 'snapshots/stale' WHERE id = $1`, first.SessionID)
-	require.NoError(t, err, "seed a running sandbox with a stale key")
-	require.NoError(t, h.sessions.UpdateTurnComplete(ctx, h.orgID, first.SessionID, 1, nil, "agent-session", ""), "complete the turn without a checkpoint")
+	_, err := h.pool.Exec(ctx, `UPDATE sessions SET sandbox_state = 'running', snapshot_key = 'snapshots/bootstrap', checkpoint_kind = 'bootstrap', checkpointed_at = now() WHERE id = $1`, first.SessionID)
+	require.NoError(t, err, "seed a running sandbox with a published bootstrap checkpoint")
+	require.NoError(t, h.sessions.UpdateTurnComplete(ctx, h.orgID, first.SessionID, 1, nil, "agent-session", ""), "complete the turn without a new checkpoint")
 	session, err := h.sessions.GetByID(ctx, h.orgID, first.SessionID)
 	require.NoError(t, err, "reload session")
 	require.Equal(t, models.SessionStatusIdle, session.Status, "the session returns to idle")
 	require.Equal(t, 1, session.CurrentTurn, "the turn counter advances")
-	require.Nil(t, session.SnapshotKey, "the stale key is cleared")
+	require.Equal(t, "snapshots/bootstrap", *session.SnapshotKey, "the previously published checkpoint is retained")
 	require.Equal(t, models.SandboxStateRunning, session.SandboxState, "the sandbox state is left to its owner")
 	_, err = h.pool.Exec(ctx, `UPDATE automation_runs SET dispatch_state = 'done', status = 'completed', outcome_reason = 'turn_completed', completed_at = now() WHERE id = $1`, run1.ID)
 	require.NoError(t, err, "finish the run")
@@ -898,7 +899,7 @@ func TestAutomationDispatch_TurnCompletesWithoutCheckpoint(t *testing.T) {
 	run2 := h.push(t, h2, t0.Add(time.Second))
 	next := h.dispatch(t, run2, models.AgentTypeCodex)
 	require.Equal(t, automations.DispatchReserved, next.Kind, "the next push is reserved")
-	require.Equal(t, models.AutomationRunContinuationReconstructed, next.ContinuationMode, "without a checkpoint the next turn reconstructs")
+	require.Equal(t, models.AutomationRunContinuationReconstructed, next.ContinuationMode, "a retained checkpoint the generation has no provenance for is reconstructed context")
 	run2 = h.reload(t, run2.ID)
 	require.Equal(t, 2, *run2.TurnNumber, "the next turn is numbered after the counted one")
 }
@@ -924,4 +925,179 @@ func TestAutomationDispatch_DelayedDeliveryNeedsRevalidation(t *testing.T) {
 	var generations int
 	require.NoError(t, h.pool.QueryRow(ctx, `SELECT count(*) FROM automation_target_sessions WHERE org_id = $1`, h.orgID).Scan(&generations), "count generations")
 	require.Equal(t, 0, generations, "no generation was created on stale evidence")
+}
+
+// TestAutomationDispatch_SecondTieDuringLookup proves the version guard
+// catches an ambiguous arrival that changes neither epoch nor observed
+// head: a second tie delivered during the lookup, on a target already
+// pending, forces a retry instead of resolving from the stale lookup.
+func TestAutomationDispatch_SecondTieDuringLookup(t *testing.T) {
+	h := newDispatchHarness(t)
+	t0 := recentDeliveryTime()
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+	h3 := "3333333333333333333333333333333333333333"
+
+	runA := h.push(t, h1, t0)
+	runB := h.push(t, h2, t0)
+	require.Equal(t, models.AutomationRunHeadAmbiguous, *runB.HeadResolution, "the tying candidate is ambiguous")
+	resolver := &fakeHeadResolver{info: automations.PullRequestHeadInfo{SHA: h2, UpdatedAt: &t0, State: "open", BaseBranch: "main"}}
+	h.dispatcher.SetHeadResolver(resolver)
+	var runC models.AutomationRun
+	resolver.onLookup = func() {
+		runC = h.push(t, h3, t0)
+		require.Equal(t, models.AutomationRunHeadAmbiguous, *runC.HeadResolution, "the second tie is ambiguous too")
+	}
+
+	held := h.dispatch(t, runB, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchRetry, held.Kind, "a lookup taken before another tie arrived is retried")
+	runC = h.reload(t, runC.ID)
+	require.Equal(t, models.AutomationRunStatusPending, runC.Status, "the later tie is not superseded from a stale lookup")
+
+	resolver.info = automations.PullRequestHeadInfo{SHA: h3, UpdatedAt: &t0, State: "open", BaseBranch: "main"}
+	lost := h.dispatch(t, runB, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchTerminalized, lost.Kind, "with a current lookup the candidate not at the head is superseded")
+	runC = h.reload(t, runC.ID)
+	require.Equal(t, models.AutomationRunHeadAuthoritative, *runC.HeadResolution, "the candidate at the current head survives")
+	require.Equal(t, h3, *runC.ResolvedHeadSHA, "the survivor records the head it reviews")
+	_ = runA
+}
+
+// TestAutomationDispatch_ResolvedHeadSurvivesNonPushEpoch proves the
+// resolved head is the run's own: after a non-push delivery advances the
+// target past the run's resolved epoch, a degraded retry still reviews the
+// head the run resolved, not the head it was delivered with.
+func TestAutomationDispatch_ResolvedHeadSurvivesNonPushEpoch(t *testing.T) {
+	h := newDispatchHarness(t)
+	t0 := recentDeliveryTime()
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+	h3 := "3333333333333333333333333333333333333333"
+	h4 := "4444444444444444444444444444444444444444"
+
+	run1 := h.push(t, h1, t0)
+	first := h.dispatch(t, run1, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, first.Kind, "first run is reserved")
+	run2 := h.push(t, h2, t0.Add(time.Second))
+	t3 := t0.Add(2 * time.Second)
+	resolver := &fakeHeadResolver{info: automations.PullRequestHeadInfo{SHA: h3, UpdatedAt: &t3, State: "open", BaseBranch: "main"}}
+	h.dispatcher.SetHeadResolver(resolver)
+	waiting := h.dispatch(t, run2, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchWaiting, waiting.Kind, "the push waits behind the executing turn")
+	run2 = h.reload(t, run2.ID)
+	require.Equal(t, h3, *run2.ResolvedHeadSHA, "the waiting run records the head it resolved")
+
+	// A ready_for_review delivery observes a newer head and opens epoch 4
+	// without superseding the waiting push.
+	ready := h.deliver(t, automations.GitHubEventTriggerRequest{
+		Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "ready_for_review",
+		HeadSHA: h4, PullRequestUpdatedAt: timePtr(t0.Add(3 * time.Second)), BaseBranch: "main",
+	})
+	require.Equal(t, 4, *ready.HeadEpoch, "the non-push delivery opened epoch 4")
+	run2 = h.reload(t, run2.ID)
+	require.Equal(t, models.AutomationRunStatusPending, run2.Status, "a non-push delivery does not supersede the waiting push")
+
+	resolver.err = context.DeadlineExceeded
+	h.finishTurn(t, run1, h1)
+	degraded := h.dispatch(t, run2, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, degraded.Kind, "the degraded dispatch reserves the run")
+	require.Equal(t, h3, h.jobPayload(t, degraded.JobID)["head_sha"], "the turn reviews the head the run resolved, not the delivered or the target's latest")
+	run2 = h.reload(t, run2.ID)
+	require.Equal(t, 3, *run2.HeadEpoch, "the run keeps its resolved epoch")
+}
+
+// TestAutomationDispatch_ResolvedWaiterSurvivesNewTie proves a run whose
+// resolved head is the current head survives an ambiguity opened by a
+// later tie: the survivor rule compares the run's effective head, so the
+// only run covering the current head is not superseded.
+func TestAutomationDispatch_ResolvedWaiterSurvivesNewTie(t *testing.T) {
+	h := newDispatchHarness(t)
+	t0 := recentDeliveryTime()
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+	h3 := "3333333333333333333333333333333333333333"
+	h4 := "4444444444444444444444444444444444444444"
+
+	run1 := h.push(t, h1, t0)
+	first := h.dispatch(t, run1, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, first.Kind, "first run is reserved")
+	run2 := h.push(t, h2, t0.Add(time.Second))
+	t3 := t0.Add(2 * time.Second)
+	resolver := &fakeHeadResolver{info: automations.PullRequestHeadInfo{SHA: h3, UpdatedAt: &t3, State: "open", BaseBranch: "main"}}
+	h.dispatcher.SetHeadResolver(resolver)
+	waiting := h.dispatch(t, run2, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchWaiting, waiting.Kind, "the push waits behind the executing turn")
+
+	// A push at H4 tying the observed H3 timestamp opens an ambiguity.
+	tie := h.push(t, h4, t3)
+	require.Equal(t, models.AutomationRunHeadAmbiguous, *tie.HeadResolution, "the tying push is ambiguous")
+	h.finishTurn(t, run1, h1)
+	survivor := h.dispatch(t, run2, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, survivor.Kind, "the run whose resolved head is current survives the ambiguity")
+	require.Equal(t, h3, h.jobPayload(t, survivor.JobID)["head_sha"], "the survivor reviews the current head")
+	tie = h.reload(t, tie.ID)
+	require.Equal(t, models.AutomationRunStatusSkipped, tie.Status, "the candidate at another head is superseded")
+	require.Equal(t, run2.ID, *tie.SupersededByRunID, "the loser points at the survivor")
+}
+
+// TestAutomationDispatch_UntimestampedReopenNeedsRevalidation proves a
+// reopened delivery without a timestamp transitions the target but leaves
+// its openness unknown, so a fresh generation still requires a lookup.
+func TestAutomationDispatch_UntimestampedReopenNeedsRevalidation(t *testing.T) {
+	h := newDispatchHarness(t)
+	ctx := context.Background()
+	t0 := recentDeliveryTime()
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+
+	run1 := h.push(t, h1, t0)
+	_, err := h.pool.Exec(ctx, `UPDATE automation_targets SET lifecycle_state = 'closed', lifecycle_updated_at = now() WHERE id = $1`, *run1.TargetID)
+	require.NoError(t, err, "close the target")
+	skipped, err := h.runs.TerminalizeUnstarted(ctx, nil, h.orgID, run1.ID, models.AutomationRunOutcomePRClosed, nil, "closed before dispatch")
+	require.NoError(t, err, "skip the earlier push")
+	require.True(t, skipped, "the earlier push is out of the way so the reopened run is next")
+	reopened := h.deliver(t, automations.GitHubEventTriggerRequest{
+		Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "reopened", HeadSHA: h2, BaseBranch: "main",
+	})
+	target, err := h.targets.GetByID(ctx, h.orgID, *reopened.TargetID)
+	require.NoError(t, err, "reload target")
+	require.Equal(t, models.AutomationTargetLifecycleOpen, target.LifecycleState, "the reopen transitions the target")
+	require.Nil(t, target.LifecycleUpdatedAt, "an untimestamped transition leaves the evidence unknown")
+
+	h.dispatcher.SetHeadResolver(&fakeHeadResolver{err: context.DeadlineExceeded})
+	held := h.dispatch(t, reopened, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchRetry, held.Kind, "unknown openness with a failed lookup cannot open a generation")
+	var generations int
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT count(*) FROM automation_target_sessions WHERE org_id = $1`, h.orgID).Scan(&generations), "count generations")
+	require.Equal(t, 0, generations, "no generation was created on unknown evidence")
+}
+
+// TestAutomationDispatch_OldMergedDeliveryFreshGeneration proves the
+// merged final turn on a target with stale evidence and no generation
+// refreshes the evidence for the merged state rather than reopening it.
+func TestAutomationDispatch_OldMergedDeliveryFreshGeneration(t *testing.T) {
+	h := newDispatchHarness(t)
+	ctx := context.Background()
+	h1 := "1111111111111111111111111111111111111111"
+
+	_, err := h.pool.Exec(ctx, `UPDATE automations SET github_event_triggers = ARRAY['github.pull_request.updated', 'github.pull_request.merged'] WHERE id = $1`, h.automation.ID)
+	require.NoError(t, err, "subscribe the automation to merged events")
+	h.automation, err = db.NewAutomationStore(h.pool).GetByID(ctx, h.orgID, h.automation.ID)
+	require.NoError(t, err, "reload the automation")
+
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	merged := h.deliver(t, automations.GitHubEventTriggerRequest{
+		Event: models.AutomationGitHubEventPullRequestMerged, PullRequestAction: "closed", HeadSHA: h1, PullRequestUpdatedAt: &old, BaseBranch: "main",
+	})
+	h.dispatcher.SetHeadResolver(&fakeHeadResolver{info: automations.PullRequestHeadInfo{SHA: h1, UpdatedAt: &old, State: "closed", BaseBranch: "main"}})
+	final := h.dispatch(t, merged, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, final.Kind, "the merged final turn starts a fresh generation")
+	require.Equal(t, models.AutomationRunContinuationFresh, final.ContinuationMode, "no generation existed")
+	target, err := h.targets.GetByID(ctx, h.orgID, *merged.TargetID)
+	require.NoError(t, err, "reload target")
+	require.Equal(t, models.AutomationTargetLifecycleMerged, target.LifecycleState, "the evidence refresh keeps the merged state")
+	require.WithinDuration(t, time.Now(), *target.LifecycleUpdatedAt, time.Minute, "the live lookup refreshed the evidence")
+
+	late := h.push(t, "2222222222222222222222222222222222222222", time.Now().UTC())
+	require.Equal(t, models.AutomationRunStatusSkipped, late.Status, "a push after merge is still skipped at arrival")
 }

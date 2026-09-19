@@ -99,6 +99,7 @@ type AutomationRun struct {
 	PullRequestUpdatedAt *time.Time                       `db:"pull_request_updated_at" json:"pull_request_updated_at,omitempty"`
 	HeadEpoch            *int                             `db:"head_epoch"              json:"head_epoch,omitempty"`
 	HeadResolution       *AutomationRunHeadResolution     `db:"head_resolution"         json:"head_resolution,omitempty"`
+	ResolvedHeadSHA      *string                          `db:"resolved_head_sha"       json:"resolved_head_sha,omitempty"`
 	ContinuationMode     *AutomationRunContinuationMode   `db:"continuation_mode"       json:"continuation_mode,omitempty"`
 	ContinuationReason   *AutomationRunContinuationReason `db:"continuation_reason"     json:"continuation_reason,omitempty"`
 	NativeContext        *bool                            `db:"native_context"          json:"native_context,omitempty"`
