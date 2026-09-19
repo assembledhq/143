@@ -39,12 +39,12 @@ func (s *TurnStore) LoadTarget(ctx context.Context, orgID, targetID uuid.UUID) (
 	return s.targets.GetByID(ctx, orgID, targetID)
 }
 
-func (s *TurnStore) AttemptOwned(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID) (bool, error) {
-	return s.runs.AttemptOwned(ctx, tx, orgID, runID, lockToken)
+func (s *TurnStore) EndInterruptedAttempt(ctx context.Context, orgID, runID, sessionID, lockToken uuid.UUID, status models.SessionStatus) (bool, error) {
+	return s.runs.EndInterruptedAttempt(ctx, orgID, runID, sessionID, lockToken, status)
 }
 
-func (s *TurnStore) RecordContinuationFallback(ctx context.Context, orgID, runID, lockToken uuid.UUID, reason models.AutomationRunContinuationReason) (bool, error) {
-	return s.runs.RecordContinuationFallback(ctx, orgID, runID, lockToken, reason)
+func (s *TurnStore) RecordContinuationFallback(ctx context.Context, orgID, runID, lockToken uuid.UUID, reason models.AutomationRunContinuationReason, baselineHeadSHA *string) (bool, error) {
+	return s.runs.RecordContinuationFallback(ctx, orgID, runID, lockToken, reason, baselineHeadSHA)
 }
 
 func (s *TurnStore) LoadGeneration(ctx context.Context, orgID, targetID uuid.UUID, generation int) (models.AutomationTargetSession, error) {

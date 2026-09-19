@@ -69,37 +69,53 @@ func (s *AutomationRunStore) RecordTurnDuration(ctx context.Context, q DBTX, org
 	return tag.RowsAffected() > 0, nil
 }
 
-// AttemptOwned reports whether the run is still executing under this
-// attempt lock token and the job lease is still held. Attempt-end writes
-// that carry no marker (the drain path) check it inside their transaction.
-func (s *AutomationRunStore) AttemptOwned(ctx context.Context, q DBTX, orgID, runID, lockToken uuid.UUID) (bool, error) {
-	if q == nil {
-		q = s.db
+// EndInterruptedAttempt restores the session's pre-turn status for an
+// interrupted (drained) attempt without a marker. The run and job rows are
+// locked and validated in the same statement as the session write, so a
+// paused worker whose job was reclaimed between a check and a write cannot
+// reset the next attempt's session: the lock waits for a concurrent claim
+// and the predicate is re-evaluated after it. Returns whether the session
+// was updated.
+func (s *AutomationRunStore) EndInterruptedAttempt(ctx context.Context, orgID, runID, sessionID, lockToken uuid.UUID, status models.SessionStatus) (bool, error) {
+	if lockToken == uuid.Nil {
+		return false, errors.New("end interrupted attempt: lock token is required")
 	}
-	var owned bool
-	err := q.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM automation_runs r
-			WHERE r.id = @id AND r.org_id = @org_id`+automationRunAttemptFence+`
-		)`, pgx.NamedArgs{"id": runID, "org_id": orgID, "lock_token": lockToken}).Scan(&owned)
+	tag, err := s.db.Exec(ctx, `
+		WITH owned AS (
+			SELECT r.id
+			FROM automation_runs r
+			JOIN jobs j ON j.id = r.job_id AND j.org_id = r.org_id
+			WHERE r.id = @id AND r.org_id = @org_id AND r.session_id = @session_id
+			  AND r.dispatch_state = 'executing'
+			  AND r.attempt_lock_token = @lock_token
+			  AND j.status = 'running' AND j.lock_token = @lock_token
+			FOR UPDATE OF r, j
+		)
+		UPDATE sessions s
+		SET status = @status, last_activity_at = now()
+		FROM owned
+		WHERE s.id = @session_id AND s.org_id = @org_id`,
+		pgx.NamedArgs{"id": runID, "org_id": orgID, "session_id": sessionID, "lock_token": lockToken, "status": status})
 	if err != nil {
-		return false, fmt.Errorf("check automation attempt ownership: %w", err)
+		return false, fmt.Errorf("end interrupted automation attempt: %w", err)
 	}
-	return owned, nil
+	return tag.RowsAffected() > 0, nil
 }
 
 // RecordContinuationFallback records that a continued turn could not
 // restore its checkpoint and is rebuilding the workspace in the same
-// session (design doc 125, readiness "rebuild" with restore_failed).
-func (s *AutomationRunStore) RecordContinuationFallback(ctx context.Context, orgID, runID, lockToken uuid.UUID, reason models.AutomationRunContinuationReason) (bool, error) {
+// session (design doc 125, readiness "rebuild" with restore_failed). The
+// delta baseline moves with it: native context is gone, so the last
+// completed review is the baseline, or none.
+func (s *AutomationRunStore) RecordContinuationFallback(ctx context.Context, orgID, runID, lockToken uuid.UUID, reason models.AutomationRunContinuationReason, baselineHeadSHA *string) (bool, error) {
 	if err := reason.Validate(); err != nil {
 		return false, err
 	}
 	tag, err := s.db.Exec(ctx, `
 		UPDATE automation_runs r
-		SET continuation_mode = @mode, continuation_reason = @reason, updated_at = now()
+		SET continuation_mode = @mode, continuation_reason = @reason, previous_head_sha = @previous_head_sha, updated_at = now()
 		WHERE r.id = @id AND r.org_id = @org_id`+automationRunAttemptFence,
-		pgx.NamedArgs{"id": runID, "org_id": orgID, "lock_token": lockToken, "mode": models.AutomationRunContinuationReconstructed, "reason": reason})
+		pgx.NamedArgs{"id": runID, "org_id": orgID, "lock_token": lockToken, "mode": models.AutomationRunContinuationReconstructed, "reason": reason, "previous_head_sha": baselineHeadSHA})
 	if err != nil {
 		return false, fmt.Errorf("record automation continuation fallback: %w", err)
 	}
