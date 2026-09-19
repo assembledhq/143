@@ -224,3 +224,16 @@ func TestCapabilityFilteredToolSourceEmptySnapshotWithAllowlistBlocksProviders(t
 	}
 	require.Equal(t, []string{"capability_list"}, visible, "an empty snapshot under an allowlist exposes nothing that needs a grant")
 }
+
+func TestCapabilityFilteredToolSourcePolicyReadUnderAllowlist(t *testing.T) {
+	t.Parallel()
+	source := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{{Name: "code_review_history_policy"}, {Name: "code_review_history_update_policy"}}}, ToolCapabilityPolicy{
+		Capabilities:  []models.AgentCapabilitySnapshotItem{{ID: models.AgentCapabilityCodeReviewPolicy, AccessLevel: models.AgentCapabilityAccessRead}},
+		ToolAllowlist: models.PerTargetToolAllowlist,
+	})
+	var visible []string
+	for _, tool := range source.ListTools() {
+		visible = append(visible, tool.Name)
+	}
+	require.Equal(t, []string{"code_review_history_policy"}, visible, "a policy-management grant keeps the policy read and loses the update under the allowlist")
+}

@@ -1776,6 +1776,9 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	sandboxCfg.Env["INTERNAL_API_TOKEN"] = internalToken
 	sandboxCfg.Env["INTERNAL_API_URL"] = o.internalAPIURL
 	sandboxCfg.Env[internalapi.CodingSessionIDEnvVar] = session.ID.String()
+	if perTargetTurn {
+		sandboxCfg.Env[models.ToolAllowlistEnvVar] = models.ToolAllowlistEnvValue()
+	}
 	if evalBootstrapRunID != nil {
 		sandboxCfg.Env["EVAL_BOOTSTRAP_TOOLS_ENABLED"] = "true"
 		sandboxCfg.Env["EVAL_BOOTSTRAP_RUN_ID"] = evalBootstrapRunID.String()

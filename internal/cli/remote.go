@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/mcp"
 )
 
@@ -42,7 +43,13 @@ func newPreviewAugmentedToolSource(base mcp.ToolSource, client *Client) mcp.Tool
 // The preview executor is returned alongside the source so callers can
 // configure it (e.g. attaching --wait progress output) without reaching back
 // through the capability wrapper, which has to stay on the outside.
-func newInternalToolSource(ctx context.Context, base mcp.ToolSource, token, apiURL string, stderr io.Writer) (mcp.ToolSource, *previewToolExecutor) {
+//
+// envAllowlist is the positive tool allowlist carried by the sandbox
+// environment for a per-target automation turn (design doc 125). When it is
+// set the filter fails closed: it is applied whether or not the snapshot
+// fetch succeeds, with no capability grants when it fails, so a fetch error
+// exposes nothing that needs a grant.
+func newInternalToolSource(ctx context.Context, base mcp.ToolSource, token, apiURL string, stderr io.Writer, envAllowlist []string) (mcp.ToolSource, *previewToolExecutor) {
 	preview := &previewToolExecutor{client: NewClient(Config{ServerURL: apiURL, Token: token}).WithRequestTimeout(previewWaitTimeout), internal: true}
 	var source mcp.ToolSource = &previewAugmentedToolSource{
 		base:    mcp.NewInternalMetaToolSource(base, token, apiURL),
@@ -50,11 +57,19 @@ func newInternalToolSource(ctx context.Context, base mcp.ToolSource, token, apiU
 	}
 	snapshot, err := mcp.FetchCapabilitySnapshot(ctx, token, apiURL)
 	switch {
+	case envAllowlist != nil:
+		var capabilities []models.AgentCapabilitySnapshotItem
+		if err != nil {
+			fmt.Fprintf(stderr, "143-tools: capability snapshot unavailable; the tool allowlist applies with no grants: %v\n", err)
+		} else {
+			capabilities = snapshot.Snapshot
+		}
+		source = mcp.NewCapabilityFilteredToolSource(source, mcp.ToolCapabilityPolicy{Capabilities: capabilities, ToolAllowlist: envAllowlist})
 	case err != nil:
 		fmt.Fprintf(stderr, "143-tools: capability snapshot unavailable, running without filter: %v\n", err)
 	case snapshot.ToolAllowlist != nil:
-		// An allowlisted session (a per-target automation turn) is filtered
-		// whatever its snapshot holds, even nothing.
+		// An allowlisted session is filtered whatever its snapshot holds,
+		// even nothing.
 		source = mcp.NewCapabilityFilteredToolSource(source, mcp.ToolCapabilityPolicy{Capabilities: snapshot.Snapshot, ToolAllowlist: snapshot.ToolAllowlist})
 	case len(snapshot.Snapshot) > 0:
 		source = mcp.NewCapabilityFilteredToolSource(source, mcp.ToolCapabilityPolicy{Capabilities: snapshot.Snapshot})

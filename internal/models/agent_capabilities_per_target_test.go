@@ -23,6 +23,7 @@ func TestRestrictCapabilitySnapshotForPerTargetTurn(t *testing.T) {
 				{ID: AgentCapabilityIssueSources, AccessLevel: AgentCapabilityAccessRead},
 				{ID: AgentCapabilityTeamDocs, AccessLevel: AgentCapabilityAccessRead},
 				{ID: AgentCapabilityProductionDiagnostics, AccessLevel: AgentCapabilityAccessRead},
+				{ID: AgentCapabilityCodeReviewPolicy, AccessLevel: AgentCapabilityAccessWrite},
 			},
 			want: []AgentCapabilitySnapshotItem{
 				{ID: AgentCapabilitySessionHistory, AccessLevel: AgentCapabilityAccessRead},
@@ -31,6 +32,7 @@ func TestRestrictCapabilitySnapshotForPerTargetTurn(t *testing.T) {
 				{ID: AgentCapabilityIssueSources, AccessLevel: AgentCapabilityAccessRead},
 				{ID: AgentCapabilityTeamDocs, AccessLevel: AgentCapabilityAccessRead},
 				{ID: AgentCapabilityProductionDiagnostics, AccessLevel: AgentCapabilityAccessRead},
+				{ID: AgentCapabilityCodeReviewPolicy, AccessLevel: AgentCapabilityAccessRead},
 			},
 		},
 		{
@@ -38,7 +40,6 @@ func TestRestrictCapabilitySnapshotForPerTargetTurn(t *testing.T) {
 			in: []AgentCapabilitySnapshotItem{
 				{ID: AgentCapabilityPublishing, AccessLevel: AgentCapabilityAccessPublish},
 				{ID: AgentCapabilityAutomationManagement, AccessLevel: AgentCapabilityAccessWrite},
-				{ID: AgentCapabilityCodeReviewPolicy, AccessLevel: AgentCapabilityAccessWrite},
 				{ID: AgentCapabilitySlackNotifications, AccessLevel: AgentCapabilityAccessWrite},
 				{ID: AgentCapabilityExternalComments, AccessLevel: AgentCapabilityAccessWrite},
 				{ID: AgentCapabilityEvalAuthoring, AccessLevel: AgentCapabilityAccessWrite},
@@ -54,6 +55,13 @@ func TestRestrictCapabilitySnapshotForPerTargetTurn(t *testing.T) {
 			require.Equal(t, tt.want, RestrictCapabilitySnapshotForPerTargetTurn(tt.in), "the positive allowlist decides, not the grant")
 		})
 	}
+}
+
+func TestToolAllowlistEnvRoundTrip(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, PerTargetToolAllowlist, ToolAllowlistFromEnvValue(ToolAllowlistEnvValue()), "the environment form round-trips")
+	require.Nil(t, ToolAllowlistFromEnvValue(""), "unset means no allowlist")
+	require.Equal(t, []string{"a:b"}, ToolAllowlistFromEnvValue(" a:b , "), "whitespace and empty entries are dropped")
 }
 
 func TestPerTargetToolScopes(t *testing.T) {
