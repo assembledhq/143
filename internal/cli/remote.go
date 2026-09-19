@@ -49,10 +49,15 @@ func newInternalToolSource(ctx context.Context, base mcp.ToolSource, token, apiU
 		preview: preview,
 	}
 	snapshot, err := mcp.FetchCapabilitySnapshot(ctx, token, apiURL)
-	if err != nil {
+	switch {
+	case err != nil:
 		fmt.Fprintf(stderr, "143-tools: capability snapshot unavailable, running without filter: %v\n", err)
-	} else if len(snapshot) > 0 {
-		source = mcp.NewCapabilityFilteredToolSource(source, mcp.ToolCapabilityPolicy{Capabilities: snapshot})
+	case snapshot.ToolAllowlist != nil:
+		// An allowlisted session (a per-target automation turn) is filtered
+		// whatever its snapshot holds, even nothing.
+		source = mcp.NewCapabilityFilteredToolSource(source, mcp.ToolCapabilityPolicy{Capabilities: snapshot.Snapshot, ToolAllowlist: snapshot.ToolAllowlist})
+	case len(snapshot.Snapshot) > 0:
+		source = mcp.NewCapabilityFilteredToolSource(source, mcp.ToolCapabilityPolicy{Capabilities: snapshot.Snapshot})
 	}
 	return source, preview
 }

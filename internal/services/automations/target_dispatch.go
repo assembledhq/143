@@ -474,6 +474,9 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 		// and saving the native agent session id on the primary thread,
 		// which the next continued turn resumes from.
 		template.InteractionMode = models.SessionInteractionModeInteractive
+		// The turn executes with the run's snapshot restricted to the
+		// positive per-target allowlist.
+		template.CapabilitySnapshot = models.RestrictCapabilitySnapshotForPerTargetTurn(in.Run.CapabilitySnapshot)
 		if template.ExecutionBrief != nil && strings.TrimSpace(*template.ExecutionBrief) != "" {
 			goal = *template.ExecutionBrief
 		}
@@ -516,7 +519,7 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 			}
 			return DispatchOutcome{}, fmt.Errorf("claim primary thread for automation turn: %w", err)
 		}
-		if err := d.sessions.UpsertCapabilitySnapshotInTx(ctx, tx, orgID, claimed.ID, in.Run.CapabilitySnapshot); err != nil {
+		if err := d.sessions.UpsertCapabilitySnapshotInTx(ctx, tx, orgID, claimed.ID, models.RestrictCapabilitySnapshotForPerTargetTurn(in.Run.CapabilitySnapshot)); err != nil {
 			return DispatchOutcome{}, err
 		}
 		sessionID = claimed.ID
