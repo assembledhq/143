@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -49,7 +50,7 @@ func newDispatchHarness(t *testing.T) *dispatchHarness {
 	jobs := db.NewJobStore(pool)
 	trigger := automations.NewGitHubEventTriggerService(automationStore, runs, jobs, pool, zerolog.Nop())
 	trigger.SetTargetStores(targets, runs)
-	dispatcher := automations.NewTargetDispatcher(pool, targets, runs, sessions, threads, jobs, zerolog.Nop())
+	dispatcher := automations.NewTargetDispatcher(pool, automationStore, targets, runs, sessions, threads, jobs, zerolog.Nop())
 	return &dispatchHarness{
 		pool: pool, orgID: orgID, repoID: repoID, automation: automation,
 		runs: runs, targets: targets, sessions: sessions, jobs: jobs, trigger: trigger, dispatcher: dispatcher,
@@ -159,10 +160,12 @@ func (h *dispatchHarness) jobPayload(t *testing.T, jobID uuid.UUID) map[string]s
 	var raw json.RawMessage
 	var jobType, dedupeKey string
 	require.NoError(t, h.pool.QueryRow(context.Background(), `SELECT job_type, COALESCE(dedupe_key, ''), payload FROM jobs WHERE id = $1`, jobID).Scan(&jobType, &dedupeKey, &raw), "load job")
-	var payload map[string]string
-	require.NoError(t, json.Unmarshal(raw, &payload), "decode payload")
-	payload["__job_type"] = jobType
-	payload["__dedupe_key"] = dedupeKey
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(raw, &decoded), "decode payload")
+	payload := map[string]string{"__job_type": jobType, "__dedupe_key": dedupeKey}
+	for key, value := range decoded {
+		payload[key] = fmt.Sprint(value)
+	}
 	return payload
 }
 
@@ -257,7 +260,7 @@ func TestAutomationDispatch_FreshThenContinue(t *testing.T) {
 	require.NotEmpty(t, payload["structured_prompt"], "payload carries the turn prompt")
 	var messageCount int
 	require.NoError(t, h.pool.QueryRow(ctx, `SELECT count(*) FROM session_messages WHERE org_id = $1 AND session_id = $2 AND role = 'user' AND source = 'automation_turn'`, h.orgID, first.SessionID).Scan(&messageCount), "count messages")
-	require.Equal(t, 1, messageCount, "the visible user message is inserted on the session")
+	require.Equal(t, 2, messageCount, "each turn inserts its visible user message on the session")
 	session, err := h.sessions.GetByID(ctx, h.orgID, first.SessionID)
 	require.NoError(t, err, "load session")
 	require.Equal(t, models.SessionStatusRunning, session.Status, "the continued session is claimed running")
@@ -372,4 +375,213 @@ func (h *dispatchHarness) activeGenerationIDBefore(t *testing.T, targetID uuid.U
 	var id uuid.UUID
 	require.NoError(t, h.pool.QueryRow(context.Background(), `SELECT id FROM automation_target_sessions WHERE org_id = $1 AND target_id = $2 AND generation = 1`, h.orgID, targetID).Scan(&id), "load generation 1 id")
 	return id
+}
+
+// fakeHeadResolver answers the dispatch-time lookup from a script.
+type fakeHeadResolver struct {
+	info  automations.PullRequestHeadInfo
+	err   error
+	calls int
+}
+
+func (f *fakeHeadResolver) ResolvePullRequestHead(_ context.Context, _, _ uuid.UUID, _ int) (automations.PullRequestHeadInfo, error) {
+	f.calls++
+	return f.info, f.err
+}
+
+// TestAutomationDispatch_HeadLookup proves the dispatch-time head rules
+// against real rows: a missed webhook is adopted and reviewed, a closed
+// pull request skips, ambiguous candidates resolve to the one at the
+// current head, and when none holds it the dispatching candidate reviews it.
+func TestAutomationDispatch_HeadLookup(t *testing.T) {
+	h := newDispatchHarness(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+	h3 := "3333333333333333333333333333333333333333"
+	t3 := t0.Add(10 * time.Second)
+
+	// A delivered push at H1 while GitHub already reports H3: the run
+	// reviews H3 with a new epoch and records the resolved base branch.
+	resolver := &fakeHeadResolver{info: automations.PullRequestHeadInfo{SHA: h3, UpdatedAt: &t3, State: "open", BaseBranch: "release"}}
+	h.dispatcher.SetHeadResolver(resolver)
+	run1 := h.push(t, h1, t0)
+	first := h.dispatch(t, run1, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, first.Kind, "missed-webhook run is reserved")
+	require.Equal(t, 1, resolver.calls, "the lookup runs once per dispatch")
+	run1 = h.reload(t, run1.ID)
+	require.Equal(t, 2, *run1.HeadEpoch, "the missed head opens a new epoch")
+	require.False(t, run1.HeadLookupDegraded, "a successful lookup is not degraded")
+	payload := h.jobPayload(t, first.JobID)
+	require.Equal(t, h3, payload["head_sha"], "the turn reviews the current head, not the delivered one")
+	target, err := h.targets.GetByID(ctx, h.orgID, *run1.TargetID)
+	require.NoError(t, err, "reload target")
+	require.Equal(t, h3, *target.ObservedHeadSHA, "the target observed the current head")
+	generation := h.activeGeneration(t, target.ID)
+	require.Equal(t, h3, *generation.LastAttemptedHeadSHA, "the generation records the head being reviewed")
+	require.Equal(t, "release", *generation.LastBaseRef, "the generation records the resolved base branch")
+	h.finishTurn(t, run1, h3)
+
+	// Two pushes with equal timestamps at different heads: the first is
+	// strictly newer than the watermark and authoritative, the second ties
+	// it and is ambiguous. The lookup resolves the tie to the candidate at
+	// the current head.
+	tie := t3.Add(time.Minute)
+	runA := h.push(t, h1, tie)
+	runB := h.push(t, h2, tie)
+	require.Equal(t, models.AutomationRunHeadAuthoritative, *runA.HeadResolution, "first tie candidate is authoritative")
+	require.Equal(t, 3, *runA.HeadEpoch, "first tie candidate opened epoch 3")
+	require.Equal(t, models.AutomationRunHeadAmbiguous, *runB.HeadResolution, "second tie candidate is ambiguous")
+	require.Nil(t, runB.HeadEpoch, "an ambiguous candidate has no epoch")
+	require.Equal(t, models.AutomationRunDispatchWaiting, *runB.DispatchState, "ambiguous candidates wait visibly")
+	resolver.info = automations.PullRequestHeadInfo{SHA: h2, UpdatedAt: &tie, State: "open", BaseBranch: "release"}
+	lost := h.dispatch(t, runA, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchTerminalized, lost.Kind, "the candidate without the current head is superseded")
+	require.Equal(t, models.AutomationRunOutcomeSuperseded, lost.OutcomeReason, "superseded outcome is recorded")
+	runB = h.reload(t, runB.ID)
+	require.Equal(t, models.AutomationRunHeadAuthoritative, *runB.HeadResolution, "the candidate at the current head is stamped authoritative")
+	require.Equal(t, 4, *runB.HeadEpoch, "the resolved head opened epoch 4")
+	target, err = h.targets.GetByID(ctx, h.orgID, target.ID)
+	require.NoError(t, err, "reload target")
+	require.False(t, target.HeadResolutionPending, "resolution clears the pending flag")
+	require.Nil(t, target.HeadResolutionDeadlineAt, "resolution clears the deadline")
+	runA = h.reload(t, runA.ID)
+	require.Equal(t, runB.ID, *runA.SupersededByRunID, "the loser points at the survivor")
+	won := h.dispatch(t, runB, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, won.Kind, "the survivor is reserved")
+	h.finishTurn(t, runB, h2)
+
+	// A tie where no candidate holds the current head (a missed webhook
+	// for H6): the dispatching run becomes the survivor and reviews H6, and
+	// the ambiguous candidate is superseded.
+	tie2 := tie.Add(time.Minute)
+	h4 := "4444444444444444444444444444444444444444"
+	h5 := "5555555555555555555555555555555555555555"
+	h6 := "6666666666666666666666666666666666666666"
+	runC := h.push(t, h4, tie2)
+	runD := h.push(t, h5, tie2)
+	require.Equal(t, models.AutomationRunHeadAmbiguous, *runD.HeadResolution, "the tying candidate is ambiguous")
+	t6 := tie2.Add(time.Second)
+	resolver.info = automations.PullRequestHeadInfo{SHA: h6, UpdatedAt: &t6, State: "open", BaseBranch: "release"}
+	survivor := h.dispatch(t, runC, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, survivor.Kind, "the dispatching run survives and reviews the current head")
+	require.Equal(t, h6, h.jobPayload(t, survivor.JobID)["head_sha"], "the survivor reviews the missed head")
+	runD = h.reload(t, runD.ID)
+	require.Equal(t, models.AutomationRunStatusSkipped, runD.Status, "the other candidate is superseded")
+	require.Equal(t, runC.ID, *runD.SupersededByRunID, "the other candidate points at the survivor")
+	h.finishTurn(t, runC, h6)
+
+	// A closed pull request skips at dispatch.
+	runE := h.push(t, h4, t6.Add(time.Minute))
+	resolver.info = automations.PullRequestHeadInfo{SHA: h4, State: "closed"}
+	closed := h.dispatch(t, runE, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchTerminalized, closed.Kind, "a closed pull request is skipped")
+	require.Equal(t, models.AutomationRunOutcomePRClosed, closed.OutcomeReason, "pr_closed is recorded")
+}
+
+// TestAutomationDispatch_LookupFailureWithAmbiguity proves that a failed
+// lookup holds ambiguous candidates as waiting with backoff instead of
+// guessing, and that a failed lookup without ambiguity degrades to the
+// delivered head.
+func TestAutomationDispatch_LookupFailureWithAmbiguity(t *testing.T) {
+	h := newDispatchHarness(t)
+	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+	resolver := &fakeHeadResolver{err: context.DeadlineExceeded}
+	h.dispatcher.SetHeadResolver(resolver)
+
+	runA := h.push(t, h1, t0)
+	runB := h.push(t, h2, t0)
+	held := h.dispatch(t, runA, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchRetry, held.Kind, "an ambiguous candidate is held while the lookup fails")
+	require.Equal(t, 30*time.Second, held.RetryAfter, "the first retry is 30 seconds out")
+	require.Greater(t, held.MaxWait, 30*time.Minute, "the hold is bounded beyond the ambiguity window")
+	runA = h.reload(t, runA.ID)
+	require.Equal(t, models.AutomationRunDispatchWaiting, *runA.DispatchState, "the held candidate stays waiting")
+	require.Equal(t, models.AutomationRunStatusPending, runA.Status, "the held candidate stays pending")
+	_ = runB
+
+	// A later authoritative push on a fresh target degrades when the
+	// lookup fails and nothing is ambiguous.
+	h.finishAmbiguity(t, *runA.TargetID)
+	runC := h.push(t, "3333333333333333333333333333333333333333", t0.Add(time.Minute))
+	degraded := h.dispatch(t, runC, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, degraded.Kind, "an authoritative push dispatches on lookup failure")
+	runC = h.reload(t, runC.ID)
+	require.True(t, runC.HeadLookupDegraded, "the run records the degraded lookup")
+}
+
+// finishAmbiguity clears a target's ambiguity state and skips its ambiguous
+// candidates, standing in for the deadline sweep that lands with completion.
+func (h *dispatchHarness) finishAmbiguity(t *testing.T, targetID uuid.UUID) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := h.pool.Exec(ctx, `UPDATE automation_runs SET status = 'skipped', dispatch_state = 'done', outcome_reason = 'superseded', completed_at = now() WHERE org_id = $1 AND target_id = $2 AND head_resolution = 'ambiguous'`, h.orgID, targetID)
+	require.NoError(t, err, "skip ambiguous candidates")
+	require.NoError(t, h.targets.ClearHeadResolutionPending(ctx, nil, h.orgID, targetID), "clear ambiguity")
+}
+
+// TestAutomationDispatch_ThreadClaimContentionWaits proves a primary thread
+// that cannot be claimed leaves the session untouched: the ownership
+// transaction rolls back its session claim and the run waits.
+func TestAutomationDispatch_ThreadClaimContentionWaits(t *testing.T) {
+	h := newDispatchHarness(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+	run1 := h.push(t, h1, t0)
+	first := h.dispatch(t, run1, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, first.Kind, "first run is reserved")
+	h.finishTurn(t, run1, h1)
+	_, err := h.pool.Exec(ctx, `UPDATE session_threads SET status = 'running' WHERE session_id = $1`, first.SessionID)
+	require.NoError(t, err, "make the primary thread unclaimable")
+
+	run2 := h.push(t, h2, t0.Add(time.Second))
+	outcome := h.dispatch(t, run2, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchWaiting, outcome.Kind, "an unclaimable primary thread makes the run wait")
+	session, err := h.sessions.GetByID(ctx, h.orgID, first.SessionID)
+	require.NoError(t, err, "reload session")
+	require.Equal(t, models.SessionStatusIdle, session.Status, "the session claim was rolled back")
+	run2 = h.reload(t, run2.ID)
+	require.Equal(t, models.AutomationRunDispatchWaiting, *run2.DispatchState, "the run is recorded as waiting")
+	var messages int
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT count(*) FROM session_messages WHERE org_id = $1 AND session_id = $2 AND source = 'automation_turn'`, h.orgID, first.SessionID).Scan(&messages), "count messages")
+	require.Equal(t, 1, messages, "only the first turn's message exists; the rolled-back turn inserted none")
+
+	_, err = h.pool.Exec(ctx, `UPDATE session_threads SET status = 'idle' WHERE session_id = $1`, first.SessionID)
+	require.NoError(t, err, "free the primary thread")
+	recovered := h.dispatch(t, run2, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, recovered.Kind, "the waiting run is reserved once the thread frees")
+}
+
+// TestAutomationDispatch_AutomationChangedUnderLock proves dispatch rereads
+// the automation under the lock: a continuity switch that committed after
+// the worker loaded the run sends the run down the per-run path, and any
+// other change asks for a retry with fresh input.
+func TestAutomationDispatch_AutomationChangedUnderLock(t *testing.T) {
+	h := newDispatchHarness(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	run := h.push(t, "1111111111111111111111111111111111111111", t0)
+
+	stale := h.automation
+	_, err := h.pool.Exec(ctx, `UPDATE automations SET goal = 'tightened goal', updated_at = now() + interval '1 second' WHERE id = $1`, h.automation.ID)
+	require.NoError(t, err, "change the automation after the worker loaded it")
+	outcome, err := h.dispatcher.Dispatch(ctx, automations.DispatchInput{Run: run, Automation: stale, SessionTemplate: h.template(models.AgentTypeCodex)})
+	require.NoError(t, err, "dispatch should not error")
+	require.Equal(t, automations.DispatchRetry, outcome.Kind, "a changed automation asks the worker to reload")
+
+	_, err = h.pool.Exec(ctx, `UPDATE automations SET session_continuity = 'per_run', updated_at = now() + interval '2 seconds' WHERE id = $1`, h.automation.ID)
+	require.NoError(t, err, "switch the automation to per_run after the worker loaded it")
+	outcome, err = h.dispatcher.Dispatch(ctx, automations.DispatchInput{Run: run, Automation: stale, SessionTemplate: h.template(models.AgentTypeCodex)})
+	require.NoError(t, err, "dispatch should not error")
+	require.Equal(t, automations.DispatchNotApplicable, outcome.Kind, "a per_run automation sends the run down the per-run path")
+	run = h.reload(t, run.ID)
+	require.Equal(t, models.AutomationRunStatusPending, run.Status, "the run is left for the per-run path")
+	var generations int
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT count(*) FROM automation_target_sessions WHERE org_id = $1`, h.orgID).Scan(&generations), "count generations")
+	require.Equal(t, 0, generations, "no generation was created from stale input")
 }

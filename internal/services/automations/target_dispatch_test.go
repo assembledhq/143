@@ -52,7 +52,7 @@ func TestTargetDispatcher_Applies(t *testing.T) {
 			},
 		},
 	}
-	d := NewTargetDispatcher(nil, nil, nil, nil, nil, nil, zerolog.Nop())
+	d := NewTargetDispatcher(nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -97,6 +97,7 @@ func TestTargetDispatcher_Decide(t *testing.T) {
 		name          string
 		automation    models.Automation
 		template      *models.Session
+		expectedUser  *uuid.UUID
 		github        automationRunGitHubContext
 		generation    models.AutomationTargetSession
 		hasGeneration bool
@@ -152,8 +153,26 @@ func TestTargetDispatcher_Decide(t *testing.T) {
 		{
 			name: "executing user change retires", hasGeneration: true, generation: activeGeneration(),
 			session:  func() models.Session { s := readySession(); s.TriggeredByUserID = &userA; return s },
-			template: &models.Session{AgentType: models.AgentType(claude), TriggeredByUserID: &userB},
-			want:     retireDecision(models.AutomationTargetRetiredIdentityChanged),
+			template: template(), expectedUser: &userB,
+			want: retireDecision(models.AutomationTargetRetiredIdentityChanged),
+		},
+		{
+			name: "same executing user continues", hasGeneration: true, generation: activeGeneration(),
+			session:  func() models.Session { s := readySession(); s.TriggeredByUserID = &userA; return s },
+			template: template(), expectedUser: &userA,
+			want: continuationDecision{kind: decisionProceed, mode: models.AutomationRunContinuationContinued},
+		},
+		{
+			name: "destroyed sandbox with a usable checkpoint continues", hasGeneration: true, generation: activeGeneration(),
+			session:  func() models.Session { s := readySession(); s.SandboxState = models.SandboxStateDestroyed; return s },
+			template: template(),
+			want:     continuationDecision{kind: decisionProceed, mode: models.AutomationRunContinuationContinued},
+		},
+		{
+			name: "checkpoint without a timestamp fails the age bound", hasGeneration: true, generation: activeGeneration(),
+			session:  func() models.Session { s := readySession(); s.CheckpointedAt = nil; return s },
+			template: template(), maxAge: time.Hour,
+			want: reconstructDecision(models.AutomationRunContinuationReasonSnapshotMissing),
 		},
 		{
 			name: "base retarget retires", hasGeneration: true,
@@ -196,7 +215,7 @@ func TestTargetDispatcher_Decide(t *testing.T) {
 				return s
 			},
 			template: template(),
-			want:     continuationDecision{kind: decisionRetry, retryAfter: automationPendingSnapshotRetry, note: "snapshot upload in flight"},
+			want:     continuationDecision{kind: decisionRetry, retryAfter: automationPendingSnapshotRetry, maxWait: automationPendingSnapshotGrace + automationPendingSnapshotRetry, note: "snapshot upload in flight"},
 		},
 		{
 			name: "stale pending upload with a published key continues", hasGeneration: true, generation: activeGeneration(),
@@ -221,7 +240,7 @@ func TestTargetDispatcher_Decide(t *testing.T) {
 				return s
 			},
 			template: template(),
-			want:     continuationDecision{kind: decisionRetry, retryAfter: automationPendingSnapshotRetry, note: "snapshot upload stranded; waiting for the reaper"},
+			want:     continuationDecision{kind: decisionRetry, retryAfter: automationPendingSnapshotRetry, maxWait: 2 * automationPendingSnapshotGrace, note: "snapshot upload stranded; waiting for the reaper"},
 		},
 		{
 			name: "live container continues", hasGeneration: true, generation: activeGeneration(),
@@ -237,8 +256,13 @@ func TestTargetDispatcher_Decide(t *testing.T) {
 			want:     continuationDecision{kind: decisionProceed, mode: models.AutomationRunContinuationContinued},
 		},
 		{
-			name: "destroyed sandbox reconstructs", hasGeneration: true, generation: activeGeneration(),
-			session:  func() models.Session { s := readySession(); s.SandboxState = models.SandboxStateDestroyed; return s },
+			name: "destroyed sandbox without a checkpoint reconstructs", hasGeneration: true, generation: activeGeneration(),
+			session: func() models.Session {
+				s := readySession()
+				s.SandboxState = models.SandboxStateDestroyed
+				s.SnapshotKey = nil
+				return s
+			},
 			template: template(),
 			want:     continuationDecision{kind: decisionProceed, mode: models.AutomationRunContinuationReconstructed, reason: continuation(models.AutomationRunContinuationReasonSandboxDestroyed)},
 		},
@@ -269,7 +293,7 @@ func TestTargetDispatcher_Decide(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			d := NewTargetDispatcher(nil, nil, nil, nil, nil, nil, zerolog.Nop())
+			d := NewTargetDispatcher(nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
 			d.now = func() time.Time { return now }
 			d.SetMaxSnapshotAge(tt.maxAge)
 			session := models.Session{}
@@ -277,11 +301,11 @@ func TestTargetDispatcher_Decide(t *testing.T) {
 				session = tt.session()
 			}
 			automation := tt.automation
-			got := d.decide(DispatchInput{Automation: automation, SessionTemplate: tt.template}, tt.github, models.AutomationTarget{}, tt.generation, tt.hasGeneration, session, tt.isPush)
+			got := d.decide(automation, tt.template, tt.expectedUser, tt.github, tt.generation, tt.hasGeneration, session, tt.isPush)
 			require.Equal(t, tt.want, got, "decision should follow the design's compatibility and readiness tables")
-			if got.retireReason != nil {
-				require.Equal(t, retired(*got.retireReason), got.retireReason, "retire reason should be set")
-				require.NotNil(t, got.reason, "a retirement carries the matching continuation reason")
+			if tt.want.retireReason != nil {
+				require.Equal(t, retired(*tt.want.retireReason), got.retireReason, "retire reason should match")
+				require.Equal(t, continuation(models.ContinuationReasonForRetirement(*tt.want.retireReason)), got.reason, "a retirement carries the matching continuation reason")
 			}
 		})
 	}
@@ -292,20 +316,131 @@ func TestBaselineHead(t *testing.T) {
 	checkpoint := "cccc"
 	reviewed := "rrrr"
 	key := "k"
+	other := "other"
+	native := "agent-session"
 	tests := []struct {
 		name       string
 		generation models.AutomationTargetSession
+		session    models.Session
+		thread     models.SessionThread
 		mode       models.AutomationRunContinuationMode
 		want       *string
 	}{
-		{name: "continued turn uses the checkpoint head", generation: models.AutomationTargetSession{CheckpointHeadSHA: &checkpoint, CheckpointSnapshotKey: &key, LastReviewedHeadSHA: &reviewed}, mode: models.AutomationRunContinuationContinued, want: &checkpoint},
-		{name: "continued turn without provenance uses the reviewed head", generation: models.AutomationTargetSession{LastReviewedHeadSHA: &reviewed}, mode: models.AutomationRunContinuationContinued, want: &reviewed},
-		{name: "reconstructed turn uses the reviewed head", generation: models.AutomationTargetSession{CheckpointHeadSHA: &checkpoint, CheckpointSnapshotKey: &key, LastReviewedHeadSHA: &reviewed}, mode: models.AutomationRunContinuationReconstructed, want: &reviewed},
+		{
+			name:       "coherent checkpoint with native context uses the checkpoint head",
+			generation: models.AutomationTargetSession{CheckpointHeadSHA: &checkpoint, CheckpointSnapshotKey: &key, LastReviewedHeadSHA: &reviewed},
+			session:    models.Session{SnapshotKey: &key},
+			thread:     models.SessionThread{AgentSessionID: &native},
+			mode:       models.AutomationRunContinuationContinued,
+			want:       &checkpoint,
+		},
+		{
+			name:       "key mismatch is treated as null provenance",
+			generation: models.AutomationTargetSession{CheckpointHeadSHA: &checkpoint, CheckpointSnapshotKey: &other, LastReviewedHeadSHA: &reviewed},
+			session:    models.Session{SnapshotKey: &key},
+			thread:     models.SessionThread{AgentSessionID: &native},
+			mode:       models.AutomationRunContinuationContinued,
+			want:       &reviewed,
+		},
+		{
+			name:       "no native context falls back to the reviewed head",
+			generation: models.AutomationTargetSession{CheckpointHeadSHA: &checkpoint, CheckpointSnapshotKey: &key, LastReviewedHeadSHA: &reviewed},
+			session:    models.Session{SnapshotKey: &key},
+			mode:       models.AutomationRunContinuationContinued,
+			want:       &reviewed,
+		},
+		{
+			name:       "null provenance uses the reviewed head",
+			generation: models.AutomationTargetSession{LastReviewedHeadSHA: &reviewed},
+			session:    models.Session{SnapshotKey: &key, AgentSessionID: &native},
+			mode:       models.AutomationRunContinuationContinued,
+			want:       &reviewed,
+		},
+		{
+			name:       "reconstructed turn uses the reviewed head",
+			generation: models.AutomationTargetSession{CheckpointHeadSHA: &checkpoint, CheckpointSnapshotKey: &key, LastReviewedHeadSHA: &reviewed},
+			session:    models.Session{SnapshotKey: &key, AgentSessionID: &native},
+			mode:       models.AutomationRunContinuationReconstructed,
+			want:       &reviewed,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.want, baselineHead(tt.generation, tt.mode), "baseline follows checkpoint coherence")
+			require.Equal(t, tt.want, baselineHead(tt.generation, tt.session, tt.thread, tt.mode), "baseline follows checkpoint coherence and native resume")
+		})
+	}
+}
+
+func TestHeadLookupBackoff(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		waiting time.Duration
+		want    time.Duration
+	}{
+		{name: "first retry", waiting: 0, want: 30 * time.Second},
+		{name: "after one minute", waiting: time.Minute, want: time.Minute},
+		{name: "after five minutes", waiting: 5 * time.Minute, want: 4 * time.Minute},
+		{name: "capped at ten minutes", waiting: 3 * time.Hour, want: 10 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			since := now.Add(-tt.waiting)
+			run := models.AutomationRun{TriggeredAt: since.Add(-time.Hour), WaitStartedAt: &since}
+			require.Equal(t, tt.want, headLookupBackoff(now, run), "backoff doubles from 30s to 10m over the wait")
+		})
+	}
+	run := models.AutomationRun{TriggeredAt: now.Add(-2 * time.Minute)}
+	require.Equal(t, 2*time.Minute, headLookupBackoff(now, run), "without a wait start the trigger time anchors the backoff")
+}
+
+func TestLifecycleAllowsRun(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		state models.AutomationTargetLifecycleState
+		event models.AutomationGitHubEvent
+		want  bool
+	}{
+		{models.AutomationTargetLifecycleOpen, models.AutomationGitHubEventIssueCommentCreated, true},
+		{models.AutomationTargetLifecycleMerged, models.AutomationGitHubEventPullRequestMerged, true},
+		{models.AutomationTargetLifecycleMerged, models.AutomationGitHubEventPullRequestUpdated, false},
+		{models.AutomationTargetLifecycleClosed, models.AutomationGitHubEventPullRequestMerged, false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.state)+"/"+string(tt.event), func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, lifecycleAllowsRun(tt.state, tt.event), "only open targets and the merged run on a merged target execute")
+		})
+	}
+}
+
+func TestAutomationExecutingUser(t *testing.T) {
+	t.Parallel()
+	creator := uuid.New()
+	tests := []struct {
+		name       string
+		automation models.Automation
+		want       *uuid.UUID
+		wantErr    bool
+	}{
+		{name: "org scope runs as nobody", automation: models.Automation{IdentityScope: models.AutomationIdentityScopeOrg}},
+		{name: "default scope is org", automation: models.Automation{}},
+		{name: "personal scope runs as the creator", automation: models.Automation{IdentityScope: models.AutomationIdentityScopePersonal, CreatedBy: &creator}, want: &creator},
+		{name: "personal scope without a creator fails", automation: models.Automation{IdentityScope: models.AutomationIdentityScopePersonal}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := automationExecutingUser(tt.automation)
+			if tt.wantErr {
+				require.Error(t, err, "identity must be resolvable")
+				return
+			}
+			require.NoError(t, err, "identity resolves")
+			require.Equal(t, tt.want, got, "identity follows the current scope")
 		})
 	}
 }
@@ -313,26 +448,24 @@ func TestBaselineHead(t *testing.T) {
 func TestPayloadCarriesRun(t *testing.T) {
 	t.Parallel()
 	runID := uuid.New()
-	sessionID := uuid.New()
 	tests := []struct {
 		name    string
-		payload map[string]string
+		payload AutomationTurnJobPayload
 		want    bool
 	}{
-		{name: "continue payload for this run", payload: map[string]string{"automation_run_id": runID.String()}, want: true},
-		{name: "continue payload for another run", payload: map[string]string{"automation_run_id": uuid.NewString()}},
-		{name: "fresh payload for this run's session", payload: map[string]string{"session_id": sessionID.String()}, want: true},
-		{name: "fresh payload for another session", payload: map[string]string{"session_id": uuid.NewString()}},
+		{name: "payload for this run", payload: AutomationTurnJobPayload{AutomationRunID: runID.String()}, want: true},
+		{name: "payload for another run", payload: AutomationTurnJobPayload{AutomationRunID: uuid.NewString()}},
+		{name: "payload without a run", payload: AutomationTurnJobPayload{SessionID: uuid.NewString()}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			raw, err := json.Marshal(tt.payload)
 			require.NoError(t, err, "payload should marshal")
-			require.Equal(t, tt.want, payloadCarriesRun(raw, runID, sessionID), "conflict lookup accepts only this run's job")
+			require.Equal(t, tt.want, payloadCarriesRun(raw, runID), "conflict lookup accepts only this run's job")
 		})
 	}
-	require.False(t, payloadCarriesRun([]byte("not json"), runID, sessionID), "malformed payload is rejected")
+	require.False(t, payloadCarriesRun([]byte("not json"), runID), "malformed payload is rejected")
 }
 
 func TestAutomationTurnPrompt(t *testing.T) {
@@ -348,6 +481,8 @@ func TestAutomationTurnPrompt(t *testing.T) {
 	reconstructed := AutomationTurnPrompt(AutomationTurnPromptInput{Goal: "g", TurnNumber: 2, Mode: models.AutomationRunContinuationReconstructed, HeadSHA: "2222"})
 	require.Contains(t, reconstructed, "- Baseline head: none", "missing baseline renders as none")
 	require.Contains(t, reconstructed, "earlier context for this pull request is unavailable", "reconstructed prompt asks for a full review")
+	fresh := AutomationTurnPrompt(AutomationTurnPromptInput{Goal: "g", TurnNumber: 1, Mode: models.AutomationRunContinuationFresh, HeadSHA: "2222"})
+	require.Contains(t, fresh, "first turn of this pull request's review conversation", "fresh prompt asks for a full review")
 }
 
 func TestGithubContextFromRun(t *testing.T) {

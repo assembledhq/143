@@ -2447,7 +2447,10 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 				KillSwitch:      automationContinuityDisabled(),
 			}
 			if services.AutomationTargets.Applies(dispatchInput) {
-				return dispatchAutomationTargetRun(ctx, services, log, dispatchInput)
+				handled, dispatchErr := dispatchAutomationTargetRun(ctx, services, log, dispatchInput)
+				if handled || dispatchErr != nil {
+					return dispatchErr
+				}
 			}
 		}
 
@@ -9610,33 +9613,40 @@ func finalizeThreadCancellationIfRequested(
 }
 
 // continue_session handler continues a multi-turn session with a follow-up message.
+// continueSessionJobInput is the continue_session job payload as the worker
+// decodes it. Per-target automation turns are produced by
+// automationservice.AutomationTurnJobPayload; the two must agree on field
+// names and types (see TestAutomationTurnJobPayloadContract).
+type continueSessionJobInput struct {
+	SessionID              string `json:"session_id"`
+	OrgID                  string `json:"org_id"`
+	ThreadID               string `json:"thread_id"`
+	ChangesetID            string `json:"changeset_id"`
+	ChangesetLeaseHolderID string `json:"changeset_lease_holder_id"`
+	PullRequestID          string `json:"pull_request_id"`
+	FeedbackBatchID        string `json:"feedback_batch_id"`
+	StructuredPrompt       string `json:"structured_prompt"`
+	RepairRunID            string `json:"repair_run_id"`
+	CommandType            string `json:"command_type"`
+	HealthVersion          int64  `json:"health_version"`
+	HeadSHA                string `json:"head_sha"`
+	WorkspaceMode          string `json:"workspace_mode"`
+	PullRequestNumber      int    `json:"pull_request_number"`
+	AutoAttempt            bool   `json:"auto_attempt"`
+	HumanInputRequestID    string `json:"human_input_request_id"`
+	QueuedMessageID        string `json:"queued_message_id"`
+	PostSuccessAction      string `json:"post_success_action"`
+	PostSuccessAuthorMode  string `json:"post_success_author_mode"`
+	// Per-target automation turns (design doc 125); the producer is
+	// automationservice.AutomationTurnJobPayload.
+	AutomationRunID  string `json:"automation_run_id"`
+	TargetGeneration int    `json:"target_generation"`
+	ContinuationMode string `json:"continuation_mode"`
+}
+
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			SessionID              string `json:"session_id"`
-			OrgID                  string `json:"org_id"`
-			ThreadID               string `json:"thread_id"`
-			ChangesetID            string `json:"changeset_id"`
-			ChangesetLeaseHolderID string `json:"changeset_lease_holder_id"`
-			PullRequestID          string `json:"pull_request_id"`
-			FeedbackBatchID        string `json:"feedback_batch_id"`
-			StructuredPrompt       string `json:"structured_prompt"`
-			RepairRunID            string `json:"repair_run_id"`
-			CommandType            string `json:"command_type"`
-			HealthVersion          int64  `json:"health_version"`
-			HeadSHA                string `json:"head_sha"`
-			WorkspaceMode          string `json:"workspace_mode"`
-			PullRequestNumber      int    `json:"pull_request_number"`
-			AutoAttempt            bool   `json:"auto_attempt"`
-			HumanInputRequestID    string `json:"human_input_request_id"`
-			QueuedMessageID        string `json:"queued_message_id"`
-			PostSuccessAction      string `json:"post_success_action"`
-			PostSuccessAuthorMode  string `json:"post_success_author_mode"`
-			// Per-target automation turns (design doc 125).
-			AutomationRunID  string `json:"automation_run_id"`
-			TargetGeneration string `json:"target_generation"`
-			ContinuationMode string `json:"continuation_mode"`
-		}
+		var input continueSessionJobInput
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
 		}
@@ -9802,14 +9812,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			if strings.TrimSpace(input.StructuredPrompt) == "" {
 				return errors.New("automation turn continuation requires structured_prompt")
 			}
-			generation := 0
-			if input.TargetGeneration != "" {
-				parsedGeneration, parseErr := strconv.Atoi(input.TargetGeneration)
-				if parseErr != nil {
-					return fmt.Errorf("parse target generation: %w", parseErr)
-				}
-				generation = parsedGeneration
-			}
+			generation := input.TargetGeneration
 			mode := models.AutomationRunContinuationMode(input.ContinuationMode)
 			if mode != "" {
 				if err := mode.Validate(); err != nil {
@@ -14041,8 +14044,16 @@ func claimAutomationTurnAttempt(ctx context.Context, stores *Stores, logger zero
 	if err != nil {
 		return false, fmt.Errorf("load automation run for attempt claim: %w", err)
 	}
-	if run.DispatchState == nil || *run.DispatchState != models.AutomationRunDispatchExecuting || run.JobID == nil {
+	if run.TargetID == nil {
+		// A legacy per-run session: no reservation to fence against.
 		return true, nil
+	}
+	if run.DispatchState == nil || *run.DispatchState != models.AutomationRunDispatchExecuting || run.JobID == nil {
+		logger.Warn().
+			Str("run_id", runID.String()).
+			Str("job_id", jobID.String()).
+			Msg("automation turn job found its run not executing; skipping")
+		return false, nil
 	}
 	if *run.JobID != jobID {
 		logger.Warn().
@@ -14073,19 +14084,27 @@ func claimAutomationTurnAttempt(ctx context.Context, stores *Stores, logger zero
 }
 
 // dispatchAutomationTargetRun runs the per-target ownership transaction and
-// maps its outcome onto the job: reserved and waiting runs finish the job
-// (the turn's own job, or a later wake, carries the run from here);
-// undecidable runs retry with the dispatcher's backoff.
-func dispatchAutomationTargetRun(ctx context.Context, services *Services, log zerolog.Logger, in automationservice.DispatchInput) error {
+// maps its outcome onto the job. A reserved or terminalized run finishes
+// the job (the turn's own job carries the run from here). A waiting run
+// keeps this job alive with a slow poll, without spending its attempt
+// budget, until the target frees or the wait times out; the wake job will
+// make this poll redundant once it lands. An undecidable run retries with
+// the dispatcher's backoff and bound. A run the dispatcher no longer
+// considers per-target reports handled=false so the caller runs the
+// ordinary per-run path.
+func dispatchAutomationTargetRun(ctx context.Context, services *Services, log zerolog.Logger, in automationservice.DispatchInput) (bool, error) {
 	outcome, err := services.AutomationTargets.Dispatch(ctx, in)
 	if err != nil {
-		return fmt.Errorf("dispatch per-target automation run: %w", err)
+		return true, fmt.Errorf("dispatch per-target automation run: %w", err)
 	}
 	event := log.Info().Str("dispatch", string(outcome.Kind))
 	if outcome.Note != "" {
 		event = event.Str("note", outcome.Note)
 	}
 	switch outcome.Kind {
+	case automationservice.DispatchNotApplicable:
+		event.Msg("per-target automation run falls back to the per-run path")
+		return false, nil
 	case automationservice.DispatchReserved:
 		event.
 			Str("session_id", outcome.SessionID.String()).
@@ -14093,12 +14112,31 @@ func dispatchAutomationTargetRun(ctx context.Context, services *Services, log ze
 			Str("job_id", outcome.JobID.String()).
 			Str("continuation_mode", string(outcome.ContinuationMode)).
 			Msg("per-target automation turn dispatched")
+		return true, nil
+	case automationservice.DispatchWaiting:
+		event.Msg("per-target automation run is waiting for its target")
+		retryAfter := automationWaitingPollInterval
+		maxWait := automationWaitingPollWindow
+		return true, &RetryableError{Err: fmt.Errorf("automation run waiting: %s", outcome.Note), RetryAfter: &retryAfter, MaxRetryDuration: &maxWait}
 	case automationservice.DispatchRetry:
 		event.Dur("retry_after", outcome.RetryAfter).Msg("per-target automation run not decidable yet; retrying")
 		retryAfter := outcome.RetryAfter
-		return &RetryableError{Err: fmt.Errorf("automation run undecidable: %s", outcome.Note), RetryAfter: &retryAfter, ConsumeAttempt: true}
+		maxWait := outcome.MaxWait
+		if maxWait <= 0 {
+			maxWait = automationWaitingPollWindow
+		}
+		return true, &RetryableError{Err: fmt.Errorf("automation run undecidable: %s", outcome.Note), RetryAfter: &retryAfter, MaxRetryDuration: &maxWait}
 	default:
 		event.Msg("per-target automation run handled")
+		return true, nil
 	}
-	return nil
 }
+
+const (
+	// automationWaitingPollInterval is how often a waiting per-target run's
+	// automation_run job re-enters the ownership transaction.
+	automationWaitingPollInterval = 30 * time.Second
+	// automationWaitingPollWindow bounds that poll; it matches the design's
+	// two-hour wait timeout.
+	automationWaitingPollWindow = 2 * time.Hour
+)

@@ -153,8 +153,11 @@ func (s *AutomationRunStore) SupersedeWaitingPush(ctx context.Context, tx pgx.Tx
 	return tag.RowsAffected(), nil
 }
 
-// CountWaiting returns how many runs are waiting on the target, for the
-// waiting cap.
+// CountWaiting returns how many admitted runs have not started executing on
+// the target: runs recorded as waiting plus runs whose automation_run job
+// has not dispatched yet. Both count toward the waiting cap, otherwise a
+// burst of arrivals could pass the cap and become more than the cap's
+// worth of waiters once dispatched.
 func (s *AutomationRunStore) CountWaiting(ctx context.Context, q DBTX, orgID, targetID uuid.UUID) (int, error) {
 	if q == nil {
 		q = s.db
@@ -162,7 +165,9 @@ func (s *AutomationRunStore) CountWaiting(ctx context.Context, q DBTX, orgID, ta
 	var count int
 	err := q.QueryRow(ctx, `
 		SELECT count(*) FROM automation_runs
-		WHERE org_id = @org_id AND target_id = @target_id AND dispatch_state = 'waiting'`,
+		WHERE org_id = @org_id AND target_id = @target_id
+		  AND status = 'pending'
+		  AND (dispatch_state = 'waiting' OR dispatch_state IS NULL)`,
 		pgx.NamedArgs{"org_id": orgID, "target_id": targetID}).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count waiting automation runs: %w", err)
@@ -375,7 +380,8 @@ func (s *AutomationRunStore) ListAmbiguousPushCandidates(ctx context.Context, q 
 		SELECT id, COALESCE(config_snapshot #>> '{github,head_sha}', '')
 		FROM automation_runs
 		WHERE org_id = @org_id AND target_id = @target_id
-		  AND status = 'pending' AND dispatch_state = 'waiting'
+		  AND status = 'pending'
+		  AND (dispatch_state = 'waiting' OR dispatch_state IS NULL)
 		  AND head_resolution = 'ambiguous'
 		ORDER BY triggered_at, id`,
 		pgx.NamedArgs{"org_id": orgID, "target_id": targetID})
@@ -555,8 +561,17 @@ func (s *SessionThreadStore) ClaimPrimaryForAutomationTurn(ctx context.Context, 
 	if err != nil {
 		return models.SessionThread{}, err
 	}
-	s.publishThreadRuntime(ctx, thread)
+	// The runtime event is published by the caller after commit
+	// (PublishRuntime); publishing here would announce a claim that a later
+	// rollback undoes.
 	return thread, nil
+}
+
+// PublishRuntime emits the thread's current runtime state to the session
+// stream. Callers that claim a thread inside a transaction call it after
+// the commit.
+func (s *SessionThreadStore) PublishRuntime(ctx context.Context, orgID, threadID uuid.UUID) {
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
 }
 
 // ActiveJobPayloadByDedupeKeyInTx returns the pending or running job that
@@ -581,4 +596,65 @@ func (s *JobStore) ActiveJobPayloadByDedupeKeyInTx(ctx context.Context, tx pgx.T
 		return ActiveJobRef{}, nil, err
 	}
 	return active, payload, nil
+}
+
+// TouchObservedHead advances the observed head's timestamp for a delivery
+// of the same head without opening a new epoch, so a force-push back to a
+// previously observed head still outranks a delayed older delivery.
+func (s *AutomationTargetStore) TouchObservedHead(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, headSHA string, updatedAt time.Time) error {
+	tag, err := tx.Exec(ctx, `
+		UPDATE automation_targets
+		SET observed_head_updated_at = GREATEST(COALESCE(observed_head_updated_at, @updated_at), @updated_at),
+		    updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND observed_head_sha = @head_sha`,
+		pgx.NamedArgs{"id": targetID, "org_id": orgID, "head_sha": headSHA, "updated_at": updatedAt})
+	if err != nil {
+		return fmt.Errorf("touch automation target head: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrAutomationTargetNotFound
+	}
+	return nil
+}
+
+// SetAttemptedHead records the head a reserved turn is about to review on
+// its generation, so the turn's workspace preparation and later recovery
+// read a durable value rather than the delivered head in the audit snapshot.
+func (s *AutomationTargetStore) SetAttemptedHead(ctx context.Context, tx pgx.Tx, orgID, generationID uuid.UUID, headSHA string, baseRef string) error {
+	tag, err := tx.Exec(ctx, `
+		UPDATE automation_target_sessions
+		SET last_attempted_head_sha = NULLIF(@head_sha, ''),
+		    last_base_ref = COALESCE(NULLIF(@base_ref, ''), last_base_ref),
+		    updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND status = 'active'`,
+		pgx.NamedArgs{"id": generationID, "org_id": orgID, "head_sha": headSHA, "base_ref": baseRef})
+	if err != nil {
+		return fmt.Errorf("record attempted head: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrAutomationTargetGenerationNotActive
+	}
+	return nil
+}
+
+// UpsertCapabilitySnapshotInTx replaces the session's capability snapshot
+// with the current run's, inside the ownership transaction, so credential
+// and tool resolution during a continued turn sees the current grant.
+func (s *SessionStore) UpsertCapabilitySnapshotInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID, snapshot []models.AgentCapabilitySnapshotItem) error {
+	if snapshot == nil {
+		snapshot = []models.AgentCapabilitySnapshotItem{}
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("marshal capability snapshot: %w", err)
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO session_execution_metadata (session_id, org_id, capability_snapshot)
+		SELECT id, org_id, @snapshot::jsonb FROM sessions WHERE id = @session_id AND org_id = @org_id
+		ON CONFLICT (session_id) DO UPDATE SET capability_snapshot = EXCLUDED.capability_snapshot`,
+		pgx.NamedArgs{"session_id": sessionID, "org_id": orgID, "snapshot": encoded})
+	if err != nil {
+		return fmt.Errorf("upsert session capability snapshot: %w", err)
+	}
+	return nil
 }
