@@ -2456,10 +2456,13 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 
 		// Atomic claim: pending → running. Performed BEFORE session creation
 		// so a duplicate worker that loses the race never reaches the Sessions
-		// or Jobs stores at all. Once we own the row (transitioned=true), any
-		// later failure path uses TransitionStatusIf(running → ...) so we
-		// don't accidentally overwrite a status another path already wrote.
-		transitioned, err := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusRunning, nil, nil)
+		// or Jobs stores at all. The claim also clears any per-target waiting
+		// bookkeeping a run picked up before it fell back to this path, so
+		// the turn's attempt fence treats it as an ordinary per-run run. Once
+		// we own the row (transitioned=true), any later failure path uses
+		// TransitionStatusIf(running → ...) so we don't accidentally
+		// overwrite a status another path already wrote.
+		transitioned, err := stores.AutomationRuns.ClaimPendingForPerRun(ctx, orgID, runID)
 		if err != nil {
 			return fmt.Errorf("transition run to running: %w", err)
 		}

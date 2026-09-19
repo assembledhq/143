@@ -218,6 +218,31 @@ func (s *AutomationRunStore) MarkWaiting(ctx context.Context, q DBTX, orgID, run
 	return tag.RowsAffected() > 0, nil
 }
 
+// ClaimPendingForPerRun is the per-run path's pending-to-running claim. A
+// run that waited for a target and then fell back to per-run execution
+// (kill switch, continuity switched to per_run) carries dispatch_state
+// 'waiting'; the claim clears that bookkeeping in the same statement so the
+// turn's attempt fence sees an ordinary per-run run. A reserved run is
+// never pending, so genuine reservations keep their fencing. Returns
+// whether this caller won the claim.
+func (s *AutomationRunStore) ClaimPendingForPerRun(ctx context.Context, orgID, runID uuid.UUID) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE automation_runs
+		SET status = 'running',
+		    dispatch_state = NULL,
+		    wait_reason = NULL,
+		    wait_started_at = NULL,
+		    updated_at = now()
+		WHERE id = @id AND org_id = @org_id
+		  AND status = 'pending'
+		  AND dispatch_state IS DISTINCT FROM 'executing'`,
+		pgx.NamedArgs{"id": runID, "org_id": orgID})
+	if err != nil {
+		return false, fmt.Errorf("claim automation run for per-run execution: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // AutomationRunReservation is the single-statement reservation that turns a
 // pending run into the target's executing turn. Every field the executing
 // CHECK requires is installed by the same UPDATE.

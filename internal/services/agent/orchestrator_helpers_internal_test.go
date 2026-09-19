@@ -1355,3 +1355,27 @@ func TestBillingModeForAgent(t *testing.T) {
 		})
 	}
 }
+
+func TestCompletesInteractiveTurn(t *testing.T) {
+	t.Parallel()
+	runID := uuid.New()
+	tests := []struct {
+		name        string
+		run         *models.Session
+		snapshotKey string
+		want        bool
+	}{
+		{name: "nil session never completes a turn", want: false},
+		{name: "single-run session ends as completed", run: &models.Session{InteractionMode: models.SessionInteractionModeSingleRun}, snapshotKey: "snapshots/a", want: false},
+		{name: "interactive session with a checkpoint completes the turn", run: &models.Session{InteractionMode: models.SessionInteractionModeInteractive}, snapshotKey: "snapshots/a", want: true},
+		{name: "user interactive session without a checkpoint ends as completed", run: &models.Session{InteractionMode: models.SessionInteractionModeInteractive}, want: false},
+		{name: "automation-owned session without a checkpoint still completes the turn", run: &models.Session{InteractionMode: models.SessionInteractionModeInteractive, AutomationRunID: &runID}, want: true},
+		{name: "single-run automation session ends as completed", run: &models.Session{InteractionMode: models.SessionInteractionModeSingleRun, AutomationRunID: &runID}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, completesInteractiveTurn(tt.run, tt.snapshotKey), "turn bookkeeping follows the session's ownership, not only the checkpoint")
+		})
+	}
+}

@@ -2361,8 +2361,13 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    -- them to the same value.
 		    current_turn = GREATEST(current_turn + 1, @current_turn),
 		    last_activity_at = now(),
-		    agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
-		    sandbox_state = 'snapshotted',
+		    -- An empty snapshot key completes the turn's bookkeeping without a
+		    -- checkpoint (the turn succeeded but its snapshot failed): the
+		    -- stale key is cleared so nothing restores from it, and the
+		    -- sandbox state is left to the runtime that owns it.
+		    agent_session_id = @agent_session_id,
+		    snapshot_key = NULLIF(@snapshot_key::text, ''),
+		    sandbox_state = CASE WHEN @snapshot_key::text = '' THEN sandbox_state ELSE 'snapshotted' END,
 		    workspace_generation = workspace_generation + 1,
 		    token_usage = @token_usage,
 		    model_used = COALESCE(@model_used, model_used),

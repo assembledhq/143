@@ -41,6 +41,7 @@ type githubAutomationTargetStore interface {
 	TouchObservedHead(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, headSHA string, updatedAt time.Time) error
 	MarkHeadResolutionPending(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, deadline time.Time) error
 	SetLifecycle(ctx context.Context, q db.DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState) error
+	SetLifecycleObserved(ctx context.Context, q db.DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState, observedAt time.Time) error
 }
 
 // githubAutomationArrivalRunStore is the run-store surface arrival needs,
@@ -104,24 +105,31 @@ func (s *GitHubEventTriggerService) recordTargetArrival(ctx context.Context, tx 
 
 	// Lifecycle: a reopened delivery reopens the target; a merged event is
 	// the final turn on a merged target; anything else after close is
-	// skipped.
+	// skipped. The evidence is stamped with the delivery's own timestamp so
+	// a delayed delivery is as old as it really is.
+	setLifecycle := func(state models.AutomationTargetLifecycleState) error {
+		if req.PullRequestUpdatedAt != nil {
+			return s.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, state, *req.PullRequestUpdatedAt)
+		}
+		return s.targets.SetLifecycle(ctx, tx, orgID, target.ID, state)
+	}
 	switch {
 	case req.PullRequestAction == githubActionReopened && target.LifecycleState != models.AutomationTargetLifecycleOpen:
-		if err := s.targets.SetLifecycle(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleOpen); err != nil {
+		if err := setLifecycle(models.AutomationTargetLifecycleOpen); err != nil {
 			return false, err
 		}
 		target.LifecycleState = models.AutomationTargetLifecycleOpen
 	case req.Event == models.AutomationGitHubEventPullRequestMerged && target.LifecycleState != models.AutomationTargetLifecycleMerged:
-		if err := s.targets.SetLifecycle(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleMerged); err != nil {
+		if err := setLifecycle(models.AutomationTargetLifecycleMerged); err != nil {
 			return false, err
 		}
 		target.LifecycleState = models.AutomationTargetLifecycleMerged
 	}
-	// A pull_request delivery describes the PR's current state, so it
-	// refreshes the openness evidence that dispatch revalidates before
-	// creating a generation.
-	if target.LifecycleState == models.AutomationTargetLifecycleOpen && req.PullRequestAction != "" {
-		if err := s.targets.SetLifecycle(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleOpen); err != nil {
+	// A timestamped pull_request delivery describes the PR's state at that
+	// time, so it refreshes the openness evidence dispatch revalidates before
+	// creating a generation. A delivery without a timestamp is no evidence.
+	if target.LifecycleState == models.AutomationTargetLifecycleOpen && req.PullRequestAction != "" && req.PullRequestUpdatedAt != nil {
+		if err := s.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleOpen, *req.PullRequestUpdatedAt); err != nil {
 			return false, err
 		}
 	}

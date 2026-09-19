@@ -36,6 +36,15 @@ type dispatchHarness struct {
 	dispatcher *automations.TargetDispatcher
 }
 
+// recentDeliveryTime is the pull_request.updated_at the tests deliver
+// with. Arrival stamps openness evidence with the delivery's own timestamp,
+// so it must be recent for a fresh generation to start without a lookup.
+func recentDeliveryTime() time.Time {
+	return time.Now().UTC().Truncate(time.Second).Add(-time.Minute)
+}
+
+func timePtr(v time.Time) *time.Time { return &v }
+
 func newDispatchHarness(t *testing.T) *dispatchHarness {
 	t.Helper()
 	pool := setup(t)
@@ -176,7 +185,7 @@ func (h *dispatchHarness) jobPayload(t *testing.T, jobID uuid.UUID) map[string]s
 func TestAutomationDispatch_FreshThenContinue(t *testing.T) {
 	h := newDispatchHarness(t)
 	ctx := context.Background()
-	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	t0 := recentDeliveryTime()
 	h1 := "1111111111111111111111111111111111111111"
 	h2 := "2222222222222222222222222222222222222222"
 
@@ -272,7 +281,7 @@ func TestAutomationDispatch_FreshThenContinue(t *testing.T) {
 // reservation and one waiter.
 func TestAutomationDispatch_ConcurrentReservation(t *testing.T) {
 	h := newDispatchHarness(t)
-	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	t0 := recentDeliveryTime()
 	head := "3333333333333333333333333333333333333333"
 	run := h.push(t, head, t0)
 	// The seeded automation subscribes to pull_request.updated only, so the
@@ -316,7 +325,7 @@ func TestAutomationDispatch_ConcurrentReservation(t *testing.T) {
 func TestAutomationDispatch_ConflictLookup(t *testing.T) {
 	h := newDispatchHarness(t)
 	ctx := context.Background()
-	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	t0 := recentDeliveryTime()
 	run := h.push(t, "4444444444444444444444444444444444444444", t0)
 	dedupeKey := automations.AutomationTurnDedupeKey(run.ID)
 
@@ -344,7 +353,7 @@ func TestAutomationDispatch_ConflictLookup(t *testing.T) {
 // a fresh generation with the matching continuation reason.
 func TestAutomationDispatch_AgentConfigChangeGoesFresh(t *testing.T) {
 	h := newDispatchHarness(t)
-	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	t0 := recentDeliveryTime()
 	h1 := "5555555555555555555555555555555555555555"
 	h2 := "6666666666666666666666666666666666666666"
 	run1 := h.push(t, h1, t0)
@@ -382,10 +391,18 @@ type fakeHeadResolver struct {
 	info  automations.PullRequestHeadInfo
 	err   error
 	calls int
+	// onLookup, when set, runs once during the lookup: it models work that
+	// commits between the dispatcher's lookup and its lock.
+	onLookup func()
 }
 
 func (f *fakeHeadResolver) ResolvePullRequestHead(_ context.Context, _, _ uuid.UUID, _ int) (automations.PullRequestHeadInfo, error) {
 	f.calls++
+	if f.onLookup != nil {
+		hook := f.onLookup
+		f.onLookup = nil
+		hook()
+	}
 	return f.info, f.err
 }
 
@@ -396,7 +413,7 @@ func (f *fakeHeadResolver) ResolvePullRequestHead(_ context.Context, _, _ uuid.U
 func TestAutomationDispatch_HeadLookup(t *testing.T) {
 	h := newDispatchHarness(t)
 	ctx := context.Background()
-	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	t0 := recentDeliveryTime()
 	h1 := "1111111111111111111111111111111111111111"
 	h2 := "2222222222222222222222222222222222222222"
 	h3 := "3333333333333333333333333333333333333333"
@@ -486,7 +503,7 @@ func TestAutomationDispatch_HeadLookup(t *testing.T) {
 // delivered head.
 func TestAutomationDispatch_LookupFailureWithAmbiguity(t *testing.T) {
 	h := newDispatchHarness(t)
-	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	t0 := recentDeliveryTime()
 	h1 := "1111111111111111111111111111111111111111"
 	h2 := "2222222222222222222222222222222222222222"
 	resolver := &fakeHeadResolver{err: context.DeadlineExceeded}
@@ -528,7 +545,7 @@ func (h *dispatchHarness) finishAmbiguity(t *testing.T, targetID uuid.UUID) {
 func TestAutomationDispatch_ThreadClaimContentionWaits(t *testing.T) {
 	h := newDispatchHarness(t)
 	ctx := context.Background()
-	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	t0 := recentDeliveryTime()
 	h1 := "1111111111111111111111111111111111111111"
 	h2 := "2222222222222222222222222222222222222222"
 	run1 := h.push(t, h1, t0)
@@ -563,7 +580,7 @@ func TestAutomationDispatch_ThreadClaimContentionWaits(t *testing.T) {
 func TestAutomationDispatch_AutomationChangedUnderLock(t *testing.T) {
 	h := newDispatchHarness(t)
 	ctx := context.Background()
-	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	t0 := recentDeliveryTime()
 	run := h.push(t, "1111111111111111111111111111111111111111", t0)
 
 	stale := h.automation
@@ -592,7 +609,7 @@ func TestAutomationDispatch_AutomationChangedUnderLock(t *testing.T) {
 func TestAutomationDispatch_DestroyedSandboxWithCheckpointContinues(t *testing.T) {
 	h := newDispatchHarness(t)
 	ctx := context.Background()
-	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	t0 := recentDeliveryTime()
 	h1 := "1111111111111111111111111111111111111111"
 	h2 := "2222222222222222222222222222222222222222"
 
@@ -618,7 +635,7 @@ func TestAutomationDispatch_DestroyedSandboxWithCheckpointContinues(t *testing.T
 func TestAutomationDispatch_ProvenanceMismatchReconstructs(t *testing.T) {
 	h := newDispatchHarness(t)
 	ctx := context.Background()
-	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	t0 := recentDeliveryTime()
 	h1 := "1111111111111111111111111111111111111111"
 	h2 := "2222222222222222222222222222222222222222"
 
@@ -644,7 +661,7 @@ func TestAutomationDispatch_ProvenanceMismatchReconstructs(t *testing.T) {
 // authoritative push is admitted behind it, and the push executes first.
 func TestAutomationDispatch_PushPriority(t *testing.T) {
 	h := newDispatchHarness(t)
-	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	t0 := recentDeliveryTime()
 	h1 := "1111111111111111111111111111111111111111"
 	h2 := "2222222222222222222222222222222222222222"
 
@@ -674,7 +691,7 @@ func TestAutomationDispatch_PushPriority(t *testing.T) {
 func TestAutomationDispatch_StaleLifecycleNeedsEvidence(t *testing.T) {
 	h := newDispatchHarness(t)
 	ctx := context.Background()
-	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	t0 := recentDeliveryTime()
 	h1 := "1111111111111111111111111111111111111111"
 
 	run := h.push(t, h1, t0)
@@ -695,4 +712,216 @@ func TestAutomationDispatch_StaleLifecycleNeedsEvidence(t *testing.T) {
 	var age time.Duration
 	require.NoError(t, h.pool.QueryRow(ctx, `SELECT now() - lifecycle_updated_at FROM automation_targets WHERE id = $1`, *run.TargetID).Scan(&age), "read the refreshed evidence")
 	require.Less(t, age, time.Minute, "the lookup refreshed the openness evidence")
+}
+
+// TestAutomationDispatch_StaleLookupDoesNotSupersede proves a lookup taken
+// before the lock cannot outrank a delivery that committed in between: an
+// ambiguous candidate whose cached lookup shows H2 after an H3 push was
+// observed retries instead of adopting H2 and superseding H3.
+func TestAutomationDispatch_StaleLookupDoesNotSupersede(t *testing.T) {
+	h := newDispatchHarness(t)
+	t0 := recentDeliveryTime()
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+	h3 := "3333333333333333333333333333333333333333"
+
+	runA := h.push(t, h1, t0)
+	runB := h.push(t, h2, t0)
+	require.Equal(t, models.AutomationRunHeadAmbiguous, *runB.HeadResolution, "the tying candidate is ambiguous")
+	// The lookup sees H2; while it is in flight an H3 push is delivered
+	// and observed with a newer timestamp, before the dispatcher locks.
+	t2 := t0.Add(time.Second)
+	resolver := &fakeHeadResolver{info: automations.PullRequestHeadInfo{SHA: h2, UpdatedAt: &t2, State: "open", BaseBranch: "main"}}
+	h.dispatcher.SetHeadResolver(resolver)
+	var runC models.AutomationRun
+	resolver.onLookup = func() {
+		runC = h.push(t, h3, t0.Add(2*time.Second))
+		require.Equal(t, 2, *runC.HeadEpoch, "the newer push opened epoch 2")
+	}
+
+	held := h.dispatch(t, runB, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchRetry, held.Kind, "a lookup the target moved past is retried, not applied")
+	runC = h.reload(t, runC.ID)
+	require.Equal(t, models.AutomationRunStatusPending, runC.Status, "the newer push is not superseded by a stale lookup")
+	target, err := h.targets.GetByID(context.Background(), h.orgID, *runC.TargetID)
+	require.NoError(t, err, "reload target")
+	require.Equal(t, h3, *target.ObservedHeadSHA, "the target keeps the delivered newer head")
+	require.Equal(t, 2, target.HeadEpoch, "no epoch was opened for the stale head")
+
+	// With a current lookup the ambiguity resolves: the candidates at H1
+	// and H2 are superseded by the delivered H3, which has its own run.
+	t3 := t0.Add(2 * time.Second)
+	resolver.info = automations.PullRequestHeadInfo{SHA: h3, UpdatedAt: &t3, State: "open", BaseBranch: "main"}
+	lost := h.dispatch(t, runB, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchTerminalized, lost.Kind, "the candidate not at the current head is superseded")
+	require.Equal(t, models.AutomationRunOutcomeSuperseded, lost.OutcomeReason, "superseded outcome is recorded")
+	reserved := h.dispatch(t, runC, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, reserved.Kind, "the run that delivered the current head reviews it")
+	require.Equal(t, h3, h.jobPayload(t, reserved.JobID)["head_sha"], "the turn reviews the current head")
+	runA = h.reload(t, runA.ID)
+	require.Equal(t, models.AutomationRunStatusSkipped, runA.Status, "the other tie candidate was superseded by the newer push")
+}
+
+// TestAutomationDispatch_ResolvedEpochSurvivesLookupFailure proves a run
+// that resolved a missed head while the target was busy reviews that head
+// on a later degraded dispatch, not its delivered head under the newer
+// epoch.
+func TestAutomationDispatch_ResolvedEpochSurvivesLookupFailure(t *testing.T) {
+	h := newDispatchHarness(t)
+	t0 := recentDeliveryTime()
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+	h3 := "3333333333333333333333333333333333333333"
+
+	run1 := h.push(t, h1, t0)
+	first := h.dispatch(t, run1, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, first.Kind, "first run is reserved")
+	run2 := h.push(t, h2, t0.Add(time.Second))
+	t3 := t0.Add(2 * time.Second)
+	resolver := &fakeHeadResolver{info: automations.PullRequestHeadInfo{SHA: h3, UpdatedAt: &t3, State: "open", BaseBranch: "main"}}
+	h.dispatcher.SetHeadResolver(resolver)
+	waiting := h.dispatch(t, run2, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchWaiting, waiting.Kind, "the push waits behind the executing turn")
+	run2 = h.reload(t, run2.ID)
+	require.Equal(t, 3, *run2.HeadEpoch, "the missed head's epoch is stamped on the waiting run")
+
+	resolver.err = context.DeadlineExceeded
+	h.finishTurn(t, run1, h1)
+	degraded := h.dispatch(t, run2, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, degraded.Kind, "a degraded dispatch still reserves an authoritative run")
+	require.Equal(t, h3, h.jobPayload(t, degraded.JobID)["head_sha"], "the turn reviews the resolved head, not the delivered one")
+	run2 = h.reload(t, run2.ID)
+	require.True(t, run2.HeadLookupDegraded, "the failed lookup is recorded")
+	require.Equal(t, 3, *run2.HeadEpoch, "the resolved epoch is kept")
+	require.Equal(t, h3, *h.activeGeneration(t, *run2.TargetID).LastAttemptedHeadSHA, "the generation records the resolved head")
+}
+
+// TestAutomationDispatch_PerRunFallbackClearsWaiting proves a run that
+// waited for its target and then fell back to per-run execution is claimed
+// without its waiting bookkeeping, so the turn's attempt fence treats it as
+// an ordinary per-run run.
+func TestAutomationDispatch_PerRunFallbackClearsWaiting(t *testing.T) {
+	h := newDispatchHarness(t)
+	ctx := context.Background()
+	t0 := recentDeliveryTime()
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+
+	run1 := h.push(t, h1, t0)
+	first := h.dispatch(t, run1, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, first.Kind, "first run is reserved")
+	run2 := h.push(t, h2, t0.Add(time.Second))
+	waiting := h.dispatch(t, run2, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchWaiting, waiting.Kind, "the push waits behind the executing turn")
+
+	claimed, err := h.runs.ClaimPendingForPerRun(ctx, h.orgID, run2.ID)
+	require.NoError(t, err, "per-run claim")
+	require.True(t, claimed, "a waiting run is claimable by the per-run path")
+	run2 = h.reload(t, run2.ID)
+	require.Equal(t, models.AutomationRunStatusRunning, run2.Status, "the per-run claim runs the run")
+	require.Nil(t, run2.DispatchState, "the per-run claim clears the waiting state")
+	require.Nil(t, run2.WaitReason, "the per-run claim clears the wait reason")
+	require.Nil(t, run2.WaitStartedAt, "the per-run claim clears the wait start")
+
+	claimed, err = h.runs.ClaimPendingForPerRun(ctx, h.orgID, run1.ID)
+	require.NoError(t, err, "per-run claim of a reserved run")
+	require.False(t, claimed, "a reserved run is never claimed by the per-run path")
+	run1 = h.reload(t, run1.ID)
+	require.Equal(t, models.AutomationRunDispatchExecuting, *run1.DispatchState, "the reservation keeps its fencing")
+}
+
+// TestAutomationDispatch_MergedFinalTurn proves the subscribed merged
+// event runs its final turn although GitHub reports a merged pull request
+// as closed, and that the target keeps its merged state.
+func TestAutomationDispatch_MergedFinalTurn(t *testing.T) {
+	h := newDispatchHarness(t)
+	ctx := context.Background()
+	t0 := recentDeliveryTime()
+	h1 := "1111111111111111111111111111111111111111"
+
+	_, err := h.pool.Exec(ctx, `UPDATE automations SET github_event_triggers = ARRAY['github.pull_request.updated', 'github.pull_request.merged'] WHERE id = $1`, h.automation.ID)
+	require.NoError(t, err, "subscribe the automation to merged events")
+	h.automation, err = db.NewAutomationStore(h.pool).GetByID(ctx, h.orgID, h.automation.ID)
+	require.NoError(t, err, "reload the automation")
+
+	run1 := h.push(t, h1, t0)
+	first := h.dispatch(t, run1, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, first.Kind, "first run is reserved")
+	h.finishTurn(t, run1, h1)
+
+	merged := h.deliver(t, automations.GitHubEventTriggerRequest{
+		Event: models.AutomationGitHubEventPullRequestMerged, PullRequestAction: "closed", HeadSHA: h1, PullRequestUpdatedAt: timePtr(t0.Add(time.Minute)), BaseBranch: "main",
+	})
+	target, err := h.targets.GetByID(ctx, h.orgID, *merged.TargetID)
+	require.NoError(t, err, "reload target")
+	require.Equal(t, models.AutomationTargetLifecycleMerged, target.LifecycleState, "the merged event marks the target merged")
+	h.dispatcher.SetHeadResolver(&fakeHeadResolver{info: automations.PullRequestHeadInfo{SHA: h1, UpdatedAt: timePtr(t0.Add(time.Minute)), State: "closed", BaseBranch: "main"}})
+	final := h.dispatch(t, merged, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, final.Kind, "the merged event's final turn runs although GitHub reports the pull request closed")
+	require.Equal(t, models.AutomationRunContinuationContinued, final.ContinuationMode, "the final turn continues the conversation")
+	target, err = h.targets.GetByID(ctx, h.orgID, target.ID)
+	require.NoError(t, err, "reload target")
+	require.Equal(t, models.AutomationTargetLifecycleMerged, target.LifecycleState, "the closed lookup does not overwrite the merged state")
+
+	late := h.push(t, "2222222222222222222222222222222222222222", t0.Add(2*time.Minute))
+	require.Equal(t, models.AutomationRunStatusSkipped, late.Status, "a push after merge is skipped at arrival")
+}
+
+// TestAutomationDispatch_TurnCompletesWithoutCheckpoint proves the
+// session store's turn completion works without a checkpoint: the turn
+// counter advances and the native agent session id is recorded, the stale
+// key is cleared, and the next turn reconstructs rather than reusing turn 1.
+func TestAutomationDispatch_TurnCompletesWithoutCheckpoint(t *testing.T) {
+	h := newDispatchHarness(t)
+	ctx := context.Background()
+	t0 := recentDeliveryTime()
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+
+	run1 := h.push(t, h1, t0)
+	first := h.dispatch(t, run1, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, first.Kind, "first run is reserved")
+	_, err := h.pool.Exec(ctx, `UPDATE sessions SET sandbox_state = 'running', snapshot_key = 'snapshots/stale' WHERE id = $1`, first.SessionID)
+	require.NoError(t, err, "seed a running sandbox with a stale key")
+	require.NoError(t, h.sessions.UpdateTurnComplete(ctx, h.orgID, first.SessionID, 1, nil, "agent-session", ""), "complete the turn without a checkpoint")
+	session, err := h.sessions.GetByID(ctx, h.orgID, first.SessionID)
+	require.NoError(t, err, "reload session")
+	require.Equal(t, models.SessionStatusIdle, session.Status, "the session returns to idle")
+	require.Equal(t, 1, session.CurrentTurn, "the turn counter advances")
+	require.Nil(t, session.SnapshotKey, "the stale key is cleared")
+	require.Equal(t, models.SandboxStateRunning, session.SandboxState, "the sandbox state is left to its owner")
+	_, err = h.pool.Exec(ctx, `UPDATE automation_runs SET dispatch_state = 'done', status = 'completed', outcome_reason = 'turn_completed', completed_at = now() WHERE id = $1`, run1.ID)
+	require.NoError(t, err, "finish the run")
+	_, err = h.pool.Exec(ctx, `UPDATE session_threads SET status = 'idle', agent_session_id = 'agent-session' WHERE session_id = $1`, first.SessionID)
+	require.NoError(t, err, "idle the thread")
+
+	run2 := h.push(t, h2, t0.Add(time.Second))
+	next := h.dispatch(t, run2, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, next.Kind, "the next push is reserved")
+	require.Equal(t, models.AutomationRunContinuationReconstructed, next.ContinuationMode, "without a checkpoint the next turn reconstructs")
+	run2 = h.reload(t, run2.ID)
+	require.Equal(t, 2, *run2.TurnNumber, "the next turn is numbered after the counted one")
+}
+
+// TestAutomationDispatch_DelayedDeliveryNeedsRevalidation proves a
+// delivery's own timestamp is the openness evidence: a day-old delivery
+// on a new target does not let a fresh generation start while the lookup
+// fails.
+func TestAutomationDispatch_DelayedDeliveryNeedsRevalidation(t *testing.T) {
+	h := newDispatchHarness(t)
+	ctx := context.Background()
+	h1 := "1111111111111111111111111111111111111111"
+
+	stale := time.Now().UTC().Add(-24 * time.Hour)
+	run := h.push(t, h1, stale)
+	var evidence time.Time
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT lifecycle_updated_at FROM automation_targets WHERE id = $1`, *run.TargetID).Scan(&evidence), "read evidence")
+	require.WithinDuration(t, stale, evidence, time.Second, "openness evidence carries the delivery's timestamp")
+
+	h.dispatcher.SetHeadResolver(&fakeHeadResolver{err: context.DeadlineExceeded})
+	held := h.dispatch(t, run, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchRetry, held.Kind, "a stale delivery with a failed lookup cannot open a generation")
+	var generations int
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT count(*) FROM automation_target_sessions WHERE org_id = $1`, h.orgID).Scan(&generations), "count generations")
+	require.Equal(t, 0, generations, "no generation was created on stale evidence")
 }
