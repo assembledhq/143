@@ -3595,13 +3595,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 
 	// 10b. Retry once on token expiration for Codex agents.
 	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, log)
-	automationTurn.markAgentEnded()
 
 	// 10c. Shed the just-picked credential's in-process health-cache slot if
 	// the (possibly retried) result indicates a credential-level failure.
 	// No-ops cleanly for agent types whose auth flows do not pass through
 	// the unified resolver (e.g. Codex subscription via codexauth.Service).
 	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, run, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, false, log)
+	automationTurn.markAgentEnded()
 	err = errors.Join(err, streamErr)
 	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, run, sandbox, authBillingMode, log); harvestErr != nil {
 		log.Warn().
@@ -5231,7 +5231,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 						return nil, fmt.Errorf("prepare prompt for restored-workspace fallback: %w", err)
 					}
 					if automationTurn != nil {
-						basePrompt.UserPrompt = appendAgentAttachmentSection(userMessage, materializedAttachments)
+						// The restored native session is gone: re-render the
+						// turn for embedded history before the fresh exec.
+						rerendered, err := o.fallbackToEmbeddedHistory(ctx, sandbox, session, automationTurn, log)
+						if err != nil {
+							return nil, fmt.Errorf("re-render automation turn for embedded history: %w", err)
+						}
+						basePrompt.UserPrompt = appendAgentAttachmentSection(rerendered, materializedAttachments)
 					} else {
 						basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildRestoredWorkspaceResumeContext(session, promptIssue, scopedMessages, userMessage), materializedAttachments)
 					}

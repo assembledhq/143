@@ -51,6 +51,10 @@ type AutomationTurnStore interface {
 	WriteResult(ctx context.Context, tx pgx.Tx, orgID, jobID uuid.UUID, result *models.AutomationRunResult) (bool, error)
 	RecordTurnDuration(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID, durationMS int) (bool, error)
 	CompletePreflight(ctx context.Context, orgID, runID, lockToken uuid.UUID, outcome models.AutomationRunOutcomeReason, summary string) (bool, error)
+	// LockAttempt locks the attempt's run and job rows in tx and reports
+	// whether the lease is still held; a concurrent claim waits for tx.
+	LockAttempt(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID) (bool, error)
+	RecordTurnBaseline(ctx context.Context, orgID, runID, lockToken uuid.UUID, baselineHeadSHA *string) (bool, error)
 	// EndInterruptedAttempt restores the session's pre-turn status for a
 	// drained attempt in one fenced statement; no marker is written.
 	EndInterruptedAttempt(ctx context.Context, orgID, runID, sessionID, lockToken uuid.UUID, status models.SessionStatus) (bool, error)
@@ -142,7 +146,11 @@ type automationTurnState struct {
 	fingerprint     *string
 	dependencyState string
 	nativeContext   bool
-	prompt          string
+	// nativeContextLost is set when a native resume failed after the
+	// checkpoint restored and the turn re-rendered its prompt for embedded
+	// history.
+	nativeContextLost bool
+	prompt            string
 
 	startedAt      time.Time
 	agentStartedAt time.Time
@@ -580,7 +588,7 @@ func (o *Orchestrator) renderAutomationTurnPrompt(ctx context.Context, sandbox *
 		HeadSHA:         state.headSHA,
 		BaseSHA:         state.baseSHA,
 		BaseBranch:      state.baseBranch,
-		NativeContext:   state.continued() && session.AgentSessionID != nil && *session.AgentSessionID != "",
+		NativeContext:   state.continued() && !state.nativeContextLost && session.AgentSessionID != nil && *session.AgentSessionID != "",
 		DependencyState: state.dependencyState,
 		FullReview:      delta.fullReview,
 		DiffStat:        delta.stat,
@@ -599,9 +607,10 @@ func (o *Orchestrator) renderAutomationTurnPrompt(ctx context.Context, sandbox *
 			log.Warn().Err(err).Msg("failed to load earlier review summaries")
 		}
 		for _, s := range summaries {
-			if s.HeadSHA != "" && s.HeadSHA == state.baselineSHA && !data.InterruptedCheckpoint {
-				// The baseline turn's findings are in native context or in
-				// the transcript; embed only the reviews after it.
+			if data.NativeContext && s.HeadSHA != "" && s.HeadSHA == state.baselineSHA && !data.InterruptedCheckpoint {
+				// With native context the baseline turn's findings are
+				// already in the agent's memory; embed only the reviews
+				// after it. Without native context every review is data.
 				continue
 			}
 			data.Summaries = append(data.Summaries, prompts.AutomationTurnSummary{TurnNumber: s.TurnNumber, HeadSHA: s.HeadSHA, Summary: s.Summary})
@@ -759,24 +768,60 @@ func (o *Orchestrator) runPendingPreflight(ctx context.Context, state *automatio
 // releaseInheritedContainer destroys a container an earlier attempt of
 // the same session left recorded (a crash mid-turn), so a preflight that
 // ends the run before any sandbox is created never releases the session
-// while a stale container still holds it.
-func (o *Orchestrator) releaseInheritedContainer(ctx context.Context, session *models.Session, log zerolog.Logger) error {
+// while a stale container still holds it. The destroy is authorized
+// under the attempt's lock: the run and job rows stay locked from the
+// authorization through the destroy and the CAS clear, so a takeover
+// (which locks the same job row) waits, and a worker whose lease is gone
+// is refused before it touches anything. A container recorded on another
+// node is only cleared when that node is known dead; otherwise the
+// attempt yields to the node that owns it.
+func (o *Orchestrator) releaseInheritedContainer(ctx context.Context, state *automationTurnState, session *models.Session, log zerolog.Logger) error {
 	if session.ContainerID == nil || *session.ContainerID == "" {
 		return nil
 	}
 	recorded := *session.ContainerID
-	cleared, err := o.sessions.ClearContainerID(ctx, session.OrgID, session.ID, recorded)
+	recordedNode := ""
+	if session.WorkerNodeID != nil {
+		recordedNode = *session.WorkerNodeID
+	}
+	onDeadNode := false
+	if recordedNode != "" && recordedNode != o.nodeID {
+		deadNode, ok := jobctx.DeadTargetNodeFromContext(ctx)
+		if !ok || deadNode != recordedNode {
+			return fmt.Errorf("%w: inherited sandbox %s is recorded on node %s", ErrSandboxOnDifferentNode, recorded, recordedNode)
+		}
+		onDeadNode = true
+	}
+	err := o.automationTurns.EndAttempt(ctx, func(ctx context.Context, tx pgx.Tx, sessions SessionStore) error {
+		owned, err := o.automationTurns.LockAttempt(ctx, tx, session.OrgID, state.run.ID, state.lockToken)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			return ErrAutomationAttemptLost
+		}
+		if !onDeadNode {
+			// Destroy while the attempt lock is held; a failure keeps the
+			// recorded id so the cleanup stays retryable.
+			if err := o.provider.Destroy(context.WithoutCancel(ctx), &Sandbox{ID: recorded, Provider: o.provider.Name()}); err != nil {
+				return fmt.Errorf("destroy inherited sandbox %s: %w", recorded, err)
+			}
+		}
+		cleared, err := sessions.ClearContainerID(ctx, session.OrgID, session.ID, recorded)
+		if err != nil {
+			return fmt.Errorf("clear inherited sandbox: %w", err)
+		}
+		if !cleared {
+			return fmt.Errorf("inherited sandbox %s is held by another owner", recorded)
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("clear inherited sandbox: %w", err)
-	}
-	if !cleared {
-		return fmt.Errorf("inherited sandbox %s is held by another owner", recorded)
-	}
-	if err := o.provider.Destroy(context.WithoutCancel(ctx), &Sandbox{ID: recorded, Provider: o.provider.Name()}); err != nil {
-		log.Warn().Err(err).Str("container_id", recorded).Msg("failed to destroy inherited sandbox")
+		return err
 	}
 	session.ContainerID = nil
 	session.WorkerNodeID = nil
+	log.Info().Str("container_id", recorded).Bool("dead_node", onDeadNode).Msg("released the container an earlier attempt left behind")
 	return nil
 }
 
@@ -784,11 +829,39 @@ func (o *Orchestrator) releaseInheritedContainer(ctx context.Context, session *m
 // anything was allocated for this attempt, after releasing any container
 // an earlier attempt left behind.
 func (o *Orchestrator) endClosedTargetTurn(ctx context.Context, state *automationTurnState, session *models.Session, log zerolog.Logger) error {
-	if err := o.releaseInheritedContainer(ctx, session, log); err != nil {
+	if err := o.releaseInheritedContainer(ctx, state, session, log); err != nil {
 		return err
 	}
 	state.deferPreflight(models.AutomationRunOutcomePRClosed, "the pull request is no longer open")
 	return o.runPendingPreflight(ctx, state, session, log)
+}
+
+// fallbackToEmbeddedHistory re-renders the turn's prompt when the native
+// resume failed after the checkpoint restored: the agent starts without
+// its memory, so native context is reported absent, the baseline moves
+// to the last completed review (persisted on the run), and every earlier
+// review is embedded as bounded data.
+func (o *Orchestrator) fallbackToEmbeddedHistory(ctx context.Context, sandbox *Sandbox, session *models.Session, state *automationTurnState, log zerolog.Logger) (string, error) {
+	var baseline *string
+	if state.generation.LastReviewedHeadSHA != nil && gitSHAPattern.MatchString(*state.generation.LastReviewedHeadSHA) {
+		b := *state.generation.LastReviewedHeadSHA
+		baseline = &b
+	}
+	recorded, err := o.automationTurns.RecordTurnBaseline(ctx, session.OrgID, state.run.ID, state.lockToken, baseline)
+	if err != nil {
+		return "", err
+	}
+	if !recorded {
+		return "", fmt.Errorf("%w: baseline was not recorded", ErrAutomationAttemptLost)
+	}
+	state.nativeContextLost = true
+	state.run.PreviousHeadSHA = baseline
+	state.baselineSHA = ""
+	if baseline != nil {
+		state.baselineSHA = *baseline
+	}
+	log.Warn().Str("run_id", state.run.ID.String()).Msg("native resume failed after the checkpoint restored; continuing with embedded history from the last completed review")
+	return o.renderAutomationTurnPrompt(ctx, sandbox, session, state, log)
 }
 
 // fallbackToReconstruction turns a continued turn whose checkpoint could
