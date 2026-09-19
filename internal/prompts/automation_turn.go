@@ -16,7 +16,12 @@ type AutomationTurnSummary struct {
 // delimited UNTRUSTED DATA block; the template repeats the boundary
 // instruction on every turn.
 type AutomationTurnPromptData struct {
-	Goal                  string
+	// Goal is the automation's own goal, trusted instructions.
+	Goal string
+	// EventContext is the trigger's GitHub event context (title, actor,
+	// paths, comment text) captured at arrival: pull-request-derived text,
+	// rendered as untrusted data.
+	EventContext          string
 	TurnNumber            int
 	Mode                  string
 	ContinuationReason    string
@@ -63,6 +68,7 @@ func AutomationTurnPrompt(data AutomationTurnPromptData) string {
 		data.Summaries[i].HeadSHA = sanitizeUntrustedLine(data.Summaries[i].HeadSHA)
 	}
 	data.EventText = boundUntrusted(data.EventText, AutomationTurnEventTextLimit)
+	data.EventContext = boundUntrusted(data.EventContext, AutomationTurnEventTextLimit)
 	if data.DependencyState == "" {
 		data.DependencyState = "unknown"
 	}

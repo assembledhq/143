@@ -311,3 +311,34 @@ func TestAutomationTurn_WorkspaceAndPromptBookkeeping(t *testing.T) {
 	require.Equal(t, 2, summaries[1].TurnNumber, "turn numbers are carried")
 	require.Equal(t, "2222222222222222222222222222222222222222", summaries[1].HeadSHA, "the second turn's resolved head")
 }
+
+// TestAutomationTurn_AttemptFenceHelpers proves the marker-free fences the
+// drain and restore-fallback paths rely on.
+func TestAutomationTurn_AttemptFenceHelpers(t *testing.T) {
+	h := newTurnHarness(t)
+	ctx := context.Background()
+
+	owned, err := h.store.AttemptOwned(ctx, nil, h.orgID, h.run.ID, h.lockToken)
+	require.NoError(t, err, "ownership check")
+	require.True(t, owned, "the lease holder owns the attempt")
+	owned, err = h.store.AttemptOwned(ctx, nil, h.orgID, h.run.ID, uuid.New())
+	require.NoError(t, err, "ownership check with another token")
+	require.False(t, owned, "another token does not own the attempt")
+	_, err = h.pool.Exec(ctx, `UPDATE jobs SET status = 'pending', lock_token = NULL WHERE id = $1`, h.jobID)
+	require.NoError(t, err, "reclaim the job")
+	owned, err = h.store.AttemptOwned(ctx, nil, h.orgID, h.run.ID, h.lockToken)
+	require.NoError(t, err, "ownership check after reclaim")
+	require.False(t, owned, "a reclaimed job no longer owns the attempt")
+	_, err = h.pool.Exec(ctx, `UPDATE jobs SET status = 'running', lock_token = $2 WHERE id = $1`, h.jobID, h.lockToken)
+	require.NoError(t, err, "restore the lease")
+
+	recorded, err := h.store.RecordContinuationFallback(ctx, h.orgID, h.run.ID, uuid.New(), models.AutomationRunContinuationReasonRestoreFailed)
+	require.NoError(t, err, "fallback with another token")
+	require.False(t, recorded, "the fence rejects another lease")
+	recorded, err = h.store.RecordContinuationFallback(ctx, h.orgID, h.run.ID, h.lockToken, models.AutomationRunContinuationReasonRestoreFailed)
+	require.NoError(t, err, "fallback")
+	require.True(t, recorded, "the lease holder records the fallback")
+	run := h.reload(t, h.run.ID)
+	require.Equal(t, models.AutomationRunContinuationReconstructed, *run.ContinuationMode, "the run is reconstructed")
+	require.Equal(t, models.AutomationRunContinuationReasonRestoreFailed, *run.ContinuationReason, "with restore_failed")
+}

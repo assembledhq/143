@@ -1,4 +1,10 @@
 {{.Goal}}
+{{- if .EventContext}}
+
+<<<BEGIN UNTRUSTED DATA: trigger event context>>>
+{{.EventContext}}
+<<<END UNTRUSTED DATA>>>
+{{- end}}
 
 ## Continuation context
 

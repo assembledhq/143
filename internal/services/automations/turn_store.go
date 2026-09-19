@@ -35,6 +35,18 @@ func (s *TurnStore) LoadRun(ctx context.Context, orgID, runID uuid.UUID) (models
 	return s.runs.GetByRunID(ctx, orgID, runID)
 }
 
+func (s *TurnStore) LoadTarget(ctx context.Context, orgID, targetID uuid.UUID) (models.AutomationTarget, error) {
+	return s.targets.GetByID(ctx, orgID, targetID)
+}
+
+func (s *TurnStore) AttemptOwned(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID) (bool, error) {
+	return s.runs.AttemptOwned(ctx, tx, orgID, runID, lockToken)
+}
+
+func (s *TurnStore) RecordContinuationFallback(ctx context.Context, orgID, runID, lockToken uuid.UUID, reason models.AutomationRunContinuationReason) (bool, error) {
+	return s.runs.RecordContinuationFallback(ctx, orgID, runID, lockToken, reason)
+}
+
 func (s *TurnStore) LoadGeneration(ctx context.Context, orgID, targetID uuid.UUID, generation int) (models.AutomationTargetSession, error) {
 	return s.targets.GetGenerationByNumber(ctx, orgID, targetID, generation)
 }

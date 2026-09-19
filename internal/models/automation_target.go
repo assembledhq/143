@@ -101,6 +101,20 @@ const (
 	AutomationTargetLifecycleMerged AutomationTargetLifecycleState = "merged"
 )
 
+// AllowsEvent reports whether a run for event may execute on a target in
+// this lifecycle state: open targets run everything; a merged target runs
+// only its merged event; a closed target runs nothing.
+func (s AutomationTargetLifecycleState) AllowsEvent(event AutomationGitHubEvent) bool {
+	switch s {
+	case AutomationTargetLifecycleOpen:
+		return true
+	case AutomationTargetLifecycleMerged:
+		return event == AutomationGitHubEventPullRequestMerged
+	default:
+		return false
+	}
+}
+
 func (s AutomationTargetLifecycleState) Validate() error {
 	switch s {
 	case AutomationTargetLifecycleOpen, AutomationTargetLifecycleClosed, AutomationTargetLifecycleMerged:
@@ -440,8 +454,10 @@ type CheckpointProvenance struct {
 }
 
 // AutomationTurnWorkspace is what workspace preparation records on a run:
-// the merge-base the delta falls back to, the node the turn ran on, and the
-// restore cost when the turn restored a checkpoint.
+// the merge-base the delta falls back to, the node the turn ran on, the
+// snapshot size when the turn restored a checkpoint, and the time from the
+// attempt's start to a ready workspace on every path (snapshot restore, or
+// clone and checkout for a rebuilt workspace).
 type AutomationTurnWorkspace struct {
 	BaseSHA              string
 	WorkerNodeID         string

@@ -337,7 +337,7 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 	// merged event keeps its final turn and the target keeps its merged
 	// state.
 	event := runEvent(run)
-	if !lifecycleAllowsRun(target.LifecycleState, event) {
+	if !target.LifecycleState.AllowsEvent(event) {
 		return d.terminalize(ctx, tx, orgID, run.ID, models.AutomationRunOutcomePRClosed, "pull request is no longer open")
 	}
 	if current.ok && current.info.State != "" && current.info.State != "open" && event != models.AutomationGitHubEventPullRequestMerged {
@@ -658,19 +658,6 @@ func (d *TargetDispatcher) terminalizeWith(ctx context.Context, tx pgx.Tx, orgID
 		return DispatchOutcome{}, fmt.Errorf("commit automation dispatch terminalization: %w", err)
 	}
 	return DispatchOutcome{Kind: DispatchTerminalized, OutcomeReason: outcome, Note: note}, nil
-}
-
-// lifecycleAllowsRun applies the stored lifecycle gate: open targets run
-// everything; a merged target runs only its merged event.
-func lifecycleAllowsRun(state models.AutomationTargetLifecycleState, event models.AutomationGitHubEvent) bool {
-	switch state {
-	case models.AutomationTargetLifecycleOpen:
-		return true
-	case models.AutomationTargetLifecycleMerged:
-		return event == models.AutomationGitHubEventPullRequestMerged
-	default:
-		return false
-	}
 }
 
 // targetChangedSince reports whether the target row was written between

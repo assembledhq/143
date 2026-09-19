@@ -37,6 +37,7 @@ import (
 // package does not import db.
 type AutomationTurnStore interface {
 	LoadRun(ctx context.Context, orgID, runID uuid.UUID) (models.AutomationRun, error)
+	LoadTarget(ctx context.Context, orgID, targetID uuid.UUID) (models.AutomationTarget, error)
 	LoadGeneration(ctx context.Context, orgID, targetID uuid.UUID, generation int) (models.AutomationTargetSession, error)
 	ListCompletedTurnSummaries(ctx context.Context, orgID, targetID uuid.UUID, generation, limit int) ([]models.AutomationTurnSummary, error)
 	RecordTurnWorkspace(ctx context.Context, orgID, runID, lockToken uuid.UUID, ws models.AutomationTurnWorkspace) (bool, error)
@@ -50,6 +51,10 @@ type AutomationTurnStore interface {
 	WriteResult(ctx context.Context, tx pgx.Tx, orgID, jobID uuid.UUID, result *models.AutomationRunResult) (bool, error)
 	RecordTurnDuration(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID, durationMS int) (bool, error)
 	CompletePreflight(ctx context.Context, orgID, runID, lockToken uuid.UUID, outcome models.AutomationRunOutcomeReason, summary string) (bool, error)
+	// AttemptOwned reports whether the attempt still holds its lease, for
+	// attempt-end writes that carry no marker.
+	AttemptOwned(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID) (bool, error)
+	RecordContinuationFallback(ctx context.Context, orgID, runID, lockToken uuid.UUID, reason models.AutomationRunContinuationReason) (bool, error)
 	RetireGeneration(ctx context.Context, orgID, generationID uuid.UUID, reason models.AutomationTargetRetiredReason) error
 }
 
@@ -68,6 +73,9 @@ var (
 	// ErrAutomationAttemptLost means the attempt fence rejected the end-of-
 	// attempt write: another worker holds the job lease.
 	ErrAutomationAttemptLost = errors.New("automation turn attempt lost its lease")
+	// ErrAutomationTargetClosed means the pull request closed after the run
+	// was reserved; the turn ends as a pr_closed preflight.
+	ErrAutomationTargetClosed = errors.New("automation turn target is no longer open")
 	// errAutomationTurnStoreMissing is returned when a per-target turn
 	// reaches an orchestrator without the turn store configured.
 	errAutomationTurnStoreMissing = errors.New("automation turn store is not configured")
@@ -125,19 +133,46 @@ type automationTurnState struct {
 	baselineSHA       string
 	baseSHA           string
 	isPush            bool
+	event             models.AutomationGitHubEvent
+	// goal is the automation's trusted goal; eventContext is the trigger's
+	// pull-request-derived context, rendered as untrusted data.
+	goal         string
+	eventContext string
 
 	fingerprint     *string
 	dependencyState string
 	nativeContext   bool
 	prompt          string
 
-	startedAt    time.Time
-	restoreBytes *int64
-	restoreMS    *int
+	startedAt      time.Time
+	agentStartedAt time.Time
+	restoreBytes   *int64
+	restoreMS      *int
 
 	checkpointKey       string
 	checkpointPublished bool
 	ended               bool
+
+	// pendingPreflight is a preflight outcome discovered during setup. It
+	// is applied by the deferred hook after the sandbox and turn hold are
+	// released, so the session is never claimable while this attempt still
+	// holds its container.
+	pendingPreflight        models.AutomationRunOutcomeReason
+	pendingPreflightSummary string
+}
+
+// markAgentStarted records when the agent process started, so the turn
+// duration covers agent execution only.
+func (s *automationTurnState) markAgentStarted() {
+	if s != nil {
+		s.agentStartedAt = time.Now().UTC()
+	}
+}
+
+// deferPreflight records a preflight outcome for the deferred hook.
+func (s *automationTurnState) deferPreflight(outcome models.AutomationRunOutcomeReason, summary string) {
+	s.pendingPreflight = outcome
+	s.pendingPreflightSummary = summary
 }
 
 func (s *automationTurnState) mode() models.AutomationRunContinuationMode {
@@ -204,7 +239,8 @@ func (o *Orchestrator) beginAutomationTurn(ctx context.Context, session *models.
 		return ctx, nil, fmt.Errorf("load automation generation: %w", err)
 	}
 	var snapshot struct {
-		GitHub automationRunGitHubSnapshot `json:"github"`
+		GitHub automationRunGitHubSnapshot  `json:"github"`
+		Event  models.AutomationGitHubEvent `json:"github_event"`
 	}
 	if len(run.ConfigSnapshot) > 0 {
 		if err := json.Unmarshal(run.ConfigSnapshot, &snapshot); err != nil {
@@ -235,6 +271,7 @@ func (o *Orchestrator) beginAutomationTurn(ctx context.Context, session *models.
 	if baseBranch != "" && !gitRefNamePattern.MatchString(baseBranch) {
 		return ctx, nil, fmt.Errorf("automation run %s base branch %q is not a valid ref name", run.ID, baseBranch)
 	}
+	goal, eventContext := splitGoalSnapshot(run.GoalSnapshot)
 	state := &automationTurnState{
 		opts:              opts,
 		run:               run,
@@ -247,13 +284,41 @@ func (o *Orchestrator) beginAutomationTurn(ctx context.Context, session *models.
 		repository:        snapshot.GitHub.Repository,
 		pullRequestURL:    snapshot.GitHub.PullRequestURL,
 		isPush:            run.GitHubAction != nil && *run.GitHubAction == "synchronize",
+		event:             snapshot.Event,
+		goal:              goal,
+		eventContext:      eventContext,
 		dependencyState:   "unknown",
 		startedAt:         time.Now().UTC(),
 	}
 	if run.PreviousHeadSHA != nil && gitSHAPattern.MatchString(*run.PreviousHeadSHA) {
 		state.baselineSHA = *run.PreviousHeadSHA
 	}
-	return withAutomationTurnState(ctx, state), state, nil
+	ctx = withAutomationTurnState(ctx, state)
+	// Execution-time lifecycle check (design doc 125, "Executing preflight
+	// outcomes"): a pull request that closed after the reservation ends the
+	// turn as pr_closed. The state is returned so the caller can apply it.
+	target, err := o.automationTurns.LoadTarget(ctx, session.OrgID, *run.TargetID)
+	if err != nil {
+		return ctx, nil, fmt.Errorf("load automation target: %w", err)
+	}
+	if !target.LifecycleState.AllowsEvent(state.event) {
+		return ctx, state, fmt.Errorf("%w: lifecycle is %s", ErrAutomationTargetClosed, target.LifecycleState)
+	}
+	return ctx, state, nil
+}
+
+// goalSnapshotEventMarker separates the automation's goal from the GitHub
+// event context the trigger appended to the run's goal snapshot.
+const goalSnapshotEventMarker = "\n\nGitHub event context:\n"
+
+// splitGoalSnapshot separates the trusted goal from the pull-request-derived
+// event context so only the goal is rendered as instructions.
+func splitGoalSnapshot(goalSnapshot string) (goal, eventContext string) {
+	goal, eventContext, found := strings.Cut(goalSnapshot, goalSnapshotEventMarker)
+	if !found {
+		return strings.TrimSpace(goalSnapshot), ""
+	}
+	return strings.TrimSpace(goal), strings.TrimSpace(eventContext)
 }
 
 // automationTurnWorkingBranch is the display-only working branch of a
@@ -340,7 +405,9 @@ func (o *Orchestrator) prepareAutomationTurnWorkspace(ctx context.Context, sandb
 		}
 	}
 	// Unsupported workspaces: a nested repository or Git LFS content.
-	if out, _, err := o.execGit(ctx, sandbox, token, "find . -mindepth 2 -name .git -not -path './.git/*' -print -quit"); err == nil && strings.TrimSpace(out) != "" {
+	// A registered submodule's .git is a file; an independent nested
+	// repository has a .git directory.
+	if out, _, err := o.execGit(ctx, sandbox, token, "find . -mindepth 2 -type d -name .git -not -path './.git/*' -print -quit"); err == nil && strings.TrimSpace(out) != "" {
 		return fmt.Errorf("%w: nested repository at %s", ErrAutomationUnsupportedWorkspace, strings.TrimSpace(out))
 	}
 	if out, _, err := o.execGit(ctx, sandbox, token, "git ls-files -- '.gitattributes' '**/.gitattributes' | head -20 | xargs -r grep -l 'filter=lfs' 2>/dev/null || true"); err == nil && strings.TrimSpace(out) != "" {
@@ -483,7 +550,8 @@ func (o *Orchestrator) computeAutomationTurnDelta(ctx context.Context, sandbox *
 func (o *Orchestrator) renderAutomationTurnPrompt(ctx context.Context, sandbox *Sandbox, session *models.Session, state *automationTurnState, log zerolog.Logger) (string, error) {
 	delta := o.computeAutomationTurnDelta(ctx, sandbox, state, log)
 	data := prompts.AutomationTurnPromptData{
-		Goal:            state.run.GoalSnapshot,
+		Goal:            state.goal,
+		EventContext:    state.eventContext,
 		TurnNumber:      derefInt(state.run.TurnNumber),
 		Mode:            string(state.mode()),
 		BaselineSHA:     state.baselineSHA,
@@ -569,7 +637,10 @@ func (o *Orchestrator) publishAutomationCheckpoint(ctx context.Context, state *a
 	if err != nil {
 		return false, err
 	}
-	if published {
+	// The bootstrap checkpoint carries provenance but is not end-of-attempt
+	// evidence: the marker reports only a checkpoint taken at the attempt's
+	// end.
+	if published && kind != models.CheckpointKindBootstrap {
 		state.checkpointKey = snapshotKey
 		state.checkpointPublished = true
 	}
@@ -612,7 +683,11 @@ func (o *Orchestrator) endAutomationAttempt(ctx context.Context, state *automati
 		id := agentSessionID
 		marker.AgentSessionID = &id
 	}
-	duration := int(time.Since(state.startedAt) / time.Millisecond)
+	durationSince := state.agentStartedAt
+	if durationSince.IsZero() {
+		durationSince = state.startedAt
+	}
+	duration := int(time.Since(durationSince) / time.Millisecond)
 	err := o.automationTurns.EndAttempt(ctx, func(ctx context.Context, tx pgx.Tx, sessions SessionStore) error {
 		if err := write(sessions); err != nil {
 			return err
@@ -636,21 +711,66 @@ func (o *Orchestrator) endAutomationAttempt(ctx context.Context, state *automati
 	return nil
 }
 
-// completeAutomationPreflight ends a reserved turn that could not start.
-func (o *Orchestrator) completeAutomationPreflight(ctx context.Context, state *automationTurnState, session *models.Session, outcome models.AutomationRunOutcomeReason, summary string, log zerolog.Logger) error {
-	if state == nil {
-		return nil
+// runPendingPreflight applies a preflight outcome recorded during setup.
+// It runs from a deferred hook registered before the sandbox is created,
+// so the sandbox and turn hold are already released when the run ends and
+// the session becomes claimable.
+func (o *Orchestrator) runPendingPreflight(ctx context.Context, state *automationTurnState, session *models.Session, log zerolog.Logger) {
+	if state == nil || state.pendingPreflight == "" || state.ended {
+		return
 	}
-	done, err := o.automationTurns.CompletePreflight(context.WithoutCancel(ctx), session.OrgID, state.run.ID, state.lockToken, outcome, summary)
+	outcome := state.pendingPreflight
+	state.pendingPreflight = ""
+	done, err := o.automationTurns.CompletePreflight(context.WithoutCancel(ctx), session.OrgID, state.run.ID, state.lockToken, outcome, state.pendingPreflightSummary)
 	if err != nil {
-		return err
+		log.Error().Err(err).Str("run_id", state.run.ID.String()).Str("outcome", string(outcome)).Msg("failed to complete automation turn preflight; the run stays executing for the reaper")
+		return
 	}
 	if !done {
-		return fmt.Errorf("%w: preflight %s was not applied", ErrAutomationAttemptLost, outcome)
+		log.Warn().Str("run_id", state.run.ID.String()).Str("outcome", string(outcome)).Msg("automation turn preflight was not applied: the attempt lost its lease")
+		return
 	}
 	state.ended = true
 	log.Info().Str("run_id", state.run.ID.String()).Str("outcome", string(outcome)).Msg("automation turn ended before the agent started")
+}
+
+// fallbackToReconstruction turns a continued turn whose checkpoint could
+// not be restored into a reconstructed turn in the same session (readiness
+// "rebuild" with restore_failed). The run records the fallback so the
+// marker and the run row agree.
+func (o *Orchestrator) fallbackToReconstruction(ctx context.Context, state *automationTurnState, session *models.Session, cause error, log zerolog.Logger) error {
+	recorded, err := o.automationTurns.RecordContinuationFallback(ctx, session.OrgID, state.run.ID, state.lockToken, models.AutomationRunContinuationReasonRestoreFailed)
+	if err != nil {
+		return err
+	}
+	if !recorded {
+		return fmt.Errorf("%w: continuation fallback was not recorded", ErrAutomationAttemptLost)
+	}
+	reason := models.AutomationRunContinuationReasonRestoreFailed
+	mode := models.AutomationRunContinuationReconstructed
+	state.run.ContinuationReason = &reason
+	state.run.ContinuationMode = &mode
+	state.opts.ContinuationMode = mode
+	state.restoreBytes = nil
+	log.Warn().Err(cause).Str("run_id", state.run.ID.String()).Msg("checkpoint restore failed; rebuilding the workspace in the same session")
 	return nil
+}
+
+// endInterruptedAutomationTurn restores the pre-turn status of an
+// interrupted (drained) attempt without a marker, fenced by the attempt so
+// a paused worker whose job was reclaimed cannot reset the next attempt's
+// session. Returns ErrAutomationAttemptLost when the fence rejects it.
+func (o *Orchestrator) endInterruptedAutomationTurn(ctx context.Context, state *automationTurnState, session *models.Session, fallbackStatus models.SessionStatus) error {
+	return o.automationTurns.EndAttempt(ctx, func(ctx context.Context, tx pgx.Tx, sessions SessionStore) error {
+		owned, err := o.automationTurns.AttemptOwned(ctx, tx, session.OrgID, state.run.ID, state.lockToken)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			return ErrAutomationAttemptLost
+		}
+		return sessions.UpdateStatus(ctx, session.OrgID, session.ID, fallbackStatus)
+	})
 }
 
 // automationTurnResultDiff disables session diff collection for per-target
@@ -720,6 +840,8 @@ func (o *Orchestrator) prepareAutomationTurnRepository(ctx context.Context, sand
 	if _, err := prepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log, skip); err != nil {
 		return err
 	}
+	readyMS := int(time.Since(state.startedAt) / time.Millisecond)
+	state.restoreMS = &readyMS
 	recorded, err := o.automationTurns.RecordTurnWorkspace(ctx, state.run.OrgID, state.run.ID, state.lockToken, models.AutomationTurnWorkspace{
 		BaseSHA:              state.baseSHA,
 		WorkerNodeID:         o.nodeID,
@@ -735,15 +857,15 @@ func (o *Orchestrator) prepareAutomationTurnRepository(ctx context.Context, sand
 	return nil
 }
 
-// failAutomationTurnSetup handles a workspace preparation failure of a
-// continued or reconstructed turn: a preflight outcome ends the run without
-// a marker and finishes the job; an unsupported workspace retires the
-// generation and fails the attempt; anything else fails the attempt.
+// failAutomationTurnSetup handles a setup failure of a continued or
+// reconstructed turn: a preflight outcome is recorded for the deferred
+// hook (applied once the sandbox is released) and the job finishes; an
+// unsupported workspace retires the generation and fails the attempt;
+// anything else fails the attempt.
 func (o *Orchestrator) failAutomationTurnSetup(ctx context.Context, session *models.Session, opts *ContinueSessionOptions, sandbox *Sandbox, state *automationTurnState, cause error, log zerolog.Logger) error {
 	if outcome, summary, ok := automationPreflightOutcome(cause); ok {
-		if err := o.completeAutomationPreflight(ctx, state, session, outcome, summary, log); err != nil {
-			return fmt.Errorf("%w: %w", cause, err)
-		}
+		log.Info().Err(cause).Str("outcome", string(outcome)).Msg("automation turn cannot start; ending after cleanup")
+		state.deferPreflight(outcome, summary)
 		return nil
 	}
 	if errors.Is(cause, ErrAutomationUnsupportedWorkspace) {
@@ -758,9 +880,8 @@ func (o *Orchestrator) failAutomationTurnSetup(ctx context.Context, session *mod
 // run_agent path.
 func (o *Orchestrator) failAutomationTurnRunSetup(ctx context.Context, run *models.Session, sandbox *Sandbox, state *automationTurnState, cause error, log zerolog.Logger) error {
 	if outcome, summary, ok := automationPreflightOutcome(cause); ok {
-		if err := o.completeAutomationPreflight(ctx, state, run, outcome, summary, log); err != nil {
-			return fmt.Errorf("%w: %w", cause, err)
-		}
+		log.Info().Err(cause).Str("outcome", string(outcome)).Msg("automation turn cannot start; ending after cleanup")
+		state.deferPreflight(outcome, summary)
 		return nil
 	}
 	if errors.Is(cause, ErrAutomationUnsupportedWorkspace) {
@@ -780,6 +901,8 @@ func automationPreflightOutcome(err error) (models.AutomationRunOutcomeReason, s
 		return models.AutomationRunOutcomeStaleHead, "the pull request head is no longer reachable", true
 	case errors.Is(err, errAutomationRepositoryUnavailable):
 		return models.AutomationRunOutcomeRepositoryUnavailable, err.Error(), true
+	case errors.Is(err, ErrAutomationTargetClosed):
+		return models.AutomationRunOutcomePRClosed, "the pull request is no longer open", true
 	default:
 		return "", "", false
 	}
@@ -813,4 +936,10 @@ func (o *Orchestrator) endCancelledAutomationTurn(ctx context.Context, state *au
 	}
 	completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusCancelled, models.ActivityPhaseBoundaryCancelled, log)
 	log.Info().Int("turn", turnNumber).Msg("cancelled automation turn ended")
+}
+
+// automationTurnSnapshotKey names one publication of an owned session's
+// checkpoint: the attempt that took it and the time it was taken.
+func automationTurnSnapshotKey(orgID, sessionID, runID uuid.UUID, attempt int, at time.Time) string {
+	return fmt.Sprintf("snapshots/%s/%s/turns/%s/%d-%d/workspace.tar.zst", orgID, sessionID, runID, attempt, at.UnixNano())
 }
