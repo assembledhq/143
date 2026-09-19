@@ -396,7 +396,7 @@ func TestAutomationTargetStore_RetireActiveGenerationsForAutomation(t *testing.T
 	mock.ExpectBegin()
 	// Targets are locked first, in id order, and each active generation is
 	// read only after its lock is held.
-	mock.ExpectQuery("SELECT id\\s+FROM automation_targets\\s+WHERE org_id = @org_id AND automation_id = @automation_id AND active_generation > 0\\s+ORDER BY id\\s+FOR UPDATE").
+	mock.ExpectQuery("SELECT id\\s+FROM automation_targets\\s+WHERE org_id = @org_id AND automation_id = @automation_id\\s+ORDER BY id\\s+FOR UPDATE").
 		WithArgs(anyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(first.TargetID).AddRow(second.TargetID))
 	// first: idle, releases immediately.
@@ -446,7 +446,7 @@ func TestAutomationTargetStore_RetireActiveGenerationsForAutomation_SkipsTargets
 
 	orgID := uuid.New()
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT id\\s+FROM automation_targets\\s+WHERE org_id = @org_id AND automation_id = @automation_id AND active_generation > 0\\s+ORDER BY id\\s+FOR UPDATE").
+	mock.ExpectQuery("SELECT id\\s+FROM automation_targets\\s+WHERE org_id = @org_id AND automation_id = @automation_id\\s+ORDER BY id\\s+FOR UPDATE").
 		WithArgs(anyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectQuery("SELECT .+ FROM automation_target_sessions .+ status = 'active'").

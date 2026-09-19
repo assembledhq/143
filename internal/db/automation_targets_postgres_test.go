@@ -349,13 +349,76 @@ func TestAutomationTargetsPostgres(t *testing.T) {
 			require.NoError(t, err, "older attempt write after replacement")
 			require.False(t, ok, "an older attempt cannot write once a newer one exists")
 
+			// Once the job lease is gone, the current attempt and token can no
+			// longer write even though every run-side fence still matches.
 			_, err = pool.Exec(ctx, `UPDATE jobs SET status = 'pending', lock_token = NULL WHERE id = $1`, secondJob)
 			require.NoError(t, err, "reclaim job")
-			third := marker(secondToken)
-			third.Attempt = 3
-			ok, err = results.Write(ctx, nil, f.orgID, secondJob, third)
+			reclaimed := marker(secondToken)
+			reclaimed.Attempt = 2
+			reclaimed.Outcome = models.AutomationRunResultCancelled
+			ok, err = results.Write(ctx, nil, f.orgID, secondJob, reclaimed)
 			require.NoError(t, err, "write after reclaim")
 			require.False(t, ok, "a reclaimed job's token cannot write")
+			stored, err = results.GetByRun(ctx, f.orgID, runID)
+			require.NoError(t, err, "read marker after reclaim")
+			require.Equal(t, models.AutomationRunResultAgentFailed, stored.Outcome, "a reclaimed job's write leaves the marker unchanged")
+		}},
+		{"disabling continuity waits for a target whose first generation is uncommitted", func(t *testing.T, pool *pgxpool.Pool, f automationTargetFixture) {
+			ctx := context.Background()
+			store := NewAutomationTargetStore(pool)
+			session := seedPostgresSession(t, pool, f.orgID)
+			tx, err := pool.Begin(ctx)
+			require.NoError(t, err, "begin")
+			target, err := store.LockOrCreate(ctx, tx, f.orgID, f.automationID, f.repoID, models.AutomationTargetKindGitHubPullRequest, "7")
+			require.NoError(t, err, "create target with no generation")
+			require.NoError(t, tx.Commit(ctx), "commit")
+
+			// A first dispatch holds the target lock while inserting generation
+			// 1; the committed row still says active_generation = 0, so the
+			// continuity switch must wait on the lock rather than skip the
+			// target on that stale value.
+			dispatch, err := pool.Begin(ctx)
+			require.NoError(t, err, "begin dispatch")
+			_, err = store.LockByID(ctx, dispatch, f.orgID, target.ID)
+			require.NoError(t, err, "dispatch locks the target")
+			gen1, err := store.InsertGeneration(ctx, dispatch, f.orgID, target.ID, session)
+			require.NoError(t, err, "dispatch inserts the first generation")
+
+			type outcome struct {
+				retired []models.AutomationTargetSession
+				err     error
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				bulk, err := pool.Begin(ctx)
+				if err != nil {
+					done <- outcome{err: err}
+					return
+				}
+				retired, err := store.RetireActiveGenerationsForAutomation(ctx, bulk, f.orgID, f.automationID, models.AutomationTargetRetiredContinuityDisabled)
+				if err != nil {
+					_ = bulk.Rollback(ctx)
+					done <- outcome{err: err}
+					return
+				}
+				done <- outcome{retired: retired, err: bulk.Commit(ctx)}
+			}()
+			require.Eventually(t, func() bool {
+				var waiting int
+				err := pool.QueryRow(ctx, `
+					SELECT count(*) FROM pg_stat_activity
+					WHERE wait_event_type = 'Lock' AND query ILIKE '%FROM automation_targets%'`).Scan(&waiting)
+				return err == nil && waiting > 0
+			}, 10*time.Second, 20*time.Millisecond, "the continuity switch should block on the target lock")
+			require.NoError(t, dispatch.Commit(ctx), "commit dispatch")
+
+			result := <-done
+			require.NoError(t, result.err, "the continuity switch should succeed once the lock is released")
+			require.Len(t, result.retired, 1, "the newly inserted generation is retired")
+			require.Equal(t, gen1.ID, result.retired[0].ID, "the generation committed by the dispatch is the one retired")
+			_, err = store.GetActiveGeneration(ctx, nil, f.orgID, target.ID)
+			require.ErrorIs(t, err, ErrAutomationTargetGenerationNotFound, "no generation stays active after the switch")
+			require.Nil(t, postgresOwnerMarker(t, pool, f.orgID, session), "the session is released")
 		}},
 		{"disabling continuity retires a generation inserted while it waited for the target lock", func(t *testing.T, pool *pgxpool.Pool, f automationTargetFixture) {
 			ctx := context.Background()
