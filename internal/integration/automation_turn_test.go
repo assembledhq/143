@@ -369,3 +369,46 @@ func TestAutomationTurn_AttemptFenceHelpers(t *testing.T) {
 	require.Equal(t, models.AutomationRunContinuationReasonRestoreFailed, *run.ContinuationReason, "with restore_failed")
 	require.Equal(t, baseline, *run.PreviousHeadSHA, "the baseline moved to the last completed review")
 }
+
+// TestAutomationTurn_DispatchRestrictsCapabilitySnapshot proves both
+// dispatch paths install the run's snapshot restricted to the positive
+// per-target allowlist: write and publishing grants are dropped and the
+// read capabilities are capped at read, whatever the organization granted.
+func TestAutomationTurn_DispatchRestrictsCapabilitySnapshot(t *testing.T) {
+	h := newDispatchHarness(t)
+	ctx := context.Background()
+	t0 := recentDeliveryTime()
+	granted := `[{"id":"publishing","access_level":"publish","source":"policy","granted_at":"2026-09-19T10:00:00Z","config":{}},
+		{"id":"session_history","access_level":"write","source":"policy","granted_at":"2026-09-19T10:00:00Z","config":{}},
+		{"id":"slack_notifications","access_level":"write","source":"policy","granted_at":"2026-09-19T10:00:00Z","config":{}},
+		{"id":"team_docs","access_level":"read","source":"policy","granted_at":"2026-09-19T10:00:00Z","config":{}}]`
+	expect := func(t *testing.T, sessionID uuid.UUID) {
+		t.Helper()
+		session, err := h.sessions.GetByID(ctx, h.orgID, sessionID)
+		require.NoError(t, err, "reload session")
+		var ids []string
+		for _, item := range session.CapabilitySnapshot {
+			ids = append(ids, string(item.ID))
+			require.Equal(t, models.AgentCapabilityAccessRead, item.AccessLevel, "%s is capped at read", item.ID)
+		}
+		require.Equal(t, []string{"session_history", "team_docs"}, ids, "only allowlisted capabilities survive")
+	}
+
+	run1 := h.push(t, "1111111111111111111111111111111111111111", t0)
+	_, err := h.pool.Exec(ctx, `UPDATE automation_runs SET capability_snapshot = $2::jsonb WHERE id = $1`, run1.ID, granted)
+	require.NoError(t, err, "grant the run a broad snapshot")
+	run1 = h.reload(t, run1.ID)
+	first := h.dispatch(t, run1, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, first.Kind, "first run is reserved")
+	expect(t, first.SessionID)
+
+	h.finishTurn(t, run1, "1111111111111111111111111111111111111111")
+	run2 := h.push(t, "2222222222222222222222222222222222222222", t0.Add(time.Second))
+	_, err = h.pool.Exec(ctx, `UPDATE automation_runs SET capability_snapshot = $2::jsonb WHERE id = $1`, run2.ID, granted)
+	require.NoError(t, err, "grant the second run a broad snapshot")
+	run2 = h.reload(t, run2.ID)
+	second := h.dispatch(t, run2, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, second.Kind, "second run is reserved")
+	require.Equal(t, models.AutomationRunContinuationContinued, second.ContinuationMode, "the second run continues")
+	expect(t, second.SessionID)
+}

@@ -1746,9 +1746,16 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	}
 	tokenTTL := sandboxCfg.Timeout + 5*time.Minute
 	scopes := []string{"preview:read", "preview:interact", "preview:manage"}
+	perTargetTurn := automationTurnStateFromContext(ctx) != nil
+	if perTargetTurn {
+		// A per-target automation turn's token carries the positive tool
+		// allowlist and no preview, eval, or goal-improvement scope, so the
+		// internal API refuses everything outside the list (design doc 125).
+		scopes = models.PerTargetToolScopes()
+	}
 	sessionOrigin := string(session.Origin)
 	var evalBootstrapRunID *uuid.UUID
-	if session.Origin == models.SessionOriginEvalBootstrap {
+	if session.Origin == models.SessionOriginEvalBootstrap && !perTargetTurn {
 		if o.evalBootstraps != nil && threadID != nil && *threadID != uuid.Nil {
 			if run, err := o.evalBootstraps.GetBySessionThread(ctx, session.OrgID, session.ID, *threadID); err == nil {
 				evalBootstrapRunID = &run.ID
@@ -1758,7 +1765,7 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 			}
 		}
 	}
-	if session.Origin == models.SessionOriginAutomationGoalImprovement {
+	if session.Origin == models.SessionOriginAutomationGoalImprovement && !perTargetTurn {
 		scopes = append(scopes, "automation-goal-improvement:complete")
 	}
 	internalToken, err := auth.GenerateSessionThreadTokenWithClaims(o.internalAPISecret, session.OrgID, *repoID, session.ID, threadID, scopes, sessionOrigin, evalBootstrapRunID, tokenTTL)

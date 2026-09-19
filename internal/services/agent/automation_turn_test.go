@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 )
@@ -831,4 +832,28 @@ func TestFallbackToEmbeddedHistory(t *testing.T) {
 	require.Contains(t, prompt, "Reviewed A.", "the baseline review is embedded as data")
 	require.Contains(t, strings.Join(git.calls, "\n"), reviewed+".."+head, "the delta starts at the last completed review")
 	require.Equal(t, []string{prompt}, store.prompts, "the transcript's message is rewritten")
+}
+
+func TestInjectInternalAPIEnvForPerTargetTurn(t *testing.T) {
+	t.Parallel()
+	secret := "test-internal-api-secret"
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New(), Origin: models.SessionOriginAutomation}
+	repoID, threadID := uuid.New(), uuid.New()
+	cfg := &SandboxConfig{Timeout: time.Minute}
+	o := &Orchestrator{internalAPIURL: "https://platform.test", internalAPISecret: secret}
+	ctx := withAutomationTurnState(context.Background(), &automationTurnState{run: models.AutomationRun{ID: uuid.New()}})
+	o.injectInternalAPIEnv(ctx, session, &repoID, &threadID, cfg, zerolog.Nop())
+	claims, err := auth.ValidateInternalToken(secret, cfg.Env["INTERNAL_API_TOKEN"])
+	require.NoError(t, err, "token validates")
+	require.Equal(t, models.PerTargetToolScopes(), claims.AllowedToolScopes, "a per-target turn's token carries exactly the allowlist scopes")
+	require.False(t, models.HasToolScope(claims.AllowedToolScopes, "preview:read"), "no preview scope")
+	require.False(t, models.HasToolScope(claims.AllowedToolScopes, "preview:manage"), "no preview manage scope")
+	require.Empty(t, cfg.Env["EVAL_BOOTSTRAP_TOOLS_ENABLED"], "no eval tools")
+
+	plain := &SandboxConfig{Timeout: time.Minute}
+	o.injectInternalAPIEnv(context.Background(), session, &repoID, &threadID, plain, zerolog.Nop())
+	claims, err = auth.ValidateInternalToken(secret, plain.Env["INTERNAL_API_TOKEN"])
+	require.NoError(t, err, "token validates")
+	require.True(t, models.HasToolScope(claims.AllowedToolScopes, "preview:read"), "an ordinary session keeps its preview scope")
+	require.False(t, models.HasToolScope(claims.AllowedToolScopes, models.PerTargetToolAllowlistScope), "an ordinary session is not allowlisted")
 }
