@@ -3166,6 +3166,9 @@ func TestAutomationHandler_Update_DisablingContinuityRetiresGenerations(t *testi
 	activeGeneration.Status = models.AutomationTargetSessionStatusActive
 	activeGeneration.RetiredReason = nil
 	activeGeneration.RetiredAt = nil
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").
+		WithArgs(testAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery("SELECT id\\s+FROM automation_targets\\s+WHERE org_id = @org_id AND automation_id = @automation_id\\s+ORDER BY id\\s+FOR UPDATE").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(generation.TargetID))

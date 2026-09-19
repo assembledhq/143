@@ -111,17 +111,39 @@ func scanAutomationTargetSession(row pgx.Row) (models.AutomationTargetSession, e
 	return g, err
 }
 
+// lockAutomationTargets takes the transaction-scoped advisory lock that
+// serializes target creation with automation-wide target operations
+// (disabling continuity). Row locks alone cannot do this: a target row that
+// another transaction has inserted but not committed is invisible to a
+// FOR UPDATE scan. Every path that creates a target or acts on all of an
+// automation's targets takes this lock first, then target row locks, so
+// the lock order is fixed.
+func lockAutomationTargets(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('automation_targets'), hashtext(@key))`,
+		pgx.NamedArgs{"key": orgID.String() + ":" + automationID.String()}); err != nil {
+		return fmt.Errorf("lock automation targets: %w", err)
+	}
+	return nil
+}
+
 // LockOrCreate upserts the target row for (automation, repository, kind, key)
-// and returns it locked FOR UPDATE for the rest of tx. The insert validates
-// that the automation and repository belong to orgID, because UUID foreign
-// keys alone do not enforce same-org relationships; a cross-org reference
-// surfaces as ErrAutomationTargetNotFound.
+// and returns it locked FOR UPDATE for the rest of tx. It first takes the
+// automation-scoped advisory lock (see lockAutomationTargets), so a
+// continuity switch in flight for the automation completes before a new
+// target can be created, and the caller's later read of the automation row
+// observes the switched mode. The insert validates that the automation and
+// repository belong to orgID, because UUID foreign keys alone do not
+// enforce same-org relationships; a cross-org reference surfaces as
+// ErrAutomationTargetNotFound.
 func (s *AutomationTargetStore) LockOrCreate(ctx context.Context, tx pgx.Tx, orgID, automationID, repositoryID uuid.UUID, kind models.AutomationTargetKind, key string) (models.AutomationTarget, error) {
 	if err := kind.Validate(); err != nil {
 		return models.AutomationTarget{}, err
 	}
 	if len(key) == 0 || len(key) > 64 {
 		return models.AutomationTarget{}, fmt.Errorf("automation target key must be 1 to 64 characters")
+	}
+	if err := lockAutomationTargets(ctx, tx, orgID, automationID); err != nil {
+		return models.AutomationTarget{}, err
 	}
 	args := pgx.NamedArgs{
 		"org_id":        orgID,
@@ -356,14 +378,19 @@ func (s *AutomationTargetStore) RetireGeneration(ctx context.Context, tx pgx.Tx,
 // ownership-release rules to each. Used when continuity is switched back to
 // per_run. Returns the retired rows.
 //
-// Every target row of the automation is locked first, in a stable order,
-// and each target's active generation is read only after its lock is held.
-// Reading the generations before locking would let a concurrent ownership
-// transaction retire one and insert its replacement in between, and
-// filtering targets by a committed active_generation would skip a target
-// whose first generation is being inserted by an uncommitted transaction.
+// The automation-scoped advisory lock is taken first, so a target that a
+// concurrent ownership transaction is still inserting (invisible to a row
+// scan) cannot slip past the switch: that transaction holds the same lock
+// from LockOrCreate until it commits. Then every target row of the
+// automation is locked in a stable order, and each target's active
+// generation is read only after its lock is held; reading generations
+// before locking, or filtering targets by a committed active_generation,
+// would skip a replacement or a first generation committed in between.
 func (s *AutomationTargetStore) RetireActiveGenerationsForAutomation(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID, reason models.AutomationTargetRetiredReason) ([]models.AutomationTargetSession, error) {
 	if err := reason.Validate(); err != nil {
+		return nil, err
+	}
+	if err := lockAutomationTargets(ctx, tx, orgID, automationID); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `

@@ -56,6 +56,9 @@ func TestAutomationTargetStore_LockOrCreate(t *testing.T) {
 			key:  "1234",
 			kind: models.AutomationTargetKindGitHubPullRequest,
 			setupMock: func(mock pgxmock.PgxPoolIface, target models.AutomationTarget) {
+				mock.ExpectExec("SELECT pg_advisory_xact_lock").
+					WithArgs(anyArgs(1)...).
+					WillReturnResult(pgxmock.NewResult("SELECT", 1))
 				mock.ExpectExec("INSERT INTO automation_targets").
 					WithArgs(anyArgs(5)...).
 					WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -70,6 +73,9 @@ func TestAutomationTargetStore_LockOrCreate(t *testing.T) {
 			key:  "1234",
 			kind: models.AutomationTargetKindGitHubPullRequest,
 			setupMock: func(mock pgxmock.PgxPoolIface, _ models.AutomationTarget) {
+				mock.ExpectExec("SELECT pg_advisory_xact_lock").
+					WithArgs(anyArgs(1)...).
+					WillReturnResult(pgxmock.NewResult("SELECT", 1))
 				mock.ExpectExec("INSERT INTO automation_targets").
 					WithArgs(anyArgs(5)...).
 					WillReturnResult(pgxmock.NewResult("INSERT", 0))
@@ -394,8 +400,12 @@ func TestAutomationTargetStore_RetireActiveGenerationsForAutomation(t *testing.T
 	activeSecond.ID = second.ID
 
 	mock.ExpectBegin()
-	// Targets are locked first, in id order, and each active generation is
-	// read only after its lock is held.
+	// The automation-scoped advisory lock comes first, then targets are
+	// locked in id order, and each active generation is read only after its
+	// lock is held.
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").
+		WithArgs(anyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery("SELECT id\\s+FROM automation_targets\\s+WHERE org_id = @org_id AND automation_id = @automation_id\\s+ORDER BY id\\s+FOR UPDATE").
 		WithArgs(anyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(first.TargetID).AddRow(second.TargetID))
@@ -446,6 +456,9 @@ func TestAutomationTargetStore_RetireActiveGenerationsForAutomation_SkipsTargets
 
 	orgID := uuid.New()
 	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").
+		WithArgs(anyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery("SELECT id\\s+FROM automation_targets\\s+WHERE org_id = @org_id AND automation_id = @automation_id\\s+ORDER BY id\\s+FOR UPDATE").
 		WithArgs(anyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
