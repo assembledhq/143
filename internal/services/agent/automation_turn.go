@@ -774,7 +774,10 @@ func (o *Orchestrator) runPendingPreflight(ctx context.Context, state *automatio
 // (which locks the same job row) waits, and a worker whose lease is gone
 // is refused before it touches anything. A container recorded on another
 // node is only cleared when that node is known dead; otherwise the
-// attempt yields to the node that owns it.
+// attempt yields to the node that owns it. The CAS clear runs before the
+// destroy: it refuses a container a preview or another runtime holds, so
+// nothing held by another owner is ever destroyed, and a destroy failure
+// rolls the clear back so the recorded id stays for a retry.
 func (o *Orchestrator) releaseInheritedContainer(ctx context.Context, state *automationTurnState, session *models.Session, log zerolog.Logger) error {
 	if session.ContainerID == nil || *session.ContainerID == "" {
 		return nil
@@ -800,19 +803,20 @@ func (o *Orchestrator) releaseInheritedContainer(ctx context.Context, state *aut
 		if !owned {
 			return ErrAutomationAttemptLost
 		}
-		if !onDeadNode {
-			// Destroy while the attempt lock is held; a failure keeps the
-			// recorded id so the cleanup stays retryable.
-			if err := o.provider.Destroy(context.WithoutCancel(ctx), &Sandbox{ID: recorded, Provider: o.provider.Name()}); err != nil {
-				return fmt.Errorf("destroy inherited sandbox %s: %w", recorded, err)
-			}
-		}
 		cleared, err := sessions.ClearContainerID(ctx, session.OrgID, session.ID, recorded)
 		if err != nil {
 			return fmt.Errorf("clear inherited sandbox: %w", err)
 		}
 		if !cleared {
 			return fmt.Errorf("inherited sandbox %s is held by another owner", recorded)
+		}
+		if !onDeadNode {
+			// Destroy while the attempt lock and the uncommitted clear are
+			// held; a failure rolls the clear back so the recorded id stays
+			// for a retry.
+			if err := o.provider.Destroy(context.WithoutCancel(ctx), &Sandbox{ID: recorded, Provider: o.provider.Name()}); err != nil {
+				return fmt.Errorf("destroy inherited sandbox %s: %w", recorded, err)
+			}
 		}
 		return nil
 	})
