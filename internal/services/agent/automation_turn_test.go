@@ -25,7 +25,10 @@ type fakeAutomationTurnStore struct {
 	targetErr        error
 	fallbacks        []models.AutomationRunContinuationReason
 	fallbackBaseline *string
+	baselines        []*string
 	owned            bool
+	locked           bool
+	sessions         SessionStore
 	generation       models.AutomationTargetSession
 	genErr           error
 	summaries        []models.AutomationTurnSummary
@@ -76,7 +79,14 @@ func (f *fakeAutomationTurnStore) PublishCheckpointWithProvenance(context.Contex
 	return true, nil
 }
 func (f *fakeAutomationTurnStore) EndAttempt(ctx context.Context, fn func(ctx context.Context, tx pgx.Tx, sessions SessionStore) error) error {
-	return fn(ctx, nil, nil)
+	return fn(ctx, nil, f.sessions)
+}
+func (f *fakeAutomationTurnStore) LockAttempt(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	return f.locked, nil
+}
+func (f *fakeAutomationTurnStore) RecordTurnBaseline(_ context.Context, _, _, _ uuid.UUID, baseline *string) (bool, error) {
+	f.baselines = append(f.baselines, baseline)
+	return true, nil
 }
 func (f *fakeAutomationTurnStore) WriteResult(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, *models.AutomationRunResult) (bool, error) {
 	return true, nil
@@ -687,4 +697,138 @@ func TestFallbackToReconstruction(t *testing.T) {
 	require.Equal(t, reviewed, state.baselineSHA, "the delta no longer starts at the lost checkpoint's head")
 	require.True(t, state.reconstructed(), "the turn is now reconstructed")
 	require.False(t, state.applyDependencyFingerprint("v1:x"), "a rebuilt workspace never skips the bootstrap")
+}
+
+// clearOnlySessions implements the one SessionStore method inherited
+// container cleanup uses; every other method is unreachable.
+type clearOnlySessions struct {
+	SessionStore
+	cleared []string
+	refuse  bool
+}
+
+func (s *clearOnlySessions) ClearContainerID(_ context.Context, _, _ uuid.UUID, expected string) (bool, error) {
+	if s.refuse {
+		return false, nil
+	}
+	s.cleared = append(s.cleared, expected)
+	return true, nil
+}
+
+type destroyRecordingProvider struct {
+	*testInternalSandboxProvider
+	destroyed  []string
+	destroyErr error
+}
+
+func (p *destroyRecordingProvider) Destroy(_ context.Context, sb *Sandbox) error {
+	p.destroyed = append(p.destroyed, sb.ID)
+	return p.destroyErr
+}
+
+func TestReleaseInheritedContainer(t *testing.T) {
+	t.Parallel()
+	container := "container-old"
+	node := "node-a"
+	other := "node-b"
+	tests := []struct {
+		name        string
+		ctx         context.Context
+		session     models.Session
+		locked      bool
+		refuseClear bool
+		destroyErr  error
+		wantErr     error
+		wantMsg     string
+		wantDestroy bool
+		wantCleared bool
+	}{
+		{name: "no recorded container is a no-op", ctx: context.Background(), session: models.Session{}, locked: true},
+		{name: "lost lease refuses before touching the container", ctx: context.Background(), session: models.Session{ContainerID: &container, WorkerNodeID: &node}, locked: false, wantErr: ErrAutomationAttemptLost},
+		{name: "the lease holder destroys then clears under the lock", ctx: context.Background(), session: models.Session{ContainerID: &container, WorkerNodeID: &node}, locked: true, wantDestroy: true, wantCleared: true},
+		{name: "a destroy failure keeps the recorded id for a retry", ctx: context.Background(), session: models.Session{ContainerID: &container, WorkerNodeID: &node}, locked: true, destroyErr: errors.New("docker down"), wantMsg: "destroy inherited sandbox", wantDestroy: true},
+		{name: "a container held by another owner is not released", ctx: context.Background(), session: models.Session{ContainerID: &container, WorkerNodeID: &node}, locked: true, refuseClear: true, wantMsg: "held by another owner", wantDestroy: true},
+		{name: "a container on another live node yields", ctx: context.Background(), session: models.Session{ContainerID: &container, WorkerNodeID: &other}, locked: true, wantErr: ErrSandboxOnDifferentNode},
+		{name: "a container on a dead node is cleared without a local destroy", ctx: jobctx.WithDeadTargetNode(context.Background(), other), session: models.Session{ContainerID: &container, WorkerNodeID: &other}, locked: true, wantCleared: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sessions := &clearOnlySessions{refuse: tt.refuseClear}
+			store := &fakeAutomationTurnStore{locked: tt.locked, sessions: sessions}
+			provider := &destroyRecordingProvider{testInternalSandboxProvider: &testInternalSandboxProvider{}, destroyErr: tt.destroyErr}
+			o := &Orchestrator{provider: provider, logger: zerolog.Nop(), automationTurns: store, nodeID: node}
+			session := tt.session
+			session.ID = uuid.New()
+			session.OrgID = uuid.New()
+			state := &automationTurnState{run: models.AutomationRun{ID: uuid.New()}, lockToken: uuid.New()}
+			err := o.releaseInheritedContainer(tt.ctx, state, &session, zerolog.Nop())
+			switch {
+			case tt.wantErr != nil:
+				require.ErrorIs(t, err, tt.wantErr, "expected error class")
+			case tt.wantMsg != "":
+				require.ErrorContains(t, err, tt.wantMsg, "expected failure")
+			default:
+				require.NoError(t, err, "release succeeds")
+			}
+			require.Equal(t, tt.wantDestroy, len(provider.destroyed) == 1, "destroy issued")
+			require.Equal(t, tt.wantCleared, len(sessions.cleared) == 1, "container id cleared")
+			if err == nil && tt.session.ContainerID != nil {
+				require.Nil(t, session.ContainerID, "the in-memory session forgets the container")
+			}
+		})
+	}
+}
+
+func TestRenderPromptEmbedsBaselineReviewWithoutNativeContext(t *testing.T) {
+	t.Parallel()
+	head := "2222222222222222222222222222222222222222"
+	baseline := "1111111111111111111111111111111111111111"
+	target := uuid.New()
+	generation := 1
+	run := models.AutomationRun{ID: uuid.New(), GoalSnapshot: "goal", TargetID: &target, TargetGeneration: &generation}
+	summaries := []models.AutomationTurnSummary{{TurnNumber: 1, HeadSHA: baseline, Summary: "Baseline review findings."}}
+	git := &scriptedGit{answers: map[string]func(io.Writer, io.Writer) (int, error){"git diff --stat": ok(" a.go | 1 +\n"), "git diff --name-only": ok("a.go\n")}}
+	render := func(mode models.AutomationRunContinuationMode, agentSessionID *string, lost bool) string {
+		store := &fakeAutomationTurnStore{summaries: summaries}
+		o := &Orchestrator{provider: &testInternalSandboxProvider{execFn: git.exec}, logger: zerolog.Nop(), automationTurns: store}
+		state := &automationTurnState{opts: &AutomationTurnContinueOptions{ContinuationMode: mode}, run: run, headSHA: head, baselineSHA: baseline, goal: "goal", nativeContextLost: lost}
+		prompt, err := o.renderAutomationTurnPrompt(context.Background(), &Sandbox{}, &models.Session{ID: uuid.New(), OrgID: uuid.New(), AgentSessionID: agentSessionID}, state, zerolog.Nop())
+		require.NoError(t, err, "prompt renders")
+		return prompt
+	}
+	native := "agent-1"
+	require.NotContains(t, render(models.AutomationRunContinuationContinued, &native, false), "Baseline review findings.", "with native context the baseline review is in the agent's memory")
+	require.Contains(t, render(models.AutomationRunContinuationContinued, nil, false), "Baseline review findings.", "without a native session the baseline review is embedded")
+	require.Contains(t, render(models.AutomationRunContinuationContinued, &native, true), "Baseline review findings.", "after a failed native resume the baseline review is embedded")
+	require.Contains(t, render(models.AutomationRunContinuationReconstructed, &native, false), "Baseline review findings.", "a reconstructed turn embeds the baseline review")
+}
+
+func TestFallbackToEmbeddedHistory(t *testing.T) {
+	t.Parallel()
+	reviewed := "1111111111111111111111111111111111111111"
+	checkpoint := "3333333333333333333333333333333333333333"
+	head := "2222222222222222222222222222222222222222"
+	target := uuid.New()
+	generation := 1
+	git := &scriptedGit{answers: map[string]func(io.Writer, io.Writer) (int, error){"git diff --name-only": ok("a.go\n")}}
+	store := &fakeAutomationTurnStore{summaries: []models.AutomationTurnSummary{{TurnNumber: 1, HeadSHA: reviewed, Summary: "Reviewed A."}}}
+	o := &Orchestrator{provider: &testInternalSandboxProvider{execFn: git.exec}, logger: zerolog.Nop(), automationTurns: store}
+	state := &automationTurnState{
+		opts:       &AutomationTurnContinueOptions{ContinuationMode: models.AutomationRunContinuationContinued},
+		run:        models.AutomationRun{ID: uuid.New(), GoalSnapshot: "goal", TargetID: &target, TargetGeneration: &generation, PreviousHeadSHA: &checkpoint},
+		generation: models.AutomationTargetSession{LastReviewedHeadSHA: &reviewed, CheckpointHeadSHA: &checkpoint},
+		headSHA:    head, baselineSHA: checkpoint, goal: "goal", lockToken: uuid.New(),
+	}
+	native := "agent-1"
+	prompt, err := o.fallbackToEmbeddedHistory(context.Background(), &Sandbox{}, &models.Session{ID: uuid.New(), OrgID: uuid.New(), AgentSessionID: &native}, state, zerolog.Nop())
+	require.NoError(t, err, "fallback renders")
+	require.Equal(t, reviewed, state.baselineSHA, "the baseline moves to the last completed review")
+	require.Equal(t, reviewed, *store.baselines[0], "the moved baseline is persisted on the run")
+	require.True(t, state.nativeContextLost, "native context is recorded as lost")
+	require.Contains(t, prompt, "- Baseline head: "+reviewed, "the prompt diffs from the last completed review")
+	require.Contains(t, prompt, "not available; earlier findings are summarized below as data", "the prompt says native context is absent")
+	require.Contains(t, prompt, "Reviewed A.", "the baseline review is embedded as data")
+	require.Contains(t, strings.Join(git.calls, "\n"), reviewed+".."+head, "the delta starts at the last completed review")
+	require.Equal(t, []string{prompt}, store.prompts, "the transcript's message is rewritten")
 }

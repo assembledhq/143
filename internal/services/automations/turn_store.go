@@ -39,6 +39,14 @@ func (s *TurnStore) LoadTarget(ctx context.Context, orgID, targetID uuid.UUID) (
 	return s.targets.GetByID(ctx, orgID, targetID)
 }
 
+func (s *TurnStore) LockAttempt(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID) (bool, error) {
+	return s.runs.LockAttempt(ctx, tx, orgID, runID, lockToken)
+}
+
+func (s *TurnStore) RecordTurnBaseline(ctx context.Context, orgID, runID, lockToken uuid.UUID, baselineHeadSHA *string) (bool, error) {
+	return s.runs.RecordTurnBaseline(ctx, orgID, runID, lockToken, baselineHeadSHA)
+}
+
 func (s *TurnStore) EndInterruptedAttempt(ctx context.Context, orgID, runID, sessionID, lockToken uuid.UUID, status models.SessionStatus) (bool, error) {
 	return s.runs.EndInterruptedAttempt(ctx, orgID, runID, sessionID, lockToken, status)
 }

@@ -102,6 +102,49 @@ func (s *AutomationRunStore) EndInterruptedAttempt(ctx context.Context, orgID, r
 	return tag.RowsAffected() > 0, nil
 }
 
+// LockAttempt locks the run and job rows of an executing attempt inside
+// tx and reports whether the attempt still holds its lease. A concurrent
+// attempt claim (which locks the same job row) waits until tx ends, so a
+// destructive action taken while the lock is held cannot race a takeover.
+func (s *AutomationRunStore) LockAttempt(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID) (bool, error) {
+	if lockToken == uuid.Nil {
+		return false, errors.New("lock automation attempt: lock token is required")
+	}
+	var id uuid.UUID
+	err := tx.QueryRow(ctx, `
+		SELECT r.id
+		FROM automation_runs r
+		JOIN jobs j ON j.id = r.job_id AND j.org_id = r.org_id
+		WHERE r.id = @id AND r.org_id = @org_id
+		  AND r.dispatch_state = 'executing'
+		  AND r.attempt_lock_token = @lock_token
+		  AND j.status = 'running' AND j.lock_token = @lock_token
+		FOR UPDATE OF r, j`,
+		pgx.NamedArgs{"id": runID, "org_id": orgID, "lock_token": lockToken}).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock automation attempt: %w", err)
+	}
+	return true, nil
+}
+
+// RecordTurnBaseline replaces the run's delta baseline when the turn loses
+// the context the reservation assumed (native resume failed after a
+// checkpoint restore): the baseline becomes the last completed review.
+func (s *AutomationRunStore) RecordTurnBaseline(ctx context.Context, orgID, runID, lockToken uuid.UUID, baselineHeadSHA *string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE automation_runs r
+		SET previous_head_sha = @previous_head_sha, updated_at = now()
+		WHERE r.id = @id AND r.org_id = @org_id`+automationRunAttemptFence,
+		pgx.NamedArgs{"id": runID, "org_id": orgID, "lock_token": lockToken, "previous_head_sha": baselineHeadSHA})
+	if err != nil {
+		return false, fmt.Errorf("record automation turn baseline: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // RecordContinuationFallback records that a continued turn could not
 // restore its checkpoint and is rebuilding the workspace in the same
 // session (design doc 125, readiness "rebuild" with restore_failed). The

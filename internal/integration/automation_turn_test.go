@@ -338,8 +338,27 @@ func TestAutomationTurn_AttemptFenceHelpers(t *testing.T) {
 	_, err = h.results.GetByRun(ctx, h.orgID, h.run.ID)
 	require.Error(t, err, "the drain path writes no marker")
 
+	tx, err := h.pool.Begin(ctx)
+	require.NoError(t, err, "begin lock")
+	locked, err := h.store.LockAttempt(ctx, tx, h.orgID, h.run.ID, uuid.New())
+	require.NoError(t, err, "lock with another token")
+	require.False(t, locked, "another token cannot lock the attempt")
+	locked, err = h.store.LockAttempt(ctx, tx, h.orgID, h.run.ID, h.lockToken)
+	require.NoError(t, err, "lock attempt")
+	require.True(t, locked, "the lease holder locks the attempt")
+	require.NoError(t, tx.Rollback(ctx), "release the lock")
+
+	moved := "1111111111111111111111111111111111111111"
+	recorded, err := h.store.RecordTurnBaseline(ctx, h.orgID, h.run.ID, uuid.New(), &moved)
+	require.NoError(t, err, "baseline with another token")
+	require.False(t, recorded, "the fence rejects another lease")
+	recorded, err = h.store.RecordTurnBaseline(ctx, h.orgID, h.run.ID, h.lockToken, &moved)
+	require.NoError(t, err, "baseline")
+	require.True(t, recorded, "the lease holder moves the baseline")
+	require.Equal(t, moved, *h.reload(t, h.run.ID).PreviousHeadSHA, "the baseline is persisted")
+
 	baseline := "1111111111111111111111111111111111111111"
-	recorded, err := h.store.RecordContinuationFallback(ctx, h.orgID, h.run.ID, uuid.New(), models.AutomationRunContinuationReasonRestoreFailed, &baseline)
+	recorded, err = h.store.RecordContinuationFallback(ctx, h.orgID, h.run.ID, uuid.New(), models.AutomationRunContinuationReasonRestoreFailed, &baseline)
 	require.NoError(t, err, "fallback with another token")
 	require.False(t, recorded, "the fence rejects another lease")
 	recorded, err = h.store.RecordContinuationFallback(ctx, h.orgID, h.run.ID, h.lockToken, models.AutomationRunContinuationReasonRestoreFailed, &baseline)
