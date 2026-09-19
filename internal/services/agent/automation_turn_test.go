@@ -745,9 +745,9 @@ func TestReleaseInheritedContainer(t *testing.T) {
 	}{
 		{name: "no recorded container is a no-op", ctx: context.Background(), session: models.Session{}, locked: true},
 		{name: "lost lease refuses before touching the container", ctx: context.Background(), session: models.Session{ContainerID: &container, WorkerNodeID: &node}, locked: false, wantErr: ErrAutomationAttemptLost},
-		{name: "the lease holder destroys then clears under the lock", ctx: context.Background(), session: models.Session{ContainerID: &container, WorkerNodeID: &node}, locked: true, wantDestroy: true, wantCleared: true},
-		{name: "a destroy failure keeps the recorded id for a retry", ctx: context.Background(), session: models.Session{ContainerID: &container, WorkerNodeID: &node}, locked: true, destroyErr: errors.New("docker down"), wantMsg: "destroy inherited sandbox", wantDestroy: true},
-		{name: "a container held by another owner is not released", ctx: context.Background(), session: models.Session{ContainerID: &container, WorkerNodeID: &node}, locked: true, refuseClear: true, wantMsg: "held by another owner", wantDestroy: true},
+		{name: "the lease holder clears under the lock and then destroys", ctx: context.Background(), session: models.Session{ContainerID: &container, WorkerNodeID: &node}, locked: true, wantDestroy: true, wantCleared: true},
+		{name: "a destroy failure rolls the clear back so the recorded id stays for a retry", ctx: context.Background(), session: models.Session{ContainerID: &container, WorkerNodeID: &node}, locked: true, destroyErr: errors.New("docker down"), wantMsg: "destroy inherited sandbox", wantDestroy: true, wantCleared: true},
+		{name: "a container held by another owner is neither cleared nor destroyed", ctx: context.Background(), session: models.Session{ContainerID: &container, WorkerNodeID: &node}, locked: true, refuseClear: true, wantMsg: "held by another owner"},
 		{name: "a container on another live node yields", ctx: context.Background(), session: models.Session{ContainerID: &container, WorkerNodeID: &other}, locked: true, wantErr: ErrSandboxOnDifferentNode},
 		{name: "a container on a dead node is cleared without a local destroy", ctx: jobctx.WithDeadTargetNode(context.Background(), other), session: models.Session{ContainerID: &container, WorkerNodeID: &other}, locked: true, wantCleared: true},
 	}
