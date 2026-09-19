@@ -451,8 +451,10 @@ func (s *AutomationTargetStore) SetLifecycle(ctx context.Context, q DBTX, orgID,
 // the source's own timestamp (a webhook's pull_request.updated_at) rather
 // than the time the delivery was processed, so a delayed delivery cannot
 // pass for fresh openness evidence. A transition takes the observation
-// time as is; a same-state refresh only ever moves the evidence forward.
-func (s *AutomationTargetStore) SetLifecycleObserved(ctx context.Context, q DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState, observedAt time.Time) error {
+// time as is, and a nil observedAt leaves the evidence unknown so dispatch
+// must revalidate; a same-state refresh only ever moves the evidence
+// forward.
+func (s *AutomationTargetStore) SetLifecycleObserved(ctx context.Context, q DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState, observedAt *time.Time) error {
 	if err := state.Validate(); err != nil {
 		return err
 	}

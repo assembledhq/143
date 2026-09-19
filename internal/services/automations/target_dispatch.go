@@ -286,7 +286,7 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 	if err != nil {
 		return DispatchOutcome{}, err
 	}
-	if current.ok && targetHeadStateChanged(before, target) {
+	if current.ok && targetChangedSince(before, target) {
 		if _, err := d.runs.MarkWaiting(ctx, tx, orgID, in.Run.ID); err != nil {
 			return DispatchOutcome{}, err
 		}
@@ -369,7 +369,7 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 	// target's ambiguity state is already cleared, and the run must not be
 	// mistaken for an ambiguous candidate on its next dispatch.
 	if resolved.stamp {
-		if err := d.runs.StampHeadResolution(ctx, tx, orgID, run.ID, resolved.epoch, *resolved.resolution); err != nil {
+		if err := d.runs.StampHeadResolution(ctx, tx, orgID, run.ID, resolved.epoch, *resolved.resolution, resolved.headSHA); err != nil {
 			return DispatchOutcome{}, err
 		}
 	}
@@ -439,7 +439,9 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 			}
 			return DispatchOutcome{Kind: DispatchRetry, RetryAfter: headLookupBackoff(d.now(), run), Note: "pull request openness is stale and the lookup is unavailable"}, nil
 		}
-		if err := d.targets.SetLifecycle(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleOpen); err != nil {
+		// The live lookup refreshes the evidence for the state the target
+		// is in; a merged target running its final turn stays merged.
+		if err := d.targets.SetLifecycle(ctx, tx, orgID, target.ID, target.LifecycleState); err != nil {
 			return DispatchOutcome{}, err
 		}
 	}
@@ -594,6 +596,7 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 		PreviousHeadSHA:    previous,
 		HeadEpoch:          resolved.epoch,
 		HeadResolution:     resolved.resolution,
+		ResolvedHeadSHA:    &github.HeadSHA,
 		HeadLookupDegraded: resolved.degraded,
 	})
 	if err != nil {
@@ -668,29 +671,17 @@ func lifecycleAllowsRun(state models.AutomationTargetLifecycleState, event model
 	}
 }
 
-// targetHeadStateChanged reports whether the target's head authority state
-// moved between the pre-lookup read and the locked read: a new epoch, a
-// new observed head or watermark, an ambiguity flag, or a lifecycle change.
-func targetHeadStateChanged(before, after models.AutomationTarget) bool {
+// targetChangedSince reports whether the target row was written between
+// the pre-lookup read and the locked read. Every arrival that touches head
+// authority (adopting a head, advancing the watermark, marking or clearing
+// ambiguity, a lifecycle change) bumps updated_at, so the row's updated_at
+// is its mutation version: a same-timestamp ambiguous arrival that changes
+// no epoch or head still marks ambiguity and moves it.
+func targetChangedSince(before, after models.AutomationTarget) bool {
 	if before.ID == uuid.Nil {
-		return after.ID != uuid.Nil && (after.HeadEpoch != 0 || after.ObservedHeadSHA != nil)
+		return after.ID != uuid.Nil
 	}
-	return before.HeadEpoch != after.HeadEpoch ||
-		!stringPtrEqual(before.ObservedHeadSHA, after.ObservedHeadSHA) ||
-		!timePtrEqual(before.ObservedHeadUpdatedAt, after.ObservedHeadUpdatedAt) ||
-		before.HeadResolutionPending != after.HeadResolutionPending ||
-		before.LifecycleState != after.LifecycleState
-}
-
-func timePtrEqual(a, b *time.Time) bool {
-	switch {
-	case a == nil && b == nil:
-		return true
-	case a == nil || b == nil:
-		return false
-	default:
-		return a.Equal(*b)
-	}
+	return !before.UpdatedAt.Equal(after.UpdatedAt)
 }
 
 func (d *TargetDispatcher) lifecycleStale(target models.AutomationTarget) bool {
@@ -737,14 +728,13 @@ func (d *TargetDispatcher) resolveHead(ctx context.Context, tx pgx.Tx, orgID uui
 		// its delivered head.
 		return out, nil
 	}
-	// A run already resolved to the target's current epoch reviews that
-	// epoch's head, which the target records. The delivered head stays in
-	// the run's snapshot as audit; without this a run that resolved a
-	// missed head while the target was busy and then met a failed lookup
-	// would review its delivered head under the newer epoch.
-	if run.HeadResolution != nil && *run.HeadResolution == authoritative && run.HeadEpoch != nil &&
-		*run.HeadEpoch == target.HeadEpoch && target.ObservedHeadSHA != nil && *target.ObservedHeadSHA != "" {
-		out.headSHA = *target.ObservedHeadSHA
+	// A run that already resolved to a head reviews that head; the
+	// delivered head stays in the run's snapshot as audit. Without this a
+	// run that resolved a missed head while the target was busy and then
+	// met a failed lookup would review its delivered head under the
+	// resolved epoch.
+	if run.ResolvedHeadSHA != nil && *run.ResolvedHeadSHA != "" {
+		out.headSHA = *run.ResolvedHeadSHA
 	}
 	ambiguousRun := run.HeadResolution != nil && *run.HeadResolution == models.AutomationRunHeadAmbiguous
 	headless := github.HeadSHA == ""
@@ -803,13 +793,14 @@ func (d *TargetDispatcher) resolveHead(ctx context.Context, tx pgx.Tx, orgID uui
 			return out, err
 		}
 		// The survivor is the candidate at the current head: this run if
-		// it delivered that head, else the candidate that did. When none
-		// did, the dispatching run reviews a head it adopted just now; a
-		// head that a separate delivery already observed has its own
-		// authoritative run, and every candidate is superseded.
+		// its effective head (resolved earlier, else delivered) is that
+		// head, else the candidate that delivered it. When none did, the
+		// dispatching run reviews a head it adopted just now; a head that a
+		// separate delivery already observed has its own authoritative run,
+		// and every candidate is superseded.
 		survivor := uuid.Nil
 		switch {
-		case github.HeadSHA == head.SHA:
+		case out.headSHA == head.SHA:
 			survivor = run.ID
 		default:
 			for _, c := range candidates {
@@ -830,7 +821,7 @@ func (d *TargetDispatcher) resolveHead(ctx context.Context, tx pgx.Tx, orgID uui
 			switch {
 			case c.RunID == survivor:
 				if c.RunID != run.ID {
-					if err := d.runs.StampHeadResolution(ctx, tx, orgID, c.RunID, &epoch, authoritative); err != nil {
+					if err := d.runs.StampHeadResolution(ctx, tx, orgID, c.RunID, &epoch, authoritative, head.SHA); err != nil {
 						return out, err
 					}
 				}
@@ -854,7 +845,8 @@ func (d *TargetDispatcher) resolveHead(ctx context.Context, tx pgx.Tx, orgID uui
 	out.headSHA = head.SHA
 	out.epoch = &epoch
 	out.resolution = &authoritative
-	out.stamp = run.HeadEpoch == nil || *run.HeadEpoch != epoch || run.HeadResolution == nil || *run.HeadResolution != authoritative
+	out.stamp = run.HeadEpoch == nil || *run.HeadEpoch != epoch || run.HeadResolution == nil || *run.HeadResolution != authoritative ||
+		run.ResolvedHeadSHA == nil || *run.ResolvedHeadSHA != head.SHA
 	return out, nil
 }
 
