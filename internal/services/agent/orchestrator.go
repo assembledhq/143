@@ -2837,7 +2837,7 @@ func completesInteractiveTurn(run *models.Session, snapshotKey string) bool {
 	return snapshotKey != "" || run.AutomationRunID != nil
 }
 
-func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error {
+func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (returnErr error) {
 	// Create a cancellable context. The cancel registry is populated later
 	// once the sandbox is available, so CancelSession can send SIGINT.
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -2855,15 +2855,17 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		turnCtx, state, err := o.beginAutomationTurn(ctx, run, turnOpts)
 		if err != nil {
 			if state != nil && errors.Is(err, ErrAutomationTargetClosed) {
-				state.deferPreflight(models.AutomationRunOutcomePRClosed, "the pull request is no longer open")
-				o.runPendingPreflight(turnCtx, state, run, log)
-				return nil
+				return o.endClosedTargetTurn(turnCtx, state, run, log)
 			}
 			return fmt.Errorf("begin automation turn: %w", err)
 		}
 		ctx = turnCtx
 		automationTurn = state
-		defer o.runPendingPreflight(ctx, automationTurn, run, log)
+		defer func() {
+			if err := o.runPendingPreflight(ctx, automationTurn, run, log); err != nil && returnErr == nil {
+				returnErr = err
+			}
+		}()
 	}
 
 	// 1. Concurrency check.
@@ -3593,6 +3595,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	// 10b. Retry once on token expiration for Codex agents.
 	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, log)
+	automationTurn.markAgentEnded()
 
 	// 10c. Shed the just-picked credential's in-process health-cache slot if
 	// the (possibly retried) result indicates a credential-level failure.
@@ -4049,10 +4052,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		turnCtx, state, err := o.beginAutomationTurn(ctx, session, turnOpts)
 		if err != nil {
 			if state != nil && errors.Is(err, ErrAutomationTargetClosed) {
-				// Nothing is allocated yet; the deferred hook ends the run.
-				state.deferPreflight(models.AutomationRunOutcomePRClosed, "the pull request is no longer open")
-				o.runPendingPreflight(turnCtx, state, session, log)
-				return nil
+				// Nothing is allocated for this attempt; a container an
+				// earlier attempt left behind is released first.
+				return o.endClosedTargetTurn(turnCtx, state, session, log)
 			}
 			return fmt.Errorf("begin automation turn: %w", err)
 		}
@@ -4060,8 +4062,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		automationTurn = state
 		// Registered before the sandbox exists so it runs after the sandbox
 		// and turn hold are released: a preflight outcome must not make the
-		// session claimable while this attempt still holds its container.
-		defer o.runPendingPreflight(ctx, automationTurn, session, log)
+		// session claimable while this attempt still holds its container. A
+		// completion failure fails the job so it retries.
+		defer func() {
+			if err := o.runPendingPreflight(ctx, automationTurn, session, log); err != nil && returnErr == nil {
+				returnErr = err
+			}
+		}()
 	}
 	rebuildWorkspace := prHeadReconstruction || automationTurn.reconstructed()
 
@@ -5183,8 +5190,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			// Override UserPrompt with conversation history so the agent has
 			// prior context when running a fresh exec. The snapshot already
 			// restored the workspace, so do not ask the agent to re-apply the
-			// stored diff.
-			basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildRestoredWorkspaceResumeContext(session, promptIssue, scopedMessages, userMessage), materializedAttachments)
+			// stored diff. A per-target turn's prompt already carries its
+			// history as bounded untrusted data, so it is used as is.
+			if automationTurn != nil {
+				basePrompt.UserPrompt = appendAgentAttachmentSection(userMessage, materializedAttachments)
+			} else {
+				basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildRestoredWorkspaceResumeContext(session, promptIssue, scopedMessages, userMessage), materializedAttachments)
+			}
 			basePrompt.Continuation = false
 			basePrompt.RevisionContext = revisionContext
 			prompt = basePrompt
@@ -5218,7 +5230,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					if err != nil {
 						return nil, fmt.Errorf("prepare prompt for restored-workspace fallback: %w", err)
 					}
-					basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildRestoredWorkspaceResumeContext(session, promptIssue, scopedMessages, userMessage), materializedAttachments)
+					if automationTurn != nil {
+						basePrompt.UserPrompt = appendAgentAttachmentSection(userMessage, materializedAttachments)
+					} else {
+						basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildRestoredWorkspaceResumeContext(session, promptIssue, scopedMessages, userMessage), materializedAttachments)
+					}
 					basePrompt.Continuation = false
 					basePrompt.RevisionContext = revisionContext
 					return basePrompt, nil
@@ -5315,7 +5331,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 
 		// Override UserPrompt with resume context (conversation history + diff).
-		basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildResumeContext(session, &issue, messages, userMessage), materializedAttachments)
+		// A per-target turn's prompt already carries its history as bounded
+		// untrusted data, so it is used as is.
+		if automationTurn != nil {
+			basePrompt.UserPrompt = appendAgentAttachmentSection(userMessage, materializedAttachments)
+		} else {
+			basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildResumeContext(session, &issue, messages, userMessage), materializedAttachments)
+		}
 		basePrompt.Continuation = false
 		basePrompt.RevisionContext = revisionContext
 		prompt = basePrompt
@@ -5446,6 +5468,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
 	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
+	automationTurn.markAgentEnded()
 	err = errors.Join(err, streamErr)
 	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, session, sandbox, authBillingMode, log); harvestErr != nil {
 		log.Warn().

@@ -51,10 +51,10 @@ type AutomationTurnStore interface {
 	WriteResult(ctx context.Context, tx pgx.Tx, orgID, jobID uuid.UUID, result *models.AutomationRunResult) (bool, error)
 	RecordTurnDuration(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID, durationMS int) (bool, error)
 	CompletePreflight(ctx context.Context, orgID, runID, lockToken uuid.UUID, outcome models.AutomationRunOutcomeReason, summary string) (bool, error)
-	// AttemptOwned reports whether the attempt still holds its lease, for
-	// attempt-end writes that carry no marker.
-	AttemptOwned(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID) (bool, error)
-	RecordContinuationFallback(ctx context.Context, orgID, runID, lockToken uuid.UUID, reason models.AutomationRunContinuationReason) (bool, error)
+	// EndInterruptedAttempt restores the session's pre-turn status for a
+	// drained attempt in one fenced statement; no marker is written.
+	EndInterruptedAttempt(ctx context.Context, orgID, runID, sessionID, lockToken uuid.UUID, status models.SessionStatus) (bool, error)
+	RecordContinuationFallback(ctx context.Context, orgID, runID, lockToken uuid.UUID, reason models.AutomationRunContinuationReason, baselineHeadSHA *string) (bool, error)
 	RetireGeneration(ctx context.Context, orgID, generationID uuid.UUID, reason models.AutomationTargetRetiredReason) error
 }
 
@@ -146,6 +146,7 @@ type automationTurnState struct {
 
 	startedAt      time.Time
 	agentStartedAt time.Time
+	agentEndedAt   time.Time
 	restoreBytes   *int64
 	restoreMS      *int
 
@@ -167,6 +168,27 @@ func (s *automationTurnState) markAgentStarted() {
 	if s != nil {
 		s.agentStartedAt = time.Now().UTC()
 	}
+}
+
+// markAgentEnded records when agent execution, including its retries,
+// ended; the end-of-turn snapshot is not agent time.
+func (s *automationTurnState) markAgentEnded() {
+	if s != nil {
+		s.agentEndedAt = time.Now().UTC()
+	}
+}
+
+// agentDurationMS is the agent execution time, or -1 when the agent never
+// ran (a setup failure is not agent time).
+func (s *automationTurnState) agentDurationMS() int {
+	if s == nil || s.agentStartedAt.IsZero() {
+		return -1
+	}
+	end := s.agentEndedAt
+	if end.IsZero() {
+		end = time.Now().UTC()
+	}
+	return int(end.Sub(s.agentStartedAt) / time.Millisecond)
 }
 
 // deferPreflight records a preflight outcome for the deferred hook.
@@ -683,11 +705,7 @@ func (o *Orchestrator) endAutomationAttempt(ctx context.Context, state *automati
 		id := agentSessionID
 		marker.AgentSessionID = &id
 	}
-	durationSince := state.agentStartedAt
-	if durationSince.IsZero() {
-		durationSince = state.startedAt
-	}
-	duration := int(time.Since(durationSince) / time.Millisecond)
+	duration := state.agentDurationMS()
 	err := o.automationTurns.EndAttempt(ctx, func(ctx context.Context, tx pgx.Tx, sessions SessionStore) error {
 		if err := write(sessions); err != nil {
 			return err
@@ -699,8 +717,10 @@ func (o *Orchestrator) endAutomationAttempt(ctx context.Context, state *automati
 		if !written {
 			return ErrAutomationAttemptLost
 		}
-		if _, err := o.automationTurns.RecordTurnDuration(ctx, tx, session.OrgID, state.run.ID, state.lockToken, duration); err != nil {
-			return err
+		if duration >= 0 {
+			if _, err := o.automationTurns.RecordTurnDuration(ctx, tx, session.OrgID, state.run.ID, state.lockToken, duration); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -714,24 +734,61 @@ func (o *Orchestrator) endAutomationAttempt(ctx context.Context, state *automati
 // runPendingPreflight applies a preflight outcome recorded during setup.
 // It runs from a deferred hook registered before the sandbox is created,
 // so the sandbox and turn hold are already released when the run ends and
-// the session becomes claimable.
-func (o *Orchestrator) runPendingPreflight(ctx context.Context, state *automationTurnState, session *models.Session, log zerolog.Logger) {
+// the session becomes claimable. A completion failure is returned so the
+// job fails and retries instead of leaving the run executing behind a
+// successful job.
+func (o *Orchestrator) runPendingPreflight(ctx context.Context, state *automationTurnState, session *models.Session, log zerolog.Logger) error {
 	if state == nil || state.pendingPreflight == "" || state.ended {
-		return
+		return nil
 	}
 	outcome := state.pendingPreflight
-	state.pendingPreflight = ""
 	done, err := o.automationTurns.CompletePreflight(context.WithoutCancel(ctx), session.OrgID, state.run.ID, state.lockToken, outcome, state.pendingPreflightSummary)
 	if err != nil {
-		log.Error().Err(err).Str("run_id", state.run.ID.String()).Str("outcome", string(outcome)).Msg("failed to complete automation turn preflight; the run stays executing for the reaper")
-		return
+		return fmt.Errorf("complete automation turn preflight %s: %w", outcome, err)
 	}
+	state.pendingPreflight = ""
 	if !done {
 		log.Warn().Str("run_id", state.run.ID.String()).Str("outcome", string(outcome)).Msg("automation turn preflight was not applied: the attempt lost its lease")
-		return
+		return nil
 	}
 	state.ended = true
 	log.Info().Str("run_id", state.run.ID.String()).Str("outcome", string(outcome)).Msg("automation turn ended before the agent started")
+	return nil
+}
+
+// releaseInheritedContainer destroys a container an earlier attempt of
+// the same session left recorded (a crash mid-turn), so a preflight that
+// ends the run before any sandbox is created never releases the session
+// while a stale container still holds it.
+func (o *Orchestrator) releaseInheritedContainer(ctx context.Context, session *models.Session, log zerolog.Logger) error {
+	if session.ContainerID == nil || *session.ContainerID == "" {
+		return nil
+	}
+	recorded := *session.ContainerID
+	cleared, err := o.sessions.ClearContainerID(ctx, session.OrgID, session.ID, recorded)
+	if err != nil {
+		return fmt.Errorf("clear inherited sandbox: %w", err)
+	}
+	if !cleared {
+		return fmt.Errorf("inherited sandbox %s is held by another owner", recorded)
+	}
+	if err := o.provider.Destroy(context.WithoutCancel(ctx), &Sandbox{ID: recorded, Provider: o.provider.Name()}); err != nil {
+		log.Warn().Err(err).Str("container_id", recorded).Msg("failed to destroy inherited sandbox")
+	}
+	session.ContainerID = nil
+	session.WorkerNodeID = nil
+	return nil
+}
+
+// endClosedTargetTurn applies the pr_closed preflight discovered before
+// anything was allocated for this attempt, after releasing any container
+// an earlier attempt left behind.
+func (o *Orchestrator) endClosedTargetTurn(ctx context.Context, state *automationTurnState, session *models.Session, log zerolog.Logger) error {
+	if err := o.releaseInheritedContainer(ctx, session, log); err != nil {
+		return err
+	}
+	state.deferPreflight(models.AutomationRunOutcomePRClosed, "the pull request is no longer open")
+	return o.runPendingPreflight(ctx, state, session, log)
 }
 
 // fallbackToReconstruction turns a continued turn whose checkpoint could
@@ -739,7 +796,14 @@ func (o *Orchestrator) runPendingPreflight(ctx context.Context, state *automatio
 // "rebuild" with restore_failed). The run records the fallback so the
 // marker and the run row agree.
 func (o *Orchestrator) fallbackToReconstruction(ctx context.Context, state *automationTurnState, session *models.Session, cause error, log zerolog.Logger) error {
-	recorded, err := o.automationTurns.RecordContinuationFallback(ctx, session.OrgID, state.run.ID, state.lockToken, models.AutomationRunContinuationReasonRestoreFailed)
+	// Native context is gone with the checkpoint: the baseline is the last
+	// completed review, or none.
+	var baseline *string
+	if state.generation.LastReviewedHeadSHA != nil && gitSHAPattern.MatchString(*state.generation.LastReviewedHeadSHA) {
+		b := *state.generation.LastReviewedHeadSHA
+		baseline = &b
+	}
+	recorded, err := o.automationTurns.RecordContinuationFallback(ctx, session.OrgID, state.run.ID, state.lockToken, models.AutomationRunContinuationReasonRestoreFailed, baseline)
 	if err != nil {
 		return err
 	}
@@ -750,27 +814,31 @@ func (o *Orchestrator) fallbackToReconstruction(ctx context.Context, state *auto
 	mode := models.AutomationRunContinuationReconstructed
 	state.run.ContinuationReason = &reason
 	state.run.ContinuationMode = &mode
+	state.run.PreviousHeadSHA = baseline
 	state.opts.ContinuationMode = mode
+	state.baselineSHA = ""
+	if baseline != nil {
+		state.baselineSHA = *baseline
+	}
 	state.restoreBytes = nil
 	log.Warn().Err(cause).Str("run_id", state.run.ID.String()).Msg("checkpoint restore failed; rebuilding the workspace in the same session")
 	return nil
 }
 
 // endInterruptedAutomationTurn restores the pre-turn status of an
-// interrupted (drained) attempt without a marker, fenced by the attempt so
-// a paused worker whose job was reclaimed cannot reset the next attempt's
-// session. Returns ErrAutomationAttemptLost when the fence rejects it.
+// interrupted (drained) attempt without a marker, in one statement that
+// locks and validates the attempt's run and job rows, so a paused worker
+// whose job was reclaimed cannot reset the next attempt's session. Returns
+// ErrAutomationAttemptLost when the fence rejects it.
 func (o *Orchestrator) endInterruptedAutomationTurn(ctx context.Context, state *automationTurnState, session *models.Session, fallbackStatus models.SessionStatus) error {
-	return o.automationTurns.EndAttempt(ctx, func(ctx context.Context, tx pgx.Tx, sessions SessionStore) error {
-		owned, err := o.automationTurns.AttemptOwned(ctx, tx, session.OrgID, state.run.ID, state.lockToken)
-		if err != nil {
-			return err
-		}
-		if !owned {
-			return ErrAutomationAttemptLost
-		}
-		return sessions.UpdateStatus(ctx, session.OrgID, session.ID, fallbackStatus)
-	})
+	updated, err := o.automationTurns.EndInterruptedAttempt(ctx, session.OrgID, state.run.ID, session.ID, state.lockToken, fallbackStatus)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return ErrAutomationAttemptLost
+	}
+	return nil
 }
 
 // automationTurnResultDiff disables session diff collection for per-target

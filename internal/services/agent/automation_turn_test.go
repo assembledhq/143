@@ -19,19 +19,20 @@ import (
 
 // fakeAutomationTurnStore scripts the store surface of the turn path.
 type fakeAutomationTurnStore struct {
-	run        models.AutomationRun
-	runErr     error
-	target     models.AutomationTarget
-	targetErr  error
-	fallbacks  []models.AutomationRunContinuationReason
-	owned      bool
-	generation models.AutomationTargetSession
-	genErr     error
-	summaries  []models.AutomationTurnSummary
-	workspace  []models.AutomationTurnWorkspace
-	prompts    []string
-	preflights []models.AutomationRunOutcomeReason
-	retired    []models.AutomationTargetRetiredReason
+	run              models.AutomationRun
+	runErr           error
+	target           models.AutomationTarget
+	targetErr        error
+	fallbacks        []models.AutomationRunContinuationReason
+	fallbackBaseline *string
+	owned            bool
+	generation       models.AutomationTargetSession
+	genErr           error
+	summaries        []models.AutomationTurnSummary
+	workspace        []models.AutomationTurnWorkspace
+	prompts          []string
+	preflights       []models.AutomationRunOutcomeReason
+	retired          []models.AutomationTargetRetiredReason
 }
 
 func (f *fakeAutomationTurnStore) LoadRun(_ context.Context, _, _ uuid.UUID) (models.AutomationRun, error) {
@@ -46,11 +47,12 @@ func (f *fakeAutomationTurnStore) LoadTarget(_ context.Context, _, _ uuid.UUID) 
 	}
 	return f.target, nil
 }
-func (f *fakeAutomationTurnStore) AttemptOwned(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+func (f *fakeAutomationTurnStore) EndInterruptedAttempt(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, models.SessionStatus) (bool, error) {
 	return f.owned, nil
 }
-func (f *fakeAutomationTurnStore) RecordContinuationFallback(_ context.Context, _, _, _ uuid.UUID, reason models.AutomationRunContinuationReason) (bool, error) {
+func (f *fakeAutomationTurnStore) RecordContinuationFallback(_ context.Context, _, _, _ uuid.UUID, reason models.AutomationRunContinuationReason, baseline *string) (bool, error) {
 	f.fallbacks = append(f.fallbacks, reason)
+	f.fallbackBaseline = baseline
 	return true, nil
 }
 func (f *fakeAutomationTurnStore) LoadGeneration(_ context.Context, _, _ uuid.UUID, _ int) (models.AutomationTargetSession, error) {
@@ -217,6 +219,36 @@ func TestBeginAutomationTurn(t *testing.T) {
 			opts:    &AutomationTurnContinueOptions{RunID: base.ID, HeadSHA: "4444444444444444444444444444444444444444"},
 			wantMsg: "does not match the run's head",
 		},
+		{
+			name:    "a closed target ends the turn as a pr_closed preflight",
+			ctx:     ctxWithLease,
+			run:     func() models.AutomationRun { return base },
+			store:   &fakeAutomationTurnStore{target: models.AutomationTarget{LifecycleState: models.AutomationTargetLifecycleClosed}},
+			opts:    &AutomationTurnContinueOptions{RunID: base.ID},
+			wantErr: ErrAutomationTargetClosed,
+		},
+		{
+			name: "a merged target still runs its merged event",
+			ctx:  ctxWithLease,
+			run: func() models.AutomationRun {
+				r := base
+				r.ConfigSnapshot = []byte(`{"github_event":"github.pull_request.merged","github":{"pull_request_number":42,"head_sha":"` + head + `","base_branch":"main"}}`)
+				return r
+			},
+			store: &fakeAutomationTurnStore{target: models.AutomationTarget{LifecycleState: models.AutomationTargetLifecycleMerged}},
+			opts:  &AutomationTurnContinueOptions{RunID: base.ID},
+			check: func(t *testing.T, state *automationTurnState) {
+				require.Equal(t, models.AutomationGitHubEventPullRequestMerged, state.event, "the event is read from the snapshot")
+			},
+		},
+		{
+			name:    "a merged target refuses a plain push",
+			ctx:     ctxWithLease,
+			run:     func() models.AutomationRun { return base },
+			store:   &fakeAutomationTurnStore{target: models.AutomationTarget{LifecycleState: models.AutomationTargetLifecycleMerged}},
+			opts:    &AutomationTurnContinueOptions{RunID: base.ID},
+			wantErr: ErrAutomationTargetClosed,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -233,6 +265,9 @@ func TestBeginAutomationTurn(t *testing.T) {
 			switch {
 			case tt.wantErr != nil:
 				require.ErrorIs(t, err, tt.wantErr, "expected error class")
+				if errors.Is(tt.wantErr, ErrAutomationTargetClosed) {
+					require.NotNil(t, state, "the closed case returns the state so the caller can end the run")
+				}
 			case tt.wantMsg != "":
 				require.ErrorContains(t, err, tt.wantMsg, "expected validation failure")
 			default:
@@ -564,6 +599,15 @@ func (s *markerCapturingStore) WriteResult(_ context.Context, _ pgx.Tx, _, _ uui
 	return !s.reject, nil
 }
 
+func TestAgentDurationExcludesSetupAndSnapshot(t *testing.T) {
+	t.Parallel()
+	state := &automationTurnState{startedAt: time.Now().Add(-time.Hour)}
+	require.Equal(t, -1, state.agentDurationMS(), "a turn whose agent never ran records no agent time")
+	state.agentStartedAt = time.Now().Add(-10 * time.Second)
+	state.agentEndedAt = state.agentStartedAt.Add(2 * time.Second)
+	require.Equal(t, 2000, state.agentDurationMS(), "the duration is agent start to agent end, not to the snapshot")
+}
+
 func TestAutomationTurnResultDiff(t *testing.T) {
 	t.Parallel()
 	diff := "diff"
@@ -634,8 +678,13 @@ func TestFallbackToReconstruction(t *testing.T) {
 	store := &fakeAutomationTurnStore{}
 	o := &Orchestrator{logger: zerolog.Nop(), automationTurns: store}
 	state := &automationTurnState{opts: &AutomationTurnContinueOptions{ContinuationMode: models.AutomationRunContinuationContinued}, run: models.AutomationRun{ID: uuid.New()}, lockToken: uuid.New()}
+	reviewed := "1111111111111111111111111111111111111111"
+	state.generation.LastReviewedHeadSHA = &reviewed
+	state.baselineSHA = "3333333333333333333333333333333333333333"
 	require.NoError(t, o.fallbackToReconstruction(context.Background(), state, &models.Session{ID: uuid.New(), OrgID: uuid.New()}, errors.New("restore failed"), zerolog.Nop()), "fallback records")
 	require.Equal(t, []models.AutomationRunContinuationReason{models.AutomationRunContinuationReasonRestoreFailed}, store.fallbacks, "the run records restore_failed")
+	require.Equal(t, reviewed, *store.fallbackBaseline, "the baseline moves to the last completed review")
+	require.Equal(t, reviewed, state.baselineSHA, "the delta no longer starts at the lost checkpoint's head")
 	require.True(t, state.reconstructed(), "the turn is now reconstructed")
 	require.False(t, state.applyDependencyFingerprint("v1:x"), "a rebuilt workspace never skips the bootstrap")
 }
