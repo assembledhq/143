@@ -37,16 +37,18 @@ func TestAutomationRunHandler_PerTargetDispatch(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		outcome   automationservice.DispatchOutcome
-		err       error
-		wantRetry bool
-		wantErr   bool
+		name           string
+		outcome        automationservice.DispatchOutcome
+		err            error
+		wantRetry      bool
+		wantRetryAfter time.Duration
+		wantMaxWait    time.Duration
+		wantErr        bool
 	}{
 		{name: "reserved runs finish the job", outcome: automationservice.DispatchOutcome{Kind: automationservice.DispatchReserved, JobID: uuid.New(), SessionID: uuid.New(), ThreadID: uuid.New(), ContinuationMode: models.AutomationRunContinuationFresh}},
-		{name: "waiting runs finish the job", outcome: automationservice.DispatchOutcome{Kind: automationservice.DispatchWaiting, Note: "target busy"}},
+		{name: "waiting runs keep the job polling without spending attempts", outcome: automationservice.DispatchOutcome{Kind: automationservice.DispatchWaiting, Note: "target busy"}, wantRetry: true, wantRetryAfter: automationWaitingPollInterval, wantMaxWait: automationWaitingPollWindow},
 		{name: "terminalized runs finish the job", outcome: automationservice.DispatchOutcome{Kind: automationservice.DispatchTerminalized, OutcomeReason: models.AutomationRunOutcomePRClosed}},
-		{name: "undecidable runs retry with the dispatcher's backoff", outcome: automationservice.DispatchOutcome{Kind: automationservice.DispatchRetry, RetryAfter: 15 * time.Second, Note: "snapshot upload in flight"}, wantRetry: true},
+		{name: "undecidable runs retry with the dispatcher's backoff and bound", outcome: automationservice.DispatchOutcome{Kind: automationservice.DispatchRetry, RetryAfter: 15 * time.Second, MaxWait: 3 * time.Minute, Note: "snapshot upload in flight"}, wantRetry: true, wantRetryAfter: 15 * time.Second, wantMaxWait: 3 * time.Minute},
 		{name: "dispatch errors surface for the job's retry", err: errors.New("boom"), wantErr: true},
 	}
 
@@ -101,9 +103,12 @@ func TestAutomationRunHandler_PerTargetDispatch(t *testing.T) {
 				require.Error(t, err, "dispatcher errors leave the run pending for retry")
 			case tt.wantRetry:
 				var retryable *RetryableError
-				require.ErrorAs(t, err, &retryable, "undecidable runs retry")
-				require.NotNil(t, retryable.RetryAfter, "retry carries the dispatcher's backoff")
-				require.Equal(t, tt.outcome.RetryAfter, *retryable.RetryAfter, "retry uses the dispatcher's backoff")
+				require.ErrorAs(t, err, &retryable, "undecided runs retry")
+				require.NotNil(t, retryable.RetryAfter, "retry carries a delay")
+				require.Equal(t, tt.wantRetryAfter, *retryable.RetryAfter, "retry uses the expected delay")
+				require.False(t, retryable.ConsumeAttempt, "polling and deferrals never spend the attempt budget")
+				require.NotNil(t, retryable.MaxRetryDuration, "retry is bounded")
+				require.Equal(t, tt.wantMaxWait, *retryable.MaxRetryDuration, "retry bound matches the wait window")
 			default:
 				require.NoError(t, err, "decided runs finish the job")
 			}
@@ -138,4 +143,29 @@ func TestAutomationContinuityDisabled(t *testing.T) {
 			require.Equal(t, tt.want, automationContinuityDisabled(), "kill switch accepts 1 and true only")
 		})
 	}
+}
+
+// TestAutomationTurnJobPayloadContract pins the producer-to-consumer field
+// contract: the dispatcher's payload must decode into the worker's
+// continue_session input with every per-target field intact.
+func TestAutomationTurnJobPayloadContract(t *testing.T) {
+	t.Parallel()
+	payload := automationservice.AutomationTurnJobPayload{
+		SessionID: uuid.NewString(), OrgID: uuid.NewString(), ThreadID: uuid.NewString(),
+		AutomationRunID: uuid.NewString(), TargetGeneration: 3, ContinuationMode: "continued",
+		HeadSHA: "abc", PullRequestNumber: 42, StructuredPrompt: "review",
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "payload marshals")
+	var input continueSessionJobInput
+	require.NoError(t, json.Unmarshal(raw, &input), "the worker decodes the dispatcher's payload")
+	require.Equal(t, payload.SessionID, input.SessionID, "session id round-trips")
+	require.Equal(t, payload.OrgID, input.OrgID, "org id round-trips")
+	require.Equal(t, payload.ThreadID, input.ThreadID, "thread id round-trips")
+	require.Equal(t, payload.AutomationRunID, input.AutomationRunID, "run id round-trips")
+	require.Equal(t, payload.TargetGeneration, input.TargetGeneration, "generation round-trips as a number")
+	require.Equal(t, payload.ContinuationMode, input.ContinuationMode, "continuation mode round-trips")
+	require.Equal(t, payload.HeadSHA, input.HeadSHA, "head round-trips")
+	require.Equal(t, payload.PullRequestNumber, input.PullRequestNumber, "pull request number round-trips as a number")
+	require.Equal(t, payload.StructuredPrompt, input.StructuredPrompt, "prompt round-trips")
 }

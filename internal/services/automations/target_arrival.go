@@ -38,6 +38,7 @@ const (
 type githubAutomationTargetStore interface {
 	LockOrCreate(ctx context.Context, tx pgx.Tx, orgID, automationID, repositoryID uuid.UUID, kind models.AutomationTargetKind, key string) (models.AutomationTarget, error)
 	AdoptHead(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, headSHA string, updatedAt *time.Time) (int, error)
+	TouchObservedHead(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, headSHA string, updatedAt time.Time) error
 	MarkHeadResolutionPending(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, deadline time.Time) error
 	SetLifecycle(ctx context.Context, q db.DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState) error
 }
@@ -50,6 +51,7 @@ type githubAutomationArrivalRunStore interface {
 	TerminalizeUnstarted(ctx context.Context, q db.DBTX, orgID, runID uuid.UUID, outcome models.AutomationRunOutcomeReason, supersededBy *uuid.UUID, summary string) (bool, error)
 	SupersedeWaitingPush(ctx context.Context, tx pgx.Tx, orgID, targetID, newRunID uuid.UUID, newEpoch int) (int64, error)
 	CountWaiting(ctx context.Context, q db.DBTX, orgID, targetID uuid.UUID) (int, error)
+	MarkWaiting(ctx context.Context, q db.DBTX, orgID, runID uuid.UUID) (bool, error)
 }
 
 // SetTargetStores enables per-target arrival bookkeeping. Without it, runs
@@ -168,10 +170,17 @@ func (s *GitHubEventTriggerService) recordTargetArrival(ctx context.Context, tx 
 		}
 	case sameHead:
 		// A same-head delivery joins the observed epoch. A newer timestamp
-		// for the same head (an edit, a label) still advances nothing.
+		// for the same head (an edit, a force-push back to it) advances the
+		// observed timestamp so a delayed older delivery cannot outrank it,
+		// but opens no new epoch.
 		epoch := target.HeadEpoch
 		arrival.HeadEpoch = &epoch
 		arrival.HeadResolution = &authoritative
+		if req.PullRequestUpdatedAt != nil && (target.ObservedHeadUpdatedAt == nil || req.PullRequestUpdatedAt.After(*target.ObservedHeadUpdatedAt)) {
+			if err := s.targets.TouchObservedHead(ctx, tx, orgID, target.ID, req.HeadSHA, *req.PullRequestUpdatedAt); err != nil {
+				return false, err
+			}
+		}
 	case push && older:
 		if err := s.arrivalRuns.RecordArrival(ctx, tx, orgID, run.ID, arrival); err != nil {
 			return false, err
@@ -182,12 +191,19 @@ func (s *GitHubEventTriggerService) recordTargetArrival(ctx context.Context, tx 
 		return false, nil
 	case push:
 		// Equal timestamp with a different head, or a missing timestamp:
-		// never resolved by guessing. The candidate waits for the
+		// never resolved by guessing. The candidate waits, visibly, for the
 		// dispatch-time lookup or the ambiguity deadline.
 		arrival.HeadResolution = &ambiguous
 		if err := s.targets.MarkHeadResolutionPending(ctx, tx, orgID, target.ID, s.now().Add(automationHeadAmbiguityWindow)); err != nil {
 			return false, err
 		}
+		if err := s.arrivalRuns.RecordArrival(ctx, tx, orgID, run.ID, arrival); err != nil {
+			return false, err
+		}
+		if _, err := s.arrivalRuns.MarkWaiting(ctx, tx, orgID, run.ID); err != nil {
+			return false, err
+		}
+		return true, nil
 	default:
 		// Non-push events at an unobserved head execute with a null epoch
 		// and can never move the baseline.

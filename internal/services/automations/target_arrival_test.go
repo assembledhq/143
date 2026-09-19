@@ -20,6 +20,7 @@ type fakeArrivalTargetStore struct {
 	adoptedAt   []*time.Time
 	lifecycle   []models.AutomationTargetLifecycleState
 	pendingAt   []time.Time
+	touched     []time.Time
 	lockCalls   int
 	nextEpoch   int
 	lockOrCreat func() (models.AutomationTarget, error)
@@ -40,6 +41,11 @@ func (f *fakeArrivalTargetStore) AdoptHead(_ context.Context, _ pgx.Tx, _, _ uui
 	return f.target.HeadEpoch + f.nextEpoch, nil
 }
 
+func (f *fakeArrivalTargetStore) TouchObservedHead(_ context.Context, _ pgx.Tx, _, _ uuid.UUID, headSHA string, updatedAt time.Time) error {
+	f.touched = append(f.touched, updatedAt)
+	return nil
+}
+
 func (f *fakeArrivalTargetStore) MarkHeadResolutionPending(_ context.Context, _ pgx.Tx, _, _ uuid.UUID, deadline time.Time) error {
 	f.pendingAt = append(f.pendingAt, deadline)
 	return nil
@@ -51,10 +57,11 @@ func (f *fakeArrivalTargetStore) SetLifecycle(_ context.Context, _ db.DBTX, _, _
 }
 
 type fakeArrivalRunStore struct {
-	arrivals     map[uuid.UUID]db.AutomationRunArrival
-	terminalized map[uuid.UUID]models.AutomationRunOutcomeReason
-	superseded   []int
-	waiting      int
+	arrivals      map[uuid.UUID]db.AutomationRunArrival
+	terminalized  map[uuid.UUID]models.AutomationRunOutcomeReason
+	superseded    []int
+	waiting       int
+	markedWaiting []uuid.UUID
 }
 
 func newFakeArrivalRunStore() *fakeArrivalRunStore {
@@ -78,6 +85,11 @@ func (f *fakeArrivalRunStore) SupersedeWaitingPush(_ context.Context, _ pgx.Tx, 
 
 func (f *fakeArrivalRunStore) CountWaiting(_ context.Context, _ db.DBTX, _, _ uuid.UUID) (int, error) {
 	return f.waiting, nil
+}
+
+func (f *fakeArrivalRunStore) MarkWaiting(_ context.Context, _ db.DBTX, _, runID uuid.UUID) (bool, error) {
+	f.markedWaiting = append(f.markedWaiting, runID)
+	return true, nil
 }
 
 func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
@@ -110,6 +122,7 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 		wantAdopted    []string
 		wantSuperseded []int
 		wantPending    bool
+		wantTouched    []time.Time
 		wantLifecycle  []models.AutomationTargetLifecycleState
 	}{
 		{
@@ -129,7 +142,16 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 				Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "edited",
 				HeadSHA: observed, PullRequestUpdatedAt: timePtr(base.Add(time.Minute)),
 			},
-			wantJob: true, wantEpoch: intPtr(3), wantResolution: &authoritative,
+			wantJob: true, wantEpoch: intPtr(3), wantResolution: &authoritative, wantTouched: []time.Time{base.Add(time.Minute)},
+		},
+		{
+			name:   "same-head force-push with a newer timestamp advances the watermark",
+			target: openTarget(),
+			req: GitHubEventTriggerRequest{
+				Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "synchronize",
+				HeadSHA: observed, PullRequestUpdatedAt: timePtr(base.Add(2 * time.Second)),
+			},
+			wantJob: true, wantEpoch: intPtr(3), wantResolution: &authoritative, wantTouched: []time.Time{base.Add(2 * time.Second)},
 		},
 		{
 			name:   "older push with a different head is skipped as stale",
@@ -261,7 +283,11 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 			require.Equal(t, tt.wantPending, len(targets.pendingAt) == 1, "ambiguity marks the target pending")
 			if tt.wantPending {
 				require.Equal(t, base.Add(automationHeadAmbiguityWindow), targets.pendingAt[0], "ambiguity deadline is 30 minutes out")
+				require.Equal(t, []uuid.UUID{runID}, arrivals.markedWaiting, "an ambiguous candidate waits visibly")
+			} else {
+				require.Empty(t, arrivals.markedWaiting, "only ambiguous candidates are marked waiting at arrival")
 			}
+			require.Equal(t, tt.wantTouched, targets.touched, "same-head deliveries advance the observed timestamp only when newer")
 			require.Equal(t, tt.wantLifecycle, targets.lifecycle, "lifecycle transitions match")
 			if tt.wantJob {
 				require.Len(t, jobs.jobs, 1, "dispatchable run enqueues the automation_run job")

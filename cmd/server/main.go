@@ -1843,7 +1843,7 @@ func buildServices(
 		codeReviewDisputes.SetPullRequestSnapshotter(prService)
 		codeReviewInsights.SetOutcomeProvider(prService)
 	}
-	automationTargetDispatcher := automations.NewTargetDispatcher(pool, db.NewAutomationTargetStore(pool), automationRunStore, sessionStore, sessionThreadStore, jobStore, logger)
+	automationTargetDispatcher := automations.NewTargetDispatcher(pool, automationStore, db.NewAutomationTargetStore(pool), automationRunStore, sessionStore, sessionThreadStore, jobStore, logger)
 	automationTargetDispatcher.SetHeadResolver(prService)
 	automationTargetDispatcher.SetMaxSnapshotAge(cfg.SessionMaxSnapshotAge)
 	svc := &worker.Services{
