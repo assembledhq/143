@@ -13,28 +13,33 @@ import (
 // Unlike projects (which are finite and goal-oriented), automations run on a
 // schedule and never "complete" — they are enabled or paused.
 type Automation struct {
-	ID               uuid.UUID               `db:"id"               json:"id"`
-	OrgID            uuid.UUID               `db:"org_id"           json:"org_id"`
-	RepositoryID     *uuid.UUID              `db:"repository_id"    json:"repository_id,omitempty"`
-	Name             string                  `db:"name"             json:"name"`
-	Goal             string                  `db:"goal"             json:"goal"`
-	Scope            *string                 `db:"scope"            json:"scope,omitempty"`
-	IconType         AutomationIconType      `db:"icon_type"        json:"icon_type"`
-	IconValue        string                  `db:"icon_value"       json:"icon_value"`
-	AgentType        *string                 `db:"agent_type"       json:"agent_type,omitempty"`
-	ModelOverride    *string                 `db:"model_override"   json:"model_override,omitempty"`
-	ReasoningEffort  *ReasoningEffort        `db:"reasoning_effort" json:"reasoning_effort,omitempty"`
-	ExecutionMode    AutomationExecutionMode `db:"execution_mode"   json:"execution_mode"`
-	MaxConcurrent    int                     `db:"max_concurrent"   json:"max_concurrent"`
-	BaseBranch       string                  `db:"base_branch"      json:"base_branch"`
-	IdentityScope    AutomationIdentityScope `db:"identity_scope"   json:"identity_scope"`
-	PublishPolicy    AutomationPublishPolicy `db:"publish_policy"   json:"publish_policy"`
-	PrePRReviewLoops int                     `db:"pre_pr_review_loops" json:"pre_pr_review_loops"`
-	ScheduleType     AutomationScheduleType  `db:"schedule_type"    json:"schedule_type"`
-	IntervalValue    *int                    `db:"interval_value"   json:"interval_value,omitempty"`
-	IntervalUnit     *ScheduleUnit           `db:"interval_unit"    json:"interval_unit,omitempty"`
-	IntervalRunAt    *string                 `db:"interval_run_at"  json:"interval_run_at,omitempty"`
-	CronExpression   *string                 `db:"cron_expression"  json:"cron_expression,omitempty"`
+	ID              uuid.UUID               `db:"id"               json:"id"`
+	OrgID           uuid.UUID               `db:"org_id"           json:"org_id"`
+	RepositoryID    *uuid.UUID              `db:"repository_id"    json:"repository_id,omitempty"`
+	Name            string                  `db:"name"             json:"name"`
+	Goal            string                  `db:"goal"             json:"goal"`
+	Scope           *string                 `db:"scope"            json:"scope,omitempty"`
+	IconType        AutomationIconType      `db:"icon_type"        json:"icon_type"`
+	IconValue       string                  `db:"icon_value"       json:"icon_value"`
+	AgentType       *string                 `db:"agent_type"       json:"agent_type,omitempty"`
+	ModelOverride   *string                 `db:"model_override"   json:"model_override,omitempty"`
+	ReasoningEffort *ReasoningEffort        `db:"reasoning_effort" json:"reasoning_effort,omitempty"`
+	ExecutionMode   AutomationExecutionMode `db:"execution_mode"   json:"execution_mode"`
+	MaxConcurrent   int                     `db:"max_concurrent"   json:"max_concurrent"`
+	BaseBranch      string                  `db:"base_branch"      json:"base_branch"`
+	IdentityScope   AutomationIdentityScope `db:"identity_scope"   json:"identity_scope"`
+	PublishPolicy   AutomationPublishPolicy `db:"publish_policy"   json:"publish_policy"`
+	// SessionContinuity is read from the automation row at dispatch time, not
+	// from a run's config_snapshot (which keeps it for audit only). per_target
+	// requires a GitHub event trigger and publish_policy=none; see
+	// ValidateAutomationSessionContinuity.
+	SessionContinuity AutomationSessionContinuity `db:"session_continuity" json:"session_continuity"`
+	PrePRReviewLoops  int                         `db:"pre_pr_review_loops" json:"pre_pr_review_loops"`
+	ScheduleType      AutomationScheduleType      `db:"schedule_type"    json:"schedule_type"`
+	IntervalValue     *int                        `db:"interval_value"   json:"interval_value,omitempty"`
+	IntervalUnit      *ScheduleUnit               `db:"interval_unit"    json:"interval_unit,omitempty"`
+	IntervalRunAt     *string                     `db:"interval_run_at"  json:"interval_run_at,omitempty"`
+	CronExpression    *string                     `db:"cron_expression"  json:"cron_expression,omitempty"`
 	// Timezone is the IANA zone used to evaluate wall-clock schedule targets:
 	// cron_expression for cron rows, and interval_run_at for interval rows
 	// that specify one. An interval row without interval_run_at uses pure
@@ -80,6 +85,40 @@ type AutomationRun struct {
 	ResultSummary      *string                       `db:"result_summary"        json:"result_summary,omitempty"`
 	CreatedAt          time.Time                     `db:"created_at"            json:"created_at"`
 	UpdatedAt          time.Time                     `db:"updated_at"            json:"updated_at"`
+
+	// Per-target continuity fields (design doc 125). All nil or zero on
+	// per-run rows and on rows created before continuity existed. SessionID
+	// is the executing session for the turn; session_automation_links keeps
+	// its meaning as the run that created a session.
+	TargetID             *uuid.UUID                       `db:"target_id"               json:"target_id,omitempty"`
+	TargetGeneration     *int                             `db:"target_generation"       json:"target_generation,omitempty"`
+	SessionID            *uuid.UUID                       `db:"session_id"              json:"session_id,omitempty"`
+	ThreadID             *uuid.UUID                       `db:"thread_id"               json:"thread_id,omitempty"`
+	TurnNumber           *int                             `db:"turn_number"             json:"turn_number,omitempty"`
+	GitHubAction         *string                          `db:"github_action"           json:"github_action,omitempty"`
+	PullRequestUpdatedAt *time.Time                       `db:"pull_request_updated_at" json:"pull_request_updated_at,omitempty"`
+	HeadEpoch            *int                             `db:"head_epoch"              json:"head_epoch,omitempty"`
+	HeadResolution       *AutomationRunHeadResolution     `db:"head_resolution"         json:"head_resolution,omitempty"`
+	ContinuationMode     *AutomationRunContinuationMode   `db:"continuation_mode"       json:"continuation_mode,omitempty"`
+	ContinuationReason   *AutomationRunContinuationReason `db:"continuation_reason"     json:"continuation_reason,omitempty"`
+	NativeContext        *bool                            `db:"native_context"          json:"native_context,omitempty"`
+	PreviousHeadSHA      *string                          `db:"previous_head_sha"       json:"previous_head_sha,omitempty"`
+	BaseSHA              *string                          `db:"base_sha"                json:"base_sha,omitempty"`
+	DispatchState        *AutomationRunDispatchState      `db:"dispatch_state"          json:"dispatch_state,omitempty"`
+	WaitReason           *AutomationRunWaitReason         `db:"wait_reason"             json:"wait_reason,omitempty"`
+	WaitStartedAt        *time.Time                       `db:"wait_started_at"         json:"wait_started_at,omitempty"`
+	ExecutionStartedAt   *time.Time                       `db:"execution_started_at"    json:"execution_started_at,omitempty"`
+	JobID                *uuid.UUID                       `db:"job_id"                  json:"-"`
+	Attempt              int                              `db:"attempt"                 json:"attempt"`
+	AttemptLockToken     *uuid.UUID                       `db:"attempt_lock_token"      json:"-"`
+	AttemptStartedAt     *time.Time                       `db:"attempt_started_at"      json:"-"`
+	SupersededByRunID    *uuid.UUID                       `db:"superseded_by_run_id"    json:"superseded_by_run_id,omitempty"`
+	OutcomeReason        *AutomationRunOutcomeReason      `db:"outcome_reason"          json:"outcome_reason,omitempty"`
+	HeadLookupDegraded   bool                             `db:"head_lookup_degraded"    json:"head_lookup_degraded"`
+	WorkerNodeID         *string                          `db:"worker_node_id"          json:"-"`
+	RestoreSnapshotBytes *int64                           `db:"restore_snapshot_bytes"  json:"restore_snapshot_bytes,omitempty"`
+	RestoreDurationMS    *int                             `db:"restore_duration_ms"     json:"restore_duration_ms,omitempty"`
+	TurnDurationMS       *int                             `db:"turn_duration_ms"        json:"turn_duration_ms,omitempty"`
 
 	// Session is a compact view of the session this run spawned, populated
 	// only by list/detail endpoints that join sessions (currently
@@ -464,6 +503,7 @@ func (a *Automation) BuildConfigSnapshot() (json.RawMessage, error) {
 		"scope":               a.Scope,
 		"identity_scope":      a.IdentityScope.OrDefault(),
 		"publish_policy":      a.PublishPolicy.OrDefault(),
+		"session_continuity":  a.SessionContinuity.OrDefault(),
 		"pre_pr_review_loops": a.PrePRReviewLoops,
 		"base_branch":         a.BaseBranch,
 		"previous_run_at":     previousRunAt,
