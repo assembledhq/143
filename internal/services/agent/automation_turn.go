@@ -774,10 +774,13 @@ func (o *Orchestrator) runPendingPreflight(ctx context.Context, state *automatio
 // (which locks the same job row) waits, and a worker whose lease is gone
 // is refused before it touches anything. A container recorded on another
 // node is only cleared when that node is known dead; otherwise the
-// attempt yields to the node that owns it. The CAS clear runs before the
-// destroy: it refuses a container a preview or another runtime holds, so
-// nothing held by another owner is ever destroyed, and a destroy failure
-// rolls the clear back so the recorded id stays for a retry.
+// attempt yields to the node that owns it. The release follows the turn
+// hold's own protocol (FinalizeContainerDestroy, then Destroy): the CAS
+// clear refuses a container a preview or another runtime holds, and it
+// commits before the destroy so a reader that arrives after the commit
+// finds no container to attach to instead of a dying one. A destroy
+// failure after the commit leaves an unreferenced container for the
+// sandbox reaper, never a recorded id pointing at a dead one.
 func (o *Orchestrator) releaseInheritedContainer(ctx context.Context, state *automationTurnState, session *models.Session, log zerolog.Logger) error {
 	if session.ContainerID == nil || *session.ContainerID == "" {
 		return nil
@@ -810,14 +813,6 @@ func (o *Orchestrator) releaseInheritedContainer(ctx context.Context, state *aut
 		if !cleared {
 			return fmt.Errorf("inherited sandbox %s is held by another owner", recorded)
 		}
-		if !onDeadNode {
-			// Destroy while the attempt lock and the uncommitted clear are
-			// held; a failure rolls the clear back so the recorded id stays
-			// for a retry.
-			if err := o.provider.Destroy(context.WithoutCancel(ctx), &Sandbox{ID: recorded, Provider: o.provider.Name()}); err != nil {
-				return fmt.Errorf("destroy inherited sandbox %s: %w", recorded, err)
-			}
-		}
 		return nil
 	})
 	if err != nil {
@@ -825,6 +820,11 @@ func (o *Orchestrator) releaseInheritedContainer(ctx context.Context, state *aut
 	}
 	session.ContainerID = nil
 	session.WorkerNodeID = nil
+	if !onDeadNode {
+		if err := o.provider.Destroy(context.WithoutCancel(ctx), &Sandbox{ID: recorded, Provider: o.provider.Name()}); err != nil {
+			log.Warn().Err(err).Str("container_id", recorded).Msg("failed to destroy the inherited sandbox after clearing it; the sandbox reaper owns it")
+		}
+	}
 	log.Info().Str("container_id", recorded).Bool("dead_node", onDeadNode).Msg("released the container an earlier attempt left behind")
 	return nil
 }
