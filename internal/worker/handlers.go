@@ -14044,15 +14044,18 @@ func claimAutomationTurnAttempt(ctx context.Context, stores *Stores, logger zero
 	if err != nil {
 		return false, fmt.Errorf("load automation run for attempt claim: %w", err)
 	}
-	if run.TargetID == nil {
-		// A legacy per-run session: no reservation to fence against.
+	if run.DispatchState == nil {
+		// No reservation to fence against: a legacy per-run session, or a
+		// per-run fallback (kill switch, per_run mode) whose run was claimed
+		// by the ordinary pending-to-running transition.
 		return true, nil
 	}
-	if run.DispatchState == nil || *run.DispatchState != models.AutomationRunDispatchExecuting || run.JobID == nil {
+	if *run.DispatchState != models.AutomationRunDispatchExecuting || run.JobID == nil {
 		logger.Warn().
 			Str("run_id", runID.String()).
 			Str("job_id", jobID.String()).
-			Msg("automation turn job found its run not executing; skipping")
+			Str("dispatch_state", string(*run.DispatchState)).
+			Msg("automation turn job found its reserved run not executing; skipping")
 		return false, nil
 	}
 	if *run.JobID != jobID {
@@ -14119,12 +14122,12 @@ func dispatchAutomationTargetRun(ctx context.Context, services *Services, log ze
 		maxWait := automationWaitingPollWindow
 		return true, &RetryableError{Err: fmt.Errorf("automation run waiting: %s", outcome.Note), RetryAfter: &retryAfter, MaxRetryDuration: &maxWait}
 	case automationservice.DispatchRetry:
+		// The worker's retry window is anchored at the job's first retry, so
+		// every deferral shares the wait window rather than switching to a
+		// shorter one that would already be exhausted.
 		event.Dur("retry_after", outcome.RetryAfter).Msg("per-target automation run not decidable yet; retrying")
 		retryAfter := outcome.RetryAfter
-		maxWait := outcome.MaxWait
-		if maxWait <= 0 {
-			maxWait = automationWaitingPollWindow
-		}
+		maxWait := automationWaitingPollWindow
 		return true, &RetryableError{Err: fmt.Errorf("automation run undecidable: %s", outcome.Note), RetryAfter: &retryAfter, MaxRetryDuration: &maxWait}
 	default:
 		event.Msg("per-target automation run handled")

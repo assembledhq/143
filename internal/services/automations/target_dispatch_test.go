@@ -89,7 +89,7 @@ func TestTargetDispatcher_Decide(t *testing.T) {
 		}
 	}
 	activeGeneration := func() models.AutomationTargetSession {
-		return models.AutomationTargetSession{ID: uuid.New(), Generation: 2, TurnCount: 3, LastReviewedHeadSHA: &reviewed}
+		return models.AutomationTargetSession{ID: uuid.New(), Generation: 2, TurnCount: 3, LastReviewedHeadSHA: &reviewed, CheckpointSnapshotKey: &key}
 	}
 	template := func() *models.Session { return &models.Session{AgentType: models.AgentType(claude)} }
 
@@ -215,10 +215,10 @@ func TestTargetDispatcher_Decide(t *testing.T) {
 				return s
 			},
 			template: template(),
-			want:     continuationDecision{kind: decisionRetry, retryAfter: automationPendingSnapshotRetry, maxWait: automationPendingSnapshotGrace + automationPendingSnapshotRetry, note: "snapshot upload in flight"},
+			want:     continuationDecision{kind: decisionRetry, retryAfter: automationPendingSnapshotRetry, note: "snapshot upload in flight"},
 		},
 		{
-			name: "stale pending upload with a published key continues", hasGeneration: true, generation: activeGeneration(),
+			name: "stale pending upload with a published key still retries", hasGeneration: true, generation: activeGeneration(),
 			session: func() models.Session {
 				s := readySession()
 				setAt := now.Add(-10 * time.Minute)
@@ -227,7 +227,7 @@ func TestTargetDispatcher_Decide(t *testing.T) {
 				return s
 			},
 			template: template(),
-			want:     continuationDecision{kind: decisionProceed, mode: models.AutomationRunContinuationContinued},
+			want:     continuationDecision{kind: decisionRetry, retryAfter: automationPendingSnapshotRetry, note: "snapshot upload in flight"},
 		},
 		{
 			name: "stale pending upload without a key waits for the reaper", hasGeneration: true, generation: activeGeneration(),
@@ -240,10 +240,41 @@ func TestTargetDispatcher_Decide(t *testing.T) {
 				return s
 			},
 			template: template(),
-			want:     continuationDecision{kind: decisionRetry, retryAfter: automationPendingSnapshotRetry, maxWait: 2 * automationPendingSnapshotGrace, note: "snapshot upload stranded; waiting for the reaper"},
+			want:     continuationDecision{kind: decisionRetry, retryAfter: automationPendingSnapshotRetry, note: "snapshot upload in flight"},
 		},
 		{
-			name: "live container continues", hasGeneration: true, generation: activeGeneration(),
+			name: "coherent checkpoint continues", hasGeneration: true, generation: activeGeneration(),
+			session: readySession, template: template(),
+			want: continuationDecision{kind: decisionProceed, mode: models.AutomationRunContinuationContinued},
+		},
+		{
+			name: "checkpoint without provenance reconstructs", hasGeneration: true,
+			generation: func() models.AutomationTargetSession {
+				g := activeGeneration()
+				g.CheckpointSnapshotKey = nil
+				return g
+			}(),
+			session: readySession, template: template(),
+			want: continuationDecision{kind: decisionProceed, mode: models.AutomationRunContinuationReconstructed, reason: continuation(models.AutomationRunContinuationReasonSnapshotMissing)},
+		},
+		{
+			name: "checkpoint whose provenance names another key reconstructs", hasGeneration: true,
+			generation: func() models.AutomationTargetSession {
+				g := activeGeneration()
+				g.CheckpointSnapshotKey = &pending
+				return g
+			}(),
+			session: readySession, template: template(),
+			want: continuationDecision{kind: decisionProceed, mode: models.AutomationRunContinuationReconstructed, reason: continuation(models.AutomationRunContinuationReasonSnapshotMissing)},
+		},
+		{
+			name: "destroyed sandbox with a coherent checkpoint continues", hasGeneration: true, generation: activeGeneration(),
+			session:  func() models.Session { s := readySession(); s.SandboxState = models.SandboxStateDestroyed; return s },
+			template: template(),
+			want:     continuationDecision{kind: decisionProceed, mode: models.AutomationRunContinuationContinued},
+		},
+		{
+			name: "live container without a checkpoint reconstructs", hasGeneration: true, generation: activeGeneration(),
 			session: func() models.Session {
 				s := readySession()
 				s.ContainerID = &container
@@ -253,7 +284,7 @@ func TestTargetDispatcher_Decide(t *testing.T) {
 				return s
 			},
 			template: template(),
-			want:     continuationDecision{kind: decisionProceed, mode: models.AutomationRunContinuationContinued},
+			want:     continuationDecision{kind: decisionProceed, mode: models.AutomationRunContinuationReconstructed, reason: continuation(models.AutomationRunContinuationReasonSnapshotMissing)},
 		},
 		{
 			name: "destroyed sandbox without a checkpoint reconstructs", hasGeneration: true, generation: activeGeneration(),
@@ -346,6 +377,13 @@ func TestBaselineHead(t *testing.T) {
 			name:       "no native context falls back to the reviewed head",
 			generation: models.AutomationTargetSession{CheckpointHeadSHA: &checkpoint, CheckpointSnapshotKey: &key, LastReviewedHeadSHA: &reviewed},
 			session:    models.Session{SnapshotKey: &key},
+			mode:       models.AutomationRunContinuationContinued,
+			want:       &reviewed,
+		},
+		{
+			name:       "a session-level agent session id alone is not a resume source",
+			generation: models.AutomationTargetSession{CheckpointHeadSHA: &checkpoint, CheckpointSnapshotKey: &key, LastReviewedHeadSHA: &reviewed},
+			session:    models.Session{SnapshotKey: &key, AgentSessionID: &native},
 			mode:       models.AutomationRunContinuationContinued,
 			want:       &reviewed,
 		},

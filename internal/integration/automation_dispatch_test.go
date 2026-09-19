@@ -138,8 +138,8 @@ func (h *dispatchHarness) finishTurn(t *testing.T, run models.AutomationRun, hea
 			checkpointed_at = now(), current_turn = current_turn + 1, agent_session_id = 'agent-session'
 		WHERE id = $1`, *run.SessionID, "snapshots/"+run.ID.String())
 	require.NoError(t, err, "idle the session with a checkpoint")
-	_, err = h.pool.Exec(ctx, `UPDATE session_threads SET status = 'idle' WHERE session_id = $1`, *run.SessionID)
-	require.NoError(t, err, "idle the thread")
+	_, err = h.pool.Exec(ctx, `UPDATE session_threads SET status = 'idle', agent_session_id = 'agent-session' WHERE session_id = $1`, *run.SessionID)
+	require.NoError(t, err, "idle the thread with the native agent session id the next turn resumes from")
 	_, err = h.pool.Exec(ctx, `
 		UPDATE automation_target_sessions SET turn_count = turn_count + 1, last_reviewed_head_sha = $2, last_reviewed_epoch = COALESCE($3, last_reviewed_epoch),
 			checkpoint_snapshot_key = $4, checkpoint_head_sha = $2, checkpoint_review_complete = true, last_run_id = $5, last_turn_at = now()
@@ -497,7 +497,6 @@ func TestAutomationDispatch_LookupFailureWithAmbiguity(t *testing.T) {
 	held := h.dispatch(t, runA, models.AgentTypeCodex)
 	require.Equal(t, automations.DispatchRetry, held.Kind, "an ambiguous candidate is held while the lookup fails")
 	require.Equal(t, 30*time.Second, held.RetryAfter, "the first retry is 30 seconds out")
-	require.Greater(t, held.MaxWait, 30*time.Minute, "the hold is bounded beyond the ambiguity window")
 	runA = h.reload(t, runA.ID)
 	require.Equal(t, models.AutomationRunDispatchWaiting, *runA.DispatchState, "the held candidate stays waiting")
 	require.Equal(t, models.AutomationRunStatusPending, runA.Status, "the held candidate stays pending")
@@ -584,4 +583,116 @@ func TestAutomationDispatch_AutomationChangedUnderLock(t *testing.T) {
 	var generations int
 	require.NoError(t, h.pool.QueryRow(ctx, `SELECT count(*) FROM automation_target_sessions WHERE org_id = $1`, h.orgID).Scan(&generations), "count generations")
 	require.Equal(t, 0, generations, "no generation was created from stale input")
+}
+
+// TestAutomationDispatch_DestroyedSandboxWithCheckpointContinues proves a
+// generation whose container is gone still continues from its coherent
+// checkpoint: the session claim admits a destroyed sandbox because the
+// decision already established a restore source.
+func TestAutomationDispatch_DestroyedSandboxWithCheckpointContinues(t *testing.T) {
+	h := newDispatchHarness(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+
+	run1 := h.push(t, h1, t0)
+	first := h.dispatch(t, run1, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, first.Kind, "first run is reserved")
+	h.finishTurn(t, run1, h1)
+	_, err := h.pool.Exec(ctx, `UPDATE sessions SET sandbox_state = 'destroyed', container_id = NULL, worker_node_id = NULL WHERE id = $1`, first.SessionID)
+	require.NoError(t, err, "destroy the sandbox between turns")
+
+	run2 := h.push(t, h2, t0.Add(time.Second))
+	continued := h.dispatch(t, run2, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, continued.Kind, "the push is reserved")
+	require.Equal(t, models.AutomationRunContinuationContinued, continued.ContinuationMode, "a coherent checkpoint continues even when the sandbox is destroyed")
+	require.Equal(t, first.SessionID, continued.SessionID, "the same session continues")
+	run2 = h.reload(t, run2.ID)
+	require.Equal(t, h1, *run2.PreviousHeadSHA, "the delta baseline is the checkpoint head")
+}
+
+// TestAutomationDispatch_ProvenanceMismatchReconstructs proves a published
+// checkpoint the generation's provenance does not describe restores the
+// workspace as reconstructed context with the last review as baseline.
+func TestAutomationDispatch_ProvenanceMismatchReconstructs(t *testing.T) {
+	h := newDispatchHarness(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+
+	run1 := h.push(t, h1, t0)
+	first := h.dispatch(t, run1, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, first.Kind, "first run is reserved")
+	h.finishTurn(t, run1, h1)
+	_, err := h.pool.Exec(ctx, `UPDATE sessions SET snapshot_key = 'snapshots/other' WHERE id = $1`, first.SessionID)
+	require.NoError(t, err, "install a checkpoint the generation did not record")
+
+	run2 := h.push(t, h2, t0.Add(time.Second))
+	outcome := h.dispatch(t, run2, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, outcome.Kind, "the push is reserved")
+	require.Equal(t, models.AutomationRunContinuationReconstructed, outcome.ContinuationMode, "a checkpoint without matching provenance is reconstructed context")
+	require.Equal(t, models.AutomationRunContinuationReasonSnapshotMissing, *outcome.ContinuationReason, "the reason names the missing provenance")
+	require.Equal(t, first.SessionID, outcome.SessionID, "the generation's session is reused")
+	run2 = h.reload(t, run2.ID)
+	require.Equal(t, h1, *run2.PreviousHeadSHA, "a reconstructed turn's baseline is the last completed review")
+}
+
+// TestAutomationDispatch_PushPriority proves the next turn is chosen by
+// priority under the lock: an earlier non-push run waits when an
+// authoritative push is admitted behind it, and the push executes first.
+func TestAutomationDispatch_PushPriority(t *testing.T) {
+	h := newDispatchHarness(t)
+	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	h1 := "1111111111111111111111111111111111111111"
+	h2 := "2222222222222222222222222222222222222222"
+
+	run1 := h.push(t, h1, t0)
+	first := h.dispatch(t, run1, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, first.Kind, "first run is reserved")
+	edited := h.deliver(t, automations.GitHubEventTriggerRequest{
+		Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "edited", HeadSHA: h1, BaseBranch: "main",
+	})
+	push := h.push(t, h2, t0.Add(time.Second))
+	h.finishTurn(t, run1, h1)
+
+	held := h.dispatch(t, edited, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchWaiting, held.Kind, "the earlier non-push run yields to the admitted push")
+	require.Contains(t, held.Note, push.ID.String(), "the wait names the run with priority")
+	reserved := h.dispatch(t, push, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, reserved.Kind, "the push executes first")
+	h.finishTurn(t, push, h2)
+	after := h.dispatch(t, edited, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, after.Kind, "the non-push run executes once the push finishes")
+}
+
+// TestAutomationDispatch_StaleLifecycleNeedsEvidence proves a new
+// generation is only created with current openness evidence: with stale
+// evidence and no lookup the run waits with backoff, and a successful
+// lookup refreshes the evidence before the generation is created.
+func TestAutomationDispatch_StaleLifecycleNeedsEvidence(t *testing.T) {
+	h := newDispatchHarness(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
+	h1 := "1111111111111111111111111111111111111111"
+
+	run := h.push(t, h1, t0)
+	_, err := h.pool.Exec(ctx, `UPDATE automation_targets SET lifecycle_updated_at = now() - interval '2 hours' WHERE id = $1`, *run.TargetID)
+	require.NoError(t, err, "age the openness evidence")
+
+	held := h.dispatch(t, run, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchRetry, held.Kind, "stale evidence without a lookup defers the fresh generation")
+	require.Equal(t, 30*time.Second, held.RetryAfter, "the deferral uses the lookup backoff")
+	run = h.reload(t, run.ID)
+	require.Equal(t, models.AutomationRunStatusPending, run.Status, "the run stays pending")
+	require.Equal(t, models.AutomationRunDispatchWaiting, *run.DispatchState, "the run is recorded as waiting")
+
+	updated := t0.Add(time.Second)
+	h.dispatcher.SetHeadResolver(&fakeHeadResolver{info: automations.PullRequestHeadInfo{SHA: h1, UpdatedAt: &updated, State: "open", BaseBranch: "main"}})
+	reserved := h.dispatch(t, run, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, reserved.Kind, "a successful lookup lets the fresh generation start")
+	var age time.Duration
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT now() - lifecycle_updated_at FROM automation_targets WHERE id = $1`, *run.TargetID).Scan(&age), "read the refreshed evidence")
+	require.Less(t, age, time.Minute, "the lookup refreshed the openness evidence")
 }

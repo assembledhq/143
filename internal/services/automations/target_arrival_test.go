@@ -134,6 +134,7 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 			},
 			wantJob: true, wantEpoch: intPtr(4), wantResolution: &authoritative,
 			wantAdopted: []string{newer}, wantSuperseded: []int{4},
+			wantLifecycle: []models.AutomationTargetLifecycleState{models.AutomationTargetLifecycleOpen},
 		},
 		{
 			name:   "same-head delivery joins the observed epoch",
@@ -143,6 +144,7 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 				HeadSHA: observed, PullRequestUpdatedAt: timePtr(base.Add(time.Minute)),
 			},
 			wantJob: true, wantEpoch: intPtr(3), wantResolution: &authoritative, wantTouched: []time.Time{base.Add(time.Minute)},
+			wantLifecycle: []models.AutomationTargetLifecycleState{models.AutomationTargetLifecycleOpen},
 		},
 		{
 			name:   "same-head force-push with a newer timestamp advances the watermark",
@@ -152,6 +154,7 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 				HeadSHA: observed, PullRequestUpdatedAt: timePtr(base.Add(2 * time.Second)),
 			},
 			wantJob: true, wantEpoch: intPtr(3), wantResolution: &authoritative, wantTouched: []time.Time{base.Add(2 * time.Second)},
+			wantLifecycle: []models.AutomationTargetLifecycleState{models.AutomationTargetLifecycleOpen},
 		},
 		{
 			name:   "older push with a different head is skipped as stale",
@@ -160,7 +163,8 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 				Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "synchronize",
 				HeadSHA: newer, PullRequestUpdatedAt: timePtr(base.Add(-time.Second)),
 			},
-			wantOutcome: models.AutomationRunOutcomeStaleHead,
+			wantOutcome:   models.AutomationRunOutcomeStaleHead,
+			wantLifecycle: []models.AutomationTargetLifecycleState{models.AutomationTargetLifecycleOpen},
 		},
 		{
 			name:   "equal timestamp with a different head is ambiguous",
@@ -170,6 +174,7 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 				HeadSHA: newer, PullRequestUpdatedAt: timePtr(base),
 			},
 			wantJob: true, wantResolution: &ambiguous, wantPending: true,
+			wantLifecycle: []models.AutomationTargetLifecycleState{models.AutomationTargetLifecycleOpen},
 		},
 		{
 			name:   "push without a timestamp is ambiguous",
@@ -178,6 +183,7 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 				Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "synchronize", HeadSHA: newer,
 			},
 			wantJob: true, wantResolution: &ambiguous, wantPending: true,
+			wantLifecycle: []models.AutomationTargetLifecycleState{models.AutomationTargetLifecycleOpen},
 		},
 		{
 			name:   "comment at an unobserved head executes with a null epoch",
@@ -197,6 +203,7 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 				HeadSHA: newer, PullRequestUpdatedAt: timePtr(base),
 			},
 			wantJob: true, wantEpoch: intPtr(1), wantResolution: &authoritative, wantAdopted: []string{newer},
+			wantLifecycle: []models.AutomationTargetLifecycleState{models.AutomationTargetLifecycleOpen},
 		},
 		{
 			name: "late event on a closed target is skipped",
@@ -218,7 +225,7 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 				HeadSHA: newer, PullRequestUpdatedAt: timePtr(base),
 			},
 			wantJob: true, wantEpoch: intPtr(1), wantResolution: &authoritative, wantAdopted: []string{newer},
-			wantLifecycle: []models.AutomationTargetLifecycleState{models.AutomationTargetLifecycleOpen},
+			wantLifecycle: []models.AutomationTargetLifecycleState{models.AutomationTargetLifecycleOpen, models.AutomationTargetLifecycleOpen},
 		},
 		{
 			name:   "merged event marks the target merged and executes as the final turn",
@@ -288,7 +295,7 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 				require.Empty(t, arrivals.markedWaiting, "only ambiguous candidates are marked waiting at arrival")
 			}
 			require.Equal(t, tt.wantTouched, targets.touched, "same-head deliveries advance the observed timestamp only when newer")
-			require.Equal(t, tt.wantLifecycle, targets.lifecycle, "lifecycle transitions match")
+			require.Equal(t, tt.wantLifecycle, targets.lifecycle, "lifecycle transitions match, including the openness refresh a pull_request delivery provides")
 			if tt.wantJob {
 				require.Len(t, jobs.jobs, 1, "dispatchable run enqueues the automation_run job")
 				require.Empty(t, arrivals.terminalized, "dispatchable run is not terminalized")
