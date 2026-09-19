@@ -356,11 +356,12 @@ func (s *AutomationTargetStore) RetireGeneration(ctx context.Context, tx pgx.Tx,
 // ownership-release rules to each. Used when continuity is switched back to
 // per_run. Returns the retired rows.
 //
-// The target rows are locked first, in a stable order, and each target's
-// active generation is read only after its lock is held. Reading the
-// generations before locking would let a concurrent ownership transaction
-// retire one and insert its replacement in between, leaving the replacement
-// active after the switch.
+// Every target row of the automation is locked first, in a stable order,
+// and each target's active generation is read only after its lock is held.
+// Reading the generations before locking would let a concurrent ownership
+// transaction retire one and insert its replacement in between, and
+// filtering targets by a committed active_generation would skip a target
+// whose first generation is being inserted by an uncommitted transaction.
 func (s *AutomationTargetStore) RetireActiveGenerationsForAutomation(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID, reason models.AutomationTargetRetiredReason) ([]models.AutomationTargetSession, error) {
 	if err := reason.Validate(); err != nil {
 		return nil, err
@@ -368,7 +369,7 @@ func (s *AutomationTargetStore) RetireActiveGenerationsForAutomation(ctx context
 	rows, err := tx.Query(ctx, `
 		SELECT id
 		FROM automation_targets
-		WHERE org_id = @org_id AND automation_id = @automation_id AND active_generation > 0
+		WHERE org_id = @org_id AND automation_id = @automation_id
 		ORDER BY id
 		FOR UPDATE`,
 		pgx.NamedArgs{"org_id": orgID, "automation_id": automationID})
