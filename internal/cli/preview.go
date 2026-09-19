@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/mcp"
 )
 
@@ -104,7 +105,7 @@ func runSandboxPreview(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), previewWaitTimeout)
 	defer cancel()
-	source, executor := newInternalToolSource(ctx, mcp.NewToolRegistry(mcp.BuildRegistryFromEnv(stderr)), token, apiURL, stderr)
+	source, executor := newInternalToolSource(ctx, mcp.NewToolRegistry(mcp.BuildRegistryFromEnv(stderr)), token, apiURL, stderr, models.ToolAllowlistFromEnvValue(os.Getenv(models.ToolAllowlistEnvVar)))
 	if hasFlag(args, "--wait") {
 		executor.progress = stderr
 	}

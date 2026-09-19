@@ -18,6 +18,12 @@ import (
 // internal API route then requires its own tool scope.
 const PerTargetToolAllowlistScope = "tool-allowlist:v1"
 
+// ToolAllowlistEnvVar carries the allowlist into the sandbox environment
+// as a comma-separated list, so the in-sandbox tool filter fails closed:
+// it applies the list whether or not the effective-capabilities fetch
+// succeeds and whether or not the internal token is present.
+const ToolAllowlistEnvVar = "INTERNAL_TOOL_ALLOWLIST"
+
 // PerTargetToolAllowlist is the exact set of tools a per-target turn may
 // call, as "namespace:action" identifiers.
 var PerTargetToolAllowlist = []string{
@@ -34,13 +40,16 @@ var PerTargetToolAllowlist = []string{
 }
 
 // perTargetAllowedCapabilities are the capabilities that contribute at
-// least one allowlisted tool; they are kept at read level. Every other
-// capability (publishing, automation management, code review policy
-// writes, Slack sends, Linear and PagerDuty writes, eval authoring) is
-// dropped from a per-target turn's snapshot.
+// least one allowlisted tool; they are kept at read level. Code review
+// policy management is kept at read because it is the policy read's only
+// grant when review_feedback is absent; its update stays denied by the
+// tool list and by the read cap. Every other capability (publishing,
+// automation management, Slack sends, Linear and PagerDuty writes, eval
+// authoring) is dropped from a per-target turn's snapshot.
 var perTargetAllowedCapabilities = map[AgentCapabilityID]bool{
 	AgentCapabilitySessionHistory:        true,
 	AgentCapabilityReviewFeedback:        true,
+	AgentCapabilityCodeReviewPolicy:      true,
 	AgentCapabilityPRHistory:             true,
 	AgentCapabilityIssueSources:          true,
 	AgentCapabilityTeamDocs:              true,
@@ -66,6 +75,26 @@ func PerTargetToolScopes() []string {
 // HasToolScope reports whether scopes contain the given scope.
 func HasToolScope(scopes []string, scope string) bool {
 	return slices.Contains(scopes, scope)
+}
+
+// ToolAllowlistEnvValue is the environment form of the allowlist.
+func ToolAllowlistEnvValue() string {
+	return strings.Join(PerTargetToolAllowlist, ",")
+}
+
+// ToolAllowlistFromEnvValue parses the environment form; nil when unset.
+func ToolAllowlistFromEnvValue(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	tools := make([]string, 0, 32)
+	for _, tool := range strings.Split(value, ",") {
+		if tool = strings.TrimSpace(tool); tool != "" {
+			tools = append(tools, tool)
+		}
+	}
+	return tools
 }
 
 // ToolAllowlistFromScopes returns the tools an allowlisted token grants,

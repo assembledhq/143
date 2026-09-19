@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/mcp"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 )
@@ -99,8 +100,14 @@ func runMCPServe(stderr io.Writer) int {
 func selectToolSource(ctx context.Context, overrides globalOverrides) (mcp.ToolSource, error) {
 	envRegistry := mcp.BuildRegistryFromEnv(os.Stderr)
 	var direct mcp.ToolSource = mcp.NewToolRegistry(envRegistry)
+	envAllowlist := models.ToolAllowlistFromEnvValue(os.Getenv(models.ToolAllowlistEnvVar))
 	if token, apiURL := os.Getenv("INTERNAL_API_TOKEN"), os.Getenv("INTERNAL_API_URL"); token != "" && apiURL != "" {
-		direct, _ = newInternalToolSource(ctx, direct, token, apiURL, os.Stderr)
+		direct, _ = newInternalToolSource(ctx, direct, token, apiURL, os.Stderr, envAllowlist)
+	} else if envAllowlist != nil {
+		// A per-target turn without its internal token (stripped from the
+		// environment) still runs under the allowlist, with no grants: the
+		// provider tools that need a grant are unreachable.
+		direct = mcp.NewCapabilityFilteredToolSource(direct, mcp.ToolCapabilityPolicy{ToolAllowlist: envAllowlist})
 	}
 	if InSandbox() || len(direct.ListTools()) > 0 {
 		return direct, nil
