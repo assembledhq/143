@@ -540,12 +540,22 @@ func (s *SessionStore) CountsByOrg(ctx context.Context, orgID uuid.UUID, filters
 }
 
 func (s *SessionStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (models.Session, error) {
+	return getSessionByID(ctx, s.db, orgID, runID)
+}
+
+// GetByIDInTx is GetByID inside an existing transaction, for callers that
+// must read the row under locks they already hold.
+func (s *SessionStore) GetByIDInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (models.Session, error) {
+	return getSessionByID(ctx, tx, orgID, sessionID)
+}
+
+func getSessionByID(ctx context.Context, q DBTX, orgID, runID uuid.UUID) (models.Session, error) {
 	query := `
 		SELECT ` + sessionSelectColumns + `
 		FROM sessions
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+	rows, err := q.Query(ctx, query, pgx.NamedArgs{
 		"id":     runID,
 		"org_id": orgID,
 	})

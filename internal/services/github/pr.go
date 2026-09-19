@@ -2549,22 +2549,23 @@ type PullRequestEvent struct {
 func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullRequestEvent) error {
 	if automationEvents := automationGitHubEventsForPullRequest(event); len(automationEvents) > 0 || event.Action == "unlabeled" {
 		s.triggerGitHubAutomationEvents(ctx, automationevents.GitHubEventTriggerRequest{
-			Repository:         event.Repository.FullName,
-			PullRequestNumber:  event.Number,
-			PullRequestAction:  event.Action,
-			PullRequestURL:     event.PR.HTMLURL,
-			PullRequestTitle:   event.PR.Title,
-			HeadSHA:            event.PR.Head.SHA,
-			Actor:              event.Sender.Login,
-			ActorType:          event.Sender.Type,
-			Body:               githubPullRequestBody(event.PR.Title, event.PR.Body),
-			ProviderEventID:    event.DeliveryID,
-			EventID:            fmt.Sprintf("pull_request:%s:%d", event.Action, event.Number),
-			BaseBranch:         event.PR.Base.Ref,
-			Labels:             githubLabelNames(event.PR.Labels),
-			LabelsKnown:        true,
-			RequireLabelFilter: event.Action == "labeled",
-			ChangedLabel:       event.Label.Name,
+			Repository:           event.Repository.FullName,
+			PullRequestNumber:    event.Number,
+			PullRequestAction:    event.Action,
+			PullRequestUpdatedAt: event.PR.UpdatedAt,
+			PullRequestURL:       event.PR.HTMLURL,
+			PullRequestTitle:     event.PR.Title,
+			HeadSHA:              event.PR.Head.SHA,
+			Actor:                event.Sender.Login,
+			ActorType:            event.Sender.Type,
+			Body:                 githubPullRequestBody(event.PR.Title, event.PR.Body),
+			ProviderEventID:      event.DeliveryID,
+			EventID:              fmt.Sprintf("pull_request:%s:%d", event.Action, event.Number),
+			BaseBranch:           event.PR.Base.Ref,
+			Labels:               githubLabelNames(event.PR.Labels),
+			LabelsKnown:          true,
+			RequireLabelFilter:   event.Action == "labeled",
+			ChangedLabel:         event.Label.Name,
 		}, automationEvents, event.OwnerOrgID, event.Repository.ID)
 	}
 
@@ -4514,6 +4515,45 @@ type PullRequestHead struct {
 	SHA        string
 	BaseBranch string
 	Labels     []string
+	// UpdatedAt is GitHub's pull_request.updated_at, which orders pushes for
+	// per-target automation continuity. Nil when the response omitted it.
+	UpdatedAt *time.Time
+}
+
+// ResolvePullRequestHead fetches the pull request's current head, state,
+// base branch, and updated_at with the repository's installation token. It
+// backs the dispatch-time head lookup for per-target automation continuity
+// (design doc 125, "Head Authority").
+func (s *PRService) ResolvePullRequestHead(ctx context.Context, orgID, repositoryID uuid.UUID, pullRequestNumber int) (automationevents.PullRequestHeadInfo, error) {
+	if s == nil || s.repos == nil || s.tokenProvider == nil {
+		return automationevents.PullRequestHeadInfo{}, fmt.Errorf("pull request head lookup is not configured")
+	}
+	if pullRequestNumber <= 0 {
+		return automationevents.PullRequestHeadInfo{}, fmt.Errorf("invalid pull request number %d", pullRequestNumber)
+	}
+	repo, err := s.repos.GetByID(ctx, orgID, repositoryID)
+	if err != nil {
+		return automationevents.PullRequestHeadInfo{}, fmt.Errorf("load repository for head lookup: %w", err)
+	}
+	owner, repoName, ok := strings.Cut(repo.FullName, "/")
+	if !ok || owner == "" || repoName == "" {
+		return automationevents.PullRequestHeadInfo{}, fmt.Errorf("malformed repository name %q", repo.FullName)
+	}
+	resolution, err := s.getInstallationResolutionForRepo(ctx, orgID, &repo)
+	if err != nil {
+		return automationevents.PullRequestHeadInfo{}, fmt.Errorf("get installation token for head lookup: %w", err)
+	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "automation_head")
+	head, err := s.GetPullRequestHead(ctx, resolution.Token, owner, repoName, pullRequestNumber)
+	if err != nil {
+		return automationevents.PullRequestHeadInfo{}, err
+	}
+	return automationevents.PullRequestHeadInfo{
+		SHA:        head.SHA,
+		UpdatedAt:  head.UpdatedAt,
+		State:      head.State,
+		BaseBranch: head.BaseBranch,
+	}, nil
 }
 
 // CodeReviewPullRequestSnapshot is the current GitHub state needed by code
@@ -4690,10 +4730,11 @@ func (s *PRService) GetPullRequestHead(ctx context.Context, token, owner, repo s
 		return PullRequestHead{}, fmt.Errorf("get pull request: %w", err)
 	}
 	var details struct {
-		Number  int    `json:"number"`
-		HTMLURL string `json:"html_url"`
-		State   string `json:"state"`
-		Head    struct {
+		Number    int        `json:"number"`
+		HTMLURL   string     `json:"html_url"`
+		State     string     `json:"state"`
+		UpdatedAt *time.Time `json:"updated_at"`
+		Head      struct {
 			Ref string `json:"ref"`
 			SHA string `json:"sha"`
 		} `json:"head"`
@@ -4716,6 +4757,7 @@ func (s *PRService) GetPullRequestHead(ctx context.Context, token, owner, repo s
 		SHA:        details.Head.SHA,
 		BaseBranch: details.Base.Ref,
 		Labels:     githubLabelNames(details.Labels),
+		UpdatedAt:  details.UpdatedAt,
 	}, nil
 }
 

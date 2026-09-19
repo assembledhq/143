@@ -862,11 +862,16 @@ const (
 	SessionMessageSourceAgentTool        SessionMessageSource = "agent_tool"
 	SessionMessageSourceSystemAutoRepair SessionMessageSource = "system_auto_repair"
 	SessionMessageSourceGitHubPRFeedback SessionMessageSource = "github_pr_feedback"
+	// SessionMessageSourceAutomationTurn marks the visible user message the
+	// ownership transaction inserts for a per-target automation turn
+	// (design doc 125). The turn's prompt travels in the job payload; the
+	// message is the transcript's copy.
+	SessionMessageSourceAutomationTurn SessionMessageSource = "automation_turn"
 )
 
 func (s SessionMessageSource) Validate() error {
 	switch s {
-	case "", SessionMessageSourceAgentTool, SessionMessageSourceSystemAutoRepair, SessionMessageSourceGitHubPRFeedback:
+	case "", SessionMessageSourceAgentTool, SessionMessageSourceSystemAutoRepair, SessionMessageSourceGitHubPRFeedback, SessionMessageSourceAutomationTurn:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionMessageSource: %q", s)
