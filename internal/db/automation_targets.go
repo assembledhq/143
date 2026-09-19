@@ -447,6 +447,37 @@ func (s *AutomationTargetStore) SetLifecycle(ctx context.Context, q DBTX, orgID,
 	return nil
 }
 
+// SetLifecycleObserved records a lifecycle state observed at observedAt,
+// the source's own timestamp (a webhook's pull_request.updated_at) rather
+// than the time the delivery was processed, so a delayed delivery cannot
+// pass for fresh openness evidence. A transition takes the observation
+// time as is; a same-state refresh only ever moves the evidence forward.
+func (s *AutomationTargetStore) SetLifecycleObserved(ctx context.Context, q DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState, observedAt time.Time) error {
+	if err := state.Validate(); err != nil {
+		return err
+	}
+	if q == nil {
+		q = s.db
+	}
+	tag, err := q.Exec(ctx, `
+		UPDATE automation_targets
+		SET lifecycle_updated_at = CASE
+		        WHEN lifecycle_state = @state THEN GREATEST(lifecycle_updated_at, @observed_at::timestamptz)
+		        ELSE @observed_at::timestamptz
+		    END,
+		    lifecycle_state = @state,
+		    updated_at = now()
+		WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": targetID, "org_id": orgID, "state": state, "observed_at": observedAt})
+	if err != nil {
+		return fmt.Errorf("set automation target lifecycle: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrAutomationTargetNotFound
+	}
+	return nil
+}
+
 // RequestWake writes the wake outbox marker and returns the recorded time.
 // Callers enqueue the automation_target_wake job in the same transaction;
 // ClearWake later clears the marker only if no newer request arrived.

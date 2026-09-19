@@ -2806,6 +2806,21 @@ func (o *Orchestrator) resolvePromptSeed(ctx context.Context, session *models.Se
 // RunAgent is the main entry point. It executes an agent run end-to-end:
 // concurrency check → sandbox creation → repo clone → agent execution →
 // result handling → follow-up job enqueuing → sandbox cleanup.
+// completesInteractiveTurn reports whether a successful run ends as a
+// completed interactive turn (session idle, turn counter advanced, native
+// agent session id recorded) rather than a terminal completed session. A
+// user's interactive session needs a checkpoint to be worth continuing, so
+// a failed snapshot ends it. An automation-owned session (design doc 125)
+// completes its turn bookkeeping regardless: the next turn decides for
+// itself whether the checkpoint is usable, and a turn that was counted
+// once must never be numbered again.
+func completesInteractiveTurn(run *models.Session, snapshotKey string) bool {
+	if run == nil || !run.IsInteractive() {
+		return false
+	}
+	return snapshotKey != "" || run.AutomationRunID != nil
+}
+
 func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error {
 	// Create a cancellable context. The cancel registry is populated later
 	// once the sandbox is available, so CancelSession can send SIGINT.
@@ -3699,7 +3714,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	// Store the successful result.
 	runResult := o.buildRunResult(ctx, run, sandbox, result)
 	status := models.SessionStatusCompleted
-	isInteractive := run.IsInteractive() && snapshotKey != ""
+	isInteractive := completesInteractiveTurn(run, snapshotKey)
 
 	if isInteractive {
 		turnNumber := run.CurrentTurn + 1

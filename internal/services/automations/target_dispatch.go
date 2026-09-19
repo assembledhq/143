@@ -46,6 +46,9 @@ const (
 	// automationConfigChangeRetry is the delay before a run re-enters
 	// dispatch after its automation changed underneath it.
 	automationConfigChangeRetry = time.Second
+	// automationStaleLookupRetry is the delay before a run re-enters
+	// dispatch after its target changed between the lookup and the lock.
+	automationStaleLookupRetry = time.Second
 
 	// AutomationTurnJobQueue is the queue per-target turns run on.
 	AutomationTurnJobQueue = "agent"
@@ -263,6 +266,14 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 	if repositoryID == nil {
 		return DispatchOutcome{}, errors.New("automation dispatch requires a repository")
 	}
+	// The lookup runs before the lock, so a delivery may commit between the
+	// lookup and the lock. The target's head state is read before the lookup
+	// and compared under the lock; a changed target means the lookup may be
+	// stale and the run retries with a fresh one.
+	before, err := d.targets.GetByID(ctx, orgID, *in.Run.TargetID)
+	if err != nil && !errors.Is(err, db.ErrAutomationTargetNotFound) {
+		return DispatchOutcome{}, fmt.Errorf("read automation target before lookup: %w", err)
+	}
 	current := d.lookup(ctx, orgID, *repositoryID, github.PullRequestNumber)
 
 	tx, err := d.txStarter.Begin(ctx)
@@ -274,6 +285,15 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 	target, err := d.targets.LockOrCreate(ctx, tx, orgID, in.Automation.ID, *repositoryID, models.AutomationTargetKindGitHubPullRequest, targetKeyForRun(in.Run, github))
 	if err != nil {
 		return DispatchOutcome{}, err
+	}
+	if current.ok && targetHeadStateChanged(before, target) {
+		if _, err := d.runs.MarkWaiting(ctx, tx, orgID, in.Run.ID); err != nil {
+			return DispatchOutcome{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return DispatchOutcome{}, fmt.Errorf("commit automation dispatch wait: %w", err)
+		}
+		return DispatchOutcome{Kind: DispatchRetry, RetryAfter: automationStaleLookupRetry, Note: "target changed between the head lookup and the lock"}, nil
 	}
 
 	// The automation row is reread under the advisory lock, on the
@@ -313,13 +333,18 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 
 	// Lifecycle: the stored gate first, then the lookup's current state,
 	// which closes the target when GitHub says the pull request is done.
+	// GitHub reports a merged pull request as closed, so the subscribed
+	// merged event keeps its final turn and the target keeps its merged
+	// state.
 	event := runEvent(run)
 	if !lifecycleAllowsRun(target.LifecycleState, event) {
 		return d.terminalize(ctx, tx, orgID, run.ID, models.AutomationRunOutcomePRClosed, "pull request is no longer open")
 	}
-	if current.ok && current.info.State != "" && current.info.State != "open" {
-		if err := d.targets.SetLifecycle(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleClosed); err != nil {
-			return DispatchOutcome{}, err
+	if current.ok && current.info.State != "" && current.info.State != "open" && event != models.AutomationGitHubEventPullRequestMerged {
+		if target.LifecycleState != models.AutomationTargetLifecycleMerged {
+			if err := d.targets.SetLifecycle(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleClosed); err != nil {
+				return DispatchOutcome{}, err
+			}
 		}
 		return d.terminalize(ctx, tx, orgID, run.ID, models.AutomationRunOutcomePRClosed, "pull request is "+current.info.State)
 	}
@@ -643,6 +668,31 @@ func lifecycleAllowsRun(state models.AutomationTargetLifecycleState, event model
 	}
 }
 
+// targetHeadStateChanged reports whether the target's head authority state
+// moved between the pre-lookup read and the locked read: a new epoch, a
+// new observed head or watermark, an ambiguity flag, or a lifecycle change.
+func targetHeadStateChanged(before, after models.AutomationTarget) bool {
+	if before.ID == uuid.Nil {
+		return after.ID != uuid.Nil && (after.HeadEpoch != 0 || after.ObservedHeadSHA != nil)
+	}
+	return before.HeadEpoch != after.HeadEpoch ||
+		!stringPtrEqual(before.ObservedHeadSHA, after.ObservedHeadSHA) ||
+		!timePtrEqual(before.ObservedHeadUpdatedAt, after.ObservedHeadUpdatedAt) ||
+		before.HeadResolutionPending != after.HeadResolutionPending ||
+		before.LifecycleState != after.LifecycleState
+}
+
+func timePtrEqual(a, b *time.Time) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return a.Equal(*b)
+	}
+}
+
 func (d *TargetDispatcher) lifecycleStale(target models.AutomationTarget) bool {
 	return target.LifecycleUpdatedAt == nil || d.now().Sub(*target.LifecycleUpdatedAt) > automationLifecycleStaleAfter
 }
@@ -687,6 +737,15 @@ func (d *TargetDispatcher) resolveHead(ctx context.Context, tx pgx.Tx, orgID uui
 		// its delivered head.
 		return out, nil
 	}
+	// A run already resolved to the target's current epoch reviews that
+	// epoch's head, which the target records. The delivered head stays in
+	// the run's snapshot as audit; without this a run that resolved a
+	// missed head while the target was busy and then met a failed lookup
+	// would review its delivered head under the newer epoch.
+	if run.HeadResolution != nil && *run.HeadResolution == authoritative && run.HeadEpoch != nil &&
+		*run.HeadEpoch == target.HeadEpoch && target.ObservedHeadSHA != nil && *target.ObservedHeadSHA != "" {
+		out.headSHA = *target.ObservedHeadSHA
+	}
 	ambiguousRun := run.HeadResolution != nil && *run.HeadResolution == models.AutomationRunHeadAmbiguous
 	headless := github.HeadSHA == ""
 	if !isPush && !headless {
@@ -708,18 +767,20 @@ func (d *TargetDispatcher) resolveHead(ctx context.Context, tx pgx.Tx, orgID uui
 	// epoch; the same head refreshes the watermark; ambiguous candidates
 	// resolve to the one at the current head.
 	epoch := target.HeadEpoch
+	adopted := false
 	switch {
 	case target.ObservedHeadSHA == nil || *target.ObservedHeadSHA != head.SHA:
-		adopted, err := d.targets.AdoptHead(ctx, tx, orgID, target.ID, head.SHA, head.UpdatedAt)
+		newEpoch, err := d.targets.AdoptHead(ctx, tx, orgID, target.ID, head.SHA, head.UpdatedAt)
 		if err != nil {
 			return out, err
 		}
-		epoch = adopted
+		epoch = newEpoch
+		adopted = true
 		target.ObservedHeadSHA = &head.SHA
-		target.HeadEpoch = adopted
+		target.HeadEpoch = newEpoch
 		// A missed newer head supersedes older waiting pushes exactly as a
 		// newer delivery would have at arrival.
-		if _, err := d.runs.SupersedeWaitingPush(ctx, tx, orgID, target.ID, run.ID, adopted); err != nil {
+		if _, err := d.runs.SupersedeWaitingPush(ctx, tx, orgID, target.ID, run.ID, newEpoch); err != nil {
 			return out, err
 		}
 	case head.UpdatedAt != nil && (target.ObservedHeadUpdatedAt == nil || head.UpdatedAt.After(*target.ObservedHeadUpdatedAt)):
@@ -741,12 +802,29 @@ func (d *TargetDispatcher) resolveHead(ctx context.Context, tx pgx.Tx, orgID uui
 		if err != nil {
 			return out, err
 		}
-		survivor := run.ID
-		for _, c := range candidates {
-			if c.HeadSHA == head.SHA {
-				survivor = c.RunID
-				break
+		// The survivor is the candidate at the current head: this run if
+		// it delivered that head, else the candidate that did. When none
+		// did, the dispatching run reviews a head it adopted just now; a
+		// head that a separate delivery already observed has its own
+		// authoritative run, and every candidate is superseded.
+		survivor := uuid.Nil
+		switch {
+		case github.HeadSHA == head.SHA:
+			survivor = run.ID
+		default:
+			for _, c := range candidates {
+				if c.HeadSHA == head.SHA {
+					survivor = c.RunID
+					break
+				}
 			}
+			if survivor == uuid.Nil && adopted {
+				survivor = run.ID
+			}
+		}
+		var supersededBy *uuid.UUID
+		if survivor != uuid.Nil {
+			supersededBy = &survivor
 		}
 		for _, c := range candidates {
 			switch {
@@ -757,7 +835,7 @@ func (d *TargetDispatcher) resolveHead(ctx context.Context, tx pgx.Tx, orgID uui
 					}
 				}
 			default:
-				if _, err := d.runs.TerminalizeUnstarted(ctx, tx, orgID, c.RunID, models.AutomationRunOutcomeSuperseded, &survivor, "superseded by the pull request's current head"); err != nil {
+				if _, err := d.runs.TerminalizeUnstarted(ctx, tx, orgID, c.RunID, models.AutomationRunOutcomeSuperseded, supersededBy, "superseded by the pull request's current head"); err != nil {
 					return out, err
 				}
 			}
@@ -768,7 +846,7 @@ func (d *TargetDispatcher) resolveHead(ctx context.Context, tx pgx.Tx, orgID uui
 		target.HeadResolutionPending = false
 		if survivor != run.ID {
 			out.terminal = models.AutomationRunOutcomeSuperseded
-			out.supersededBy = &survivor
+			out.supersededBy = supersededBy
 			out.note = "superseded by the pull request's current head"
 			return out, nil
 		}
