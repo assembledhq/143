@@ -1027,10 +1027,14 @@ const listByAutomationFromClause = `FROM automation_runs ar
 		  AND sessions.deleted_at IS NULL
 		  AND sessions.id = COALESCE(
 			ar.session_id,
-			(SELECT sal.session_id
+			(SELECT linked.id
 			   FROM session_automation_links sal
+			   JOIN sessions linked
+				 ON linked.org_id = sal.org_id
+				AND linked.id = sal.session_id
+				AND linked.deleted_at IS NULL
 			  WHERE sal.automation_run_id = ar.id AND sal.org_id = ar.org_id
-			  ORDER BY sal.created_at DESC
+			  ORDER BY linked.created_at DESC
 			  LIMIT 1))
 		LIMIT 1
 	) s ON true

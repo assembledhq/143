@@ -3162,9 +3162,16 @@ func TestAutomationHandler_Update_DisablingContinuityRetiresGenerations(t *testi
 	mock.ExpectExec("UPDATE automations SET").
 		WithArgs(testAnyArgs(32)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectQuery("SELECT g.id\\s+FROM automation_target_sessions g").
+	activeGeneration := generation
+	activeGeneration.Status = models.AutomationTargetSessionStatusActive
+	activeGeneration.RetiredReason = nil
+	activeGeneration.RetiredAt = nil
+	mock.ExpectQuery("SELECT id\\s+FROM automation_targets\\s+WHERE org_id = @org_id AND automation_id = @automation_id AND active_generation > 0\\s+ORDER BY id\\s+FOR UPDATE").
 		WithArgs(testAnyArgs(2)...).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(generation.ID))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(generation.TargetID))
+	mock.ExpectQuery("SELECT .+ FROM automation_target_sessions .+ status = 'active'").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(db.AutomationTargetSessionColumnNames).AddRow(db.AutomationTargetSessionRow(activeGeneration)...))
 	mock.ExpectQuery("SELECT t.id\\s+FROM automation_targets t").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(generation.TargetID))

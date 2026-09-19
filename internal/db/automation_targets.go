@@ -355,30 +355,40 @@ func (s *AutomationTargetStore) RetireGeneration(ctx context.Context, tx pgx.Tx,
 // the automation's targets with reason, applying RetireGeneration's
 // ownership-release rules to each. Used when continuity is switched back to
 // per_run. Returns the retired rows.
+//
+// The target rows are locked first, in a stable order, and each target's
+// active generation is read only after its lock is held. Reading the
+// generations before locking would let a concurrent ownership transaction
+// retire one and insert its replacement in between, leaving the replacement
+// active after the switch.
 func (s *AutomationTargetStore) RetireActiveGenerationsForAutomation(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID, reason models.AutomationTargetRetiredReason) ([]models.AutomationTargetSession, error) {
 	if err := reason.Validate(); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `
-		SELECT g.id
-		FROM automation_target_sessions g
-		JOIN automation_targets t ON t.id = g.target_id AND t.org_id = g.org_id
-		WHERE g.org_id = @org_id AND t.automation_id = @automation_id AND g.status = 'active'
-		ORDER BY g.created_at, g.id`,
+		SELECT id
+		FROM automation_targets
+		WHERE org_id = @org_id AND automation_id = @automation_id AND active_generation > 0
+		ORDER BY id
+		FOR UPDATE`,
 		pgx.NamedArgs{"org_id": orgID, "automation_id": automationID})
 	if err != nil {
-		return nil, fmt.Errorf("list active automation target generations: %w", err)
+		return nil, fmt.Errorf("lock automation targets: %w", err)
 	}
-	generationIDs, err := collectIDs(rows)
+	targetIDs, err := collectIDs(rows)
 	if err != nil {
-		return nil, fmt.Errorf("scan active automation target generations: %w", err)
+		return nil, fmt.Errorf("scan automation targets: %w", err)
 	}
-	retired := make([]models.AutomationTargetSession, 0, len(generationIDs))
-	for _, id := range generationIDs {
-		generation, err := s.RetireGeneration(ctx, tx, orgID, id, reason)
-		if errors.Is(err, ErrAutomationTargetGenerationNotActive) {
+	retired := make([]models.AutomationTargetSession, 0, len(targetIDs))
+	for _, targetID := range targetIDs {
+		active, err := s.GetActiveGeneration(ctx, tx, orgID, targetID)
+		if errors.Is(err, ErrAutomationTargetGenerationNotFound) {
 			continue
 		}
+		if err != nil {
+			return nil, err
+		}
+		generation, err := s.RetireGeneration(ctx, tx, orgID, active.ID, reason)
 		if err != nil {
 			return nil, err
 		}
@@ -432,9 +442,12 @@ func (s *AutomationTargetStore) RequestWake(ctx context.Context, q DBTX, orgID, 
 	return requestedAt, nil
 }
 
-// ClearWake clears the wake outbox marker only when it is not newer than
-// requestedAt, so a wake that raced with a fresh request leaves the fresh
-// request in place. Returns whether the marker was cleared.
+// ClearWake clears the wake outbox marker only when it still equals the
+// value the caller observed (requestedAt), so a request written after the
+// observation survives. Equality rather than ordering is required because
+// now() is transaction-start time: a transaction that started earlier can
+// write a later request carrying an older timestamp. Returns whether the
+// marker was cleared.
 func (s *AutomationTargetStore) ClearWake(ctx context.Context, q DBTX, orgID, targetID uuid.UUID, requestedAt time.Time) (bool, error) {
 	if q == nil {
 		q = s.db
@@ -443,7 +456,7 @@ func (s *AutomationTargetStore) ClearWake(ctx context.Context, q DBTX, orgID, ta
 		UPDATE automation_targets
 		SET wake_requested_at = NULL, updated_at = now()
 		WHERE id = @id AND org_id = @org_id
-		  AND wake_requested_at IS NOT NULL AND wake_requested_at <= @requested_at`,
+		  AND wake_requested_at = @requested_at`,
 		pgx.NamedArgs{"id": targetID, "org_id": orgID, "requested_at": requestedAt})
 	if err != nil {
 		return false, fmt.Errorf("clear automation target wake: %w", err)

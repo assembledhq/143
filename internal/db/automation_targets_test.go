@@ -388,12 +388,21 @@ func TestAutomationTargetStore_RetireActiveGenerationsForAutomation(t *testing.T
 		g.RetiredAt = &retiredAt
 	}
 	second.OwnershipReleasePending = true
+	activeFirst := newTestAutomationTargetSession(orgID, first.TargetID, first.Generation)
+	activeFirst.ID = first.ID
+	activeSecond := newTestAutomationTargetSession(orgID, second.TargetID, second.Generation)
+	activeSecond.ID = second.ID
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT g.id\\s+FROM automation_target_sessions g").
+	// Targets are locked first, in id order, and each active generation is
+	// read only after its lock is held.
+	mock.ExpectQuery("SELECT id\\s+FROM automation_targets\\s+WHERE org_id = @org_id AND automation_id = @automation_id AND active_generation > 0\\s+ORDER BY id\\s+FOR UPDATE").
 		WithArgs(anyArgs(2)...).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(first.ID).AddRow(second.ID))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(first.TargetID).AddRow(second.TargetID))
 	// first: idle, releases immediately.
+	mock.ExpectQuery("SELECT .+ FROM automation_target_sessions .+ status = 'active'").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(AutomationTargetSessionColumnNames).AddRow(AutomationTargetSessionRow(activeFirst)...))
 	mock.ExpectQuery("SELECT t.id\\s+FROM automation_targets t").
 		WithArgs(anyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(first.TargetID))
@@ -407,6 +416,9 @@ func TestAutomationTargetStore_RetireActiveGenerationsForAutomation(t *testing.T
 		WithArgs(anyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"wake_requested_at"}).AddRow(time.Now()))
 	// second: executing, release deferred.
+	mock.ExpectQuery("SELECT .+ FROM automation_target_sessions .+ status = 'active'").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(AutomationTargetSessionColumnNames).AddRow(AutomationTargetSessionRow(activeSecond)...))
 	mock.ExpectQuery("SELECT t.id\\s+FROM automation_targets t").
 		WithArgs(anyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(second.TargetID))
@@ -422,7 +434,31 @@ func TestAutomationTargetStore_RetireActiveGenerationsForAutomation(t *testing.T
 	store := NewAutomationTargetStore(mock)
 	retired, err := store.RetireActiveGenerationsForAutomation(context.Background(), tx, orgID, automationID, reason)
 	require.NoError(t, err, "retiring every active generation should succeed")
-	require.Equal(t, []models.AutomationTargetSession{first, second}, retired, "every active generation should be retired in creation order")
+	require.Equal(t, []models.AutomationTargetSession{first, second}, retired, "every active generation should be retired in target order")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestAutomationTargetStore_RetireActiveGenerationsForAutomation_SkipsTargetsWithoutActiveGeneration(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id\\s+FROM automation_targets\\s+WHERE org_id = @org_id AND automation_id = @automation_id AND active_generation > 0\\s+ORDER BY id\\s+FOR UPDATE").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectQuery("SELECT .+ FROM automation_target_sessions .+ status = 'active'").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(AutomationTargetSessionColumnNames))
+	tx, err := mock.Begin(context.Background())
+	require.NoError(t, err, "mock transaction should begin")
+
+	store := NewAutomationTargetStore(mock)
+	retired, err := store.RetireActiveGenerationsForAutomation(context.Background(), tx, orgID, uuid.New(), models.AutomationTargetRetiredContinuityDisabled)
+	require.NoError(t, err, "a target whose generation was retired concurrently is skipped")
+	require.Empty(t, retired, "nothing is retired when no generation is active")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
