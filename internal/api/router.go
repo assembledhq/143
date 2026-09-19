@@ -754,6 +754,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	automationHandler.SetOrgStore(orgStore)
 	automationHandler.SetCodingCredentialStore(codingCredentialStore)
 	automationHandler.SetPool(pool)
+	automationHandler.SetAutomationTargetStore(db.NewAutomationTargetStore(pool))
 	automationHandler.SetCapabilityDependencies(agentCapabilityPolicyStore, agentCapabilitySvc)
 	automationGoalImprovementService := automations.NewGoalImprovementService(automationGoalImprovementStore, automationStore, automationRunStore, sessionStore, jobStore, pool, llmClient)
 	automationGoalImprovementService.SetAuditEmitter(auditEmitter)

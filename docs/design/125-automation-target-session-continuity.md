@@ -1,10 +1,10 @@
 # Design: Automation Target Session Continuity
 
-> **Status:** Not Started | **Last reviewed:** 2026-09-19
+> **Status:** Partially Implemented | **Last reviewed:** 2026-09-19
 
-> **Depends on:** [overall.md](../overall.md), [48-automations-separation.md](../implemented/48-automations-separation.md), [119-github-automation-trigger-context.md](../implemented/119-github-automation-trigger-context.md), [76-pr-repair-session-continuity.md](../implemented/76-pr-repair-session-continuity.md), [82-durable-session-executors.md](../implemented/82-durable-session-executors.md), [88-shared-sandbox-thread-runtimes.md](../implemented/88-shared-sandbox-thread-runtimes.md), [54-s3-session-snapshots.md](../implemented/54-s3-session-snapshots.md), [102-agent-run-capabilities.md](../implemented/102-agent-run-capabilities.md)
+> **Depends on:** [overall.md](overall.md), [48-automations-separation.md](implemented/48-automations-separation.md), [119-github-automation-trigger-context.md](implemented/119-github-automation-trigger-context.md), [76-pr-repair-session-continuity.md](implemented/76-pr-repair-session-continuity.md), [82-durable-session-executors.md](implemented/82-durable-session-executors.md), [88-shared-sandbox-thread-runtimes.md](implemented/88-shared-sandbox-thread-runtimes.md), [54-s3-session-snapshots.md](implemented/54-s3-session-snapshots.md), [102-agent-run-capabilities.md](implemented/102-agent-run-capabilities.md)
 >
-> **Related:** [code-review-scheduling-and-reuse.md](../code-review-scheduling-and-reuse.md) (result reuse for the built-in reviewer, not session reuse), [116-automatic-pr-feedback-follow-through.md](116-automatic-pr-feedback-follow-through.md) (canonical-session continuation for 143-generated PRs)
+> **Related:** [code-review-scheduling-and-reuse.md](code-review-scheduling-and-reuse.md) (result reuse for the built-in reviewer, not session reuse), [116-automatic-pr-feedback-follow-through.md](future/116-automatic-pr-feedback-follow-through.md) (canonical-session continuation for 143-generated PRs)
 
 ## Summary
 
@@ -181,7 +181,7 @@ This section defines the atomic unit that turns a pending run into an executing 
 
 One database transaction, lock order fixed:
 
-1. Upsert and `SELECT ... FOR UPDATE` the `automation_targets` row.
+1. Take the automation-scoped transaction advisory lock (`pg_advisory_xact_lock` keyed by org and automation), then upsert and `SELECT ... FOR UPDATE` the `automation_targets` row. The advisory lock exists because a target row inserted by an uncommitted transaction is invisible to row scans: the continuity switch to `per_run` takes the same lock before locking every target of the automation, so it either waits for an in-flight target creation to commit or finishes before that creation reads the automation row. Lock order is always advisory lock, then target rows.
 2. Read the active generation, if any, and evaluate Compatibility. For push runs, resolve the current head (see Head Authority).
 3. If another run is executing for the target (`automation_runs.dispatch_state = executing` for this `target_id`, enforced by a partial unique index), record the run as waiting (`dispatch_state = waiting`, `wait_reason = target_busy`, `wait_started_at = now`) and commit. Push runs supersede older waiting push runs here.
 4. Create the session if the action is fresh. Claim the session and its primary thread with a new store method `ClaimForAutomationTurn(ctx, orgID, sessionID, threadID, allowDestroyed)`. It accepts `idle` plus `ResumableSessionStatuses`, applies the same runtime reset assignments as `ClaimForResume`, permits `sandbox_state = destroyed` only when the action is reconstruct, and claims the primary thread through the thread store's resume or fresh claim as appropriate. Existing `ClaimForResume` is not reused because it excludes `idle` and rejects destroyed sandboxes. On an owned session this claim cannot contend with a human turn.

@@ -93,6 +93,7 @@ import type {
   Automation,
   AutomationGitHubEventFilters,
   AutomationRun,
+  AutomationSessionContinuity,
   ListResponse,
   Repository,
 } from "@/lib/types";
@@ -272,6 +273,93 @@ function StaticPropertyRow({ label, value }: { label: string; value: string }) {
         {value}
       </span>
     </div>
+  );
+}
+
+// sessionContinuityAllowsPerTarget mirrors the API rule
+// (INVALID_SESSION_CONTINUITY): continuing one session per pull request needs
+// a pull request trigger and a "do not publish" policy, because the session
+// is a review conversation that never opens pull requests.
+function sessionContinuityAllowsPerTarget(automation: Automation): boolean {
+  return (
+    (automation.github_event_triggers?.length ?? 0) > 0 &&
+    automation.publish_policy === "none"
+  );
+}
+
+const sessionContinuityLabels: Record<AutomationSessionContinuity, string> = {
+  per_run: "New session per run",
+  per_target: "Continue one session per pull request",
+};
+
+function SessionContinuityProperty({
+  automation,
+  canManage,
+  uid,
+  onChange,
+}: {
+  automation: Automation;
+  canManage: boolean;
+  uid: string;
+  onChange: (value: AutomationSessionContinuity) => void;
+}) {
+  const value = automation.session_continuity ?? "per_run";
+  const perTargetAllowed = sessionContinuityAllowsPerTarget(automation);
+  const hint =
+    value === "per_target"
+      ? "People cannot message these sessions while a pull request conversation is active, and the agent runs without external-write tools."
+      : perTargetAllowed
+        ? null
+        : "Continuing one session per pull request needs a pull request trigger and “Do not publish”.";
+
+  return (
+    <>
+      {canManage ? (
+        <PropertyRow
+          label="Conversation"
+          htmlFor={`automation-session-continuity-${uid}`}
+        >
+          <Select
+            value={value}
+            onValueChange={(next) => {
+              if (next !== "per_run" && next !== "per_target") return;
+              if (next === value) return;
+              onChange(next);
+            }}
+          >
+            <SelectTrigger
+              id={`automation-session-continuity-${uid}`}
+              aria-label="Session continuity"
+              density="dense"
+              className={inlineControlClass}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="per_run">
+                {sessionContinuityLabels.per_run}
+              </SelectItem>
+              <SelectItem value="per_target" disabled={!perTargetAllowed}>
+                {sessionContinuityLabels.per_target}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </PropertyRow>
+      ) : (
+        <StaticPropertyRow
+          label="Conversation"
+          value={sessionContinuityLabels[value]}
+        />
+      )}
+      {hint ? (
+        <p
+          data-testid="automation-session-continuity-hint"
+          className="ml-[7rem] px-1.5 text-xs text-muted-foreground"
+        >
+          {hint}
+        </p>
+      ) : null}
+    </>
   );
 }
 
@@ -1699,6 +1787,18 @@ function AutomationDetailRail({
               }
             />
           )}
+
+          <SessionContinuityProperty
+            automation={automation}
+            canManage={canManage}
+            uid={uid}
+            onChange={(session_continuity) =>
+              save({
+                body: { session_continuity },
+                optimistic: { session_continuity },
+              })
+            }
+          />
 
           <StaticPropertyRow
             label="Priority"

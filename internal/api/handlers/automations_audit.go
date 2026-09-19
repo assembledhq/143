@@ -23,6 +23,9 @@ func automationAuditSnapshot(a *models.Automation) map[string]any {
 		"publish_policy": a.PublishPolicy.OrDefault(),
 		"schedule_type":  a.ScheduleType,
 	}
+	if a.SessionContinuity.OrDefault() != models.AutomationSessionContinuityPerRun {
+		snap["session_continuity"] = a.SessionContinuity.OrDefault()
+	}
 	if len(a.GitHubEventTriggers) > 0 {
 		snap["triggers"] = automationProductTriggerSummary(a.GitHubEventTriggers)
 		snap["github_event_triggers"] = automationGitHubEventStrings(a.GitHubEventTriggers)
@@ -81,6 +84,7 @@ func automationAuditDiff(old, new_ *models.Automation) map[string]any {
 	track("base_branch", old.BaseBranch, new_.BaseBranch)
 	track("identity_scope", old.IdentityScope.OrDefault(), new_.IdentityScope.OrDefault())
 	track("publish_policy", old.PublishPolicy.OrDefault(), new_.PublishPolicy.OrDefault())
+	track("session_continuity", old.SessionContinuity.OrDefault(), new_.SessionContinuity.OrDefault())
 	track("schedule_type", old.ScheduleType, new_.ScheduleType)
 	track("interval_value", optInt(old.IntervalValue), optInt(new_.IntervalValue))
 	track("interval_unit", optScheduleUnit(old.IntervalUnit), optScheduleUnit(new_.IntervalUnit))

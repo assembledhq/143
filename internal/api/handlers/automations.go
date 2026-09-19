@@ -52,6 +52,7 @@ type AutomationHandler struct {
 	capabilityService     *agentcapabilities.Service
 	goalImprovement       *automationservice.GoalImprovementService
 	eventTriggerStore     automationEventTriggerStore
+	targetStore           *db.AutomationTargetStore
 	canceller             SessionCanceller
 	audit                 *db.AuditEmitter
 	pool                  db.TxStarter // needed for transactional RunNow
@@ -128,6 +129,24 @@ func (h *AutomationHandler) SetCodingCredentialStore(store automationCodingCrede
 // and enqueue the job atomically.
 func (h *AutomationHandler) SetPool(pool db.TxStarter) {
 	h.pool = pool
+}
+
+// SetAutomationTargetStore wires the per-target continuity store so that
+// switching session_continuity back to per_run retires every active
+// generation in the same transaction as the automation update.
+func (h *AutomationHandler) SetAutomationTargetStore(store *db.AutomationTargetStore) {
+	h.targetStore = store
+}
+
+// writeAutomationSessionContinuityError renders the continuity cross-field
+// rejection with details.field naming the offending request field.
+func writeAutomationSessionContinuityError(w http.ResponseWriter, r *http.Request, err error) {
+	var continuityErr *models.AutomationSessionContinuityError
+	if errors.As(err, &continuityErr) {
+		writeErrorWithDetails(w, r, http.StatusBadRequest, "INVALID_SESSION_CONTINUITY", continuityErr.Message, map[string]any{"field": continuityErr.Field})
+		return
+	}
+	writeError(w, r, http.StatusBadRequest, "INVALID_SESSION_CONTINUITY", err.Error())
 }
 
 // SetLogger wires a logger used for non-fatal diagnostics that should reach
@@ -356,6 +375,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		BaseBranch          *string                                   `json:"base_branch"`
 		IdentityScope       *models.AutomationIdentityScope           `json:"identity_scope"`
 		PublishPolicy       *models.AutomationPublishPolicy           `json:"publish_policy"`
+		SessionContinuity   *models.AutomationSessionContinuity       `json:"session_continuity"`
 		ScheduleType        *models.AutomationScheduleType            `json:"schedule_type"`
 		IntervalValue       *int                                      `json:"interval_value"`
 		IntervalUnit        *models.ScheduleUnit                      `json:"interval_unit"`
@@ -570,6 +590,14 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "MISSING_TRIGGER", "event-only automations require at least one event trigger")
 		return
 	}
+	sessionContinuity := models.AutomationSessionContinuityPerRun
+	if req.SessionContinuity != nil {
+		sessionContinuity = *req.SessionContinuity
+	}
+	if err := models.ValidateAutomationSessionContinuity(sessionContinuity, githubEventTriggers, publishPolicy); err != nil {
+		writeAutomationSessionContinuityError(w, r, err)
+		return
+	}
 
 	automation := models.Automation{
 		OrgID:               orgID,
@@ -587,6 +615,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		BaseBranch:          baseBranch,
 		IdentityScope:       identityScope,
 		PublishPolicy:       publishPolicy,
+		SessionContinuity:   sessionContinuity.OrDefault(),
 		PrePRReviewLoops:    prePRReviewLoops,
 		ScheduleType:        scheduleType,
 		IntervalValue:       intervalValuePtr,
@@ -1406,6 +1435,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		BaseBranch          *string                                   `json:"base_branch"`
 		IdentityScope       *models.AutomationIdentityScope           `json:"identity_scope"`
 		PublishPolicy       *models.AutomationPublishPolicy           `json:"publish_policy"`
+		SessionContinuity   *models.AutomationSessionContinuity       `json:"session_continuity"`
 		ScheduleType        *models.AutomationScheduleType            `json:"schedule_type"`
 		IntervalValue       *int                                      `json:"interval_value"`
 		IntervalUnit        *models.ScheduleUnit                      `json:"interval_unit"`
@@ -1614,6 +1644,18 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		automation.GitHubEventFilters = githubEventFilters
 	}
+	if req.SessionContinuity != nil {
+		automation.SessionContinuity = *req.SessionContinuity
+	}
+	// The continuity rules span three fields, so re-run them whenever any of
+	// the three changes; an unrelated PATCH leaves a historical row alone.
+	if req.SessionContinuity != nil || req.PublishPolicy != nil || req.ProductTriggers != nil || req.GitHubEventTriggers != nil {
+		if err := models.ValidateAutomationSessionContinuity(automation.SessionContinuity, automation.GitHubEventTriggers, automation.PublishPolicy); err != nil {
+			writeAutomationSessionContinuityError(w, r, err)
+			return
+		}
+	}
+	automation.SessionContinuity = automation.SessionContinuity.OrDefault()
 	var eventTriggers []models.AutomationEventTrigger
 	if req.EventTriggers != nil {
 		var err error
@@ -1796,7 +1838,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.automationStore.Update(r.Context(), &automation); err != nil {
+	if err := h.persistAutomationUpdate(r.Context(), &before, &automation); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update automation", err)
 		return
 	}
@@ -1836,6 +1878,32 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			marshalAuditDetails(h.logger, details))
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Automation]{Data: automation})
+}
+
+// persistAutomationUpdate writes the updated row. When session_continuity
+// switches from per_target back to per_run, every active generation of the
+// automation is retired with continuity_disabled in the same transaction
+// (design doc 125, "Lifecycle Transitions"), so no session stays
+// automation-owned after the switch. Without a pool or target store the
+// plain update runs, which is the shape unit tests construct.
+func (h *AutomationHandler) persistAutomationUpdate(ctx context.Context, before, after *models.Automation) error {
+	disablingContinuity := before.SessionContinuity.OrDefault() == models.AutomationSessionContinuityPerTarget &&
+		after.SessionContinuity.OrDefault() == models.AutomationSessionContinuityPerRun
+	if !disablingContinuity || h.pool == nil || h.targetStore == nil {
+		return h.automationStore.Update(ctx, after)
+	}
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin automation update: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
+	if err := h.automationStore.UpdateInTx(ctx, tx, after); err != nil {
+		return err
+	}
+	if _, err := h.targetStore.RetireActiveGenerationsForAutomation(ctx, tx, after.OrgID, after.ID, models.AutomationTargetRetiredContinuityDisabled); err != nil {
+		return fmt.Errorf("retire automation target generations: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 func (h *AutomationHandler) Delete(w http.ResponseWriter, r *http.Request) {

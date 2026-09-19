@@ -28,7 +28,8 @@ const automationColumns = `id, org_id, repository_id, name, goal, scope,
 	identity_scope, publish_policy, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 	github_event_triggers, github_event_filters,
 	next_run_at, last_run_at, enabled, created_by, paused_by, paused_at,
-	priority, external_metadata, created_at, updated_at, deleted_at`
+	priority, external_metadata, created_at, updated_at, deleted_at,
+	session_continuity`
 
 // maxDueAutomationsPerTick caps how many due automations the scheduler claims
 // in one tick. Combined with the 10-minute tick cadence, this gives a global
@@ -49,6 +50,7 @@ func scanAutomation(row pgx.Row) (models.Automation, error) {
 		&githubEventTriggers, &a.GitHubEventFilters,
 		&a.NextRunAt, &a.LastRunAt, &a.Enabled, &a.CreatedBy, &a.PausedBy, &a.PausedAt,
 		&a.Priority, &a.ExternalMetadata, &a.CreatedAt, &a.UpdatedAt, &a.DeletedAt,
+		&a.SessionContinuity,
 	)
 	if err == nil {
 		a.GitHubEventTriggers = automationGitHubEventsFromStrings(githubEventTriggers)
@@ -96,14 +98,14 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 			org_id, repository_id, name, goal, scope,
 			icon_type, icon_value,
 			agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
-			identity_scope, publish_policy, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
+			identity_scope, publish_policy, session_continuity, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 			github_event_triggers, github_event_filters,
 			next_run_at, enabled, created_by, priority, external_metadata
 		) VALUES (
 			@org_id, @repository_id, @name, @goal, @scope,
 			@icon_type, @icon_value,
 			@agent_type, @model_override, @reasoning_effort, @execution_mode, @max_concurrent, @base_branch,
-			@identity_scope, @publish_policy, @pre_pr_review_loops, @schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
+			@identity_scope, @publish_policy, @session_continuity, @pre_pr_review_loops, @schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
 			@github_event_triggers, @github_event_filters,
 			@next_run_at, @enabled, @created_by, @priority, @external_metadata
 		) RETURNING id, created_at, updated_at`
@@ -132,6 +134,7 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 		"base_branch":           a.BaseBranch,
 		"identity_scope":        a.IdentityScope.OrDefault(),
 		"publish_policy":        a.PublishPolicy.OrDefault(),
+		"session_continuity":    a.SessionContinuity.OrDefault(),
 		"pre_pr_review_loops":   a.PrePRReviewLoops,
 		"schedule_type":         a.ScheduleType,
 		"interval_value":        a.IntervalValue,
@@ -251,6 +254,17 @@ func (s *AutomationStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filter
 }
 
 func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) error {
+	return updateAutomation(ctx, s.db, a)
+}
+
+// UpdateInTx is Update inside an existing transaction, for callers that must
+// pair the row update with dependent writes (retiring per-target generations
+// when session_continuity switches back to per_run).
+func (s *AutomationStore) UpdateInTx(ctx context.Context, tx pgx.Tx, a *models.Automation) error {
+	return updateAutomation(ctx, tx, a)
+}
+
+func updateAutomation(ctx context.Context, q DBTX, a *models.Automation) error {
 	query := `
 		UPDATE automations SET
 			name = @name, goal = @goal, scope = @scope, repository_id = @repository_id,
@@ -259,6 +273,7 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 			execution_mode = @execution_mode, max_concurrent = @max_concurrent,
 			base_branch = @base_branch, identity_scope = @identity_scope,
 			publish_policy = @publish_policy,
+			session_continuity = @session_continuity,
 			pre_pr_review_loops = @pre_pr_review_loops,
 			schedule_type = @schedule_type, interval_value = @interval_value,
 			interval_unit = @interval_unit, interval_run_at = @interval_run_at, cron_expression = @cron_expression,
@@ -276,7 +291,7 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 		githubEventFilters = json.RawMessage(`{}`)
 	}
 
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	_, err := q.Exec(ctx, query, pgx.NamedArgs{
 		"id":                    a.ID,
 		"org_id":                a.OrgID,
 		"name":                  a.Name,
@@ -293,6 +308,7 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 		"base_branch":           a.BaseBranch,
 		"identity_scope":        a.IdentityScope.OrDefault(),
 		"publish_policy":        a.PublishPolicy.OrDefault(),
+		"session_continuity":    a.SessionContinuity.OrDefault(),
 		"pre_pr_review_loops":   a.PrePRReviewLoops,
 		"schedule_type":         a.ScheduleType,
 		"interval_value":        a.IntervalValue,
@@ -647,20 +663,67 @@ func NewAutomationRunStore(db TxStarter) *AutomationRunStore {
 	return &AutomationRunStore{db: db}
 }
 
+// automationRunContinuityColumns are the per-target continuity columns
+// (design doc 125) appended to every run projection. The order must match
+// AutomationRunContinuityColumnNames and automationRunContinuityDests.
+const automationRunContinuityColumns = `target_id, target_generation, session_id, thread_id, turn_number,
+	github_action, pull_request_updated_at, head_epoch, head_resolution,
+	continuation_mode, continuation_reason, native_context, previous_head_sha, base_sha,
+	dispatch_state, wait_reason, wait_started_at, execution_started_at, job_id,
+	attempt, attempt_lock_token, attempt_started_at, superseded_by_run_id, outcome_reason,
+	head_lookup_degraded, worker_node_id, restore_snapshot_bytes, restore_duration_ms, turn_duration_ms`
+
+// AutomationRunContinuityColumnNames is the column-name form of
+// automationRunContinuityColumns, exported so tests in other packages can
+// build pgxmock rows for run projections without redefining the list. In the
+// list projection the run's own session_id is aliased run_session_id because
+// the joined session already produces a session_id column.
+var AutomationRunContinuityColumnNames = []string{
+	"target_id", "target_generation", "run_session_id", "thread_id", "turn_number",
+	"github_action", "pull_request_updated_at", "head_epoch", "head_resolution",
+	"continuation_mode", "continuation_reason", "native_context", "previous_head_sha", "base_sha",
+	"dispatch_state", "wait_reason", "wait_started_at", "execution_started_at", "job_id",
+	"attempt", "attempt_lock_token", "attempt_started_at", "superseded_by_run_id", "outcome_reason",
+	"head_lookup_degraded", "worker_node_id", "restore_snapshot_bytes", "restore_duration_ms", "turn_duration_ms",
+}
+
+// automationRunContinuityListColumns is automationRunContinuityColumns
+// qualified for the ListByAutomation projection.
+const automationRunContinuityListColumns = `ar.target_id, ar.target_generation, ar.session_id AS run_session_id, ar.thread_id, ar.turn_number,
+	ar.github_action, ar.pull_request_updated_at, ar.head_epoch, ar.head_resolution,
+	ar.continuation_mode, ar.continuation_reason, ar.native_context, ar.previous_head_sha, ar.base_sha,
+	ar.dispatch_state, ar.wait_reason, ar.wait_started_at, ar.execution_started_at, ar.job_id,
+	ar.attempt, ar.attempt_lock_token, ar.attempt_started_at, ar.superseded_by_run_id, ar.outcome_reason,
+	ar.head_lookup_degraded, ar.worker_node_id, ar.restore_snapshot_bytes, ar.restore_duration_ms, ar.turn_duration_ms`
+
+func automationRunContinuityDests(r *models.AutomationRun) []any {
+	return []any{
+		&r.TargetID, &r.TargetGeneration, &r.SessionID, &r.ThreadID, &r.TurnNumber,
+		&r.GitHubAction, &r.PullRequestUpdatedAt, &r.HeadEpoch, &r.HeadResolution,
+		&r.ContinuationMode, &r.ContinuationReason, &r.NativeContext, &r.PreviousHeadSHA, &r.BaseSHA,
+		&r.DispatchState, &r.WaitReason, &r.WaitStartedAt, &r.ExecutionStartedAt, &r.JobID,
+		&r.Attempt, &r.AttemptLockToken, &r.AttemptStartedAt, &r.SupersededByRunID, &r.OutcomeReason,
+		&r.HeadLookupDegraded, &r.WorkerNodeID, &r.RestoreSnapshotBytes, &r.RestoreDurationMS, &r.TurnDurationMS,
+	}
+}
+
 const automationRunColumns = `id, automation_id, org_id, triggered_at, triggered_by,
 	triggered_by_user_id, scheduled_time, trigger_id, provider, provider_event_id, trigger_context,
 	goal_snapshot, config_snapshot,
-	status, capability_snapshot, completed_at, result_summary, created_at, updated_at`
+	status, capability_snapshot, completed_at, result_summary, created_at, updated_at,
+	` + automationRunContinuityColumns
 
 func scanAutomationRun(row pgx.Row) (models.AutomationRun, error) {
 	var r models.AutomationRun
 	var provider *string
-	err := row.Scan(
+	dests := []any{
 		&r.ID, &r.AutomationID, &r.OrgID, &r.TriggeredAt, &r.TriggeredBy,
 		&r.TriggeredByUserID, &r.ScheduledTime, &r.TriggerID, &provider, &r.ProviderEventID, &r.TriggerContext,
 		&r.GoalSnapshot, &r.ConfigSnapshot,
 		&r.Status, &r.CapabilitySnapshot, &r.CompletedAt, &r.ResultSummary, &r.CreatedAt, &r.UpdatedAt,
-	)
+	}
+	dests = append(dests, automationRunContinuityDests(&r)...)
+	err := row.Scan(dests...)
 	if provider != nil {
 		p := models.AutomationEventProvider(*provider)
 		r.Provider = &p
@@ -886,6 +949,10 @@ var AutomationRunListColumns = []string{
 	"pr_number", "pr_url", "pr_status", "pr_ci_status",
 }
 
+func init() {
+	AutomationRunListColumns = append(AutomationRunListColumns, AutomationRunContinuityColumnNames...)
+}
+
 // listByAutomationSelectColumns is the SQL projection matching
 // AutomationRunListColumns. Lateral joins keep one row per run (preserving
 // keyset pagination on triggered_at, id) while avoiding an N+1 from the
@@ -930,11 +997,16 @@ const listByAutomationSelectColumns = `ar.id, ar.automation_id, ar.org_id, ar.tr
 	s.failure_retry_advised AS session_failure_retry_advised,
 	s.pr_creation_state AS session_pr_creation_state,
 	pr.github_pr_number AS pr_number, pr.github_pr_url AS pr_url,
-	pr.status AS pr_status, pr.ci_status AS pr_ci_status`
+	pr.status AS pr_status, pr.ci_status AS pr_ci_status,
+	` + automationRunContinuityListColumns
 
 // listByAutomationFromClause is the FROM + LATERAL JOINs used by
 // ListByAutomation. Pulled out as a const so the cursor variants can share
 // the same join shape and the query plan stays predictable.
+//
+// The executing session for a per-target run is automation_runs.session_id
+// (design doc 125); it is preferred when set. Historical per-run rows keep
+// reading through session_automation_links, the run that created the session.
 //
 // Multiplicity note: session_automation_links has no UNIQUE constraint on
 // automation_run_id (the design doc explicitly leaves room for multi-session
@@ -947,16 +1019,23 @@ const listByAutomationFromClause = `FROM automation_runs ar
 			sessions.failure_explanation, sessions.failure_category, sessions.failure_next_steps,
 			sessions.failure_retry_advised,
 			COALESCE(sps.pr_creation_state, 'idle') AS pr_creation_state
-		FROM session_automation_links sal
-		JOIN sessions
-		  ON sessions.org_id = sal.org_id
-		 AND sessions.id = sal.session_id
-		 AND sessions.deleted_at IS NULL
+		FROM sessions
 		LEFT JOIN session_publish_state sps
 		  ON sps.org_id = sessions.org_id
 		 AND sps.session_id = sessions.id
-		WHERE sal.automation_run_id = ar.id AND sal.org_id = ar.org_id
-		ORDER BY sessions.created_at DESC
+		WHERE sessions.org_id = ar.org_id
+		  AND sessions.deleted_at IS NULL
+		  AND sessions.id = COALESCE(
+			ar.session_id,
+			(SELECT linked.id
+			   FROM session_automation_links sal
+			   JOIN sessions linked
+				 ON linked.org_id = sal.org_id
+				AND linked.id = sal.session_id
+				AND linked.deleted_at IS NULL
+			  WHERE sal.automation_run_id = ar.id AND sal.org_id = ar.org_id
+			  ORDER BY linked.created_at DESC
+			  LIMIT 1))
 		LIMIT 1
 	) s ON true
 	LEFT JOIN LATERAL (
@@ -1057,7 +1136,7 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 		prCIStatus *models.PullRequestCIStatus
 	)
 
-	err := row.Scan(
+	dests := []any{
 		&r.ID, &r.AutomationID, &r.OrgID, &r.TriggeredAt, &r.TriggeredBy,
 		&r.TriggeredByUserID, &r.ScheduledTime, &r.TriggerID, &provider, &r.ProviderEventID, &r.TriggerContext, &r.GoalSnapshot,
 		&targetRepository, &targetPRNumber, &targetPRURL, &targetPRTitle, &targetHeadSHA,
@@ -1071,8 +1150,9 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 		&sessionFailureRetryAdvised,
 		&sessionPRCreationState,
 		&prNumber, &prURL, &prStatus, &prCIStatus,
-	)
-	if err != nil {
+	}
+	dests = append(dests, automationRunContinuityDests(&r)...)
+	if err := row.Scan(dests...); err != nil {
 		return r, err
 	}
 	if provider != nil {

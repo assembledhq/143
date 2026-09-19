@@ -3459,6 +3459,27 @@ export type AutomationRunStatus =
   | "skipped";
 export type AutomationIdentityScope = "org" | "personal";
 export type AutomationPublishPolicy = "pull_request" | "none";
+// per_target continues one automation-owned session per pull request across
+// runs; it requires a GitHub PR trigger and publish_policy "none". See design
+// doc 125.
+export type AutomationSessionContinuity = "per_run" | "per_target";
+export type AutomationRunContinuationMode = "fresh" | "continued" | "reconstructed";
+export type AutomationRunDispatchState = "waiting" | "executing" | "done";
+export type AutomationRunHeadResolution = "authoritative" | "ambiguous" | "unresolved";
+export type AutomationRunOutcomeReason =
+  | "turn_completed"
+  | "head_lookup_degraded"
+  | "agent_failed"
+  | "cancelled"
+  | "awaiting_input"
+  | "retries_exhausted"
+  | "stale_head"
+  | "duplicate_head"
+  | "superseded"
+  | "wait_timeout"
+  | "wait_overflow"
+  | "pr_closed"
+  | "repository_unavailable";
 export type AutomationGitHubEvent =
   | "github.pull_request.opened"
   | "github.pull_request.updated"
@@ -3590,6 +3611,7 @@ export interface Automation {
   base_branch: string;
   identity_scope: AutomationIdentityScope;
   publish_policy: AutomationPublishPolicy;
+  session_continuity?: AutomationSessionContinuity;
   pre_pr_review_loops: number;
   schedule_type: AutomationScheduleType;
   interval_value?: number;
@@ -3674,6 +3696,29 @@ export interface AutomationRun {
   session?: AutomationRunSession;
   trigger_target?: AutomationRunTriggerTarget;
   trigger_details?: AutomationRunTriggerDetails;
+  // Per-target continuity fields (design doc 125). Absent on per-run rows and
+  // on rows created before continuity existed.
+  session_id?: string;
+  thread_id?: string;
+  target_id?: string;
+  target_generation?: number;
+  turn_number?: number;
+  github_action?: string;
+  head_epoch?: number;
+  head_resolution?: AutomationRunHeadResolution;
+  head_lookup_degraded?: boolean;
+  continuation_mode?: AutomationRunContinuationMode;
+  continuation_reason?: string;
+  native_context?: boolean;
+  previous_head_sha?: string;
+  base_sha?: string;
+  dispatch_state?: AutomationRunDispatchState;
+  wait_reason?: "target_busy";
+  outcome_reason?: AutomationRunOutcomeReason;
+  superseded_by_run_id?: string;
+  attempt?: number;
+  restore_duration_ms?: number;
+  turn_duration_ms?: number;
 }
 
 export interface AutomationRunTriggerTarget {

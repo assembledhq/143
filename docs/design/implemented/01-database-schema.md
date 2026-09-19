@@ -322,6 +322,92 @@ Links sessions to automation runs without storing automation ownership on the co
 - `(org_id, session_id)` — tenant-scoped point lookup
 - `(org_id, automation_run_id, created_at DESC)` — sessions per automation run
 
+### Automation target session continuity (migration 000290)
+
+Per-target continuity lets an automation continue one automation-owned session per pull request across runs instead of starting a fresh session each time. See [125-automation-target-session-continuity.md](../125-automation-target-session-continuity.md). Everything is additive; `automations.session_continuity` defaults to `per_run`, so old workers keep their behaviour.
+
+Columns added to existing tables:
+
+| Table | Column | Notes |
+|-------|--------|-------|
+| automations | session_continuity | `per_run` (default) or `per_target`; `per_target` requires a GitHub PR trigger and `publish_policy = none` |
+| sessions | automation_owner_generation_id | uuid, no FK (avoids a cycle with `automation_target_sessions`); set while a generation is active. Partial index `(org_id, automation_owner_generation_id)` |
+| session_messages | automation_run_id | FK -> automation_runs, nullable; per-turn usage attribution. Partial index `(org_id, automation_run_id)` |
+| automation_runs | target_id, target_generation, session_id, thread_id, turn_number, github_action, pull_request_updated_at, head_epoch, head_resolution, continuation_mode, continuation_reason, native_context, previous_head_sha, base_sha, dispatch_state, wait_reason, wait_started_at, execution_started_at, job_id, attempt, attempt_lock_token, attempt_started_at, superseded_by_run_id, outcome_reason, head_lookup_degraded, worker_node_id, restore_snapshot_bytes, restore_duration_ms, turn_duration_ms | Run-local turn identity, dispatch state, attempt fencing, head authority, and timing. `chk_automation_runs_executing` requires `session_id`, `job_id`, and `execution_started_at` whenever `dispatch_state = 'executing'`. Partial unique index `(org_id, target_id) WHERE dispatch_state = 'executing'`; indexes `(org_id, session_id, triggered_at DESC)` and `(org_id, target_id, triggered_at) WHERE dispatch_state = 'waiting'` |
+
+#### `automation_targets`
+
+Identity, lifecycle, lock, and wake-outbox row for one (automation, repository, pull request). Exists whether or not a session exists yet.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| org_id | uuid | FK -> organizations |
+| automation_id | uuid | FK -> automations |
+| repository_id | uuid | FK -> repositories |
+| target_kind | text | `github_pull_request` |
+| target_key | text | PR number as text, 1 to 64 chars |
+| active_generation | integer | 0 means no session yet |
+| lifecycle_state | text | `open`, `closed`, `merged` |
+| lifecycle_updated_at | timestamptz | |
+| observed_head_sha | text | newest authoritative head |
+| observed_head_updated_at | timestamptz | GitHub `pull_request.updated_at` of that head |
+| head_epoch | integer | increments per authoritative head |
+| head_resolution_pending | boolean | ambiguous push ordering awaiting a GitHub lookup |
+| head_resolution_deadline_at | timestamptz | |
+| wake_requested_at | timestamptz | outbox marker for `automation_target_wake` |
+| created_at, updated_at | timestamptz | |
+
+Unique `(org_id, automation_id, repository_id, target_kind, target_key)`; partial index `(org_id, wake_requested_at)`.
+
+#### `automation_target_sessions`
+
+One row per generation of a target's session; at most one `active` row per target (partial unique index). Retired rows stay for history.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | PK |
+| org_id | uuid | FK -> organizations |
+| target_id | uuid | FK -> automation_targets |
+| generation | integer | >= 1, unique per target |
+| session_id | uuid | FK -> sessions |
+| status | text | `active`, `retired` |
+| retired_reason | text | `manual_reset`, `pr_closed`, `pr_merged`, `session_unavailable`, `not_resumable`, `agent_config_changed`, `identity_changed`, `base_retargeted`, `turn_limit`, `snapshot_too_large`, `unsupported_workspace`, `awaiting_input`, `continuity_disabled` |
+| retired_at | timestamptz | CHECK: set together with `retired_reason` iff `status = retired` |
+| turn_count | integer | |
+| ownership_release_pending | boolean | retired while a turn executed; the turn's completion clears the session marker |
+| last_attempted_head_sha, last_reviewed_head_sha | text | baseline advances only on a completed review |
+| last_reviewed_epoch | integer | |
+| checkpoint_snapshot_key, checkpoint_head_sha, checkpoint_dependency_fingerprint, checkpoint_review_complete | text / boolean | provenance of the session's current `snapshot_key` |
+| last_base_ref | text | |
+| last_run_id | uuid | FK -> automation_runs |
+| last_turn_at | timestamptz | |
+| created_at, updated_at | timestamptz | |
+
+Index `(org_id, session_id)`.
+
+#### `automation_run_results`
+
+Result marker written by the orchestrator at every attempt end, in the same transaction as the session status write, so completion can be recovered after a crash. One row per run.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| run_id | uuid | PK, FK -> automation_runs |
+| org_id | uuid | FK -> organizations |
+| attempt | integer | |
+| attempt_lock_token | uuid | job lease token that wrote the row |
+| thread_id | uuid | |
+| turn_number | integer | |
+| outcome | text | `turn_completed`, `agent_failed`, `cancelled`, `awaiting_input` |
+| review_complete | boolean | true only for `turn_completed` |
+| checkpoint_key | text | |
+| checkpoint_published | boolean | |
+| checkpoint_head_sha | text | |
+| native_context | boolean | |
+| dependency_fingerprint | text | |
+| agent_session_id | text | |
+| recorded_at | timestamptz | |
+
 ### `session_linear_context`
 
 Linear-specific session metadata. These fields are hydrated into session API responses, but they are stored outside the core `sessions` row because they are integration routing state, not core execution lifecycle.
