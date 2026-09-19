@@ -171,7 +171,7 @@ func TestGoalImprovementService_ApplySavedUsesLockedTransaction(t *testing.T) {
 			nil, nil, nil, nil, nil, now, now,
 		))
 	mock.ExpectExec(`UPDATE automations SET`).
-		WithArgs(anyGoalImprovementServiceArgs(31)...).
+		WithArgs(anyGoalImprovementServiceArgs(32)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec(`UPDATE automation_goal_improvements\s+SET applied_by = @applied_by, applied_at = now\(\), updated_at = now\(\)\s+WHERE id = @id AND org_id = @org_id`).
 		WithArgs(&userID, improvementID, orgID).
@@ -220,6 +220,7 @@ func automationColumnsForGoalImprovementServiceTest() []string {
 		"github_event_triggers", "github_event_filters",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
+		"session_continuity",
 	}
 }
 
@@ -241,6 +242,7 @@ func addAutomationRowForGoalImprovementServiceTest(rows *pgxmock.Rows, a models.
 		nil, githubEventFilters,
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
 		a.Priority, metadata, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
+		a.SessionContinuity,
 	)
 }
 
