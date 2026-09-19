@@ -132,6 +132,61 @@ func reserveExecutingRun(t *testing.T, pool *pgxpool.Pool, f automationTargetFix
 	return err
 }
 
+// bulkRetirementOutcome is what startBlockedContinuitySwitch reports once
+// RetireActiveGenerationsForAutomation commits or fails.
+type bulkRetirementOutcome struct {
+	retired []models.AutomationTargetSession
+	err     error
+}
+
+// startBlockedContinuitySwitch runs RetireActiveGenerationsForAutomation in
+// its own transaction on a goroutine and returns only once that exact
+// backend is waiting on a lock, so the caller knows the switch observed the
+// state before the caller's open transaction commits. The wait is keyed on
+// the goroutine's pg_backend_pid, not on query text, because parallel cases
+// in other schemas run the same statements.
+func startBlockedContinuitySwitch(t *testing.T, pool *pgxpool.Pool, store *AutomationTargetStore, f automationTargetFixture) <-chan bulkRetirementOutcome {
+	t.Helper()
+	ctx := context.Background()
+	pidCh := make(chan int, 1)
+	done := make(chan bulkRetirementOutcome, 1)
+	go func() {
+		bulk, err := pool.Begin(ctx)
+		if err != nil {
+			done <- bulkRetirementOutcome{err: err}
+			return
+		}
+		var pid int
+		if err := bulk.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+			_ = bulk.Rollback(ctx)
+			done <- bulkRetirementOutcome{err: err}
+			return
+		}
+		pidCh <- pid
+		retired, err := store.RetireActiveGenerationsForAutomation(ctx, bulk, f.orgID, f.automationID, models.AutomationTargetRetiredContinuityDisabled)
+		if err != nil {
+			_ = bulk.Rollback(ctx)
+			done <- bulkRetirementOutcome{err: err}
+			return
+		}
+		done <- bulkRetirementOutcome{retired: retired, err: bulk.Commit(ctx)}
+	}()
+	var pid int
+	select {
+	case pid = <-pidCh:
+	case outcome := <-done:
+		require.NoError(t, outcome.err, "the continuity switch failed before reporting its backend pid")
+		t.Fatal("the continuity switch finished before it could block")
+	}
+	require.Eventually(t, func() bool {
+		var waiting bool
+		err := pool.QueryRow(ctx, `
+			SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = $1`, pid).Scan(&waiting)
+		return err == nil && waiting
+	}, 10*time.Second, 20*time.Millisecond, "the continuity switch should block on a lock held by the open transaction")
+	return done
+}
+
 // TestAutomationTargetsPostgres proves migration 000290 and the target,
 // generation, and result-marker stores against a real PostgreSQL: the
 // same-org guard, one active generation per target, the executing CHECK and
@@ -384,32 +439,7 @@ func TestAutomationTargetsPostgres(t *testing.T) {
 			gen1, err := store.InsertGeneration(ctx, dispatch, f.orgID, target.ID, session)
 			require.NoError(t, err, "dispatch inserts the first generation")
 
-			type outcome struct {
-				retired []models.AutomationTargetSession
-				err     error
-			}
-			done := make(chan outcome, 1)
-			go func() {
-				bulk, err := pool.Begin(ctx)
-				if err != nil {
-					done <- outcome{err: err}
-					return
-				}
-				retired, err := store.RetireActiveGenerationsForAutomation(ctx, bulk, f.orgID, f.automationID, models.AutomationTargetRetiredContinuityDisabled)
-				if err != nil {
-					_ = bulk.Rollback(ctx)
-					done <- outcome{err: err}
-					return
-				}
-				done <- outcome{retired: retired, err: bulk.Commit(ctx)}
-			}()
-			require.Eventually(t, func() bool {
-				var waiting int
-				err := pool.QueryRow(ctx, `
-					SELECT count(*) FROM pg_stat_activity
-					WHERE wait_event_type = 'Lock' AND query ILIKE '%FROM automation_targets%'`).Scan(&waiting)
-				return err == nil && waiting > 0
-			}, 10*time.Second, 20*time.Millisecond, "the continuity switch should block on the target lock")
+			done := startBlockedContinuitySwitch(t, pool, store, f)
 			require.NoError(t, dispatch.Commit(ctx), "commit dispatch")
 
 			result := <-done
@@ -441,32 +471,7 @@ func TestAutomationTargetsPostgres(t *testing.T) {
 			_, err = store.LockByID(ctx, dispatch, f.orgID, target.ID)
 			require.NoError(t, err, "dispatch locks the target")
 
-			type outcome struct {
-				retired []models.AutomationTargetSession
-				err     error
-			}
-			done := make(chan outcome, 1)
-			go func() {
-				bulk, err := pool.Begin(ctx)
-				if err != nil {
-					done <- outcome{err: err}
-					return
-				}
-				retired, err := store.RetireActiveGenerationsForAutomation(ctx, bulk, f.orgID, f.automationID, models.AutomationTargetRetiredContinuityDisabled)
-				if err != nil {
-					_ = bulk.Rollback(ctx)
-					done <- outcome{err: err}
-					return
-				}
-				done <- outcome{retired: retired, err: bulk.Commit(ctx)}
-			}()
-			require.Eventually(t, func() bool {
-				var waiting int
-				err := pool.QueryRow(ctx, `
-					SELECT count(*) FROM pg_stat_activity
-					WHERE wait_event_type = 'Lock' AND query ILIKE '%FROM automation_targets%'`).Scan(&waiting)
-				return err == nil && waiting > 0
-			}, 10*time.Second, 20*time.Millisecond, "the continuity switch should block on the target lock")
+			done := startBlockedContinuitySwitch(t, pool, store, f)
 
 			_, err = store.RetireGeneration(ctx, dispatch, f.orgID, gen1.ID, models.AutomationTargetRetiredAgentConfigChanged)
 			require.NoError(t, err, "dispatch retires the first generation")
@@ -481,6 +486,40 @@ func TestAutomationTargetsPostgres(t *testing.T) {
 			_, err = store.GetActiveGeneration(ctx, nil, f.orgID, target.ID)
 			require.ErrorIs(t, err, ErrAutomationTargetGenerationNotFound, "no generation stays active after the switch")
 			require.Nil(t, postgresOwnerMarker(t, pool, f.orgID, second), "the replacement's session is released")
+		}},
+		{"disabling continuity waits for a target that is still being created", func(t *testing.T, pool *pgxpool.Pool, f automationTargetFixture) {
+			ctx := context.Background()
+			store := NewAutomationTargetStore(pool)
+			session := seedPostgresSession(t, pool, f.orgID)
+
+			// The ownership transaction for a brand-new pull request creates
+			// the target and its first generation in one transaction. Neither
+			// row is visible to the switch's row scan, so the automation-scoped
+			// advisory lock is what makes the switch wait.
+			dispatch, err := pool.Begin(ctx)
+			require.NoError(t, err, "begin dispatch")
+			target, err := store.LockOrCreate(ctx, dispatch, f.orgID, f.automationID, f.repoID, models.AutomationTargetKindGitHubPullRequest, "99")
+			require.NoError(t, err, "dispatch creates the target")
+			gen1, err := store.InsertGeneration(ctx, dispatch, f.orgID, target.ID, session)
+			require.NoError(t, err, "dispatch inserts the first generation")
+
+			done := startBlockedContinuitySwitch(t, pool, store, f)
+			require.NoError(t, dispatch.Commit(ctx), "commit dispatch")
+
+			result := <-done
+			require.NoError(t, result.err, "the continuity switch should succeed once the dispatch commits")
+			require.Len(t, result.retired, 1, "the generation created by the dispatch is retired")
+			require.Equal(t, gen1.ID, result.retired[0].ID, "the newly created generation is the one retired")
+			_, err = store.GetActiveGeneration(ctx, nil, f.orgID, target.ID)
+			require.ErrorIs(t, err, ErrAutomationTargetGenerationNotFound, "no generation stays active after the switch")
+			require.Nil(t, postgresOwnerMarker(t, pool, f.orgID, session), "the session is released")
+
+			// The switch, once committed, does not block later target creation.
+			tx, err := pool.Begin(ctx)
+			require.NoError(t, err, "begin later dispatch")
+			_, err = store.LockOrCreate(ctx, tx, f.orgID, f.automationID, f.repoID, models.AutomationTargetKindGitHubPullRequest, "100")
+			require.NoError(t, err, "target creation proceeds after the switch")
+			require.NoError(t, tx.Commit(ctx), "commit later dispatch")
 		}},
 		{"down migration removes every object", func(t *testing.T, pool *pgxpool.Pool, f automationTargetFixture) {
 			ctx := context.Background()
