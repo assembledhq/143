@@ -72,15 +72,42 @@ func TestAutomationRunResultStore_Write(t *testing.T) {
 				mock.ExpectQuery("INSERT INTO automation_run_results").
 					WithArgs(anyArgs(15)...).
 					WillReturnRows(pgxmock.NewRows(automationRunResultColumnNames))
+				mock.ExpectQuery("SELECT .+ FROM automation_run_results").
+					WithArgs(anyArgs(5)...).
+					WillReturnRows(pgxmock.NewRows(automationRunResultColumnNames))
 			},
+		},
+		{
+			name:   "same attempt returns the stored marker unchanged",
+			mutate: func(r *models.AutomationRunResult) { r.ReviewComplete = false },
+			setupMock: func(mock pgxmock.PgxPoolIface, r models.AutomationRunResult) {
+				// The conflict clause leaves an existing same-attempt row alone,
+				// so the insert returns nothing and the stored row is read back.
+				stored := r
+				stored.ReviewComplete = true
+				mock.ExpectQuery("INSERT INTO automation_run_results").
+					WithArgs(anyArgs(15)...).
+					WillReturnRows(pgxmock.NewRows(automationRunResultColumnNames))
+				mock.ExpectQuery("SELECT .+ FROM automation_run_results").
+					WithArgs(anyArgs(5)...).
+					WillReturnRows(pgxmock.NewRows(automationRunResultColumnNames).AddRow(automationRunResultRow(stored)...))
+			},
+			wantOK: true,
 		},
 		{
 			name:   "review_complete is forced false for a failed turn",
 			mutate: func(r *models.AutomationRunResult) { r.Outcome = models.AutomationRunResultAgentFailed },
 			setupMock: func(mock pgxmock.PgxPoolIface, r models.AutomationRunResult) {
 				r.ReviewComplete = false
+				// Positional order follows first appearance in the SQL:
+				// attempt, attempt_lock_token, thread_id, turn_number, outcome,
+				// review_complete, ... so the bound review_complete is the
+				// sixth argument. Asserting it proves the coercion happened in
+				// the store rather than in this fixture.
+				args := anyArgs(15)
+				args[5] = false
 				mock.ExpectQuery("INSERT INTO automation_run_results").
-					WithArgs(anyArgs(15)...).
+					WithArgs(args...).
 					WillReturnRows(pgxmock.NewRows(automationRunResultColumnNames).AddRow(automationRunResultRow(r)...))
 			},
 			wantOK: true,
@@ -126,6 +153,9 @@ func TestAutomationRunResultStore_Write(t *testing.T) {
 				require.Equal(t, tt.wantOK, ok, "write should report whether the fence accepted it")
 				if tt.wantOK && result.Outcome != models.AutomationRunResultTurnCompleted {
 					require.False(t, result.ReviewComplete, "review_complete should be false unless the turn completed")
+				}
+				if tt.name == "same attempt returns the stored marker unchanged" {
+					require.True(t, result.ReviewComplete, "a same-attempt duplicate should return the stored marker, not the new input")
 				}
 			}
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")

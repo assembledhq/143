@@ -279,15 +279,15 @@ func TestAutomationRunResults_Fences(t *testing.T) {
 	require.True(t, ok, "the owner's marker should be accepted")
 	require.False(t, first.RecordedAt.IsZero(), "the stored marker should carry its recorded time")
 
-	// Same attempt rewrites idempotently.
-	rewrite := marker(lockToken, 1)
-	rewrite.ReviewComplete = false
-	ok, err = resultStore.Write(ctx, nil, orgID, jobID, rewrite)
-	require.NoError(t, err, "same-attempt rewrite should not error")
-	require.True(t, ok, "the same attempt may rewrite its marker")
+	// A duplicate write by the same attempt leaves the marker unchanged.
+	duplicate := marker(lockToken, 1)
+	duplicate.ReviewComplete = false
+	ok, err = resultStore.Write(ctx, nil, orgID, jobID, duplicate)
+	require.NoError(t, err, "same-attempt duplicate should not error")
+	require.True(t, ok, "the same attempt is still the owner")
 	stored, err := resultStore.GetByRun(ctx, orgID, runID)
 	require.NoError(t, err, "read marker")
-	require.False(t, stored.ReviewComplete, "the rewrite should replace the stored marker")
+	require.Equal(t, *first, stored, "a same-attempt duplicate must not change the stored marker")
 
 	// Once the job lease is gone, the same token can no longer write.
 	_, err = pool.Exec(ctx, `UPDATE jobs SET status = 'pending', lock_token = NULL WHERE id = $1 AND org_id = $2`, jobID, orgID)
@@ -296,4 +296,63 @@ func TestAutomationRunResults_Fences(t *testing.T) {
 	require.NoError(t, err, "write after reclaim should not error")
 	require.False(t, ok, "a worker whose job was reclaimed cannot write a marker")
 
+}
+
+// linkSessionToRun records sessionID as a session created by runID through
+// session_automation_links, the historical run-to-session relationship.
+func linkSessionToRun(t *testing.T, pool *pgxpool.Pool, orgID, runID, sessionID uuid.UUID) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO session_automation_links (session_id, org_id, automation_run_id)
+		VALUES ($1, $2, $3)`, sessionID, orgID, runID)
+	require.NoError(t, err, "link session to run")
+}
+
+// TestAutomationRunList_SessionLookup proves the run list's session
+// projection after the continuity rewrite: the executing session on the run
+// row wins when present, and the historical fallback still picks the newest
+// live linked session even when a newer linked session was soft-deleted.
+func TestAutomationRunList_SessionLookup(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	orgID := seedOrg(t, pool)
+	repoID := seedRepository(t, pool, orgID, "acme/web")
+	automation := seedAutomation(t, pool, orgID, repoID)
+	runStore := db.NewAutomationRunStore(pool)
+
+	// Run A: executing session recorded on the run row, plus an unrelated link.
+	runA := seedRun(t, pool, automation)
+	executing := seedSession(t, pool, orgID, sessionOpts{RepositoryID: &repoID})
+	linked := seedSession(t, pool, orgID, sessionOpts{RepositoryID: &repoID})
+	linkSessionToRun(t, pool, orgID, runA, linked.ID)
+	_, err := pool.Exec(ctx, `UPDATE automation_runs SET session_id = $1 WHERE id = $2 AND org_id = $3`, executing.ID, runA, orgID)
+	require.NoError(t, err, "record the executing session")
+
+	// Run B: two linked sessions, the newer one soft-deleted.
+	runB := seedRun(t, pool, automation)
+	older := seedSession(t, pool, orgID, sessionOpts{RepositoryID: &repoID})
+	newer := seedSession(t, pool, orgID, sessionOpts{RepositoryID: &repoID})
+	linkSessionToRun(t, pool, orgID, runB, older.ID)
+	linkSessionToRun(t, pool, orgID, runB, newer.ID)
+	_, err = pool.Exec(ctx, `UPDATE sessions SET created_at = created_at + interval '1 minute' WHERE id = $1 AND org_id = $2`, newer.ID, orgID)
+	require.NoError(t, err, "make the second session the newest")
+	_, err = pool.Exec(ctx, `UPDATE sessions SET deleted_at = now() WHERE id = $1 AND org_id = $2`, newer.ID, orgID)
+	require.NoError(t, err, "soft-delete the newest linked session")
+
+	runs, err := runStore.ListByAutomation(ctx, orgID, automation.ID, db.AutomationRunFilters{Limit: 10})
+	require.NoError(t, err, "list runs")
+	byID := map[uuid.UUID]models.AutomationRun{}
+	for _, run := range runs {
+		byID[run.ID] = run
+	}
+	require.Len(t, byID, 2, "both runs are listed")
+
+	require.NotNil(t, byID[runA].Session, "run A projects a session")
+	require.Equal(t, executing.ID, byID[runA].Session.ID, "the executing session on the run row wins over the creation link")
+	require.NotNil(t, byID[runA].SessionID, "run A exposes its executing session id")
+	require.Equal(t, executing.ID, *byID[runA].SessionID, "run A's session_id is the executing session")
+
+	require.NotNil(t, byID[runB].Session, "run B falls back to a linked session")
+	require.Equal(t, older.ID, byID[runB].Session.ID, "the fallback skips the soft-deleted newest session and returns the live one")
+	require.Nil(t, byID[runB].SessionID, "run B has no executing session of its own")
 }

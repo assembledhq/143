@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -256,7 +257,16 @@ func TestAutomationTargetsPostgres(t *testing.T) {
 			newer, err := store.GetByID(ctx, f.orgID, target.ID)
 			require.NoError(t, err, "reload")
 			require.NotNil(t, newer.WakeRequestedAt, "newer request still recorded")
+			// A transaction that started earlier can write a later request with
+			// an older now(); the clear must compare the exact observed marker.
+			_, err = pool.Exec(ctx, `UPDATE automation_targets SET wake_requested_at = $2::timestamptz - interval '1 second' WHERE id = $1`, target.ID, *newer.WakeRequestedAt)
+			require.NoError(t, err, "simulate a later request carrying an older timestamp")
 			cleared, err = store.ClearWake(ctx, nil, f.orgID, target.ID, *newer.WakeRequestedAt)
+			require.NoError(t, err, "clear against an older marker")
+			require.False(t, cleared, "a request with an older timestamp written after the observation must survive")
+			current, err := store.GetByID(ctx, f.orgID, target.ID)
+			require.NoError(t, err, "reload")
+			cleared, err = store.ClearWake(ctx, nil, f.orgID, target.ID, *current.WakeRequestedAt)
 			require.NoError(t, err, "clear with the current timestamp")
 			require.True(t, cleared, "the current request clears")
 			require.NoError(t, store.SetLifecycle(ctx, nil, f.orgID, target.ID, models.AutomationTargetLifecycleMerged), "set lifecycle")
@@ -305,20 +315,109 @@ func TestAutomationTargetsPostgres(t *testing.T) {
 			require.True(t, ok, "owner's marker is accepted")
 			require.False(t, first.RecordedAt.IsZero(), "recorded time returned")
 
-			rewrite := marker(lockToken)
-			rewrite.ReviewComplete = false
-			ok, err = results.Write(ctx, nil, f.orgID, jobID, rewrite)
-			require.NoError(t, err, "same-attempt rewrite")
-			require.True(t, ok, "same attempt may rewrite")
+			// A duplicate end-of-attempt callback must not change the evidence.
+			duplicate := marker(lockToken)
+			duplicate.ReviewComplete = false
+			duplicate.Outcome = models.AutomationRunResultAgentFailed
+			ok, err = results.Write(ctx, nil, f.orgID, jobID, duplicate)
+			require.NoError(t, err, "same-attempt duplicate write")
+			require.True(t, ok, "the same attempt is still the owner")
 			stored, err := results.GetByRun(ctx, f.orgID, runID)
 			require.NoError(t, err, "read marker")
-			require.False(t, stored.ReviewComplete, "rewrite replaced the marker")
+			require.Equal(t, *first, stored, "a same-attempt duplicate leaves the stored marker unchanged")
+			require.Equal(t, *first, *duplicate, "the duplicate write returns the stored marker")
 
-			_, err = pool.Exec(ctx, `UPDATE jobs SET status = 'pending', lock_token = NULL WHERE id = $1`, jobID)
-			require.NoError(t, err, "reclaim job")
+			// A newer attempt under a new lease replaces the marker, and a
+			// failed outcome never records review_complete even when asked.
+			secondToken := uuid.New()
+			secondJob := seedPostgresRunningJob(t, pool, f.orgID, secondToken)
+			_, err = pool.Exec(ctx, `UPDATE automation_runs SET attempt = 2, attempt_lock_token = $1, job_id = $2 WHERE id = $3`, secondToken, secondJob, runID)
+			require.NoError(t, err, "claim a second attempt")
+			replacement := marker(secondToken)
+			replacement.Attempt = 2
+			replacement.Outcome = models.AutomationRunResultAgentFailed
+			replacement.ReviewComplete = true
+			ok, err = results.Write(ctx, nil, f.orgID, secondJob, replacement)
+			require.NoError(t, err, "newer attempt write")
+			require.True(t, ok, "a newer attempt replaces the marker")
+			stored, err = results.GetByRun(ctx, f.orgID, runID)
+			require.NoError(t, err, "read replaced marker")
+			require.Equal(t, 2, stored.Attempt, "the newer attempt's marker is stored")
+			require.Equal(t, models.AutomationRunResultAgentFailed, stored.Outcome, "the newer outcome is stored")
+			require.False(t, stored.ReviewComplete, "review_complete is coerced false for a failed turn")
 			ok, err = results.Write(ctx, nil, f.orgID, jobID, marker(lockToken))
+			require.NoError(t, err, "older attempt write after replacement")
+			require.False(t, ok, "an older attempt cannot write once a newer one exists")
+
+			_, err = pool.Exec(ctx, `UPDATE jobs SET status = 'pending', lock_token = NULL WHERE id = $1`, secondJob)
+			require.NoError(t, err, "reclaim job")
+			third := marker(secondToken)
+			third.Attempt = 3
+			ok, err = results.Write(ctx, nil, f.orgID, secondJob, third)
 			require.NoError(t, err, "write after reclaim")
 			require.False(t, ok, "a reclaimed job's token cannot write")
+		}},
+		{"disabling continuity retires a generation inserted while it waited for the target lock", func(t *testing.T, pool *pgxpool.Pool, f automationTargetFixture) {
+			ctx := context.Background()
+			store := NewAutomationTargetStore(pool)
+			first := seedPostgresSession(t, pool, f.orgID)
+			second := seedPostgresSession(t, pool, f.orgID)
+			tx, err := pool.Begin(ctx)
+			require.NoError(t, err, "begin")
+			target, err := store.LockOrCreate(ctx, tx, f.orgID, f.automationID, f.repoID, models.AutomationTargetKindGitHubPullRequest, "42")
+			require.NoError(t, err, "create target")
+			gen1, err := store.InsertGeneration(ctx, tx, f.orgID, target.ID, first)
+			require.NoError(t, err, "insert first generation")
+			require.NoError(t, tx.Commit(ctx), "commit")
+
+			// A dispatch transaction holds the target lock while it replaces
+			// the generation; the continuity switch must wait for it and then
+			// retire the replacement, not the row it might have read earlier.
+			dispatch, err := pool.Begin(ctx)
+			require.NoError(t, err, "begin dispatch")
+			_, err = store.LockByID(ctx, dispatch, f.orgID, target.ID)
+			require.NoError(t, err, "dispatch locks the target")
+
+			type outcome struct {
+				retired []models.AutomationTargetSession
+				err     error
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				bulk, err := pool.Begin(ctx)
+				if err != nil {
+					done <- outcome{err: err}
+					return
+				}
+				retired, err := store.RetireActiveGenerationsForAutomation(ctx, bulk, f.orgID, f.automationID, models.AutomationTargetRetiredContinuityDisabled)
+				if err != nil {
+					_ = bulk.Rollback(ctx)
+					done <- outcome{err: err}
+					return
+				}
+				done <- outcome{retired: retired, err: bulk.Commit(ctx)}
+			}()
+			require.Eventually(t, func() bool {
+				var waiting int
+				err := pool.QueryRow(ctx, `
+					SELECT count(*) FROM pg_stat_activity
+					WHERE wait_event_type = 'Lock' AND query ILIKE '%FROM automation_targets%'`).Scan(&waiting)
+				return err == nil && waiting > 0
+			}, 10*time.Second, 20*time.Millisecond, "the continuity switch should block on the target lock")
+
+			_, err = store.RetireGeneration(ctx, dispatch, f.orgID, gen1.ID, models.AutomationTargetRetiredAgentConfigChanged)
+			require.NoError(t, err, "dispatch retires the first generation")
+			gen2, err := store.InsertGeneration(ctx, dispatch, f.orgID, target.ID, second)
+			require.NoError(t, err, "dispatch inserts the replacement")
+			require.NoError(t, dispatch.Commit(ctx), "commit dispatch")
+
+			result := <-done
+			require.NoError(t, result.err, "the continuity switch should succeed once the lock is released")
+			require.Len(t, result.retired, 1, "exactly the replacement generation is retired")
+			require.Equal(t, gen2.ID, result.retired[0].ID, "the generation active at lock time is the one retired")
+			_, err = store.GetActiveGeneration(ctx, nil, f.orgID, target.ID)
+			require.ErrorIs(t, err, ErrAutomationTargetGenerationNotFound, "no generation stays active after the switch")
+			require.Nil(t, postgresOwnerMarker(t, pool, f.orgID, second), "the replacement's session is released")
 		}},
 		{"down migration removes every object", func(t *testing.T, pool *pgxpool.Pool, f automationTargetFixture) {
 			ctx := context.Background()
