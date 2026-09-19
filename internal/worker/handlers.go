@@ -10028,6 +10028,11 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 		}
 
+		if continueOpts != nil && continueOpts.AutomationTurn != nil {
+			// The turn rides on the context as well so recovery paths that
+			// re-enter ContinueSession without options keep it.
+			jobCtx = agent.WithAutomationTurn(jobCtx, continueOpts.AutomationTurn)
+		}
 		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
 			cancellationError := errors.Is(err, agent.ErrSessionCancelled) ||
 				errors.Is(err, agent.ErrThreadCancelledBeforeWorkspaceReady) ||

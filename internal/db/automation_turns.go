@@ -69,6 +69,43 @@ func (s *AutomationRunStore) RecordTurnDuration(ctx context.Context, q DBTX, org
 	return tag.RowsAffected() > 0, nil
 }
 
+// AttemptOwned reports whether the run is still executing under this
+// attempt lock token and the job lease is still held. Attempt-end writes
+// that carry no marker (the drain path) check it inside their transaction.
+func (s *AutomationRunStore) AttemptOwned(ctx context.Context, q DBTX, orgID, runID, lockToken uuid.UUID) (bool, error) {
+	if q == nil {
+		q = s.db
+	}
+	var owned bool
+	err := q.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM automation_runs r
+			WHERE r.id = @id AND r.org_id = @org_id`+automationRunAttemptFence+`
+		)`, pgx.NamedArgs{"id": runID, "org_id": orgID, "lock_token": lockToken}).Scan(&owned)
+	if err != nil {
+		return false, fmt.Errorf("check automation attempt ownership: %w", err)
+	}
+	return owned, nil
+}
+
+// RecordContinuationFallback records that a continued turn could not
+// restore its checkpoint and is rebuilding the workspace in the same
+// session (design doc 125, readiness "rebuild" with restore_failed).
+func (s *AutomationRunStore) RecordContinuationFallback(ctx context.Context, orgID, runID, lockToken uuid.UUID, reason models.AutomationRunContinuationReason) (bool, error) {
+	if err := reason.Validate(); err != nil {
+		return false, err
+	}
+	tag, err := s.db.Exec(ctx, `
+		UPDATE automation_runs r
+		SET continuation_mode = @mode, continuation_reason = @reason, updated_at = now()
+		WHERE r.id = @id AND r.org_id = @org_id`+automationRunAttemptFence,
+		pgx.NamedArgs{"id": runID, "org_id": orgID, "lock_token": lockToken, "mode": models.AutomationRunContinuationReconstructed, "reason": reason})
+	if err != nil {
+		return false, fmt.Errorf("record automation continuation fallback: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // ListCompletedTurnSummaries returns the completed runs of a generation in
 // completion order, oldest first, bounded to the newest limit rows. The
 // head is the run's resolved head when dispatch resolved one, else the

@@ -2854,10 +2854,16 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if turnOpts := AutomationTurnFromContext(ctx); turnOpts != nil {
 		turnCtx, state, err := o.beginAutomationTurn(ctx, run, turnOpts)
 		if err != nil {
+			if state != nil && errors.Is(err, ErrAutomationTargetClosed) {
+				state.deferPreflight(models.AutomationRunOutcomePRClosed, "the pull request is no longer open")
+				o.runPendingPreflight(turnCtx, state, run, log)
+				return nil
+			}
 			return fmt.Errorf("begin automation turn: %w", err)
 		}
 		ctx = turnCtx
 		automationTurn = state
+		defer o.runPendingPreflight(ctx, automationTurn, run, log)
 	}
 
 	// 1. Concurrency check.
@@ -2968,6 +2974,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if resolvedRepoID != nil {
 		repo, err := o.repositories.GetByID(ctx, run.OrgID, *resolvedRepoID)
 		if err != nil {
+			if automationTurn != nil {
+				return o.failAutomationTurnRunSetup(ctx, run, nil, automationTurn, fmt.Errorf("%w: fetch repository: %v", errAutomationRepositoryUnavailable, err), log)
+			}
 			o.failRun(ctx, run, fmt.Sprintf("fetch repository: %s", err))
 			return fmt.Errorf("fetch repository: %w", err)
 		}
@@ -2983,6 +2992,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		// Get GitHub installation token for cloning.
 		ghToken, err := o.github.GetInstallationToken(ctx, repo.InstallationID)
 		if err != nil {
+			if automationTurn != nil {
+				return o.failAutomationTurnRunSetup(ctx, run, nil, automationTurn, fmt.Errorf("%w: installation token: %v", errAutomationRepositoryUnavailable, err), log)
+			}
 			o.failRun(ctx, run, fmt.Sprintf("get installation token: %s", err))
 			return fmt.Errorf("get installation token: %w", err)
 		}
@@ -3573,6 +3585,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if attacher := NewMultiInteractiveHandleAttacher(attachers...); attacher != nil {
 		execCtx = WithInteractiveHandleAttacher(execCtx, attacher)
 	}
+	automationTurn.markAgentStarted()
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
@@ -3657,7 +3670,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			elapsed := time.Since(runStartedAt).Round(time.Second)
-			o.failTimedOutSession(run, elapsed, 0, err, log, activityExecution)
+			o.failTimedOutSession(ctx, run, elapsed, 0, err, log, activityExecution)
 			return fmt.Errorf("%w after %s: %w", ErrSessionTimedOut, elapsed, err)
 		}
 		failureAlreadyRecorded := isRunFailureRecorded(err)
@@ -4028,13 +4041,27 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// identity before anything is written. A reconstructed turn rebuilds
 	// the workspace like PR-head reconstruction does.
 	var automationTurn *automationTurnState
+	turnOpts := AutomationTurnFromContext(ctx)
 	if opts != nil && opts.AutomationTurn != nil {
-		turnCtx, state, err := o.beginAutomationTurn(ctx, session, opts.AutomationTurn)
+		turnOpts = opts.AutomationTurn
+	}
+	if turnOpts != nil {
+		turnCtx, state, err := o.beginAutomationTurn(ctx, session, turnOpts)
 		if err != nil {
+			if state != nil && errors.Is(err, ErrAutomationTargetClosed) {
+				// Nothing is allocated yet; the deferred hook ends the run.
+				state.deferPreflight(models.AutomationRunOutcomePRClosed, "the pull request is no longer open")
+				o.runPendingPreflight(turnCtx, state, session, log)
+				return nil
+			}
 			return fmt.Errorf("begin automation turn: %w", err)
 		}
 		ctx = turnCtx
 		automationTurn = state
+		// Registered before the sandbox exists so it runs after the sandbox
+		// and turn hold are released: a preflight outcome must not make the
+		// session claimable while this attempt still holds its container.
+		defer o.runPendingPreflight(ctx, automationTurn, session, log)
 	}
 	rebuildWorkspace := prHeadReconstruction || automationTurn.reconstructed()
 
@@ -4747,6 +4774,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			automationTurn.restoreMS = &restoreMS
 			automationTurn.restoreBytes = &restoreBytes
 		}
+		if err != nil && automationTurn.continued() {
+			// A continued per-target turn whose checkpoint cannot be restored
+			// rebuilds the workspace in the same session instead of retrying
+			// the same unusable checkpoint.
+			if fallbackErr := o.fallbackToReconstruction(ctx, automationTurn, session, err, log); fallbackErr != nil {
+				o.closeSandboxAuth(session.ID, log)
+				return fmt.Errorf("hydrate sandbox: %w (fallback: %w)", err, fallbackErr)
+			}
+			hasSnapshot = false
+			rebuildWorkspace = true
+			sandbox, err = o.provider.Create(ctx, sandboxCfg)
+		}
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
 			log.Error().Err(err).Msg("sandbox hydrate failed during continue_session")
@@ -5074,7 +5113,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 			if automationTurn != nil {
 				if err := o.prepareAutomationTurnRestoredWorkspace(ctx, session, sandbox, sandboxCfg, automationTurn, log); err != nil {
-					return err
+					return o.failAutomationTurnSetup(ctx, session, opts, sandbox, automationTurn, err, log)
 				}
 			} else if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
 				return fmt.Errorf("prepare repository: %w", err)
@@ -5366,6 +5405,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		execCtx = WithInteractiveHandleAttacher(execCtx, attacher)
 	}
 	o.honorPendingCancelRequest(ctx, session.OrgID, session.ID, log)
+	automationTurn.markAgentStarted()
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	if err == nil && restoredWorkspaceFallbackPrompt != nil && shouldRetryResumeFromSnapshot(session, prompt, result) {
 		log.Warn().
@@ -5459,7 +5499,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			if handled {
 				return fmt.Errorf("%w after %s: %w", ErrCodeReviewThreadFailed, elapsed, err)
 			}
-			o.failTimedOutSession(session, elapsed, messageTurnNumber, err, log, activityExecution)
+			o.failTimedOutSession(ctx, session, elapsed, messageTurnNumber, err, log, activityExecution)
 			return fmt.Errorf("%w on turn %d after %s: %w", ErrSessionTimedOut, messageTurnNumber, elapsed, err)
 		}
 		if isRunFailureRecorded(err) && isCodeReviewThreadTurn(session, threadID) {
@@ -5944,6 +5984,9 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 	if session.RepositoryID != nil {
 		repo, err := o.repositories.GetByID(ctx, session.OrgID, *session.RepositoryID)
 		if err != nil {
+			if automationTurn != nil {
+				return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("%w: fetch repository: %v", errAutomationRepositoryUnavailable, err)
+			}
 			return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("fetch repository: %w", err)
 		}
 		repoFullName = repo.FullName
@@ -5953,6 +5996,9 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 		}
 		token, err := o.github.GetInstallationToken(ctx, repo.InstallationID)
 		if err != nil {
+			if automationTurn != nil {
+				return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("%w: installation token: %v", errAutomationRepositoryUnavailable, err)
+			}
 			return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("get installation token: %w", err)
 		}
 		if err := o.provider.CloneRepo(ctx, sandbox, repo.CloneURL, branch, token); err != nil {
@@ -7110,7 +7156,7 @@ func (o *Orchestrator) failRunWithCategoryForThreadAndActivityPhase(ctx context.
 // retryAdvised is hard-coded true inside failRunWithCategory; the default
 // fits the "transient slowness" case and we accept the small false-positive
 // rate where a session is structurally too large to ever fit.
-func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Duration, turnNumber int, underlyingErr error, log zerolog.Logger, activityExecution *activityPhaseExecution) {
+func (o *Orchestrator) failTimedOutSession(ctx context.Context, run *models.Session, elapsed time.Duration, turnNumber int, underlyingErr error, log zerolog.Logger, activityExecution *activityPhaseExecution) {
 	// Single canonical log per timeout: includes the canonical message that
 	// SessionTimeoutBurst alerts key off, plus the platform-health fields
 	// (agent_type, outcome, duration_ms) that the platform-health dashboard
@@ -7126,7 +7172,9 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 	}
 	event.Msg(canonicalTimeoutLogMessage)
 
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Detached from the expired deadline but keeping the context's values,
+	// so a per-target turn's failure still ends its attempt with a marker.
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cleanupCancel()
 
 	// Sub-second elapsed almost always means the handler ctx was already
@@ -8363,7 +8411,17 @@ func (o *Orchestrator) handleSystemInterruptedSession(ctx context.Context, sessi
 	}
 
 	var statusErr error
-	if activityExecution != nil {
+	if automationTurn != nil {
+		// Fenced by the attempt: a paused worker whose job was reclaimed must
+		// not reset the next attempt's session.
+		statusErr = o.endInterruptedAutomationTurn(bgCtx, automationTurn, session, fallbackStatus)
+		if statusErr == nil {
+			completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusInterrupted, models.ActivityPhaseBoundaryMaintenance, log)
+		} else if errors.Is(statusErr, ErrAutomationAttemptLost) {
+			log.Warn().Str("run_id", automationTurn.run.ID.String()).Msg("interrupted automation turn lost its lease; leaving the session to the attempt that owns it")
+			return
+		}
+	} else if activityExecution != nil {
 		statusErr = activityExecution.persistSessionStatusAndComplete(bgCtx, o.sessions, fallbackStatus, models.ActivityPhaseStatusInterrupted, models.ActivityPhaseBoundaryMaintenance)
 	} else {
 		statusErr = o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, fallbackStatus)
@@ -8610,6 +8668,14 @@ func (o *Orchestrator) snapshotSession(ctx context.Context, session *models.Sess
 	}
 
 	snapshotKey := fmt.Sprintf("snapshots/%s/%s/workspace.tar.zst", session.OrgID, session.ID)
+	if automationTurn := automationTurnStateFromContext(ctx); automationTurn != nil {
+		// An owned session's checkpoints are immutable per publication: the
+		// key names the attempt, so an upload whose provenance write fails
+		// or loses its lease cannot overwrite the blob the installed key and
+		// provenance still describe. Superseded blobs are the snapshot
+		// reaper's.
+		snapshotKey = automationTurnSnapshotKey(session.OrgID, session.ID, automationTurn.run.ID, automationTurn.run.Attempt, time.Now().UTC())
+	}
 
 	for attempt := 1; attempt <= retryableSnapshotSaveMaxAttempts; attempt++ {
 		reader, err := o.provider.Snapshot(ctx, sandbox)
