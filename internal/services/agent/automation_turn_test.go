@@ -877,3 +877,25 @@ func TestInjectInternalAPIEnvForPerTargetTurn(t *testing.T) {
 	require.True(t, models.HasToolScope(claims.AllowedToolScopes, "preview:read"), "an ordinary session keeps its preview scope")
 	require.False(t, models.HasToolScope(claims.AllowedToolScopes, models.PerTargetToolAllowlistScope), "an ordinary session is not allowlisted")
 }
+
+// TestFinishWorkerOwnershipFailure proves the worker-ownership failure is
+// always reported, and that an owned session's session and thread rows are
+// left alone: their release belongs to the turn's completion, or to the
+// recovery that took the attempt away. Swallowing the error would let the
+// job succeed with no result, after which recovery fails the unexecuted run
+// as retries_exhausted.
+func TestFinishWorkerOwnershipFailure(t *testing.T) {
+	t.Parallel()
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	threadID := uuid.New()
+	cause := errors.New("CAS failed")
+
+	// Every store is nil: reaching one for an owned session would panic,
+	// which is the point. The error must still come back wrapped.
+	owned := &Orchestrator{}
+	ctx := withAutomationTurnState(context.Background(), &automationTurnState{})
+	err := owned.finishWorkerOwnershipFailure(ctx, session, &threadID, cause, zerolog.Nop())
+	require.Error(t, err, "the failure is reported for an owned session")
+	require.ErrorIs(t, err, cause, "wrapping the cause")
+	require.Contains(t, err.Error(), "persist session worker ownership", "naming the failure")
+}

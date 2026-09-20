@@ -5027,45 +5027,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				Str("container_id", sandbox.ID).
 				Str("worker_node_id", o.nodeID).
 				Msg("persist session worker ownership: CAS failed (container_id moved or worker_node_id held by another worker)")
-			// Detached context for the cleanup writes: this site fires when
-			// a CAS conflict means another worker already owns the row, and
-			// also during rolling-deploy ctx cancellation. Both cases need
-			// the revert to land. Without WithoutCancel, a cancelled ctx
-			// silently fails the UpdateStatus and leaves session.status =
-			// 'running' / thread.status = 'running' permanently — that's
-			// the orphan that produces "Session is not active" +
-			// "Agent is working..." in the UI at the same time.
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-			defer cleanupCancel()
-			if automationTurnStateFromContext(ctx) != nil {
-				// An owned session is released by its completion, or by the
-				// recovery that took the attempt away. Reverting it here
-				// would idle a session a later turn may already be running.
-				log.Warn().Msg("skipping the session revert for a per-target automation turn: its completion owns the release")
-				return
+			var failureThreadID *uuid.UUID
+			if opts != nil {
+				failureThreadID = opts.ThreadID
 			}
-			if revertErr := o.sessions.UpdateStatus(cleanupCtx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
-				log.Error().Err(revertErr).Msg("failed to revert session to idle after worker ownership persistence failure")
-			}
-			// Mirror the session revert onto the active thread. The handler
-			// also resets thread.status on error, but it can miss when its
-			// own ctx is cancelled mid-shutdown (the exact scenario this
-			// failure path tends to fire in). Belt-and-suspenders here is
-			// what unblocks the UI for the user that just sent a message.
-			if opts != nil && opts.ThreadID != nil && o.sessionThreads != nil {
-				if revertErr := o.sessionThreads.UpdateStatus(cleanupCtx, session.OrgID, *opts.ThreadID, models.ThreadStatusIdle); revertErr != nil {
-					log.Error().Err(revertErr).
-						Str("thread_id", opts.ThreadID.String()).
-						Msg("failed to revert thread to idle after worker ownership persistence failure")
-				}
-			}
-			o.registerSandboxFailureMessage(
-				ctx,
-				session,
-				fmt.Sprintf("Failed to persist sandbox worker ownership: %s\n\nPlease try again in a moment.", err),
-				"sandbox ownership",
-			)
-			return fmt.Errorf("persist session worker ownership: %w", err)
+			return o.finishWorkerOwnershipFailure(ctx, session, failureThreadID, err, log)
 		}
 	}
 
@@ -9000,6 +8966,45 @@ func stringPtrValue(s *string) string {
 // it just transitions the status (e.g. cancel without a result payload). All
 // errors are logged best-effort because this is bookkeeping — a failure here
 // must not abort the surrounding session-level cleanup.
+// finishWorkerOwnershipFailure reports a failed worker-ownership CAS on a
+// continued turn. The reverts use a detached context because this site also
+// fires during rolling-deploy cancellation, where a cancelled context would
+// silently leave the session and thread at "running" forever. They are
+// skipped for an owned session, whose release belongs to its completion or
+// to the recovery that took its attempt away; the failure itself is always
+// returned, so the turn fails and its job retries rather than succeeding
+// with no result.
+func (o *Orchestrator) finishWorkerOwnershipFailure(ctx context.Context, session *models.Session, threadID *uuid.UUID, ownershipErr error, log zerolog.Logger) error {
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cleanupCancel()
+	if automationTurnStateFromContext(ctx) != nil {
+		log.Warn().Msg("skipping the session revert for a per-target automation turn: its completion owns the release")
+	} else {
+		if revertErr := o.sessions.UpdateStatus(cleanupCtx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
+			log.Error().Err(revertErr).Msg("failed to revert session to idle after worker ownership persistence failure")
+		}
+		// Mirror the session revert onto the active thread. The handler
+		// also resets thread.status on error, but it can miss when its own
+		// ctx is cancelled mid-shutdown (the exact scenario this failure
+		// path tends to fire in). Belt-and-suspenders here is what unblocks
+		// the UI for the user that just sent a message.
+		if threadID != nil && o.sessionThreads != nil {
+			if revertErr := o.sessionThreads.UpdateStatus(cleanupCtx, session.OrgID, *threadID, models.ThreadStatusIdle); revertErr != nil {
+				log.Error().Err(revertErr).
+					Str("thread_id", threadID.String()).
+					Msg("failed to revert thread to idle after worker ownership persistence failure")
+			}
+		}
+	}
+	o.registerSandboxFailureMessage(
+		ctx,
+		session,
+		fmt.Sprintf("Failed to persist sandbox worker ownership: %s\n\nPlease try again in a moment.", ownershipErr),
+		"sandbox ownership",
+	)
+	return fmt.Errorf("persist session worker ownership: %w", ownershipErr)
+}
+
 func (o *Orchestrator) updatePrimaryThreadTerminal(ctx context.Context, run *models.Session, status models.ThreadStatus, result *models.SessionResult, log zerolog.Logger) {
 	if o.sessionThreads == nil || run == nil || run.PrimaryThreadID == nil || *run.PrimaryThreadID == uuid.Nil {
 		return
