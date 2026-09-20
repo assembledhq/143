@@ -1197,10 +1197,12 @@ func TestAutomationRunStore_ReapStuckRuns(t *testing.T) {
 	orgID := uuid.New()
 
 	// The reaper MUST filter by org_id, status IN ('pending', 'running'), and
-	// triggered_at < cutoff. Regressions on the org_id filter would sweep
-	// across tenants; regressions on status/triggered_at would either reap
-	// healthy runs or fail to free saturated max_concurrent slots.
-	mock.ExpectExec(`UPDATE automation_runs\s+SET status = 'failed'.*org_id = @org_id.*status IN \('pending', 'running'\).*triggered_at < @cutoff`).
+	// the run's clock (triggered_at, or attempt_started_at for an executing
+	// per-target run). It MUST exempt waiting per-target runs and executing
+	// runs whose job holds a live lease. Regressions on the org_id filter
+	// would sweep across tenants; regressions on status/clock would either
+	// reap healthy runs or fail to free saturated max_concurrent slots.
+	mock.ExpectExec(`UPDATE automation_runs r\s+SET status = 'failed'.*org_id = @org_id.*status IN \('pending', 'running'\).*IS DISTINCT FROM 'waiting'.*attempt_started_at.*< @cutoff.*triggered_at < @cutoff.*lease_expires_at > now\(\)`).
 		WithArgs(anyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 4))
 

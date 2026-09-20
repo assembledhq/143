@@ -1442,14 +1442,33 @@ func (s *AutomationRunStore) GetStats(ctx context.Context, orgID, automationID u
 func (s *AutomationRunStore) ReapStuckRuns(ctx context.Context, orgID uuid.UUID, threshold time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-threshold)
 	summary := "run exceeded execution timeout; marked failed by reaper"
-	query := `UPDATE automation_runs
+	// Per-target runs (design doc 125): a waiting run is never stuck; an
+	// executing run is measured from its attempt start and skipped while
+	// its job holds a live lease or a session executor is active for it.
+	query := `UPDATE automation_runs r
 		SET status = 'failed',
 		    completed_at = now(),
 		    result_summary = @summary,
+		    dispatch_state = CASE WHEN r.dispatch_state IS NULL THEN NULL ELSE 'done' END,
 		    updated_at = now()
-		WHERE org_id = @org_id
-		  AND status IN ('pending', 'running')
-		  AND triggered_at < @cutoff`
+		WHERE r.org_id = @org_id
+		  AND r.status IN ('pending', 'running')
+		  AND r.dispatch_state IS DISTINCT FROM 'waiting'
+		  AND CASE
+		        WHEN r.dispatch_state = 'executing' THEN COALESCE(r.attempt_started_at, r.execution_started_at, r.triggered_at) < @cutoff
+		        ELSE r.triggered_at < @cutoff
+		      END
+		  AND NOT (
+		        r.dispatch_state = 'executing' AND r.job_id IS NOT NULL AND (
+		          EXISTS (
+		            SELECT 1 FROM jobs j
+		            WHERE j.id = r.job_id AND j.org_id = r.org_id
+		              AND j.status = 'running' AND j.lease_expires_at > now())
+		          OR EXISTS (
+		            SELECT 1 FROM session_executors e
+		            WHERE e.job_id = r.job_id AND e.org_id = r.org_id
+		              AND e.status NOT IN ('stopped', 'failed')
+		              AND (e.lease_expires_at IS NULL OR e.lease_expires_at > now()))))`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":  orgID,
 		"summary": summary,

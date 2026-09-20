@@ -848,6 +848,10 @@ func main() {
 			logger,
 		)
 		scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
+		scheduler.SetAutomationTargetSweeps(
+			automations.NewTurnCompleter(pool, automationRunStore, db.NewAutomationTargetStore(pool), jobStore, logger),
+			cluster.NewAutomationTargetSweepLock(pool),
+		)
 		scheduler.SetCodeReviewScheduleReconciler(db.NewCodeReviewScheduleStore(pool))
 		scheduler.SetCapabilityResolver(agentcapabilities.NewService(db.NewAgentCapabilityPolicyStore(pool)))
 		scheduler.SetSessionStore(sessionStore)
@@ -858,6 +862,7 @@ func main() {
 		)
 		scheduler.SetGitHubOrgRosterReconciliation(db.NewGitHubInstallationStore(pool))
 		go scheduler.Start(ctx, 10*time.Minute)
+		go scheduler.StartAutomationTargetSweeps(ctx, time.Minute)
 	}
 
 	srv := &http.Server{
@@ -1847,6 +1852,7 @@ func buildServices(
 	automationTargetDispatcher.SetHeadResolver(prService)
 	automationTargetDispatcher.SetMaxSnapshotAge(cfg.SessionMaxSnapshotAge)
 	orchestrator.SetAutomationTurnStore(automations.NewTurnStore(pool, sessionStore, automationRunStore, db.NewAutomationTargetStore(pool), db.NewAutomationRunResultStore(pool), sessionMessageStore))
+	automationTurnCompleter := automations.NewTurnCompleter(pool, automationRunStore, db.NewAutomationTargetStore(pool), jobStore, logger)
 	svc := &worker.Services{
 		Orchestrator:      orchestrator,
 		PR:                prService,
@@ -1855,6 +1861,7 @@ func buildServices(
 		ProjectTasks:      projectTaskUpdater,
 		AutomationRuns:    automationRunUpdater,
 		AutomationTargets: automationTargetDispatcher,
+		AutomationTurns:   automationTurnCompleter,
 		Prioritization:    prioritizationSvc,
 		SlackSummarizer:   slackSummarizer,
 		LLM:               llmClient,

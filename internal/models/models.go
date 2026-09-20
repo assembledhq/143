@@ -1095,6 +1095,7 @@ type LatestJobError struct {
 // Job type constants for async work queue items.
 const (
 	JobTypeAutomationRun                 = "automation_run"
+	JobTypeAutomationTargetWake          = "automation_target_wake"
 	JobTypeStartPreview                  = "start_preview"
 	JobTypeStartBranchPreview            = "start_branch_preview"
 	JobTypeAutoPreviewDeferred           = "auto_preview_deferred"
