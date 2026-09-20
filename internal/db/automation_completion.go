@@ -30,22 +30,48 @@ type AutomationRunCompletion struct {
 	RetireGeneration bool
 }
 
+// automationRunNoLiveLease is true when no worker can still be executing
+// the run's attempt: the job holds no live lease and no session executor is
+// active for it. It is the recovery paths' evidence that an attempt is over
+// even though the process that ran it never said so.
+const automationRunNoLiveLease = `(
+			NOT EXISTS (
+				SELECT 1 FROM jobs j
+				WHERE j.id = r.job_id AND j.org_id = r.org_id
+				  AND j.status = 'running' AND j.lease_expires_at > now())
+			AND NOT EXISTS (
+				SELECT 1 FROM session_executors e
+				WHERE e.job_id = r.job_id AND e.org_id = r.org_id
+				  AND e.status IN ('starting', 'running', 'draining')
+				  AND (e.lease_expires_at IS NULL OR e.lease_expires_at > now()))
+		)`
+
+// automationRunJobTerminal is true when the run's job reached a terminal
+// state. A job that ended `succeeded` while its run is still executing is
+// an orchestrator bug rather than an exhausted retry budget, but the run is
+// abandoned either way and must be settled.
+const automationRunJobTerminal = `EXISTS (
+			SELECT 1 FROM jobs j
+			WHERE j.id = r.job_id AND j.org_id = r.org_id
+			  AND j.status IN ('succeeded', 'failed', 'dead_letter', 'cancelled'))`
+
 // automationRunCompletionFence restricts completion to the run's executing
 // attempt that wrote the marker, under the caller's job: either the job is
-// running with the caller's lease, or the job has reached a terminal state
-// (no attempt can be live, so the marker is final). The terminal case is
-// how a dead-lettered job with a marker is completed without a lease.
+// running with the caller's lease, or no live lease remains, in which case
+// the attempt is over whatever happened to the worker and the marker is
+// final. The second case is how a run whose job died with a marker already
+// written is completed without a lease.
 const automationRunCompletionFence = `
 		  AND r.dispatch_state = 'executing'
 		  AND r.job_id = @job_id
 		  AND EXISTS (
 			SELECT 1 FROM automation_run_results m
 			WHERE m.run_id = r.id AND m.org_id = r.org_id AND m.attempt = r.attempt)
-		  AND EXISTS (
+		  AND (EXISTS (
 			SELECT 1 FROM jobs j
 			WHERE j.id = r.job_id AND j.org_id = r.org_id
-			  AND ((j.status = 'running' AND j.lock_token = @lock_token)
-			       OR j.status IN ('succeeded', 'failed', 'dead_letter', 'cancelled')))`
+			  AND j.status = 'running' AND j.lock_token = @lock_token)
+		       OR ` + automationRunNoLiveLease + `)`
 
 // CompleteFromMarker records the run's terminal status from the result
 // marker of its current attempt and updates the generation's counters.
@@ -65,13 +91,25 @@ func (s *AutomationRunStore) CompleteFromMarker(ctx context.Context, tx pgx.Tx, 
 	var headEpoch *int
 	var markerOutcome models.AutomationRunResultOutcome
 	var reviewComplete, nativeContext bool
+	var threadID uuid.UUID
+	var turnNumber int
+	var agentSessionID *string
+	// The target lock is taken before the run and the generation, the order
+	// arrival, dispatch, and retirement take them in, so a completion and a
+	// lifecycle change never deadlock.
+	if err := lockAutomationTargetOfRun(ctx, tx, orgID, runID); err != nil {
+		if errors.Is(err, ErrAutomationTargetNotFound) {
+			return AutomationRunCompletion{}, nil
+		}
+		return AutomationRunCompletion{}, err
+	}
 	err := tx.QueryRow(ctx, `
-		SELECT m.outcome, m.review_complete, m.native_context
+		SELECT m.outcome, m.review_complete, m.native_context, m.thread_id, m.turn_number, m.agent_session_id
 		FROM automation_run_results m
 		JOIN automation_runs r ON r.id = m.run_id AND r.org_id = m.org_id AND r.attempt = m.attempt
 		WHERE m.run_id = @id AND m.org_id = @org_id AND r.dispatch_state = 'executing'
 		FOR UPDATE OF r`,
-		pgx.NamedArgs{"id": runID, "org_id": orgID}).Scan(&markerOutcome, &reviewComplete, &nativeContext)
+		pgx.NamedArgs{"id": runID, "org_id": orgID}).Scan(&markerOutcome, &reviewComplete, &nativeContext, &threadID, &turnNumber, &agentSessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AutomationRunCompletion{}, nil
 	}
@@ -140,6 +178,34 @@ func (s *AutomationRunStore) CompleteFromMarker(ctx context.Context, tx pgx.Tx, 
 		return AutomationRunCompletion{}, fmt.Errorf("record automation turn on generation: %w", err)
 	}
 	out.RetireGeneration = markerOutcome == models.AutomationRunResultAwaitingInput
+	// The attempt is over, so the turn hold is too. Clearing it here repairs
+	// a worker that died between the marker and its deferred release: the
+	// container stays recorded for the next turn's inherited-container path,
+	// but a retirement in this transaction can release ownership at once
+	// instead of leaving ownership_release_pending with no executing run to
+	// clear it. In the ordinary path the orchestrator already released it
+	// and this matches no row.
+	if _, err := tx.Exec(ctx, `
+		UPDATE sessions SET turn_holding_container = FALSE
+		WHERE id = @id AND org_id = @org_id AND turn_holding_container`,
+		pgx.NamedArgs{"id": out.SessionID, "org_id": orgID}); err != nil {
+		return AutomationRunCompletion{}, fmt.Errorf("release turn hold at completion: %w", err)
+	}
+	// The primary thread returns to idle from the marker's own turn number,
+	// so a turn whose job died after the marker still frees the thread for
+	// the next dispatch. The handler's richer write (summary, diff) has
+	// already landed in the ordinary path and left the thread idle, which
+	// this statement does not touch.
+	if _, err := tx.Exec(ctx, `
+		UPDATE session_threads
+		SET status = 'idle',
+		    current_turn = GREATEST(current_turn, @turn_number),
+		    last_activity_at = now(),
+		    agent_session_id = COALESCE(@agent_session_id, agent_session_id)
+		WHERE id = @id AND org_id = @org_id AND status IN ('pending', 'running')`,
+		pgx.NamedArgs{"id": threadID, "org_id": orgID, "turn_number": turnNumber, "agent_session_id": agentSessionID}); err != nil {
+		return AutomationRunCompletion{}, fmt.Errorf("release thread at completion: %w", err)
+	}
 	if err := applyPendingOwnershipRelease(ctx, tx, orgID, out.SessionID); err != nil {
 		return AutomationRunCompletion{}, err
 	}
@@ -152,30 +218,35 @@ func (s *AutomationRunStore) CompleteFromMarker(ctx context.Context, tx pgx.Tx, 
 	return out, nil
 }
 
-// FailRetriesExhausted records retries_exhausted on an executing run whose
-// job reached a terminal state (dead-lettered, failed, cancelled, or
-// succeeded without ending the attempt) without a result marker for the
-// current attempt (design doc 125, "Retry and recovery"). The session and its
-// primary thread return to idle without counting a turn, the target is
-// woken, and a pending ownership release is applied. Returns the target
-// that was released, or false when the run was not in that state.
-func (s *AutomationRunStore) FailRetriesExhausted(ctx context.Context, tx pgx.Tx, orgID, runID uuid.UUID) (uuid.UUID, bool, error) {
+// FailRetriesExhausted records retries_exhausted on an abandoned executing
+// run: no result marker for the current attempt, no live lease, and either
+// a terminal job or an attempt older than staleBefore (design doc 125,
+// "Retry and recovery"). The session and its primary thread return to idle
+// without counting a turn, the turn hold is released, the target is woken,
+// and a pending ownership release is applied. Returns the target that was
+// released, or false when the run was not in that state.
+func (s *AutomationRunStore) FailRetriesExhausted(ctx context.Context, tx pgx.Tx, orgID, runID uuid.UUID, staleBefore time.Time) (uuid.UUID, bool, error) {
 	var sessionID, threadID, targetID uuid.UUID
+	if err := lockAutomationTargetOfRun(ctx, tx, orgID, runID); err != nil {
+		if errors.Is(err, ErrAutomationTargetNotFound) {
+			return uuid.Nil, false, nil
+		}
+		return uuid.Nil, false, err
+	}
 	err := tx.QueryRow(ctx, `
 		UPDATE automation_runs r
 		SET status = 'failed', dispatch_state = 'done', outcome_reason = @outcome,
 		    completed_at = now(), result_summary = 'the turn''s job ended without a result', updated_at = now()
 		WHERE r.id = @id AND r.org_id = @org_id
 		  AND r.dispatch_state = 'executing' AND r.job_id IS NOT NULL
-		  AND EXISTS (
-			SELECT 1 FROM jobs j
-			WHERE j.id = r.job_id AND j.org_id = r.org_id
-			  AND j.status IN ('succeeded', 'failed', 'dead_letter', 'cancelled'))
 		  AND NOT EXISTS (
 			SELECT 1 FROM automation_run_results m
 			WHERE m.run_id = r.id AND m.org_id = r.org_id AND m.attempt = r.attempt)
+		  AND `+automationRunNoLiveLease+`
+		  AND (`+automationRunJobTerminal+`
+		       OR COALESCE(r.attempt_started_at, r.execution_started_at, r.triggered_at) < @stale_before)
 		RETURNING r.session_id, r.thread_id, r.target_id`,
-		pgx.NamedArgs{"id": runID, "org_id": orgID, "outcome": models.AutomationRunOutcomeRetriesExhausted},
+		pgx.NamedArgs{"id": runID, "org_id": orgID, "outcome": models.AutomationRunOutcomeRetriesExhausted, "stale_before": staleBefore},
 	).Scan(&sessionID, &threadID, &targetID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, false, nil
@@ -184,8 +255,8 @@ func (s *AutomationRunStore) FailRetriesExhausted(ctx context.Context, tx pgx.Tx
 		return uuid.Nil, false, fmt.Errorf("fail automation run after exhausted retries: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE sessions SET status = 'idle', last_activity_at = now()
-		WHERE id = @id AND org_id = @org_id AND status IN ('pending', 'running')`,
+		UPDATE sessions SET status = 'idle', turn_holding_container = FALSE, last_activity_at = now()
+		WHERE id = @id AND org_id = @org_id AND (status IN ('pending', 'running') OR turn_holding_container)`,
 		pgx.NamedArgs{"id": sessionID, "org_id": orgID}); err != nil {
 		return uuid.Nil, false, fmt.Errorf("release session after exhausted retries: %w", err)
 	}
@@ -207,22 +278,107 @@ func (s *AutomationRunStore) FailRetriesExhausted(ctx context.Context, tx pgx.Tx
 	return targetID, true, nil
 }
 
-// ListExecutingRunsWithTerminalJobs returns the org's executing runs whose
-// job reached a terminal state, oldest first: the crash-recovery input for
-// completion from a marker or retries_exhausted.
-func (s *AutomationRunStore) ListExecutingRunsWithTerminalJobs(ctx context.Context, orgID uuid.UUID) ([]uuid.UUID, error) {
+// ListAbandonedExecutingRuns returns the org's executing runs that no
+// worker can still be running, oldest first: no live lease, and either a
+// terminal job or an attempt that started before staleBefore. They are the
+// recovery sweep's input, completed from their marker or failed with
+// retries_exhausted. The stuck-run reaper deliberately leaves executing
+// runs to this path, which releases the session, the thread, and ownership
+// rather than terminalizing the run row alone.
+func (s *AutomationRunStore) ListAbandonedExecutingRuns(ctx context.Context, orgID uuid.UUID, staleBefore time.Time) ([]uuid.UUID, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT r.id FROM automation_runs r
-		JOIN jobs j ON j.id = r.job_id AND j.org_id = r.org_id
-		WHERE r.org_id = @org_id AND r.dispatch_state = 'executing'
-		  AND j.status IN ('succeeded', 'failed', 'dead_letter', 'cancelled')
+		WHERE r.org_id = @org_id AND r.dispatch_state = 'executing' AND r.job_id IS NOT NULL
+		  AND `+automationRunNoLiveLease+`
+		  AND (`+automationRunJobTerminal+`
+		       OR COALESCE(r.attempt_started_at, r.execution_started_at, r.triggered_at) < @stale_before)
 		ORDER BY r.triggered_at, r.id`,
-		pgx.NamedArgs{"org_id": orgID})
+		pgx.NamedArgs{"org_id": orgID, "stale_before": staleBefore})
 	if err != nil {
-		return nil, fmt.Errorf("list executing runs with terminal jobs: %w", err)
+		return nil, fmt.Errorf("list abandoned executing runs: %w", err)
 	}
 	defer rows.Close()
 	return collectIDs(rows)
+}
+
+// AutomationStrandedOwnership is a retired generation whose ownership
+// release never completed because no executing run remains to apply it.
+type AutomationStrandedOwnership struct {
+	GenerationID uuid.UUID
+	TargetID     uuid.UUID
+}
+
+// ListStrandedOwnershipReleases returns the org's generations that are
+// waiting on an ownership release with no executing run left to apply it,
+// the state a worker that died between its result and its cleanup leaves
+// behind.
+func (s *AutomationTargetStore) ListStrandedOwnershipReleases(ctx context.Context, orgID uuid.UUID) ([]AutomationStrandedOwnership, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT g.id, g.target_id
+		FROM automation_target_sessions g
+		WHERE g.org_id = @org_id AND g.ownership_release_pending
+		  AND NOT EXISTS (
+			SELECT 1 FROM automation_runs r
+			WHERE r.org_id = g.org_id AND r.target_id = g.target_id
+			  AND r.target_generation = g.generation AND r.dispatch_state = 'executing')
+		ORDER BY g.updated_at, g.id`,
+		pgx.NamedArgs{"org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("list stranded ownership releases: %w", err)
+	}
+	defer rows.Close()
+	out := make([]AutomationStrandedOwnership, 0, 8)
+	for rows.Next() {
+		var row AutomationStrandedOwnership
+		if err := rows.Scan(&row.GenerationID, &row.TargetID); err != nil {
+			return nil, fmt.Errorf("scan stranded ownership release: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// ReleaseStrandedOwnership clears the owner marker of a generation whose
+// release is pending with no executing run left to apply it, under the
+// target lock. The session's turn hold is cleared with it: the hold can
+// only be a dead worker's, because an owned session accepts no human turn
+// and no run of this generation is executing. The target is woken.
+func (s *AutomationTargetStore) ReleaseStrandedOwnership(ctx context.Context, tx pgx.Tx, orgID, generationID, targetID uuid.UUID) (bool, error) {
+	if err := lockAutomationTarget(ctx, tx, orgID, targetID); err != nil {
+		return false, err
+	}
+	var sessionID uuid.UUID
+	err := tx.QueryRow(ctx, `
+		UPDATE automation_target_sessions g
+		SET ownership_release_pending = false, updated_at = now()
+		WHERE g.id = @id AND g.org_id = @org_id AND g.target_id = @target_id
+		  AND g.ownership_release_pending
+		  AND NOT EXISTS (
+			SELECT 1 FROM automation_runs r
+			WHERE r.org_id = g.org_id AND r.target_id = g.target_id
+			  AND r.target_generation = g.generation AND r.dispatch_state = 'executing')
+		RETURNING g.session_id`,
+		pgx.NamedArgs{"id": generationID, "org_id": orgID, "target_id": targetID}).Scan(&sessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("release stranded automation ownership: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE sessions
+		SET automation_owner_generation_id = NULL, turn_holding_container = FALSE
+		WHERE id = @session_id AND org_id = @org_id AND automation_owner_generation_id = @generation_id`,
+		pgx.NamedArgs{"session_id": sessionID, "org_id": orgID, "generation_id": generationID}); err != nil {
+		return false, fmt.Errorf("clear session ownership after stranded release: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE automation_targets SET wake_requested_at = now(), updated_at = now()
+		WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": targetID, "org_id": orgID}); err != nil {
+		return false, fmt.Errorf("request wake after stranded release: %w", err)
+	}
+	return true, nil
 }
 
 // HasResultForCurrentAttempt reports whether a result marker exists for the
@@ -272,13 +428,17 @@ func (s *AutomationRunStore) FailTimedOutWaits(ctx context.Context, tx pgx.Tx, o
 	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE automation_runs r
-		SET status = 'skipped', dispatch_state = 'done', outcome_reason = @outcome,
+		SET status = @status, dispatch_state = 'done', outcome_reason = @outcome,
 		    completed_at = now(), result_summary = 'the run waited too long for its target', updated_at = now()
 		WHERE r.org_id = @org_id AND r.target_id = @target_id
 		  AND r.status = 'pending' AND r.dispatch_state = 'waiting'
 		  AND r.wait_started_at < @cutoff
 		  AND r.head_resolution IS DISTINCT FROM 'ambiguous'`,
-		pgx.NamedArgs{"org_id": orgID, "target_id": targetID, "cutoff": cutoff, "outcome": models.AutomationRunOutcomeWaitTimeout})
+		pgx.NamedArgs{
+			"org_id": orgID, "target_id": targetID, "cutoff": cutoff,
+			"outcome": models.AutomationRunOutcomeWaitTimeout,
+			"status":  models.AutomationRunOutcomeWaitTimeout.RunStatus(),
+		})
 	if err != nil {
 		return 0, fmt.Errorf("fail timed out automation waits: %w", err)
 	}
@@ -292,6 +452,27 @@ func (s *AutomationRunStore) FailTimedOutWaits(ctx context.Context, tx pgx.Tx, o
 		return 0, fmt.Errorf("request wake after wait timeout: %w", err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+// lockAutomationTargetOfRun takes the run's target lock without locking the
+// run, so completion acquires locks in the same order as arrival, dispatch,
+// and retirement: target first.
+func lockAutomationTargetOfRun(ctx context.Context, tx pgx.Tx, orgID, runID uuid.UUID) error {
+	var id uuid.UUID
+	err := tx.QueryRow(ctx, `
+		SELECT t.id
+		FROM automation_targets t
+		JOIN automation_runs r ON r.target_id = t.id AND r.org_id = t.org_id
+		WHERE r.id = @run_id AND r.org_id = @org_id
+		FOR UPDATE OF t`,
+		pgx.NamedArgs{"run_id": runID, "org_id": orgID}).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAutomationTargetNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("lock automation target of run: %w", err)
+	}
+	return nil
 }
 
 func lockAutomationTarget(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID) error {
@@ -308,14 +489,17 @@ func lockAutomationTarget(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.U
 }
 
 // ListOrgsWithPerTargetWork returns the orgs that have a waiting or
-// executing per-target run, a pending head resolution, or an outstanding
-// wake request: the orgs the scheduler's per-target sweeps visit.
+// executing per-target run, a pending head resolution, an outstanding wake
+// request, or a pending ownership release: the orgs the scheduler's
+// per-target sweeps visit.
 // lint:allow-no-orgid reason="scheduler sweep enumerates orgs with per-target work across all tenants"
 func (s *AutomationTargetStore) ListOrgsWithPerTargetWork(ctx context.Context) ([]uuid.UUID, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT DISTINCT org_id FROM automation_runs WHERE dispatch_state IN ('waiting', 'executing')
 		UNION
-		SELECT DISTINCT org_id FROM automation_targets WHERE head_resolution_pending OR wake_requested_at IS NOT NULL`)
+		SELECT DISTINCT org_id FROM automation_targets WHERE head_resolution_pending OR wake_requested_at IS NOT NULL
+		UNION
+		SELECT DISTINCT org_id FROM automation_target_sessions WHERE ownership_release_pending`)
 	if err != nil {
 		return nil, fmt.Errorf("list orgs with per-target work: %w", err)
 	}
@@ -345,7 +529,7 @@ func (s *AutomationTargetStore) ListTargetsWithExpiredAmbiguity(ctx context.Cont
 // target lock (design doc 125, "Ambiguity deadline"). Returns the number
 // of candidates converted; zero when the deadline has not passed or the
 // target is no longer pending.
-func (s *AutomationTargetStore) ResolveAmbiguityDeadline(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, now time.Time) (int64, error) {
+func (s *AutomationTargetStore) ResolveAmbiguityDeadline(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, now time.Time) (bool, int64, error) {
 	var pending bool
 	var deadline *time.Time
 	err := tx.QueryRow(ctx, `
@@ -353,13 +537,13 @@ func (s *AutomationTargetStore) ResolveAmbiguityDeadline(ctx context.Context, tx
 		FROM automation_targets WHERE id = @id AND org_id = @org_id FOR UPDATE`,
 		pgx.NamedArgs{"id": targetID, "org_id": orgID}).Scan(&pending, &deadline)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, ErrAutomationTargetNotFound
+		return false, 0, ErrAutomationTargetNotFound
 	}
 	if err != nil {
-		return 0, fmt.Errorf("lock target for ambiguity deadline: %w", err)
+		return false, 0, fmt.Errorf("lock target for ambiguity deadline: %w", err)
 	}
 	if !pending || deadline == nil || deadline.After(now) {
-		return 0, nil
+		return false, 0, nil
 	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE automation_runs
@@ -369,7 +553,7 @@ func (s *AutomationTargetStore) ResolveAmbiguityDeadline(ctx context.Context, tx
 		  AND head_resolution = @ambiguous`,
 		pgx.NamedArgs{"org_id": orgID, "target_id": targetID, "unresolved": models.AutomationRunHeadUnresolved, "ambiguous": models.AutomationRunHeadAmbiguous})
 	if err != nil {
-		return 0, fmt.Errorf("convert ambiguous candidates: %w", err)
+		return false, 0, fmt.Errorf("convert ambiguous candidates: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE automation_targets
@@ -377,9 +561,12 @@ func (s *AutomationTargetStore) ResolveAmbiguityDeadline(ctx context.Context, tx
 		    wake_requested_at = now(), updated_at = now()
 		WHERE id = @id AND org_id = @org_id`,
 		pgx.NamedArgs{"id": targetID, "org_id": orgID}); err != nil {
-		return 0, fmt.Errorf("clear ambiguity deadline: %w", err)
+		return false, 0, fmt.Errorf("clear ambiguity deadline: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	// The deadline transition applied even when it converted nothing: the
+	// candidates can have left through the per-run fallback, and a stale
+	// pending flag would block every later push while a lookup is failing.
+	return true, tag.RowsAffected(), nil
 }
 
 // ListTargetsNeedingWake returns the org's targets that have waiting runs,

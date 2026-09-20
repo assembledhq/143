@@ -1442,33 +1442,23 @@ func (s *AutomationRunStore) GetStats(ctx context.Context, orgID, automationID u
 func (s *AutomationRunStore) ReapStuckRuns(ctx context.Context, orgID uuid.UUID, threshold time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-threshold)
 	summary := "run exceeded execution timeout; marked failed by reaper"
-	// Per-target runs (design doc 125): a waiting run is never stuck; an
-	// executing run is measured from its attempt start and skipped while
-	// its job holds a live lease or a session executor is active for it.
+	// Per-target runs (design doc 125) are exempt from this reaper. A
+	// waiting run is not stuck: it is queued behind its target and has its
+	// own two-hour wait timeout. An executing run owns a session, a thread,
+	// and possibly the target's ownership release, so terminalizing the run
+	// row alone would strand all three; the recovery sweep settles those
+	// from the result marker or as retries_exhausted, releasing what the
+	// run holds. This query therefore reaps only runs that never entered
+	// per-target dispatch.
 	query := `UPDATE automation_runs r
 		SET status = 'failed',
 		    completed_at = now(),
 		    result_summary = @summary,
-		    dispatch_state = CASE WHEN r.dispatch_state IS NULL THEN NULL ELSE 'done' END,
 		    updated_at = now()
 		WHERE r.org_id = @org_id
 		  AND r.status IN ('pending', 'running')
-		  AND r.dispatch_state IS DISTINCT FROM 'waiting'
-		  AND CASE
-		        WHEN r.dispatch_state = 'executing' THEN COALESCE(r.attempt_started_at, r.execution_started_at, r.triggered_at) < @cutoff
-		        ELSE r.triggered_at < @cutoff
-		      END
-		  AND NOT (
-		        r.dispatch_state = 'executing' AND r.job_id IS NOT NULL AND (
-		          EXISTS (
-		            SELECT 1 FROM jobs j
-		            WHERE j.id = r.job_id AND j.org_id = r.org_id
-		              AND j.status = 'running' AND j.lease_expires_at > now())
-		          OR EXISTS (
-		            SELECT 1 FROM session_executors e
-		            WHERE e.job_id = r.job_id AND e.org_id = r.org_id
-		              AND e.status NOT IN ('stopped', 'failed')
-		              AND (e.lease_expires_at IS NULL OR e.lease_expires_at > now()))))`
+		  AND r.dispatch_state IS NULL
+		  AND r.triggered_at < @cutoff`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":  orgID,
 		"summary": summary,
