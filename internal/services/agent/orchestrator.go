@@ -3260,7 +3260,21 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		}
 		// Use a background context for cleanup since the run context may be cancelled.
 		destroyCtx := context.Background()
-		destroyNow, releasedID, releaseErr := o.sessions.ReleaseTurnHold(destroyCtx, run.OrgID, run.ID)
+		var (
+			destroyNow bool
+			releasedID string
+			releaseErr error
+		)
+		if turnState := automationTurnStateFromContext(ctx); turnState != nil {
+			var owned bool
+			owned, destroyNow, releasedID, releaseErr = o.releaseAutomationTurnHold(destroyCtx, turnState, run.OrgID, run.ID)
+			if releaseErr == nil && !owned {
+				log.Warn().Msg("automation turn hold release was fenced out: a later turn owns this session's container")
+				return
+			}
+		} else {
+			destroyNow, releasedID, releaseErr = o.sessions.ReleaseTurnHold(destroyCtx, run.OrgID, run.ID)
+		}
 		if releaseErr != nil {
 			// Fall back to destroy to avoid leaking the container if we
 			// can't read the holder state.
@@ -4962,7 +4976,21 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// Detached context so DB writes + destroy succeed even if ctx was
 		// cancelled (user cancel, timeout, shutdown).
 		destroyCtx := context.Background()
-		destroyNow, releasedID, releaseErr := o.sessions.ReleaseTurnHold(destroyCtx, session.OrgID, session.ID)
+		var (
+			destroyNow bool
+			releasedID string
+			releaseErr error
+		)
+		if turnState := automationTurnStateFromContext(ctx); turnState != nil {
+			var owned bool
+			owned, destroyNow, releasedID, releaseErr = o.releaseAutomationTurnHold(destroyCtx, turnState, session.OrgID, session.ID)
+			if releaseErr == nil && !owned {
+				log.Warn().Msg("automation turn hold release was fenced out: a later turn owns this session's container")
+				return
+			}
+		} else {
+			destroyNow, releasedID, releaseErr = o.sessions.ReleaseTurnHold(destroyCtx, session.OrgID, session.ID)
+		}
 		if releaseErr != nil {
 			log.Warn().Err(releaseErr).Msg("failed to release turn hold; destroying container anyway")
 			destroyNow = true
@@ -5009,6 +5037,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			// "Agent is working..." in the UI at the same time.
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cleanupCancel()
+			if automationTurnStateFromContext(ctx) != nil {
+				// An owned session is released by its completion, or by the
+				// recovery that took the attempt away. Reverting it here
+				// would idle a session a later turn may already be running.
+				log.Warn().Msg("skipping the session revert for a per-target automation turn: its completion owns the release")
+				return
+			}
 			if revertErr := o.sessions.UpdateStatus(cleanupCtx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 				log.Error().Err(revertErr).Msg("failed to revert session to idle after worker ownership persistence failure")
 			}
@@ -8970,6 +9005,14 @@ func (o *Orchestrator) updatePrimaryThreadTerminal(ctx context.Context, run *mod
 		return
 	}
 	threadID := *run.PrimaryThreadID
+	// A per-target turn's thread is written under the attempt fence: this
+	// path runs on failure, where the attempt may already have been taken
+	// away by a recovery, and an unfenced write would mark a thread that a
+	// later turn is running on.
+	if turnState := automationTurnStateFromContext(ctx); turnState != nil && o.automationTurns != nil {
+		o.failAutomationThreadTurn(ctx, turnState, run.OrgID, threadID, status, result, log)
+		return
+	}
 	var err error
 	if result != nil {
 		err = o.sessionThreads.UpdateResult(ctx, run.OrgID, threadID, status, result)

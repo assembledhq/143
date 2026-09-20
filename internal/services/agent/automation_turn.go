@@ -43,7 +43,12 @@ type AutomationTurnStore interface {
 	RecordTurnWorkspace(ctx context.Context, orgID, runID, lockToken uuid.UUID, ws models.AutomationTurnWorkspace) (bool, error)
 	UpdateTurnPrompt(ctx context.Context, orgID, runID uuid.UUID, content string) (bool, error)
 	TagAssistantMessage(ctx context.Context, orgID, sessionID, threadID uuid.UUID, turnNumber int, runID uuid.UUID) error
-	PublishCheckpointWithProvenance(ctx context.Context, orgID, sessionID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, stopReason models.RuntimeStopReason, provenance models.CheckpointProvenance) (bool, error)
+	PublishCheckpointWithProvenance(ctx context.Context, orgID, sessionID, runID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, stopReason models.RuntimeStopReason, provenance models.CheckpointProvenance) (bool, error)
+	// ReleaseTurnHold releases the owned session's turn hold under the
+	// attempt fence; owned is false when a later turn owns the session.
+	ReleaseTurnHold(ctx context.Context, orgID, sessionID, runID, lockToken uuid.UUID) (owned bool, destroyNow bool, containerID string, err error)
+	// FailThreadTurn drives the primary thread terminal under the fence.
+	FailThreadTurn(ctx context.Context, orgID, runID, lockToken, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) (bool, error)
 	// EndAttempt runs fn in one transaction with a transaction-bound
 	// session store, so the attempt's session status write and its result
 	// marker commit together.
@@ -663,7 +668,7 @@ func (o *Orchestrator) publishAutomationCheckpoint(ctx context.Context, state *a
 	if state == nil || snapshotKey == "" {
 		return false, nil
 	}
-	published, err := o.automationTurns.PublishCheckpointWithProvenance(ctx, session.OrgID, session.ID, state.lockToken, agentSessionID, snapshotKey, kind, checkpointCapabilityForAgent(session.AgentType), sizeBytes, checkpointedAt, stopReason, models.CheckpointProvenance{
+	published, err := o.automationTurns.PublishCheckpointWithProvenance(ctx, session.OrgID, session.ID, state.run.ID, state.lockToken, agentSessionID, snapshotKey, kind, checkpointCapabilityForAgent(session.AgentType), sizeBytes, checkpointedAt, stopReason, models.CheckpointProvenance{
 		GenerationID:          state.generation.ID,
 		HeadSHA:               state.headSHA,
 		DependencyFingerprint: state.fingerprint,
@@ -1087,6 +1092,28 @@ func (o *Orchestrator) endCancelledAutomationTurn(ctx context.Context, state *au
 	}
 	completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusCancelled, models.ActivityPhaseBoundaryCancelled, log)
 	log.Info().Int("turn", turnNumber).Msg("cancelled automation turn ended")
+}
+
+// releaseAutomationTurnHold releases an owned session's turn hold under the
+// attempt fence. owned is false when the attempt is no longer ours, and the
+// caller must then leave the hold and the container to the turn that owns
+// them.
+func (o *Orchestrator) releaseAutomationTurnHold(ctx context.Context, state *automationTurnState, orgID, sessionID uuid.UUID) (owned bool, destroyNow bool, containerID string, err error) {
+	return o.automationTurns.ReleaseTurnHold(ctx, orgID, sessionID, state.run.ID, state.lockToken)
+}
+
+// failAutomationThreadTurn drives an owned session's primary thread
+// terminal under the attempt fence, so a worker that lost its attempt
+// cannot fail a thread a later turn is running on.
+func (o *Orchestrator) failAutomationThreadTurn(ctx context.Context, state *automationTurnState, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult, log zerolog.Logger) {
+	written, err := o.automationTurns.FailThreadTurn(ctx, orgID, state.run.ID, state.lockToken, threadID, status, result)
+	if err != nil {
+		log.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to drive the automation turn's primary thread terminal")
+		return
+	}
+	if !written {
+		log.Warn().Str("thread_id", threadID.String()).Msg("automation turn thread failure was fenced out: the attempt is no longer ours")
+	}
 }
 
 // completeAutomationThreadTurn returns a per-target turn's primary thread
