@@ -417,17 +417,25 @@ func TestAutomationLifecycle_ReopenArrivingBeforeItsClose(t *testing.T) {
 	_, err := h.completer.Complete(ctx, h.orgID, h.run.ID, h.jobID, h.lockToken)
 	require.NoError(t, err, "finish the first turn")
 
-	closedAt := time.Now().UTC().Add(-5 * time.Minute)
-	reopenedAt := closedAt.Add(time.Minute)
+	// Both moments are after the evidence the target already has, so the
+	// ordering under test is the deliveries' own, not staleness against the
+	// arrival that created the target.
+	before := h.target(t).LifecycleUpdatedAt
+	require.NotNil(t, before, "the target already has openness evidence")
+	closedAt := before.Add(10 * time.Second)
+	reopenedAt := closedAt.Add(10 * time.Second)
 
 	// The reopen is delivered first, on a target that is still open.
 	require.NoError(t, h.lifecycle.OnPullRequestReopened(ctx, h.orgID, "acme/web", 42, reopenedAt), "reopen arrives first")
-	require.Equal(t, models.AutomationTargetLifecycleOpen, h.target(t).LifecycleState, "the target is open")
+	target := h.target(t)
+	require.Equal(t, models.AutomationTargetLifecycleOpen, target.LifecycleState, "the target is open")
+	require.NotNil(t, target.LifecycleUpdatedAt, "the reopen recorded its observation")
+	require.WithinDuration(t, reopenedAt, *target.LifecycleUpdatedAt, time.Millisecond, "the recorded moment is the reopen's, even though the state did not change")
 
 	// Its close, from a minute earlier, arrives afterwards.
 	require.NoError(t, h.lifecycle.OnPullRequestClosed(ctx, h.orgID, "acme/web", 42, false, closedAt), "the older close arrives late")
 
-	target := h.target(t)
+	target = h.target(t)
 	require.Equal(t, models.AutomationTargetLifecycleOpen, target.LifecycleState, "the open pull request is still open")
 	generation, err := h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
 	require.NoError(t, err, "reload generation")

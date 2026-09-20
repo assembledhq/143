@@ -88,11 +88,15 @@ func (l *TargetLifecycle) OnPullRequestReopened(ctx context.Context, orgID uuid.
 		if err != nil {
 			return err
 		}
-		if !reopened {
-			return nil
-		}
+		// Committed whether or not the state changed: an already-open target
+		// still records this observation, and that recorded moment is what
+		// keeps a close delivered after it, but timestamped before it, from
+		// looking fresh and retiring a generation on an open pull request.
 		if err := tx.Commit(ctx); err != nil {
 			return err
+		}
+		if !reopened {
+			return nil
 		}
 		l.logger.Info().
 			Str("org_id", orgID.String()).
