@@ -99,6 +99,7 @@ type AutomationRunAttempt struct {
 	SessionID           uuid.UUID
 	AgentType           *string
 	Model               *string
+	ReasoningEffort     *string
 	ProducedDiff        bool
 	ProducedPullRequest bool
 }
@@ -109,13 +110,65 @@ func (a AutomationRunAttempt) ProducedWork() bool {
 	return a.ProducedDiff || a.ProducedPullRequest
 }
 
-// Matches reports whether a ranked candidate names the same (agent, model) this
-// attempt already ran, so the chain does not spend a second session on it.
-// Comparison is on the trimmed strings because an agent left unset at one layer
-// is resolved downstream, and nil and "" mean the same thing here.
+// Matches reports whether a ranked candidate names the same (agent, model,
+// reasoning effort) this attempt already ran.
+//
+// Reasoning effort is part of the identity because the chain deliberately
+// supports re-trying one model at a cheaper level; comparing only (agent,
+// model) would mark that fallback spent the moment the first level ran, and it
+// would never get a session. The candidate list draws the same line.
+//
+// Callers must hand this a rank whose agent is already RESOLVED to a concrete
+// value. A session records the agent it actually ran, never a blank one, so a
+// rank still carrying nil can never match its own attempt — which would spin
+// the chain re-dispatching the same model until the reaper stopped it.
 func (a AutomationRunAttempt) Matches(rank AutomationModelRank) bool {
 	return strings.TrimSpace(stringOrEmpty(a.AgentType)) == strings.TrimSpace(stringOrEmpty(rank.AgentType)) &&
-		strings.TrimSpace(stringOrEmpty(a.Model)) == strings.TrimSpace(stringOrEmpty(rank.Model))
+		strings.TrimSpace(stringOrEmpty(a.Model)) == strings.TrimSpace(stringOrEmpty(rank.Model)) &&
+		strings.TrimSpace(stringOrEmpty(a.ReasoningEffort)) == strings.TrimSpace(reasoningEffortOrEmpty(rank.ReasoningEffort))
+}
+
+func reasoningEffortOrEmpty(v *ReasoningEffort) string {
+	if v == nil {
+		return ""
+	}
+	return string(*v)
+}
+
+// AutomationModelRanksRemaining returns the ranks this run has not yet spent a
+// session on, in chain order.
+//
+// Each attempt consumes the EARLIEST unspent rank it matches, oldest attempt
+// first, rather than every rank it happens to equal. That is what lets a chain
+// deliberately return to an earlier model — A then B then A — actually reach
+// its third rank: the first A consumes rank 0 and leaves rank 2 for later.
+//
+// attempts arrive newest-first (the order the store returns them), so this
+// walks them in reverse to replay dispatch order.
+//
+// The worker and the promotion hook both call this. They used to carry
+// separate implementations and disagreed about a chain's length, which let the
+// hook promote a run the worker then immediately failed as exhausted.
+func AutomationModelRanksRemaining(ranks []AutomationModelRank, attempts []AutomationRunAttempt) []AutomationModelRank {
+	if len(attempts) == 0 {
+		return ranks
+	}
+	spent := make([]bool, len(ranks))
+	for i := len(attempts) - 1; i >= 0; i-- {
+		for idx := range ranks {
+			if !spent[idx] && attempts[i].Matches(ranks[idx]) {
+				spent[idx] = true
+				break
+			}
+		}
+	}
+	remaining := make([]AutomationModelRank, 0, len(ranks))
+	for idx, rank := range ranks {
+		if !spent[idx] {
+			remaining = append(remaining, rank)
+		}
+	}
+	return remaining
 }
 
 func stringOrEmpty(v *string) string {

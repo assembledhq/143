@@ -846,7 +846,7 @@ func (s *AutomationRunStore) GetByRunID(ctx context.Context, orgID, runID uuid.U
 // the session the run page displays cannot disagree.
 func (s *AutomationRunStore) ListSessionAttempts(ctx context.Context, orgID, runID uuid.UUID) ([]models.AutomationRunAttempt, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT sessions.id, sessions.agent_type, sessions.model_override,
+		SELECT sessions.id, sessions.agent_type, sessions.model_override, sessions.reasoning_effort,
 			COALESCE(btrim(COALESCE(sessions.diff, '')) <> '', false) AS produced_diff,
 			EXISTS (
 				SELECT 1 FROM pull_requests

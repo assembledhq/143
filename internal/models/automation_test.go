@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -766,5 +767,266 @@ func TestAutomationModelRanksFromConfigSnapshot(t *testing.T) {
 		_, _, err := AutomationModelRanksFromConfigSnapshot(json.RawMessage(`{`))
 
 		require.Error(t, err, "a corrupt snapshot must not silently read as no-chain")
+	})
+}
+
+// effortPtr is the *ReasoningEffort counterpart of strPtr, so ranks can be
+// built inline in table cases.
+func effortPtr(effort ReasoningEffort) *ReasoningEffort {
+	return &effort
+}
+
+func TestAutomationRunAttemptMatches(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		attempt AutomationRunAttempt
+		rank    AutomationModelRank
+		want    bool
+	}{
+		{
+			name:    "the same agent, model and effort is the rank this attempt ran",
+			attempt: AutomationRunAttempt{AgentType: strPtr("codex"), Model: strPtr(CodexModelGPT55), ReasoningEffort: strPtr(string(ReasoningEffortXHigh))},
+			rank:    AutomationModelRank{AgentType: strPtr("codex"), Model: strPtr(CodexModelGPT55), ReasoningEffort: effortPtr(ReasoningEffortXHigh)},
+			want:    true,
+		},
+		{
+			name:    "a different model is a different rank",
+			attempt: AutomationRunAttempt{AgentType: strPtr("claude_code"), Model: strPtr(ClaudeCodeModelOpus5), ReasoningEffort: strPtr(string(ReasoningEffortHigh))},
+			rank:    AutomationModelRank{AgentType: strPtr("claude_code"), Model: strPtr(ClaudeCodeModelSonnet46), ReasoningEffort: effortPtr(ReasoningEffortHigh)},
+			want:    false,
+		},
+		{
+			name:    "a different agent is a different rank even on the same model name",
+			attempt: AutomationRunAttempt{AgentType: strPtr("codex"), Model: strPtr(CodexModelGPT55), ReasoningEffort: strPtr(string(ReasoningEffortHigh))},
+			rank:    AutomationModelRank{AgentType: strPtr("claude_code"), Model: strPtr(CodexModelGPT55), ReasoningEffort: effortPtr(ReasoningEffortHigh)},
+			want:    false,
+		},
+		{
+			// The chain deliberately supports retrying one model at a cheaper
+			// level. While effort was not part of the identity, the xhigh
+			// attempt marked the low rank spent the moment it ran, so the low
+			// rank of a gpt/xhigh -> gpt/low chain could never get a session.
+			name:    "the same model at a different reasoning effort is a rank of its own",
+			attempt: AutomationRunAttempt{AgentType: strPtr("codex"), Model: strPtr(CodexModelGPT55), ReasoningEffort: strPtr(string(ReasoningEffortXHigh))},
+			rank:    AutomationModelRank{AgentType: strPtr("codex"), Model: strPtr(CodexModelGPT55), ReasoningEffort: effortPtr(ReasoningEffortLow)},
+			want:    false,
+		},
+		{
+			// Every field is optional at some layer, and the two sides reach
+			// this comparison from different stores: a session column can be
+			// NULL where the frozen rank holds "" and vice versa.
+			name:    "nil and empty mean the same thing on every field",
+			attempt: AutomationRunAttempt{AgentType: strPtr(""), Model: nil, ReasoningEffort: strPtr("")},
+			rank:    AutomationModelRank{AgentType: nil, Model: strPtr(""), ReasoningEffort: nil},
+			want:    true,
+		},
+		{
+			name:    "a nil attempt effort matches a rank that names none",
+			attempt: AutomationRunAttempt{AgentType: strPtr("codex"), Model: strPtr(CodexModelGPT55), ReasoningEffort: nil},
+			rank:    AutomationModelRank{AgentType: strPtr("codex"), Model: strPtr(CodexModelGPT55), ReasoningEffort: nil},
+			want:    true,
+		},
+		{
+			name:    "a nil attempt effort does not match a rank that names one",
+			attempt: AutomationRunAttempt{AgentType: strPtr("codex"), Model: strPtr(CodexModelGPT55), ReasoningEffort: nil},
+			rank:    AutomationModelRank{AgentType: strPtr("codex"), Model: strPtr(CodexModelGPT55), ReasoningEffort: effortPtr(ReasoningEffortLow)},
+			want:    false,
+		},
+		{
+			name:    "surrounding whitespace is ignored on every field",
+			attempt: AutomationRunAttempt{AgentType: strPtr("  codex  "), Model: strPtr("  " + CodexModelGPT55 + "  "), ReasoningEffort: strPtr("  xhigh  ")},
+			rank:    AutomationModelRank{AgentType: strPtr("codex"), Model: strPtr(CodexModelGPT55), ReasoningEffort: effortPtr(ReasoningEffortXHigh)},
+			want:    true,
+		},
+		{
+			// A session always records the agent it actually ran, so a rank
+			// still carrying a blank agent can never match its own attempt.
+			// Callers must resolve a rank's agent before comparing, or the
+			// chain re-dispatches the same model until the reaper stops it.
+			name:    "an unresolved rank agent never matches a recorded one",
+			attempt: AutomationRunAttempt{AgentType: strPtr("codex"), Model: strPtr(CodexModelGPT55)},
+			rank:    AutomationModelRank{AgentType: nil, Model: strPtr(CodexModelGPT55)},
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.want, tt.attempt.Matches(tt.rank), "a mis-matched rank is either re-run or skipped, so the identity comparison has to be exact")
+		})
+	}
+}
+
+func TestAutomationRunAttemptProducedWork(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		attempt AutomationRunAttempt
+		want    bool
+	}{
+		{
+			name:    "an attempt that left nothing behind",
+			attempt: AutomationRunAttempt{},
+			want:    false,
+		},
+		{
+			name:    "an attempt that left a diff",
+			attempt: AutomationRunAttempt{ProducedDiff: true},
+			want:    true,
+		},
+		{
+			name:    "an attempt that opened a pull request",
+			attempt: AutomationRunAttempt{ProducedPullRequest: true},
+			want:    true,
+		},
+		{
+			name:    "an attempt that did both",
+			attempt: AutomationRunAttempt{ProducedDiff: true, ProducedPullRequest: true},
+			want:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.want, tt.attempt.ProducedWork(), "promoting past an attempt that left work behind duplicates that work, so either signal has to count")
+		})
+	}
+}
+
+func TestAutomationModelRanksRemaining(t *testing.T) {
+	t.Parallel()
+
+	// A realistic chain whose third rank deliberately repeats the first: the
+	// primary is retried once more after a cheaper model has had a go.
+	opus := AutomationModelRank{AgentType: strPtr("claude_code"), Model: strPtr(ClaudeCodeModelOpus5), ReasoningEffort: effortPtr(ReasoningEffortHigh)}
+	sonnet := AutomationModelRank{AgentType: strPtr("claude_code"), Model: strPtr(ClaudeCodeModelSonnet46), ReasoningEffort: effortPtr(ReasoningEffortHigh), Fallback: true}
+	gpt := AutomationModelRank{AgentType: strPtr("codex"), Model: strPtr(CodexModelGPT55), ReasoningEffort: effortPtr(ReasoningEffortXHigh), Fallback: true}
+	opusAgain := AutomationModelRank{AgentType: strPtr("claude_code"), Model: strPtr(ClaudeCodeModelOpus5), ReasoningEffort: effortPtr(ReasoningEffortHigh), Fallback: true}
+
+	// attemptFor builds the ledger row a session running that rank records.
+	// Each attempt is its own session, so the ids differ.
+	attemptFor := func(rank AutomationModelRank) AutomationRunAttempt {
+		attempt := AutomationRunAttempt{SessionID: uuid.New(), AgentType: rank.AgentType, Model: rank.Model}
+		if rank.ReasoningEffort != nil {
+			attempt.ReasoningEffort = strPtr(string(*rank.ReasoningEffort))
+		}
+		return attempt
+	}
+
+	t.Run("a run with no attempts still has its whole chain", func(t *testing.T) {
+		t.Parallel()
+
+		chain := []AutomationModelRank{opus, sonnet, gpt}
+
+		require.Equal(t, chain, AutomationModelRanksRemaining(chain, nil), "a run that has not dispatched anything must be offered every rank")
+	})
+
+	t.Run("one attempt spends exactly one rank", func(t *testing.T) {
+		t.Parallel()
+
+		chain := []AutomationModelRank{opus, sonnet, gpt}
+
+		remaining := AutomationModelRanksRemaining(chain, []AutomationRunAttempt{attemptFor(opus)})
+
+		require.Equal(t, []AutomationModelRank{sonnet, gpt}, remaining, "the attempted rank drops out and the rest of the chain is untouched")
+	})
+
+	t.Run("an A -> B -> A chain keeps its second A after one A attempt", func(t *testing.T) {
+		t.Parallel()
+
+		// The headline of the greedy earliest-match rule. Spending every rank
+		// an attempt happens to equal would delete both copies of A at once,
+		// so a chain that deliberately returns to its primary could never
+		// reach its third rank.
+		chain := []AutomationModelRank{opus, sonnet, opusAgain}
+
+		remaining := AutomationModelRanksRemaining(chain, []AutomationRunAttempt{attemptFor(opus)})
+
+		require.Equal(t, []AutomationModelRank{sonnet, opusAgain}, remaining, "one attempt on A consumes only the earliest A, leaving the repeat rank to run later")
+	})
+
+	t.Run("the repeated A is all that is left once A and B have run", func(t *testing.T) {
+		t.Parallel()
+
+		chain := []AutomationModelRank{opus, sonnet, opusAgain}
+		// Attempts arrive newest-first, the order the store returns them.
+		attempts := []AutomationRunAttempt{attemptFor(sonnet), attemptFor(opus)}
+
+		remaining := AutomationModelRanksRemaining(chain, attempts)
+
+		require.Equal(t, []AutomationModelRank{opusAgain}, remaining, "after both distinct models have run, the chain's trailing repeat is the only rank left to dispatch")
+	})
+
+	t.Run("a chain with every rank attempted is exhausted", func(t *testing.T) {
+		t.Parallel()
+
+		chain := []AutomationModelRank{opus, sonnet, opusAgain}
+		attempts := []AutomationRunAttempt{attemptFor(opusAgain), attemptFor(sonnet), attemptFor(opus)}
+
+		require.Empty(t, AutomationModelRanksRemaining(chain, attempts), "an exhausted chain must report empty so the run fails instead of re-dispatching a spent rank")
+	})
+
+	t.Run("a rank skipped at pre-flight stays in the chain", func(t *testing.T) {
+		t.Parallel()
+
+		// Pre-flight can skip a rank without spawning a session — no
+		// credential for that agent yet — so the chain advances by what was
+		// attempted, never by a session count. Here sonnet was skipped and
+		// gpt ran instead; sonnet must still be offered.
+		chain := []AutomationModelRank{opus, sonnet, gpt}
+		attempts := []AutomationRunAttempt{attemptFor(gpt), attemptFor(opus)}
+
+		remaining := AutomationModelRanksRemaining(chain, attempts)
+
+		require.Equal(t, []AutomationModelRank{sonnet}, remaining, "a rank nobody attempted is unspent, however many sessions the run has already burned")
+	})
+
+	t.Run("an attempt matching no rank in the chain is ignored", func(t *testing.T) {
+		t.Parallel()
+
+		// The chain is frozen at dispatch, so an edit can leave the run with
+		// an attempt on a model the frozen chain never held. It must not
+		// silently consume somebody else's rank.
+		chain := []AutomationModelRank{opus, sonnet}
+		stranger := AutomationModelRank{AgentType: strPtr("codex"), Model: strPtr(CodexModelGPT53Codex)}
+
+		remaining := AutomationModelRanksRemaining(chain, []AutomationRunAttempt{attemptFor(stranger)})
+
+		require.Equal(t, chain, remaining, "an unrecognized attempt spends nothing")
+	})
+
+	t.Run("the remaining ranks keep their chain order", func(t *testing.T) {
+		t.Parallel()
+
+		// Callers dispatch remaining[0], so the surviving ranks have to come
+		// back in configured order rather than in attempt order.
+		chain := []AutomationModelRank{opus, sonnet, gpt, opusAgain}
+
+		remaining := AutomationModelRanksRemaining(chain, []AutomationRunAttempt{attemptFor(sonnet)})
+
+		require.Equal(t, []AutomationModelRank{opus, gpt, opusAgain}, remaining, "the chain's configured order survives a hole punched in its middle")
+	})
+
+	t.Run("a newest-first ledger replays as the dispatch order that produced it", func(t *testing.T) {
+		t.Parallel()
+
+		// attempts are handed over newest-first; the walk reverses them so it
+		// consumes ranks in the order the sessions actually ran. Today Matches
+		// is an equality test, so distinct attempts claim disjoint ranks and
+		// the direction cannot change the outcome — this pins the input
+		// contract, so that a future non-exact Matches has a case to break.
+		chain := []AutomationModelRank{opus, sonnet, opusAgain, gpt}
+		newestFirst := []AutomationRunAttempt{attemptFor(opusAgain), attemptFor(sonnet), attemptFor(opus)}
+
+		remaining := AutomationModelRanksRemaining(chain, newestFirst)
+
+		require.Equal(t, []AutomationModelRank{gpt}, remaining, "two attempts on A spend both A ranks and leave only the rank nothing has run")
 	})
 }

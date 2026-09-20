@@ -3567,3 +3567,136 @@ func TestAutomationHandler_Get_ResponseCarriesFallbackModels(t *testing.T) {
 	require.Equal(t, a.FallbackModels.ReasoningEfforts, resp.Data.FallbackModels.ReasoningEfforts, "per-rank reasoning efforts should survive the round trip")
 	require.NoError(t, mock.ExpectationsWereMet(), "Get should read the automation once")
 }
+
+// --- pre_pr_review_loops across the fallback chain ---
+
+// TestAutomationHandler_Create_PrePRReviewLoopsAllowsReviewCapableFallback is
+// the reachable half of the guard on Create: a Codex primary with review on and
+// a Claude Code rank is exactly the chain the feature exists to serve, so the
+// new validatePrePRReviewLoopsForFallbackChain call must let it through rather
+// than treating "different agent" as "cannot review".
+func TestAutomationHandler_Create_PrePRReviewLoopsAllowsReviewCapableFallback(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	chain := models.AutomationFallbackModels{Models: []string{models.ClaudeCodeModelOpus48}}
+	mock.ExpectQuery("INSERT INTO automations").
+		WithArgs(automationArgsWithFallbackModels(30, automationInsertFallbackModelsArg, chain)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), time.Now(), time.Now()))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"name":                "my automation",
+		"goal":                "poke at things",
+		"interval_value":      2,
+		"interval_unit":       "days",
+		"agent_type":          string(models.AgentTypeCodex),
+		"model":               models.CodexModelGPT55,
+		"pre_pr_review_loops": 2,
+		// No agent_types: the rank's agent is inferred from the model name, so
+		// the guard has to resolve it the same way dispatch will.
+		"fallback_models": map[string]any{"models": []string{models.ClaudeCodeModelOpus48}},
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, "a Claude Code rank under a Codex primary can review, so review loops must not block it")
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Create should return the automation it stored")
+	require.Equal(t, 2, resp.Data.PrePRReviewLoops, "the requested review loop count should survive the chain check")
+	require.Equal(t, chain.Models, resp.Data.FallbackModels.Models, "the approved chain should be returned untouched")
+	require.NoError(t, mock.ExpectationsWereMet(), "an approved chain should reach the INSERT")
+}
+
+// TestAutomationHandler_Create_PrePRReviewLoopsZeroSkipsTheChain pins the other
+// edge of the guard: with review off there is nothing to review with, so a rank
+// on any agent is fine. Amp is the interesting rank here — it is the agent the
+// guard's own error message tells users to avoid — and it must still save when
+// the automation never asked for a review loop.
+func TestAutomationHandler_Create_PrePRReviewLoopsZeroSkipsTheChain(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	chain := models.AutomationFallbackModels{Models: []string{models.AmpModeSmart}}
+	mock.ExpectQuery("INSERT INTO automations").
+		WithArgs(automationArgsWithFallbackModels(30, automationInsertFallbackModelsArg, chain)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), time.Now(), time.Now()))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"name":                "my automation",
+		"goal":                "poke at things",
+		"interval_value":      2,
+		"interval_unit":       "days",
+		"agent_type":          string(models.AgentTypeClaudeCode),
+		"model":               models.ClaudeCodeModelSonnet46,
+		"pre_pr_review_loops": 0,
+		"fallback_models":     map[string]any{"models": []string{models.AmpModeSmart}},
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, "with review off the chain constraint does not apply, so an Amp rank should save")
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Create should return the automation it stored")
+	require.Equal(t, 0, resp.Data.PrePRReviewLoops, "an explicit 0 must not be overwritten by the per-agent default")
+	require.Equal(t, chain.Models, resp.Data.FallbackModels.Models, "the Amp rank should be stored as sent")
+	require.NoError(t, mock.ExpectationsWereMet(), "the chain should reach the INSERT")
+}
+
+func TestAutomationHandler_Update_RaisingPrePRReviewLoopsRechecksStoredChain(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID, id := uuid.New(), uuid.New()
+	now := time.Now()
+	iv := 1
+	unit := models.ScheduleUnitDays
+	agentType := string(models.AgentTypeCodex)
+	// An Amp rank saved while review was off — the shape the guard has to
+	// re-examine the moment pre_pr_review_loops is raised above zero.
+	chain := models.AutomationFallbackModels{Models: []string{models.AmpModeSmart}}
+	stored := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		AgentType:        &agentType,
+		PrePRReviewLoops: 0,
+		FallbackModels:   chain,
+		ExecutionMode:    "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, stored))
+	mock.ExpectExec("UPDATE automations SET").
+		WithArgs(automationArgsWithFallbackModels(32, automationUpdateFallbackModelsArg, chain)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{"pre_pr_review_loops": 3}
+	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Update(rr, req)
+	// Amp does support native review today (models.AgentSupportsNativeReview),
+	// so the stored chain survives the raise. If that ever changes, this test
+	// is the one that will catch the API accepting a chain publication cannot
+	// finish.
+	require.Equal(t, http.StatusOK, rr.Code, "every stored rank can review, so raising the loop count should be accepted")
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Update should return the automation it stored")
+	require.Equal(t, 3, resp.Data.PrePRReviewLoops, "the raised loop count should be persisted")
+	require.Equal(t, chain.Models, resp.Data.FallbackModels.Models, "re-checking the stored chain must not drop it")
+	require.NoError(t, mock.ExpectationsWereMet(), "the untouched chain should reach the UPDATE")
+}

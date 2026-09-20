@@ -15,7 +15,7 @@ import (
 // is the same snapshot-first rule automationRunIdentityScope applies to
 // identity. A snapshot written before fallback models existed reports ok=false,
 // and only then do we read the live row.
-func automationModelCandidates(run models.AutomationRun, automation models.Automation) ([]models.AutomationModelRank, error) {
+func automationModelCandidates(run models.AutomationRun, automation models.Automation, defaultAgentType models.AgentType) ([]models.AutomationModelRank, error) {
 	ranks, ok, err := models.AutomationModelRanksFromConfigSnapshot(run.ConfigSnapshot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve automation model ranks: %w", err)
@@ -24,19 +24,53 @@ func automationModelCandidates(run models.AutomationRun, automation models.Autom
 		ranks = automation.ModelRanks()
 	}
 
+	// Resolve every rank's agent to a concrete value FIRST, because two things
+	// downstream compare agents and both are wrong on a blank one. Availability
+	// cannot look up a credential for "", so a blank rank would dispatch
+	// unchecked; and a session records the agent it actually ran, so a rank
+	// still carrying nil never matches its own attempt and the chain
+	// re-dispatches that model until the reaper stops it. Leaving the agent
+	// unset is the common automation configuration, so both paths matter.
+	resolved := make([]models.AutomationModelRank, 0, len(ranks))
+	for _, rank := range ranks {
+		agentType := string(automationRankAgentType(rank, defaultAgentType))
+		rank.AgentType = &agentType
+		resolved = append(resolved, rank)
+	}
+
 	// Collapse consecutive duplicates the way codeReviewOrchestratorCandidates
 	// compares roster entries: a fallback that repeats the rank before it would
 	// otherwise burn an attempt re-running the model that just failed.
 	// Non-adjacent repeats are kept, because a chain that deliberately returns
-	// to an earlier model after trying another one is a valid retry strategy.
-	candidates := make([]models.AutomationModelRank, 0, len(ranks))
-	for _, rank := range ranks {
+	// to an earlier model after trying another one is a valid retry strategy —
+	// models.AutomationModelRanksRemaining spends those positions one at a time
+	// so the later copy is genuinely reachable.
+	candidates := make([]models.AutomationModelRank, 0, len(resolved))
+	for _, rank := range resolved {
 		if len(candidates) > 0 && automationModelRanksEqual(candidates[len(candidates)-1], rank) {
 			continue
 		}
 		candidates = append(candidates, rank)
 	}
 	return candidates, nil
+}
+
+// automationRankAgentType applies the automation agent ladder to one rank:
+// the rank's own agent, else the org default the caller resolved, else the
+// built-in default. A rank naming only a model still inherits the org default.
+func automationRankAgentType(rank models.AutomationModelRank, defaultAgentType models.AgentType) models.AgentType {
+	if explicit := strings.TrimSpace(stringPtrValue(rank.AgentType)); explicit != "" {
+		candidate := models.AgentType(explicit)
+		if err := candidate.Validate(); err == nil {
+			return candidate
+		}
+	}
+	if defaultAgentType != "" {
+		if err := defaultAgentType.Validate(); err == nil {
+			return defaultAgentType
+		}
+	}
+	return models.DefaultDefaultAgentType
 }
 
 // automationModelRanksEqual treats reasoning effort as part of a rank's
@@ -61,34 +95,6 @@ func automationModelRankAgentType(rank models.AutomationModelRank) string {
 
 func automationModelRankModel(rank models.AutomationModelRank) string {
 	return strings.TrimSpace(stringPtrValue(rank.Model))
-}
-
-// automationModelCandidatesRemaining drops every candidate the run has already
-// spent a session on. This — not a session count — is what advances the chain:
-// pre-flight availability can skip a rank without spawning a session, so the
-// Nth session is not necessarily rank N, and resuming by count would re-dispatch
-// the model that just failed while never reaching the tail of the chain.
-//
-// Matching on (agent, model) rather than on position also means a rank that
-// merely repeats an earlier one is never spent twice.
-func automationModelCandidatesRemaining(candidates []models.AutomationModelRank, attempts []models.AutomationRunAttempt) []models.AutomationModelRank {
-	if len(attempts) == 0 {
-		return candidates
-	}
-	remaining := make([]models.AutomationModelRank, 0, len(candidates))
-	for _, candidate := range candidates {
-		spent := false
-		for _, attempt := range attempts {
-			if attempt.Matches(candidate) {
-				spent = true
-				break
-			}
-		}
-		if !spent {
-			remaining = append(remaining, candidate)
-		}
-	}
-	return remaining
 }
 
 // automationModelCandidateLabels names the ranks considered on this dispatch,
@@ -129,14 +135,13 @@ func resolveAutomationModelSelection(ctx context.Context, services *Services, or
 
 	for idx := 0; idx < len(candidates); idx++ {
 		candidate := candidates[idx]
+		// Every candidate reaches here with a concrete agent, because
+		// automationModelCandidates resolved the ladder before dedupe. A blank
+		// one would mean an unchecked dispatch, so treat it as unusable rather
+		// than assuming it works.
 		agentType := automationModelRankAgentType(candidate)
 		if agentType == "" {
-			// The agent is resolved downstream by the handler's ladder (org
-			// default, then the built-in default), so there is nothing to look
-			// up here yet. Treat the rank as usable rather than skipping it —
-			// leaving the agent unset is the common automation configuration,
-			// and skipping would strand those runs with no candidate at all.
-			return candidate, idx, true, nil
+			continue
 		}
 		available, err := services.CodingAgents.IsAgentAvailable(ctx, orgID, userID, models.AgentType(agentType), automationModelRankModel(candidate))
 		if err != nil {

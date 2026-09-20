@@ -121,8 +121,12 @@ func TestAutomationModelCandidates(t *testing.T) {
 		name       string
 		snapshot   json.RawMessage
 		automation models.Automation
-		expected   []automationModelRankForTest
-		expectErr  bool
+		// defaultAgentType is the org default the handler resolves once per
+		// dispatch. The zero value exercises the bottom of the ladder, where
+		// models.DefaultDefaultAgentType is the last resort.
+		defaultAgentType models.AgentType
+		expected         []automationModelRankForTest
+		expectErr        bool
 	}{
 		{
 			// The snapshot is the contract the run was dispatched under, so it
@@ -214,6 +218,43 @@ func TestAutomationModelCandidates(t *testing.T) {
 			},
 		},
 		{
+			// Resolution has to happen BEFORE the collapse, not after. These
+			// two ranks end up naming the same agent and the same model; the
+			// only difference is that the primary inherits its agent while the
+			// fallback spells it out. Comparing the raw pointers first sees
+			// "" against "codex", keeps both, and spends a whole extra attempt
+			// re-running the model that just failed.
+			name: "collapses a rank that inherits its agent into the adjacent rank that names it",
+			automation: models.Automation{
+				ID:            uuid.New(),
+				ModelOverride: stringPtr(models.DefaultCodexModel),
+				FallbackModels: models.AutomationFallbackModels{
+					AgentTypes: []string{string(models.AgentTypeCodex)},
+					Models:     []string{models.DefaultCodexModel},
+				},
+			},
+			defaultAgentType: models.AgentTypeCodex,
+			expected: []automationModelRankForTest{
+				{AgentType: string(models.AgentTypeCodex), Model: models.DefaultCodexModel},
+			},
+		},
+		{
+			// An automation that overrides only the model is the common shape,
+			// and its primary reaches here with no agent at all. The org
+			// default the handler resolved must be stamped onto it, because
+			// everything downstream — the availability lookup, the session
+			// row, the attempt ledger — deals in concrete agents.
+			name: "stamps the org default onto a primary that names only a model",
+			automation: models.Automation{
+				ID:            uuid.New(),
+				ModelOverride: stringPtr(models.DefaultCodexModel),
+			},
+			defaultAgentType: models.AgentTypeOpenCode,
+			expected: []automationModelRankForTest{
+				{AgentType: string(models.AgentTypeOpenCode), Model: models.DefaultCodexModel},
+			},
+		},
+		{
 			// A snapshot we cannot parse must surface as an error rather than
 			// quietly degrading to the live row: the caller fails the run so a
 			// human sees the corruption instead of a run that silently ignored
@@ -230,7 +271,7 @@ func TestAutomationModelCandidates(t *testing.T) {
 			t.Parallel()
 
 			run := models.AutomationRun{ID: uuid.New(), ConfigSnapshot: tt.snapshot}
-			candidates, err := automationModelCandidates(run, tt.automation)
+			candidates, err := automationModelCandidates(run, tt.automation, tt.defaultAgentType)
 			if tt.expectErr {
 				require.Error(t, err, "an unparseable snapshot must not be mistaken for a run that simply has no chain")
 				return
@@ -242,113 +283,76 @@ func TestAutomationModelCandidates(t *testing.T) {
 	}
 }
 
-// TestAutomationModelCandidatesRemaining covers the defect this whole rework
-// exists to fix. The chain used to advance by session count, but pre-flight
-// availability can skip a rank without ever spawning a session, so the Nth
-// session is not the Nth rank: with [opus, codex (no credential), sonnet], the
-// run reached sonnet on its second session, and the third dispatch — indexing
-// at count 2 — landed back on sonnet and re-ran the model that had just failed.
-// Subtracting the (agent, model) pairs that actually ran is what makes that
-// impossible: a model is dropped the moment it has a session, so the third
-// dispatch can only reach a rank no session has touched.
-func TestAutomationModelCandidatesRemaining(t *testing.T) {
+// TestAutomationRankAgentType pins the ladder every rank is resolved through
+// before anything compares, checks or dispatches it. A rank that leaves this
+// function without a concrete agent is the infinite-re-dispatch bug: the
+// session records the agent it actually ran, so a rank still carrying nil can
+// never match its own attempt and the run re-dispatches that model until the
+// reaper kills it.
+func TestAutomationRankAgentType(t *testing.T) {
 	t.Parallel()
 
-	opus := models.AutomationModelRank{
-		AgentType: stringPtr(string(models.AgentTypeClaudeCode)),
-		Model:     stringPtr(models.ClaudeCodeModelOpus5),
-	}
-	codex := models.AutomationModelRank{
-		AgentType: stringPtr(string(models.AgentTypeCodex)),
-		Model:     stringPtr(models.DefaultCodexModel),
-		Fallback:  true,
-	}
-	sonnet := models.AutomationModelRank{
-		AgentType: stringPtr(string(models.AgentTypeClaudeCode)),
-		Model:     stringPtr(models.ClaudeCodeModelSonnet46),
-		Fallback:  true,
-	}
-	// A rank that names only a model: its agent is resolved downstream by the
-	// handler's ladder, so it is stored with no agent at all.
-	agentlessOpus := models.AutomationModelRank{Model: stringPtr(models.ClaudeCodeModelOpus5), Fallback: true}
-
-	attempt := func(agentType, model *string) models.AutomationRunAttempt {
-		return models.AutomationRunAttempt{SessionID: uuid.New(), AgentType: agentType, Model: model}
-	}
-
 	tests := []struct {
-		name       string
-		candidates []models.AutomationModelRank
-		attempts   []models.AutomationRunAttempt
-		expected   []models.AutomationModelRank
+		name             string
+		rank             models.AutomationModelRank
+		defaultAgentType models.AgentType
+		expected         models.AgentType
 	}{
 		{
-			// The first dispatch of a run has nothing to subtract, so the
-			// chain must come through untouched down to the primary.
-			name:       "returns the chain unchanged when the run has attempted nothing",
-			candidates: []models.AutomationModelRank{opus, codex, sonnet},
-			expected:   []models.AutomationModelRank{opus, codex, sonnet},
+			// A rank that names its own agent is the whole point of a
+			// heterogeneous chain, so it outranks anything the org says.
+			name:             "a rank's own agent wins over the org default",
+			rank:             models.AutomationModelRank{AgentType: stringPtr(string(models.AgentTypeClaudeCode)), Model: stringPtr(models.DefaultClaudeCodeModel)},
+			defaultAgentType: models.AgentTypeCodex,
+			expected:         models.AgentTypeClaudeCode,
 		},
 		{
-			// The regression itself: codex was skipped pre-flight for want of
-			// a credential, so the run's two sessions covered ranks 0 and 2 and
-			// the session count (2) lagged the chain position (3). Counting
-			// said "resume at rank 2" and re-ran sonnet, the model that had
-			// just failed. Subtracting what actually ran leaves only the rank
-			// no session ever touched — and never sonnet again.
-			name:       "never returns a rank a session already ran, even when a skipped rank made the count lag the chain",
-			candidates: []models.AutomationModelRank{opus, codex, sonnet},
-			attempts: []models.AutomationRunAttempt{
-				// Newest first, the order ListSessionAttempts returns.
-				attempt(sonnet.AgentType, sonnet.Model),
-				attempt(opus.AgentType, opus.Model),
-			},
-			expected: []models.AutomationModelRank{codex},
+			// An agent that is not on the roster — a typo, or one retired
+			// since the automation was saved — would fail every availability
+			// lookup, so it falls through rather than stranding the rank.
+			name:             "an explicit agent that is not a real agent falls through to the org default",
+			rank:             models.AutomationModelRank{AgentType: stringPtr("retired_agent"), Model: stringPtr(models.DefaultCodexModel)},
+			defaultAgentType: models.AgentTypeClaudeCode,
+			expected:         models.AgentTypeClaudeCode,
 		},
 		{
-			// Once every rank has a session, nothing remains and the caller
-			// fails the run instead of wrapping around to the primary. This is
-			// the state the count-based logic could never reach, because its
-			// index had already passed the end of a chain it had not spent.
-			name:       "returns nothing once every rank in the chain has a session",
-			candidates: []models.AutomationModelRank{opus, codex, sonnet},
-			attempts: []models.AutomationRunAttempt{
-				attempt(sonnet.AgentType, sonnet.Model),
-				attempt(codex.AgentType, codex.Model),
-				attempt(opus.AgentType, opus.Model),
-			},
-			expected: []models.AutomationModelRank{},
+			// Whitespace is not an agent. An entry padded by an older writer
+			// must take the default instead of being looked up as " ".
+			name:             "a whitespace-only agent takes the org default",
+			rank:             models.AutomationModelRank{AgentType: stringPtr("   "), Model: stringPtr(models.DefaultCodexModel)},
+			defaultAgentType: models.AgentTypeOpenCode,
+			expected:         models.AgentTypeOpenCode,
 		},
 		{
-			// nil and "" are the same value here: an agentless rank is spent
-			// by the agentless session it spawned, while the rank that names
-			// an agent for the same model is untouched, because the agent is
-			// half the key.
-			name:       "matches an agentless attempt to the agentless rank only",
-			candidates: []models.AutomationModelRank{opus, agentlessOpus},
-			attempts:   []models.AutomationRunAttempt{attempt(nil, stringPtr(models.ClaudeCodeModelOpus5))},
-			expected:   []models.AutomationModelRank{opus},
+			// The common automation shape: only a model is overridden, and the
+			// org's configured default supplies the agent.
+			name:             "a rank with no agent takes the org default",
+			rank:             models.AutomationModelRank{Model: stringPtr(models.DefaultClaudeCodeModel)},
+			defaultAgentType: models.AgentTypeClaudeCode,
+			expected:         models.AgentTypeClaudeCode,
 		},
 		{
-			// Matching is by identity, not by index: an attempt on rank 1
-			// spends rank 1 and leaves the primary available, and the stored
-			// strings are compared trimmed so padding written by an older
-			// caller cannot make a spent rank look fresh.
-			name:       "spends the rank whose trimmed agent and model match, not the rank at that position",
-			candidates: []models.AutomationModelRank{opus, codex, sonnet},
-			attempts: []models.AutomationRunAttempt{
-				attempt(stringPtr("  "+string(models.AgentTypeCodex)+" "), stringPtr(" "+models.DefaultCodexModel+"  ")),
-			},
-			expected: []models.AutomationModelRank{opus, sonnet},
+			// Orgs that never set a default still have to dispatch, so the
+			// bottom of the ladder is the built-in default rather than "".
+			name:     "an empty org default falls to the built-in default",
+			rank:     models.AutomationModelRank{Model: stringPtr(models.DefaultCodexModel)},
+			expected: models.DefaultDefaultAgentType,
 		},
 		{
-			// A -> B -> A is a legal chain, but the run only ever gets one
-			// session per model: once A has run, both copies of it are spent,
-			// because a second session on A would repeat work already done.
-			name:       "spends every copy of a model that appears twice in the chain",
-			candidates: []models.AutomationModelRank{opus, codex, opus},
-			attempts:   []models.AutomationRunAttempt{attempt(opus.AgentType, opus.Model)},
-			expected:   []models.AutomationModelRank{codex},
+			// Org settings are user-writable, so an unparseable default must
+			// not leak into a rank and fail the availability lookup there.
+			name:             "an invalid org default falls to the built-in default",
+			rank:             models.AutomationModelRank{Model: stringPtr(models.DefaultCodexModel)},
+			defaultAgentType: models.AgentType("retired_agent"),
+			expected:         models.DefaultDefaultAgentType,
+		},
+		{
+			// Both rungs above are unusable, so even a rank naming nothing at
+			// all comes out dispatchable.
+			name:             "a rank with neither agent nor a usable default still resolves",
+			rank:             models.AutomationModelRank{},
+			defaultAgentType: models.AgentType(" "),
+			expected:         models.DefaultDefaultAgentType,
 		},
 	}
 
@@ -356,11 +360,61 @@ func TestAutomationModelCandidatesRemaining(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			remaining := automationModelCandidatesRemaining(tt.candidates, tt.attempts)
-			require.Equal(t, automationModelRanksForTest(tt.expected), automationModelRanksForTest(remaining),
-				"only ranks this run has not already spent a session on may be dispatched again")
+			resolved := automationRankAgentType(tt.rank, tt.defaultAgentType)
+			require.Equal(t, tt.expected, resolved,
+				"the rank agent ladder decides which credential is checked and which agent the session records")
+			require.NoError(t, resolved.Validate(),
+				"every rank must leave the ladder on a real agent; an unusable one fails availability and never matches its own attempt")
 		})
 	}
+}
+
+// TestAutomationModelCandidates_ResolvesEveryRankAgent is the regression guard
+// for the infinite re-dispatch loop. A rank used to keep whatever agent the
+// automation stored — nil for an automation that overrides only the model —
+// while the session it spawned recorded the agent the ladder resolved
+// downstream. The frozen rank and its own attempt therefore never matched, so
+// models.AutomationModelRanksRemaining handed the same rank back on every
+// dispatch and the run re-ran one model until the stuck-run reaper failed it.
+func TestAutomationModelCandidates_ResolvesEveryRankAgent(t *testing.T) {
+	t.Parallel()
+
+	// No agent_type anywhere: neither the primary nor the fallback names one,
+	// which is exactly the shape that used to come back nil.
+	automation := models.Automation{
+		ID:            uuid.New(),
+		ModelOverride: stringPtr(models.DefaultCodexModel),
+		FallbackModels: models.AutomationFallbackModels{
+			Models: []string{models.DefaultClaudeCodeModel},
+		},
+	}
+	run := models.AutomationRun{ID: uuid.New()}
+
+	candidates, err := automationModelCandidates(run, automation, models.AgentTypeOpenCode)
+	require.NoError(t, err, "an automation that overrides only its model still has a chain to dispatch")
+	require.Len(t, candidates, 2, "the primary and its one fallback are distinct models and must both survive the collapse")
+
+	for idx, candidate := range candidates {
+		require.NotNil(t, candidate.AgentType,
+			"rank %d must carry a concrete agent: a nil agent could never match its own recorded attempt, so the run would re-dispatch this model forever", idx)
+		require.NoError(t, models.AgentType(*candidate.AgentType).Validate(),
+			"rank %d must resolve to a real agent, since availability is looked up per (agent, model)", idx)
+	}
+
+	require.Equal(t, string(models.AgentTypeOpenCode), stringPtrValue(candidates[0].AgentType),
+		"rank 0 of an automation with no agent_type must carry the org default, not nil — the session it dispatches records that same agent")
+
+	// The proof that the ledger now closes the loop: the attempt a dispatch of
+	// rank 0 would record spends rank 0, leaving only the fallback. Before the
+	// fix this returned the full chain again, forever.
+	attempt := models.AutomationRunAttempt{
+		SessionID: uuid.New(),
+		AgentType: candidates[0].AgentType,
+		Model:     candidates[0].Model,
+	}
+	remaining := models.AutomationModelRanksRemaining(candidates, []models.AutomationRunAttempt{attempt})
+	require.Equal(t, automationModelRanksForTest(candidates[1:]), automationModelRanksForTest(remaining),
+		"the attempt a resolved rank produces must spend that rank, or the chain never advances past its primary")
 }
 
 func TestResolveAutomationModelSelection(t *testing.T) {
@@ -374,8 +428,18 @@ func TestResolveAutomationModelSelection(t *testing.T) {
 		{AgentType: stringPtr(string(models.AgentTypeClaudeCode)), Model: stringPtr(models.DefaultClaudeCodeModel), Fallback: true},
 		{AgentType: stringPtr(string(models.AgentTypeOpenCode)), Model: stringPtr(models.OpenCodeModelGPT55), Fallback: true},
 	}
-	// The second rank leaves its agent unset, which is the common shape for an
-	// automation that only overrides the model.
+	// The shape automationModelCandidates actually produces for an automation
+	// that only overrides the model: the second rank named no agent, and the
+	// ladder stamped the org default onto it before this walk ever sees it.
+	// Nothing here is special-cased for it — it is checked like any other rank.
+	chainWithInheritedAgent := []models.AutomationModelRank{
+		rankedChain[0],
+		{AgentType: stringPtr(string(models.AgentTypeClaudeCode)), Model: stringPtr(models.DefaultClaudeCodeModel), Fallback: true},
+	}
+	// A rank that reached the walk with its agent still blank. This cannot
+	// happen through automationModelCandidates any more, so it means something
+	// upstream failed to resolve — and there is no credential to look up for
+	// "", so dispatching it would be an unchecked dispatch.
 	chainWithUnsetAgent := []models.AutomationModelRank{
 		rankedChain[0],
 		{Model: stringPtr(models.DefaultClaudeCodeModel), Fallback: true},
@@ -452,15 +516,26 @@ func TestResolveAutomationModelSelection(t *testing.T) {
 			expectedOK:    true,
 		},
 		{
-			// A rank with no agent has nothing to look up yet: the handler's
-			// ladder (org default, then the built-in default) resolves it
-			// downstream. Skipping it would strand the most common automation
-			// configuration with no candidate at all.
-			name:           "selects a rank with an unset agent without a credential lookup",
-			candidates:     chainWithUnsetAgent,
+			// A rank that inherited its agent is not privileged. It used to be
+			// returned unchecked, which meant the most common automation shape
+			// dispatched into a credential nobody had verified; now the lookup
+			// happens against the agent the ladder resolved, which is also the
+			// agent the session will record.
+			name:           "checks a rank that inherited its agent, using the resolved agent",
+			candidates:     chainWithInheritedAgent,
 			unavailable:    []int{0},
 			expectedIndex:  1,
 			expectedOK:     true,
+			expectedChecks: []int{0, 1},
+		},
+		{
+			// A blank agent has no credential to look up, so "assume it works"
+			// was really "dispatch unchecked". Treat it as unusable instead and
+			// keep walking; a later rank may still be runnable.
+			name:           "skips a rank whose agent is still blank rather than dispatching it unchecked",
+			candidates:     chainWithUnsetAgent,
+			unavailable:    []int{0},
+			expectedOK:     false,
 			expectedChecks: []int{0},
 		},
 	}
@@ -623,15 +698,15 @@ func TestAutomationRunHandler_FailsRunWhenNoModelRankIsAvailable(t *testing.T) {
 			50, []byte("{}"), now, now, nil,
 		))
 
+	// No sessions yet, so nothing is subtracted and the walk considers the
+	// whole chain, primary first.
+	expectAutomationRunSessionAttempts(mock)
+
 	// The run is claimed first, so the failure below has to be written from
 	// running rather than pending.
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	// No sessions yet, so nothing is subtracted and the walk considers the
-	// whole chain, primary first.
-	expectAutomationRunSessionAttempts(mock)
 
 	// TransitionStatusIf's named arguments expand in order of first appearance
 	// in the SQL: to_status, completed_at, result_summary, id, org_id,

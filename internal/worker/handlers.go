@@ -2332,7 +2332,23 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		// require coupling automations and automation_runs tables into one
 		// UPDATE, which isn't worth the complexity for a race that only
 		// starts *one* extra session.
-		if !automation.Enabled {
+		// The sessions already linked to this run are the model attempts already
+		// spent. Read before the pause check below, which needs to know whether
+		// this run has ever started.
+		attempts, err := stores.AutomationRuns.ListSessionAttempts(ctx, orgID, runID)
+		if err != nil {
+			return fmt.Errorf("resolve automation run attempts: %w", err)
+		}
+
+		// A promoted run sits in pending between its capacity failure and the
+		// worker claiming its next model, so "pending" no longer implies "never
+		// started". Skipping one mid-chain would cancel a run that is genuinely
+		// in flight, which is the opposite of the pause contract above.
+		if !automation.Enabled && len(attempts) > 0 {
+			log.Info().Int("attempts", len(attempts)).
+				Msg("automation paused mid-fallback-chain; continuing the in-flight run")
+		}
+		if !automation.Enabled && len(attempts) == 0 {
 			now := time.Now()
 			summary := "automation paused before run could start"
 			if _, err := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusSkipped, &now, &summary); err != nil {
@@ -2397,22 +2413,32 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			}
 		}
 
-		// The sessions already linked to this run are the model attempts already
-		// spent. Dropping those from the chain — rather than indexing into it by
-		// session count — is what makes a re-dispatch resume on a model that has
-		// not run yet: pre-flight availability can skip a rank without spawning
-		// a session, so the Nth session is not necessarily rank N.
-		attempts, err := stores.AutomationRuns.ListSessionAttempts(ctx, orgID, runID)
-		if err != nil {
-			failClaimedRun(fmt.Sprintf("failed to read automation run attempts: %s", err))
-			return fmt.Errorf("resolve automation run attempts: %w", err)
+		// Dropping the already-spent ranks from the chain — rather than indexing
+		// into it by session count — is what makes a re-dispatch resume on a
+		// model that has not run yet: pre-flight availability can skip a rank
+		// without spawning a session, so the Nth session is not necessarily
+		// rank N.
+		//
+		// The org default feeds the agent ladder for every rank at once, so the
+		// agent a rank is checked against, dispatched on, and later matched by
+		// are all the same concrete value.
+		orgDefaultAgentType := models.DefaultDefaultAgentType
+		if stores.Organizations != nil {
+			org, orgErr := stores.Organizations.GetByID(ctx, orgID)
+			if orgErr != nil {
+				log.Warn().Err(orgErr).Msg("failed to load org settings for automation agent fallback")
+			} else if settings, parseErr := models.ParseOrgSettings(org.Settings); parseErr != nil {
+				log.Warn().Err(parseErr).Msg("failed to parse org settings for automation agent fallback")
+			} else if settings.DefaultAgentType != "" {
+				orgDefaultAgentType = settings.DefaultAgentType
+			}
 		}
-		candidates, err := automationModelCandidates(run, automation)
+		candidates, err := automationModelCandidates(run, automation, orgDefaultAgentType)
 		if err != nil {
 			failClaimedRun(err.Error())
 			return nil
 		}
-		remaining := automationModelCandidatesRemaining(candidates, attempts)
+		remaining := models.AutomationModelRanksRemaining(candidates, attempts)
 		rank, _, rankAvailable, err := resolveAutomationModelSelection(ctx, services, orgID, sessionTriggeredByUserID, remaining)
 		if err != nil {
 			failClaimedRun(fmt.Sprintf("failed to resolve automation model availability: %s", err))
@@ -2437,27 +2463,9 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			return nil
 		}
 
-		// The selected rank's agent type is the explicit input to the ladder
-		// below rather than a replacement for it, so a fallback that names only
-		// a model still inherits the org default agent.
-		agentType := models.DefaultDefaultAgentType
-		if rankAgentType := strings.TrimSpace(stringPtrValue(rank.AgentType)); rankAgentType != "" {
-			candidate := models.AgentType(rankAgentType)
-			if err := candidate.Validate(); err == nil {
-				agentType = candidate
-			} else {
-				log.Warn().Err(err).Msg("invalid agent_type on automation, falling back to default")
-			}
-		} else if stores.Organizations != nil {
-			org, err := stores.Organizations.GetByID(ctx, orgID)
-			if err != nil {
-				log.Warn().Err(err).Msg("failed to load org settings for automation agent fallback")
-			} else if settings, err := models.ParseOrgSettings(org.Settings); err != nil {
-				log.Warn().Err(err).Msg("failed to parse org settings for automation agent fallback")
-			} else if settings.DefaultAgentType != "" {
-				agentType = settings.DefaultAgentType
-			}
-		}
+		// Already resolved through the ladder alongside every other rank, so
+		// the session records the same agent the ledger will match on.
+		agentType := automationRankAgentType(rank, orgDefaultAgentType)
 
 		var targetBranch *string
 		if automation.BaseBranch != "" {

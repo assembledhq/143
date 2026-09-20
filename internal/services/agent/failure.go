@@ -300,3 +300,48 @@ func ModelUnavailable(message string) bool {
 	// health: a model-capacity error does not mean its credential is unhealthy.
 	return CredentialFailureSignalFromResult(&AgentResult{Error: message}, time.Now()).RateLimited
 }
+
+// preAgentSetupFailureMarkers are the orchestrator's own failure messages for
+// steps that run BEFORE any model is invoked — resolving a GitHub installation
+// token, cloning the repository. Each is written in exactly one place (a
+// failRun call site in orchestrator.go) rather than parsed from a provider
+// response.
+//
+// Matched anywhere in the message rather than only at the start, because an
+// outer layer may wrap them. The asymmetry is deliberate: a false negative here
+// costs one fallback opportunity, while a false positive spends a full agent
+// run on every model in the chain.
+var preAgentSetupFailureMarkers = []string{
+	"get installation token:",
+	"clone repo:",
+}
+
+// ModelUnavailableForRetry reports whether a failure is one a DIFFERENT model
+// could plausibly survive. It is ModelUnavailable narrowed on both ends, for
+// callers that respond by spending another agent run.
+//
+// It drops the bare "service unavailable" marker, which any dependency's HTTP
+// 503 produces, and it rejects the orchestrator's pre-agent setup failures
+// outright. Without those two narrowings a GitHub outage reads as model
+// capacity: every model in a fallback chain gets its own session and fails
+// identically, turning one dependency blip into N wasted agent runs.
+//
+// ModelUnavailable keeps the broader vocabulary because its code-review caller
+// classifies an error that already came from a model turn, where a 503 has no
+// other plausible source.
+func ModelUnavailableForRetry(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	for _, marker := range preAgentSetupFailureMarkers {
+		if strings.Contains(lower, marker) {
+			return false
+		}
+	}
+	for _, marker := range []string{
+		"model is at capacity", "model is overloaded", "overloaded_error", "server is overloaded",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return CredentialFailureSignalFromResult(&AgentResult{Error: message}, time.Now()).RateLimited
+}

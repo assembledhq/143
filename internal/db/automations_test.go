@@ -1427,25 +1427,32 @@ func TestAutomationStore_FallbackModelsRoundTrip(t *testing.T) {
 // ListSessionAttempts. The store collects rows with pgx.RowToStructByPos, so
 // these columns must stay in lock-step with the field order of
 // models.AutomationRunAttempt — a drift between the two would misalign the
-// agent, model and work flags silently in production.
+// agent, model, effort and work flags silently in production. reasoning_effort
+// sits between model_override and produced_diff because that is where
+// ReasoningEffort sits in the struct; moving it one slot would scan the
+// produced_diff bool into it without any error.
 func automationRunAttemptColumns() []string {
-	return []string{"id", "agent_type", "model_override", "produced_diff", "produced_pull_request"}
+	return []string{"id", "agent_type", "model_override", "reasoning_effort", "produced_diff", "produced_pull_request"}
 }
 
 func addAutomationRunAttemptRow(rows *pgxmock.Rows, a models.AutomationRunAttempt) *pgxmock.Rows {
-	return rows.AddRow(a.SessionID, a.AgentType, a.Model, a.ProducedDiff, a.ProducedPullRequest)
+	return rows.AddRow(a.SessionID, a.AgentType, a.Model, a.ReasoningEffort, a.ProducedDiff, a.ProducedPullRequest)
 }
 
 // listSessionAttemptsQuery pins the projection, the link join and the ordering.
+// reasoning_effort is named explicitly so the pin actually fails if the column
+// is dropped from the SELECT: it is part of rank identity now, and a chain that
+// deliberately re-tries one model at a cheaper level depends on it.
+//
 // The ORDER BY is part of the contract, not a nicety: the promotion hook reads
 // attempts[0] as "the session that just failed", so rows in the wrong order
 // would let a superseded session yank a running chain back to pending.
-const listSessionAttemptsQuery = `SELECT sessions\.id, sessions\.agent_type, sessions\.model_override[\s\S]+FROM session_automation_links[\s\S]+ORDER BY sessions\.created_at DESC`
+const listSessionAttemptsQuery = `SELECT sessions\.id, sessions\.agent_type, sessions\.model_override, sessions\.reasoning_effort[\s\S]+FROM session_automation_links[\s\S]+ORDER BY sessions\.created_at DESC`
 
 func TestAutomationRunStore_ListSessionAttempts(t *testing.T) {
 	t.Parallel()
 
-	t.Run("returns attempts newest first with the agent, model and work flags", func(t *testing.T) {
+	t.Run("returns attempts newest first with the agent, model, effort and work flags", func(t *testing.T) {
 		t.Parallel()
 
 		mock, err := pgxmock.NewPool()
@@ -1456,15 +1463,16 @@ func TestAutomationRunStore_ListSessionAttempts(t *testing.T) {
 		orgID := uuid.New()
 		runID := uuid.New()
 
-		// The newest attempt left a diff behind; the first one ran on the org
-		// default and so recorded no model override at all. Both shapes have to
-		// survive the scan, because the worker drops spent ranks by comparing
-		// (agent, model) and a nil that scanned as garbage would drop the wrong
-		// candidate.
+		// The newest attempt left a diff behind and pinned an explicit effort;
+		// the first one ran on the org default and so recorded neither a model
+		// override nor an effort. Both shapes have to survive the scan, because
+		// the worker drops spent ranks by comparing (agent, model, effort) and a
+		// nil that scanned as garbage would drop the wrong candidate.
 		newest := models.AutomationRunAttempt{
 			SessionID:           uuid.New(),
 			AgentType:           strPtr("codex"),
 			Model:               strPtr(models.CodexModelGPT55),
+			ReasoningEffort:     strPtr(string(models.ReasoningEffortXHigh)),
 			ProducedDiff:        true,
 			ProducedPullRequest: false,
 		}
@@ -1472,6 +1480,7 @@ func TestAutomationRunStore_ListSessionAttempts(t *testing.T) {
 			SessionID:           uuid.New(),
 			AgentType:           strPtr("claude_code"),
 			Model:               nil,
+			ReasoningEffort:     nil,
 			ProducedDiff:        false,
 			ProducedPullRequest: false,
 		}
@@ -1488,6 +1497,15 @@ func TestAutomationRunStore_ListSessionAttempts(t *testing.T) {
 		require.NoError(t, err, "ListSessionAttempts should scan the run's spawned sessions")
 		require.Equal(t, []models.AutomationRunAttempt{newest, oldest}, attempts,
 			"every column must land on its own field, in the order the query returned them")
+		// Effort is half of what tells a gpt/xhigh rank apart from a gpt/low one.
+		// Losing it here would make AutomationRunAttempt.Matches treat the
+		// cheaper rank as already spent, so that rank would never get a session.
+		require.NotNil(t, attempts[0].ReasoningEffort,
+			"an attempt that ran at an explicit effort must carry it back, or the chain cannot tell its ranks apart")
+		require.Equal(t, string(models.ReasoningEffortXHigh), *attempts[0].ReasoningEffort,
+			"the effort the session actually ran at must round-trip unchanged")
+		require.Nil(t, attempts[1].ReasoningEffort,
+			"a session that pinned no effort must stay nil rather than borrow the neighbouring column")
 		require.True(t, attempts[0].ProducedWork(),
 			"a diff on the newest attempt must be visible, or the chain would retry on another model and duplicate work")
 		require.False(t, attempts[1].ProducedWork(),
@@ -1541,13 +1559,20 @@ func TestAutomationRunStore_ListSessionAttempts(t *testing.T) {
 		defer mock.Close()
 
 		store := NewAutomationRunStore(mock)
-		// A projection that no longer lines up with AutomationRunAttempt — the
-		// exact drift positional scanning cannot detect on its own. It has to
-		// fail loudly rather than yield an empty list that would re-dispatch a
-		// model the run already spent.
+		// The pre-reasoning_effort projection, replayed against today's struct:
+		// the exact drift this file guards against. RowToStructByPos matches on
+		// position and count alone, so it can only notice the missing column
+		// because the arity changed — a same-arity reorder would scan silently
+		// and hand the chain a garbage effort. That is why the projection lives
+		// in automationRunAttemptColumns() as one shared list instead of being
+		// spelled out per subtest.
+		//
+		// Either way it has to fail loudly rather than yield an empty list,
+		// which would re-dispatch a model the run already spent.
 		mock.ExpectQuery(listSessionAttemptsQuery).
 			WithArgs(anyArgs(2)...).
-			WillReturnRows(pgxmock.NewRows([]string{"id", "agent_type"}).AddRow(uuid.New(), strPtr("codex")))
+			WillReturnRows(pgxmock.NewRows([]string{"id", "agent_type", "model_override", "produced_diff", "produced_pull_request"}).
+				AddRow(uuid.New(), strPtr("codex"), strPtr(models.CodexModelGPT55), true, false))
 
 		attempts, err := store.ListSessionAttempts(context.Background(), uuid.New(), uuid.New())
 		require.Error(t, err, "a row that does not match the struct must not read as zero attempts")

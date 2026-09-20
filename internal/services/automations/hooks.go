@@ -40,6 +40,17 @@ type automationFallbackRunStore interface {
 	ListSessionAttempts(ctx context.Context, orgID, runID uuid.UUID) ([]models.AutomationRunAttempt, error)
 }
 
+const (
+	// automationRunExecutionBudget mirrors stuckAutomationRunThreshold in
+	// internal/cluster/scheduler.go: how long a pending/running automation_run
+	// may sit before the reaper marks it failed. Every attempt in a fallback
+	// chain shares it, because promotion preserves the run's triggered_at.
+	automationRunExecutionBudget = time.Hour
+	// automationAttemptBudgetReserve is the slice of that budget one more
+	// session needs, matching models.DefaultMaxSessionDurationSeconds.
+	automationAttemptBudgetReserve = 20 * time.Minute
+)
+
 type automationFallbackJobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 	Notify(ctx context.Context, jobID uuid.UUID)
@@ -243,7 +254,20 @@ func (h *AutomationHooks) promoteToNextModelRank(ctx context.Context, session *m
 	// Whether anything is left to try is decided the same way the worker
 	// decides it — by dropping the (agent, model) pairs already spent — so the
 	// hook cannot promote a run the worker will immediately fail as exhausted.
-	if !automationModelRanksRemain(ranks, attempts) {
+	if len(models.AutomationModelRanksRemaining(ranks, attempts)) == 0 {
+		return false, nil
+	}
+	// A promoted run keeps its original triggered_at, so every attempt shares
+	// one reaper budget. Promoting with less than a session's worth of it left
+	// starts work that outlives its own run: the reaper marks the run failed
+	// while that session keeps going, and its completion hook can no longer
+	// update the terminal row — so a diff or a pull request can land with
+	// nothing recording it.
+	if !automationRunBudgetFitsAnotherAttempt(automationRun.TriggeredAt, time.Now()) {
+		h.logger.Info().
+			Str("automation_run_id", runID.String()).
+			Time("triggered_at", automationRun.TriggeredAt).
+			Msg("automation run has too little execution budget left to try another model; failing run")
 		return false, nil
 	}
 	if !sessionModelUnavailable(session) {
@@ -325,33 +349,21 @@ func (h *AutomationHooks) promoteToNextModelRank(ctx context.Context, session *m
 // effects and cost, so burning five models on a deterministic prompt bug is
 // worse than one honest failure.
 func sessionModelUnavailable(session *models.Session) bool {
-	if session.FailureExplanation != nil && agent.ModelUnavailable(*session.FailureExplanation) {
+	if session.FailureExplanation != nil && agent.ModelUnavailableForRetry(*session.FailureExplanation) {
 		return true
 	}
-	return session.Error != nil && agent.ModelUnavailable(*session.Error)
+	return session.Error != nil && agent.ModelUnavailableForRetry(*session.Error)
 }
 
-// automationModelRanksRemain reports whether the chain still holds an (agent,
-// model) pair this run has not already spent a session on.
+// automationRunBudgetFitsAnotherAttempt reports whether a run still has room
+// for one more session inside the window the reaper allows it.
 //
-// It mirrors the worker's automationModelCandidatesRemaining deliberately: if
-// the two disagreed, the hook would promote a run the worker then immediately
-// failed as exhausted, costing a pointless running->pending->running->failed
-// flap and replacing the real failure reason with an empty model list.
-func automationModelRanksRemain(ranks []models.AutomationModelRank, attempts []models.AutomationRunAttempt) bool {
-	for _, rank := range ranks {
-		spent := false
-		for _, attempt := range attempts {
-			if attempt.Matches(rank) {
-				spent = true
-				break
-			}
-		}
-		if !spent {
-			return true
-		}
-	}
-	return false
+// Both bounds are deliberately the conservative defaults rather than the org's
+// configured session timeout: this only has to stop the chain from starting
+// work it cannot finish, and reading per-org settings here would put a second
+// lookup on every failed automation session.
+func automationRunBudgetFitsAnotherAttempt(triggeredAt, now time.Time) bool {
+	return now.Add(automationAttemptBudgetReserve).Before(triggeredAt.Add(automationRunExecutionBudget))
 }
 
 // attemptsProducedWork reports whether any session this run has already spawned

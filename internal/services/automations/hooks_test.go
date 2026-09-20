@@ -499,6 +499,11 @@ func (f *fakeFallbackJobStore) Notify(_ context.Context, jobID uuid.UUID) {
 // a hand-typed agent/model pair that drifted from the chain would silently turn
 // an "already spent" case into a "still remaining" one and the test would pass
 // for the wrong reason. The slice is newest-first, like ListSessionAttempts.
+//
+// Reasoning effort is copied across for the same reason as agent and model: an
+// attempt's identity is the (agent, model, effort) triple the session actually
+// ran, so a helper that dropped the effort would leave every attempt looking
+// like the chain's effort-less rank and mis-report which ranks are spent.
 func attemptsForRanks(t *testing.T, snapshot []byte, count int) []models.AutomationRunAttempt {
 	t.Helper()
 
@@ -510,12 +515,24 @@ func attemptsForRanks(t *testing.T, snapshot []byte, count int) []models.Automat
 	attempts := make([]models.AutomationRunAttempt, 0, count)
 	for i := count - 1; i >= 0; i-- {
 		attempts = append(attempts, models.AutomationRunAttempt{
-			SessionID: uuid.New(),
-			AgentType: ranks[i].AgentType,
-			Model:     ranks[i].Model,
+			SessionID:       uuid.New(),
+			AgentType:       ranks[i].AgentType,
+			Model:           ranks[i].Model,
+			ReasoningEffort: reasoningEffortPointer(ranks[i].ReasoningEffort),
 		})
 	}
 	return attempts
+}
+
+// reasoningEffortPointer converts a rank's typed effort into the plain string
+// the sessions table stores, preserving nil: a rank with no explicit effort
+// spawns a session with a NULL reasoning_effort, not the empty string.
+func reasoningEffortPointer(effort *models.ReasoningEffort) *string {
+	if effort == nil {
+		return nil
+	}
+	value := string(*effort)
+	return &value
 }
 
 // promotionFixture wires a hooks value with a fallback promoter over one
@@ -534,6 +551,10 @@ type promotionFixture struct {
 // (newest first). The hook is invoked for attempts[0]'s session, i.e. the run's
 // newest attempt — the only one allowed to promote — so a case that wants the
 // superseded-session path has to say so by overriding session.ID.
+//
+// The run is triggered recently enough that its reaper budget comfortably fits
+// another session, so budget is never what decides these cases. A case that
+// wants the exhausted-budget path says so by overriding run.TriggeredAt.
 func newPromotionFixture(t *testing.T, snapshot []byte, attempts []models.AutomationRunAttempt) *promotionFixture {
 	t.Helper()
 
@@ -546,6 +567,7 @@ func newPromotionFixture(t *testing.T, snapshot []byte, attempts []models.Automa
 			OrgID:          orgID,
 			AutomationID:   autoID,
 			ConfigSnapshot: snapshot,
+			TriggeredAt:    time.Now().Add(-5 * time.Minute),
 		},
 		attempts: attempts,
 	}
@@ -1188,4 +1210,217 @@ func TestAutomationHooks_OnSessionComplete_ReadsCapacityMarkerFromEitherField(t 
 			require.Len(t, f.jobs.calls, 1, "the run must be re-dispatched onto the next rank")
 		})
 	}
+}
+
+// TestAutomationHooks_OnSessionComplete_DoesNotPromoteInfrastructureFailure is
+// Fix 7 from the hook's side. Both of these failures happen before any model is
+// invoked — the orchestrator writes them while resolving a GitHub installation
+// token or cloning the repository — so no rank in the chain can do better, and
+// every rank would spawn a session that dies in exactly the same place.
+//
+// The messages deliberately carry a capacity marker or a 503 in their tails:
+// that is the realistic shape (GitHub returns 503s and rate limits of its own),
+// and it is precisely what the old classifier matched on. Under the old rule a
+// single GitHub blip cost one agent session per configured model; now the run
+// lands failed on the first try.
+func TestAutomationHooks_OnSessionComplete_DoesNotPromoteInfrastructureFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// failure is what the orchestrator left on the session, verbatim in
+		// the shape its failRun call sites format.
+		failure string
+		why     string
+	}{
+		{
+			name:    "github installation token failure",
+			failure: "get installation token: github api returned 503 service unavailable",
+			why:     "the run never reached a model; the GitHub App is what was unavailable",
+		},
+		{
+			name:    "github installation token rate limit",
+			failure: "get installation token: 429 too many requests from api.github.com",
+			why:     "GitHub's rate limit is not the model's, and every rank would re-hit it",
+		},
+		{
+			name:    "clone failure carrying a capacity marker",
+			failure: "clone repo: fatal: could not read from remote repository: server is overloaded",
+			why:     "cloning runs before the agent starts, so the marker cannot be about the model",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// A rank remains and the budget is fine, so the infrastructure
+			// classification is the only thing that can decline this promotion.
+			f := newPromotionFixture(t, twoRankModelChainSnapshot, attemptsForRanks(t, twoRankModelChainSnapshot, 1))
+			failure := tt.failure
+			f.session.Error = &failure
+
+			err := f.hooks.OnSessionComplete(context.Background(), f.session, models.SessionStatusFailed)
+
+			require.NoError(t, err, "an infrastructure failure still lands the run cleanly")
+			requireFailedExactlyOnce(t, f,
+				"a pre-agent setup failure must not spend the chain: "+tt.why)
+			require.Equal(t, tt.failure, *f.runs.calls[0].resultSummary,
+				"the user must see the real infrastructure failure rather than a model-capacity story")
+		})
+	}
+}
+
+// TestAutomationRunBudgetFitsAnotherAttempt covers the arithmetic the promotion
+// guard rests on. Every attempt in a chain shares one triggered_at, so the
+// question is always "does what is left of the run's reaper window still hold a
+// whole session?" — not "how long has this attempt been running?".
+func TestAutomationRunBudgetFitsAnotherAttempt(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+
+	tests := []struct {
+		name string
+		// triggeredAt is when the RUN started, which promotion preserves
+		// across every attempt.
+		triggeredAt time.Time
+		want        bool
+		why         string
+	}{
+		{
+			name:        "comfortably inside the budget",
+			triggeredAt: now.Add(-5 * time.Minute),
+			want:        true,
+			why:         "55 minutes of the hour remain, far more than one session needs",
+		},
+		{
+			name:        "just inside the reserve boundary",
+			triggeredAt: now.Add(-(automationRunExecutionBudget - automationAttemptBudgetReserve) + time.Second),
+			want:        true,
+			why:         "a whisker over the reserve still fits a session, so the chain may continue",
+		},
+		{
+			// Exactly at the boundary the remaining window equals the reserve,
+			// which is a tie rather than room: a session starting here would
+			// end at the same instant the reaper sweeps the run, and the guard
+			// exists to avoid exactly that photo finish.
+			name:        "exactly at the reserve boundary",
+			triggeredAt: now.Add(-(automationRunExecutionBudget - automationAttemptBudgetReserve)),
+			want:        false,
+			why:         "a session that ends precisely when the reaper fires is the race this guard prevents",
+		},
+		{
+			name:        "past the reserve boundary",
+			triggeredAt: now.Add(-50 * time.Minute),
+			want:        false,
+			why:         "10 minutes left cannot hold a 20-minute session",
+		},
+		{
+			name:        "already past the whole budget",
+			triggeredAt: now.Add(-2 * automationRunExecutionBudget),
+			want:        false,
+			why:         "the reaper is overdue to fail this run; starting more work would be strictly harmful",
+		},
+		{
+			// Clock skew between the app and the database can date a row
+			// slightly in the future. That is more budget, not less, so it
+			// must not read as exhausted.
+			name:        "triggered in the future",
+			triggeredAt: now.Add(time.Minute),
+			want:        true,
+			why:         "a future triggered_at means the full budget is still ahead of the run",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.want, automationRunBudgetFitsAnotherAttempt(tt.triggeredAt, now),
+				"budget check must match the reaper's own window: %s", tt.why)
+		})
+	}
+}
+
+// TestAutomationHooks_OnSessionComplete_DoesNotPromoteWithoutBudget is Fix 5.
+// A promoted run keeps its original triggered_at, and ReapStuckRuns keys off
+// that rather than the current status — so promoting near the end of the window
+// starts a session that outlives its own run.
+//
+// The failure mode is not a wasted retry but a silent one: the reaper marks the
+// run failed while the newly dispatched session keeps going, and by the time
+// that session opens a pull request its completion hook can no longer update the
+// already-terminal row. The PR exists on the remote with nothing in the product
+// recording it.
+func TestAutomationHooks_OnSessionComplete_DoesNotPromoteWithoutBudget(t *testing.T) {
+	t.Parallel()
+
+	// Two of three ranks spent so the chain is definitely not exhausted, and
+	// the failure is a genuine capacity error: budget is the only thing left
+	// that can decline this promotion.
+	f := newPromotionFixture(t, threeRankModelChainSnapshot, attemptsForRanks(t, threeRankModelChainSnapshot, 2))
+	f.runs.run.TriggeredAt = time.Now().Add(-50 * time.Minute)
+
+	err := f.hooks.OnSessionComplete(context.Background(), f.session, models.SessionStatusFailed)
+
+	require.NoError(t, err, "refusing to promote is an ordinary outcome, not an error")
+	requireFailedExactlyOnce(t, f,
+		"with 10 minutes of the run's hour left, the reaper would fail the run while the promoted session kept running and opened a pull request nothing recorded")
+	require.Equal(t, capacityFailure, *f.runs.calls[0].resultSummary,
+		"the user must still see the capacity failure that ended the chain")
+}
+
+// TestAutomationHooks_OnSessionComplete_PromotesWithBudgetToSpare is the
+// control for the case above: the same run, same chain, same capacity failure,
+// differing only in how much of the reaper window is left. Without this pair a
+// budget guard that simply never promoted would look correct.
+func TestAutomationHooks_OnSessionComplete_PromotesWithBudgetToSpare(t *testing.T) {
+	t.Parallel()
+
+	f := newPromotionFixture(t, threeRankModelChainSnapshot, attemptsForRanks(t, threeRankModelChainSnapshot, 2))
+	f.runs.run.TriggeredAt = time.Now().Add(-10 * time.Minute)
+
+	err := f.hooks.OnSessionComplete(context.Background(), f.session, models.SessionStatusFailed)
+
+	require.NoError(t, err, "promotion should succeed")
+	require.Len(t, f.runs.calls, 1, "a promoted run takes only the running->pending write")
+	require.Equal(t, models.AutomationRunStatusPending, f.runs.calls[0].toStatus,
+		"50 minutes of budget comfortably holds another session, so the chain must continue")
+	require.Len(t, f.jobs.calls, 1, "the remaining rank must be dispatched")
+}
+
+// effortOnlyModelChainSnapshot is a chain whose two ranks name the same agent
+// and the same model and differ ONLY in reasoning effort: run gpt-5-codex at
+// xhigh, and if that model is at capacity, fall back to the cheaper level.
+// This is a supported configuration, not a degenerate one — a cheaper level is
+// often served when the expensive one is not.
+var effortOnlyModelChainSnapshot = []byte(`{"agent_type":"codex","model_override":"gpt-5-codex","reasoning_effort":"xhigh","fallback_models":{"models":["gpt-5-codex"],"reasoning_efforts":["low"]}}`)
+
+// TestAutomationHooks_OnSessionComplete_PromotesRankDifferingOnlyInReasoningEffort
+// is Fix 2 seen from the hook. Spent ranks are subtracted by matching each
+// attempt against the chain, and that match now includes reasoning effort. When
+// it compared only (agent, model), the xhigh attempt marked the low-effort rank
+// spent as well: the chain read as exhausted after one session and the user's
+// second configured rank could never get a turn.
+func TestAutomationHooks_OnSessionComplete_PromotesRankDifferingOnlyInReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	attempts := attemptsForRanks(t, effortOnlyModelChainSnapshot, 1)
+	// Guard the premise: if the fixture ever stopped recording the effort the
+	// session ran at, this test would be asserting nothing.
+	require.NotNil(t, attempts[0].ReasoningEffort, "the spent attempt must record the effort its session ran at")
+	require.Equal(t, string(models.ReasoningEffortXHigh), *attempts[0].ReasoningEffort,
+		"the spent attempt stands for rank 0, the primary at xhigh")
+
+	f := newPromotionFixture(t, effortOnlyModelChainSnapshot, attempts)
+
+	err := f.hooks.OnSessionComplete(context.Background(), f.session, models.SessionStatusFailed)
+
+	require.NoError(t, err, "promotion should succeed")
+	require.Len(t, f.runs.calls, 1, "a promoted run takes only the running->pending write")
+	require.Equal(t, models.AutomationRunStatusPending, f.runs.calls[0].toStatus,
+		"the low-effort rank is a distinct, unspent candidate and must send the run back to pending")
+	require.Len(t, f.jobs.calls, 1,
+		"a rank that differs only in reasoning effort must still get its own session; treating it as spent silently drops a model the user configured")
 }
