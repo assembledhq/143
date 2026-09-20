@@ -441,3 +441,51 @@ func TestAutomationLifecycle_ReopenArrivingBeforeItsClose(t *testing.T) {
 	require.NoError(t, err, "reload generation")
 	require.Equal(t, models.AutomationTargetSessionStatusActive, generation.Status, "and its generation survived")
 }
+
+// TestAutomationLifecycle_SubscribedReopenArrivingAfterItsClose proves the
+// arrival path arbitrates the same way the notification path does. A
+// subscribed reopened delivery can reach the trigger after the close it
+// precedes has already been applied. Taking it would put the target back to
+// open and replace the close's evidence with the reopen's older moment, so
+// the transition is refused and the run that carried it is skipped.
+func TestAutomationLifecycle_SubscribedReopenArrivingAfterItsClose(t *testing.T) {
+	h := newLifecycleHarness(t)
+	ctx := context.Background()
+	h.endAttempt(t, models.AutomationRunResultTurnCompleted)
+	_, err := h.completer.Complete(ctx, h.orgID, h.run.ID, h.jobID, h.lockToken)
+	require.NoError(t, err, "finish the first turn")
+
+	// Both moments are after the openness evidence arrival already recorded,
+	// so what is under test is the deliveries' own ordering rather than
+	// staleness against the arrival that created the target.
+	before := h.target(t).LifecycleUpdatedAt
+	require.NotNil(t, before, "the target already has openness evidence")
+	reopenedAt := before.Add(10 * time.Second)
+	closedAt := reopenedAt.Add(10 * time.Second)
+
+	// The close lands first and terminates the target.
+	require.NoError(t, h.lifecycle.OnPullRequestClosed(ctx, h.orgID, "acme/web", 42, false, closedAt), "close")
+	target := h.target(t)
+	require.Equal(t, models.AutomationTargetLifecycleClosed, target.LifecycleState, "the target is closed")
+	require.WithinDuration(t, closedAt, *target.LifecycleUpdatedAt, time.Millisecond, "on the close's own moment")
+
+	// The reopen it precedes is delivered late, as a subscribed event, so it
+	// arrives through the trigger rather than the notification.
+	reopened := h.deliver(t, automations.GitHubEventTriggerRequest{
+		Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "reopened",
+		HeadSHA: "7777777777777777777777777777777777777777", PullRequestUpdatedAt: timePtr(reopenedAt), BaseBranch: "main",
+	})
+
+	target = h.target(t)
+	require.Equal(t, models.AutomationTargetLifecycleClosed, target.LifecycleState, "the closed pull request is still closed")
+	require.WithinDuration(t, closedAt, *target.LifecycleUpdatedAt, time.Millisecond, "and keeps the close's newer evidence")
+
+	run := h.reload(t, reopened.ID)
+	require.Equal(t, models.AutomationRunStatusSkipped, run.Status, "the late reopen's run is skipped")
+	require.Equal(t, models.AutomationRunOutcomePRClosed, *run.OutcomeReason, "as pr_closed")
+
+	// Nothing restarted the target: its generation stays retired.
+	generation, err := h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.Equal(t, models.AutomationTargetSessionStatusRetired, generation.Status, "the close's retirement stands")
+}
