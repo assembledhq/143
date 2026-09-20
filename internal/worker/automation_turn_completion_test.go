@@ -40,7 +40,7 @@ func (f *fakeAutomationTurnCompleter) Complete(_ context.Context, _, runID, jobI
 	return f.complete, f.completeErr
 }
 
-func (f *fakeAutomationTurnCompleter) RecoverTerminalJob(_ context.Context, _, runID, _ uuid.UUID) (models.AutomationRunOutcomeReason, error) {
+func (f *fakeAutomationTurnCompleter) RecoverAbandonedRun(_ context.Context, _, runID, _ uuid.UUID, _ time.Time) (models.AutomationRunOutcomeReason, error) {
 	f.recovers = append(f.recovers, runID)
 	return f.recover, f.recoverErr
 }

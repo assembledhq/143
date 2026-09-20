@@ -142,6 +142,7 @@ func TestAutomationCompletion_CompleteFromMarker(t *testing.T) {
 	require.NotNil(t, generation.LastTurnAt, "last turn time recorded")
 	require.Equal(t, "1111111111111111111111111111111111111111", *generation.LastReviewedHeadSHA, "the baseline advanced to the reviewed head")
 	require.Equal(t, *h.run.HeadEpoch, generation.LastReviewedEpoch, "the baseline epoch is the run's epoch")
+	require.Equal(t, "idle", h.threadStatus(t), "the primary thread is released for the next turn")
 	require.NotNil(t, h.target(t).WakeRequestedAt, "a wake is requested")
 	jobs := h.wakeJobs(t)
 	require.Len(t, jobs, 1, "one wake job is enqueued with the completion")
@@ -262,12 +263,12 @@ func TestAutomationCompletion_TerminalJobRecovery(t *testing.T) {
 	t.Run("no marker fails with retries exhausted", func(t *testing.T) {
 		h := newCompletionHarness(t)
 		ctx := context.Background()
-		failed, err := h.completer.FailRetriesExhausted(ctx, h.orgID, h.run.ID)
+		failed, err := h.completer.FailRetriesExhausted(ctx, h.orgID, h.run.ID, time.Now())
 		require.NoError(t, err, "retries exhausted with a live job")
-		require.False(t, failed, "a live job is not exhausted")
+		require.False(t, failed, "a live lease is never abandoned")
 
 		h.deadLetterJob(t)
-		outcome, err := h.completer.RecoverTerminalJob(ctx, h.orgID, h.run.ID, h.jobID)
+		outcome, err := h.completer.RecoverAbandonedRun(ctx, h.orgID, h.run.ID, h.jobID, time.Now())
 		require.NoError(t, err, "recover")
 		require.Equal(t, models.AutomationRunOutcomeRetriesExhausted, outcome, "no marker means retries exhausted")
 		run := h.reload(t, h.run.ID)
@@ -278,7 +279,7 @@ func TestAutomationCompletion_TerminalJobRecovery(t *testing.T) {
 		require.Equal(t, 0, h.generation(t).TurnCount, "no turn counted")
 		require.NotNil(t, h.target(t).WakeRequestedAt, "a wake is requested")
 		require.Len(t, h.wakeJobs(t), 1, "one wake job")
-		outcome, err = h.completer.RecoverTerminalJob(ctx, h.orgID, h.run.ID, h.jobID)
+		outcome, err = h.completer.RecoverAbandonedRun(ctx, h.orgID, h.run.ID, h.jobID, time.Now())
 		require.NoError(t, err, "second recover")
 		require.Empty(t, outcome, "recovery is idempotent")
 	})
@@ -406,7 +407,7 @@ func TestAutomationCompletion_WaitTimeoutAndAmbiguityDeadline(t *testing.T) {
 	require.EqualValues(t, 1, report.WaitTimeouts, "only the non-ambiguous waiter timed out")
 	require.Equal(t, 0, report.AmbiguityDeadlines, "the deadline has not passed")
 	runA = h.reload(t, runA.ID)
-	require.Equal(t, models.AutomationRunStatusSkipped, runA.Status, "wait timeout skips the run")
+	require.Equal(t, models.AutomationRunStatusFailed, runA.Status, "a wait timeout is a failed run, as the shared outcome mapping says")
 	require.Equal(t, models.AutomationRunOutcomeWaitTimeout, *runA.OutcomeReason, "outcome wait_timeout")
 	require.Equal(t, models.AutomationRunDispatchDone, *runA.DispatchState, "dispatch done")
 	runB = h.reload(t, runB.ID)
@@ -504,4 +505,255 @@ func TestAutomationCompletion_RescheduleActiveByDedupeKey(t *testing.T) {
 	require.NoError(t, err, "reschedule a running job")
 	require.False(t, moved, "a running job is not rescheduled")
 	_ = db.ErrAutomationRunNotFound
+}
+
+// TestAutomationCompletion_ReleasesThreadForTheNextTurn proves a completed
+// turn leaves the primary thread claimable: the next waiter dispatches
+// instead of waiting for a thread that stayed running. This is the state a
+// continued turn reaches when its handler returns before writing the
+// thread, so the completion itself has to be the durable release.
+func TestAutomationCompletion_ReleasesThreadForTheNextTurn(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	head2 := "2222222222222222222222222222222222222222"
+	run2 := h.push(t, head2, recentDeliveryTime().Add(time.Second))
+	require.Equal(t, automations.DispatchWaiting, h.dispatch(t, run2, models.AgentTypeCodex).Kind, "the second run waits")
+
+	h.endAttempt(t, models.AutomationRunResultTurnCompleted)
+	// The orchestrator wrote the session and the marker; the worker died
+	// before its own thread write, so the thread is still running.
+	_, err := h.pool.Exec(ctx, `UPDATE session_threads SET status = 'running' WHERE id = $1`, *h.run.ThreadID)
+	require.NoError(t, err, "leave the thread running")
+	result, err := h.completer.Complete(ctx, h.orgID, h.run.ID, h.jobID, h.lockToken)
+	require.NoError(t, err, "completion")
+	require.True(t, result.Applied, "the run completes")
+	require.Equal(t, "idle", h.threadStatus(t), "the completion released the thread")
+
+	var currentTurn int
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT current_turn FROM session_threads WHERE id = $1`, *h.run.ThreadID).Scan(&currentTurn), "thread turn")
+	require.Equal(t, *h.run.TurnNumber, currentTurn, "the thread's turn advanced to the marker's turn, so the next message does not reuse it")
+
+	// The next waiter now dispatches rather than waiting on the thread.
+	outcome := h.dispatch(t, h.reload(t, run2.ID), models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchReserved, outcome.Kind, "the next turn is reserved on the freed thread")
+	require.Equal(t, h.outcome.SessionID, outcome.SessionID, "on the same generation session")
+}
+
+// TestAutomationCompletion_RichThreadWriteSurvivesCompletion proves the
+// completion does not overwrite the handler's summary and diff when the
+// ordinary path already wrote them and left the thread idle.
+func TestAutomationCompletion_RichThreadWriteSurvivesCompletion(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	h.endAttempt(t, models.AutomationRunResultTurnCompleted)
+	summary := "reviewed the diff"
+	diff := "--- a\n+++ b\n"
+	require.NoError(t, db.NewSessionThreadStore(h.pool).UpdateTurnComplete(ctx, h.orgID, *h.run.ThreadID, *h.run.TurnNumber,
+		&models.SessionResult{ResultSummary: &summary, Diff: &diff}, "agent-1"), "the handler writes the thread result")
+
+	result, err := h.completer.Complete(ctx, h.orgID, h.run.ID, h.jobID, h.lockToken)
+	require.NoError(t, err, "completion")
+	require.True(t, result.Applied, "the run completes")
+	var storedSummary, storedDiff *string
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT result_summary, diff FROM session_threads WHERE id = $1`, *h.run.ThreadID).Scan(&storedSummary, &storedDiff), "thread result")
+	require.Equal(t, summary, *storedSummary, "the handler's summary survives")
+	require.Equal(t, diff, *storedDiff, "the handler's diff survives")
+}
+
+// TestAutomationCompletion_AwaitingInputWithOutstandingHold proves a worker
+// that died between its awaiting_input marker and its deferred hold release
+// does not leave the session automation-owned forever: the completion
+// clears the stale hold, so the retirement releases ownership at once and a
+// person can answer in the session.
+func TestAutomationCompletion_AwaitingInputWithOutstandingHold(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	h.endAttempt(t, models.AutomationRunResultAwaitingInput)
+	_, err := h.pool.Exec(ctx, `UPDATE sessions SET turn_holding_container = TRUE, container_id = 'container-1' WHERE id = $1`, h.outcome.SessionID)
+	require.NoError(t, err, "leave the turn hold outstanding, as a crashed worker does")
+	h.deadLetterJob(t)
+
+	outcome, err := h.completer.RecoverAbandonedRun(ctx, h.orgID, h.run.ID, h.jobID, time.Now())
+	require.NoError(t, err, "recover")
+	require.Equal(t, models.AutomationRunOutcomeAwaitingInput, outcome, "the marker's outcome is recorded")
+	generation, err := h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.Equal(t, models.AutomationTargetSessionStatusRetired, generation.Status, "the generation is retired")
+	require.False(t, generation.OwnershipReleasePending, "the release did not stay pending behind the stale hold")
+	require.Nil(t, sessionOwnerMarker(t, h.pool, h.orgID, h.outcome.SessionID), "the session is no longer owned, so a person can answer")
+	var holding bool
+	var containerID *string
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT turn_holding_container, container_id FROM sessions WHERE id = $1`, h.outcome.SessionID).Scan(&holding, &containerID), "session hold")
+	require.False(t, holding, "the stale hold is cleared")
+	require.Equal(t, "container-1", *containerID, "the container stays recorded for the next turn's inherited-container path")
+}
+
+// TestAutomationCompletion_StrandedOwnershipRelease proves the sweep
+// releases an ownership release that no executing run remains to apply,
+// whatever stranded it.
+func TestAutomationCompletion_StrandedOwnershipRelease(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	generationID := h.generation(t).ID
+	h.endAttempt(t, models.AutomationRunResultTurnCompleted)
+	_, err := h.completer.Complete(ctx, h.orgID, h.run.ID, h.jobID, h.lockToken)
+	require.NoError(t, err, "completion")
+	// The run is done, so nothing is executing; strand the release as a
+	// crash between a retirement and the run's completion would.
+	_, err = h.pool.Exec(ctx, `UPDATE automation_target_sessions SET status = 'retired', retired_reason = 'pr_closed', retired_at = now(), ownership_release_pending = true WHERE id = $1`, generationID)
+	require.NoError(t, err, "strand the release")
+	_, err = h.pool.Exec(ctx, `UPDATE sessions SET turn_holding_container = TRUE WHERE id = $1`, h.outcome.SessionID)
+	require.NoError(t, err, "leave a stale hold behind too")
+
+	report, err := h.completer.Sweep(ctx, h.orgID)
+	require.NoError(t, err, "sweep")
+	require.Equal(t, 1, report.OwnershipReleases, "the stranded release is applied")
+	require.Nil(t, sessionOwnerMarker(t, h.pool, h.orgID, h.outcome.SessionID), "the session is released")
+	var holding bool
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT turn_holding_container FROM sessions WHERE id = $1`, h.outcome.SessionID).Scan(&holding), "session hold")
+	require.False(t, holding, "the stale hold is cleared with it")
+	generation, err := h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.False(t, generation.OwnershipReleasePending, "the pending flag is cleared")
+
+	report, err = h.completer.Sweep(ctx, h.orgID)
+	require.NoError(t, err, "second sweep")
+	require.Equal(t, 0, report.OwnershipReleases, "nothing is left to release")
+}
+
+// TestAutomationCompletion_StrandedOwnershipWaitsForAnExecutingRun proves
+// the reconciliation does not race an executing run: a release pending
+// behind a live turn is left for that turn's completion.
+func TestAutomationCompletion_StrandedOwnershipWaitsForAnExecutingRun(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	tx, err := h.pool.Begin(ctx)
+	require.NoError(t, err, "begin retirement")
+	retired, err := h.targets.RetireGeneration(ctx, tx, h.orgID, h.generation(t).ID, models.AutomationTargetRetiredPRClosed)
+	require.NoError(t, err, "retire while the turn executes")
+	require.NoError(t, tx.Commit(ctx), "commit retirement")
+	require.True(t, retired.OwnershipReleasePending, "the release waits for the executing run")
+
+	report, err := h.completer.Sweep(ctx, h.orgID)
+	require.NoError(t, err, "sweep")
+	require.Equal(t, 0, report.OwnershipReleases, "an executing run still owns the release")
+	require.NotNil(t, sessionOwnerMarker(t, h.pool, h.orgID, h.outcome.SessionID), "the session stays owned while the turn runs")
+}
+
+// TestAutomationCompletion_StaleAttemptWithoutADeadJob proves a worker that
+// vanished without dead-lettering its job does not hold its target forever:
+// once the attempt is older than the stale bound and no lease is live, the
+// sweep settles it and releases the session and thread.
+func TestAutomationCompletion_StaleAttemptWithoutADeadJob(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+
+	report, err := h.completer.Sweep(ctx, h.orgID)
+	require.NoError(t, err, "sweep with a live lease")
+	require.Equal(t, 0, report.RetriesExhausted, "a live lease is never abandoned")
+	require.Equal(t, models.AutomationRunStatusRunning, h.reload(t, h.run.ID).Status, "the run is untouched")
+
+	// The lease expires and the attempt ages past the bound; the job row
+	// still says running, which is what a vanished worker leaves behind.
+	_, err = h.pool.Exec(ctx, `UPDATE jobs SET lease_expires_at = now() - interval '5 minutes' WHERE id = $1`, h.jobID)
+	require.NoError(t, err, "expire the lease")
+	_, err = h.pool.Exec(ctx, `UPDATE automation_runs SET attempt_started_at = now() - interval '3 hours' WHERE id = $1`, h.run.ID)
+	require.NoError(t, err, "age the attempt")
+
+	report, err = h.completer.Sweep(ctx, h.orgID)
+	require.NoError(t, err, "sweep after the bound")
+	require.Equal(t, 1, report.RetriesExhausted, "the abandoned attempt is settled")
+	run := h.reload(t, h.run.ID)
+	require.Equal(t, models.AutomationRunStatusFailed, run.Status, "failed run")
+	require.Equal(t, models.AutomationRunOutcomeRetriesExhausted, *run.OutcomeReason, "retries exhausted")
+	require.Equal(t, models.SessionStatusIdle, h.session(t).Status, "the session is released")
+	require.Equal(t, "idle", h.threadStatus(t), "the thread is released")
+}
+
+// TestAutomationCompletion_StuckRunReaperLeavesPerTargetRuns proves the
+// legacy reaper no longer terminalizes a per-target run behind the
+// completer's back, which would strand its session, thread, and ownership.
+func TestAutomationCompletion_StuckRunReaperLeavesPerTargetRuns(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	run2 := h.push(t, "2222222222222222222222222222222222222222", recentDeliveryTime().Add(time.Second))
+	require.Equal(t, automations.DispatchWaiting, h.dispatch(t, run2, models.AgentTypeCodex).Kind, "the second run waits")
+	_, err := h.pool.Exec(ctx, `UPDATE automation_runs SET triggered_at = now() - interval '5 hours', attempt_started_at = now() - interval '5 hours' WHERE org_id = $1`, h.orgID)
+	require.NoError(t, err, "age every run past the reaper threshold")
+
+	reaped, err := h.runs.ReapStuckRuns(ctx, h.orgID, time.Hour)
+	require.NoError(t, err, "reap")
+	require.EqualValues(t, 0, reaped, "neither the executing nor the waiting per-target run is reaped")
+	require.Equal(t, models.AutomationRunStatusRunning, h.reload(t, h.run.ID).Status, "the executing run keeps its session and thread")
+	require.Equal(t, models.AutomationRunStatusPending, h.reload(t, run2.ID).Status, "the waiting run keeps its place in the queue")
+	require.Equal(t, models.AutomationRunDispatchExecuting, *h.reload(t, h.run.ID).DispatchState, "dispatch state is untouched")
+}
+
+// TestAutomationCompletion_SerializesWithRetirement proves completion takes
+// the target lock first, like arrival, dispatch, and retirement do, so a
+// concurrent lifecycle change blocks it rather than deadlocking with it.
+func TestAutomationCompletion_SerializesWithRetirement(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	h.endAttempt(t, models.AutomationRunResultTurnCompleted)
+
+	// A reset holds the target lock and has already touched the generation.
+	tx, err := h.pool.Begin(ctx)
+	require.NoError(t, err, "begin retirement")
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = h.targets.RetireGeneration(ctx, tx, h.orgID, h.generation(t).ID, models.AutomationTargetRetiredManualReset)
+	require.NoError(t, err, "retire under the target lock")
+
+	done := make(chan error, 1)
+	go func() {
+		_, completeErr := h.completer.Complete(context.Background(), h.orgID, h.run.ID, h.jobID, h.lockToken)
+		done <- completeErr
+	}()
+	select {
+	case err := <-done:
+		require.FailNowf(t, "completion should block on the target lock", "it returned early: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	require.NoError(t, tx.Commit(ctx), "commit the retirement")
+	select {
+	case err := <-done:
+		require.NoError(t, err, "completion proceeds once the target lock is free, with no deadlock")
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "completion did not finish after the retirement committed")
+	}
+	run := h.reload(t, h.run.ID)
+	require.Equal(t, models.AutomationRunStatusCompleted, run.Status, "the run still completed")
+	generation, err := h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.Equal(t, 1, generation.TurnCount, "the retired generation still counted the turn")
+	require.False(t, generation.OwnershipReleasePending, "the completion applied the release the retirement left pending")
+	require.Nil(t, sessionOwnerMarker(t, h.pool, h.orgID, h.outcome.SessionID), "the session is released")
+}
+
+// TestAutomationCompletion_AmbiguityDeadlineWithoutCandidates proves the
+// deadline transition commits even when no candidate is left to convert:
+// the stale pending flag would otherwise block every later push while the
+// head lookup is unavailable.
+func TestAutomationCompletion_AmbiguityDeadlineWithoutCandidates(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	tie := recentDeliveryTime().Add(time.Minute)
+	h.push(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", tie)
+	runB := h.push(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", tie)
+	require.Equal(t, models.AutomationRunHeadAmbiguous, *runB.HeadResolution, "the tie is ambiguous")
+	require.True(t, h.target(t).HeadResolutionPending, "resolution pending")
+
+	// The candidates leave through the per-run fallback, as the kill switch
+	// or a continuity switch back to per_run makes them.
+	_, err := h.pool.Exec(ctx, `UPDATE automation_runs SET status = 'completed', dispatch_state = NULL, head_resolution = NULL, completed_at = now() WHERE org_id = $1 AND head_resolution = 'ambiguous'`, h.orgID)
+	require.NoError(t, err, "take the candidates out through the per-run path")
+	_, err = h.pool.Exec(ctx, `UPDATE automation_targets SET head_resolution_deadline_at = now() - interval '1 minute' WHERE id = $1`, *h.run.TargetID)
+	require.NoError(t, err, "expire the deadline")
+
+	report, err := h.completer.Sweep(ctx, h.orgID)
+	require.NoError(t, err, "sweep")
+	require.Equal(t, 1, report.AmbiguityDeadlines, "the deadline transition applied")
+	target := h.target(t)
+	require.False(t, target.HeadResolutionPending, "the stale pending flag is cleared")
+	require.Nil(t, target.HeadResolutionDeadlineAt, "and so is the deadline")
 }

@@ -10078,15 +10078,18 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			jobCtx = agent.WithAutomationTurn(jobCtx, continueOpts.AutomationTurn)
 		}
 		continueErr := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts)
-		if automationRunID != nil {
+		if automationRunID != nil && continueErr != nil {
+			// The attempt ended even though the orchestrator returned an
+			// error, so its result is the run's terminal record and the job
+			// is done. The completion releases the primary thread from the
+			// marker's own turn number, which the error paths below do not
+			// do for an owned session.
 			completed, completeErr := completeAutomationTurn(ctx, services, logger, orgID, *automationRunID)
 			if completeErr != nil {
 				return completeErr
 			}
 			if completed {
-				if continueErr != nil {
-					logger.Info().Err(continueErr).Str("run_id", automationRunID.String()).Msg("per-target automation turn ended with an error; its result completed the run")
-				}
+				logger.Info().Err(continueErr).Str("run_id", automationRunID.String()).Msg("per-target automation turn ended with an error; its result completed the run")
 				return nil
 			}
 		}
@@ -10407,6 +10410,17 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						Str("thread_id", threadID.String()).
 						Msg("failed to mark session thread turn complete")
 				}
+			}
+		}
+
+		// The per-target run is completed after the thread write, so the
+		// target is never freed for its next waiter while this turn's
+		// primary thread is still running. A completion failure retries the
+		// job, and the retry completes from the marker without re-running
+		// the turn.
+		if automationRunID != nil {
+			if _, completeErr := completeAutomationTurn(ctx, services, logger, orgID, *automationRunID); completeErr != nil {
+				return completeErr
 			}
 		}
 
@@ -14124,7 +14138,7 @@ type automationTargetDispatcher interface {
 // markers, settles runs whose job died, and wakes targets (design doc 125).
 type automationTurnCompleter interface {
 	Complete(ctx context.Context, orgID, runID, jobID, lockToken uuid.UUID) (automationservice.CompletionResult, error)
-	RecoverTerminalJob(ctx context.Context, orgID, runID, jobID uuid.UUID) (models.AutomationRunOutcomeReason, error)
+	RecoverAbandonedRun(ctx context.Context, orgID, runID, jobID uuid.UUID, staleBefore time.Time) (models.AutomationRunOutcomeReason, error)
 	Wake(ctx context.Context, orgID, targetID uuid.UUID) (automationservice.WakeOutcome, error)
 }
 
@@ -14286,7 +14300,10 @@ func registerAutomationTurnDeadLetter(ctx context.Context, services *Services, l
 	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
 		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
 		defer cancel()
-		outcome, err := services.AutomationTurns.RecoverTerminalJob(writeCtx, orgID, runID, jobID)
+		// The job is terminal by the time this hook runs, so the attempt is
+		// over whatever its age; the stale-attempt bound only matters to the
+		// sweep, which settles runs whose worker died without dead-lettering.
+		outcome, err := services.AutomationTurns.RecoverAbandonedRun(writeCtx, orgID, runID, jobID, time.Now())
 		if err != nil {
 			logger.Error().Err(err).
 				Str("run_id", runID.String()).

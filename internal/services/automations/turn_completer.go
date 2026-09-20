@@ -38,6 +38,12 @@ const (
 	// AutomationWakeStaleAfter is how old an unconsumed wake request may be
 	// before reconciliation enqueues another wake.
 	AutomationWakeStaleAfter = 2 * time.Minute
+	// AutomationAttemptStaleAfter is how long an executing attempt may hold
+	// its session without a live lease before the recovery sweep settles it.
+	// It matches the stuck-run reaper's threshold, which no longer touches
+	// per-target runs because terminalizing one without releasing its
+	// session, thread, and ownership would strand all three.
+	AutomationAttemptStaleAfter = 1 * time.Hour
 )
 
 // AutomationTargetWakePayload is the automation_target_wake job's payload.
@@ -83,6 +89,7 @@ type SweepReport struct {
 	WaitTimeouts         int64
 	AmbiguityDeadlines   int
 	WakesReconciled      int
+	OwnershipReleases    int
 }
 
 // TurnCompleter completes per-target runs from their result markers, wakes
@@ -151,16 +158,17 @@ func (c *TurnCompleter) Complete(ctx context.Context, orgID, runID, jobID, lockT
 	return result, nil
 }
 
-// FailRetriesExhausted records retries_exhausted on an executing run whose
-// job is terminal and has no marker for the current attempt, releases the
-// session and thread, and wakes the target. Returns whether it applied.
-func (c *TurnCompleter) FailRetriesExhausted(ctx context.Context, orgID, runID uuid.UUID) (bool, error) {
+// FailRetriesExhausted records retries_exhausted on an abandoned executing
+// run (no marker for the current attempt, no live lease, and either a
+// terminal job or an attempt older than staleBefore), releases the session
+// and thread, and wakes the target. Returns whether it applied.
+func (c *TurnCompleter) FailRetriesExhausted(ctx context.Context, orgID, runID uuid.UUID, staleBefore time.Time) (bool, error) {
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("begin retries exhausted: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	targetID, done, err := c.runs.FailRetriesExhausted(ctx, tx, orgID, runID)
+	targetID, done, err := c.runs.FailRetriesExhausted(ctx, tx, orgID, runID, staleBefore)
 	if err != nil {
 		return false, err
 	}
@@ -181,11 +189,12 @@ func (c *TurnCompleter) FailRetriesExhausted(ctx context.Context, orgID, runID u
 	return true, nil
 }
 
-// RecoverTerminalJob settles an executing run whose job reached a terminal
-// state: a marker for the current attempt completes the run, otherwise the
-// run fails with retries_exhausted. Returns the outcome recorded, or empty
-// when the run needed nothing.
-func (c *TurnCompleter) RecoverTerminalJob(ctx context.Context, orgID, runID, jobID uuid.UUID) (models.AutomationRunOutcomeReason, error) {
+// RecoverAbandonedRun settles an executing run that no worker can still be
+// running: a marker for the current attempt completes the run, otherwise
+// the run fails with retries_exhausted. Either way the session, the thread,
+// and any pending ownership release are freed. Returns the outcome
+// recorded, or empty when the run needed nothing.
+func (c *TurnCompleter) RecoverAbandonedRun(ctx context.Context, orgID, runID, jobID uuid.UUID, staleBefore time.Time) (models.AutomationRunOutcomeReason, error) {
 	completed, err := c.Complete(ctx, orgID, runID, jobID, uuid.Nil)
 	if err != nil {
 		return "", err
@@ -193,7 +202,7 @@ func (c *TurnCompleter) RecoverTerminalJob(ctx context.Context, orgID, runID, jo
 	if completed.Applied {
 		return completed.Outcome, nil
 	}
-	failed, err := c.FailRetriesExhausted(ctx, orgID, runID)
+	failed, err := c.FailRetriesExhausted(ctx, orgID, runID, staleBefore)
 	if err != nil {
 		return "", err
 	}
@@ -320,7 +329,8 @@ func (c *TurnCompleter) Sweep(ctx context.Context, orgID uuid.UUID) (SweepReport
 	now := c.now()
 	log := c.logger.With().Str("org_id", orgID.String()).Logger()
 
-	runIDs, err := c.runs.ListExecutingRunsWithTerminalJobs(ctx, orgID)
+	staleBefore := now.Add(-AutomationAttemptStaleAfter)
+	runIDs, err := c.runs.ListAbandonedExecutingRuns(ctx, orgID, staleBefore)
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -333,7 +343,7 @@ func (c *TurnCompleter) Sweep(ctx context.Context, orgID uuid.UUID) (SweepReport
 		if run.JobID == nil {
 			continue
 		}
-		outcome, err := c.RecoverTerminalJob(ctx, orgID, runID, *run.JobID)
+		outcome, err := c.RecoverAbandonedRun(ctx, orgID, runID, *run.JobID, staleBefore)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("recover run %s: %w", runID, err))
 			continue
@@ -365,13 +375,29 @@ func (c *TurnCompleter) Sweep(ctx context.Context, orgID uuid.UUID) (SweepReport
 		errs = append(errs, err)
 	}
 	for _, targetID := range targetIDs {
-		converted, err := c.resolveAmbiguityDeadline(ctx, orgID, targetID, now)
+		resolved, converted, err := c.resolveAmbiguityDeadline(ctx, orgID, targetID, now)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("ambiguity deadline for target %s: %w", targetID, err))
 			continue
 		}
-		if converted > 0 {
+		if resolved {
 			report.AmbiguityDeadlines++
+			log.Debug().Str("target_id", targetID.String()).Int64("converted", converted).Msg("resolved an expired ambiguity deadline")
+		}
+	}
+
+	stranded, err := c.targets.ListStrandedOwnershipReleases(ctx, orgID)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, row := range stranded {
+		released, err := c.releaseStrandedOwnership(ctx, orgID, row)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("release stranded ownership on target %s: %w", row.TargetID, err))
+			continue
+		}
+		if released {
+			report.OwnershipReleases++
 		}
 	}
 
@@ -393,6 +419,7 @@ func (c *TurnCompleter) Sweep(ctx context.Context, orgID uuid.UUID) (SweepReport
 			Int("retries_exhausted", report.RetriesExhausted).
 			Int64("wait_timeouts", report.WaitTimeouts).
 			Int("ambiguity_deadlines", report.AmbiguityDeadlines).
+			Int("ownership_releases", report.OwnershipReleases).
 			Int("wakes_reconciled", report.WakesReconciled).
 			Msg("per-target automation sweep")
 	}
@@ -421,26 +448,55 @@ func (c *TurnCompleter) failTimedOutWaits(ctx context.Context, orgID, targetID u
 	return failed, nil
 }
 
-func (c *TurnCompleter) resolveAmbiguityDeadline(ctx context.Context, orgID, targetID uuid.UUID, now time.Time) (int64, error) {
+// resolveAmbiguityDeadline commits the deadline transition whenever it
+// applied, including when it converted no candidate: the flag and the
+// deadline still have to be cleared, or a tie whose candidates left through
+// the per-run fallback would block every later push.
+func (c *TurnCompleter) resolveAmbiguityDeadline(ctx context.Context, orgID, targetID uuid.UUID, now time.Time) (bool, int64, error) {
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
-		return 0, err
+		return false, 0, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	converted, err := c.targets.ResolveAmbiguityDeadline(ctx, tx, orgID, targetID, now)
+	resolved, converted, err := c.targets.ResolveAmbiguityDeadline(ctx, tx, orgID, targetID, now)
 	if err != nil {
-		return 0, err
+		return false, 0, err
 	}
-	if converted == 0 {
-		return 0, nil
+	if !resolved {
+		return false, 0, nil
 	}
 	if err := c.enqueueWake(ctx, tx, orgID, targetID); err != nil {
-		return 0, err
+		return false, 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return 0, err
+		return false, 0, err
 	}
-	return converted, nil
+	return true, converted, nil
+}
+
+// releaseStrandedOwnership clears an ownership release that no executing
+// run remains to apply, so a session whose worker died between its result
+// and its cleanup becomes an ordinary session again.
+func (c *TurnCompleter) releaseStrandedOwnership(ctx context.Context, orgID uuid.UUID, row db.AutomationStrandedOwnership) (bool, error) {
+	tx, err := c.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	released, err := c.targets.ReleaseStrandedOwnership(ctx, tx, orgID, row.GenerationID, row.TargetID)
+	if err != nil {
+		return false, err
+	}
+	if !released {
+		return false, nil
+	}
+	if err := c.enqueueWake(ctx, tx, orgID, row.TargetID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (c *TurnCompleter) reconcileWake(ctx context.Context, orgID, targetID uuid.UUID) error {
