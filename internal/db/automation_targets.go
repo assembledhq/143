@@ -467,34 +467,58 @@ func (s *AutomationTargetStore) SetLifecycle(ctx context.Context, q DBTX, orgID,
 // SetLifecycleObserved records a lifecycle state observed at observedAt,
 // the source's own timestamp (a webhook's pull_request.updated_at) rather
 // than the time the delivery was processed, so a delayed delivery cannot
-// pass for fresh openness evidence. A transition takes the observation
-// time as is, and a nil observedAt leaves the evidence unknown so dispatch
-// must revalidate; a same-state refresh only ever moves the evidence
-// forward.
-func (s *AutomationTargetStore) SetLifecycleObserved(ctx context.Context, q DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState, observedAt *time.Time) error {
+// pass for fresh openness evidence. A same-state refresh only ever moves
+// the evidence forward, and a state change is refused outright when its
+// observation is older than the evidence the target already holds: a
+// delivery that describes a moment the target has moved past must not
+// replace newer evidence with older, in either direction. A nil observedAt
+// carries no moment to arbitrate on, so it transitions the state and
+// leaves the evidence unknown for dispatch to revalidate.
+//
+// Returns whether the observation was applied. A refused observation is not
+// an error — the caller decides what a stale delivery means for the rest of
+// its work — but it does mean the target still holds the state it had.
+func (s *AutomationTargetStore) SetLifecycleObserved(ctx context.Context, q DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState, observedAt *time.Time) (bool, error) {
 	if err := state.Validate(); err != nil {
-		return err
+		return false, err
 	}
 	if q == nil {
 		q = s.db
 	}
-	tag, err := q.Exec(ctx, `
-		UPDATE automation_targets
-		SET lifecycle_updated_at = CASE
-		        WHEN lifecycle_state = @state THEN GREATEST(lifecycle_updated_at, @observed_at::timestamptz)
-		        ELSE @observed_at::timestamptz
-		    END,
-		    lifecycle_state = @state,
-		    updated_at = now()
-		WHERE id = @id AND org_id = @org_id`,
-		pgx.NamedArgs{"id": targetID, "org_id": orgID, "state": state, "observed_at": observedAt})
+	// One statement so the arbitration reads the same row the update writes,
+	// and so a refusal is told apart from a target that is not there.
+	var exists, applied bool
+	err := q.QueryRow(ctx, `
+		WITH current AS (
+		    SELECT id, org_id, lifecycle_state, lifecycle_updated_at
+		    FROM automation_targets
+		    WHERE id = @id AND org_id = @org_id
+		), applied AS (
+		    UPDATE automation_targets t
+		    SET lifecycle_updated_at = CASE
+		            WHEN t.lifecycle_state = @state THEN GREATEST(t.lifecycle_updated_at, @observed_at::timestamptz)
+		            ELSE @observed_at::timestamptz
+		        END,
+		        lifecycle_state = @state,
+		        updated_at = now()
+		    FROM current c
+		    WHERE t.id = c.id AND t.org_id = c.org_id
+		      AND (c.lifecycle_state = @state
+		           OR c.lifecycle_updated_at IS NULL
+		           OR @observed_at::timestamptz IS NULL
+		           OR @observed_at::timestamptz >= c.lifecycle_updated_at)
+		    RETURNING t.id
+		)
+		SELECT EXISTS (SELECT 1 FROM current), EXISTS (SELECT 1 FROM applied)`,
+		pgx.NamedArgs{"id": targetID, "org_id": orgID, "state": state, "observed_at": observedAt}).
+		Scan(&exists, &applied)
 	if err != nil {
-		return fmt.Errorf("set automation target lifecycle: %w", err)
+		return false, fmt.Errorf("set automation target lifecycle: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrAutomationTargetNotFound
+	if !exists {
+		return false, ErrAutomationTargetNotFound
 	}
-	return nil
+	return applied, nil
 }
 
 // RequestWake writes the wake outbox marker and returns the recorded time.
