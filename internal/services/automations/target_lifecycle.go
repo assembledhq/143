@@ -49,6 +49,13 @@ func (l *TargetLifecycle) OnPullRequestClosed(ctx context.Context, orgID uuid.UU
 		if err != nil {
 			return err
 		}
+		if outcome.Stale {
+			l.logger.Info().
+				Str("org_id", orgID.String()).
+				Str("target_id", targetID.String()).
+				Msg("dropped a pull request close that describes the target before its current state")
+			return nil
+		}
 		if err := l.completer.EnqueueWakeJob(ctx, tx, orgID, targetID); err != nil {
 			return err
 		}

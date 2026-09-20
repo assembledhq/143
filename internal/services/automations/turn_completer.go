@@ -147,14 +147,11 @@ func (c *TurnCompleter) Complete(ctx context.Context, orgID, runID, jobID, lockT
 		retireReason = lifecycleReason
 	}
 	if retireReason != "" {
-		_, err := c.targets.RetireGeneration(ctx, tx, orgID, done.GenerationID, retireReason)
-		switch {
-		case errors.Is(err, db.ErrAutomationTargetGenerationNotActive):
-			// Already retired by a lifecycle transition; the completion
-			// itself applied the ownership release.
-		case err != nil:
+		retired, err := c.retireGeneration(ctx, tx, orgID, done.GenerationID, retireReason)
+		if err != nil {
 			return CompletionResult{}, err
-		default:
+		}
+		if retired {
 			result.GenerationRetired = true
 			result.RetiredReason = retireReason
 		}
@@ -176,6 +173,47 @@ func (c *TurnCompleter) Complete(ctx context.Context, orgID, runID, jobID, lockT
 	return result, nil
 }
 
+// retireGeneration retires a generation, treating an already-retired one as
+// success without a retirement: a lifecycle transition may have retired it
+// first, and this transaction's completion still applied the release.
+func (c *TurnCompleter) retireGeneration(ctx context.Context, tx pgx.Tx, orgID, generationID uuid.UUID, reason models.AutomationTargetRetiredReason) (bool, error) {
+	_, err := c.targets.RetireGeneration(ctx, tx, orgID, generationID, reason)
+	switch {
+	case errors.Is(err, db.ErrAutomationTargetGenerationNotActive):
+		return false, nil
+	case err != nil:
+		return false, err
+	default:
+		return true, nil
+	}
+}
+
+// retireTerminalTarget retires the target's active generation when its pull
+// request is already closed or merged and no run is left to execute on it.
+// Every path that ends the target's last piece of work calls it, not only
+// marker-based completion: a final turn that dead-letters without a result,
+// or a last waiter that times out, would otherwise leave an active
+// generation owning a session on a pull request that is gone, with no
+// pending release for the ownership sweep to find.
+func (c *TurnCompleter) retireTerminalTarget(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID) (models.AutomationTargetRetiredReason, error) {
+	reason, err := c.targets.TerminalLifecycleRetirement(ctx, tx, orgID, targetID)
+	if err != nil || reason == "" {
+		return "", err
+	}
+	generation, err := c.targets.GetActiveGeneration(ctx, tx, orgID, targetID)
+	if errors.Is(err, db.ErrAutomationTargetGenerationNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	retired, err := c.retireGeneration(ctx, tx, orgID, generation.ID, reason)
+	if err != nil || !retired {
+		return "", err
+	}
+	return reason, nil
+}
+
 // FailRetriesExhausted records retries_exhausted on an abandoned executing
 // run (no marker for the current attempt, no live lease, and either a
 // terminal job or an attempt older than staleBefore), releases the session
@@ -193,11 +231,22 @@ func (c *TurnCompleter) FailRetriesExhausted(ctx context.Context, orgID, runID u
 	if !done {
 		return false, nil
 	}
+	retiredReason, err := c.retireTerminalTarget(ctx, tx, orgID, targetID)
+	if err != nil {
+		return false, err
+	}
 	if err := c.enqueueWake(ctx, tx, orgID, targetID); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit retries exhausted: %w", err)
+	}
+	if retiredReason != "" {
+		c.logger.Info().
+			Str("org_id", orgID.String()).
+			Str("target_id", targetID.String()).
+			Str("retired_reason", string(retiredReason)).
+			Msg("retired the generation of a target whose pull request is gone")
 	}
 	c.logger.Warn().
 		Str("org_id", orgID.String()).
@@ -462,6 +511,11 @@ func (c *TurnCompleter) failTimedOutWaits(ctx context.Context, orgID, targetID u
 	}
 	if failed == 0 {
 		return 0, nil
+	}
+	// The timed-out run can have been the last thing a closed or merged
+	// target had left to do.
+	if _, err := c.retireTerminalTarget(ctx, tx, orgID, targetID); err != nil {
+		return 0, err
 	}
 	if err := c.enqueueWake(ctx, tx, orgID, targetID); err != nil {
 		return 0, err
