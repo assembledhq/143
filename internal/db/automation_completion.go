@@ -99,7 +99,12 @@ func (s *AutomationRunStore) CompleteFromMarker(ctx context.Context, tx pgx.Tx, 
 	// claim never deadlock. A recovery call (no lock token) also revokes an
 	// expired lease under the job lock, so the worker it is recovering from
 	// cannot renew and resume.
-	if err := lockAutomationRunLifecycle(ctx, tx, orgID, runID, lockToken == uuid.Nil); err != nil {
+	// Revocation is unconditional: the fence below also accepts a completion
+	// when no live lease remains, which a caller holding a stale non-nil
+	// token can reach after another attempt claimed and then stalled. Doing
+	// it only for nil-token recovery would free the target while that
+	// attempt's token stayed renewable.
+	if err := lockAutomationRunLifecycle(ctx, tx, orgID, runID, true); err != nil {
 		if errors.Is(err, ErrAutomationTargetNotFound) {
 			return AutomationRunCompletion{}, nil
 		}
@@ -131,15 +136,20 @@ func (s *AutomationRunStore) CompleteFromMarker(ctx context.Context, tx pgx.Tx, 
 		    completed_at = now(),
 		    -- The continuation prompt reads these summaries back
 		    -- (ListCompletedTurnSummaries), so the run keeps the turn's own
-		    -- summary. The thread carries it in the ordinary path and the
-		    -- session in a fresh generation's first turn; both are durable
-		    -- before completion runs, so a recovery records the same text.
+		    -- summary. The session is asked first: its summary is written in
+		    -- the same transaction as the marker, so it is always this
+		    -- turn's. The thread, which the worker writes afterwards, is
+		    -- accepted only once it has reached this turn, or a turn whose
+		    -- worker died before that write would inherit the previous
+		    -- turn's text.
 		    result_summary = COALESCE(
 		        @result_summary,
-		        (SELECT NULLIF(th.result_summary, '') FROM session_threads th
-		         WHERE th.id = @thread_id AND th.org_id = r.org_id),
 		        (SELECT NULLIF(se.result_summary, '') FROM sessions se
-		         WHERE se.id = r.session_id AND se.org_id = r.org_id),
+		         WHERE se.id = r.session_id AND se.org_id = r.org_id
+		           AND se.current_turn >= @turn_number),
+		        (SELECT NULLIF(th.result_summary, '') FROM session_threads th
+		         WHERE th.id = @thread_id AND th.org_id = r.org_id
+		           AND th.current_turn >= @turn_number),
 		        r.result_summary),
 		    updated_at = now()
 		WHERE r.id = @id AND r.org_id = @org_id`+automationRunCompletionFence+`
@@ -148,7 +158,7 @@ func (s *AutomationRunStore) CompleteFromMarker(ctx context.Context, tx pgx.Tx, 
 		pgx.NamedArgs{
 			"id": runID, "org_id": orgID, "job_id": jobID, "lock_token": lockToken,
 			"status": outcome.RunStatus(), "outcome": outcome, "native_context": nativeContext,
-			"result_summary": resultSummary, "thread_id": threadID,
+			"result_summary": resultSummary, "thread_id": threadID, "turn_number": turnNumber,
 		},
 	).Scan(&out.TargetID, &out.TargetGeneration, &out.SessionID, &headSHA, &headEpoch)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -473,13 +483,15 @@ func (s *AutomationRunStore) FailTimedOutWaits(ctx context.Context, tx pgx.Tx, o
 // retirement take the target first; the attempt claim takes the job before
 // the run.
 //
-// revokeAbandonedLease is set by the recovery paths, which act precisely
-// when no live lease remains. Under the job row lock they clear the
-// fencing token of a job whose lease has expired, because RenewLease only
-// matches the token and would otherwise let a paused worker renew an
-// expired lease and carry on writing after recovery released its session,
-// thread, and container hold. Clearing the token makes that renewal fail,
-// which is how the worker learns it lost the job.
+// revokeAbandonedLease is set by every writer that may proceed without a
+// live lease. Under the job row lock it settles a job whose lease has
+// expired: the fencing token is cleared, because RenewLease matches only
+// the token and would otherwise let a paused worker renew an expired lease
+// and carry on writing after the session, thread, and container hold were
+// released, and the job is recorded failed, because a job left running
+// with no lease is reclaimed by nothing and counts against a drain
+// forever. A live lease matches neither statement, so a caller that still
+// owns its job revokes nothing.
 func lockAutomationRunLifecycle(ctx context.Context, tx pgx.Tx, orgID, runID uuid.UUID, revokeAbandonedLease bool) error {
 	var targetID uuid.UUID
 	var jobID *uuid.UUID
@@ -513,9 +525,19 @@ func lockAutomationRunLifecycle(ctx context.Context, tx pgx.Tx, orgID, runID uui
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE jobs
-		SET lock_token = NULL, lease_expires_at = NULL, updated_at = now()
+		SET status = 'failed',
+		    last_error = COALESCE(NULLIF(last_error, ''), 'the automation turn was recovered after its lease expired'),
+		    completed_at = now(),
+		    locked_by_node_id = NULL,
+		    run_owner_id = NULL,
+		    owner_kind = 'worker',
+		    lock_token = NULL,
+		    locked_at = NULL,
+		    lease_expires_at = NULL,
+		    updated_at = now()
 		WHERE id = @job_id AND org_id = @org_id
-		  AND (status <> 'running' OR lease_expires_at IS NULL OR lease_expires_at <= now())`,
+		  AND status = 'running'
+		  AND (lease_expires_at IS NULL OR lease_expires_at <= now())`,
 		pgx.NamedArgs{"job_id": *jobID, "org_id": orgID}); err != nil {
 		return fmt.Errorf("revoke abandoned automation turn lease: %w", err)
 	}

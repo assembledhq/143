@@ -19,7 +19,15 @@ import (
 )
 
 // fakeAutomationTurnStore scripts the store surface of the turn path.
+// fakeThreadTurn records a fenced primary-thread release.
+type fakeThreadTurn struct {
+	ThreadID       uuid.UUID
+	Turn           int
+	AgentSessionID string
+}
+
 type fakeAutomationTurnStore struct {
+	threadTurns      []fakeThreadTurn
 	run              models.AutomationRun
 	runErr           error
 	target           models.AutomationTarget
@@ -52,6 +60,10 @@ func (f *fakeAutomationTurnStore) LoadTarget(_ context.Context, _, _ uuid.UUID) 
 	return f.target, nil
 }
 func (f *fakeAutomationTurnStore) EndInterruptedAttempt(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, models.SessionStatus) (bool, error) {
+	return f.owned, nil
+}
+func (f *fakeAutomationTurnStore) CompleteThreadTurn(_ context.Context, _, _, _, threadID uuid.UUID, turn int, agentSessionID string) (bool, error) {
+	f.threadTurns = append(f.threadTurns, fakeThreadTurn{ThreadID: threadID, Turn: turn, AgentSessionID: agentSessionID})
 	return f.owned, nil
 }
 func (f *fakeAutomationTurnStore) RecordContinuationFallback(_ context.Context, _, _, _ uuid.UUID, reason models.AutomationRunContinuationReason, baseline *string) (bool, error) {

@@ -117,6 +117,24 @@ func (s *TurnStore) CompletePreflight(ctx context.Context, orgID, runID, lockTok
 	return true, nil
 }
 
+// CompleteThreadTurn returns the turn's primary thread to idle in its own
+// transaction, under the run row lock and the attempt fence.
+func (s *TurnStore) CompleteThreadTurn(ctx context.Context, orgID, runID, lockToken, threadID uuid.UUID, turn int, agentSessionID string) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	written, err := s.runs.CompleteThreadTurnForAttempt(ctx, tx, orgID, runID, lockToken, threadID, turn, nil, agentSessionID)
+	if err != nil || !written {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // RetireGeneration retires a generation in its own transaction.
 func (s *TurnStore) RetireGeneration(ctx context.Context, orgID, generationID uuid.UUID, reason models.AutomationTargetRetiredReason) error {
 	tx, err := s.pool.Begin(ctx)

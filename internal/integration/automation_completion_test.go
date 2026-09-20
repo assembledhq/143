@@ -59,6 +59,21 @@ func (h *completionHarness) endAttempt(t *testing.T, outcome models.AutomationRu
 	require.NoError(t, err, "attempt end commits")
 }
 
+// writeThreadTurn writes the turn's thread result the way the worker does:
+// in a transaction, under the run row lock and the attempt fence.
+func (h *completionHarness) writeThreadTurn(t *testing.T, lockToken uuid.UUID, result *models.SessionResult) (bool, error) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := h.pool.Begin(ctx)
+	require.NoError(t, err, "begin thread write")
+	defer func() { _ = tx.Rollback(ctx) }()
+	written, err := h.runs.CompleteThreadTurnForAttempt(ctx, tx, h.orgID, h.run.ID, lockToken, *h.run.ThreadID, *h.run.TurnNumber, result, "agent-1")
+	if err != nil || !written {
+		return written, err
+	}
+	return true, tx.Commit(ctx)
+}
+
 func (h *completionHarness) target(t *testing.T) models.AutomationTarget {
 	t.Helper()
 	target, err := h.targets.GetByID(context.Background(), h.orgID, *h.run.TargetID)
@@ -772,14 +787,14 @@ func TestAutomationCompletion_FencedThreadWriteAndSummary(t *testing.T) {
 	diff := "--- a\n+++ b\n"
 	result := &models.SessionResult{ResultSummary: &summary, Diff: &diff}
 
-	written, err := h.runs.CompleteThreadTurnForAttempt(ctx, h.orgID, h.run.ID, uuid.New(), *h.run.ThreadID, *h.run.TurnNumber, result, "agent-1")
+	written, err := h.writeThreadTurn(t, uuid.New(), result)
 	require.NoError(t, err, "a stale lease should not error")
 	require.False(t, written, "a worker that lost its lease cannot write the thread")
 	var storedSummary *string
 	require.NoError(t, h.pool.QueryRow(ctx, `SELECT result_summary FROM session_threads WHERE id = $1`, *h.run.ThreadID).Scan(&storedSummary), "thread summary")
 	require.Nil(t, storedSummary, "the fenced-out write left the thread alone")
 
-	written, err = h.runs.CompleteThreadTurnForAttempt(ctx, h.orgID, h.run.ID, h.lockToken, *h.run.ThreadID, *h.run.TurnNumber, result, "agent-1")
+	written, err = h.writeThreadTurn(t, h.lockToken, result)
 	require.NoError(t, err, "the lease holder writes the thread")
 	require.True(t, written, "the attempt is still ours")
 
@@ -841,4 +856,92 @@ func TestSchedulerAdvisoryLock_PinsItsConnection(t *testing.T) {
 	require.NoError(t, err, "acquire after release")
 	require.True(t, held, "the lock is genuinely free again")
 	require.NoError(t, second.Release(ctx), "release")
+}
+
+// TestAutomationCompletion_SummaryFollowsTheMarkersTurn proves a turn whose
+// worker died before writing the thread takes its own summary from the
+// session, not the previous turn's text still on the thread.
+func TestAutomationCompletion_SummaryFollowsTheMarkersTurn(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	// The previous turn's summary is still on the thread, at its own turn.
+	_, err := h.pool.Exec(ctx, `UPDATE session_threads SET result_summary = 'the previous turn', current_turn = 0 WHERE id = $1`, *h.run.ThreadID)
+	require.NoError(t, err, "leave the previous turn's summary on the thread")
+	h.endAttempt(t, models.AutomationRunResultTurnCompleted)
+	// The orchestrator's session write carries this turn's summary, in the
+	// same transaction as the marker.
+	_, err = h.pool.Exec(ctx, `UPDATE sessions SET result_summary = 'this turn' WHERE id = $1`, h.outcome.SessionID)
+	require.NoError(t, err, "record this turn's summary on the session")
+	h.deadLetterJob(t)
+
+	outcome, err := h.completer.RecoverAbandonedRun(ctx, h.orgID, h.run.ID, h.jobID, time.Now())
+	require.NoError(t, err, "recover")
+	require.Equal(t, models.AutomationRunOutcomeTurnCompleted, outcome, "the marker completed the run")
+	require.Equal(t, "this turn", *h.reload(t, h.run.ID).ResultSummary, "the run records its own summary, not the previous turn's")
+}
+
+// TestAutomationCompletion_RevokedLeaseSettlesTheJob proves a revoked lease
+// leaves no job counted as running: nothing reclaims a running job with a
+// null lease, so it would block a drain forever.
+func TestAutomationCompletion_RevokedLeaseSettlesTheJob(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	_, err := h.pool.Exec(ctx, `UPDATE jobs SET lease_expires_at = now() - interval '5 minutes' WHERE id = $1`, h.jobID)
+	require.NoError(t, err, "expire the lease")
+	_, err = h.pool.Exec(ctx, `UPDATE automation_runs SET attempt_started_at = now() - interval '3 hours' WHERE id = $1`, h.run.ID)
+	require.NoError(t, err, "age the attempt")
+
+	_, err = h.completer.Sweep(ctx, h.orgID)
+	require.NoError(t, err, "sweep")
+	var status string
+	var lockToken *uuid.UUID
+	var leaseExpiresAt, completedAt *time.Time
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT status, lock_token, lease_expires_at, completed_at FROM jobs WHERE id = $1`, h.jobID).
+		Scan(&status, &lockToken, &leaseExpiresAt, &completedAt), "job row")
+	require.Equal(t, "failed", status, "the recovered job is terminal, not left running")
+	require.Nil(t, lockToken, "its fencing token is cleared")
+	require.Nil(t, leaseExpiresAt, "its lease is cleared")
+	require.NotNil(t, completedAt, "it is stamped complete")
+}
+
+// TestAutomationCompletion_ThreadWriteBlocksOnRecovery proves the fenced
+// thread write serializes with recovery through the run row lock: a worker
+// whose statement starts before a recovery commits still cannot write the
+// thread afterwards.
+func TestAutomationCompletion_ThreadWriteBlocksOnRecovery(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	h.endAttempt(t, models.AutomationRunResultTurnCompleted)
+	_, err := h.pool.Exec(ctx, `UPDATE session_threads SET status = 'running' WHERE id = $1`, *h.run.ThreadID)
+	require.NoError(t, err, "the worker has not written its thread result yet")
+
+	// A recovery holds the run row and has not committed.
+	tx, err := h.pool.Begin(ctx)
+	require.NoError(t, err, "begin recovery")
+	defer func() { _ = tx.Rollback(ctx) }()
+	locked, err := h.runs.LockAttempt(ctx, tx, h.orgID, h.run.ID, h.lockToken)
+	require.NoError(t, err, "lock the attempt")
+	require.True(t, locked, "recovery holds the run row")
+	_, err = tx.Exec(ctx, `UPDATE automation_runs SET dispatch_state = 'done', status = 'completed' WHERE id = $1`, h.run.ID)
+	require.NoError(t, err, "recovery settles the run")
+
+	summary := "the lost worker's summary"
+	done := make(chan bool, 1)
+	errs := make(chan error, 1)
+	go func() {
+		written, writeErr := h.writeThreadTurn(t, h.lockToken, &models.SessionResult{ResultSummary: &summary})
+		errs <- writeErr
+		done <- written
+	}()
+	select {
+	case <-done:
+		require.FailNow(t, "the thread write should block on the run row lock")
+	case <-time.After(300 * time.Millisecond):
+	}
+	require.NoError(t, tx.Commit(ctx), "commit the recovery")
+	require.NoError(t, <-errs, "the thread write should not error")
+	require.False(t, <-done, "the write is fenced out once recovery has taken the attempt")
+	var storedSummary *string
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT result_summary FROM session_threads WHERE id = $1`, *h.run.ThreadID).Scan(&storedSummary), "thread summary")
+	require.Nil(t, storedSummary, "the lost worker wrote nothing")
 }
