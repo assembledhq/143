@@ -8975,12 +8975,35 @@ func automationRunRowColumns() []string {
 	}
 }
 
+// expectAutomationRunSessionAttempts stubs AutomationRunStore.ListSessionAttempts,
+// the durable record of which models this run already spent a session on. The
+// dispatch path subtracts these from the configured chain, so passing no
+// attempts means "nothing has run yet" and this dispatch considers the whole
+// chain starting at the primary; passing an attempt expresses "this run already
+// ran that model".
+//
+// The column list and its order mirror the SELECT in internal/db/automations.go:
+// the store scans positionally, so a reordering here would silently mis-fill
+// the struct rather than fail. reasoning_effort sits between model_override and
+// produced_diff because the chain's identity is (agent, model, effort) — a run
+// may deliberately re-try one model at a cheaper level, and dropping the column
+// would shift produced_diff into it.
+func expectAutomationRunSessionAttempts(mock pgxmock.PgxPoolIface, attempts ...models.AutomationRunAttempt) {
+	rows := pgxmock.NewRows([]string{"id", "agent_type", "model_override", "reasoning_effort", "produced_diff", "produced_pull_request"})
+	for _, attempt := range attempts {
+		rows.AddRow(attempt.SessionID, attempt.AgentType, attempt.Model, attempt.ReasoningEffort, attempt.ProducedDiff, attempt.ProducedPullRequest)
+	}
+	mock.ExpectQuery(`SELECT sessions\.id, sessions\.agent_type, sessions\.model_override[\s\S]+FROM session_automation_links`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(rows)
+}
+
 // automationRowColumns mirrors automationColumns in internal/db/automations.go.
 func automationRowColumns() []string {
 	return []string{
 		"id", "org_id", "repository_id", "name", "goal", "scope",
 		"icon_type", "icon_value",
-		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
+		"agent_type", "model_override", "reasoning_effort", "fallback_models", "execution_mode", "max_concurrent", "base_branch",
 		"identity_scope", "publish_policy", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"github_event_triggers", "github_event_filters",
@@ -9116,12 +9139,16 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
+			&agentType, nil, &reasoningEffort, models.AutomationFallbackModels{}, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
+
+	// No session has run for this run yet, so nothing is subtracted from the
+	// chain and this dispatch takes the configured primary.
+	expectAutomationRunSessionAttempts(mock)
 
 	// 3. Atomically claim pending → running BEFORE creating the session, so
 	// a duplicate handler that loses this race never reaches the sessions or
@@ -9130,9 +9157,9 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-		// 4. Create the session. The context-table CTE writes automation_run_id
-		// as side-table context near the end of the argument list; asserting that specific value here
-		// proves the handler linked the session back to the run it's servicing.
+	// 4. Create the session. The context-table CTE writes automation_run_id
+	// as side-table context near the end of the argument list; asserting that specific value here
+	// proves the handler linked the session back to the run it's servicing.
 	// execution_brief must carry the run's goal_snapshot; without that,
 	// promptSeedForSession synthesizes an empty "Session task" seed and the
 	// agent silently ignores everything the user wrote in the automation goal.
@@ -9204,12 +9231,16 @@ func TestAutomationRunHandler_UsesRepositoryOverrideFromTriggerContext(t *testin
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &automationRepoID, "incident", "fix incident", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
+			nil, nil, nil, models.AutomationFallbackModels{}, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleNone, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
+	// No session has run for this run yet, so nothing is subtracted from the
+	// chain and this dispatch takes the configured primary.
+	expectAutomationRunSessionAttempts(mock)
+
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -9280,14 +9311,18 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
+			nil, nil, nil, models.AutomationFallbackModels{}, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
 
-	// 3. The conditional transition finds the row already non-pending (the
+	// 3. The attempt ledger is read before the claim, because the pause check
+	// above it needs to know whether this run has already started.
+	expectAutomationRunSessionAttempts(mock)
+
+	// 4. The conditional transition finds the row already non-pending (the
 	// other worker won) and reports zero rows affected. The handler MUST
 	// stop here — no session create, no job enqueue.
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -9383,6 +9418,12 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationDeleted(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// TestAutomationRunHandler_MarksSkippedWhenAutomationPaused covers the half of
+// the pause contract that still cancels: a run that never started. It is the
+// counterpart to
+// TestAutomationRunHandler_ContinuesPausedAutomationRunThatAlreadyHasAttempts,
+// and the pair is what makes "len(attempts) == 0" the actual condition — a
+// change that skipped unconditionally, or never skipped, would fail one of them.
 func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 	t.Parallel()
 
@@ -9417,12 +9458,16 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
+			nil, nil, nil, models.AutomationFallbackModels{}, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, false, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
+
+	// Zero attempts: this run never dispatched a session, so nothing is in
+	// flight and cancelling it costs no work.
+	expectAutomationRunSessionAttempts(mock)
 
 	// Run gets marked skipped via the conditional pending → skipped transition.
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -9431,8 +9476,327 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 
 	handler := newAutomationRunHandler(stores, nil, zerolog.Nop())
 	err = handler(context.Background(), models.JobTypeAutomationRun, payload)
-	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, err, "a scheduled run that slipped through a pause is skipped, not retried")
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"a paused automation whose run never started must be skipped without claiming the row or creating a session")
+}
+
+// TestAutomationRunHandler_FailsRunWhenEveryRankWasAlreadyAttempted is the
+// regression guard for the count-based chain. A run whose only rank has already
+// spawned a session has nothing left to try; the old logic indexed into the
+// chain by session count and re-dispatched that same model forever. The run
+// must now land terminally failed, with a summary that says the chain is spent
+// rather than blaming availability, and no second session may be created.
+func TestAutomationRunHandler_FailsRunWhenEveryRankWasAlreadyAttempted(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Automations = db.NewAutomationStore(mock)
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+	agentType := string(models.AgentTypeCodex)
+	repoID := uuid.New()
+
+	payload, err := json.Marshal(map[string]string{
+		"org_id":            orgID.String(),
+		"automation_id":     automationID.String(),
+		"automation_run_id": runID.String(),
+	})
+	require.NoError(t, err, "marshal payload should succeed")
+
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
+			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+		))
+
+	// A single-rank chain: the primary is the whole chain, so one spent
+	// attempt exhausts it.
+	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
+			automationID, orgID, &repoID, "nightly", "cleanup", nil,
+			models.AutomationIconTypeEmoji, "⚙️",
+			&agentType, stringPtr(models.DefaultCodexModel), nil, models.AutomationFallbackModels{}, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
+			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{}, []byte("{}"),
+			nil, nil, true, nil, nil, nil,
+			50, []byte("{}"), now, now, nil,
+		))
+
+	// The run already ran its primary. Under the old count-based logic this
+	// same row told the handler to resume at index 1, which wrapped back onto
+	// the model that had just failed.
+	expectAutomationRunSessionAttempts(mock, models.AutomationRunAttempt{
+		SessionID: uuid.New(),
+		AgentType: &agentType,
+		Model:     stringPtr(models.DefaultCodexModel),
+	})
+
+	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// TransitionStatusIf's named arguments expand in order of first appearance
+	// in the SQL: to_status, completed_at, result_summary, id, org_id,
+	// from_status.
+	var summary string
+	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
+		WithArgs(
+			models.AutomationRunStatusFailed,
+			pgxmock.AnyArg(),
+			automationRunSummaryCaptureArg{captured: &summary},
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			models.AutomationRunStatusRunning,
+		).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	availability := &automationModelAvailabilityStub{unavailable: map[string]bool{}}
+
+	handler := newAutomationRunHandler(stores, &Services{CodingAgents: availability}, zerolog.Nop())
+	err = handler(context.Background(), models.JobTypeAutomationRun, payload)
+
+	require.NoError(t, err, "a spent model chain is a terminal outcome for the run, not a retryable job failure")
+	require.Equal(t, "every configured model was already attempted for this run", summary,
+		"an exhausted chain has no models left to name, so the summary must say that outright instead of blaming availability")
+	require.Empty(t, availability.checked,
+		"a chain with nothing left to try must not cost a credential lookup")
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"no second session may be created and no run_agent job enqueued for a model the run already ran")
+}
+
+// TestAutomationRunHandler_ContinuesPausedAutomationRunThatAlreadyHasAttempts
+// guards the pause contract documented in the handler: pausing an automation
+// clears its schedule, it does not cancel work already in flight. A run that
+// failed on capacity and was promoted to its next model sits in *pending* while
+// it waits for a worker, so "pending and paused" no longer means "never
+// started". The old check read only automation.Enabled and cancelled those runs
+// mid-chain, throwing away a session's worth of work the user had already paid
+// for — and doing it precisely when the fallback chain was most useful.
+func TestAutomationRunHandler_ContinuesPausedAutomationRunThatAlreadyHasAttempts(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Automations = db.NewAutomationStore(mock)
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	runID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now()
+	agentType := string(models.AgentTypeCodex)
+	repoID := uuid.New()
+	fallbacks := models.AutomationFallbackModels{
+		AgentTypes: []string{string(models.AgentTypeClaudeCode)},
+		Models:     []string{models.DefaultClaudeCodeModel},
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"org_id":            orgID.String(),
+		"automation_id":     automationID.String(),
+		"automation_run_id": runID.String(),
+	})
+	require.NoError(t, err, "marshal payload should succeed")
+
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
+			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+		))
+
+	// enabled=false: the user paused the automation while this run was
+	// between models.
+	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
+			automationID, orgID, &repoID, "nightly", "cleanup", nil,
+			models.AutomationIconTypeEmoji, "⚙️",
+			&agentType, stringPtr(models.DefaultCodexModel), nil, fallbacks, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
+			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{}, []byte("{}"),
+			nil, nil, false, nil, nil, nil,
+			50, []byte("{}"), now, now, nil,
+		))
+
+	// The run already spent its primary. This row is the only thing that
+	// distinguishes it from the never-started run in
+	// TestAutomationRunHandler_MarksSkippedWhenAutomationPaused, which is why
+	// the ledger has to be read before the pause check rather than after it.
+	expectAutomationRunSessionAttempts(mock, models.AutomationRunAttempt{
+		SessionID: uuid.New(),
+		AgentType: &agentType,
+		Model:     stringPtr(models.DefaultCodexModel),
+	})
+
+	// Claiming the row at all is already the assertion: a skipped run never
+	// reaches pending → running.
+	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// The chain resumes on the fallback, not on the primary the run already
+	// spent and not on nothing at all.
+	expectedModel := models.DefaultClaudeCodeModel
+	createSessionArgs := workerAnyArgs(39)
+	createSessionArgs[1] = models.AgentTypeClaudeCode
+	createSessionArgs[9] = &expectedModel
+	createSessionArgs[23] = &runID
+	mock.ExpectBegin()
+	mock.ExpectQuery(`INSERT INTO sessions`).
+		WithArgs(createSessionArgs...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
+	mock.ExpectQuery(`INSERT INTO session_threads`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
+
+	mock.ExpectQuery(`INSERT INTO jobs`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	availability := &automationModelAvailabilityStub{unavailable: map[string]bool{}}
+	handler := newAutomationRunHandler(stores, &Services{CodingAgents: availability}, zerolog.Nop())
+	err = handler(context.Background(), models.JobTypeAutomationRun, payload)
+
+	require.NoError(t, err, "continuing an in-flight run of a paused automation is a normal dispatch, not a job failure")
+	require.Equal(t,
+		[]string{automationModelAvailabilityKey(string(models.AgentTypeClaudeCode), models.DefaultClaudeCodeModel)},
+		availability.checked,
+		"the run must resume on the rank it has not spent; checking the already-attempted primary would mean the ledger was ignored")
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"pausing an automation must not cancel a run that is already mid-chain — the skipped transition must never be written here")
+}
+
+// TestAutomationRunHandler_DispatchesOrgDefaultAgentForAgentlessAutomation is
+// the end-to-end guard for the infinite re-dispatch loop. An automation that
+// overrides only its model reaches dispatch with rank 0 carrying no agent at
+// all. The session still has to run on *something*, so the handler resolved the
+// ladder at session-build time only — which meant the session recorded
+// "claude_code" while the rank it came from still said nil. Nothing ever
+// matched, so every re-dispatch handed back the same rank and the run re-ran one
+// model until the stuck-run reaper failed it.
+func TestAutomationRunHandler_DispatchesOrgDefaultAgentForAgentlessAutomation(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Automations = db.NewAutomationStore(mock)
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+	stores.Organizations = db.NewOrganizationStore(mock)
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	runID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now()
+	repoID := uuid.New()
+	// Deliberately NOT models.DefaultDefaultAgentType: a test whose org default
+	// equalled the built-in one would pass even if the org setting were ignored.
+	orgDefaultAgentType := models.AgentTypeClaudeCode
+
+	payload, err := json.Marshal(map[string]string{
+		"org_id":            orgID.String(),
+		"automation_id":     automationID.String(),
+		"automation_run_id": runID.String(),
+	})
+	require.NoError(t, err, "marshal payload should succeed")
+
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
+			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+		))
+
+	// agent_type is nil and there are no fallbacks: a one-rank chain whose
+	// only rank names a model and nothing else.
+	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
+			automationID, orgID, &repoID, "nightly", "cleanup", nil,
+			models.AutomationIconTypeEmoji, "⚙️",
+			nil, stringPtr(models.DefaultCodexModel), nil, models.AutomationFallbackModels{}, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
+			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{}, []byte("{}"),
+			nil, nil, true, nil, nil, nil,
+			50, []byte("{}"), now, now, nil,
+		))
+
+	expectAutomationRunSessionAttempts(mock)
+
+	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// The org default is read once per dispatch and feeds the ladder for every
+	// rank at once, so the agent that is checked, dispatched and later matched
+	// is one value rather than three independent resolutions.
+	mock.ExpectQuery("SELECT id, name, settings").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerOrganizationColumns()).
+			AddRow(orgID, "Assembled", json.RawMessage(`{"default_agent_type":"claude_code"}`), now, now))
+
+	expectedModel := models.DefaultCodexModel
+	createSessionArgs := workerAnyArgs(39)
+	createSessionArgs[1] = orgDefaultAgentType
+	createSessionArgs[9] = &expectedModel
+	createSessionArgs[23] = &runID
+	mock.ExpectBegin()
+	mock.ExpectQuery(`INSERT INTO sessions`).
+		WithArgs(createSessionArgs...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
+	mock.ExpectQuery(`INSERT INTO session_threads`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
+
+	mock.ExpectQuery(`INSERT INTO jobs`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	availability := &automationModelAvailabilityStub{unavailable: map[string]bool{}}
+	handler := newAutomationRunHandler(stores, &Services{CodingAgents: availability}, zerolog.Nop())
+	err = handler(context.Background(), models.JobTypeAutomationRun, payload)
+
+	require.NoError(t, err, "an automation that overrides only its model must dispatch normally")
+	require.Equal(t,
+		[]string{automationModelAvailabilityKey(string(orgDefaultAgentType), models.DefaultCodexModel)},
+		availability.checked,
+		"availability must be looked up against the resolved agent; a blank one has no credential to check and would dispatch unverified")
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"the session must be created on the org default agent, which is what the createSessionArgs agent_type position pins")
+
+	// The other half of the fix: the attempt this dispatch will produce has to
+	// spend the rank it came from. ListSessionAttempts reports the session's
+	// own agent, so an unresolved rank 0 would leave the chain looking
+	// completely unspent and the next dispatch would re-run this same model.
+	automation := models.Automation{ID: automationID, ModelOverride: stringPtr(models.DefaultCodexModel)}
+	candidates, err := automationModelCandidates(models.AutomationRun{ID: runID}, automation, orgDefaultAgentType)
+	require.NoError(t, err, "the same chain the handler built must rebuild here")
+	ledgerAttempt := models.AutomationRunAttempt{
+		SessionID: sessionID,
+		AgentType: stringPtr(string(orgDefaultAgentType)),
+		Model:     stringPtr(models.DefaultCodexModel),
+	}
+	require.Empty(t, models.AutomationModelRanksRemaining(candidates, []models.AutomationRunAttempt{ledgerAttempt}),
+		"the attempt this session records must spend its own rank; if it does not, the chain never advances and the run re-dispatches until the reaper fails it")
 }
 
 func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
@@ -9472,12 +9836,16 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, models.AutomationPublishPolicyPullRequest, 0,
+			nil, nil, nil, models.AutomationFallbackModels{}, "sequential", 1, "main", models.AutomationIdentityScopePersonal, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &creatorID, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
+
+	// No session has run for this run yet, so nothing is subtracted from the
+	// chain and this dispatch takes the configured primary.
+	expectAutomationRunSessionAttempts(mock)
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -9545,12 +9913,16 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
+			nil, nil, nil, models.AutomationFallbackModels{}, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &clickerID, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
+
+	// No session has run for this run yet, so nothing is subtracted from the
+	// chain and this dispatch takes the configured primary.
+	expectAutomationRunSessionAttempts(mock)
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -9624,12 +9996,16 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
+			nil, nil, nil, models.AutomationFallbackModels{}, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &creatorID, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
+
+	// No session has run for this run yet, so nothing is subtracted from the
+	// chain and this dispatch takes the configured primary.
+	expectAutomationRunSessionAttempts(mock)
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -9695,12 +10071,16 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, models.AutomationPublishPolicyPullRequest, 0,
+			nil, nil, nil, models.AutomationFallbackModels{}, "sequential", 1, "main", models.AutomationIdentityScopePersonal, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
+
+	// The attempt ledger is read before the identity check, so even a run that
+	// is about to be failed for a missing creator pays this one query.
+	expectAutomationRunSessionAttempts(mock)
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).

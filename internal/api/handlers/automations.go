@@ -351,6 +351,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		AgentType           *models.AgentType                         `json:"agent_type"`
 		Model               *string                                   `json:"model"`
 		ReasoningEffort     models.ReasoningEffort                    `json:"reasoning_effort"`
+		FallbackModels      *models.AutomationFallbackModels          `json:"fallback_models"`
 		ExecutionMode       *models.ProjectExecMode                   `json:"execution_mode"`
 		MaxConcurrent       *int                                      `json:"max_concurrent"`
 		BaseBranch          *string                                   `json:"base_branch"`
@@ -434,6 +435,14 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	reasoningOverride, err := parseReasoningEffortForAgent(effectiveAgentType, string(req.ReasoningEffort))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", err.Error())
+		return
+	}
+	// Fallbacks are validated against the primary that was just resolved, so a
+	// rank that inherits the agent or effort is checked against the values this
+	// automation will actually store.
+	fallbackModels, err := resolveAutomationFallbackModels(models.AutomationFallbackModels{}, req.FallbackModels, agentType, reasoningOverride)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
 		return
 	}
 
@@ -582,6 +591,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		AgentType:           agentType,
 		ModelOverride:       modelOverride,
 		ReasoningEffort:     reasoningOverride,
+		FallbackModels:      fallbackModels,
 		ExecutionMode:       execMode,
 		MaxConcurrent:       maxConcurrent,
 		BaseBranch:          baseBranch,
@@ -688,9 +698,10 @@ func (h *AutomationHandler) CreateExternal(w http.ResponseWriter, r *http.Reques
 			MaxConcurrent *int                    `json:"max_concurrent"`
 		} `json:"execution"`
 		Agent struct {
-			Type            *models.AgentType      `json:"type"`
-			Model           *string                `json:"model"`
-			ReasoningEffort models.ReasoningEffort `json:"reasoning_effort"`
+			Type            *models.AgentType                `json:"type"`
+			Model           *string                          `json:"model"`
+			ReasoningEffort models.ReasoningEffort           `json:"reasoning_effort"`
+			FallbackModels  *models.AutomationFallbackModels `json:"fallback_models"`
 		} `json:"agent"`
 		PullRequest struct {
 			BaseBranch       *string                         `json:"base_branch"`
@@ -731,6 +742,7 @@ func (h *AutomationHandler) CreateExternal(w http.ResponseWriter, r *http.Reques
 		"agent_type":            req.Agent.Type,
 		"model":                 req.Agent.Model,
 		"reasoning_effort":      req.Agent.ReasoningEffort,
+		"fallback_models":       req.Agent.FallbackModels,
 		"base_branch":           req.PullRequest.BaseBranch,
 		"identity_scope":        identityScope,
 		"publish_policy":        req.PullRequest.PublishPolicy,
@@ -1401,6 +1413,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		AgentType           *models.AgentType                         `json:"agent_type"`
 		Model               *string                                   `json:"model"`
 		ReasoningEffort     *models.ReasoningEffort                   `json:"reasoning_effort"`
+		FallbackModels      *models.AutomationFallbackModels          `json:"fallback_models"`
 		ExecutionMode       *models.ProjectExecMode                   `json:"execution_mode"`
 		MaxConcurrent       *int                                      `json:"max_concurrent"`
 		BaseBranch          *string                                   `json:"base_branch"`
@@ -1524,6 +1537,21 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		automation.ReasoningEffort = reasoningOverride
+	}
+	// The whole ranked set is re-validated whenever any part of it moves, not
+	// just when fallback_models itself is patched: a lone {"model": ...} can
+	// switch the primary agent, and per-rank reasoning efforts that were legal
+	// under the old agent may not be under the new one. Runs after the blocks
+	// above so the primary a rank inherits is the patched one.
+	if req.AgentType != nil || req.Model != nil || req.ReasoningEffort != nil || req.FallbackModels != nil {
+		// Assigned wholesale rather than appended to, so the `before` copy
+		// taken above still holds the pre-patch chain for the audit diff.
+		fallbackModels, err := resolveAutomationFallbackModels(automation.FallbackModels, req.FallbackModels, automation.AgentType, automation.ReasoningEffort)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
+			return
+		}
+		automation.FallbackModels = fallbackModels
 	}
 	if req.ExecutionMode != nil {
 		if err := req.ExecutionMode.Validate(); err != nil {

@@ -6733,6 +6733,23 @@ func (o *Orchestrator) failRunWithResultAndPhaseTerminal(ctx context.Context, ru
 		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
 		return
 	}
+	// Align the in-memory session with what was just persisted, the way the
+	// success path does after UpdateResult. The completion hooks below consume
+	// this struct, not the row: without this they see a session whose Error,
+	// ResultSummary and Diff are still whatever they were at load time. That
+	// silently disabled two behaviors — an automation run's failure summary fell
+	// back to the generic "Agent session failed." label, and the automation
+	// model-fallback chain could not tell a capacity failure from any other.
+	run.Status = models.SessionStatusFailed
+	if result.Error != nil {
+		run.Error = result.Error
+	}
+	if result.ResultSummary != nil {
+		run.ResultSummary = result.ResultSummary
+	}
+	if result.Diff != nil {
+		run.Diff = result.Diff
+	}
 	if run.ProjectTaskID != nil && o.projectTasks != nil {
 		if err := o.projectTasks.OnSessionComplete(ctx, run, "failed"); err != nil {
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run failure")

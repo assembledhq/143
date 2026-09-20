@@ -1569,17 +1569,17 @@ func automationToolDefinitions() []Tool {
 	return []Tool{
 		{
 			Name:        "automation_create",
-			Description: "Create a repo-scoped automation from a JSON payload. The payload uses the same flat fields as the automation create API and must set repository_id to the current session repository.",
+			Description: "Create a repo-scoped automation from a JSON payload. The payload uses the same flat fields as the automation create API and must set repository_id to the current session repository. Optional fallback_models ranks models tried after the primary one: an object with a models array (at most 4 entries) plus optional index-aligned agent_types and reasoning_efforts arrays, each either omitted or the same length as models.",
 			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
-				"payload": {Type: "string", Description: "JSON automation create payload"},
+				"payload": {Type: "string", Description: "JSON automation create payload, including the optional fallback_models object"},
 			}, Required: []string{"payload"}},
 		},
 		{
 			Name:        "automation_update",
-			Description: "Update a repo-scoped automation from a JSON payload. The target automation must belong to the current session repository.",
+			Description: "Update a repo-scoped automation from a JSON payload. The target automation must belong to the current session repository. Optional fallback_models ranks models tried after the primary one: an object with a models array (at most 4 entries) plus optional index-aligned agent_types and reasoning_efforts arrays, each either omitted or the same length as models.",
 			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
 				"automation_id": {Type: "string", Description: "Automation UUID"},
-				"payload":       {Type: "string", Description: "JSON automation update payload"},
+				"payload":       {Type: "string", Description: "JSON automation update payload, including the optional fallback_models object"},
 			}, Required: []string{"automation_id", "payload"}},
 		},
 		{

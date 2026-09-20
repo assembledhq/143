@@ -1750,6 +1750,155 @@ describe("NewAutomationPage", () => {
     });
   });
 
+  // --- Ranked fallback models ------------------------------------------------
+  //
+  // Codex is the default agent and holds OAuth; Claude Code and Amp come from
+  // org credentials. Ranks may run on a different agent than the primary, so
+  // the picker has to offer an agent with a different reasoning ladder (Claude
+  // Code) and one with none at all (Amp).
+  function mockFallbackModelForm() {
+    let requestBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/settings", () =>
+        HttpResponse.json({
+          data: {
+            id: "org-1",
+            name: "Test Org",
+            settings: { default_agent_type: "codex", agent_config: {} },
+          },
+        }),
+      ),
+      http.get("*/api/v1/settings/codex-auth/status", () =>
+        HttpResponse.json({ data: { status: "completed" } }),
+      ),
+      http.get("*/api/v1/coding-credentials*", ({ request }) => {
+        const scope = new URL(request.url).searchParams.get("scope");
+        if (scope !== "org") {
+          return HttpResponse.json({ data: [], meta: { scope } });
+        }
+        return HttpResponse.json({
+          data: ["claude_code", "amp"].map((agent) => ({
+            id: `cred-${agent}`,
+            org_id: "org-1",
+            scope: "org",
+            agent,
+            auth_type: "api_key",
+            provider: agent === "amp" ? "amp" : "anthropic",
+            label: `${agent} key`,
+            status: "healthy",
+            is_default: false,
+            priority: 1,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          })),
+          meta: {},
+        });
+      }),
+      http.get("*/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+      http.post("*/api/v1/automations", async ({ request }) => {
+        requestBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    return () => requestBody;
+  }
+
+  async function addFallbackRank(
+    user: ReturnType<typeof userEvent.setup>,
+    rank: number,
+    model: string,
+  ) {
+    await user.click(screen.getByRole("button", { name: /Add fallback model/ }));
+    await user.click(
+      screen.getByRole("combobox", { name: `Rank ${rank} fallback model` }),
+    );
+    await user.click(await screen.findByRole("option", { name: model }));
+  }
+
+  it("submits the ranked fallback chain built in advanced settings", async () => {
+    const user = userEvent.setup();
+    const getRequestBody = mockFallbackModelForm();
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    });
+    await user.click(screen.getByText("Advanced options"));
+    await addFallbackRank(user, 2, "claude-sonnet-4-6");
+    await addFallbackRank(user, 3, "smart");
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    // The chain has to survive creation rather than needing a second trip
+    // through the detail page. `agent_types` is written explicitly so the
+    // backend never re-derives which agent a rank runs on, and
+    // `reasoning_efforts` is omitted because every rank here inherits.
+    await waitFor(() =>
+      expect(getRequestBody()).toMatchObject({
+        fallback_models: {
+          models: ["claude-sonnet-4-6", "smart"],
+          agent_types: ["claude_code", "amp"],
+        },
+      }),
+    );
+  }, 20000);
+
+  it("drops a fallback the chosen primary model has become before submitting", async () => {
+    const user = userEvent.setup();
+    const getRequestBody = mockFallbackModelForm();
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    });
+    await user.click(screen.getByText("Advanced options"));
+    await addFallbackRank(user, 2, "claude-sonnet-4-6");
+    await addFallbackRank(user, 3, "smart");
+
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    await user.click(
+      await screen.findByRole("option", { name: "claude-sonnet-4-6" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    // A rank equal to the primary would retry the model that just failed, which
+    // is the one thing the chain exists to avoid — and the create request is
+    // the last point where the form can still fix it.
+    await waitFor(() =>
+      expect(getRequestBody()).toMatchObject({
+        model: "claude-sonnet-4-6",
+        fallback_models: { models: ["smart"], agent_types: ["amp"] },
+      }),
+    );
+    expect(
+      (getRequestBody()?.fallback_models as { models: string[] }).models,
+    ).not.toContain("claude-sonnet-4-6");
+  }, 20000);
+
   it("shows goal length validation and blocks submit when the goal exceeds the backend limit", async () => {
     const user = userEvent.setup();
 

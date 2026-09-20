@@ -1800,3 +1800,146 @@ func TestPublicationInitiatorMembershipScopeMigration(t *testing.T) {
 	require.Contains(t, upSQL, "NOT VALID", "constraint replacement should avoid scanning rows under the catalog lock")
 	require.Contains(t, string(validateBody), "VALIDATE CONSTRAINT session_publications_initiator_scope_fkey", "a separate migration should validate existing publication attribution")
 }
+
+// The automation fallback chain lives in a jsonb column rather than a side
+// table, so the schema itself has to guarantee two things the Go layer assumes
+// everywhere: the column is always present and non-null (scanAutomation reads
+// it unconditionally), and it always holds a JSON *object* (the decoder targets
+// a struct, so an array or scalar would fail at read time on data that was
+// accepted at write time). Model names deliberately are not constrained in SQL
+// — models.ValidateModelForAgentType owns that — so this test pins the
+// container shape, the backfill of pre-existing automations, and a clean
+// rollback, and nothing else.
+func TestAutomationFallbackModelsMigrationPostgresBehavior(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run the Postgres migration behavior test")
+	}
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	require.NoError(t, err, "test should connect to TEST_DATABASE_URL")
+	defer conn.Close(ctx)
+
+	schema := "test_automation_fallback_models_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+	_, err = conn.Exec(ctx, `CREATE SCHEMA `+schema)
+	require.NoError(t, err, "test should create an isolated schema")
+	defer func() {
+		_, _ = conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
+	}()
+	_, err = conn.Exec(ctx, `SET search_path TO `+schema+`, public`)
+	require.NoError(t, err, "test should isolate migration objects to the test schema")
+
+	// Only the columns the migration touches or the seed row needs; the real
+	// automations table is far wider, and pinning its full shape here would
+	// make this test fail on unrelated schema changes.
+	_, err = conn.Exec(ctx, `
+		CREATE TABLE automations (
+			id uuid PRIMARY KEY,
+			org_id uuid NOT NULL,
+			goal text NOT NULL,
+			agent_type text,
+			model_override text,
+			reasoning_effort text
+		)`)
+	require.NoError(t, err, "test should create the pre-migration automation shape")
+
+	existingID := uuid.New()
+	_, err = conn.Exec(ctx, `
+		INSERT INTO automations (id, org_id, goal, agent_type, model_override)
+		VALUES ($1, $2, 'keep the build green', 'claude_code', 'claude-sonnet-4-5')`,
+		existingID, uuid.New())
+	require.NoError(t, err, "test should seed an automation that predates the fallback chain")
+
+	upBody, err := os.ReadFile("../../migrations/000290_automation_fallback_models.up.sql")
+	require.NoError(t, err, "test should read the automation fallback models up migration")
+	_, err = conn.Exec(ctx, string(upBody))
+	require.NoError(t, err, "fallback models migration should apply to the pre-migration schema")
+
+	// Automations created before the feature must read back as an empty chain
+	// rather than NULL, because ModelRanks() dereferences the value directly.
+	var backfilled string
+	var backfilledIsNull bool
+	err = conn.QueryRow(ctx, `
+		SELECT fallback_models::text, fallback_models IS NULL
+		FROM automations
+		WHERE id = $1`, existingID).Scan(&backfilled, &backfilledIsNull)
+	require.NoError(t, err, "test should read the backfilled fallback chain")
+	require.False(t, backfilledIsNull, "existing automations must not be left with a NULL fallback chain")
+	require.JSONEq(t, `{}`, backfilled, "existing automations should backfill to an empty fallback chain")
+
+	// The DEFAULT has to cover inserts that omit the column too, since the
+	// insert path only names fallback_models when the caller supplied one.
+	insertedID := uuid.New()
+	_, err = conn.Exec(ctx, `
+		INSERT INTO automations (id, org_id, goal)
+		VALUES ($1, $2, 'ship the thing')`, insertedID, uuid.New())
+	require.NoError(t, err, "an insert omitting the fallback chain should rely on the column default")
+	var inserted string
+	err = conn.QueryRow(ctx, `SELECT fallback_models::text FROM automations WHERE id = $1`, insertedID).Scan(&inserted)
+	require.NoError(t, err, "test should read the defaulted fallback chain")
+	require.JSONEq(t, `{}`, inserted, "new automations should default to an empty fallback chain")
+
+	_, err = conn.Exec(ctx, `
+		INSERT INTO automations (id, org_id, goal, fallback_models)
+		VALUES ($1, $2, 'explicit null', NULL)`, uuid.New(), uuid.New())
+	require.Error(t, err, "an explicit NULL fallback chain should be rejected by the NOT NULL constraint")
+
+	// A populated chain is the shape the feature actually writes; it must pass
+	// the type guard so the guard cannot be satisfied only by '{}'.
+	populatedID := uuid.New()
+	_, err = conn.Exec(ctx, `
+		INSERT INTO automations (id, org_id, goal, fallback_models)
+		VALUES ($1, $2, 'with a chain', $3::jsonb)`,
+		populatedID, uuid.New(),
+		`{"models":["gpt-5-codex"],"agent_types":["codex"],"reasoning_efforts":["high"]}`)
+	require.NoError(t, err, "a populated fallback chain object should satisfy the type guard")
+
+	// Anything that is not a JSON object would decode into the struct as an
+	// error at read time, so it has to be refused at write time.
+	for _, nonObject := range []string{`[]`, `[{"models":[]}]`, `"claude-sonnet-4-5"`, `3`, `null`, `true`} {
+		_, execErr := conn.Exec(ctx, `
+			INSERT INTO automations (id, org_id, goal, fallback_models)
+			VALUES ($1, $2, 'bad shape', $3::jsonb)`, uuid.New(), uuid.New(), nonObject)
+		require.Error(t, execErr, "a non-object fallback chain value (%s) should be rejected", nonObject)
+	}
+
+	downBody, err := os.ReadFile("../../migrations/000290_automation_fallback_models.down.sql")
+	require.NoError(t, err, "test should read the automation fallback models down migration")
+	_, err = conn.Exec(ctx, string(downBody))
+	require.NoError(t, err, "down migration should roll the fallback chain back")
+
+	var remainingColumns int
+	err = conn.QueryRow(ctx, `
+		SELECT count(*)
+		FROM information_schema.columns
+		WHERE table_schema = current_schema()
+		  AND table_name = 'automations'
+		  AND column_name = 'fallback_models'`).Scan(&remainingColumns)
+	require.NoError(t, err, "test should inspect the rolled-back automation columns")
+	require.Equal(t, 0, remainingColumns, "down migration should drop the fallback chain column")
+
+	// Dropping the column would cascade the constraint away, but the down
+	// migration drops it explicitly first; assert it is gone so a future
+	// reordering that leaves a stale constraint behind is caught.
+	var remainingConstraints int
+	err = conn.QueryRow(ctx, `
+		SELECT count(*)
+		FROM pg_constraint c
+		JOIN pg_class r ON r.oid = c.conrelid
+		JOIN pg_namespace n ON n.oid = r.relnamespace
+		WHERE n.nspname = current_schema()
+		  AND r.relname = 'automations'
+		  AND c.conname = 'chk_automations_fallback_models'`).Scan(&remainingConstraints)
+	require.NoError(t, err, "test should inspect the rolled-back automation constraints")
+	require.Equal(t, 0, remainingConstraints, "down migration should drop the fallback chain type guard")
+
+	// The rollback must leave pre-existing automations intact, so a deploy can
+	// be reverted without losing automation configuration.
+	var retainedGoal string
+	err = conn.QueryRow(ctx, `SELECT goal FROM automations WHERE id = $1`, existingID).Scan(&retainedGoal)
+	require.NoError(t, err, "down migration should preserve existing automations")
+	require.Equal(t, "keep the build green", retainedGoal, "rollback should not disturb automation configuration")
+}

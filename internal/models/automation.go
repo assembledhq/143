@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,28 +14,32 @@ import (
 // Unlike projects (which are finite and goal-oriented), automations run on a
 // schedule and never "complete" — they are enabled or paused.
 type Automation struct {
-	ID               uuid.UUID               `db:"id"               json:"id"`
-	OrgID            uuid.UUID               `db:"org_id"           json:"org_id"`
-	RepositoryID     *uuid.UUID              `db:"repository_id"    json:"repository_id,omitempty"`
-	Name             string                  `db:"name"             json:"name"`
-	Goal             string                  `db:"goal"             json:"goal"`
-	Scope            *string                 `db:"scope"            json:"scope,omitempty"`
-	IconType         AutomationIconType      `db:"icon_type"        json:"icon_type"`
-	IconValue        string                  `db:"icon_value"       json:"icon_value"`
-	AgentType        *string                 `db:"agent_type"       json:"agent_type,omitempty"`
-	ModelOverride    *string                 `db:"model_override"   json:"model_override,omitempty"`
-	ReasoningEffort  *ReasoningEffort        `db:"reasoning_effort" json:"reasoning_effort,omitempty"`
-	ExecutionMode    AutomationExecutionMode `db:"execution_mode"   json:"execution_mode"`
-	MaxConcurrent    int                     `db:"max_concurrent"   json:"max_concurrent"`
-	BaseBranch       string                  `db:"base_branch"      json:"base_branch"`
-	IdentityScope    AutomationIdentityScope `db:"identity_scope"   json:"identity_scope"`
-	PublishPolicy    AutomationPublishPolicy `db:"publish_policy"   json:"publish_policy"`
-	PrePRReviewLoops int                     `db:"pre_pr_review_loops" json:"pre_pr_review_loops"`
-	ScheduleType     AutomationScheduleType  `db:"schedule_type"    json:"schedule_type"`
-	IntervalValue    *int                    `db:"interval_value"   json:"interval_value,omitempty"`
-	IntervalUnit     *ScheduleUnit           `db:"interval_unit"    json:"interval_unit,omitempty"`
-	IntervalRunAt    *string                 `db:"interval_run_at"  json:"interval_run_at,omitempty"`
-	CronExpression   *string                 `db:"cron_expression"  json:"cron_expression,omitempty"`
+	ID              uuid.UUID          `db:"id"               json:"id"`
+	OrgID           uuid.UUID          `db:"org_id"           json:"org_id"`
+	RepositoryID    *uuid.UUID         `db:"repository_id"    json:"repository_id,omitempty"`
+	Name            string             `db:"name"             json:"name"`
+	Goal            string             `db:"goal"             json:"goal"`
+	Scope           *string            `db:"scope"            json:"scope,omitempty"`
+	IconType        AutomationIconType `db:"icon_type"        json:"icon_type"`
+	IconValue       string             `db:"icon_value"       json:"icon_value"`
+	AgentType       *string            `db:"agent_type"       json:"agent_type,omitempty"`
+	ModelOverride   *string            `db:"model_override"   json:"model_override,omitempty"`
+	ReasoningEffort *ReasoningEffort   `db:"reasoning_effort" json:"reasoning_effort,omitempty"`
+	// FallbackModels holds ranks 1..N of the model chain; rank 0 is the
+	// AgentType/ModelOverride/ReasoningEffort trio above. Read the whole chain
+	// through ModelRanks rather than these fields directly.
+	FallbackModels   AutomationFallbackModels `db:"fallback_models"  json:"fallback_models,omitzero"`
+	ExecutionMode    AutomationExecutionMode  `db:"execution_mode"   json:"execution_mode"`
+	MaxConcurrent    int                      `db:"max_concurrent"   json:"max_concurrent"`
+	BaseBranch       string                   `db:"base_branch"      json:"base_branch"`
+	IdentityScope    AutomationIdentityScope  `db:"identity_scope"   json:"identity_scope"`
+	PublishPolicy    AutomationPublishPolicy  `db:"publish_policy"   json:"publish_policy"`
+	PrePRReviewLoops int                      `db:"pre_pr_review_loops" json:"pre_pr_review_loops"`
+	ScheduleType     AutomationScheduleType   `db:"schedule_type"    json:"schedule_type"`
+	IntervalValue    *int                     `db:"interval_value"   json:"interval_value,omitempty"`
+	IntervalUnit     *ScheduleUnit            `db:"interval_unit"    json:"interval_unit,omitempty"`
+	IntervalRunAt    *string                  `db:"interval_run_at"  json:"interval_run_at,omitempty"`
+	CronExpression   *string                  `db:"cron_expression"  json:"cron_expression,omitempty"`
 	// Timezone is the IANA zone used to evaluate wall-clock schedule targets:
 	// cron_expression for cron rows, and interval_run_at for interval rows
 	// that specify one. An interval row without interval_run_at uses pure
@@ -57,6 +62,345 @@ type Automation struct {
 	CreatedAt           time.Time                `db:"created_at"      json:"created_at"`
 	UpdatedAt           time.Time                `db:"updated_at"      json:"updated_at"`
 	DeletedAt           *time.Time               `db:"deleted_at"      json:"-"`
+}
+
+// MaxAutomationFallbackModels bounds the ranks stored beyond the primary, so a
+// run can attempt at most five models in total.
+//
+// Deliberately smaller than MaxCodeReviewReviewerModels (10): a code-review
+// rank is one reviewer thread running in parallel, whereas an automation rank
+// is a full sequential agent run. All ranks share one run's wall clock —
+// ReapStuckRuns keys off triggered_at — so the ceiling has to fit inside it.
+const MaxAutomationFallbackModels = 4
+
+// AutomationFallbackModels holds ranks 1..N of an automation's model chain as
+// index-aligned arrays, mirroring CodeReviewAgentRoster's parallel-array shape.
+// Rank 0 is not stored here: it stays in the automation's own agent_type,
+// model_override and reasoning_effort columns, which the worker, the config
+// snapshot, the audit diff, MCP and both frontend pages already read. Storing
+// it twice would create a dual-write invariant across all of them.
+//
+// AgentTypes and ReasoningEfforts are each either empty — meaning "derive per
+// rank" — or exactly as long as Models. Use ModelRanks to read the chain; it
+// materializes the flat ordered list that validation, the runtime and the UI
+// all work from.
+type AutomationFallbackModels struct {
+	AgentTypes       []string          `json:"agent_types,omitempty"`
+	Models           []string          `json:"models,omitempty"`
+	ReasoningEfforts []ReasoningEffort `json:"reasoning_efforts,omitempty"`
+}
+
+// AutomationRunAttempt is one model attempt an automation run has already
+// spent: the session it spawned, the agent and model that session actually ran
+// on, and whether it left work behind.
+//
+// Field order is load-bearing — the store scans it positionally.
+type AutomationRunAttempt struct {
+	SessionID           uuid.UUID
+	AgentType           *string
+	Model               *string
+	ReasoningEffort     *string
+	ProducedDiff        bool
+	ProducedPullRequest bool
+}
+
+// ProducedWork reports whether this attempt left something behind that a retry
+// on another model would duplicate.
+func (a AutomationRunAttempt) ProducedWork() bool {
+	return a.ProducedDiff || a.ProducedPullRequest
+}
+
+// Matches reports whether a ranked candidate names the same (agent, model,
+// reasoning effort) this attempt already ran.
+//
+// Reasoning effort is part of the identity because the chain deliberately
+// supports re-trying one model at a cheaper level; comparing only (agent,
+// model) would mark that fallback spent the moment the first level ran, and it
+// would never get a session. The candidate list draws the same line.
+//
+// Callers must hand this a rank whose agent is already RESOLVED to a concrete
+// value. A session records the agent it actually ran, never a blank one, so a
+// rank still carrying nil can never match its own attempt — which would spin
+// the chain re-dispatching the same model until the reaper stopped it.
+func (a AutomationRunAttempt) Matches(rank AutomationModelRank) bool {
+	return strings.TrimSpace(stringOrEmpty(a.AgentType)) == strings.TrimSpace(stringOrEmpty(rank.AgentType)) &&
+		strings.TrimSpace(stringOrEmpty(a.Model)) == strings.TrimSpace(stringOrEmpty(rank.Model)) &&
+		strings.TrimSpace(stringOrEmpty(a.ReasoningEffort)) == strings.TrimSpace(reasoningEffortOrEmpty(rank.ReasoningEffort))
+}
+
+func reasoningEffortOrEmpty(v *ReasoningEffort) string {
+	if v == nil {
+		return ""
+	}
+	return string(*v)
+}
+
+// AutomationModelRanksRemaining returns the ranks this run has not yet spent a
+// session on, in chain order.
+//
+// Each attempt consumes the EARLIEST unspent rank it matches, oldest attempt
+// first, rather than every rank it happens to equal. That is what lets a chain
+// deliberately return to an earlier model — A then B then A — actually reach
+// its third rank: the first A consumes rank 0 and leaves rank 2 for later.
+//
+// attempts arrive newest-first (the order the store returns them), so this
+// walks them in reverse to replay dispatch order.
+//
+// The worker and the promotion hook both call this. They used to carry
+// separate implementations and disagreed about a chain's length, which let the
+// hook promote a run the worker then immediately failed as exhausted.
+func AutomationModelRanksRemaining(ranks []AutomationModelRank, attempts []AutomationRunAttempt) []AutomationModelRank {
+	if len(attempts) == 0 {
+		return ranks
+	}
+	spent := make([]bool, len(ranks))
+	for i := len(attempts) - 1; i >= 0; i-- {
+		for idx := range ranks {
+			if !spent[idx] && attempts[i].Matches(ranks[idx]) {
+				spent[idx] = true
+				break
+			}
+		}
+	}
+	remaining := make([]AutomationModelRank, 0, len(ranks))
+	for idx, rank := range ranks {
+		if !spent[idx] {
+			remaining = append(remaining, rank)
+		}
+	}
+	return remaining
+}
+
+func stringOrEmpty(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+// AutomationModelRank is one entry in an automation's ordered model chain.
+// Rank 0 (Fallback false) is the configured primary; the rest are fallbacks
+// tried in order when an earlier rank has no usable credential or fails with a
+// capacity error.
+type AutomationModelRank struct {
+	AgentType       *string          `json:"agent_type,omitempty"`
+	Model           *string          `json:"model,omitempty"`
+	ReasoningEffort *ReasoningEffort `json:"reasoning_effort,omitempty"`
+	Fallback        bool             `json:"fallback"`
+}
+
+// Len returns the number of configured fallback ranks.
+func (f AutomationFallbackModels) Len() int {
+	return len(f.Models)
+}
+
+// AgentTypeAt resolves the agent for one fallback rank: the explicit entry,
+// else the agent the model name itself implies, else the automation's primary
+// agent. Mirrors the explicit → legacy → default tiering of
+// CodeReviewAgentRoster.ReviewerReasoningEffort.
+func (f AutomationFallbackModels) AgentTypeAt(index int, primary *string) *string {
+	if index >= 0 && index < len(f.AgentTypes) && strings.TrimSpace(f.AgentTypes[index]) != "" {
+		trimmed := strings.TrimSpace(f.AgentTypes[index])
+		return &trimmed
+	}
+	if index >= 0 && index < len(f.Models) {
+		if inferred := AgentTypeForModel(strings.TrimSpace(f.Models[index])); inferred != "" {
+			s := string(inferred)
+			return &s
+		}
+	}
+	return primary
+}
+
+// ReasoningEffortAt resolves the effort for one fallback rank: the explicit
+// entry, else the automation's primary effort, else nil so the agent's own
+// default applies.
+//
+// An INHERITED effort is dropped when the rank's own agent cannot run it.
+// Inheritance is a convenience for the common same-agent case, not a
+// constraint: without this, setting the primary to Claude Code at "max" would
+// make every Codex fallback unsavable (Codex has no "max"), and an Amp or Pi
+// fallback unsavable at any effort, since those agents accept none. An
+// EXPLICIT per-rank effort is returned untouched so the user still gets a clear
+// error for their own typo rather than a silent downgrade.
+func (f AutomationFallbackModels) ReasoningEffortAt(index int, primary *ReasoningEffort, agentType *string) *ReasoningEffort {
+	if index >= 0 && index < len(f.ReasoningEfforts) && f.ReasoningEfforts[index] != "" {
+		effort := f.ReasoningEfforts[index]
+		return &effort
+	}
+	if primary == nil || *primary == "" {
+		return nil
+	}
+	if agentType == nil || !AgentType(strings.TrimSpace(*agentType)).SupportsReasoningEffortLevel(*primary) {
+		return nil
+	}
+	return primary
+}
+
+// Normalize trims every entry and drops arrays that carry no information, so a
+// round-trip through the API and the database produces one canonical encoding.
+// Without it the audit diff's reflect.DeepEqual reports spurious changes
+// between nil and empty slices on no-op PATCHes.
+func (f AutomationFallbackModels) Normalize() AutomationFallbackModels {
+	if len(f.Models) == 0 {
+		return AutomationFallbackModels{}
+	}
+	normalized := AutomationFallbackModels{Models: make([]string, len(f.Models))}
+	for i, model := range f.Models {
+		normalized.Models[i] = strings.TrimSpace(model)
+	}
+	if hasNonEmptyString(f.AgentTypes) {
+		normalized.AgentTypes = make([]string, len(f.Models))
+		for i := range normalized.AgentTypes {
+			if i < len(f.AgentTypes) {
+				normalized.AgentTypes[i] = strings.TrimSpace(f.AgentTypes[i])
+			}
+		}
+	}
+	if hasNonEmptyEffort(f.ReasoningEfforts) {
+		normalized.ReasoningEfforts = make([]ReasoningEffort, len(f.Models))
+		for i := range normalized.ReasoningEfforts {
+			if i < len(f.ReasoningEfforts) {
+				normalized.ReasoningEfforts[i] = f.ReasoningEfforts[i]
+			}
+		}
+	}
+	return normalized
+}
+
+func hasNonEmptyString(values []string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNonEmptyEffort(values []ReasoningEffort) bool {
+	for _, value := range values {
+		if value != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// Validate checks the ranked chain against the automation's primary agent.
+//
+// Every message contains the word "model" on purpose: the automations handlers
+// classify validation failures by substring to choose between INVALID_MODEL and
+// INVALID_AGENT_TYPE.
+//
+// primaryEffort is checked per rank rather than once: reasoning-effort legality
+// is agent-dependent, so a fallback on a different agent cannot blindly inherit
+// the primary's effort.
+//
+// Duplicates are accepted, matching the code-review roster: ranking the same
+// model twice is wasteful, not invalid, and the runtime collapses consecutive
+// duplicates anyway.
+func (f AutomationFallbackModels) Validate(primaryAgentType *string, primaryEffort *ReasoningEffort) error {
+	if len(f.Models) == 0 {
+		if len(f.AgentTypes) > 0 || len(f.ReasoningEfforts) > 0 {
+			return fmt.Errorf("fallback model agent types and reasoning efforts require a fallback model list")
+		}
+		return nil
+	}
+	if len(f.Models) > MaxAutomationFallbackModels {
+		return fmt.Errorf("at most %d fallback models are allowed", MaxAutomationFallbackModels)
+	}
+	if len(f.AgentTypes) > 0 && len(f.AgentTypes) != len(f.Models) {
+		return fmt.Errorf("fallback model agent types must match the number of fallback models")
+	}
+	if len(f.ReasoningEfforts) > 0 && len(f.ReasoningEfforts) != len(f.Models) {
+		return fmt.Errorf("fallback model reasoning efforts must match the number of fallback models")
+	}
+
+	for idx, model := range f.Models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return fmt.Errorf("fallback model %d must be non-empty", idx+1)
+		}
+		resolvedAgent := f.AgentTypeAt(idx, primaryAgentType)
+		if resolvedAgent == nil || strings.TrimSpace(*resolvedAgent) == "" {
+			return fmt.Errorf("fallback model %d (%q) is not recognized; set an agent for it", idx+1, model)
+		}
+		agentType := AgentType(strings.TrimSpace(*resolvedAgent))
+		if err := agentType.Validate(); err != nil {
+			return fmt.Errorf("invalid agent for fallback model %d: %w", idx+1, err)
+		}
+		if err := ValidateModelForAgentType(agentType, model); err != nil {
+			return fmt.Errorf("invalid fallback model %d: %w", idx+1, err)
+		}
+		effort := f.ReasoningEffortAt(idx, primaryEffort, resolvedAgent)
+		if effort == nil || *effort == "" {
+			continue
+		}
+		if err := (*effort).Validate(); err != nil {
+			return fmt.Errorf("invalid reasoning effort for fallback model %d: %w", idx+1, err)
+		}
+		if !agentType.SupportsReasoningEffortLevel(*effort) {
+			return fmt.Errorf("reasoning effort %q is not supported for fallback model %d by agent %q", *effort, idx+1, agentType)
+		}
+	}
+	return nil
+}
+
+// ModelRanks materializes the automation's ordered model chain: rank 0 is the
+// configured primary, followed by each fallback with its resolved agent and
+// reasoning effort. Every consumer — validation, the worker's candidate walk,
+// the run snapshot reader and the UI's row labels — reads the chain through
+// this one accessor, so the flat list the code-review roster stores directly is
+// reproduced here without duplicating the primary in storage.
+func (a *Automation) ModelRanks() []AutomationModelRank {
+	primary := AutomationModelRank{
+		AgentType:       a.AgentType,
+		Model:           a.ModelOverride,
+		ReasoningEffort: a.ReasoningEffort,
+	}
+	ranks := make([]AutomationModelRank, 0, 1+a.FallbackModels.Len())
+	ranks = append(ranks, primary)
+	for idx := range a.FallbackModels.Models {
+		model := strings.TrimSpace(a.FallbackModels.Models[idx])
+		rankAgent := a.FallbackModels.AgentTypeAt(idx, a.AgentType)
+		ranks = append(ranks, AutomationModelRank{
+			AgentType:       rankAgent,
+			Model:           &model,
+			ReasoningEffort: a.FallbackModels.ReasoningEffortAt(idx, a.ReasoningEffort, rankAgent),
+			Fallback:        true,
+		})
+	}
+	return ranks
+}
+
+// AutomationModelRanksFromConfigSnapshot rebuilds the model chain a run was
+// dispatched under. The second return value is false when the snapshot predates
+// fallback models (or is absent entirely), in which case the caller should read
+// the live automation row — the same "absent key means historical default"
+// contract as AutomationPublishPolicyFromConfigSnapshot.
+func AutomationModelRanksFromConfigSnapshot(raw json.RawMessage) ([]AutomationModelRank, bool, error) {
+	if len(raw) == 0 {
+		return nil, false, nil
+	}
+	var snapshot struct {
+		AgentType       *string                   `json:"agent_type"`
+		ModelOverride   *string                   `json:"model_override"`
+		ReasoningEffort *ReasoningEffort          `json:"reasoning_effort"`
+		FallbackModels  *AutomationFallbackModels `json:"fallback_models"`
+	}
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return nil, false, fmt.Errorf("parse automation model ranks snapshot: %w", err)
+	}
+	if snapshot.FallbackModels == nil {
+		return nil, false, nil
+	}
+	automation := Automation{
+		AgentType:       snapshot.AgentType,
+		ModelOverride:   snapshot.ModelOverride,
+		ReasoningEffort: snapshot.ReasoningEffort,
+		FallbackModels:  *snapshot.FallbackModels,
+	}
+	return automation.ModelRanks(), true, nil
 }
 
 // AutomationRun records a single execution of an automation (scheduled or manual).
@@ -96,6 +440,14 @@ type AutomationRun struct {
 	// the automation session.
 	TriggerTarget  *AutomationRunTriggerTarget  `json:"trigger_target,omitempty"`
 	TriggerDetails *AutomationRunTriggerDetails `json:"trigger_details,omitempty"`
+	// PrimaryAgentType and PrimaryModel are the rank-0 model this run was
+	// dispatched under, read from its own frozen config snapshot and populated
+	// only by the run list endpoints. A reader compares them against
+	// Session.AgentType/ModelOverride to tell whether the run fell back; the
+	// live automation row cannot answer that, because editing its model would
+	// relabel every historical run.
+	PrimaryAgentType *string `json:"primary_agent_type,omitempty"`
+	PrimaryModel     *string `json:"primary_model,omitempty"`
 }
 
 type AutomationRunTriggerTarget struct {
@@ -134,6 +486,11 @@ type AutomationRunSession struct {
 	FailureNextSteps    []string        `json:"failure_next_steps,omitempty"`
 	FailureRetryAdvised bool            `json:"failure_retry_advised"`
 	PRCreationState     PRCreationState `json:"pr_creation_state"`
+	// AgentType and ModelOverride record what this attempt actually ran on.
+	// A run whose primary model was unavailable dispatches a fallback rank, so
+	// the run row has to show the model that ran rather than the one configured.
+	AgentType     *string `json:"agent_type,omitempty"`
+	ModelOverride *string `json:"model_override,omitempty"`
 	// PR is populated only when a PullRequest row exists for this session.
 	// Reuses models.PRSummary so the frontend can share rendering with the
 	// session list page.
@@ -461,6 +818,7 @@ func (a *Automation) BuildConfigSnapshot() (json.RawMessage, error) {
 		"agent_type":          a.AgentType,
 		"model_override":      a.ModelOverride,
 		"reasoning_effort":    a.ReasoningEffort,
+		"fallback_models":     a.FallbackModels,
 		"scope":               a.Scope,
 		"identity_scope":      a.IdentityScope.OrDefault(),
 		"publish_policy":      a.PublishPolicy.OrDefault(),
