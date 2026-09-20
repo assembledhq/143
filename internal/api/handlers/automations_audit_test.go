@@ -3,12 +3,17 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -307,5 +312,205 @@ func TestMarshalAuditDetails(t *testing.T) {
 		details := map[string]any{"unencodable": make(chan int)}
 		require.Nil(t, marshalAuditDetails(bufLogger, details))
 		require.Contains(t, buf.String(), "marshal audit details")
+	})
+}
+
+// TestAutomationAuditDiff_FallbackModels pins what the timeline reports for the
+// ranked chain. The diff renders each side through automationFallbackModelsSummary
+// first: track compares with reflect.DeepEqual, which calls nil and an empty
+// slice different, so comparing the structs directly would file an audit row
+// every time a client re-sent the chain it already had.
+func TestAutomationAuditDiff_FallbackModels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		old        models.AutomationFallbackModels
+		new_       models.AutomationFallbackModels
+		wantChange bool
+	}{
+		{
+			name:       "configuring a chain is a change",
+			old:        models.AutomationFallbackModels{},
+			new_:       models.AutomationFallbackModels{Models: []string{models.CodexModelGPT55}},
+			wantChange: true,
+		},
+		{
+			name:       "clearing a chain is a change",
+			old:        models.AutomationFallbackModels{Models: []string{models.CodexModelGPT55}},
+			new_:       models.AutomationFallbackModels{},
+			wantChange: true,
+		},
+		{
+			// Rank order is the failover order, so a reorder is a real edit
+			// even though the set of models is identical.
+			name:       "reordering the ranks is a change",
+			old:        models.AutomationFallbackModels{Models: []string{models.CodexModelGPT55, models.ClaudeCodeModelSonnet46}},
+			new_:       models.AutomationFallbackModels{Models: []string{models.ClaudeCodeModelSonnet46, models.CodexModelGPT55}},
+			wantChange: true,
+		},
+		{
+			name: "adding a per-rank override is a change",
+			old:  models.AutomationFallbackModels{Models: []string{models.CodexModelGPT55}},
+			new_: models.AutomationFallbackModels{
+				Models:           []string{models.CodexModelGPT55},
+				ReasoningEfforts: []models.ReasoningEffort{models.ReasoningEffortHigh},
+			},
+			wantChange: true,
+		},
+		{
+			name:       "re-sending the same chain is not a change",
+			old:        models.AutomationFallbackModels{Models: []string{models.CodexModelGPT55}},
+			new_:       models.AutomationFallbackModels{Models: []string{models.CodexModelGPT55}},
+			wantChange: false,
+		},
+		{
+			// What a form-driven client actually posts back: padded whitespace
+			// and parallel arrays it never filled in.
+			name: "a redundantly encoded copy of the same chain is not a change",
+			old:  models.AutomationFallbackModels{Models: []string{models.CodexModelGPT55}},
+			new_: models.AutomationFallbackModels{
+				AgentTypes:       []string{""},
+				Models:           []string{"  " + models.CodexModelGPT55 + "  "},
+				ReasoningEfforts: []models.ReasoningEffort{""},
+			},
+			wantChange: false,
+		},
+		{
+			name:       "two automations without a chain are not a change",
+			old:        models.AutomationFallbackModels{},
+			new_:       models.AutomationFallbackModels{AgentTypes: []string{}, Models: []string{}},
+			wantChange: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			old := models.Automation{Name: "a", FallbackModels: tt.old}
+			new_ := models.Automation{Name: "a", FallbackModels: tt.new_}
+			changes := automationAuditDiff(&old, &new_)
+			if tt.wantChange {
+				require.Contains(t, changes, "fallback_models", "a chain edit must be visible in the audit timeline")
+				return
+			}
+			require.NotContains(t, changes, "fallback_models", "an unchanged chain must not file an audit row")
+		})
+	}
+}
+
+// capturedArg records the value pgxmock matched at its position. The audit
+// details payload is argument 8 of 13 in the audit_logs INSERT, so this is what
+// lets a test assert on what was recorded rather than merely that something was.
+type capturedArg struct{ value *any }
+
+func (c capturedArg) Match(v any) bool {
+	*c.value = v
+	return true
+}
+
+// TestAutomationHandler_Update_FallbackModelsAudit covers the two ends of audit
+// behavior for the chain through the real handler: a fallback-only edit is
+// recorded, and a client that re-sends the chain it already has records nothing.
+func TestAutomationHandler_Update_FallbackModelsAudit(t *testing.T) {
+	t.Parallel()
+
+	storedAutomation := func(id, orgID uuid.UUID, chain models.AutomationFallbackModels) models.Automation {
+		now := time.Now()
+		iv := 1
+		unit := models.ScheduleUnitDays
+		return models.Automation{
+			ID: id, OrgID: orgID, Name: "a", Goal: "g",
+			FallbackModels: chain,
+			ExecutionMode:  "sequential", BaseBranch: "main", ScheduleType: "interval",
+			Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+			CreatedAt: now, UpdatedAt: now,
+		}
+	}
+
+	t.Run("a fallback-only PATCH records a fallback_models change", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID, id := uuid.New(), uuid.New()
+		mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+			WithArgs(testAnyArgs(2)...).
+			WillReturnRows(newAutomationRow(mock, storedAutomation(id, orgID, models.AutomationFallbackModels{})))
+		mock.ExpectExec("UPDATE automations SET").
+			WithArgs(testAnyArgs(32)...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		var details any
+		auditArgs := testAnyArgs(13)
+		auditArgs[7] = capturedArg{value: &details}
+		mock.ExpectQuery("INSERT INTO audit_logs").
+			WithArgs(auditArgs...).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), time.Now()))
+
+		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+		h.SetAuditEmitter(newAuditEmitterForTest(mock))
+
+		body := map[string]any{"fallback_models": map[string]any{"models": []string{models.CodexModelGPT55}}}
+		req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+		rr := httptest.NewRecorder()
+		h.Update(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, "configuring a chain should succeed")
+		require.NoError(t, mock.ExpectationsWereMet(), "a chain edit should write an audit row")
+
+		raw, ok := details.(json.RawMessage)
+		require.True(t, ok, "the audit details column should carry the encoded payload")
+		var payload struct {
+			Changes map[string]struct {
+				Before any `json:"before"`
+				After  any `json:"after"`
+			} `json:"changes"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &payload), "the audit details should be valid JSON")
+		change, tracked := payload.Changes["fallback_models"]
+		require.True(t, tracked, "the audit row must name fallback_models as the field that moved")
+		require.Nil(t, change.Before, "an automation that had no chain should record a nil before")
+		require.NotNil(t, change.After, "the new chain should be recorded")
+	})
+
+	t.Run("re-sending the stored chain records nothing", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID, id := uuid.New(), uuid.New()
+		stored := models.AutomationFallbackModels{Models: []string{models.CodexModelGPT55}}
+		mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+			WithArgs(testAnyArgs(2)...).
+			WillReturnRows(newAutomationRow(mock, storedAutomation(id, orgID, stored)))
+		mock.ExpectExec("UPDATE automations SET").
+			WithArgs(testAnyArgs(32)...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		// Deliberately no audit expectation. pgxmock only reports UNMET
+		// expectations, so an unexpected INSERT would not fail
+		// ExpectationsWereMet on its own — the mock rejects the call and the
+		// emitter swallows the error into its logger. Reading that logger is
+		// what turns a stray audit write into a failure here.
+		var auditLog bytes.Buffer
+		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+		h.SetAuditEmitter(db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.New(&auditLog)))
+
+		body := map[string]any{"fallback_models": map[string]any{
+			// The encoding a round-trip through the fallback editor produces:
+			// same ranks, extra empty parallel arrays.
+			"models":      []string{models.CodexModelGPT55},
+			"agent_types": []string{""},
+		}}
+		req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+		rr := httptest.NewRecorder()
+		h.Update(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, "re-sending the stored chain should still succeed")
+		require.Empty(t, auditLog.String(), "a no-op chain PATCH must not attempt an audit write")
+		require.NoError(t, mock.ExpectationsWereMet(), "the PATCH should still read and write the automation")
 	})
 }

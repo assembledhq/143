@@ -50,7 +50,7 @@ func automationTestColumns() []string {
 	return []string{
 		"id", "org_id", "repository_id", "name", "goal", "scope",
 		"icon_type", "icon_value",
-		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
+		"agent_type", "model_override", "reasoning_effort", "fallback_models", "execution_mode", "max_concurrent", "base_branch",
 		"identity_scope", "publish_policy", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"github_event_triggers", "github_event_filters",
@@ -104,7 +104,7 @@ func newAutomationRow(mock pgxmock.PgxPoolIface, a models.Automation) *pgxmock.R
 	return pgxmock.NewRows(automationTestColumns()).AddRow(
 		a.ID, a.OrgID, a.RepositoryID, a.Name, a.Goal, a.Scope,
 		a.IconType.OrDefault(), a.IconValue,
-		a.AgentType, a.ModelOverride, a.ReasoningEffort, a.ExecutionMode, a.MaxConcurrent, a.BaseBranch,
+		a.AgentType, a.ModelOverride, a.ReasoningEffort, a.FallbackModels.Normalize(), a.ExecutionMode, a.MaxConcurrent, a.BaseBranch,
 		a.IdentityScope.OrDefault(), a.PublishPolicy.OrDefault(), a.PrePRReviewLoops,
 		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
 		automationGitHubEventStrings(a.GitHubEventTriggers), githubEventFilters,
@@ -708,7 +708,7 @@ func TestAutomationHandler_Create_OK(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(29)...).
+		WithArgs(testAnyArgs(30)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -753,7 +753,7 @@ func TestAutomationHandler_Create_PersonalIdentityScope(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(29)...).
+		WithArgs(testAnyArgs(30)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -787,7 +787,7 @@ func TestAutomationHandler_Create_ModelInfersAgentType(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(29)...).
+		WithArgs(testAnyArgs(30)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -849,7 +849,7 @@ func TestAutomationHandler_Create_AllowsAvailableValidModel(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(29)...).
+		WithArgs(testAnyArgs(30)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -885,7 +885,7 @@ func TestAutomationHandler_Create_ReasoningFallsBackWhenOrgSettingsMalformed(t *
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(29)...).
+		WithArgs(testAnyArgs(30)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -922,7 +922,7 @@ func TestAutomationHandler_Create_IntervalNonUTCTimezone(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(29)...).
+		WithArgs(testAnyArgs(30)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -1123,7 +1123,7 @@ func TestAutomationHandler_Update_OK(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(31)...).
+		WithArgs(testAnyArgs(32)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1178,7 +1178,7 @@ func TestAutomationHandler_Update_ReasoningFallsBackWhenOrgSettingsMalformed(t *
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(31)...).
+		WithArgs(testAnyArgs(32)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1220,7 +1220,7 @@ func TestAutomationHandler_Update_BlankModelPreservesExplicitAgentType(t *testin
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(31)...).
+		WithArgs(testAnyArgs(32)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1274,7 +1274,7 @@ func TestAutomationHandler_Update_TimezoneOnlyRecomputesNextRunAt(t *testing.T) 
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(31)...).
+		WithArgs(testAnyArgs(32)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1328,7 +1328,7 @@ func TestAutomationHandler_Update_SwitchScheduleType_OK(t *testing.T) {
 			WithArgs(testAnyArgs(2)...).
 			WillReturnRows(newAutomationRow(mock, a))
 		mock.ExpectExec("UPDATE automations SET").
-			WithArgs(testAnyArgs(31)...).
+			WithArgs(testAnyArgs(32)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1364,7 +1364,7 @@ func TestAutomationHandler_Update_SwitchScheduleType_OK(t *testing.T) {
 			WithArgs(testAnyArgs(2)...).
 			WillReturnRows(newAutomationRow(mock, a))
 		mock.ExpectExec("UPDATE automations SET").
-			WithArgs(testAnyArgs(31)...).
+			WithArgs(testAnyArgs(32)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1535,7 +1535,7 @@ func TestAutomationHandler_Pause_OK(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(31)...).
+		WithArgs(testAnyArgs(32)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1593,7 +1593,7 @@ func TestAutomationHandler_Resume_OK(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(31)...).
+		WithArgs(testAnyArgs(32)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -2074,6 +2074,10 @@ func TestAutomationHandler_ListRuns_OK(t *testing.T) {
 	prURL := "https://github.com/example/repo/pull/1213"
 	prStatus := "open"
 	prCIStatus := "success"
+	sessionAgentType := string(models.AgentTypeCodex)
+	sessionModelOverride := models.CodexModelGPT55
+	runPrimaryAgentType := string(models.AgentTypeClaudeCode)
+	runPrimaryModel := models.ClaudeCodeModelOpus5
 	mock.ExpectQuery("SELECT .+ FROM automation_runs ar.+LEFT JOIN LATERAL").
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(
@@ -2086,6 +2090,8 @@ func TestAutomationHandler_ListRuns_OK(t *testing.T) {
 				&sessionID, &title, &sessionStatus,
 				[]byte(`{"added":12,"removed":3}`),
 				nil, nil, nil, &retryAdvised, &prCreationState,
+				&sessionAgentType, &sessionModelOverride,
+				&runPrimaryAgentType, &runPrimaryModel,
 				&prNumber, &prURL, &prStatus, &prCIStatus,
 			),
 		)
@@ -2316,7 +2322,7 @@ func TestAutomationHandler_Create_WithGitHubEventTriggers(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(29)...).
+		WithArgs(testAnyArgs(30)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -2353,7 +2359,7 @@ func TestAutomationHandler_Create_EventOnlyAutomation(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(29)...).
+		WithArgs(testAnyArgs(30)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -2390,7 +2396,7 @@ func TestAutomationHandler_Create_EventOnlyPagerDutyAutomation(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(29)...).
+		WithArgs(testAnyArgs(30)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -2477,7 +2483,7 @@ func TestAutomationHandler_Create_DeduplicatesGitHubEventTriggers(t *testing.T) 
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(29)...).
+		WithArgs(testAnyArgs(30)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -2531,7 +2537,7 @@ func TestAutomationHandler_Update_WithGitHubEventTriggers(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(31)...).
+		WithArgs(testAnyArgs(32)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -2605,7 +2611,7 @@ func TestAutomationHandler_Update_PagerDutyOnlyAutomationAllowsEdits(t *testing.
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, automation))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(31)...).
+		WithArgs(testAnyArgs(32)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	triggerStore := &stubAutomationEventTriggerStore{list: []models.AutomationEventTrigger{{
@@ -2910,4 +2916,654 @@ func TestAutomationHandler_Setters(t *testing.T) {
 	h.SetEventTriggerStore(&stubAutomationEventTriggerStore{})
 	// No assertions: exercising the setters to bump coverage; they're trivial stores.
 	require.NotNil(t, h)
+}
+
+// ---------------------------------------------------------------------------
+// fallback_models: the ranked chain an automation falls back through when a
+// rank has no usable credential at dispatch or fails with a capacity error.
+// ---------------------------------------------------------------------------
+
+// Position of @fallback_models in the positional argument lists pgx builds from
+// AutomationStore.Create's and Update's pgx.NamedArgs. pgx numbers named args by
+// first appearance in the SQL, so these track the column order of those two
+// statements. Pinning the position is what lets these tests assert the chain
+// that actually reaches the database, rather than the response body — which is
+// rendered from the same in-memory struct and would agree with the handler even
+// if the store were handed something else.
+const (
+	automationInsertFallbackModelsArg = 10
+	automationUpdateFallbackModelsArg = 9
+)
+
+// automationArgsWithFallbackModels returns testAnyArgs(total) with the
+// fallback_models position replaced by the exact chain the write must carry.
+func automationArgsWithFallbackModels(total, position int, want models.AutomationFallbackModels) []any {
+	args := testAnyArgs(total)
+	args[position] = want
+	return args
+}
+
+// TestAutomationHandler_Create_PersistsFallbackModels covers the write half of
+// the feature. The chain has to reach the INSERT in canonical form (trimmed,
+// all-empty parallel arrays dropped): the audit diff compares rendered chains,
+// so an untrimmed value stored here would make the next no-op PATCH look like a
+// real edit in the org's audit timeline.
+func TestAutomationHandler_Create_PersistsFallbackModels(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	canonical := models.AutomationFallbackModels{
+		Models: []string{models.ClaudeCodeModelOpus48, models.ClaudeCodeModelHaiku45},
+	}
+	mock.ExpectQuery("INSERT INTO automations").
+		WithArgs(automationArgsWithFallbackModels(30, automationInsertFallbackModelsArg, canonical)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), time.Now(), time.Now()))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"name":           "my automation",
+		"goal":           "poke at things",
+		"interval_value": 2,
+		"interval_unit":  "days",
+		"model":          models.ClaudeCodeModelSonnet46,
+		"fallback_models": map[string]any{
+			// Padding and an all-empty parallel array are what a form-driven
+			// client sends when the user left the per-rank agent pickers alone.
+			"models":      []string{"  " + models.ClaudeCodeModelOpus48 + "  ", models.ClaudeCodeModelHaiku45},
+			"agent_types": []string{"", ""},
+		},
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, "a valid fallback chain should be accepted")
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Create should return the automation it stored")
+	require.Equal(t, canonical.Models, resp.Data.FallbackModels.Models, "the created automation should echo the ranked chain back in order")
+	require.NoError(t, mock.ExpectationsWereMet(), "the canonical chain should reach the INSERT")
+}
+
+// TestAutomationHandler_Create_CrossAgentFallbackModel is the headline use case:
+// ranks may name a different agent than the primary, so a Claude Code
+// automation can fail over to Codex when Anthropic is degraded. A rank with no
+// explicit agent takes the one its model name implies, which is what makes this
+// work without the client having to spell out agent_types.
+func TestAutomationHandler_Create_CrossAgentFallbackModel(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	crossAgent := models.AutomationFallbackModels{Models: []string{models.CodexModelGPT55}}
+	mock.ExpectQuery("INSERT INTO automations").
+		WithArgs(automationArgsWithFallbackModels(30, automationInsertFallbackModelsArg, crossAgent)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), time.Now(), time.Now()))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"name":            "my automation",
+		"goal":            "poke at things",
+		"interval_value":  2,
+		"interval_unit":   "days",
+		"agent_type":      string(models.AgentTypeClaudeCode),
+		"model":           models.ClaudeCodeModelSonnet46,
+		"fallback_models": map[string]any{"models": []string{models.CodexModelGPT55}},
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, "a Codex fallback under a Claude Code primary should be accepted")
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Create should return the automation it stored")
+	require.NotNil(t, resp.Data.AgentType, "the primary agent should still be set")
+	require.Equal(t, string(models.AgentTypeClaudeCode), *resp.Data.AgentType, "a cross-agent fallback must not rewrite the primary agent")
+	require.Equal(t, []string{models.CodexModelGPT55}, resp.Data.FallbackModels.Models, "the cross-agent rank should be stored as sent")
+	require.NoError(t, mock.ExpectationsWereMet(), "the cross-agent chain should reach the INSERT")
+}
+
+// TestAutomationHandler_Create_RejectsInvalidFallbackModels pins both halves of
+// the rejection contract: the request is refused before any write, and it is
+// refused as INVALID_MODEL. The code matters — the automation form keys its
+// inline error off it, and INVALID_AGENT_TYPE would point the user at the
+// primary agent picker for a mistake they made in the fallback editor.
+func TestAutomationHandler_Create_RejectsInvalidFallbackModels(t *testing.T) {
+	t.Parallel()
+
+	tooMany := make([]string, models.MaxAutomationFallbackModels+1)
+	for i := range tooMany {
+		tooMany[i] = models.ClaudeCodeModelOpus48
+	}
+
+	tests := []struct {
+		name     string
+		fallback map[string]any
+	}{
+		{
+			name:     "model no agent can run",
+			fallback: map[string]any{"models": []string{"not-a-real-model"}},
+		},
+		{
+			name:     "explicit agent that does not exist",
+			fallback: map[string]any{"models": []string{models.ClaudeCodeModelOpus48}, "agent_types": []string{"bogus"}},
+		},
+		{
+			// An inherited effort the rank cannot run is dropped, but an
+			// explicit one is the user's own typo and is surfaced.
+			name:     "explicit effort the rank's agent cannot run",
+			fallback: map[string]any{"models": []string{models.CodexModelGPT55}, "reasoning_efforts": []string{string(models.ReasoningEffortMax)}},
+		},
+		{
+			name:     "explicit agent that cannot run the rank's model",
+			fallback: map[string]any{"models": []string{models.ClaudeCodeModelOpus48}, "agent_types": []string{string(models.AgentTypeCodex)}},
+		},
+		{
+			name:     "more ranks than the cap allows",
+			fallback: map[string]any{"models": tooMany},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// A nil store panics if the handler reaches it, so this also
+			// asserts the request is rejected before any database work.
+			h := NewAutomationHandler(nil, nil)
+			body := map[string]any{
+				"name":            "my automation",
+				"goal":            "poke at things",
+				"interval_value":  2,
+				"interval_unit":   "days",
+				"model":           models.ClaudeCodeModelSonnet46,
+				"fallback_models": tt.fallback,
+			}
+			req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+			rr := httptest.NewRecorder()
+			h.Create(rr, req)
+			require.Equal(t, http.StatusBadRequest, rr.Code, "an unrunnable fallback chain should be rejected")
+
+			var resp models.ErrorResponse
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Create should return a JSON error response")
+			require.Equal(t, "INVALID_MODEL", resp.Error.Code, "fallback chain failures are model failures, not INVALID_AGENT_TYPE")
+		})
+	}
+}
+
+// TestAutomationHandler_Create_RejectsMismatchedFallbackArrays pins the reason
+// resolveAutomationFallbackModels validates before it normalizes. Normalize
+// re-lengths the parallel arrays to match models, so normalizing first would
+// answer a client whose arrays are out of sync with a 201 and a silently
+// truncated chain — losing a per-rank agent or effort the user chose. Telling
+// them their arrays disagree is the only honest answer.
+func TestAutomationHandler_Create_RejectsMismatchedFallbackArrays(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		fallback map[string]any
+	}{
+		{
+			name: "more agent types than models",
+			fallback: map[string]any{
+				"models":      []string{models.ClaudeCodeModelOpus48},
+				"agent_types": []string{string(models.AgentTypeClaudeCode), string(models.AgentTypeCodex)},
+			},
+		},
+		{
+			name: "fewer agent types than models",
+			fallback: map[string]any{
+				"models":      []string{models.ClaudeCodeModelOpus48, models.CodexModelGPT55},
+				"agent_types": []string{string(models.AgentTypeClaudeCode)},
+			},
+		},
+		{
+			name: "reasoning efforts out of step with models",
+			fallback: map[string]any{
+				"models":            []string{models.ClaudeCodeModelOpus48, models.CodexModelGPT55},
+				"reasoning_efforts": []string{string(models.ReasoningEffortHigh)},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+			body := map[string]any{
+				"name":            "my automation",
+				"goal":            "poke at things",
+				"interval_value":  2,
+				"interval_unit":   "days",
+				"model":           models.ClaudeCodeModelSonnet46,
+				"fallback_models": tt.fallback,
+			}
+			req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+			rr := httptest.NewRecorder()
+			h.Create(rr, req)
+
+			require.Equal(t, http.StatusBadRequest, rr.Code, "index-aligned arrays that disagree must be rejected, not silently reshaped")
+			var resp struct {
+				Error struct{ Code string } `json:"error"`
+			}
+			require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "error body should decode")
+			require.Equal(t, "INVALID_MODEL", resp.Error.Code, "fallback chain failures are model failures")
+			require.NoError(t, mock.ExpectationsWereMet(), "a rejected chain must not reach the INSERT")
+		})
+	}
+}
+
+// TestAutomationHandler_Create_DoesNotEnforceFallbackAvailability guards the
+// deliberate asymmetry in validateAutomationModelAvailability: the primary is
+// checked against the org's usable credentials at save time, the ranks are not.
+// Enforcing it on ranks would both cost an org-wide credential read per rank and
+// make the chain unsavable during exactly the outage it exists to survive;
+// dispatch skips a rank with no usable credential instead.
+// TestAutomationHandler_Create_RejectsUnavailableValidModel covers the primary
+// half, which this must not change.
+func TestAutomationHandler_Create_DoesNotEnforceFallbackAvailability(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	chain := models.AutomationFallbackModels{Models: []string{models.CodexModelGPT55}}
+	mock.ExpectQuery("INSERT INTO automations").
+		WithArgs(automationArgsWithFallbackModels(30, automationInsertFallbackModelsArg, chain)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), time.Now(), time.Now()))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	// Anthropic is usable, OpenAI is not — so the Codex rank has no credential
+	// behind it right now.
+	h.SetCodingCredentialStore(&stubAutomationCodingCredentialLookup{
+		rows: []models.DecryptedCodingCredential{
+			{Provider: models.ProviderAnthropic, Status: models.CodingCredentialStatusActive},
+		},
+	})
+
+	body := map[string]any{
+		"name":            "my automation",
+		"goal":            "poke at things",
+		"interval_value":  2,
+		"interval_unit":   "days",
+		"model":           models.ClaudeCodeModelSonnet46,
+		"fallback_models": map[string]any{"models": []string{models.CodexModelGPT55}},
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, "a fallback with no usable credential today should still save")
+	require.NoError(t, mock.ExpectationsWereMet(), "the unavailable rank should still reach the INSERT")
+}
+
+// TestAutomationHandler_Update_FallbackModelsOnly covers a PATCH that names no
+// agent, model or reasoning effort: the chain is validated against the primary
+// already on the row, and that primary is left exactly as it was.
+func TestAutomationHandler_Update_FallbackModelsOnly(t *testing.T) {
+	t.Parallel()
+
+	// A Claude-Code-at-max automation is the interesting stored primary: "max"
+	// is a level Codex cannot run, so it exercises the inheritance rule.
+	storedAutomation := func(id, orgID uuid.UUID) models.Automation {
+		now := time.Now()
+		iv := 1
+		unit := models.ScheduleUnitDays
+		agentType := string(models.AgentTypeClaudeCode)
+		model := models.ClaudeCodeModelOpus5
+		effort := models.ReasoningEffortMax
+		return models.Automation{
+			ID: id, OrgID: orgID, Name: "a", Goal: "g",
+			AgentType: &agentType, ModelOverride: &model, ReasoningEffort: &effort,
+			ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+			Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+			CreatedAt: now, UpdatedAt: now,
+		}
+	}
+
+	t.Run("persists the chain and leaves the stored primary alone", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID, id := uuid.New(), uuid.New()
+		stored := storedAutomation(id, orgID)
+		mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+			WithArgs(testAnyArgs(2)...).
+			WillReturnRows(newAutomationRow(mock, stored))
+		mock.ExpectExec("UPDATE automations SET").
+			WithArgs(automationArgsWithFallbackModels(32, automationUpdateFallbackModelsArg,
+				models.AutomationFallbackModels{Models: []string{models.CodexModelGPT55}})...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+		body := map[string]any{"fallback_models": map[string]any{"models": []string{models.CodexModelGPT55}}}
+		req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+		rr := httptest.NewRecorder()
+		h.Update(rr, req)
+		// The rank inherits the primary's "max" only if its own agent can run
+		// it; Codex cannot, so the inherited level is dropped rather than
+		// failing the save. Without that rule a Claude-Code-at-max automation
+		// could never have a Codex fallback at all.
+		require.Equal(t, http.StatusOK, rr.Code, "a Codex rank under a Claude-Code-at-max primary should save")
+
+		var resp models.SingleResponse[models.Automation]
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Update should return the automation it stored")
+		require.Equal(t, []string{models.CodexModelGPT55}, resp.Data.FallbackModels.Models, "the patched chain should be returned")
+		require.NotNil(t, resp.Data.AgentType, "a fallback-only PATCH must not clear the primary agent")
+		require.Equal(t, string(models.AgentTypeClaudeCode), *resp.Data.AgentType, "the stored primary agent should survive a fallback-only PATCH")
+		require.NotNil(t, resp.Data.ModelOverride, "a fallback-only PATCH must not clear the primary model")
+		require.Equal(t, models.ClaudeCodeModelOpus5, *resp.Data.ModelOverride, "the stored primary model should survive a fallback-only PATCH")
+		require.NotNil(t, resp.Data.ReasoningEffort, "a fallback-only PATCH must not clear the primary reasoning effort")
+		require.Equal(t, models.ReasoningEffortMax, *resp.Data.ReasoningEffort, "the primary keeps an effort a fallback rank cannot run")
+		require.NoError(t, mock.ExpectationsWereMet(), "the patched chain should reach the UPDATE")
+	})
+
+	t.Run("rejects an explicit per-rank effort the rank's agent cannot run", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID, id := uuid.New(), uuid.New()
+		stored := storedAutomation(id, orgID)
+		// Only the read is expected: a chain that fails validation must not
+		// reach the UPDATE.
+		mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+			WithArgs(testAnyArgs(2)...).
+			WillReturnRows(newAutomationRow(mock, stored))
+
+		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+		body := map[string]any{"fallback_models": map[string]any{
+			"models":            []string{models.CodexModelGPT55},
+			"reasoning_efforts": []string{string(models.ReasoningEffortMax)},
+		}}
+		req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+		rr := httptest.NewRecorder()
+		h.Update(rr, req)
+		require.Equal(t, http.StatusBadRequest, rr.Code, "an explicit effort the rank cannot run should be rejected, not silently downgraded")
+
+		var resp models.ErrorResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Update should return a JSON error response")
+		require.Equal(t, "INVALID_MODEL", resp.Error.Code, "fallback chain failures are model failures, not INVALID_AGENT_TYPE")
+		require.NoError(t, mock.ExpectationsWereMet(), "a rejected PATCH should not write")
+	})
+}
+
+// TestAutomationHandler_Update_PrimaryChangeRevalidatesStoredChain pins the
+// widened condition in Update: the chain is re-validated whenever any part of
+// the primary moves, not only when fallback_models is itself in the body. A
+// primary-only PATCH must not be able to write a chain the automation cannot
+// run back to the row.
+func TestAutomationHandler_Update_PrimaryChangeRevalidatesStoredChain(t *testing.T) {
+	t.Parallel()
+
+	// The stored row pins no agent of its own, which is what lets a lone
+	// {"model": ...} move the primary agent: resolveAutomationAgentAndModel
+	// keeps an agent already on the row and only infers one from the model when
+	// the row has none.
+	storedAutomation := func(id, orgID uuid.UUID, chain models.AutomationFallbackModels) models.Automation {
+		now := time.Now()
+		iv := 1
+		unit := models.ScheduleUnitDays
+		effort := models.ReasoningEffortHigh
+		return models.Automation{
+			ID: id, OrgID: orgID, Name: "a", Goal: "g",
+			ReasoningEffort: &effort,
+			FallbackModels:  chain,
+			ExecutionMode:   "sequential", BaseBranch: "main", ScheduleType: "interval",
+			Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+			CreatedAt: now, UpdatedAt: now,
+		}
+	}
+
+	t.Run("rejects a stored chain that no longer validates", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID, id := uuid.New(), uuid.New()
+		// A row whose rank pins an effort its agent cannot run — the shape a
+		// chain takes once a model or effort is retired from an agent's list.
+		stale := models.AutomationFallbackModels{
+			Models:           []string{models.CodexModelGPT55},
+			ReasoningEfforts: []models.ReasoningEffort{models.ReasoningEffortMax},
+		}
+		mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+			WithArgs(testAnyArgs(2)...).
+			WillReturnRows(newAutomationRow(mock, storedAutomation(id, orgID, stale)))
+
+		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+		// The body never mentions fallback_models; only the primary moves. The
+		// sibling subtest sends this exact body against the same row with a
+		// valid chain and gets a 200, so the 400 here can only come from the
+		// chain and not from the primary the PATCH names.
+		body := map[string]any{"model": models.CodexModelGPT5Codex}
+		req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+		rr := httptest.NewRecorder()
+		h.Update(rr, req)
+		require.Equal(t, http.StatusBadRequest, rr.Code, "a primary-only PATCH should still re-validate the stored chain")
+
+		var resp models.ErrorResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Update should return a JSON error response")
+		require.Equal(t, "INVALID_MODEL", resp.Error.Code, "fallback chain failures are model failures, not INVALID_AGENT_TYPE")
+		require.NoError(t, mock.ExpectationsWereMet(), "a rejected PATCH should not write")
+	})
+
+	t.Run("carries a still-valid stored chain through a primary switch", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID, id := uuid.New(), uuid.New()
+		chain := models.AutomationFallbackModels{Models: []string{models.ClaudeCodeModelOpus48}}
+		mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+			WithArgs(testAnyArgs(2)...).
+			WillReturnRows(newAutomationRow(mock, storedAutomation(id, orgID, chain)))
+		// Re-validation must not rewrite or drop the chain it approved.
+		mock.ExpectExec("UPDATE automations SET").
+			WithArgs(automationArgsWithFallbackModels(32, automationUpdateFallbackModelsArg, chain)...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+		body := map[string]any{"model": models.CodexModelGPT5Codex}
+		req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+		rr := httptest.NewRecorder()
+		h.Update(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, "switching the primary to Codex should keep a Claude Code rank that still validates")
+
+		var resp models.SingleResponse[models.Automation]
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Update should return the automation it stored")
+		require.NotNil(t, resp.Data.AgentType, "the patched primary agent should be set")
+		require.Equal(t, string(models.AgentTypeCodex), *resp.Data.AgentType, "patching the model should switch the primary agent")
+		require.Equal(t, chain.Models, resp.Data.FallbackModels.Models, "a primary switch must not clear the fallback chain")
+		require.NoError(t, mock.ExpectationsWereMet(), "the untouched chain should reach the UPDATE")
+	})
+}
+
+// TestAutomationHandler_Update_FallbackModelsNilVersusEmpty pins the tri-state
+// the pointer field buys: absent means "leave alone", {} means "clear". Without
+// the distinction a PATCH of an unrelated field would wipe the chain.
+func TestAutomationHandler_Update_FallbackModelsNilVersusEmpty(t *testing.T) {
+	t.Parallel()
+
+	stored := models.AutomationFallbackModels{Models: []string{models.CodexModelGPT55}}
+	storedAutomation := func(id, orgID uuid.UUID) models.Automation {
+		now := time.Now()
+		iv := 1
+		unit := models.ScheduleUnitDays
+		return models.Automation{
+			ID: id, OrgID: orgID, Name: "a", Goal: "g",
+			FallbackModels: stored,
+			ExecutionMode:  "sequential", BaseBranch: "main", ScheduleType: "interval",
+			Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+			CreatedAt: now, UpdatedAt: now,
+		}
+	}
+
+	t.Run("omitting fallback_models leaves the stored chain untouched", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID, id := uuid.New(), uuid.New()
+		mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+			WithArgs(testAnyArgs(2)...).
+			WillReturnRows(newAutomationRow(mock, storedAutomation(id, orgID)))
+		mock.ExpectExec("UPDATE automations SET").
+			WithArgs(automationArgsWithFallbackModels(32, automationUpdateFallbackModelsArg, stored)...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+		body := map[string]any{"name": "renamed"}
+		req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+		rr := httptest.NewRecorder()
+		h.Update(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, "an unrelated PATCH should succeed")
+
+		var resp models.SingleResponse[models.Automation]
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Update should return the automation it stored")
+		require.Equal(t, stored.Models, resp.Data.FallbackModels.Models, "renaming an automation must not disturb its chain")
+		require.NoError(t, mock.ExpectationsWereMet(), "the stored chain should be written back unchanged")
+	})
+
+	t.Run("an explicit empty object clears the chain", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID, id := uuid.New(), uuid.New()
+		mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+			WithArgs(testAnyArgs(2)...).
+			WillReturnRows(newAutomationRow(mock, storedAutomation(id, orgID)))
+		mock.ExpectExec("UPDATE automations SET").
+			WithArgs(automationArgsWithFallbackModels(32, automationUpdateFallbackModelsArg, models.AutomationFallbackModels{})...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+		body := map[string]any{"fallback_models": map[string]any{}}
+		req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+		rr := httptest.NewRecorder()
+		h.Update(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, "clearing the chain should succeed")
+
+		var raw map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw), "Update should return a JSON object")
+		var data map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(raw["data"], &data), "the response should carry a data object")
+		_, present := data["fallback_models"]
+		require.False(t, present, "a cleared chain should be omitted from the wire, not sent as an empty object the UI has to special-case")
+		require.NoError(t, mock.ExpectationsWereMet(), "the cleared chain should reach the UPDATE")
+	})
+}
+
+// TestAutomationHandler_CreateExternal_NestedFallbackModels covers the external
+// API's nested agent object. CreateExternal re-encodes its request into Create's
+// flat body, so a field that is not carried across the flatten is silently
+// dropped — a 201 with no chain stored, which is the worst kind of failure for
+// an API-managed automation.
+func TestAutomationHandler_CreateExternal_NestedFallbackModels(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	chain := models.AutomationFallbackModels{Models: []string{models.CodexModelGPT55}}
+	mock.ExpectQuery("INSERT INTO automations").
+		WithArgs(automationArgsWithFallbackModels(30, automationInsertFallbackModelsArg, chain)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), time.Now(), time.Now()))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"name": "my automation",
+		"goal": "poke at things",
+		"schedule": map[string]any{
+			"type":           string(models.AutomationScheduleInterval),
+			"interval_value": 2,
+			"interval_unit":  "days",
+		},
+		"agent": map[string]any{
+			"type":            string(models.AgentTypeClaudeCode),
+			"model":           models.ClaudeCodeModelSonnet46,
+			"fallback_models": map[string]any{"models": []string{models.CodexModelGPT55}},
+		},
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.CreateExternal(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, "the external API should accept a nested fallback chain")
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "CreateExternal should return the automation it stored")
+	require.Equal(t, chain.Models, resp.Data.FallbackModels.Models, "agent.fallback_models should survive the flatten into Create's body")
+	require.NoError(t, mock.ExpectationsWereMet(), "the nested chain should reach the INSERT")
+}
+
+// TestAutomationHandler_Get_ResponseCarriesFallbackModels covers the read half:
+// the chain has to appear on the wire under its own key, otherwise the
+// automation detail page would render an empty fallback editor over a row that
+// has a chain and the next save would clear it.
+func TestAutomationHandler_Get_ResponseCarriesFallbackModels(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID, id := uuid.New(), uuid.New()
+	now := time.Now()
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		FallbackModels: models.AutomationFallbackModels{
+			AgentTypes:       []string{string(models.AgentTypeCodex), string(models.AgentTypeClaudeCode)},
+			Models:           []string{models.CodexModelGPT55, models.ClaudeCodeModelSonnet45},
+			ReasoningEfforts: []models.ReasoningEffort{models.ReasoningEffortHigh, models.ReasoningEffortMax},
+		},
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	req := newAutomationRequest(t, http.MethodGet, "/api/v1/automations/"+id.String(), nil, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Get(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, "Get should return the automation")
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw), "Get should return a JSON object")
+	var data map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw["data"], &data), "the response should carry a data object")
+	require.Contains(t, data, "fallback_models", "the stored chain must be readable back under its wire name")
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "the response should decode into an Automation")
+	require.Equal(t, a.FallbackModels.Models, resp.Data.FallbackModels.Models, "every rank should survive the round trip in order")
+	require.Equal(t, a.FallbackModels.AgentTypes, resp.Data.FallbackModels.AgentTypes, "per-rank agents should survive the round trip")
+	require.Equal(t, a.FallbackModels.ReasoningEfforts, resp.Data.FallbackModels.ReasoningEfforts, "per-rank reasoning efforts should survive the round trip")
+	require.NoError(t, mock.ExpectationsWereMet(), "Get should read the automation once")
 }

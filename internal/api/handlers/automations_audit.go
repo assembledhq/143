@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -76,6 +78,7 @@ func automationAuditDiff(old, new_ *models.Automation) map[string]any {
 	track("icon_value", old.IconValue, new_.IconValue)
 	track("agent_type", optString(old.AgentType), optString(new_.AgentType))
 	track("model_override", optString(old.ModelOverride), optString(new_.ModelOverride))
+	track("fallback_models", automationFallbackModelsSummary(old.FallbackModels), automationFallbackModelsSummary(new_.FallbackModels))
 	track("execution_mode", old.ExecutionMode, new_.ExecutionMode)
 	track("max_concurrent", old.MaxConcurrent, new_.MaxConcurrent)
 	track("base_branch", old.BaseBranch, new_.BaseBranch)
@@ -94,6 +97,40 @@ func automationAuditDiff(old, new_ *models.Automation) map[string]any {
 	track("repository_id", optUUIDString(old.RepositoryID), optUUIDString(new_.RepositoryID))
 
 	return changes
+}
+
+// automationFallbackModelsSummary renders the fallback chain as one readable
+// line — "1: gpt-5-codex, 2: claude-sonnet-4-5 (claude_code, high)" — instead of
+// three parallel arrays the audit viewer would have to zip back together. Rank
+// numbering matches the "fallback model N" wording of the validation errors.
+//
+// Normalizing first is what makes a no-op PATCH quiet: track compares with
+// reflect.DeepEqual, which reports nil and empty slices as a change.
+func automationFallbackModelsSummary(f models.AutomationFallbackModels) any {
+	normalized := f.Normalize()
+	if normalized.Len() == 0 {
+		return nil
+	}
+	entries := make([]string, 0, normalized.Len())
+	for idx, model := range normalized.Models {
+		// Only explicit per-rank overrides are rendered; an inherited agent or
+		// effort already shows up under agent_type/reasoning_effort, and
+		// repeating it here would make an unrelated primary change look like a
+		// fallback change.
+		var qualifiers []string
+		if idx < len(normalized.AgentTypes) && normalized.AgentTypes[idx] != "" {
+			qualifiers = append(qualifiers, normalized.AgentTypes[idx])
+		}
+		if idx < len(normalized.ReasoningEfforts) && normalized.ReasoningEfforts[idx] != "" {
+			qualifiers = append(qualifiers, string(normalized.ReasoningEfforts[idx]))
+		}
+		entry := fmt.Sprintf("%d: %s", idx+1, model)
+		if len(qualifiers) > 0 {
+			entry += fmt.Sprintf(" (%s)", strings.Join(qualifiers, ", "))
+		}
+		entries = append(entries, entry)
+	}
+	return strings.Join(entries, ", ")
 }
 
 func automationProductTriggerSummary(events []models.AutomationGitHubEvent) []string {

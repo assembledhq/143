@@ -311,6 +311,7 @@ func TestBuildConfigSnapshot(t *testing.T) {
 		PrePRReviewLoops: 2,
 		BaseBranch:       "main",
 		LastRunAt:        &lastRunAt,
+		FallbackModels:   AutomationFallbackModels{Models: []string{CodexModelGPT55}},
 	}
 
 	raw, err := a.BuildConfigSnapshot()
@@ -328,6 +329,8 @@ func TestBuildConfigSnapshot(t *testing.T) {
 	require.Equal(t, float64(2), decoded["pre_pr_review_loops"], "config snapshot should include the pre-PR review pass count")
 	require.Equal(t, "main", decoded["base_branch"], "config snapshot should include base branch")
 	require.Equal(t, "2026-06-27T13:30:00Z", decoded["previous_run_at"], "config snapshot should include the previous automation run time in UTC")
+	require.Equal(t, map[string]any{"models": []any{CodexModelGPT55}}, decoded["fallback_models"],
+		"config snapshot should freeze the fallback chain the run dispatches under")
 }
 
 func TestBuildConfigSnapshot_NilOptionalFields(t *testing.T) {
@@ -348,6 +351,10 @@ func TestBuildConfigSnapshot_NilOptionalFields(t *testing.T) {
 	require.Equal(t, float64(0), decoded["pre_pr_review_loops"], "config snapshot should include disabled pre-PR review by default")
 	require.Equal(t, "develop", decoded["base_branch"], "config snapshot should include base branch")
 	require.Nil(t, decoded["previous_run_at"], "config snapshot should preserve missing previous automation run time")
+	// Present-but-empty rather than absent: the key is what tells a reader the
+	// snapshot is new enough to be authoritative about the chain, so an
+	// automation with no fallbacks still has to emit it.
+	require.Equal(t, map[string]any{}, decoded["fallback_models"], "config snapshot should include an empty fallback chain")
 }
 
 func TestAutomationPublishPolicyValidate(t *testing.T) {
@@ -443,4 +450,321 @@ func TestAutomationGitHubEventValidate(t *testing.T) {
 			require.NoError(t, err, "supported GitHub automation event should validate")
 		})
 	}
+}
+
+func TestAutomationFallbackModelsValidate(t *testing.T) {
+	t.Parallel()
+
+	claudeAgent := "claude_code"
+	codexAgent := "codex"
+	ampAgent := "amp"
+	maxEffort := ReasoningEffortMax
+
+	tests := []struct {
+		name      string
+		fallbacks AutomationFallbackModels
+		agentType *string
+		effort    *ReasoningEffort
+		wantErr   string
+	}{
+		{
+			name:      "empty is valid",
+			fallbacks: AutomationFallbackModels{},
+		},
+		{
+			name:      "models without explicit agents infer from the model name",
+			fallbacks: AutomationFallbackModels{Models: []string{CodexModelGPT55, ClaudeCodeModelSonnet46}},
+			agentType: &claudeAgent,
+		},
+		{
+			name:      "explicit cross-agent fallback is allowed",
+			fallbacks: AutomationFallbackModels{AgentTypes: []string{codexAgent}, Models: []string{CodexModelGPT55}},
+			agentType: &claudeAgent,
+		},
+		{
+			name:      "duplicates are accepted",
+			fallbacks: AutomationFallbackModels{Models: []string{CodexModelGPT55, CodexModelGPT55, CodexModelGPT55, CodexModelGPT55}},
+			agentType: &codexAgent,
+		},
+		{
+			name: "more than the cap is rejected",
+			fallbacks: AutomationFallbackModels{Models: []string{
+				CodexModelGPT55, CodexModelGPT54, CodexModelGPT53Codex, CodexModelGPT52Codex, CodexModelGPT5Codex,
+			}},
+			agentType: &codexAgent,
+			wantErr:   "at most 4 fallback models are allowed",
+		},
+		{
+			name:      "agent types must match the model count",
+			fallbacks: AutomationFallbackModels{AgentTypes: []string{codexAgent, codexAgent}, Models: []string{CodexModelGPT55}},
+			agentType: &codexAgent,
+			wantErr:   "agent types must match",
+		},
+		{
+			name:      "reasoning efforts must match the model count",
+			fallbacks: AutomationFallbackModels{Models: []string{CodexModelGPT55}, ReasoningEfforts: []ReasoningEffort{ReasoningEffortHigh, ReasoningEffortLow}},
+			agentType: &codexAgent,
+			wantErr:   "reasoning efforts must match",
+		},
+		{
+			name:      "arrays without models are rejected",
+			fallbacks: AutomationFallbackModels{AgentTypes: []string{codexAgent}},
+			agentType: &codexAgent,
+			wantErr:   "require a fallback model list",
+		},
+		{
+			name:      "whitespace-only model is rejected",
+			fallbacks: AutomationFallbackModels{Models: []string{"   "}},
+			agentType: &codexAgent,
+			wantErr:   "fallback model 1 must be non-empty",
+		},
+		{
+			name:      "model illegal for its resolved agent is rejected",
+			fallbacks: AutomationFallbackModels{AgentTypes: []string{codexAgent}, Models: []string{ClaudeCodeModelOpus5}},
+			agentType: &codexAgent,
+			wantErr:   "invalid fallback model 1",
+		},
+		{
+			// Inheritance is a convenience, not a constraint: a Claude-Code
+			// primary at "max" must not make every Codex fallback unsavable.
+			name:      "an effort the rank's agent cannot run is not inherited",
+			fallbacks: AutomationFallbackModels{AgentTypes: []string{codexAgent}, Models: []string{CodexModelGPT55}},
+			agentType: &claudeAgent,
+			effort:    &maxEffort,
+		},
+		{
+			name:      "an agent with no reasoning levels at all can still be a fallback",
+			fallbacks: AutomationFallbackModels{AgentTypes: []string{ampAgent}, Models: []string{AmpModeSmart}},
+			agentType: &claudeAgent,
+			effort:    &maxEffort,
+		},
+		{
+			// An explicit value is the user's own typo, so it still errors
+			// rather than being silently downgraded.
+			name: "an explicit effort the rank's agent cannot run is rejected",
+			fallbacks: AutomationFallbackModels{
+				AgentTypes:       []string{codexAgent},
+				Models:           []string{CodexModelGPT55},
+				ReasoningEfforts: []ReasoningEffort{ReasoningEffortMax},
+			},
+			agentType: &claudeAgent,
+			wantErr:   `reasoning effort "max" is not supported for fallback model 1`,
+		},
+		{
+			name: "an explicit per-rank effort overrides an un-inheritable one",
+			fallbacks: AutomationFallbackModels{
+				AgentTypes:       []string{codexAgent},
+				Models:           []string{CodexModelGPT55},
+				ReasoningEfforts: []ReasoningEffort{ReasoningEffortHigh},
+			},
+			agentType: &claudeAgent,
+			effort:    &maxEffort,
+		},
+		{
+			name:      "unrecognized model with no agent to fall back on is rejected",
+			fallbacks: AutomationFallbackModels{Models: []string{"not-a-real-model"}},
+			wantErr:   "is not recognized",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.fallbacks.Validate(tt.agentType, tt.effort)
+			if tt.wantErr == "" {
+				require.NoError(t, err, "fallback chain should validate")
+				return
+			}
+			require.Error(t, err, "invalid fallback chain should be rejected")
+			require.Contains(t, err.Error(), tt.wantErr, "error should explain which rank failed")
+			require.Contains(t, err.Error(), "model", "message must mention model so handlers classify it as INVALID_MODEL")
+		})
+	}
+}
+
+func TestAutomationFallbackModelsNormalize(t *testing.T) {
+	t.Parallel()
+
+	t.Run("drops arrays that carry no information", func(t *testing.T) {
+		t.Parallel()
+
+		normalized := AutomationFallbackModels{
+			AgentTypes:       []string{"", ""},
+			Models:           []string{"  " + CodexModelGPT55 + "  ", CodexModelGPT54},
+			ReasoningEfforts: []ReasoningEffort{"", ""},
+		}.Normalize()
+
+		require.Equal(t, []string{CodexModelGPT55, CodexModelGPT54}, normalized.Models, "models should be trimmed")
+		require.Nil(t, normalized.AgentTypes, "an all-empty agent list should normalize away")
+		require.Nil(t, normalized.ReasoningEfforts, "an all-empty effort list should normalize away")
+	})
+
+	t.Run("an empty model list normalizes to the zero value", func(t *testing.T) {
+		t.Parallel()
+
+		require.Equal(t, AutomationFallbackModels{}, AutomationFallbackModels{Models: []string{}}.Normalize(),
+			"no fallbacks must round-trip as the zero value so no-op patches produce no audit diff")
+	})
+
+	t.Run("pads a partially specified array to the model count", func(t *testing.T) {
+		t.Parallel()
+
+		normalized := AutomationFallbackModels{
+			Models:           []string{CodexModelGPT55, CodexModelGPT54},
+			ReasoningEfforts: []ReasoningEffort{ReasoningEffortHigh},
+		}.Normalize()
+
+		require.Len(t, normalized.ReasoningEfforts, 2, "index-aligned arrays must match the model count")
+		require.Equal(t, ReasoningEffortHigh, normalized.ReasoningEfforts[0], "specified entries should survive")
+		require.Equal(t, ReasoningEffort(""), normalized.ReasoningEfforts[1], "unspecified entries pad as empty")
+	})
+}
+
+func TestAutomationModelRanks(t *testing.T) {
+	t.Parallel()
+
+	claudeAgent := "claude_code"
+	codexAgent := "codex"
+	primaryModel := ClaudeCodeModelOpus5
+	highEffort := ReasoningEffortHigh
+
+	t.Run("an automation with no fallbacks yields only the primary", func(t *testing.T) {
+		t.Parallel()
+
+		a := Automation{AgentType: &claudeAgent, ModelOverride: &primaryModel, ReasoningEffort: &highEffort}
+		ranks := a.ModelRanks()
+
+		require.Len(t, ranks, 1, "a legacy automation has exactly one rank")
+		require.False(t, ranks[0].Fallback, "rank 0 is the configured primary, not a fallback")
+		require.Equal(t, primaryModel, *ranks[0].Model, "rank 0 carries the automation's model override")
+		require.Equal(t, highEffort, *ranks[0].ReasoningEffort, "rank 0 carries the automation's reasoning effort")
+	})
+
+	t.Run("fallbacks resolve their agent and inherit the primary effort", func(t *testing.T) {
+		t.Parallel()
+
+		a := Automation{
+			AgentType:       &claudeAgent,
+			ModelOverride:   &primaryModel,
+			ReasoningEffort: &highEffort,
+			FallbackModels: AutomationFallbackModels{
+				Models: []string{ClaudeCodeModelSonnet46, CodexModelGPT55},
+			},
+		}
+		ranks := a.ModelRanks()
+
+		require.Len(t, ranks, 3, "one primary plus two fallbacks")
+		require.Equal(t, claudeAgent, *ranks[1].AgentType, "a same-agent fallback keeps the primary agent")
+		require.Equal(t, codexAgent, *ranks[2].AgentType, "a fallback's agent is inferred from its model name")
+		require.True(t, ranks[1].Fallback, "ranks beyond the primary are fallbacks")
+		require.Equal(t, highEffort, *ranks[1].ReasoningEffort, "a fallback with no explicit effort inherits the primary's")
+	})
+
+	t.Run("a rank whose agent cannot run the primary effort does not inherit it", func(t *testing.T) {
+		t.Parallel()
+
+		maxEffort := ReasoningEffortMax
+		a := Automation{
+			AgentType:       &claudeAgent,
+			ModelOverride:   &primaryModel,
+			ReasoningEffort: &maxEffort,
+			FallbackModels:  AutomationFallbackModels{Models: []string{CodexModelGPT55}},
+		}
+		ranks := a.ModelRanks()
+
+		require.Equal(t, maxEffort, *ranks[0].ReasoningEffort, "the primary keeps its own effort")
+		require.Nil(t, ranks[1].ReasoningEffort, "codex has no max level, so the fallback runs at its agent default")
+	})
+
+	t.Run("an explicit per-rank effort wins over the primary", func(t *testing.T) {
+		t.Parallel()
+
+		a := Automation{
+			AgentType:       &claudeAgent,
+			ModelOverride:   &primaryModel,
+			ReasoningEffort: &highEffort,
+			FallbackModels: AutomationFallbackModels{
+				AgentTypes:       []string{codexAgent},
+				Models:           []string{CodexModelGPT55},
+				ReasoningEfforts: []ReasoningEffort{ReasoningEffortLow},
+			},
+		}
+		ranks := a.ModelRanks()
+
+		require.Equal(t, ReasoningEffortLow, *ranks[1].ReasoningEffort, "an explicit rank effort overrides the primary")
+		require.Equal(t, codexAgent, *ranks[1].AgentType, "an explicit rank agent overrides inference")
+	})
+}
+
+func TestAutomationModelRanksFromConfigSnapshot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a snapshot predating fallback models reports not-ok", func(t *testing.T) {
+		t.Parallel()
+
+		ranks, ok, err := AutomationModelRanksFromConfigSnapshot(json.RawMessage(`{"agent_type":"codex","model_override":"gpt-5.5"}`))
+
+		require.NoError(t, err, "a legacy snapshot is not an error")
+		require.False(t, ok, "an absent fallback_models key means the caller should read the live automation")
+		require.Nil(t, ranks, "no chain is reconstructed from a legacy snapshot")
+	})
+
+	t.Run("an empty snapshot reports not-ok", func(t *testing.T) {
+		t.Parallel()
+
+		_, ok, err := AutomationModelRanksFromConfigSnapshot(nil)
+
+		require.NoError(t, err, "a missing snapshot is not an error")
+		require.False(t, ok, "there is no chain to reconstruct")
+	})
+
+	t.Run("round-trips the chain a run was dispatched under", func(t *testing.T) {
+		t.Parallel()
+
+		claudeAgent := "claude_code"
+		model := ClaudeCodeModelOpus5
+		effort := ReasoningEffortHigh
+		a := Automation{
+			AgentType:       &claudeAgent,
+			ModelOverride:   &model,
+			ReasoningEffort: &effort,
+			BaseBranch:      "main",
+			FallbackModels:  AutomationFallbackModels{Models: []string{CodexModelGPT55}},
+		}
+		snapshot, err := a.BuildConfigSnapshot()
+		require.NoError(t, err, "snapshot should marshal")
+
+		ranks, ok, err := AutomationModelRanksFromConfigSnapshot(snapshot)
+
+		require.NoError(t, err, "snapshot should decode")
+		require.True(t, ok, "a snapshot carrying fallback_models has an authoritative chain")
+		require.Equal(t, a.ModelRanks(), ranks, "the frozen chain must match what the automation had at dispatch")
+	})
+
+	t.Run("an automation edited after the run cannot re-rank it", func(t *testing.T) {
+		t.Parallel()
+
+		claudeAgent := "claude_code"
+		model := ClaudeCodeModelOpus5
+		a := Automation{AgentType: &claudeAgent, ModelOverride: &model}
+		snapshot, err := a.BuildConfigSnapshot()
+		require.NoError(t, err, "snapshot should marshal")
+
+		a.FallbackModels = AutomationFallbackModels{Models: []string{CodexModelGPT55}}
+
+		ranks, ok, err := AutomationModelRanksFromConfigSnapshot(snapshot)
+
+		require.NoError(t, err, "snapshot should decode")
+		require.True(t, ok, "the snapshot is authoritative")
+		require.Len(t, ranks, 1, "a fallback added after dispatch must not appear in the run's chain")
+	})
+
+	t.Run("malformed JSON surfaces an error", func(t *testing.T) {
+		t.Parallel()
+
+		_, _, err := AutomationModelRanksFromConfigSnapshot(json.RawMessage(`{`))
+
+		require.Error(t, err, "a corrupt snapshot must not silently read as no-chain")
+	})
 }

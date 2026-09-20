@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -275,4 +276,27 @@ func countLines(s string) int {
 		return 0
 	}
 	return strings.Count(s, "\n") + 1
+}
+
+// ModelUnavailable reports whether an agent failure message describes the
+// model being temporarily unable to serve the request — capacity, overload,
+// or rate limiting — rather than a deterministic problem with the work itself.
+//
+// Callers use this to decide whether retrying the same work on a different
+// model is worthwhile. It deliberately does NOT mark the credential unhealthy:
+// a model-capacity error says nothing about whether the credential works, and
+// routing it through the credential-shedding path (shedOnRunResult) would
+// bench a healthy credential org-wide for 15 minutes.
+func ModelUnavailable(message string) bool {
+	lower := strings.ToLower(message)
+	for _, marker := range []string{
+		"model is at capacity", "model is overloaded", "overloaded_error", "server is overloaded", "service unavailable",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	// Reuse the runtime's rate-limit vocabulary without changing credential
+	// health: a model-capacity error does not mean its credential is unhealthy.
+	return CredentialFailureSignalFromResult(&AgentResult{Error: message}, time.Now()).RateLimited
 }

@@ -3573,6 +3573,22 @@ export interface AutomationGitHubEventFilters {
   review_states?: string[];
 }
 
+// Mirrors models.AutomationFallbackModels: ranks 1..N of the model chain, held
+// as index-aligned parallel arrays. Rank 0 is the automation's own
+// agent_type/model_override/reasoning_effort, which is why it is absent here.
+// `agent_types` and `reasoning_efforts` are each either omitted entirely (the
+// backend derives them per rank — the agent from the model name, the effort
+// from the primary) or exactly as long as `models`; a shorter array is rejected.
+// An empty `reasoning_efforts` entry means "inherit the primary's effort", so it
+// is only safe when this rank's agent can actually accept that level.
+export interface AutomationFallbackModels {
+  agent_types?: string[];
+  models?: string[];
+  // Structurally CodingAgentReasoningEffort[]; spelled out because this file is
+  // hand-written and deliberately imports nothing.
+  reasoning_efforts?: ("" | "low" | "medium" | "high" | "xhigh" | "max")[];
+}
+
 export interface Automation {
   id: string;
   org_id: string;
@@ -3585,6 +3601,7 @@ export interface Automation {
   agent_type?: string;
   model_override?: string;
   reasoning_effort?: Session["reasoning_effort"];
+  fallback_models?: AutomationFallbackModels;
   execution_mode: string;
   max_concurrent: number;
   base_branch: string;
@@ -3672,6 +3689,12 @@ export interface AutomationRun {
   // when the run hasn't spawned a session yet (pending/skipped, or
   // mid-flight before the worker creates the session).
   session?: AutomationRunSession;
+  // The rank-0 model this run was dispatched under, read from its own frozen
+  // config snapshot. Compare against session.model_override to tell whether the
+  // run fell back — the live automation cannot answer that, because editing its
+  // model would relabel every historical run.
+  primary_agent_type?: string;
+  primary_model?: string;
   trigger_target?: AutomationRunTriggerTarget;
   trigger_details?: AutomationRunTriggerDetails;
 }
@@ -3797,6 +3820,11 @@ export type BranchCreationState = SessionPublishState;
 export interface AutomationRunSession {
   id: string;
   title?: string;
+  // The agent and model this attempt actually ran on. They can differ from the
+  // automation's primary when a fallback rank was dispatched, so the run rows
+  // can say which model produced the result instead of implying the primary.
+  agent_type?: string;
+  model_override?: string;
   // Mirrors models.SessionStatus values; the row UI keys off this
   // (notably "needs_human_guidance") to choose between failure and
   // attention treatments.

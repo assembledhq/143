@@ -1483,6 +1483,9 @@ func buildServices(
 	projectTaskUpdater := projectservice.NewHooks(projectTaskStore, projectStore, logger)
 	automationStore := db.NewAutomationStore(pool)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
+	// Lets a run whose session died of model capacity re-dispatch on the next
+	// rank of its fallback chain instead of landing as failed.
+	automationRunUpdater.SetFallbackPromoter(automationRunStore, jobStore)
 	automationGoalImprovementStore := db.NewAutomationGoalImprovementStore(pool)
 	automationGoalImprovementUpdater := automations.NewGoalImprovementService(automationGoalImprovementStore, automationStore, automationRunStore, sessionStore, jobStore, pool, llmClient)
 	auditEmitter := db.NewAuditEmitter(db.NewAuditLogStore(pool), logger)

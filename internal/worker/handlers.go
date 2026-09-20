@@ -2387,9 +2387,62 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			return nil
 		}
 
+		// Past the claim, a bare error return would strand the row as running:
+		// a retried job can no longer win the CAS above, so every failure from
+		// here on has to leave a terminal status behind.
+		failClaimedRun := func(summary string) {
+			now := time.Now()
+			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusRunning, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
+				log.Error().Err(updateErr).Str("result_summary", summary).Msg("failed to mark automation run failed")
+			}
+		}
+
+		// The sessions already linked to this run are the model attempts already
+		// spent. Dropping those from the chain — rather than indexing into it by
+		// session count — is what makes a re-dispatch resume on a model that has
+		// not run yet: pre-flight availability can skip a rank without spawning
+		// a session, so the Nth session is not necessarily rank N.
+		attempts, err := stores.AutomationRuns.ListSessionAttempts(ctx, orgID, runID)
+		if err != nil {
+			failClaimedRun(fmt.Sprintf("failed to read automation run attempts: %s", err))
+			return fmt.Errorf("resolve automation run attempts: %w", err)
+		}
+		candidates, err := automationModelCandidates(run, automation)
+		if err != nil {
+			failClaimedRun(err.Error())
+			return nil
+		}
+		remaining := automationModelCandidatesRemaining(candidates, attempts)
+		rank, _, rankAvailable, err := resolveAutomationModelSelection(ctx, services, orgID, sessionTriggeredByUserID, remaining)
+		if err != nil {
+			failClaimedRun(fmt.Sprintf("failed to resolve automation model availability: %s", err))
+			return err
+		}
+		if !rankAvailable {
+			// Dispatching into a model we already know has no usable credential
+			// buys nothing but a failed session, so fail the run here and name
+			// what was tried. Re-running the job would reach the same verdict.
+			//
+			// An exhausted chain lands here too, with nothing left to name; say
+			// so rather than printing a dangling colon.
+			summary := "no configured model was available"
+			if labels := automationModelCandidateLabels(remaining); labels != "" {
+				summary += ": " + labels
+			} else {
+				summary = "every configured model was already attempted for this run"
+			}
+			failClaimedRun(summary)
+			log.Warn().Int("attempts", len(attempts)).Int("model_ranks", len(candidates)).Int("remaining", len(remaining)).
+				Msg("automation fallback models exhausted")
+			return nil
+		}
+
+		// The selected rank's agent type is the explicit input to the ladder
+		// below rather than a replacement for it, so a fallback that names only
+		// a model still inherits the org default agent.
 		agentType := models.DefaultDefaultAgentType
-		if automation.AgentType != nil && *automation.AgentType != "" {
-			candidate := models.AgentType(*automation.AgentType)
+		if rankAgentType := strings.TrimSpace(stringPtrValue(rank.AgentType)); rankAgentType != "" {
+			candidate := models.AgentType(rankAgentType)
 			if err := candidate.Validate(); err == nil {
 				agentType = candidate
 			} else {
@@ -2429,13 +2482,17 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		}
 
 		session := &models.Session{
-			OrgID:              orgID,
-			AgentType:          agentType,
-			Status:             "pending",
-			AutonomyLevel:      models.DefaultSessionAutonomy,
-			TokenMode:          "low",
-			ModelOverride:      automation.ModelOverride,
-			ReasoningEffort:    automation.ReasoningEffort,
+			OrgID:         orgID,
+			AgentType:     agentType,
+			Status:        "pending",
+			AutonomyLevel: models.DefaultSessionAutonomy,
+			TokenMode:     "low",
+			// From the chosen rank, not the live automation row: this puts
+			// model selection under the same snapshot-first rule the identity
+			// scope and publish policy already follow, so editing an
+			// automation cannot re-point a run that is already dispatching.
+			ModelOverride:      rank.Model,
+			ReasoningEffort:    rank.ReasoningEffort,
 			TriggeredByUserID:  sessionTriggeredByUserID,
 			TargetBranch:       targetBranch,
 			RepositoryID:       repositoryID,
@@ -2471,6 +2528,9 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		log.Info().
 			Str("session_id", session.ID.String()).
 			Str("agent_type", string(agentType)).
+			Str("model", automationModelCandidateLabel(rank)).
+			Int("attempt", len(attempts)).
+			Bool("fallback", rank.Fallback).
 			Msg("automation session dispatched")
 		return nil
 	}

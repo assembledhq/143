@@ -496,6 +496,8 @@ func (s *GoalImprovementService) startDeepImprovement(ctx context.Context, orgID
 		agentType = models.AgentType(*automation.AgentType)
 	}
 	targetBranch := automation.BaseBranch
+	// The automation's fallback chain is deliberately not carried over: this is a one-shot
+	// analysis we want to read on a single known model, not a run we want silently retried elsewhere.
 	return s.startDeepImprovementFromInput(ctx, deepImprovementInput{
 		OrgID:            orgID,
 		AutomationID:     &automation.ID,
@@ -589,6 +591,7 @@ func (s *GoalImprovementService) startDeepImprovementFromInput(ctx context.Conte
 		agentType = models.AgentTypeCodex
 	}
 	title := in.Title
+	// Single-model by design (see startDeepImprovement): no fallback ranks on analysis sessions.
 	session := &models.Session{
 		OrgID:              in.OrgID,
 		Origin:             models.SessionOriginAutomationGoalImprovement,
@@ -600,7 +603,7 @@ func (s *GoalImprovementService) startDeepImprovementFromInput(ctx context.Conte
 		TokenMode:          models.SessionTokenModeLow,
 		TriggeredByUserID:  in.CreatedBy,
 		Title:              &title,
-		ExecutionBrief:         &prompt,
+		ExecutionBrief:     &prompt,
 		RepositoryID:       in.RepositoryID,
 		TargetBranch:       in.TargetBranch,
 		ModelOverride:      in.ModelOverride,
@@ -864,6 +867,7 @@ func savedAutomationInputConfig(a models.Automation) json.RawMessage {
 		"agent_type":            a.AgentType,
 		"model":                 a.ModelOverride,
 		"reasoning_effort":      a.ReasoningEffort,
+		"fallback_models":       a.FallbackModels,
 		"execution_mode":        a.ExecutionMode,
 		"max_concurrent":        a.MaxConcurrent,
 		"publish_policy":        a.PublishPolicy.OrDefault(),

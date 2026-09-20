@@ -270,12 +270,16 @@ describe("AutomationDetailPage", () => {
 
     // Only the rarely-touched knobs stay folded away.
     expect(screen.queryByLabelText("Review passes")).not.toBeInTheDocument();
+    // The fallback chain is a multi-row editor that most automations never
+    // need; inline it would dominate a rail whose other rows are one line each.
+    expect(screen.queryByText("Fallback models")).not.toBeInTheDocument();
 
     await userEvent
       .setup()
       .click(screen.getByRole("button", { name: "Advanced" }));
 
     expect(screen.getByLabelText("Review passes")).toBeInTheDocument();
+    expect(screen.getByText("Fallback models")).toBeInTheDocument();
   });
 
   it("updates the browser tab title with the automation name", async () => {
@@ -2908,6 +2912,429 @@ describe("AutomationDetailPage", () => {
     await new Promise((resolve) => setTimeout(resolve, 600));
     expect(updateBodies).toEqual([]);
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  // --- Ranked fallback models ------------------------------------------------
+  //
+  // Shared scaffolding for the chain tests. Everything but the model-related
+  // fields is the same fixture the rest of this file uses. The PATCH handler is
+  // an inline override like every other one here, and this one has to echo
+  // `fallback_models` back: the mutation writes the response into the detail
+  // cache, so a handler that dropped the key would wipe the chain the user just
+  // saved and make the next edit reconcile against nothing.
+  function mockAutomationWithChain(automationOverrides: Record<string, unknown>) {
+    const automation = {
+      id: "auto-1",
+      org_id: "org-1",
+      repository_id: "repo-1",
+      name: "Weekly audit",
+      goal: "Check release health",
+      scope: "",
+      interval_value: 1,
+      interval_unit: "weeks",
+      base_branch: "main",
+      enabled: true,
+      timezone: "UTC",
+      last_run_at: null,
+      next_run_at: null,
+      priority: 50,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      ...automationOverrides,
+    };
+    const updateBodies: Record<string, unknown>[] = [];
+
+    server.use(
+      http.get("*/api/v1/settings", () =>
+        HttpResponse.json({
+          data: { settings: { default_agent_type: "codex", agent_config: {} } },
+        }),
+      ),
+      http.get("*/api/v1/settings/codex-auth/status", () =>
+        HttpResponse.json({ data: { status: "completed" } }),
+      ),
+      http.get("*/api/v1/coding-credentials*", ({ request }) => {
+        const scope = new URL(request.url).searchParams.get("scope");
+        if (scope !== "org") {
+          return HttpResponse.json({ data: [], meta: { scope } });
+        }
+        // Claude Code and Amp on top of Codex's OAuth. Ranks may run on a
+        // different agent than the primary, so the picker has to offer an agent
+        // with a different reasoning ladder (Claude Code) and one with none at
+        // all (Amp).
+        return HttpResponse.json({
+          data: ["claude_code", "amp"].map((agent) => ({
+            id: `cred-${agent}`,
+            org_id: "org-1",
+            scope: "org",
+            agent,
+            auth_type: "api_key",
+            provider: agent === "amp" ? "amp" : "anthropic",
+            label: `${agent} key`,
+            status: "healthy",
+            is_default: false,
+            priority: 1,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          })),
+          meta: {},
+        });
+      }),
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({ data: automation }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1/stats*", () =>
+        HttpResponse.json({
+          data: {
+            since: "2026-01-01T00:00:00Z",
+            until: "2026-01-31T00:00:00Z",
+            buckets: [],
+            totals: {
+              total: 0,
+              completed: 0,
+              completed_noop: 0,
+              failed: 0,
+              skipped: 0,
+              running: 0,
+              pending: 0,
+              success_rate: 0,
+              avg_duration_seconds: 0,
+            },
+          },
+        }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        updateBodies.push(body);
+        return HttpResponse.json({
+          data: {
+            ...automation,
+            ...("model" in body ? { model_override: body.model } : {}),
+            ...("reasoning_effort" in body
+              ? { reasoning_effort: body.reasoning_effort || undefined }
+              : {}),
+            ...("fallback_models" in body
+              ? { fallback_models: body.fallback_models }
+              : {}),
+          },
+        });
+      }),
+    );
+
+    return updateBodies;
+  }
+
+  it("saves a fallback rank added from the Advanced section", async () => {
+    const user = userEvent.setup();
+    const updateBodies = mockAutomationWithChain({
+      agent_type: "codex",
+      model_override: "gpt-5.4",
+    });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    await user.click(screen.getByRole("button", { name: "Advanced" }));
+    // The automation's own model is rank 1 of the same chain, so the editor has
+    // to show it rather than starting the numbering at the first fallback.
+    expect(screen.getByText("1. Preferred model")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Add fallback model/ }));
+    await user.click(
+      screen.getByRole("combobox", { name: "Rank 2 fallback model" }),
+    );
+    await user.click(
+      await screen.findByRole("option", { name: "claude-sonnet-4-6" }),
+    );
+
+    // `agent_types` is written explicitly so the backend never has to re-derive
+    // which agent the rank runs on; `reasoning_efforts` is omitted entirely
+    // because this rank inherits, which is the encoding the API normalizes to.
+    await waitFor(() =>
+      expect(updateBodies).toEqual([
+        {
+          fallback_models: {
+            models: ["claude-sonnet-4-6"],
+            agent_types: ["claude_code"],
+          },
+        },
+      ]),
+    );
+  });
+
+  it("drops a fallback the primary model has just become, in the same patch", async () => {
+    const user = userEvent.setup();
+    const updateBodies = mockAutomationWithChain({
+      agent_type: "codex",
+      model_override: "gpt-5.4",
+      fallback_models: {
+        models: ["claude-sonnet-4-6", "smart"],
+        agent_types: ["claude_code", "amp"],
+      },
+    });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    await user.click(
+      await screen.findByRole("option", { name: "claude-sonnet-4-6" }),
+    );
+
+    // One patch, not two: useAutosave coalesces queued patches by shallow key
+    // merge, so a follow-up chain save would race the model change instead of
+    // building on it — and the promoted rank would retry the model that just
+    // became the primary.
+    await waitFor(() =>
+      expect(updateBodies).toEqual([
+        {
+          model: "claude-sonnet-4-6",
+          fallback_models: { models: ["smart"], agent_types: ["amp"] },
+        },
+      ]),
+    );
+  });
+
+  it("leaves inherited ranks alone when the primary moves to a level they cannot run", async () => {
+    const user = userEvent.setup();
+    const updateBodies = mockAutomationWithChain({
+      agent_type: "claude_code",
+      model_override: "claude-opus-5",
+      fallback_models: {
+        models: ["gpt-5.4"],
+        agent_types: ["codex"],
+      },
+    });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
+    await user.click(await screen.findByRole("option", { name: "Max" }));
+
+    // An empty rank entry means "inherit the primary", and Codex has no "max".
+    // The API does not reject that: it drops an inherited level the rank's agent
+    // cannot run and the rank uses Codex's own default. So the chain is already
+    // valid and must NOT ride along — pinning the rank to a level Codex happens
+    // to have (what this used to send) would silently invent a setting nobody
+    // chose, and would re-validate a chain this edit never touched.
+    await waitFor(() =>
+      expect(updateBodies).toEqual([{ reasoning_effort: "max" }]),
+    );
+  });
+
+  it("labels a run whose session ran on a model other than the run's own primary", async () => {
+    mockAutomationWithChain({
+      agent_type: "codex",
+      model_override: "gpt-5.4",
+      fallback_models: {
+        models: ["claude-sonnet-4-6"],
+        agent_types: ["claude_code"],
+      },
+    });
+    // Silent failover is otherwise invisible: the run carries the same status
+    // and summary either way, so an automation quietly running on its
+    // last-resort model for weeks would read as healthy.
+    server.use(
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "run-1",
+              automation_id: "auto-1",
+              triggered_at: "2026-01-02T00:00:00Z",
+              triggered_by: "schedule",
+              goal_snapshot: "Check release health",
+              status: "completed",
+              result_summary: "Checked release health",
+              completed_at: "2026-01-02T00:00:30Z",
+              created_at: "2026-01-02T00:00:00Z",
+              updated_at: "2026-01-02T00:00:30Z",
+              primary_model: "gpt-5.4",
+              session: {
+                id: "sess-1",
+                title: "Checked release health",
+                status: "completed",
+                failure_retry_advised: false,
+                pr_creation_state: "idle",
+                model_override: "claude-sonnet-4-6",
+              },
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    expect(
+      await screen.findByText(/Fallback model:/),
+    ).toBeInTheDocument();
+  });
+
+  it("does not label a run as a fallback after the automation's primary is edited", async () => {
+    mockAutomationWithChain({
+      agent_type: "claude_code",
+      model_override: "claude-sonnet-4-6",
+      fallback_models: {
+        models: ["gpt-5.4"],
+        agent_types: ["codex"],
+      },
+    });
+    // The run ran on the primary it was dispatched under; the automation's
+    // model was edited afterwards. Comparing against the LIVE primary would
+    // relabel this — and every other historical run — as a failover.
+    server.use(
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "run-1",
+              automation_id: "auto-1",
+              triggered_at: "2026-01-02T00:00:00Z",
+              triggered_by: "schedule",
+              goal_snapshot: "Check release health",
+              status: "completed",
+              result_summary: "Checked release health",
+              completed_at: "2026-01-02T00:00:30Z",
+              created_at: "2026-01-02T00:00:00Z",
+              updated_at: "2026-01-02T00:00:30Z",
+              primary_model: "gpt-5.4",
+              session: {
+                id: "sess-1",
+                title: "Checked release health",
+                status: "completed",
+                failure_retry_advised: false,
+                pr_creation_state: "idle",
+                model_override: "gpt-5.4",
+              },
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    expect(
+      await screen.findByText("Execution: Completed"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Fallback model:/)).not.toBeInTheDocument();
+  });
+
+  it("labels a fallback even when the run's primary was Auto", async () => {
+    mockAutomationWithChain({
+      agent_type: "codex",
+      fallback_models: {
+        models: ["claude-sonnet-4-6"],
+        agent_types: ["claude_code"],
+      },
+    });
+    // A run dispatched with no model override records none on rank 0, so any
+    // session model at all means the chain moved. Gating the badge on the
+    // primary being set would hide every failover under an "Auto" primary.
+    server.use(
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "run-1",
+              automation_id: "auto-1",
+              triggered_at: "2026-01-02T00:00:00Z",
+              triggered_by: "schedule",
+              goal_snapshot: "Check release health",
+              status: "completed",
+              result_summary: "Checked release health",
+              completed_at: "2026-01-02T00:00:30Z",
+              created_at: "2026-01-02T00:00:00Z",
+              updated_at: "2026-01-02T00:00:30Z",
+              
+              session: {
+                id: "sess-1",
+                title: "Checked release health",
+                status: "completed",
+                failure_retry_advised: false,
+                pr_creation_state: "idle",
+                model_override: "claude-sonnet-4-6",
+              },
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    expect(
+      await screen.findByText(/Fallback model:/),
+    ).toBeInTheDocument();
+  });
+
+  it("never re-sends a stored fallback chain when an unrelated field is edited", async () => {
+    const updateBodies = mockAutomationWithChain({
+      agent_type: "codex",
+      model_override: "gpt-5.4",
+      fallback_models: {
+        models: ["claude-sonnet-4-6"],
+        agent_types: ["claude_code"],
+      },
+    });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    const scope = screen.getByLabelText("Scope");
+    fireEvent.change(scope, { target: { value: "src/" } });
+    fireEvent.blur(scope);
+
+    await waitFor(() => expect(updateBodies).toHaveLength(1));
+    // Reconciliation only fires for edits that can invalidate the chain. A
+    // scope edit cannot, so the chain must not ride along — the API re-validates
+    // the whole chain whenever the key is present, which would let a rank
+    // nobody touched refuse an unrelated save.
+    expect(updateBodies[0]).toEqual({ scope: "src/" });
+  });
+
+  it("shows a read-only fallback chain to viewers who cannot manage the automation", async () => {
+    currentUserRole.value = "builder";
+    const updateBodies = mockAutomationWithChain({
+      agent_type: "codex",
+      model_override: "gpt-5.4",
+      fallback_models: {
+        models: ["claude-sonnet-4-6", "smart"],
+        agent_types: ["claude_code", "amp"],
+      },
+    });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Advanced" }));
+
+    // A builder can still need to know which models a run may land on when
+    // reading a failed run, so the chain is shown rather than hidden.
+    expect(screen.getByText("Fallback models")).toBeInTheDocument();
+    expect(screen.getByText(/^2\./)).toHaveTextContent("claude-sonnet-4-6");
+    expect(screen.getByText(/^3\./)).toHaveTextContent("smart");
+    // But nothing they could fire a save from — the API would refuse it.
+    expect(
+      screen.queryByRole("button", { name: /Add fallback model/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "Rank 2 fallback model" }),
+    ).not.toBeInTheDocument();
+    expect(updateBodies).toHaveLength(0);
   });
 
   it("surfaces the API's reason when an inline property save is rejected", async () => {

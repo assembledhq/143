@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -49,18 +48,11 @@ func codeReviewOrchestratorCandidates(cfg models.CodeReviewPolicyConfig) []codeR
 	return candidates
 }
 
+// codeReviewModelUnavailable is the code-review-local name for the shared
+// classifier. Automations rank fallback models off the same vocabulary, so the
+// markers live in the agent package rather than being duplicated per feature.
 func codeReviewModelUnavailable(message string) bool {
-	lower := strings.ToLower(message)
-	for _, marker := range []string{
-		"model is at capacity", "model is overloaded", "overloaded_error", "server is overloaded", "service unavailable",
-	} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	// Reuse the runtime's rate-limit vocabulary without changing credential
-	// health: a model-capacity error does not mean its credential is unhealthy.
-	return agent.CredentialFailureSignalFromResult(&agent.AgentResult{Error: message}, time.Now()).RateLimited
+	return agent.ModelUnavailable(message)
 }
 
 func codeReviewAgentModelUnavailable(result models.CodeReviewAgentResult) bool {
