@@ -2161,6 +2161,12 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Retrying or starting over runs the session again, which an owned
+	// session's automation is already doing.
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+		return
+	}
+
 	mode, err := parseRetrySessionMode(r)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_RETRY_MODE", "invalid retry mode", err)
@@ -3827,6 +3833,12 @@ func (h *SessionHandler) AnswerHumanInputRequest(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST_ID", "invalid human input request ID")
 		return
 	}
+	// An automation-owned session accepts no human turn: this path enqueues
+	// a continuation on it (design doc 125).
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+		return
+	}
+
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
@@ -3888,6 +3900,12 @@ func (h *SessionHandler) CancelHumanInputRequest(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST_ID", "invalid human input request ID")
 		return
 	}
+	// An automation-owned session accepts no human turn: this path enqueues
+	// a continuation on it (design doc 125).
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+		return
+	}
+
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
@@ -5251,6 +5269,12 @@ func (h *SessionHandler) ArchiveSession(w http.ResponseWriter, r *http.Request) 
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+
+	// Archiving deletes the session's checkpoint, which is exactly the
+	// continuity an owned session's next turn restores from.
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
 		return
 	}
 

@@ -153,8 +153,11 @@ func (s *AutomationTargetStore) ApplyPullRequestClosed(ctx context.Context, tx p
 }
 
 // ReopenTarget puts a closed or merged target back to open, under the
-// target lock. The retired generation stays retired: the next trigger
-// creates a new one. Returns false when the target was already open.
+// target lock, and records the observation whatever the current state.
+// The retired generation stays retired: the next trigger creates a new one.
+// Returns whether the state changed; the caller commits either way, because
+// the recorded observation is what keeps a later out-of-order close from
+// being treated as fresh.
 func (s *AutomationTargetStore) ReopenTarget(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, observedAt time.Time) (bool, error) {
 	if err := lockAutomationTarget(ctx, tx, orgID, targetID); err != nil {
 		return false, err
@@ -174,13 +177,41 @@ func (s *AutomationTargetStore) ReopenTarget(ctx context.Context, tx pgx.Tx, org
 		pgx.NamedArgs{"id": targetID, "org_id": orgID}).Scan(&state); err != nil {
 		return false, fmt.Errorf("read automation target lifecycle: %w", err)
 	}
-	if state == models.AutomationTargetLifecycleOpen {
-		return false, nil
-	}
+	// The observation is recorded even when the target is already open, so a
+	// close delivered out of order cannot pass the freshness check against
+	// evidence this reopen should have advanced. SetLifecycleObserved keeps
+	// the newer of the two for a state that is not changing.
 	if err := s.SetLifecycleObserved(ctx, tx, orgID, targetID, models.AutomationTargetLifecycleOpen, &observedAt); err != nil {
 		return false, err
 	}
-	return true, nil
+	return state != models.AutomationTargetLifecycleOpen, nil
+}
+
+// RetireTerminalTarget retires the target's active generation when its pull
+// request is already closed or merged and no run is left waiting or
+// executing on it. Every path that ends a target's last piece of work calls
+// it: an active generation left owning a session sets no pending ownership
+// release, so no sweep would ever find it. Returns the reason applied, or
+// an empty reason when nothing needed retiring.
+func (s *AutomationTargetStore) RetireTerminalTarget(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID) (models.AutomationTargetRetiredReason, error) {
+	reason, err := s.TerminalLifecycleRetirement(ctx, tx, orgID, targetID)
+	if err != nil || reason == "" {
+		return "", err
+	}
+	generation, err := s.GetActiveGeneration(ctx, tx, orgID, targetID)
+	if errors.Is(err, ErrAutomationTargetGenerationNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if _, err := s.RetireGeneration(ctx, tx, orgID, generation.ID, reason); err != nil {
+		if errors.Is(err, ErrAutomationTargetGenerationNotActive) {
+			return "", nil
+		}
+		return "", err
+	}
+	return reason, nil
 }
 
 // lifecycleObservationIsFresh reports whether an observation describes the

@@ -376,3 +376,60 @@ func TestAutomationLifecycle_StaleCloseAfterReopen(t *testing.T) {
 	require.Equal(t, secondGeneration.ID, current.ID, "the reopen's generation survives the stale close")
 	require.Equal(t, models.AutomationTargetSessionStatusActive, current.Status, "and is still active")
 }
+
+// TestAutomationLifecycle_MergedFinalTurnExitsThroughPreflight proves a
+// merged target's final turn that ends before the agent starts still ends
+// the generation. A preflight outcome writes no result marker, so nothing
+// else would retire what the close left alive for that turn.
+func TestAutomationLifecycle_MergedFinalTurnExitsThroughPreflight(t *testing.T) {
+	h := newLifecycleHarness(t)
+	ctx := context.Background()
+	_, err := h.pool.Exec(ctx, `UPDATE automation_runs SET config_snapshot = jsonb_set(config_snapshot, '{github_event}', to_jsonb($2::text)) WHERE id = $1`,
+		h.run.ID, string(models.AutomationGitHubEventPullRequestMerged))
+	require.NoError(t, err, "the executing turn is the subscribed merged run")
+
+	h.closePR(t, true)
+	generation, err := h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.Equal(t, models.AutomationTargetSessionStatusActive, generation.Status, "the merged close waits for its final turn")
+
+	// The final turn finds its head unreachable and ends before the agent
+	// starts: no marker, no assistant turn.
+	done, err := h.store.CompletePreflight(ctx, h.orgID, h.run.ID, h.lockToken, models.AutomationRunOutcomeStaleHead, "the pull request head is no longer reachable")
+	require.NoError(t, err, "preflight completes")
+	require.True(t, done, "the lease holder completes the preflight")
+
+	generation, err = h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.Equal(t, models.AutomationTargetSessionStatusRetired, generation.Status, "the generation is retired anyway")
+	require.Equal(t, models.AutomationTargetRetiredPRMerged, *generation.RetiredReason, "with pr_merged")
+	require.Nil(t, sessionOwnerMarker(t, h.pool, h.orgID, h.outcome.SessionID), "and the session is handed back")
+}
+
+// TestAutomationLifecycle_ReopenArrivingBeforeItsClose proves an
+// out-of-order delivery cannot close an open pull request: the reopen
+// records its own observation even though the target was already open, so
+// the close that follows it describes an older moment and is dropped.
+func TestAutomationLifecycle_ReopenArrivingBeforeItsClose(t *testing.T) {
+	h := newLifecycleHarness(t)
+	ctx := context.Background()
+	h.endAttempt(t, models.AutomationRunResultTurnCompleted)
+	_, err := h.completer.Complete(ctx, h.orgID, h.run.ID, h.jobID, h.lockToken)
+	require.NoError(t, err, "finish the first turn")
+
+	closedAt := time.Now().UTC().Add(-5 * time.Minute)
+	reopenedAt := closedAt.Add(time.Minute)
+
+	// The reopen is delivered first, on a target that is still open.
+	require.NoError(t, h.lifecycle.OnPullRequestReopened(ctx, h.orgID, "acme/web", 42, reopenedAt), "reopen arrives first")
+	require.Equal(t, models.AutomationTargetLifecycleOpen, h.target(t).LifecycleState, "the target is open")
+
+	// Its close, from a minute earlier, arrives afterwards.
+	require.NoError(t, h.lifecycle.OnPullRequestClosed(ctx, h.orgID, "acme/web", 42, false, closedAt), "the older close arrives late")
+
+	target := h.target(t)
+	require.Equal(t, models.AutomationTargetLifecycleOpen, target.LifecycleState, "the open pull request is still open")
+	generation, err := h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.Equal(t, models.AutomationTargetSessionStatusActive, generation.Status, "and its generation survived")
+}
