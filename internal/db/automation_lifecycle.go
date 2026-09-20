@@ -51,8 +51,8 @@ type AutomationTargetLifecycleOutcome struct {
 	// It is false when a merged final turn is still to run: that turn's
 	// completion retires the generation instead.
 	GenerationRetired bool
-	// FinalTurnPending is set when a merged run is still waiting or
-	// executing, so the generation lives until it finishes.
+	// FinalTurnPending is set when the subscribed merged run is still
+	// waiting or executing, so the generation lives until it finishes.
 	FinalTurnPending bool
 }
 
@@ -97,14 +97,25 @@ func (s *AutomationTargetStore) ApplyPullRequestClosed(ctx context.Context, tx p
 	}
 	out.SkippedRuns = tag.RowsAffected()
 
-	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM automation_runs r
-			WHERE r.org_id = @org_id AND r.target_id = @target_id
-			  AND r.dispatch_state IN ('waiting', 'executing')
-			  AND (r.status = 'pending' OR r.status = 'running'))`,
-		pgx.NamedArgs{"org_id": orgID, "target_id": targetID}).Scan(&out.FinalTurnPending); err != nil {
-		return out, fmt.Errorf("check for a pending final turn: %w", err)
+	// Only a surviving merged run defers the retirement, and only on a
+	// merged pull request: it is the generation's last turn, so the
+	// generation lives until its completion retires it. An unmerged close
+	// retires now even with a turn executing — RetireGeneration marks the
+	// ownership release pending and that turn's completion applies it,
+	// which is what keeps the session from staying owned when the turn ends
+	// through a path that writes no result.
+	if merged {
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM automation_runs r
+				WHERE r.org_id = @org_id AND r.target_id = @target_id
+				  AND (r.dispatch_state IN ('waiting', 'executing') OR r.dispatch_state IS NULL)
+				  AND r.status IN ('pending', 'running')
+				  AND r.config_snapshot->>'github_event' = @merged_event)`,
+			pgx.NamedArgs{"org_id": orgID, "target_id": targetID, "merged_event": models.AutomationGitHubEventPullRequestMerged}).
+			Scan(&out.FinalTurnPending); err != nil {
+			return out, fmt.Errorf("check for a pending final turn: %w", err)
+		}
 	}
 
 	if !out.FinalTurnPending {
@@ -150,9 +161,11 @@ func (s *AutomationTargetStore) ReopenTarget(ctx context.Context, tx pgx.Tx, org
 }
 
 // TerminalLifecycleRetirement is the reason a target's lifecycle gives for
-// retiring its generation once the current turn finishes, or an empty
-// reason when the target is still open. The completer asks for it so the
-// merged pull request's final turn is the last one on its generation.
+// retiring its generation now that the current turn has finished, or an
+// empty reason when the target is still open or another turn is still to
+// run on it. The completer asks for it so a merged pull request's final
+// turn is the last one on its generation, and so a close that arrived
+// while a turn was executing still ends the generation.
 func (s *AutomationTargetStore) TerminalLifecycleRetirement(ctx context.Context, q DBTX, orgID, targetID uuid.UUID) (models.AutomationTargetRetiredReason, error) {
 	if q == nil {
 		q = s.db
@@ -167,14 +180,33 @@ func (s *AutomationTargetStore) TerminalLifecycleRetirement(ctx context.Context,
 	if err != nil {
 		return "", fmt.Errorf("read automation target lifecycle: %w", err)
 	}
+	var reason models.AutomationTargetRetiredReason
 	switch state {
 	case models.AutomationTargetLifecycleMerged:
-		return models.AutomationTargetRetiredPRMerged, nil
+		reason = models.AutomationTargetRetiredPRMerged
 	case models.AutomationTargetLifecycleClosed:
-		return models.AutomationTargetRetiredPRClosed, nil
+		reason = models.AutomationTargetRetiredPRClosed
 	default:
 		return "", nil
 	}
+	// A merged pull request's subscribed merged run is the generation's last
+	// turn, and it can still be waiting behind the turn that is completing
+	// now. Retiring here would send that final turn to a new generation
+	// without the conversation it is meant to finish.
+	var pending bool
+	if err := q.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM automation_runs r
+			WHERE r.org_id = @org_id AND r.target_id = @target_id
+			  AND (r.dispatch_state IN ('waiting', 'executing') OR r.dispatch_state IS NULL)
+			  AND r.status IN ('pending', 'running'))`,
+		pgx.NamedArgs{"org_id": orgID, "target_id": targetID}).Scan(&pending); err != nil {
+		return "", fmt.Errorf("check for a remaining turn on a terminal target: %w", err)
+	}
+	if pending {
+		return "", nil
+	}
+	return reason, nil
 }
 
 // GetSessionAutomationOwner returns the generation that owns the session,
