@@ -282,3 +282,97 @@ func TestAutomationLifecycle_NotifiesWithoutAPullRequestMirror(t *testing.T) {
 	h.closePR(t, false)
 	require.Equal(t, models.AutomationTargetLifecycleClosed, h.target(t).LifecycleState, "the target closed anyway")
 }
+
+// TestAutomationLifecycle_MergedFinalTurnLostWithoutAMarker proves a merged
+// target whose final turn dies without writing a result does not keep an
+// active generation owning its session: the recovery that settles the run
+// retires the generation, because the pull request is gone and nothing is
+// left to run.
+func TestAutomationLifecycle_MergedFinalTurnLostWithoutAMarker(t *testing.T) {
+	h := newLifecycleHarness(t)
+	ctx := context.Background()
+	_, err := h.pool.Exec(ctx, `UPDATE automation_runs SET config_snapshot = jsonb_set(config_snapshot, '{github_event}', to_jsonb($2::text)) WHERE id = $1`,
+		h.run.ID, string(models.AutomationGitHubEventPullRequestMerged))
+	require.NoError(t, err, "the executing turn is the subscribed merged run")
+
+	h.closePR(t, true)
+	generation, err := h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.Equal(t, models.AutomationTargetSessionStatusActive, generation.Status, "the merged close waits for its final turn")
+
+	// That turn's job dies without a result marker.
+	h.deadLetterJob(t)
+	outcome, err := h.completer.RecoverAbandonedRun(ctx, h.orgID, h.run.ID, h.jobID, time.Now())
+	require.NoError(t, err, "recover")
+	require.Equal(t, models.AutomationRunOutcomeRetriesExhausted, outcome, "the final turn is settled without a result")
+
+	generation, err = h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.Equal(t, models.AutomationTargetSessionStatusRetired, generation.Status, "the generation is retired anyway")
+	require.Equal(t, models.AutomationTargetRetiredPRMerged, *generation.RetiredReason, "with pr_merged")
+	require.Nil(t, sessionOwnerMarker(t, h.pool, h.orgID, h.outcome.SessionID), "and the session is handed back")
+}
+
+// TestAutomationLifecycle_MergedFinalWaiterTimesOut proves the same for a
+// final turn that never runs: the wait timeout that ends it also ends the
+// generation.
+func TestAutomationLifecycle_MergedFinalWaiterTimesOut(t *testing.T) {
+	h := newLifecycleHarness(t)
+	ctx := context.Background()
+	_, err := h.pool.Exec(ctx, `UPDATE automations SET github_event_triggers = $2 WHERE id = $1`,
+		h.automation.ID, []string{string(models.AutomationGitHubEventPullRequestUpdated), string(models.AutomationGitHubEventPullRequestMerged)})
+	require.NoError(t, err, "subscribe the automation to merges")
+	mergedRun := h.deliver(t, automations.GitHubEventTriggerRequest{
+		Event: models.AutomationGitHubEventPullRequestMerged, PullRequestAction: "closed",
+		HeadSHA: "3333333333333333333333333333333333333333", PullRequestUpdatedAt: timePtr(recentDeliveryTime().Add(time.Second)), BaseBranch: "main",
+	})
+	// Finish the executing turn so only the merged waiter is left.
+	h.endAttempt(t, models.AutomationRunResultTurnCompleted)
+	_, err = h.completer.Complete(ctx, h.orgID, h.run.ID, h.jobID, h.lockToken)
+	require.NoError(t, err, "finish the first turn")
+
+	h.closePR(t, true)
+	generation, err := h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.Equal(t, models.AutomationTargetSessionStatusActive, generation.Status, "the generation waits for the merged run")
+
+	// The merged run never dispatches and its wait times out.
+	_, err = h.pool.Exec(ctx, `UPDATE automation_runs SET dispatch_state = 'waiting', wait_started_at = now() - interval '3 hours' WHERE id = $1`, mergedRun.ID)
+	require.NoError(t, err, "age the final waiter")
+	report, err := h.completer.Sweep(ctx, h.orgID)
+	require.NoError(t, err, "sweep")
+	require.EqualValues(t, 1, report.WaitTimeouts, "the final waiter timed out")
+
+	generation, err = h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.Equal(t, models.AutomationTargetSessionStatusRetired, generation.Status, "the timeout retired the generation")
+	require.Equal(t, models.AutomationTargetRetiredPRMerged, *generation.RetiredReason, "with pr_merged")
+	require.Nil(t, sessionOwnerMarker(t, h.pool, h.orgID, h.outcome.SessionID), "the session is handed back")
+}
+
+// TestAutomationLifecycle_StaleCloseAfterReopen proves a redelivered close
+// from before a reopen is dropped: it must not retire the generation the
+// reopen started, on a pull request that is open.
+func TestAutomationLifecycle_StaleCloseAfterReopen(t *testing.T) {
+	h := newLifecycleHarness(t)
+	ctx := context.Background()
+	closedAt := time.Now().UTC().Add(-10 * time.Minute)
+	reopenedAt := closedAt.Add(time.Minute)
+	h.endAttempt(t, models.AutomationRunResultTurnCompleted)
+	_, err := h.completer.Complete(ctx, h.orgID, h.run.ID, h.jobID, h.lockToken)
+	require.NoError(t, err, "finish the first turn")
+
+	require.NoError(t, h.lifecycle.OnPullRequestClosed(ctx, h.orgID, "acme/web", 42, false, closedAt), "close")
+	require.NoError(t, h.lifecycle.OnPullRequestReopened(ctx, h.orgID, "acme/web", 42, reopenedAt), "reopen")
+	next := h.push(t, "6666666666666666666666666666666666666666", time.Now().UTC().Truncate(time.Second))
+	require.Equal(t, automations.DispatchReserved, h.dispatch(t, next, models.AgentTypeCodex).Kind, "the reopened target takes work")
+	secondGeneration := h.activeGeneration(t, *h.run.TargetID)
+
+	// GitHub redelivers the original close.
+	require.NoError(t, h.lifecycle.OnPullRequestClosed(ctx, h.orgID, "acme/web", 42, false, closedAt), "redeliver the old close")
+
+	require.Equal(t, models.AutomationTargetLifecycleOpen, h.target(t).LifecycleState, "the target is still open")
+	current := h.activeGeneration(t, *h.run.TargetID)
+	require.Equal(t, secondGeneration.ID, current.ID, "the reopen's generation survives the stale close")
+	require.Equal(t, models.AutomationTargetSessionStatusActive, current.Status, "and is still active")
+}

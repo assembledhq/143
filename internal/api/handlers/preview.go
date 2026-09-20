@@ -1937,6 +1937,11 @@ func (h *PreviewHandler) ensurePreview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Every path that takes a session's container is guarded, not only
+	// StartPreview: an automation-owned session's turn is using it.
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+		return
+	}
 	body, reqErr := h.decodeStartPreviewBody(r)
 	if reqErr != nil {
 		writePreviewHTTPError(w, r, reqErr)
@@ -2051,6 +2056,11 @@ func (h *PreviewHandler) RestartPreview(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	// Every path that takes a session's container is guarded, not only
+	// StartPreview: an automation-owned session's turn is using it.
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+		return
+	}
 	body, reqErr := h.decodeStartPreviewBody(r)
 	if reqErr != nil {
 		writePreviewHTTPError(w, r, reqErr)
@@ -2145,6 +2155,11 @@ func (h *PreviewHandler) UpdatePreview(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, ok := parsePreviewSessionID(w, r)
 	if !ok {
+		return
+	}
+	// Every path that takes a session's container is guarded, not only
+	// StartPreview: an automation-owned session's turn is using it.
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
 		return
 	}
 	userID, ok := previewRequestUserID(r.Context(), middleware.UserFromContext(r.Context()))

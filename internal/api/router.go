@@ -1027,6 +1027,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	previewHandler.SetBrowserSessionService(preview.NewBrowserSessionService(previewBrowserSessionStore, browserInspector, previewManager))
 	branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prService, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
 	previewHandler.SetAutomationOwnershipGuard(sessionStore)
+	sessionReviewCommentHandler.SetAutomationOwnershipGuard(sessionStore)
 	previewHandler.SetAuditEmitter(auditEmitter)
 	branchPreviewHandler.SetAuditEmitter(auditEmitter)
 	previewHandler.SetJobStore(jobStore)

@@ -47,6 +47,9 @@ type AutomationTargetLifecycleOutcome struct {
 	TargetID uuid.UUID
 	// SkippedRuns is how many waiting runs were skipped as pr_closed.
 	SkippedRuns int64
+	// Stale is set when the notification described the pull request at a
+	// time the target has already moved past, so nothing was applied.
+	Stale bool
 	// GenerationRetired is set when the active generation was retired now.
 	// It is false when a merged final turn is still to run: that turn's
 	// completion retires the generation instead.
@@ -68,6 +71,17 @@ func (s *AutomationTargetStore) ApplyPullRequestClosed(ctx context.Context, tx p
 	out := AutomationTargetLifecycleOutcome{TargetID: targetID}
 	if err := lockAutomationTarget(ctx, tx, orgID, targetID); err != nil {
 		return out, err
+	}
+	fresh, err := lifecycleObservationIsFresh(ctx, tx, orgID, targetID, observedAt)
+	if err != nil {
+		return out, err
+	}
+	if !fresh {
+		// A redelivered close from before a reopen would otherwise retire the
+		// generation that reopen started and skip its waiters, on a pull
+		// request that is open.
+		out.Stale = true
+		return out, nil
 	}
 	state := models.AutomationTargetLifecycleClosed
 	retiredReason := models.AutomationTargetRetiredPRClosed
@@ -145,6 +159,15 @@ func (s *AutomationTargetStore) ReopenTarget(ctx context.Context, tx pgx.Tx, org
 	if err := lockAutomationTarget(ctx, tx, orgID, targetID); err != nil {
 		return false, err
 	}
+	fresh, err := lifecycleObservationIsFresh(ctx, tx, orgID, targetID, observedAt)
+	if err != nil {
+		return false, err
+	}
+	if !fresh {
+		// A redelivered reopen from before a later close would otherwise
+		// reopen a target whose pull request is closed.
+		return false, nil
+	}
 	var state models.AutomationTargetLifecycleState
 	if err := tx.QueryRow(ctx, `
 		SELECT lifecycle_state FROM automation_targets WHERE id = @id AND org_id = @org_id`,
@@ -158,6 +181,30 @@ func (s *AutomationTargetStore) ReopenTarget(ctx context.Context, tx pgx.Tx, org
 		return false, err
 	}
 	return true, nil
+}
+
+// lifecycleObservationIsFresh reports whether an observation describes the
+// pull request at or after the moment the target's lifecycle was last
+// observed. A webhook redelivery can arrive after a later event has already
+// been applied, and these transitions are destructive — a stale close
+// retires a generation and skips its waiters — so a strictly older
+// observation is dropped rather than applied. An observation the target has
+// no evidence for is accepted.
+func lifecycleObservationIsFresh(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, observedAt time.Time) (bool, error) {
+	var lastObserved *time.Time
+	err := tx.QueryRow(ctx, `
+		SELECT lifecycle_updated_at FROM automation_targets WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": targetID, "org_id": orgID}).Scan(&lastObserved)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrAutomationTargetNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("read automation target lifecycle evidence: %w", err)
+	}
+	if lastObserved == nil {
+		return true, nil
+	}
+	return !observedAt.Before(*lastObserved), nil
 }
 
 // TerminalLifecycleRetirement is the reason a target's lifecycle gives for
