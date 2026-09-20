@@ -309,6 +309,17 @@ func applyPendingOwnershipRelease(ctx context.Context, q DBTX, orgID, sessionID 
 // "Retry and recovery"). Returns false when the attempt is no longer ours,
 // in which case the thread belongs to a later turn and is left alone.
 func (s *AutomationRunStore) CompleteThreadTurnForAttempt(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken, threadID uuid.UUID, turn int, result *models.SessionResult, agentSessionID string) (bool, error) {
+	return s.setThreadTurnForAttempt(ctx, tx, orgID, runID, lockToken, threadID, models.ThreadStatusIdle, turn, result, agentSessionID)
+}
+
+// FailThreadTurnForAttempt drives the primary thread terminal under the
+// same fence, for the failure paths that would otherwise mark a thread a
+// later turn is already running on.
+func (s *AutomationRunStore) FailThreadTurnForAttempt(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) (bool, error) {
+	return s.setThreadTurnForAttempt(ctx, tx, orgID, runID, lockToken, threadID, status, 0, result, "")
+}
+
+func (s *AutomationRunStore) setThreadTurnForAttempt(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken, threadID uuid.UUID, status models.ThreadStatus, turn int, result *models.SessionResult, agentSessionID string) (bool, error) {
 	if lockToken == uuid.Nil {
 		return false, errors.New("complete automation thread turn: lock token is required")
 	}
@@ -322,20 +333,26 @@ func (s *AutomationRunStore) CompleteThreadTurnForAttempt(ctx context.Context, t
 	if !owned {
 		return false, nil
 	}
-	var summary, diff *string
+	var summary, diff, failureCategory *string
+	var failureExplanation *string
 	if result != nil {
-		summary, diff = result.ResultSummary, result.Diff
+		summary, diff, failureCategory = result.ResultSummary, result.Diff, result.FailureCategory
+		failureExplanation = sessionResultFailureExplanation(result)
 	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE session_threads th
-		SET status = 'idle',
-		    current_turn = @current_turn,
+		SET status = @status,
+		    current_turn = CASE WHEN @current_turn::int > 0 THEN @current_turn::int ELSE th.current_turn END,
 		    last_activity_at = now(),
+		    completed_at = CASE
+		        WHEN @status IN ('completed', 'failed', 'cancelled') THEN now()
+		        ELSE th.completed_at
+		    END,
 		    agent_session_id = COALESCE(@agent_session_id, th.agent_session_id),
 		    result_summary = COALESCE(@result_summary, th.result_summary),
 		    diff = COALESCE(@diff, th.diff),
-		    failure_explanation = NULL,
-		    failure_category = NULL
+		    failure_explanation = @failure_explanation,
+		    failure_category = @failure_category
 		WHERE th.id = @thread_id AND th.org_id = @org_id
 		  AND EXISTS (
 			SELECT 1 FROM automation_runs r
@@ -343,7 +360,8 @@ func (s *AutomationRunStore) CompleteThreadTurnForAttempt(ctx context.Context, t
 		pgx.NamedArgs{
 			"thread_id": threadID, "org_id": orgID, "id": runID, "lock_token": lockToken,
 			"current_turn": turn, "agent_session_id": emptyStringNil(agentSessionID),
-			"result_summary": summary, "diff": diff,
+			"result_summary": summary, "diff": diff, "status": status,
+			"failure_explanation": failureExplanation, "failure_category": failureCategory,
 		})
 	if err != nil {
 		return false, fmt.Errorf("complete automation thread turn: %w", err)

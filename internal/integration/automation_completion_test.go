@@ -945,3 +945,95 @@ func TestAutomationCompletion_ThreadWriteBlocksOnRecovery(t *testing.T) {
 	require.NoError(t, h.pool.QueryRow(ctx, `SELECT result_summary FROM session_threads WHERE id = $1`, *h.run.ThreadID).Scan(&storedSummary), "thread summary")
 	require.Nil(t, storedSummary, "the lost worker wrote nothing")
 }
+
+// TestAutomationCompletion_AttemptWritesAreFencedOnceTheAttemptIsLost
+// proves the writes a paused worker performs after its attempt was taken
+// away are all refused: the checkpoint publication, the turn hold release,
+// and the terminal thread write.
+func TestAutomationCompletion_AttemptWritesAreFencedOnceTheAttemptIsLost(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	stale := uuid.New()
+
+	published, err := h.store.PublishCheckpointWithProvenance(ctx, h.orgID, h.outcome.SessionID, h.run.ID, stale,
+		"agent-1", "snapshots/stale", models.CheckpointKindTurnComplete, models.CheckpointCapabilityFullResume, 1024, time.Now().UTC(),
+		models.RuntimeStopReasonNone, models.CheckpointProvenance{HeadSHA: "1111111111111111111111111111111111111111", ReviewComplete: true})
+	require.NoError(t, err, "a stale publication should not error")
+	require.False(t, published, "a lost attempt cannot install a checkpoint")
+	require.Nil(t, h.session(t).SnapshotKey, "the session keeps no stale key")
+
+	_, err = h.pool.Exec(ctx, `UPDATE sessions SET turn_holding_container = TRUE, container_id = 'container-1' WHERE id = $1`, h.outcome.SessionID)
+	require.NoError(t, err, "a later turn holds the container")
+	owned, destroyNow, containerID, err := h.store.ReleaseTurnHold(ctx, h.orgID, h.outcome.SessionID, h.run.ID, stale)
+	require.NoError(t, err, "a stale release should not error")
+	require.False(t, owned, "a lost attempt cannot release the hold")
+	require.False(t, destroyNow, "and is told nothing to destroy")
+	require.Empty(t, containerID, "and learns no container id")
+	var holding bool
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT turn_holding_container FROM sessions WHERE id = $1`, h.outcome.SessionID).Scan(&holding), "session hold")
+	require.True(t, holding, "the later turn's hold is untouched")
+
+	failureText := "the lost worker's failure"
+	written, err := h.store.FailThreadTurn(ctx, h.orgID, h.run.ID, stale, *h.run.ThreadID, models.ThreadStatusFailed, &models.SessionResult{Error: &failureText})
+	require.NoError(t, err, "a stale thread failure should not error")
+	require.False(t, written, "a lost attempt cannot fail the thread")
+	require.NotEqual(t, "failed", h.threadStatus(t), "the thread a later turn runs on is untouched")
+
+	// The lease holder's own writes still land.
+	owned, _, _, err = h.store.ReleaseTurnHold(ctx, h.orgID, h.outcome.SessionID, h.run.ID, h.lockToken)
+	require.NoError(t, err, "release")
+	require.True(t, owned, "the attempt holder releases its own hold")
+}
+
+// TestAutomationCompletion_RecoverySerializesWithTheAttemptEnd proves the
+// recovery and a worker's own attempt-end transaction take the run and job
+// locks in the same order: the second waits for the first instead of
+// deadlocking, which would roll back a successful turn's result.
+func TestAutomationCompletion_RecoverySerializesWithTheAttemptEnd(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+
+	// The worker's lease expired while it was finishing its turn, so
+	// recovery is entitled to act; the marker write does not check expiry,
+	// so the worker is still writing its result. This is the contended
+	// case: both want the run and the job rows.
+	_, err := h.pool.Exec(ctx, `UPDATE jobs SET lease_expires_at = now() - interval '5 minutes' WHERE id = $1`, h.jobID)
+	require.NoError(t, err, "expire the lease")
+	_, err = h.pool.Exec(ctx, `UPDATE automation_runs SET attempt_started_at = now() - interval '3 hours' WHERE id = $1`, h.run.ID)
+	require.NoError(t, err, "age the attempt past the stale bound")
+
+	// The worker's attempt end holds the run and job rows through its
+	// marker write, and has not committed.
+	tx, err := h.pool.Begin(ctx)
+	require.NoError(t, err, "begin attempt end")
+	defer func() { _ = tx.Rollback(ctx) }()
+	marker := &models.AutomationRunResult{
+		RunID: h.run.ID, OrgID: h.orgID, Attempt: h.run.Attempt, AttemptLockToken: h.lockToken,
+		ThreadID: *h.run.ThreadID, TurnNumber: *h.run.TurnNumber, Outcome: models.AutomationRunResultTurnCompleted,
+		ReviewComplete: true, NativeContext: true,
+	}
+	written, err := h.store.WriteResult(ctx, tx, h.orgID, h.jobID, marker)
+	require.NoError(t, err, "write the marker")
+	require.True(t, written, "the lease holder writes the marker")
+
+	done := make(chan error, 1)
+	go func() {
+		_, recoverErr := h.completer.RecoverAbandonedRun(context.Background(), h.orgID, h.run.ID, h.jobID, time.Now())
+		done <- recoverErr
+	}()
+	select {
+	case err := <-done:
+		require.FailNowf(t, "recovery should wait for the attempt end", "it returned early: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	require.NoError(t, tx.Commit(ctx), "commit the attempt end")
+	select {
+	case err := <-done:
+		require.NoError(t, err, "recovery proceeds once the attempt end commits, with no deadlock")
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "recovery did not finish after the attempt end committed")
+	}
+	run := h.reload(t, h.run.ID)
+	require.Equal(t, models.AutomationRunStatusCompleted, run.Status, "the successful turn's result survived")
+	require.Equal(t, models.AutomationRunOutcomeTurnCompleted, *run.OutcomeReason, "recorded from its marker")
+}

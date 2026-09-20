@@ -28,6 +28,7 @@ type fakeThreadTurn struct {
 
 type fakeAutomationTurnStore struct {
 	threadTurns      []fakeThreadTurn
+	threadFailures   []fakeThreadTurn
 	run              models.AutomationRun
 	runErr           error
 	target           models.AutomationTarget
@@ -88,8 +89,15 @@ func (f *fakeAutomationTurnStore) UpdateTurnPrompt(_ context.Context, _, _ uuid.
 func (f *fakeAutomationTurnStore) TagAssistantMessage(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int, uuid.UUID) error {
 	return nil
 }
-func (f *fakeAutomationTurnStore) PublishCheckpointWithProvenance(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string, models.CheckpointKind, models.CheckpointCapability, int64, time.Time, models.RuntimeStopReason, models.CheckpointProvenance) (bool, error) {
+func (f *fakeAutomationTurnStore) PublishCheckpointWithProvenance(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, string, models.CheckpointKind, models.CheckpointCapability, int64, time.Time, models.RuntimeStopReason, models.CheckpointProvenance) (bool, error) {
 	return true, nil
+}
+func (f *fakeAutomationTurnStore) ReleaseTurnHold(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) (bool, bool, string, error) {
+	return f.owned, false, "", nil
+}
+func (f *fakeAutomationTurnStore) FailThreadTurn(_ context.Context, _, _, _, threadID uuid.UUID, status models.ThreadStatus, _ *models.SessionResult) (bool, error) {
+	f.threadFailures = append(f.threadFailures, fakeThreadTurn{ThreadID: threadID, AgentSessionID: string(status)})
+	return f.owned, nil
 }
 func (f *fakeAutomationTurnStore) EndAttempt(ctx context.Context, fn func(ctx context.Context, tx pgx.Tx, sessions SessionStore) error) error {
 	return fn(ctx, nil, f.sessions)

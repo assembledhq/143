@@ -114,8 +114,7 @@ func (s *AutomationRunStore) CompleteFromMarker(ctx context.Context, tx pgx.Tx, 
 		SELECT m.outcome, m.review_complete, m.native_context, m.thread_id, m.turn_number, m.agent_session_id
 		FROM automation_run_results m
 		JOIN automation_runs r ON r.id = m.run_id AND r.org_id = m.org_id AND r.attempt = m.attempt
-		WHERE m.run_id = @id AND m.org_id = @org_id AND r.dispatch_state = 'executing'
-		FOR UPDATE OF r`,
+		WHERE m.run_id = @id AND m.org_id = @org_id AND r.dispatch_state = 'executing'`,
 		pgx.NamedArgs{"id": runID, "org_id": orgID}).Scan(&markerOutcome, &reviewComplete, &nativeContext, &threadID, &turnNumber, &agentSessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AutomationRunCompletion{}, nil
@@ -477,11 +476,10 @@ func (s *AutomationRunStore) FailTimedOutWaits(ctx context.Context, tx pgx.Tx, o
 	return tag.RowsAffected(), nil
 }
 
-// lockAutomationRunLifecycle takes the run's target lock and then its job
-// row, without locking the run itself, so every writer acquires locks in
-// one order: target, job, run, generation. Arrival, dispatch, and
-// retirement take the target first; the attempt claim takes the job before
-// the run.
+// lockAutomationRunLifecycle takes the run's target lock, then the run row,
+// then its job row, so every writer acquires locks in one order: target,
+// run, job, generation. Arrival, dispatch, and retirement take the target
+// first; every fenced attempt write takes the run before the job.
 //
 // revokeAbandonedLease is set by every writer that may proceed without a
 // live lease. Under the job row lock it settles a job whose lease has
@@ -510,6 +508,18 @@ func lockAutomationRunLifecycle(ctx context.Context, tx pgx.Tx, orgID, runID uui
 	}
 	if jobID == nil {
 		return nil
+	}
+	// The run row is locked before the job row, the order every fenced
+	// attempt write takes them in (FOR UPDATE OF r, j) and the attempt
+	// claim now takes them in too.
+	var lockedRunID uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		SELECT id FROM automation_runs WHERE id = @run_id AND org_id = @org_id FOR UPDATE`,
+		pgx.NamedArgs{"run_id": runID, "org_id": orgID}).Scan(&lockedRunID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrAutomationTargetNotFound
+		}
+		return fmt.Errorf("lock automation run: %w", err)
 	}
 	var jobStatus string
 	if err := tx.QueryRow(ctx, `
