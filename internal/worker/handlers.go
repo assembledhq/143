@@ -10373,7 +10373,9 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					ResultSummary: summaryPtr,
 					Diff:          diffPtr,
 				}
-				if err := stores.SessionThreads.UpdateTurnComplete(ctx, orgID, threadID, threadTurnBefore+1, threadResult, resultAgentSessionID); err != nil {
+				if automationRunID != nil {
+					completeAutomationThreadTurn(ctx, stores, logger, orgID, *automationRunID, threadID, threadTurnBefore+1, threadResult, resultAgentSessionID)
+				} else if err := stores.SessionThreads.UpdateTurnComplete(ctx, orgID, threadID, threadTurnBefore+1, threadResult, resultAgentSessionID); err != nil {
 					logger.Warn().Err(err).
 						Str("session_id", sessionID.String()).
 						Str("thread_id", threadID.String()).
@@ -10403,6 +10405,8 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						cancelRecovery()
 					}
 				}
+			} else if automationRunID != nil {
+				completeAutomationThreadTurn(ctx, stores, logger, orgID, *automationRunID, threadID, threadTurnBefore+1, nil, resultAgentSessionID)
 			} else {
 				if err := stores.SessionThreads.CompleteTurn(ctx, orgID, threadID, threadTurnBefore+1, resultAgentSessionID); err != nil {
 					logger.Warn().Err(err).
@@ -14318,6 +14322,35 @@ func registerAutomationTurnDeadLetter(ctx context.Context, services *Services, l
 			Str("outcome", string(outcome)).
 			Msg("per-target automation run settled after dead-letter")
 	})
+}
+
+// completeAutomationThreadTurn writes a per-target turn's thread result
+// under the attempt fence, so a worker that paused past its lease cannot
+// overwrite a thread another run has since claimed. A fenced-out write is
+// not an error: the completer's own release already left the thread in the
+// state the winning turn expects.
+func completeAutomationThreadTurn(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, runID, threadID uuid.UUID, turn int, result *models.SessionResult, agentSessionID string) {
+	if stores == nil || stores.AutomationRuns == nil {
+		return
+	}
+	lockToken, hasToken := jobctx.LockTokenFromContext(ctx)
+	if !hasToken {
+		return
+	}
+	written, err := stores.AutomationRuns.CompleteThreadTurnForAttempt(ctx, orgID, runID, lockToken, threadID, turn, result, agentSessionID)
+	if err != nil {
+		logger.Warn().Err(err).
+			Str("run_id", runID.String()).
+			Str("thread_id", threadID.String()).
+			Msg("failed to persist automation turn thread result")
+		return
+	}
+	if !written {
+		logger.Warn().
+			Str("run_id", runID.String()).
+			Str("thread_id", threadID.String()).
+			Msg("automation turn thread result was fenced out: the attempt is no longer ours")
+	}
 }
 
 // completeAutomationTurn records the run's terminal state from the result

@@ -290,3 +290,43 @@ func applyPendingOwnershipRelease(ctx context.Context, q DBTX, orgID, sessionID 
 	}
 	return nil
 }
+
+// CompleteThreadTurnForAttempt writes the primary thread's turn result
+// under the attempt fence. The worker's ordinary thread write is not
+// fenced, so a worker that paused past its lease could otherwise overwrite
+// the status, turn number, provider session id, summary, and diff of a
+// turn that has since been claimed by another run (design doc 125,
+// "Retry and recovery"). Returns false when the attempt is no longer ours,
+// in which case the thread belongs to a later turn and is left alone.
+func (s *AutomationRunStore) CompleteThreadTurnForAttempt(ctx context.Context, orgID, runID, lockToken, threadID uuid.UUID, turn int, result *models.SessionResult, agentSessionID string) (bool, error) {
+	if lockToken == uuid.Nil {
+		return false, errors.New("complete automation thread turn: lock token is required")
+	}
+	var summary, diff *string
+	if result != nil {
+		summary, diff = result.ResultSummary, result.Diff
+	}
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_threads th
+		SET status = 'idle',
+		    current_turn = @current_turn,
+		    last_activity_at = now(),
+		    agent_session_id = COALESCE(@agent_session_id, th.agent_session_id),
+		    result_summary = COALESCE(@result_summary, th.result_summary),
+		    diff = COALESCE(@diff, th.diff),
+		    failure_explanation = NULL,
+		    failure_category = NULL
+		WHERE th.id = @thread_id AND th.org_id = @org_id
+		  AND EXISTS (
+			SELECT 1 FROM automation_runs r
+			WHERE r.id = @id AND r.org_id = @org_id`+automationRunAttemptFence+`)`,
+		pgx.NamedArgs{
+			"thread_id": threadID, "org_id": orgID, "id": runID, "lock_token": lockToken,
+			"current_turn": turn, "agent_session_id": emptyStringNil(agentSessionID),
+			"result_summary": summary, "diff": diff,
+		})
+	if err != nil {
+		return false, fmt.Errorf("complete automation thread turn: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}

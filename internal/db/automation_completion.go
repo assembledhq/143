@@ -94,10 +94,12 @@ func (s *AutomationRunStore) CompleteFromMarker(ctx context.Context, tx pgx.Tx, 
 	var threadID uuid.UUID
 	var turnNumber int
 	var agentSessionID *string
-	// The target lock is taken before the run and the generation, the order
-	// arrival, dispatch, and retirement take them in, so a completion and a
-	// lifecycle change never deadlock.
-	if err := lockAutomationTargetOfRun(ctx, tx, orgID, runID); err != nil {
+	// Locks are taken target, job, run, generation: the order every other
+	// writer uses, so a completion and a lifecycle change or an attempt
+	// claim never deadlock. A recovery call (no lock token) also revokes an
+	// expired lease under the job lock, so the worker it is recovering from
+	// cannot renew and resume.
+	if err := lockAutomationRunLifecycle(ctx, tx, orgID, runID, lockToken == uuid.Nil); err != nil {
 		if errors.Is(err, ErrAutomationTargetNotFound) {
 			return AutomationRunCompletion{}, nil
 		}
@@ -127,7 +129,18 @@ func (s *AutomationRunStore) CompleteFromMarker(ctx context.Context, tx pgx.Tx, 
 		    dispatch_state = 'done',
 		    native_context = @native_context,
 		    completed_at = now(),
-		    result_summary = COALESCE(@result_summary, result_summary),
+		    -- The continuation prompt reads these summaries back
+		    -- (ListCompletedTurnSummaries), so the run keeps the turn's own
+		    -- summary. The thread carries it in the ordinary path and the
+		    -- session in a fresh generation's first turn; both are durable
+		    -- before completion runs, so a recovery records the same text.
+		    result_summary = COALESCE(
+		        @result_summary,
+		        (SELECT NULLIF(th.result_summary, '') FROM session_threads th
+		         WHERE th.id = @thread_id AND th.org_id = r.org_id),
+		        (SELECT NULLIF(se.result_summary, '') FROM sessions se
+		         WHERE se.id = r.session_id AND se.org_id = r.org_id),
+		        r.result_summary),
 		    updated_at = now()
 		WHERE r.id = @id AND r.org_id = @org_id`+automationRunCompletionFence+`
 		RETURNING r.target_id, r.target_generation, r.session_id,
@@ -135,7 +148,7 @@ func (s *AutomationRunStore) CompleteFromMarker(ctx context.Context, tx pgx.Tx, 
 		pgx.NamedArgs{
 			"id": runID, "org_id": orgID, "job_id": jobID, "lock_token": lockToken,
 			"status": outcome.RunStatus(), "outcome": outcome, "native_context": nativeContext,
-			"result_summary": resultSummary,
+			"result_summary": resultSummary, "thread_id": threadID,
 		},
 	).Scan(&out.TargetID, &out.TargetGeneration, &out.SessionID, &headSHA, &headEpoch)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -227,7 +240,7 @@ func (s *AutomationRunStore) CompleteFromMarker(ctx context.Context, tx pgx.Tx, 
 // released, or false when the run was not in that state.
 func (s *AutomationRunStore) FailRetriesExhausted(ctx context.Context, tx pgx.Tx, orgID, runID uuid.UUID, staleBefore time.Time) (uuid.UUID, bool, error) {
 	var sessionID, threadID, targetID uuid.UUID
-	if err := lockAutomationTargetOfRun(ctx, tx, orgID, runID); err != nil {
+	if err := lockAutomationRunLifecycle(ctx, tx, orgID, runID, true); err != nil {
 		if errors.Is(err, ErrAutomationTargetNotFound) {
 			return uuid.Nil, false, nil
 		}
@@ -454,23 +467,57 @@ func (s *AutomationRunStore) FailTimedOutWaits(ctx context.Context, tx pgx.Tx, o
 	return tag.RowsAffected(), nil
 }
 
-// lockAutomationTargetOfRun takes the run's target lock without locking the
-// run, so completion acquires locks in the same order as arrival, dispatch,
-// and retirement: target first.
-func lockAutomationTargetOfRun(ctx context.Context, tx pgx.Tx, orgID, runID uuid.UUID) error {
-	var id uuid.UUID
+// lockAutomationRunLifecycle takes the run's target lock and then its job
+// row, without locking the run itself, so every writer acquires locks in
+// one order: target, job, run, generation. Arrival, dispatch, and
+// retirement take the target first; the attempt claim takes the job before
+// the run.
+//
+// revokeAbandonedLease is set by the recovery paths, which act precisely
+// when no live lease remains. Under the job row lock they clear the
+// fencing token of a job whose lease has expired, because RenewLease only
+// matches the token and would otherwise let a paused worker renew an
+// expired lease and carry on writing after recovery released its session,
+// thread, and container hold. Clearing the token makes that renewal fail,
+// which is how the worker learns it lost the job.
+func lockAutomationRunLifecycle(ctx context.Context, tx pgx.Tx, orgID, runID uuid.UUID, revokeAbandonedLease bool) error {
+	var targetID uuid.UUID
+	var jobID *uuid.UUID
 	err := tx.QueryRow(ctx, `
-		SELECT t.id
+		SELECT t.id, r.job_id
 		FROM automation_targets t
 		JOIN automation_runs r ON r.target_id = t.id AND r.org_id = t.org_id
 		WHERE r.id = @run_id AND r.org_id = @org_id
 		FOR UPDATE OF t`,
-		pgx.NamedArgs{"run_id": runID, "org_id": orgID}).Scan(&id)
+		pgx.NamedArgs{"run_id": runID, "org_id": orgID}).Scan(&targetID, &jobID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrAutomationTargetNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("lock automation target of run: %w", err)
+	}
+	if jobID == nil {
+		return nil
+	}
+	var jobStatus string
+	if err := tx.QueryRow(ctx, `
+		SELECT status FROM jobs WHERE id = @job_id AND org_id = @org_id FOR UPDATE`,
+		pgx.NamedArgs{"job_id": *jobID, "org_id": orgID}).Scan(&jobStatus); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("lock automation turn job: %w", err)
+	}
+	if !revokeAbandonedLease {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE jobs
+		SET lock_token = NULL, lease_expires_at = NULL, updated_at = now()
+		WHERE id = @job_id AND org_id = @org_id
+		  AND (status <> 'running' OR lease_expires_at IS NULL OR lease_expires_at <= now())`,
+		pgx.NamedArgs{"job_id": *jobID, "org_id": orgID}); err != nil {
+		return fmt.Errorf("revoke abandoned automation turn lease: %w", err)
 	}
 	return nil
 }

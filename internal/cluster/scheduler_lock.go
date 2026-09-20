@@ -2,8 +2,10 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -82,16 +84,27 @@ func (s *SchedulerLock) Release(ctx context.Context) error {
 		_, err := s.pool.Exec(ctx, `SELECT pg_advisory_unlock($1)`, s.lockID)
 		return err
 	}
-	// The connection goes back to the pool either way: a connection closed
-	// with the lock still held releases it when the backend ends, which is
-	// the worst case if the unlock statement itself fails.
-	defer conn.Release()
+	// The unlock runs on its own deadline rather than the loop's context,
+	// which is usually already cancelled by the time a shutdown releases.
+	unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	var unlocked bool
-	if err := conn.QueryRow(ctx, `SELECT pg_advisory_unlock($1)`, s.lockID).Scan(&unlocked); err != nil {
+	err := conn.QueryRow(unlockCtx, `SELECT pg_advisory_unlock($1)`, s.lockID).Scan(&unlocked)
+	if err == nil && unlocked {
+		conn.Release()
+		return nil
+	}
+	// The unlock was not confirmed, so this connection may still hold the
+	// lock. Returning it to the pool would hand the lock to an unrelated
+	// caller and block every other replica until the backend happened to
+	// close, so the connection is destroyed instead: the backend ends and
+	// PostgreSQL drops its session locks with it.
+	if closeErr := conn.Conn().Close(context.WithoutCancel(unlockCtx)); closeErr != nil {
+		err = errors.Join(err, closeErr)
+	}
+	conn.Release()
+	if err != nil {
 		return fmt.Errorf("release advisory lock: %w", err)
 	}
-	if !unlocked {
-		return fmt.Errorf("advisory lock %d was not held by this connection", s.lockID)
-	}
-	return nil
+	return fmt.Errorf("advisory lock %d was not held by this connection", s.lockID)
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/cluster"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -756,4 +757,88 @@ func TestAutomationCompletion_AmbiguityDeadlineWithoutCandidates(t *testing.T) {
 	target := h.target(t)
 	require.False(t, target.HeadResolutionPending, "the stale pending flag is cleared")
 	require.Nil(t, target.HeadResolutionDeadlineAt, "and so is the deadline")
+}
+
+// TestAutomationCompletion_FencedThreadWriteAndSummary proves the turn's
+// thread result is written under the attempt fence, so a worker that lost
+// its lease cannot overwrite a thread another run has claimed, and that the
+// completion carries that summary onto the run, where the continuation
+// prompt reads it back.
+func TestAutomationCompletion_FencedThreadWriteAndSummary(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	h.endAttempt(t, models.AutomationRunResultTurnCompleted)
+	summary := "found two issues in the diff"
+	diff := "--- a\n+++ b\n"
+	result := &models.SessionResult{ResultSummary: &summary, Diff: &diff}
+
+	written, err := h.runs.CompleteThreadTurnForAttempt(ctx, h.orgID, h.run.ID, uuid.New(), *h.run.ThreadID, *h.run.TurnNumber, result, "agent-1")
+	require.NoError(t, err, "a stale lease should not error")
+	require.False(t, written, "a worker that lost its lease cannot write the thread")
+	var storedSummary *string
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT result_summary FROM session_threads WHERE id = $1`, *h.run.ThreadID).Scan(&storedSummary), "thread summary")
+	require.Nil(t, storedSummary, "the fenced-out write left the thread alone")
+
+	written, err = h.runs.CompleteThreadTurnForAttempt(ctx, h.orgID, h.run.ID, h.lockToken, *h.run.ThreadID, *h.run.TurnNumber, result, "agent-1")
+	require.NoError(t, err, "the lease holder writes the thread")
+	require.True(t, written, "the attempt is still ours")
+
+	completion, err := h.completer.Complete(ctx, h.orgID, h.run.ID, h.jobID, h.lockToken)
+	require.NoError(t, err, "completion")
+	require.True(t, completion.Applied, "the run completes")
+	require.Equal(t, summary, *h.reload(t, h.run.ID).ResultSummary, "the run keeps the turn's summary")
+	summaries, err := h.runs.ListCompletedTurnSummaries(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration, 5)
+	require.NoError(t, err, "list summaries")
+	require.Len(t, summaries, 1, "the completed turn is in the continuation history")
+	require.Equal(t, summary, summaries[0].Summary, "with its summary, not an empty string")
+}
+
+// TestAutomationCompletion_RevokesAbandonedLease proves recovery revokes an
+// expired lease under the job lock: a paused worker's heartbeat can no
+// longer renew it, so it cannot resume writing after its session, thread,
+// and container hold were released.
+func TestAutomationCompletion_RevokesAbandonedLease(t *testing.T) {
+	h := newCompletionHarness(t)
+	ctx := context.Background()
+	// The lease expires while the worker is paused. RenewLease matches only
+	// the token, so without revocation it would happily renew.
+	_, err := h.pool.Exec(ctx, `UPDATE jobs SET lease_expires_at = now() - interval '5 minutes' WHERE id = $1`, h.jobID)
+	require.NoError(t, err, "expire the lease")
+	_, err = h.pool.Exec(ctx, `UPDATE automation_runs SET attempt_started_at = now() - interval '3 hours' WHERE id = $1`, h.run.ID)
+	require.NoError(t, err, "age the attempt past the stale bound")
+
+	report, err := h.completer.Sweep(ctx, h.orgID)
+	require.NoError(t, err, "sweep")
+	require.Equal(t, 1, report.RetriesExhausted, "the abandoned attempt is settled")
+
+	_, renewed, err := h.jobs.RenewLease(ctx, h.jobID, h.lockToken, time.Minute)
+	require.NoError(t, err, "renew should not error")
+	require.False(t, renewed, "the paused worker cannot renew a revoked lease")
+	var lockToken *uuid.UUID
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT lock_token FROM jobs WHERE id = $1`, h.jobID).Scan(&lockToken), "job lock token")
+	require.Nil(t, lockToken, "the fencing token is cleared")
+}
+
+// TestSchedulerAdvisoryLock_PinsItsConnection proves the sweep loop's lock
+// is held by one connection and released on that same connection: taken on
+// a pooled connection and unlocked on another, it would stay held and no
+// replica would ever run the loop again.
+func TestSchedulerAdvisoryLock_PinsItsConnection(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	first := cluster.NewAutomationTargetSweepLock(pool)
+	second := cluster.NewAutomationTargetSweepLock(pool)
+
+	acquired, err := first.TryAcquire(ctx)
+	require.NoError(t, err, "acquire")
+	require.True(t, acquired, "the first caller takes the lock")
+	held, err := second.TryAcquire(ctx)
+	require.NoError(t, err, "second acquire")
+	require.False(t, held, "a second caller is refused while it is held")
+
+	require.NoError(t, first.Release(ctx), "release on the pinned connection")
+	held, err = second.TryAcquire(ctx)
+	require.NoError(t, err, "acquire after release")
+	require.True(t, held, "the lock is genuinely free again")
+	require.NoError(t, second.Release(ctx), "release")
 }
