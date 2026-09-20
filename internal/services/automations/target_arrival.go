@@ -41,7 +41,7 @@ type githubAutomationTargetStore interface {
 	TouchObservedHead(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, headSHA string, updatedAt time.Time) error
 	MarkHeadResolutionPending(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, deadline time.Time) error
 	SetLifecycle(ctx context.Context, q db.DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState) error
-	SetLifecycleObserved(ctx context.Context, q db.DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState, observedAt *time.Time) error
+	SetLifecycleObserved(ctx context.Context, q db.DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState, observedAt *time.Time) (bool, error)
 }
 
 // githubAutomationArrivalRunStore is the run-store surface arrival needs,
@@ -108,23 +108,39 @@ func (s *GitHubEventTriggerService) recordTargetArrival(ctx context.Context, tx 
 	// skipped. The evidence is stamped with the delivery's own timestamp so
 	// a delayed delivery is as old as it really is, and a delivery without
 	// one transitions the state but leaves the evidence unknown.
+	//
+	// The store refuses a transition whose observation is older than the
+	// evidence the target already holds, which is the same arbitration the
+	// lifecycle notification path applies. A subscribed reopened delivery
+	// can arrive after the close it precedes, and taking it would put the
+	// target back to open and replace newer closed evidence with older. A
+	// refused transition leaves the state it found, so the local copy is
+	// only advanced when the write was applied.
 	switch {
 	case req.PullRequestAction == githubActionReopened && target.LifecycleState != models.AutomationTargetLifecycleOpen:
-		if err := s.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleOpen, req.PullRequestUpdatedAt); err != nil {
+		applied, err := s.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleOpen, req.PullRequestUpdatedAt)
+		if err != nil {
 			return false, err
 		}
-		target.LifecycleState = models.AutomationTargetLifecycleOpen
+		if applied {
+			target.LifecycleState = models.AutomationTargetLifecycleOpen
+		}
 	case req.Event == models.AutomationGitHubEventPullRequestMerged && target.LifecycleState != models.AutomationTargetLifecycleMerged:
-		if err := s.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleMerged, req.PullRequestUpdatedAt); err != nil {
+		applied, err := s.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleMerged, req.PullRequestUpdatedAt)
+		if err != nil {
 			return false, err
 		}
-		target.LifecycleState = models.AutomationTargetLifecycleMerged
+		if applied {
+			target.LifecycleState = models.AutomationTargetLifecycleMerged
+		}
 	}
 	// A timestamped pull_request delivery describes the PR's state at that
 	// time, so it refreshes the openness evidence dispatch revalidates before
 	// creating a generation. A delivery without a timestamp is no evidence.
+	// This one is a same-state refresh, which only moves the evidence
+	// forward, so it is never refused.
 	if target.LifecycleState == models.AutomationTargetLifecycleOpen && req.PullRequestAction != "" && req.PullRequestUpdatedAt != nil {
-		if err := s.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleOpen, req.PullRequestUpdatedAt); err != nil {
+		if _, err := s.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleOpen, req.PullRequestUpdatedAt); err != nil {
 			return false, err
 		}
 	}

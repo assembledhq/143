@@ -89,7 +89,11 @@ func (s *AutomationTargetStore) ApplyPullRequestClosed(ctx context.Context, tx p
 		state = models.AutomationTargetLifecycleMerged
 		retiredReason = models.AutomationTargetRetiredPRMerged
 	}
-	if err := s.SetLifecycleObserved(ctx, tx, orgID, targetID, state, &observedAt); err != nil {
+	// The store arbitrates the write again, and refuses the same observation
+	// the freshness check above already rejected. The check stays because it
+	// gates more than the write: a stale close must skip no waiters and
+	// retire no generation either.
+	if _, err := s.SetLifecycleObserved(ctx, tx, orgID, targetID, state, &observedAt); err != nil {
 		return out, err
 	}
 
@@ -181,7 +185,7 @@ func (s *AutomationTargetStore) ReopenTarget(ctx context.Context, tx pgx.Tx, org
 	// close delivered out of order cannot pass the freshness check against
 	// evidence this reopen should have advanced. SetLifecycleObserved keeps
 	// the newer of the two for a state that is not changing.
-	if err := s.SetLifecycleObserved(ctx, tx, orgID, targetID, models.AutomationTargetLifecycleOpen, &observedAt); err != nil {
+	if _, err := s.SetLifecycleObserved(ctx, tx, orgID, targetID, models.AutomationTargetLifecycleOpen, &observedAt); err != nil {
 		return false, err
 	}
 	return state != models.AutomationTargetLifecycleOpen, nil

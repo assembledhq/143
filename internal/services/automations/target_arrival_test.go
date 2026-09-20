@@ -25,6 +25,10 @@ type fakeArrivalTargetStore struct {
 	lockCalls   int
 	nextEpoch   int
 	lockOrCreat func() (models.AutomationTarget, error)
+	// refuseLifecycle makes SetLifecycleObserved report the observation as
+	// refused, the way the store answers a transition older than the
+	// evidence the target already holds.
+	refuseLifecycle bool
 }
 
 func (f *fakeArrivalTargetStore) LockOrCreate(_ context.Context, _ pgx.Tx, _, _, _ uuid.UUID, _ models.AutomationTargetKind, _ string) (models.AutomationTarget, error) {
@@ -57,10 +61,13 @@ func (f *fakeArrivalTargetStore) SetLifecycle(_ context.Context, _ db.DBTX, _, _
 	return nil
 }
 
-func (f *fakeArrivalTargetStore) SetLifecycleObserved(_ context.Context, _ db.DBTX, _, _ uuid.UUID, state models.AutomationTargetLifecycleState, observedAt *time.Time) error {
+func (f *fakeArrivalTargetStore) SetLifecycleObserved(_ context.Context, _ db.DBTX, _, _ uuid.UUID, state models.AutomationTargetLifecycleState, observedAt *time.Time) (bool, error) {
 	f.lifecycle = append(f.lifecycle, state)
 	f.observedAt = append(f.observedAt, observedAt)
-	return nil
+	if f.refuseLifecycle {
+		return false, nil
+	}
+	return true, nil
 }
 
 type fakeArrivalRunStore struct {
@@ -118,19 +125,22 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		target         models.AutomationTarget
-		waiting        int
-		req            GitHubEventTriggerRequest
-		wantJob        bool
-		wantOutcome    models.AutomationRunOutcomeReason
-		wantEpoch      *int
-		wantResolution *models.AutomationRunHeadResolution
-		wantAdopted    []string
-		wantSuperseded []int
-		wantPending    bool
-		wantTouched    []time.Time
-		wantLifecycle  []models.AutomationTargetLifecycleState
+		name    string
+		target  models.AutomationTarget
+		waiting int
+		// refuseLifecycle makes the store refuse a lifecycle transition, as
+		// it does for an observation older than the target's own evidence.
+		refuseLifecycle bool
+		req             GitHubEventTriggerRequest
+		wantJob         bool
+		wantOutcome     models.AutomationRunOutcomeReason
+		wantEpoch       *int
+		wantResolution  *models.AutomationRunHeadResolution
+		wantAdopted     []string
+		wantSuperseded  []int
+		wantPending     bool
+		wantTouched     []time.Time
+		wantLifecycle   []models.AutomationTargetLifecycleState
 	}{
 		{
 			name:   "strictly newer push adopts the head and supersedes older waiting pushes",
@@ -245,6 +255,19 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 			wantLifecycle: []models.AutomationTargetLifecycleState{models.AutomationTargetLifecycleOpen},
 		},
 		{
+			name: "reopened delivery the store refuses leaves the target closed and skips the run",
+			target: models.AutomationTarget{
+				ID: uuid.New(), LifecycleState: models.AutomationTargetLifecycleClosed,
+			},
+			refuseLifecycle: true,
+			req: GitHubEventTriggerRequest{
+				Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "reopened",
+				HeadSHA: newer, PullRequestUpdatedAt: timePtr(base.Add(-time.Hour)),
+			},
+			wantOutcome:   models.AutomationRunOutcomePRClosed,
+			wantLifecycle: []models.AutomationTargetLifecycleState{models.AutomationTargetLifecycleOpen},
+		},
+		{
 			name:   "merged event marks the target merged and executes as the final turn",
 			target: openTarget(),
 			req: GitHubEventTriggerRequest{
@@ -277,7 +300,7 @@ func TestGitHubEventTriggerService_PerTargetArrival(t *testing.T) {
 			}}}
 			runs := &fakeGitHubAutomationRunStore{}
 			jobs := &fakeGitHubAutomationJobStore{}
-			targets := &fakeArrivalTargetStore{target: tt.target}
+			targets := &fakeArrivalTargetStore{target: tt.target, refuseLifecycle: tt.refuseLifecycle}
 			arrivals := newFakeArrivalRunStore()
 			arrivals.waiting = tt.waiting
 			service := NewGitHubEventTriggerService(store, runs, jobs, &pagerDutyTxStarterFake{}, zerolog.Nop())
