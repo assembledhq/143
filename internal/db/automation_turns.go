@@ -221,6 +221,16 @@ func (s *AutomationRunStore) CompleteExecutingPreflight(ctx context.Context, tx 
 	if lockToken == uuid.Nil {
 		return false, errors.New("complete executing preflight: lock token is required")
 	}
+	// Target first, then job, then the run: the order every per-target
+	// writer uses, so a preflight and a recovery or a lifecycle change
+	// cannot deadlock. The caller holds a live lease, so nothing is
+	// revoked.
+	if err := lockAutomationRunLifecycle(ctx, tx, orgID, runID, false); err != nil {
+		if errors.Is(err, ErrAutomationTargetNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
 	var sessionID, threadID, targetID uuid.UUID
 	err := tx.QueryRow(ctx, `
 		UPDATE automation_runs r
@@ -291,22 +301,32 @@ func applyPendingOwnershipRelease(ctx context.Context, q DBTX, orgID, sessionID 
 	return nil
 }
 
-// CompleteThreadTurnForAttempt writes the primary thread's turn result
-// under the attempt fence. The worker's ordinary thread write is not
+// CompleteThreadTurnForAttempt writes the primary thread's turn result in
+// the caller's transaction, under the attempt fence and the run row lock. The worker's ordinary thread write is not
 // fenced, so a worker that paused past its lease could otherwise overwrite
 // the status, turn number, provider session id, summary, and diff of a
 // turn that has since been claimed by another run (design doc 125,
 // "Retry and recovery"). Returns false when the attempt is no longer ours,
 // in which case the thread belongs to a later turn and is left alone.
-func (s *AutomationRunStore) CompleteThreadTurnForAttempt(ctx context.Context, orgID, runID, lockToken, threadID uuid.UUID, turn int, result *models.SessionResult, agentSessionID string) (bool, error) {
+func (s *AutomationRunStore) CompleteThreadTurnForAttempt(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken, threadID uuid.UUID, turn int, result *models.SessionResult, agentSessionID string) (bool, error) {
 	if lockToken == uuid.Nil {
 		return false, errors.New("complete automation thread turn: lock token is required")
+	}
+	// The run row is locked first, so the ownership this write is fenced by
+	// cannot change while the statement waits for the thread row: a
+	// recovery or a later attempt claim blocks behind the same lock.
+	owned, lockErr := s.LockAttempt(ctx, tx, orgID, runID, lockToken)
+	if lockErr != nil {
+		return false, lockErr
+	}
+	if !owned {
+		return false, nil
 	}
 	var summary, diff *string
 	if result != nil {
 		summary, diff = result.ResultSummary, result.Diff
 	}
-	tag, err := s.db.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE session_threads th
 		SET status = 'idle',
 		    current_turn = @current_turn,

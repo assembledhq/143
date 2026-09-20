@@ -58,6 +58,10 @@ type AutomationTurnStore interface {
 	// EndInterruptedAttempt restores the session's pre-turn status for a
 	// drained attempt in one fenced statement; no marker is written.
 	EndInterruptedAttempt(ctx context.Context, orgID, runID, sessionID, lockToken uuid.UUID, status models.SessionStatus) (bool, error)
+	// CompleteThreadTurn returns the primary thread to idle under the
+	// attempt fence, so a worker that lost its lease cannot overwrite the
+	// thread state of a turn another run has since claimed.
+	CompleteThreadTurn(ctx context.Context, orgID, runID, lockToken, threadID uuid.UUID, turn int, agentSessionID string) (bool, error)
 	RecordContinuationFallback(ctx context.Context, orgID, runID, lockToken uuid.UUID, reason models.AutomationRunContinuationReason, baselineHeadSHA *string) (bool, error)
 	RetireGeneration(ctx context.Context, orgID, generationID uuid.UUID, reason models.AutomationTargetRetiredReason) error
 }
@@ -715,16 +719,20 @@ func (o *Orchestrator) endAutomationAttempt(ctx context.Context, state *automati
 		marker.AgentSessionID = &id
 	}
 	duration := state.agentDurationMS()
+	// The marker is written first, so this transaction takes the run and
+	// job locks before the session lock. A recovery takes target, job, run,
+	// then session; writing the session first would invert that and let the
+	// two deadlock, which would roll back a successful turn's result.
 	err := o.automationTurns.EndAttempt(ctx, func(ctx context.Context, tx pgx.Tx, sessions SessionStore) error {
-		if err := write(sessions); err != nil {
-			return err
-		}
 		written, err := o.automationTurns.WriteResult(ctx, tx, session.OrgID, state.jobID, marker)
 		if err != nil {
 			return fmt.Errorf("write automation run result: %w", err)
 		}
 		if !written {
 			return ErrAutomationAttemptLost
+		}
+		if err := write(sessions); err != nil {
+			return err
 		}
 		if duration >= 0 {
 			if _, err := o.automationTurns.RecordTurnDuration(ctx, tx, session.OrgID, state.run.ID, state.lockToken, duration); err != nil {
@@ -1074,13 +1082,31 @@ func (o *Orchestrator) endCancelledAutomationTurn(ctx context.Context, state *au
 		log.Error().Err(err).Msg("failed to end cancelled automation turn")
 		return
 	}
-	if o.sessionThreads != nil && session.PrimaryThreadID != nil && *session.PrimaryThreadID != uuid.Nil {
-		if threadErr := o.sessionThreads.CompleteTurn(ctx, session.OrgID, *session.PrimaryThreadID, turnNumber, agentSessionID); threadErr != nil {
-			log.Warn().Err(threadErr).Str("thread_id", session.PrimaryThreadID.String()).Msg("failed to return primary thread to idle after cancel")
-		}
+	if session.PrimaryThreadID != nil && *session.PrimaryThreadID != uuid.Nil {
+		o.completeAutomationThreadTurn(ctx, state, session.OrgID, *session.PrimaryThreadID, turnNumber, agentSessionID, log)
 	}
 	completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusCancelled, models.ActivityPhaseBoundaryCancelled, log)
 	log.Info().Int("turn", turnNumber).Msg("cancelled automation turn ended")
+}
+
+// completeAutomationThreadTurn returns a per-target turn's primary thread
+// to idle under the attempt fence. An unfenced write would let a worker
+// that paused past its lease overwrite the status, turn number, and
+// provider session id of a turn another run has since claimed; a
+// fenced-out write is not an error, because the completion that took the
+// attempt away already left the thread as its own turn needs it.
+func (o *Orchestrator) completeAutomationThreadTurn(ctx context.Context, state *automationTurnState, orgID, threadID uuid.UUID, turnNumber int, agentSessionID string, log zerolog.Logger) {
+	if o.automationTurns == nil || state == nil {
+		return
+	}
+	written, err := o.automationTurns.CompleteThreadTurn(ctx, orgID, state.run.ID, state.lockToken, threadID, turnNumber, agentSessionID)
+	if err != nil {
+		log.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to return the automation turn's primary thread to idle")
+		return
+	}
+	if !written {
+		log.Warn().Str("thread_id", threadID.String()).Msg("automation turn thread release was fenced out: the attempt is no longer ours")
+	}
 }
 
 // automationTurnSnapshotKey names one publication of an owned session's

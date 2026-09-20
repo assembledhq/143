@@ -10279,7 +10279,11 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Msg("duplicate continue_session job lost sandbox-hold race; dead-lettering silently — winner retains the session row")
 				return &FatalError{Err: err}
 			}
-			if hasThread && !errors.Is(err, agent.ErrSessionCancelled) {
+			// A per-target turn's thread is released by its completion or,
+			// when the attempt was lost, by the recovery that takes the
+			// attempt away; an unfenced write here could idle a thread a
+			// later turn is already running on.
+			if hasThread && automationRunID == nil && !errors.Is(err, agent.ErrSessionCancelled) {
 				// Detached context: this cleanup must land even when ctx was
 				// cancelled by worker drain mid-shutdown. Otherwise the
 				// thread is stuck in 'running' and the UI shows an orphaned
@@ -14330,14 +14334,23 @@ func registerAutomationTurnDeadLetter(ctx context.Context, services *Services, l
 // not an error: the completer's own release already left the thread in the
 // state the winning turn expects.
 func completeAutomationThreadTurn(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, runID, threadID uuid.UUID, turn int, result *models.SessionResult, agentSessionID string) {
-	if stores == nil || stores.AutomationRuns == nil {
+	if stores == nil || stores.AutomationRuns == nil || stores.ThreadSendTx == nil {
 		return
 	}
 	lockToken, hasToken := jobctx.LockTokenFromContext(ctx)
 	if !hasToken {
 		return
 	}
-	written, err := stores.AutomationRuns.CompleteThreadTurnForAttempt(ctx, orgID, runID, lockToken, threadID, turn, result, agentSessionID)
+	tx, err := stores.ThreadSendTx.Begin(ctx)
+	if err != nil {
+		logger.Warn().Err(err).Str("run_id", runID.String()).Msg("failed to begin the automation turn thread write")
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	written, err := stores.AutomationRuns.CompleteThreadTurnForAttempt(ctx, tx, orgID, runID, lockToken, threadID, turn, result, agentSessionID)
+	if err == nil && written {
+		err = tx.Commit(ctx)
+	}
 	if err != nil {
 		logger.Warn().Err(err).
 			Str("run_id", runID.String()).

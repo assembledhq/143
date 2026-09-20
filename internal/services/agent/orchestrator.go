@@ -3819,7 +3819,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 			o.cleanupReviewBundle(ctx, runResult, log)
 			return fmt.Errorf("update interactive turn result: %w", err)
 		}
-		if primaryThreadID != nil && o.sessionThreads != nil {
+		if primaryThreadID != nil && automationTurn != nil {
+			o.completeAutomationThreadTurn(ctx, automationTurn, run.OrgID, *primaryThreadID, turnNumber, agentSessionID, log)
+		} else if primaryThreadID != nil && o.sessionThreads != nil {
 			if err := o.sessionThreads.CompleteTurn(ctx, run.OrgID, *primaryThreadID, turnNumber, agentSessionID); err != nil {
 				log.Warn().Err(err).Str("thread_id", primaryThreadID.String()).Msg("failed to mark primary thread turn complete")
 			}
