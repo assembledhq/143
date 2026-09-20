@@ -956,6 +956,9 @@ Acceptance measurements before enabling by default for any template: median time
 - **2026-09-20 — The session-failure dead-letter hooks stand down for owned sessions.** The worker's interrupt, capacity, and stale-sandbox hooks mark the session failed on dead-letter; for a per-target turn they would fight the completer's release to idle. The turn on the handler context tells them to stand down.
 - **2026-09-19 — Target creation and the continuity switch share an advisory lock.** Implementation review showed that a target inserted by an uncommitted ownership transaction is invisible to the switch's `FOR UPDATE` scan. `LockOrCreate` and the bulk retirement take an automation-scoped transaction advisory lock before any target row lock.
 
+- **2026-09-20 — The lifecycle notification is best-effort, and completion is the second chance.** `PRService` tells per-target continuity about every close, merge, and reopen, outside the transaction that records the pull request's own state, so a failure there cannot fail the webhook. What the notification would have done is bounded anyway: the wait timeout and the recovery sweep still end the waiters, and a completion on a target whose lifecycle is already terminal retires the generation itself. A redelivered close changes nothing the first one did not.
+- **2026-09-20 — The owned-session guard is an injected check, not a store call.** Handlers take a narrow `automationOwnershipGuard` rather than reaching into the session store, so the check is wired once in the router and a test can install an owned session without a database. The thread service keeps it on its own session-store interface, because its two entry points must refuse before they claim anything.
+
 ## Review History
 
 - **Round 1 (2026-09-19, Codex gpt-6-astra, high effort).** Verdict: request changes. Five factual corrections and fifteen design findings. All folded in.

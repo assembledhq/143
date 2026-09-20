@@ -41,10 +41,13 @@ var errPreviewResponseWritten = errors.New("preview response already written")
 
 // PreviewHandler handles all preview-related HTTP endpoints.
 type PreviewHandler struct {
-	manager           *preview.Manager
-	store             *db.PreviewStore
-	jobStore          *db.JobStore
-	sessionStore      *db.SessionStore
+	manager      *preview.Manager
+	store        *db.PreviewStore
+	jobStore     *db.JobStore
+	sessionStore *db.SessionStore
+	// automationOwners rejects a preview on a session a per-target
+	// automation generation owns. Nil-safe: skipped when not wired.
+	automationOwners  automationOwnershipGuard
 	orgStore          agent.OrgSettingsReader
 	repoStore         *db.RepositoryStore
 	fileReader        sandbox.FileReader
@@ -64,6 +67,11 @@ type PreviewHandler struct {
 	// sandboxBusyRetryDelay overrides sandboxBusyAcquireRetryDelay in tests;
 	// zero means the production default.
 	sandboxBusyRetryDelay time.Duration
+}
+
+// SetAutomationOwnershipGuard wires the per-target continuity guard.
+func (h *PreviewHandler) SetAutomationOwnershipGuard(guard automationOwnershipGuard) {
+	h.automationOwners = guard
 }
 
 func (h *PreviewHandler) SetBrowserSessionService(service *preview.BrowserSessionService) {
@@ -1315,6 +1323,11 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_SESSION_ID", "invalid session ID")
+		return
+	}
+	// A preview takes the session's container, which an automation-owned
+	// session's turn is using or about to use.
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
 		return
 	}
 

@@ -66,6 +66,7 @@ type CompletionResult struct {
 	Outcome           models.AutomationRunOutcomeReason
 	TargetID          uuid.UUID
 	GenerationRetired bool
+	RetiredReason     models.AutomationTargetRetiredReason
 }
 
 // WakeOutcome reports what Wake did for a target.
@@ -130,8 +131,23 @@ func (c *TurnCompleter) Complete(ctx context.Context, orgID, runID, jobID, lockT
 		return CompletionResult{}, nil
 	}
 	result := CompletionResult{Applied: true, Outcome: done.Outcome, TargetID: done.TargetID}
+	// An awaiting_input turn hands the session to a person; a turn that ran
+	// on a closed or merged pull request was the last one its generation
+	// will have, and the close could not retire it while this turn held the
+	// target (design doc 125, "Lifecycle Transitions": retired after the
+	// final turn).
+	retireReason := models.AutomationTargetRetiredReason("")
 	if done.RetireGeneration {
-		_, err := c.targets.RetireGeneration(ctx, tx, orgID, done.GenerationID, models.AutomationTargetRetiredAwaitingInput)
+		retireReason = models.AutomationTargetRetiredAwaitingInput
+	} else {
+		lifecycleReason, err := c.targets.TerminalLifecycleRetirement(ctx, tx, orgID, done.TargetID)
+		if err != nil {
+			return CompletionResult{}, err
+		}
+		retireReason = lifecycleReason
+	}
+	if retireReason != "" {
+		_, err := c.targets.RetireGeneration(ctx, tx, orgID, done.GenerationID, retireReason)
 		switch {
 		case errors.Is(err, db.ErrAutomationTargetGenerationNotActive):
 			// Already retired by a lifecycle transition; the completion
@@ -140,6 +156,7 @@ func (c *TurnCompleter) Complete(ctx context.Context, orgID, runID, jobID, lockT
 			return CompletionResult{}, err
 		default:
 			result.GenerationRetired = true
+			result.RetiredReason = retireReason
 		}
 	}
 	if err := c.enqueueWake(ctx, tx, orgID, done.TargetID); err != nil {
@@ -154,6 +171,7 @@ func (c *TurnCompleter) Complete(ctx context.Context, orgID, runID, jobID, lockT
 		Str("target_id", done.TargetID.String()).
 		Str("outcome", string(done.Outcome)).
 		Bool("generation_retired", result.GenerationRetired).
+		Str("retired_reason", string(result.RetiredReason)).
 		Msg("completed per-target automation turn")
 	return result, nil
 }
@@ -210,6 +228,12 @@ func (c *TurnCompleter) RecoverAbandonedRun(ctx context.Context, orgID, runID, j
 		return models.AutomationRunOutcomeRetriesExhausted, nil
 	}
 	return "", nil
+}
+
+// EnqueueWakeJob enqueues the target's wake job in the caller's
+// transaction, for a caller that has already written the wake outbox.
+func (c *TurnCompleter) EnqueueWakeJob(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID) error {
+	return c.enqueueWake(ctx, tx, orgID, targetID)
 }
 
 // EnqueueWake writes the wake outbox and enqueues the target's wake job in

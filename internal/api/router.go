@@ -482,6 +482,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		llmClient,
 		logger,
 	)
+	// Per-target continuity (design doc 125): a session an automation
+	// generation owns accepts no human turn.
+	sessionHandler.SetAutomationOwnershipGuard(sessionStore)
 	sessionHandler.SetChangesetStore(sessionChangesetStore)
 	sessionHandler.SetPublicationStore(sessionPublicationStore)
 	sessionHandler.SetViewStore(sessionViewStore)
@@ -1015,6 +1018,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 	previewHandler.SetBrowserSessionService(preview.NewBrowserSessionService(previewBrowserSessionStore, browserInspector, previewManager))
 	branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prService, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
+	previewHandler.SetAutomationOwnershipGuard(sessionStore)
 	previewHandler.SetAuditEmitter(auditEmitter)
 	branchPreviewHandler.SetAuditEmitter(auditEmitter)
 	previewHandler.SetJobStore(jobStore)

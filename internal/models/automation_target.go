@@ -1,6 +1,7 @@
 package models
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -473,4 +474,40 @@ type AutomationTurnSummary struct {
 	TurnNumber  int
 	Summary     string
 	CompletedAt string
+}
+
+// SessionAutomationOwner describes the generation that owns a session
+// (design doc 125, "Automation-owned sessions"). A session with an owner
+// accepts no human turn: its thread belongs to the automation's next turn,
+// and a message sent into it would either be lost or race that turn. The
+// person's way out is the target's Reset action, which retires the
+// generation and hands the session back.
+type SessionAutomationOwner struct {
+	AutomationID   uuid.UUID `json:"automation_id"`
+	TargetID       uuid.UUID `json:"target_id"`
+	GenerationID   uuid.UUID `json:"generation_id"`
+	ResetURL       string    `json:"reset_url"`
+	ReleasePending bool      `json:"release_pending"`
+}
+
+// ErrSessionAutomationOwned is what every human-entry path on an owned
+// session returns; handlers map it to 409 SESSION_AUTOMATION_OWNED with the
+// owner as details.
+var ErrSessionAutomationOwned = errors.New("session is owned by an automation target")
+
+// SessionAutomationOwnedError carries the owner alongside the sentinel, so
+// a handler can answer with the target and its reset link.
+type SessionAutomationOwnedError struct {
+	Owner SessionAutomationOwner
+}
+
+func (e *SessionAutomationOwnedError) Error() string {
+	return ErrSessionAutomationOwned.Error()
+}
+
+func (e *SessionAutomationOwnedError) Unwrap() error { return ErrSessionAutomationOwned }
+
+// SessionAutomationResetURL is the path that hands an owned session back.
+func SessionAutomationResetURL(automationID, targetID uuid.UUID) string {
+	return fmt.Sprintf("/api/v1/automations/%s/targets/%s/reset", automationID, targetID)
 }

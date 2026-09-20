@@ -155,7 +155,8 @@ type PRService struct {
 	httpClient               *http.Client
 	mergeabilityRetryDelays  []time.Duration
 	mergeabilityRetryWait    func(context.Context, time.Duration) error
-	linearMilestones         LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
+	linearMilestones         LinearMilestoneEnqueuer   // nil-safe: Linear writes disabled if nil
+	automationTargets        AutomationTargetLifecycle // nil-safe: per-target continuity lifecycle disabled if nil
 	prPreviewSurfacesEnabled bool
 	prHealthSyncGroup        singleflight.Group
 	publicationPolicy        PublicationExecutionPolicy
@@ -183,6 +184,14 @@ type PRService struct {
 // linker service and packages a worker enqueue + payload.
 type LinearMilestoneEnqueuer func(ctx context.Context, orgID, sessionID uuid.UUID, event string, prNumber int)
 
+// AutomationTargetLifecycle is the per-target continuity notification
+// (design doc 125). It is told about every close, merge, and reopen, not
+// only the ones an automation subscribes to.
+type AutomationTargetLifecycle interface {
+	OnPullRequestClosed(ctx context.Context, orgID uuid.UUID, repoFullName string, number int, merged bool, observedAt time.Time) error
+	OnPullRequestReopened(ctx context.Context, orgID uuid.UUID, repoFullName string, number int, observedAt time.Time) error
+}
+
 type AutomationEventTriggerer interface {
 	TriggerGitHubEvent(ctx context.Context, req automationevents.GitHubEventTriggerRequest) error
 	RememberKnownLabels(req automationevents.GitHubEventTriggerRequest)
@@ -191,6 +200,15 @@ type AutomationEventTriggerer interface {
 // SetLinearMilestoneEnqueuer wires the Linear post-event hook.
 func (s *PRService) SetLinearMilestoneEnqueuer(enq LinearMilestoneEnqueuer) {
 	s.linearMilestones = enq
+}
+
+// SetAutomationTargetLifecycle wires the per-target continuity
+// notification. It fires on every close, merge, and reopen, whether or not
+// an automation subscribes to that event, because a target whose pull
+// request ended must stop waiting and hand its session back (design doc
+// 125, "Lifecycle Transitions").
+func (s *PRService) SetAutomationTargetLifecycle(lifecycle AutomationTargetLifecycle) {
+	s.automationTargets = lifecycle
 }
 
 func (s *PRService) SetAutomationEventTriggerer(triggerer AutomationEventTriggerer) {
@@ -2630,6 +2648,7 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 			} else if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, models.PullRequestStatusOpen); err != nil {
 				return fmt.Errorf("update PR status to open: %w", err)
 			}
+			s.notifyAutomationTargetsReopened(ctx, pr, codeReviewLifecycleObservedAt(event.PR.UpdatedAt))
 		}
 		reason := PullRequestSyncReasonInitial
 		if pullRequestHasHealthBaseline(pr) && *pr.HeadSHA != event.PR.Head.SHA {
@@ -3152,6 +3171,7 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 			commitSHA = headSHA
 		}
 		s.runMergedPullRequestFollowUps(ctx, pr, commitSHA)
+		s.notifyAutomationTargetsClosed(ctx, pr, true, observedAt)
 		s.publishPullRequestTerminalState(ctx, pr)
 		return true, nil
 	}
@@ -3184,8 +3204,43 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 	}
 	s.teardownPRPreview(ctx, pr, false)
 	s.maybeAutoArchiveSessionOnPRClose(ctx, pr, nil, false)
+	s.notifyAutomationTargetsClosed(ctx, pr, false, observedAt)
 	s.publishPullRequestTerminalState(ctx, pr)
 	return true, nil
+}
+
+// notifyAutomationTargetsClosed tells per-target continuity that this pull
+// request ended, so its waiting runs stop waiting and its session is handed
+// back. Best-effort: a failure is logged and the scheduler's sweeps still
+// bound the waiters, but the target would otherwise keep its session until
+// they fire.
+func (s *PRService) notifyAutomationTargetsClosed(ctx context.Context, pr models.PullRequest, merged bool, observedAt time.Time) {
+	if s.automationTargets == nil {
+		return
+	}
+	if err := s.automationTargets.OnPullRequestClosed(ctx, pr.OrgID, pr.GitHubRepo, pr.GitHubPRNumber, merged, observedAt); err != nil {
+		s.logger.Warn().Err(err).
+			Str("org_id", pr.OrgID.String()).
+			Str("repository", pr.GitHubRepo).
+			Int("pull_request", pr.GitHubPRNumber).
+			Bool("merged", merged).
+			Msg("failed to apply a closed pull request to its automation targets")
+	}
+}
+
+// notifyAutomationTargetsReopened puts the pull request's targets back to
+// open so the next trigger starts a fresh generation.
+func (s *PRService) notifyAutomationTargetsReopened(ctx context.Context, pr models.PullRequest, observedAt time.Time) {
+	if s.automationTargets == nil {
+		return
+	}
+	if err := s.automationTargets.OnPullRequestReopened(ctx, pr.OrgID, pr.GitHubRepo, pr.GitHubPRNumber, observedAt); err != nil {
+		s.logger.Warn().Err(err).
+			Str("org_id", pr.OrgID.String()).
+			Str("repository", pr.GitHubRepo).
+			Int("pull_request", pr.GitHubPRNumber).
+			Msg("failed to reopen the automation targets of a reopened pull request")
+	}
 }
 
 func codeReviewLifecycleObservedAt(providerUpdatedAt *time.Time) time.Time {
