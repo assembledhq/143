@@ -212,14 +212,14 @@ func (s *AutomationRunStore) ListCompletedTurnSummaries(ctx context.Context, org
 // message the reservation inserted, requests a target wake, and applies a
 // pending ownership release. No result marker is written. Returns false
 // when the fence rejects the write.
-func (s *AutomationRunStore) CompleteExecutingPreflight(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID, outcome models.AutomationRunOutcomeReason, summary string) (bool, error) {
+func (s *AutomationRunStore) CompleteExecutingPreflight(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID, outcome models.AutomationRunOutcomeReason, summary string) (uuid.UUID, bool, error) {
 	switch outcome {
 	case models.AutomationRunOutcomeStaleHead, models.AutomationRunOutcomePRClosed, models.AutomationRunOutcomeRepositoryUnavailable:
 	default:
-		return false, fmt.Errorf("complete executing preflight: %q is not a preflight outcome", outcome)
+		return uuid.Nil, false, fmt.Errorf("complete executing preflight: %q is not a preflight outcome", outcome)
 	}
 	if lockToken == uuid.Nil {
-		return false, errors.New("complete executing preflight: lock token is required")
+		return uuid.Nil, false, errors.New("complete executing preflight: lock token is required")
 	}
 	// Target first, then job, then the run: the order every per-target
 	// writer uses, so a preflight and a recovery or a lifecycle change
@@ -227,9 +227,9 @@ func (s *AutomationRunStore) CompleteExecutingPreflight(ctx context.Context, tx 
 	// revoked.
 	if err := lockAutomationRunLifecycle(ctx, tx, orgID, runID, false); err != nil {
 		if errors.Is(err, ErrAutomationTargetNotFound) {
-			return false, nil
+			return uuid.Nil, false, nil
 		}
-		return false, err
+		return uuid.Nil, false, err
 	}
 	var sessionID, threadID, targetID uuid.UUID
 	err := tx.QueryRow(ctx, `
@@ -241,39 +241,39 @@ func (s *AutomationRunStore) CompleteExecutingPreflight(ctx context.Context, tx 
 		pgx.NamedArgs{"id": runID, "org_id": orgID, "lock_token": lockToken, "status": outcome.RunStatus(), "outcome": outcome, "summary": summary},
 	).Scan(&sessionID, &threadID, &targetID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return uuid.Nil, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("complete executing preflight: %w", err)
+		return uuid.Nil, false, fmt.Errorf("complete executing preflight: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE sessions SET status = 'idle', last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status IN ('pending', 'running')`,
 		pgx.NamedArgs{"id": sessionID, "org_id": orgID}); err != nil {
-		return false, fmt.Errorf("release session after preflight: %w", err)
+		return uuid.Nil, false, fmt.Errorf("release session after preflight: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE session_threads SET status = 'idle'
 		WHERE id = @id AND org_id = @org_id AND status IN ('pending', 'running')`,
 		pgx.NamedArgs{"id": threadID, "org_id": orgID}); err != nil {
-		return false, fmt.Errorf("release thread after preflight: %w", err)
+		return uuid.Nil, false, fmt.Errorf("release thread after preflight: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM session_messages
 		WHERE org_id = @org_id AND automation_run_id = @run_id AND role = 'user' AND source = @source`,
 		pgx.NamedArgs{"org_id": orgID, "run_id": runID, "source": models.SessionMessageSourceAutomationTurn}); err != nil {
-		return false, fmt.Errorf("delete reservation message after preflight: %w", err)
+		return uuid.Nil, false, fmt.Errorf("delete reservation message after preflight: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE automation_targets SET wake_requested_at = now(), updated_at = now()
 		WHERE id = @id AND org_id = @org_id`,
 		pgx.NamedArgs{"id": targetID, "org_id": orgID}); err != nil {
-		return false, fmt.Errorf("request wake after preflight: %w", err)
+		return uuid.Nil, false, fmt.Errorf("request wake after preflight: %w", err)
 	}
 	if err := applyPendingOwnershipRelease(ctx, tx, orgID, sessionID); err != nil {
-		return false, err
+		return uuid.Nil, false, err
 	}
-	return true, nil
+	return targetID, true, nil
 }
 
 // applyPendingOwnershipRelease clears the session's owner marker when the

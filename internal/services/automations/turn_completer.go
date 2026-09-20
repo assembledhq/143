@@ -188,32 +188,6 @@ func (c *TurnCompleter) retireGeneration(ctx context.Context, tx pgx.Tx, orgID, 
 	}
 }
 
-// retireTerminalTarget retires the target's active generation when its pull
-// request is already closed or merged and no run is left to execute on it.
-// Every path that ends the target's last piece of work calls it, not only
-// marker-based completion: a final turn that dead-letters without a result,
-// or a last waiter that times out, would otherwise leave an active
-// generation owning a session on a pull request that is gone, with no
-// pending release for the ownership sweep to find.
-func (c *TurnCompleter) retireTerminalTarget(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID) (models.AutomationTargetRetiredReason, error) {
-	reason, err := c.targets.TerminalLifecycleRetirement(ctx, tx, orgID, targetID)
-	if err != nil || reason == "" {
-		return "", err
-	}
-	generation, err := c.targets.GetActiveGeneration(ctx, tx, orgID, targetID)
-	if errors.Is(err, db.ErrAutomationTargetGenerationNotFound) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	retired, err := c.retireGeneration(ctx, tx, orgID, generation.ID, reason)
-	if err != nil || !retired {
-		return "", err
-	}
-	return reason, nil
-}
-
 // FailRetriesExhausted records retries_exhausted on an abandoned executing
 // run (no marker for the current attempt, no live lease, and either a
 // terminal job or an attempt older than staleBefore), releases the session
@@ -231,7 +205,7 @@ func (c *TurnCompleter) FailRetriesExhausted(ctx context.Context, orgID, runID u
 	if !done {
 		return false, nil
 	}
-	retiredReason, err := c.retireTerminalTarget(ctx, tx, orgID, targetID)
+	retiredReason, err := c.targets.RetireTerminalTarget(ctx, tx, orgID, targetID)
 	if err != nil {
 		return false, err
 	}
@@ -514,7 +488,7 @@ func (c *TurnCompleter) failTimedOutWaits(ctx context.Context, orgID, targetID u
 	}
 	// The timed-out run can have been the last thing a closed or merged
 	// target had left to do.
-	if _, err := c.retireTerminalTarget(ctx, tx, orgID, targetID); err != nil {
+	if _, err := c.targets.RetireTerminalTarget(ctx, tx, orgID, targetID); err != nil {
 		return 0, err
 	}
 	if err := c.enqueueWake(ctx, tx, orgID, targetID); err != nil {

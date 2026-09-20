@@ -168,12 +168,19 @@ func (s *TurnStore) CompletePreflight(ctx context.Context, orgID, runID, lockTok
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	done, err := s.runs.CompleteExecutingPreflight(ctx, tx, orgID, runID, lockToken, outcome, summary)
+	targetID, done, err := s.runs.CompleteExecutingPreflight(ctx, tx, orgID, runID, lockToken, outcome, summary)
 	if err != nil {
 		return false, err
 	}
 	if !done {
 		return false, nil
+	}
+	// A preflight outcome can be how a merged pull request's final turn
+	// ends. It writes no result marker, so nothing else would retire the
+	// generation the close left alive for it, and the session would stay
+	// owned with no pending release for any sweep to find.
+	if _, err := s.targets.RetireTerminalTarget(ctx, tx, orgID, targetID); err != nil {
+		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
