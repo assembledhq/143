@@ -2587,6 +2587,13 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 		}, automationEvents, event.OwnerOrgID, event.Repository.ID)
 	}
 
+	// Per-target continuity is told about the lifecycle from the event
+	// itself, before any of the mirror handling below. A pull request that
+	// 143 did not create has no `pull_requests` row, but it can still have
+	// automation targets, and their waiters and owned session must end with
+	// it (design doc 125, "Lifecycle Transitions").
+	s.notifyAutomationTargetsForEvent(ctx, event)
+
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.Number)
 	needsReconciliation := webhookPullRequestNeedsReconciliation(pr, err, event.Action)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -2648,7 +2655,6 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 			} else if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, models.PullRequestStatusOpen); err != nil {
 				return fmt.Errorf("update PR status to open: %w", err)
 			}
-			s.notifyAutomationTargetsReopened(ctx, pr, codeReviewLifecycleObservedAt(event.PR.UpdatedAt))
 		}
 		reason := PullRequestSyncReasonInitial
 		if pullRequestHasHealthBaseline(pr) && *pr.HeadSHA != event.PR.Head.SHA {
@@ -3171,6 +3177,9 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 			commitSHA = headSHA
 		}
 		s.runMergedPullRequestFollowUps(ctx, pr, commitSHA)
+		// Also from here, because the periodic state sync calls this
+		// transition when a webhook was dropped. Notifying twice for one
+		// close is harmless: the second finds the work already done.
 		s.notifyAutomationTargetsClosed(ctx, pr, true, observedAt)
 		s.publishPullRequestTerminalState(ctx, pr)
 		return true, nil
@@ -3209,6 +3218,37 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 	return true, nil
 }
 
+// notifyAutomationTargetsForEvent applies a webhook's own lifecycle action
+// to the pull request's automation targets, independently of whether 143
+// mirrors the pull request.
+func (s *PRService) notifyAutomationTargetsForEvent(ctx context.Context, event PullRequestEvent) {
+	if s.automationTargets == nil || event.OwnerOrgID == nil || event.Number <= 0 {
+		return
+	}
+	repo := strings.TrimSpace(event.Repository.FullName)
+	if repo == "" {
+		return
+	}
+	observedAt := codeReviewLifecycleObservedAt(event.PR.UpdatedAt)
+	var err error
+	switch event.Action {
+	case "closed":
+		err = s.automationTargets.OnPullRequestClosed(ctx, *event.OwnerOrgID, repo, event.Number, event.PR.Merged, observedAt)
+	case "reopened":
+		err = s.automationTargets.OnPullRequestReopened(ctx, *event.OwnerOrgID, repo, event.Number, observedAt)
+	default:
+		return
+	}
+	if err != nil {
+		s.logger.Warn().Err(err).
+			Str("org_id", event.OwnerOrgID.String()).
+			Str("repository", repo).
+			Int("pull_request", event.Number).
+			Str("action", event.Action).
+			Msg("failed to apply a pull request lifecycle event to its automation targets")
+	}
+}
+
 // notifyAutomationTargetsClosed tells per-target continuity that this pull
 // request ended, so its waiting runs stop waiting and its session is handed
 // back. Best-effort: a failure is logged and the scheduler's sweeps still
@@ -3225,21 +3265,6 @@ func (s *PRService) notifyAutomationTargetsClosed(ctx context.Context, pr models
 			Int("pull_request", pr.GitHubPRNumber).
 			Bool("merged", merged).
 			Msg("failed to apply a closed pull request to its automation targets")
-	}
-}
-
-// notifyAutomationTargetsReopened puts the pull request's targets back to
-// open so the next trigger starts a fresh generation.
-func (s *PRService) notifyAutomationTargetsReopened(ctx context.Context, pr models.PullRequest, observedAt time.Time) {
-	if s.automationTargets == nil {
-		return
-	}
-	if err := s.automationTargets.OnPullRequestReopened(ctx, pr.OrgID, pr.GitHubRepo, pr.GitHubPRNumber, observedAt); err != nil {
-		s.logger.Warn().Err(err).
-			Str("org_id", pr.OrgID.String()).
-			Str("repository", pr.GitHubRepo).
-			Int("pull_request", pr.GitHubPRNumber).
-			Msg("failed to reopen the automation targets of a reopened pull request")
 	}
 }
 

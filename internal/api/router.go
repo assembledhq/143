@@ -785,6 +785,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		githubAutomationTriggerer.SetLabelResolver(prService)
 		githubAutomationTriggerer.SetTargetStores(db.NewAutomationTargetStore(pool), automationRunStore)
 		prService.SetAutomationEventTriggerer(githubAutomationTriggerer)
+		// The webhook path runs on this instance, so per-target continuity's
+		// lifecycle notification is wired here, not only on the worker's.
+		prService.SetAutomationTargetLifecycle(automations.NewTargetLifecycle(
+			pool,
+			db.NewAutomationTargetStore(pool),
+			automations.NewTurnCompleter(pool, automationRunStore, db.NewAutomationTargetStore(pool), jobStore, logger),
+			logger,
+		))
 		prService.SetSessionMessageStore(sessionMessageStore)
 		prService.SetSessionThreadStore(sessionThreadStore)
 		prService.SetSessionReviewLoopStore(reviewLoopStore)
