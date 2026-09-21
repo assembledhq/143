@@ -482,6 +482,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		llmClient,
 		logger,
 	)
+	// Per-target continuity (design doc 125): a session an automation
+	// generation owns accepts no human turn.
+	sessionHandler.SetAutomationOwnershipGuard(sessionStore)
 	sessionHandler.SetChangesetStore(sessionChangesetStore)
 	sessionHandler.SetPublicationStore(sessionPublicationStore)
 	sessionHandler.SetViewStore(sessionViewStore)
@@ -782,6 +785,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		githubAutomationTriggerer.SetLabelResolver(prService)
 		githubAutomationTriggerer.SetTargetStores(db.NewAutomationTargetStore(pool), automationRunStore)
 		prService.SetAutomationEventTriggerer(githubAutomationTriggerer)
+		// The webhook path runs on this instance, so per-target continuity's
+		// lifecycle notification is wired here, not only on the worker's.
+		prService.SetAutomationTargetLifecycle(automations.NewTargetLifecycle(
+			pool,
+			db.NewAutomationTargetStore(pool),
+			automations.NewTurnCompleter(pool, automationRunStore, db.NewAutomationTargetStore(pool), jobStore, logger),
+			logger,
+		))
 		prService.SetSessionMessageStore(sessionMessageStore)
 		prService.SetSessionThreadStore(sessionThreadStore)
 		prService.SetSessionReviewLoopStore(reviewLoopStore)
@@ -1015,6 +1026,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 	previewHandler.SetBrowserSessionService(preview.NewBrowserSessionService(previewBrowserSessionStore, browserInspector, previewManager))
 	branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prService, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
+	previewHandler.SetAutomationOwnershipGuard(sessionStore)
+	sessionReviewCommentHandler.SetAutomationOwnershipGuard(sessionStore)
 	previewHandler.SetAuditEmitter(auditEmitter)
 	branchPreviewHandler.SetAuditEmitter(auditEmitter)
 	previewHandler.SetJobStore(jobStore)

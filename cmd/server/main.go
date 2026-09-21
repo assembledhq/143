@@ -1853,6 +1853,9 @@ func buildServices(
 	automationTargetDispatcher.SetMaxSnapshotAge(cfg.SessionMaxSnapshotAge)
 	orchestrator.SetAutomationTurnStore(automations.NewTurnStore(pool, sessionStore, automationRunStore, db.NewAutomationTargetStore(pool), db.NewAutomationRunResultStore(pool), sessionMessageStore))
 	automationTurnCompleter := automations.NewTurnCompleter(pool, automationRunStore, db.NewAutomationTargetStore(pool), jobStore, logger)
+	if prService != nil {
+		prService.SetAutomationTargetLifecycle(automations.NewTargetLifecycle(pool, db.NewAutomationTargetStore(pool), automationTurnCompleter, logger))
+	}
 	svc := &worker.Services{
 		Orchestrator:      orchestrator,
 		PR:                prService,

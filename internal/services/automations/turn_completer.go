@@ -66,6 +66,7 @@ type CompletionResult struct {
 	Outcome           models.AutomationRunOutcomeReason
 	TargetID          uuid.UUID
 	GenerationRetired bool
+	RetiredReason     models.AutomationTargetRetiredReason
 }
 
 // WakeOutcome reports what Wake did for a target.
@@ -130,16 +131,29 @@ func (c *TurnCompleter) Complete(ctx context.Context, orgID, runID, jobID, lockT
 		return CompletionResult{}, nil
 	}
 	result := CompletionResult{Applied: true, Outcome: done.Outcome, TargetID: done.TargetID}
+	// An awaiting_input turn hands the session to a person; a turn that ran
+	// on a closed or merged pull request was the last one its generation
+	// will have, and the close could not retire it while this turn held the
+	// target (design doc 125, "Lifecycle Transitions": retired after the
+	// final turn).
+	retireReason := models.AutomationTargetRetiredReason("")
 	if done.RetireGeneration {
-		_, err := c.targets.RetireGeneration(ctx, tx, orgID, done.GenerationID, models.AutomationTargetRetiredAwaitingInput)
-		switch {
-		case errors.Is(err, db.ErrAutomationTargetGenerationNotActive):
-			// Already retired by a lifecycle transition; the completion
-			// itself applied the ownership release.
-		case err != nil:
+		retireReason = models.AutomationTargetRetiredAwaitingInput
+	} else {
+		lifecycleReason, err := c.targets.TerminalLifecycleRetirement(ctx, tx, orgID, done.TargetID)
+		if err != nil {
 			return CompletionResult{}, err
-		default:
+		}
+		retireReason = lifecycleReason
+	}
+	if retireReason != "" {
+		retired, err := c.retireGeneration(ctx, tx, orgID, done.GenerationID, retireReason)
+		if err != nil {
+			return CompletionResult{}, err
+		}
+		if retired {
 			result.GenerationRetired = true
+			result.RetiredReason = retireReason
 		}
 	}
 	if err := c.enqueueWake(ctx, tx, orgID, done.TargetID); err != nil {
@@ -154,8 +168,24 @@ func (c *TurnCompleter) Complete(ctx context.Context, orgID, runID, jobID, lockT
 		Str("target_id", done.TargetID.String()).
 		Str("outcome", string(done.Outcome)).
 		Bool("generation_retired", result.GenerationRetired).
+		Str("retired_reason", string(result.RetiredReason)).
 		Msg("completed per-target automation turn")
 	return result, nil
+}
+
+// retireGeneration retires a generation, treating an already-retired one as
+// success without a retirement: a lifecycle transition may have retired it
+// first, and this transaction's completion still applied the release.
+func (c *TurnCompleter) retireGeneration(ctx context.Context, tx pgx.Tx, orgID, generationID uuid.UUID, reason models.AutomationTargetRetiredReason) (bool, error) {
+	_, err := c.targets.RetireGeneration(ctx, tx, orgID, generationID, reason)
+	switch {
+	case errors.Is(err, db.ErrAutomationTargetGenerationNotActive):
+		return false, nil
+	case err != nil:
+		return false, err
+	default:
+		return true, nil
+	}
 }
 
 // FailRetriesExhausted records retries_exhausted on an abandoned executing
@@ -175,11 +205,22 @@ func (c *TurnCompleter) FailRetriesExhausted(ctx context.Context, orgID, runID u
 	if !done {
 		return false, nil
 	}
+	retiredReason, err := c.targets.RetireTerminalTarget(ctx, tx, orgID, targetID)
+	if err != nil {
+		return false, err
+	}
 	if err := c.enqueueWake(ctx, tx, orgID, targetID); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit retries exhausted: %w", err)
+	}
+	if retiredReason != "" {
+		c.logger.Info().
+			Str("org_id", orgID.String()).
+			Str("target_id", targetID.String()).
+			Str("retired_reason", string(retiredReason)).
+			Msg("retired the generation of a target whose pull request is gone")
 	}
 	c.logger.Warn().
 		Str("org_id", orgID.String()).
@@ -210,6 +251,12 @@ func (c *TurnCompleter) RecoverAbandonedRun(ctx context.Context, orgID, runID, j
 		return models.AutomationRunOutcomeRetriesExhausted, nil
 	}
 	return "", nil
+}
+
+// EnqueueWakeJob enqueues the target's wake job in the caller's
+// transaction, for a caller that has already written the wake outbox.
+func (c *TurnCompleter) EnqueueWakeJob(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID) error {
+	return c.enqueueWake(ctx, tx, orgID, targetID)
 }
 
 // EnqueueWake writes the wake outbox and enqueues the target's wake job in
@@ -438,6 +485,11 @@ func (c *TurnCompleter) failTimedOutWaits(ctx context.Context, orgID, targetID u
 	}
 	if failed == 0 {
 		return 0, nil
+	}
+	// The timed-out run can have been the last thing a closed or merged
+	// target had left to do.
+	if _, err := c.targets.RetireTerminalTarget(ctx, tx, orgID, targetID); err != nil {
+		return 0, err
 	}
 	if err := c.enqueueWake(ctx, tx, orgID, targetID); err != nil {
 		return 0, err
