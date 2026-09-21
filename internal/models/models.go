@@ -862,11 +862,16 @@ const (
 	SessionMessageSourceAgentTool        SessionMessageSource = "agent_tool"
 	SessionMessageSourceSystemAutoRepair SessionMessageSource = "system_auto_repair"
 	SessionMessageSourceGitHubPRFeedback SessionMessageSource = "github_pr_feedback"
+	// SessionMessageSourceAutomationTurn marks the visible user message the
+	// ownership transaction inserts for a per-target automation turn
+	// (design doc 125). The turn's prompt travels in the job payload; the
+	// message is the transcript's copy.
+	SessionMessageSourceAutomationTurn SessionMessageSource = "automation_turn"
 )
 
 func (s SessionMessageSource) Validate() error {
 	switch s {
-	case "", SessionMessageSourceAgentTool, SessionMessageSourceSystemAutoRepair, SessionMessageSourceGitHubPRFeedback:
+	case "", SessionMessageSourceAgentTool, SessionMessageSourceSystemAutoRepair, SessionMessageSourceGitHubPRFeedback, SessionMessageSourceAutomationTurn:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionMessageSource: %q", s)
@@ -889,6 +894,11 @@ type SessionMessage struct {
 	Source          SessionMessageSource   `db:"source" json:"source,omitempty"`
 	CreatedAt       time.Time              `db:"created_at" json:"created_at"`
 	ActivityPhaseID *uuid.UUID             `db:"activity_phase_id" json:"activity_phase_id,omitempty"`
+	// AutomationRunID attributes a per-target automation turn's user and
+	// assistant messages to the run that produced them (design doc 125). It
+	// is written at insert and read by usage rollups in SQL; message reads
+	// do not hydrate it.
+	AutomationRunID *uuid.UUID `db:"-" json:"automation_run_id,omitempty"`
 }
 
 // ThreadCreatedBySource identifies what or who created a session thread.
@@ -1085,6 +1095,7 @@ type LatestJobError struct {
 // Job type constants for async work queue items.
 const (
 	JobTypeAutomationRun                 = "automation_run"
+	JobTypeAutomationTargetWake          = "automation_target_wake"
 	JobTypeStartPreview                  = "start_preview"
 	JobTypeStartBranchPreview            = "start_branch_preview"
 	JobTypeAutoPreviewDeferred           = "auto_preview_deferred"

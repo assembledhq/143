@@ -1196,11 +1196,14 @@ func TestAutomationRunStore_ReapStuckRuns(t *testing.T) {
 	store := NewAutomationRunStore(mock)
 	orgID := uuid.New()
 
-	// The reaper MUST filter by org_id, status IN ('pending', 'running'), and
-	// triggered_at < cutoff. Regressions on the org_id filter would sweep
-	// across tenants; regressions on status/triggered_at would either reap
-	// healthy runs or fail to free saturated max_concurrent slots.
-	mock.ExpectExec(`UPDATE automation_runs\s+SET status = 'failed'.*org_id = @org_id.*status IN \('pending', 'running'\).*triggered_at < @cutoff`).
+	// The reaper MUST filter by org_id, status IN ('pending', 'running'),
+	// triggered_at < cutoff, and dispatch_state IS NULL. Regressions on the
+	// org_id filter would sweep across tenants; regressions on status or
+	// triggered_at would either reap healthy runs or fail to free saturated
+	// max_concurrent slots; a regression on dispatch_state would terminalize
+	// a per-target run without releasing its session, thread, or ownership
+	// (design doc 125 — the recovery sweep owns those runs).
+	mock.ExpectExec(`UPDATE automation_runs r\s+SET status = 'failed'.*org_id = @org_id.*status IN \('pending', 'running'\).*dispatch_state IS NULL.*triggered_at < @cutoff`).
 		WithArgs(anyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 4))
 

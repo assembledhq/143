@@ -184,6 +184,15 @@ func (s *AutomationStore) GetByID(ctx context.Context, orgID, automationID uuid.
 // LockByIDForUpdate returns an automation row locked for the caller's
 // transaction. Use this before making decisions that must serialize against
 // other writers for the same automation, such as max_concurrent checks.
+// GetByIDInTx is GetByID on the caller's transaction connection, for reads
+// that must not borrow a second pool connection while the transaction holds
+// locks.
+func (s *AutomationStore) GetByIDInTx(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID) (models.Automation, error) {
+	query := fmt.Sprintf(`SELECT %s FROM automations
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`, automationColumns)
+	return scanAutomation(tx.QueryRow(ctx, query, pgx.NamedArgs{"id": automationID, "org_id": orgID}))
+}
+
 func (s *AutomationStore) LockByIDForUpdate(ctx context.Context, tx pgx.Tx, orgID, automationID uuid.UUID) (models.Automation, error) {
 	query := fmt.Sprintf(`SELECT %s FROM automations
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
@@ -667,7 +676,7 @@ func NewAutomationRunStore(db TxStarter) *AutomationRunStore {
 // (design doc 125) appended to every run projection. The order must match
 // AutomationRunContinuityColumnNames and automationRunContinuityDests.
 const automationRunContinuityColumns = `target_id, target_generation, session_id, thread_id, turn_number,
-	github_action, pull_request_updated_at, head_epoch, head_resolution,
+	github_action, pull_request_updated_at, head_epoch, head_resolution, resolved_head_sha,
 	continuation_mode, continuation_reason, native_context, previous_head_sha, base_sha,
 	dispatch_state, wait_reason, wait_started_at, execution_started_at, job_id,
 	attempt, attempt_lock_token, attempt_started_at, superseded_by_run_id, outcome_reason,
@@ -680,7 +689,7 @@ const automationRunContinuityColumns = `target_id, target_generation, session_id
 // the joined session already produces a session_id column.
 var AutomationRunContinuityColumnNames = []string{
 	"target_id", "target_generation", "run_session_id", "thread_id", "turn_number",
-	"github_action", "pull_request_updated_at", "head_epoch", "head_resolution",
+	"github_action", "pull_request_updated_at", "head_epoch", "head_resolution", "resolved_head_sha",
 	"continuation_mode", "continuation_reason", "native_context", "previous_head_sha", "base_sha",
 	"dispatch_state", "wait_reason", "wait_started_at", "execution_started_at", "job_id",
 	"attempt", "attempt_lock_token", "attempt_started_at", "superseded_by_run_id", "outcome_reason",
@@ -690,7 +699,7 @@ var AutomationRunContinuityColumnNames = []string{
 // automationRunContinuityListColumns is automationRunContinuityColumns
 // qualified for the ListByAutomation projection.
 const automationRunContinuityListColumns = `ar.target_id, ar.target_generation, ar.session_id AS run_session_id, ar.thread_id, ar.turn_number,
-	ar.github_action, ar.pull_request_updated_at, ar.head_epoch, ar.head_resolution,
+	ar.github_action, ar.pull_request_updated_at, ar.head_epoch, ar.head_resolution, ar.resolved_head_sha,
 	ar.continuation_mode, ar.continuation_reason, ar.native_context, ar.previous_head_sha, ar.base_sha,
 	ar.dispatch_state, ar.wait_reason, ar.wait_started_at, ar.execution_started_at, ar.job_id,
 	ar.attempt, ar.attempt_lock_token, ar.attempt_started_at, ar.superseded_by_run_id, ar.outcome_reason,
@@ -699,7 +708,7 @@ const automationRunContinuityListColumns = `ar.target_id, ar.target_generation, 
 func automationRunContinuityDests(r *models.AutomationRun) []any {
 	return []any{
 		&r.TargetID, &r.TargetGeneration, &r.SessionID, &r.ThreadID, &r.TurnNumber,
-		&r.GitHubAction, &r.PullRequestUpdatedAt, &r.HeadEpoch, &r.HeadResolution,
+		&r.GitHubAction, &r.PullRequestUpdatedAt, &r.HeadEpoch, &r.HeadResolution, &r.ResolvedHeadSHA,
 		&r.ContinuationMode, &r.ContinuationReason, &r.NativeContext, &r.PreviousHeadSHA, &r.BaseSHA,
 		&r.DispatchState, &r.WaitReason, &r.WaitStartedAt, &r.ExecutionStartedAt, &r.JobID,
 		&r.Attempt, &r.AttemptLockToken, &r.AttemptStartedAt, &r.SupersededByRunID, &r.OutcomeReason,
@@ -1433,14 +1442,23 @@ func (s *AutomationRunStore) GetStats(ctx context.Context, orgID, automationID u
 func (s *AutomationRunStore) ReapStuckRuns(ctx context.Context, orgID uuid.UUID, threshold time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-threshold)
 	summary := "run exceeded execution timeout; marked failed by reaper"
-	query := `UPDATE automation_runs
+	// Per-target runs (design doc 125) are exempt from this reaper. A
+	// waiting run is not stuck: it is queued behind its target and has its
+	// own two-hour wait timeout. An executing run owns a session, a thread,
+	// and possibly the target's ownership release, so terminalizing the run
+	// row alone would strand all three; the recovery sweep settles those
+	// from the result marker or as retries_exhausted, releasing what the
+	// run holds. This query therefore reaps only runs that never entered
+	// per-target dispatch.
+	query := `UPDATE automation_runs r
 		SET status = 'failed',
 		    completed_at = now(),
 		    result_summary = @summary,
 		    updated_at = now()
-		WHERE org_id = @org_id
-		  AND status IN ('pending', 'running')
-		  AND triggered_at < @cutoff`
+		WHERE r.org_id = @org_id
+		  AND r.status IN ('pending', 'running')
+		  AND r.dispatch_state IS NULL
+		  AND r.triggered_at < @cutoff`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":  orgID,
 		"summary": summary,

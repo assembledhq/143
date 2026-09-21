@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
+	automationservice "github.com/assembledhq/143/internal/services/automations"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/assembledhq/143/internal/services/externalidentity"
 	"github.com/assembledhq/143/internal/services/feedback"
@@ -189,6 +191,11 @@ func registerStaleSandboxDeadLetter(ctx context.Context, stores *Stores, logger 
 	if stores == nil || stores.Sessions == nil {
 		return
 	}
+	if agent.AutomationTurnFromContext(ctx) != nil {
+		// An owned session is settled by the completer's dead-letter path
+		// (retries_exhausted returns it to idle), not marked failed.
+		return
+	}
 	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
 		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
 		defer cancel()
@@ -248,6 +255,11 @@ func registerStaleSandboxDeadLetter(ctx context.Context, stores *Stores, logger 
 
 func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
 	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	if agent.AutomationTurnFromContext(ctx) != nil {
+		// An owned session is settled by the completer's dead-letter path
+		// (retries_exhausted returns it to idle), not marked failed.
 		return
 	}
 	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
@@ -343,6 +355,11 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 // ~2.5h later — exactly the orphan the reaper's phase-0.5 comment describes.
 func registerSystemInterruptDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
 	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	if agent.AutomationTurnFromContext(ctx) != nil {
+		// An owned session is settled by the completer's dead-letter path
+		// (retries_exhausted returns it to idle), not marked failed.
 		return
 	}
 	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
@@ -459,6 +476,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	}
 	if stores.Automations != nil && stores.AutomationRuns != nil {
 		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
+		w.Register(models.JobTypeAutomationTargetWake, newAutomationTargetWakeHandler(services, logger))
 	}
 	if stores.CodeReviews != nil {
 		w.Register(models.JobTypeRunCodeReview, newRunCodeReviewHandler(stores, services, logger))
@@ -650,8 +668,9 @@ type Stores struct {
 	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
 	SandboxHolders      *db.SessionSandboxHolderStore   // nil-safe: snapshot quiescence for shared sandbox thread runtimes
 	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
-	Automations         *db.AutomationStore    // nil-safe: automations feature disabled if nil
-	AutomationRuns      *db.AutomationRunStore // nil-safe: automations feature disabled if nil
+	Automations         *db.AutomationStore       // nil-safe: automations feature disabled if nil
+	AutomationRuns      *db.AutomationRunStore    // nil-safe: automations feature disabled if nil
+	AutomationTargets   *db.AutomationTargetStore // nil-safe: per-target continuity disabled if nil
 	ReviewLoops         *db.SessionReviewLoopStore
 	CodeReviews         *db.CodeReviewStore
 	CodeReviewDisputes  *db.CodeReviewDisputeStore
@@ -869,6 +888,8 @@ type Services struct {
 	SandboxProvider            agent.SandboxProvider
 	ProjectTasks               agent.ProjectTaskUpdater   // nil-safe: updates project tasks on terminal session fallback paths
 	AutomationRuns             agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
+	AutomationTargets          automationTargetDispatcher // nil-safe: per-target continuity dispatch disabled if nil
+	AutomationTurns            automationTurnCompleter    // nil-safe: per-target completion, recovery, and wake disabled if nil
 	Prioritization             *prioritization.Service
 	Feedback                   *feedback.Service
 	Memory                     MemoryReinforcer                               // optional — enables memory reinforcement on PR approval
@@ -2373,20 +2394,6 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			return nil
 		}
 
-		// Atomic claim: pending → running. Performed BEFORE session creation
-		// so a duplicate worker that loses the race never reaches the Sessions
-		// or Jobs stores at all. Once we own the row (transitioned=true), any
-		// later failure path uses TransitionStatusIf(running → ...) so we
-		// don't accidentally overwrite a status another path already wrote.
-		transitioned, err := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusRunning, nil, nil)
-		if err != nil {
-			return fmt.Errorf("transition run to running: %w", err)
-		}
-		if !transitioned {
-			log.Info().Msg("skipping automation_run: lost race claiming pending row")
-			return nil
-		}
-
 		agentType := models.DefaultDefaultAgentType
 		if automation.AgentType != nil && *automation.AgentType != "" {
 			candidate := models.AgentType(*automation.AgentType)
@@ -2421,7 +2428,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			now := time.Now()
 			summary := err.Error()
-			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusRunning, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
+			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
 				log.Error().Err(updateErr).Msg("failed to mark run failed after automation prompt seed error")
 				return fmt.Errorf("mark run failed after automation prompt seed error: %w", updateErr)
 			}
@@ -2443,6 +2450,44 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			ExecutionBrief:     &goalSeed,
 			CapabilitySnapshot: run.CapabilitySnapshot,
 		}
+
+		// Per-target continuity (design doc 125): runs attached to a target
+		// go through the ownership transaction, which reserves the run,
+		// claims or creates the pull request's owned session, and enqueues
+		// the turn itself. Precedence: worker kill switch, then the
+		// automation row's current continuity mode, then the run's target.
+		if services != nil && services.AutomationTargets != nil {
+			dispatchInput := automationservice.DispatchInput{
+				Run:             run,
+				Automation:      automation,
+				SessionTemplate: session,
+				KillSwitch:      automationContinuityDisabled(),
+			}
+			if services.AutomationTargets.Applies(dispatchInput) {
+				handled, dispatchErr := dispatchAutomationTargetRun(ctx, services, log, dispatchInput)
+				if handled || dispatchErr != nil {
+					return dispatchErr
+				}
+			}
+		}
+
+		// Atomic claim: pending → running. Performed BEFORE session creation
+		// so a duplicate worker that loses the race never reaches the Sessions
+		// or Jobs stores at all. The claim also clears any per-target waiting
+		// bookkeeping a run picked up before it fell back to this path, so
+		// the turn's attempt fence treats it as an ordinary per-run run. Once
+		// we own the row (transitioned=true), any later failure path uses
+		// TransitionStatusIf(running → ...) so we don't accidentally
+		// overwrite a status another path already wrote.
+		transitioned, err := stores.AutomationRuns.ClaimPendingForPerRun(ctx, orgID, runID)
+		if err != nil {
+			return fmt.Errorf("transition run to running: %w", err)
+		}
+		if !transitioned {
+			log.Info().Msg("skipping automation_run: lost race claiming pending row")
+			return nil
+		}
+
 		if err := stores.Sessions.Create(ctx, session); err != nil {
 			// Session creation failed after we claimed the row — flip
 			// running → failed so the UI reflects the dispatch failure
@@ -8242,9 +8287,38 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			OrgID               string `json:"org_id"`
 			ThreadID            string `json:"thread_id"`
 			HumanInputRequestID string `json:"human_input_request_id"`
+			// Per-target automation turn fields, produced by
+			// automationservice.AutomationTurnJobPayload for a fresh
+			// generation's first turn (design doc 125).
+			AutomationRunID   string `json:"automation_run_id"`
+			TargetGeneration  int    `json:"target_generation"`
+			ContinuationMode  string `json:"continuation_mode"`
+			HeadSHA           string `json:"head_sha"`
+			PullRequestNumber int    `json:"pull_request_number"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal run_agent payload: %w", err)
+		}
+		var automationTurn *agent.AutomationTurnContinueOptions
+		if input.AutomationRunID != "" {
+			parsedRunID, parseErr := uuid.Parse(input.AutomationRunID)
+			if parseErr != nil {
+				return fmt.Errorf("parse automation run ID: %w", parseErr)
+			}
+			mode := models.AutomationRunContinuationMode(input.ContinuationMode)
+			if mode == "" {
+				mode = models.AutomationRunContinuationFresh
+			}
+			if err := mode.Validate(); err != nil {
+				return err
+			}
+			automationTurn = &agent.AutomationTurnContinueOptions{
+				RunID:             parsedRunID,
+				TargetGeneration:  input.TargetGeneration,
+				PullRequestNumber: input.PullRequestNumber,
+				HeadSHA:           input.HeadSHA,
+				ContinuationMode:  mode,
+			}
 		}
 
 		orgID, err := parseOrgID(input.OrgID, ctx)
@@ -8308,6 +8382,30 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		if err := maybeDispatchSessionExecutor(ctx, services, jobType, run, run.PrimaryThreadID); err != nil {
 			return err
 		}
+		// A fresh per-target automation turn executes under an attempt claim
+		// validated against this job's lease (design doc 125). The payload's
+		// run is authoritative; the session's origin run is the fallback for
+		// legacy per-run sessions.
+		claimRunID := run.AutomationRunID
+		if automationTurn != nil {
+			claimRunID = &automationTurn.RunID
+		}
+		if claimRunID != nil {
+			owned, claimErr := claimAutomationTurnAttempt(ctx, stores, services, logger, orgID, *claimRunID)
+			if claimErr != nil {
+				return claimErr
+			}
+			if !owned {
+				return nil
+			}
+		}
+		if automationTurn != nil {
+			// The turn rides on the handler context so the dead-letter hooks
+			// registered below know an owned session is settled by the
+			// completer, not by the session-failure hooks.
+			ctx = agent.WithAutomationTurn(ctx, automationTurn)
+			registerAutomationTurnDeadLetter(ctx, services, logger, orgID, automationTurn.RunID)
+		}
 
 		// Apply the per-session wall-clock timeout at the handler boundary so
 		// the orchestrator exits cleanly when a container is killed or
@@ -8318,6 +8416,9 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		runtimeCeiling := services.Orchestrator.ResolveAbsoluteRuntimeCeiling(ctx, orgID)
 		jobCtx, cancel := context.WithTimeout(ctx, runtimeCeiling+agent.HandlerCleanupBuffer)
 		defer cancel()
+		if automationTurn != nil {
+			jobCtx = agent.WithAutomationTurn(jobCtx, automationTurn)
+		}
 
 		logger.Info().
 			Str("session_id", runID.String()).
@@ -8335,6 +8436,22 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			runErr = services.Orchestrator.RecoverSession(jobCtx, &run)
 		default:
 			runErr = services.Orchestrator.RunAgent(jobCtx, &run)
+		}
+		if automationTurn != nil {
+			// A result marker means the attempt ended, whatever the
+			// orchestrator returned; the completion is the run's terminal
+			// record and the job is done. Without a marker the error mapping
+			// below decides whether the attempt retries.
+			completed, completeErr := completeAutomationTurn(ctx, services, logger, orgID, automationTurn.RunID)
+			if completeErr != nil {
+				return completeErr
+			}
+			if completed {
+				if runErr != nil {
+					logger.Info().Err(runErr).Str("run_id", automationTurn.RunID.String()).Msg("per-target automation turn ended with an error; its result completed the run")
+				}
+				return nil
+			}
 		}
 		if err := runErr; err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacity) {
@@ -9577,29 +9694,40 @@ func finalizeThreadCancellationIfRequested(
 }
 
 // continue_session handler continues a multi-turn session with a follow-up message.
+// continueSessionJobInput is the continue_session job payload as the worker
+// decodes it. Per-target automation turns are produced by
+// automationservice.AutomationTurnJobPayload; the two must agree on field
+// names and types (see TestAutomationTurnJobPayloadContract).
+type continueSessionJobInput struct {
+	SessionID              string `json:"session_id"`
+	OrgID                  string `json:"org_id"`
+	ThreadID               string `json:"thread_id"`
+	ChangesetID            string `json:"changeset_id"`
+	ChangesetLeaseHolderID string `json:"changeset_lease_holder_id"`
+	PullRequestID          string `json:"pull_request_id"`
+	FeedbackBatchID        string `json:"feedback_batch_id"`
+	StructuredPrompt       string `json:"structured_prompt"`
+	RepairRunID            string `json:"repair_run_id"`
+	CommandType            string `json:"command_type"`
+	HealthVersion          int64  `json:"health_version"`
+	HeadSHA                string `json:"head_sha"`
+	WorkspaceMode          string `json:"workspace_mode"`
+	PullRequestNumber      int    `json:"pull_request_number"`
+	AutoAttempt            bool   `json:"auto_attempt"`
+	HumanInputRequestID    string `json:"human_input_request_id"`
+	QueuedMessageID        string `json:"queued_message_id"`
+	PostSuccessAction      string `json:"post_success_action"`
+	PostSuccessAuthorMode  string `json:"post_success_author_mode"`
+	// Per-target automation turns (design doc 125); the producer is
+	// automationservice.AutomationTurnJobPayload.
+	AutomationRunID  string `json:"automation_run_id"`
+	TargetGeneration int    `json:"target_generation"`
+	ContinuationMode string `json:"continuation_mode"`
+}
+
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			SessionID              string `json:"session_id"`
-			OrgID                  string `json:"org_id"`
-			ThreadID               string `json:"thread_id"`
-			ChangesetID            string `json:"changeset_id"`
-			ChangesetLeaseHolderID string `json:"changeset_lease_holder_id"`
-			PullRequestID          string `json:"pull_request_id"`
-			FeedbackBatchID        string `json:"feedback_batch_id"`
-			StructuredPrompt       string `json:"structured_prompt"`
-			RepairRunID            string `json:"repair_run_id"`
-			CommandType            string `json:"command_type"`
-			HealthVersion          int64  `json:"health_version"`
-			HeadSHA                string `json:"head_sha"`
-			WorkspaceMode          string `json:"workspace_mode"`
-			PullRequestNumber      int    `json:"pull_request_number"`
-			AutoAttempt            bool   `json:"auto_attempt"`
-			HumanInputRequestID    string `json:"human_input_request_id"`
-			QueuedMessageID        string `json:"queued_message_id"`
-			PostSuccessAction      string `json:"post_success_action"`
-			PostSuccessAuthorMode  string `json:"post_success_author_mode"`
-		}
+		var input continueSessionJobInput
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
 		}
@@ -9753,6 +9881,37 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				},
 			}
 		}
+		var automationRunID *uuid.UUID
+		if input.AutomationRunID != "" {
+			parsedRunID, parseErr := uuid.Parse(input.AutomationRunID)
+			if parseErr != nil {
+				return fmt.Errorf("parse automation run ID: %w", parseErr)
+			}
+			if continueOpts != nil {
+				return errors.New("continue_session cannot combine an automation turn with PR repair or PR feedback")
+			}
+			if strings.TrimSpace(input.StructuredPrompt) == "" {
+				return errors.New("automation turn continuation requires structured_prompt")
+			}
+			generation := input.TargetGeneration
+			mode := models.AutomationRunContinuationMode(input.ContinuationMode)
+			if mode != "" {
+				if err := mode.Validate(); err != nil {
+					return err
+				}
+			}
+			automationRunID = &parsedRunID
+			continueOpts = &agent.ContinueSessionOptions{
+				AutomationTurn: &agent.AutomationTurnContinueOptions{
+					RunID:             parsedRunID,
+					TargetGeneration:  generation,
+					PullRequestNumber: input.PullRequestNumber,
+					HeadSHA:           input.HeadSHA,
+					ContinuationMode:  mode,
+					StructuredPrompt:  input.StructuredPrompt,
+				},
+			}
+		}
 		if input.ThreadID != "" && stores.SessionThreads != nil {
 			parsedThreadID, parseErr := uuid.Parse(input.ThreadID)
 			if parseErr != nil {
@@ -9814,11 +9973,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				if continueOpts != nil {
 					threadOpts.PRRepair = continueOpts.PRRepair
 					threadOpts.PRFeedback = continueOpts.PRFeedback
+					threadOpts.AutomationTurn = continueOpts.AutomationTurn
 				}
 				continueOpts = threadOpts
 			}
 		}
-		isSystemContinuation := continueOpts != nil && (continueOpts.PRRepair != nil || continueOpts.PRFeedback != nil)
+		isSystemContinuation := continueOpts != nil && (continueOpts.PRRepair != nil || continueOpts.PRFeedback != nil || continueOpts.AutomationTurn != nil)
 		if humanInputRequestID == nil && queuedMessageID != nil && !isSystemContinuation {
 			answeredID, answerErr := answerQueuedHumanInputForContinue(ctx, stores, orgID, sessionID, threadID, hasThread, *queuedMessageID, logger)
 			if answerErr != nil {
@@ -9895,8 +10055,45 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		if err := maybeDispatchSessionExecutor(ctx, services, jobType, session, dispatchThreadID); err != nil {
 			return err
 		}
+		// A per-target automation turn executes under an attempt claim
+		// validated against this job's lease (design doc 125); a worker whose
+		// job was reclaimed never runs the turn.
+		if automationRunID != nil {
+			owned, claimErr := claimAutomationTurnAttempt(ctx, stores, services, logger, orgID, *automationRunID)
+			if claimErr != nil {
+				return claimErr
+			}
+			if !owned {
+				return nil
+			}
+			// See newRunAgentHandler: the turn on the handler context tells
+			// the session-failure dead-letter hooks to stand down.
+			ctx = agent.WithAutomationTurn(ctx, continueOpts.AutomationTurn)
+			registerAutomationTurnDeadLetter(ctx, services, logger, orgID, *automationRunID)
+		}
 
-		if err := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts); err != nil {
+		if continueOpts != nil && continueOpts.AutomationTurn != nil {
+			// The turn rides on the context as well so recovery paths that
+			// re-enter ContinueSession without options keep it.
+			jobCtx = agent.WithAutomationTurn(jobCtx, continueOpts.AutomationTurn)
+		}
+		continueErr := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts)
+		if automationRunID != nil && continueErr != nil {
+			// The attempt ended even though the orchestrator returned an
+			// error, so its result is the run's terminal record and the job
+			// is done. The completion releases the primary thread from the
+			// marker's own turn number, which the error paths below do not
+			// do for an owned session.
+			completed, completeErr := completeAutomationTurn(ctx, services, logger, orgID, *automationRunID)
+			if completeErr != nil {
+				return completeErr
+			}
+			if completed {
+				logger.Info().Err(continueErr).Str("run_id", automationRunID.String()).Msg("per-target automation turn ended with an error; its result completed the run")
+				return nil
+			}
+		}
+		if err := continueErr; err != nil {
 			cancellationError := errors.Is(err, agent.ErrSessionCancelled) ||
 				errors.Is(err, agent.ErrThreadCancelledBeforeWorkspaceReady) ||
 				errors.Is(context.Cause(jobCtx), agent.ErrUserCancelCause)
@@ -10082,7 +10279,11 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Msg("duplicate continue_session job lost sandbox-hold race; dead-lettering silently — winner retains the session row")
 				return &FatalError{Err: err}
 			}
-			if hasThread && !errors.Is(err, agent.ErrSessionCancelled) {
+			// A per-target turn's thread is released by its completion or,
+			// when the attempt was lost, by the recovery that takes the
+			// attempt away; an unfenced write here could idle a thread a
+			// later turn is already running on.
+			if hasThread && automationRunID == nil && !errors.Is(err, agent.ErrSessionCancelled) {
 				// Detached context: this cleanup must land even when ctx was
 				// cancelled by worker drain mid-shutdown. Otherwise the
 				// thread is stuck in 'running' and the UI shows an orphaned
@@ -10176,7 +10377,9 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					ResultSummary: summaryPtr,
 					Diff:          diffPtr,
 				}
-				if err := stores.SessionThreads.UpdateTurnComplete(ctx, orgID, threadID, threadTurnBefore+1, threadResult, resultAgentSessionID); err != nil {
+				if automationRunID != nil {
+					completeAutomationThreadTurn(ctx, stores, logger, orgID, *automationRunID, threadID, threadTurnBefore+1, threadResult, resultAgentSessionID)
+				} else if err := stores.SessionThreads.UpdateTurnComplete(ctx, orgID, threadID, threadTurnBefore+1, threadResult, resultAgentSessionID); err != nil {
 					logger.Warn().Err(err).
 						Str("session_id", sessionID.String()).
 						Str("thread_id", threadID.String()).
@@ -10206,6 +10409,8 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						cancelRecovery()
 					}
 				}
+			} else if automationRunID != nil {
+				completeAutomationThreadTurn(ctx, stores, logger, orgID, *automationRunID, threadID, threadTurnBefore+1, nil, resultAgentSessionID)
 			} else {
 				if err := stores.SessionThreads.CompleteTurn(ctx, orgID, threadID, threadTurnBefore+1, resultAgentSessionID); err != nil {
 					logger.Warn().Err(err).
@@ -10213,6 +10418,17 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						Str("thread_id", threadID.String()).
 						Msg("failed to mark session thread turn complete")
 				}
+			}
+		}
+
+		// The per-target run is completed after the thread write, so the
+		// target is never freed for its next waiter while this turn's
+		// primary thread is still running. A completion failure retries the
+		// job, and the retry completes from the marker without re-running
+		// the turn.
+		if automationRunID != nil {
+			if _, completeErr := completeAutomationTurn(ctx, services, logger, orgID, *automationRunID); completeErr != nil {
+				return completeErr
 			}
 		}
 
@@ -13918,3 +14134,320 @@ func disableGitHubOrgAutoJoinAfterPermissionLoss(ctx context.Context, stores *St
 		Msg("disabled github org auto-join after GitHub returned 403 for roster sync")
 	return nil
 }
+
+// automationTargetDispatcher runs the per-target ownership transaction for
+// runs of automations with session_continuity = per_target (design doc 125).
+type automationTargetDispatcher interface {
+	Applies(in automationservice.DispatchInput) bool
+	Dispatch(ctx context.Context, in automationservice.DispatchInput) (automationservice.DispatchOutcome, error)
+}
+
+// automationTurnCompleter completes per-target runs from their result
+// markers, settles runs whose job died, and wakes targets (design doc 125).
+type automationTurnCompleter interface {
+	Complete(ctx context.Context, orgID, runID, jobID, lockToken uuid.UUID) (automationservice.CompletionResult, error)
+	RecoverAbandonedRun(ctx context.Context, orgID, runID, jobID uuid.UUID, staleBefore time.Time) (models.AutomationRunOutcomeReason, error)
+	Wake(ctx context.Context, orgID, targetID uuid.UUID) (automationservice.WakeOutcome, error)
+}
+
+// automationContinuityKillSwitchEnv forces every automation run onto a fresh
+// per-run session while leaving target rows untouched, so continuity can be
+// switched off without editing automations.
+const automationContinuityKillSwitchEnv = "AUTOMATION_SESSION_CONTINUITY_DISABLED"
+
+func automationContinuityDisabled() bool {
+	value := strings.TrimSpace(os.Getenv(automationContinuityKillSwitchEnv))
+	return value == "1" || strings.EqualFold(value, "true")
+}
+
+// claimAutomationTurnAttempt starts a new attempt of an executing per-target
+// run under the current job lease. It returns false when the run is not a
+// per-target run executing under this job, or when the lease is not ours,
+// in which case the caller must not run the turn. A retry that finds a
+// result marker for the run's current attempt completes the run from it
+// under this job's live lease instead of claiming a new attempt (design doc
+// 125, "Retry and recovery"), and also returns false: the turn already
+// ended.
+func claimAutomationTurnAttempt(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, runID uuid.UUID) (bool, error) {
+	if stores == nil || stores.AutomationRuns == nil || stores.ThreadSendTx == nil {
+		return true, nil
+	}
+	jobID, hasJob := jobctx.JobIDFromContext(ctx)
+	lockToken, hasToken := jobctx.LockTokenFromContext(ctx)
+	if !hasJob || !hasToken {
+		return true, nil
+	}
+	run, err := stores.AutomationRuns.GetByRunID(ctx, orgID, runID)
+	if err != nil {
+		return false, fmt.Errorf("load automation run for attempt claim: %w", err)
+	}
+	if run.DispatchState == nil {
+		// No reservation to fence against: a legacy per-run session, or a
+		// per-run fallback (kill switch, per_run mode) whose run was claimed
+		// by the ordinary pending-to-running transition.
+		return true, nil
+	}
+	if *run.DispatchState != models.AutomationRunDispatchExecuting || run.JobID == nil {
+		logger.Warn().
+			Str("run_id", runID.String()).
+			Str("job_id", jobID.String()).
+			Str("dispatch_state", string(*run.DispatchState)).
+			Msg("automation turn job found its reserved run not executing; skipping")
+		return false, nil
+	}
+	if *run.JobID != jobID {
+		logger.Warn().
+			Str("run_id", runID.String()).
+			Str("job_id", jobID.String()).
+			Str("reserved_job_id", run.JobID.String()).
+			Msg("automation turn job does not match the run's reservation; skipping")
+		return false, nil
+	}
+	hasMarker, err := stores.AutomationRuns.HasResultForCurrentAttempt(ctx, orgID, runID)
+	if err != nil {
+		return false, fmt.Errorf("check automation run result before attempt claim: %w", err)
+	}
+	if hasMarker {
+		if services == nil || services.AutomationTurns == nil {
+			return false, fmt.Errorf("automation run %s has a result for its current attempt but no completer is configured", runID)
+		}
+		completed, err := services.AutomationTurns.Complete(ctx, orgID, runID, jobID, lockToken)
+		if err != nil {
+			retryAfter := 2 * time.Second
+			return false, &RetryableError{Err: fmt.Errorf("complete automation turn from its result on retry: %w", err), RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
+		}
+		logger.Info().
+			Str("run_id", runID.String()).
+			Bool("applied", completed.Applied).
+			Str("outcome", string(completed.Outcome)).
+			Msg("automation turn retry found a result for the current attempt; completed without a new attempt")
+		return false, nil
+	}
+	tx, err := stores.ThreadSendTx.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin automation attempt claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	attempt, owned, err := stores.AutomationRuns.ClaimAttempt(ctx, tx, orgID, runID, jobID, lockToken)
+	if err != nil {
+		return false, err
+	}
+	if !owned {
+		logger.Warn().Str("run_id", runID.String()).Msg("automation turn attempt claim rejected: job lease is not ours")
+		return false, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit automation attempt claim: %w", err)
+	}
+	logger.Info().Str("run_id", runID.String()).Int("attempt", attempt).Msg("claimed automation turn attempt")
+	return true, nil
+}
+
+// dispatchAutomationTargetRun runs the per-target ownership transaction and
+// maps its outcome onto the job. A reserved or terminalized run finishes
+// the job (the turn's own job carries the run from here). A waiting run
+// keeps this job alive with a slow poll, without spending its attempt
+// budget, until the target frees or the wait times out; the wake job will
+// make this poll redundant once it lands. An undecidable run retries with
+// the dispatcher's backoff and bound. A run the dispatcher no longer
+// considers per-target reports handled=false so the caller runs the
+// ordinary per-run path.
+func dispatchAutomationTargetRun(ctx context.Context, services *Services, log zerolog.Logger, in automationservice.DispatchInput) (bool, error) {
+	outcome, err := services.AutomationTargets.Dispatch(ctx, in)
+	if err != nil {
+		return true, fmt.Errorf("dispatch per-target automation run: %w", err)
+	}
+	event := log.Info().Str("dispatch", string(outcome.Kind))
+	if outcome.Note != "" {
+		event = event.Str("note", outcome.Note)
+	}
+	switch outcome.Kind {
+	case automationservice.DispatchNotApplicable:
+		event.Msg("per-target automation run falls back to the per-run path")
+		return false, nil
+	case automationservice.DispatchReserved:
+		event.
+			Str("session_id", outcome.SessionID.String()).
+			Str("thread_id", outcome.ThreadID.String()).
+			Str("job_id", outcome.JobID.String()).
+			Str("continuation_mode", string(outcome.ContinuationMode)).
+			Msg("per-target automation turn dispatched")
+		return true, nil
+	case automationservice.DispatchWaiting:
+		event.Msg("per-target automation run is waiting for its target")
+		retryAfter := automationWaitingPollInterval
+		maxWait := automationWaitingPollWindow
+		return true, &RetryableError{Err: fmt.Errorf("automation run waiting: %s", outcome.Note), RetryAfter: &retryAfter, MaxRetryDuration: &maxWait}
+	case automationservice.DispatchRetry:
+		// The worker's retry window is anchored at the job's first retry, so
+		// every deferral shares the wait window rather than switching to a
+		// shorter one that would already be exhausted.
+		event.Dur("retry_after", outcome.RetryAfter).Msg("per-target automation run not decidable yet; retrying")
+		retryAfter := outcome.RetryAfter
+		maxWait := automationWaitingPollWindow
+		return true, &RetryableError{Err: fmt.Errorf("automation run undecidable: %s", outcome.Note), RetryAfter: &retryAfter, MaxRetryDuration: &maxWait}
+	default:
+		event.Msg("per-target automation run handled")
+		return true, nil
+	}
+}
+
+// registerAutomationTurnDeadLetter settles a per-target run when its job
+// dead-letters: a result marker for the current attempt completes the run,
+// otherwise it fails with retries_exhausted and the owned session returns
+// to idle. The scheduler's sweep does the same for a worker that died
+// before the hook ran.
+func registerAutomationTurnDeadLetter(ctx context.Context, services *Services, logger zerolog.Logger, orgID, runID uuid.UUID) {
+	if services == nil || services.AutomationTurns == nil {
+		return
+	}
+	jobID, ok := jobctx.JobIDFromContext(ctx)
+	if !ok {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+		// The job is terminal by the time this hook runs, so the attempt is
+		// over whatever its age; the stale-attempt bound only matters to the
+		// sweep, which settles runs whose worker died without dead-lettering.
+		outcome, err := services.AutomationTurns.RecoverAbandonedRun(writeCtx, orgID, runID, jobID, time.Now())
+		if err != nil {
+			logger.Error().Err(err).
+				Str("run_id", runID.String()).
+				Str("job_id", jobID.String()).
+				Msg("failed to settle per-target automation run after dead-letter; the scheduler sweep will retry")
+			return
+		}
+		logger.Warn().
+			AnErr("dead_letter_error", deadLetterErr).
+			Str("run_id", runID.String()).
+			Str("job_id", jobID.String()).
+			Str("outcome", string(outcome)).
+			Msg("per-target automation run settled after dead-letter")
+	})
+}
+
+// completeAutomationThreadTurn writes a per-target turn's thread result
+// under the attempt fence, so a worker that paused past its lease cannot
+// overwrite a thread another run has since claimed. A fenced-out write is
+// not an error: the completer's own release already left the thread in the
+// state the winning turn expects.
+func completeAutomationThreadTurn(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, runID, threadID uuid.UUID, turn int, result *models.SessionResult, agentSessionID string) {
+	if stores == nil || stores.AutomationRuns == nil || stores.ThreadSendTx == nil {
+		return
+	}
+	lockToken, hasToken := jobctx.LockTokenFromContext(ctx)
+	if !hasToken {
+		return
+	}
+	tx, err := stores.ThreadSendTx.Begin(ctx)
+	if err != nil {
+		logger.Warn().Err(err).Str("run_id", runID.String()).Msg("failed to begin the automation turn thread write")
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	written, err := stores.AutomationRuns.CompleteThreadTurnForAttempt(ctx, tx, orgID, runID, lockToken, threadID, turn, result, agentSessionID)
+	if err == nil && written {
+		err = tx.Commit(ctx)
+	}
+	if err != nil {
+		logger.Warn().Err(err).
+			Str("run_id", runID.String()).
+			Str("thread_id", threadID.String()).
+			Msg("failed to persist automation turn thread result")
+		return
+	}
+	if !written {
+		logger.Warn().
+			Str("run_id", runID.String()).
+			Str("thread_id", threadID.String()).
+			Msg("automation turn thread result was fenced out: the attempt is no longer ours")
+	}
+}
+
+// completeAutomationTurn records the run's terminal state from the result
+// marker the orchestrator wrote for this attempt, under this job's lease.
+// It reports whether a completion was applied. A completion failure is
+// returned as a retryable error so the retry path completes from the
+// marker without running another attempt; the marker itself committed
+// with the attempt's end.
+func completeAutomationTurn(ctx context.Context, services *Services, logger zerolog.Logger, orgID, runID uuid.UUID) (bool, error) {
+	if services == nil || services.AutomationTurns == nil {
+		return false, nil
+	}
+	jobID, hasJob := jobctx.JobIDFromContext(ctx)
+	lockToken, hasToken := jobctx.LockTokenFromContext(ctx)
+	if !hasJob || !hasToken {
+		return false, nil
+	}
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	completed, err := services.AutomationTurns.Complete(writeCtx, orgID, runID, jobID, lockToken)
+	if err != nil {
+		retryAfter := 2 * time.Second
+		return false, &RetryableError{Err: fmt.Errorf("complete automation turn: %w", err), RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
+	}
+	if !completed.Applied {
+		return false, nil
+	}
+	logger.Info().
+		Str("run_id", runID.String()).
+		Str("target_id", completed.TargetID.String()).
+		Str("outcome", string(completed.Outcome)).
+		Bool("generation_retired", completed.GenerationRetired).
+		Msg("per-target automation turn completed")
+	return true, nil
+}
+
+// newAutomationTargetWakeHandler runs the wake for one target: the next
+// waiter's automation_run job is made runnable now (design doc 125,
+// "Target Wake-up"). A wake request that arrived while this one ran is
+// served by running the job again.
+func newAutomationTargetWakeHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input automationservice.AutomationTargetWakePayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal automation_target_wake payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		targetID, err := uuid.Parse(input.TargetID)
+		if err != nil {
+			return fmt.Errorf("parse target ID: %w", err)
+		}
+		if services == nil || services.AutomationTurns == nil {
+			return nil
+		}
+		log := logger.With().Str("org_id", orgID.String()).Str("target_id", targetID.String()).Logger()
+		outcome, err := services.AutomationTurns.Wake(ctx, orgID, targetID)
+		if errors.Is(err, db.ErrAutomationTargetNotFound) {
+			log.Info().Msg("automation target wake: target no longer exists")
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("wake automation target: %w", err)
+		}
+		event := log.Info().Bool("enqueued_fresh_job", outcome.Enqueued).Bool("requeue", outcome.Requeue)
+		if outcome.Nudged != nil {
+			event = event.Str("run_id", outcome.Nudged.String())
+		}
+		event.Msg("automation target woken")
+		if outcome.Requeue {
+			retryAfter := time.Second
+			return &RetryableError{Err: errors.New("a newer wake request arrived during the wake"), RetryAfter: &retryAfter, BypassMaxRetryDuration: true}
+		}
+		return nil
+	}
+}
+
+const (
+	// automationWaitingPollInterval is how often a waiting per-target run's
+	// automation_run job re-enters the ownership transaction.
+	automationWaitingPollInterval = 30 * time.Second
+	// automationWaitingPollWindow bounds that poll; it matches the design's
+	// two-hour wait timeout.
+	automationWaitingPollWindow = 2 * time.Hour
+)

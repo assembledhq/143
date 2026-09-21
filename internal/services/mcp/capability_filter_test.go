@@ -178,3 +178,62 @@ func TestCapabilityFilteredToolSourceAllowsAutomationManagementTools(t *testing.
 		{Name: "automation_resume"},
 	}, source.ListTools(), "automation management capability should allow automation tools only")
 }
+
+func TestCapabilityFilteredToolSourceWithToolAllowlist(t *testing.T) {
+	t.Parallel()
+
+	tools := []Tool{
+		{Name: "session_history_search"}, {Name: "code_review_history_policy"}, {Name: "code_review_history_update_policy"},
+		{Name: "github_list_recent_prs"}, {Name: "sentry_list_errors"}, {Name: "linear_get_task"}, {Name: "linear_update_task"},
+		{Name: "slack_get_thread"}, {Name: "slack_send"}, {Name: "log_query"}, {Name: "pr_create"},
+		{Name: "capability_list"}, {Name: "capability_request"}, {Name: "automation_goal_improvement_complete"}, {Name: "preview_ensure"},
+	}
+	source := NewCapabilityFilteredToolSource(staticToolSource{tools: tools}, ToolCapabilityPolicy{
+		Capabilities: []models.AgentCapabilitySnapshotItem{
+			{ID: models.AgentCapabilitySessionHistory, AccessLevel: models.AgentCapabilityAccessRead},
+			{ID: models.AgentCapabilityReviewFeedback, AccessLevel: models.AgentCapabilityAccessRead},
+			{ID: models.AgentCapabilityCodeReviewPolicy, AccessLevel: models.AgentCapabilityAccessWrite},
+			{ID: models.AgentCapabilityIssueSources, AccessLevel: models.AgentCapabilityAccessRead},
+			{ID: models.AgentCapabilityTeamDocs, AccessLevel: models.AgentCapabilityAccessRead},
+			{ID: models.AgentCapabilityProductionDiagnostics, AccessLevel: models.AgentCapabilityAccessRead},
+			{ID: models.AgentCapabilityPublishing, AccessLevel: models.AgentCapabilityAccessPublish},
+			{ID: models.AgentCapabilitySlackNotifications, AccessLevel: models.AgentCapabilityAccessWrite},
+			{ID: models.AgentCapabilityExternalComments, AccessLevel: models.AgentCapabilityAccessWrite},
+		},
+		ToolAllowlist: models.PerTargetToolAllowlist,
+	})
+	var visible []string
+	for _, tool := range source.ListTools() {
+		visible = append(visible, tool.Name)
+	}
+	require.Equal(t, []string{"session_history_search", "code_review_history_policy", "linear_get_task", "slack_get_thread", "log_query", "capability_list"}, visible,
+		"only allowlisted tools with a grant remain; sentry, writes, publishing, and every bypass namespace are gone even when granted")
+	require.True(t, source.CallTool(context.Background(), "preview_ensure", nil).IsError, "preview no longer bypasses the filter")
+	require.True(t, source.CallTool(context.Background(), "automation_goal_improvement_complete", nil).IsError, "goal-improvement completion no longer bypasses the filter")
+	require.True(t, source.CallTool(context.Background(), "capability_request", nil).IsError, "capability requests are denied")
+	require.False(t, source.CallTool(context.Background(), "capability_list", nil).IsError, "capability self-inspection stays available")
+	require.True(t, source.CallTool(context.Background(), "github_list_recent_prs", nil).IsError, "an allowlisted tool without its capability grant is still denied")
+}
+
+func TestCapabilityFilteredToolSourceEmptySnapshotWithAllowlistBlocksProviders(t *testing.T) {
+	t.Parallel()
+	source := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{{Name: "linear_get_task"}, {Name: "capability_list"}}}, ToolCapabilityPolicy{ToolAllowlist: models.PerTargetToolAllowlist})
+	var visible []string
+	for _, tool := range source.ListTools() {
+		visible = append(visible, tool.Name)
+	}
+	require.Equal(t, []string{"capability_list"}, visible, "an empty snapshot under an allowlist exposes nothing that needs a grant")
+}
+
+func TestCapabilityFilteredToolSourcePolicyReadUnderAllowlist(t *testing.T) {
+	t.Parallel()
+	source := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{{Name: "code_review_history_policy"}, {Name: "code_review_history_update_policy"}}}, ToolCapabilityPolicy{
+		Capabilities:  []models.AgentCapabilitySnapshotItem{{ID: models.AgentCapabilityCodeReviewPolicy, AccessLevel: models.AgentCapabilityAccessRead}},
+		ToolAllowlist: models.PerTargetToolAllowlist,
+	})
+	var visible []string
+	for _, tool := range source.ListTools() {
+		visible = append(visible, tool.Name)
+	}
+	require.Equal(t, []string{"code_review_history_policy"}, visible, "a policy-management grant keeps the policy read and loses the update under the allowlist")
+}

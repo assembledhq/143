@@ -53,6 +53,8 @@ func scanAutomationRunResult(row pgx.Row) (models.AutomationRunResult, error) {
 // result.AttemptLockToken. It is fenced twice, as every attempt write is:
 // the run row must still be executing under this attempt and token for
 // jobID, and the jobs row must still be running under the same lock token.
+// The run and job rows are locked while the marker is written, so a
+// concurrent attempt claim waits and the fence is re-evaluated after it.
 // One row exists per run and it is replaced only by a strictly newer
 // attempt. A repeated write by the same attempt and token leaves the stored
 // marker untouched and returns it, so duplicate end-of-attempt callbacks
@@ -86,15 +88,14 @@ func (s *AutomationRunResultStore) Write(ctx context.Context, q DBTX, orgID, job
 			@review_complete, @checkpoint_key, @checkpoint_published, @checkpoint_head_sha, @native_context,
 			@dependency_fingerprint, @agent_session_id
 		FROM automation_runs r
+		JOIN jobs j ON j.id = r.job_id AND j.org_id = r.org_id
 		WHERE r.id = @run_id AND r.org_id = @org_id
 		  AND r.dispatch_state = 'executing'
 		  AND r.attempt = @attempt
 		  AND r.attempt_lock_token = @attempt_lock_token
 		  AND r.job_id = @job_id
-		  AND EXISTS (
-			SELECT 1 FROM jobs j
-			WHERE j.id = @job_id AND j.org_id = @org_id
-			  AND j.status = 'running' AND j.lock_token = @attempt_lock_token)
+		  AND j.status = 'running' AND j.lock_token = @attempt_lock_token
+		FOR UPDATE OF r, j
 		ON CONFLICT (run_id) DO UPDATE SET
 			attempt = EXCLUDED.attempt,
 			attempt_lock_token = EXCLUDED.attempt_lock_token,
