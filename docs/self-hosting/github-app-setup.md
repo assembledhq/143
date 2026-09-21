@@ -93,12 +93,14 @@ Under **Permissions**, configure:
 | **Repository > Contents** | Read & Write | Clone repos, create branches, push commits |
 | **Repository > Pull requests** | Read & Write | Create and update PRs, read reviews |
 | **Repository > Workflows** | Read & Write | Push commits that add or modify `.github/workflows/*.yml` files |
-| **Repository > Issues** | Read | Reference issues from commits and PRs |
+| **Repository > Issues** | Read & Write | Reference issues from commits and PRs; apply and remove pull request labels (GitHub governs PR labels under Issues, not Pull requests) |
 | **Repository > Checks** | Read | Monitor CI status on PRs |
 | **Repository > Deployments** | Read | Detect when fixes are deployed |
 | **Repository > Metadata** | Read | Required for all GitHub Apps (auto-selected) |
 | **Repository > Administration** | Read & Write | Optional: create or repair the 143 Code Reviewer trigger team's repo access during setup |
 | **Organization > Members** | Read & Write | Sync org membership rosters and optionally create or repair the 143 Code Reviewer trigger team |
+
+**Updating permissions on an existing app.** Editing this page does not change what an installation can do until the update is applied. For an installation on an account other than the one that owns the app, GitHub emails an owner and the update stays pending until they accept it (org settings → Installed GitHub Apps → the app → **Review request**). For an installation on the app's own user or org account, GitHub applies the update automatically and there is nothing to accept — so no request appears. Either way, installation tokens are cached up to 1 hour; restart workers or wait for the cache to expire before the new permission takes effect.
 
 If you do not use the productized 143 Code Reviewer team setup flow, you can keep **Organization > Members** at **Read** and omit **Repository > Administration**. Normal code review execution does not use those elevated permissions; the setup endpoint uses them only to create the GitHub team and grant it read access to selected repositories.
 
@@ -220,8 +222,10 @@ Create separate GitHub OAuth Apps and GitHub Apps for development and production
 | First-time `Create PR` fails with `GITHUB_APP_USER_AUTH_NOT_CONFIGURED` | Check that `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_CLIENT_SECRET` are set and that the GitHub App has a user authorization callback URL pointing to `{BASE_URL}/api/v1/users/me/github/callback` |
 | Webhook signature verification fails (401) | Make sure `GITHUB_WEBHOOK_SECRET` matches what you entered in the GitHub App settings |
 | "Resource not accessible by integration" on API calls | The app is missing a required permission — check the permissions table above and update in GitHub App settings |
-| Code Reviewer trigger setup says GitHub permissions are required | Grant **Organization > Members: Read & Write** and **Repository > Administration: Read & Write**, then have the GitHub org owner approve the installation permission update |
-| `refusing to allow a GitHub App to ... workflow '.github/workflows/...' without 'workflows' permission` on push | Add **Workflows: Read & Write** in the GitHub App permissions, then accept the new permission on each installation (GitHub emails the org owner). Existing installation tokens are cached up to 1 hour — restart workers or wait for the cache to expire after accepting |
+| 403 "Resource not accessible by integration" when adding or removing a PR label | PR labels are governed by **Repository > Issues: Read & Write**, not by Pull requests. Grant it, then let the cached installation token expire (see *Updating permissions on an existing app* above) |
+| 403 "Resource not accessible by integration" when requesting a review from a team | Check the team has access to the repo — GitHub rejects review requests for a team with no repo access even when **Pull requests: Read & Write** is granted |
+| Code Reviewer trigger setup says GitHub permissions are required | Grant **Organization > Members: Read & Write** and **Repository > Administration: Read & Write**, then apply the update on each installation (see *Updating permissions on an existing app* above) |
+| `refusing to allow a GitHub App to ... workflow '.github/workflows/...' without 'workflows' permission` on push | Add **Workflows: Read & Write** in the GitHub App permissions, then apply the new permission on each installation (see *Updating permissions on an existing app* above). Existing installation tokens are cached up to 1 hour — restart workers or wait for the cache to expire |
 | PRs aren't being created | Verify the app is installed on the target repo and has Contents + Pull Requests write access |
 | Webhooks not arriving | Check that the webhook URL is correct and reachable. Use the Recent Deliveries tab in GitHub App settings to debug |
 | "redirect_uri is not associated with this application" | Your `BASE_URL` doesn't match the callback URL registered in GitHub. For login, update the GitHub OAuth App callback URL or set `GITHUB_OAUTH_REDIRECT_URI`. For PR authorship, update the GitHub App user authorization callback URL to `{BASE_URL}/api/v1/users/me/github/callback` |
