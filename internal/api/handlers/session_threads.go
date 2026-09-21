@@ -230,6 +230,7 @@ func (h *SessionThreadHandler) CreateThread(w http.ResponseWriter, r *http.Reque
 	})
 	if err != nil {
 		switch {
+		case writeAutomationOwnedError(w, r, err):
 		case errors.Is(err, db.ErrThreadLimitReached):
 			writeError(w, r, http.StatusConflict, "THREAD_LIMIT", "maximum of 4 threads per session")
 		case errors.Is(err, thread.ErrSessionNotFound):
@@ -313,6 +314,7 @@ func (h *SessionThreadHandler) UpdateThread(w http.ResponseWriter, r *http.Reque
 	})
 	if err != nil {
 		switch {
+		case writeAutomationOwnedError(w, r, err):
 		case errors.Is(err, thread.ErrSessionNotFound), errors.Is(err, thread.ErrThreadNotFound):
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session or thread not found")
 		case errors.Is(err, thread.ErrSessionTerminal):
@@ -604,6 +606,7 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 			return
 		}
 		switch {
+		case writeAutomationOwnedError(w, r, err):
 		case errors.Is(err, thread.ErrThreadNotFound):
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 		case errors.Is(err, thread.ErrThreadInboxBackpressure):

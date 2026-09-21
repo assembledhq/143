@@ -1442,14 +1442,23 @@ func (s *AutomationRunStore) GetStats(ctx context.Context, orgID, automationID u
 func (s *AutomationRunStore) ReapStuckRuns(ctx context.Context, orgID uuid.UUID, threshold time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-threshold)
 	summary := "run exceeded execution timeout; marked failed by reaper"
-	query := `UPDATE automation_runs
+	// Per-target runs (design doc 125) are exempt from this reaper. A
+	// waiting run is not stuck: it is queued behind its target and has its
+	// own two-hour wait timeout. An executing run owns a session, a thread,
+	// and possibly the target's ownership release, so terminalizing the run
+	// row alone would strand all three; the recovery sweep settles those
+	// from the result marker or as retries_exhausted, releasing what the
+	// run holds. This query therefore reaps only runs that never entered
+	// per-target dispatch.
+	query := `UPDATE automation_runs r
 		SET status = 'failed',
 		    completed_at = now(),
 		    result_summary = @summary,
 		    updated_at = now()
-		WHERE org_id = @org_id
-		  AND status IN ('pending', 'running')
-		  AND triggered_at < @cutoff`
+		WHERE r.org_id = @org_id
+		  AND r.status IN ('pending', 'running')
+		  AND r.dispatch_state IS NULL
+		  AND r.triggered_at < @cutoff`
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"org_id":  orgID,
 		"summary": summary,
