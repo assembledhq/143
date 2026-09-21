@@ -531,13 +531,13 @@ func (h *SessionHandler) enrichSessionLinks(ctx context.Context, orgID uuid.UUID
 	session.LinkedIssues = links
 }
 
-// SetAuditEmitter injects the audit emitter for logging session events.
 // SetAutomationOwnershipGuard wires the per-target continuity guard: a
 // session an automation generation owns accepts no human turn.
 func (h *SessionHandler) SetAutomationOwnershipGuard(guard automationOwnershipGuard) {
 	h.automationOwners = guard
 }
 
+// SetAuditEmitter injects the audit emitter for logging session events.
 func (h *SessionHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
 }

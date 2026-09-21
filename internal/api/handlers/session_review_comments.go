@@ -327,15 +327,15 @@ func (h *SessionReviewCommentHandler) Delete(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// SendToAgent compiles open review comments into a structured message and
-// sends it to the session as a follow-up message, enqueuing a continue_session job.
-// If messageStore/jobStore are not configured, it falls back to returning the
-// formatted message for the frontend to send manually.
 // SetAutomationOwnershipGuard wires the per-target continuity guard.
 func (h *SessionReviewCommentHandler) SetAutomationOwnershipGuard(guard automationOwnershipGuard) {
 	h.automationOwners = guard
 }
 
+// SendToAgent compiles open review comments into a structured message and
+// sends it to the session as a follow-up message, enqueuing a continue_session job.
+// If messageStore/jobStore are not configured, it falls back to returning the
+// formatted message for the frontend to send manually.
 func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))

@@ -646,18 +646,18 @@ func (o *Orchestrator) renderAutomationTurnPrompt(ctx context.Context, sandbox *
 
 // automationTurnDependencyState decides whether the tool bootstrap from the
 // checkpoint still applies and returns the prompt's environment note.
-func (state *automationTurnState) applyDependencyFingerprint(fingerprint string) (skipBootstrap bool) {
-	state.fingerprint = &fingerprint
-	coherent := state.continued() && state.generation.CheckpointSnapshotKey != nil && state.generation.CheckpointDependencyFingerprint != nil
-	if coherent && *state.generation.CheckpointDependencyFingerprint == fingerprint {
-		state.dependencyState = "dependency inputs are unchanged since the last checkpoint; the tool bootstrap was not re-run"
+func (s *automationTurnState) applyDependencyFingerprint(fingerprint string) (skipBootstrap bool) {
+	s.fingerprint = &fingerprint
+	coherent := s.continued() && s.generation.CheckpointSnapshotKey != nil && s.generation.CheckpointDependencyFingerprint != nil
+	if coherent && *s.generation.CheckpointDependencyFingerprint == fingerprint {
+		s.dependencyState = "dependency inputs are unchanged since the last checkpoint; the tool bootstrap was not re-run"
 		return true
 	}
-	if state.continued() {
-		state.dependencyState = "dependency inputs changed since the last checkpoint; the environment may be cold and the tool bootstrap was re-run"
+	if s.continued() {
+		s.dependencyState = "dependency inputs changed since the last checkpoint; the environment may be cold and the tool bootstrap was re-run"
 		return false
 	}
-	state.dependencyState = "reconstructed workspace; the environment is cold and the tool bootstrap was re-run"
+	s.dependencyState = "reconstructed workspace; the environment is cold and the tool bootstrap was re-run"
 	return false
 }
 

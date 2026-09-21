@@ -446,12 +446,13 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 		}
 	}
 
-	// Retire an incompatible generation before creating the next one.
+	// Retire an incompatible generation before creating the next one. The
+	// decision already accounts for the retirement, so nothing below reads
+	// the generation again.
 	if hasGeneration && decision.retireReason != nil {
 		if _, err := d.targets.RetireGeneration(ctx, tx, orgID, generation.ID, *decision.retireReason); err != nil {
 			return DispatchOutcome{}, fmt.Errorf("retire incompatible generation: %w", err)
 		}
-		hasGeneration = false
 	}
 
 	var (

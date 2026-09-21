@@ -4816,7 +4816,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return fmt.Errorf("hydrate sandbox: %w (fallback: %w)", err, fallbackErr)
 			}
 			hasSnapshot = false
-			rebuildWorkspace = true
 			sandbox, err = o.provider.Create(ctx, sandboxCfg)
 		}
 		if err != nil {
