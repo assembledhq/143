@@ -142,6 +142,59 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 			SessionSandboxHolderStatusActive, SessionSandboxHolderStatusDraining,
 			SessionSandboxHolderStatusReleased, SessionSandboxHolderStatusExpired,
 		),
+		// automation_target.go (migration 000290)
+		"automations_session_continuity": toStrings(
+			AutomationSessionContinuityPerRun, AutomationSessionContinuityPerTarget,
+		),
+		"automation_targets_target_kind": toStrings(
+			AutomationTargetKindGitHubPullRequest,
+		),
+		"automation_targets_lifecycle_state": toStrings(
+			AutomationTargetLifecycleOpen, AutomationTargetLifecycleClosed, AutomationTargetLifecycleMerged,
+		),
+		"automation_target_sessions_status": toStrings(
+			AutomationTargetSessionStatusActive, AutomationTargetSessionStatusRetired,
+		),
+		"automation_target_sessions_retired_reason": toStrings(
+			AutomationTargetRetiredManualReset, AutomationTargetRetiredPRClosed, AutomationTargetRetiredPRMerged,
+			AutomationTargetRetiredSessionUnavailable, AutomationTargetRetiredNotResumable,
+			AutomationTargetRetiredAgentConfigChanged, AutomationTargetRetiredIdentityChanged,
+			AutomationTargetRetiredBaseRetargeted, AutomationTargetRetiredTurnLimit,
+			AutomationTargetRetiredSnapshotTooLarge, AutomationTargetRetiredUnsupportedWorkspace,
+			AutomationTargetRetiredAwaitingInput, AutomationTargetRetiredContinuityDisabled,
+		),
+		"automation_runs_head_resolution": toStrings(
+			AutomationRunHeadAuthoritative, AutomationRunHeadAmbiguous, AutomationRunHeadUnresolved,
+		),
+		"automation_runs_continuation_mode": toStrings(
+			AutomationRunContinuationFresh, AutomationRunContinuationContinued, AutomationRunContinuationReconstructed,
+		),
+		"automation_runs_continuation_reason": toStrings(
+			AutomationRunContinuationReasonNoGeneration, AutomationRunContinuationReasonKillSwitch,
+			AutomationRunContinuationReasonSessionUnavailable, AutomationRunContinuationReasonNotResumable,
+			AutomationRunContinuationReasonAgentConfigChanged, AutomationRunContinuationReasonIdentityChanged,
+			AutomationRunContinuationReasonBaseRetargeted, AutomationRunContinuationReasonTurnLimit,
+			AutomationRunContinuationReasonSnapshotTooLarge, AutomationRunContinuationReasonUnsupportedWorkspace,
+			AutomationRunContinuationReasonAwaitingInput, AutomationRunContinuationReasonSnapshotMissing,
+			AutomationRunContinuationReasonRestoreFailed, AutomationRunContinuationReasonSandboxDestroyed,
+		),
+		"automation_runs_dispatch_state": toStrings(
+			AutomationRunDispatchWaiting, AutomationRunDispatchExecuting, AutomationRunDispatchDone,
+		),
+		"automation_runs_wait_reason": toStrings(
+			AutomationRunWaitTargetBusy,
+		),
+		"automation_runs_outcome_reason": toStrings(
+			AutomationRunOutcomeTurnCompleted, AutomationRunOutcomeHeadLookupDegraded,
+			AutomationRunOutcomeAgentFailed, AutomationRunOutcomeCancelled, AutomationRunOutcomeAwaitingInput,
+			AutomationRunOutcomeRetriesExhausted, AutomationRunOutcomeStaleHead, AutomationRunOutcomeDuplicateHead,
+			AutomationRunOutcomeSuperseded, AutomationRunOutcomeWaitTimeout, AutomationRunOutcomeWaitOverflow,
+			AutomationRunOutcomePRClosed, AutomationRunOutcomeRepositoryUnavailable,
+		),
+		"automation_run_results_outcome": toStrings(
+			AutomationRunResultTurnCompleted, AutomationRunResultAgentFailed,
+			AutomationRunResultCancelled, AutomationRunResultAwaitingInput,
+		),
 		// project_enums.go
 		"projects_status": toStrings(
 			ProjectStatusDraft, ProjectStatusActive, ProjectStatusCompleted,

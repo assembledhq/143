@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -279,4 +280,51 @@ func derefStrPtr(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// automationOwnershipGuard reports whether a per-target automation
+// generation owns a session. It is a narrow interface so a handler depends
+// on the check rather than on the session store, and so a test can install
+// an owned session without a database.
+type automationOwnershipGuard interface {
+	RejectIfAutomationOwned(ctx context.Context, orgID, sessionID uuid.UUID) error
+}
+
+// rejectAutomationOwnedSession answers 409 SESSION_AUTOMATION_OWNED when a
+// per-target automation generation owns the session, and reports whether it
+// answered. An owned session accepts no human turn: its thread belongs to
+// the automation's next turn (design doc 125). The details name the target
+// and the Reset action that hands the session back, and say whether the
+// release is already pending because the generation is retired and the
+// current turn is still finishing.
+func rejectAutomationOwnedSession(w http.ResponseWriter, r *http.Request, guard automationOwnershipGuard, orgID, sessionID uuid.UUID) bool {
+	if guard == nil {
+		return false
+	}
+	err := guard.RejectIfAutomationOwned(r.Context(), orgID, sessionID)
+	if err == nil {
+		return false
+	}
+	var owned *models.SessionAutomationOwnedError
+	if !errors.As(err, &owned) {
+		writeError(w, r, http.StatusInternalServerError, "SESSION_LOOKUP_FAILED", "failed to check session ownership", err)
+		return true
+	}
+	writeErrorWithDetails(w, r, http.StatusConflict, "SESSION_AUTOMATION_OWNED",
+		"this session belongs to an automation target; reset the target to take it over",
+		owned.Owner)
+	return true
+}
+
+// writeAutomationOwnedError answers a *models.SessionAutomationOwnedError
+// returned from a service, and reports whether it answered.
+func writeAutomationOwnedError(w http.ResponseWriter, r *http.Request, err error) bool {
+	var owned *models.SessionAutomationOwnedError
+	if !errors.As(err, &owned) {
+		return false
+	}
+	writeErrorWithDetails(w, r, http.StatusConflict, "SESSION_AUTOMATION_OWNED",
+		"this session belongs to an automation target; reset the target to take it over",
+		owned.Owner)
+	return true
 }

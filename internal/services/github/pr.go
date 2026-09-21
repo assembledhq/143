@@ -155,7 +155,8 @@ type PRService struct {
 	httpClient               *http.Client
 	mergeabilityRetryDelays  []time.Duration
 	mergeabilityRetryWait    func(context.Context, time.Duration) error
-	linearMilestones         LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
+	linearMilestones         LinearMilestoneEnqueuer   // nil-safe: Linear writes disabled if nil
+	automationTargets        AutomationTargetLifecycle // nil-safe: per-target continuity lifecycle disabled if nil
 	prPreviewSurfacesEnabled bool
 	prHealthSyncGroup        singleflight.Group
 	publicationPolicy        PublicationExecutionPolicy
@@ -183,6 +184,14 @@ type PRService struct {
 // linker service and packages a worker enqueue + payload.
 type LinearMilestoneEnqueuer func(ctx context.Context, orgID, sessionID uuid.UUID, event string, prNumber int)
 
+// AutomationTargetLifecycle is the per-target continuity notification
+// (design doc 125). It is told about every close, merge, and reopen, not
+// only the ones an automation subscribes to.
+type AutomationTargetLifecycle interface {
+	OnPullRequestClosed(ctx context.Context, orgID uuid.UUID, repoFullName string, number int, merged bool, observedAt time.Time) error
+	OnPullRequestReopened(ctx context.Context, orgID uuid.UUID, repoFullName string, number int, observedAt time.Time) error
+}
+
 type AutomationEventTriggerer interface {
 	TriggerGitHubEvent(ctx context.Context, req automationevents.GitHubEventTriggerRequest) error
 	RememberKnownLabels(req automationevents.GitHubEventTriggerRequest)
@@ -191,6 +200,15 @@ type AutomationEventTriggerer interface {
 // SetLinearMilestoneEnqueuer wires the Linear post-event hook.
 func (s *PRService) SetLinearMilestoneEnqueuer(enq LinearMilestoneEnqueuer) {
 	s.linearMilestones = enq
+}
+
+// SetAutomationTargetLifecycle wires the per-target continuity
+// notification. It fires on every close, merge, and reopen, whether or not
+// an automation subscribes to that event, because a target whose pull
+// request ended must stop waiting and hand its session back (design doc
+// 125, "Lifecycle Transitions").
+func (s *PRService) SetAutomationTargetLifecycle(lifecycle AutomationTargetLifecycle) {
+	s.automationTargets = lifecycle
 }
 
 func (s *PRService) SetAutomationEventTriggerer(triggerer AutomationEventTriggerer) {
@@ -2549,24 +2567,32 @@ type PullRequestEvent struct {
 func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullRequestEvent) error {
 	if automationEvents := automationGitHubEventsForPullRequest(event); len(automationEvents) > 0 || event.Action == "unlabeled" {
 		s.triggerGitHubAutomationEvents(ctx, automationevents.GitHubEventTriggerRequest{
-			Repository:         event.Repository.FullName,
-			PullRequestNumber:  event.Number,
-			PullRequestAction:  event.Action,
-			PullRequestURL:     event.PR.HTMLURL,
-			PullRequestTitle:   event.PR.Title,
-			HeadSHA:            event.PR.Head.SHA,
-			Actor:              event.Sender.Login,
-			ActorType:          event.Sender.Type,
-			Body:               githubPullRequestBody(event.PR.Title, event.PR.Body),
-			ProviderEventID:    event.DeliveryID,
-			EventID:            fmt.Sprintf("pull_request:%s:%d", event.Action, event.Number),
-			BaseBranch:         event.PR.Base.Ref,
-			Labels:             githubLabelNames(event.PR.Labels),
-			LabelsKnown:        true,
-			RequireLabelFilter: event.Action == "labeled",
-			ChangedLabel:       event.Label.Name,
+			Repository:           event.Repository.FullName,
+			PullRequestNumber:    event.Number,
+			PullRequestAction:    event.Action,
+			PullRequestUpdatedAt: event.PR.UpdatedAt,
+			PullRequestURL:       event.PR.HTMLURL,
+			PullRequestTitle:     event.PR.Title,
+			HeadSHA:              event.PR.Head.SHA,
+			Actor:                event.Sender.Login,
+			ActorType:            event.Sender.Type,
+			Body:                 githubPullRequestBody(event.PR.Title, event.PR.Body),
+			ProviderEventID:      event.DeliveryID,
+			EventID:              fmt.Sprintf("pull_request:%s:%d", event.Action, event.Number),
+			BaseBranch:           event.PR.Base.Ref,
+			Labels:               githubLabelNames(event.PR.Labels),
+			LabelsKnown:          true,
+			RequireLabelFilter:   event.Action == "labeled",
+			ChangedLabel:         event.Label.Name,
 		}, automationEvents, event.OwnerOrgID, event.Repository.ID)
 	}
+
+	// Per-target continuity is told about the lifecycle from the event
+	// itself, before any of the mirror handling below. A pull request that
+	// 143 did not create has no `pull_requests` row, but it can still have
+	// automation targets, and their waiters and owned session must end with
+	// it (design doc 125, "Lifecycle Transitions").
+	s.notifyAutomationTargetsForEvent(ctx, event)
 
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.Number)
 	needsReconciliation := webhookPullRequestNeedsReconciliation(pr, err, event.Action)
@@ -3151,6 +3177,10 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 			commitSHA = headSHA
 		}
 		s.runMergedPullRequestFollowUps(ctx, pr, commitSHA)
+		// Also from here, because the periodic state sync calls this
+		// transition when a webhook was dropped. Notifying twice for one
+		// close is harmless: the second finds the work already done.
+		s.notifyAutomationTargetsClosed(ctx, pr, true, observedAt)
 		s.publishPullRequestTerminalState(ctx, pr)
 		return true, nil
 	}
@@ -3183,8 +3213,59 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 	}
 	s.teardownPRPreview(ctx, pr, false)
 	s.maybeAutoArchiveSessionOnPRClose(ctx, pr, nil, false)
+	s.notifyAutomationTargetsClosed(ctx, pr, false, observedAt)
 	s.publishPullRequestTerminalState(ctx, pr)
 	return true, nil
+}
+
+// notifyAutomationTargetsForEvent applies a webhook's own lifecycle action
+// to the pull request's automation targets, independently of whether 143
+// mirrors the pull request.
+func (s *PRService) notifyAutomationTargetsForEvent(ctx context.Context, event PullRequestEvent) {
+	if s.automationTargets == nil || event.OwnerOrgID == nil || event.Number <= 0 {
+		return
+	}
+	repo := strings.TrimSpace(event.Repository.FullName)
+	if repo == "" {
+		return
+	}
+	observedAt := codeReviewLifecycleObservedAt(event.PR.UpdatedAt)
+	var err error
+	switch event.Action {
+	case "closed":
+		err = s.automationTargets.OnPullRequestClosed(ctx, *event.OwnerOrgID, repo, event.Number, event.PR.Merged, observedAt)
+	case "reopened":
+		err = s.automationTargets.OnPullRequestReopened(ctx, *event.OwnerOrgID, repo, event.Number, observedAt)
+	default:
+		return
+	}
+	if err != nil {
+		s.logger.Warn().Err(err).
+			Str("org_id", event.OwnerOrgID.String()).
+			Str("repository", repo).
+			Int("pull_request", event.Number).
+			Str("action", event.Action).
+			Msg("failed to apply a pull request lifecycle event to its automation targets")
+	}
+}
+
+// notifyAutomationTargetsClosed tells per-target continuity that this pull
+// request ended, so its waiting runs stop waiting and its session is handed
+// back. Best-effort: a failure is logged and the scheduler's sweeps still
+// bound the waiters, but the target would otherwise keep its session until
+// they fire.
+func (s *PRService) notifyAutomationTargetsClosed(ctx context.Context, pr models.PullRequest, merged bool, observedAt time.Time) {
+	if s.automationTargets == nil {
+		return
+	}
+	if err := s.automationTargets.OnPullRequestClosed(ctx, pr.OrgID, pr.GitHubRepo, pr.GitHubPRNumber, merged, observedAt); err != nil {
+		s.logger.Warn().Err(err).
+			Str("org_id", pr.OrgID.String()).
+			Str("repository", pr.GitHubRepo).
+			Int("pull_request", pr.GitHubPRNumber).
+			Bool("merged", merged).
+			Msg("failed to apply a closed pull request to its automation targets")
+	}
 }
 
 func codeReviewLifecycleObservedAt(providerUpdatedAt *time.Time) time.Time {
@@ -4514,6 +4595,45 @@ type PullRequestHead struct {
 	SHA        string
 	BaseBranch string
 	Labels     []string
+	// UpdatedAt is GitHub's pull_request.updated_at, which orders pushes for
+	// per-target automation continuity. Nil when the response omitted it.
+	UpdatedAt *time.Time
+}
+
+// ResolvePullRequestHead fetches the pull request's current head, state,
+// base branch, and updated_at with the repository's installation token. It
+// backs the dispatch-time head lookup for per-target automation continuity
+// (design doc 125, "Head Authority").
+func (s *PRService) ResolvePullRequestHead(ctx context.Context, orgID, repositoryID uuid.UUID, pullRequestNumber int) (automationevents.PullRequestHeadInfo, error) {
+	if s == nil || s.repos == nil || s.tokenProvider == nil {
+		return automationevents.PullRequestHeadInfo{}, fmt.Errorf("pull request head lookup is not configured")
+	}
+	if pullRequestNumber <= 0 {
+		return automationevents.PullRequestHeadInfo{}, fmt.Errorf("invalid pull request number %d", pullRequestNumber)
+	}
+	repo, err := s.repos.GetByID(ctx, orgID, repositoryID)
+	if err != nil {
+		return automationevents.PullRequestHeadInfo{}, fmt.Errorf("load repository for head lookup: %w", err)
+	}
+	owner, repoName, ok := strings.Cut(repo.FullName, "/")
+	if !ok || owner == "" || repoName == "" {
+		return automationevents.PullRequestHeadInfo{}, fmt.Errorf("malformed repository name %q", repo.FullName)
+	}
+	resolution, err := s.getInstallationResolutionForRepo(ctx, orgID, &repo)
+	if err != nil {
+		return automationevents.PullRequestHeadInfo{}, fmt.Errorf("get installation token for head lookup: %w", err)
+	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "automation_head")
+	head, err := s.GetPullRequestHead(ctx, resolution.Token, owner, repoName, pullRequestNumber)
+	if err != nil {
+		return automationevents.PullRequestHeadInfo{}, err
+	}
+	return automationevents.PullRequestHeadInfo{
+		SHA:        head.SHA,
+		UpdatedAt:  head.UpdatedAt,
+		State:      head.State,
+		BaseBranch: head.BaseBranch,
+	}, nil
 }
 
 // CodeReviewPullRequestSnapshot is the current GitHub state needed by code
@@ -4690,10 +4810,11 @@ func (s *PRService) GetPullRequestHead(ctx context.Context, token, owner, repo s
 		return PullRequestHead{}, fmt.Errorf("get pull request: %w", err)
 	}
 	var details struct {
-		Number  int    `json:"number"`
-		HTMLURL string `json:"html_url"`
-		State   string `json:"state"`
-		Head    struct {
+		Number    int        `json:"number"`
+		HTMLURL   string     `json:"html_url"`
+		State     string     `json:"state"`
+		UpdatedAt *time.Time `json:"updated_at"`
+		Head      struct {
 			Ref string `json:"ref"`
 			SHA string `json:"sha"`
 		} `json:"head"`
@@ -4716,6 +4837,7 @@ func (s *PRService) GetPullRequestHead(ctx context.Context, token, owner, repo s
 		SHA:        details.Head.SHA,
 		BaseBranch: details.Base.Ref,
 		Labels:     githubLabelNames(details.Labels),
+		UpdatedAt:  details.UpdatedAt,
 	}, nil
 }
 

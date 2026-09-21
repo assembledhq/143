@@ -1,0 +1,220 @@
+package automations
+
+import (
+	"context"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
+)
+
+// TurnStore adapts the db stores to agent.AutomationTurnStore, the surface
+// the orchestrator's per-target turn path needs (design doc 125). It lives
+// here because the agent package does not import db.
+type TurnStore struct {
+	pool     db.TxStarter
+	runs     *db.AutomationRunStore
+	targets  *db.AutomationTargetStore
+	results  *db.AutomationRunResultStore
+	sessions *db.SessionStore
+	messages *db.SessionMessageStore
+}
+
+// NewTurnStore wires the turn store over one pool.
+func NewTurnStore(pool db.TxStarter, sessions *db.SessionStore, runs *db.AutomationRunStore, targets *db.AutomationTargetStore, results *db.AutomationRunResultStore, messages *db.SessionMessageStore) *TurnStore {
+	return &TurnStore{pool: pool, runs: runs, targets: targets, results: results, sessions: sessions, messages: messages}
+}
+
+var _ agent.AutomationTurnStore = (*TurnStore)(nil)
+
+func (s *TurnStore) LoadRun(ctx context.Context, orgID, runID uuid.UUID) (models.AutomationRun, error) {
+	return s.runs.GetByRunID(ctx, orgID, runID)
+}
+
+func (s *TurnStore) LoadTarget(ctx context.Context, orgID, targetID uuid.UUID) (models.AutomationTarget, error) {
+	return s.targets.GetByID(ctx, orgID, targetID)
+}
+
+func (s *TurnStore) LockAttempt(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID) (bool, error) {
+	return s.runs.LockAttempt(ctx, tx, orgID, runID, lockToken)
+}
+
+func (s *TurnStore) RecordTurnBaseline(ctx context.Context, orgID, runID, lockToken uuid.UUID, baselineHeadSHA *string) (bool, error) {
+	return s.runs.RecordTurnBaseline(ctx, orgID, runID, lockToken, baselineHeadSHA)
+}
+
+func (s *TurnStore) EndInterruptedAttempt(ctx context.Context, orgID, runID, sessionID, lockToken uuid.UUID, status models.SessionStatus) (bool, error) {
+	return s.runs.EndInterruptedAttempt(ctx, orgID, runID, sessionID, lockToken, status)
+}
+
+func (s *TurnStore) RecordContinuationFallback(ctx context.Context, orgID, runID, lockToken uuid.UUID, reason models.AutomationRunContinuationReason, baselineHeadSHA *string) (bool, error) {
+	return s.runs.RecordContinuationFallback(ctx, orgID, runID, lockToken, reason, baselineHeadSHA)
+}
+
+func (s *TurnStore) LoadGeneration(ctx context.Context, orgID, targetID uuid.UUID, generation int) (models.AutomationTargetSession, error) {
+	return s.targets.GetGenerationByNumber(ctx, orgID, targetID, generation)
+}
+
+func (s *TurnStore) ListCompletedTurnSummaries(ctx context.Context, orgID, targetID uuid.UUID, generation, limit int) ([]models.AutomationTurnSummary, error) {
+	return s.runs.ListCompletedTurnSummaries(ctx, orgID, targetID, generation, limit)
+}
+
+func (s *TurnStore) RecordTurnWorkspace(ctx context.Context, orgID, runID, lockToken uuid.UUID, ws models.AutomationTurnWorkspace) (bool, error) {
+	return s.runs.RecordTurnWorkspace(ctx, orgID, runID, lockToken, ws)
+}
+
+func (s *TurnStore) UpdateTurnPrompt(ctx context.Context, orgID, runID uuid.UUID, content string) (bool, error) {
+	return s.messages.UpdateAutomationTurnPrompt(ctx, orgID, runID, content)
+}
+
+func (s *TurnStore) TagAssistantMessage(ctx context.Context, orgID, sessionID, threadID uuid.UUID, turnNumber int, runID uuid.UUID) error {
+	return s.messages.TagAutomationTurnAssistantMessage(ctx, orgID, sessionID, threadID, turnNumber, runID)
+}
+
+// PublishCheckpointWithProvenance installs the attempt's checkpoint under
+// the run row lock. The statement's own job fence reads ownership without
+// locking it, so a publication that starts while a recovery is revoking the
+// lease could otherwise wait on the session row and then install a revoked
+// attempt's checkpoint; taking the attempt lock first makes the two
+// serialize.
+func (s *TurnStore) PublishCheckpointWithProvenance(ctx context.Context, orgID, sessionID, runID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, stopReason models.RuntimeStopReason, provenance models.CheckpointProvenance) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	owned, err := s.runs.LockAttempt(ctx, tx, orgID, runID, lockToken)
+	if err != nil || !owned {
+		return false, err
+	}
+	published, err := s.sessions.WithTx(tx).PublishCheckpointWithProvenance(ctx, orgID, sessionID, lockToken, agentSessionID, snapshotKey, kind, capability, sizeBytes, checkpointedAt, stopReason, provenance)
+	if err != nil || !published {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ReleaseTurnHold releases the session's turn hold under the run row lock,
+// refusing when the attempt is no longer ours. A worker that paused past
+// its lease must not clear a hold a later turn has taken, because the
+// destroy that follows the release would then take that turn's container.
+func (s *TurnStore) ReleaseTurnHold(ctx context.Context, orgID, sessionID, runID, lockToken uuid.UUID) (bool, bool, string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, false, "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	owned, err := s.runs.LockAttempt(ctx, tx, orgID, runID, lockToken)
+	if err != nil || !owned {
+		return false, false, "", err
+	}
+	destroyNow, containerID, err := s.sessions.WithTx(tx).ReleaseTurnHold(ctx, orgID, sessionID)
+	if err != nil {
+		return false, false, "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, false, "", err
+	}
+	return true, destroyNow, containerID, nil
+}
+
+// FailThreadTurn drives the turn's primary thread terminal under the
+// attempt fence, for the orchestrator's failure paths.
+func (s *TurnStore) FailThreadTurn(ctx context.Context, orgID, runID, lockToken, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	written, err := s.runs.FailThreadTurnForAttempt(ctx, tx, orgID, runID, lockToken, threadID, status, result)
+	if err != nil || !written {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// EndAttempt runs fn in one transaction with a transaction-bound session
+// store, so the attempt's status write and its result marker commit
+// together.
+func (s *TurnStore) EndAttempt(ctx context.Context, fn func(ctx context.Context, tx pgx.Tx, sessions agent.SessionStore) error) error {
+	return s.sessions.InTransaction(ctx, func(ctx context.Context, tx pgx.Tx, store *db.SessionStore) error {
+		return fn(ctx, tx, store)
+	})
+}
+
+func (s *TurnStore) WriteResult(ctx context.Context, tx pgx.Tx, orgID, jobID uuid.UUID, result *models.AutomationRunResult) (bool, error) {
+	return s.results.Write(ctx, tx, orgID, jobID, result)
+}
+
+func (s *TurnStore) RecordTurnDuration(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID, durationMS int) (bool, error) {
+	return s.runs.RecordTurnDuration(ctx, tx, orgID, runID, lockToken, durationMS)
+}
+
+// CompletePreflight ends a reserved run that could not start, in its own
+// transaction.
+func (s *TurnStore) CompletePreflight(ctx context.Context, orgID, runID, lockToken uuid.UUID, outcome models.AutomationRunOutcomeReason, summary string) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	targetID, done, err := s.runs.CompleteExecutingPreflight(ctx, tx, orgID, runID, lockToken, outcome, summary)
+	if err != nil {
+		return false, err
+	}
+	if !done {
+		return false, nil
+	}
+	// A preflight outcome can be how a merged pull request's final turn
+	// ends. It writes no result marker, so nothing else would retire the
+	// generation the close left alive for it, and the session would stay
+	// owned with no pending release for any sweep to find.
+	if _, err := s.targets.RetireTerminalTarget(ctx, tx, orgID, targetID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CompleteThreadTurn returns the turn's primary thread to idle in its own
+// transaction, under the run row lock and the attempt fence.
+func (s *TurnStore) CompleteThreadTurn(ctx context.Context, orgID, runID, lockToken, threadID uuid.UUID, turn int, agentSessionID string) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	written, err := s.runs.CompleteThreadTurnForAttempt(ctx, tx, orgID, runID, lockToken, threadID, turn, nil, agentSessionID)
+	if err != nil || !written {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// RetireGeneration retires a generation in its own transaction.
+func (s *TurnStore) RetireGeneration(ctx context.Context, orgID, generationID uuid.UUID, reason models.AutomationTargetRetiredReason) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := s.targets.RetireGeneration(ctx, tx, orgID, generationID, reason); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}

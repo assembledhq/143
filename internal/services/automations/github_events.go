@@ -57,6 +57,10 @@ type GitHubEventTriggerRequest struct {
 	BaseBranch        string
 	Path              string
 	ReviewState       string
+	// PullRequestUpdatedAt is GitHub's pull_request.updated_at for the
+	// delivery. It orders pushes for per-target continuity (design doc 125,
+	// "Head Authority"); nil when the payload omitted it.
+	PullRequestUpdatedAt *time.Time
 	// RequireLabelFilter marks pull_request labeled deliveries. These
 	// deliveries re-evaluate lifecycle triggers only for automations whose
 	// label filter contains ChangedLabel.
@@ -81,6 +85,8 @@ type GitHubEventTriggerService struct {
 	txStarter    githubEventTxStarter
 	capabilities githubCapabilityResolver
 	labels       githubLabelResolver
+	targets      githubAutomationTargetStore
+	arrivalRuns  githubAutomationArrivalRunStore
 	logger       zerolog.Logger
 	now          func() time.Time
 
@@ -396,6 +402,16 @@ func (s *GitHubEventTriggerService) triggerAutomation(ctx context.Context, autom
 	if !created {
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit duplicate github automation run tx: %w", err)
+		}
+		return nil
+	}
+	dispatchable, err := s.recordTargetArrival(ctx, tx, automation, run, req)
+	if err != nil {
+		return fmt.Errorf("record automation target arrival: %w", err)
+	}
+	if !dispatchable {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit terminalized github automation run tx: %w", err)
 		}
 		return nil
 	}

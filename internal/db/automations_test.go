@@ -24,6 +24,7 @@ func automationColumnSlice() []string {
 		"github_event_triggers", "github_event_filters",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
+		"session_continuity",
 	}
 }
 
@@ -45,6 +46,7 @@ func addAutomationRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
 		automationGitHubEventsToStrings(a.GitHubEventTriggers), githubEventFilters,
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
 		a.Priority, metadata, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
+		a.SessionContinuity,
 	)
 }
 
@@ -86,7 +88,7 @@ func TestAutomationStore_Create(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(anyArgs(29)...).
+		WithArgs(anyArgs(30)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 				AddRow(newID, now, now),
@@ -251,7 +253,7 @@ func TestAutomationStore_Update(t *testing.T) {
 	}
 
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(anyArgs(31)...).
+		WithArgs(anyArgs(32)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	require.NoError(t, store.Update(context.Background(), a))
@@ -585,12 +587,32 @@ func TestAutomationStore_BulkSoftDelete(t *testing.T) {
 // --- AutomationRunStore ---
 
 func automationRunColumnSlice() []string {
-	return []string{
+	cols := []string{
 		"id", "automation_id", "org_id", "triggered_at", "triggered_by",
 		"triggered_by_user_id", "scheduled_time", "trigger_id", "provider", "provider_event_id",
 		"trigger_context", "goal_snapshot", "config_snapshot",
 		"status", "capability_snapshot", "completed_at", "result_summary", "created_at", "updated_at",
 	}
+	return append(cols, AutomationRunContinuityColumnNames...)
+}
+
+// automationRunRows builds one pgxmock row for scanAutomationRun, padding the
+// per-target continuity columns with NULL.
+func automationRunRows(values ...any) *pgxmock.Rows {
+	cols := automationRunColumnSlice()
+	for len(values) < len(cols) {
+		values = append(values, nil)
+	}
+	return pgxmock.NewRows(cols).AddRow(values...)
+}
+
+// padAutomationRunListRow appends NULLs so a hand-built ListByAutomation row
+// covers the trailing continuity columns.
+func padAutomationRunListRow(row []any) []any {
+	for len(row) < len(AutomationRunListColumns) {
+		row = append(row, nil)
+	}
+	return row
 }
 
 func TestAutomationRunStore_CreateRun_Inserts(t *testing.T) {
@@ -669,7 +691,7 @@ func TestAutomationRunStore_GetByID(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM automation_runs WHERE id =").
 		WithArgs(anyArgs(3)...).
 		WillReturnRows(
-			pgxmock.NewRows(automationRunColumnSlice()).AddRow(
+			automationRunRows(
 				runID, automationID, orgID, now, models.AutomationTriggeredByManual,
 				nil, nil, nil, nil, nil, []byte(`{}`), "goal", []byte(`{}`),
 				models.AutomationRunStatusPending, nil, nil, nil, now, now,
@@ -878,7 +900,7 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 			mock.ExpectQuery("SELECT .+ FROM automation_runs ar.+LEFT JOIN LATERAL").
 				WithArgs(anyArgs(2)...).
 				WillReturnRows(
-					pgxmock.NewRows(cols).AddRow(row...),
+					pgxmock.NewRows(cols).AddRow(padAutomationRunListRow(row)...),
 				)
 
 			runs, err := store.ListByAutomation(context.Background(), uuid.New(), uuid.New(), AutomationRunFilters{Limit: 25})
@@ -923,9 +945,7 @@ func TestAutomationRunStore_ListByAutomationProjectsGitHubTriggerContext(t *test
 		&event, &eventID, &dedupeGroupID, &actor, &actorType, &botTriggered,
 		models.AutomationRunStatusCompleted, &now, nil, now, now,
 	}
-	for i := 0; i < 13; i++ {
-		row = append(row, nil)
-	}
+	row = padAutomationRunListRow(row)
 	mock.ExpectQuery("SELECT .+ FROM automation_runs ar.+LEFT JOIN LATERAL").
 		WithArgs(anyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(AutomationRunListColumns).AddRow(row...))
@@ -1176,11 +1196,14 @@ func TestAutomationRunStore_ReapStuckRuns(t *testing.T) {
 	store := NewAutomationRunStore(mock)
 	orgID := uuid.New()
 
-	// The reaper MUST filter by org_id, status IN ('pending', 'running'), and
-	// triggered_at < cutoff. Regressions on the org_id filter would sweep
-	// across tenants; regressions on status/triggered_at would either reap
-	// healthy runs or fail to free saturated max_concurrent slots.
-	mock.ExpectExec(`UPDATE automation_runs\s+SET status = 'failed'.*org_id = @org_id.*status IN \('pending', 'running'\).*triggered_at < @cutoff`).
+	// The reaper MUST filter by org_id, status IN ('pending', 'running'),
+	// triggered_at < cutoff, and dispatch_state IS NULL. Regressions on the
+	// org_id filter would sweep across tenants; regressions on status or
+	// triggered_at would either reap healthy runs or fail to free saturated
+	// max_concurrent slots; a regression on dispatch_state would terminalize
+	// a per-target run without releasing its session, thread, or ownership
+	// (design doc 125 — the recovery sweep owns those runs).
+	mock.ExpectExec(`UPDATE automation_runs r\s+SET status = 'failed'.*org_id = @org_id.*status IN \('pending', 'running'\).*dispatch_state IS NULL.*triggered_at < @cutoff`).
 		WithArgs(anyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 4))
 
