@@ -75,6 +75,12 @@ type SessionStore interface {
 	ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
+	// RejectIfAutomationOwned returns a *models.SessionAutomationOwnedError
+	// when a per-target automation generation owns the session (design doc
+	// 125). Such a session accepts no human turn: its thread belongs to the
+	// automation's next turn, and the person's way out is the target's
+	// Reset action.
+	RejectIfAutomationOwned(ctx context.Context, orgID, sessionID uuid.UUID) error
 }
 
 // QuestionStore is the optional clarifying-question surface used by
@@ -397,6 +403,11 @@ func (s *Service) SetHumanInputRequestStore(store HumanInputRequestStore) {
 
 // CreateThread validates inputs and creates a blank idle thread.
 func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*models.SessionThread, error) {
+	// A sibling thread on an automation-owned session would share the
+	// checkout the automation's turn is working in.
+	if err := s.sessionStore.RejectIfAutomationOwned(ctx, input.OrgID, input.SessionID); err != nil {
+		return nil, err
+	}
 	// Verify session exists and belongs to org.
 	session, err := s.sessionStore.GetByID(ctx, input.OrgID, input.SessionID)
 	if err != nil {
@@ -733,6 +744,12 @@ func isActiveStatus(status models.ThreadStatus) bool {
 // answer, enqueue) we best-effort revert the thread to idle and the session
 // to the status it had before the claim.
 func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*SendMessageResult, error) {
+	// An automation-owned session accepts no human turn. Rejected before any
+	// state mutation, so nothing is claimed or queued for a thread the
+	// automation's next turn owns.
+	if err := s.sessionStore.RejectIfAutomationOwned(ctx, input.OrgID, input.SessionID); err != nil {
+		return nil, err
+	}
 	// Reject early — before any state mutation — when the caller asked to
 	// resolve comments but the service was constructed without the plumbing
 	// to do so. Pushing this check above the claim avoids leaving the thread

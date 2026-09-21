@@ -5190,6 +5190,11 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 	mock.ExpectQuery(`(?s)SELECT.*FROM pull_requests.*WHERE session_id.*org_id`).
 		WithArgs(workerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(workerPullRequestRow(prID, sessionID, orgID, repo, headRef, now)...))
+	// SendMessage first asks whether a per-target automation generation owns
+	// the session (design doc 125): an owned session accepts no human turn.
+	mock.ExpectQuery(`(?s)SELECT.*FROM sessions s\s+JOIN automation_target_sessions g`).
+		WithArgs(pgx.NamedArgs{"session_id": sessionID, "org_id": orgID}).
+		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectQuery(`SELECT .* FROM thread_inbox_entries`).
 		WithArgs(orgID, threadID, "push-reconcile:"+sessionID.String()+":0").
 		WillReturnRows(pgxmock.NewRows(threadInboxColumns))
@@ -11084,6 +11089,7 @@ func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testi
 	sessionRow := workerSessionRow(runID, issueID, orgID, models.SessionStatusRunning, 0, nil, nil)
 	setWorkerSessionColumnValue(sessionRow, "project_task_id", &projectTaskID)
 	setWorkerSessionColumnValue(sessionRow, "automation_run_id", &automationRunID)
+	setWorkerSessionColumnValue(sessionRow, "interaction_mode", string(models.SessionInteractionModeSingleRun))
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -11192,6 +11198,7 @@ func TestRunAgentHandler_SystemInterruptDeadLetterFailsSessionAndThread(t *testi
 	sessionRow := workerSessionRow(runID, issueID, orgID, models.SessionStatusRunning, 0, nil, nil)
 	setWorkerSessionColumnValue(sessionRow, "project_task_id", &projectTaskID)
 	setWorkerSessionColumnValue(sessionRow, "automation_run_id", &automationRunID)
+	setWorkerSessionColumnValue(sessionRow, "interaction_mode", string(models.SessionInteractionModeSingleRun))
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(

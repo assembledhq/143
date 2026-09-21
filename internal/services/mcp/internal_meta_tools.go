@@ -283,22 +283,32 @@ func (s *internalMetaToolSource) do(ctx context.Context, method, path string, q 
 	return TextResult(string(out))
 }
 
-func FetchCapabilitySnapshot(ctx context.Context, token, apiURL string) ([]models.AgentCapabilitySnapshotItem, error) {
+// CapabilitySnapshotResponse is what the effective-capabilities endpoint
+// returns to the sandbox: the session's snapshot and, for an allowlisted
+// session token, the positive tool allowlist the filter must apply even
+// when the snapshot is empty.
+type CapabilitySnapshotResponse struct {
+	Snapshot      []models.AgentCapabilitySnapshotItem
+	ToolAllowlist []string
+}
+
+func FetchCapabilitySnapshot(ctx context.Context, token, apiURL string) (CapabilitySnapshotResponse, error) {
 	source := &internalMetaToolSource{token: token, apiURL: internalapi.NormalizeBaseURL(apiURL), client: &http.Client{Timeout: 30 * time.Second}}
 	result := source.do(ctx, http.MethodGet, "/api/v1/internal/agent-capabilities/effective", nil, nil)
 	if result == nil || len(result.Content) == 0 {
-		return nil, fmt.Errorf("capability list failed: empty response")
+		return CapabilitySnapshotResponse{}, fmt.Errorf("capability list failed: empty response")
 	}
 	if result.IsError {
-		return nil, fmt.Errorf("capability list failed: %s", result.Content[0].Text)
+		return CapabilitySnapshotResponse{}, fmt.Errorf("capability list failed: %s", result.Content[0].Text)
 	}
 	var resp struct {
 		Data struct {
-			Snapshot []models.AgentCapabilitySnapshotItem `json:"snapshot"`
+			Snapshot      []models.AgentCapabilitySnapshotItem `json:"snapshot"`
+			ToolAllowlist []string                             `json:"tool_allowlist"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(result.Content[0].Text), &resp); err != nil {
-		return nil, err
+		return CapabilitySnapshotResponse{}, err
 	}
-	return resp.Data.Snapshot, nil
+	return CapabilitySnapshotResponse{Snapshot: resp.Data.Snapshot, ToolAllowlist: resp.Data.ToolAllowlist}, nil
 }

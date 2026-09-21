@@ -4699,3 +4699,90 @@ func TestPullRequestEventDecodesChangedLabelAndState(t *testing.T) {
 	require.Equal(t, "open", event.PR.State, "webhook should expose current pull request state")
 	require.Equal(t, []string{"frontend"}, githubLabelNames(event.PR.Labels), "webhook should retain the current label set")
 }
+
+type recordingTargetLifecycle struct {
+	closed   []recordedLifecycleCall
+	reopened []recordedLifecycleCall
+	err      error
+}
+
+type recordedLifecycleCall struct {
+	OrgID  uuid.UUID
+	Repo   string
+	Number int
+	Merged bool
+}
+
+func (l *recordingTargetLifecycle) OnPullRequestClosed(_ context.Context, orgID uuid.UUID, repo string, number int, merged bool, _ time.Time) error {
+	l.closed = append(l.closed, recordedLifecycleCall{OrgID: orgID, Repo: repo, Number: number, Merged: merged})
+	return l.err
+}
+
+func (l *recordingTargetLifecycle) OnPullRequestReopened(_ context.Context, orgID uuid.UUID, repo string, number int, _ time.Time) error {
+	l.reopened = append(l.reopened, recordedLifecycleCall{OrgID: orgID, Repo: repo, Number: number})
+	return l.err
+}
+
+// TestHandlePullRequestEvent_NotifiesAutomationTargetLifecycle proves the
+// per-target continuity notification keys on the webhook's own repository
+// and number, before any of the pull request mirroring below it. A pull
+// request 143 never created has no mirror row, but it can still have
+// automation targets whose waiters and owned session must end with it
+// (design doc 125, "Lifecycle Transitions"). A notification failure is
+// swallowed: the webhook still succeeds, and the scheduler's sweeps bound
+// the waiters anyway.
+func TestHandlePullRequestEvent_NotifiesAutomationTargetLifecycle(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+
+	tests := []struct {
+		name         string
+		action       string
+		merged       bool
+		orgID        *uuid.UUID
+		repo         string
+		number       int
+		lifecycleErr error
+		wantClosed   []recordedLifecycleCall
+		wantReopened []recordedLifecycleCall
+	}{
+		{name: "a close notifies", action: "closed", orgID: &orgID, repo: "acme/app", number: 42,
+			wantClosed: []recordedLifecycleCall{{OrgID: orgID, Repo: "acme/app", Number: 42}}},
+		{name: "a merge notifies as merged", action: "closed", merged: true, orgID: &orgID, repo: "acme/app", number: 42,
+			wantClosed: []recordedLifecycleCall{{OrgID: orgID, Repo: "acme/app", Number: 42, Merged: true}}},
+		{name: "a reopen notifies", action: "reopened", orgID: &orgID, repo: "acme/app", number: 42,
+			wantReopened: []recordedLifecycleCall{{OrgID: orgID, Repo: "acme/app", Number: 42}}},
+		{name: "an unrelated action notifies nothing", action: "synchronize", orgID: &orgID, repo: "acme/app", number: 42},
+		{name: "an untenanted webhook notifies nothing", action: "closed", repo: "acme/app", number: 42},
+		{name: "a webhook without a repository notifies nothing", action: "closed", orgID: &orgID, number: 42},
+		{name: "a notification failure does not fail the webhook", action: "closed", orgID: &orgID, repo: "acme/app", number: 42,
+			lifecycleErr: errors.New("targets unavailable"),
+			wantClosed:   []recordedLifecycleCall{{OrgID: orgID, Repo: "acme/app", Number: 42}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// The pull request has no mirror row: the mirror handling below
+			// the notification finds nothing, so the notification must not
+			// depend on it.
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "mock pool")
+			defer mock.Close()
+			mock.MatchExpectationsInOrder(false)
+			mock.ExpectQuery(`SELECT .+ FROM pull_requests`).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnError(pgx.ErrNoRows)
+			svc := NewPRService(nil, db.NewPullRequestStore(mock), nil, nil, nil, nil, nil, zerolog.Nop())
+			lifecycle := &recordingTargetLifecycle{err: tt.lifecycleErr}
+			svc.SetAutomationTargetLifecycle(lifecycle)
+
+			event := PullRequestEvent{Action: tt.action, Number: tt.number, OwnerOrgID: tt.orgID}
+			event.Repository.FullName = tt.repo
+			event.PR.Merged = tt.merged
+			require.NoError(t, svc.HandlePullRequestEvent(context.Background(), event), "the webhook succeeds")
+
+			require.Equal(t, tt.wantClosed, lifecycle.closed, "close notifications")
+			require.Equal(t, tt.wantReopened, lifecycle.reopened, "reopen notifications")
+		})
+	}
+}

@@ -450,7 +450,7 @@ func TestLifecycleAllowsRun(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(string(tt.state)+"/"+string(tt.event), func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.want, lifecycleAllowsRun(tt.state, tt.event), "only open targets and the merged run on a merged target execute")
+			require.Equal(t, tt.want, tt.state.AllowsEvent(tt.event), "only open targets and the merged run on a merged target execute")
 		})
 	}
 }

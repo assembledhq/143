@@ -31,6 +31,9 @@ type internalCapabilityResponse struct {
 	Catalog      []models.AgentCapabilityDefinition   `json:"catalog"`
 	SessionID    uuid.UUID                            `json:"session_id"`
 	RepositoryID uuid.UUID                            `json:"repository_id"`
+	// ToolAllowlist is the positive tool list of an allowlisted session
+	// token (a per-target automation turn); absent otherwise.
+	ToolAllowlist []string `json:"tool_allowlist,omitempty"`
 }
 
 func NewInternalAgentCapabilitiesHandler(svc *agentcapabilities.Service, sessionStore *db.SessionStore, signingSecret string) *InternalAgentCapabilitiesHandler {
@@ -43,10 +46,11 @@ func (h *InternalAgentCapabilitiesHandler) Effective(w http.ResponseWriter, r *h
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[internalCapabilityResponse]{Data: internalCapabilityResponse{
-		Snapshot:     session.CapabilitySnapshot,
-		Catalog:      h.svc.Definitions(),
-		SessionID:    *claims.SessionID,
-		RepositoryID: claims.RepoID,
+		Snapshot:      session.CapabilitySnapshot,
+		Catalog:       h.svc.Definitions(),
+		SessionID:     *claims.SessionID,
+		RepositoryID:  claims.RepoID,
+		ToolAllowlist: models.ToolAllowlistFromScopes(claims.AllowedToolScopes),
 	}})
 }
 

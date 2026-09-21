@@ -103,10 +103,20 @@ func (m *mockThreadStore) MarkCancelRequestedBySessions(context.Context, uuid.UU
 }
 
 type mockSessionStoreForThread struct {
+	automationOwner  *models.SessionAutomationOwner
 	getByIDFn        func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimIdleFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimForResumeFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
+}
+
+// automationOwner, when set, makes every human-entry guard reject the
+// session as automation-owned.
+func (m *mockSessionStoreForThread) RejectIfAutomationOwned(_ context.Context, _, _ uuid.UUID) error {
+	if m.automationOwner == nil {
+		return nil
+	}
+	return &models.SessionAutomationOwnedError{Owner: *m.automationOwner}
 }
 
 func (m *mockSessionStoreForThread) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {

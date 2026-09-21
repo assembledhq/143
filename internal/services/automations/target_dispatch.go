@@ -337,7 +337,7 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 	// merged event keeps its final turn and the target keeps its merged
 	// state.
 	event := runEvent(run)
-	if !lifecycleAllowsRun(target.LifecycleState, event) {
+	if !target.LifecycleState.AllowsEvent(event) {
 		return d.terminalize(ctx, tx, orgID, run.ID, models.AutomationRunOutcomePRClosed, "pull request is no longer open")
 	}
 	if current.ok && current.info.State != "" && current.info.State != "open" && event != models.AutomationGitHubEventPullRequestMerged {
@@ -474,6 +474,9 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 		// and saving the native agent session id on the primary thread,
 		// which the next continued turn resumes from.
 		template.InteractionMode = models.SessionInteractionModeInteractive
+		// The turn executes with the run's snapshot restricted to the
+		// positive per-target allowlist.
+		template.CapabilitySnapshot = models.RestrictCapabilitySnapshotForPerTargetTurn(in.Run.CapabilitySnapshot)
 		if template.ExecutionBrief != nil && strings.TrimSpace(*template.ExecutionBrief) != "" {
 			goal = *template.ExecutionBrief
 		}
@@ -516,7 +519,7 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 			}
 			return DispatchOutcome{}, fmt.Errorf("claim primary thread for automation turn: %w", err)
 		}
-		if err := d.sessions.UpsertCapabilitySnapshotInTx(ctx, tx, orgID, claimed.ID, in.Run.CapabilitySnapshot); err != nil {
+		if err := d.sessions.UpsertCapabilitySnapshotInTx(ctx, tx, orgID, claimed.ID, models.RestrictCapabilitySnapshotForPerTargetTurn(in.Run.CapabilitySnapshot)); err != nil {
 			return DispatchOutcome{}, err
 		}
 		sessionID = claimed.ID
@@ -537,14 +540,16 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 	// The visible user message is the transcript's copy of the turn's
 	// prompt. A fresh turn gets one too, so a recovery that continues from
 	// a bootstrap checkpoint finds a user message.
+	runID := in.Run.ID
 	message := &models.SessionMessage{
-		SessionID:  sessionID,
-		OrgID:      orgID,
-		ThreadID:   &threadID,
-		TurnNumber: turnNumber,
-		Role:       models.MessageRoleUser,
-		Content:    prompt,
-		Source:     models.SessionMessageSourceAutomationTurn,
+		SessionID:       sessionID,
+		OrgID:           orgID,
+		ThreadID:        &threadID,
+		TurnNumber:      turnNumber,
+		Role:            models.MessageRoleUser,
+		Content:         prompt,
+		Source:          models.SessionMessageSourceAutomationTurn,
+		AutomationRunID: &runID,
 	}
 	if err := db.NewSessionMessageStore(tx).CreateWithSource(ctx, message); err != nil {
 		return DispatchOutcome{}, fmt.Errorf("insert automation turn message: %w", err)
@@ -656,19 +661,6 @@ func (d *TargetDispatcher) terminalizeWith(ctx context.Context, tx pgx.Tx, orgID
 		return DispatchOutcome{}, fmt.Errorf("commit automation dispatch terminalization: %w", err)
 	}
 	return DispatchOutcome{Kind: DispatchTerminalized, OutcomeReason: outcome, Note: note}, nil
-}
-
-// lifecycleAllowsRun applies the stored lifecycle gate: open targets run
-// everything; a merged target runs only its merged event.
-func lifecycleAllowsRun(state models.AutomationTargetLifecycleState, event models.AutomationGitHubEvent) bool {
-	switch state {
-	case models.AutomationTargetLifecycleOpen:
-		return true
-	case models.AutomationTargetLifecycleMerged:
-		return event == models.AutomationGitHubEventPullRequestMerged
-	default:
-		return false
-	}
 }
 
 // targetChangedSince reports whether the target row was written between

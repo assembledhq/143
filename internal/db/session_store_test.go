@@ -814,7 +814,7 @@ func TestSessionStore_PromotePendingSnapshot(t *testing.T) {
 	// Promote must clear both pending_snapshot_key AND pending_snapshot_set_at
 	// in the same statement — otherwise the reaper would see a phantom
 	// timestamp on a row whose pending key has already been promoted.
-	mock.ExpectQuery("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key[\\s\\S]*pending_snapshot_key = NULL[\\s\\S]*pending_snapshot_set_at = NULL[\\s\\S]*workspace_revision = workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = NOW\\(\\)[\\s\\S]*pending_snapshot_key = @expected_key[\\s\\S]*RETURNING workspace_revision, workspace_revision_updated_at").
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*snapshot_key = pending_snapshot_key[\\s\\S]*pending_snapshot_key = NULL[\\s\\S]*pending_snapshot_set_at = NULL[\\s\\S]*workspace_revision = workspace_revision \\+ 1[\\s\\S]*workspace_revision_updated_at = NOW\\(\\)[\\s\\S]*pending_snapshot_key = @expected_key[\\s\\S]*RETURNING id, org_id, automation_owner_generation_id, workspace_revision, workspace_revision_updated_at[\\s\\S]*UPDATE automation_target_sessions[\\s\\S]*checkpoint_snapshot_key = NULL").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), expected).
 		WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).AddRow(int64(4), time.Now()))
 
@@ -870,7 +870,7 @@ func TestSessionStore_UpdateWorkspaceSnapshotAllowsNilResult(t *testing.T) {
 	sessionID := uuid.New()
 	snapshotKey := "snapshots/org/session/interrupted.tar.zst"
 
-	mock.ExpectExec("UPDATE sessions[\\s\\S]+snapshot_key = @snapshot_key[\\s\\S]+diff = COALESCE\\(@diff, diff\\)").
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+snapshot_key = CASE WHEN automation_owner_generation_id IS NOT NULL THEN snapshot_key ELSE @snapshot_key END[\\s\\S]+diff = COALESCE\\(@diff, diff\\)").
 		WithArgs(pgx.NamedArgs{
 			"id":                sessionID,
 			"org_id":            orgID,
@@ -2169,7 +2169,7 @@ func TestSessionStore_UpdateSnapshotInfo(t *testing.T) {
 	// Pinned: UpdateSnapshotInfo must NOT write last_activity_at. The
 	// orchestrator calls UpdateResult (which bumps it) immediately before
 	// this; a second bump here would be a redundant write on every snapshot.
-	mock.ExpectExec(`UPDATE sessions\s+SET agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,\s+sandbox_state = 'snapshotted'\s+WHERE id = @id AND org_id = @org_id`).
+	mock.ExpectExec(`UPDATE sessions\s+SET agent_session_id = @agent_session_id,\s+snapshot_key = CASE WHEN automation_owner_generation_id IS NOT NULL THEN snapshot_key ELSE @snapshot_key END,\s+sandbox_state = CASE WHEN automation_owner_generation_id IS NOT NULL THEN sandbox_state ELSE 'snapshotted' END\s+WHERE id = @id AND org_id = @org_id`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 

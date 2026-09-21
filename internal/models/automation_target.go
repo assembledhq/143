@@ -1,6 +1,7 @@
 package models
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -100,6 +101,20 @@ const (
 	AutomationTargetLifecycleClosed AutomationTargetLifecycleState = "closed"
 	AutomationTargetLifecycleMerged AutomationTargetLifecycleState = "merged"
 )
+
+// AllowsEvent reports whether a run for event may execute on a target in
+// this lifecycle state: open targets run everything; a merged target runs
+// only its merged event; a closed target runs nothing.
+func (s AutomationTargetLifecycleState) AllowsEvent(event AutomationGitHubEvent) bool {
+	switch s {
+	case AutomationTargetLifecycleOpen:
+		return true
+	case AutomationTargetLifecycleMerged:
+		return event == AutomationGitHubEventPullRequestMerged
+	default:
+		return false
+	}
+}
 
 func (s AutomationTargetLifecycleState) Validate() error {
 	switch s {
@@ -425,4 +440,74 @@ type AutomationRunResult struct {
 	DependencyFingerprint *string                    `db:"dependency_fingerprint" json:"-"`
 	AgentSessionID        *string                    `db:"agent_session_id" json:"-"`
 	RecordedAt            time.Time                  `db:"recorded_at" json:"recorded_at"`
+}
+
+// CheckpointProvenance is what PublishCheckpointWithProvenance records on
+// the owning generation together with the checkpoint it installs on the
+// session (design doc 125, "Checkpoint coherence"): the key, the head the
+// workspace was at, the dependency input fingerprint that applies to that
+// workspace, and whether the turn that produced it completed its review.
+type CheckpointProvenance struct {
+	GenerationID          uuid.UUID
+	HeadSHA               string
+	DependencyFingerprint *string
+	ReviewComplete        bool
+}
+
+// AutomationTurnWorkspace is what workspace preparation records on a run:
+// the merge-base the delta falls back to, the node the turn ran on, the
+// snapshot size when the turn restored a checkpoint, and the time from the
+// attempt's start to a ready workspace on every path (snapshot restore, or
+// clone and checkout for a rebuilt workspace).
+type AutomationTurnWorkspace struct {
+	BaseSHA              string
+	WorkerNodeID         string
+	RestoreSnapshotBytes *int64
+	RestoreDurationMS    *int
+}
+
+// AutomationTurnSummary is a completed run's review summary, embedded as
+// data in a later turn's prompt.
+type AutomationTurnSummary struct {
+	RunID       uuid.UUID
+	HeadSHA     string
+	TurnNumber  int
+	Summary     string
+	CompletedAt string
+}
+
+// SessionAutomationOwner describes the generation that owns a session
+// (design doc 125, "Automation-owned sessions"). A session with an owner
+// accepts no human turn: its thread belongs to the automation's next turn,
+// and a message sent into it would either be lost or race that turn. The
+// person's way out is the target's Reset action, which retires the
+// generation and hands the session back.
+type SessionAutomationOwner struct {
+	AutomationID   uuid.UUID `json:"automation_id"`
+	TargetID       uuid.UUID `json:"target_id"`
+	GenerationID   uuid.UUID `json:"generation_id"`
+	ResetURL       string    `json:"reset_url"`
+	ReleasePending bool      `json:"release_pending"`
+}
+
+// ErrSessionAutomationOwned is what every human-entry path on an owned
+// session returns; handlers map it to 409 SESSION_AUTOMATION_OWNED with the
+// owner as details.
+var ErrSessionAutomationOwned = errors.New("session is owned by an automation target")
+
+// SessionAutomationOwnedError carries the owner alongside the sentinel, so
+// a handler can answer with the target and its reset link.
+type SessionAutomationOwnedError struct {
+	Owner SessionAutomationOwner
+}
+
+func (e *SessionAutomationOwnedError) Error() string {
+	return ErrSessionAutomationOwned.Error()
+}
+
+func (e *SessionAutomationOwnedError) Unwrap() error { return ErrSessionAutomationOwned }
+
+// SessionAutomationResetURL is the path that hands an owned session back.
+func SessionAutomationResetURL(automationID, targetID uuid.UUID) string {
+	return fmt.Sprintf("/api/v1/automations/%s/targets/%s/reset", automationID, targetID)
 }

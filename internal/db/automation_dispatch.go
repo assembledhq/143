@@ -334,8 +334,24 @@ func (s *AutomationRunStore) ReserveForExecution(ctx context.Context, tx pgx.Tx,
 // the job. Returns the new attempt number and false when the caller is not
 // the owner.
 func (s *AutomationRunStore) ClaimAttempt(ctx context.Context, tx pgx.Tx, orgID, runID, jobID, lockToken uuid.UUID) (int, bool, error) {
-	var owned int
+	// The run row is locked before the job row. Every attempt write locks
+	// them in that order (the fenced statements take FOR UPDATE OF r, j),
+	// and so does recovery, so no pair of writers can hold one and wait for
+	// the other.
+	var runID2 uuid.UUID
 	err := tx.QueryRow(ctx, `
+		SELECT id FROM automation_runs
+		WHERE id = @run_id AND org_id = @org_id AND dispatch_state = 'executing' AND job_id = @job_id
+		FOR UPDATE`,
+		pgx.NamedArgs{"run_id": runID, "org_id": orgID, "job_id": jobID}).Scan(&runID2)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("lock run for attempt claim: %w", err)
+	}
+	var owned int
+	err = tx.QueryRow(ctx, `
 		SELECT 1 FROM jobs
 		WHERE id = @job_id AND org_id = @org_id AND status = 'running'
 		  AND lock_token = @lock_token AND lease_expires_at > now()
