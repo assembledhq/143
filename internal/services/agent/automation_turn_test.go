@@ -13,12 +13,22 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 )
 
 // fakeAutomationTurnStore scripts the store surface of the turn path.
+// fakeThreadTurn records a fenced primary-thread release.
+type fakeThreadTurn struct {
+	ThreadID       uuid.UUID
+	Turn           int
+	AgentSessionID string
+}
+
 type fakeAutomationTurnStore struct {
+	threadTurns      []fakeThreadTurn
+	threadFailures   []fakeThreadTurn
 	run              models.AutomationRun
 	runErr           error
 	target           models.AutomationTarget
@@ -53,6 +63,10 @@ func (f *fakeAutomationTurnStore) LoadTarget(_ context.Context, _, _ uuid.UUID) 
 func (f *fakeAutomationTurnStore) EndInterruptedAttempt(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, models.SessionStatus) (bool, error) {
 	return f.owned, nil
 }
+func (f *fakeAutomationTurnStore) CompleteThreadTurn(_ context.Context, _, _, _, threadID uuid.UUID, turn int, agentSessionID string) (bool, error) {
+	f.threadTurns = append(f.threadTurns, fakeThreadTurn{ThreadID: threadID, Turn: turn, AgentSessionID: agentSessionID})
+	return f.owned, nil
+}
 func (f *fakeAutomationTurnStore) RecordContinuationFallback(_ context.Context, _, _, _ uuid.UUID, reason models.AutomationRunContinuationReason, baseline *string) (bool, error) {
 	f.fallbacks = append(f.fallbacks, reason)
 	f.fallbackBaseline = baseline
@@ -75,8 +89,15 @@ func (f *fakeAutomationTurnStore) UpdateTurnPrompt(_ context.Context, _, _ uuid.
 func (f *fakeAutomationTurnStore) TagAssistantMessage(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int, uuid.UUID) error {
 	return nil
 }
-func (f *fakeAutomationTurnStore) PublishCheckpointWithProvenance(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string, models.CheckpointKind, models.CheckpointCapability, int64, time.Time, models.RuntimeStopReason, models.CheckpointProvenance) (bool, error) {
+func (f *fakeAutomationTurnStore) PublishCheckpointWithProvenance(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, string, models.CheckpointKind, models.CheckpointCapability, int64, time.Time, models.RuntimeStopReason, models.CheckpointProvenance) (bool, error) {
 	return true, nil
+}
+func (f *fakeAutomationTurnStore) ReleaseTurnHold(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) (bool, bool, string, error) {
+	return f.owned, false, "", nil
+}
+func (f *fakeAutomationTurnStore) FailThreadTurn(_ context.Context, _, _, _, threadID uuid.UUID, status models.ThreadStatus, _ *models.SessionResult) (bool, error) {
+	f.threadFailures = append(f.threadFailures, fakeThreadTurn{ThreadID: threadID, AgentSessionID: string(status)})
+	return f.owned, nil
 }
 func (f *fakeAutomationTurnStore) EndAttempt(ctx context.Context, fn func(ctx context.Context, tx pgx.Tx, sessions SessionStore) error) error {
 	return fn(ctx, nil, f.sessions)
@@ -831,4 +852,50 @@ func TestFallbackToEmbeddedHistory(t *testing.T) {
 	require.Contains(t, prompt, "Reviewed A.", "the baseline review is embedded as data")
 	require.Contains(t, strings.Join(git.calls, "\n"), reviewed+".."+head, "the delta starts at the last completed review")
 	require.Equal(t, []string{prompt}, store.prompts, "the transcript's message is rewritten")
+}
+
+func TestInjectInternalAPIEnvForPerTargetTurn(t *testing.T) {
+	t.Parallel()
+	secret := "test-internal-api-secret"
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New(), Origin: models.SessionOriginAutomation}
+	repoID, threadID := uuid.New(), uuid.New()
+	cfg := &SandboxConfig{Timeout: time.Minute}
+	o := &Orchestrator{internalAPIURL: "https://platform.test", internalAPISecret: secret}
+	ctx := withAutomationTurnState(context.Background(), &automationTurnState{run: models.AutomationRun{ID: uuid.New()}})
+	o.injectInternalAPIEnv(ctx, session, &repoID, &threadID, cfg, zerolog.Nop())
+	claims, err := auth.ValidateInternalToken(secret, cfg.Env["INTERNAL_API_TOKEN"])
+	require.NoError(t, err, "token validates")
+	require.Equal(t, models.PerTargetToolScopes(), claims.AllowedToolScopes, "a per-target turn's token carries exactly the allowlist scopes")
+	require.False(t, models.HasToolScope(claims.AllowedToolScopes, "preview:read"), "no preview scope")
+	require.False(t, models.HasToolScope(claims.AllowedToolScopes, "preview:manage"), "no preview manage scope")
+	require.Empty(t, cfg.Env["EVAL_BOOTSTRAP_TOOLS_ENABLED"], "no eval tools")
+
+	plain := &SandboxConfig{Timeout: time.Minute}
+	o.injectInternalAPIEnv(context.Background(), session, &repoID, &threadID, plain, zerolog.Nop())
+	claims, err = auth.ValidateInternalToken(secret, plain.Env["INTERNAL_API_TOKEN"])
+	require.NoError(t, err, "token validates")
+	require.True(t, models.HasToolScope(claims.AllowedToolScopes, "preview:read"), "an ordinary session keeps its preview scope")
+	require.False(t, models.HasToolScope(claims.AllowedToolScopes, models.PerTargetToolAllowlistScope), "an ordinary session is not allowlisted")
+}
+
+// TestFinishWorkerOwnershipFailure proves the worker-ownership failure is
+// always reported, and that an owned session's session and thread rows are
+// left alone: their release belongs to the turn's completion, or to the
+// recovery that took the attempt away. Swallowing the error would let the
+// job succeed with no result, after which recovery fails the unexecuted run
+// as retries_exhausted.
+func TestFinishWorkerOwnershipFailure(t *testing.T) {
+	t.Parallel()
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	threadID := uuid.New()
+	cause := errors.New("CAS failed")
+
+	// Every store is nil: reaching one for an owned session would panic,
+	// which is the point. The error must still come back wrapped.
+	owned := &Orchestrator{}
+	ctx := withAutomationTurnState(context.Background(), &automationTurnState{})
+	err := owned.finishWorkerOwnershipFailure(ctx, session, &threadID, cause, zerolog.Nop())
+	require.Error(t, err, "the failure is reported for an owned session")
+	require.ErrorIs(t, err, cause, "wrapping the cause")
+	require.Contains(t, err.Error(), "persist session worker ownership", "naming the failure")
 }

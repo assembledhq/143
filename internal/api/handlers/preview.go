@@ -41,10 +41,13 @@ var errPreviewResponseWritten = errors.New("preview response already written")
 
 // PreviewHandler handles all preview-related HTTP endpoints.
 type PreviewHandler struct {
-	manager           *preview.Manager
-	store             *db.PreviewStore
-	jobStore          *db.JobStore
-	sessionStore      *db.SessionStore
+	manager      *preview.Manager
+	store        *db.PreviewStore
+	jobStore     *db.JobStore
+	sessionStore *db.SessionStore
+	// automationOwners rejects a preview on a session a per-target
+	// automation generation owns. Nil-safe: skipped when not wired.
+	automationOwners  automationOwnershipGuard
 	orgStore          agent.OrgSettingsReader
 	repoStore         *db.RepositoryStore
 	fileReader        sandbox.FileReader
@@ -64,6 +67,11 @@ type PreviewHandler struct {
 	// sandboxBusyRetryDelay overrides sandboxBusyAcquireRetryDelay in tests;
 	// zero means the production default.
 	sandboxBusyRetryDelay time.Duration
+}
+
+// SetAutomationOwnershipGuard wires the per-target continuity guard.
+func (h *PreviewHandler) SetAutomationOwnershipGuard(guard automationOwnershipGuard) {
+	h.automationOwners = guard
 }
 
 func (h *PreviewHandler) SetBrowserSessionService(service *preview.BrowserSessionService) {
@@ -1317,6 +1325,11 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_SESSION_ID", "invalid session ID")
 		return
 	}
+	// A preview takes the session's container, which an automation-owned
+	// session's turn is using or about to use.
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+		return
+	}
 
 	body, reqErr := h.decodeStartPreviewBody(r)
 	if reqErr != nil {
@@ -1924,6 +1937,11 @@ func (h *PreviewHandler) ensurePreview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Every path that takes a session's container is guarded, not only
+	// StartPreview: an automation-owned session's turn is using it.
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+		return
+	}
 	body, reqErr := h.decodeStartPreviewBody(r)
 	if reqErr != nil {
 		writePreviewHTTPError(w, r, reqErr)
@@ -2038,6 +2056,11 @@ func (h *PreviewHandler) RestartPreview(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	// Every path that takes a session's container is guarded, not only
+	// StartPreview: an automation-owned session's turn is using it.
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+		return
+	}
 	body, reqErr := h.decodeStartPreviewBody(r)
 	if reqErr != nil {
 		writePreviewHTTPError(w, r, reqErr)
@@ -2132,6 +2155,11 @@ func (h *PreviewHandler) UpdatePreview(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, ok := parsePreviewSessionID(w, r)
 	if !ok {
+		return
+	}
+	// Every path that takes a session's container is guarded, not only
+	// StartPreview: an automation-owned session's turn is using it.
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
 		return
 	}
 	userID, ok := previewRequestUserID(r.Context(), middleware.UserFromContext(r.Context()))

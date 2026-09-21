@@ -212,14 +212,24 @@ func (s *AutomationRunStore) ListCompletedTurnSummaries(ctx context.Context, org
 // message the reservation inserted, requests a target wake, and applies a
 // pending ownership release. No result marker is written. Returns false
 // when the fence rejects the write.
-func (s *AutomationRunStore) CompleteExecutingPreflight(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID, outcome models.AutomationRunOutcomeReason, summary string) (bool, error) {
+func (s *AutomationRunStore) CompleteExecutingPreflight(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken uuid.UUID, outcome models.AutomationRunOutcomeReason, summary string) (uuid.UUID, bool, error) {
 	switch outcome {
 	case models.AutomationRunOutcomeStaleHead, models.AutomationRunOutcomePRClosed, models.AutomationRunOutcomeRepositoryUnavailable:
 	default:
-		return false, fmt.Errorf("complete executing preflight: %q is not a preflight outcome", outcome)
+		return uuid.Nil, false, fmt.Errorf("complete executing preflight: %q is not a preflight outcome", outcome)
 	}
 	if lockToken == uuid.Nil {
-		return false, errors.New("complete executing preflight: lock token is required")
+		return uuid.Nil, false, errors.New("complete executing preflight: lock token is required")
+	}
+	// Target first, then job, then the run: the order every per-target
+	// writer uses, so a preflight and a recovery or a lifecycle change
+	// cannot deadlock. The caller holds a live lease, so nothing is
+	// revoked.
+	if err := lockAutomationRunLifecycle(ctx, tx, orgID, runID, false); err != nil {
+		if errors.Is(err, ErrAutomationTargetNotFound) {
+			return uuid.Nil, false, nil
+		}
+		return uuid.Nil, false, err
 	}
 	var sessionID, threadID, targetID uuid.UUID
 	err := tx.QueryRow(ctx, `
@@ -231,39 +241,39 @@ func (s *AutomationRunStore) CompleteExecutingPreflight(ctx context.Context, tx 
 		pgx.NamedArgs{"id": runID, "org_id": orgID, "lock_token": lockToken, "status": outcome.RunStatus(), "outcome": outcome, "summary": summary},
 	).Scan(&sessionID, &threadID, &targetID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return uuid.Nil, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("complete executing preflight: %w", err)
+		return uuid.Nil, false, fmt.Errorf("complete executing preflight: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE sessions SET status = 'idle', last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status IN ('pending', 'running')`,
 		pgx.NamedArgs{"id": sessionID, "org_id": orgID}); err != nil {
-		return false, fmt.Errorf("release session after preflight: %w", err)
+		return uuid.Nil, false, fmt.Errorf("release session after preflight: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE session_threads SET status = 'idle'
 		WHERE id = @id AND org_id = @org_id AND status IN ('pending', 'running')`,
 		pgx.NamedArgs{"id": threadID, "org_id": orgID}); err != nil {
-		return false, fmt.Errorf("release thread after preflight: %w", err)
+		return uuid.Nil, false, fmt.Errorf("release thread after preflight: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM session_messages
 		WHERE org_id = @org_id AND automation_run_id = @run_id AND role = 'user' AND source = @source`,
 		pgx.NamedArgs{"org_id": orgID, "run_id": runID, "source": models.SessionMessageSourceAutomationTurn}); err != nil {
-		return false, fmt.Errorf("delete reservation message after preflight: %w", err)
+		return uuid.Nil, false, fmt.Errorf("delete reservation message after preflight: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE automation_targets SET wake_requested_at = now(), updated_at = now()
 		WHERE id = @id AND org_id = @org_id`,
 		pgx.NamedArgs{"id": targetID, "org_id": orgID}); err != nil {
-		return false, fmt.Errorf("request wake after preflight: %w", err)
+		return uuid.Nil, false, fmt.Errorf("request wake after preflight: %w", err)
 	}
 	if err := applyPendingOwnershipRelease(ctx, tx, orgID, sessionID); err != nil {
-		return false, err
+		return uuid.Nil, false, err
 	}
-	return true, nil
+	return targetID, true, nil
 }
 
 // applyPendingOwnershipRelease clears the session's owner marker when the
@@ -289,4 +299,72 @@ func applyPendingOwnershipRelease(ctx context.Context, q DBTX, orgID, sessionID 
 		return fmt.Errorf("apply pending ownership release: %w", err)
 	}
 	return nil
+}
+
+// CompleteThreadTurnForAttempt writes the primary thread's turn result in
+// the caller's transaction, under the attempt fence and the run row lock. The worker's ordinary thread write is not
+// fenced, so a worker that paused past its lease could otherwise overwrite
+// the status, turn number, provider session id, summary, and diff of a
+// turn that has since been claimed by another run (design doc 125,
+// "Retry and recovery"). Returns false when the attempt is no longer ours,
+// in which case the thread belongs to a later turn and is left alone.
+func (s *AutomationRunStore) CompleteThreadTurnForAttempt(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken, threadID uuid.UUID, turn int, result *models.SessionResult, agentSessionID string) (bool, error) {
+	return s.setThreadTurnForAttempt(ctx, tx, orgID, runID, lockToken, threadID, models.ThreadStatusIdle, turn, result, agentSessionID)
+}
+
+// FailThreadTurnForAttempt drives the primary thread terminal under the
+// same fence, for the failure paths that would otherwise mark a thread a
+// later turn is already running on.
+func (s *AutomationRunStore) FailThreadTurnForAttempt(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) (bool, error) {
+	return s.setThreadTurnForAttempt(ctx, tx, orgID, runID, lockToken, threadID, status, 0, result, "")
+}
+
+func (s *AutomationRunStore) setThreadTurnForAttempt(ctx context.Context, tx pgx.Tx, orgID, runID, lockToken, threadID uuid.UUID, status models.ThreadStatus, turn int, result *models.SessionResult, agentSessionID string) (bool, error) {
+	if lockToken == uuid.Nil {
+		return false, errors.New("complete automation thread turn: lock token is required")
+	}
+	// The run row is locked first, so the ownership this write is fenced by
+	// cannot change while the statement waits for the thread row: a
+	// recovery or a later attempt claim blocks behind the same lock.
+	owned, lockErr := s.LockAttempt(ctx, tx, orgID, runID, lockToken)
+	if lockErr != nil {
+		return false, lockErr
+	}
+	if !owned {
+		return false, nil
+	}
+	var summary, diff, failureCategory *string
+	var failureExplanation *string
+	if result != nil {
+		summary, diff, failureCategory = result.ResultSummary, result.Diff, result.FailureCategory
+		failureExplanation = sessionResultFailureExplanation(result)
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE session_threads th
+		SET status = @status,
+		    current_turn = CASE WHEN @current_turn::int > 0 THEN @current_turn::int ELSE th.current_turn END,
+		    last_activity_at = now(),
+		    completed_at = CASE
+		        WHEN @status IN ('completed', 'failed', 'cancelled') THEN now()
+		        ELSE th.completed_at
+		    END,
+		    agent_session_id = COALESCE(@agent_session_id, th.agent_session_id),
+		    result_summary = COALESCE(@result_summary, th.result_summary),
+		    diff = COALESCE(@diff, th.diff),
+		    failure_explanation = @failure_explanation,
+		    failure_category = @failure_category
+		WHERE th.id = @thread_id AND th.org_id = @org_id
+		  AND EXISTS (
+			SELECT 1 FROM automation_runs r
+			WHERE r.id = @id AND r.org_id = @org_id`+automationRunAttemptFence+`)`,
+		pgx.NamedArgs{
+			"thread_id": threadID, "org_id": orgID, "id": runID, "lock_token": lockToken,
+			"current_turn": turn, "agent_session_id": emptyStringNil(agentSessionID),
+			"result_summary": summary, "diff": diff, "status": status,
+			"failure_explanation": failureExplanation, "failure_category": failureCategory,
+		})
+	if err != nil {
+		return false, fmt.Errorf("complete automation thread turn: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }

@@ -109,12 +109,22 @@ func (m *mockThreadStore) MarkCancelRequestedBySessions(ctx context.Context, org
 }
 
 type mockSessionStore struct {
+	automationOwner  *models.SessionAutomationOwner
 	getByIDFn        func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	listByIDsFn      func(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) ([]models.Session, error)
 	claimIdleFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimForResumeFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
 	updateCalls      []models.SessionStatus
+}
+
+// automationOwner, when set, makes every human-entry guard reject the
+// session as automation-owned.
+func (m *mockSessionStore) RejectIfAutomationOwned(_ context.Context, _, _ uuid.UUID) error {
+	if m.automationOwner == nil {
+		return nil
+	}
+	return &models.SessionAutomationOwnedError{Owner: *m.automationOwner}
 }
 
 func (m *mockSessionStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
@@ -3915,6 +3925,61 @@ func TestService_GetTranscriptWindow(t *testing.T) {
 			require.NoError(t, err, "unexpected error")
 			require.Equal(t, tt.wantHasOlder, result.Window.HasOlder, "HasOlder should match")
 			require.Equal(t, tt.wantStatus, result.ThreadStatus, "ThreadStatus should match")
+		})
+	}
+}
+
+// TestService_RejectsAutomationOwnedSession proves a session a per-target
+// automation generation owns accepts no human turn: neither a message nor a
+// sibling tab, and the rejection carries the target so the caller can point
+// at its Reset action. The check runs before any state mutation, so nothing
+// is claimed for a thread the automation's next turn owns.
+func TestService_RejectsAutomationOwnedSession(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	automationID := uuid.New()
+	targetID := uuid.New()
+	owner := models.SessionAutomationOwner{
+		AutomationID: automationID,
+		TargetID:     targetID,
+		GenerationID: uuid.New(),
+		ResetURL:     models.SessionAutomationResetURL(automationID, targetID),
+	}
+
+	tests := []struct {
+		name string
+		call func(svc *Service) error
+	}{
+		{name: "a message send is refused", call: func(svc *Service) error {
+			userID := uuid.New()
+			_, err := svc.SendMessage(context.Background(), SendMessageInput{
+				SessionID: sessionID, OrgID: orgID, ThreadID: threadID, UserID: &userID, Message: "take over",
+			})
+			return err
+		}},
+		{name: "a new tab is refused", call: func(svc *Service) error {
+			_, err := svc.CreateThread(context.Background(), CreateThreadInput{
+				SessionID: sessionID, OrgID: orgID,
+			})
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			svc, deps := newTestService(t)
+			deps.sessionStore.automationOwner = &owner
+
+			err := tt.call(svc)
+			require.ErrorIs(t, err, models.ErrSessionAutomationOwned, "an owned session refuses human entry")
+			var owned *models.SessionAutomationOwnedError
+			require.ErrorAs(t, err, &owned, "the rejection is typed")
+			require.Equal(t, targetID, owned.Owner.TargetID, "it names the target")
+			require.Equal(t, owner.ResetURL, owned.Owner.ResetURL, "and the reset action that hands the session back")
+			require.Empty(t, deps.threadStore.pendingCalls, "nothing was claimed before the rejection")
 		})
 	}
 }
