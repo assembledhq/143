@@ -38,6 +38,8 @@ func (s *internalMetaToolSource) ListTools() []Tool {
 		return tools
 	}
 	tools = append(tools,
+		Tool{Name: "automation_execute_action", Description: "Execute one configured external action with stable operation_key and action_key. After interruption inspect action-status and resume the same step; succeeded and unknown actions are never resent. Available across automation run modes.", InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{"request": {Type: "object", Description: "Action request: operation_key, action_key, kind, text or properties; GitHub actions require pr_number and head_sha. Slack/Notion may omit PR preconditions in any run mode; include them only for commit-specific content. Supplied preconditions remain enforced on resume and must match the target in per-target turns."}, "file": {Type: "string", Description: "CLI only: local JSON request file"}, "resume": {Type: "boolean", Description: "Resume the stored step without replacing content", Default: false}, "operation_key": {Type: "string", Description: "Stable workflow key for resume"}, "action_key": {Type: "string", Description: "Stable step key for resume"}}}},
+		Tool{Name: "automation_action_status", Description: "Read recorded action receipts for one operation. Keys survive runs and session reconstruction. Unknown sends require reconciliation; use the same keys to resume safe steps.", InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{"operation_key": {Type: "string", Description: "Stable workflow key"}}, Required: []string{"operation_key"}}},
 		Tool{Name: "capability_list", Description: "List the current agent run capability snapshot and requestable capabilities.", InputSchema: ToolSchema{Type: "object"}},
 		Tool{Name: "capability_request", Description: "Request an additional capability for the current session through human approval.", InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
 			"capability_id": {Type: "string", Description: "Capability ID to request"},
@@ -89,6 +91,47 @@ func (s *internalMetaToolSource) ListTools() []Tool {
 
 func (s *internalMetaToolSource) CallTool(ctx context.Context, name string, args json.RawMessage) *ToolCallResult {
 	switch name {
+	case "automation_action_status":
+		var params struct {
+			OperationKey string `json:"operation_key"`
+		}
+		if err := json.Unmarshal(args, &params); err != nil || models.ValidateAutomationOperationKey(params.OperationKey) != nil {
+			return ErrorResult("INVALID_ARGUMENTS: operation_key is required")
+		}
+		return s.do(ctx, http.MethodGet, "/api/v1/internal/automation/actions", url.Values{"operation_key": []string{params.OperationKey}}, nil)
+	case "automation_execute_action":
+		var params struct {
+			Request json.RawMessage `json:"request"`
+			Resume  bool            `json:"resume"`
+			File    string          `json:"file"`
+			models.AutomationActionKey
+		}
+		if err := json.Unmarshal(args, &params); err != nil {
+			return ErrorResult("INVALID_ARGUMENTS: invalid request")
+		}
+		if params.File != "" {
+			return ErrorResult("INVALID_ARGUMENTS: file must be loaded by the CLI")
+		}
+		if params.Resume {
+			if len(params.Request) > 0 {
+				return ErrorResult("INVALID_ARGUMENTS: resume cannot replace the request")
+			}
+			if err := params.AutomationActionKey.Validate(); err != nil {
+				return ErrorResult("INVALID_ARGUMENTS: operation_key and action_key are required")
+			}
+			body, err := json.Marshal(params.AutomationActionKey)
+			if err != nil {
+				return ErrorResult("INVALID_ARGUMENTS: invalid keys")
+			}
+			return s.do(ctx, http.MethodPost, "/api/v1/internal/automation/actions/resume", nil, body)
+		}
+		if params.OperationKey != "" || params.ActionKey != "" {
+			return ErrorResult("INVALID_ARGUMENTS: keys outside request are only for resume")
+		}
+		if len(params.Request) == 0 {
+			return ErrorResult("INVALID_ARGUMENTS: request or resume is required")
+		}
+		return s.do(ctx, http.MethodPost, "/api/v1/internal/automation/actions", nil, params.Request)
 	case "capability_list":
 		return s.do(ctx, http.MethodGet, "/api/v1/internal/agent-capabilities/effective", nil, nil)
 	case "capability_request":

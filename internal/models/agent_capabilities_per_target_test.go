@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -76,5 +77,35 @@ func TestPerTargetToolScopes(t *testing.T) {
 	}
 	for _, allowed := range []string{"session-history:search", "code-review-history:policy", "github:get_pr_reviews", "linear:get_task", "pagerduty:list_oncalls", "notion:get_document", "slack:get_thread", "logs:stats", "capability:list"} {
 		require.True(t, HasToolScope(scopes, ToolScope(allowed)), "%s is allowed", allowed)
+	}
+}
+
+func TestPerTargetScopedReviewException(t *testing.T) {
+	t.Parallel()
+	cfg, err := json.Marshal(AutomationActionConfig{Actions: []AutomationActionKind{AutomationActionSlack}, SlackChannelID: "C0123456789"})
+	require.NoError(t, err, "marshal valid destinations")
+	tests := []struct {
+		name    string
+		level   AgentCapabilityAccessLevel
+		config  json.RawMessage
+		allowed bool
+	}{
+		{"explicit write", AgentCapabilityAccessWrite, cfg, true}, {"read grant", AgentCapabilityAccessRead, cfg, false}, {"invalid destinations", AgentCapabilityAccessWrite, json.RawMessage(`{}`), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			items := []AgentCapabilitySnapshotItem{{ID: AgentCapabilityAutomationActions, AccessLevel: tt.level, Config: tt.config}, {ID: AgentCapabilitySlackNotifications, AccessLevel: AgentCapabilityAccessWrite}}
+			restricted := RestrictCapabilitySnapshotForPerTargetTurn(items)
+			if tt.allowed {
+				require.Equal(t, items[:1], restricted, "retain only fixed workflow write grant")
+			} else {
+				require.Empty(t, restricted, "invalid grant contributes no exception")
+			}
+			scopes := PerTargetToolScopes(items...)
+			require.Equal(t, tt.allowed, HasToolScope(scopes, ToolScope("automation:execute-action")), "request scope follows the valid opt-in grant")
+			require.Equal(t, ToolAllowlistFromScopes(scopes), ToolAllowlistFromEnvValue(ToolAllowlistEnvValue(items...)), "environment and token use identical allowlist")
+			require.False(t, HasToolScope(scopes, ToolScope("slack:send")), "general writes remain unavailable")
+		})
 	}
 }

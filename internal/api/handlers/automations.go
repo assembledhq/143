@@ -397,6 +397,10 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Capabilities != nil && !authorizeAutomationActionGrants(w, r, *req.Capabilities) {
+		return
+	}
+
 	name := strings.TrimSpace(req.Name)
 	goal := strings.TrimSpace(req.Goal)
 	if name == "" || goal == "" {
@@ -1453,6 +1457,10 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+
+	if req.Capabilities != nil && !authorizeAutomationActionGrants(w, r, *req.Capabilities) {
 		return
 	}
 

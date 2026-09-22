@@ -682,3 +682,19 @@ func TestSlackAPIClient_FetchChannelInfo(t *testing.T) {
 		})
 	}
 }
+
+func TestSlackWritesDoNotFollowRedirects(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Location", "/redirected")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	client := NewSlackAPIClient(zerolog.Nop())
+	client.baseURL = server.URL
+	_, err := client.PostMessage(context.Background(), "test-token", "C123", "", "hello")
+	require.ErrorContains(t, err, "status 307", "a redirected write has no confirmed delivery")
+	require.Equal(t, 1, calls, "never resend a non-idempotent Slack write on redirect")
+}

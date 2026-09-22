@@ -4007,6 +4007,8 @@ func (s *PRService) HandleIssueCommentEvent(ctx context.Context, event IssueComm
 	}
 	s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
 		Event:             models.AutomationGitHubEventIssueCommentCreated,
+		OwnAppComment:     event.Comment.PerformedViaGitHubApp != nil && s.tokenProvider != nil && event.Comment.PerformedViaGitHubApp.ID == s.tokenProvider.appID,
+		CommentID:         event.Comment.ID,
 		Repository:        event.Repository.FullName,
 		PullRequestNumber: event.Issue.Number,
 		PullRequestURL:    event.Issue.HTMLURL,

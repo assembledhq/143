@@ -24,8 +24,8 @@ const PerTargetToolAllowlistScope = "tool-allowlist:v1"
 // succeeds and whether or not the internal token is present.
 const ToolAllowlistEnvVar = "INTERNAL_TOOL_ALLOWLIST"
 
-// PerTargetToolAllowlist is the exact set of tools a per-target turn may
-// call, as "namespace:action" identifiers.
+// PerTargetToolAllowlist is the read-only baseline. PerTargetTools adds only
+// the explicitly configured automation actions, as "namespace:action" identifiers.
 var PerTargetToolAllowlist = []string{
 	"session-history:search", "session-history:get", "session-history:messages",
 	"code-review-history:list", "code-review-history:get", "code-review-history:policy",
@@ -63,10 +63,11 @@ func ToolScope(tool string) string {
 
 // PerTargetToolScopes are the scopes a per-target turn's session token
 // carries: the allowlist marker and one scope per allowlisted tool.
-func PerTargetToolScopes() []string {
-	scopes := make([]string, 0, len(PerTargetToolAllowlist)+1)
+func PerTargetToolScopes(items ...AgentCapabilitySnapshotItem) []string {
+	tools := PerTargetTools(items)
+	scopes := make([]string, 0, len(tools)+1)
 	scopes = append(scopes, PerTargetToolAllowlistScope)
-	for _, tool := range PerTargetToolAllowlist {
+	for _, tool := range tools {
 		scopes = append(scopes, ToolScope(tool))
 	}
 	return scopes
@@ -78,8 +79,8 @@ func HasToolScope(scopes []string, scope string) bool {
 }
 
 // ToolAllowlistEnvValue is the environment form of the allowlist.
-func ToolAllowlistEnvValue() string {
-	return strings.Join(PerTargetToolAllowlist, ",")
+func ToolAllowlistEnvValue(items ...AgentCapabilitySnapshotItem) string {
+	return strings.Join(PerTargetTools(items), ",")
 }
 
 // ToolAllowlistFromEnvValue parses the environment form; nil when unset.
@@ -114,12 +115,17 @@ func ToolAllowlistFromScopes(scopes []string) []string {
 
 // RestrictCapabilitySnapshotForPerTargetTurn applies the positive allowlist
 // to a resolved capability snapshot: capabilities that contribute no
-// allowlisted tool are dropped, and the rest are capped at read access.
+// allowlisted tool are dropped, and the rest are capped at read access except
+// for the configured automation actions.
 // The result is what the turn executes with, whatever the organization
 // granted.
 func RestrictCapabilitySnapshotForPerTargetTurn(items []AgentCapabilitySnapshotItem) []AgentCapabilitySnapshotItem {
 	out := make([]AgentCapabilitySnapshotItem, 0, len(items))
 	for _, item := range items {
+		if item.ID == AgentCapabilityAutomationActions && HasAutomationActions([]AgentCapabilitySnapshotItem{item}) {
+			out = append(out, item)
+			continue
+		}
 		if !perTargetAllowedCapabilities[item.ID] {
 			continue
 		}
@@ -128,4 +134,25 @@ func RestrictCapabilitySnapshotForPerTargetTurn(items []AgentCapabilitySnapshotI
 		out = append(out, restricted)
 	}
 	return out
+}
+
+// HasAutomationActions admits only the explicit, valid write grant.
+func HasAutomationActions(items []AgentCapabilitySnapshotItem) bool {
+	for _, item := range items {
+		if item.ID == AgentCapabilityAutomationActions && item.AccessLevel == AgentCapabilityAccessWrite {
+			if _, err := ParseAutomationActionConfig(item.Config); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// PerTargetTools preserves the read allowlist and adds only the configured automation actions.
+func PerTargetTools(items []AgentCapabilitySnapshotItem) []string {
+	tools := append([]string{}, PerTargetToolAllowlist...)
+	if HasAutomationActions(items) {
+		tools = append(tools, "automation:execute-action", "automation:action-status")
+	}
+	return tools
 }

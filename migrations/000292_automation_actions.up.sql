@@ -1,0 +1,32 @@
+CREATE TABLE automation_actions (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ org_id uuid NOT NULL REFERENCES organizations(id),
+ automation_id uuid NOT NULL REFERENCES automations(id),
+ repository_id uuid NOT NULL REFERENCES repositories(id),
+ scope_key text NOT NULL CHECK (length(scope_key) BETWEEN 1 AND 100),
+ operation_key text NOT NULL CHECK (operation_key ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$'),
+ action_key text NOT NULL CHECK (action_key ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$'),
+ pr_number integer NOT NULL CHECK (pr_number >= 0),
+ kind text NOT NULL CHECK (kind IN ('github_label','github_team_review','github_issue_comment','notion_tracking_row','slack_notification')),
+ created_run_id uuid NOT NULL REFERENCES automation_runs(id),
+ last_run_id uuid NOT NULL REFERENCES automation_runs(id),
+ head_sha text NOT NULL CHECK (head_sha = '' OR head_sha ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'),
+ request_digest text NOT NULL CHECK (request_digest ~ '^[0-9a-f]{64}$'),
+ destination jsonb NOT NULL CHECK (jsonb_typeof(destination) = 'object'),
+ payload jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+ status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','succeeded','failed','unknown')),
+ attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+ send_token uuid,
+ send_deadline_at timestamptz,
+ provider_object_id text CHECK (length(provider_object_id)<=1024),
+ provider_url text CHECK (length(provider_url)<=2048),
+ last_error_code text CHECK (length(last_error_code)<=100),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ completed_at timestamptz,
+ CHECK (status <> 'sending' OR (send_token IS NOT NULL AND send_deadline_at IS NOT NULL)),
+ FOREIGN KEY (repository_id,org_id) REFERENCES repositories(id,org_id),
+ UNIQUE (org_id, automation_id, scope_key, operation_key, action_key)
+);
+CREATE INDEX idx_automation_actions_run ON automation_actions (org_id, last_run_id);
+CREATE INDEX idx_automation_actions_comments ON automation_actions (org_id,repository_id,pr_number) WHERE kind='github_issue_comment';

@@ -120,6 +120,22 @@ func RunCLI(ctx context.Context, tr ToolSource, args []string, stdout, stderr io
 		return 1
 	}
 
+	if cmd.ToolName == "automation_execute_action" {
+		if file, ok := argsJSON["file"].(string); ok && file != "" {
+			if _, provided := argsJSON["request"]; provided || argsJSON["resume"] == true {
+				writeCLIError(stderr, "INVALID_ARGUMENTS", "file cannot be combined with request or resume")
+				return 1
+			}
+			raw, err := readAutomationActionRequestFile(file)
+			if err != nil {
+				writeCLIError(stderr, "INVALID_ARGUMENTS", err.Error())
+				return 1
+			}
+			argsJSON["request"] = raw
+			delete(argsJSON, "file")
+		}
+	}
+
 	// Check required fields.
 	if err := checkRequired(argsJSON, cmd.Tool.InputSchema.Required); err != nil {
 		writeCLIError(stderr, "INVALID_ARGUMENTS", fmt.Sprintf("%s. Usage: %s [flags]. Run '%s --help' for detailed usage.", err, cmd.Usage(), cmd.Usage()))
@@ -152,6 +168,22 @@ func RunCLI(ctx context.Context, tr ToolSource, args []string, stdout, stderr io
 	for _, c := range result.Content {
 		if c.Type == "text" {
 			fmt.Fprintln(stdout, c.Text)
+		}
+	}
+
+	if cmd.ToolName == "automation_execute_action" {
+		for _, c := range result.Content {
+			if c.Type == "text" {
+				var receipt struct {
+					Data struct {
+						Status    string `json:"status"`
+						ErrorCode string `json:"error_code"`
+					} `json:"data"`
+				}
+				if json.Unmarshal([]byte(c.Text), &receipt) != nil || receipt.Data.ErrorCode != "" || (receipt.Data.Status != "delivered") {
+					return 1
+				}
+			}
 		}
 	}
 
@@ -201,6 +233,10 @@ func buildCLICommands(tools []Tool) []CLICommand {
 // typed conversions from the split tool name prefix and suffix.
 func cliPathForTool(name string) (CLINamespace, CLIAction, bool) {
 	switch {
+	case name == "automation_execute_action":
+		return NamespaceAutomation, CLIAction("execute-action"), true
+	case name == "automation_action_status":
+		return NamespaceAutomation, CLIAction("action-status"), true
 	case name == "create_pr":
 		return NamespacePR, ActionCreate, true
 	case name == "update_pr":
@@ -565,4 +601,24 @@ func MainCLI() {
 	tr := NewToolRegistry(reg)
 	code := RunCLI(context.Background(), tr, os.Args[1:], os.Stdout, os.Stderr)
 	os.Exit(code)
+}
+
+func readAutomationActionRequestFile(path string) (json.RawMessage, error) {
+	// #nosec G304 -- The local CLI caller explicitly selects this path with --file; no server-supplied path or privilege boundary. Reads are bounded and JSON-validated below.
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open automation action request file: %w", err)
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(file, (64<<10)+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if len(raw) > 64<<10 || !json.Valid(raw) {
+		return nil, fmt.Errorf("automation action request file must be valid JSON and at most 64 KiB")
+	}
+	return json.RawMessage(raw), nil
 }
