@@ -305,6 +305,7 @@ function SessionContinuityProperty({
 }) {
   const value = automation.session_continuity ?? "per_run";
   const perTargetAllowed = sessionContinuityAllowsPerTarget(automation);
+  const hintId = `automation-session-continuity-${uid}-hint`;
   const hint =
     value === "per_target"
       ? "People cannot message these sessions while a pull request conversation is active, and the agent runs without external-write tools."
@@ -330,6 +331,7 @@ function SessionContinuityProperty({
             <SelectTrigger
               id={`automation-session-continuity-${uid}`}
               aria-label="Session continuity"
+              aria-describedby={hint ? hintId : undefined}
               density="dense"
               className={inlineControlClass}
             >
@@ -353,6 +355,7 @@ function SessionContinuityProperty({
       )}
       {hint ? (
         <p
+          id={hintId}
           data-testid="automation-session-continuity-hint"
           className="ml-[7rem] px-1.5 text-xs text-muted-foreground"
         >

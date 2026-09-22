@@ -1599,12 +1599,20 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Front-end review")).toBeInTheDocument();
     });
 
-    expect(
-      screen.getByRole("combobox", { name: "Session continuity" }),
-    ).toHaveTextContent("Continue one session per pull request");
-    expect(
-      screen.getByTestId("automation-session-continuity-hint"),
-    ).toHaveTextContent("cannot message these sessions");
+    const continuitySelect = screen.getByRole("combobox", {
+      name: "Session continuity",
+    });
+    const continuityHint = screen.getByTestId(
+      "automation-session-continuity-hint",
+    );
+    expect(continuitySelect).toHaveTextContent(
+      "Continue one session per pull request",
+    );
+    expect(continuityHint).toHaveTextContent("cannot message these sessions");
+    expect(continuitySelect).toHaveAttribute(
+      "aria-describedby",
+      continuityHint.id,
+    );
   });
 
   it("explains why per-pull-request continuity is unavailable", async () => {
@@ -1645,13 +1653,19 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    expect(
-      screen.getByTestId("automation-session-continuity-hint"),
-    ).toHaveTextContent("needs a pull request trigger");
-
-    await user.click(
-      screen.getByRole("combobox", { name: "Session continuity" }),
+    const continuitySelect = screen.getByRole("combobox", {
+      name: "Session continuity",
+    });
+    const continuityHint = screen.getByTestId(
+      "automation-session-continuity-hint",
     );
+    expect(continuityHint).toHaveTextContent("needs a pull request trigger");
+    expect(continuitySelect).toHaveAttribute(
+      "aria-describedby",
+      continuityHint.id,
+    );
+
+    await user.click(continuitySelect);
     expect(
       await screen.findByRole("option", {
         name: "Continue one session per pull request",
