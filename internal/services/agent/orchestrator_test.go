@@ -19,6 +19,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
@@ -1374,6 +1375,8 @@ func boolPtr(v bool) *bool {
 }
 
 type testDeps struct {
+	internalAPIURL            string
+	internalAPISecret         string
 	provider                  *testutil.MockSandboxProvider
 	adapter                   *mockAgentAdapter
 	sessions                  *mockSessionStore
@@ -1675,6 +1678,8 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		sessionThreads = d.sessionThreads
 	}
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
+		InternalAPIURL:            d.internalAPIURL,
+		InternalAPISecret:         d.internalAPISecret,
 		Provider:                  d.provider,
 		Adapters:                  map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
 		Sessions:                  d.sessions,
@@ -11240,4 +11245,49 @@ func TestContinueSession_AmpMissingAPIKeyFailsFast(t *testing.T) {
 		"assistant message should surface the actionable error text to the user")
 	require.Equal(t, session.CurrentTurn+1, assistantMessages[0].TurnNumber,
 		"assistant error message belongs on the attempted turn, not the prior one")
+}
+
+func TestRecoverSession_PreservesAutomationActionAuthority(t *testing.T) {
+	t.Parallel()
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	run, thread, job, attempt := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	session.Origin = models.SessionOriginAutomation
+	session.AutomationRunID = &run
+	session.PrimaryThreadID = &thread
+	session.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{{ID: models.AgentCapabilityAutomationActions, AccessLevel: models.AgentCapabilityAccessWrite, Config: json.RawMessage(`{"actions":["slack_notification"],"slack_channel_id":"C0123456789"}`)}}
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusRunning
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/action-session.tar")
+	session.AgentSessionID = strPtr("agent-action-session-1")
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.internalAPIURL, d.internalAPISecret = "https://platform.test", "recovery-action-test-secret"
+	d.messages.messages = []models.SessionMessage{{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "Continue the automation goal from the checkpoint."}}
+	d.snapshots.data = map[string][]byte{*session.SnapshotKey: []byte("checkpoint-bytes")}
+	d.provider.RestoreFn = func(_ context.Context, _ *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	executed := false
+	d.adapter.executeFn = func(_ context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, _ chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		executed = true
+		require.True(t, prompt.Continuation, "exercise checkpoint recovery's nil-options continuation path")
+		claims, err := auth.ValidateInternalToken(d.internalAPISecret, sandbox.Env["INTERNAL_API_TOKEN"])
+		require.NoError(t, err, "restored sandbox must receive a valid replacement token")
+		require.Equal(t, &thread, claims.ThreadID, "recovery must preserve the stored executing thread")
+		require.Equal(t, &run, claims.AutomationRunID, "recovery retains its automation run")
+		require.Equal(t, &job, claims.AutomationJobID, "recovery binds the new job")
+		require.Equal(t, &attempt, claims.AutomationAttemptToken, "recovery binds the new attempt")
+		require.Contains(t, claims.AllowedToolScopes, models.ToolScope("automation:execute-action"), "pending action resumption remains callable")
+		require.Contains(t, claims.AllowedToolScopes, models.ToolScope("automation:action-status"), "receipt inspection remains callable")
+		return &agent.AgentResult{Summary: "Recovered", ExitCode: 0}, nil
+	}
+	ctx := jobctx.WithJobID(jobctx.WithLockToken(context.Background(), attempt), job)
+	require.NoError(t, buildOrchestrator(d).RecoverSession(ctx, session), "recover an action-enabled session from its checkpoint")
+	require.True(t, executed, "regression must reach the recovered agent")
 }

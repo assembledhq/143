@@ -112,3 +112,12 @@ func TestAutomationTurnPromptBounds(t *testing.T) {
 	require.Equal(t, 3, strings.Count(out, "[truncated]"), "the diff stat, the summary, and the event text are each bounded")
 	require.Less(t, len(out), AutomationTurnDiffStatLimit+AutomationTurnSummaryLimit+AutomationTurnEventTextLimit+200*40+2048, "the prompt stays within the sum of its bounds")
 }
+
+func TestAutomationTurnReviewActionGuidance(t *testing.T) {
+	t.Parallel()
+	enabled := AutomationTurnPrompt(AutomationTurnPromptData{Goal: "Review", ActionsEnabled: true})
+	require.Contains(t, enabled, "143-tools automation action-status", "inspect durable state first")
+	require.Contains(t, enabled, "--resume", "resume saved content")
+	require.Contains(t, enabled, "never retry using direct provider APIs", "uncertainty cannot bypass duplicate protection")
+	require.NotContains(t, AutomationTurnPrompt(AutomationTurnPromptData{Goal: "Review"}), "## Resumable automation actions", "ungranted turns must not receive write guidance")
+}

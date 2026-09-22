@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -898,4 +899,121 @@ func TestFinishWorkerOwnershipFailure(t *testing.T) {
 	require.Error(t, err, "the failure is reported for an owned session")
 	require.ErrorIs(t, err, cause, "wrapping the cause")
 	require.Contains(t, err.Error(), "persist session worker ownership", "naming the failure")
+}
+
+func TestReviewActionTokenRefreshAcrossContinuedTurns(t *testing.T) {
+	t.Parallel()
+	cfgRaw := json.RawMessage(`{"actions":["slack_notification"],"slack_channel_id":"C0BMANGRNTZ"}`)
+	snapshot := []models.AgentCapabilitySnapshotItem{{ID: models.AgentCapabilityAutomationActions, AccessLevel: models.AgentCapabilityAccessWrite, Config: cfgRaw}}
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New(), Origin: models.SessionOriginAutomation}
+	repoID, threadID := uuid.New(), uuid.New()
+	o := &Orchestrator{internalAPIURL: "https://platform.test", internalAPISecret: "secret"}
+	cfg := &SandboxConfig{Timeout: time.Minute}
+	var tokens []string
+	for i := range 3 {
+		state := &automationTurnState{run: models.AutomationRun{ID: uuid.New(), CapabilitySnapshot: snapshot}, lockToken: uuid.New()}
+		if i == 2 {
+			state.run.CapabilitySnapshot = nil
+		}
+		o.injectInternalAPIEnv(withAutomationTurnState(jobctx.WithJobID(context.Background(), uuid.New()), state), session, &repoID, &threadID, cfg, zerolog.Nop())
+		token := cfg.Env["INTERNAL_API_TOKEN"]
+		claims, err := auth.ValidateInternalToken("secret", token)
+		require.NoError(t, err, "refreshed token validates")
+		require.Equal(t, models.ToolAllowlistFromScopes(claims.AllowedToolScopes), models.ToolAllowlistFromEnvValue(cfg.Env[models.ToolAllowlistEnvVar]), "warm environment agrees with this turn token")
+		if i < 2 {
+			require.Equal(t, &state.run.ID, claims.AutomationRunID, "each continued turn binds its own run")
+			require.Equal(t, &state.lockToken, claims.AutomationAttemptToken, "each continued turn binds its own attempt")
+		} else {
+			require.Nil(t, claims.AutomationRunID, "revocation removes action identity")
+			require.NotContains(t, claims.AllowedToolScopes, models.ToolScope("automation:execute-action"), "revocation removes write exception")
+		}
+		tokens = append(tokens, token)
+	}
+	require.NotEqual(t, tokens[0], tokens[1], "same warm session must replace its old token")
+}
+
+func TestAutomationActionTokenForPerRunAttempts(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		job   bool
+		grant bool
+	}{{"scheduled", true, true}, {"manual", true, true}, {"event", true, true}, {"missing lease", false, true}, {"no grant", true, false}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			run, repo, thread, job, attempt := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			session := &models.Session{ID: uuid.New(), OrgID: uuid.New(), Origin: models.SessionOriginAutomation, AutomationRunID: &run}
+			if tt.grant {
+				session.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{{ID: models.AgentCapabilityAutomationActions, AccessLevel: models.AgentCapabilityAccessWrite, Config: json.RawMessage(`{"actions":["slack_notification"],"slack_channel_id":"C0123456789"}`)}}
+			}
+			ctx := context.Background()
+			if tt.job {
+				ctx = jobctx.WithJobID(jobctx.WithLockToken(ctx, attempt), job)
+			}
+			o := &Orchestrator{internalAPIURL: "https://platform.test", internalAPISecret: "secret"}
+			cfg := &SandboxConfig{Timeout: time.Minute, Env: map[string]string{"INTERNAL_API_TOKEN": "stale"}}
+			o.injectInternalAPIEnv(ctx, session, &repo, &thread, cfg, zerolog.Nop())
+			if tt.grant && !tt.job {
+				require.Empty(t, cfg.Env["INTERNAL_API_TOKEN"], "missing job must discard stale authority")
+				return
+			}
+			claims, err := auth.ValidateInternalToken("secret", cfg.Env["INTERNAL_API_TOKEN"])
+			require.NoError(t, err, "current attempt token validates")
+			if tt.grant {
+				require.Equal(t, &run, claims.AutomationRunID, "per-run token binds originating run")
+				require.Equal(t, &job, claims.AutomationJobID, "per-run token binds current job")
+				require.Equal(t, &attempt, claims.AutomationAttemptToken, "per-run token binds current attempt")
+				require.Contains(t, claims.AllowedToolScopes, models.ToolScope("automation:execute-action"), "granted action is callable")
+			} else {
+				require.Nil(t, claims.AutomationRunID, "ungranted token carries no action authority")
+			}
+		})
+	}
+}
+
+func TestAutomationActionTokenThreadIdentity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                          string
+		explicit, continuous, primary bool
+	}{
+		{"explicit secondary thread", true, false, true},
+		{"ordinary recovery primary thread", false, false, true},
+		{"continuous run recovery thread", false, true, true},
+		{"missing trusted thread", false, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			run, repo, primary, executing, job, attempt := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			snap := []models.AgentCapabilitySnapshotItem{{ID: models.AgentCapabilityAutomationActions, AccessLevel: models.AgentCapabilityAccessWrite, Config: json.RawMessage(`{"actions":["slack_notification"],"slack_channel_id":"C0123456789"}`)}}
+			session := &models.Session{ID: uuid.New(), OrgID: uuid.New(), AutomationRunID: &run, CapabilitySnapshot: snap}
+			if tt.primary {
+				session.PrimaryThreadID = &primary
+			}
+			ctx := jobctx.WithJobID(jobctx.WithLockToken(context.Background(), attempt), job)
+			if tt.continuous {
+				ctx = withAutomationTurnState(ctx, &automationTurnState{run: models.AutomationRun{ID: run, ThreadID: &executing, CapabilitySnapshot: snap}, lockToken: attempt})
+			}
+			var supplied *uuid.UUID
+			if tt.explicit {
+				supplied = &executing
+			}
+			cfg := &SandboxConfig{Env: map[string]string{"INTERNAL_API_TOKEN": "stale"}, Timeout: time.Minute}
+			o := &Orchestrator{internalAPIURL: "https://platform.test", internalAPISecret: "secret"}
+			o.injectInternalAPIEnv(ctx, session, &repo, supplied, cfg, zerolog.Nop())
+			if !tt.primary && !tt.continuous && !tt.explicit {
+				require.Empty(t, cfg.Env["INTERNAL_API_TOKEN"], "missing trusted identity cannot preserve stale token")
+				return
+			}
+			claims, err := auth.ValidateInternalToken("secret", cfg.Env["INTERNAL_API_TOKEN"])
+			require.NoError(t, err, "mint token for the verified execution context")
+			expected := primary
+			if tt.explicit || tt.continuous {
+				expected = executing
+			}
+			require.Equal(t, &expected, claims.ThreadID, "explicit or continuous execution identity takes precedence over primary thread")
+		})
+	}
 }

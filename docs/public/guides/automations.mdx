@@ -31,6 +31,18 @@ schedules remain editable without being converted to a simpler schedule.
 
 Filters such as base branch, author, path, feedback type, and review state reduce unnecessary runs. Keep filters as specific as the workflow allows; an automation that reacts to every comment and every check can evaluate the same revision several times.
 
+## Keep one conversation per pull request
+
+Select **Continue one session per pull request** with a PR trigger and **Do not publish**. Each event continues the PR's session. Most external-write tools are unavailable because a crashed turn can execute again.
+
+An organization admin can enable **Resumable automation actions** for any automation, including scheduled and manual runs. Choose **Configure actions**, select the operations the goal needs, and fill in only their destinations. For example, a daily Slack report needs only a Slack channel; it does not need GitHub or Notion configuration. The capability is off by default and is separate from External comments and Slack notifications.
+
+Supported actions add a GitHub PR label, request a team's review, comment on a PR, create a Notion page in a configured data source, or send a Slack message. Notion configuration lists allowed property names and types, with exactly one title property. The connected provider must permit the chosen action and destination. Enabling or changing this grant requires an organization admin; members can disable it.
+
+Use the [resumable action commands](/reference/agent-tools#automation-execute-action-and-automation-action-status) in the goal. Give each logical workflow a stable operation key and each step a stable action key. Later runs can inspect receipts and resume unfinished steps with the same keys. Separate scheduled occurrences use new operation keys. Confirmed actions are not repeated; uncertain sends require operator reconciliation. Finishing an agent run does not prove all intended actions completed.
+
+Configuration changes apply to future runs and block unfinished actions using the old configuration. Completed receipts remain available. GitHub actions require the current PR head. Slack and Notion can omit this precondition in every run mode, including continuous sessions, so independent steps can resume after a push or run during a subscribed merge-event turn. Supply a PR/head precondition for commit-specific content; it stays enforced on resume.
+
 ## Read PR decisions
 
 For GitHub-triggered review work, the default history view shows one decision for each pull-request revision. The summary separates:

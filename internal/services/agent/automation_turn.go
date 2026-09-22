@@ -590,6 +590,7 @@ func (o *Orchestrator) renderAutomationTurnPrompt(ctx context.Context, sandbox *
 	delta := o.computeAutomationTurnDelta(ctx, sandbox, state, log)
 	data := prompts.AutomationTurnPromptData{
 		Goal:            state.goal,
+		ActionsEnabled:  models.HasAutomationActions(state.run.CapabilitySnapshot),
 		EventContext:    state.eventContext,
 		TurnNumber:      derefInt(state.run.TurnNumber),
 		Mode:            string(state.mode()),

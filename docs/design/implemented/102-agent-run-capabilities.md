@@ -39,3 +39,9 @@ Remaining follow-up work from the future spec:
 The full target design remains in
 [future/102-automation-capabilities.md](../future/102-automation-capabilities.md)
 until those follow-up pieces are complete.
+
+## Resumable automation actions
+
+`automation_actions` is opt-in for every automation run mode. An organization admin selects individual GitHub, Notion, or Slack primitives and their fixed destinations. Full policy updates carrying this enabled grant require an admin; members can revoke it. Continuous target sessions retain their read allowlist plus `automation execute-action` and `automation action-status`; raw provider writes remain unavailable.
+
+Tokens bind the originating run and current session, thread, job, and attempt. Writes recheck the running job lease, current enabled policy, snapshot, and (for continuous sessions) active target generation. Durable workflow/step keys preserve receipts across runs and sessions. Each API call attempts one step. Unknown sends require reconciliation. See [the implementation contract](../automation-action-delivery.md).

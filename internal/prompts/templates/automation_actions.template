@@ -1,0 +1,12 @@
+## Resumable automation actions
+
+Read `143-tools capability list` for the configured `automation_actions` kinds and destinations. Use only actions needed for the goal. Select a stable operation_key for the logical workflow (for example daily-report:2026-09-22) and an action_key for each step. Reuse these keys after interruptions and across runs; use new operation keys for genuinely distinct occurrences. A successful replay returns reused: true and the original receipt timestamps; it did not send again.
+
+First inspect `143-tools automation action-status --operation_key KEY`. To execute a new step, write a JSON file containing operation_key, action_key, kind, and its content, then call `143-tools automation execute-action --file PATH`.
+- github_label and github_team_review use their configured label/team; github_issue_comment also takes text. All require pr_number and the current full head_sha.
+- slack_notification takes text. notion_tracking_row takes properties, a map from configured property names to string values; supported types are title, rich_text, url, date (YYYY-MM-DD), and select (an existing option).
+- Slack and Notion may omit PR preconditions in every run mode. Include pr_number and head_sha when the content is valid only for that commit; an explicit precondition is always enforced, including on resume. In a continuous target session any supplied PR must match that target.
+- To resume a recorded pending or definitively failed step, use `143-tools automation execute-action --resume --operation_key KEY --action_key KEY`. This uses frozen content. Changed content under the same keys is rejected.
+- A succeeded action already has its receipt: do not repeat it under another key. An in_progress action has an active sender. An unknown action (needs_attention) might have succeeded without a receipt: report its ID for operator reconciliation; never retry using direct provider APIs or fresh keys.
+
+After any interrupted command, inspect status before proceeding. Report actual receipts and incomplete or uncertain steps. Status covers recorded steps only; it does not prove the whole goal is complete. Execute each step independently and preserve any ordering required by the goal.

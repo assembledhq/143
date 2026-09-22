@@ -26,9 +26,11 @@ const CAPABILITY_DETAILS: Record<AgentCapabilityID, string> = {
   production_diagnostics:
     "Allows bounded, read-only access to production logs and error-tracker data when debugging live issues. Enable only when needed.",
   external_comments:
-    "Lets the agent post comments and status updates to Linear and Slack on your behalf.",
+    "Lets the agent create or update Linear tasks and add PagerDuty notes or status updates.",
   slack_notifications:
     "Lets the agent send Slack completion and status notifications through the connected 143 Slack app.",
+  automation_actions:
+    "Allows any automation to execute configured GitHub, Notion, or Slack actions independently. Stable workflow and step keys preserve receipts across runs and sessions. An admin chooses permitted actions and destinations. Uncertain sends require reconciliation.",
   automation_management:
     "Lets the agent create, update, pause, resume, and run repo-scoped automations. Enable only for trusted setup or maintenance work.",
   code_review_policy_management:
