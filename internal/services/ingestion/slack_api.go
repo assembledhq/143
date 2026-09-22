@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,14 @@ import (
 )
 
 const slackAPIBase = "https://slack.com/api"
+
+var ErrSlackRateLimited = errors.New("slack rate limited")
+
+// SlackMessageError preserves a structured provider rejection for callers that
+// must distinguish safe retries from ambiguous delivery failures.
+type SlackMessageError struct{ Code string }
+
+func (e *SlackMessageError) Error() string { return "slack chat.postMessage: " + e.Code }
 
 // SlackMessage represents a single Slack message.
 type SlackMessage struct {
@@ -198,7 +207,7 @@ type SlackAPIClient struct {
 // NewSlackAPIClient creates a new Slack API client.
 func NewSlackAPIClient(logger zerolog.Logger) *SlackAPIClient {
 	return &SlackAPIClient{
-		client: &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		logger: logger,
 	}
 }
@@ -318,7 +327,7 @@ func (c *SlackAPIClient) PostMessage(ctx context.Context, accessToken, channelID
 		return SlackPostedMessage{}, err
 	}
 	if !resp.OK {
-		return SlackPostedMessage{}, fmt.Errorf("slack chat.postMessage: %s", resp.Error)
+		return SlackPostedMessage{}, &SlackMessageError{Code: resp.Error}
 	}
 	return SlackPostedMessage{Channel: resp.Channel, Timestamp: resp.TS}, nil
 }
@@ -337,7 +346,7 @@ func (c *SlackAPIClient) PostMessageWithBlocks(ctx context.Context, accessToken,
 		return SlackPostedMessage{}, err
 	}
 	if !resp.OK {
-		return SlackPostedMessage{}, fmt.Errorf("slack chat.postMessage: %s", resp.Error)
+		return SlackPostedMessage{}, &SlackMessageError{Code: resp.Error}
 	}
 	return SlackPostedMessage{Channel: resp.Channel, Timestamp: resp.TS}, nil
 }
@@ -592,7 +601,7 @@ func (c *SlackAPIClient) slackGet(ctx context.Context, accessToken, method strin
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		retryAfter := resp.Header.Get("Retry-After")
-		return fmt.Errorf("slack rate limited, retry after %s seconds", retryAfter)
+		return fmt.Errorf("%w, retry after %s seconds", ErrSlackRateLimited, retryAfter)
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -629,7 +638,7 @@ func (c *SlackAPIClient) slackPost(ctx context.Context, accessToken, method stri
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		retryAfter := resp.Header.Get("Retry-After")
-		return fmt.Errorf("slack rate limited, retry after %s seconds", retryAfter)
+		return fmt.Errorf("%w, retry after %s seconds", ErrSlackRateLimited, retryAfter)
 	}
 	if resp.StatusCode != http.StatusOK {
 		responseBody, _ := io.ReadAll(resp.Body)

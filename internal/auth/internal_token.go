@@ -11,19 +11,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 )
 
 // InternalTokenClaims are the claims embedded in an internal API token.
 type InternalTokenClaims struct {
-	OrgID              uuid.UUID  `json:"org_id"`
-	RepoID             uuid.UUID  `json:"repo_id"`
-	SessionID          *uuid.UUID `json:"session_id,omitempty"`
-	ThreadID           *uuid.UUID `json:"thread_id,omitempty"`
-	AllowedToolScopes  []string   `json:"allowed_tool_scopes,omitempty"`
-	SessionOrigin      string     `json:"session_origin,omitempty"`
-	EvalBootstrapRunID *uuid.UUID `json:"eval_bootstrap_run_id,omitempty"`
-	ExpiresAt          time.Time  `json:"exp"`
+	AutomationRunID        *uuid.UUID `json:"automation_run_id,omitempty"`
+	AutomationJobID        *uuid.UUID `json:"automation_job_id,omitempty"`
+	AutomationAttemptToken *uuid.UUID `json:"automation_attempt_token,omitempty"`
+	OrgID                  uuid.UUID  `json:"org_id"`
+	RepoID                 uuid.UUID  `json:"repo_id"`
+	SessionID              *uuid.UUID `json:"session_id,omitempty"`
+	ThreadID               *uuid.UUID `json:"thread_id,omitempty"`
+	AllowedToolScopes      []string   `json:"allowed_tool_scopes,omitempty"`
+	SessionOrigin          string     `json:"session_origin,omitempty"`
+	EvalBootstrapRunID     *uuid.UUID `json:"eval_bootstrap_run_id,omitempty"`
+	ExpiresAt              time.Time  `json:"exp"`
 }
 
 // GenerateInternalToken creates a short-lived HMAC-signed token scoped to an org and repo.
@@ -75,6 +79,18 @@ func GenerateSessionThreadTokenWithClaims(secret string, orgID uuid.UUID, repoID
 		EvalBootstrapRunID: evalBootstrapRunID,
 		ExpiresAt:          time.Now().Add(ttl),
 	}
+	return signInternalToken(secret, claims)
+}
+
+// GenerateAutomationActionToken binds a write tool to one executing automation attempt.
+func GenerateAutomationActionToken(secret string, actor models.AutomationActionActor, scopes []string, origin string, ttl time.Duration) (string, error) {
+	if actor.OrgID == uuid.Nil || actor.RepositoryID == uuid.Nil || actor.RunID == uuid.Nil || actor.AttemptToken == uuid.Nil || actor.JobID == uuid.Nil || actor.SessionID == uuid.Nil || actor.ThreadID == uuid.Nil {
+		return "", fmt.Errorf("automation action token requires a run, attempt, session, and thread")
+	}
+	return signInternalToken(secret, InternalTokenClaims{OrgID: actor.OrgID, RepoID: actor.RepositoryID, SessionID: &actor.SessionID, ThreadID: &actor.ThreadID, AllowedToolScopes: scopes, SessionOrigin: origin, AutomationRunID: &actor.RunID, AutomationJobID: &actor.JobID, AutomationAttemptToken: &actor.AttemptToken, ExpiresAt: time.Now().Add(ttl)})
+}
+
+func signInternalToken(secret string, claims InternalTokenClaims) (string, error) {
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", fmt.Errorf("marshal claims: %w", err)

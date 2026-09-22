@@ -32,6 +32,7 @@ import (
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agentcapabilities"
+	"github.com/assembledhq/143/internal/services/automationactions"
 	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
@@ -208,6 +209,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Create PRService if GitHub App credentials are configured.
 	var prService *ghservice.PRService
+	var automationActionTokens automationactions.InstallationTokens
 	var appUserAuthSvc *ghservice.AppUserAuthService
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey, logger)
@@ -215,6 +217,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			logger.Warn().Err(err).Msg("failed to initialize GitHub App service, PR webhooks will be disabled")
 		} else {
 			ghSvc.SetRateLimitController(githubRateLimitController, logger)
+			automationActionTokens = ghSvc
 			prService = ghservice.NewPRService(
 				ghSvc, pullRequestStore, sessionStore, issueStore,
 				deployStore, repoStore, jobStore, logger,
@@ -781,6 +784,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// Wire user credential store and LLM client into PR service.
 	if prService != nil {
 		githubAutomationTriggerer := automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, pool, logger)
+		githubAutomationTriggerer.SetActions(db.NewAutomationActionStore(pool))
 		githubAutomationTriggerer.SetCapabilityResolver(agentCapabilitySvc)
 		githubAutomationTriggerer.SetLabelResolver(prService)
 		githubAutomationTriggerer.SetTargetStores(db.NewAutomationTargetStore(pool), automationRunStore)
@@ -1159,6 +1163,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		// Every internal route names its tool so the per-target allowlist
 		// (design doc 125) is enforced server-side on every call.
 		toolGate := handlers.NewInternalToolGate(cfg.SessionSecret)
+		automationActions := automationactions.New(db.NewAutomationActionStore(pool), automationactions.NewProviders(automationActionTokens, credentialStore, ingestion.NewSlackAPIClient(logger)), logger)
+		automationActionHandler := handlers.NewInternalAutomationActionHandler(sessionStore, automationActions, cfg.SessionSecret)
 		r.Route("/api/v1/internal", func(r chi.Router) {
 			r.Get("/sessions/{id}/preview", toolGate.Require("preview:status", internalAgentPreviewHandler.Status))
 			r.Post("/sessions/{id}/preview/ensure", toolGate.Require("preview:ensure", internalAgentPreviewHandler.Ensure))
@@ -1192,6 +1198,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Post("/sessions/{id}/changesets/{changeset_id}/confirm-restack", toolGate.Require("changesets:confirm_restack", internalChangesetHandler.ConfirmRestack))
 			r.Post("/sessions/{id}/changesets/verify", toolGate.Require("changesets:verify", internalChangesetHandler.Verify))
 			r.Get("/sessions/{id}/changesets/diff", toolGate.Require("changesets:diff", internalChangesetHandler.Diff))
+			r.Post("/automation/actions", toolGate.Require("automation:execute-action", automationActionHandler.Request))
+			r.Post("/automation/actions/resume", toolGate.Require("automation:execute-action", automationActionHandler.Resume))
+			r.Get("/automation/actions", toolGate.Require("automation:action-status", automationActionHandler.Status))
 			r.Post("/slack/messages", toolGate.Require("slack:send", internalSlackMessageHandler.Send))
 			r.Post("/automations", toolGate.Require("automation:create", internalAutomationHandler.Create))
 			r.Patch("/automations/{id}", toolGate.Require("automation:update", internalAutomationHandler.Update))

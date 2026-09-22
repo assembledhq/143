@@ -114,6 +114,14 @@ func (s *Service) ValidateGrant(grant models.AgentCapabilityPolicyGrantInput) er
 			return fmt.Errorf("%w: INVALID_CAPABILITY_CONFIG: config must be a JSON object", ErrInvalidGrant)
 		}
 	}
+	if grant.CapabilityID == models.AgentCapabilityAutomationActions && grant.Enabled {
+		if grant.AccessLevel != models.AgentCapabilityAccessWrite {
+			return fmt.Errorf("%w: automation actions require write access", ErrInvalidGrant)
+		}
+		if _, err := models.ParseAutomationActionConfig(grant.Config); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidGrant, err)
+		}
+	}
 	return nil
 }
 
@@ -340,6 +348,7 @@ func accessAllowed(requested, max models.AgentCapabilityAccessLevel) bool {
 
 func catalogDefinitions() []models.AgentCapabilityDefinition {
 	return []models.AgentCapabilityDefinition{
+		def(models.AgentCapabilityAutomationActions, "Resumable automation actions", "Execute configured GitHub, Notion, or Slack actions independently and resume them across automation runs.", "Actions", models.AgentCapabilityAccessWrite, models.AgentCapabilityRiskHigh, models.AgentCapabilityScopeRepository),
 		def(models.AgentCapabilityRepoContext, "Repository context", "Code, docs, and repository-local facts.", "Context", models.AgentCapabilityAccessRead, models.AgentCapabilityRiskLow, models.AgentCapabilityScopeRepository),
 		def(models.AgentCapabilityPRHistory, "PR history", "Recent pull requests, reviews, and repository conventions.", "Context", models.AgentCapabilityAccessRead, models.AgentCapabilityRiskLow, models.AgentCapabilityScopeRepository),
 		def(models.AgentCapabilitySessionHistory, "Session history", "Prior 143 sessions for this org and repository.", "Context", models.AgentCapabilityAccessRead, models.AgentCapabilityRiskMedium, models.AgentCapabilityScopeRepository),
@@ -348,7 +357,7 @@ func catalogDefinitions() []models.AgentCapabilityDefinition {
 		def(models.AgentCapabilityIssueSources, "Issue sources", "Linear, Sentry, and support-derived issue context.", "Context", models.AgentCapabilityAccessRead, models.AgentCapabilityRiskMedium, models.AgentCapabilityScopeIntegration),
 		def(models.AgentCapabilityTeamDocs, "Team docs/messages", "Notion, Slack, architecture, and product context.", "Context", models.AgentCapabilityAccessRead, models.AgentCapabilityRiskMedium, models.AgentCapabilityScopeIntegration),
 		def(models.AgentCapabilityProductionDiagnostics, "Production diagnostics", "Bounded read-only production logs and error-tracker evidence.", "Diagnostics", models.AgentCapabilityAccessRead, models.AgentCapabilityRiskHigh, models.AgentCapabilityScopeIntegration),
-		def(models.AgentCapabilityExternalComments, "External comments", "Linear and Slack comments or status updates.", "Actions", models.AgentCapabilityAccessWrite, models.AgentCapabilityRiskMedium, models.AgentCapabilityScopeIntegration),
+		def(models.AgentCapabilityExternalComments, "External comments", "Create or update Linear tasks and add PagerDuty notes or status updates.", "Actions", models.AgentCapabilityAccessWrite, models.AgentCapabilityRiskMedium, models.AgentCapabilityScopeIntegration),
 		def(models.AgentCapabilitySlackNotifications, "Slack notifications", "Send a Slack completion or status message through the connected 143 Slack app.", "Actions", models.AgentCapabilityAccessWrite, models.AgentCapabilityRiskMedium, models.AgentCapabilityScopeIntegration),
 		def(models.AgentCapabilityAutomationManagement, "Automation management", "Create and manage repo-scoped automations through 143 workflows.", "Actions", models.AgentCapabilityAccessWrite, models.AgentCapabilityRiskHigh, models.AgentCapabilityScopeRepository),
 		def(models.AgentCapabilityCodeReviewPolicy, "Code review policy management", "Apply versioned updates to the org's automated code review policy.", "Actions", models.AgentCapabilityAccessWrite, models.AgentCapabilityRiskHigh, models.AgentCapabilityScopeOrg),

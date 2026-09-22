@@ -94,6 +94,10 @@ func addAllowedToolPaths(allowed map[string]bool, capability models.AgentCapabil
 		}
 	}
 	switch capability.ID {
+	case models.AgentCapabilityAutomationActions:
+		if capability.AccessLevel == models.AgentCapabilityAccessWrite {
+			add(NamespaceAutomation, CLIAction("execute-action"), CLIAction("action-status"))
+		}
 	case models.AgentCapabilitySessionHistory:
 		add(NamespaceSessionHistory, ActionSearch, ActionGet, ActionMessages)
 	case models.AgentCapabilityReviewFeedback:

@@ -11,6 +11,7 @@ import (
 type AgentCapabilityID string
 
 const (
+	AgentCapabilityAutomationActions     AgentCapabilityID = "automation_actions"
 	AgentCapabilityRepoContext           AgentCapabilityID = "repo_context"
 	AgentCapabilityPRHistory             AgentCapabilityID = "pr_history"
 	AgentCapabilitySessionHistory        AgentCapabilityID = "session_history"
@@ -29,7 +30,8 @@ const (
 
 func (id AgentCapabilityID) Validate() error {
 	switch id {
-	case AgentCapabilityRepoContext,
+	case AgentCapabilityAutomationActions,
+		AgentCapabilityRepoContext,
 		AgentCapabilityPRHistory,
 		AgentCapabilitySessionHistory,
 		AgentCapabilityReviewFeedback,

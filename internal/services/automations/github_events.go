@@ -50,13 +50,16 @@ type GitHubEventTriggerRequest struct {
 	HeadSHA           string
 	Actor             string
 	ActorType         string
-	Body              string
-	ProviderEventID   string
-	EventID           string
-	DedupeGroupID     string
-	BaseBranch        string
-	Path              string
-	ReviewState       string
+	// OwnAppComment is derived from GitHub app provenance after webhook verification.
+	OwnAppComment   bool
+	CommentID       int64
+	Body            string
+	ProviderEventID string
+	EventID         string
+	DedupeGroupID   string
+	BaseBranch      string
+	Path            string
+	ReviewState     string
 	// PullRequestUpdatedAt is GitHub's pull_request.updated_at for the
 	// delivery. It orders pushes for per-target continuity (design doc 125,
 	// "Head Authority"); nil when the payload omitted it.
@@ -87,12 +90,21 @@ type GitHubEventTriggerService struct {
 	labels       githubLabelResolver
 	targets      githubAutomationTargetStore
 	arrivalRuns  githubAutomationArrivalRunStore
+	actions      githubAutomationActionLookup
 	logger       zerolog.Logger
 	now          func() time.Time
 
 	labelMemoMu sync.Mutex
 	labelMemo   map[githubLabelMemoKey]githubLabelMemoEntry
 	labelGroup  singleflight.Group
+}
+
+type githubAutomationActionLookup interface {
+	ListAutomationActionCommentOwners(context.Context, uuid.UUID, uuid.UUID, int, int64, string) ([]uuid.UUID, error)
+}
+
+func (s *GitHubEventTriggerService) SetActions(store githubAutomationActionLookup) {
+	s.actions = store
 }
 
 type githubCapabilityResolver interface {
@@ -172,7 +184,20 @@ func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req 
 	}
 	s.rememberKnownLabels(req)
 	var resolvedLabelReq *GitHubEventTriggerRequest
+	commentOwners := map[uuid.UUID]bool{}
+	if req.OwnAppComment && req.CommentID > 0 && s.actions != nil {
+		owners, err := s.actions.ListAutomationActionCommentOwners(ctx, req.OrgID, req.RepositoryID, req.PullRequestNumber, req.CommentID, req.Body)
+		if err != nil {
+			return fmt.Errorf("check automation action webhook: %w", err)
+		}
+		for _, id := range owners {
+			commentOwners[id] = true
+		}
+	}
 	for _, automation := range automations {
+		if commentOwners[automation.ID] {
+			continue
+		}
 		filters, err := decodeGitHubEventFilters(automation)
 		if err != nil {
 			return err

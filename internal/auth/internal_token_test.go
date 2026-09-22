@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -164,4 +165,20 @@ func TestGenerateInternalToken_DifferentOrgs(t *testing.T) {
 	claims2, err := ValidateInternalToken(secret, token2)
 	require.NoError(t, err)
 	require.Equal(t, org2, claims2.OrgID)
+}
+
+func TestAutomationActionTokenBindsAttempt(t *testing.T) {
+	t.Parallel()
+	actor := models.AutomationActionActor{OrgID: uuid.New(), RepositoryID: uuid.New(), SessionID: uuid.New(), ThreadID: uuid.New(), RunID: uuid.New(), AttemptToken: uuid.New(), JobID: uuid.New()}
+	scopes := []string{models.PerTargetToolAllowlistScope, models.ToolScope("automation:execute-action")}
+	token, err := GenerateAutomationActionToken("secret", actor, scopes, "automation", time.Minute)
+	require.NoError(t, err, "mint complete attempt identity")
+	claims, err := ValidateInternalToken("secret", token)
+	require.NoError(t, err, "verify signed attempt token")
+	require.Equal(t, &actor.RunID, claims.AutomationRunID, "bind run")
+	require.Equal(t, &actor.AttemptToken, claims.AutomationAttemptToken, "bind job attempt")
+	require.Equal(t, scopes, claims.AllowedToolScopes, "preserve explicit narrow scope")
+	actor.AttemptToken = uuid.Nil
+	_, err = GenerateAutomationActionToken("secret", actor, scopes, "automation", time.Minute)
+	require.Error(t, err, "never sign missing attempt identity")
 }

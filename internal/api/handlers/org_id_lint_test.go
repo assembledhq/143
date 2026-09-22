@@ -133,15 +133,18 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"GitHubStatusHandler.StartConnect":                    "OAuth redirect only, no store calls",
 
 		// OAuth start handlers — just redirect to external provider, no org data access.
-		"IntegrationHandler.StartLinearOAuth":  "OAuth redirect only",
-		"IntegrationHandler.StartSentryOAuth":  "OAuth redirect only",
-		"IntegrationHandler.StartGitHubOAuth":  "OAuth redirect only",
-		"IntegrationHandler.StartSlackOAuth":   "OAuth redirect only",
-		"IntegrationHandler.ReinstallSlackBot": "delegates to Slack OAuth redirect only",
-		"SlackbotHandler.Events":               "public Slack callback resolves org from verified Slack team/app installation",
-		"SlackbotHandler.Commands":             "public Slack callback resolves org from verified Slack team/app installation",
-		"SlackbotHandler.Interactions":         "public Slack callback resolves org from verified Slack team/app installation",
-		"InternalSlackMessageHandler.Send":     "internal sandbox route resolves org from the signed session-scoped internal token",
+		"IntegrationHandler.StartLinearOAuth":     "OAuth redirect only",
+		"IntegrationHandler.StartSentryOAuth":     "OAuth redirect only",
+		"IntegrationHandler.StartGitHubOAuth":     "OAuth redirect only",
+		"IntegrationHandler.StartSlackOAuth":      "OAuth redirect only",
+		"IntegrationHandler.ReinstallSlackBot":    "delegates to Slack OAuth redirect only",
+		"SlackbotHandler.Events":                  "public Slack callback resolves org from verified Slack team/app installation",
+		"SlackbotHandler.Commands":                "public Slack callback resolves org from verified Slack team/app installation",
+		"SlackbotHandler.Interactions":            "public Slack callback resolves org from verified Slack team/app installation",
+		"InternalAutomationActionHandler.Request": "internal route resolves org from signed attempt-scoped token",
+		"InternalAutomationActionHandler.Resume":  "internal route resolves org from signed attempt-scoped token",
+		"InternalAutomationActionHandler.Status":  "internal route resolves org from signed attempt-scoped token",
+		"InternalSlackMessageHandler.Send":        "internal sandbox route resolves org from the signed session-scoped internal token",
 
 		// Thin wrappers that delegate to a helper which calls OrgIDFromContext.
 		"ProjectHandler.Start":                     "delegates to transitionStatus which uses OrgIDFromContext",

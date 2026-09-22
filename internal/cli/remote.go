@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/mcp"
@@ -63,6 +64,11 @@ func newInternalToolSource(ctx context.Context, base mcp.ToolSource, token, apiU
 			fmt.Fprintf(stderr, "143-tools: capability snapshot unavailable; the tool allowlist applies with no grants: %v\n", err)
 		} else {
 			capabilities = snapshot.Snapshot
+			if snapshot.ToolAllowlist != nil {
+				// A warm sandbox may still carry an older environment. It cannot widen
+				// the tools granted by the current signed token.
+				envAllowlist = slices.DeleteFunc(slices.Clone(envAllowlist), func(tool string) bool { return !slices.Contains(snapshot.ToolAllowlist, tool) })
+			}
 		}
 		source = mcp.NewCapabilityFilteredToolSource(source, mcp.ToolCapabilityPolicy{Capabilities: capabilities, ToolAllowlist: envAllowlist})
 	case err != nil:
