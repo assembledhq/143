@@ -371,7 +371,8 @@ func TestCodeReviewStatusCommentReviewNowLink(t *testing.T) {
 			expected := "[Review now](https://143.test/code-reviews?review_now=" + sessionID.String() + ")"
 			if tt.present {
 				require.Contains(t, body, expected, "rolling comment links to the authenticated confirmation for its source session")
-				require.Contains(t, body, "Existing applicable work may be reused", "link must not promise a forced fresh assessment")
+				require.Contains(t, body, "Open 143 to request a review of your latest pushed changes.", "link explains the destination and which changes will be reviewed")
+				require.Contains(t, body, "If a running or completed review already covers those changes, 143 may use it instead of starting another.", "link explains that an existing review may satisfy the request")
 			} else {
 				require.NotContains(t, body, "[Review now]", "unsupported or superseded comment must not advertise action")
 			}
