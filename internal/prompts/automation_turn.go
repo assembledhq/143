@@ -17,7 +17,8 @@ type AutomationTurnSummary struct {
 // instruction on every turn.
 type AutomationTurnPromptData struct {
 	// Goal is the automation's own goal, trusted instructions.
-	Goal string
+	Goal           string
+	ActionsEnabled bool
 	// EventContext is the trigger's GitHub event context (title, actor,
 	// paths, comment text) captured at arrival: pull-request-derived text,
 	// rendered as untrusted data.

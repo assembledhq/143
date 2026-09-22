@@ -27,6 +27,7 @@ import (
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
+	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/sandboxdeps"
 	"github.com/assembledhq/143/internal/services/github/identity"
@@ -1746,12 +1747,13 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	}
 	tokenTTL := sandboxCfg.Timeout + 5*time.Minute
 	scopes := []string{"preview:read", "preview:interact", "preview:manage"}
-	perTargetTurn := automationTurnStateFromContext(ctx) != nil
+	turnState := automationTurnStateFromContext(ctx)
+	perTargetTurn := turnState != nil
 	if perTargetTurn {
 		// A per-target automation turn's token carries the positive tool
 		// allowlist and no preview, eval, or goal-improvement scope, so the
 		// internal API refuses everything outside the list (design doc 125).
-		scopes = models.PerTargetToolScopes()
+		scopes = models.PerTargetToolScopes(turnState.run.CapabilitySnapshot...)
 	}
 	sessionOrigin := string(session.Origin)
 	var evalBootstrapRunID *uuid.UUID
@@ -1768,7 +1770,39 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	if session.Origin == models.SessionOriginAutomationGoalImprovement && !perTargetTurn {
 		scopes = append(scopes, "automation-goal-improvement:complete")
 	}
-	internalToken, err := auth.GenerateSessionThreadTokenWithClaims(o.internalAPISecret, session.OrgID, *repoID, session.ID, threadID, scopes, sessionOrigin, evalBootstrapRunID, tokenTTL)
+	var internalToken string
+	var err error
+	actionSnapshot := session.CapabilitySnapshot
+	actionRunID := session.AutomationRunID
+	if perTargetTurn {
+		actionSnapshot = turnState.run.CapabilitySnapshot
+		actionRunID = &turnState.run.ID
+	}
+	if actionRunID != nil && models.HasAutomationActions(actionSnapshot) {
+		// A warm sandbox receives a token for this job attempt, including per-run continuations.
+		delete(sandboxCfg.Env, "INTERNAL_API_TOKEN")
+		var thread uuid.UUID
+		if threadID != nil && *threadID != uuid.Nil {
+			thread = *threadID
+		} else if perTargetTurn && turnState.run.ThreadID != nil {
+			thread = *turnState.run.ThreadID
+		} else if session.PrimaryThreadID != nil {
+			// Checkpoint recovery continues the primary thread without options.
+			// The action store still verifies this thread against the run and job.
+			thread = *session.PrimaryThreadID
+		}
+		jobID, _ := jobctx.JobIDFromContext(ctx)
+		attempt, _ := jobctx.LockTokenFromContext(ctx)
+		if perTargetTurn {
+			attempt = turnState.lockToken
+		}
+		if !perTargetTurn {
+			scopes = append(scopes, models.ToolScope("automation:execute-action"), models.ToolScope("automation:action-status"))
+		}
+		internalToken, err = auth.GenerateAutomationActionToken(o.internalAPISecret, models.AutomationActionActor{OrgID: session.OrgID, RepositoryID: *repoID, SessionID: session.ID, ThreadID: thread, RunID: *actionRunID, JobID: jobID, AttemptToken: attempt}, scopes, sessionOrigin, tokenTTL)
+	} else {
+		internalToken, err = auth.GenerateSessionThreadTokenWithClaims(o.internalAPISecret, session.OrgID, *repoID, session.ID, threadID, scopes, sessionOrigin, evalBootstrapRunID, tokenTTL)
+	}
 	if err != nil {
 		log.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to generate internal API token")
 		return
@@ -1777,7 +1811,7 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	sandboxCfg.Env["INTERNAL_API_URL"] = o.internalAPIURL
 	sandboxCfg.Env[internalapi.CodingSessionIDEnvVar] = session.ID.String()
 	if perTargetTurn {
-		sandboxCfg.Env[models.ToolAllowlistEnvVar] = models.ToolAllowlistEnvValue()
+		sandboxCfg.Env[models.ToolAllowlistEnvVar] = models.ToolAllowlistEnvValue(turnState.run.CapabilitySnapshot...)
 	}
 	if evalBootstrapRunID != nil {
 		sandboxCfg.Env["EVAL_BOOTSTRAP_TOOLS_ENABLED"] = "true"
@@ -3123,6 +3157,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	// 6b. Generate integration skills doc from org credentials.
 	// This tells the agent what CLI tools are available in the sandbox.
 	input.IntegrationSkills = o.BuildIntegrationSkills(ctx, run.OrgID)
+	if models.HasAutomationActions(run.CapabilitySnapshot) {
+		input.IntegrationSkills += "\n" + prompts.AutomationActionInstructions()
+	}
 	if revisionContext, revErr := ParseRevisionContext(run.RevisionContext); revErr != nil {
 		log.Warn().Err(revErr).Msg("failed to parse session revision context")
 	} else {
@@ -4679,6 +4716,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			Msg("reused code review workspace is ready")
 	}
 	integrationSkills := o.BuildIntegrationSkills(ctx, session.OrgID)
+	if models.HasAutomationActions(session.CapabilitySnapshot) {
+		integrationSkills += "\n" + prompts.AutomationActionInstructions()
+	}
 	restrictedPRFeedback := opts != nil && opts.PRFeedback != nil
 	if restrictedPRFeedback {
 		// The control plane owns pushes, comments, and review-thread mutations.

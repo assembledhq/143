@@ -68,3 +68,10 @@ Review the full pull request against the goal.
 {{- else}}
 Review the changes since the baseline head against the goal. Do not repeat findings for unchanged code unless the change invalidates them, and state which earlier findings the new push resolved.
 {{- end}}
+
+{{- if .ActionsEnabled}}
+
+## Resumable automation actions
+
+This turn may use the configured automation actions. GitHub steps require this target's PR number and current full head SHA. Attach the same precondition to Slack/Notion only when the content must remain valid for that specific commit; otherwise omit it so the step can resume across pushes. Read `143-tools automation action-status --operation_key KEY` before resuming with `--resume`. An uncertain send requires operator reconciliation; never retry using direct provider APIs or a new key. The same keys retain receipts across turns and reconstructed sessions.
+{{- end}}

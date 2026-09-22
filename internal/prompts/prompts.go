@@ -587,3 +587,6 @@ type EvalBootstrapPromptData struct {
 func EvalBootstrapPrompt(data EvalBootstrapPromptData) string {
 	return render("eval_bootstrap_prompt.template", data)
 }
+
+// AutomationActionInstructions describes the shared action protocol for every automation run mode.
+func AutomationActionInstructions() string { return render("automation_actions.template", nil) }

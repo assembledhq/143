@@ -307,7 +307,7 @@ function SessionContinuityProperty({
   const perTargetAllowed = sessionContinuityAllowsPerTarget(automation);
   const hint =
     value === "per_target"
-      ? "People cannot message these sessions while a pull request conversation is active, and the agent runs without external-write tools."
+      ? "People cannot message these sessions while a pull request conversation is active. Explicitly granted automation actions are supported; other external-write tools remain unavailable."
       : perTargetAllowed
         ? null
         : "Continuing one session per pull request needs a pull request trigger and “Do not publish”.";
@@ -856,6 +856,7 @@ function CapabilitiesProperty({
   automation: Automation;
   canManage: boolean;
 }) {
+  const { user } = useAuth();
   const { data: capabilityCatalogResponse } = useQuery<
     ListResponse<AgentCapabilityDefinition>
   >({
@@ -904,6 +905,8 @@ function CapabilitiesProperty({
         grants={grants}
         onChange={(next) => autosave.save(next)}
         disabled={!canManage}
+        allowActions
+        canConfigureActions={user?.role === "admin"}
       />
     </div>
   );

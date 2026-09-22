@@ -640,6 +640,7 @@ export type AgentCapabilityID =
   | 'external_comments'
   | 'slack_notifications'
   | 'automation_management'
+  | 'automation_actions'
   | 'code_review_policy_management'
   | 'eval_authoring'
   | 'publishing';
