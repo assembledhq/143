@@ -36,7 +36,7 @@ export function ReviewNowFromComment({ canManage }: { canManage: boolean }) {
         <DialogHeader>
           <DialogTitle>Review now</DialogTitle>
           <DialogDescription>
-            Request review of the latest revision. This skips the automatic timing delays and can join or reuse existing work.
+            Request a review of your latest pushed changes, skipping the automatic timing delays. If a running or completed review already covers those changes, 143 may use it instead of starting another.
           </DialogDescription>
         </DialogHeader>
         {!validID ? <p role="alert">This review link is invalid.</p> :
