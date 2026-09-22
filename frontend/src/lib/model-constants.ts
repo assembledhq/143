@@ -1,5 +1,6 @@
 export const CLAUDE_CODE_MODEL_FABLE_51 = "claude-fable-5-1";
 export const CLAUDE_CODE_MODEL_FABLE_5 = "claude-fable-5";
+export const CLAUDE_CODE_MODEL_OPUS_55 = "claude-opus-5-5";
 export const CLAUDE_CODE_MODEL_OPUS_5 = "claude-opus-5";
 export const CLAUDE_CODE_MODEL_OPUS_48 = "claude-opus-4-8";
 export const CLAUDE_CODE_MODEL_OPUS_47 = "claude-opus-4-7";
@@ -11,6 +12,7 @@ export const CLAUDE_CODE_MODEL_HAIKU_45 = "claude-haiku-4-5";
 export const AVAILABLE_CLAUDE_CODE_MODELS = [
   CLAUDE_CODE_MODEL_FABLE_51,
   CLAUDE_CODE_MODEL_FABLE_5,
+  CLAUDE_CODE_MODEL_OPUS_55,
   CLAUDE_CODE_MODEL_OPUS_5,
   CLAUDE_CODE_MODEL_OPUS_48,
   CLAUDE_CODE_MODEL_OPUS_47,
@@ -23,6 +25,8 @@ export const AVAILABLE_CLAUDE_CODE_MODELS = [
 export const DEFAULT_CLAUDE_CODE_MODEL = CLAUDE_CODE_MODEL_OPUS_5;
 
 export const CODEX_MODEL_GPT_6_ASTRA = "gpt-6-astra";
+export const CODEX_MODEL_GPT_6_SOL = "gpt-6-sol";
+export const CODEX_MODEL_GPT_6_LUNA = "gpt-6-luna";
 export const CODEX_MODEL_GPT_5_6_SOL = "gpt-5.6-sol";
 export const CODEX_MODEL_GPT_5_6_SOL_FAST = "gpt-5.6-sol-fast";
 export const CODEX_MODEL_GPT_5_6_TERRA = "gpt-5.6-terra";
@@ -41,6 +45,8 @@ export const CODEX_MODEL_GPT_5_3_CODEX_SPARK = "gpt-5.3-codex-spark";
 
 export const AVAILABLE_CODEX_MODELS = [
   CODEX_MODEL_GPT_6_ASTRA,
+  CODEX_MODEL_GPT_6_SOL,
+  CODEX_MODEL_GPT_6_LUNA,
   CODEX_MODEL_GPT_5_6_SOL,
   CODEX_MODEL_GPT_5_6_SOL_FAST,
   CODEX_MODEL_GPT_5_6_TERRA,
