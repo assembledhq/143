@@ -3271,6 +3271,32 @@ func TestParseCodeReviewOrchestratorSynthesis(t *testing.T) {
 	}
 }
 
+func TestCodeReviewMissingArtifactSynthesisBlocksApproval(t *testing.T) {
+	t.Parallel()
+
+	// A frozen reviewer replay reported that a generated role map was required
+	// to assess an authorization change but absent from the review workspace.
+	raw := `{"approval_recommended":false,"description_assessments":[],"findings":[],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":true,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Review authorization capability changed.","review_summary":"The generated role map is unavailable, so the authorization change cannot be assessed.","risk_notes":["Generated role map is missing."]}`
+	synthesis, err := parseCodeReviewOrchestratorSynthesis(raw)
+	require.NoError(t, err, "missing-artifact synthesis should satisfy the structured output contract")
+	require.False(t, synthesis.ApprovalRecommended, "missing-artifact synthesis should not recommend approval")
+	require.True(t, synthesis.UnresolvedUncertainty, "missing-artifact synthesis should preserve the evidence gap")
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	policy.Enabled = true
+	risk := models.EvaluateCodeReviewRisk(policy, models.CodeReviewRiskInput{
+		FilesChanged:          1,
+		Additions:             1,
+		Deletions:             1,
+		ChecksPassing:         true,
+		DescriptionPassed:     true,
+		UpToDate:              true,
+		UnresolvedUncertainty: synthesis.UnresolvedUncertainty,
+	})
+	require.Equal(t, []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonUnresolvedUncertainty}}, risk.ReasonDetails, "backend risk evaluation should withhold approval for incomplete generated evidence")
+	require.False(t, risk.Acceptable, "unresolved uncertainty should block automated approval")
+}
+
 func TestCodeReviewFindingsFromSynthesis(t *testing.T) {
 	t.Parallel()
 
