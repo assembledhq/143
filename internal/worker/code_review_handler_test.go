@@ -1352,7 +1352,7 @@ func TestCodeReviewVisualEvidencePromptProjection(t *testing.T) {
 	require.Equal(t, threadID, input.ThreadID, "agent message should target the selected reviewer or orchestrator thread")
 	require.Equal(t, commands, input.Commands, "reviewer message should retain native command metadata")
 	require.Equal(t, codeReviewVisualEvidenceImages(snapshot), input.Images, "every agent message should receive the same ordered first-party images")
-	require.Equal(t, models.SessionMessageSourceAgentTool, input.MessageSource, "visual evidence should enter the thread through the system agent-tool source")
+	require.Equal(t, models.SessionMessageSourceCodeReview, input.MessageSource, "review input should carry trusted code-review provenance")
 }
 
 func TestCodeReviewVisualEvidencePromptProjectionDeduplicatesContentHashes(t *testing.T) {
@@ -2915,6 +2915,7 @@ func TestRequestCodeReviewOrchestratorSynthesisRepair(t *testing.T) {
 	require.True(t, started, "repair request should start one bounded correction turn")
 	require.Len(t, sender.inputs, 1, "repair request should dispatch exactly one correction message")
 	require.Equal(t, threadID, sender.inputs[0].ThreadID, "repair request should continue the existing orchestrator thread")
+	require.Equal(t, models.SessionMessageSourceCodeReview, sender.inputs[0].MessageSource, "repair input should retain platform code-review provenance")
 	require.Contains(t, sender.inputs[0].Message, `"approval_recommended": false`, "correction message should require the omitted approval field with valid JSON")
 	require.Contains(t, sender.inputs[0].Message, `"findings":`, "correction message should preserve structured findings")
 	require.Contains(t, sender.inputs[0].Message, `"human_review_reasons":`, "correction message should require explicit escalation reasons")

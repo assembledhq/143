@@ -860,6 +860,7 @@ type SessionMessageSource string
 
 const (
 	SessionMessageSourceAgentTool        SessionMessageSource = "agent_tool"
+	SessionMessageSourceCodeReview       SessionMessageSource = "code_review"
 	SessionMessageSourceSystemAutoRepair SessionMessageSource = "system_auto_repair"
 	SessionMessageSourceGitHubPRFeedback SessionMessageSource = "github_pr_feedback"
 	// SessionMessageSourceAutomationTurn marks the visible user message the
@@ -871,7 +872,7 @@ const (
 
 func (s SessionMessageSource) Validate() error {
 	switch s {
-	case "", SessionMessageSourceAgentTool, SessionMessageSourceSystemAutoRepair, SessionMessageSourceGitHubPRFeedback, SessionMessageSourceAutomationTurn:
+	case "", SessionMessageSourceAgentTool, SessionMessageSourceCodeReview, SessionMessageSourceSystemAutoRepair, SessionMessageSourceGitHubPRFeedback, SessionMessageSourceAutomationTurn:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionMessageSource: %q", s)

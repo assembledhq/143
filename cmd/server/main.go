@@ -1564,6 +1564,7 @@ func buildServices(
 	}
 
 	uploadStore := buildUploadStore(context.Background(), cfg, logger)
+	codeReviewRoleStore := db.NewCodeReviewStore(pool)
 
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:                   sandboxProvider,
@@ -1575,6 +1576,7 @@ func buildServices(
 		HumanInputRequests:         sessionHumanInputStore,
 		SessionMessages:            sessionMessageStore,
 		SessionThreads:             sessionThreadStore,
+		CodeReviewRoles:            codeReviewRoleStore,
 		SessionIssueLinks:          db.NewSessionIssueLinkStore(pool),
 		IssueSnapshots:             db.NewSessionTurnIssueSnapshotStore(pool),
 		ProjectTasks:               projectTaskUpdater,
