@@ -17,6 +17,7 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/prompts"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
@@ -124,6 +125,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if job.OrgID == uuid.Nil || job.SessionID == uuid.Nil {
 			return fmt.Errorf("org_id and session_id are required")
 		}
+		reviewLog := codeReviewTimingLogger(ctx, logger, job)
+		attemptStage := observability.BeginStage(true, reviewLog, "review_controller_attempt")
+		defer func() { attemptStage.End(codeReviewStageOutcome(ctx, handlerErr)) }()
 		registerCodeReviewDeadLetterReconciliation(ctx, stores, services, logger, job)
 		registerCodeReviewRetryScheduledWait(ctx, stores.CodeReviews, logger, job)
 		metadata, err := stores.CodeReviews.MarkRunning(ctx, job.OrgID, job.SessionID)
@@ -410,7 +414,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhasePublishing); err != nil {
 			return fmt.Errorf("set code review publishing phase: %w", err)
 		}
+		publicationStage := observability.BeginStage(true, reviewLog, "github_publication")
 		submission, submitted, err := submitCodeReviewToGitHub(ctx, stores, services, job, metadata, decision.Decision, body)
+		publicationStage.End(codeReviewStageOutcome(ctx, err))
 		if err != nil {
 			return err
 		}
@@ -425,7 +431,8 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			deletions = &deletionCount
 		}
 		removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
-		if _, err := stores.CodeReviews.CompleteReview(ctx, job.OrgID, db.CompleteCodeReviewParams{
+		completionStage := observability.BeginStage(true, reviewLog, "review_completion_persist")
+		_, completionErr := stores.CodeReviews.CompleteReview(ctx, job.OrgID, db.CompleteCodeReviewParams{
 			SessionID:         job.SessionID,
 			Decision:          decision.Decision,
 			Acceptable:        decision.Acceptable,
@@ -435,8 +442,10 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			Additions:         additions,
 			Deletions:         deletions,
 			RiskReasonDetails: decision.RiskReasonDetails,
-		}); err != nil {
-			return fmt.Errorf("complete code review: %w", err)
+		})
+		completionStage.End(codeReviewStageOutcome(ctx, completionErr))
+		if completionErr != nil {
+			return fmt.Errorf("complete code review: %w", completionErr)
 		}
 		event := logger.Info().
 			Str("org_id", job.OrgID.String()).
@@ -450,6 +459,41 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 		return nil
 	}
+}
+
+func codeReviewStageOutcome(ctx context.Context, err error) string {
+	if err == nil {
+		return "succeeded"
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return "cancelled"
+	}
+	var retryable *RetryableError
+	if errors.As(err, &retryable) {
+		return "waiting"
+	}
+	return "failed"
+}
+
+func codeReviewTimingLogger(ctx context.Context, logger zerolog.Logger, job runCodeReviewPayload) zerolog.Logger {
+	reviewContext := logger.With().
+		Str("org_id", job.OrgID.String()).
+		Str("session_id", job.SessionID.String()).
+		Str("review_head_sha", job.HeadSHA)
+	if job.MetadataID != uuid.Nil {
+		reviewContext = reviewContext.Str("review_id", job.MetadataID.String())
+	}
+	reviewLog := reviewContext.Logger()
+	if jobID, ok := jobctx.JobIDFromContext(ctx); ok {
+		reviewLog = reviewLog.With().Str("job_id", jobID.String()).Logger()
+	}
+	if lockToken, ok := jobctx.LockTokenFromContext(ctx); ok {
+		reviewLog = reviewLog.With().Str("lock_token", lockToken.String()).Logger()
+	}
+	if nodeID, ok := jobctx.WorkerNodeIDFromContext(ctx); ok {
+		reviewLog = reviewLog.With().Str("worker_node_id", nodeID).Logger()
+	}
+	return reviewLog
 }
 
 func stopCodeReviewIfParentSessionCancelled(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest) (bool, error) {
@@ -741,7 +785,9 @@ type codeReviewExecutionValidator interface {
 	ValidateScheduledExecution(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error)
 }
 
-func syncCodeReviewPullRequestState(ctx context.Context, services *Services, logger zerolog.Logger, job runCodeReviewPayload) error {
+func syncCodeReviewPullRequestState(ctx context.Context, services *Services, logger zerolog.Logger, job runCodeReviewPayload) (returnErr error) {
+	stage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "github_preflight")
+	defer func() { stage.End(codeReviewStageOutcome(ctx, returnErr)) }()
 	if services != nil {
 		if validator, ok := services.CodeReviewLifecycle.(codeReviewExecutionValidator); ok {
 			valid, err := validator.ValidateScheduledExecution(ctx, job.OrgID, job.PullRequestID, job.SessionID)
@@ -977,7 +1023,9 @@ func (r *codeReviewOrchestratorStructuredResult) UnmarshalJSON(data []byte) erro
 	return nil
 }
 
-func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) error {
+func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) (returnErr error) {
+	stage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "reviewer_dispatch_check")
+	defer func() { stage.End(codeReviewStageOutcome(ctx, returnErr)) }()
 	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
 	if err != nil {
 		return fmt.Errorf("list code review reviewer results: %w", err)
@@ -1161,7 +1209,9 @@ func unavailableCodeReviewReviewerResult(job runCodeReviewPayload, index int, ag
 	return failedCodeReviewReviewerResult(job, index, agentType, agentModel, models.CodeReviewAgentResultStatusFailed, raw, true)
 }
 
-func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) error {
+func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) (returnErr error) {
+	stage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "reviewer_harvest_check")
+	defer func() { stage.End(codeReviewStageOutcome(ctx, returnErr)) }()
 	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
 	if err != nil {
 		return fmt.Errorf("list code review reviewer results for harvest: %w", err)
@@ -1315,6 +1365,15 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 		if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusCompleted, rawOutput, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
 			return fmt.Errorf("mark reviewer completed: %w", err)
 		}
+		resultLog := codeReviewTimingLogger(ctx, logger, job)
+		resultLog.Info().
+			Str("result_id", result.ID.String()).
+			Str("thread_id", threadID.String()).
+			Str("role", string(result.Role)).
+			Str("agent_provider", result.AgentProvider).
+			Str("model", stringPtrValue(result.AgentModel)).
+			Str("status", string(models.CodeReviewAgentResultStatusCompleted)).
+			Msg("code review result durable")
 	}
 	return nil
 }
@@ -2575,7 +2634,9 @@ func codeReviewWaitingForReviewers(policy models.CodeReviewPolicyConfig) error {
 	}
 }
 
-func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot) error {
+func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot) (returnErr error) {
+	stage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "synthesis_dispatch_check")
+	defer func() { stage.End(codeReviewStageOutcome(ctx, returnErr)) }()
 	cfg := policy.Config()
 	attempt := codeReviewOrchestratorAttemptCount(agentResults)
 	if attempt > 0 && (!codeReviewOrchestratorNeedsFallback(agentResults) || time.Now().After(codeReviewOrchestratorDispatchDeadline(cfg, metadata, agentResults))) {
@@ -2849,7 +2910,9 @@ func codeReviewReasoningEffortsEqual(left, right *models.ReasoningEffort) bool {
 	return *left == *right
 }
 
-func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) error {
+func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) (returnErr error) {
+	stage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "synthesis_harvest_check")
+	defer func() { stage.End(codeReviewStageOutcome(ctx, returnErr)) }()
 	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
 	if err != nil {
 		return fmt.Errorf("list code review orchestrator results for harvest: %w", err)
@@ -3048,6 +3111,16 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 		if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusCompleted, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
 			return fmt.Errorf("mark orchestrator completed: %w", err)
 		}
+		resultLog := codeReviewTimingLogger(ctx, logger, job)
+		resultLog.Info().
+			Str("result_id", result.ID.String()).
+			Str("thread_id", threadID.String()).
+			Str("role", string(result.Role)).
+			Str("agent_provider", result.AgentProvider).
+			Str("model", stringPtrValue(result.AgentModel)).
+			Bool("synthesis_validated", state.SynthesisValidated).
+			Str("status", string(models.CodeReviewAgentResultStatusCompleted)).
+			Msg("code review result durable")
 		for _, satisfaction := range codeReviewVisualEvidenceSatisfactions(synthesis, visualEvidence) {
 			metrics.RecordCodeReviewVisualEvidenceSatisfaction(ctx, string(satisfaction.Basis), satisfaction.Surface)
 		}
@@ -3216,7 +3289,9 @@ func completeCodeReviewAfterStableDeterministicFailure(
 	if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhasePublishing); err != nil {
 		return fmt.Errorf("set deterministic early-stop publishing phase: %w", err)
 	}
+	publicationStage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "github_publication")
 	submission, submitted, err := submitCodeReviewToGitHub(ctx, stores, services, job, metadata, decision.Decision, body)
+	publicationStage.End(codeReviewStageOutcome(ctx, err))
 	if err != nil {
 		return err
 	}
@@ -3226,7 +3301,8 @@ func completeCodeReviewAfterStableDeterministicFailure(
 	}
 	additions, deletions := codeReviewLineChanges(changedFiles)
 	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
-	if _, err := stores.CodeReviews.CompleteReview(ctx, job.OrgID, db.CompleteCodeReviewParams{
+	completionStage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "review_completion_persist")
+	_, completionErr := stores.CodeReviews.CompleteReview(ctx, job.OrgID, db.CompleteCodeReviewParams{
 		SessionID:         job.SessionID,
 		Decision:          decision.Decision,
 		Acceptable:        decision.Acceptable,
@@ -3236,8 +3312,10 @@ func completeCodeReviewAfterStableDeterministicFailure(
 		Additions:         &additions,
 		Deletions:         &deletions,
 		RiskReasonDetails: decision.RiskReasonDetails,
-	}); err != nil {
-		return fmt.Errorf("complete deterministic early-stop code review: %w", err)
+	})
+	completionStage.End(codeReviewStageOutcome(ctx, completionErr))
+	if completionErr != nil {
+		return fmt.Errorf("complete deterministic early-stop code review: %w", completionErr)
 	}
 	logger.Info().
 		Str("org_id", job.OrgID.String()).

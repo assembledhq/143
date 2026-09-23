@@ -193,6 +193,8 @@ func TestDurableSessionExecutorDispatcher_DispatchLogsHandoffLifecycle(t *testin
 	require.Contains(t, logs.String(), "session executor job handoff completed", "dispatch logs should include handoff completion")
 	require.Contains(t, logs.String(), executorID.String(), "dispatch logs should include the executor id for correlation")
 	require.Contains(t, logs.String(), jobID.String(), "dispatch logs should include the job id for correlation")
+	require.Contains(t, logs.String(), `"container_id":"container-`+executorID.String()+`"`, "dispatch logs should preserve the legacy executor container field")
+	require.Contains(t, logs.String(), `"executor_container_id":"container-`+executorID.String()+`"`, "dispatch logs should identify the executor container explicitly")
 }
 
 func TestDurableSessionExecutorDispatcher_CleansUpWhenLaunchFails(t *testing.T) {

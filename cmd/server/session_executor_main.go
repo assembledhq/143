@@ -29,6 +29,7 @@ import (
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
 	threadservice "github.com/assembledhq/143/internal/services/thread"
+	"github.com/assembledhq/143/internal/version"
 	"github.com/assembledhq/143/internal/worker"
 )
 
@@ -44,7 +45,7 @@ func isSessionExecutorInvocation(args []string) bool {
 
 func runSessionExecutorMain() {
 	cfg := config.Load()
-	logger := logging.NewLogger(cfg.LogLevel, cfg.Env)
+	logger := logging.NewLogger(cfg.LogLevel, cfg.Env).With().Str("service", "session-executor").Str("build_sha", version.BuildSHA).Logger()
 	executorID, err := parseSessionExecutorID(os.Args)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("invalid session executor arguments")
