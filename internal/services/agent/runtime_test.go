@@ -166,6 +166,18 @@ func (s *runtimeTestSessionStore) AcquireTurnHold(context.Context, uuid.UUID, uu
 	return "", nil
 }
 
+func (s *runtimeTestSessionStore) AcquireExistingTurnHold(context.Context, uuid.UUID, uuid.UUID, string) (bool, error) {
+	return true, nil
+}
+
+func (s *runtimeTestSessionStore) ResetAfterLostReuse(context.Context, uuid.UUID, uuid.UUID, string) (bool, error) {
+	return true, nil
+}
+
+func (s *runtimeTestSessionStore) PeekContainerID(context.Context, uuid.UUID, uuid.UUID) (string, error) {
+	return "", nil
+}
+
 func (s *runtimeTestSessionStore) SetWorkerNodeIDForContainer(context.Context, uuid.UUID, uuid.UUID, string, string) error {
 	return nil
 }

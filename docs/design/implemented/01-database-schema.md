@@ -744,6 +744,19 @@ compare decisions against the policy active at the time.
 - `(org_id, repository_id, created_at DESC)` — repository review history
 - `(org_id, created_at DESC)` where `status = 'completed'` — organization analytics windows
 
+Code-review workspace retention uses `session_sandbox_holders` with
+`holder_kind = 'code_review'` (migration 000293) and `holder_id` equal to this
+metadata row's ID. Acquisition verifies the active, non-stale review, exact
+head, persisted reviewer/synthesis thread, session container, and owning node.
+The holder has a 60-second renewable lease and a 120-second maximum idle
+retention from the latest successfully completed review turn. For this holder
+kind, each eligible turn acquisition resets `created_at` as the idle-retention
+epoch; controller renewal does not reset it. Acquisition and renewal preserve
+the original lease token and container identity; terminal, draining-owner,
+expired, or mismatched holders are released or expired before
+host-local GC can finalize an idle container. Agent-turn, preview, and runtime
+holders independently block destruction.
+
 ### `code_review_prompt_records`
 
 Immutable prompt, output, and visual-evidence audit records for a code review

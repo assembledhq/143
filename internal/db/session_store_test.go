@@ -2918,6 +2918,83 @@ func TestSessionStore_FinalizeContainerDestroy(t *testing.T) {
 	})
 }
 
+func TestSessionStore_FinalizeIdleCodeReviewContainer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		rows    int64
+		cleared bool
+	}{
+		{name: "terminal unheld review", rows: 1, cleared: true},
+		{name: "active review or live holder"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should be created")
+			defer mock.Close()
+			orgID, sessionID := uuid.New(), uuid.New()
+			mock.ExpectExec(`UPDATE sessions[\s\S]+origin = 'code_review'[\s\S]+code_review_session_metadata[\s\S]+j\.job_type IN \('run_agent', 'continue_session'\)[\s\S]+session_sandbox_holders[\s\S]+thread_runtimes`).
+				WithArgs(sessionID, orgID, "review-container").
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+			store := NewSessionStore(mock)
+			cleared, err := store.FinalizeIdleCodeReviewContainer(context.Background(), orgID, sessionID, "review-container")
+			require.NoError(t, err, "review cleanup should execute its terminal and active-holder guards")
+			require.Equal(t, tt.cleared, cleared, "only an unheld terminal review should transfer container destruction ownership")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionStore_ExistingTurnHoldFencesClearedContainer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		rows     int64
+		acquired bool
+	}{
+		{name: "matching container", rows: 1, acquired: true},
+		{name: "container cleared or replaced"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should be created")
+			defer mock.Close()
+			orgID, sessionID := uuid.New(), uuid.New()
+			mock.ExpectExec(`UPDATE sessions[\s\S]+turn_holding_container = TRUE[\s\S]+container_id = @container_id`).
+				WithArgs(sessionID, orgID, "expected-container").
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+			store := NewSessionStore(mock)
+			acquired, err := store.AcquireExistingTurnHold(context.Background(), orgID, sessionID, "expected-container")
+			require.NoError(t, err, "existing hold should check the container identity atomically")
+			require.Equal(t, tt.acquired, acquired, "a cleared container must not be republished by a stale turn")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionStore_ResetAfterLostReuseIsConditional(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should be created")
+	defer mock.Close()
+	orgID, sessionID := uuid.New(), uuid.New()
+	mock.ExpectExec(`UPDATE sessions[\s\S]+status = 'running'[\s\S]+container_id IS NULL[\s\S]+container_id IS DISTINCT FROM @container_id[\s\S]+turn_holding_container = FALSE`).
+		WithArgs(sessionID, orgID, "retired-container").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	store := NewSessionStore(mock)
+	reset, err := store.ResetAfterLostReuse(context.Background(), orgID, sessionID, "retired-container")
+	require.NoError(t, err, "reuse reset should check that no successor owns the session")
+	require.False(t, reset, "reuse reset should not overwrite a successor's running status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionStore_SetWorkerNodeIDForContainer(t *testing.T) {
 	t.Parallel()
 
@@ -3102,41 +3179,42 @@ func TestSessionStore_ListOrphanedContainers_QueryError(t *testing.T) {
 	require.Contains(t, err.Error(), "list orphaned containers")
 }
 
-func TestSessionStore_ListReferencedContainerIDs(t *testing.T) {
+func TestSessionStore_ListContainerReferences(t *testing.T) {
 	t.Parallel()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "should create mock pool")
-	defer mock.Close()
-
-	store := NewSessionStore(mock)
-	mock.ExpectQuery(`SELECT container_id\s+FROM sessions\s+WHERE container_id IS NOT NULL`).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"container_id"}).
-				AddRow("container-a").
-				AddRow("container-b"),
-		)
-
-	ids, err := store.ListReferencedContainerIDs(context.Background())
-	require.NoError(t, err, "ListReferencedContainerIDs should not return an error")
-	require.Equal(t, []string{"container-a", "container-b"}, ids, "ListReferencedContainerIDs should return every non-null session container id")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-}
-
-func TestSessionStore_ListReferencedContainerIDs_QueryError(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "should create mock pool")
-	defer mock.Close()
-
-	store := NewSessionStore(mock)
-	mock.ExpectQuery(`SELECT container_id\s+FROM sessions\s+WHERE container_id IS NOT NULL`).
-		WillReturnError(errors.New("boom"))
-
-	_, err = store.ListReferencedContainerIDs(context.Background())
-	require.Error(t, err, "ListReferencedContainerIDs should surface query failures")
-	require.Contains(t, err.Error(), "list referenced container ids", "ListReferencedContainerIDs should wrap query failures with context")
+	tests := []struct {
+		name        string
+		queryErr    error
+		wantAll     []string
+		wantReviews []string
+	}{
+		{name: "one scan classifies review containers", wantAll: []string{"container-a", "container-b"}, wantReviews: []string{"container-b"}},
+		{name: "query error fails closed", queryErr: errors.New("database unavailable")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "container inventory mock should initialize")
+			defer mock.Close()
+			expected := mock.ExpectQuery(`SELECT container_id, COALESCE\(origin = 'code_review', false\)\s+FROM sessions\s+WHERE container_id IS NOT NULL`)
+			if tt.queryErr != nil {
+				expected.WillReturnError(tt.queryErr)
+			} else {
+				expected.WillReturnRows(pgxmock.NewRows([]string{"container_id", "is_code_review"}).
+					AddRow("container-a", false).AddRow("container-b", true))
+			}
+			all, reviews, err := NewSessionStore(mock).ListContainerReferences(context.Background())
+			if tt.queryErr != nil {
+				require.ErrorContains(t, err, "list container references", "inventory failure should carry operation context")
+			} else {
+				require.NoError(t, err, "inventory should scan all references once")
+			}
+			require.Equal(t, tt.wantAll, all, "inventory should contain every referenced container")
+			require.Equal(t, tt.wantReviews, reviews, "review subset should contain only review containers")
+			require.NoError(t, mock.ExpectationsWereMet(), "container inventory query should match the expected single scan")
+		})
+	}
 }
 
 func TestSessionStore_BeginRuntime_PreservesRecoveringState(t *testing.T) {

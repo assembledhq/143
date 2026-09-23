@@ -137,6 +137,7 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		"session_sandbox_holders_holder_kind": toStrings(
 			SessionSandboxHolderKindThreadRuntime, SessionSandboxHolderKindPreview,
 			SessionSandboxHolderKindSnapshot, SessionSandboxHolderKindOperator,
+			SessionSandboxHolderKindCodeReview,
 		),
 		"session_sandbox_holders_status": toStrings(
 			SessionSandboxHolderStatusActive, SessionSandboxHolderStatusDraining,

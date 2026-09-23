@@ -900,6 +900,12 @@ func main() {
 		nodeDrainCtx, nodeDrainCancel := context.WithTimeout(context.Background(), nodeDrainMarkTimeout)
 		if err := nodeManager.RequestDrain(nodeDrainCtx, time.Now()); err != nil {
 			logger.Warn().Err(err).Msg("failed to mark node draining")
+		} else if cfg.NodeID != "" {
+			if released, err := db.NewSessionSandboxHolderStore(pool).ReleaseCodeReviewHoldersByOwner(nodeDrainCtx, cfg.NodeID); err != nil {
+				logger.Warn().Err(err).Str("worker_node_id", cfg.NodeID).Msg("failed to release code review workspace holders during drain")
+			} else if released > 0 {
+				logger.Info().Int64("released_review_holders", released).Str("worker_node_id", cfg.NodeID).Msg("released code review workspace holders during drain")
+			}
 		}
 		if workerPreviewStore != nil && cfg.NodeID != "" {
 			if _, err := workerPreviewStore.MarkPreviewRuntimesDrainingByWorker(nodeDrainCtx, cfg.NodeID); err != nil {
@@ -1792,6 +1798,7 @@ func buildServices(
 				UnreferencedGracePeriod: cfg.SandboxGCGrace,
 				HardMaxAge:              cfg.SandboxGCHardMax,
 			}, logger)
+			sandboxGC.SetCodeReviewHolderExpirer(sessionSandboxHolderStore)
 		} else {
 			logger.Info().Msg("sandbox provider does not support managed-container listing; sandbox GC disabled")
 		}

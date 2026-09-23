@@ -128,6 +128,12 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		reviewLog := codeReviewTimingLogger(ctx, logger, job)
 		attemptStage := observability.BeginStage(true, reviewLog, "review_controller_attempt")
 		defer func() { attemptStage.End(codeReviewStageOutcome(ctx, handlerErr)) }()
+		maintainCodeReviewWorkspaceHolder(ctx, stores, reviewLog, job)
+		defer func() {
+			holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			maintainCodeReviewWorkspaceHolder(holdCtx, stores, reviewLog, job)
+		}()
 		registerCodeReviewDeadLetterReconciliation(ctx, stores, services, logger, job)
 		registerCodeReviewRetryScheduledWait(ctx, stores.CodeReviews, logger, job)
 		metadata, err := stores.CodeReviews.MarkRunning(ctx, job.OrgID, job.SessionID)
@@ -494,6 +500,24 @@ func codeReviewTimingLogger(ctx context.Context, logger zerolog.Logger, job runC
 		reviewLog = reviewLog.With().Str("worker_node_id", nodeID).Logger()
 	}
 	return reviewLog
+}
+
+func maintainCodeReviewWorkspaceHolder(ctx context.Context, stores *Stores, log zerolog.Logger, job runCodeReviewPayload) {
+	if stores == nil || stores.SandboxHolders == nil {
+		return
+	}
+	released, err := stores.SandboxHolders.ReleaseTerminalCodeReview(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to release terminal code review workspace holder")
+		return
+	}
+	if released {
+		log.Info().Msg("released terminal code review workspace holder")
+		return
+	}
+	if _, err := stores.SandboxHolders.RenewCodeReview(ctx, job.OrgID, job.SessionID, time.Minute); err != nil {
+		log.Warn().Err(err).Msg("failed to renew code review workspace holder")
+	}
 }
 
 func stopCodeReviewIfParentSessionCancelled(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest) (bool, error) {

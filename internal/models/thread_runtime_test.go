@@ -200,6 +200,7 @@ func TestSessionSandboxHolderEnumsValidate(t *testing.T) {
 			{name: "preview", value: SessionSandboxHolderKindPreview},
 			{name: "snapshot", value: SessionSandboxHolderKindSnapshot},
 			{name: "operator", value: SessionSandboxHolderKindOperator},
+			{name: "code review", value: SessionSandboxHolderKindCodeReview},
 			{name: "invalid", value: SessionSandboxHolderKind("bogus"), wantErr: true},
 		}
 

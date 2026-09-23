@@ -339,6 +339,7 @@ type mockSessionStore struct {
 	finalizeFn             func(expectedContainerID string) (bool, error)
 	clearContainerIDFn     func(expectedContainerID string) (bool, error)
 	containerHoldStateFn   func(expectedContainerID string) (bool, bool, error)
+	peekContainerIDFn      func() (string, error)
 	acquireHoldCalls       int
 	releaseHoldCalls       int
 	finalizeCalls          int
@@ -667,6 +668,25 @@ func (m *mockSessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID
 	}
 	// Default: caller's proposal wins.
 	return proposedContainerID, nil
+}
+
+func (m *mockSessionStore) AcquireExistingTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error) {
+	actual, err := m.AcquireTurnHold(ctx, orgID, sessionID, expectedContainerID)
+	return err == nil && actual == expectedContainerID, err
+}
+
+func (m *mockSessionStore) ResetAfterLostReuse(_ context.Context, _, _ uuid.UUID, _ string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.statusUpdates = append(m.statusUpdates, string(models.SessionStatusIdle))
+	return true, nil
+}
+
+func (m *mockSessionStore) PeekContainerID(context.Context, uuid.UUID, uuid.UUID) (string, error) {
+	if m.peekContainerIDFn != nil {
+		return m.peekContainerIDFn()
+	}
+	return "test-sandbox", nil
 }
 
 func (m *mockSessionStore) SetWorkerNodeIDForContainer(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID, workerNodeID string) error {
@@ -8150,6 +8170,42 @@ func TestContinueSession_ReusedContainerReopensAuthListener(t *testing.T) {
 		require.NotContains(t, cmd, "143-tools git-bootstrap",
 			"git-bootstrap must not re-run on reused containers; original RunAgent already wired git config")
 	}
+}
+
+func TestContinueSession_ReusedContainerClearedBeforeHoldRetries(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	existing := "retired-review-container"
+	session.ContainerID = &existing
+	session.SandboxState = models.SandboxStateRunning
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{byProvider: map[models.ProviderName]*models.DecryptedCredential{
+		models.ProviderAnthropic: {Provider: models.ProviderAnthropic, Config: models.AnthropicConfig{APIKey: "sk-ant-test"}},
+	}}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{{
+		ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2,
+		Role: models.MessageRoleUser, Content: "follow-up",
+	}}
+	d.sessions.acquireHoldFn = func(string) (string, error) { return "", nil }
+	d.adapter.executeFn = func(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatal("agent must not execute after its reused container was cleared")
+		return nil, nil
+	}
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.ErrorIs(t, err, agent.ErrSandboxPreviewRace, "cleared reused container should retry from fresh session state")
+	require.Contains(t, d.sessions.statusUpdates, string(models.SessionStatusIdle), "lost reuse should reopen an unheld turn for retry")
+	require.Equal(t, 0, d.provider.GetDestroyCalls(), "losing reuse must not destroy a container the turn never owned")
 }
 
 // TestContinueSession_AuthSocketClosedOnAcquireHoldError verifies that

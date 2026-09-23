@@ -22,6 +22,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/auth"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/metrics"
@@ -491,6 +492,21 @@ func (o *Orchestrator) stopWorkspaceWaitIfThreadCancelled(ctx context.Context, o
 	return fmt.Errorf("%w: thread %s", ErrThreadCancelledBeforeWorkspaceReady, threadID)
 }
 
+// A retained review workspace may be reclaimed by GC while a sibling waits
+// for its checkout. Re-read the durable container identity on each probe so
+// that a stale in-memory session cannot spend the full readiness timeout
+// polling a container that has already been destroyed.
+func (o *Orchestrator) stopWorkspaceWaitIfContainerChanged(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) error {
+	currentContainerID, err := o.sessions.PeekContainerID(ctx, orgID, sessionID)
+	if err != nil {
+		return fmt.Errorf("check reused workspace ownership while waiting: %w", err)
+	}
+	if currentContainerID != expectedContainerID {
+		return fmt.Errorf("%w: reused workspace %s is no longer current", ErrStaleSandboxIDCleared, expectedContainerID)
+	}
+	return nil
+}
+
 // GitHubTokenProvider abstracts retrieving a GitHub App installation token.
 type GitHubTokenProvider interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
@@ -620,6 +636,11 @@ type SessionStore interface {
 	// caller must destroy its just-created sandbox and attach to the
 	// actualContainerID instead.
 	AcquireTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, proposedContainerID string) (actualContainerID string, err error)
+	// Reuse must only attach to the exact container read before setup. If GC
+	// cleared that row, retry from a fresh session read rather than republish it.
+	AcquireExistingTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error)
+	ResetAfterLostReuse(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error)
+	PeekContainerID(ctx context.Context, orgID, sessionID uuid.UUID) (string, error)
 	// SetWorkerNodeIDForContainer records which worker currently owns the live
 	// container referenced by container_id.
 	SetWorkerNodeIDForContainer(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID, workerNodeID string) error
@@ -697,6 +718,10 @@ type SessionThreadStore interface {
 // against the active review's persisted agent-result identity.
 type CodeReviewRoleResolver interface {
 	ResolveAgentRoleForThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.CodeReviewAgentRole, bool, error)
+}
+
+type codeReviewWorkspaceHolderAcquirer interface {
+	AcquireCodeReview(ctx context.Context, orgID uuid.UUID, params db.AcquireCodeReviewSandboxHolderParams) (models.SessionSandboxHolder, bool, error)
 }
 
 type sessionThreadDrainLister interface {
@@ -1907,6 +1932,35 @@ func reviewTurnPreparationMode(mode repositoryPreparationMode, pending []models.
 		}
 	}
 	return mode
+}
+
+// retainCodeReviewWorkspace runs only after a successful platform-owned review
+// turn. The caller invokes it before ReleaseTurnHold so the active turn itself
+// keeps the container alive until the durable holder is acquired.
+func (o *Orchestrator) retainCodeReviewWorkspace(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandbox *Sandbox, pending []models.SessionMessage, successful bool, log zerolog.Logger) bool {
+	if o == nil || !successful || ctx.Err() != nil || session == nil || sandbox == nil ||
+		session.Origin != models.SessionOriginCodeReview || threadID == nil || *threadID == uuid.Nil ||
+		reviewTurnPreparationMode(repositoryPreparationMinimalReview, pending) != repositoryPreparationMinimalReview || o.nodeID == "" {
+		return false
+	}
+	acquirer, ok := o.sandboxHolders.(codeReviewWorkspaceHolderAcquirer)
+	if !ok {
+		return false
+	}
+	holdCtx, holdCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer holdCancel()
+	holder, acquired, err := acquirer.AcquireCodeReview(holdCtx, session.OrgID, db.AcquireCodeReviewSandboxHolderParams{
+		SessionID: session.ID, ThreadID: *threadID, ContainerID: sandbox.ID,
+		OwnerNodeID: o.nodeID, LeaseToken: uuid.New(), LeaseDuration: time.Minute,
+	})
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to retain code review workspace; using snapshot recovery")
+		return false
+	}
+	if acquired {
+		log.Info().Str("review_id", holder.HolderID.String()).Time("holder_expires_at", holder.ExpiresAt).Msg("retained code review workspace for synthesis handoff")
+	}
+	return acquired
 }
 
 // Synthesis enqueues its turn before its agent-result row is persisted. Retry
@@ -4819,7 +4873,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			reusedCodeReviewWorkspaceReadyInitialBackoff,
 			reusedCodeReviewWorkspaceReadyMaxBackoff,
 			func(checkCtx context.Context) error {
-				return o.stopWorkspaceWaitIfThreadCancelled(checkCtx, session.OrgID, workspaceThreadID)
+				if err := o.stopWorkspaceWaitIfThreadCancelled(checkCtx, session.OrgID, workspaceThreadID); err != nil {
+					return err
+				}
+				return o.stopWorkspaceWaitIfContainerChanged(checkCtx, session.OrgID, session.ID, workspaceSandbox.ID)
 			},
 		)
 		if errors.Is(readyErr, ErrThreadCancelledBeforeWorkspaceReady) {
@@ -4828,6 +4885,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			workspaceStage.End(observability.StageOutcome(ctx, readyErr))
 		}
 		if readyErr != nil {
+			if errors.Is(readyErr, ErrStaleSandboxIDCleared) {
+				log.Info().Str("container_id", workspaceSandbox.ID).Msg("reused review workspace was reclaimed while waiting; retrying from durable session state")
+				if _, resetErr := o.sessions.ResetAfterLostReuse(ctx, session.OrgID, session.ID, workspaceSandbox.ID); resetErr != nil {
+					log.Warn().Err(resetErr).Msg("failed to reopen review turn after workspace reclamation")
+				}
+				return ErrStaleSandboxIDCleared
+			}
 			if errors.Is(readyErr, ErrThreadCancelledBeforeWorkspaceReady) {
 				log.Info().
 					Err(readyErr).
@@ -5070,16 +5134,31 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		sandbox.Metadata[SandboxMetadataTargetBranch] = continueTargetBranch
 	}
-	// Record the turn hold. AcquireTurnHold uses COALESCE so it is idempotent
-	// when we reused a container (the row's container_id already matches our
-	// sandbox.ID). When we freshly hydrated, a concurrent preview hydrate may
+	// Record the turn hold. Reuse uses a strict container-id CAS so GC cannot
+	// clear the row and then have this stale turn republish a dying container.
+	// When we freshly hydrated, a concurrent preview hydrate may
 	// have published first — in that case actualContainerID differs from
 	// sandbox.ID and we must destroy our local container and abort so the
 	// user's retry picks up the winner via the reuse path.
 	// On DB error we destroy any locally-created sandbox and fail the turn —
 	// if we left it alive the reconciler couldn't find it (no container_id
 	// row reference) and it would leak.
-	actualContainerID, holdErr := o.sessions.AcquireTurnHold(ctx, session.OrgID, session.ID, sandbox.ID)
+	var actualContainerID string
+	var holdErr error
+	if reusedExisting {
+		var acquired bool
+		acquired, holdErr = o.sessions.AcquireExistingTurnHold(ctx, session.OrgID, session.ID, sandbox.ID)
+		if holdErr == nil && !acquired {
+			o.closeSandboxAuth(session.ID, log)
+			if _, statusErr := o.sessions.ResetAfterLostReuse(ctx, session.OrgID, session.ID, sandbox.ID); statusErr != nil {
+				log.Warn().Err(statusErr).Msg("failed to revert session after reused container was cleared")
+			}
+			return ErrSandboxPreviewRace
+		}
+		actualContainerID = sandbox.ID
+	} else {
+		actualContainerID, holdErr = o.sessions.AcquireTurnHold(ctx, session.OrgID, session.ID, sandbox.ID)
+	}
 	if holdErr != nil {
 		destroyCtx := context.Background()
 		if !reusedExisting {
@@ -5161,6 +5240,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// Detached context so DB writes + destroy succeed even if ctx was
 		// cancelled (user cancel, timeout, shutdown).
 		destroyCtx := context.Background()
+		o.retainCodeReviewWorkspace(ctx, session, threadID, sandbox, pendingMsgs, returnErr == nil && reviewTiming, log)
 		var (
 			destroyNow bool
 			releasedID string
