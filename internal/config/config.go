@@ -199,6 +199,8 @@ type Config struct {
 	// spend on public repositories.
 	CodeReviewDisputeUntrustedIntakePerLogin       int `env:"CODE_REVIEW_DISPUTE_UNTRUSTED_INTAKE_PER_LOGIN"        envDefault:"5"`
 	CodeReviewDisputeUntrustedIntakePerPullRequest int `env:"CODE_REVIEW_DISPUTE_UNTRUSTED_INTAKE_PER_PULL_REQUEST" envDefault:"20"`
+	// Roll out advisory pre-dispatch placement independently of preparation.
+	CodeReviewExecutorPlacementEnabled bool `env:"CODE_REVIEW_EXECUTOR_PLACEMENT_ENABLED" envDefault:"false"`
 
 	// CSRF
 	CSRFSigningKey string `env:"CSRF_SIGNING_KEY"`

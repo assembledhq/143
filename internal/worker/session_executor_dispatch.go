@@ -42,7 +42,7 @@ func maybeDispatchSessionExecutor(ctx context.Context, stores *Stores, services 
 		}
 		return nil
 	}
-	if session.Origin == models.SessionOriginCodeReview {
+	if session.Origin == models.SessionOriginCodeReview && services.CodeReviewExecutorPlacementEnabled {
 		if stores == nil || stores.Sessions == nil || stores.Jobs == nil {
 			return fmt.Errorf("code review executor placement stores are required")
 		}
@@ -83,6 +83,7 @@ func maybeDispatchSessionExecutor(ctx context.Context, stores *Stores, services 
 			}
 			return placementErr
 		}
+		freshSession.PrimaryThreadID = session.PrimaryThreadID
 		session = freshSession
 	}
 	executorID, err := services.SessionExecutorDispatcher.Dispatch(ctx, jobType, session, threadID)
@@ -136,6 +137,11 @@ func codeReviewExecutorPlacement(
 	if known && available {
 		return nil
 	}
+	if !known {
+		// Missing heartbeat metadata is not evidence of a full host. The
+		// executor's local admission gate will make the authoritative call.
+		return nil
+	}
 	// Heartbeat capacity is advisory. A worker-local reservation and
 	// ownership CAS remain the hard admission gates inside the executor.
 	target, err := selectCapacity(ctx, currentNodeID)
@@ -143,9 +149,6 @@ func codeReviewExecutorPlacement(
 		return fmt.Errorf("select review executor worker: %w", err)
 	}
 	if target == nil {
-		if !known {
-			return nil
-		}
 		return &RetryableError{Err: errReviewNoCapacity, RetryAfter: durationPtr(10 * time.Second), MaxRetryDuration: durationPtr(codeReviewPlacementRetryWindow), ClearTargetNodeID: true}
 	}
 	if *target != currentNodeID {

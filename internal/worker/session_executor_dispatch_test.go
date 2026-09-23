@@ -291,6 +291,17 @@ func TestMaybeDispatchSessionExecutor_AllowsInlineWhenNotRequired(t *testing.T) 
 	require.NoError(t, err, "local/dev services should keep the explicit inline fallback")
 }
 
+func TestMaybeDispatchSessionExecutor_CodeReviewPlacementDefaultsOff(t *testing.T) {
+	t.Parallel()
+	dispatcher := &fakeSessionExecutorDispatcher{}
+	session := models.Session{ID: uuid.New(), OrgID: uuid.New(), Origin: models.SessionOriginCodeReview}
+	services := &Services{SessionExecutorDispatcher: dispatcher}
+	err := maybeDispatchSessionExecutor(context.Background(), nil, services, "run_agent", session, nil)
+	var handoff *HandoffError
+	require.ErrorAs(t, err, &handoff, "disabled placement should preserve ordinary executor handoff")
+	require.Equal(t, 1, dispatcher.calls, "disabled placement should dispatch without requiring placement stores")
+}
+
 func TestCodeReviewExecutorPlacement(t *testing.T) {
 	t.Parallel()
 	owner := "owner"
@@ -321,7 +332,7 @@ func TestCodeReviewExecutorPlacement(t *testing.T) {
 		{name: "cold workspace stays local when capacity exists", currentNode: owner, localKnown: true, localAvailable: true, wantLocalCalled: true},
 		{name: "cold workspace redirects only when local full", currentNode: owner, localKnown: true, capacityNode: &other, wantTarget: &other, wantDelay: 5 * time.Second, wantSelectCalled: true, wantLocalCalled: true, wantWindow: true},
 		{name: "fleet saturation waits without launching", currentNode: owner, localKnown: true, wantClear: true, wantDelay: 10 * time.Second, wantSelectCalled: true, wantLocalCalled: true, wantWindow: true},
-		{name: "unknown metadata falls back to runtime admission", currentNode: owner, wantSelectCalled: true, wantLocalCalled: true},
+		{name: "unknown metadata falls back to runtime admission", currentNode: owner, capacityNode: &other, wantLocalCalled: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

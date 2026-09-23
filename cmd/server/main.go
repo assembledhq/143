@@ -1900,6 +1900,7 @@ func buildServices(
 		SandboxGC:                  sandboxGC,
 		SandboxAuthBroker:          sandboxAuthBroker,
 	}
+	svc.CodeReviewExecutorPlacementEnabled = cfg.CodeReviewExecutorPlacementEnabled
 	pagerDutyTriggerer := automations.NewPagerDutyEventTriggerService(
 		db.NewAutomationEventTriggerStore(pool),
 		db.NewAutomationStore(pool),

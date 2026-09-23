@@ -726,13 +726,14 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 		WITH unavailable_target_nodes AS (
 			SELECT id
 			FROM nodes
-			WHERE status IN ('dead', 'draining') OR last_heartbeat_at < @dead_before
+			WHERE status IN ('dead', 'draining') OR mode NOT IN ('worker', 'all') OR last_heartbeat_at < @dead_before
 		),
 		claiming_node AS (
 			SELECT id
 			FROM nodes
 			WHERE id = @node_id
 			  AND status = 'active'
+			  AND mode IN ('worker', 'all')
 			  AND last_heartbeat_at >= @dead_before
 		),
 		next_job AS (
