@@ -13,6 +13,7 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
@@ -82,8 +83,11 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 		Str("job_type", executor.JobType).
 		Str("executor_id", executor.ID.String()).
 		Str("host_node_id", executor.HostNodeID).
-		Str("build_sha", executor.BuildSHA).
+		Str("dispatched_build_sha", executor.BuildSHA).
 		Logger()
+	if executor.ThreadID != nil {
+		logger = logger.With().Str("thread_id", executor.ThreadID.String()).Logger()
+	}
 	logger.Info().Str("executor_status", string(executor.Status)).Msg("session executor boot loaded executor row")
 	if executor.Status == models.SessionExecutorStatusCompleted ||
 		executor.Status == models.SessionExecutorStatusFailed ||
@@ -93,13 +97,16 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 	}
 
 	bootStartedAt := time.Now()
+	bootStage := observability.BeginStage(true, logger, "executor_handoff_boot")
 	logger.Info().Msg("session executor boot waiting for job handoff")
 	job, ok, err := r.waitForRunningJob(ctx, executor)
 	if err != nil {
+		bootStage.End(observability.StageOutcome(ctx, err))
 		logger.Error().Err(err).Dur("wait_duration", time.Since(bootStartedAt)).Msg("session executor boot failed while waiting for job handoff")
 		return err
 	}
 	if !ok || job == nil {
+		bootStage.End("failed")
 		logger.Error().Dur("wait_duration", time.Since(bootStartedAt)).Msg("session executor boot validation timed out waiting for job handoff")
 		r.markExecutorTerminal(context.WithoutCancel(ctx), executor, models.SessionExecutorStatusFailed, 1, "executor boot validation timed out waiting for job handoff")
 		return fmt.Errorf("%w: running job ownership does not match executor", ErrExecutorInvalidHandoff)
@@ -111,19 +118,23 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 		Int("max_attempts", job.MaxAttempts).
 		Msg("session executor boot observed job handoff")
 	if job.LockToken == nil || *job.LockToken != executor.LockToken {
+		bootStage.End("failed")
 		logger.Error().Msg("session executor boot found job lock token mismatch")
 		return fmt.Errorf("%w: job lock token mismatch", ErrExecutorInvalidHandoff)
 	}
 
 	ok, err = r.Executors.MarkRunningWithLease(ctx, executor.OrgID, executor.ID, executor.LockToken, leaseDuration)
 	if err != nil {
+		bootStage.End(observability.StageOutcome(ctx, err))
 		logger.Error().Err(err).Msg("session executor failed to mark executor running")
 		return err
 	}
 	if !ok {
+		bootStage.End("failed")
 		logger.Warn().Msg("session executor lost lease before marking executor running")
 		return fmt.Errorf("%w: executor row was not claimable", ErrExecutorLostLease)
 	}
+	bootStage.End("succeeded")
 	logger.Info().Dur("lease_duration", leaseDuration).Msg("session executor marked executor running")
 
 	handler, ok := r.handlerFor(job.JobType)

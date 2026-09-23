@@ -1856,6 +1856,20 @@ func PrepareSandboxRepository(ctx context.Context, provider SandboxProvider, san
 	return err
 }
 
+// repositoryPreparationMode is extended by M1; M0 records full setup timing.
+type repositoryPreparationMode string
+
+const repositoryPreparationFull repositoryPreparationMode = "full"
+
+func prepareSandboxRepositoryForSession(ctx context.Context, provider SandboxProvider, session *models.Session, sandbox *Sandbox, workDir string, mode repositoryPreparationMode, log zerolog.Logger) error {
+	stageLog := log.With().Str("preparation_mode", string(mode)).Logger()
+	reviewTiming := session != nil && session.Origin == models.SessionOriginCodeReview
+	stage := observability.BeginStage(reviewTiming, stageLog, "repository_preparation")
+	_, err := prepareSandboxRepositoryWithTiming(ctx, provider, sandbox, workDir, stageLog, false, reviewTiming)
+	stage.End(observability.StageOutcome(ctx, err))
+	return err
+}
+
 // readSandboxRepoConfig reads and parses the repo config at the checkout.
 // A missing, empty, or malformed config is reported as an empty config.
 func readSandboxRepoConfig(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, log zerolog.Logger) repoconfig.Config {
@@ -1883,6 +1897,10 @@ func readSandboxRepoConfig(ctx context.Context, provider SandboxProvider, sandbo
 // checkpoint's bootstrap still applies) and runs its bootstrap commands. It
 // returns the declared dependencies.
 func prepareSandboxRepository(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, log zerolog.Logger, skipDependencies bool) (map[string]string, error) {
+	return prepareSandboxRepositoryWithTiming(ctx, provider, sandbox, workDir, log, skipDependencies, false)
+}
+
+func prepareSandboxRepositoryWithTiming(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, log zerolog.Logger, skipDependencies, reviewTiming bool) (map[string]string, error) {
 	if provider == nil || sandbox == nil || workDir == "" {
 		return nil, nil
 	}
@@ -1891,9 +1909,14 @@ func prepareSandboxRepository(ctx context.Context, provider SandboxProvider, san
 		exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
 			return provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
 		}
+		dependencyStage := observability.BeginStage(reviewTiming, log, "repository_dependency_apply")
 		sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
+		dependencyStage.End("attempted") // Apply is best-effort and does not report individual failures.
 	}
-	return cfg.Dependencies, runSandboxBootstrapCommands(ctx, provider, sandbox, workDir, cfg.Bootstrap.Commands, log)
+	bootstrapStage := observability.BeginStage(reviewTiming && len(cfg.Bootstrap.Commands) > 0, log, "repository_bootstrap")
+	err := runSandboxBootstrapCommands(ctx, provider, sandbox, workDir, cfg.Bootstrap.Commands, log)
+	bootstrapStage.End(observability.StageOutcome(ctx, err))
+	return cfg.Dependencies, err
 }
 
 func runSandboxBootstrapCommands(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, commands []string, log zerolog.Logger) error {
@@ -3528,7 +3551,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 				return fmt.Errorf("render automation turn prompt: %w", err)
 			}
 			input.UserMessage = rendered
-		} else if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
+		} else if err := prepareSandboxRepositoryForSession(ctx, o.provider, run, sandbox, sandboxCfg.WorkDir, repositoryPreparationFull, log); err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("prepare repository: %s", err))
 			return fmt.Errorf("prepare repository: %w", err)
 		}
@@ -4160,11 +4183,42 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		session.PrimaryThreadID = &threadID
 	}
 
-	// Determine whether we can restore from a snapshot or need a fresh start.
+	// Record review-stage timing without changing workspace selection.
+	reviewTiming := session.Origin == models.SessionOriginCodeReview
 	hasSnapshot := !rebuildWorkspace &&
 		session.SnapshotKey != nil && *session.SnapshotKey != "" &&
 		o.snapshots != nil &&
 		(session.SandboxState != models.SandboxStateDestroyed || automationTurn.continued())
+	reusedExisting := !rebuildWorkspace && session.ContainerID != nil && *session.ContainerID != ""
+	workspaceSource := "cold"
+	if reusedExisting {
+		workspaceSource = "reused"
+	} else if hasSnapshot {
+		workspaceSource = "restored"
+	}
+	if reviewTiming {
+		logContext := log.With().Str("session_origin", string(session.Origin)).Str("agent_type", string(session.AgentType)).Str("workspace_source", workspaceSource)
+		if opts != nil && opts.ThreadID != nil {
+			logContext = logContext.Str("thread_id", opts.ThreadID.String())
+		}
+		if session.ModelOverride != nil {
+			logContext = logContext.Str("model", *session.ModelOverride)
+		}
+		if session.ReasoningEffort != nil {
+			logContext = logContext.Str("reasoning_effort", string(*session.ReasoningEffort))
+		}
+		if jobID, ok := jobctx.JobIDFromContext(ctx); ok {
+			logContext = logContext.Str("job_id", jobID.String())
+		}
+		if lockToken, ok := jobctx.LockTokenFromContext(ctx); ok {
+			logContext = logContext.Str("lock_token", lockToken.String())
+		}
+		log = logContext.Logger()
+		turnStage := observability.BeginStage(true, log, "agent_turn")
+		defer func() { turnStage.End(observability.StageOutcome(ctx, returnErr)) }()
+	}
+
+	// Determine whether we can restore from a snapshot or need a fresh start.
 	if rebuildWorkspace && session.ContainerID != nil && *session.ContainerID != "" {
 		recordedContainerID := *session.ContainerID
 		cleared, clearErr := o.sessions.ClearContainerID(ctx, session.OrgID, session.ID, recordedContainerID)
@@ -4180,16 +4234,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		session.ContainerID = nil
 		session.WorkerNodeID = nil
 	}
-	reusedExisting := session.ContainerID != nil && *session.ContainerID != ""
-
 	var capacityReservation *SandboxCapacityReservation
 	if !reusedExisting && o.sandboxCapacity != nil {
+		capacityStage := observability.BeginStage(reviewTiming, log, "capacity_admission")
 		var capErr error
 		capacityReservation, capErr = o.sandboxCapacity.Acquire(ctx, SandboxCapacityRequest{
 			Purpose:   "continue_session",
 			SessionID: session.ID.String(),
 			OrgID:     session.OrgID.String(),
 		})
+		capacityStage.End(sandboxCapacityStageOutcome(ctx, capErr))
 		if capErr != nil {
 			log.Info().Err(capErr).Msg("sandbox capacity reached, continue_session stays pending")
 			return capErr
@@ -4683,7 +4737,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			Str("expected_branch", expectedBranch).
 			Str("expected_head_sha", expectedHead).
 			Msg("waiting for reused code review workspace to become ready")
-		if readyErr := waitForSandboxWorkspaceReady(
+		workspaceStage := observability.BeginStage(reviewTiming, log.With().Str("sandbox_container_id", workspaceSandbox.ID).Logger(), "workspace_ready_wait")
+		readyErr := waitForSandboxWorkspaceReady(
 			ctx,
 			o.provider,
 			workspaceSandbox,
@@ -4695,7 +4750,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			func(checkCtx context.Context) error {
 				return o.stopWorkspaceWaitIfThreadCancelled(checkCtx, session.OrgID, workspaceThreadID)
 			},
-		); readyErr != nil {
+		)
+		if errors.Is(readyErr, ErrThreadCancelledBeforeWorkspaceReady) {
+			workspaceStage.End("cancelled")
+		} else {
+			workspaceStage.End(observability.StageOutcome(ctx, readyErr))
+		}
+		if readyErr != nil {
 			if errors.Is(readyErr, ErrThreadCancelledBeforeWorkspaceReady) {
 				log.Info().
 					Err(readyErr).
@@ -4837,7 +4898,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		log.Info().Str("container_id", sandbox.ID).Msg("reusing existing sandbox container (preview is holding it)")
 	case hasSnapshot:
 		restoreStartedAt := time.Now()
+		hydrateStage := observability.BeginStage(reviewTiming, log, "workspace_hydration")
 		sandbox, err = HydrateSandboxFromSnapshot(ctx, o.provider, o.snapshots, *session.SnapshotKey, sandboxCfg)
+		hydrateStage.End(observability.StageOutcome(ctx, err))
 		if capacityReservation != nil {
 			capacityReservation.Release()
 		}
@@ -4856,7 +4919,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return fmt.Errorf("hydrate sandbox: %w (fallback: %w)", err, fallbackErr)
 			}
 			hasSnapshot = false
+			workspaceSource = "cold"
+			if reviewTiming {
+				log.Info().Str("workspace_source_final", workspaceSource).Msg("code review workspace restoration fell back to cold creation")
+			}
+			createStage := observability.BeginStage(reviewTiming, log.With().Str("workspace_source_final", workspaceSource).Logger(), "sandbox_create")
 			sandbox, err = o.provider.Create(ctx, sandboxCfg)
+			createStage.End(observability.StageOutcome(ctx, err))
 		}
 		if err != nil {
 			o.closeSandboxAuth(session.ID, log)
@@ -4875,7 +4944,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return fmt.Errorf("hydrate sandbox: %w", err)
 		}
 	default:
+		createStage := observability.BeginStage(reviewTiming, log, "sandbox_create")
 		sandbox, err = o.provider.Create(ctx, sandboxCfg)
+		createStage.End(observability.StageOutcome(ctx, err))
 		if capacityReservation != nil {
 			capacityReservation.Release()
 		}
@@ -4895,6 +4966,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			)
 			return fmt.Errorf("create sandbox: %w", err)
 		}
+	}
+	if reviewTiming {
+		log = log.With().Str("sandbox_container_id", sandbox.ID).Logger()
+		log.Info().Str("workspace_source_final", workspaceSource).Msg("code review workspace selected")
 	}
 	sandbox.Env = cloneStringMap(sandboxCfg.Env)
 	// Re-populate sandbox.Metadata["base_commit_sha"] from the DB so that
@@ -5153,7 +5228,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// container without agent credentials).
 		switch session.AgentType {
 		case models.AgentTypeCodex:
+			authStage := observability.BeginStage(reviewTiming, log, "agent_auth")
 			mode, err := o.ensureCodexAuth(ctx, session, threadID, sandbox, sandboxCfg.Env)
+			authStage.End(observability.StageOutcome(ctx, err))
 			if err != nil {
 				return err
 			}
@@ -5162,19 +5239,23 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			if err := o.restoreClaudeCodeConfigFromBackup(ctx, sandbox); err != nil {
 				log.Warn().Err(err).Msg("failed to restore Claude Code config from backup; continuing with existing sandbox state")
 			}
+			authStage := observability.BeginStage(reviewTiming, log, "agent_auth")
 			mode, err := o.ensureClaudeCodeAuth(ctx, session, threadID, sandbox, sandboxCfg.Env)
+			authStage.End(observability.StageOutcome(ctx, err))
 			if err != nil {
 				return err
 			}
 			authBillingMode = mode
 		}
 		if !reusedExisting {
+			gitAuthStage := observability.BeginStage(reviewTiming, log, "git_auth_bootstrap")
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
+			gitAuthStage.End("attempted")
 			if automationTurn != nil {
 				if err := o.prepareAutomationTurnRestoredWorkspace(ctx, session, sandbox, sandboxCfg, automationTurn, log); err != nil {
 					return o.failAutomationTurnSetup(ctx, session, opts, sandbox, automationTurn, err, log)
 				}
-			} else if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
+			} else if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, repositoryPreparationFull, log); err != nil {
 				return fmt.Errorf("prepare repository: %w", err)
 			}
 		}
@@ -5340,7 +5421,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("render automation turn prompt: %w", err), log)
 			}
 			userMessage = rendered
-		} else if err := PrepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log); err != nil {
+		} else if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, repositoryPreparationFull, log); err != nil {
 			return fmt.Errorf("prepare repository: %w", err)
 		}
 
@@ -5659,7 +5740,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	// 7. Create assistant message with result summary.
-	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, writeCtx, result); err != nil {
+	responseStage := observability.BeginStage(reviewTiming, log, "agent_response_persist")
+	responseErr := o.createAssistantMessage(ctx, session.ID, session.OrgID, writeCtx, result)
+	responseStage.End(observability.StageOutcome(ctx, responseErr))
+	if err := responseErr; err != nil {
 		if activityExecution != nil {
 			err = fmt.Errorf("persist final assistant response: %w", err)
 			handled, persistErr := o.failCodeReviewThreadTurn(ctx, session, threadID, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution, log)
@@ -5704,7 +5788,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if threadRuntimeCtl != nil {
 		currentRuntimeID = threadRuntimeCtl.runtime.ID
 	}
+	snapshotStage := observability.BeginStage(reviewTiming, log, "snapshot_save")
 	newSnapshotKey, snapshotSize, snapshotErr := o.snapshotSessionOnTurnSuccess(ctx, session, sandbox, result, log, currentRuntimeID)
+	snapshotStage.End(observability.StageOutcome(ctx, snapshotErr))
 	if snapshotErr != nil {
 		log.Warn().Err(snapshotErr).Msg("failed to snapshot session after continue")
 	} else if newSnapshotKey != "" {
@@ -5754,9 +5840,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if err := o.automationTurns.TagAssistantMessage(ctx, session.OrgID, session.ID, *automationTurn.run.ThreadID, messageTurnNumber, automationTurn.run.ID); err != nil {
 			log.Warn().Err(err).Msg("failed to attribute the assistant message to the automation run")
 		}
-	} else if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, sessionTurnNumber, runResult, agentSessionID, snapshotKey); err != nil {
-		o.cleanupReviewBundle(ctx, runResult, log)
-		return fmt.Errorf("update turn complete: %w", err)
+	} else {
+		resultStage := observability.BeginStage(reviewTiming, log, "result_persistence")
+		persistErr := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, sessionTurnNumber, runResult, agentSessionID, snapshotKey)
+		resultStage.End(observability.StageOutcome(ctx, persistErr))
+		if persistErr != nil {
+			o.cleanupReviewBundle(ctx, runResult, log)
+			return fmt.Errorf("update turn complete: %w", persistErr)
+		}
 	}
 	o.verifySuccessfulTurn(ctx, session, sandbox, result, log)
 
@@ -5764,6 +5855,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	log.Info().Int("turn", sessionTurnNumber).Int("message_turn", messageTurnNumber).Msg("session turn completed, now idle")
 	return nil
+}
+
+func sandboxCapacityStageOutcome(ctx context.Context, err error) string {
+	if err != nil && ctx.Err() == nil && errors.Is(err, ErrSandboxCapacityReached) {
+		return "waiting"
+	}
+	return observability.StageOutcome(ctx, err)
 }
 
 // drainQueuedMessages re-enqueues a continue_session when a user message
@@ -6082,8 +6180,11 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 			}
 			return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("get installation token: %w", err)
 		}
-		if err := o.provider.CloneRepo(ctx, sandbox, repo.CloneURL, branch, token); err != nil {
-			return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("clone repo: %w", err)
+		cloneStage := observability.BeginStage(codeReviewCheckout, log, "repository_clone")
+		cloneErr := o.provider.CloneRepo(ctx, sandbox, repo.CloneURL, branch, token)
+		cloneStage.End(observability.StageOutcome(ctx, cloneErr))
+		if cloneErr != nil {
+			return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("clone repo: %w", cloneErr)
 		}
 		// Configure the git credential helper immediately after the clone, so any
 		// subsequent authenticated git operation in this fresh workspace can reach
@@ -6092,7 +6193,9 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 		// would fall back to an interactive credential prompt and fail in the
 		// sandbox. (The PR-head fetch below authenticates explicitly and does not
 		// depend on this, but running bootstrap here keeps any future git op safe.)
+		gitAuthStage := observability.BeginStage(codeReviewCheckout, log, "git_auth_bootstrap")
 		o.runSandboxGitBootstrap(ctx, sandbox, sandbox.WorkDir, log)
+		gitAuthStage.End("attempted") // This best-effort helper reports failures through its own warnings.
 		workingBranch := sessionWorkingBranch(session, &issue)
 		if automationTurn != nil {
 			// Per-target turns check out the run's exact head, detached; the
@@ -6111,8 +6214,11 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 			if workingBranch == "" {
 				return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("code review session is missing working branch")
 			}
-			if err := o.checkoutExpectedPullRequestHead(ctx, sandbox, repo.CloneURL, token, codeReviewPRNumber, workingBranch, codeReviewHeadSHA); err != nil {
-				return models.Issue{}, "", TokenBillingModeUnknown, err
+			checkoutStage := observability.BeginStage(true, log, "review_head_checkout")
+			checkoutErr := o.checkoutExpectedPullRequestHead(ctx, sandbox, repo.CloneURL, token, codeReviewPRNumber, workingBranch, codeReviewHeadSHA)
+			checkoutStage.End(observability.StageOutcome(ctx, checkoutErr))
+			if checkoutErr != nil {
+				return models.Issue{}, "", TokenBillingModeUnknown, checkoutErr
 			}
 			session.WorkingBranch = &workingBranch
 		} else if workingBranch != "" {
@@ -6132,13 +6238,17 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 	authBillingMode := TokenBillingModeUnknown
 	switch session.AgentType {
 	case models.AgentTypeCodex:
+		authStage := observability.BeginStage(codeReviewCheckout, log, "agent_auth")
 		mode, err := o.ensureCodexAuth(ctx, session, threadID, sandbox, env)
+		authStage.End(observability.StageOutcome(ctx, err))
 		if err != nil {
 			return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("codex auth injection: %w", err)
 		}
 		authBillingMode = mode
 	case models.AgentTypeClaudeCode:
+		authStage := observability.BeginStage(codeReviewCheckout, log, "agent_auth")
 		mode, err := o.ensureClaudeCodeAuth(ctx, session, threadID, sandbox, env)
+		authStage.End(observability.StageOutcome(ctx, err))
 		if err != nil {
 			return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("claude code auth injection: %w", err)
 		}

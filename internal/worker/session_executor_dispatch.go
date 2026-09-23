@@ -15,6 +15,7 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
@@ -83,7 +84,7 @@ type DurableSessionExecutorDispatcher struct {
 	Logger                zerolog.Logger
 }
 
-func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType string, session models.Session, threadID *uuid.UUID) (uuid.UUID, error) {
+func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType string, session models.Session, threadID *uuid.UUID) (resultID uuid.UUID, returnErr error) {
 	if d == nil {
 		return uuid.Nil, fmt.Errorf("session executor dispatcher is nil")
 	}
@@ -112,7 +113,13 @@ func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType
 		Str("job_type", jobType).
 		Str("lock_token", lockToken.String()).
 		Str("host_node_id", d.NodeID).
+		Str("build_sha", d.BuildSHA).
 		Logger()
+	if threadID != nil {
+		logger = logger.With().Str("thread_id", threadID.String()).Logger()
+	}
+	dispatchStage := observability.BeginStage(session.Origin == models.SessionOriginCodeReview, logger, "executor_dispatch")
+	defer func() { dispatchStage.End(observability.StageOutcome(ctx, returnErr)) }()
 	logger.Info().Msg("session executor dispatch starting")
 	logSessionExecutorHostResourceSnapshot(ctx, logger, "dispatch_start")
 
@@ -173,19 +180,21 @@ func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType
 	}
 	logger.Info().Msg("session executor container launch starting")
 	logSessionExecutorHostResourceSnapshot(ctx, logger, "pre_container_launch")
+	launchStage := observability.BeginStage(session.Origin == models.SessionOriginCodeReview, logger, "executor_container_launch")
 	launchResult, err := d.Launcher.Launch(ctx, spec)
+	launchStage.End(observability.StageOutcome(ctx, err))
 	if err != nil {
 		dispatchErr := fmt.Errorf("launch session executor: %w", err)
 		logger.Error().Err(dispatchErr).Msg("session executor container launch failed")
 		return uuid.Nil, errors.Join(dispatchErr, d.markExecutorDispatchFailed(ctx, session.OrgID, executorID, lockToken, dispatchErr))
 	}
-	logger.Info().Str("container_id", launchResult.ContainerID).Msg("session executor container launch returned")
+	logger.Info().Str("container_id", launchResult.ContainerID).Str("executor_container_id", launchResult.ContainerID).Msg("session executor container launch returned")
 	logSessionExecutorHostResourceSnapshot(ctx, logger, "post_container_launch")
 	if launchResult.ContainerID != "" {
 		ok, err := d.Executors.RecordContainerIDWithLease(ctx, session.OrgID, executorID, lockToken, launchResult.ContainerID)
 		if err != nil {
 			dispatchErr := fmt.Errorf("record session executor container id: %w", err)
-			logger.Error().Err(dispatchErr).Str("container_id", launchResult.ContainerID).Msg("session executor container id recording failed")
+			logger.Error().Err(dispatchErr).Str("container_id", launchResult.ContainerID).Str("executor_container_id", launchResult.ContainerID).Msg("session executor container id recording failed")
 			return uuid.Nil, errors.Join(
 				dispatchErr,
 				d.cleanupLaunchedExecutor(ctx, spec),
@@ -194,20 +203,22 @@ func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType
 		}
 		if !ok {
 			dispatchErr := fmt.Errorf("record session executor container id lost fencing race")
-			logger.Warn().Str("container_id", launchResult.ContainerID).Msg("session executor container id recording lost fencing race")
+			logger.Warn().Str("container_id", launchResult.ContainerID).Str("executor_container_id", launchResult.ContainerID).Msg("session executor container id recording lost fencing race")
 			return uuid.Nil, errors.Join(
 				dispatchErr,
 				d.cleanupLaunchedExecutor(ctx, spec),
 				d.markExecutorDispatchFailed(ctx, session.OrgID, executorID, lockToken, dispatchErr),
 			)
 		}
-		logger.Info().Str("container_id", launchResult.ContainerID).Msg("session executor container id recorded")
+		logger.Info().Str("container_id", launchResult.ContainerID).Str("executor_container_id", launchResult.ContainerID).Msg("session executor container id recorded")
 	} else {
 		logger.Warn().Msg("session executor launch returned without a container id")
 	}
 
 	logger.Info().Msg("session executor job handoff starting")
+	handoffStage := observability.BeginStage(session.Origin == models.SessionOriginCodeReview, logger, "executor_job_handoff")
 	ok, err = d.Jobs.HandoffToSessionExecutorWithLease(ctx, session.OrgID, jobID, lockToken, executorID)
+	handoffStage.End(observability.StageOutcome(ctx, err))
 	if err != nil {
 		dispatchErr := fmt.Errorf("job handoff failed: %w", err)
 		logger.Error().Err(dispatchErr).Msg("session executor job handoff failed")

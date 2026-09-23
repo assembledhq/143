@@ -174,8 +174,37 @@ func TestSandboxCapacityGate_AcquireRejectsWhenFull(t *testing.T) {
 	reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "agent_run"})
 
 	require.ErrorIs(t, err, agent.ErrSandboxCapacity, "Acquire should reject when live sandboxes are already at capacity")
+	require.ErrorIs(t, err, agent.ErrSandboxCapacityReached, "a full host should be classified as actual capacity pressure")
 	require.Nil(t, reservation, "Acquire should not return a reservation when capacity is exhausted")
 	require.Equal(t, 0, gate.ReservedCount(), "Rejected acquire should not leak a reservation")
+}
+
+func TestSandboxCapacityGate_AcquireDistinguishesPressureFromFailures(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		counter     agent.LiveSandboxCounter
+		maxActive   int
+		wantReached bool
+	}{
+		{name: "missing limit", counter: &fakeLiveSandboxCounter{}, wantReached: false},
+		{name: "missing counter", maxActive: 2, wantReached: false},
+		{name: "counter failed", counter: &fakeLiveSandboxCounter{err: errors.New("database unavailable")}, maxActive: 2, wantReached: false},
+		{name: "host full", counter: &fakeLiveSandboxCounter{count: 2}, maxActive: 2, wantReached: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gate := agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
+				Counter: tt.counter, MaxActive: tt.maxActive, Logger: zerolog.Nop(),
+			})
+			reservation, err := gate.Acquire(context.Background(), agent.SandboxCapacityRequest{Purpose: "continue_session"})
+			require.Nil(t, reservation, "a rejected admission should not reserve a sandbox")
+			require.ErrorIs(t, err, agent.ErrSandboxCapacity, "all unsafe admission failures should retain the broad capacity error")
+			require.Equal(t, tt.wantReached, errors.Is(err, agent.ErrSandboxCapacityReached), "only a full host should be classified as retryable pressure")
+		})
+	}
 }
 
 func TestSandboxCapacityGate_AcquireRunsPressureCleanupBeforeRejectingFullHost(t *testing.T) {
