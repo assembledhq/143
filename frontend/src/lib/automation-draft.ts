@@ -35,6 +35,7 @@ export type AutomationFormState = {
   triggerAuthors: string;
   triggerPaths: string;
   triggerLabels: string;
+  triggerExcludedLabels: string;
   triggerFeedbackTypes: string;
   triggerReviewStates: string;
   pagerDutyEnabled: boolean;
@@ -127,6 +128,7 @@ export function defaultAutomationFormState(
     triggerAuthors: "",
     triggerPaths: "",
     triggerLabels: "",
+    triggerExcludedLabels: "",
     triggerFeedbackTypes: "",
     triggerReviewStates: "",
     pagerDutyEnabled: false,
@@ -188,6 +190,7 @@ export function automationFormStateFromDraft(
     triggerAuthors: stringOr(parsed.triggerAuthors, ""),
     triggerPaths: stringOr(parsed.triggerPaths, ""),
     triggerLabels: stringOr(parsed.triggerLabels, ""),
+    triggerExcludedLabels: stringOr(parsed.triggerExcludedLabels, ""),
     triggerFeedbackTypes: stringOr(parsed.triggerFeedbackTypes, ""),
     triggerReviewStates: stringOr(parsed.triggerReviewStates, ""),
     pagerDutyEnabled: parsed.pagerDutyEnabled === true,
@@ -320,6 +323,7 @@ function isEmptyDraft(draft: AutomationDraft): boolean {
     && draft.triggerAuthors.length === 0
     && draft.triggerPaths.length === 0
     && draft.triggerLabels.length === 0
+    && draft.triggerExcludedLabels.length === 0
     && draft.triggerFeedbackTypes.length === 0
     && draft.triggerReviewStates.length === 0
     && !draft.pagerDutyEnabled

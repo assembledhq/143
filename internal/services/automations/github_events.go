@@ -206,7 +206,7 @@ func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req 
 			continue
 		}
 		automationReq := req
-		if len(filters.Labels) > 0 && !req.LabelsKnown {
+		if (len(filters.Labels) > 0 || len(filters.ExcludedLabels) > 0) && !req.LabelsKnown {
 			if resolvedLabelReq == nil {
 				resolved := s.withResolvedLabels(ctx, req)
 				resolvedLabelReq = &resolved
@@ -223,8 +223,8 @@ func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req 
 
 // withResolvedLabels fills in PR labels for one label-filtered automation.
 // The caller invokes it inside the per-automation loop and reuses the result
-// for other label-filtered siblings; automations without that filter keep the
-// original request and do not receive resolved labels in their snapshots.
+// for other label-filtered siblings; automations without either label filter
+// keep the original request and do not receive resolved labels in snapshots.
 func (s *GitHubEventTriggerService) withResolvedLabels(ctx context.Context, req GitHubEventTriggerRequest) GitHubEventTriggerRequest {
 	if req.LabelsKnown || s.labels == nil || req.PullRequestNumber <= 0 {
 		return req
@@ -750,10 +750,15 @@ func automationMatchesGitHubEventFilters(automation models.Automation, req GitHu
 	if len(filters.Paths) > 0 && req.Path != "" && !matchesPathFilter(filters.Paths, req.Path) {
 		return false, nil
 	}
-	// Labels are matched strictly: an event whose labels are unknown (payload
-	// carried none and the API lookup was unavailable or failed) cannot satisfy
-	// a label filter.
-	if len(filters.Labels) > 0 && (!req.LabelsKnown || !matchesAnyFold(filters.Labels, req.Labels)) {
+	// Both label filters require known labels. Otherwise an unavailable API
+	// lookup could let an excluded PR through.
+	if (len(filters.Labels) > 0 || len(filters.ExcludedLabels) > 0) && !req.LabelsKnown {
+		return false, nil
+	}
+	if len(filters.Labels) > 0 && !matchesAnyFold(filters.Labels, req.Labels) {
+		return false, nil
+	}
+	if len(filters.ExcludedLabels) > 0 && matchesAnyFold(filters.ExcludedLabels, req.Labels) {
 		return false, nil
 	}
 	if len(filters.FeedbackTypes) > 0 && isGitHubFeedbackEvent(req.Event) && !containsFold(filters.FeedbackTypes, githubFeedbackType(req.Event)) {

@@ -31,6 +31,8 @@ schedules remain editable without being converted to a simpler schedule.
 
 Filters such as base branch, author, path, feedback type, and review state reduce unnecessary runs. Keep filters as specific as the workflow allows; an automation that reacts to every comment and every check can evaluate the same revision several times.
 
+For GitHub triggers, **PR labels** matches a PR with any listed label. **Exclude PR labels** skips a PR with any listed label, even when it also matches **PR labels**. Label matching is case-insensitive. If a GitHub event does not include PR labels, 143 looks them up before deciding whether to run; if the lookup fails, an automation with either label filter does not run.
+
 ## Keep one conversation per pull request
 
 Select **Continue one session per pull request** with a PR trigger and **Do not publish**. Each event continues the PR's session. Most external-write tools are unavailable because a crashed turn can execute again.

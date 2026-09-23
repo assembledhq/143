@@ -2851,7 +2851,7 @@ describe("AutomationDetailPage", () => {
             next_run_at: null,
             priority: 50,
             github_event_triggers: ["github.pr.merged"],
-            github_event_filters: { authors: [] },
+            github_event_filters: { excluded_labels: [] },
             created_at: "2026-01-01T00:00:00Z",
             updated_at: "2026-01-01T00:00:00Z",
           },
@@ -2871,8 +2871,8 @@ describe("AutomationDetailPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Triggers" }));
     await user.click(screen.getByRole("button", { name: /Trigger filters/ }));
-    fireEvent.change(await screen.findByLabelText("Authors"), {
-      target: { value: "octocat" },
+    fireEvent.change(await screen.findByLabelText("Exclude PR labels"), {
+      target: { value: "do-not-run, draft" },
     });
 
     // Closing the popover removes the focused input from the DOM, which does
@@ -2882,7 +2882,7 @@ describe("AutomationDetailPage", () => {
 
     await waitFor(() =>
       expect(updateBodies).toContainEqual({
-        github_event_filters: { authors: ["octocat"] },
+        github_event_filters: { excluded_labels: ["do-not-run", "draft"] },
       }),
     );
   });
