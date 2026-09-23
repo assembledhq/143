@@ -17,8 +17,15 @@ const kinds = [
   ["slack_notification", "Send a Slack message"],
 ] as const;
 type Kind = typeof kinds[number][0];
-const propertyTypes = ["title", "rich_text", "url", "date", "select"] as const;
-type PropertyType = typeof propertyTypes[number];
+const propertyTypeOptions = [
+  ["title", "Title"],
+  ["rich_text", "Rich text"],
+  ["url", "URL"],
+  ["date", "Date"],
+  ["select", "Select"],
+] as const;
+type PropertyType = typeof propertyTypeOptions[number][0];
+const propertyTypes = propertyTypeOptions.map(([value]) => value);
 type ActionConfig = {
   actions: Kind[];
   repository: string;
@@ -69,7 +76,7 @@ export function AutomationActionsConfig({ config, disabled, onSave }: {
   const error = duplicateProperty ? "Notion property names must be distinct." : actionConfigError(configured);
   const has = (kind: Kind) => draft.actions.includes(kind);
   const field = (key: "repository" | "label" | "team" | "notion_data_source_id" | "slack_channel_id", label: string, placeholder: string) => (
-    <div className="space-y-1" key={key}>
+    <div className="space-y-2" key={key}>
       <Label htmlFor={`${id}-${key}`}>{label}</Label>
       <Input id={`${id}-${key}`} value={draft[key]} placeholder={placeholder} onChange={(event) => setDraft({ ...draft, [key]: event.target.value })} />
     </div>
@@ -93,17 +100,17 @@ export function AutomationActionsConfig({ config, disabled, onSave }: {
           {has("notion_tracking_row") && <>
             {field("notion_data_source_id", "Notion data source ID", "UUID from Manage data sources")}
             <p className="text-sm text-muted-foreground">Allow specific property names and types. Select values must already exist in Notion.</p>
-            {properties.map(([name, type], index) => <div key={index} className="flex items-center gap-2">
+            {properties.map(([name, type], index) => <div key={index} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(8rem,0.7fr)_auto] sm:items-center">
               <Input aria-label={`Property ${index + 1} name`} value={name} onChange={(event) => setProperties(properties.map((item, i) => i === index ? [event.target.value, type] : item))} />
-              <Select value={type} onValueChange={(value: PropertyType) => setProperties(properties.map((item, i) => i === index ? [name, value] : item))}><SelectTrigger aria-label={`Property ${index + 1} type`}><SelectValue /></SelectTrigger><SelectContent>{propertyTypes.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
-              <Button type="button" variant="ghost" size="sm" aria-label={`Remove property ${index + 1}`} onClick={() => setProperties(properties.filter((_, i) => i !== index))}>Remove</Button>
+              <Select value={type} onValueChange={(value: PropertyType) => setProperties(properties.map((item, i) => i === index ? [name, value] : item))}><SelectTrigger aria-label={`Property ${index + 1} type`}><SelectValue /></SelectTrigger><SelectContent>{propertyTypeOptions.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select>
+              <Button type="button" variant="ghost" size="sm" className="justify-self-start text-destructive hover:text-destructive sm:justify-self-auto" aria-label={`Remove property ${index + 1}`} onClick={() => setProperties(properties.filter((_, i) => i !== index))}>Remove</Button>
             </div>)}
             <DisabledTooltip disabled={properties.length >= 20} content="You can configure up to 20 properties."><Button type="button" variant="outline" size="sm" disabled={properties.length >= 20} onClick={() => setProperties([...properties, ["", properties.length === 0 ? "title" : "rich_text"]])}>Add property</Button></DisabledTooltip>
           </>}
           {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
           <p className="text-sm text-muted-foreground">Changes apply to future runs and block unfinished actions using the old configuration. Completed receipts remain available.</p>
         </div>
-        <DialogFooter><Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button><DisabledTooltip disabled={!!error} content={error ?? ""}><Button type="button" disabled={!!error} onClick={() => { onSave(configured); setOpen(false); }}>Save configuration</Button></DisabledTooltip></DialogFooter>
+        <DialogFooter className="flex-row items-center justify-end gap-2"><Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button><DisabledTooltip disabled={!!error} content={error ?? ""}><Button type="button" disabled={!!error} onClick={() => { onSave(configured); setOpen(false); }}>Save configuration</Button></DisabledTooltip></DialogFooter>
       </DialogContent>
     </Dialog>
   );

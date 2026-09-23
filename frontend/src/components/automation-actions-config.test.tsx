@@ -30,4 +30,14 @@ describe("automation action configuration", () => {
     render(<AutomationActionsConfig config={{}} disabled onSave={vi.fn()} />);
     expect(screen.getByRole("button", { name: "Configure actions" })).toBeDisabled();
   });
+  it("formats Notion property types as product copy", async () => {
+    const user = userEvent.setup();
+    render(<AutomationActionsConfig config={{}} onSave={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Configure actions" }));
+    await user.click(screen.getByLabelText("Create a Notion page"));
+    await user.click(screen.getByRole("button", { name: "Add property" }));
+    await user.click(screen.getByLabelText("Property 1 type"));
+    expect(screen.getByRole("option", { name: "Rich text" })).toBeInTheDocument();
+    expect(screen.queryByText("rich_text")).not.toBeInTheDocument();
+  });
 });
