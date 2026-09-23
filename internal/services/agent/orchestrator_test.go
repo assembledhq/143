@@ -8184,12 +8184,14 @@ func TestContinueSession_ReusedContainerHoldLossClassifiesCurrentOwner(t *testin
 		holdActual       string
 		peekValues       []string
 		resetBlocked     bool
+		threadScoped     bool
 		wantErr          error
 		wantIdleReset    bool
 		wantWinnerProbes int
 	}{
 		{name: "cleared container retries without normal retry limit", peekValues: []string{""}, wantErr: agent.ErrStaleSandboxIDCleared, wantIdleReset: true},
 		{name: "replaced live container dead-letters duplicate", holdActual: "winner-container", peekValues: []string{"winner-container"}, wantErr: agent.ErrSandboxRaceLoser, wantWinnerProbes: 1},
+		{name: "replaced live container retries sibling thread", holdActual: "winner-container", peekValues: []string{"winner-container"}, threadScoped: true, wantErr: agent.ErrSandboxSiblingRace, wantWinnerProbes: 1},
 		{name: "successor published after null peek dead-letters duplicate", peekValues: []string{"", "winner-container"}, resetBlocked: true, wantErr: agent.ErrSandboxRaceLoser, wantWinnerProbes: 1},
 		{name: "null persists after reset race retries", peekValues: []string{"", ""}, resetBlocked: true, wantErr: agent.ErrStaleSandboxIDCleared},
 	}
@@ -8217,6 +8219,12 @@ func TestContinueSession_ReusedContainerHoldLossClassifiesCurrentOwner(t *testin
 				ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2,
 				Role: models.MessageRoleUser, Content: "follow-up",
 			}}
+			var opts *agent.ContinueSessionOptions
+			if tt.threadScoped {
+				threadID := uuid.New()
+				d.messages.messages[0].ThreadID = &threadID
+				opts = &agent.ContinueSessionOptions{ThreadID: &threadID}
+			}
 			d.sessions.acquireHoldFn = func(string) (string, error) { return tt.holdActual, nil }
 			peekIndex := 0
 			d.sessions.peekContainerIDFn = func() (string, error) {
@@ -8236,7 +8244,7 @@ func TestContinueSession_ReusedContainerHoldLossClassifiesCurrentOwner(t *testin
 				return nil, nil
 			}
 			orch := buildOrchestrator(d)
-			err := orch.ContinueSession(context.Background(), session, nil)
+			err := orch.ContinueSession(context.Background(), session, opts)
 			require.ErrorIs(t, err, tt.wantErr, "lost reuse should classify cleared and replaced containers differently")
 			require.Equal(t, len(tt.peekValues), peekIndex, "lost reuse should re-read the container only when a reset CAS loses")
 			require.Equal(t, tt.wantWinnerProbes, d.sessions.containerStateCalls, "only a replaced container should probe the live winner")
