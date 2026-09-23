@@ -30,6 +30,8 @@ var (
 	errReviewNoCapacity       = errors.New("no code review worker advertises sandbox capacity")
 )
 
+const codeReviewPlacementRetryWindow = 8 * time.Minute
+
 func maybeDispatchSessionExecutor(ctx context.Context, stores *Stores, services *Services, jobType string, session models.Session, threadID *uuid.UUID) error {
 	if services == nil {
 		return nil
@@ -55,10 +57,13 @@ func maybeDispatchSessionExecutor(ctx context.Context, stores *Stores, services 
 		if freshSession.Origin != models.SessionOriginCodeReview {
 			return fmt.Errorf("code review session origin changed before executor dispatch")
 		}
-		placementErr := codeReviewExecutorPlacement(ctx, freshSession, currentNodeID, stores.Jobs.IsHealthyWorkerNode, stores.Jobs.SelectWorkerWithSandboxCapacity)
+		placementErr := codeReviewExecutorPlacement(ctx, freshSession, currentNodeID, stores.Jobs.IsHealthyWorkerNode, stores.Jobs.WorkerSandboxCapacity, stores.Jobs.SelectWorkerWithSandboxCapacity)
 		if placementErr != nil {
 			var retry *RetryableError
 			if errors.As(placementErr, &retry) {
+				if errors.Is(placementErr, errReviewCapacityRedirect) || errors.Is(placementErr, errReviewNoCapacity) {
+					registerSandboxCapacityDeadLetter(ctx, stores, services, *zerolog.Ctx(ctx), freshSession, threadID, jobType)
+				}
 				reason := "unknown"
 				switch {
 				case errors.Is(placementErr, errReviewOwnerRedirect):
@@ -97,8 +102,14 @@ func codeReviewExecutorPlacement(
 	session models.Session,
 	currentNodeID string,
 	isHealthy func(context.Context, string) (bool, error),
+	localCapacity func(context.Context, string) (bool, bool, error),
 	selectCapacity func(context.Context, string) (*string, error),
 ) error {
+	// A published container with no owner is a transient legacy handshake.
+	// Do not route it to a different Docker daemon based on capacity metadata.
+	if session.ContainerID != nil && *session.ContainerID != "" && (session.WorkerNodeID == nil || *session.WorkerNodeID == "") {
+		return nil
+	}
 	if owner := models.SessionWorkerTarget(&session); owner != nil {
 		healthy, err := isHealthy(ctx, *owner)
 		if err != nil {
@@ -106,7 +117,7 @@ func codeReviewExecutorPlacement(
 		}
 		if healthy {
 			if *owner != currentNodeID {
-				return &RetryableError{Err: fmt.Errorf("%w: %s", errReviewOwnerRedirect, *owner), TargetNodeID: owner, RetryAfter: durationPtr(0)}
+				return &RetryableError{Err: fmt.Errorf("%w: %s", errReviewOwnerRedirect, *owner), TargetNodeID: owner, RetryAfter: durationPtr(0), BypassMaxRetryDuration: true}
 			}
 			return nil
 		}
@@ -114,21 +125,31 @@ func codeReviewExecutorPlacement(
 		// the queue's dead-target context. Route through that target once so
 		// the subsequent claim carries the identity needed for safe cleanup.
 		if deadTarget, ok := jobctx.DeadTargetNodeFromContext(ctx); !ok || deadTarget != *owner {
-			return &RetryableError{Err: fmt.Errorf("%w: %s", errReviewOwnerUnavailable, *owner), TargetNodeID: owner, RetryAfter: durationPtr(0)}
+			return &RetryableError{Err: fmt.Errorf("%w: %s", errReviewOwnerUnavailable, *owner), TargetNodeID: owner, RetryAfter: durationPtr(0), BypassMaxRetryDuration: true}
 		}
+		return nil
+	}
+	known, available, err := localCapacity(ctx, currentNodeID)
+	if err != nil {
+		return fmt.Errorf("read local review sandbox capacity: %w", err)
+	}
+	if known && available {
 		return nil
 	}
 	// Heartbeat capacity is advisory. A worker-local reservation and
 	// ownership CAS remain the hard admission gates inside the executor.
-	target, err := selectCapacity(ctx, "")
+	target, err := selectCapacity(ctx, currentNodeID)
 	if err != nil {
 		return fmt.Errorf("select review executor worker: %w", err)
 	}
 	if target == nil {
-		return &RetryableError{Err: errReviewNoCapacity, RetryAfter: durationPtr(10 * time.Second), ClearTargetNodeID: true}
+		if !known {
+			return nil
+		}
+		return &RetryableError{Err: errReviewNoCapacity, RetryAfter: durationPtr(10 * time.Second), MaxRetryDuration: durationPtr(codeReviewPlacementRetryWindow), ClearTargetNodeID: true}
 	}
 	if *target != currentNodeID {
-		return &RetryableError{Err: errReviewCapacityRedirect, TargetNodeID: target, RetryAfter: durationPtr(0)}
+		return &RetryableError{Err: errReviewCapacityRedirect, TargetNodeID: target, RetryAfter: durationPtr(5 * time.Second), MaxRetryDuration: durationPtr(codeReviewPlacementRetryWindow)}
 	}
 	return nil
 }

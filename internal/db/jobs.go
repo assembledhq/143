@@ -1525,6 +1525,38 @@ func (s *JobStore) IsHealthyWorkerNode(ctx context.Context, nodeID string) (bool
 	return healthy, nil
 }
 
+// WorkerSandboxCapacity reads one worker's heartbeat capacity. Known is false
+// when capacity metadata is absent or its live-container count failed; in
+// that case the executor's local admission gate remains authoritative.
+// lint:allow-no-orgid reason="nodes is a cluster-scoped table with no org_id"
+func (s *JobStore) WorkerSandboxCapacity(ctx context.Context, nodeID string) (known, available bool, err error) {
+	err = s.db.QueryRow(ctx, `
+		SELECT
+			metadata ? 'max_active_sandboxes'
+			  AND metadata ? 'live_sandbox_count'
+			  AND metadata ? 'reserved_sandbox_count'
+			  AND COALESCE(metadata->>'live_sandbox_count_error', '') = ''
+			  AND COALESCE(NULLIF(metadata->>'max_active_sandboxes', '')::int, 0) > 0 AS known,
+			COALESCE(NULLIF(metadata->>'live_sandbox_count', '')::int, 0)
+			  + COALESCE(NULLIF(metadata->>'reserved_sandbox_count', '')::int, 0)
+			  < COALESCE(NULLIF(metadata->>'max_active_sandboxes', '')::int, 0) AS available
+		FROM nodes
+		WHERE id = @node_id
+		  AND mode IN ('worker', 'all')
+		  AND status = 'active'
+		  AND last_heartbeat_at >= @dead_before`, pgx.NamedArgs{
+		"node_id":     nodeID,
+		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
+	}).Scan(&known, &available)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("read worker sandbox capacity: %w", err)
+	}
+	return known, available, nil
+}
+
 // SandboxCapacitySummary returns best-effort aggregate sandbox capacity from
 // fresh worker heartbeat metadata.
 // lint:allow-no-orgid reason="cross-org worker capacity summary for speculative prewarm classification"

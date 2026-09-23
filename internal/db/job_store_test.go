@@ -43,6 +43,35 @@ func TestJobStore_IsHealthyWorkerNode(t *testing.T) {
 	}
 }
 
+func TestJobStore_WorkerSandboxCapacity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		known     bool
+		available bool
+	}{
+		{name: "local worker has a free slot", known: true, available: true},
+		{name: "local worker is full", known: true, available: false},
+		{name: "heartbeat capacity is unknown", known: false, available: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "capacity store mock should initialize")
+			defer mock.Close()
+			mock.ExpectQuery(`SELECT[\s\S]+metadata \? 'max_active_sandboxes'[\s\S]+last_heartbeat_at >= @dead_before`).
+				WithArgs("worker-1", pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"known", "available"}).AddRow(tt.known, tt.available))
+			known, available, err := NewJobStore(mock).WorkerSandboxCapacity(context.Background(), "worker-1")
+			require.NoError(t, err, "worker capacity lookup should succeed")
+			require.Equal(t, tt.known, known, "known should reflect heartbeat metadata validity")
+			require.Equal(t, tt.available, available, "available should reflect free sandbox slots")
+			require.NoError(t, mock.ExpectationsWereMet(), "all local capacity queries should be made")
+		})
+	}
+}
+
 func TestJobStore_Enqueue(t *testing.T) {
 	t.Parallel()
 

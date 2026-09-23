@@ -302,19 +302,26 @@ func TestCodeReviewExecutorPlacement(t *testing.T) {
 		currentNode      string
 		ownerHealthy     bool
 		deadTarget       string
+		localKnown       bool
+		localAvailable   bool
 		capacityNode     *string
 		wantTarget       *string
 		wantClear        bool
 		wantDelay        time.Duration
 		wantSelectCalled bool
+		wantLocalCalled  bool
+		wantBypass       bool
+		wantWindow       bool
 	}{
 		{name: "live workspace on this node", session: models.Session{ContainerID: &container, WorkerNodeID: &owner}, currentNode: owner, ownerHealthy: true},
-		{name: "live workspace on sibling", session: models.Session{ContainerID: &container, WorkerNodeID: &owner}, currentNode: other, ownerHealthy: true, wantTarget: &owner},
-		{name: "dead owner needs a recovery claim", session: models.Session{ContainerID: &container, WorkerNodeID: &owner}, currentNode: other, wantTarget: &owner},
+		{name: "live workspace on sibling", session: models.Session{ContainerID: &container, WorkerNodeID: &owner}, currentNode: other, ownerHealthy: true, wantTarget: &owner, wantBypass: true},
+		{name: "dead owner needs a recovery claim", session: models.Session{ContainerID: &container, WorkerNodeID: &owner}, currentNode: other, wantTarget: &owner, wantBypass: true},
 		{name: "dead owner claim performs runtime cleanup", session: models.Session{ContainerID: &container, WorkerNodeID: &owner}, currentNode: other, deadTarget: owner},
-		{name: "cold workspace stays local when capacity exists", currentNode: owner, capacityNode: &owner, wantSelectCalled: true},
-		{name: "cold workspace redirects to available sibling", currentNode: owner, capacityNode: &other, wantTarget: &other, wantSelectCalled: true},
-		{name: "fleet saturation waits without launching", currentNode: owner, wantClear: true, wantDelay: 10 * time.Second, wantSelectCalled: true},
+		{name: "container without owner is not redirected", session: models.Session{ContainerID: &container}, currentNode: owner},
+		{name: "cold workspace stays local when capacity exists", currentNode: owner, localKnown: true, localAvailable: true, wantLocalCalled: true},
+		{name: "cold workspace redirects only when local full", currentNode: owner, localKnown: true, capacityNode: &other, wantTarget: &other, wantDelay: 5 * time.Second, wantSelectCalled: true, wantLocalCalled: true, wantWindow: true},
+		{name: "fleet saturation waits without launching", currentNode: owner, localKnown: true, wantClear: true, wantDelay: 10 * time.Second, wantSelectCalled: true, wantLocalCalled: true, wantWindow: true},
+		{name: "unknown metadata falls back to runtime admission", currentNode: owner, wantSelectCalled: true, wantLocalCalled: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -324,13 +331,21 @@ func TestCodeReviewExecutorPlacement(t *testing.T) {
 				ctx = jobctx.WithDeadTargetNode(ctx, tt.deadTarget)
 			}
 			selectCalled := false
+			localCalled := false
 			err := codeReviewExecutorPlacement(ctx, tt.session, tt.currentNode,
 				func(context.Context, string) (bool, error) { return tt.ownerHealthy, nil },
-				func(context.Context, string) (*string, error) {
+				func(_ context.Context, nodeID string) (bool, bool, error) {
+					localCalled = true
+					require.Equal(t, tt.currentNode, nodeID, "local capacity should be checked on the claiming node")
+					return tt.localKnown, tt.localAvailable, nil
+				},
+				func(_ context.Context, excludedNodeID string) (*string, error) {
 					selectCalled = true
+					require.Equal(t, tt.currentNode, excludedNodeID, "alternate selection should exclude the claiming node")
 					return tt.capacityNode, nil
 				})
 			require.Equal(t, tt.wantSelectCalled, selectCalled, "placement should consult capacity only when no live owner can be used")
+			require.Equal(t, tt.wantLocalCalled, localCalled, "placement should check the claiming node before considering alternates")
 			if tt.wantTarget == nil && !tt.wantClear {
 				require.NoError(t, err, "local placement should allow dispatch")
 				return
@@ -340,6 +355,8 @@ func TestCodeReviewExecutorPlacement(t *testing.T) {
 			require.Equal(t, tt.wantTarget, retry.TargetNodeID, "placement should select the expected target")
 			require.Equal(t, tt.wantClear, retry.ClearTargetNodeID, "placement should clear a stale target only during fleet saturation")
 			require.Equal(t, tt.wantDelay, *retry.RetryAfter, "placement should use the expected retry delay")
+			require.Equal(t, tt.wantBypass, retry.BypassMaxRetryDuration, "only ownership redirects should bypass the retry window")
+			require.Equal(t, tt.wantWindow, retry.MaxRetryDuration != nil, "capacity waits should start a bounded retry window")
 		})
 	}
 }
