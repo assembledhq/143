@@ -17,6 +17,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestJobStore_IsHealthyWorkerNode(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		healthy bool
+	}{
+		{name: "active worker is healthy", healthy: true},
+		{name: "stale or draining worker is unavailable", healthy: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "job store mock should initialize")
+			defer mock.Close()
+			mock.ExpectQuery(`SELECT EXISTS[\s\S]+status = 'active'[\s\S]+last_heartbeat_at >= @dead_before`).
+				WithArgs("worker-1", pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.healthy))
+			got, err := NewJobStore(mock).IsHealthyWorkerNode(context.Background(), "worker-1")
+			require.NoError(t, err, "worker health lookup should succeed")
+			require.Equal(t, tt.healthy, got, "worker health should reflect the database observation")
+			require.NoError(t, mock.ExpectationsWereMet(), "all worker health queries should be made")
+		})
+	}
+}
+
 func TestJobStore_Enqueue(t *testing.T) {
 	t.Parallel()
 

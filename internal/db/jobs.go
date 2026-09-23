@@ -1502,6 +1502,29 @@ func (s *JobStore) SelectWorkerWithSandboxCapacity(ctx context.Context, excludeN
 	return &nodeID, nil
 }
 
+// IsHealthyWorkerNode checks whether a recorded sandbox owner can accept a
+// pinned turn. This is only a placement hint: the sandbox runtime still
+// verifies ownership and container liveness after dispatch.
+// lint:allow-no-orgid reason="nodes is a cluster-scoped table with no org_id"
+func (s *JobStore) IsHealthyWorkerNode(ctx context.Context, nodeID string) (bool, error) {
+	var healthy bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM nodes
+			WHERE id = @node_id
+			  AND mode IN ('worker', 'all')
+			  AND status = 'active'
+			  AND last_heartbeat_at >= @dead_before
+		)`, pgx.NamedArgs{
+		"node_id":     nodeID,
+		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
+	}).Scan(&healthy)
+	if err != nil {
+		return false, fmt.Errorf("check worker node health: %w", err)
+	}
+	return healthy, nil
+}
+
 // SandboxCapacitySummary returns best-effort aggregate sandbox capacity from
 // fresh worker heartbeat metadata.
 // lint:allow-no-orgid reason="cross-org worker capacity summary for speculative prewarm classification"
