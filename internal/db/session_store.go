@@ -3584,16 +3584,15 @@ func (s *SessionStore) AcquireExistingTurnHold(ctx context.Context, orgID, sessi
 
 // ResetAfterLostReuse reopens a turn only if the container was cleared
 // before it could acquire a hold and no replacement has been published.
-func (s *SessionStore) ResetAfterLostReuse(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error) {
+func (s *SessionStore) ResetAfterLostReuse(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
 	tag, err := s.db.Exec(ctx, `
 		UPDATE sessions
 		SET status = 'idle'
 		WHERE id = @id AND org_id = @org_id
 		  AND status = 'running'
 		  AND container_id IS NULL
-		  AND container_id IS DISTINCT FROM @container_id
 		  AND turn_holding_container = FALSE`, pgx.NamedArgs{
-		"id": sessionID, "org_id": orgID, "container_id": expectedContainerID,
+		"id": sessionID, "org_id": orgID,
 	})
 	if err != nil {
 		return false, fmt.Errorf("reset session after lost container reuse: %w", err)

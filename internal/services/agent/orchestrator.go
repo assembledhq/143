@@ -639,7 +639,7 @@ type SessionStore interface {
 	// Reuse must only attach to the exact container read before setup. If GC
 	// cleared that row, retry from a fresh session read rather than republish it.
 	AcquireExistingTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error)
-	ResetAfterLostReuse(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error)
+	ResetAfterLostReuse(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error)
 	PeekContainerID(ctx context.Context, orgID, sessionID uuid.UUID) (string, error)
 	// SetWorkerNodeIDForContainer records which worker currently owns the live
 	// container referenced by container_id.
@@ -4908,7 +4908,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if readyErr != nil {
 			if errors.Is(readyErr, ErrStaleSandboxIDCleared) {
 				log.Info().Str("container_id", workspaceSandbox.ID).Msg("reused review workspace was reclaimed while waiting; retrying from durable session state")
-				if _, resetErr := o.sessions.ResetAfterLostReuse(ctx, session.OrgID, session.ID, workspaceSandbox.ID); resetErr != nil {
+				if _, resetErr := o.sessions.ResetAfterLostReuse(ctx, session.OrgID, session.ID); resetErr != nil {
 					log.Warn().Err(resetErr).Msg("failed to reopen review turn after workspace reclamation")
 				}
 				return ErrStaleSandboxIDCleared
@@ -5170,13 +5170,48 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		var acquired bool
 		acquired, holdErr = o.sessions.AcquireExistingTurnHold(ctx, session.OrgID, session.ID, sandbox.ID)
 		if holdErr == nil && !acquired {
-			o.closeSandboxAuth(session.ID, log)
-			if _, statusErr := o.sessions.ResetAfterLostReuse(ctx, session.OrgID, session.ID, sandbox.ID); statusErr != nil {
-				log.Warn().Err(statusErr).Msg("failed to revert session after reused container was cleared")
+			// A lost strict-CAS can mean either that GC cleared the old ID or
+			// that another live turn published a replacement. Only the former
+			// may retry directly; the latter needs the normal winner diagnosis.
+			actualContainerID, holdErr = o.sessions.PeekContainerID(ctx, session.OrgID, session.ID)
+			if holdErr != nil {
+				o.closeSandboxAuth(session.ID, log)
+				log.Warn().Err(holdErr).Msg("could not classify lost reused-container hold; treating it as a live winner")
+				return ErrSandboxRaceLoser
 			}
-			return ErrSandboxPreviewRace
+			if actualContainerID == "" {
+				var reset bool
+				reset, holdErr = o.sessions.ResetAfterLostReuse(ctx, session.OrgID, session.ID)
+				if holdErr != nil {
+					o.closeSandboxAuth(session.ID, log)
+					log.Warn().Err(holdErr).Msg("could not reset a cleared reused-container turn; treating it as a live winner")
+					return ErrSandboxRaceLoser
+				}
+				if reset {
+					o.closeSandboxAuth(session.ID, log)
+					return ErrStaleSandboxIDCleared
+				}
+				// The null observation may have lost a race to a successor
+				// before ResetAfterLostReuse ran. Re-read with a fresh snapshot.
+				actualContainerID, holdErr = o.sessions.PeekContainerID(ctx, session.OrgID, session.ID)
+				if holdErr != nil {
+					o.closeSandboxAuth(session.ID, log)
+					log.Warn().Err(holdErr).Msg("could not classify a changed reused-container hold; treating it as a live winner")
+					return ErrSandboxRaceLoser
+				}
+				if actualContainerID == "" {
+					o.closeSandboxAuth(session.ID, log)
+					return ErrStaleSandboxIDCleared
+				}
+			}
+			if actualContainerID == sandbox.ID {
+				o.closeSandboxAuth(session.ID, log)
+				log.Warn().Str("container_id", sandbox.ID).Msg("reused-container hold lost despite unchanged ID; treating it as a live winner")
+				return ErrSandboxRaceLoser
+			}
+		} else {
+			actualContainerID = sandbox.ID
 		}
-		actualContainerID = sandbox.ID
 	} else {
 		actualContainerID, holdErr = o.sessions.AcquireTurnHold(ctx, session.OrgID, session.ID, sandbox.ID)
 	}

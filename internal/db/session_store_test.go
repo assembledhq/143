@@ -2985,11 +2985,11 @@ func TestSessionStore_ResetAfterLostReuseIsConditional(t *testing.T) {
 	require.NoError(t, err, "pgx mock should be created")
 	defer mock.Close()
 	orgID, sessionID := uuid.New(), uuid.New()
-	mock.ExpectExec(`UPDATE sessions[\s\S]+status = 'running'[\s\S]+container_id IS NULL[\s\S]+container_id IS DISTINCT FROM @container_id[\s\S]+turn_holding_container = FALSE`).
-		WithArgs(sessionID, orgID, "retired-container").
+	mock.ExpectExec(`UPDATE sessions[\s\S]+status = 'running'[\s\S]+container_id IS NULL[\s\S]+turn_holding_container = FALSE`).
+		WithArgs(sessionID, orgID).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	store := NewSessionStore(mock)
-	reset, err := store.ResetAfterLostReuse(context.Background(), orgID, sessionID, "retired-container")
+	reset, err := store.ResetAfterLostReuse(context.Background(), orgID, sessionID)
 	require.NoError(t, err, "reuse reset should check that no successor owns the session")
 	require.False(t, reset, "reuse reset should not overwrite a successor's running status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")

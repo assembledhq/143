@@ -246,7 +246,7 @@ func TestCodeReviewHolder_ConcurrentHandoffAndTerminalCleanup(t *testing.T) {
 	_, err = pool.Exec(ctx, `UPDATE sessions SET status = 'running', container_id = 'successor-container',
 		turn_holding_container = FALSE WHERE id = $1 AND org_id = $2`, session.ID, orgID)
 	require.NoError(t, err, "test successor should replace the reclaimed workspace")
-	reset, err := sessions.ResetAfterLostReuse(ctx, orgID, session.ID, containerID)
+	reset, err := sessions.ResetAfterLostReuse(ctx, orgID, session.ID)
 	require.NoError(t, err, "stale lane reset should check current container ownership")
 	require.False(t, reset, "stale lane must not reset a successor's running session")
 	var status string

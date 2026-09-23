@@ -124,7 +124,7 @@ func (s *drainStubSessions) AcquireTurnHold(context.Context, uuid.UUID, uuid.UUI
 func (s *drainStubSessions) AcquireExistingTurnHold(context.Context, uuid.UUID, uuid.UUID, string) (bool, error) {
 	return true, nil
 }
-func (s *drainStubSessions) ResetAfterLostReuse(context.Context, uuid.UUID, uuid.UUID, string) (bool, error) {
+func (s *drainStubSessions) ResetAfterLostReuse(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
 	return true, nil
 }
 func (s *drainStubSessions) PeekContainerID(context.Context, uuid.UUID, uuid.UUID) (string, error) {

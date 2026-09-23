@@ -170,7 +170,7 @@ func (s *runtimeTestSessionStore) AcquireExistingTurnHold(context.Context, uuid.
 	return true, nil
 }
 
-func (s *runtimeTestSessionStore) ResetAfterLostReuse(context.Context, uuid.UUID, uuid.UUID, string) (bool, error) {
+func (s *runtimeTestSessionStore) ResetAfterLostReuse(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
 	return true, nil
 }
 
