@@ -467,6 +467,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			event = event.Int64("github_review_id", *submission.GitHubReviewID)
 		}
 		event.Str("decision", string(decision.Decision)).Msg("completed code review")
+		logCodeReviewFirstReviewerStart(ctx, stores, reviewLog, job, metadata.CreatedAt)
 		reconcileCodeReviewSessionSuccess(ctx, stores, logger, job)
 		enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 		return nil
@@ -485,6 +486,20 @@ func codeReviewStageOutcome(ctx context.Context, err error) string {
 		return "waiting"
 	}
 	return "failed"
+}
+
+func logCodeReviewFirstReviewerStart(ctx context.Context, stores *Stores, logger zerolog.Logger, job runCodeReviewPayload, reviewCreatedAt time.Time) {
+	startedAt, err := stores.CodeReviews.FirstReviewerThreadStartedAt(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		logger.Warn().Err(err).Msg("could not measure first reviewer thread start")
+		return
+	}
+	if startedAt == nil || startedAt.Before(reviewCreatedAt) {
+		logger.Info().Bool("reviewer_thread_started", false).Msg("completed review has no measurable reviewer thread start")
+		return
+	}
+	logger.Info().Int64("time_to_first_reviewer_thread_start_ms", startedAt.Sub(reviewCreatedAt).Milliseconds()).
+		Msg("completed code review first reviewer thread timing")
 }
 
 func codeReviewTimingLogger(ctx context.Context, logger zerolog.Logger, job runCodeReviewPayload) zerolog.Logger {

@@ -44,7 +44,11 @@ type RetryableError struct {
 	// wait. Unlike BypassMaxRetryDuration, the job is still guaranteed to
 	// terminate if the dependency does not recover.
 	MaxRetryDuration *time.Duration
-	RetryAfter       *time.Duration
+	// RetryWindowStartedAt permits a phase-specific durable window. The caller
+	// must obtain this timestamp from persistent state, not time.Now on each
+	// attempt, so earlier retry phases cannot consume this phase's budget.
+	RetryWindowStartedAt *time.Time
+	RetryAfter           *time.Duration
 	// GitHubRetryPolicy selects worker-owned final scheduling after the durable
 	// recovery-window start is known. It is intentionally typed rather than
 	// inferred from error prose or attempts.
@@ -347,6 +351,9 @@ func (w *Worker) poll(ctx context.Context) {
 func ensureRetryWindowStartedAt(ctx context.Context, store retryWindowLeaseStore, job *models.Job, retryable *RetryableError, now time.Time) (time.Time, bool, error) {
 	if job == nil {
 		return time.Time{}, false, errors.New("ensure retry window start: job is nil")
+	}
+	if retryable != nil && retryable.RetryWindowStartedAt != nil {
+		return *retryable.RetryWindowStartedAt, true, nil
 	}
 	if retryable == nil || retryable.MaxRetryDuration == nil || retryable.BypassMaxRetryDuration {
 		return job.CreatedAt, true, nil

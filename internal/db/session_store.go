@@ -4047,6 +4047,36 @@ func (s *SessionStore) ListContainerReferences(ctx context.Context) (allIDs, rev
 	return allIDs, reviewIDs, nil
 }
 
+// ListActiveCodeReviewPreparations protects a live initializer's unpublished
+// Docker container from host GC. Once its lease expires, ordinary orphan
+// cleanup may reclaim the container because publication is fenced on that
+// same lease.
+// lint:allow-no-orgid reason="host-local Docker GC inventories cross-org preparation jobs"
+func (s *SessionStore) ListActiveCodeReviewPreparations(ctx context.Context) ([]string, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT org_id::text || ':' || COALESCE(payload->>'session_id', '')
+		FROM jobs
+		WHERE job_type = 'prepare_code_review_workspace'
+		  AND status = 'running'
+		  AND lease_expires_at > now()`)
+	if err != nil {
+		return nil, fmt.Errorf("list active code review preparations: %w", err)
+	}
+	defer rows.Close()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("scan code review preparation: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate code review preparations: %w", err)
+	}
+	return refs, nil
+}
+
 // UpdateWorkingBranch sets the working branch name for a session.
 func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
 	query := `UPDATE sessions SET working_branch = @working_branch, last_activity_at = now() WHERE id = @id AND org_id = @org_id`

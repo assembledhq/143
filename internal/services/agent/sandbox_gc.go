@@ -43,6 +43,7 @@ type SandboxGCProvider interface {
 // container before removing it.
 type SandboxReferenceStore interface {
 	ListContainerReferences(ctx context.Context) (allIDs, reviewIDs []string, err error)
+	ListActiveCodeReviewPreparations(ctx context.Context) ([]string, error)
 	FinalizeContainerDestroy(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error)
 }
 
@@ -188,6 +189,14 @@ func (g *SandboxGC) reapOnce(ctx context.Context, now time.Time, unreferencedGra
 			reviewRefSet[id] = struct{}{}
 		}
 	}
+	preparations, err := g.store.ListActiveCodeReviewPreparations(ctx)
+	if err != nil {
+		return fmt.Errorf("list active code review preparations: %w", err)
+	}
+	preparing := make(map[string]struct{}, len(preparations))
+	for _, ref := range preparations {
+		preparing[ref] = struct{}{}
+	}
 
 	containers, err := g.provider.ListManagedSandboxes(ctx)
 	if err != nil {
@@ -201,6 +210,11 @@ func (g *SandboxGC) reapOnce(ctx context.Context, now time.Time, unreferencedGra
 		}
 		age := sandboxContainerAge(now, c.CreatedAt)
 		if _, ok := refSet[c.ID]; !ok {
+			if c.Purpose == "prepare_code_review_workspace" {
+				if _, active := preparing[c.OrgID+":"+c.SessionID]; active {
+					continue
+				}
+			}
 			if !unreferencedCreatedBefore.IsZero() && c.CreatedAt.After(unreferencedCreatedBefore) {
 				continue
 			}

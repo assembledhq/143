@@ -265,6 +265,22 @@ func (s *JobStore) GetActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, qu
 	return active, nil
 }
 
+// FirstJobCreatedAtByDedupeKey anchors a phase-specific retry budget to the
+// first durable enqueue. A failed preparation may be re-enqueued, but that
+// must not restart the controller's workspace wait window.
+func (s *JobStore) FirstJobCreatedAtByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (time.Time, error) {
+	var createdAt time.Time
+	err := s.db.QueryRow(ctx, `
+		SELECT created_at
+		FROM jobs
+		WHERE org_id = $1 AND queue = $2 AND dedupe_key = $3
+		ORDER BY created_at ASC LIMIT 1`, orgID, queue, dedupeKey).Scan(&createdAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("first job creation by dedupe key: %w", err)
+	}
+	return createdAt, nil
+}
+
 // QueueChangesetPRCreation atomically reserves a changeset's PR slot when
 // needed and ensures it has an active open_pr job. A queued or pushing slot
 // may outlive the job that started a pre-publication review, so those states

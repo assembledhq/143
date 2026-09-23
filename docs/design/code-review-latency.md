@@ -115,6 +115,8 @@ Second, make cold review initialization a single durable job per active review s
 
 The preparation handler is registered on every upgraded worker, while `CODE_REVIEW_WORKSPACE_PREPARATION_ENABLED` defaults to false. Enable it only after the entire agent-worker fleet can claim the new job type; this permits a compatible-worker rollout before controllers start enqueuing preparation jobs.
 
+The controller's preparation wait is bounded from the first durable preparation enqueue for that review generation, independent of any earlier GitHub retry window. Host GC preserves an unpublished preparation container while its job lease is live and reclaims it after the lease expires.
+
 Use the job lease and session container/generation compare-and-swap for publication. Do not hold a database transaction across Docker, Git, or network operations. A stale initializer cannot publish after lease loss, and can destroy only its own unpublished losing container. A succeeded initialization job is not proof that its old container still exists; recovery revalidates the workspace and creates a new fenced generation when necessary. Keep the readiness barrier as defense in depth, with readiness defined for the chosen preparation mode.
 
 Do not claim that an in-process reservation coordinates separate executor processes. A shared hard capacity-reservation authority is deferred to the existing scheduling plan's capacity stage; this slice improves placement and removes duplicate initialization without weakening admission. Include queued/retrying initialization in cancellation and reconciliation so a stopped review cannot later dispatch reviewers.

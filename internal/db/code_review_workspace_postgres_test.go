@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -61,7 +62,7 @@ func newReviewWorkspaceFixture(t *testing.T) reviewWorkspaceFixture {
 		CREATE TABLE jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL,queue text NOT NULL,
 			job_type text NOT NULL,payload jsonb NOT NULL DEFAULT '{}',priority integer NOT NULL DEFAULT 0,
 			status text NOT NULL DEFAULT 'pending',max_attempts integer NOT NULL DEFAULT 3,dedupe_key text,target_node_id text,
-			locked_by_node_id text,lock_token uuid,lease_expires_at timestamptz);
+			locked_by_node_id text,lock_token uuid,lease_expires_at timestamptz,created_at timestamptz NOT NULL DEFAULT now());
 		CREATE UNIQUE INDEX idx_workspace_jobs_dedupe ON jobs(queue,dedupe_key)
 			WHERE dedupe_key IS NOT NULL AND status IN ('pending','running');
 		CREATE TABLE session_sandbox_holders(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL,
@@ -266,4 +267,37 @@ func TestCodeReviewWorkspaceJobDedupe(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, created, "one active preparation job should own the dedupe key")
+}
+
+func TestCodeReviewWorkspaceWaitWindowSurvivesJobReplacement(t *testing.T) {
+	t.Parallel()
+	f := newReviewWorkspaceFixture(t)
+	ctx := context.Background()
+	key := "code_review_prepare:" + f.review.String() + ":" + f.session.String() + ":0"
+	_, err := f.pool.Exec(ctx, `UPDATE jobs SET dedupe_key=$1,status='failed',created_at=now()-interval '10 minutes' WHERE id=$2`, key, f.job)
+	require.NoError(t, err, "record the first failed preparation attempt")
+	_, err = f.pool.Exec(ctx, `INSERT INTO jobs(org_id,queue,job_type,dedupe_key,payload)
+		VALUES($1,'agent','prepare_code_review_workspace',$2,$3)`, f.org, key, map[string]any{"session_id": f.session.String()})
+	require.NoError(t, err, "enqueue a replacement preparation without resetting the phase")
+	startedAt, err := NewJobStore(f.pool).FirstJobCreatedAtByDedupeKey(ctx, f.org, "agent", key)
+	require.NoError(t, err, "load the durable start of the workspace wait")
+	require.Greater(t, time.Since(startedAt), 9*time.Minute, "replacement job must retain the first wait deadline")
+	_, err = NewJobStore(f.pool).FirstJobCreatedAtByDedupeKey(ctx, uuid.New(), "agent", key)
+	require.Error(t, err, "another organization must not see this review's preparation jobs")
+}
+
+func TestActiveCodeReviewPreparationProtectsOnlyLiveLease(t *testing.T) {
+	t.Parallel()
+	f := newReviewWorkspaceFixture(t)
+	ctx := context.Background()
+	_, err := f.pool.Exec(ctx, `UPDATE jobs SET payload=$1 WHERE id=$2`, map[string]any{"session_id": f.session.String()}, f.job)
+	require.NoError(t, err, "attach the preparation session identity")
+	refs, err := NewSessionStore(f.pool).ListActiveCodeReviewPreparations(ctx)
+	require.NoError(t, err, "list live preparation leases for host GC")
+	require.Equal(t, []string{f.org.String() + ":" + f.session.String()}, refs, "the active lease should protect its unpublished container")
+	_, err = f.pool.Exec(ctx, `UPDATE jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1`, f.job)
+	require.NoError(t, err, "expire the preparation lease")
+	refs, err = NewSessionStore(f.pool).ListActiveCodeReviewPreparations(ctx)
+	require.NoError(t, err, "list preparations after lease expiry")
+	require.Empty(t, refs, "GC may reclaim an unpublished container after its publish lease expires")
 }

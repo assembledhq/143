@@ -34,6 +34,12 @@ func codeReviewWorkspaceWaitError(reason string) error {
 	return &RetryableError{Err: fmt.Errorf("waiting for code review workspace: %s", reason), RetryAfter: &delay, MaxRetryDuration: &limit}
 }
 
+func codeReviewControllerWorkspaceWaitError(reason string, startedAt time.Time) error {
+	retry := codeReviewWorkspaceWaitError(reason).(*RetryableError)
+	retry.RetryWindowStartedAt = &startedAt
+	return retry
+}
+
 // ensureCodeReviewWorkspaceReady runs after deterministic early-stop and
 // before the first reviewer thread is dispatched. A completed init job is not
 // evidence of readiness; every attempt checks the current holder and owner.
@@ -98,8 +104,12 @@ func ensureCodeReviewWorkspaceReady(ctx context.Context, stores *Stores, service
 	if err != nil {
 		return fmt.Errorf("enqueue code review workspace preparation: %w", err)
 	}
+	startedAt, err := stores.Jobs.FirstJobCreatedAtByDedupeKey(ctx, job.OrgID, "agent", key)
+	if err != nil {
+		return fmt.Errorf("load review workspace wait start: %w", err)
+	}
 	log.Info().Str("session_id", session.ID.String()).Int64("generation", session.WorkspaceGeneration).Msg("waiting for prepared code review workspace")
-	return codeReviewWorkspaceWaitError("preparation pending")
+	return codeReviewControllerWorkspaceWaitError("preparation pending", startedAt)
 }
 
 func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, log zerolog.Logger) JobHandler {
@@ -249,7 +259,9 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 			return publishErr
 		}
 		if !published {
-			return nil // a newer generation, cancelled review, or lost lease won
+			log.Info().Str("session_id", input.SessionID.String()).Str("container_id", sandbox.ID).
+				Msg("code review workspace publication lost to sibling, cancellation, or lease loss")
+			return nil
 		}
 		log.Info().Str("session_id", input.SessionID.String()).Str("container_id", sandbox.ID).Msg("published prepared code review workspace")
 		return nil
