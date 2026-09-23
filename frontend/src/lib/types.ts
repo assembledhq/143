@@ -3591,6 +3591,7 @@ export interface AutomationGitHubEventFilters {
   authors?: string[];
   paths?: string[];
   labels?: string[];
+  excluded_labels?: string[];
   feedback_types?: string[];
   review_states?: string[];
 }

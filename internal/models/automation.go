@@ -363,12 +363,14 @@ type AutomationGitHubEventFilters struct {
 	Paths        []string `json:"paths,omitempty"`
 	// Labels matches the pull request's GitHub labels. An event passes when the
 	// PR carries at least one of the configured labels (case-insensitive).
-	// Unlike the other filters this one is strict: an event whose labels could
-	// not be determined is filtered out rather than allowed through, so a
+	// An event whose labels could not be determined is filtered out, so a
 	// "frontend"-scoped automation never fires on an unlabelled PR.
-	Labels        []string `json:"labels,omitempty"`
-	FeedbackTypes []string `json:"feedback_types,omitempty"`
-	ReviewStates  []string `json:"review_states,omitempty"`
+	Labels []string `json:"labels,omitempty"`
+	// ExcludedLabels blocks an event when the PR carries any configured label.
+	// Like Labels, this requires the PR labels to be known before a run starts.
+	ExcludedLabels []string `json:"excluded_labels,omitempty"`
+	FeedbackTypes  []string `json:"feedback_types,omitempty"`
+	ReviewStates   []string `json:"review_states,omitempty"`
 }
 
 type AutomationScheduleType string

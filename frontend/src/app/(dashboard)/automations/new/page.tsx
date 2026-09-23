@@ -275,6 +275,7 @@ export default function NewAutomationPage() {
     triggerAuthors,
     triggerPaths,
     triggerLabels,
+    triggerExcludedLabels,
     triggerFeedbackTypes,
     triggerReviewStates,
     pagerDutyEnabled,
@@ -492,6 +493,7 @@ export default function NewAutomationPage() {
       triggerAuthors: "",
       triggerPaths: "",
       triggerLabels: "",
+      triggerExcludedLabels: "",
       triggerFeedbackTypes: "",
       triggerReviewStates: "",
       pagerDutyEnabled: false,
@@ -549,6 +551,7 @@ export default function NewAutomationPage() {
       authors: commaList(triggerAuthors),
       paths: commaList(triggerPaths),
       labels: commaList(triggerLabels),
+      excluded_labels: commaList(triggerExcludedLabels),
       feedback_types: commaList(triggerFeedbackTypes),
       review_states: commaList(triggerReviewStates),
     }),
@@ -557,6 +560,7 @@ export default function NewAutomationPage() {
       triggerBaseBranches,
       triggerFeedbackTypes,
       triggerLabels,
+      triggerExcludedLabels,
       triggerPaths,
       triggerReviewStates,
     ],
@@ -1278,8 +1282,8 @@ export default function NewAutomationPage() {
                         <div className="space-y-1">
                           <Label>Trigger filters</Label>
                           <p className="text-xs text-muted-foreground">
-                            Comma-separated filters applied when GitHub sends
-                            matching context.
+                            Comma-separated values. PR labels include any match;
+                            excluded PR labels skip any match.
                           </p>
                         </div>
                         <div className="grid gap-3 sm:grid-cols-2">
@@ -1325,6 +1329,19 @@ export default function NewAutomationPage() {
                                 setFormField("triggerLabels", e.target.value)
                               }
                               placeholder="frontend, backend"
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label htmlFor="trigger-excluded-labels">
+                              Exclude PR labels
+                            </Label>
+                            <Input
+                              id="trigger-excluded-labels"
+                              value={triggerExcludedLabels}
+                              onChange={(e) =>
+                                setFormField("triggerExcludedLabels", e.target.value)
+                              }
+                              placeholder="do-not-run, draft"
                             />
                           </div>
                           <div className="space-y-1.5">

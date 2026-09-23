@@ -1397,6 +1397,7 @@ func validateAutomationGitHubEventFilters(raw json.RawMessage) (json.RawMessage,
 	filters.Authors = normalize(filters.Authors)
 	filters.Paths = normalize(filters.Paths)
 	filters.Labels = normalize(filters.Labels)
+	filters.ExcludedLabels = normalize(filters.ExcludedLabels)
 	filters.FeedbackTypes = normalize(filters.FeedbackTypes)
 	filters.ReviewStates = normalize(filters.ReviewStates)
 	out, err := json.Marshal(filters)
