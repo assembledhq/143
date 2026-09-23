@@ -14,6 +14,10 @@ const (
 	defaultSandboxGCPressureGracePeriod = 2 * time.Minute
 	defaultSandboxGCPressureMaxDestroy  = 2
 	defaultSandboxGCHardMaxAge          = 24 * time.Hour
+	// Host GC uses container creation time as a coarse grace period because
+	// Docker inventory does not expose when a holder was last released. This
+	// is only a fallback: synthesis releases its holder before the turn ends.
+	minimumReviewContainerGCGrace = 2 * time.Minute
 )
 
 // ManagedSandboxContainer is the provider-neutral subset of Docker container
@@ -215,7 +219,7 @@ func (g *SandboxGC) reapOnce(ctx context.Context, now time.Time, unreferencedGra
 
 		if age < g.cfg.HardMaxAge {
 			_, isReview := reviewRefSet[c.ID]
-			if isReview && age >= 2*time.Minute && (maxDestroyAttempts == 0 || destroyAttempts < maxDestroyAttempts) {
+			if isReview && age >= minimumReviewContainerGCGrace && (maxDestroyAttempts == 0 || destroyAttempts < maxDestroyAttempts) {
 				if finalizer, ok := g.store.(idleCodeReviewContainerFinalizer); ok {
 					orgID, sessionID, parseErr := parseManagedSandboxIDs(c)
 					if parseErr == nil {

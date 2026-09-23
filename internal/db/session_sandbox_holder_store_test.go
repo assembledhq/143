@@ -84,7 +84,7 @@ func TestSessionSandboxHolderStore_AcquireCodeReview(t *testing.T) {
 					reviewID, "worker-1", leaseToken, models.SessionSandboxHolderStatusActive,
 					now, now.Add(time.Minute), now, nil, now)
 			}
-			mock.ExpectQuery(`WITH eligible AS MATERIALIZED[\s\S]+JOIN nodes n[\s\S]+n\.last_heartbeat_at >= now\(\) - interval '90 seconds'[\s\S]+FOR UPDATE OF m, s[\s\S]+ON CONFLICT[\s\S]+created_at = now\(\)[\s\S]+h\.container_id = EXCLUDED\.container_id[\s\S]+h\.status = 'active'`).
+			mock.ExpectQuery(`WITH eligible AS MATERIALIZED[\s\S]+JOIN nodes n[\s\S]+n\.last_heartbeat_at >= now\(\) - interval '90 seconds'[\s\S]+r\.role = 'reviewer'[\s\S]+FOR UPDATE OF m, s[\s\S]+ON CONFLICT[\s\S]+created_at = now\(\)[\s\S]+h\.container_id = EXCLUDED\.container_id[\s\S]+h\.status = 'active'`).
 				WithArgs(orgID, sessionID, "container-1", "worker-1", threadID.String(), leaseToken, 60).
 				WillReturnRows(rows)
 			store := NewSessionSandboxHolderStore(mock)
@@ -100,6 +100,36 @@ func TestSessionSandboxHolderStore_AcquireCodeReview(t *testing.T) {
 			} else {
 				require.Equal(t, models.SessionSandboxHolder{}, holder, "a rejected review should not expose a holder")
 			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionSandboxHolderStore_ReleaseAfterSuccessfulSynthesis(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		rows     int64
+		released bool
+	}{
+		{name: "matching synthesis", rows: 1, released: true},
+		{name: "stale or reviewer thread"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should be created")
+			defer mock.Close()
+			orgID, sessionID, threadID := uuid.New(), uuid.New(), uuid.New()
+			mock.ExpectExec(`WITH eligible AS MATERIALIZED[\s\S]+r\.role = 'orchestrator'[\s\S]+FOR UPDATE OF m, s[\s\S]+h\.container_id = @container_id[\s\S]+h\.owner_node_id = @owner_node_id`).
+				WithArgs(orgID, sessionID, "container-1", "worker-1", threadID.String()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+			released, err := NewSessionSandboxHolderStore(mock).ReleaseAfterSuccessfulSynthesis(context.Background(), orgID, AcquireCodeReviewSandboxHolderParams{
+				SessionID: sessionID, ThreadID: threadID, ContainerID: "container-1", OwnerNodeID: "worker-1",
+			})
+			require.NoError(t, err, "synthesis holder release should enforce persisted role and container ownership")
+			require.Equal(t, tt.released, released, "only a matching synthesis should release a holder")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

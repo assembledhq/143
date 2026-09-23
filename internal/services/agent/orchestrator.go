@@ -724,6 +724,10 @@ type codeReviewWorkspaceHolderAcquirer interface {
 	AcquireCodeReview(ctx context.Context, orgID uuid.UUID, params db.AcquireCodeReviewSandboxHolderParams) (models.SessionSandboxHolder, bool, error)
 }
 
+type codeReviewWorkspaceHolderSynthesisReleaser interface {
+	ReleaseAfterSuccessfulSynthesis(ctx context.Context, orgID uuid.UUID, params db.AcquireCodeReviewSandboxHolderParams) (bool, error)
+}
+
 type sessionThreadDrainLister interface {
 	ListBySessionWithOptions(ctx context.Context, orgID, sessionID uuid.UUID, includeArchived bool) ([]models.SessionThread, error)
 }
@@ -1934,25 +1938,35 @@ func reviewTurnPreparationMode(mode repositoryPreparationMode, pending []models.
 	return mode
 }
 
-// retainCodeReviewWorkspace runs only after a successful platform-owned review
-// turn. The caller invokes it before ReleaseTurnHold so the active turn itself
-// keeps the container alive until the durable holder is acquired.
-func (o *Orchestrator) retainCodeReviewWorkspace(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandbox *Sandbox, pending []models.SessionMessage, successful bool, log zerolog.Logger) bool {
+// maintainCodeReviewWorkspaceAfterTurn runs before ReleaseTurnHold. The active
+// turn protects the container while a reviewer acquires durable retention or
+// a completed synthesis releases it for immediate destruction.
+func (o *Orchestrator) maintainCodeReviewWorkspaceAfterTurn(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandbox *Sandbox, pending []models.SessionMessage, successful bool, log zerolog.Logger) bool {
 	if o == nil || !successful || ctx.Err() != nil || session == nil || sandbox == nil ||
 		session.Origin != models.SessionOriginCodeReview || threadID == nil || *threadID == uuid.Nil ||
 		reviewTurnPreparationMode(repositoryPreparationMinimalReview, pending) != repositoryPreparationMinimalReview || o.nodeID == "" {
 		return false
 	}
+	holdCtx, holdCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer holdCancel()
+	params := db.AcquireCodeReviewSandboxHolderParams{
+		SessionID: session.ID, ThreadID: *threadID, ContainerID: sandbox.ID,
+		OwnerNodeID: o.nodeID, LeaseToken: uuid.New(), LeaseDuration: time.Minute,
+	}
+	if releaser, ok := o.sandboxHolders.(codeReviewWorkspaceHolderSynthesisReleaser); ok {
+		released, err := releaser.ReleaseAfterSuccessfulSynthesis(holdCtx, session.OrgID, params)
+		if err != nil {
+			log.Warn().Err(err).Msg("failed to release code review workspace after synthesis")
+		} else if released {
+			log.Info().Msg("released code review workspace after synthesis")
+			return true
+		}
+	}
 	acquirer, ok := o.sandboxHolders.(codeReviewWorkspaceHolderAcquirer)
 	if !ok {
 		return false
 	}
-	holdCtx, holdCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer holdCancel()
-	holder, acquired, err := acquirer.AcquireCodeReview(holdCtx, session.OrgID, db.AcquireCodeReviewSandboxHolderParams{
-		SessionID: session.ID, ThreadID: *threadID, ContainerID: sandbox.ID,
-		OwnerNodeID: o.nodeID, LeaseToken: uuid.New(), LeaseDuration: time.Minute,
-	})
+	holder, acquired, err := acquirer.AcquireCodeReview(holdCtx, session.OrgID, params)
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to retain code review workspace; using snapshot recovery")
 		return false
@@ -1961,6 +1975,13 @@ func (o *Orchestrator) retainCodeReviewWorkspace(ctx context.Context, session *m
 		log.Info().Str("review_id", holder.HolderID.String()).Time("holder_expires_at", holder.ExpiresAt).Msg("retained code review workspace for synthesis handoff")
 	}
 	return acquired
+}
+
+func (o *Orchestrator) releaseTurnHoldAfterReview(ctx, releaseCtx context.Context, session *models.Session, threadID, requestedThreadID *uuid.UUID, sandbox *Sandbox, pending []models.SessionMessage, successful bool, log zerolog.Logger) (bool, string, error) {
+	if threadID != nil && (requestedThreadID == nil || *requestedThreadID == *threadID) {
+		o.maintainCodeReviewWorkspaceAfterTurn(ctx, session, threadID, sandbox, pending, successful, log)
+	}
+	return o.sessions.ReleaseTurnHold(releaseCtx, session.OrgID, session.ID)
 }
 
 // Synthesis enqueues its turn before its agent-result row is persisted. Retry
@@ -5240,7 +5261,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// Detached context so DB writes + destroy succeed even if ctx was
 		// cancelled (user cancel, timeout, shutdown).
 		destroyCtx := context.Background()
-		o.retainCodeReviewWorkspace(ctx, session, threadID, sandbox, pendingMsgs, returnErr == nil && reviewTiming, log)
 		var (
 			destroyNow bool
 			releasedID string
@@ -5254,14 +5274,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return
 			}
 		} else {
-			destroyNow, releasedID, releaseErr = o.sessions.ReleaseTurnHold(destroyCtx, session.OrgID, session.ID)
+			destroyNow, releasedID, releaseErr = o.releaseTurnHoldAfterReview(ctx, destroyCtx, session, threadID, preparationThreadID, sandbox, pendingMsgs, returnErr == nil && reviewTiming, log)
 		}
 		if releaseErr != nil {
 			log.Warn().Err(releaseErr).Msg("failed to release turn hold; destroying container anyway")
 			destroyNow = true
 		}
 		if !destroyNow {
-			log.Info().Str("container_id", sandbox.ID).Msg("preview is holding the sandbox container; leaving it alive for the preview")
+			log.Info().Str("container_id", sandbox.ID).Msg("another sandbox holder is retaining the container")
 			return
 		}
 		// FinalizeContainerDestroy re-checks holder state atomically: if a

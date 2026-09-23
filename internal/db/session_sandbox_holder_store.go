@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -125,7 +126,13 @@ func (s *SessionSandboxHolderStore) AcquireCodeReview(ctx context.Context, orgID
 				SELECT 1 FROM code_review_agent_results r
 				WHERE r.org_id = m.org_id AND r.session_id = m.session_id
 				  AND r.structured_result->>'thread_id' = @thread_id
-				  AND r.role IN ('reviewer', 'orchestrator')
+				  AND r.role = 'reviewer'
+			  )
+			  AND NOT EXISTS (
+				SELECT 1 FROM code_review_agent_results r
+				WHERE r.org_id = m.org_id AND r.session_id = m.session_id
+				  AND r.structured_result->>'thread_id' = @thread_id
+				  AND r.role = 'orchestrator'
 			  )
 			FOR UPDATE OF m, s
 		)
@@ -155,13 +162,63 @@ func (s *SessionSandboxHolderStore) AcquireCodeReview(ctx context.Context, orgID
 		return models.SessionSandboxHolder{}, false, fmt.Errorf("acquire code review sandbox holder: %w", err)
 	}
 	holder, err := pgx.CollectOneRow(rows, scanSessionSandboxHolderRow)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return models.SessionSandboxHolder{}, false, nil
 	}
 	if err != nil {
 		return models.SessionSandboxHolder{}, false, fmt.Errorf("acquire code review sandbox holder: %w", err)
 	}
 	return holder, true, nil
+}
+
+// ReleaseAfterSuccessfulSynthesis lets the owner destroy the workspace as
+// soon as the final synthesis turn ends. The persisted orchestrator thread,
+// active review, and exact container/node must still match; a stale turn cannot
+// release a successor's holder. This runs before ReleaseTurnHold, which remains
+// responsible for the final live-holder check and physical destroy decision.
+func (s *SessionSandboxHolderStore) ReleaseAfterSuccessfulSynthesis(ctx context.Context, orgID uuid.UUID, params AcquireCodeReviewSandboxHolderParams) (bool, error) {
+	if orgID == uuid.Nil || params.SessionID == uuid.Nil || params.ThreadID == uuid.Nil || params.ContainerID == "" || params.OwnerNodeID == "" {
+		return false, fmt.Errorf("release synthesis sandbox holder: missing ownership identity")
+	}
+	tag, err := s.db.Exec(ctx, `
+		WITH eligible AS MATERIALIZED (
+			SELECT m.id AS review_id
+			FROM code_review_session_metadata m
+			JOIN sessions s ON s.org_id = m.org_id AND s.id = m.session_id
+			WHERE m.org_id = @org_id AND m.session_id = @session_id
+			  AND m.status IN ('queued', 'running') AND m.stale = false
+			  AND s.origin = 'code_review'
+			  AND s.container_id = @container_id AND s.worker_node_id = @owner_node_id
+			  AND s.revision_context->>'head_sha' = m.head_sha
+			  AND EXISTS (
+				SELECT 1 FROM code_review_agent_results r
+				WHERE r.org_id = m.org_id AND r.session_id = m.session_id
+				  AND r.structured_result->>'thread_id' = @thread_id
+				  AND r.role = 'orchestrator'
+			  )
+			  AND NOT EXISTS (
+				SELECT 1 FROM code_review_agent_results r
+				WHERE r.org_id = m.org_id AND r.session_id = m.session_id
+				  AND r.structured_result->>'thread_id' = @thread_id
+				  AND r.role = 'reviewer'
+			  )
+			FOR UPDATE OF m, s
+		)
+		UPDATE session_sandbox_holders h
+		SET status = 'released', released_at = COALESCE(released_at, now()), updated_at = now()
+		FROM eligible e
+		WHERE h.org_id = @org_id AND h.session_id = @session_id
+		  AND h.holder_kind = 'code_review' AND h.holder_id = e.review_id
+		  AND h.container_id = @container_id AND h.owner_node_id = @owner_node_id
+		  AND h.status IN ('active', 'draining')`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": params.SessionID,
+		"thread_id": params.ThreadID.String(), "container_id": params.ContainerID,
+		"owner_node_id": params.OwnerNodeID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("release synthesis sandbox holder: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // RenewCodeReview keeps an already-owned handoff container available while

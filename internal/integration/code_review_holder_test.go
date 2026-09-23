@@ -172,9 +172,55 @@ func TestCodeReviewHolder_ConcurrentHandoffAndTerminalCleanup(t *testing.T) {
 	})
 	require.NoError(t, err, "healthy owner should acquire a new holder after drain release")
 	require.True(t, acquired, "fresh eligible turn should regain holder ownership")
+	synthesisThreadID := uuid.New()
+	_, err = pool.Exec(ctx, `
+		INSERT INTO code_review_agent_results (org_id, session_id, agent_provider, role, status, structured_result)
+		VALUES ($1, $2, 'claude', 'orchestrator', 'running', jsonb_build_object('thread_id', $3::text))`,
+		orgID, session.ID, synthesisThreadID.String())
+	require.NoError(t, err, "synthesis result should identify its persisted thread")
+	released, err := holders.ReleaseAfterSuccessfulSynthesis(ctx, orgID, db.AcquireCodeReviewSandboxHolderParams{
+		SessionID: session.ID, ThreadID: threadID, ContainerID: containerID, OwnerNodeID: nodeID,
+	})
+	require.NoError(t, err, "reviewer thread should not cause a synthesis release error")
+	require.False(t, released, "reviewer thread must not release the active review holder")
+	released, err = holders.ReleaseAfterSuccessfulSynthesis(ctx, orgID, db.AcquireCodeReviewSandboxHolderParams{
+		SessionID: session.ID, ThreadID: synthesisThreadID, ContainerID: "wrong-container", OwnerNodeID: nodeID,
+	})
+	require.NoError(t, err, "stale container should not cause a synthesis release error")
+	require.False(t, released, "stale synthesis must not release a successor's holder")
+	var ambiguousResultID uuid.UUID
+	err = pool.QueryRow(ctx, `
+		INSERT INTO code_review_agent_results (org_id, session_id, agent_provider, role, status, structured_result)
+		VALUES ($1, $2, 'claude', 'reviewer', 'running', jsonb_build_object('thread_id', $3::text))
+		RETURNING id`, orgID, session.ID, synthesisThreadID.String()).Scan(&ambiguousResultID)
+	require.NoError(t, err, "ambiguous role fixture should be inserted")
+	released, err = holders.ReleaseAfterSuccessfulSynthesis(ctx, orgID, db.AcquireCodeReviewSandboxHolderParams{
+		SessionID: session.ID, ThreadID: synthesisThreadID, ContainerID: containerID, OwnerNodeID: nodeID,
+	})
+	require.NoError(t, err, "ambiguous role should fail closed without an SQL error")
+	require.False(t, released, "ambiguous reviewer and synthesis roles must not release the holder")
+	_, err = pool.Exec(ctx, `DELETE FROM code_review_agent_results WHERE id = $1 AND org_id = $2`, ambiguousResultID, orgID)
+	require.NoError(t, err, "ambiguous fixture should be removed before the matching synthesis")
+	released, err = holders.ReleaseAfterSuccessfulSynthesis(ctx, orgID, db.AcquireCodeReviewSandboxHolderParams{
+		SessionID: session.ID, ThreadID: synthesisThreadID, ContainerID: containerID, OwnerNodeID: nodeID,
+	})
+	require.NoError(t, err, "matching synthesis should release its workspace holder")
+	require.True(t, released, "completed synthesis should permit immediate container cleanup")
+	_, acquired, err = holders.AcquireCodeReview(ctx, orgID, db.AcquireCodeReviewSandboxHolderParams{
+		SessionID: session.ID, ThreadID: synthesisThreadID, ContainerID: containerID,
+		OwnerNodeID: nodeID, LeaseToken: uuid.New(), LeaseDuration: time.Minute,
+	})
+	require.NoError(t, err, "synthesis should not fail holder acquisition")
+	require.False(t, acquired, "synthesis must not rearm a released review holder")
+	_, acquired, err = holders.AcquireCodeReview(ctx, orgID, db.AcquireCodeReviewSandboxHolderParams{
+		SessionID: session.ID, ThreadID: threadID, ContainerID: containerID,
+		OwnerNodeID: nodeID, LeaseToken: uuid.New(), LeaseDuration: time.Minute,
+	})
+	require.NoError(t, err, "reviewer should be allowed to restore its holder for terminal cleanup coverage")
+	require.True(t, acquired, "reviewer should regain durable retention while the review is active")
 	_, err = pool.Exec(ctx, `UPDATE code_review_session_metadata SET status = 'completed' WHERE id = $1 AND org_id = $2`, reviewID, orgID)
 	require.NoError(t, err, "review should become terminal")
-	released, err := holders.ReleaseTerminalCodeReview(ctx, orgID, session.ID)
+	released, err = holders.ReleaseTerminalCodeReview(ctx, orgID, session.ID)
 	require.NoError(t, err, "terminal review holder release should execute")
 	require.True(t, released, "terminal review should release its holder")
 	var pendingJobID uuid.UUID
