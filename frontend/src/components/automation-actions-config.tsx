@@ -93,10 +93,10 @@ export function AutomationActionsConfig({ config, disabled, onSave }: {
           {has("notion_tracking_row") && <>
             {field("notion_data_source_id", "Notion data source ID", "UUID from Manage data sources")}
             <p className="text-sm text-muted-foreground">Allow specific property names and types. Select values must already exist in Notion.</p>
-            {properties.map(([name, type], index) => <div key={index} className="flex items-center gap-2">
-              <Input aria-label={`Property ${index + 1} name`} value={name} onChange={(event) => setProperties(properties.map((item, i) => i === index ? [event.target.value, type] : item))} />
-              <Select value={type} onValueChange={(value: PropertyType) => setProperties(properties.map((item, i) => i === index ? [name, value] : item))}><SelectTrigger aria-label={`Property ${index + 1} type`}><SelectValue /></SelectTrigger><SelectContent>{propertyTypes.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
-              <Button type="button" variant="ghost" size="sm" aria-label={`Remove property ${index + 1}`} onClick={() => setProperties(properties.filter((_, i) => i !== index))}>Remove</Button>
+            {properties.map(([name, type], index) => <div key={index} data-testid="notion-property-row" className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <Input className="min-w-0 sm:flex-1" aria-label={`Property ${index + 1} name`} value={name} onChange={(event) => setProperties(properties.map((item, i) => i === index ? [event.target.value, type] : item))} />
+              <Select value={type} onValueChange={(value: PropertyType) => setProperties(properties.map((item, i) => i === index ? [name, value] : item))}><SelectTrigger className="w-full sm:w-40" aria-label={`Property ${index + 1} type`}><SelectValue /></SelectTrigger><SelectContent>{propertyTypes.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select>
+              <Button className="self-start sm:self-auto" type="button" variant="ghost" size="sm" aria-label={`Remove property ${index + 1}`} onClick={() => setProperties(properties.filter((_, i) => i !== index))}>Remove</Button>
             </div>)}
             <DisabledTooltip disabled={properties.length >= 20} content="You can configure up to 20 properties."><Button type="button" variant="outline" size="sm" disabled={properties.length >= 20} onClick={() => setProperties([...properties, ["", properties.length === 0 ? "title" : "rich_text"]])}>Add property</Button></DisabledTooltip>
           </>}

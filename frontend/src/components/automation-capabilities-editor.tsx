@@ -112,7 +112,7 @@ export function AutomationCapabilitiesEditor({
 
   return (
     <div className="space-y-4">
-      {policyNeedsAdmin ? <p className="text-xs text-muted-foreground">An admin must edit capabilities while resumable automation actions are enabled. You can still disable resumable automation actions.</p> : null}
+      {policyNeedsAdmin ? <p className="text-sm text-muted-foreground">An admin must edit capabilities while resumable automation actions are enabled. You can still disable resumable automation actions.</p> : null}
       {groups.map(([category, definitions]) => (
         <div key={category} className="space-y-2">
           <div className="text-xs font-medium uppercase text-muted-foreground">{category}</div>

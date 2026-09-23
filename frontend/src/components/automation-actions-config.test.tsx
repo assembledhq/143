@@ -30,4 +30,13 @@ describe("automation action configuration", () => {
     render(<AutomationActionsConfig config={{}} disabled onSave={vi.fn()} />);
     expect(screen.getByRole("button", { name: "Configure actions" })).toBeDisabled();
   });
+  it("stacks Notion property controls on narrow screens", async () => {
+    const user = userEvent.setup();
+    render(<AutomationActionsConfig config={{}} onSave={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Configure actions" }));
+    await user.click(screen.getByLabelText("Create a Notion page"));
+    await user.click(screen.getByRole("button", { name: "Add property" }));
+    expect(screen.getByTestId("notion-property-row")).toHaveClass("flex-col", "sm:flex-row");
+    expect(screen.getByLabelText("Property 1 type")).toHaveClass("w-full", "sm:w-40");
+  });
 });
