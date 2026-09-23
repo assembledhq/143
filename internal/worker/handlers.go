@@ -480,6 +480,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	}
 	if stores.CodeReviews != nil {
 		w.Register(models.JobTypeRunCodeReview, newRunCodeReviewHandler(stores, services, logger))
+		w.Register(models.JobTypePrepareCodeReviewWorkspace, newPrepareCodeReviewWorkspaceHandler(stores, services, logger))
 		w.Register(models.JobTypeSyncCodeReviewStatusComment, newSyncCodeReviewStatusCommentHandler(stores, services, logger))
 		if services != nil && services.CodeReviewLifecycle != nil {
 			w.Register(models.JobTypeStartCodeReviewReassessment, newStartCodeReviewReassessmentHandler(stores, services, logger))
@@ -691,6 +692,8 @@ type Stores struct {
 	SlackInboundEvents  *db.SlackInboundEventStore
 	SlackOutbound       *db.SlackOutboundMessageStore
 	SessionAttributions *db.SessionAttributionStore
+
+	CodeReviewWorkspaces *db.CodeReviewWorkspaceStore // nil-safe: durable shared review preparation
 }
 
 // newWorkerThreadService keeps worker-owned thread message paths on the same
@@ -991,6 +994,11 @@ type Services struct {
 	// workers set this so a startup wiring regression cannot silently reintroduce
 	// deploy-sensitive inline long-running sessions.
 	RequireSessionExecutorDispatcher bool
+
+	CodeReviewWorkspacePreparer interface {
+		PrepareCodeReviewWorkspace(ctx context.Context, session *models.Session, expectedHead string) (*agent.Sandbox, error)
+	}
+	CodeReviewWorkspacePreparationEnabled bool
 }
 
 type githubOrgRosterService interface {

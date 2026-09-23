@@ -295,6 +295,12 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return completeCodeReviewAfterStableDeterministicFailure(ctx, stores, services, logger, job, metadata, policy.Config(), pr, changedFiles, stableRisk)
 		}
 		if codeReviewCanRunReviewerThreads(stores) {
+			if err := ensureCodeReviewWorkspaceReady(ctx, stores, services, logger, job); err != nil {
+				if errors.Is(err, errCodeReviewWorkspaceStopped) {
+					return nil
+				}
+				return err
+			}
 			if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseReviewing); err != nil {
 				return fmt.Errorf("set code review reviewer phase: %w", err)
 			}
