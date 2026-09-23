@@ -38,6 +38,10 @@ func codeReviewWorkspaceWaitError(reason string) *RetryableError {
 func codeReviewControllerWorkspaceWaitError(reason string, startedAt time.Time) error {
 	retry := codeReviewWorkspaceWaitError(reason)
 	retry.RetryWindowStartedAt = &startedAt
+	// The readiness gate owns the eight-minute deadline and falls back to the
+	// ordinary reviewer path. The worker's age+delay check would otherwise
+	// dead-letter the review on the final scheduled poll before it can fall back.
+	retry.BypassMaxRetryDuration = true
 	return retry
 }
 
@@ -127,6 +131,21 @@ func ensureCodeReviewWorkspaceReady(ctx context.Context, stores *Stores, service
 		ExpectedGeneration: session.WorkspaceGeneration,
 	}
 	key := codeReviewWorkspacePreparationKey(metadata.ID, session.ID, session.WorkspaceGeneration)
+	startedAt, startErr := stores.Jobs.FirstJobCreatedAtByDedupeKey(ctx, job.OrgID, "agent", key)
+	if startErr != nil && !errors.Is(startErr, pgx.ErrNoRows) {
+		return fmt.Errorf("load review workspace wait start: %w", startErr)
+	}
+	if startErr == nil && !time.Now().Before(startedAt.Add(codeReviewWorkspaceWaitLimit)) {
+		cancelled, cancelErr := stores.Jobs.CancelActiveCodeReviewPreparation(ctx, job.OrgID, "agent", key)
+		if cancelErr != nil {
+			// An uncertain cancellation cannot bypass the session/holder CAS in
+			// either workspace path, so let the review proceed after logging it.
+			log.Warn().Err(cancelErr).Str("session_id", session.ID.String()).Msg("could not cancel timed-out review workspace preparation")
+		}
+		log.Warn().Str("session_id", session.ID.String()).Int64("cancelled_preparation_jobs", cancelled).
+			Msg("review workspace preparation exceeded wait limit; using ordinary reviewer path")
+		return nil
+	}
 	latestStatus, statusErr := stores.Jobs.LatestJobStatusByDedupeKey(ctx, job.OrgID, "agent", key)
 	if statusErr != nil && !errors.Is(statusErr, pgx.ErrNoRows) {
 		return fmt.Errorf("load review workspace preparation status: %w", statusErr)
@@ -155,9 +174,11 @@ func ensureCodeReviewWorkspaceReady(ctx context.Context, stores *Stores, service
 			return fmt.Errorf("enqueue code review workspace preparation: %w", err)
 		}
 	}
-	startedAt, err := stores.Jobs.FirstJobCreatedAtByDedupeKey(ctx, job.OrgID, "agent", key)
-	if err != nil {
-		return fmt.Errorf("load review workspace wait start: %w", err)
+	if errors.Is(startErr, pgx.ErrNoRows) {
+		startedAt, err = stores.Jobs.FirstJobCreatedAtByDedupeKey(ctx, job.OrgID, "agent", key)
+		if err != nil {
+			return fmt.Errorf("load review workspace wait start after enqueue: %w", err)
+		}
 	}
 	log.Debug().Str("session_id", session.ID.String()).Int64("generation", session.WorkspaceGeneration).Msg("waiting for prepared code review workspace")
 	return codeReviewControllerWorkspaceWaitError("preparation pending", startedAt)
@@ -184,6 +205,12 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 		if !hasJob || !hasToken || !hasOwner || strings.TrimSpace(ownerNodeID) == "" {
 			return fmt.Errorf("code review workspace job is missing lease or worker identity")
 		}
+		log = log.With().
+			Str("org_id", input.OrgID.String()).
+			Str("session_id", input.SessionID.String()).
+			Str("review_id", input.MetadataID.String()).
+			Str("job_id", jobID.String()).
+			Str("worker_node_id", ownerNodeID).Logger()
 		stage := observability.BeginStage(true, log, "review_workspace_prepare_job")
 		defer func() { stage.End(observability.StageOutcome(ctx, returnErr)) }()
 		metadata, err := stores.CodeReviews.GetBySessionID(ctx, input.OrgID, input.SessionID)
@@ -282,6 +309,8 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 		sandbox, err := services.CodeReviewWorkspacePreparer.PrepareCodeReviewWorkspace(ctx, &session, metadata.HeadSHA)
 		if err != nil {
 			if errors.Is(err, agent.ErrSandboxCapacityReached) {
+				log.Warn().Err(err).Str("current_node_id", ownerNodeID).
+					Msg("review workspace preparation rejected by local sandbox capacity")
 				alternate, selectErr := stores.Jobs.SelectWorkerWithSandboxCapacity(ctx, ownerNodeID)
 				if selectErr != nil {
 					log.Warn().Err(selectErr).Msg("could not select alternate review workspace worker after capacity rejection")

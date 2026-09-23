@@ -48,8 +48,8 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 	cfg.SessionID = session.ID.String()
 	cfg.OrgID = session.OrgID.String()
 	cfg.Purpose = "prepare_code_review_workspace"
-	if jobID, ok := jobctx.JobIDFromContext(ctx); ok {
-		cfg.PreparationJobID = jobID.String()
+	if lockToken, ok := jobctx.LockTokenFromContext(ctx); ok {
+		cfg.PreparationLeaseToken = lockToken.String()
 	}
 	cfg.Env = o.env.ResolveForModel(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID, stringPtrValue(session.ModelOverride))
 	if cfg.Env == nil {

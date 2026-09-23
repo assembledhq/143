@@ -462,12 +462,12 @@ func TestSandboxGC_PressurePreservesActiveUnpublishedReviewPreparation(t *testin
 	t.Parallel()
 	now := time.Now()
 	orgID, sessionID := uuid.New().String(), uuid.New().String()
-	oldJob, liveJob := uuid.New().String(), uuid.New().String()
+	oldLease, liveLease := uuid.New().String(), uuid.New().String()
 	provider := &fakeSandboxGCProvider{containers: []agent.ManagedSandboxContainer{
-		{ID: "orphaned-sibling", OrgID: orgID, SessionID: sessionID, Purpose: "prepare_code_review_workspace", PreparationJobID: oldJob, CreatedAt: now.Add(-10 * time.Minute)},
-		{ID: "preparing", OrgID: orgID, SessionID: sessionID, Purpose: "prepare_code_review_workspace", PreparationJobID: liveJob, CreatedAt: now.Add(-10 * time.Minute)},
+		{ID: "orphaned-sibling", OrgID: orgID, SessionID: sessionID, Purpose: "prepare_code_review_workspace", PreparationLeaseToken: oldLease, CreatedAt: now.Add(-10 * time.Minute)},
+		{ID: "preparing", OrgID: orgID, SessionID: sessionID, Purpose: "prepare_code_review_workspace", PreparationLeaseToken: liveLease, CreatedAt: now.Add(-10 * time.Minute)},
 	}}
-	store := &fakeSandboxGCStore{activePreparations: []string{liveJob}}
+	store := &fakeSandboxGCStore{activePreparations: []string{liveLease}}
 	gc := agent.NewSandboxGC(provider, store, nil, agent.SandboxGCConfig{}, zerolog.Nop())
 	require.NoError(t, gc.ReapForCapacity(context.Background(), now), "pressure GC should inspect an active preparation")
 	require.Equal(t, []string{"orphaned-sibling"}, provider.destroyedIDs(), "a live preparation must protect only its own container")

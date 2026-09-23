@@ -632,13 +632,13 @@ func TestDockerProvider_ListManagedSandboxes(t *testing.T) {
 					ID:      "container-1",
 					Created: createdAt.Add(-time.Hour).Unix(),
 					Labels: map[string]string{
-						SandboxLabelManaged:          "true",
-						SandboxLabelType:             "sandbox",
-						SandboxLabelSessionID:        "session-1",
-						SandboxLabelOrgID:            "org-1",
-						SandboxLabelPurpose:          "prepare_code_review_workspace",
-						SandboxLabelPreparationJobID: "job-1",
-						SandboxLabelCreatedAt:        createdAt.Format(time.RFC3339Nano),
+						SandboxLabelManaged:               "true",
+						SandboxLabelType:                  "sandbox",
+						SandboxLabelSessionID:             "session-1",
+						SandboxLabelOrgID:                 "org-1",
+						SandboxLabelPurpose:               "prepare_code_review_workspace",
+						SandboxLabelPreparationLeaseToken: "lease-1",
+						SandboxLabelCreatedAt:             createdAt.Format(time.RFC3339Nano),
 					},
 				},
 				{
@@ -695,12 +695,12 @@ func TestDockerProvider_ListManagedSandboxes(t *testing.T) {
 	require.Empty(t, capturedOptions.Filters.Get("label"), "ListManagedSandboxes should filter in-process so both current and legacy label schemes are eligible")
 	require.Equal(t, []agent.ManagedSandboxContainer{
 		{
-			ID:               "container-1",
-			SessionID:        "session-1",
-			OrgID:            "org-1",
-			Purpose:          "prepare_code_review_workspace",
-			PreparationJobID: "job-1",
-			CreatedAt:        createdAt,
+			ID:                    "container-1",
+			SessionID:             "session-1",
+			OrgID:                 "org-1",
+			Purpose:               "prepare_code_review_workspace",
+			PreparationLeaseToken: "lease-1",
+			CreatedAt:             createdAt,
 		},
 		{
 			ID:        "container-2",
@@ -981,7 +981,7 @@ func TestDockerProvider_Create(t *testing.T) {
 		cfg.SessionID = "session-123"
 		cfg.OrgID = "org-456"
 		cfg.Purpose = "prepare_code_review_workspace"
-		cfg.PreparationJobID = "job-789"
+		cfg.PreparationLeaseToken = "lease-789"
 		_, err := p.Create(context.Background(), cfg)
 		require.NoError(t, err, "Create should succeed for a labeled sandbox")
 
@@ -995,7 +995,7 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "session-123", capturedLabels[SandboxLabelSessionID], "sandbox labels should include the session id when present")
 		require.Equal(t, "org-456", capturedLabels[SandboxLabelOrgID], "sandbox labels should include the org id when present")
 		require.Equal(t, "prepare_code_review_workspace", capturedLabels[SandboxLabelPurpose], "sandbox labels should include the sandbox purpose")
-		require.Equal(t, "job-789", capturedLabels[SandboxLabelPreparationJobID], "unpublished preparation containers should identify their owning job")
+		require.Equal(t, "lease-789", capturedLabels[SandboxLabelPreparationLeaseToken], "unpublished preparation containers should identify their owning attempt")
 		require.NotEmpty(t, capturedLabels[SandboxLabelCreatedAt], "sandbox labels should include an RFC3339 creation timestamp for GC age decisions")
 	})
 

@@ -62,7 +62,9 @@ func newReviewWorkspaceFixture(t *testing.T) reviewWorkspaceFixture {
 		CREATE TABLE jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL,queue text NOT NULL,
 			job_type text NOT NULL,payload jsonb NOT NULL DEFAULT '{}',priority integer NOT NULL DEFAULT 0,
 			status text NOT NULL DEFAULT 'pending',max_attempts integer NOT NULL DEFAULT 3,dedupe_key text,target_node_id text,
-			locked_by_node_id text,lock_token uuid,lease_expires_at timestamptz,created_at timestamptz NOT NULL DEFAULT now());
+			locked_by_node_id text,run_owner_id text,owner_kind text,lock_token uuid,locked_at timestamptz,
+			lease_expires_at timestamptz,created_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now(),completed_at timestamptz);
 		CREATE UNIQUE INDEX idx_workspace_jobs_dedupe ON jobs(queue,dedupe_key)
 			WHERE dedupe_key IS NOT NULL AND status IN ('pending','running');
 		CREATE TABLE session_sandbox_holders(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL,
@@ -286,6 +288,28 @@ func TestCodeReviewWorkspaceWaitWindowSurvivesJobReplacement(t *testing.T) {
 	require.Error(t, err, "another organization must not see this review's preparation jobs")
 }
 
+func TestCodeReviewWorkspaceTimedOutPreparationFencesPublication(t *testing.T) {
+	t.Parallel()
+	f := newReviewWorkspaceFixture(t)
+	ctx := context.Background()
+	key := "code_review_prepare:" + f.review.String() + ":" + f.session.String() + ":0"
+	_, err := f.pool.Exec(ctx, `UPDATE jobs SET dedupe_key=$1 WHERE id=$2`, key, f.job)
+	require.NoError(t, err, "associate the live initializer with its review generation")
+	jobs := NewJobStore(f.pool)
+	cancelled, err := jobs.CancelActiveCodeReviewPreparation(ctx, uuid.New(), "agent", key)
+	require.NoError(t, err, "cancelling another organization's preparation should be a no-op")
+	require.Equal(t, int64(0), cancelled, "another organization must not cancel this preparation")
+	cancelled, err = jobs.CancelActiveCodeReviewPreparation(ctx, f.org, "agent", key)
+	require.NoError(t, err, "cancel the timed-out live initializer")
+	require.Equal(t, int64(1), cancelled, "the exact live preparation should be cancelled")
+	status, err := jobs.LatestJobStatusByDedupeKey(ctx, f.org, "agent", key)
+	require.NoError(t, err, "read the terminal preparation status")
+	require.Equal(t, models.JobStatusCancelled, status, "the cancelled preparation should release its queue lease")
+	published, err := NewCodeReviewWorkspaceStore(f.pool).PublishPrepared(ctx, f.org, f.params)
+	require.NoError(t, err, "publication after cancellation should fail by fencing, not a database error")
+	require.False(t, published, "a cancelled initializer must not publish after reviewer fallback")
+}
+
 func TestActiveCodeReviewPreparationProtectsOnlyLiveLease(t *testing.T) {
 	t.Parallel()
 	f := newReviewWorkspaceFixture(t)
@@ -294,7 +318,7 @@ func TestActiveCodeReviewPreparationProtectsOnlyLiveLease(t *testing.T) {
 	require.NoError(t, err, "attach the preparation session identity")
 	refs, err := NewSessionStore(f.pool).ListActiveCodeReviewPreparations(ctx)
 	require.NoError(t, err, "list live preparation leases for host GC")
-	require.Equal(t, []string{f.job.String()}, refs, "the active lease should protect only its own unpublished container")
+	require.Equal(t, []string{f.token.String()}, refs, "the active attempt should protect only its own unpublished container")
 	_, err = f.pool.Exec(ctx, `UPDATE jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1`, f.job)
 	require.NoError(t, err, "expire the preparation lease")
 	refs, err = NewSessionStore(f.pool).ListActiveCodeReviewPreparations(ctx)

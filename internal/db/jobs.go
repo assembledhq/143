@@ -297,6 +297,31 @@ func (s *JobStore) LatestJobStatusByDedupeKey(ctx context.Context, orgID uuid.UU
 	return status, nil
 }
 
+// CancelActiveCodeReviewPreparation fences a timed-out initializer before the
+// controller falls back to the ordinary reviewer workspace path. A running
+// worker may still finish an in-flight Docker operation, but it cannot renew
+// its lease or publish the container after this update.
+func (s *JobStore) CancelActiveCodeReviewPreparation(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE jobs
+		SET status = 'cancelled',
+			completed_at = now(),
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			owner_kind = 'worker',
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			updated_at = now()
+		WHERE org_id = $1 AND queue = $2 AND dedupe_key = $3
+		  AND job_type = 'prepare_code_review_workspace'
+		  AND status IN ('pending', 'running')`, orgID, queue, dedupeKey)
+	if err != nil {
+		return 0, fmt.Errorf("cancel timed-out code review preparation: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // QueueChangesetPRCreation atomically reserves a changeset's PR slot when
 // needed and ensures it has an active open_pr job. A queued or pushing slot
 // may outlive the job that started a pre-publication review, so those states

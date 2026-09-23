@@ -4047,16 +4047,17 @@ func (s *SessionStore) ListContainerReferences(ctx context.Context) (allIDs, rev
 	return allIDs, reviewIDs, nil
 }
 
-// ListActiveCodeReviewPreparations returns live initializer job IDs. Their
-// Docker labels identify the exact unpublished container host GC must skip;
-// siblings from expired leases remain reclaimable.
+// ListActiveCodeReviewPreparations returns live initializer lease tokens.
+// Their Docker labels identify only unpublished containers from the current
+// attempt; siblings from expired leases remain reclaimable.
 // lint:allow-no-orgid reason="host-local Docker GC inventories cross-org preparation jobs"
 func (s *SessionStore) ListActiveCodeReviewPreparations(ctx context.Context) ([]string, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT id::text
+		SELECT lock_token::text
 		FROM jobs
 		WHERE job_type = 'prepare_code_review_workspace'
 		  AND status = 'running'
+		  AND lock_token IS NOT NULL
 		  AND lease_expires_at > now()`)
 	if err != nil {
 		return nil, fmt.Errorf("list active code review preparations: %w", err)

@@ -309,7 +309,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return completeCodeReviewAfterStableDeterministicFailure(ctx, stores, services, logger, job, metadata, policy.Config(), pr, changedFiles, stableRisk)
 		}
 		if codeReviewCanRunReviewerThreads(stores) {
-			if err := ensureCodeReviewWorkspaceReady(ctx, stores, services, logger, job); err != nil {
+			if err := ensureCodeReviewWorkspaceReady(ctx, stores, services, reviewLog, job); err != nil {
 				if errors.Is(err, errCodeReviewWorkspaceStopped) {
 					return nil
 				}
