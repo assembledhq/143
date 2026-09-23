@@ -294,7 +294,7 @@ func TestActiveCodeReviewPreparationProtectsOnlyLiveLease(t *testing.T) {
 	require.NoError(t, err, "attach the preparation session identity")
 	refs, err := NewSessionStore(f.pool).ListActiveCodeReviewPreparations(ctx)
 	require.NoError(t, err, "list live preparation leases for host GC")
-	require.Equal(t, []string{f.org.String() + ":" + f.session.String()}, refs, "the active lease should protect its unpublished container")
+	require.Equal(t, []string{f.job.String()}, refs, "the active lease should protect only its own unpublished container")
 	_, err = f.pool.Exec(ctx, `UPDATE jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1`, f.job)
 	require.NoError(t, err, "expire the preparation lease")
 	refs, err = NewSessionStore(f.pool).ListActiveCodeReviewPreparations(ctx)

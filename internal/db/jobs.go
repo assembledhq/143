@@ -281,6 +281,22 @@ func (s *JobStore) FirstJobCreatedAtByDedupeKey(ctx context.Context, orgID uuid.
 	return createdAt, nil
 }
 
+// LatestJobStatusByDedupeKey distinguishes an active preparation from a
+// terminal failure, so the controller does not spawn another failed job on
+// every workspace poll. A succeeded job may be re-enqueued for recovery if
+// its published workspace has since disappeared.
+func (s *JobStore) LatestJobStatusByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (models.JobStatus, error) {
+	var status models.JobStatus
+	err := s.db.QueryRow(ctx, `
+		SELECT status FROM jobs
+		WHERE org_id = $1 AND queue = $2 AND dedupe_key = $3
+		ORDER BY created_at DESC, id DESC LIMIT 1`, orgID, queue, dedupeKey).Scan(&status)
+	if err != nil {
+		return "", fmt.Errorf("latest job status by dedupe key: %w", err)
+	}
+	return status, nil
+}
+
 // QueueChangesetPRCreation atomically reserves a changeset's PR slot when
 // needed and ensures it has an active open_pr job. A queued or pushing slot
 // may outlive the job that started a pre-publication review, so those states

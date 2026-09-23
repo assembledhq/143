@@ -210,6 +210,20 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				return codeReviewWaitingForOrchestrator(policy.Config())
 			}
 		}
+		if codeReviewCanRunReviewerThreads(stores) {
+			started, err := codeReviewWorkspacePreparationStarted(ctx, stores, services, job)
+			if err != nil {
+				return err
+			}
+			if started {
+				if err := ensureCodeReviewWorkspaceReady(ctx, stores, services, reviewLog, job); err != nil {
+					if errors.Is(err, errCodeReviewWorkspaceStopped) {
+						return nil
+					}
+					return err
+				}
+			}
+		}
 		if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
 			if errors.Is(syncErr, errCodeReviewSchedulingSuperseded) {
 				return nil

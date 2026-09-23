@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -18,15 +19,17 @@ func (reviewWorkspaceCapacityCounter) CountLiveSandboxes(context.Context) (int, 
 
 type reviewWorkspaceProvider struct {
 	SandboxProvider
-	createCount  int
-	cloneCount   int
-	destroyCount int
-	commands     []string
-	actualHead   string
+	createCount   int
+	cloneCount    int
+	destroyCount  int
+	commands      []string
+	actualHead    string
+	createdConfig SandboxConfig
 }
 
 func (p *reviewWorkspaceProvider) Create(_ context.Context, cfg SandboxConfig) (*Sandbox, error) {
 	p.createCount++
+	p.createdConfig = cfg
 	return &Sandbox{ID: "prepared-container", Provider: "test", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 }
 
@@ -83,7 +86,8 @@ func TestPrepareCodeReviewWorkspaceExactHead(t *testing.T) {
 				AgentType: models.AgentTypeCodex, RepositoryID: &repoID, Title: &title,
 				RevisionContext: []byte(`{"kind":"code_review","github_pr_number":42,"head_sha":"expected-head"}`),
 			}
-			sandbox, err := orchestrator.PrepareCodeReviewWorkspace(context.Background(), session, "expected-head")
+			preparationJobID := uuid.New()
+			sandbox, err := orchestrator.PrepareCodeReviewWorkspace(jobctx.WithJobID(context.Background(), preparationJobID), session, "expected-head")
 			if tt.wantErr {
 				require.Error(t, err, "an unexpected checkout head must reject the prepared workspace")
 				require.Nil(t, sandbox, "a failed checkout must not transfer an unpublished sandbox")
@@ -92,6 +96,7 @@ func TestPrepareCodeReviewWorkspaceExactHead(t *testing.T) {
 				require.Equal(t, "prepared-container", sandbox.ID, "the prepared sandbox should be returned for fenced publication")
 			}
 			require.Equal(t, 1, provider.createCount, "workspace preparation should create one sandbox")
+			require.Equal(t, preparationJobID.String(), provider.createdConfig.PreparationJobID, "created sandbox should identify the exact preparation lease for GC")
 			require.Equal(t, 1, provider.cloneCount, "workspace preparation should clone the repository once")
 			require.Equal(t, tt.wantDestroy, provider.destroyCount, "only failed preparation should destroy its unpublished container")
 			require.Contains(t, strings.Join(provider.commands, "\n"), "pull/42/head", "preparation should fetch the captured pull request head")

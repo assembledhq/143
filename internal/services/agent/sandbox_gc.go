@@ -23,11 +23,12 @@ const (
 // ManagedSandboxContainer is the provider-neutral subset of Docker container
 // metadata the worker-local GC needs to reconcile host state with DB state.
 type ManagedSandboxContainer struct {
-	ID        string
-	SessionID string
-	OrgID     string
-	Purpose   string
-	CreatedAt time.Time
+	ID               string
+	SessionID        string
+	OrgID            string
+	Purpose          string
+	PreparationJobID string
+	CreatedAt        time.Time
 }
 
 // SandboxGCProvider is implemented by providers that can enumerate their
@@ -210,8 +211,8 @@ func (g *SandboxGC) reapOnce(ctx context.Context, now time.Time, unreferencedGra
 		}
 		age := sandboxContainerAge(now, c.CreatedAt)
 		if _, ok := refSet[c.ID]; !ok {
-			if c.Purpose == "prepare_code_review_workspace" {
-				if _, active := preparing[c.OrgID+":"+c.SessionID]; active {
+			if c.Purpose == "prepare_code_review_workspace" && c.PreparationJobID != "" {
+				if _, active := preparing[c.PreparationJobID]; active {
 					continue
 				}
 			}

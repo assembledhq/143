@@ -87,6 +87,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"jobs", "group by coalesce(nullif(locked_by_node_id"},          // RunningJobSamples: platform-wide running jobs grouped by worker and type
 		{"jobs", "left join dead_nodes"},                                // ReclaimLostRunningJobs: cross-org recovery loop
 		{"jobs", "where status = 'running' and locked_by_node_id = $1"}, // CountRunningOwnedByNode: node-scoped drain status
+		{"jobs", "where job_type = 'prepare_code_review_workspace'"},    // ListActiveCodeReviewPreparations: host-local GC must find live leases across organizations by job ID
 		{"jobs", "locked_by_node_id = @node_id"},                        // WorkerDeployStatus: node-scoped deploy drain status
 		{"session_sandbox_holders", "owner_node_id = @node_id"},         // WorkerDeployStatus: node-scoped sandbox holder drain status
 		{"session_logs", "from session_logs"},                           // no org_id column; scoped via session_id FK

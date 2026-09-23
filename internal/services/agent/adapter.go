@@ -509,6 +509,10 @@ type SandboxConfig struct {
 	// "preview"). Included in provider logs to disambiguate
 	// sandboxes that aren't attached to a single session.
 	Purpose string
+	// PreparationJobID identifies the leased job that owns an unpublished
+	// review workspace. Host GC uses the container label to protect only that
+	// job's live container, not older siblings for the same session.
+	PreparationJobID string
 	// AuthSocketPath is the host-side path of a per-session AF_UNIX socket
 	// the provider should make reachable inside the container. The provider
 	// bind-mounts the socket's parent directory (not the file itself) onto

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
@@ -47,6 +48,9 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 	cfg.SessionID = session.ID.String()
 	cfg.OrgID = session.OrgID.String()
 	cfg.Purpose = "prepare_code_review_workspace"
+	if jobID, ok := jobctx.JobIDFromContext(ctx); ok {
+		cfg.PreparationJobID = jobID.String()
+	}
 	cfg.Env = o.env.ResolveForModel(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID, stringPtrValue(session.ModelOverride))
 	if cfg.Env == nil {
 		cfg.Env = make(map[string]string)

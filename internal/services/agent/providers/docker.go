@@ -54,12 +54,13 @@ const (
 	defaultHealthCheckImage     = "busybox:1.36.1"
 	healthCheckImagePullTimeout = 2 * time.Minute
 
-	SandboxLabelManaged   = "com.assembledhq.143.managed"
-	SandboxLabelType      = "com.assembledhq.143.type"
-	SandboxLabelSessionID = "com.assembledhq.143.session_id"
-	SandboxLabelOrgID     = "com.assembledhq.143.org_id"
-	SandboxLabelPurpose   = "com.assembledhq.143.purpose"
-	SandboxLabelCreatedAt = "com.assembledhq.143.created_at"
+	SandboxLabelManaged          = "com.assembledhq.143.managed"
+	SandboxLabelType             = "com.assembledhq.143.type"
+	SandboxLabelSessionID        = "com.assembledhq.143.session_id"
+	SandboxLabelOrgID            = "com.assembledhq.143.org_id"
+	SandboxLabelPurpose          = "com.assembledhq.143.purpose"
+	SandboxLabelPreparationJobID = "com.assembledhq.143.preparation_job_id"
+	SandboxLabelCreatedAt        = "com.assembledhq.143.created_at"
 
 	sandboxLabelLegacySandbox   = "143.sandbox"
 	sandboxLabelLegacySessionID = "143.session_id"
@@ -824,6 +825,9 @@ func sandboxContainerLabels(cfg agent.SandboxConfig, createdAt time.Time) map[st
 		labels[sandboxLabelLegacyPurpose] = cfg.Purpose
 		labels[SandboxLabelPurpose] = cfg.Purpose
 	}
+	if cfg.PreparationJobID != "" {
+		labels[SandboxLabelPreparationJobID] = cfg.PreparationJobID
+	}
 	return labels
 }
 
@@ -890,11 +894,12 @@ func (d *DockerProvider) ListManagedSandboxes(ctx context.Context) ([]agent.Mana
 			}
 		}
 		out = append(out, agent.ManagedSandboxContainer{
-			ID:        c.ID,
-			SessionID: firstLabelValue(c.Labels, SandboxLabelSessionID, sandboxLabelLegacySessionID),
-			OrgID:     firstLabelValue(c.Labels, SandboxLabelOrgID, sandboxLabelLegacyOrgID),
-			Purpose:   firstLabelValue(c.Labels, SandboxLabelPurpose, sandboxLabelLegacyPurpose),
-			CreatedAt: createdAt,
+			ID:               c.ID,
+			SessionID:        firstLabelValue(c.Labels, SandboxLabelSessionID, sandboxLabelLegacySessionID),
+			OrgID:            firstLabelValue(c.Labels, SandboxLabelOrgID, sandboxLabelLegacyOrgID),
+			Purpose:          firstLabelValue(c.Labels, SandboxLabelPurpose, sandboxLabelLegacyPurpose),
+			PreparationJobID: c.Labels[SandboxLabelPreparationJobID],
+			CreatedAt:        createdAt,
 		})
 	}
 	return out, nil

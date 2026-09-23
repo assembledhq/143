@@ -462,15 +462,17 @@ func TestSandboxGC_PressurePreservesActiveUnpublishedReviewPreparation(t *testin
 	t.Parallel()
 	now := time.Now()
 	orgID, sessionID := uuid.New().String(), uuid.New().String()
-	provider := &fakeSandboxGCProvider{containers: []agent.ManagedSandboxContainer{{
-		ID: "preparing", OrgID: orgID, SessionID: sessionID,
-		Purpose: "prepare_code_review_workspace", CreatedAt: now.Add(-10 * time.Minute),
-	}}}
-	store := &fakeSandboxGCStore{activePreparations: []string{orgID + ":" + sessionID}}
+	oldJob, liveJob := uuid.New().String(), uuid.New().String()
+	provider := &fakeSandboxGCProvider{containers: []agent.ManagedSandboxContainer{
+		{ID: "orphaned-sibling", OrgID: orgID, SessionID: sessionID, Purpose: "prepare_code_review_workspace", PreparationJobID: oldJob, CreatedAt: now.Add(-10 * time.Minute)},
+		{ID: "preparing", OrgID: orgID, SessionID: sessionID, Purpose: "prepare_code_review_workspace", PreparationJobID: liveJob, CreatedAt: now.Add(-10 * time.Minute)},
+	}}
+	store := &fakeSandboxGCStore{activePreparations: []string{liveJob}}
 	gc := agent.NewSandboxGC(provider, store, nil, agent.SandboxGCConfig{}, zerolog.Nop())
 	require.NoError(t, gc.ReapForCapacity(context.Background(), now), "pressure GC should inspect an active preparation")
-	require.Empty(t, provider.destroyedIDs(), "a live preparation lease must protect its unpublished container")
+	require.Equal(t, []string{"orphaned-sibling"}, provider.destroyedIDs(), "a live preparation must protect only its own container")
+	provider.containers = provider.containers[1:] // Docker no longer inventories the reclaimed sibling.
 	store.activePreparations = nil
 	require.NoError(t, gc.ReapForCapacity(context.Background(), now), "pressure GC should inspect an expired preparation")
-	require.Equal(t, []string{"preparing"}, provider.destroyedIDs(), "an unreferenced preparation may be reclaimed after its lease expires")
+	require.Equal(t, []string{"orphaned-sibling", "preparing"}, provider.destroyedIDs(), "an unreferenced preparation may be reclaimed after its lease expires")
 }

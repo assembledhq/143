@@ -4047,14 +4047,13 @@ func (s *SessionStore) ListContainerReferences(ctx context.Context) (allIDs, rev
 	return allIDs, reviewIDs, nil
 }
 
-// ListActiveCodeReviewPreparations protects a live initializer's unpublished
-// Docker container from host GC. Once its lease expires, ordinary orphan
-// cleanup may reclaim the container because publication is fenced on that
-// same lease.
+// ListActiveCodeReviewPreparations returns live initializer job IDs. Their
+// Docker labels identify the exact unpublished container host GC must skip;
+// siblings from expired leases remain reclaimable.
 // lint:allow-no-orgid reason="host-local Docker GC inventories cross-org preparation jobs"
 func (s *SessionStore) ListActiveCodeReviewPreparations(ctx context.Context) ([]string, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT org_id::text || ':' || COALESCE(payload->>'session_id', '')
+		SELECT id::text
 		FROM jobs
 		WHERE job_type = 'prepare_code_review_workspace'
 		  AND status = 'running'
@@ -4075,6 +4074,19 @@ func (s *SessionStore) ListActiveCodeReviewPreparations(ctx context.Context) ([]
 		return nil, fmt.Errorf("iterate code review preparations: %w", err)
 	}
 	return refs, nil
+}
+
+// WorkspaceGenerationForReview locates the current preparation generation
+// without loading the full session during frequent controller polls.
+func (s *SessionStore) WorkspaceGenerationForReview(ctx context.Context, orgID, sessionID uuid.UUID) (int64, error) {
+	var generation int64
+	err := s.db.QueryRow(ctx, `
+		SELECT workspace_generation FROM sessions
+		WHERE org_id = $1 AND id = $2`, orgID, sessionID).Scan(&generation)
+	if err != nil {
+		return 0, fmt.Errorf("read review workspace generation: %w", err)
+	}
+	return generation, nil
 }
 
 // UpdateWorkingBranch sets the working branch name for a session.

@@ -14,6 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -29,25 +30,61 @@ const codeReviewWorkspaceWaitLimit = 8 * time.Minute
 
 var errCodeReviewWorkspaceStopped = errors.New("code review stopped before workspace readiness")
 
-func codeReviewWorkspaceWaitError(reason string) error {
+func codeReviewWorkspaceWaitError(reason string) *RetryableError {
 	delay, limit := codeReviewWorkspaceWait, codeReviewWorkspaceWaitLimit
 	return &RetryableError{Err: fmt.Errorf("waiting for code review workspace: %s", reason), RetryAfter: &delay, MaxRetryDuration: &limit}
 }
 
 func codeReviewControllerWorkspaceWaitError(reason string, startedAt time.Time) error {
-	retry := codeReviewWorkspaceWaitError(reason).(*RetryableError)
+	retry := codeReviewWorkspaceWaitError(reason)
 	retry.RetryWindowStartedAt = &startedAt
 	return retry
+}
+
+func codeReviewWorkspacePreparationKey(reviewID, sessionID uuid.UUID, generation int64) string {
+	return fmt.Sprintf("code_review_prepare:%s:%s:%d", reviewID, sessionID, generation)
+}
+
+func codeReviewWorkspaceColdEligible(session models.Session, repositoryID uuid.UUID) bool {
+	return session.Origin == models.SessionOriginCodeReview &&
+		session.RepositoryID != nil && *session.RepositoryID == repositoryID &&
+		session.SnapshotKey == nil
+}
+
+// A prior enqueue is the durable checkpoint that preflight and deterministic
+// early-stop have already run. While preparation is pending, the controller
+// checks readiness before repeating expensive GitHub calls. It refreshes
+// GitHub once more after readiness, immediately before reviewer fan-out.
+func codeReviewWorkspacePreparationStarted(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload) (bool, error) {
+	if services == nil || !services.CodeReviewWorkspacePreparationEnabled || !services.CodeReviewExecutorPlacementEnabled {
+		return false, nil
+	}
+	if stores == nil || stores.Sessions == nil || stores.Jobs == nil {
+		return false, fmt.Errorf("code review workspace preparation is enabled without required stores")
+	}
+	generation, err := stores.Sessions.WorkspaceGenerationForReview(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return false, fmt.Errorf("load review workspace generation before preparation checkpoint: %w", err)
+	}
+	key := codeReviewWorkspacePreparationKey(job.MetadataID, job.SessionID, generation)
+	_, err = stores.Jobs.FirstJobCreatedAtByDedupeKey(ctx, job.OrgID, "agent", key)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("load review workspace preparation checkpoint: %w", err)
+	}
+	return true, nil
 }
 
 // ensureCodeReviewWorkspaceReady runs after deterministic early-stop and
 // before the first reviewer thread is dispatched. A completed init job is not
 // evidence of readiness; every attempt checks the current holder and owner.
 func ensureCodeReviewWorkspaceReady(ctx context.Context, stores *Stores, services *Services, log zerolog.Logger, job runCodeReviewPayload) error {
-	if services == nil || !services.CodeReviewWorkspacePreparationEnabled {
+	if services == nil || !services.CodeReviewWorkspacePreparationEnabled || !services.CodeReviewExecutorPlacementEnabled {
 		return nil
 	}
-	if stores == nil || stores.CodeReviewWorkspaces == nil || stores.Sessions == nil || stores.Jobs == nil {
+	if stores == nil || stores.CodeReviewWorkspaces == nil || stores.CodeReviews == nil || stores.Sessions == nil || stores.Jobs == nil {
 		return fmt.Errorf("code review workspace preparation is enabled without required stores")
 	}
 	ready, err := stores.CodeReviewWorkspaces.Readiness(ctx, job.OrgID, job.MetadataID, job.SessionID, job.HeadSHA)
@@ -78,42 +115,59 @@ func ensureCodeReviewWorkspaceReady(ctx context.Context, stores *Stores, service
 		log.Warn().Str("session_id", session.ID.String()).Msg("using legacy review workspace path without a recorded owner")
 		return nil
 	}
-	if session.SnapshotKey != nil && session.WorkspaceGeneration > 0 {
-		// Once a reviewer has used and checkpointed the workspace, the ordinary
-		// M2 resume path owns recovery. Initial preparation only serves cold
-		// sessions; it must not overwrite a later snapshot.
+	if !codeReviewWorkspaceColdEligible(session, metadata.RepositoryID) {
+		// A checkpoint, legacy session, or repository mismatch belongs to the
+		// ordinary per-reviewer recovery path. The preparation handler makes
+		// the same decision so this gate cannot wait for an impossible job.
+		log.Warn().Str("session_id", session.ID.String()).Msg("using ordinary reviewer workspace path for ineligible preparation session")
 		return nil
-	}
-	target := session.WorkerNodeID
-	if session.ContainerID == nil || target == nil {
-		target, err = stores.Jobs.SelectWorkerWithSandboxCapacity(ctx, "")
-		if err != nil {
-			return fmt.Errorf("choose review workspace worker: %w", err)
-		}
 	}
 	payload := prepareCodeReviewWorkspacePayload{
 		OrgID: job.OrgID, MetadataID: metadata.ID, SessionID: session.ID,
 		ExpectedGeneration: session.WorkspaceGeneration,
 	}
-	key := fmt.Sprintf("code_review_prepare:%s:%s:%d", metadata.ID, session.ID, session.WorkspaceGeneration)
-	_, err = stores.Jobs.EnqueueWithOpts(ctx, job.OrgID, db.EnqueueOpts{
-		Queue: "agent", JobType: models.JobTypePrepareCodeReviewWorkspace,
-		Payload: payload, Priority: 6, DedupeKey: &key, MaxAttempts: 8,
-		TargetNodeID: target,
-	})
-	if err != nil {
-		return fmt.Errorf("enqueue code review workspace preparation: %w", err)
+	key := codeReviewWorkspacePreparationKey(metadata.ID, session.ID, session.WorkspaceGeneration)
+	latestStatus, statusErr := stores.Jobs.LatestJobStatusByDedupeKey(ctx, job.OrgID, "agent", key)
+	if statusErr != nil && !errors.Is(statusErr, pgx.ErrNoRows) {
+		return fmt.Errorf("load review workspace preparation status: %w", statusErr)
+	}
+	switch latestStatus {
+	case models.JobStatusFailed, models.JobStatusDeadLetter, models.JobStatusCancelled:
+		log.Warn().Str("session_id", session.ID.String()).Str("job_status", string(latestStatus)).
+			Msg("using ordinary reviewer workspace path after preparation job stopped")
+		return nil
+	case models.JobStatusPending, models.JobStatusRunning:
+		// The unique dedupe owner is already preparing this generation.
+	default:
+		target := session.WorkerNodeID
+		if session.ContainerID == nil || target == nil {
+			target, err = stores.Jobs.SelectWorkerWithSandboxCapacity(ctx, "")
+			if err != nil {
+				return fmt.Errorf("choose review workspace worker: %w", err)
+			}
+		}
+		_, err = stores.Jobs.EnqueueWithOpts(ctx, job.OrgID, db.EnqueueOpts{
+			Queue: "agent", JobType: models.JobTypePrepareCodeReviewWorkspace,
+			Payload: payload, Priority: 6, DedupeKey: &key, MaxAttempts: 8,
+			TargetNodeID: target,
+		})
+		if err != nil {
+			return fmt.Errorf("enqueue code review workspace preparation: %w", err)
+		}
 	}
 	startedAt, err := stores.Jobs.FirstJobCreatedAtByDedupeKey(ctx, job.OrgID, "agent", key)
 	if err != nil {
 		return fmt.Errorf("load review workspace wait start: %w", err)
 	}
-	log.Info().Str("session_id", session.ID.String()).Int64("generation", session.WorkspaceGeneration).Msg("waiting for prepared code review workspace")
+	log.Debug().Str("session_id", session.ID.String()).Int64("generation", session.WorkspaceGeneration).Msg("waiting for prepared code review workspace")
 	return codeReviewControllerWorkspaceWaitError("preparation pending", startedAt)
 }
 
 func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, log zerolog.Logger) JobHandler {
 	return func(ctx context.Context, _ string, raw json.RawMessage) (returnErr error) {
+		if services != nil && (!services.CodeReviewWorkspacePreparationEnabled || !services.CodeReviewExecutorPlacementEnabled) {
+			return nil // a fleet rollout disabled preparation before this queued job claimed
+		}
 		if stores == nil || stores.CodeReviewWorkspaces == nil || stores.CodeReviews == nil || stores.Sessions == nil || stores.Jobs == nil || services == nil || services.CodeReviewWorkspacePreparer == nil || services.SandboxProvider == nil {
 			return fmt.Errorf("code review workspace preparation dependencies unavailable")
 		}
@@ -153,7 +207,7 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 		if session.Status == models.SessionStatusCancelled || session.Status == models.SessionStatusFailed || session.Status == models.SessionStatusCompleted {
 			return nil
 		}
-		if session.WorkspaceGeneration != input.ExpectedGeneration || session.Origin != models.SessionOriginCodeReview || session.RepositoryID == nil || *session.RepositoryID != metadata.RepositoryID {
+		if session.WorkspaceGeneration != input.ExpectedGeneration || !codeReviewWorkspaceColdEligible(session, metadata.RepositoryID) {
 			return nil
 		}
 		if session.ContainerID != nil {
@@ -259,8 +313,17 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 			return publishErr
 		}
 		if !published {
+			reason := "fenced_or_cancelled"
+			checkCtx, checkCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			ready, checkErr := stores.CodeReviewWorkspaces.Readiness(checkCtx, input.OrgID, input.MetadataID, input.SessionID, metadata.HeadSHA)
+			checkCancel()
+			if checkErr != nil {
+				log.Warn().Err(checkErr).Msg("could not classify losing review workspace publication")
+			} else if ready.Ready && ready.ContainerID != sandbox.ID {
+				reason = "sibling_published"
+			}
 			log.Info().Str("session_id", input.SessionID.String()).Str("container_id", sandbox.ID).
-				Msg("code review workspace publication lost to sibling, cancellation, or lease loss")
+				Str("publication_loss_reason", reason).Msg("code review workspace publication lost")
 			return nil
 		}
 		log.Info().Str("session_id", input.SessionID.String()).Str("container_id", sandbox.ID).Msg("published prepared code review workspace")
