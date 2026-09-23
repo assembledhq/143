@@ -322,6 +322,45 @@ func TestFinalizeTokenUsage_DerivesPublishedRateModels(t *testing.T) {
 	}
 }
 
+func TestFinalizeTokenUsage_DerivesNewModelAPIRates(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		agentType      models.AgentType
+		model          string
+		expectedAmount float64
+		expectedDetail string
+	}{
+		{name: "claude opus 5.5", agentType: models.AgentTypeClaudeCode, model: models.ClaudeCodeModelOpus55, expectedAmount: 29.20, expectedDetail: "anthropic_api_pricing"},
+		{name: "gpt 6 sol", agentType: models.AgentTypeCodex, model: models.CodexModelGPT6Sol, expectedAmount: 14.70, expectedDetail: "openai_api_pricing"},
+		{name: "gpt 6 luna", agentType: models.AgentTypeCodex, model: models.CodexModelGPT6Luna, expectedAmount: 0.735, expectedDetail: "openai_api_pricing"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := FinalizeTokenUsage(TokenUsage{
+				InputTokens:         1_000_000,
+				CachedInputTokens:   1_000_000,
+				CacheCreationTokens: 1_000_000,
+				OutputTokens:        1_000_000,
+			}, TokenUsageHint{
+				AgentType:      tt.agentType,
+				EffectiveModel: tt.model,
+				BillingMode:    TokenBillingModeAPIKey,
+			})
+
+			require.NotNil(t, actual.Cost, "new model API usage should derive a published USD cost")
+			require.Equal(t, TokenCostUnitUSD, actual.Cost.Unit, "new model API cost should use USD")
+			require.Equal(t, TokenCostSourceDerived, actual.Cost.Source, "new model API cost should be marked derived")
+			require.Equal(t, tt.expectedDetail, actual.Cost.Detail, "new model API cost should identify the provider rate card")
+			require.InDelta(t, tt.expectedAmount, actual.Cost.Amount, 0.0001, "new model API cost should include input, cache read, cache write, and output rates")
+		})
+	}
+}
+
 func TestFinalizeTokenUsage_DerivesGPT56PublishedRates(t *testing.T) {
 	t.Parallel()
 
