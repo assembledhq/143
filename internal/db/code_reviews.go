@@ -2368,6 +2368,39 @@ func (s *CodeReviewStore) ListAgentResults(ctx context.Context, orgID, sessionID
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewAgentResult])
 }
 
+// ResolveAgentRoleForThread returns a role only when an active, non-stale code
+// review owns the thread through a persisted agent result. Missing or
+// ambiguous ownership is a miss so callers retain full repository setup.
+func (s *CodeReviewStore) ResolveAgentRoleForThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.CodeReviewAgentRole, bool, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT DISTINCT r.role
+		FROM code_review_agent_results r
+		JOIN code_review_session_metadata m
+		  ON m.org_id = r.org_id AND m.session_id = r.session_id
+		WHERE r.org_id = @org_id
+		  AND r.session_id = @session_id
+		  AND r.structured_result->>'thread_id' = @thread_id
+		  AND m.stale = false
+		  AND m.status IN ('queued', 'running')`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "thread_id": threadID.String(),
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("resolve code review agent role: %w", err)
+	}
+	roles, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return "", false, fmt.Errorf("collect code review agent roles: %w", err)
+	}
+	if len(roles) != 1 {
+		return "", false, nil
+	}
+	role := models.CodeReviewAgentRole(roles[0])
+	if err := role.Validate(); err != nil {
+		return "", false, fmt.Errorf("resolve invalid code review agent role: %w", err)
+	}
+	return role, true, nil
+}
+
 func (s *CodeReviewStore) UpdateAgentResultOutcome(ctx context.Context, orgID, resultID uuid.UUID, status models.CodeReviewAgentResultStatus, rawOutput *string, structuredResult json.RawMessage) (models.CodeReviewAgentResult, error) {
 	if err := status.Validate(); err != nil {
 		return models.CodeReviewAgentResult{}, err

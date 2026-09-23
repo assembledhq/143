@@ -1352,7 +1352,7 @@ func TestCodeReviewVisualEvidencePromptProjection(t *testing.T) {
 	require.Equal(t, threadID, input.ThreadID, "agent message should target the selected reviewer or orchestrator thread")
 	require.Equal(t, commands, input.Commands, "reviewer message should retain native command metadata")
 	require.Equal(t, codeReviewVisualEvidenceImages(snapshot), input.Images, "every agent message should receive the same ordered first-party images")
-	require.Equal(t, models.SessionMessageSourceAgentTool, input.MessageSource, "visual evidence should enter the thread through the system agent-tool source")
+	require.Equal(t, models.SessionMessageSourceCodeReview, input.MessageSource, "review input should carry trusted code-review provenance")
 }
 
 func TestCodeReviewVisualEvidencePromptProjectionDeduplicatesContentHashes(t *testing.T) {
@@ -2915,6 +2915,7 @@ func TestRequestCodeReviewOrchestratorSynthesisRepair(t *testing.T) {
 	require.True(t, started, "repair request should start one bounded correction turn")
 	require.Len(t, sender.inputs, 1, "repair request should dispatch exactly one correction message")
 	require.Equal(t, threadID, sender.inputs[0].ThreadID, "repair request should continue the existing orchestrator thread")
+	require.Equal(t, models.SessionMessageSourceCodeReview, sender.inputs[0].MessageSource, "repair input should retain platform code-review provenance")
 	require.Contains(t, sender.inputs[0].Message, `"approval_recommended": false`, "correction message should require the omitted approval field with valid JSON")
 	require.Contains(t, sender.inputs[0].Message, `"findings":`, "correction message should preserve structured findings")
 	require.Contains(t, sender.inputs[0].Message, `"human_review_reasons":`, "correction message should require explicit escalation reasons")
@@ -3268,6 +3269,32 @@ func TestParseCodeReviewOrchestratorSynthesis(t *testing.T) {
 			require.Equal(t, tt.expected, actual, "parser should preserve every synthesis field")
 		})
 	}
+}
+
+func TestCodeReviewMissingArtifactSynthesisBlocksApproval(t *testing.T) {
+	t.Parallel()
+
+	// A frozen reviewer replay reported that a generated role map was required
+	// to assess an authorization change but absent from the review workspace.
+	raw := `{"approval_recommended":false,"description_assessments":[],"findings":[],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":true,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Review authorization capability changed.","review_summary":"The generated role map is unavailable, so the authorization change cannot be assessed.","risk_notes":["Generated role map is missing."]}`
+	synthesis, err := parseCodeReviewOrchestratorSynthesis(raw)
+	require.NoError(t, err, "missing-artifact synthesis should satisfy the structured output contract")
+	require.False(t, synthesis.ApprovalRecommended, "missing-artifact synthesis should not recommend approval")
+	require.True(t, synthesis.UnresolvedUncertainty, "missing-artifact synthesis should preserve the evidence gap")
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	policy.Enabled = true
+	risk := models.EvaluateCodeReviewRisk(policy, models.CodeReviewRiskInput{
+		FilesChanged:          1,
+		Additions:             1,
+		Deletions:             1,
+		ChecksPassing:         true,
+		DescriptionPassed:     true,
+		UpToDate:              true,
+		UnresolvedUncertainty: synthesis.UnresolvedUncertainty,
+	})
+	require.Equal(t, []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonUnresolvedUncertainty}}, risk.ReasonDetails, "backend risk evaluation should withhold approval for incomplete generated evidence")
+	require.False(t, risk.Acceptable, "unresolved uncertainty should block automated approval")
 }
 
 func TestCodeReviewFindingsFromSynthesis(t *testing.T) {

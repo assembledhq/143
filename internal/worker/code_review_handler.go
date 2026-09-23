@@ -1468,7 +1468,7 @@ func codeReviewAgentMessageInput(job runCodeReviewPayload, threadID uuid.UUID, m
 		Message:       message,
 		Images:        codeReviewVisualEvidenceImages(visualEvidence),
 		Commands:      commands,
-		MessageSource: models.SessionMessageSourceAgentTool,
+		MessageSource: models.SessionMessageSourceCodeReview,
 	}
 }
 
@@ -2357,7 +2357,7 @@ func requestCodeReviewOrchestratorSynthesisRepair(
 		OrgID:         job.OrgID,
 		ThreadID:      threadID,
 		Message:       codeReviewOrchestratorRepairPrompt(validationErr, policy, changedFiles, visualEvidence),
-		MessageSource: models.SessionMessageSourceAgentTool,
+		MessageSource: models.SessionMessageSourceCodeReview,
 	}); err != nil {
 		logger.Warn().Err(err).
 			Str("session_id", job.SessionID.String()).

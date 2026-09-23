@@ -693,6 +693,12 @@ type SessionThreadStore interface {
 	ClaimNextQueuedForSession(ctx context.Context, orgID, sessionID uuid.UUID, maxRunning int) (models.SessionThread, error)
 }
 
+// CodeReviewRoleResolver verifies platform-owned reviewer/synthesis threads
+// against the active review's persisted agent-result identity.
+type CodeReviewRoleResolver interface {
+	ResolveAgentRoleForThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.CodeReviewAgentRole, bool, error)
+}
+
 type sessionThreadDrainLister interface {
 	ListBySessionWithOptions(ctx context.Context, orgID, sessionID uuid.UUID, includeArchived bool) ([]models.SessionThread, error)
 }
@@ -825,6 +831,7 @@ type Orchestrator struct {
 	humanInputRequests         SessionHumanInputRequestStore
 	sessionMessages            SessionMessageStore
 	sessionThreads             SessionThreadStore
+	codeReviewRoles            CodeReviewRoleResolver
 	sessionIssueLinks          SessionIssueLinkStore
 	issueSnapshots             SessionIssueSnapshotStore
 	projectTasks               ProjectTaskUpdater               // can be nil
@@ -1350,6 +1357,7 @@ type OrchestratorConfig struct {
 	HumanInputRequests         SessionHumanInputRequestStore
 	SessionMessages            SessionMessageStore
 	SessionThreads             SessionThreadStore
+	CodeReviewRoles            CodeReviewRoleResolver // optional — nil retains full repository preparation
 	SessionIssueLinks          SessionIssueLinkStore
 	IssueSnapshots             SessionIssueSnapshotStore
 	ProjectTasks               ProjectTaskUpdater               // optional — updates project tasks on run completion
@@ -1450,6 +1458,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		humanInputRequests:         cfg.HumanInputRequests,
 		sessionMessages:            cfg.SessionMessages,
 		sessionThreads:             cfg.SessionThreads,
+		codeReviewRoles:            cfg.CodeReviewRoles,
 		sessionIssueLinks:          cfg.SessionIssueLinks,
 		issueSnapshots:             cfg.IssueSnapshots,
 		projectTasks:               cfg.ProjectTasks,
@@ -1856,16 +1865,70 @@ func PrepareSandboxRepository(ctx context.Context, provider SandboxProvider, san
 	return err
 }
 
-// repositoryPreparationMode is extended by M1; M0 records full setup timing.
 type repositoryPreparationMode string
 
-const repositoryPreparationFull repositoryPreparationMode = "full"
+const (
+	repositoryPreparationFull          repositoryPreparationMode = "full"
+	repositoryPreparationMinimalReview repositoryPreparationMode = "minimal_code_review"
+)
+
+// reviewRepositoryPreparationMode derives review eligibility from persisted
+// review ownership, never from a message, thread label, or caller-supplied flag.
+// An unknown role, missing revision context, or resolver failure keeps the
+// existing full setup path.
+func (o *Orchestrator) reviewRepositoryPreparationMode(ctx context.Context, session *models.Session, threadID *uuid.UUID, log zerolog.Logger) (repositoryPreparationMode, models.CodeReviewAgentRole) {
+	if session == nil || session.Origin != models.SessionOriginCodeReview || threadID == nil || *threadID == uuid.Nil || o.codeReviewRoles == nil {
+		return repositoryPreparationFull, ""
+	}
+	if _, _, _, err := codeReviewCheckoutContextFromSession(session); err != nil {
+		log.Warn().Err(err).Msg("code review revision context unavailable; retaining full repository setup")
+		return repositoryPreparationFull, ""
+	}
+	role, found, err := o.codeReviewRoles.ResolveAgentRoleForThread(ctx, session.OrgID, session.ID, *threadID)
+	if err != nil {
+		log.Warn().Err(err).Str("thread_id", threadID.String()).Msg("code review role lookup failed; retaining full repository setup")
+		return repositoryPreparationFull, ""
+	}
+	if !found || role.Validate() != nil {
+		return repositoryPreparationFull, ""
+	}
+	return repositoryPreparationMinimalReview, role
+}
+
+// A role belongs to the thread, but minimal setup is authorized for the
+// platform's review input only. Mixed queued input keeps full preparation.
+func reviewTurnPreparationMode(mode repositoryPreparationMode, pending []models.SessionMessage) repositoryPreparationMode {
+	if mode != repositoryPreparationMinimalReview || len(pending) == 0 {
+		return repositoryPreparationFull
+	}
+	for _, message := range pending {
+		if message.Source != models.SessionMessageSourceCodeReview {
+			return repositoryPreparationFull
+		}
+	}
+	return mode
+}
+
+// Synthesis enqueues its turn before its agent-result row is persisted. Retry
+// the trusted role lookup at the point preparation is needed so fast executor
+// dispatch does not unnecessarily run a full repository bootstrap. A missing
+// row still falls back to full setup; M2/M3 must preserve that safety rule.
+func (o *Orchestrator) refreshReviewPreparationMode(ctx context.Context, session *models.Session, threadID *uuid.UUID, pending []models.SessionMessage, mode repositoryPreparationMode, log zerolog.Logger) (repositoryPreparationMode, models.CodeReviewAgentRole) {
+	if mode != repositoryPreparationFull || reviewTurnPreparationMode(repositoryPreparationMinimalReview, pending) != repositoryPreparationMinimalReview {
+		return mode, ""
+	}
+	return o.reviewRepositoryPreparationMode(ctx, session, threadID, log)
+}
 
 func prepareSandboxRepositoryForSession(ctx context.Context, provider SandboxProvider, session *models.Session, sandbox *Sandbox, workDir string, mode repositoryPreparationMode, log zerolog.Logger) error {
 	stageLog := log.With().Str("preparation_mode", string(mode)).Logger()
-	reviewTiming := session != nil && session.Origin == models.SessionOriginCodeReview
-	stage := observability.BeginStage(reviewTiming, stageLog, "repository_preparation")
-	_, err := prepareSandboxRepositoryWithTiming(ctx, provider, sandbox, workDir, stageLog, false, reviewTiming)
+	stage := observability.BeginStage(session != nil && session.Origin == models.SessionOriginCodeReview, stageLog, "repository_preparation")
+	if mode == repositoryPreparationMinimalReview {
+		stageLog.Info().Msg("skipping repository dependencies and bootstrap for built-in code review")
+		stage.End("skipped")
+		return nil
+	}
+	_, err := prepareSandboxRepositoryWithTiming(ctx, provider, sandbox, workDir, stageLog, false, session != nil && session.Origin == models.SessionOriginCodeReview)
 	stage.End(observability.StageOutcome(ctx, err))
 	return err
 }
@@ -4183,7 +4246,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		session.PrimaryThreadID = &threadID
 	}
 
-	// Record review-stage timing without changing workspace selection.
+	var preparationThreadID *uuid.UUID
+	if opts != nil {
+		preparationThreadID = opts.ThreadID
+	}
+	preparationMode, reviewRole := o.reviewRepositoryPreparationMode(ctx, session, preparationThreadID, log)
 	reviewTiming := session.Origin == models.SessionOriginCodeReview
 	hasSnapshot := !rebuildWorkspace &&
 		session.SnapshotKey != nil && *session.SnapshotKey != "" &&
@@ -4206,6 +4273,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		if session.ReasoningEffort != nil {
 			logContext = logContext.Str("reasoning_effort", string(*session.ReasoningEffort))
+		}
+		if reviewRole != "" {
+			logContext = logContext.Str("review_role", string(reviewRole))
 		}
 		if jobID, ok := jobctx.JobIDFromContext(ctx); ok {
 			logContext = logContext.Str("job_id", jobID.String())
@@ -4334,6 +4404,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// text content. When only a single user message is unprocessed, this
 	// reduces to the legacy single-message behavior.
 	pendingMsgs := unprocessedUserMessagesThrough(messages, threadID, latestMsg.ID)
+	preparationMode = reviewTurnPreparationMode(preparationMode, pendingMsgs)
 	planMode := strings.HasPrefix(latestMsg.Content, planModePrefix)
 	var userMessage string
 	if len(pendingMsgs) <= 1 {
@@ -5255,8 +5326,15 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				if err := o.prepareAutomationTurnRestoredWorkspace(ctx, session, sandbox, sandboxCfg, automationTurn, log); err != nil {
 					return o.failAutomationTurnSetup(ctx, session, opts, sandbox, automationTurn, err, log)
 				}
-			} else if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, repositoryPreparationFull, log); err != nil {
-				return fmt.Errorf("prepare repository: %w", err)
+			} else {
+				mode, refreshedRole := o.refreshReviewPreparationMode(ctx, session, preparationThreadID, pendingMsgs, preparationMode, log)
+				preparationLog := log
+				if refreshedRole != "" {
+					preparationLog = log.With().Str("review_role", string(refreshedRole)).Logger()
+				}
+				if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, mode, preparationLog); err != nil {
+					return fmt.Errorf("prepare repository: %w", err)
+				}
 			}
 		}
 		if automationTurn != nil {
@@ -5421,8 +5499,15 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("render automation turn prompt: %w", err), log)
 			}
 			userMessage = rendered
-		} else if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, repositoryPreparationFull, log); err != nil {
-			return fmt.Errorf("prepare repository: %w", err)
+		} else {
+			mode, refreshedRole := o.refreshReviewPreparationMode(ctx, session, preparationThreadID, pendingMsgs, preparationMode, log)
+			preparationLog := log
+			if refreshedRole != "" {
+				preparationLog = log.With().Str("review_role", string(refreshedRole)).Logger()
+			}
+			if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, mode, preparationLog); err != nil {
+				return fmt.Errorf("prepare repository: %w", err)
+			}
 		}
 
 		// Build a full prompt via PreparePrompt so the agent gets the system
