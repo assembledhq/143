@@ -265,6 +265,63 @@ func (s *JobStore) GetActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, qu
 	return active, nil
 }
 
+// FirstJobCreatedAtByDedupeKey anchors a phase-specific retry budget to the
+// first durable enqueue. A failed preparation may be re-enqueued, but that
+// must not restart the controller's workspace wait window.
+func (s *JobStore) FirstJobCreatedAtByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (time.Time, error) {
+	var createdAt time.Time
+	err := s.db.QueryRow(ctx, `
+		SELECT created_at
+		FROM jobs
+		WHERE org_id = $1 AND queue = $2 AND dedupe_key = $3
+		ORDER BY created_at ASC LIMIT 1`, orgID, queue, dedupeKey).Scan(&createdAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("first job creation by dedupe key: %w", err)
+	}
+	return createdAt, nil
+}
+
+// LatestJobStatusByDedupeKey distinguishes an active preparation from a
+// terminal failure, so the controller does not spawn another failed job on
+// every workspace poll. A succeeded job may be re-enqueued for recovery if
+// its published workspace has since disappeared.
+func (s *JobStore) LatestJobStatusByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (models.JobStatus, error) {
+	var status models.JobStatus
+	err := s.db.QueryRow(ctx, `
+		SELECT status FROM jobs
+		WHERE org_id = $1 AND queue = $2 AND dedupe_key = $3
+		ORDER BY created_at DESC, id DESC LIMIT 1`, orgID, queue, dedupeKey).Scan(&status)
+	if err != nil {
+		return "", fmt.Errorf("latest job status by dedupe key: %w", err)
+	}
+	return status, nil
+}
+
+// CancelActiveCodeReviewPreparation fences a timed-out initializer before the
+// controller falls back to the ordinary reviewer workspace path. A running
+// worker may still finish an in-flight Docker operation, but it cannot renew
+// its lease or publish the container after this update.
+func (s *JobStore) CancelActiveCodeReviewPreparation(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE jobs
+		SET status = 'cancelled',
+			completed_at = now(),
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			owner_kind = 'worker',
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			updated_at = now()
+		WHERE org_id = $1 AND queue = $2 AND dedupe_key = $3
+		  AND job_type = 'prepare_code_review_workspace'
+		  AND status IN ('pending', 'running')`, orgID, queue, dedupeKey)
+	if err != nil {
+		return 0, fmt.Errorf("cancel timed-out code review preparation: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // QueueChangesetPRCreation atomically reserves a changeset's PR slot when
 // needed and ensures it has an active open_pr job. A queued or pushing slot
 // may outlive the job that started a pre-publication review, so those states

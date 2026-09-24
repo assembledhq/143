@@ -210,6 +210,29 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				return codeReviewWaitingForOrchestrator(policy.Config())
 			}
 		}
+		avoidReprepareAfterPreflight := false
+		if codeReviewCanRunReviewerThreads(stores) {
+			started, err := codeReviewWorkspacePreparationStarted(ctx, stores, services, job)
+			if err != nil {
+				return err
+			}
+			if started {
+				if err := ensureCodeReviewWorkspaceReady(ctx, stores, services, reviewLog, job); err != nil {
+					if errors.Is(err, errCodeReviewWorkspaceStopped) {
+						return nil
+					}
+					return err
+				}
+			}
+			avoidReprepareAfterPreflight = started
+			if !started && services != nil && services.CodeReviewWorkspacePreparationEnabled && stores.CodeReviewWorkspaces != nil {
+				ready, err := stores.CodeReviewWorkspaces.Readiness(ctx, job.OrgID, job.MetadataID, job.SessionID, job.HeadSHA)
+				if err != nil {
+					return fmt.Errorf("check review workspace before GitHub preflight: %w", err)
+				}
+				avoidReprepareAfterPreflight = ready.Ready
+			}
+		}
 		if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
 			if errors.Is(syncErr, errCodeReviewSchedulingSuperseded) {
 				return nil
@@ -295,6 +318,16 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return completeCodeReviewAfterStableDeterministicFailure(ctx, stores, services, logger, job, metadata, policy.Config(), pr, changedFiles, stableRisk)
 		}
 		if codeReviewCanRunReviewerThreads(stores) {
+			workspaceGate := ensureCodeReviewWorkspaceReady
+			if avoidReprepareAfterPreflight {
+				workspaceGate = ensureCodeReviewWorkspaceReadyAfterPreflight
+			}
+			if err := workspaceGate(ctx, stores, services, reviewLog, job); err != nil {
+				if errors.Is(err, errCodeReviewWorkspaceStopped) {
+					return nil
+				}
+				return err
+			}
 			if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseReviewing); err != nil {
 				return fmt.Errorf("set code review reviewer phase: %w", err)
 			}
@@ -461,6 +494,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			event = event.Int64("github_review_id", *submission.GitHubReviewID)
 		}
 		event.Str("decision", string(decision.Decision)).Msg("completed code review")
+		logCodeReviewFirstReviewerStart(ctx, stores, reviewLog, job, metadata.CreatedAt)
 		reconcileCodeReviewSessionSuccess(ctx, stores, logger, job)
 		enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 		return nil
@@ -479,6 +513,20 @@ func codeReviewStageOutcome(ctx context.Context, err error) string {
 		return "waiting"
 	}
 	return "failed"
+}
+
+func logCodeReviewFirstReviewerStart(ctx context.Context, stores *Stores, logger zerolog.Logger, job runCodeReviewPayload, reviewCreatedAt time.Time) {
+	startedAt, err := stores.CodeReviews.FirstReviewerThreadStartedAt(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		logger.Warn().Err(err).Msg("could not measure first reviewer thread start")
+		return
+	}
+	if startedAt == nil || startedAt.Before(reviewCreatedAt) {
+		logger.Info().Bool("reviewer_thread_started", false).Msg("completed review has no measurable reviewer thread start")
+		return
+	}
+	logger.Info().Int64("time_to_first_reviewer_thread_start_ms", startedAt.Sub(reviewCreatedAt).Milliseconds()).
+		Msg("completed code review first reviewer thread timing")
 }
 
 func codeReviewTimingLogger(ctx context.Context, logger zerolog.Logger, job runCodeReviewPayload) zerolog.Logger {

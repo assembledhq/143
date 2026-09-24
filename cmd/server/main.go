@@ -538,6 +538,8 @@ func main() {
 			SlackInboundEvents:  db.NewSlackInboundEventStore(pool),
 			SlackOutbound:       db.NewSlackOutboundMessageStore(pool),
 			SessionAttributions: db.NewSessionAttributionStore(pool),
+
+			CodeReviewWorkspaces: db.NewCodeReviewWorkspaceStore(pool),
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -1899,6 +1901,9 @@ func buildServices(
 		RuntimeSampler:             runtimeSampler,
 		SandboxGC:                  sandboxGC,
 		SandboxAuthBroker:          sandboxAuthBroker,
+
+		CodeReviewWorkspacePreparer:           orchestrator,
+		CodeReviewWorkspacePreparationEnabled: cfg.CodeReviewWorkspacePreparationEnabled,
 	}
 	pagerDutyTriggerer := automations.NewPagerDutyEventTriggerService(
 		db.NewAutomationEventTriggerStore(pool),

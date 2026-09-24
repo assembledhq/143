@@ -49,12 +49,13 @@ func (f *fakeSandboxGCProvider) destroyedIDs() []string {
 }
 
 type fakeSandboxGCStore struct {
-	references       []string
-	reviewReferences []string
-	listErr          error
-	finalize         map[string]bool
-	finalErr         error
-	reviewFinalize   map[string]bool
+	references         []string
+	reviewReferences   []string
+	activePreparations []string
+	listErr            error
+	finalize           map[string]bool
+	finalErr           error
+	reviewFinalize     map[string]bool
 
 	mu              sync.Mutex
 	finalized       []string
@@ -76,6 +77,10 @@ func (f *fakeSandboxGCStore) ListContainerReferences(context.Context) ([]string,
 	all := append([]string(nil), f.references...)
 	review := append([]string(nil), f.reviewReferences...)
 	return all, review, nil
+}
+
+func (f *fakeSandboxGCStore) ListActiveCodeReviewPreparations(context.Context) ([]string, error) {
+	return append([]string(nil), f.activePreparations...), nil
 }
 
 func (f *fakeSandboxGCStore) FinalizeContainerDestroy(_ context.Context, orgID, _ uuid.UUID, expectedContainerID string) (bool, error) {
@@ -451,4 +456,23 @@ func TestSandboxGC_ReapOnceReturnsListErrors(t *testing.T) {
 	err := gc.ReapOnce(context.Background(), time.Now())
 	require.Error(t, err, "sandbox GC should surface provider list failures")
 	require.Contains(t, err.Error(), "list managed sandbox containers", "sandbox GC should wrap provider list failures with context")
+}
+
+func TestSandboxGC_PressurePreservesActiveUnpublishedReviewPreparation(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	orgID, sessionID := uuid.New().String(), uuid.New().String()
+	oldLease, liveLease := uuid.New().String(), uuid.New().String()
+	provider := &fakeSandboxGCProvider{containers: []agent.ManagedSandboxContainer{
+		{ID: "orphaned-sibling", OrgID: orgID, SessionID: sessionID, Purpose: "prepare_code_review_workspace", PreparationLeaseToken: oldLease, CreatedAt: now.Add(-10 * time.Minute)},
+		{ID: "preparing", OrgID: orgID, SessionID: sessionID, Purpose: "prepare_code_review_workspace", PreparationLeaseToken: liveLease, CreatedAt: now.Add(-10 * time.Minute)},
+	}}
+	store := &fakeSandboxGCStore{activePreparations: []string{liveLease}}
+	gc := agent.NewSandboxGC(provider, store, nil, agent.SandboxGCConfig{}, zerolog.Nop())
+	require.NoError(t, gc.ReapForCapacity(context.Background(), now), "pressure GC should inspect an active preparation")
+	require.Equal(t, []string{"orphaned-sibling"}, provider.destroyedIDs(), "a live preparation must protect only its own container")
+	provider.containers = provider.containers[1:] // Docker no longer inventories the reclaimed sibling.
+	store.activePreparations = nil
+	require.NoError(t, gc.ReapForCapacity(context.Background(), now), "pressure GC should inspect an expired preparation")
+	require.Equal(t, []string{"orphaned-sibling", "preparing"}, provider.destroyedIDs(), "an unreferenced preparation may be reclaimed after its lease expires")
 }

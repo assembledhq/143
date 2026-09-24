@@ -4047,6 +4047,49 @@ func (s *SessionStore) ListContainerReferences(ctx context.Context) (allIDs, rev
 	return allIDs, reviewIDs, nil
 }
 
+// ListActiveCodeReviewPreparations returns live initializer lease tokens.
+// Their Docker labels identify only unpublished containers from the current
+// attempt; siblings from expired leases remain reclaimable.
+// lint:allow-no-orgid reason="host-local Docker GC inventories cross-org preparation jobs"
+func (s *SessionStore) ListActiveCodeReviewPreparations(ctx context.Context) ([]string, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT lock_token::text
+		FROM jobs
+		WHERE job_type = 'prepare_code_review_workspace'
+		  AND status = 'running'
+		  AND lock_token IS NOT NULL
+		  AND lease_expires_at > now()`)
+	if err != nil {
+		return nil, fmt.Errorf("list active code review preparations: %w", err)
+	}
+	defer rows.Close()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("scan code review preparation: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate code review preparations: %w", err)
+	}
+	return refs, nil
+}
+
+// WorkspaceGenerationForReview locates the current preparation generation
+// without loading the full session during frequent controller polls.
+func (s *SessionStore) WorkspaceGenerationForReview(ctx context.Context, orgID, sessionID uuid.UUID) (int64, error) {
+	var generation int64
+	err := s.db.QueryRow(ctx, `
+		SELECT workspace_generation FROM sessions
+		WHERE org_id = $1 AND id = $2`, orgID, sessionID).Scan(&generation)
+	if err != nil {
+		return 0, fmt.Errorf("read review workspace generation: %w", err)
+	}
+	return generation, nil
+}
+
 // UpdateWorkingBranch sets the working branch name for a session.
 func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID uuid.UUID, branch string) error {
 	query := `UPDATE sessions SET working_branch = @working_branch, last_activity_at = now() WHERE id = @id AND org_id = @org_id`

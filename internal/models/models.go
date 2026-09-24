@@ -1109,6 +1109,7 @@ const (
 	JobTypePagerDutyIngestEvent          = "pagerduty_ingest_event"
 	JobTypePagerDutySync                 = "pagerduty_sync"
 	JobTypeRunCodeReview                 = "run_code_review"
+	JobTypePrepareCodeReviewWorkspace    = "prepare_code_review_workspace"
 	JobTypeStartCodeReviewReassessment   = "start_code_review_reassessment"
 	JobTypeTriageCodeReviewDispute       = "triage_code_review_dispute"
 	JobTypeReplyCodeReviewDispute        = "reply_code_review_dispute"

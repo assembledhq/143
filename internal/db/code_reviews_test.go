@@ -805,6 +805,34 @@ func TestCodeReviewStore_CompleteReviewPublishesUpdate(t *testing.T) {
 	}, 2*time.Second, 20*time.Millisecond, "CompleteReview should publish a code review update event to subscribers")
 }
 
+func TestCodeReviewStore_FirstReviewerThreadStartedAt(t *testing.T) {
+	t.Parallel()
+	started := time.Date(2026, time.September, 23, 18, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		started  *time.Time
+		wantTime *time.Time
+	}{
+		{name: "reviewer started", started: &started, wantTime: &started},
+		{name: "deterministic review never started a reviewer", started: nil, wantTime: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create a fresh review timing database mock")
+			defer mock.Close()
+			orgID, sessionID := uuid.New(), uuid.New()
+			mock.ExpectQuery(`SELECT MIN\(started_at\)`).WithArgs(orgID, sessionID).
+				WillReturnRows(pgxmock.NewRows([]string{"min"}).AddRow(tt.started))
+			actual, err := NewCodeReviewStore(mock).FirstReviewerThreadStartedAt(context.Background(), orgID, sessionID)
+			require.NoError(t, err, "reviewer timing query should return the tenant's first reviewer claim")
+			require.Equal(t, tt.wantTime, actual, "reviewer timing should preserve the exact first claim or its absence")
+			require.NoError(t, mock.ExpectationsWereMet(), "reviewer timing query should filter by organization and session")
+		})
+	}
+}
+
 func TestCodeReviewStore_CompleteReviewRejectsInvalidChangeBreakdown(t *testing.T) {
 	t.Parallel()
 

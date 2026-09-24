@@ -36,6 +36,21 @@ func NewCodeReviewStore(db DBTX) *CodeReviewStore {
 	return &CodeReviewStore{db: db, logger: zerolog.Nop()}
 }
 
+// FirstReviewerThreadStartedAt returns the first durable reviewer claim for
+// completion telemetry. A review with no reviewer execution returns nil.
+func (s *CodeReviewStore) FirstReviewerThreadStartedAt(ctx context.Context, orgID, sessionID uuid.UUID) (*time.Time, error) {
+	var startedAt *time.Time
+	err := s.db.QueryRow(ctx, `
+		SELECT MIN(started_at)
+		FROM session_threads
+		WHERE org_id = $1 AND session_id = $2
+		  AND execution_mode = 'review'`, orgID, sessionID).Scan(&startedAt)
+	if err != nil {
+		return nil, fmt.Errorf("first reviewer thread start: %w", err)
+	}
+	return startedAt, nil
+}
+
 // SetStreams injects the Redis helper used to fan code review lifecycle changes
 // out to the org-scoped SSE stream. Publishing is best-effort: a nil helper (no
 // Redis) simply means no live events and the frontend falls back to polling.
