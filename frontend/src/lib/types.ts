@@ -419,11 +419,49 @@ export interface CodeReviewAssessmentDetail extends CodeReviewAssessmentSummary 
   failure_detail?: string | null;
   github_review_url?: string | null;
 }
+export interface CodeReviewEvidenceCitation {
+  evidence_id: string;
+  quote?: string;
+}
+export type CodeReviewFindingReassessmentStatus = "retained" | "resolved";
+export interface CodeReviewFindingReassessment {
+  finding_id: string;
+  status: CodeReviewFindingReassessmentStatus;
+  reason: string;
+  evidence_citations: CodeReviewEvidenceCitation[];
+}
+export interface CodeReviewRequirementReassessment {
+  key: string;
+  status: "satisfied" | "missing";
+  reason: string;
+  evidence_citations: CodeReviewEvidenceCitation[];
+}
+export interface CodeReviewTextEvidence {
+  evidence_id: string;
+  surface: string;
+  section: string;
+  provider_object_id: string;
+  source_url: string;
+  author_login: string;
+  content: string;
+  content_digest: string;
+}
+export interface CodeReviewTextEvidenceSnapshot {
+  items: CodeReviewTextEvidence[];
+  unclassified_digest: string;
+  complete: boolean;
+  source_provenance_complete: boolean;
+  parse_ambiguous: boolean;
+}
 export interface CodeReviewAssessmentEvidence {
   assessment: CodeReviewAssessmentDetail;
   source_assessment_id?: string | null;
   agent_results: CodeReviewAgentResult[];
   findings: CodeReviewFinding[];
+  source_findings?: CodeReviewFinding[] | null;
+  finding_reassessments?: CodeReviewFindingReassessment[] | null;
+  requirement_reassessments?: CodeReviewRequirementReassessment[] | null;
+  text_evidence?: CodeReviewTextEvidenceSnapshot | null;
   prompt_records: CodeReviewPromptRecord[];
   execution?: { status: string; failure_detail?: string | null; native_context?: boolean | null } | null;
   visual_evidence?: CodeReviewVisualEvidenceSnapshot | null;

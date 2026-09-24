@@ -105,20 +105,12 @@ func (h *CodeReviewHandler) AssessmentEvidence(w http.ResponseWriter, r *http.Re
 		writeError(w, r, 500, "CODE_REVIEW_EVIDENCE_FAILED", "failed to load visual evidence", err)
 		return
 	}
+	outcome, textEvidence, err := codeReviewAssessmentAuditFields(assessment)
+	if err != nil {
+		writeError(w, r, 500, "CODE_REVIEW_EVIDENCE_FAILED", "failed to load assessment audit evidence", err)
+		return
+	}
 	if visual != nil && assessment.ReviewScope == models.CodeReviewScopeEvidenceOnly {
-		var outcome struct {
-			Synthesis struct {
-				DescriptionAssessments []struct {
-					EvidenceIDs []string `json:"evidence_ids"`
-				} `json:"description_assessments"`
-			} `json:"synthesis"`
-		}
-		if len(assessment.StructuredOutcome) > 0 {
-			if err = json.Unmarshal(assessment.StructuredOutcome, &outcome); err != nil {
-				writeError(w, r, 500, "CODE_REVIEW_EVIDENCE_FAILED", "failed to load assessment outcome", err)
-				return
-			}
-		}
 		seen := make(map[string]bool)
 		for _, requirement := range outcome.Synthesis.DescriptionAssessments {
 			for _, id := range requirement.EvidenceIDs {
@@ -128,8 +120,56 @@ func (h *CodeReviewHandler) AssessmentEvidence(w http.ResponseWriter, r *http.Re
 				}
 			}
 		}
+		visualIDs := make(map[string]bool, len(visual.Evidence))
+		for _, item := range visual.Evidence {
+			visualIDs[item.EvidenceID] = true
+		}
+		for _, reassessment := range outcome.FindingReassessments {
+			for _, citation := range reassessment.EvidenceCitations {
+				if visualIDs[citation.EvidenceID] && !seen[citation.EvidenceID] {
+					cited = append(cited, citation.EvidenceID)
+					seen[citation.EvidenceID] = true
+				}
+			}
+		}
+		for _, reassessment := range outcome.RequirementReassessments {
+			for _, citation := range reassessment.EvidenceCitations {
+				if visualIDs[citation.EvidenceID] && !seen[citation.EvidenceID] {
+					cited = append(cited, citation.EvidenceID)
+					seen[citation.EvidenceID] = true
+				}
+			}
+		}
 	}
-	writeJSON(w, 200, map[string]any{"data": map[string]any{"assessment": assessment, "source_assessment_id": sourceID, "agent_results": results, "findings": findings, "prompt_records": records, "execution": dispatch, "visual_evidence": visual, "cited_visual_evidence_ids": cited}})
+	writeJSON(w, 200, map[string]any{"data": map[string]any{"assessment": assessment, "source_assessment_id": sourceID, "agent_results": results, "findings": findings, "source_findings": findings, "finding_reassessments": outcome.FindingReassessments, "requirement_reassessments": outcome.RequirementReassessments, "text_evidence": textEvidence, "prompt_records": records, "execution": dispatch, "visual_evidence": visual, "cited_visual_evidence_ids": cited}})
+}
+
+type codeReviewAssessmentAuditOutcome struct {
+	FindingReassessments     []models.CodeReviewFindingReassessment     `json:"finding_reassessments"`
+	RequirementReassessments []models.CodeReviewRequirementReassessment `json:"requirement_reassessments"`
+	Synthesis                struct {
+		DescriptionAssessments []struct {
+			EvidenceIDs []string `json:"evidence_ids"`
+		} `json:"description_assessments"`
+	} `json:"synthesis"`
+}
+
+func codeReviewAssessmentAuditFields(assessment models.CodeReviewAssessment) (codeReviewAssessmentAuditOutcome, json.RawMessage, error) {
+	var outcome codeReviewAssessmentAuditOutcome
+	if len(assessment.StructuredOutcome) > 0 {
+		if err := json.Unmarshal(assessment.StructuredOutcome, &outcome); err != nil {
+			return outcome, nil, err
+		}
+	}
+	var manifest struct {
+		TextEvidence json.RawMessage `json:"text_evidence"`
+	}
+	if len(assessment.InputManifest) > 0 {
+		if err := json.Unmarshal(assessment.InputManifest, &manifest); err != nil {
+			return outcome, nil, err
+		}
+	}
+	return outcome, manifest.TextEvidence, nil
 }
 
 func (h *CodeReviewHandler) withAssessmentSummaries(ctx context.Context, orgID uuid.UUID, items []models.CodeReviewListItem) ([]models.CodeReviewListItem, error) {

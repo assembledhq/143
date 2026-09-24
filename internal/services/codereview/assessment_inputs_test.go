@@ -16,7 +16,8 @@ func reviewTestCapture() ReviewInputCapture {
 		Contract: ReviewContractInput{PolicyID: uuid.New(), PolicyVersion: 1, PolicyDigest: d, RosterDigest: d,
 			ModelConfigurationDigest: d, PromptContractVersion: "v1", PromptContentDigest: d, InstructionsDigest: d, ExternalInputsComplete: true},
 		Title: "Add card", Description: "Add card\n", Visual: ReviewVisualInput{CaptureComplete: true, SourceProvenanceComplete: true},
-		Gates: ReviewGateInput{SnapshotDigest: d, Complete: true},
+		TextEvidence: ReviewTextInput{Items: []ReviewTextEvidence{newReviewTextEvidence("pull_request_description", "42", "https://github.com/acme/repo/pull/42", "author", "Add card\n", "full")}, UnclassifiedDigest: digestJSON([]string{}), Complete: true, SourceProvenanceComplete: true},
+		Gates:        ReviewGateInput{SnapshotDigest: d, EligibilityDigest: d, ChecksDigest: d, DynamicDigest: d, ChecksVerified: true, Complete: true},
 	}
 }
 
@@ -40,6 +41,8 @@ func TestBuildReviewInputManifest(t *testing.T) {
 			t.Parallel()
 			c := reviewTestCapture()
 			tt.mutate(&c)
+			c.TextEvidence.Items[0].Content = c.Description
+			c.TextEvidence.Items[0].ContentDigest = digestBytes(c.Description)
 			m, err := BuildReviewInputManifest(c)
 			if tt.wantErr {
 				require.Error(t, err, "incomplete capture must fail closed")

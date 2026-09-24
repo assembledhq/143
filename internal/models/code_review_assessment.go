@@ -27,6 +27,9 @@ type CodeReviewAssessmentRouteReason string
 const (
 	CodeReviewRouteInitialFull       CodeReviewAssessmentRouteReason = "initial_full"
 	CodeReviewRouteVisualChanged     CodeReviewAssessmentRouteReason = "visual_changed"
+	CodeReviewRouteEvidenceChanged   CodeReviewAssessmentRouteReason = "evidence_changed"
+	CodeReviewRouteChecksChanged     CodeReviewAssessmentRouteReason = "checks_changed"
+	CodeReviewRouteNoEvidenceChange  CodeReviewAssessmentRouteReason = "no_evidence_change"
 	CodeReviewRouteCodeChanged       CodeReviewAssessmentRouteReason = "code_changed"
 	CodeReviewRouteContractChanged   CodeReviewAssessmentRouteReason = "contract_changed"
 	CodeReviewRouteIntentChanged     CodeReviewAssessmentRouteReason = "intent_changed"
@@ -42,7 +45,7 @@ const (
 
 func (r CodeReviewAssessmentRouteReason) Validate() error {
 	switch r {
-	case CodeReviewRouteInitialFull, CodeReviewRouteVisualChanged, CodeReviewRouteCodeChanged, CodeReviewRouteContractChanged, CodeReviewRouteIntentChanged, CodeReviewRouteRequestChanged, CodeReviewRouteGatesChanged, CodeReviewRouteNoBaseline, CodeReviewRouteBaselineBlocked, CodeReviewRouteEvidenceInvalid, CodeReviewRouteInputsUnavailable, CodeReviewRouteForceFresh, CodeReviewRouteDispute:
+	case CodeReviewRouteInitialFull, CodeReviewRouteVisualChanged, CodeReviewRouteEvidenceChanged, CodeReviewRouteChecksChanged, CodeReviewRouteNoEvidenceChange, CodeReviewRouteCodeChanged, CodeReviewRouteContractChanged, CodeReviewRouteIntentChanged, CodeReviewRouteRequestChanged, CodeReviewRouteGatesChanged, CodeReviewRouteNoBaseline, CodeReviewRouteBaselineBlocked, CodeReviewRouteEvidenceInvalid, CodeReviewRouteInputsUnavailable, CodeReviewRouteForceFresh, CodeReviewRouteDispute:
 		return nil
 	}
 	return fmt.Errorf("invalid code review assessment route reason %q", r)

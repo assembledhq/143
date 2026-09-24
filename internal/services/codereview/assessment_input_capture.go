@@ -52,6 +52,7 @@ type assessmentFileLister interface {
 type assessmentSnapshotter interface {
 	scheduleSnapshotter
 	PullRequestSyncer
+	DiscoverCodeReviewTextEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewTextDiscovery, error)
 }
 
 type assessmentExternalContextResolver interface {
@@ -151,6 +152,9 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	sort.Slice(summary.Checks, func(i, j int) bool {
 		a, b := summary.Checks[i], summary.Checks[j]
 		if a.Name == b.Name {
+			if a.Provider == b.Provider {
+				return a.Category < b.Category
+			}
 			return a.Provider < b.Provider
 		}
 		return a.Name < b.Name
@@ -162,6 +166,16 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	visual, err := s.visual.Capture(ctx, CaptureVisualEvidenceInput{Fresh: in.Fresh, OrgID: in.OrgID, RepositoryID: in.RepositoryID, SessionID: in.SessionID, AssessmentID: &in.AssessmentID, PullRequestNumber: pr.GitHubPRNumber, HeadSHA: snapshot.HeadSHA})
 	if err != nil {
 		return result, err
+	}
+	textDiscovery, err := s.snapshots.DiscoverCodeReviewTextEvidence(ctx, in.OrgID, in.RepositoryID, pr.GitHubPRNumber)
+	if err != nil {
+		return result, err
+	}
+	if !textDiscovery.Complete {
+		return result, fmt.Errorf("%w: text evidence exceeds the complete capture budget", ErrAssessmentReuseUnavailable)
+	}
+	if textDiscovery.HeadSHA != snapshot.HeadSHA || textDiscovery.Body != snapshot.Body {
+		return result, errors.New("pull request changed during text evidence capture")
 	}
 	// Bracket the multi-request capture. A change during capture remains pending
 	// instead of creating an input manifest made from two different revisions.
@@ -196,6 +210,53 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 		}
 		images = append(images, ReviewVisualImage{SourceID: e.Source.SourceID, SourceURL: e.Source.SourceURL, SourceText: e.Source.ContextText, AltText: e.Source.AltText, ContentDigest: content})
 	}
+	textItems := make([]ReviewTextEvidence, 0, 1+len(textDiscovery.Sources))
+	prURL := "https://github.com/" + repo.FullName + "/pull/" + fmt.Sprint(pr.GitHubPRNumber)
+	textItems = append(textItems, newReviewTextEvidence("pull_request_description", fmt.Sprint(pr.GitHubPRNumber), prURL, snapshot.AuthorLogin, snapshot.Body, "full"))
+	_, descriptionSections, descriptionErr := splitReviewEvidenceSections(snapshot.Body)
+	parseAmbiguous := descriptionErr != nil
+	for _, section := range descriptionSections {
+		textItems = append(textItems, newReviewTextEvidence("pull_request_description", fmt.Sprint(pr.GitHubPRNumber), prURL, snapshot.AuthorLogin, section.Content, section.Label))
+	}
+	var unclassified []struct{ Surface, ProviderObjectID, Intent string }
+	for _, source := range textDiscovery.Sources {
+		if source.SourceURL == "" || source.ProviderObjectID == "" {
+			return result, fmt.Errorf("%w: text source lacks provenance", ErrAssessmentReuseUnavailable)
+		}
+		intent, sections, parseErr := splitReviewEvidenceSections(source.Body)
+		if parseErr != nil {
+			parseAmbiguous = true
+			intent = source.Body
+		}
+		if strings.TrimSpace(intent) != "" {
+			unclassified = append(unclassified, struct{ Surface, ProviderObjectID, Intent string }{string(source.Surface), source.ProviderObjectID, intent})
+		}
+		for _, section := range sections {
+			textItems = append(textItems, newReviewTextEvidence(string(source.Surface), source.ProviderObjectID, source.SourceURL, source.AuthorLogin, section.Content, section.Label))
+		}
+	}
+	// A check projection proves only the named check's reported status for this
+	// head. Its details URL is provenance, not a fetched or verified test log.
+	checksVerified := summary.ChecksConfirmed && summary.CheckSetComplete != nil && *summary.CheckSetComplete
+	seenChecks := make(map[string]bool, len(summary.Checks))
+	checkBytes := 0
+	if len(summary.Checks) > 100 {
+		return result, fmt.Errorf("%w: check inventory exceeds capture budget", ErrAssessmentReuseUnavailable)
+	}
+	for _, check := range summary.Checks {
+		identity := check.Provider + ":" + check.Name + ":" + string(check.Category)
+		checkBytes += len(check.Name) + len(check.Provider) + len(check.Summary) + len(check.DetailsURL)
+		if strings.TrimSpace(check.Name) == "" || seenChecks[identity] || len(check.Summary) > 4096 || checkBytes > 64*1024 {
+			return result, fmt.Errorf("%w: check status lacks unique bounded provenance", ErrAssessmentReuseUnavailable)
+		}
+		seenChecks[identity] = true
+		sourceURL := check.DetailsURL
+		if sourceURL == "" {
+			sourceURL = prURL + "/checks"
+		}
+		content := fmt.Sprintf("Check: %s\nProvider: %s\nCategory: %s\nStatus: %s\nHead: %s\nSummary: %s\n", check.Name, check.Provider, check.Category, check.Status, snapshot.HeadSHA, check.Summary)
+		textItems = append(textItems, newReviewTextEvidence("check_status", identity, sourceURL, check.Provider, content, "status"))
+	}
 	text := ""
 	if in.RequestContext != nil {
 		text = in.RequestContext.Body
@@ -226,20 +287,30 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 			Roster     models.CodeReviewAgentRoster
 			Org        json.RawMessage
 			Repository json.RawMessage
-		}{config.AgentRoster, org.Settings, repo.Settings}), PromptContractVersion: "code-review-recheck-v1", PromptContentDigest: promptDigest, InstructionsDigest: digestJSON(struct {
+		}{config.AgentRoster, org.Settings, repo.Settings}), PromptContractVersion: "code-review-recheck-v2", PromptContentDigest: promptDigest, InstructionsDigest: digestJSON(struct {
 			Head, Base, Review, Approval string
 			Repository                   json.RawMessage
 			ExternalContextDigest        string
 		}{snapshot.HeadSHA, snapshot.BaseSHA, config.ReviewInstructions, config.AutomatedApprovalPolicy, repo.Settings, externalDigest}), ExternalInputsComplete: true},
-		Title: snapshot.Title, Description: snapshot.Body, Visual: ReviewVisualInput{Images: images, CaptureComplete: visual.Complete && !visual.Overflow && visual.OmittedSourceCount == 0, SourceProvenanceComplete: visual.Complete}, Request: ReviewRequestInput{SubstantiveText: text},
-		Gates: ReviewGateInput{SnapshotDigest: digestJSON(struct {
-			Summary           models.PullRequestHealthSummary
+		Title: snapshot.Title, Description: snapshot.Body, Visual: ReviewVisualInput{Images: images, CaptureComplete: visual.Complete && !visual.Overflow && visual.OmittedSourceCount == 0, SourceProvenanceComplete: visual.Complete}, TextEvidence: ReviewTextInput{Items: textItems, UnclassifiedDigest: digestJSON(unclassified), Complete: true, SourceProvenanceComplete: true, ParseAmbiguous: parseAmbiguous}, Request: ReviewRequestInput{SubstantiveText: text},
+		Gates: ReviewGateInput{EligibilityDigest: digestJSON(struct {
+			MergeGuard        string
+			HasConflicts      bool
 			Author            string
 			ActiveAuthorTeams []string
 			Fork, Draft       bool
 			State             string
-		}{summary, snapshot.AuthorLogin, activeAuthorTeams, snapshot.FromFork, snapshot.IsDraft, snapshot.State}), Complete: true},
+		}{reviewMergeGuard(summary.MergeState), summary.HasConflicts, snapshot.AuthorLogin, activeAuthorTeams, snapshot.FromFork, snapshot.IsDraft, snapshot.State}), ChecksDigest: digestJSON(struct {
+			FailingTestCount int
+			ChecksConfirmed  bool
+			CheckSetComplete *bool
+			Checks           []models.PullRequestCheckSummary
+		}{summary.FailingTestCount, summary.ChecksConfirmed, summary.CheckSetComplete, summary.Checks}), DynamicDigest: digestJSON(struct {
+			MergeState       models.PullRequestMergeState
+			NeedsAgentAction bool
+		}{summary.MergeState, summary.NeedsAgentAction}), ChecksVerified: checksVerified, Complete: true},
 	}
+	input.Gates.SnapshotDigest = digestJSON([]string{input.Gates.EligibilityDigest, input.Gates.ChecksDigest, input.Gates.DynamicDigest})
 	manifest, err := BuildReviewInputManifest(input)
 	if err != nil {
 		return result, fmt.Errorf("capture assessment inputs: %w", err)
@@ -249,4 +320,19 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	pr.HeadSHA = &snapshot.HeadSHA
 	pr.BaseSHA = &snapshot.BaseSHA
 	return AssessmentInputCaptureResult{Manifest: manifest, VisualEvidence: visual, PullRequest: pr, Policy: *resolved.Policy, Files: files, Snapshot: snapshot}, nil
+}
+
+func reviewMergeGuard(state models.PullRequestMergeState) string {
+	switch state {
+	case models.PullRequestMergeStateBehind, models.PullRequestMergeStateConflicted,
+		models.PullRequestMergeStateMergeabilityPending, models.PullRequestMergeStateUnknown:
+		return string(state)
+	default:
+		return "reviewable"
+	}
+}
+
+func newReviewTextEvidence(surface, providerObjectID, sourceURL, authorLogin, content, section string) ReviewTextEvidence {
+	identity := surface + ":" + providerObjectID + ":" + section
+	return ReviewTextEvidence{EvidenceID: "te_" + digestBytes(identity)[:24], Surface: surface, ProviderObjectID: providerObjectID, SourceURL: sourceURL, AuthorLogin: authorLogin, Section: section, Content: content, ContentDigest: digestBytes(content)}
 }

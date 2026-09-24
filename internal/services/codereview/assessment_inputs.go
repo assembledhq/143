@@ -14,7 +14,7 @@ import (
 )
 
 // ReviewInputManifestVersion changes whenever the meaning of a captured field changes.
-const ReviewInputManifestVersion = 1
+const ReviewInputManifestVersion = 2
 
 // ReviewChangedFile binds a path and its exact diff identity. PatchDigest must
 // describe the fetched patch, including its availability; a missing patch is
@@ -67,6 +67,27 @@ type ReviewVisualInput struct {
 	SourceProvenanceComplete bool                `json:"source_provenance_complete"`
 }
 
+// ReviewTextEvidence is immutable, exact source text. URLs provide provenance
+// only; their targets are not fetched or accepted as evidence by this capture.
+type ReviewTextEvidence struct {
+	EvidenceID       string `json:"evidence_id"`
+	Surface          string `json:"surface"`
+	ProviderObjectID string `json:"provider_object_id"`
+	SourceURL        string `json:"source_url"`
+	AuthorLogin      string `json:"author_login"`
+	Section          string `json:"section"`
+	Content          string `json:"content"`
+	ContentDigest    string `json:"content_digest"`
+}
+
+type ReviewTextInput struct {
+	Items                    []ReviewTextEvidence `json:"items"`
+	UnclassifiedDigest       string               `json:"unclassified_digest"`
+	Complete                 bool                 `json:"complete"`
+	SourceProvenanceComplete bool                 `json:"source_provenance_complete"`
+	ParseAmbiguous           bool                 `json:"parse_ambiguous"`
+}
+
 // ReviewRequestInput excludes request UUID, actor, and trigger envelope. A
 // substantive objection or instruction is included and must change routing.
 type ReviewRequestInput struct {
@@ -75,18 +96,23 @@ type ReviewRequestInput struct {
 }
 
 type ReviewGateInput struct {
-	SnapshotDigest string `json:"snapshot_digest"`
-	Complete       bool   `json:"complete"`
+	SnapshotDigest    string `json:"snapshot_digest"`
+	EligibilityDigest string `json:"eligibility_digest"`
+	ChecksDigest      string `json:"checks_digest"`
+	DynamicDigest     string `json:"dynamic_digest"`
+	ChecksVerified    bool   `json:"checks_verified"`
+	Complete          bool   `json:"complete"`
 }
 
 type ReviewInputCapture struct {
-	Code        ReviewCodeInput     `json:"code"`
-	Contract    ReviewContractInput `json:"contract"`
-	Title       string              `json:"title"`
-	Description string              `json:"description"`
-	Visual      ReviewVisualInput   `json:"visual"`
-	Request     ReviewRequestInput  `json:"request"`
-	Gates       ReviewGateInput     `json:"gates"`
+	Code         ReviewCodeInput     `json:"code"`
+	Contract     ReviewContractInput `json:"contract"`
+	Title        string              `json:"title"`
+	Description  string              `json:"description"`
+	Visual       ReviewVisualInput   `json:"visual"`
+	TextEvidence ReviewTextInput     `json:"text_evidence"`
+	Request      ReviewRequestInput  `json:"request"`
+	Gates        ReviewGateInput     `json:"gates"`
 }
 
 // ReviewInputManifest is serializable into an assessment's json.RawMessage.
@@ -101,12 +127,14 @@ type ReviewInputManifest struct {
 	Title          string              `json:"title"`
 	Description    string              `json:"description"`
 	Visual         ReviewVisualInput   `json:"visual"`
+	TextEvidence   ReviewTextInput     `json:"text_evidence"`
 	Request        ReviewRequestInput  `json:"request"`
 	Gates          ReviewGateInput     `json:"gates"`
 	CodeDigest     string              `json:"code_digest"`
 	ContractDigest string              `json:"contract_digest"`
 	IntentDigest   string              `json:"intent_digest"`
 	VisualDigest   string              `json:"visual_digest"`
+	TextDigest     string              `json:"text_digest"`
 	RequestDigest  string              `json:"request_digest"`
 	GateDigest     string              `json:"gate_digest"`
 	InputDigest    string              `json:"input_digest"`
@@ -117,6 +145,7 @@ func BuildReviewInputManifest(input ReviewInputCapture) (ReviewInputManifest, er
 	// as immutable source evidence for the assessment.
 	input.Code.Files = append([]ReviewChangedFile(nil), input.Code.Files...)
 	input.Visual.Images = append([]ReviewVisualImage(nil), input.Visual.Images...)
+	input.TextEvidence.Items = append([]ReviewTextEvidence(nil), input.TextEvidence.Items...)
 	if input.Code.OrgID == uuid.Nil || input.Code.RepositoryID == uuid.Nil || input.Code.PullRequestID == uuid.Nil ||
 		strings.TrimSpace(input.Code.HeadSHA) == "" || strings.TrimSpace(input.Code.BaseSHA) == "" ||
 		strings.TrimSpace(input.Code.BaseRef) == "" || !input.Code.FilesComplete {
@@ -131,8 +160,28 @@ func BuildReviewInputManifest(input ReviewInputCapture) (ReviewInputManifest, er
 			input.Contract.PromptContentDigest, input.Contract.InstructionsDigest) {
 		return ReviewInputManifest{}, errors.New("incomplete review contract")
 	}
-	if !input.Visual.CaptureComplete || !input.Visual.SourceProvenanceComplete || !validDigest(input.Gates.SnapshotDigest) || !input.Gates.Complete {
+	if !input.Visual.CaptureComplete || !input.Visual.SourceProvenanceComplete ||
+		!allDigests(input.Gates.SnapshotDigest, input.Gates.EligibilityDigest, input.Gates.ChecksDigest, input.Gates.DynamicDigest) || !input.Gates.Complete {
 		return ReviewInputManifest{}, errors.New("incomplete visual evidence or live gates")
+	}
+	if !input.TextEvidence.Complete || !input.TextEvidence.SourceProvenanceComplete || !validDigest(input.TextEvidence.UnclassifiedDigest) {
+		return ReviewInputManifest{}, errors.New("incomplete text evidence")
+	}
+	fullBodyCount := 0
+	for _, item := range input.TextEvidence.Items {
+		if item.EvidenceID == "" || item.Surface == "" || item.ProviderObjectID == "" || item.SourceURL == "" ||
+			item.Section == "" || !validDigest(item.ContentDigest) || item.ContentDigest != digestBytes(item.Content) {
+			return ReviewInputManifest{}, fmt.Errorf("incomplete text evidence %q", item.EvidenceID)
+		}
+		if item.Surface == "pull_request_description" && item.Section == "full" {
+			fullBodyCount++
+			if item.Content != input.Description {
+				return ReviewInputManifest{}, errors.New("PR description text evidence differs from captured description")
+			}
+		}
+	}
+	if fullBodyCount != 1 {
+		return ReviewInputManifest{}, errors.New("exactly one full PR description text source is required")
 	}
 	for _, file := range input.Code.Files {
 		if file.Path == "" || file.Status == "" || !validDigest(file.PatchDigest) {
@@ -145,13 +194,16 @@ func BuildReviewInputManifest(input ReviewInputCapture) (ReviewInputManifest, er
 		}
 	}
 	intent, err := normalizeReviewIntent(input.Description)
-	reuseEligible := err == nil
+	reuseEligible := err == nil && !input.TextEvidence.ParseAmbiguous
 	if err != nil {
 		intent = input.Description
 	}
 	// GitHub's file order and evidence discovery order are not semantic inputs.
 	sort.Slice(input.Code.Files, func(i, j int) bool { return input.Code.Files[i].Path < input.Code.Files[j].Path })
 	sort.Slice(input.Visual.Images, func(i, j int) bool { return input.Visual.Images[i].SourceID < input.Visual.Images[j].SourceID })
+	sort.Slice(input.TextEvidence.Items, func(i, j int) bool {
+		return input.TextEvidence.Items[i].EvidenceID < input.TextEvidence.Items[j].EvidenceID
+	})
 	for i := 1; i < len(input.Code.Files); i++ {
 		if input.Code.Files[i].Path == input.Code.Files[i-1].Path {
 			return ReviewInputManifest{}, errors.New("duplicate changed file")
@@ -162,8 +214,13 @@ func BuildReviewInputManifest(input ReviewInputCapture) (ReviewInputManifest, er
 			return ReviewInputManifest{}, errors.New("duplicate visual source")
 		}
 	}
+	for i := 1; i < len(input.TextEvidence.Items); i++ {
+		if input.TextEvidence.Items[i].EvidenceID == input.TextEvidence.Items[i-1].EvidenceID {
+			return ReviewInputManifest{}, errors.New("duplicate text evidence source")
+		}
+	}
 	m := ReviewInputManifest{InputVersion: ReviewInputManifestVersion, ReuseEligible: reuseEligible, Code: input.Code, Contract: input.Contract,
-		Title: input.Title, Description: input.Description, Visual: input.Visual, Request: input.Request, Gates: input.Gates}
+		Title: input.Title, Description: input.Description, Visual: input.Visual, TextEvidence: input.TextEvidence, Request: input.Request, Gates: input.Gates}
 	m.CodeDigest = digestJSON(m.Code)
 	m.ContractDigest = digestJSON(m.Contract)
 	m.IntentDigest = digestJSON(struct {
@@ -171,15 +228,21 @@ func BuildReviewInputManifest(input ReviewInputCapture) (ReviewInputManifest, er
 		ReuseEligible                bool
 	}{m.Title, intent, reuseEligible})
 	m.VisualDigest = digestJSON(m.Visual)
+	m.TextDigest = digestJSON(m.TextEvidence)
 	m.RequestDigest = digestJSON(m.Request)
 	m.GateDigest = digestJSON(m.Gates)
-	m.InputDigest = digestJSON([]string{m.CodeDigest, m.ContractDigest, m.IntentDigest, m.VisualDigest, m.RequestDigest, m.GateDigest})
+	m.InputDigest = digestJSON([]string{m.CodeDigest, m.ContractDigest, m.IntentDigest, m.VisualDigest, m.TextDigest, m.RequestDigest, m.GateDigest})
 	return m, nil
 }
 
 func digestJSON(v any) string {
 	b, _ := json.Marshal(v) // only fixed, JSON-serializable input structs reach this helper
 	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+func digestBytes(v string) string {
+	sum := sha256.Sum256([]byte(v))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -202,6 +265,11 @@ func allDigests(v ...string) bool {
 // is either retained byte-for-byte or rejected. This deliberately grants no
 // semantic interpretation to image alt text.
 func normalizeReviewIntent(description string) (string, error) {
+	intent, _, err := splitReviewEvidenceSections(description)
+	return intent, err
+}
+
+func normalizeReviewIntentPlain(description string) (string, error) {
 	var out strings.Builder
 	for _, line := range strings.SplitAfter(description, "\n") {
 		if strings.HasPrefix(line, "    ") || strings.HasPrefix(line, "\t") {

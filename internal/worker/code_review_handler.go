@@ -79,6 +79,10 @@ type codeReviewDescriptionAssessment struct {
 	EvidenceBasis models.CodeReviewDescriptionEvidenceBasis `json:"evidence_basis"`
 	EvidenceIDs   []string                                  `json:"evidence_ids"`
 	Reason        string                                    `json:"reason"`
+	// Set only after the recheck supervisor validates a citation against its
+	// immutable current text capture. Model-authored full-review output cannot
+	// claim captured-text support without that independent validation.
+	currentTextCitationValidated bool
 }
 
 type codeReviewOrchestratorFinding struct {
@@ -4034,6 +4038,12 @@ func validateCodeReviewDescriptionAssessmentEvidence(assessment codeReviewDescri
 		}
 		if len(seenIDs) != 0 {
 			return errors.New("non-image satisfaction must not cite visual evidence IDs")
+		}
+		if assessment.EvidenceBasis == models.CodeReviewDescriptionEvidenceBasisCapturedText {
+			if !assessment.currentTextCitationValidated {
+				return errors.New("captured text basis requires validated current citations")
+			}
+			return nil
 		}
 		switch assessment.EvidenceBasis {
 		case models.CodeReviewDescriptionEvidenceBasisPreviewLink,

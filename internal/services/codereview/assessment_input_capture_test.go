@@ -73,6 +73,9 @@ func (f *assessmentSnapshotFixture) PrepareCodeReviewPullRequestSnapshot(context
 func (f *assessmentSnapshotFixture) SyncPullRequestState(context.Context, uuid.UUID, uuid.UUID) error {
 	return f.syncErr
 }
+func (f *assessmentSnapshotFixture) DiscoverCodeReviewTextEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewTextDiscovery, error) {
+	return ghservice.CodeReviewTextDiscovery{HeadSHA: f.snapshot.HeadSHA, Body: f.snapshot.Body, Complete: true}, nil
+}
 
 func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 	t.Parallel()
@@ -117,6 +120,8 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			require.NoError(t, err, "complete authoritative inputs should produce a manifest")
 			require.NoError(t, ValidateReviewInputManifest(result.Manifest), "persisted manifest must rebuild exactly")
 			require.Equal(t, "main", result.Manifest.Code.BaseRef, "base ref must come from GitHub rather than repository default")
+			require.True(t, result.Manifest.Gates.ChecksVerified, "complete confirmed check inventory should support check-only rechecks")
+			require.Equal(t, []ReviewTextEvidence{newReviewTextEvidence("pull_request_description", "42", "https://github.com/acme/web/pull/42", "", "Intent stays unchanged", "full")}, result.Manifest.TextEvidence.Items, "full PR description should be immutable citable text")
 			require.Equal(t, 2, snapshots.calls, "provider snapshot must bracket files and visual capture")
 			require.True(t, visual.request.Fresh, "publication refresh must bypass immutable visual snapshot restoration")
 			require.Equal(t, in.AssessmentID, *visual.request.AssessmentID, "capture must retain assessment identity")
@@ -141,4 +146,38 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			require.NotEqual(t, member.Manifest.GateDigest, nonmember.Manifest.GateDigest, "author team membership changes must invalidate approval gates")
 		})
 	}
+}
+
+func TestAssessmentInputCaptureCheckStatusProvenance(t *testing.T) {
+	t.Parallel()
+	orgID, repoID, prID := uuid.New(), uuid.New(), uuid.New()
+	in := AssessmentInputCaptureRequest{OrgID: orgID, RepositoryID: repoID, PullRequestID: prID, SessionID: uuid.New(), AssessmentID: uuid.New()}
+	head, base := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	policy := models.CodeReviewPolicyRecord{ID: uuid.New(), OrgID: orgID, Version: 1, Enabled: true}
+	policies := &policyStub{resolved: models.CodeReviewResolvedPolicy{Config: policy.Config(), Policy: &policy}}
+	snapshots := &assessmentSnapshotFixture{snapshot: ghservice.CodeReviewPullRequestSnapshot{State: "open", Number: 42, Title: "Update view", Body: "Purpose\n## Testing\nPending CI\n", HeadSHA: head, BaseSHA: base, BaseRef: "main"}}
+	prs := &pullRequestStub{result: models.PullRequest{ID: prID, OrgID: orgID, GitHubRepo: "acme/web", GitHubPRNumber: 42}, health: models.PullRequestHealthCurrent{HeadSHA: head, BaseSHA: base, SummaryJSON: json.RawMessage(`{"merge_state":"blocked","needs_agent_action":true,"failing_test_count":1,"checks_confirmed":true,"check_set_complete":true,"checks":[{"name":"unit","category":"test","status":"failed","provider":"GitHub","details_url":"https://example.test/check","summary":"tests failed"}]}`)}}
+	visual := &assessmentVisualFixture{snapshot: models.CodeReviewVisualEvidenceSnapshot{AssessmentID: &in.AssessmentID, Complete: true}}
+	s := NewAssessmentInputCaptureService(policies, prs, &visualEvidenceRepositoryStoreStub{repository: models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/web", InstallationID: 1}}, assessmentOrgFixture{models.Organization{Settings: json.RawMessage(`{}`)}}, snapshots, visual, assessmentFilesFixture{})
+	s.SetExternalContextResolver(assessmentExternalFixture{})
+	failed, err := s.CaptureAssessmentInputs(context.Background(), in)
+	require.NoError(t, err, "failed check projection should be capturable")
+	require.Equal(t, 3, len(failed.Manifest.TextEvidence.Items), "full body, Testing section, and check status should be citable")
+	check := failed.Manifest.TextEvidence.Items[0]
+	for _, item := range failed.Manifest.TextEvidence.Items {
+		if item.Surface == "check_status" {
+			check = item
+		}
+	}
+	require.Equal(t, "status", check.Section, "check source should declare status-only semantics")
+	require.Contains(t, check.Content, "Status: failed", "check evidence should quote the authoritative status")
+	require.Equal(t, "https://example.test/check", check.SourceURL, "details URL should be retained as provenance")
+	prs.health.SummaryJSON = json.RawMessage(`{"merge_state":"clean","needs_agent_action":false,"failing_test_count":0,"checks_confirmed":true,"check_set_complete":true,"checks":[{"name":"unit","category":"test","status":"passed","provider":"GitHub","details_url":"https://example.test/check","summary":"tests passed"}]}`)
+	passed, err := s.CaptureAssessmentInputs(context.Background(), in)
+	require.NoError(t, err, "passing check projection should be capturable")
+	require.Equal(t, failed.Manifest.Gates.EligibilityDigest, passed.Manifest.Gates.EligibilityDigest, "check-only update should preserve independent eligibility gates")
+	require.NotEqual(t, failed.Manifest.Gates.ChecksDigest, passed.Manifest.Gates.ChecksDigest, "check status change should alter the verified check digest")
+	require.NotEqual(t, failed.Manifest.TextDigest, passed.Manifest.TextDigest, "check status change should alter citable text evidence")
+	plan := PlanReviewRecheck(RecheckPlanInput{Current: &passed.Manifest, Baseline: &RecheckBaseline{Inputs: failed.Manifest, CompletedFull: true, CoverageComplete: true}})
+	require.Equal(t, RecheckPlan{Route: RecheckRouteEvidenceOnly, Reason: RecheckReasonChecksChanged}, plan, "fresh verified CI success should qualify without changing code or intent")
 }

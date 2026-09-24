@@ -100,8 +100,15 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		if err != nil {
 			return err
 		}
-		if baseline.Status != models.CodeReviewAssessmentCompleted || baseline.ReviewScope != models.CodeReviewScopeFull || !baseline.CoverageComplete {
+		if baseline.Status != models.CodeReviewAssessmentCompleted || baseline.ReviewScope != models.CodeReviewScopeFull || !baseline.CoverageComplete || baseline.SessionID != a.SessionID || baseline.PullRequestID != a.PullRequestID || baseline.RepositoryID != a.RepositoryID {
 			return failCodeReviewRecheck(ctx, stores, services, a, "incomplete baseline", true)
+		}
+		var baselineManifest codereviewsvc.ReviewInputManifest
+		if err = json.Unmarshal(baseline.InputManifest, &baselineManifest); err != nil {
+			return failCodeReviewRecheck(ctx, stores, services, a, "baseline inputs unavailable", true)
+		}
+		if err = codereviewsvc.ValidateReviewInputManifest(baselineManifest); err != nil {
+			return failCodeReviewRecheck(ctx, stores, services, a, "baseline inputs invalid", true)
 		}
 		results, err := stores.CodeReviewAssessments.ListAgentResults(ctx, a.OrgID, baseline.ID)
 		if err != nil {
@@ -133,7 +140,10 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		if capture.Manifest.InputDigest != a.InputDigest {
 			return failCodeReviewRecheck(ctx, stores, services, a, "inputs changed before evidence assessment", true)
 		}
-		keys, requirements, err := recheckVisualRequirements(capture.Policy.Config(), capture.Files, synthesis)
+		if capture.Manifest.CodeDigest != baselineManifest.CodeDigest || capture.Manifest.ContractDigest != baselineManifest.ContractDigest || capture.Manifest.IntentDigest != baselineManifest.IntentDigest || capture.Manifest.RequestDigest != baselineManifest.RequestDigest {
+			return failCodeReviewRecheck(ctx, stores, services, a, "baseline code or review contract changed", true)
+		}
+		requirements, err := recheckRequirements(capture.Policy.Config(), capture.Files, synthesis)
 		if err != nil {
 			return failCodeReviewRecheck(ctx, stores, services, a, err.Error(), true)
 		}
@@ -158,10 +168,12 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 				return failCodeReviewRecheck(ctx, stores, services, a, hydrateErr.Error(), true)
 			}
 			baselineContext, encodeErr := json.Marshal(struct {
-				Synthesis codeReviewOrchestratorSynthesis
-				Results   []models.CodeReviewAgentResult
-				Findings  []models.CodeReviewFinding
-			}{synthesis, completeResults, findings})
+				Synthesis         codeReviewOrchestratorSynthesis
+				Results           []models.CodeReviewAgentResult
+				Findings          []models.CodeReviewFinding
+				PriorTextEvidence codereviewsvc.ReviewTextInput
+				PriorImages       []codereviewsvc.ReviewVisualImage
+			}{synthesis, completeResults, findings, baselineManifest.TextEvidence, baselineManifest.Visual.Images})
 			if encodeErr != nil {
 				return encodeErr
 			}
@@ -169,7 +181,11 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			if encodeErr != nil {
 				return encodeErr
 			}
-			prompt := prompts.CodeReviewRecheckPrompt(prompts.CodeReviewRecheckPromptData{BaselineID: baseline.ID.String(), InputDigest: a.InputDigest, Baseline: string(baselineContext), Requirements: string(requirementJSON), VisualEvidence: codeReviewVisualEvidenceForPrompt(capture.VisualEvidence)})
+			textEvidenceJSON, encodeErr := json.Marshal(capture.Manifest.TextEvidence)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			prompt := prompts.CodeReviewRecheckPrompt(prompts.CodeReviewRecheckPromptData{BaselineID: baseline.ID.String(), InputDigest: a.InputDigest, Baseline: string(baselineContext), Requirements: string(requirementJSON), TextEvidence: string(textEvidenceJSON), VisualEvidence: codeReviewVisualEvidenceForPrompt(capture.VisualEvidence)})
 			if len(prompt) > 128*1024 {
 				return failCodeReviewRecheck(ctx, stores, services, a, "baseline exceeds recheck context budget", true)
 			}
@@ -193,12 +209,12 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		if message.ThreadID == nil || *message.ThreadID != dispatch.ThreadID || message.SessionID != a.SessionID || message.TurnNumber != dispatch.ExpectedTurn || message.Role != models.MessageRoleAssistant {
 			return failCodeReviewRecheck(ctx, stores, services, a, "recheck result does not match dispatched turn", false)
 		}
-		updated, escalationReason, err := validateCodeReviewRecheckResponse(message.Content, baseline.ID, a.InputDigest, keys, synthesis, capture.VisualEvidence)
+		validated, err := validateCodeReviewRecheckResponse(codeReviewRecheckValidationInput{Raw: message.Content, BaselineID: baseline.ID, InputDigest: a.InputDigest, Requirements: requirements, BaselineSynthesis: synthesis, BaselineFindings: findings, BaselineManifest: baselineManifest, CurrentManifest: capture.Manifest, VisualEvidence: capture.VisualEvidence})
 		if err != nil {
 			return failCodeReviewRecheck(ctx, stores, services, a, "invalid evidence response: "+err.Error(), false)
 		}
-		if escalationReason != "" {
-			return failCodeReviewRecheck(ctx, stores, services, a, "new evidence requires full review: "+escalationReason, true)
+		if validated.EscalationReason != "" {
+			return failCodeReviewRecheck(ctx, stores, services, a, "new evidence requires full review: "+validated.EscalationReason, true)
 		}
 		// Fresh capture rediscovers sources and downloads bytes without restoring
 		// or replacing this assessment's immutable evidence checkpoint.
@@ -221,16 +237,18 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		if err != nil {
 			return err
 		}
-		if _, err = codeReviewDescriptionEvaluationFromSynthesis(fresh.Policy.Config(), fresh.Files, updated, fresh.VisualEvidence); err != nil {
+		if _, err = codeReviewDescriptionEvaluationFromSynthesis(fresh.Policy.Config(), fresh.Files, validated.Synthesis, fresh.VisualEvidence); err != nil {
 			return failCodeReviewRecheck(ctx, stores, services, a, "invalid merged evidence assessment: "+err.Error(), false)
 		}
-		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{Policy: fresh.Policy.Config(), Job: payload, PullRequest: fresh.PullRequest, Health: health, AgentResults: results, Findings: findings, ChangedFiles: fresh.Files, ChangedFilesAvailable: true, OrchestratorSynthesis: updated, VisualEvidence: fresh.VisualEvidence, AssessedAt: time.Now().UTC(), SessionURL: codeReviewAssessmentURL(services.FrontendURL, a.ID), PolicySettingsURL: codeReviewPolicySettingsURL(services.FrontendURL)})
-		body += "\n\nCode review reused from assessment `" + baseline.ID.String() + "`. Updated visual evidence was checked in this assessment. [Re-check PR](" + strings.TrimRight(services.FrontendURL, "/") + "/code-reviews?recheck=" + a.ID.String() + ")."
+		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{Policy: fresh.Policy.Config(), Job: payload, PullRequest: fresh.PullRequest, Health: health, AgentResults: results, Findings: validated.EffectiveFindings, ChangedFiles: fresh.Files, ChangedFilesAvailable: true, OrchestratorSynthesis: validated.Synthesis, VisualEvidence: fresh.VisualEvidence, AssessedAt: time.Now().UTC(), SessionURL: codeReviewAssessmentURL(services.FrontendURL, a.ID), PolicySettingsURL: codeReviewPolicySettingsURL(services.FrontendURL)})
+		body += "\n\nCode review reused from assessment `" + baseline.ID.String() + "`. Updated evidence was checked in this assessment. [Re-check PR](" + strings.TrimRight(services.FrontendURL, "/") + "/code-reviews?recheck=" + a.ID.String() + ")."
 		outcome, err := json.Marshal(struct {
-			Synthesis          codeReviewOrchestratorSynthesis  `json:"synthesis"`
-			SourceAssessmentID uuid.UUID                        `json:"source_assessment_id"`
-			Dispatch           models.CodeReviewRecheckDispatch `json:"execution"`
-		}{updated, baseline.ID, dispatch})
+			Synthesis                codeReviewOrchestratorSynthesis            `json:"synthesis"`
+			SourceAssessmentID       uuid.UUID                                  `json:"source_assessment_id"`
+			Dispatch                 models.CodeReviewRecheckDispatch           `json:"execution"`
+			RequirementReassessments []models.CodeReviewRequirementReassessment `json:"requirement_reassessments"`
+			FindingReassessments     []models.CodeReviewFindingReassessment     `json:"finding_reassessments"`
+		}{validated.Synthesis, baseline.ID, dispatch, validated.RequirementReassessments, validated.FindingReassessments})
 		if err != nil {
 			return err
 		}
@@ -269,30 +287,25 @@ func recheckBaselineSynthesis(results []models.CodeReviewAgentResult) (codeRevie
 	return codeReviewOrchestratorSynthesis{}, uuid.Nil, errors.New("missing validated full-review orchestrator evidence")
 }
 
-func recheckVisualRequirements(policy models.CodeReviewPolicyConfig, files []codereviewsvc.PullRequestFile, baseline codeReviewOrchestratorSynthesis) ([]string, []models.CodeReviewDescriptionRequirement, error) {
+func recheckRequirements(policy models.CodeReviewPolicyConfig, files []codereviewsvc.PullRequestFile, baseline codeReviewOrchestratorSynthesis) ([]models.CodeReviewDescriptionRequirement, error) {
 	byKey := make(map[string]codeReviewDescriptionAssessment, len(baseline.DescriptionAssessments))
 	for _, a := range baseline.DescriptionAssessments {
+		if a.Key == "" || byKey[a.Key].Key != "" {
+			return nil, errors.New("ambiguous baseline description assessment")
+		}
 		byKey[a.Key] = a
 	}
-	var keys []string
 	var requirements []models.CodeReviewDescriptionRequirement
 	for _, req := range codeReviewApplicableDescriptionRequirements(policy, files) {
 		a, ok := byKey[req.Key]
 		if !ok {
-			return nil, nil, errors.New("incomplete baseline description assessment")
+			return nil, errors.New("incomplete baseline description assessment")
 		}
-		if a.Status == codeReviewDescriptionAssessmentMissing && req.EvidenceKind != models.CodeReviewDescriptionEvidenceKindVisual {
-			return nil, nil, errors.New("baseline has a nonvisual missing requirement")
-		}
-		if req.EvidenceKind == models.CodeReviewDescriptionEvidenceKindVisual && a.Status != codeReviewDescriptionAssessmentNotApplicable {
-			keys = append(keys, req.Key)
+		if a.Status != codeReviewDescriptionAssessmentNotApplicable {
 			requirements = append(requirements, req)
 		}
 	}
-	if len(keys) == 0 {
-		return nil, nil, errors.New("no visual requirements to reassess")
-	}
-	return keys, requirements, nil
+	return requirements, nil
 }
 
 func failCodeReviewRecheck(ctx context.Context, stores *Stores, services *Services, a models.CodeReviewAssessment, reason string, full bool) error {

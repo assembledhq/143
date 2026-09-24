@@ -2,7 +2,9 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -136,14 +138,25 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	manifestInput := codereviewsvc.ReviewInputCapture{
 		Code:     codereviewsvc.ReviewCodeInput{OrgID: org, RepositoryID: repo, PullRequestID: pr, HeadSHA: "head", BaseSHA: "base", BaseRef: "main", FilesComplete: true},
 		Contract: codereviewsvc.ReviewContractInput{PolicyID: policy, PolicyVersion: 1, PolicyDigest: strings.Repeat("a", 64), RosterDigest: strings.Repeat("b", 64), ModelConfigurationDigest: strings.Repeat("c", 64), PromptContractVersion: "1", PromptContentDigest: strings.Repeat("d", 64), InstructionsDigest: strings.Repeat("e", 64), ExternalInputsComplete: true},
-		Title:    "Visual change", Description: "Adds a screenshot for the UI change.", Visual: codereviewsvc.ReviewVisualInput{CaptureComplete: true, SourceProvenanceComplete: true, Images: []codereviewsvc.ReviewVisualImage{{SourceID: "image-1", SourceURL: "https://example.invalid/image.png", ContentDigest: strings.Repeat("f", 64)}}}, Gates: codereviewsvc.ReviewGateInput{SnapshotDigest: strings.Repeat("1", 64), Complete: true},
+		Title:    "Visual change", Description: "Adds a screenshot for the UI change.", Visual: codereviewsvc.ReviewVisualInput{CaptureComplete: true, SourceProvenanceComplete: true, Images: []codereviewsvc.ReviewVisualImage{{SourceID: "image-1", SourceURL: "https://example.invalid/image.png", ContentDigest: strings.Repeat("f", 64)}}}, Gates: codereviewsvc.ReviewGateInput{SnapshotDigest: strings.Repeat("1", 64), EligibilityDigest: strings.Repeat("2", 64), ChecksDigest: strings.Repeat("3", 64), DynamicDigest: strings.Repeat("4", 64), ChecksVerified: true, Complete: true},
 	}
+	manifestInput.TextEvidence = codereviewsvc.ReviewTextInput{Complete: true, SourceProvenanceComplete: true, UnclassifiedDigest: strings.Repeat("0", 64), Items: []codereviewsvc.ReviewTextEvidence{
+		{EvidenceID: "pr-body", Surface: "pull_request_description", ProviderObjectID: "7", SourceURL: "https://example.invalid/pr/7", Section: "full", Content: manifestInput.Description, ContentDigest: fmt.Sprintf("%x", sha256.Sum256([]byte(manifestInput.Description)))},
+		{EvidenceID: "test-log", Surface: "pull_request_comment", ProviderObjectID: "77", SourceURL: "https://example.invalid/pr/7#issuecomment-77", Section: "testing", Content: "The browser test passes with the changed UI.", ContentDigest: fmt.Sprintf("%x", sha256.Sum256([]byte("The browser test passes with the changed UI.")))},
+	}}
+	baselineInput := manifestInput
+	baselineInput.Visual.Images = nil
+	baselineInput.TextEvidence.Items = append([]codereviewsvc.ReviewTextEvidence(nil), manifestInput.TextEvidence.Items[:1]...)
+	baselineManifest, err := codereviewsvc.BuildReviewInputManifest(baselineInput)
+	require.NoError(t, err, "build prior full-review input manifest")
+	baselineManifestJSON, err := json.Marshal(baselineManifest)
+	require.NoError(t, err, "encode prior full-review input manifest")
 	manifest, err := codereviewsvc.BuildReviewInputManifest(manifestInput)
 	require.NoError(t, err, "build comparable immutable input manifest")
 	manifestJSON, err := json.Marshal(manifest)
 	require.NoError(t, err, "encode captured input manifest")
 	assessmentSQL := `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,repository_full_name,pull_request_id,metadata_id,session_id,policy_id,generation,source_assessment_id,base_sha,base_ref,head_sha,input_version,code_digest,contract_digest,intent_digest,visual_digest,request_digest,gate_digest,input_digest,input_manifest,review_scope,route_reason,coverage_complete,status,result_origin,decision,acceptable,structured_outcome,publication_key,publication_state,completed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'base','main','head',$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)`
-	_, err = pool.Exec(ctx, assessmentSQL, baseline, org, repo, repoName, pr, metadata, session, policy, 1, nil, manifest.InputVersion, manifest.CodeDigest, manifest.ContractDigest, manifest.IntentDigest, manifest.VisualDigest, manifest.RequestDigest, manifest.GateDigest, manifest.InputDigest, manifestJSON, "full", "initial_full", true, "completed", "executed", "needs_human_review", false, json.RawMessage(`{}`), "baseline-publication", "not_required", time.Now().UTC())
+	_, err = pool.Exec(ctx, assessmentSQL, baseline, org, repo, repoName, pr, metadata, session, policy, 1, nil, baselineManifest.InputVersion, baselineManifest.CodeDigest, baselineManifest.ContractDigest, baselineManifest.IntentDigest, baselineManifest.VisualDigest, baselineManifest.RequestDigest, baselineManifest.GateDigest, baselineManifest.InputDigest, baselineManifestJSON, "full", "initial_full", true, "completed", "executed", "needs_human_review", false, json.RawMessage(`{}`), "baseline-publication", "not_required", time.Now().UTC())
 	require.NoError(t, err, "seed complete full baseline assessment")
 	_, err = pool.Exec(ctx, assessmentSQL, recheck, org, repo, repoName, pr, metadata, session, policy, 2, baseline, manifest.InputVersion, manifest.CodeDigest, manifest.ContractDigest, manifest.IntentDigest, manifest.VisualDigest, manifest.RequestDigest, manifest.GateDigest, manifest.InputDigest, manifestJSON, "evidence_only", "visual_changed", false, "running", nil, nil, nil, nil, "recheck-publication", "not_started", nil)
 	require.NoError(t, err, "seed running evidence-only assessment")
@@ -152,7 +165,7 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.NoError(t, err, "encode baseline orchestrator evidence")
 	_, err = pool.Exec(ctx, `INSERT INTO code_review_agent_results(id,org_id,session_id,agent_provider,role,status,structured_result,assessment_id) VALUES($1,$2,$3,'codex','orchestrator','completed',$4,$5)`, uuid.New(), org, session, structured, baseline)
 	require.NoError(t, err, "seed one completed baseline orchestrator")
-	visual := models.CodeReviewVisualEvidenceSnapshot{Complete: true, Evidence: []models.CodeReviewVisualEvidence{{EvidenceID: "image-1", Status: models.CodeReviewVisualEvidenceFetchStatusAvailable, StoredURL: "https://example.invalid/image.png", ContentSHA256: strings.Repeat("f", 64)}}}
+	visual := models.CodeReviewVisualEvidenceSnapshot{Complete: true, Evidence: []models.CodeReviewVisualEvidence{{EvidenceID: "image-1", Source: models.CodeReviewVisualEvidenceSource{SourceID: "image-1"}, Status: models.CodeReviewVisualEvidenceFetchStatusAvailable, StoredURL: "https://example.invalid/image.png", ContentSHA256: strings.Repeat("f", 64)}}}
 	capture := &fixedRecheckCapture{result: codereviewsvc.AssessmentInputCaptureResult{Manifest: manifest, VisualEvidence: visual, Policy: models.CodeReviewPolicyRecord{ContinuationPolicy: policyConfig.ContinuationPolicy, DescriptionPolicy: policyConfig.DescriptionPolicy, ApprovalMode: policyConfig.ApprovalMode, AgentRoster: policyConfig.AgentRoster, Enabled: true}}}
 	stores := &Stores{CodeReviews: db.NewCodeReviewStore(pool), CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool), CodeReviewRechecks: db.NewCodeReviewRecheckStore(pool), SessionThreads: db.NewSessionThreadStore(pool), SessionMessages: db.NewSessionMessageStore(pool), ThreadSendTx: pool, Repositories: db.NewRepositoryStore(pool), PullRequests: db.NewPullRequestStore(pool)}
 	publisher := &fakeRecheckPublisher{}
@@ -205,8 +218,11 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.Contains(t, *afterChange.FailureDetail, "full_review:inputs changed", "changed input should carry full-review route reason")
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE org_id=$1`, org).Scan(&totalJobs), "count jobs after changed input")
 	require.Equal(t, 1, totalJobs, "changed input must not queue an unsafe continuation")
-	_, err = pool.Exec(ctx, `INSERT INTO code_review_agent_results(id,org_id,session_id,agent_provider,role,status,assessment_id) VALUES($1,$2,$3,'codex','reviewer','completed',$4)`, uuid.New(), org, session, baseline)
+	reviewerResultID, findingID := uuid.New(), uuid.New()
+	_, err = pool.Exec(ctx, `INSERT INTO code_review_agent_results(id,org_id,session_id,agent_provider,role,status,assessment_id) VALUES($1,$2,$3,'codex','reviewer','completed',$4)`, reviewerResultID, org, session, baseline)
 	require.NoError(t, err, "seed one usable original reviewer result")
+	_, err = pool.Exec(ctx, `INSERT INTO code_review_findings(id,org_id,session_id,agent_result_id,assessment_id,dedupe_key,severity,confidence,summary,body) VALUES($1,$2,$3,$4,$5,'missing-test-proof','high','high','Test coverage unproven','No current test output was present')`, findingID, org, session, reviewerResultID, baseline)
+	require.NoError(t, err, "seed original high-severity finding with durable assessment identity")
 	_, err = pool.Exec(ctx, `UPDATE pull_requests SET head_sha='head',base_sha='base',merge_state='clean',has_conflicts=false,failing_test_count=0 WHERE org_id=$1 AND id=$2`, org, pr)
 	require.NoError(t, err, "seed current clean PR health")
 	capture.result.PullRequest, err = stores.PullRequests.GetByID(ctx, org, pr)
@@ -227,12 +243,16 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.NoError(t, err, "claim exact second turn")
 	require.True(t, owned, "second continuation owns current turn")
 	noEscalation := false
-	response, err := json.Marshal(codeReviewRecheckResponse{BaselineAssessmentID: baseline, InputDigest: manifest.InputDigest, EscalateFullReview: &noEscalation, DescriptionAssessments: []codeReviewDescriptionAssessment{{Key: "screenshot", Status: codeReviewDescriptionAssessmentSatisfied, EvidenceBasis: models.CodeReviewDescriptionEvidenceBasisImage, EvidenceIDs: []string{"image-1"}, Reason: "The current screenshot shows the changed UI"}}})
+	requirements := []models.CodeReviewRequirementReassessment{{Key: "screenshot", Status: models.CodeReviewRequirementSatisfied, EvidenceCitations: []models.CodeReviewEvidenceCitation{{EvidenceID: "image-1"}}, Reason: "The current screenshot shows the changed UI"}}
+	findings := []models.CodeReviewFindingReassessment{{FindingID: findingID, Status: models.CodeReviewFindingResolved, Reason: "Current passing browser test addresses the original coverage concern", EvidenceCitations: []models.CodeReviewEvidenceCitation{{EvidenceID: "test-log", Quote: "The browser test passes with the changed UI."}}}}
+	response, err := json.Marshal(codeReviewRecheckResponse{BaselineAssessmentID: baseline, InputDigest: manifest.InputDigest, EscalateFullReview: &noEscalation, Requirements: &requirements, Findings: &findings})
 	require.NoError(t, err, "encode exact evidence answer")
-	updatedSynthesis, escalationReason, err := validateCodeReviewRecheckResponse(string(response), baseline, manifest.InputDigest, []string{"screenshot"}, synthesis, visual)
+	baselineFindings, err := stores.CodeReviewAssessments.ListFindings(ctx, org, baseline)
+	require.NoError(t, err, "read original finding rows by assessment")
+	validated, err := validateCodeReviewRecheckResponse(codeReviewRecheckValidationInput{Raw: string(response), BaselineID: baseline, InputDigest: manifest.InputDigest, Requirements: []models.CodeReviewDescriptionRequirement{visualReq}, BaselineSynthesis: synthesis, BaselineFindings: baselineFindings, BaselineManifest: baselineManifest, CurrentManifest: manifest, VisualEvidence: visual})
 	require.NoError(t, err, "exact response should pass strict validation")
-	require.Empty(t, escalationReason, "current screenshot should not trigger full review")
-	_, err = codeReviewDescriptionEvaluationFromSynthesis(capture.result.Policy.Config(), nil, updatedSynthesis, visual)
+	require.Empty(t, validated.EscalationReason, "current screenshot should not trigger full review")
+	_, err = codeReviewDescriptionEvaluationFromSynthesis(capture.result.Policy.Config(), nil, validated.Synthesis, visual)
 	require.NoError(t, err, "merged description evidence should remain valid")
 	_, err = stores.CodeReviewRechecks.Complete(ctx, models.CodeReviewRecheckTurnCompletion{OrgID: org, AssessmentID: happyAssessment, SessionID: session, ThreadID: thread, JobID: happyDispatch.JobID, LockToken: happyLease, ExpectedTurn: happyDispatch.ExpectedTurn, SessionTurn: 2, Summary: string(response), Result: &models.SessionResult{}, ProviderSessionID: "test-provider", SnapshotKey: "test-snapshot-2"})
 	require.NoError(t, err, "persist synthetic exact current assistant turn")
@@ -250,6 +270,34 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	priorApproved, err := stores.CodeReviews.HasApprovedByPullRequest(ctx, org, pr)
 	require.NoError(t, err, "read current PR approval projection")
 	require.True(t, priorApproved, "evidence-only approval must stop later automatic review spending")
+	retainedAssessment := uuid.New()
+	_, err = pool.Exec(ctx, assessmentSQL, retainedAssessment, org, repo, repoName, pr, metadata, session, policy, 10, baseline, manifest.InputVersion, manifest.CodeDigest, manifest.ContractDigest, manifest.IntentDigest, manifest.VisualDigest, manifest.RequestDigest, manifest.GateDigest, manifest.InputDigest, manifestJSON, "evidence_only", "visual_changed", false, "running", nil, nil, nil, nil, "retained-publication", "not_started", nil)
+	require.NoError(t, err, "seed a separate assessment retaining the original high finding")
+	retainedJob, err := json.Marshal(codeReviewRecheckJob{OrgID: org, AssessmentID: retainedAssessment})
+	require.NoError(t, err, "encode retained-finding assessment")
+	err = handler(ctx, "run_code_review_recheck", retainedJob)
+	require.Error(t, err, "retained-finding assessment should await one exact continuation")
+	retainedDispatch, err := stores.CodeReviewRechecks.Get(ctx, org, retainedAssessment)
+	require.NoError(t, err, "read retained-finding dispatch")
+	retainedLease := uuid.New()
+	_, err = pool.Exec(ctx, `UPDATE jobs SET status='running',lock_token=$2 WHERE org_id=$1 AND id=$3`, org, retainedLease, retainedDispatch.JobID)
+	require.NoError(t, err, "lease retained-finding continuation")
+	owned, err = stores.CodeReviewRechecks.Claim(ctx, org, retainedAssessment, retainedDispatch.JobID, retainedLease, session, thread, retainedDispatch.ExpectedTurn, retainedDispatch.MessageID)
+	require.NoError(t, err, "claim retained-finding turn")
+	require.True(t, owned, "retained-finding turn should have one lease owner")
+	retainedFindings := []models.CodeReviewFindingReassessment{{FindingID: findingID, Status: models.CodeReviewFindingRetained, Reason: "The original high finding still needs review"}}
+	retainedResponse, err := json.Marshal(codeReviewRecheckResponse{BaselineAssessmentID: baseline, InputDigest: manifest.InputDigest, EscalateFullReview: &noEscalation, Requirements: &requirements, Findings: &retainedFindings})
+	require.NoError(t, err, "encode explicit retained blocker")
+	_, err = stores.CodeReviewRechecks.Complete(ctx, models.CodeReviewRecheckTurnCompletion{OrgID: org, AssessmentID: retainedAssessment, SessionID: session, ThreadID: thread, JobID: retainedDispatch.JobID, LockToken: retainedLease, ExpectedTurn: retainedDispatch.ExpectedTurn, SessionTurn: 3, Summary: string(retainedResponse), Result: &models.SessionResult{}, ProviderSessionID: "test-provider", SnapshotKey: "test-snapshot-3"})
+	require.NoError(t, err, "persist exact retained-finding assistant turn")
+	retainedPublicationJobID, retainedPublicationLease := uuid.New(), uuid.New()
+	_, err = pool.Exec(ctx, `INSERT INTO jobs(id,org_id,queue,job_type,payload,status,lock_token) VALUES($1,$2,'agent','run_code_review_recheck','{}','running',$3)`, retainedPublicationJobID, org, retainedPublicationLease)
+	require.NoError(t, err, "lease retained-finding publication")
+	err = handler(jobctx.WithJobID(jobctx.WithLockToken(ctx, retainedPublicationLease), retainedPublicationJobID), "run_code_review_recheck", retainedJob)
+	require.NoError(t, err, "retained blocker should complete with a human-review decision")
+	retainedOutcome, err := stores.CodeReviewAssessments.GetByID(ctx, org, retainedAssessment)
+	require.NoError(t, err, "read retained blocker outcome")
+	require.Equal(t, models.CodeReviewDecisionNeedsHumanReview, *retainedOutcome.Decision, "original high finding must remain a blocker when retained")
 	staleAssessment := uuid.New()
 	_, err = pool.Exec(ctx, assessmentSQL, staleAssessment, org, repo, repoName, pr, metadata, session, policy, 5, baseline, manifest.InputVersion, manifest.CodeDigest, manifest.ContractDigest, manifest.IntentDigest, manifest.VisualDigest, manifest.RequestDigest, manifest.GateDigest, manifest.InputDigest, manifestJSON, "evidence_only", "visual_changed", false, "running", nil, nil, nil, nil, "stale-publication", "not_started", nil)
 	require.NoError(t, err, "seed evidence assessment whose inputs change at publication")
@@ -280,7 +328,7 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.NoError(t, err, "read settled publication-race assessment")
 	require.Equal(t, models.CodeReviewAssessmentSuperseded, staleOutcome.Status, "unsent staged approval must be superseded when input changes under publication lock")
 	require.Equal(t, []uuid.UUID{staleAssessment}, lifecycle.fallbacks, "one full-review fallback should be requested")
-	require.Equal(t, 1, len(publisher.requests), "changed input must not send another formal review")
+	require.Equal(t, 2, len(publisher.requests), "changed input must not send another formal review")
 	capture.changedManifest = nil
 	services.CodeReviewLifecycle = nil
 	incompatibleAssessment := uuid.New()
@@ -341,9 +389,9 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.NoError(t, err, "retire drained old review conversation")
 	require.True(t, released, "new completed full assessment should release drained old owner")
 	require.NoError(t, retireTx.Commit(ctx), "commit old conversation retirement")
-	retainedDispatch, err := stores.CodeReviewRechecks.Get(ctx, org, happyAssessment)
+	completedDispatch, err := stores.CodeReviewRechecks.Get(ctx, org, happyAssessment)
 	require.NoError(t, err, "completed receipt should remain readable after retirement")
-	require.Equal(t, models.CodeReviewRecheckDispatchCompleted, retainedDispatch.Status, "retirement should preserve completed dispatch receipt")
+	require.Equal(t, models.CodeReviewRecheckDispatchCompleted, completedDispatch.Status, "retirement should preserve completed dispatch receipt")
 	var retiredOwner *uuid.UUID
 	err = pool.QueryRow(ctx, `SELECT code_review_owner_pr_id FROM sessions WHERE org_id=$1 AND id=$2`, org, session).Scan(&retiredOwner)
 	require.NoError(t, err, "read retired session owner")
@@ -370,5 +418,5 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.Equal(t, models.CodeReviewPublicationUncertain, uncertainOutcome.PublicationState, "uncertain receipt must remain unresolved")
 	require.Equal(t, "review marker not found after input change; pending reconciliation", *uncertainOutcome.FailureDetail, "persist actionable no-marker detail for operators")
 	require.Equal(t, 1, len(publisher.reconciliations), "changed input should only read the GitHub review marker")
-	require.Equal(t, 1, len(publisher.requests), "changed input must not retry an uncertain write")
+	require.Equal(t, 2, len(publisher.requests), "changed input must not retry an uncertain write")
 }

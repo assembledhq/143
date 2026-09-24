@@ -37,6 +37,7 @@ type githubVisualEvidenceActor struct {
 type githubVisualEvidenceContent struct {
 	ID                int64                      `json:"id"`
 	HTMLURL           string                     `json:"html_url"`
+	Body              string                     `json:"body"`
 	BodyHTML          string                     `json:"body_html"`
 	AuthorAssociation string                     `json:"author_association"`
 	User              *githubVisualEvidenceActor `json:"user"`

@@ -2,6 +2,7 @@ package codereview
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
@@ -31,6 +32,34 @@ func TestApplicableDescriptionRequirements(t *testing.T) {
 			require.Equal(t, tt.expected, keys, "admission should use the same applicable requirement set as full review")
 		})
 	}
+}
+
+func TestBaselineForPlanningNoApplicableDescriptionRequirements(t *testing.T) {
+	t.Parallel()
+	base, err := BuildReviewInputManifest(reviewTestCapture())
+	require.NoError(t, err, "complete baseline manifest should build")
+	raw, err := json.Marshal(base)
+	require.NoError(t, err, "baseline manifest should marshal")
+	policy := models.DefaultCodeReviewPolicyConfig()
+	policy.DescriptionPolicy.Requirements = []models.CodeReviewDescriptionRequirement{{Key: "optional_note", Title: "Optional note", Required: false, EvidenceKind: models.CodeReviewDescriptionEvidenceKindGeneral, Prompt: "Optional context"}}
+	reasons := []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonBlockingFindings}}
+	reasonsRaw, err := json.Marshal(reasons)
+	require.NoError(t, err, "finding risk reason should marshal")
+	outcomeRaw, err := json.Marshal(map[string]any{"description_assessments": []any{}, "risk_reasons": reasons, "coverage_complete": true})
+	require.NoError(t, err, "zero-requirement full outcome should marshal")
+	a := models.CodeReviewAssessment{ReviewScope: models.CodeReviewScopeFull, Status: models.CodeReviewAssessmentCompleted, CoverageComplete: true, InputManifest: raw, StructuredOutcome: outcomeRaw, RiskReasonDetails: reasonsRaw}
+	baseline := baselineForPlanning(a, policy, nil)
+	require.NotNil(t, baseline, "complete full assessment should produce baseline facts")
+	require.True(t, baseline.CoverageComplete, "zero applicable requirements with complete finding coverage should remain eligible")
+	require.Empty(t, baseline.MissingRequirements, "no description requirement should be inferred")
+	require.Equal(t, []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings}, baseline.RiskReasons, "blocking finding reason should be preserved")
+	capture := reviewTestCapture()
+	capture.Code = base.Code
+	capture.Contract = base.Contract
+	capture.Visual.Images = []ReviewVisualImage{{SourceID: "new-evidence", SourceURL: "https://example.test/evidence.png", ContentDigest: strings.Repeat("b", 64)}}
+	current, err := BuildReviewInputManifest(capture)
+	require.NoError(t, err, "changed visual evidence should build")
+	require.Equal(t, RecheckPlan{Route: RecheckRouteEvidenceOnly, Reason: RecheckReasonVisualChanged}, PlanReviewRecheck(RecheckPlanInput{Current: &current, Baseline: baseline}), "new evidence may reassess a complete baseline with only blocking findings")
 }
 
 func TestPendingForcedFull(t *testing.T) {

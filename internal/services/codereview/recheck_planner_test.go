@@ -32,13 +32,13 @@ func TestPlanReviewRecheck(t *testing.T) {
 		force, dispute, unavailable bool
 		want                        RecheckPlan
 	}{
-		{"visual only", withImage, nil, nil, false, false, false, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonVisualChanged}},
+		{"visual only", withImage, nil, nil, false, false, false, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
 		{"same URL new bytes", func(c *ReviewInputCapture) {
 			c.Visual.Images = []ReviewVisualImage{{SourceID: "image-1", SourceURL: "https://example.test/screen.png", ContentDigest: d}}
 		}, func(b *RecheckBaseline) {
 			b.Inputs.Visual.Images = []ReviewVisualImage{{SourceID: "image-1", SourceURL: "https://example.test/screen.png", ContentDigest: strings.Repeat("a", 64)}}
 			b.Inputs.VisualDigest = digestJSON(b.Inputs.Visual)
-			b.Inputs.InputDigest = digestJSON([]string{b.Inputs.CodeDigest, b.Inputs.ContractDigest, b.Inputs.IntentDigest, b.Inputs.VisualDigest, b.Inputs.RequestDigest, b.Inputs.GateDigest})
+			b.Inputs.InputDigest = digestJSON([]string{b.Inputs.CodeDigest, b.Inputs.ContractDigest, b.Inputs.IntentDigest, b.Inputs.VisualDigest, b.Inputs.TextDigest, b.Inputs.RequestDigest, b.Inputs.GateDigest})
 		}, nil, false, false, false, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonVisualChanged}},
 		{"unchanged completed", func(*ReviewInputCapture) {}, nil, &RecheckPrevious{Inputs: base, Completed: true, EvidenceValidated: true}, false, false, false, RecheckPlan{RecheckRouteReuse, RecheckReasonUnchanged}},
 		{"new UUID actor hint ignored", func(*ReviewInputCapture) {}, nil, &RecheckPrevious{Inputs: base, Completed: true, EvidenceValidated: true}, false, false, false, RecheckPlan{RecheckRouteReuse, RecheckReasonUnchanged}},
@@ -54,13 +54,26 @@ func TestPlanReviewRecheck(t *testing.T) {
 		{"title changed", func(c *ReviewInputCapture) { withImage(c); c.Title = "New intent" }, nil, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
 		{"caption changed", func(c *ReviewInputCapture) { withImage(c); c.Description += "Changed caption\n" }, nil, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
 		{"substantive request", func(c *ReviewInputCapture) { withImage(c); c.Request.SubstantiveText = "The reviewer missed a race" }, nil, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonRequestChanged}},
-		{"gate changed", func(c *ReviewInputCapture) { withImage(c); c.Gates.SnapshotDigest = d }, nil, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonGatesChanged}},
+		{"eligibility gate changed", func(c *ReviewInputCapture) { withImage(c); c.Gates.EligibilityDigest = d; c.Gates.SnapshotDigest = d }, nil, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonGatesChanged}},
+		{"verified checks changed", func(c *ReviewInputCapture) { c.Gates.ChecksDigest = d; c.Gates.SnapshotDigest = d }, nil, nil, false, false, false, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonChecksChanged}},
+		{"unverified checks changed", func(c *ReviewInputCapture) {
+			c.Gates.ChecksDigest = d
+			c.Gates.SnapshotDigest = d
+			c.Gates.ChecksVerified = false
+		}, nil, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonGatesChanged}},
+		{"Testing section changed", func(c *ReviewInputCapture) {
+			c.Description += "## Testing\nPassed\n"
+			c.TextEvidence.Items = append(c.TextEvidence.Items, newReviewTextEvidence("pull_request_description", "42", "https://github.com/acme/repo/pull/42", "author", "## Testing\nPassed\n", "testing"))
+		}, nil, nil, false, false, false, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
+		{"unclassified human discussion changed", func(c *ReviewInputCapture) {
+			c.TextEvidence.UnclassifiedDigest = d
+		}, nil, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
 		{"incomplete coverage", withImage, func(b *RecheckBaseline) { b.CoverageComplete = false }, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonNoBaseline}},
 		{"missing baseline", withImage, func(b *RecheckBaseline) { b.Inputs = ReviewInputManifest{} }, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonNoBaseline}},
 		{"mixed blockers", withImage, func(b *RecheckBaseline) {
 			b.RiskReasons = append(b.RiskReasons, models.CodeReviewRiskReasonBlockingFindings)
-		}, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonBaselineBlocked}},
-		{"nonvisual requirement", withImage, func(b *RecheckBaseline) { b.MissingRequirements[0].EvidenceKind = "text" }, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonBaselineBlocked}},
+		}, nil, false, false, false, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
+		{"nonvisual requirement", withImage, func(b *RecheckBaseline) { b.MissingRequirements[0].EvidenceKind = "text" }, nil, false, false, false, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
 		{"failed evidence validation", withImage, nil, &RecheckPrevious{Inputs: base, Completed: true, EvidenceValidated: false}, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonEvidenceInvalid}},
 		{"force fresh", withImage, nil, nil, true, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonForceFresh}},
 		{"dispute", withImage, nil, nil, false, true, false, RecheckPlan{RecheckRouteFull, RecheckReasonDispute}},
@@ -72,7 +85,10 @@ func TestPlanReviewRecheck(t *testing.T) {
 			t.Parallel()
 			capture := baseCapture
 			capture.Code.Files = append([]ReviewChangedFile(nil), baseCapture.Code.Files...)
+			capture.TextEvidence.Items = append([]ReviewTextEvidence(nil), baseCapture.TextEvidence.Items...)
 			tt.change(&capture)
+			capture.TextEvidence.Items[0].Content = capture.Description
+			capture.TextEvidence.Items[0].ContentDigest = digestBytes(capture.Description)
 			current, err := BuildReviewInputManifest(capture)
 			require.NoError(t, err, "test capture should build")
 			baseline := reviewTestBaseline(base)

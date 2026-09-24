@@ -21,6 +21,8 @@ const (
 	RecheckReasonInputsUnavailable RecheckReason = "inputs_unavailable"
 	RecheckReasonUnchanged         RecheckReason = "unchanged"
 	RecheckReasonVisualChanged     RecheckReason = "visual_changed"
+	RecheckReasonEvidenceChanged   RecheckReason = "evidence_changed"
+	RecheckReasonChecksChanged     RecheckReason = "checks_changed"
 	RecheckReasonForceFresh        RecheckReason = "force_fresh"
 	RecheckReasonDispute           RecheckReason = "dispute"
 	RecheckReasonNoBaseline        RecheckReason = "no_complete_baseline"
@@ -30,6 +32,7 @@ const (
 	RecheckReasonRequestChanged    RecheckReason = "request_changed"
 	RecheckReasonGatesChanged      RecheckReason = "gates_changed"
 	RecheckReasonBaselineBlocked   RecheckReason = "baseline_not_visual_only"
+	RecheckReasonNoEvidenceChange  RecheckReason = "no_evidence_change"
 	RecheckReasonEvidenceInvalid   RecheckReason = "evidence_validation_failed"
 )
 
@@ -112,22 +115,27 @@ func PlanReviewRecheck(in RecheckPlanInput) RecheckPlan {
 	if c.RequestDigest != b.Inputs.RequestDigest {
 		return RecheckPlan{RecheckRouteFull, RecheckReasonRequestChanged}
 	}
-	if c.GateDigest != b.Inputs.GateDigest {
+	if c.TextEvidence.UnclassifiedDigest != b.Inputs.TextEvidence.UnclassifiedDigest {
+		return RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}
+	}
+	if c.Gates.EligibilityDigest != b.Inputs.Gates.EligibilityDigest {
 		return RecheckPlan{RecheckRouteFull, RecheckReasonGatesChanged}
 	}
-	if len(b.RiskReasons) != 1 || b.RiskReasons[0] != models.CodeReviewRiskReasonDescriptionFailed ||
-		len(b.MissingRequirements) == 0 {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonBaselineBlocked}
+	checksChanged := c.Gates.ChecksDigest != b.Inputs.Gates.ChecksDigest
+	if checksChanged && (!c.Gates.ChecksVerified || !b.Inputs.Gates.ChecksVerified) {
+		return RecheckPlan{RecheckRouteFull, RecheckReasonGatesChanged}
 	}
-	seen := make(map[string]bool, len(b.MissingRequirements))
-	for _, req := range b.MissingRequirements {
-		if req.ID == "" || req.EvidenceKind != "visual" || seen[req.ID] {
-			return RecheckPlan{RecheckRouteFull, RecheckReasonBaselineBlocked}
-		}
-		seen[req.ID] = true
+	if c.GateDigest != b.Inputs.GateDigest && !checksChanged {
+		return RecheckPlan{RecheckRouteFull, RecheckReasonGatesChanged}
 	}
-	if c.VisualDigest == b.Inputs.VisualDigest {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonBaselineBlocked}
+	if c.VisualDigest == b.Inputs.VisualDigest && c.TextDigest == b.Inputs.TextDigest && !checksChanged {
+		return RecheckPlan{RecheckRouteFull, RecheckReasonNoEvidenceChange}
+	}
+	if checksChanged {
+		return RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonChecksChanged}
+	}
+	if c.TextDigest != b.Inputs.TextDigest {
+		return RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}
 	}
 	return RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonVisualChanged}
 }
@@ -138,7 +146,7 @@ func validManifest(m ReviewInputManifest) bool {
 	}
 	expected, err := BuildReviewInputManifest(ReviewInputCapture{
 		Code: m.Code, Contract: m.Contract, Title: m.Title, Description: m.Description,
-		Visual: m.Visual, Request: m.Request, Gates: m.Gates,
+		Visual: m.Visual, TextEvidence: m.TextEvidence, Request: m.Request, Gates: m.Gates,
 	})
 	return err == nil && reflect.DeepEqual(m, expected)
 }

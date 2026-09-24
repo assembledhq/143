@@ -177,7 +177,7 @@ func baselineForPlanning(a models.CodeReviewAssessment, policy models.CodeReview
 		CoverageComplete bool                          `json:"coverage_complete"`
 	}
 	requirements := ApplicableDescriptionRequirements(policy, files)
-	if err := json.Unmarshal(a.StructuredOutcome, &outcome); err != nil || !outcome.CoverageComplete || len(outcome.DescriptionAssessments) == 0 || len(outcome.DescriptionAssessments) != len(requirements) {
+	if err := json.Unmarshal(a.StructuredOutcome, &outcome); err != nil || !outcome.CoverageComplete || len(outcome.DescriptionAssessments) != len(requirements) {
 		b.CoverageComplete = false
 		return b
 	}
@@ -466,7 +466,7 @@ func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleReque
 		capture := models.CodeReviewAssessmentCapture{ID: assessmentID, OrgID: req.OrgID, RepositoryID: state.RepositoryID, PullRequestID: req.PullRequestID, PolicyID: captured.Policy.ID, SessionID: currentBaseline.SessionID, Generation: generation, SourceAssessmentID: &currentBaseline.ID, PreviousAssessmentID: &current.ID, PreviousPublishedAssessmentID: priorPublished,
 			BaseSHA: captured.Manifest.Code.BaseSHA, BaseRef: captured.Manifest.Code.BaseRef, HeadSHA: captured.Manifest.Code.HeadSHA, InputVersion: captured.Manifest.InputVersion,
 			CodeDigest: captured.Manifest.CodeDigest, ContractDigest: captured.Manifest.ContractDigest, IntentDigest: captured.Manifest.IntentDigest, VisualDigest: captured.Manifest.VisualDigest, RequestDigest: captured.Manifest.RequestDigest, GateDigest: captured.Manifest.GateDigest, InputDigest: captured.Manifest.InputDigest, InputManifest: manifestRaw,
-			ReviewScope: models.CodeReviewScopeEvidenceOnly, RouteReason: models.CodeReviewRouteVisualChanged, PublicationKey: "code-review-assessment:" + assessmentID.String()}
+			ReviewScope: models.CodeReviewScopeEvidenceOnly, RouteReason: models.CodeReviewAssessmentRouteReason(lockedPlan.Reason), PublicationKey: "code-review-assessment:" + assessmentID.String()}
 		_, _, err = assessments.Create(ctx, capture)
 		if err != nil {
 			return err
