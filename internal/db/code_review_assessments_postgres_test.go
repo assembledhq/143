@@ -51,8 +51,7 @@ func TestCodeReviewAssessmentsPostgres(t *testing.T) {
 	require.NoError(t, err, "create existing table shapes")
 	up, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000295_code_review_assessments.up.sql"))
 	require.NoError(t, err, "read assessment migration")
-	_, err = conn.Exec(ctx, string(up))
-	require.NoError(t, err, "apply actual assessment migration")
+	applyBoundedCodeReviewMigration(t, ctx, conn, string(up))
 	org, otherOrg, repo, otherRepo, pr, session, policy := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	seed := []struct {
 		sql  string
@@ -231,6 +230,22 @@ func TestCodeReviewAssessmentsPostgres(t *testing.T) {
 	require.NoError(t, err, "read immutable captured repository name after rename")
 	require.Equal(t, "test/repo", capturedName, "historical repository name remains the captured name")
 
+}
+
+func applyBoundedCodeReviewMigration(t *testing.T, ctx context.Context, database TxStarter, sql string) {
+	t.Helper()
+	tx, err := database.Begin(ctx)
+	require.NoError(t, err, "begin the transactional review migration")
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, "SET LOCAL max_parallel_maintenance_workers = 4; SET LOCAL max_parallel_workers_per_gather = 4; SET LOCAL maintenance_work_mem = '512MB'")
+	require.NoError(t, err, "model production parallelism and maintenance memory before the migration")
+	_, err = tx.Exec(ctx, sql)
+	require.NoError(t, err, "apply the actual review migration")
+	var settings []string
+	err = tx.QueryRow(ctx, "SELECT ARRAY[current_setting('max_parallel_maintenance_workers'), current_setting('max_parallel_workers_per_gather'), current_setting('maintenance_work_mem')]").Scan(&settings)
+	require.NoError(t, err, "read effective migration memory settings")
+	require.Equal(t, []string{"0", "0", "64MB"}, settings, "review migration should override production parallelism with bounded maintenance memory")
+	require.NoError(t, tx.Commit(ctx), "commit the complete review migration")
 }
 
 func pgConstraint(err error, code string) bool {

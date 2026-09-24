@@ -5,6 +5,9 @@
 -- drop an invalid failed build before retrying: IF NOT EXISTS does not validate
 -- a prebuilt index. As in migration 281, lock_timeout bounds acquisition,
 -- not the duration of an index build once its lock is held.
+SET LOCAL max_parallel_maintenance_workers = 0;
+SET LOCAL max_parallel_workers_per_gather = 0;
+SET LOCAL maintenance_work_mem = '64MB';
 SET LOCAL lock_timeout = '30s';
 CREATE UNIQUE INDEX IF NOT EXISTS code_review_recheck_threads_org_id ON session_threads(org_id,id);
 CREATE UNIQUE INDEX IF NOT EXISTS code_review_recheck_jobs_org_id ON jobs(org_id,id);

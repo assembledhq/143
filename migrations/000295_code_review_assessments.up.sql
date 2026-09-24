@@ -1,5 +1,11 @@
 -- Assessment identity is separate from the (possibly reused) review session.
 -- Composite parent keys make tenant and metadata ownership enforceable by FKs.
+-- Bound migration memory on a busy production database. Parallel index builds
+-- and FK validation scans otherwise compete for the container's shared memory.
+SET LOCAL max_parallel_maintenance_workers = 0;
+SET LOCAL max_parallel_workers_per_gather = 0;
+SET LOCAL maintenance_work_mem = '64MB';
+
 CREATE UNIQUE INDEX code_review_policies_org_id ON code_review_policies(org_id, id);
 CREATE UNIQUE INDEX code_review_metadata_identity ON code_review_session_metadata(org_id, id, session_id, repository_id, pull_request_id, policy_id);
 
