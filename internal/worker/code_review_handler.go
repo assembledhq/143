@@ -472,11 +472,19 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return err
 		}
+		var assessmentCoverage bool
+		var evidenceRecheckURL string
+		if assessment != nil {
+			var manifest codereviewsvc.ReviewInputManifest
+			assessmentCoverage = json.Unmarshal(assessment.InputManifest, &manifest) == nil && fullAssessmentCoverage(policy.Config(), agentResults, manifest)
+			evidenceRecheckURL = codeReviewEvidenceRecheckURL(services, policy.Config(), assessment.ID, assessmentCoverage)
+		}
 		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
 			Policy:                policy.Config(),
 			Job:                   job,
 			SessionURL:            codeReviewSessionURL(services.FrontendURL, job.SessionID),
 			PolicySettingsURL:     codeReviewPolicySettingsURL(services.FrontendURL),
+			EvidenceRecheckURL:    evidenceRecheckURL,
 			PullRequest:           pr,
 			Health:                health,
 			AgentResults:          agentResults,
@@ -487,7 +495,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			VisualEvidence:        visualEvidence,
 			AssessedAt:            time.Now().UTC(),
 		})
-		var assessmentCoverage bool
 		var assessmentOutcome json.RawMessage
 		if assessment != nil {
 			if err := verifyFullAssessmentFreshness(ctx, services, job, *assessment); err != nil {
@@ -499,8 +506,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				}
 				return fmt.Errorf("refresh full assessment before publication: %w", err)
 			}
-			var manifest codereviewsvc.ReviewInputManifest
-			assessmentCoverage = json.Unmarshal(assessment.InputManifest, &manifest) == nil && fullAssessmentCoverage(policy.Config(), agentResults, manifest)
 			assessmentOutcome, err = fullAssessmentOutcome(agentResults, decision.RiskReasonDetails, assessmentCoverage)
 			if err != nil {
 				return fmt.Errorf("encode full assessment outcome: %w", err)
@@ -3384,6 +3389,7 @@ type liveCodeReviewOutcomeInput struct {
 	Job                   runCodeReviewPayload
 	SessionURL            string
 	PolicySettingsURL     string
+	EvidenceRecheckURL    string
 	PullRequest           models.PullRequest
 	Health                *models.PullRequestHealthResponse
 	AgentResults          []models.CodeReviewAgentResult
@@ -3624,6 +3630,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		OperationalSummary:        codeReviewOrchestratorOperationalSummary(input.AgentResults, decision.RiskReasonDetails),
 		SessionURL:                input.SessionURL,
 		PolicySettingsURL:         input.PolicySettingsURL,
+		EvidenceRecheckURL:        input.EvidenceRecheckURL,
 		DescriptionPassed:         descriptionPassed,
 		DescriptionIssues:         codeReviewFailedDescriptionRequirements(descriptionEvaluation.RequirementSummaries),
 		AgentSummaries:            codeReviewAgentSummaries(input.AgentResults, input.Findings),

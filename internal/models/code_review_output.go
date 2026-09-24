@@ -15,6 +15,7 @@ type CodeReviewFinalReviewInput struct {
 	OperationalSummary        string
 	SessionURL                string
 	PolicySettingsURL         string
+	EvidenceRecheckURL        string
 	DescriptionPassed         *bool
 	DescriptionIssues         []string
 	AgentSummaries            []string
@@ -125,7 +126,9 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 				paragraphs = append(paragraphs, "This is the only blocker as of `"+revision+"`.")
 			}
 		}
-		if operationalSummary != "" {
+		if nextSteps := codeReviewEvidenceRecheckNextSteps(input); nextSteps != "" && operationalSummary == "" {
+			paragraphs = append(paragraphs, "**Next steps:** "+nextSteps)
+		} else if operationalSummary != "" {
 			paragraphs = append(paragraphs, "**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.")
 		} else {
 			paragraphs = append(paragraphs, "**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.")
@@ -138,6 +141,39 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 		paragraphs = append(paragraphs, "[View the full review]("+input.SessionURL+")")
 	}
 	return strings.Join(paragraphs, "\n\n")
+}
+
+// The link offers reassessment, never a promise that evidence can resolve a
+// code defect or override another approval requirement. Only advertise it for
+// evidence-related blockers and findings, not unrelated policy-only failures.
+func codeReviewEvidenceRecheckNextSteps(input CodeReviewFinalReviewInput) string {
+	if input.EvidenceRecheckURL == "" || input.Acceptable || input.Decision == CodeReviewDecisionApproved {
+		return ""
+	}
+	var missingEvidence, checks, findings bool
+	for _, reason := range input.RiskReasons {
+		switch reason.Code {
+		case CodeReviewRiskReasonDescriptionFailed:
+			missingEvidence = true
+		case CodeReviewRiskReasonChecksFailing, CodeReviewRiskReasonRequiredCheckFailing:
+			checks = true
+		case CodeReviewRiskReasonBlockingFindings:
+			findings = true
+		}
+	}
+	action := "[Re-check PR](" + input.EvidenceRecheckURL + ")"
+	var instruction string
+	switch {
+	case missingEvidence:
+		instruction = "Add the missing evidence under **Testing** or **Evidence** in the PR description or a comment, then " + action + "."
+	case findings:
+		instruction = "If you have evidence that addresses these findings, add it under **Testing** or **Evidence** in the PR description or a comment, then " + action + "."
+	case checks:
+		instruction = "Once updated CI results are available, " + action + "."
+	default:
+		return ""
+	}
+	return instruction + " Open 143 to confirm the request. Any remaining approval requirements still apply."
 }
 
 func codeReviewAssessmentSummary(headSHA string, assessedAt time.Time) string {

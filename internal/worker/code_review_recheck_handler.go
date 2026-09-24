@@ -289,8 +289,23 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		if _, err = codeReviewDescriptionEvaluationFromSynthesis(fresh.Policy.Config(), fresh.Files, validated.Synthesis, fresh.VisualEvidence); err != nil {
 			return failCodeReviewRecheck(ctx, stores, services, a, "invalid merged evidence assessment: "+err.Error(), false)
 		}
-		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{Policy: fresh.Policy.Config(), Job: payload, PullRequest: fresh.PullRequest, Health: health, AgentResults: results, Findings: validated.EffectiveFindings, ChangedFiles: fresh.Files, ChangedFilesAvailable: true, OrchestratorSynthesis: validated.Synthesis, VisualEvidence: fresh.VisualEvidence, AssessedAt: time.Now().UTC(), SessionURL: codeReviewAssessmentURL(services.FrontendURL, a.ID), PolicySettingsURL: codeReviewPolicySettingsURL(services.FrontendURL)})
-		body += "\n\nCode review reused from assessment `" + baseline.ID.String() + "`. Updated evidence was checked in this assessment. [Re-check PR](" + strings.TrimRight(services.FrontendURL, "/") + "/code-reviews?recheck=" + a.ID.String() + ")."
+		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
+			Policy:                fresh.Policy.Config(),
+			Job:                   payload,
+			PullRequest:           fresh.PullRequest,
+			Health:                health,
+			AgentResults:          results,
+			Findings:              validated.EffectiveFindings,
+			ChangedFiles:          fresh.Files,
+			ChangedFilesAvailable: true,
+			OrchestratorSynthesis: validated.Synthesis,
+			VisualEvidence:        fresh.VisualEvidence,
+			AssessedAt:            time.Now().UTC(),
+			SessionURL:            codeReviewAssessmentURL(services.FrontendURL, a.ID),
+			PolicySettingsURL:     codeReviewPolicySettingsURL(services.FrontendURL),
+			EvidenceRecheckURL:    codeReviewEvidenceRecheckURL(services, fresh.Policy.Config(), a.ID, true),
+		})
+		body += "\n\nCode review reused from assessment `" + baseline.ID.String() + "`. Updated evidence was checked in this assessment."
 		outcome, err := json.Marshal(struct {
 			Synthesis                codeReviewOrchestratorSynthesis            `json:"synthesis"`
 			SourceAssessmentID       uuid.UUID                                  `json:"source_assessment_id"`

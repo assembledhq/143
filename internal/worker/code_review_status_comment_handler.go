@@ -250,7 +250,11 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 // This is a read-only destination. The authenticated page requires a separate
 // button click to POST, so GitHub link previews cannot spend review capacity.
 func codeReviewNowURL(frontendURL string, sessionID uuid.UUID) string {
-	if strings.TrimSpace(frontendURL) == "" || sessionID == uuid.Nil {
+	return codeReviewRequestURL(frontendURL, sessionID, "review_now")
+}
+
+func codeReviewRequestURL(frontendURL string, id uuid.UUID, action string) string {
+	if strings.TrimSpace(frontendURL) == "" || id == uuid.Nil {
 		return ""
 	}
 	target, err := url.Parse(strings.TrimRight(strings.TrimSpace(frontendURL), "/"))
@@ -259,9 +263,16 @@ func codeReviewNowURL(frontendURL string, sessionID uuid.UUID) string {
 	}
 	target.Path = strings.TrimRight(target.Path, "/") + "/code-reviews"
 	target.RawPath = ""
-	target.RawQuery = url.Values{"review_now": {sessionID.String()}}.Encode()
+	target.RawQuery = url.Values{action: {id.String()}}.Encode()
 	target.Fragment = ""
 	return target.String()
+}
+
+func codeReviewEvidenceRecheckURL(services *Services, policy models.CodeReviewPolicyConfig, assessmentID uuid.UUID, coverageComplete bool) string {
+	if services == nil || !services.CodeReviewAssessmentsEnabled || !services.CodeReviewRechecksEnabled || !policy.ContinuationPolicy.Effective().Enabled || !coverageComplete {
+		return ""
+	}
+	return codeReviewRequestURL(services.FrontendURL, assessmentID, "recheck")
 }
 
 func enqueueCodeReviewStatusCommentSync(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, stage string) {

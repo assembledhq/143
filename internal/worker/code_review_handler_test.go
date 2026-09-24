@@ -4998,6 +4998,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 		riskNotContains       string
 		bodyContains          string
 		bodyNotContains       string
+		expectedRecheck       string
 	}{
 		{
 			name: "approves when live reviewer quorum and PR health satisfy policy",
@@ -5180,8 +5181,9 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 		{
 			name: "explains a description requirement the coding agent marked missing",
 			input: liveCodeReviewOutcomeInput{
-				Policy: policy,
-				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				Policy:             policy,
+				EvidenceRecheckURL: "https://143.test/code-reviews?recheck=90d8a47d-d87e-4780-90af-040f5144685a",
+				Job:                runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
 				PullRequest: models.PullRequest{
 					OrgID:   orgID,
 					Body:    &prBody,
@@ -5209,9 +5211,10 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 					"description": codeReviewDescriptionAssessmentMissing,
 				})
 			},
-			expected:     models.CodeReviewDecisionNeedsHumanReview,
-			reason:       "PR description policy did not pass",
-			bodyContains: "Understandable description (The coding agent found the required evidence missing.)",
+			expected:        models.CodeReviewDecisionNeedsHumanReview,
+			reason:          "PR description policy did not pass",
+			bodyContains:    "Understandable description (The coding agent found the required evidence missing.)",
+			expectedRecheck: "[Re-check PR](https://143.test/code-reviews?recheck=90d8a47d-d87e-4780-90af-040f5144685a)",
 		},
 		{
 			name: "approves a P2-only review and exposes its structured advisory evidence",
@@ -5745,6 +5748,11 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			}
 			if tt.bodyContains != "" {
 				require.Contains(t, body, tt.bodyContains, "final review body should include expected evidence")
+			}
+			if tt.expectedRecheck != "" {
+				require.Contains(t, body, tt.expectedRecheck, "the initial full review should offer evidence reassessment when available")
+			} else {
+				require.NotContains(t, body, "[Re-check PR]", "reviews without an available evidence action should not advertise one")
 			}
 			if tt.bodyNotContains != "" {
 				require.NotContains(t, body, tt.bodyNotContains, "GitHub summary should not expose advisory finding details")
