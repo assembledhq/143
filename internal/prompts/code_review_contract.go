@@ -8,9 +8,9 @@ import (
 	"sort"
 )
 
-// Bind raw-task scaffolding and review templates as well as the review prompt.
+// CodeReviewContractDigest binds raw-task scaffolding and review templates.
 // Dynamic PR content has separate digests; hashing it here would prevent a
-// visual-only delta from ever qualifying for reassessment.
+// evidence-only delta from ever qualifying for reassessment.
 func CodeReviewContractDigest() (string, error) {
 	paths, err := fs.Glob(templateFS, "templates/*.template")
 	if err != nil {
