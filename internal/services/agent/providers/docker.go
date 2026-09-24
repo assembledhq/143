@@ -59,7 +59,7 @@ const (
 	SandboxLabelSessionID             = "com.assembledhq.143.session_id"
 	SandboxLabelOrgID                 = "com.assembledhq.143.org_id"
 	SandboxLabelPurpose               = "com.assembledhq.143.purpose"
-	SandboxLabelPreparationLeaseToken = "com.assembledhq.143.preparation_lease_token"
+	SandboxLabelPreparationLeaseToken = "com.assembledhq.143.preparation_lease_token" // #nosec G101 -- Docker label key, not a credential
 	SandboxLabelCreatedAt             = "com.assembledhq.143.created_at"
 
 	sandboxLabelLegacySandbox   = "143.sandbox"
