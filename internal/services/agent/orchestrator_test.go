@@ -4395,25 +4395,41 @@ func TestRunAgent_PendingCancelIsDeliveredAfterSetup(t *testing.T) {
 
 func TestRunAgent_CapturesAndPersistsBaseCommitSHA(t *testing.T) {
 	t.Parallel()
-
-	orgID := testOrg()
-	issue := testIssue(orgID)
-	run := testRun(orgID, issue.ID)
-
-	d := defaultDeps()
-	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if cmd == "git rev-parse HEAD" {
-			_, _ = io.WriteString(stdout, "abc123\n")
-		}
-		return 0, nil
+	tests := []struct {
+		name           string
+		origin         models.SessionOrigin
+		expectedTarget string
+	}{
+		{name: "coding session", origin: models.SessionOriginManual, expectedTarget: "main"},
+		{name: "review session", origin: models.SessionOriginCodeReview},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			run := testRun(orgID, issue.ID)
+			run.Origin = tt.origin
+			d := defaultDeps()
+			d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+				if cmd == "git rev-parse HEAD" {
+					_, err := io.WriteString(stdout, "abc123\n")
+					return 0, err
+				}
+				return 0, nil
+			}
+			d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				require.Equal(t, "abc123", sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA], "adapter should receive the captured starting commit")
+				require.Equal(t, tt.expectedTarget, sandbox.Metadata[agent.SandboxMetadataTargetBranch], "review diffs should exclude the target branch")
+				return &agent.AgentResult{Summary: "done"}, nil
+			}
 
-	orch := buildOrchestrator(d)
-	err := orch.RunAgent(context.Background(), run)
-	require.NoError(t, err, "RunAgent should succeed")
-	require.Equal(t, []string{"abc123"}, d.sessions.getBaseCommitSHAs(), "RunAgent should persist the captured base commit sha")
-	require.NotNil(t, run.BaseCommitSHA, "RunAgent should populate the in-memory session base commit sha")
-	require.Equal(t, "abc123", *run.BaseCommitSHA, "RunAgent should store the captured base commit sha on the session")
+			err := buildOrchestrator(d).RunAgent(context.Background(), run)
+			require.NoError(t, err, "RunAgent should succeed")
+			require.Equal(t, []string{"abc123"}, d.sessions.getBaseCommitSHAs(), "RunAgent should persist the captured base commit sha")
+			require.Equal(t, strPtr("abc123"), run.BaseCommitSHA, "RunAgent should store the captured base commit sha on the session")
+		})
+	}
 }
 
 func TestRunAgent_PersistsDiffHeadCommitSHAOnResult(t *testing.T) {
@@ -8022,76 +8038,84 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	require.GreaterOrEqual(t, d.sessions.releaseHoldCalls, 1)
 }
 
-// TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata is the
-// regression test for the "Changes tab goes blank after PR push / resolve
-// conflicts" and "Changes tab inflates with target-branch commits after
-// merging main" bugs. ContinueSession previously left sandbox.Metadata
-// empty in every setup branch (reuse / hydrate / fresh-clone), so
-// sessiondiff.Collect fell back to plain `git diff` and returned an empty
-// string for any clean working tree (post-push, post-merge). That empty
-// diff overwrote the authoritative session diff in the DB, blanking the
-// Changes tab even though the PR itself was healthy. With the fix, the
-// orchestrator copies session.BaseCommitSHA AND the resolved target branch
-// back onto sandbox.Metadata after every setup branch, so the diff
-// collector has both the immutable base SHA (fallback) and the target
-// branch (for the merge-base-style diff that excludes commits brought in
-// by integrating the target branch back into the working branch). We
-// exercise the reuse path here because it's the simplest setup that goes
-// through the post-switch metadata restore.
+// Every continuation path must restore the pinned base. Coding sessions also
+// need the target branch for the Changes tab, while review sessions must measure
+// only edits made after the pinned PR head, excluding the PR's existing changes.
 func TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata(t *testing.T) {
 	t.Parallel()
-
-	orgID := testOrg()
-	issue := testIssue(orgID)
-	issue.Source = models.IssueSourceManual
-	session := testRun(orgID, issue.ID)
-	session.Origin = models.SessionOriginManual
-	session.InteractionMode = models.SessionInteractionModeInteractive
-	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = models.SessionStatusIdle
-	session.CurrentTurn = 1
-	existing := "preview-container-base-sha"
-	session.ContainerID = &existing
-	session.SandboxState = models.SandboxStateRunning
-
-	const expectedBaseSHA = "feedfacecafe1234"
-	baseSHA := expectedBaseSHA
-	session.BaseCommitSHA = &baseSHA
-
-	d := defaultDeps()
-	d.issues.issue = issue
-	d.messages.messages = []models.SessionMessage{
-		{
-			ID:         1,
-			SessionID:  session.ID,
-			OrgID:      orgID,
-			TurnNumber: 2,
-			Role:       models.MessageRoleUser,
-			Content:    "follow-up after PR push",
-		},
+	tests := []struct {
+		name           string
+		origin         models.SessionOrigin
+		targetBranch   *string
+		expectedTarget string
+		restore        bool
+	}{
+		{name: "coding session uses repository default", origin: models.SessionOriginManual, expectedTarget: "main"},
+		{name: "coding session uses explicit target", origin: models.SessionOriginManual, targetBranch: strPtr("release"), expectedTarget: "release"},
+		{name: "code review excludes repository default", origin: models.SessionOriginCodeReview},
+		{name: "code review excludes explicit target", origin: models.SessionOriginCodeReview, targetBranch: strPtr("release")},
+		{name: "restored code review clears inherited target", origin: models.SessionOriginCodeReview, restore: true},
+		{name: "restored coding session replaces inherited target", origin: models.SessionOriginManual, restore: true, expectedTarget: "main"},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			issue.Source = models.IssueSourceManual
+			session := testRun(orgID, issue.ID)
+			session.Origin = tt.origin
+			session.InteractionMode = models.SessionInteractionModeInteractive
+			session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+			if tt.origin == models.SessionOriginCodeReview {
+				session.InteractionMode = models.SessionInteractionModeSingleRun
+				session.ValidationPolicy = models.SessionValidationPolicySkip
+			}
+			session.Status = models.SessionStatusIdle
+			session.CurrentTurn = 1
+			session.ContainerID = strPtr("preview-container-base-sha")
+			session.SandboxState = models.SandboxStateRunning
+			session.BaseCommitSHA = strPtr("feedfacecafe1234")
+			session.TargetBranch = tt.targetBranch
 
-	var observedBaseSHA, observedTargetBranch string
-	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		require.NotNil(t, sandbox.Metadata, "ContinueSession must populate sandbox.Metadata before the agent runs")
-		observedBaseSHA = sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA]
-		observedTargetBranch = sandbox.Metadata[agent.SandboxMetadataTargetBranch]
-		return &agent.AgentResult{
-			Summary:  "done",
-			ExitCode: 0,
-		}, nil
+			d := defaultDeps()
+			d.issues.issue = issue
+			if tt.restore {
+				session.ContainerID = nil
+				session.SandboxState = models.SandboxStateSnapshotted
+				session.SnapshotKey = strPtr("snapshots/review-diff.tar")
+				d.snapshots.data = map[string][]byte{*session.SnapshotKey: []byte("snapshot")}
+				d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+					return &agent.Sandbox{ID: "restored", WorkDir: cfg.WorkDir, Metadata: map[string]string{
+						agent.SandboxMetadataTargetBranch: "inherited-target",
+					}}, nil
+				}
+				d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+					_, err := io.Copy(io.Discard, reader)
+					return err
+				}
+			}
+			d.messages.messages = []models.SessionMessage{{
+				ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2,
+				Role: models.MessageRoleUser, Content: "Continue the session.",
+			}}
+			var observedBaseSHA, observedTargetBranch string
+			d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				require.NotNil(t, sandbox.Metadata, "continuation should populate diff metadata before execution")
+				observedBaseSHA = sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA]
+				observedTargetBranch = sandbox.Metadata[agent.SandboxMetadataTargetBranch]
+				return &agent.AgentResult{Summary: "done", ExitCode: 0}, nil
+			}
+			d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader([]byte("snap"))), nil
+			}
+
+			err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+			require.NoError(t, err, "continuation should complete with restored diff metadata")
+			require.Equal(t, "feedfacecafe1234", observedBaseSHA, "continuation should preserve the pinned session base")
+			require.Equal(t, tt.expectedTarget, observedTargetBranch, "only coding sessions should collect the PR diff against the target branch")
+		})
 	}
-	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader([]byte("snap"))), nil
-	}
-
-	orch := buildOrchestrator(d)
-	require.NoError(t, orch.ContinueSession(context.Background(), session, nil))
-
-	require.Equal(t, expectedBaseSHA, observedBaseSHA,
-		"ContinueSession must restore session.BaseCommitSHA onto sandbox.Metadata so sessiondiff.Collect can run `git diff <base> -- .` instead of falling back to plain `git diff`")
-	require.Equal(t, "main", observedTargetBranch,
-		"ContinueSession must stamp the resolved target branch onto sandbox.Metadata so sessiondiff.Collect can compute a merge-base diff against origin/<branch> instead of inflating the diff with target-branch changes after a merge")
 }
 
 // TestContinueSession_ReusedContainerReopensAuthListener locks in the

@@ -3646,7 +3646,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		// conflicts). Empty branch is unexpected in this path (we just cloned
 		// from it) but we guard anyway — Collect treats empty target branch
 		// as "fall back to baseCommitSHA".
-		if branch != "" {
+		if run.Origin == models.SessionOriginCodeReview {
+			// A review diff measures edits since the pinned PR head, not the
+			// existing PR changes relative to its target branch.
+			delete(sandbox.Metadata, SandboxMetadataTargetBranch)
+		} else if branch != "" {
 			if sandbox.Metadata == nil {
 				sandbox.Metadata = make(map[string]string)
 			}
@@ -5192,7 +5196,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		sandbox.Metadata[SandboxMetadataBaseCommitSHA] = *session.BaseCommitSHA
 	}
-	if continueTargetBranch != "" {
+	if session.Origin == models.SessionOriginCodeReview {
+		// Review sessions pin BaseCommitSHA to the PR head. Including a
+		// target branch would count the PR's existing changes as reviewer
+		// writes. Clear any inherited metadata on restored sandboxes too.
+		delete(sandbox.Metadata, SandboxMetadataTargetBranch)
+	} else if continueTargetBranch != "" {
 		if sandbox.Metadata == nil {
 			sandbox.Metadata = make(map[string]string)
 		}
@@ -7973,6 +7982,10 @@ func (o *Orchestrator) resultDiffOrWorkspaceFallback(ctx context.Context, run *m
 		return resultDiff
 	}
 	targetBranch := derefString(run.TargetBranch)
+	if run.Origin == models.SessionOriginCodeReview {
+		// Match the adapter's pinned-head comparison when it returns no diff.
+		targetBranch = ""
+	}
 	diff, err := o.collectWorkspaceDiff(ctx, sandbox, baseCommitSHA, targetBranch)
 	if err != nil {
 		if !errors.Is(err, errNoBaseCommitSHA) {
