@@ -152,7 +152,7 @@ Extend the existing owned-session guard to cover code-review generations. User s
 
 ## Database contracts
 
-Migrations 000294 through 000297 implement these additive contracts. All new tables have `org_id uuid NOT NULL REFERENCES organizations(id)`, typed Go enums with validation tests, tenant-scoped store methods, normal FKs, and indexes supporting their actual readers. Use composite `(org_id, id)` keys/FKs for tenant-owned references; additionally validate PR/repository/session consistency in the owning transaction. Lifecycle tables use updates; configuration uses versioned insertion. Narrow ownership triggers enforce message, preview, and thread-structure fences alongside application checks.
+Migrations 000295 through 000298 implement these additive contracts. All new tables have `org_id uuid NOT NULL REFERENCES organizations(id)`, typed Go enums with validation tests, tenant-scoped store methods, normal FKs, and indexes supporting their actual readers. Use composite `(org_id, id)` keys/FKs for tenant-owned references; additionally validate PR/repository/session consistency in the owning transaction. Lifecycle tables use updates; configuration uses versioned insertion. Narrow ownership triggers enforce message, preview, and thread-structure fences alongside application checks.
 
 ### Assessments
 
@@ -183,7 +183,7 @@ Assessment IDs are added to existing results, findings, and prompt records. Hist
 
 Add nullable `active_assessment_id`/`current_assessment_id` to `code_review_pr_state`, and nullable `assessment_id`/`retry_of_assessment_id` to `code_review_requests`. Preserve legacy session links for response compatibility; they are not assessment identity. Request records stay immutable as intent; membership/lifecycle links can advance under the PR lock.
 
-Migration 000297 extends the `code_review_requests.mode` CHECK from `ensure_current|review_now` to include `recheck` and `force_fresh`, alongside `CodeReviewRequestMode.Validate` and serialized pending-input readers. The request handler supports both new modes when the conditional-recheck capability is enabled; unsupported activation is rejected. Migration rollback after new modes are written requires data-aware recovery, not simply restoring the old CHECK.
+Migration 000298 extends the `code_review_requests.mode` CHECK from `ensure_current|review_now` to include `recheck` and `force_fresh`, alongside `CodeReviewRequestMode.Validate` and serialized pending-input readers. The request handler supports both new modes when the conditional-recheck capability is enabled; unsupported activation is rejected. Migration rollback after new modes are written requires data-aware recovery, not simply restoring the old CHECK.
 
 Add `continuation_policy jsonb NOT NULL DEFAULT '{}'` to versioned `code_review_policies`. Initial fields are `enabled boolean` and `automatic_evidence_rechecks boolean`, both default false. Preserve field presence through PATCH, historical restore, PUT compatibility, and internal writers. Automatic rechecks require continuation enabled and the corresponding backend capability. Turn cap and snapshot limits are runtime safeguards, not product settings in this version.
 

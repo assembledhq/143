@@ -68,7 +68,7 @@ CREATE TABLE thread_inbox_entries(id uuid NOT NULL DEFAULT gen_random_uuid(),org
 CREATE UNIQUE INDEX inbox_client_id ON thread_inbox_entries(org_id,thread_id,client_message_id) WHERE client_message_id IS NOT NULL;
 `)
 	require.NoError(t, err, "create migration parent shapes")
-	up, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000295_code_review_recheck_runtime.up.sql"))
+	up, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000296_code_review_recheck_runtime.up.sql"))
 	require.NoError(t, err, "read actual runtime migration")
 	_, err = pool.Exec(ctx, string(up))
 	require.NoError(t, err, "apply runtime migration")

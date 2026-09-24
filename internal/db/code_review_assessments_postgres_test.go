@@ -49,7 +49,7 @@ func TestCodeReviewAssessmentsPostgres(t *testing.T) {
  CREATE UNIQUE INDEX idx_code_review_findings_dedupe ON code_review_findings(org_id,session_id,dedupe_key);
  CREATE TABLE code_review_prompt_records(id uuid PRIMARY KEY,org_id uuid NOT NULL,session_id uuid NOT NULL,record_key text NOT NULL DEFAULT '',role text NOT NULL DEFAULT '',metadata jsonb NOT NULL DEFAULT '{}'::jsonb,created_at timestamptz NOT NULL DEFAULT now());`)
 	require.NoError(t, err, "create existing table shapes")
-	up, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000294_code_review_assessments.up.sql"))
+	up, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000295_code_review_assessments.up.sql"))
 	require.NoError(t, err, "read assessment migration")
 	_, err = conn.Exec(ctx, string(up))
 	require.NoError(t, err, "apply actual assessment migration")
