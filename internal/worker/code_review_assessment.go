@@ -467,8 +467,11 @@ func resumeStagedFullAssessment(ctx context.Context, stores *Stores, services *S
 			return fmt.Errorf("decode staged risk reasons: %w", err)
 		}
 	}
-	additions, deletions := codeReviewLineChanges(changedFiles)
-	legacy := db.CompleteCodeReviewParams{SessionID: job.SessionID, Decision: *assessment.Decision, Acceptable: *assessment.Acceptable, GitHubReviewID: submission.GitHubReviewID, GitHubReviewURL: submission.GitHubReviewURL, FinalReviewBody: finalBody, Additions: &additions, Deletions: &deletions, RiskReasonDetails: reasons}
+	legacy := db.CompleteCodeReviewParams{SessionID: job.SessionID, Decision: *assessment.Decision, Acceptable: *assessment.Acceptable, GitHubReviewID: submission.GitHubReviewID, GitHubReviewURL: submission.GitHubReviewURL, FinalReviewBody: finalBody, RiskReasonDetails: reasons}
+	if changedFiles != nil {
+		additions, deletions := codeReviewLineChanges(changedFiles)
+		legacy.Additions, legacy.Deletions = &additions, &deletions
+	}
 	if err := completeFullAssessment(ctx, stores.ThreadSendTx, assessment, legacy, assessment.StructuredOutcome, assessment.CoverageComplete, *assessment.RenderedBody); err != nil {
 		return err
 	}

@@ -83,7 +83,7 @@ func splitReviewEvidenceSections(raw string) (string, []reviewEvidenceSection, e
 			continue
 		}
 		// Setext headings can reclassify preceding text and are not safely split.
-		if trimmed != "" && len(trimmed) >= 3 && (strings.Trim(trimmed, "=") == "" || strings.Trim(trimmed, "-") == "") {
+		if trimmed != "" && (strings.Trim(trimmed, "=") == "" || strings.Trim(trimmed, "-") == "") {
 			return "", nil, errors.New("setext heading is ambiguous")
 		}
 		current.text += line

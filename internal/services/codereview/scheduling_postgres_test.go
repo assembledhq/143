@@ -112,6 +112,15 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 			testAssessmentFirstRequestAdmission(t, p, org, pr, snapshot, true)
 		}},
 		{"assessment admission preserves schedule generation", testAssessmentGenerationAdmission},
+		{"unsent evidence refresh admits another evidence turn", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRefreshUnsentEvidenceAssessment(t, p, org, repo, pr, snapshot, false, false)
+		}},
+		{"uncertain evidence publication cannot refresh", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRefreshUnsentEvidenceAssessment(t, p, org, repo, pr, snapshot, true, false)
+		}},
+		{"intent drift refresh routes full", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRefreshUnsentEvidenceAssessment(t, p, org, repo, pr, snapshot, false, true)
+		}},
 		{"push burst restart and manual joining", testSchedulingBurst},
 		{"draft automatic", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testSchedulingDraft(t, p, org, repo, pr, snapshot, "automatic")

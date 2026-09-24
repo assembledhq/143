@@ -222,9 +222,9 @@ func applyCodeReviewSortCursor(filters *db.CodeReviewListFilters, sort *codeRevi
 }
 
 type CodeReviewHandler struct {
-	assessments *db.CodeReviewAssessmentStore
-	rechecks *db.CodeReviewRecheckStore
-	assessmentPRs *db.PullRequestStore
+	assessments                  *db.CodeReviewAssessmentStore
+	rechecks                     *db.CodeReviewRecheckStore
+	assessmentPRs                *db.PullRequestStore
 	store                        *db.CodeReviewStore
 	repos                        *db.RepositoryStore
 	triggerSetup                 *codereviewsvc.GitHubTriggerSetupService
@@ -563,8 +563,11 @@ func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	page.Items, err = h.withAssessmentSummaries(r.Context(),orgID,page.Items)
-	if err != nil { writeError(w,r,500,"CODE_REVIEW_ASSESSMENT_FAILED","failed to load current review assessments",err); return }
+	page.Items, err = h.withAssessmentSummaries(r.Context(), orgID, page.Items)
+	if err != nil {
+		writeError(w, r, 500, "CODE_REVIEW_ASSESSMENT_FAILED", "failed to load current review assessments", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, models.ListResponse[models.CodeReviewListItem]{
 		Data: page.Items,
 		Meta: models.PaginationMeta{NextCursor: nextCursor, TotalCount: &page.TotalCount},
@@ -723,8 +726,11 @@ func (h *CodeReviewHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_LOAD_FAILED", "failed to load code review", err)
 		return
 	}
-	items,err:=h.withAssessmentSummaries(r.Context(),orgID,[]models.CodeReviewListItem{item})
-	if err!=nil{writeError(w,r,500,"CODE_REVIEW_ASSESSMENT_FAILED","failed to load current review assessments",err);return}
+	items, err := h.withAssessmentSummaries(r.Context(), orgID, []models.CodeReviewListItem{item})
+	if err != nil {
+		writeError(w, r, 500, "CODE_REVIEW_ASSESSMENT_FAILED", "failed to load current review assessments", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewListItem]{Data: items[0]})
 }
 
@@ -745,17 +751,56 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_FINDINGS_LOAD_FAILED", "failed to load code review findings", err)
 		return
 	}
+	var sourceFindings []models.CodeReviewFinding
+	var findingReassessments []models.CodeReviewFindingReassessment
+	var currentAssessmentID *uuid.UUID
+	var currentAssessment *models.CodeReviewAssessment
+	if h.assessments != nil {
+		current, loadErr := h.store.GetLatestCompletedAssessmentBySessionID(r.Context(), orgID, sessionID)
+		if loadErr != nil && !errors.Is(loadErr, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_EVIDENCE_FAILED", "failed to load current review assessment", loadErr)
+			return
+		}
+		if loadErr == nil {
+			currentAssessment = &current
+			source := current
+			if current.SourceAssessmentID != nil {
+				source, loadErr = h.assessments.GetByID(r.Context(), orgID, *current.SourceAssessmentID)
+				if loadErr != nil {
+					writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_EVIDENCE_FAILED", "failed to load source review assessment", loadErr)
+					return
+				}
+			}
+			sourceFindings, loadErr = h.assessments.ListFindings(r.Context(), orgID, source.ID)
+			if loadErr != nil {
+				writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_EVIDENCE_FAILED", "failed to load source review findings", loadErr)
+				return
+			}
+			findings, findingReassessments, loadErr = codereviewsvc.EffectiveAssessmentFindings(current, source, sourceFindings)
+			if loadErr != nil {
+				writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_EVIDENCE_FAILED", "failed to project current review findings", loadErr)
+				return
+			}
+			currentAssessmentID = &current.ID
+		}
+	}
 	records, err := h.store.ListPromptRecords(r.Context(), orgID, sessionID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_PROMPTS_LOAD_FAILED", "failed to load code review prompt records", err)
 		return
 	}
-	if h.assessments!=nil {
-		baseline,loadErr:=h.assessments.GetBySessionID(r.Context(),orgID,sessionID)
-		if loadErr!=nil && !errors.Is(loadErr,pgx.ErrNoRows){writeError(w,r,500,"CODE_REVIEW_EVIDENCE_FAILED","failed to load assessment evidence",loadErr);return}
-		if loadErr==nil && baseline.Status==models.CodeReviewAssessmentCompleted {
-			records,err=h.assessments.ListPromptRecords(r.Context(),orgID,baseline.ID)
-			if err!=nil{writeError(w,r,500,"CODE_REVIEW_EVIDENCE_FAILED","failed to load baseline evidence",err);return}
+	if h.assessments != nil {
+		baseline, loadErr := h.assessments.GetBySessionID(r.Context(), orgID, sessionID)
+		if loadErr != nil && !errors.Is(loadErr, pgx.ErrNoRows) {
+			writeError(w, r, 500, "CODE_REVIEW_EVIDENCE_FAILED", "failed to load assessment evidence", loadErr)
+			return
+		}
+		if loadErr == nil && baseline.Status == models.CodeReviewAssessmentCompleted {
+			records, err = h.assessments.ListPromptRecords(r.Context(), orgID, baseline.ID)
+			if err != nil {
+				writeError(w, r, 500, "CODE_REVIEW_EVIDENCE_FAILED", "failed to load baseline evidence", err)
+				return
+			}
 		}
 	}
 	visualEvidence, citedVisualEvidenceIDs, err := codeReviewVisualEvidenceForAPI(orgID, sessionID, records, results)
@@ -763,13 +808,32 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_VISUAL_EVIDENCE_LOAD_FAILED", "failed to load code review visual evidence", err)
 		return
 	}
-	reasonCodes, err := h.store.GetRiskReasonCodesBySession(r.Context(), orgID, sessionID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASONS_LOAD_FAILED", "failed to load code review reason codes", err)
-		return
+	var reasonCodes []models.CodeReviewRiskReasonCode
+	if currentAssessment != nil {
+		var reasons []models.CodeReviewRiskReason
+		if len(currentAssessment.RiskReasonDetails) > 0 {
+			if err := json.Unmarshal(currentAssessment.RiskReasonDetails, &reasons); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_EVIDENCE_FAILED", "failed to load current review reasons", err)
+				return
+			}
+		}
+		reasonCodes = make([]models.CodeReviewRiskReasonCode, 0, len(reasons))
+		for _, reason := range reasons {
+			if err := reason.Code.Validate(); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_EVIDENCE_FAILED", "failed to validate current review reasons", err)
+				return
+			}
+			reasonCodes = append(reasonCodes, reason.Code)
+		}
+	} else {
+		reasonCodes, err = h.store.GetRiskReasonCodesBySession(r.Context(), orgID, sessionID)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASONS_LOAD_FAILED", "failed to load code review reason codes", err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewEvidence]{Data: models.CodeReviewEvidence{
-		AgentResults: results, Findings: findings, PromptRecords: records, RiskReasonCodes: reasonCodes,
+		AgentResults: results, Findings: findings, SourceFindings: sourceFindings, FindingReassessments: findingReassessments, CurrentAssessmentID: currentAssessmentID, PromptRecords: records, RiskReasonCodes: reasonCodes,
 		VisualEvidence: visualEvidence, CitedVisualEvidenceIDs: citedVisualEvidenceIDs,
 	}})
 }

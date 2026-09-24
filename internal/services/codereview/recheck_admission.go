@@ -569,6 +569,94 @@ func queuePendingAssessmentInTx(ctx context.Context, s *Service, tx pgx.Tx, stat
 	return db.UpsertCodeReviewWake(ctx, tx, req.OrgID, req.PullRequestID, retry)
 }
 
+// RefreshUnsentEvidenceAssessment retires an obsolete evidence turn only when
+// its publication has provably not started. Admission then captures fresh
+// inputs and chooses another evidence turn or a full review. A pending user
+// request keeps its existing wake and takes precedence over this replacement.
+// Repeating the call uses the same request identity after an interrupted retry.
+func (s *Service) RefreshUnsentEvidenceAssessment(ctx context.Context, orgID, assessmentID uuid.UUID, reason string) error {
+	if s.scheduling == nil || s.scheduling.store == nil {
+		return errors.New("review scheduling unavailable")
+	}
+	if strings.TrimSpace(reason) == "" || utf8.RuneCountInString(reason) > 2000 {
+		return errors.New("refresh reason must be 1 to 2000 characters")
+	}
+	a, err := s.scheduling.store.GetAssessmentByID(ctx, orgID, assessmentID)
+	if err != nil {
+		return err
+	}
+	if a.ReviewScope != models.CodeReviewScopeEvidenceOnly {
+		return errors.New("refresh requires an evidence assessment")
+	}
+	manifest, err := decodeAssessmentManifest(a.InputManifest)
+	if err != nil {
+		return err
+	}
+	const detailPrefix = "evidence_recheck:"
+	detail := detailPrefix + reason
+	alreadyQueued := false
+	err = s.scheduling.store.WithLockedPR(ctx, orgID, a.RepositoryID, a.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
+		current, err := db.NewCodeReviewAssessmentStore(tx).GetByID(ctx, orgID, assessmentID)
+		if err != nil {
+			return err
+		}
+		if current.ReviewScope != models.CodeReviewScopeEvidenceOnly || current.Generation != a.Generation || current.InputDigest != a.InputDigest {
+			return db.ErrCodeReviewAssessmentState
+		}
+		if current.Status == models.CodeReviewAssessmentSuperseded && current.FailureDetail != nil && strings.HasPrefix(*current.FailureDetail, "evidence_recheck_queued:") {
+			alreadyQueued = true
+			return nil
+		}
+		if current.Status == models.CodeReviewAssessmentSuperseded && current.FailureDetail != nil && strings.HasPrefix(*current.FailureDetail, detailPrefix) {
+			return nil
+		}
+		if state.ActiveAssessmentID == nil || *state.ActiveAssessmentID != assessmentID {
+			return db.ErrCodeReviewAssessmentState
+		}
+		switch {
+		case (current.Status == models.CodeReviewAssessmentReserved || current.Status == models.CodeReviewAssessmentRunning) && current.PublicationState == models.CodeReviewPublicationNotStarted:
+			return db.NewCodeReviewAssessmentStore(tx).Supersede(ctx, orgID, assessmentID, a.Generation, a.InputDigest, detail)
+		case current.Status == models.CodeReviewAssessmentPublishing && current.PublicationState == models.CodeReviewPublicationReserved:
+			return db.NewCodeReviewAssessmentStore(tx).SupersedeUnsentPublication(ctx, orgID, assessmentID, a.Generation, a.InputDigest, detail)
+		default:
+			return db.ErrCodeReviewAssessmentState
+		}
+	})
+	if err != nil {
+		return err
+	}
+	if alreadyQueued {
+		return nil
+	}
+	if err := s.scheduling.store.SettleAssessment(ctx, orgID, assessmentID); err != nil {
+		return err
+	}
+	state, err := s.GetSchedule(ctx, orgID, a.PullRequestID)
+	if err != nil {
+		return err
+	}
+	if len(state.PendingInput) > 0 {
+		return s.scheduling.store.MarkEvidenceRefreshQueued(ctx, orgID, assessmentID)
+	}
+	if state.ActiveAssessmentID != nil && *state.ActiveAssessmentID != assessmentID {
+		replacement, err := s.scheduling.store.GetAssessmentByID(ctx, orgID, *state.ActiveAssessmentID)
+		if err != nil {
+			return err
+		}
+		if replacement.PullRequestID != a.PullRequestID || replacement.Generation <= a.Generation {
+			return db.ErrCodeReviewAssessmentState
+		}
+		return s.scheduling.store.MarkEvidenceRefreshQueued(ctx, orgID, assessmentID)
+	}
+	requestID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("code-review-evidence-refresh:"+assessmentID.String()))
+	_, err = s.requestAssessmentReview(ctx, ScheduleRequestInput{OrgID: orgID, PullRequestID: a.PullRequestID, RequestID: requestID, Mode: models.CodeReviewRecheck,
+		RequestContext: normalizeReviewRequestContext(&ReviewRequestContext{Source: "assessment_refresh", Body: manifest.Request.SubstantiveText})})
+	if err != nil {
+		return err
+	}
+	return s.scheduling.store.MarkEvidenceRefreshQueued(ctx, orgID, assessmentID)
+}
+
 // FallbackAssessmentToFull is the supervisor's idempotent recovery path after
 // it has terminally failed or superseded an assessment. The caller must
 // record the terminal outcome before invoking this method.

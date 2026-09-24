@@ -659,7 +659,12 @@ export interface CodeReviewVisualEvidenceSnapshot {
 
 export interface CodeReviewEvidence {
   agent_results: CodeReviewAgentResult[];
+  /** Findings still active in the completed assessment. */
   findings: CodeReviewFinding[];
+  /** Immutable original rows retained for audit. */
+  source_findings?: CodeReviewFinding[];
+  finding_reassessments?: CodeReviewFindingReassessment[];
+  current_assessment_id?: string;
   prompt_records?: CodeReviewPromptRecord[];
   /** @deprecated Compatibility with API instances still draining during rollout. */
   prompt_artifacts?: CodeReviewPromptRecord[];

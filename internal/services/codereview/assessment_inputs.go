@@ -270,12 +270,19 @@ func normalizeReviewIntent(description string) (string, error) {
 }
 
 func normalizeReviewIntentPlain(description string) (string, error) {
+	// Inline code spans and escapes may cross lines. Never normalize an image
+	// anywhere in the same text when either syntax is present.
+	if strings.Contains(description, "!") && strings.ContainsAny(description, "`\\") {
+		return "", errors.New("ambiguous image with code or escape syntax")
+	}
 	var out strings.Builder
 	for _, line := range strings.SplitAfter(description, "\n") {
 		if strings.HasPrefix(line, "    ") || strings.HasPrefix(line, "\t") {
 			return "", errors.New("indented Markdown code or ambiguous image")
 		}
-		if strings.ContainsAny(line, "`\\") || strings.Contains(line, "<img") || strings.Contains(line, "![][") {
+		// Literal code and escapes in ordinary prose stay byte-significant
+		// intent after the whole-text ambiguity check above.
+		if strings.Contains(line, "<img") || strings.Contains(line, "![][") {
 			return "", errors.New("unsupported Markdown construct")
 		}
 		body := strings.TrimSuffix(line, "\n")

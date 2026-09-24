@@ -1289,6 +1289,9 @@ type CodeReviewAnalytics struct {
 type CodeReviewEvidence struct {
 	AgentResults           []CodeReviewAgentResult           `json:"agent_results"`
 	Findings               []CodeReviewFinding               `json:"findings"`
+	SourceFindings         []CodeReviewFinding               `json:"source_findings,omitempty"`
+	FindingReassessments   []CodeReviewFindingReassessment   `json:"finding_reassessments,omitempty"`
+	CurrentAssessmentID    *uuid.UUID                        `json:"current_assessment_id,omitempty"`
 	PromptRecords          []CodeReviewPromptRecord          `json:"prompt_records,omitempty"`
 	RiskReasonCodes        []CodeReviewRiskReasonCode        `json:"risk_reason_codes"`
 	VisualEvidence         *CodeReviewVisualEvidenceSnapshot `json:"visual_evidence,omitempty"`

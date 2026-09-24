@@ -911,8 +911,8 @@ func TestCodeReviewStore_CompleteReviewWritesOnlyMigratedSizeColumns(t *testing.
 	completion = completion[:strings.Index(completion, "RETURNING ")]
 	require.NotEmpty(t, completion, "test should isolate the completion UPDATE")
 
-	require.Contains(t, completion, "additions = @additions", "completion should persist additions for author analytics")
-	require.Contains(t, completion, "deletions = @deletions", "completion should persist deletions for author analytics")
+	require.Contains(t, completion, "additions = COALESCE(@additions, additions)", "completion should persist additions or preserve the recorded value during recovery")
+	require.Contains(t, completion, "deletions = COALESCE(@deletions, deletions)", "completion should persist deletions or preserve the recorded value during recovery")
 	for _, column := range []string{"files_changed", "lines_changed"} {
 		require.NotContainsf(
 			t, completion, column,

@@ -1,7 +1,13 @@
 -- One durable, assessment-scoped outbox and completion receipt. This is not a
 -- second review controller: the existing continue_session job runs the turn.
-CREATE UNIQUE INDEX code_review_recheck_threads_org_id ON session_threads(org_id,id);
-CREATE UNIQUE INDEX code_review_recheck_jobs_org_id ON jobs(org_id,id);
+-- Production: prebuild these two hot-table indexes with CREATE UNIQUE INDEX
+-- CONCURRENTLY before applying this transactional migration. Check indisvalid;
+-- drop an invalid failed build before retrying: IF NOT EXISTS does not validate
+-- a prebuilt index. As in migration 281, lock_timeout bounds acquisition,
+-- not the duration of an index build once its lock is held.
+SET LOCAL lock_timeout = '30s';
+CREATE UNIQUE INDEX IF NOT EXISTS code_review_recheck_threads_org_id ON session_threads(org_id,id);
+CREATE UNIQUE INDEX IF NOT EXISTS code_review_recheck_jobs_org_id ON jobs(org_id,id);
 ALTER TABLE sessions ADD COLUMN code_review_owner_pr_id uuid;
 ALTER TABLE sessions ADD CONSTRAINT sessions_code_review_owner_pr_fk
     FOREIGN KEY (org_id,code_review_owner_pr_id) REFERENCES pull_requests(org_id,id);
@@ -109,6 +115,11 @@ BEGIN
             WHERE j.status IN ('completed','failed')
               AND j.updated_at < now() - make_interval(days => p_retention_days)
               AND NOT EXISTS (SELECT 1 FROM code_review_recheck_dispatches d WHERE d.org_id=j.org_id AND d.job_id=j.id)
+              AND NOT EXISTS (SELECT 1 FROM code_review_revision_assessments a
+                  WHERE a.org_id=j.org_id AND a.review_scope='full' AND a.status IN ('running','publishing')
+                  AND a.result_origin IS NOT NULL AND j.job_type='run_code_review'
+                  AND j.payload->>'session_id'=a.session_id::text
+                  AND j.payload->>'review_output_key'=a.publication_key)
             LIMIT 10000
         );
         GET DIAGNOSTICS batch_deleted = ROW_COUNT;

@@ -73,6 +73,11 @@ type disputeAssessmentReader interface {
 	GetLatestCompletedAssessmentBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.CodeReviewAssessment, error)
 }
 
+type disputeAssessmentFindingReader interface {
+	GetCompletedAssessmentByID(ctx context.Context, orgID, assessmentID uuid.UUID) (models.CodeReviewAssessment, error)
+	ListAssessmentFindings(ctx context.Context, orgID, assessmentID uuid.UUID) ([]models.CodeReviewFinding, error)
+}
+
 type disputePolicyStore interface {
 	GetPolicyByID(ctx context.Context, orgID, policyID uuid.UUID) (models.CodeReviewPolicyRecord, error)
 }
@@ -311,13 +316,15 @@ func (s *DisputeService) fileAgainstSessionResult(ctx context.Context, input Fil
 		return models.CodeReviewDispute{}, false, err
 	}
 	var selectedAssessment *models.CodeReviewAssessment
-	if input.GitHubThreadRootID == nil {
-		if assessmentReader, ok := s.reviews.(disputeAssessmentReader); ok {
-			assessment, assessmentErr := assessmentReader.GetLatestCompletedAssessmentBySessionID(ctx, input.OrgID, input.SessionID)
-			if assessmentErr != nil && !errors.Is(assessmentErr, pgx.ErrNoRows) {
-				return models.CodeReviewDispute{}, false, assessmentErr
-			}
-			if assessmentErr == nil {
+	var findingAssessmentID *uuid.UUID
+	if assessmentReader, ok := s.reviews.(disputeAssessmentReader); ok {
+		assessment, assessmentErr := assessmentReader.GetLatestCompletedAssessmentBySessionID(ctx, input.OrgID, input.SessionID)
+		if assessmentErr != nil && !errors.Is(assessmentErr, pgx.ErrNoRows) {
+			return models.CodeReviewDispute{}, false, assessmentErr
+		}
+		if assessmentErr == nil {
+			findingAssessmentID = &assessment.ID
+			if input.GitHubThreadRootID == nil {
 				selectedAssessment = &assessment
 				review.Decision = assessment.Decision
 				review.Acceptable = assessment.Acceptable
@@ -401,6 +408,7 @@ func (s *DisputeService) fileAgainstSessionResult(ctx context.Context, input Fil
 		"source":                         dispute.Source,
 		"reason_codes":                   dispute.ContestedReasonCodes,
 		"selected_assessment_id":         selectedAssessmentID,
+		"finding_assessment_id":          findingAssessmentID,
 		"assessment_risk_reason_details": assessmentReasons,
 	})
 	if err != nil {
@@ -506,6 +514,22 @@ func disputeAssessmentReasonSnapshot(signals json.RawMessage) (*uuid.UUID, []mod
 	return snapshot.AssessmentID, snapshot.Details, codes, nil
 }
 
+func disputeFindingAssessmentSnapshot(signals json.RawMessage) (*uuid.UUID, error) {
+	if len(signals) == 0 {
+		return nil, nil
+	}
+	var snapshot struct {
+		AssessmentID *uuid.UUID `json:"finding_assessment_id"`
+	}
+	if err := json.Unmarshal(signals, &snapshot); err != nil {
+		return nil, fmt.Errorf("decode dispute finding assessment snapshot: %w", err)
+	}
+	if snapshot.AssessmentID != nil && *snapshot.AssessmentID == uuid.Nil {
+		return nil, errors.New("dispute finding assessment snapshot has no assessment identity")
+	}
+	return snapshot.AssessmentID, nil
+}
+
 func (s *DisputeService) Triage(ctx context.Context, orgID, disputeID uuid.UUID) error {
 	dispute, err := s.disputes.GetByID(ctx, orgID, disputeID)
 	if err != nil {
@@ -546,9 +570,50 @@ func (s *DisputeService) Triage(ctx context.Context, orgID, disputeID uuid.UUID)
 	}
 	var findings []models.CodeReviewFinding
 	if dispute.Source == models.CodeReviewDisputeSourceGitHubComment {
-		findings, err = s.reviews.ListFindings(ctx, orgID, dispute.SessionID, false)
-		if err != nil {
-			return err
+		findingAssessmentID, snapshotErr := disputeFindingAssessmentSnapshot(dispute.QueueSignals)
+		if snapshotErr != nil {
+			return snapshotErr
+		}
+		if findingAssessmentID == nil {
+			findingAssessmentID = selectedAssessmentID
+		}
+		if findingAssessmentID != nil {
+			reader, ok := s.reviews.(disputeAssessmentFindingReader)
+			if !ok {
+				return errors.New("assessment finding reader unavailable")
+			}
+			current, loadErr := reader.GetCompletedAssessmentByID(ctx, orgID, *findingAssessmentID)
+			if loadErr != nil {
+				return loadErr
+			}
+			if current.SessionID != dispute.SessionID || current.PullRequestID != dispute.PullRequestID {
+				return errors.New("dispute finding assessment target mismatch")
+			}
+			if dispute.GitHubThreadRootCommentID == nil {
+				reviewContext.Decision = current.Decision
+				reviewContext.Acceptable = current.Acceptable
+				reviewContext.FinalReviewBody = current.RenderedBody
+			}
+			source := current
+			if current.SourceAssessmentID != nil {
+				source, loadErr = reader.GetCompletedAssessmentByID(ctx, orgID, *current.SourceAssessmentID)
+				if loadErr != nil {
+					return loadErr
+				}
+			}
+			original, loadErr := reader.ListAssessmentFindings(ctx, orgID, source.ID)
+			if loadErr != nil {
+				return loadErr
+			}
+			findings, _, err = EffectiveAssessmentFindings(current, source, original)
+			if err != nil {
+				return err
+			}
+		} else {
+			findings, err = s.reviews.ListFindings(ctx, orgID, dispute.SessionID, false)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	result, err := s.triageResult(ctx, dispute, reasons, reviewContext, findings, existingKinds)

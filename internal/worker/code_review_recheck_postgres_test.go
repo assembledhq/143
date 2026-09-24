@@ -49,7 +49,10 @@ type fakeRecheckPublisher struct {
 }
 
 type fakeRecheckLifecycle struct {
-	fallbacks []uuid.UUID
+	fallbacks   []uuid.UUID
+	refreshes   []uuid.UUID
+	assessments *db.CodeReviewAssessmentStore
+	txStarter   db.TxStarter
 }
 
 func (*fakeRecheckLifecycle) QueueReviewChanged(context.Context, codereviewsvc.ReviewChangedInput) (codereviewsvc.ReviewRequestedResult, error) {
@@ -62,6 +65,30 @@ func (*fakeRecheckLifecycle) HandleReviewChanged(context.Context, codereviewsvc.
 
 func (f *fakeRecheckLifecycle) FallbackAssessmentToFull(_ context.Context, _ uuid.UUID, assessmentID uuid.UUID, _ string) error {
 	f.fallbacks = append(f.fallbacks, assessmentID)
+	return nil
+}
+
+func (f *fakeRecheckLifecycle) RefreshUnsentEvidenceAssessment(ctx context.Context, orgID, assessmentID uuid.UUID, reason string) error {
+	a, err := f.assessments.GetByID(ctx, orgID, assessmentID)
+	if err != nil {
+		return err
+	}
+	if a.Status == models.CodeReviewAssessmentSuperseded && a.FailureDetail != nil && strings.HasPrefix(*a.FailureDetail, "evidence_recheck:") {
+		f.refreshes = append(f.refreshes, assessmentID)
+		return nil
+	}
+	if a.Status == models.CodeReviewAssessmentPublishing {
+		err = f.assessments.SupersedeUnsentPublication(ctx, orgID, assessmentID, a.Generation, a.InputDigest, "evidence_recheck:"+reason)
+	} else {
+		err = f.assessments.Supersede(ctx, orgID, assessmentID, a.Generation, a.InputDigest, "evidence_recheck:"+reason)
+	}
+	if err != nil {
+		return err
+	}
+	if err = db.NewCodeReviewScheduleStore(f.txStarter).SettleAssessment(ctx, orgID, assessmentID); err != nil {
+		return err
+	}
+	f.refreshes = append(f.refreshes, assessmentID)
 	return nil
 }
 
@@ -181,6 +208,10 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	dispatch, err := stores.CodeReviewRechecks.Get(ctx, org, recheck)
 	require.NoError(t, err, "one orchestrator dispatch should be durable")
 	require.Equal(t, models.CodeReviewRecheckDispatchPending, dispatch.Status, "supervisor should await exact orchestrator receipt")
+	priorCaptures := capture.calls
+	err = handler(jobctx.WithJobID(jobctx.WithLockToken(ctx, supervisorLease), supervisorJobID), "run_code_review_recheck", jobJSON)
+	require.Error(t, err, "pending exact continuation should keep supervisor waiting")
+	require.Equal(t, priorCaptures, capture.calls, "pending supervisor poll should not recapture provider evidence")
 	var reviewerJobs, continuationJobs int
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FILTER (WHERE job_type='run_code_review'),COUNT(*) FILTER (WHERE job_type='continue_session') FROM jobs WHERE org_id=$1`, org).Scan(&reviewerJobs, &continuationJobs), "count reviewer and continuation jobs")
 	require.Equal(t, 0, reviewerJobs, "visual-only recheck must not queue reviewers")
@@ -213,14 +244,39 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.NoError(t, err, "seed changed-input assessment")
 	changedJob, err := json.Marshal(codeReviewRecheckJob{OrgID: org, AssessmentID: changedAssessment})
 	require.NoError(t, err, "encode changed-input assessment job")
+	lifecycle := &fakeRecheckLifecycle{assessments: stores.CodeReviewAssessments, txStarter: pool}
+	services.CodeReviewLifecycle = lifecycle
 	err = handler(ctx, "run_code_review_recheck", changedJob)
-	require.Error(t, err, "changed input should request full-review fallback when lifecycle service is absent")
+	require.NoError(t, err, "changed evidence should retire the unsent assessment for a fresh evidence recheck")
 	afterChange, err := stores.CodeReviewAssessments.GetByID(ctx, org, changedAssessment)
 	require.NoError(t, err, "read changed-input assessment")
-	require.Equal(t, models.CodeReviewAssessmentFailed, afterChange.Status, "changed input must close evidence-only assessment")
-	require.Contains(t, *afterChange.FailureDetail, "full_review:inputs changed", "changed input should carry full-review route reason")
+	require.Equal(t, models.CodeReviewAssessmentSuperseded, afterChange.Status, "changed evidence must retire the old unsent assessment")
+	require.Contains(t, *afterChange.FailureDetail, "evidence_recheck:inputs changed", "changed evidence should retain the recheck route reason")
+	require.Equal(t, []uuid.UUID{changedAssessment}, lifecycle.refreshes, "one fresh evidence assessment should be requested")
+	err = handler(ctx, "run_code_review_recheck", changedJob)
+	require.NoError(t, err, "superseded evidence refresh should replay after a worker interruption")
+	require.Equal(t, []uuid.UUID{changedAssessment, changedAssessment}, lifecycle.refreshes, "terminal replay should resume the same deterministic refresh")
+	require.Empty(t, lifecycle.fallbacks, "evidence-only change should not force a full panel")
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE org_id=$1`, org).Scan(&totalJobs), "count jobs after changed input")
 	require.Equal(t, 2, totalJobs, "changed input must not queue an unsafe continuation")
+	gateAssessment := uuid.New()
+	gateInput := manifestInput
+	gateInput.Gates.ChecksDigest = strings.Repeat("5", 64)
+	gateManifest, err := codereviewsvc.BuildReviewInputManifest(gateInput)
+	require.NoError(t, err, "build admitted gate-only snapshot")
+	gateManifestJSON, err := json.Marshal(gateManifest)
+	require.NoError(t, err, "encode gate-only snapshot")
+	_, err = pool.Exec(ctx, assessmentSQL, gateAssessment, org, repo, repoName, pr, metadata, session, policy, 8, baseline, gateManifest.InputVersion, gateManifest.CodeDigest, gateManifest.ContractDigest, gateManifest.IntentDigest, gateManifest.VisualDigest, gateManifest.RequestDigest, gateManifest.GateDigest, gateManifest.InputDigest, gateManifestJSON, "evidence_only", "gates_changed", false, "running", nil, nil, nil, nil, "gate-publication", "not_started", nil)
+	require.NoError(t, err, "seed gate-only changed assessment")
+	gateJob, err := json.Marshal(codeReviewRecheckJob{OrgID: org, AssessmentID: gateAssessment})
+	require.NoError(t, err, "encode gate-only assessment job")
+	err = handler(ctx, "run_code_review_recheck", gateJob)
+	require.NoError(t, err, "changed gate snapshot should retire the unsent assessment for fresh evaluation")
+	gateOutcome, err := stores.CodeReviewAssessments.GetByID(ctx, org, gateAssessment)
+	require.NoError(t, err, "read changed-gate assessment")
+	require.Equal(t, models.CodeReviewAssessmentSuperseded, gateOutcome.Status, "changed gate must not reinterpret the admitted snapshot")
+	require.Equal(t, []uuid.UUID{changedAssessment, changedAssessment, gateAssessment}, lifecycle.refreshes, "gate-only change should request a fresh evidence assessment")
+	require.Empty(t, lifecycle.fallbacks, "gate-only change should not force full review")
 	reviewerResultID, findingID := uuid.New(), uuid.New()
 	_, err = pool.Exec(ctx, `INSERT INTO code_review_agent_results(id,org_id,session_id,agent_provider,role,status,assessment_id) VALUES($1,$2,$3,'codex','reviewer','completed',$4)`, reviewerResultID, org, session, baseline)
 	require.NoError(t, err, "seed one usable original reviewer result")
@@ -321,16 +377,16 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	stalePublicationJobID, stalePublicationLease := uuid.New(), uuid.New()
 	_, err = pool.Exec(ctx, `INSERT INTO jobs(id,org_id,queue,job_type,payload,status,lock_token) VALUES($1,$2,'agent','run_code_review_recheck','{}','running',$3)`, stalePublicationJobID, org, stalePublicationLease)
 	require.NoError(t, err, "lease publication-race supervisor")
-	lifecycle := &fakeRecheckLifecycle{}
 	services.CodeReviewLifecycle = lifecycle
 	capture.changedManifest = &changedManifest
 	capture.flipOnCall = capture.calls + 3 // first two captures build the result; third occurs under the publication lock.
 	err = handler(jobctx.WithJobID(jobctx.WithLockToken(ctx, stalePublicationLease), stalePublicationJobID), "run_code_review_recheck", staleJob)
-	require.NoError(t, err, "changed input at the locked publication boundary should settle and route full review")
+	require.NoError(t, err, "changed input at the locked publication boundary should refresh evidence")
 	staleOutcome, err := stores.CodeReviewAssessments.GetByID(ctx, org, staleAssessment)
 	require.NoError(t, err, "read settled publication-race assessment")
 	require.Equal(t, models.CodeReviewAssessmentSuperseded, staleOutcome.Status, "unsent staged approval must be superseded when input changes under publication lock")
-	require.Equal(t, []uuid.UUID{staleAssessment}, lifecycle.fallbacks, "one full-review fallback should be requested")
+	require.Equal(t, []uuid.UUID{changedAssessment, changedAssessment, gateAssessment, staleAssessment}, lifecycle.refreshes, "each changed unsent assessment should request a fresh evidence assessment")
+	require.Empty(t, lifecycle.fallbacks, "visual evidence drift should not request a full panel")
 	require.Equal(t, 2, len(publisher.requests), "changed input must not send another formal review")
 	capture.changedManifest = nil
 	services.CodeReviewLifecycle = nil
@@ -347,7 +403,7 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.NoError(t, err, "read incompatible recheck assessment")
 	require.Equal(t, models.CodeReviewAssessmentFailed, incompatibleOutcome.Status, "reuse incompatibility must fail the bounded recheck")
 	require.Equal(t, "full_review:assessment inputs cannot establish reusable coverage", *incompatibleOutcome.FailureDetail, "fallback reason should survive retries")
-	require.Equal(t, []uuid.UUID{staleAssessment, incompatibleAssessment}, lifecycle.fallbacks, "incompatibility should queue one additional full review")
+	require.Equal(t, []uuid.UUID{incompatibleAssessment}, lifecycle.fallbacks, "incompatibility should queue one full review")
 	capture.captureErr = nil
 	services.CodeReviewLifecycle = nil
 	escalatedAssessment := uuid.New()
@@ -377,7 +433,7 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	escalatedOutcome, err := stores.CodeReviewAssessments.GetByID(ctx, org, escalatedAssessment)
 	require.NoError(t, err, "read durable escalation reason")
 	require.Equal(t, "full_review:new evidence requires full review: "+escalationConcern, *escalatedOutcome.FailureDetail, "assessment must retain model concern for full-review fallback")
-	require.Equal(t, []uuid.UUID{staleAssessment, incompatibleAssessment, escalatedAssessment}, lifecycle.fallbacks, "escalation should request exactly one additional full review")
+	require.Equal(t, []uuid.UUID{incompatibleAssessment, escalatedAssessment}, lifecycle.fallbacks, "escalation should request exactly one additional full review")
 	services.CodeReviewLifecycle = nil
 	replacementSession, replacementMetadata, replacementAssessment := uuid.New(), uuid.New(), uuid.New()
 	_, err = pool.Exec(ctx, `INSERT INTO sessions(id,org_id,origin,status) VALUES($1,$2,'code_review','idle')`, replacementSession, org)
@@ -388,6 +444,7 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.NoError(t, err, "seed newer completed full assessment")
 	retireTx, err := pool.Begin(ctx)
 	require.NoError(t, err, "begin old conversation retirement")
+	defer func() { _ = retireTx.Rollback(ctx) }()
 	released, err := stores.CodeReviewRechecks.RetireOwnerForCompletedReplacement(ctx, retireTx, org, session, pr, replacementAssessment)
 	require.NoError(t, err, "retire drained old review conversation")
 	require.True(t, released, "new completed full assessment should release drained old owner")
@@ -422,4 +479,20 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.Equal(t, "review marker not found after input change; pending reconciliation", *uncertainOutcome.FailureDetail, "persist actionable no-marker detail for operators")
 	require.Equal(t, 1, len(publisher.reconciliations), "changed input should only read the GitHub review marker")
 	require.Equal(t, 2, len(publisher.requests), "changed input must not retry an uncertain write")
+	_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET created_at=now()-interval '3 hours' WHERE org_id=$1 AND id=$2`, org, uncertainAssessment)
+	require.NoError(t, err, "age unresolved send past bounded reconciliation window")
+	otherOrgPaused, err := stores.CodeReviewAssessments.PauseExpiredPublication(ctx, uuid.New(), uncertainAssessment, 9, manifest.InputDigest)
+	require.NoError(t, err, "foreign tenant pause lookup should be harmless")
+	require.False(t, otherOrgPaused, "foreign tenant cannot pause another assessment's publication")
+	capturesBeforePause, reconciliationsBeforePause, sendsBeforePause := capture.calls, len(publisher.reconciliations), len(publisher.requests)
+	err = handler(jobctx.WithJobID(jobctx.WithLockToken(ctx, uncertainLease), uncertainJobID), "run_code_review_recheck", uncertainJob)
+	require.NoError(t, err, "expired uncertain send should pause for operator reconciliation")
+	pausedOutcome, err := stores.CodeReviewAssessments.GetByID(ctx, org, uncertainAssessment)
+	require.NoError(t, err, "load paused uncertain assessment")
+	require.Equal(t, models.CodeReviewAssessmentPublishing, pausedOutcome.Status, "pause must retain immutable staged publication")
+	require.Equal(t, models.CodeReviewPublicationUncertain, pausedOutcome.PublicationState, "pause must retain unresolved send identity")
+	require.Contains(t, *pausedOutcome.FailureDetail, "operator_reconciliation_required:", "pause must expose actionable operator detail")
+	require.Equal(t, capturesBeforePause, capture.calls, "pause must avoid additional provider capture")
+	require.Equal(t, reconciliationsBeforePause, len(publisher.reconciliations), "pause must avoid another marker reconciliation")
+	require.Equal(t, sendsBeforePause, len(publisher.requests), "pause must avoid an additional external send")
 }

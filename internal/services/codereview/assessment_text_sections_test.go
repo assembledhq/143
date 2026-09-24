@@ -24,6 +24,13 @@ func TestSplitReviewEvidenceSections(t *testing.T) {
 		{"fence closer with suffix", "Purpose\n", "Purpose\n## Testing\n```text\nlog\n```more\n## Design\nnew intent\n", false, false},
 		{"duplicate evidence heading", "Purpose\n", "Purpose\n## Testing\none\n## Testing\ntwo\n", false, false},
 		{"setext ambiguity", "Purpose\n", "Purpose\nTesting\n-------\nresult\n", false, false},
+		{"single dash setext boundary", "Purpose\n", "Purpose\n## Testing\npassed\n-\nnew intent\n", false, false},
+		{"single equals setext boundary", "Purpose\n", "Purpose\n## Evidence\nproof\n=\nnew intent\n", false, false},
+		{"literal code prose unchanged", "Purpose with `code`\n", "Purpose with `code`\n## Testing\npassed\n", true, true},
+		{"literal escaped prose unchanged", "Purpose with \\*literal\\*\n", "Purpose with \\*literal\\*\n## Testing\npassed\n", true, true},
+		{"literal code prose changes", "Purpose with `old`\n## Testing\nfailed\n", "Purpose with `new`\n## Testing\npassed\n", false, true},
+		{"literal escaped prose changes", "Purpose with \\*old\\*\n## Testing\nfailed\n", "Purpose with \\*new\\*\n## Testing\npassed\n", false, true},
+		{"image inside literal code ambiguous", "Purpose\n", "Purpose `![alt](a.png)`\n## Testing\npassed\n", false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

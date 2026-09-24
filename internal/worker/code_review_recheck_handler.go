@@ -26,6 +26,18 @@ type codeReviewAssessmentFallback interface {
 	FallbackAssessmentToFull(context.Context, uuid.UUID, uuid.UUID, string) error
 }
 
+type codeReviewEvidenceAssessmentRefresher interface {
+	RefreshUnsentEvidenceAssessment(context.Context, uuid.UUID, uuid.UUID, string) error
+}
+
+func refreshUnsentCodeReviewEvidence(ctx context.Context, services *Services, a models.CodeReviewAssessment, reason string) error {
+	refresher, ok := services.CodeReviewLifecycle.(codeReviewEvidenceAssessmentRefresher)
+	if !ok {
+		return errors.New("code review evidence refresh unavailable")
+	}
+	return refresher.RefreshUnsentEvidenceAssessment(ctx, a.OrgID, a.ID, reason)
+}
+
 var errCodeReviewUnsentInputsChanged = errors.New("assessment inputs changed before publication send")
 var errCodeReviewPublicationSuperseded = errors.New("assessment publication superseded and full fallback queued")
 
@@ -75,6 +87,9 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			}
 			return queueCodeReviewRecheckFallback(ctx, services, a, strings.TrimPrefix(*a.FailureDetail, "full_review:"))
 		}
+		if a.Status == models.CodeReviewAssessmentSuperseded && a.FailureDetail != nil && strings.HasPrefix(*a.FailureDetail, "evidence_recheck:") {
+			return refreshUnsentCodeReviewEvidence(ctx, services, a, strings.TrimPrefix(*a.FailureDetail, "evidence_recheck:"))
+		}
 		if a.Status == models.CodeReviewAssessmentCompleted || a.Status == models.CodeReviewAssessmentCancelled || a.Status == models.CodeReviewAssessmentSuperseded {
 			return settleCodeReviewAssessment(ctx, stores, a)
 		}
@@ -88,6 +103,9 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			return nil
 		}
 		if a.Status == models.CodeReviewAssessmentPublishing || a.ResultOrigin != nil {
+			if paused, pauseErr := pauseExpiredCodeReviewPublication(ctx, stores, a); paused || pauseErr != nil {
+				return pauseErr
+			}
 			return resumeCodeReviewRecheckPublication(ctx, stores, services, a)
 		}
 		if a.Status == models.CodeReviewAssessmentReserved {
@@ -95,6 +113,43 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 				return err
 			}
 			a.Status = models.CodeReviewAssessmentRunning
+		}
+		// A running continuation can take minutes. Poll its exact queue receipt
+		// without recapturing provider evidence or downloading images every wake.
+		dispatch, dispatchErr := stores.CodeReviewRechecks.Get(ctx, a.OrgID, a.ID)
+		if dispatchErr != nil && !errors.Is(dispatchErr, pgx.ErrNoRows) {
+			return dispatchErr
+		}
+		if dispatchErr == nil {
+			switch dispatch.Status {
+			case models.CodeReviewRecheckDispatchPending, models.CodeReviewRecheckDispatchRunning:
+				terminal, reconcileErr := stores.CodeReviewRechecks.FailTerminalJob(ctx, a.OrgID, a.ID, "bound continuation job ended without an exact turn receipt")
+				if reconcileErr != nil {
+					return reconcileErr
+				}
+				if terminal {
+					terminalDispatch, loadErr := stores.CodeReviewRechecks.Get(ctx, a.OrgID, a.ID)
+					if loadErr != nil {
+						return loadErr
+					}
+					if terminalDispatch.Status == models.CodeReviewRecheckDispatchCancelled {
+						return settleCodeReviewAssessment(ctx, stores, a)
+					}
+					return failCodeReviewRecheck(ctx, stores, services, a, "bound continuation job ended without an exact turn receipt", true)
+				}
+				policy, policyErr := stores.CodeReviews.GetPolicyByID(ctx, a.OrgID, a.PolicyID)
+				if policyErr != nil {
+					return policyErr
+				}
+				if time.Now().After(codeReviewAgentDeadline(policy.Config(), dispatch.CreatedAt)) {
+					return failCodeReviewRecheck(ctx, stores, services, a, "orchestrator continuation exceeded review deadline", true)
+				}
+				return codeReviewWaitingForOrchestrator(policy.Config())
+			case models.CodeReviewRecheckDispatchFailed:
+				return failCodeReviewRecheck(ctx, stores, services, a, "orchestrator continuation failed", true)
+			case models.CodeReviewRecheckDispatchCancelled:
+				return settleCodeReviewAssessment(ctx, stores, a)
+			}
 		}
 		baseline, err := stores.CodeReviewAssessments.GetByID(ctx, a.OrgID, *a.SourceAssessmentID)
 		if err != nil {
@@ -138,7 +193,7 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			return err
 		}
 		if capture.Manifest.InputDigest != a.InputDigest {
-			return failCodeReviewRecheck(ctx, stores, services, a, "inputs changed before evidence assessment", true)
+			return refreshUnsentCodeReviewEvidence(ctx, services, a, "inputs changed before evidence assessment")
 		}
 		if capture.Manifest.CodeDigest != baselineManifest.CodeDigest || capture.Manifest.ContractDigest != baselineManifest.ContractDigest || capture.Manifest.IntentDigest != baselineManifest.IntentDigest || capture.Manifest.RequestDigest != baselineManifest.RequestDigest {
 			return failCodeReviewRecheck(ctx, stores, services, a, "baseline code or review contract changed", true)
@@ -147,8 +202,7 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		if err != nil {
 			return failCodeReviewRecheck(ctx, stores, services, a, err.Error(), true)
 		}
-		dispatch, err := stores.CodeReviewRechecks.Get(ctx, a.OrgID, a.ID)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(dispatchErr, pgx.ErrNoRows) {
 			if !services.CodeReviewRechecksEnabled || !capture.Policy.Config().ContinuationPolicy.Enabled {
 				return failCodeReviewRecheck(ctx, stores, services, a, "continuation disabled", true)
 			}
@@ -193,33 +247,6 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			if err != nil {
 				return err
 			}
-		} else if err != nil {
-			return err
-		}
-		if dispatch.Status == models.CodeReviewRecheckDispatchPending || dispatch.Status == models.CodeReviewRecheckDispatchRunning {
-			terminal, reconcileErr := stores.CodeReviewRechecks.FailTerminalJob(ctx, a.OrgID, a.ID, "bound continuation job ended without an exact turn receipt")
-			if reconcileErr != nil {
-				return reconcileErr
-			}
-			if terminal {
-				terminalDispatch, loadErr := stores.CodeReviewRechecks.Get(ctx, a.OrgID, a.ID)
-				if loadErr != nil {
-					return loadErr
-				}
-				if terminalDispatch.Status == models.CodeReviewRecheckDispatchCancelled {
-					return settleCodeReviewAssessment(ctx, stores, a)
-				}
-				return failCodeReviewRecheck(ctx, stores, services, a, "bound continuation job ended without an exact turn receipt", true)
-			}
-			if time.Now().After(codeReviewAgentDeadline(capture.Policy.Config(), dispatch.CreatedAt)) {
-				return failCodeReviewRecheck(ctx, stores, services, a, "orchestrator continuation exceeded review deadline", true)
-			}
-		}
-		if dispatch.Status == models.CodeReviewRecheckDispatchFailed {
-			return failCodeReviewRecheck(ctx, stores, services, a, "orchestrator continuation failed", true)
-		}
-		if dispatch.Status == models.CodeReviewRecheckDispatchCancelled {
-			return settleCodeReviewAssessment(ctx, stores, a)
 		}
 		if dispatch.Status != "completed" || dispatch.ResultMessageID == nil {
 			return codeReviewWaitingForOrchestrator(capture.Policy.Config())
@@ -248,7 +275,7 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			return err
 		}
 		if fresh.Manifest.InputDigest != a.InputDigest {
-			return failCodeReviewRecheck(ctx, stores, services, a, "inputs changed during evidence assessment", true)
+			return refreshUnsentCodeReviewEvidence(ctx, services, a, "inputs changed during evidence assessment")
 		}
 		payload := runCodeReviewPayload{OrgID: a.OrgID, SessionID: a.SessionID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, PolicyID: a.PolicyID, HeadSHA: a.HeadSHA, OutputKey: a.PublicationKey, FromFork: fresh.Snapshot.FromFork, PullRequestAuthor: fresh.Snapshot.AuthorLogin, RequestContext: requestContext}
 		health, err := loadStoredCodeReviewHealth(ctx, stores, payload, fresh.PullRequest)
@@ -507,15 +534,8 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 	})
 	if errors.Is(err, errCodeReviewUnsentInputsChanged) {
 		reason := "inputs changed before publication"
-		if supersedeErr := stores.CodeReviewAssessments.SupersedeUnsentPublication(ctx, a.OrgID, a.ID, a.Generation, a.InputDigest, "full_review:"+reason); supersedeErr != nil {
-			return supersedeErr
-		}
-		if settleErr := settleCodeReviewAssessment(ctx, stores, a); settleErr != nil {
-			return settleErr
-		}
-		stores.CodeReviews.PublishAssessmentUpdated(ctx, a)
-		if fallbackErr := queueCodeReviewRecheckFallback(ctx, services, a, reason); fallbackErr != nil {
-			return fallbackErr
+		if refreshErr := refreshUnsentCodeReviewEvidence(ctx, services, a, reason); refreshErr != nil {
+			return refreshErr
 		}
 		return errCodeReviewPublicationSuperseded
 	}

@@ -10154,6 +10154,13 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					cancelErr := stores.CodeReviewRechecks.Cancel(cancelCtx, orgID, *codeReviewAssessmentID, jobID, lockToken)
 					cancel()
 					if cancelErr != nil {
+						if errors.Is(cancelErr, db.ErrCodeReviewRecheckFence) {
+							dispatch, dispatchErr := stores.CodeReviewRechecks.Get(ctx, orgID, *codeReviewAssessmentID)
+							current, assessmentErr := stores.CodeReviewAssessments.GetByID(ctx, orgID, *codeReviewAssessmentID)
+							if dispatchErr == nil && assessmentErr == nil && dispatch.JobID == jobID && dispatch.SessionID == sessionID && dispatch.ThreadID == threadID && dispatch.Status == models.CodeReviewRecheckDispatchCancelled && current.Status == models.CodeReviewAssessmentCancelled && current.SessionID == sessionID {
+								return &FatalError{Err: err}
+							}
+						}
 						return cancelErr
 					}
 					return &FatalError{Err: err}

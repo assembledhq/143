@@ -55,12 +55,13 @@ CREATE TABLE session_threads(id uuid PRIMARY KEY,org_id uuid NOT NULL,session_id
 CREATE TABLE session_messages(id bigserial PRIMARY KEY,org_id uuid NOT NULL,session_id uuid NOT NULL,thread_id uuid,user_id uuid,turn_number int NOT NULL,role text NOT NULL,content text NOT NULL,attachments text[],"references" jsonb,commands jsonb,token_usage jsonb,source text NOT NULL DEFAULT '',created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL,queue text NOT NULL,job_type text NOT NULL,payload jsonb NOT NULL,priority int NOT NULL DEFAULT 0,dedupe_key text,status text NOT NULL DEFAULT 'pending',max_attempts int NOT NULL DEFAULT 3,lock_token uuid,updated_at timestamptz NOT NULL DEFAULT now());
 CREATE UNIQUE INDEX jobs_active_dedupe ON jobs(queue,dedupe_key) WHERE status IN ('pending','running');
-CREATE TABLE code_review_revision_assessments(id uuid PRIMARY KEY,org_id uuid NOT NULL,repository_id uuid NOT NULL,pull_request_id uuid NOT NULL,session_id uuid NOT NULL,review_scope text NOT NULL,status text NOT NULL,head_sha text NOT NULL DEFAULT 'head',code_digest text NOT NULL DEFAULT 'code',contract_digest text NOT NULL DEFAULT 'contract',input_digest text NOT NULL DEFAULT 'input',result_origin text,failure_detail text,completed_at timestamptz,updated_at timestamptz);
+CREATE TABLE code_review_revision_assessments(id uuid PRIMARY KEY,org_id uuid NOT NULL,repository_id uuid NOT NULL,pull_request_id uuid NOT NULL,session_id uuid NOT NULL,review_scope text NOT NULL,status text NOT NULL,head_sha text NOT NULL DEFAULT 'head',code_digest text NOT NULL DEFAULT 'code',contract_digest text NOT NULL DEFAULT 'contract',input_digest text NOT NULL DEFAULT 'input',publication_key text NOT NULL DEFAULT 'output',result_origin text,failure_detail text,completed_at timestamptz,updated_at timestamptz);
 CREATE UNIQUE INDEX assessment_org_id ON code_review_revision_assessments(org_id,id);
-CREATE TABLE code_review_session_metadata(org_id uuid NOT NULL,session_id uuid NOT NULL,pull_request_id uuid NOT NULL,status text NOT NULL);
+CREATE TABLE code_review_session_metadata(id uuid NOT NULL DEFAULT gen_random_uuid(),org_id uuid NOT NULL,session_id uuid NOT NULL,pull_request_id uuid NOT NULL,status text NOT NULL);
 CREATE TABLE preview_instances(org_id uuid,session_id uuid,preview_holding_container boolean);
 CREATE TABLE thread_runtimes(org_id uuid,session_id uuid,status text);
 CREATE TABLE session_executors(org_id uuid,session_id uuid,status text);
+CREATE TABLE session_sandbox_holders(org_id uuid,session_id uuid,holder_kind text NOT NULL DEFAULT 'snapshot',holder_id uuid,status text,expires_at timestamptz,released_at timestamptz,updated_at timestamptz);
 CREATE TABLE session_cancel_requests(org_id uuid NOT NULL,session_id uuid NOT NULL,requested_at timestamptz NOT NULL,delivered_at timestamptz);
 CREATE TABLE session_publish_state(org_id uuid,session_id uuid,pr_creation_state text,pr_creation_error text,pr_push_state text,pr_push_error text,pr_push_error_code text,branch_creation_state text,branch_creation_error text,updated_at timestamptz);
 CREATE TABLE thread_inbox_entries(id uuid NOT NULL DEFAULT gen_random_uuid(),org_id uuid NOT NULL,session_id uuid NOT NULL,thread_id uuid NOT NULL,sequence_no bigint NOT NULL,message_id bigint,client_message_id text,entry_type text NOT NULL,payload jsonb NOT NULL DEFAULT '{}',delivery_state text NOT NULL,delivery_attempts int NOT NULL DEFAULT 0,last_error text,owner_node_id text,runtime_id uuid,accepted_at timestamptz NOT NULL DEFAULT now(),delivered_at timestamptz,acked_at timestamptz,applied_at timestamptz,created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
@@ -82,7 +83,7 @@ CREATE UNIQUE INDEX inbox_client_id ON thread_inbox_entries(org_id,thread_id,cli
 		{`INSERT INTO sessions(id,org_id,origin) VALUES($1,$2,'code_review')`, []any{session, org}},
 		{`INSERT INTO session_threads(id,org_id,session_id) VALUES($1,$2,$3)`, []any{thread, org, session}},
 		{`INSERT INTO code_review_revision_assessments(id,org_id,repository_id,pull_request_id,session_id,review_scope,status) VALUES($1,$2,$3,$4,$5,'evidence_only','running')`, []any{assessment, org, repo, pr, session}},
-		{`INSERT INTO code_review_session_metadata VALUES($1,$2,$3,'completed')`, []any{org, session, pr}},
+		{`INSERT INTO code_review_session_metadata(org_id,session_id,pull_request_id,status) VALUES($1,$2,$3,'completed')`, []any{org, session, pr}},
 	}
 	for _, row := range seed {
 		_, err = pool.Exec(ctx, row.query, row.args...)
@@ -93,15 +94,36 @@ CREATE UNIQUE INDEX inbox_client_id ON thread_inbox_entries(org_id,thread_id,cli
 	require.NoError(t, err, "seed historical full-review usage")
 	_, err = pool.Exec(ctx, `UPDATE sessions SET status='running' WHERE org_id=$1 AND id=$2`, org, session)
 	require.NoError(t, err, "model full review before final session reconciliation")
+	_, err = pool.Exec(ctx, `INSERT INTO session_sandbox_holders(org_id,session_id,status,expires_at) VALUES($1,$2,'active',now()+interval '1 hour')`, org, session)
+	require.NoError(t, err, "seed active shared sandbox holder")
+	holderTx, err := pool.Begin(ctx)
+	require.NoError(t, err, "begin blocked baseline ownership transaction")
+	blockedByHolder, err := store.ClaimFullAssessmentOwner(ctx, holderTx, org, session, pr)
+	require.NoError(t, err, "read active sandbox holder fence")
+	require.False(t, blockedByHolder, "active holder must prevent claiming a reusable conversation")
+	require.NoError(t, holderTx.Commit(ctx), "commit blocked baseline claim")
+	_, err = pool.Exec(ctx, `DELETE FROM session_sandbox_holders WHERE org_id=$1 AND session_id=$2`, org, session)
+	require.NoError(t, err, "drain active holder before baseline ownership")
+	_, err = pool.Exec(ctx, `INSERT INTO session_sandbox_holders(org_id,session_id,holder_kind,holder_id,status,expires_at) SELECT $1,$2,'code_review',id,'active',now()+interval '1 hour' FROM code_review_session_metadata WHERE org_id=$1 AND session_id=$2`, org, session)
+	require.NoError(t, err, "seed terminal code review warm holder")
 	tx, err := pool.Begin(ctx)
 	require.NoError(t, err, "begin baseline ownership transaction")
 	claimed, err := store.ClaimFullAssessmentOwner(ctx, tx, org, session, pr)
 	require.NoError(t, err, "claim completed full assessment's conversation")
 	require.True(t, claimed, "completed metadata and drained runtime should permit baseline claim")
 	require.NoError(t, tx.Commit(ctx), "commit baseline conversation owner")
+	var holderStatus string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT status FROM session_sandbox_holders WHERE org_id=$1 AND session_id=$2 AND holder_kind='code_review'`, org, session).Scan(&holderStatus), "read terminal review holder")
+	require.Equal(t, "released", holderStatus, "owner claim should release only the terminal review warm holder")
 	_, err = pool.Exec(ctx, `UPDATE sessions SET status='idle' WHERE org_id=$1 AND id=$2`, org, session)
 	require.NoError(t, err, "reconcile completed full review session")
 	in := models.CodeReviewRecheckDispatchInput{OrgID: org, RepositoryID: repo, PullRequestID: pr, AssessmentID: assessment, SessionID: session, ThreadID: thread, ExpectedTurn: 1, Prompt: "Check the new screenshot", ImageURLs: []string{"https://example.invalid/evidence.png"}}
+	_, err = pool.Exec(ctx, `INSERT INTO session_sandbox_holders(org_id,session_id,status,expires_at) VALUES($1,$2,'draining',now()+interval '1 hour')`, org, session)
+	require.NoError(t, err, "seed draining sandbox holder before recheck dispatch")
+	_, _, err = store.Dispatch(ctx, in)
+	require.ErrorIs(t, err, ErrCodeReviewRecheckFence, "draining holder must prevent dispatch into occupied conversation")
+	_, err = pool.Exec(ctx, `DELETE FROM session_sandbox_holders WHERE org_id=$1 AND session_id=$2`, org, session)
+	require.NoError(t, err, "drain holder before concurrent dispatch proof")
 	const contenders = 4
 	var wg sync.WaitGroup
 	type result struct {
@@ -206,6 +228,12 @@ CREATE UNIQUE INDEX inbox_client_id ON thread_inbox_entries(org_id,thread_id,cli
 	unrelatedJob := uuid.New()
 	_, err = pool.Exec(ctx, `INSERT INTO jobs(id,org_id,queue,job_type,payload,status,updated_at) VALUES($1,$2,'agent','noop','{}','completed',now()-interval '60 days')`, unrelatedJob, org)
 	require.NoError(t, err, "seed unrelated expired job")
+	stagedFull := uuid.New()
+	_, err = pool.Exec(ctx, `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,pull_request_id,session_id,review_scope,status,result_origin,publication_key) VALUES($1,$2,$3,$4,$5,'full','publishing','executed','staged-output')`, stagedFull, org, repo, pr, session)
+	require.NoError(t, err, "seed staged full review awaiting controller recovery")
+	fullJob := uuid.New()
+	_, err = pool.Exec(ctx, `INSERT INTO jobs(id,org_id,queue,job_type,payload,status,updated_at) VALUES($1,$2,'agent','run_code_review',jsonb_build_object('session_id',$3::text,'review_output_key','staged-output'),'completed',now()-interval '60 days')`, fullJob, org, session)
+	require.NoError(t, err, "seed expired full controller payload needed for staged recovery")
 	_, err = pool.Exec(ctx, `ALTER FUNCTION delete_expired_completed_jobs(int) SET search_path = `+schema+`,public`)
 	require.NoError(t, err, "scope retention function to isolated schema")
 	var deleted int64
@@ -214,6 +242,8 @@ CREATE UNIQUE INDEX inbox_client_id ON thread_inbox_entries(org_id,thread_id,cli
 	var protectedJobCount int
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE id=$1`, d.JobID).Scan(&protectedJobCount), "check referenced job retention")
 	require.Equal(t, 1, protectedJobCount, "dispatch receipt must retain exact job identity")
+	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE id=$1`, fullJob).Scan(&protectedJobCount), "check staged full job retention")
+	require.Equal(t, 1, protectedJobCount, "staged full review must retain its original controller payload")
 	_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status='completed',result_origin='evidence_only' WHERE org_id=$1 AND id=$2`, org, assessment)
 	require.NoError(t, err, "publish previous assessment before its checkpoint can authorize native resume")
 	secondAssessment := uuid.New()

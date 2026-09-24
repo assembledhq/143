@@ -230,14 +230,47 @@ func (s *CodeReviewScheduleStore) RepairMissingWakes(ctx context.Context) error 
 	if err != nil {
 		return err
 	}
-	// A lost or exhausted supervisor must not strand a reserved assessment or
-	// an uncertain publication. The supervisor rereads its immutable identity
-	// and resumes the same job; failed full-review escalations are retried too.
+	// Stop automatic reconciliation after a bounded window without releasing
+	// the reservation for an external send whose outcome is still unknown.
+	_, err = s.db.Exec(ctx, `UPDATE code_review_revision_assessments a SET failure_detail=$1
+	 FROM (SELECT org_id,id FROM code_review_revision_assessments
+	 WHERE status='publishing' AND publication_state='uncertain' AND result_origin IS NOT NULL
+	 AND created_at <= now()-make_interval(secs => $2)
+	 AND COALESCE(failure_detail,'') NOT LIKE 'operator_reconciliation_required:%'
+	 ORDER BY created_at,id LIMIT 100) expired
+	 WHERE a.org_id=expired.org_id AND a.id=expired.id
+	 AND a.status='publishing' AND a.publication_state='uncertain'`, CodeReviewPublicationOperatorRequired, CodeReviewPublicationReconciliationWindow.Seconds())
+	if err != nil {
+		return err
+	}
+	// A lost or exhausted supervisor must not strand a reserved assessment.
+	// Retrying a superseded row also closes a crash between retirement and
+	// admission of its replacement, preserving the original request identity.
 	_, err = s.db.Exec(ctx, `INSERT INTO jobs(org_id,queue,job_type,payload,priority,dedupe_key,run_at,max_attempts)
  SELECT a.org_id,'agent','run_code_review_recheck',jsonb_build_object('org_id',a.org_id,'assessment_id',a.id),5,'code_review_recheck:'||a.id::text,now(),8
  FROM code_review_revision_assessments a
- WHERE ((a.review_scope='evidence_only' AND a.status IN ('reserved','running','publishing')) OR (a.status IN ('failed','superseded') AND a.failure_detail LIKE 'full_review:%'))
+ WHERE ((a.review_scope='evidence_only' AND a.status IN ('reserved','running','publishing')) OR (a.status IN ('failed','superseded') AND (a.failure_detail LIKE 'full_review:%' OR a.failure_detail LIKE 'evidence_recheck:%')))
+ AND COALESCE(a.failure_detail,'') NOT LIKE 'operator_reconciliation_required:%'
  AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.org_id=a.org_id AND j.queue='agent' AND j.dedupe_key='code_review_recheck:'||a.id::text AND j.status IN ('pending','running'))
+ ORDER BY a.created_at,a.id LIMIT 100 ON CONFLICT DO NOTHING`)
+	if err != nil {
+		return err
+	}
+	// Full-review publication uses its original controller payload. Reuse all
+	// captured provenance, including request/dispute identity and fork context;
+	// never construct a new review or infer that an uncertain send was absent.
+	_, err = s.db.Exec(ctx, `INSERT INTO jobs(org_id,queue,job_type,payload,priority,dedupe_key,run_at,max_attempts)
+ SELECT a.org_id,'agent','run_code_review',original.payload,5,original.dedupe_key,now(),8
+ FROM code_review_revision_assessments a
+ JOIN LATERAL (SELECT j.payload,j.dedupe_key FROM jobs j
+   WHERE j.org_id=a.org_id AND j.queue='agent' AND j.job_type='run_code_review'
+   AND j.payload->>'session_id'=a.session_id::text AND j.payload->>'review_output_key'=a.publication_key
+   AND j.dedupe_key='code_review:'||a.publication_key
+   ORDER BY j.created_at DESC,j.id DESC LIMIT 1) original ON true
+ WHERE a.review_scope='full' AND a.status IN ('running','publishing') AND a.result_origin IS NOT NULL
+ AND COALESCE(a.failure_detail,'') NOT LIKE 'operator_reconciliation_required:%'
+ AND NOT EXISTS(SELECT 1 FROM jobs active WHERE active.org_id=a.org_id AND active.queue='agent'
+   AND active.dedupe_key=original.dedupe_key AND active.status IN ('pending','running'))
  ORDER BY a.created_at,a.id LIMIT 100 ON CONFLICT DO NOTHING`)
 	if err != nil {
 		return err

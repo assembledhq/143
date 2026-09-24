@@ -16,6 +16,14 @@ import (
 var ErrCodeReviewRecheckFence = errors.New("code review recheck turn lost its assessment or job lease")
 var ErrCodeReviewRecheckUserCancelled = errors.New("code review recheck turn was cancelled by the user")
 
+// Every release, claim, and native-resume path must use the same observable
+// drain proof. An expired holder lease is not an active sandbox owner.
+const codeReviewRecheckSessionDrainedSQL = `s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
+	AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
+	AND NOT EXISTS(SELECT 1 FROM session_sandbox_holders h WHERE h.org_id=s.org_id AND h.session_id=s.id AND h.status IN ('active','draining') AND h.expires_at > now())
+	AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
+	AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining'))`
+
 // RejectIfCodeReviewOwned blocks ordinary conversation mutations after a
 // review has reserved its orchestrator session. It is deliberately separate
 // from the assessment lifecycle: completed reviews retain the conversation.
@@ -48,16 +56,25 @@ func (s *CodeReviewRecheckStore) ClaimFullAssessmentOwner(ctx context.Context, t
 	if orgID == uuid.Nil || sessionID == uuid.Nil || pullRequestID == uuid.Nil || tx == nil {
 		return false, fmt.Errorf("invalid full assessment conversation owner")
 	}
+	// CompleteReview marked this exact review terminal in the caller's transaction.
+	// Its warm-workspace holder can no longer be renewed, but the outer worker
+	// releases it only after this transaction commits. Release it here so the
+	// drain proof below can still reject every genuinely live runtime holder.
+	if _, err := tx.Exec(ctx, `UPDATE session_sandbox_holders h
+		SET status='released', released_at=COALESCE(h.released_at,now()), updated_at=now()
+		FROM code_review_session_metadata m
+		WHERE h.org_id=$1 AND h.session_id=$2 AND h.holder_kind='code_review'
+		AND h.holder_id=m.id AND m.org_id=$1 AND m.session_id=$2 AND m.pull_request_id=$3
+		AND m.status='completed' AND h.status IN ('active','draining')`, orgID, sessionID, pullRequestID); err != nil {
+		return false, err
+	}
 	var claimed uuid.UUID
 	err := tx.QueryRow(ctx, `UPDATE sessions s SET code_review_owner_pr_id=$3
 		WHERE s.org_id=$1 AND s.id=$2 AND s.origin='code_review'
 		AND s.status IN ('idle','completed','running')
 		AND EXISTS (SELECT 1 FROM code_review_session_metadata m WHERE m.org_id=s.org_id AND m.session_id=s.id AND m.pull_request_id=$3 AND m.status='completed')
 		AND (s.code_review_owner_pr_id IS NULL OR s.code_review_owner_pr_id=$3)
-		AND s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
-		AND NOT EXISTS (SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
-		AND NOT EXISTS (SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
-		AND NOT EXISTS (SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining'))
+		AND (`+codeReviewRecheckSessionDrainedSQL+`)
 		AND NOT EXISTS (SELECT 1 FROM session_threads t WHERE t.org_id=s.org_id AND t.session_id=s.id AND t.status NOT IN ('idle','completed','cancelled','failed'))
 		RETURNING s.id`, orgID, sessionID, pullRequestID).Scan(&claimed)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -80,7 +97,7 @@ func (s *CodeReviewRecheckStore) RetireOwnerForCompletedReplacement(ctx context.
 	var released uuid.UUID
 	err := tx.QueryRow(ctx, `UPDATE sessions s SET code_review_owner_pr_id=NULL
 		WHERE s.org_id=$1 AND s.id=$2 AND s.code_review_owner_pr_id=$3
-		AND s.status IN ('idle','completed') AND s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
+		AND s.status IN ('idle','completed') AND (`+codeReviewRecheckSessionDrainedSQL+`)
 		AND EXISTS (SELECT 1 FROM code_review_revision_assessments replacement
 			WHERE replacement.org_id=s.org_id AND replacement.id=$4 AND replacement.pull_request_id=$3
 			AND replacement.session_id<>s.id AND replacement.review_scope='full' AND replacement.status='completed'
@@ -90,9 +107,6 @@ func (s *CodeReviewRecheckStore) RetireOwnerForCompletedReplacement(ctx context.
 			WHERE active.org_id=s.org_id AND active.session_id=s.id AND active.pull_request_id=$3 AND active.status IN ('reserved','running','publishing'))
 		AND NOT EXISTS (SELECT 1 FROM code_review_recheck_dispatches d
 			WHERE d.org_id=s.org_id AND d.session_id=s.id AND d.status IN ('pending','running'))
-		AND NOT EXISTS (SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
-		AND NOT EXISTS (SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
-		AND NOT EXISTS (SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining'))
 		AND NOT EXISTS (SELECT 1 FROM session_threads t WHERE t.org_id=s.org_id AND t.session_id=s.id AND t.status NOT IN ('idle','completed','cancelled','failed'))
 		RETURNING s.id`, orgID, oldSessionID, pullRequestID, replacementAssessmentID).Scan(&released)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -186,7 +200,7 @@ func (s *CodeReviewRecheckStore) Dispatch(ctx context.Context, in models.CodeRev
 	// The session row serializes review ownership with ordinary human claims.
 	// A lease expiry alone is never proof that a sandbox or executor stopped.
 	var ownerReady bool
-	err = tx.QueryRow(ctx, `SELECT (s.origin='code_review' AND s.status IN ('idle','completed') AND (s.code_review_owner_pr_id IS NULL OR s.code_review_owner_pr_id=$3) AND s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false) AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container) AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining')) AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining'))) FROM sessions s WHERE s.org_id=$1 AND s.id=$2 FOR UPDATE`, in.OrgID, in.SessionID, in.PullRequestID).Scan(&ownerReady)
+	err = tx.QueryRow(ctx, `SELECT (s.origin='code_review' AND s.status IN ('idle','completed') AND (s.code_review_owner_pr_id IS NULL OR s.code_review_owner_pr_id=$3) AND `+codeReviewRecheckSessionDrainedSQL+`) FROM sessions s WHERE s.org_id=$1 AND s.id=$2 FOR UPDATE`, in.OrgID, in.SessionID, in.PullRequestID).Scan(&ownerReady)
 	if err != nil {
 		return models.CodeReviewRecheckDispatch{}, false, err
 	}
@@ -284,10 +298,7 @@ func (s *CodeReviewRecheckStore) Claim(ctx context.Context, orgID, assessmentID,
 		// the sandbox. Reclaim the *same* exact turn only after the session,
 		// preview, thread runtime, and executor are all visibly drained.
 		var drained bool
-		err = tx.QueryRow(ctx, `SELECT (s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
-			AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
-			AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
-			AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining')))
+		err = tx.QueryRow(ctx, `SELECT (`+codeReviewRecheckSessionDrainedSQL+`)
 			FROM sessions s WHERE s.org_id=$1 AND s.id=$2 AND s.code_review_owner_pr_id IS NOT NULL FOR UPDATE`, orgID, sessionID).Scan(&drained)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
@@ -312,10 +323,7 @@ func (s *CodeReviewRecheckStore) Claim(ctx context.Context, orgID, assessmentID,
 			return false, err
 		}
 		var drained bool
-		err = tx.QueryRow(ctx, `SELECT (s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
-			AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
-			AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
-			AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining')))
+		err = tx.QueryRow(ctx, `SELECT (`+codeReviewRecheckSessionDrainedSQL+`)
 			FROM sessions s WHERE s.org_id=$1 AND s.id=$2 FOR UPDATE`, orgID, sessionID).Scan(&drained)
 		if err != nil {
 			return false, err
@@ -365,9 +373,7 @@ func (s *CodeReviewRecheckStore) NativeResumeProvider(ctx context.Context, orgID
 		AND a.input_digest IS NOT NULL AND pa.head_sha=a.head_sha AND pa.code_digest=a.code_digest AND pa.contract_digest=a.contract_digest
 		AND p.status='completed' AND pa.status='completed' AND pa.result_origin='evidence_only' AND p.result_message_id IS NOT NULL AND NULLIF(p.provider_session_id,'') IS NOT NULL
 		AND NULLIF(p.snapshot_key,'') IS NOT NULL AND s.snapshot_key=p.snapshot_key AND s.pending_snapshot_key IS NULL
-		AND s.code_review_owner_pr_id=d.pull_request_id AND s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
-		AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
-		AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining'))
+		AND s.code_review_owner_pr_id=d.pull_request_id AND `+codeReviewRecheckSessionDrainedSQL+`
 		AND t.current_turn=p.expected_turn AND t.status='running' AND t.agent_session_id=p.provider_session_id`, orgID, assessmentID, jobID, lockToken).Scan(&provider)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
@@ -545,10 +551,7 @@ func (s *CodeReviewRecheckStore) Fail(ctx context.Context, orgID, assessmentID, 
 		return err
 	}
 	var drained bool
-	err = tx.QueryRow(ctx, `SELECT (s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
-		AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
-		AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
-		AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining')))
+	err = tx.QueryRow(ctx, `SELECT (`+codeReviewRecheckSessionDrainedSQL+`)
 		FROM sessions s WHERE s.org_id=$1 AND s.id=$2 FOR UPDATE`, orgID, sessionID).Scan(&drained)
 	if err != nil {
 		return err
@@ -614,10 +617,7 @@ func (s *CodeReviewRecheckStore) FailTerminalJob(ctx context.Context, orgID, ass
 		}
 	}
 	var drained bool
-	err = tx.QueryRow(ctx, `SELECT (s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
-		AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
-		AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
-		AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining')))
+	err = tx.QueryRow(ctx, `SELECT (`+codeReviewRecheckSessionDrainedSQL+`)
 		FROM sessions s WHERE s.org_id=$1 AND s.id=$2 FOR UPDATE`, orgID, sessionID).Scan(&drained)
 	if err != nil {
 		return false, err
@@ -659,10 +659,7 @@ func (s *CodeReviewRecheckStore) Cancel(ctx context.Context, orgID, assessmentID
 		return err
 	}
 	var drained bool
-	err = tx.QueryRow(ctx, `SELECT (s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
-		AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
-		AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
-		AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining')))
+	err = tx.QueryRow(ctx, `SELECT (`+codeReviewRecheckSessionDrainedSQL+`)
 		FROM sessions s WHERE s.org_id=$1 AND s.id=$2 FOR UPDATE`, orgID, sessionID).Scan(&drained)
 	if err != nil {
 		return err
@@ -697,10 +694,7 @@ func (s *CodeReviewRecheckStore) ReconcileDrainedTerminalTurn(ctx context.Contex
 		return false, err
 	}
 	var drained bool
-	err = tx.QueryRow(ctx, `SELECT (s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
-		AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
-		AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
-		AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining')))
+	err = tx.QueryRow(ctx, `SELECT (`+codeReviewRecheckSessionDrainedSQL+`)
 		FROM sessions s WHERE s.org_id=$1 AND s.id=$2 AND s.code_review_owner_pr_id=$3 FOR UPDATE`, orgID, sessionID, pullRequestID).Scan(&drained)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil

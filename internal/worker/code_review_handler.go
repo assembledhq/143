@@ -140,6 +140,16 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}()
 		registerCodeReviewDeadLetterReconciliation(ctx, stores, services, logger, job)
 		registerCodeReviewRetryScheduledWait(ctx, stores.CodeReviews, logger, job)
+		if recovered, err := recoverStagedFullAssessment(ctx, stores, services, job); recovered || err != nil {
+			if errors.Is(err, errCodeReviewPublicationSuperseded) || errors.Is(err, errCodeReviewPublicationPaused) {
+				return nil
+			}
+			if err == nil {
+				reconcileCodeReviewSessionSuccess(ctx, stores, logger, job)
+				enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
+			}
+			return err
+		}
 		metadata, err := stores.CodeReviews.MarkRunning(ctx, job.OrgID, job.SessionID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
