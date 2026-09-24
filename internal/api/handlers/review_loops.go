@@ -14,6 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/models"
 	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
+	threadsvc "github.com/assembledhq/143/internal/services/thread"
 )
 
 type ReviewLoopService interface {
@@ -73,6 +74,9 @@ func (h *ReviewLoopHandler) Start(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		switch {
+		case writeCodeReviewOwnedError(w, r, err):
+		case errors.Is(err, pgx.ErrNoRows), errors.Is(err, threadsvc.ErrSessionNotFound):
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		case errors.Is(err, reviewloopsvc.ErrInvalidPassCount):
 			writeError(w, r, http.StatusBadRequest, "INVALID_PASS_COUNT", err.Error())
 		case errors.Is(err, reviewloopsvc.ErrInvalidFixMode):

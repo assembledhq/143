@@ -452,6 +452,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		pullRequestHandler.SetFeedbackService(prService)
 	}
 	codeReviewHandler := handlers.NewCodeReviewHandler(codeReviewStore, repoStore)
+	codeReviewHandler.SetContinuationCapabilities(cfg.CodeReviewAssessmentsEnabled, cfg.CodeReviewRechecksEnabled)
+	codeReviewHandler.SetAssessments(db.NewCodeReviewAssessmentStore(pool), db.NewCodeReviewRecheckStore(pool), pullRequestStore)
 	codeReviewHandler.SetRetryService(codeReviewSvc)
 	codeReviewHandler.SetAuditEmitter(auditEmitter)
 	codeReviewHandler.SetPolicyHistoryService(codereviewsvc.NewPolicyHistoryService(codeReviewStore, auditLogStore, logger))
@@ -1071,6 +1073,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	} else {
 		uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, uploadFilesURLPrefix)
 	}
+	if prService != nil && automationActionTokens != nil {
+		visualEvidence := codereviewsvc.NewVisualEvidenceService(prService, codeReviewStore, repoStore, automationActionTokens, uploadStore, logger)
+		inputCapture := codereviewsvc.NewAssessmentInputCaptureService(codeReviewStore, pullRequestStore, repoStore, orgStore, prService, visualEvidence, codereviewsvc.NewGitHubSubmitter(automationActionTokens))
+		inputCapture.SetExternalContextResolver(agent.CodeReviewExternalContextResolver{Credentials: credentialStore, Orgs: orgStore, GitHubTools: true, SessionTools: cfg.BaseURL != "" && cfg.SessionSecret != ""})
+		if checker, ok := automationActionTokens.(interface {
+			IsActiveTeamMember(context.Context, int64, string, string, string) (bool, error)
+		}); ok {
+			inputCapture.SetAuthorTeamMembershipChecker(checker)
+		}
+		codeReviewSvc.SetAssessmentContinuation(inputCapture, cfg.CodeReviewAssessmentsEnabled && cfg.CodeReviewRechecksEnabled)
+	}
 	previewHandler.SetUploadStore(uploadStore)
 	uploadHandler := handlers.NewUploadHandler(uploadStore)
 	uploadHandler.SetMembershipStore(membershipStore)
@@ -1376,6 +1389,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/code-reviews/policy-events", codeReviewHandler.PolicyEvent)
 				r.Get("/api/v1/code-reviews/{id}", codeReviewHandler.Get)
 				r.Get("/api/v1/code-reviews/{id}/evidence", codeReviewHandler.Evidence)
+				r.Get("/api/v1/code-review-assessments/{id}", codeReviewHandler.GetAssessment)
+				r.Get("/api/v1/code-review-assessments/{id}/evidence", codeReviewHandler.AssessmentEvidence)
 				r.Get("/api/v1/code-review-policies", codeReviewHandler.GetPolicy)
 				r.Get("/api/v1/code-review-targets", codeReviewHandler.ListPendingSchedules)
 				r.Get("/api/v1/pull-requests/{id}/code-review", codeReviewHandler.GetSchedule)

@@ -181,6 +181,7 @@ func TestCodeReviewDescriptionEvidenceBasisValidate(t *testing.T) {
 		expectErr bool
 	}{
 		{name: "image", basis: CodeReviewDescriptionEvidenceBasisImage},
+		{name: "captured text", basis: CodeReviewDescriptionEvidenceBasisText},
 		{name: "preview link", basis: CodeReviewDescriptionEvidenceBasisPreviewLink},
 		{name: "repository", basis: CodeReviewDescriptionEvidenceBasisRepository},
 		{name: "pull request description", basis: CodeReviewDescriptionEvidenceBasisPullRequestDescription},

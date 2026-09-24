@@ -246,9 +246,9 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			}
 			require.Contains(t, submitter.request.Body, "https://143.test/sessions/"+sessionID.String(), "status comment should link to the review session")
 			if tt.schedulingEnabled {
-				require.Contains(t, submitter.request.Body, "[Review now](https://143.test/code-reviews?review_now="+sessionID.String()+")", "enabled worker publishes a usable review action")
+				require.Contains(t, submitter.request.Body, "[Request Full Re-Review Now](https://143.test/code-reviews?review_now="+sessionID.String()+")", "enabled worker publishes a usable review action")
 			} else {
-				require.NotContains(t, submitter.request.Body, "[Review now]", "unavailable scheduling service omits the action")
+				require.NotContains(t, submitter.request.Body, "[Request Full Re-Review Now]", "unavailable scheduling service omits the action")
 			}
 			require.Equal(t, tt.expectedCalls, submitter.calls, "fallback summary should only be hidden after the rolling comment is published")
 			if tt.lockedReviewID != nil {
@@ -368,13 +368,13 @@ func TestCodeReviewStatusCommentReviewNowLink(t *testing.T) {
 				link = codeReviewNowURL("https://143.test/", sessionID)
 			}
 			body := codeReviewStatusCommentBody(models.CodeReviewSessionMetadata{SessionID: sessionID, Status: tt.status}, nil, "https://143.test/sessions/"+sessionID.String(), link)
-			expected := "[Review now](https://143.test/code-reviews?review_now=" + sessionID.String() + ")"
+			expected := "[Request Full Re-Review Now](https://143.test/code-reviews?review_now=" + sessionID.String() + ")"
 			if tt.present {
 				require.Contains(t, body, expected, "rolling comment links to the authenticated confirmation for its source session")
 				require.Contains(t, body, "Open 143 to request a review of your latest pushed changes.", "link explains the destination and which changes will be reviewed")
 				require.Contains(t, body, "If a running or completed review already covers those changes, 143 may use it instead of starting another.", "link explains that an existing review may satisfy the request")
 			} else {
-				require.NotContains(t, body, "[Review now]", "unsupported or superseded comment must not advertise action")
+				require.NotContains(t, body, "[Request Full Re-Review Now]", "unsupported or superseded comment must not advertise action")
 			}
 			require.NotContains(t, body, "/api/", "comment link never directly invokes a mutation endpoint")
 		})

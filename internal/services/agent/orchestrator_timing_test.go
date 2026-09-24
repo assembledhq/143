@@ -191,6 +191,7 @@ func TestReviewTurnPreparationModeRequiresPlatformReviewInput(t *testing.T) {
 	}{
 		{name: "review input", mode: repositoryPreparationMinimalReview, sources: []models.SessionMessageSource{models.SessionMessageSourceCodeReview}, wantMode: repositoryPreparationMinimalReview},
 		{name: "review repair input", mode: repositoryPreparationMinimalReview, sources: []models.SessionMessageSource{models.SessionMessageSourceCodeReview, models.SessionMessageSourceCodeReview}, wantMode: repositoryPreparationMinimalReview},
+		{name: "evidence recheck input", mode: repositoryPreparationMinimalReview, sources: []models.SessionMessageSource{models.SessionMessageSourceCodeReviewRecheck}, wantMode: repositoryPreparationMinimalReview},
 		{name: "human follow-up", mode: repositoryPreparationMinimalReview, sources: []models.SessionMessageSource{""}, wantMode: repositoryPreparationFull},
 		{name: "mixed queued input", mode: repositoryPreparationMinimalReview, sources: []models.SessionMessageSource{models.SessionMessageSourceCodeReview, ""}, wantMode: repositoryPreparationFull},
 		{name: "old untagged review input", mode: repositoryPreparationMinimalReview, sources: []models.SessionMessageSource{models.SessionMessageSourceAgentTool}, wantMode: repositoryPreparationFull},

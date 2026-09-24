@@ -2304,6 +2304,7 @@ func (s *PreviewStore) AcquirePreviewHold(ctx context.Context, orgID, previewID 
 	query := `UPDATE preview_instances
 		SET preview_holding_container = TRUE, updated_at = now()
 		WHERE id = @id AND org_id = @org_id
+		  AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id=preview_instances.session_id AND s.org_id=preview_instances.org_id AND s.code_review_owner_pr_id IS NOT NULL)
 		RETURNING session_id`
 	err = s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"id":     previewID,

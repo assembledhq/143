@@ -32,9 +32,7 @@ import (
 	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/sandboxdeps"
 	"github.com/assembledhq/143/internal/services/github/identity"
-	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/assembledhq/143/internal/services/linear"
-	"github.com/assembledhq/143/internal/services/mcp"
 	"github.com/assembledhq/143/internal/services/publicationintent"
 	"github.com/assembledhq/143/internal/services/reviewbundle"
 	"github.com/assembledhq/143/internal/services/sandbox"
@@ -867,6 +865,8 @@ type Orchestrator struct {
 	automationRuns             AutomationRunUpdater             // can be nil
 	automationGoalImprovements AutomationGoalImprovementUpdater // can be nil
 	automationTurns            AutomationTurnStore              // optional — per-target automation turns (design doc 125)
+	codeReviewTurns            CodeReviewTurnStore              // optional — fenced evidence-only recheck turns
+	codeReviewInputsStrict     bool                             // require fingerprinted external prompt context for reusable reviews
 	pagerDutyWritebacker       PagerDutySessionWritebacker      // can be nil
 	issues                     IssueStore
 	repositories               RepositoryStore
@@ -1317,6 +1317,7 @@ type ContinueSessionOptions struct {
 	PRRepair             *PRRepairContinueOptions
 	PRFeedback           *PRFeedbackContinueOptions
 	AutomationTurn       *AutomationTurnContinueOptions
+	CodeReviewTurn       *CodeReviewTurnContinueOptions
 	HumanInputRequestID  *uuid.UUID
 	QueuedMessageID      *int64
 	ChangesetID          *uuid.UUID
@@ -1931,7 +1932,7 @@ func reviewTurnPreparationMode(mode repositoryPreparationMode, pending []models.
 		return repositoryPreparationFull
 	}
 	for _, message := range pending {
-		if message.Source != models.SessionMessageSourceCodeReview {
+		if message.Source != models.SessionMessageSourceCodeReview && message.Source != models.SessionMessageSourceCodeReviewRecheck {
 			return repositoryPreparationFull
 		}
 	}
@@ -3317,7 +3318,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 
 	// 6b. Generate integration skills doc from org credentials.
 	// This tells the agent what CLI tools are available in the sandbox.
-	input.IntegrationSkills = o.BuildIntegrationSkills(ctx, run.OrgID)
+	if run.Origin == models.SessionOriginCodeReview {
+		var skillsErr error
+		input.IntegrationSkills, skillsErr = o.codeReviewIntegrationSkills(ctx, run.OrgID)
+		if skillsErr != nil {
+			return fmt.Errorf("resolve code review integration prompt: %w", skillsErr)
+		}
+	} else {
+		input.IntegrationSkills = o.BuildIntegrationSkills(ctx, run.OrgID)
+	}
 	if models.HasAutomationActions(run.CapabilitySnapshot) {
 		input.IntegrationSkills += "\n" + prompts.AutomationActionInstructions()
 	}
@@ -4225,6 +4234,25 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// once the sandbox is available, so CancelSession can send SIGINT.
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	var codeReviewTurn *codeReviewTurnState
+	if opts != nil && opts.CodeReviewTurn != nil {
+		if opts.ThreadID == nil || *opts.ThreadID != opts.CodeReviewTurn.ThreadID || opts.QueuedMessageID == nil || *opts.QueuedMessageID != opts.CodeReviewTurn.MessageID || opts.AutomationTurn != nil || opts.PRRepair != nil || opts.PRFeedback != nil {
+			return ErrCodeReviewRecheckLeaseLost
+		}
+		var err error
+		codeReviewTurn, err = o.beginCodeReviewTurn(ctx, session, opts.CodeReviewTurn)
+		if err != nil {
+			return err
+		}
+		if codeReviewTurn.resumeProviderID != "" {
+			// The receipt, installed snapshot, thread turn, and review inputs
+			// were checked together. Ignore any provider ID read from a stale
+			// thread/session object passed by the worker.
+			resumeID := codeReviewTurn.resumeProviderID
+			opts.ThreadAgentSessionID = &resumeID
+		}
+		ctx = context.WithValue(ctx, codeReviewTurnContextKey{}, true)
+	}
 	// Auth failures are categorized and persisted inside the credential setup
 	// helpers before they return. Convert those direct-return paths to the same
 	// terminal per-thread sentinel used by post-execution failures so the worker
@@ -4241,6 +4269,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		Str("org_id", session.OrgID.String()).
 		Int("turn", session.CurrentTurn).
 		Logger()
+	if codeReviewTurn != nil {
+		log = log.With().Bool("code_review_recheck", true).Str("assessment_id", codeReviewTurn.options.AssessmentID.String()).Logger()
+	}
 
 	// Gate: if a post-PR snapshot upload is still in flight, hydrating from
 	// the prior SnapshotKey would restore stale pre-PR state. Bail out early
@@ -4294,7 +4325,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			}
 		}()
 	}
-	rebuildWorkspace := prHeadReconstruction || automationTurn.reconstructed()
+	// A review turn may resume natively only from the immediately preceding
+	// assessment's exact checkpoint receipt. The shared session provider ID
+	// belongs to its parent and is never proof of thread context.
+	rebuildWorkspace := prHeadReconstruction || automationTurn.reconstructed() || (codeReviewTurn != nil && codeReviewTurn.resumeProviderID == "")
 
 	if !rebuildWorkspace && session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
 		log.Info().Str("pending_snapshot_key", *session.PendingSnapshotKey).Msg("continue_session waiting for post-PR snapshot upload to land")
@@ -4932,7 +4966,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			Str("head_sha", expectedHead).
 			Msg("reused code review workspace is ready")
 	}
-	integrationSkills := o.BuildIntegrationSkills(ctx, session.OrgID)
+	var integrationSkills string
+	if session.Origin == models.SessionOriginCodeReview {
+		var skillsErr error
+		integrationSkills, skillsErr = o.codeReviewIntegrationSkills(ctx, session.OrgID)
+		if skillsErr != nil {
+			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("resolve code review integration prompt: %w", skillsErr), log)
+		}
+	} else {
+		integrationSkills = o.BuildIntegrationSkills(ctx, session.OrgID)
+	}
 	if models.HasAutomationActions(session.CapabilitySnapshot) {
 		integrationSkills += "\n" + prompts.AutomationActionInstructions()
 	}
@@ -5384,6 +5427,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			}
 			return fmt.Errorf("start thread runtime: %w", err)
 		}
+		if codeReviewTurn != nil && threadRuntimeCtl == nil {
+			return fmt.Errorf("code review recheck requires a durable thread runtime owner")
+		}
 		if threadRuntimeCtl != nil {
 			stopHeartbeat := threadRuntimeCtl.StartHeartbeat(ctx, 0, func() { cancel(ErrWorkerDrainCause) })
 			defer stopHeartbeat()
@@ -5692,7 +5738,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// Override UserPrompt with resume context (conversation history + diff).
 		// A per-target turn's prompt already carries its history as bounded
 		// untrusted data, so it is used as is.
-		if automationTurn != nil {
+		if automationTurn != nil || codeReviewTurn != nil {
 			basePrompt.UserPrompt = appendAgentAttachmentSection(userMessage, materializedAttachments)
 		} else {
 			basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildResumeContext(session, &issue, messages, userMessage), materializedAttachments)
@@ -5752,6 +5798,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			defer o.activeActivityPhases.Delete(*threadID)
 		}
 	}
+	if codeReviewTurn != nil {
+		// A job can be reclaimed after the initial claim while preflight is
+		// preparing a sandbox. Verify the exact lease again after the durable
+		// runtime owner exists and just before provider execution.
+		owned, claimErr := o.codeReviewTurns.Claim(ctx, session.OrgID, codeReviewTurn.options.AssessmentID, codeReviewTurn.jobID, codeReviewTurn.lockToken, session.ID, codeReviewTurn.options.ThreadID, codeReviewTurn.options.ExpectedTurn, codeReviewTurn.options.MessageID)
+		if claimErr != nil {
+			return fmt.Errorf("recheck provider launch fence: %w", claimErr)
+		}
+		if !owned {
+			return ErrCodeReviewRecheckLeaseLost
+		}
+	}
 	finalBoundaryReason := models.ActivityPhaseBoundaryFinalResponse
 	if planMode {
 		finalBoundaryReason = models.ActivityPhaseBoundaryPlanApproval
@@ -5788,6 +5846,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	o.honorPendingCancelRequest(ctx, session.OrgID, session.ID, log)
 	automationTurn.markAgentStarted()
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
+	if usageErr := o.recordCodeReviewAttemptUsage(ctx, session, codeReviewTurn, "primary", result); usageErr != nil {
+		err = errors.Join(err, fmt.Errorf("record recheck provider usage: %w", usageErr))
+	}
 	if err == nil && restoredWorkspaceFallbackPrompt != nil && shouldRetryResumeFromSnapshot(session, prompt, result) {
 		log.Warn().
 			Str("agent_type", string(session.AgentType)).
@@ -5799,6 +5860,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			err = fallbackErr
 		} else {
 			fallbackResult, fallbackExecErr := adapter.Execute(execCtx, sandbox, fallbackPrompt, logCh)
+			if usageErr := o.recordCodeReviewAttemptUsage(ctx, session, codeReviewTurn, "restored_fallback", fallbackResult); usageErr != nil {
+				fallbackExecErr = errors.Join(fallbackExecErr, fmt.Errorf("record recheck fallback usage: %w", usageErr))
+			}
 			if fallbackExecErr != nil {
 				err = fmt.Errorf("execute restored-workspace fallback after stale agent resume: %w", fallbackExecErr)
 			} else if fallbackResult == nil {
@@ -5821,12 +5885,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	streamErr := <-logErrCh
 
 	// 6b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, log)
+	if codeReviewTurn == nil {
+		result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, log)
+	}
 
 	// 6c. Shed the just-picked credential when the (post-retry) result shows
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
-	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
+	if codeReviewTurn == nil {
+		result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
+	}
 	automationTurn.markAgentEnded()
 	err = errors.Join(err, streamErr)
 	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, session, sandbox, authBillingMode, log); harvestErr != nil {
@@ -5845,6 +5913,17 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	wasCancelled := stopReason == StopReasonUserCancel || isUserCancelContext(ctx)
 	systemStopReason := interruptedStopReason(ctx, stopReason)
+	if codeReviewTurn != nil {
+		// Every unsuccessful recheck leaves terminal bookkeeping to the
+		// lease-fenced worker receipt after this runtime has unwound. Generic
+		// failure/cancel helpers would write an unfenced session or thread row.
+		if err != nil {
+			return fmt.Errorf("execute code review recheck: %w", err)
+		}
+		if wasCancelled || systemStopReason != StopReasonNone || stopReason != StopReasonNone || result == nil || result.RequiresHumanInput || strings.TrimSpace(result.Error) != "" {
+			return fmt.Errorf("code review recheck turn did not complete successfully")
+		}
+	}
 
 	if err != nil {
 		// User cancel is checked first so an explicit cancel that races the
@@ -5943,6 +6022,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return nil
 		}
 	}
+	if codeReviewTurn != nil && result != nil && strings.TrimSpace(o.resultDiffOrWorkspaceFallback(ctx, session, sandbox, result.Diff)) != "" {
+		return fmt.Errorf("code review recheck modified the workspace")
+	}
 	if result != nil && strings.TrimSpace(result.Error) != "" {
 		agentErr := errors.New(strings.TrimSpace(result.Error))
 		err = agentErr
@@ -5960,23 +6042,25 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	// 7. Create assistant message with result summary.
-	responseStage := observability.BeginStage(reviewTiming, log, "agent_response_persist")
-	responseErr := o.createAssistantMessage(ctx, session.ID, session.OrgID, writeCtx, result)
-	responseStage.End(observability.StageOutcome(ctx, responseErr))
-	if err := responseErr; err != nil {
-		if activityExecution != nil {
-			err = fmt.Errorf("persist final assistant response: %w", err)
-			handled, persistErr := o.failCodeReviewThreadTurn(ctx, session, threadID, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution, log)
-			if persistErr != nil {
-				return errors.Join(err, persistErr)
+	if codeReviewTurn == nil {
+		responseStage := observability.BeginStage(reviewTiming, log, "agent_response_persist")
+		responseErr := o.createAssistantMessage(ctx, session.ID, session.OrgID, writeCtx, result)
+		responseStage.End(observability.StageOutcome(ctx, responseErr))
+		if err := responseErr; err != nil {
+			if activityExecution != nil {
+				err = fmt.Errorf("persist final assistant response: %w", err)
+				handled, persistErr := o.failCodeReviewThreadTurn(ctx, session, threadID, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution, log)
+				if persistErr != nil {
+					return errors.Join(err, persistErr)
+				}
+				if handled {
+					return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, err)
+				}
+				o.failRunWithResultAndActivityPhase(ctx, session, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution)
+				return err
 			}
-			if handled {
-				return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, err)
-			}
-			o.failRunWithResultAndActivityPhase(ctx, session, &models.SessionResult{Error: strPtr(err.Error())}, err.Error(), activityExecution)
-			return err
+			log.Warn().Err(err).Msg("failed to create assistant message")
 		}
-		log.Warn().Err(err).Msg("failed to create assistant message")
 	}
 	if opts != nil && opts.ResultAgentSessionID != nil {
 		threadAgentSessionID := result.AgentSessionID
@@ -5992,7 +6076,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// orchestrator's perspective; failures inside the callback must not
 	// abort the turn. Diff is taken straight from the agent result so we
 	// never re-shell into the sandbox.
-	if opts != nil && opts.OnTurnComplete != nil && result != nil {
+	if codeReviewTurn == nil && opts != nil && opts.OnTurnComplete != nil && result != nil {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -6024,6 +6108,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			if _, err := o.publishAutomationCheckpoint(ctx, automationTurn, session, checkpointAgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, snapshotSize, time.Now().UTC(), models.RuntimeStopReasonNone, true); err != nil {
 				log.Warn().Err(err).Msg("failed to publish checkpoint with provenance after automation turn")
 			}
+		} else if codeReviewTurn != nil {
+			// The session-wide provider ID belongs to the parent conversation.
+			// Completion records this snapshot with the actual thread provider
+			// ID; generic checkpoint metadata would misattribute native state.
 		} else if _, err := o.sessions.PublishCheckpoint(ctx, session.OrgID, session.ID, lockToken, checkpointAgentSessionID, newSnapshotKey, models.CheckpointKindTurnComplete, checkpointCapabilityForAgent(session.AgentType), snapshotSize, time.Now().UTC(), nil, models.RuntimeStopReasonNone); err != nil {
 			log.Warn().Err(err).Msg("failed to publish checkpoint metadata after continue")
 		}
@@ -6042,7 +6130,21 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		snapshotKey = *session.SnapshotKey
 	}
 	runResult := o.buildRunResult(ctx, session, sandbox, result)
-	if automationTurn != nil {
+	if codeReviewTurn != nil {
+		if result == nil {
+			return fmt.Errorf("code review recheck completed without adapter result")
+		}
+		_, err := o.codeReviewTurns.Complete(ctx, models.CodeReviewRecheckTurnCompletion{
+			OrgID: session.OrgID, AssessmentID: codeReviewTurn.options.AssessmentID, SessionID: session.ID, ThreadID: codeReviewTurn.options.ThreadID,
+			JobID: codeReviewTurn.jobID, LockToken: codeReviewTurn.lockToken, ExpectedTurn: codeReviewTurn.options.ExpectedTurn, SessionTurn: sessionTurnNumber,
+			Summary: result.Summary, Result: runResult, ProviderSessionID: result.AgentSessionID, ParentAgentSessionID: parentAgentSessionID,
+			SnapshotKey: newSnapshotKey, NativeContext: prompt != nil && prompt.Continuation && prompt.ResumeSessionID == codeReviewTurn.resumeProviderID && codeReviewTurn.resumeProviderID != "", TokenUsage: runResult.TokenUsage,
+		})
+		if err != nil {
+			o.cleanupReviewBundle(ctx, runResult, log)
+			return fmt.Errorf("complete fenced code review recheck: %w", err)
+		}
+	} else if automationTurn != nil {
 		// Per-target turn: the previous checkpoint stays installed when this
 		// turn published none, the result marker commits with the status
 		// write, and the assistant message is attributed to the run.
@@ -6640,6 +6742,9 @@ func (o *Orchestrator) cleanupContinueSessionStartupFailure(
 	failureMessage string,
 	stage string,
 ) {
+	if isCodeReviewTurnContext(ctx) {
+		return
+	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if revertErr := o.sessions.UpdateStatus(cleanupCtx, session.OrgID, session.ID, status); revertErr != nil {
@@ -7409,6 +7514,9 @@ func isCodeReviewThreadTurn(run *models.Session, threadID *uuid.UUID) bool {
 func (o *Orchestrator) failContinueSessionError(ctx context.Context, run *models.Session, opts *ContinueSessionOptions, cause error, log zerolog.Logger) error {
 	if cause == nil {
 		return nil
+	}
+	if opts != nil && opts.CodeReviewTurn != nil {
+		return cause
 	}
 	var threadID *uuid.UUID
 	if opts != nil {
@@ -8631,62 +8739,41 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 	if o.credentials == nil {
 		return ""
 	}
-
 	ic := o.env.fetchIntegrationCredentials(ctx, orgID)
-	reg := integration.NewRegistry()
-
-	// Register integrations based on available credentials.
-	if ic.Sentry != nil && ic.Sentry.AccessToken != "" {
-		tracker := integration.NewSentryErrorTracker(integration.SentryTrackerConfig{
-			AuthToken: ic.Sentry.AccessToken,
-			OrgSlug:   ic.Sentry.OrgSlug,
-		})
-		reg.RegisterErrorTracker(tracker)
-	}
-	if ic.Linear != nil && ic.Linear.AccessToken != "" {
-		manager := integration.NewLinearTaskManager(integration.LinearManagerConfig{
-			AuthToken: ic.Linear.AccessToken,
-		})
-		reg.RegisterTaskManager(manager)
-	}
-	if ic.Notion != nil && ic.Notion.AccessToken != "" {
-		store := integration.NewNotionDocumentStore(integration.NotionDocumentStoreConfig{
-			AuthToken: ic.Notion.AccessToken,
-		})
-		reg.RegisterDocumentStore(store)
-	}
-	if ic.CircleCI != nil && ic.CircleCI.AuthToken != "" && ic.CircleCI.ProjectSlug != "" {
-		provider := integration.NewCircleCITestInsights(integration.CircleCIConfig{
-			AuthToken:   ic.CircleCI.AuthToken,
-			ProjectSlug: ic.CircleCI.ProjectSlug,
-		})
-		reg.RegisterCITestInsights(provider)
-	}
-
-	// Register a stub GitHub code review source for skills doc generation.
-	// This only describes available tools — actual API calls use real credentials
-	// injected via sandbox env vars. The stub never makes HTTP requests.
-	if o.github != nil {
-		reg.RegisterCodeReviewSource(&integration.StubCodeReviewSource{ProviderName: "github"})
-	}
+	settings := models.OrgSettings{}
 	if o.internalAPIURL != "" && o.internalAPISecret != "" {
-		reg.RegisterPullRequestCreator(&integration.StubPullRequestCreator{ProviderName: "session"})
-		reg.RegisterMessageSender(&integration.StubMessageSender{ProviderName: "slack"})
-		settings, err := o.sandboxAuthOrgSettings(ctx, orgID)
+		var err error
+		settings, err = o.sandboxAuthOrgSettings(ctx, orgID)
 		if err != nil {
 			o.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to load org settings for session tab tools; hiding tools from skills doc")
-		} else if settings.EffectiveCodingAgentTabToolsEnabled() {
-			reg.RegisterSessionTabManager(&integration.StubSessionTabManager{ProviderName: "session_tabs"})
+			// Preserve the legacy best-effort behavior for non-review sessions.
+			disabled := false
+			settings.CodingAgentTabToolsEnabled = &disabled
 		}
 	}
-
-	if !reg.HasAny() {
-		return ""
-	}
-
-	tr := mcp.NewToolRegistry(reg)
-	return mcp.GenerateSkillsDoc(tr)
+	return renderCodeReviewIntegrationSkills(ic, o.github != nil, o.internalAPIURL != "" && o.internalAPISecret != "", settings)
 }
+
+func (o *Orchestrator) codeReviewIntegrationSkills(ctx context.Context, orgID uuid.UUID) (string, error) {
+	if !o.codeReviewInputsStrict || o.memory != nil {
+		// Legacy reviews remain best effort. Configured memory is currently
+		// unfingerprintable, so capture excludes those turns from reuse.
+		return o.BuildIntegrationSkills(ctx, orgID), nil
+	}
+	resolver := CodeReviewExternalContextResolver{
+		Credentials:    o.credentials,
+		Orgs:           o.orgs,
+		GitHubTools:    o.github != nil,
+		SessionTools:   o.internalAPIURL != "" && o.internalAPISecret != "",
+		MemoryInjected: o.memory != nil,
+	}
+	doc, _, err := resolver.ResolveCodeReviewExternalContext(ctx, orgID)
+	return doc, err
+}
+
+func (o *Orchestrator) SetCodeReviewInputsStrict(enabled bool) { o.codeReviewInputsStrict = enabled }
+
+func (o *Orchestrator) CodeReviewMemoryContextConfigured() bool { return o.memory != nil }
 
 // handleCancelledSession snapshots the workspace and returns the session to idle
 // (if snapshot succeeds) or marks it as cancelled (if not). This is shared by

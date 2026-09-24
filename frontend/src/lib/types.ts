@@ -180,6 +180,7 @@ export interface CodeReviewDescriptionRequirement {
 
 export interface CodeReviewPolicyConfig {
   scheduling_policy?: { automatic_re_review?: boolean; quiet_period_seconds?: number; minimum_interval_seconds?: number };
+  continuation_policy?: { enabled: boolean; automatic_evidence_rechecks: boolean };
   enabled: boolean;
   approval_mode: CodeReviewApprovalMode;
   review_instructions: string;
@@ -230,7 +231,7 @@ export interface CodeReviewPolicyRecord extends CodeReviewPolicyConfig {
 }
 
 export interface CodeReviewResolvedPolicy {
-  capabilities?: { scheduling?: boolean };
+  capabilities?: { scheduling?: boolean; conditional_recheck?: boolean; automatic_evidence_recheck?: boolean };
   config: CodeReviewPolicyConfig;
   source: "default" | "organization" | "repository" | string;
   policy?: CodeReviewPolicyRecord;
@@ -386,6 +387,94 @@ export interface CodeReviewListItem {
   github_pr_url: string;
   pull_request_title: string;
   pull_request_author: string;
+  current_assessment?: CodeReviewAssessmentSummary | null;
+  active_assessment?: CodeReviewAssessmentSummary | null;
+  latest_failed_assessment?: CodeReviewAssessmentSummary | null;
+}
+
+export type CodeReviewAssessmentScope = "full" | "evidence_only";
+export type CodeReviewAssessmentStatus = "reserved" | "running" | "publishing" | "completed" | "superseded" | "failed" | "cancelled";
+export interface CodeReviewAssessmentSummary {
+  id: string;
+  status: CodeReviewAssessmentStatus;
+  review_scope: CodeReviewAssessmentScope;
+  route_reason: string;
+  source_assessment_id?: string | null;
+  previous_assessment_id?: string | null;
+  conversation_id?: string | null;
+  session_id?: string | null;
+  decision?: CodeReviewDecision | null;
+  risk_reason_details?: CodeReviewRiskReason[];
+  head_sha: string;
+  publication_state?: string;
+  result_origin?: "executed" | "reused" | "evidence_only";
+}
+export interface CodeReviewAssessmentDetail extends CodeReviewAssessmentSummary {
+  pull_request_id: string;
+  github_repo?: string;
+  github_pr_number?: number;
+  pull_request_title?: string;
+  input_digest?: string;
+  created_at?: string;
+  completed_at?: string | null;
+  failure_detail?: string | null;
+  github_review_url?: string | null;
+}
+export interface CodeReviewEvidenceCitation {
+  evidence_id: string;
+  quote?: string;
+}
+export type CodeReviewFindingReassessmentStatus = "retained" | "resolved";
+export interface CodeReviewFindingReassessment {
+  finding_id: string;
+  status: CodeReviewFindingReassessmentStatus;
+  reason: string;
+  evidence_citations: CodeReviewEvidenceCitation[];
+}
+export interface CodeReviewRequirementReassessment {
+  key: string;
+  status: "satisfied" | "missing";
+  reason: string;
+  evidence_citations: CodeReviewEvidenceCitation[];
+}
+export interface CodeReviewTextEvidence {
+  evidence_id: string;
+  surface: string;
+  section: string;
+  provider_object_id: string;
+  source_url: string;
+  author_login: string;
+  content: string;
+  content_digest: string;
+}
+export interface CodeReviewTextEvidenceSnapshot {
+  items: CodeReviewTextEvidence[];
+  unclassified_digest: string;
+  complete: boolean;
+  source_provenance_complete: boolean;
+  parse_ambiguous: boolean;
+}
+export interface CodeReviewAssessmentEvidence {
+  assessment: CodeReviewAssessmentDetail;
+  source_assessment_id?: string | null;
+  agent_results: CodeReviewAgentResult[];
+  findings: CodeReviewFinding[];
+  source_findings?: CodeReviewFinding[] | null;
+  finding_reassessments?: CodeReviewFindingReassessment[] | null;
+  requirement_reassessments?: CodeReviewRequirementReassessment[] | null;
+  text_evidence?: CodeReviewTextEvidenceSnapshot | null;
+  prompt_records: CodeReviewPromptRecord[];
+  execution?: { status: string; failure_detail?: string | null; native_context?: boolean | null } | null;
+  visual_evidence?: CodeReviewVisualEvidenceSnapshot | null;
+  cited_visual_evidence_ids?: string[];
+}
+export interface CodeReviewRequestResponse {
+  request_id: string;
+  session_id?: string | null;
+  disposition: "queued" | "joined" | "reused" | "cancelled";
+  schedule?: CodeReviewSchedule | null;
+  assessment_id?: string | null;
+  source_assessment_id?: string | null;
 }
 
 export interface CodeReviewRiskReason {
@@ -570,7 +659,12 @@ export interface CodeReviewVisualEvidenceSnapshot {
 
 export interface CodeReviewEvidence {
   agent_results: CodeReviewAgentResult[];
+  /** Findings still active in the completed assessment. */
   findings: CodeReviewFinding[];
+  /** Immutable original rows retained for audit. */
+  source_findings?: CodeReviewFinding[];
+  finding_reassessments?: CodeReviewFindingReassessment[];
+  current_assessment_id?: string;
   prompt_records?: CodeReviewPromptRecord[];
   /** @deprecated Compatibility with API instances still draining during rollout. */
   prompt_artifacts?: CodeReviewPromptRecord[];

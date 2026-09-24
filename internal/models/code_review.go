@@ -180,6 +180,8 @@ func (s CodeReviewActivityStatus) Validate() error {
 // individual fields off it (Redis pub/sub is at-most-once and unordered, so the
 // canonical record is whatever the list endpoint returns on invalidation).
 type CodeReviewUpdatedEvent struct {
+	AssessmentID    *uuid.UUID              `json:"assessment_id,omitempty"`
+	Generation      *int64                  `json:"generation,omitempty"`
 	PullRequestID   *uuid.UUID              `json:"pull_request_id,omitempty"`
 	SchedulingState CodeReviewScheduleState `json:"scheduling_state,omitempty"`
 	OrgID           uuid.UUID               `json:"org_id"`
@@ -593,15 +595,16 @@ func (r CodeReviewAgentRoster) ReviewerReasoningEffort(index int) ReasoningEffor
 }
 
 type CodeReviewPolicyConfig struct {
-	SchedulingPolicy        *CodeReviewSchedulingPolicy `json:"scheduling_policy,omitempty"`
-	Enabled                 bool                        `json:"enabled"`
-	ApprovalMode            CodeReviewApprovalMode      `json:"approval_mode"`
-	ReviewInstructions      string                      `json:"review_instructions"`
-	AutomatedApprovalPolicy string                      `json:"automated_approval_policy"`
-	DescriptionPolicy       CodeReviewDescriptionPolicy `json:"description_policy"`
-	RiskPolicy              CodeReviewRiskPolicy        `json:"risk_policy"`
-	AgentRoster             CodeReviewAgentRoster       `json:"agent_roster"`
-	InlineCommentLimit      int                         `json:"inline_comment_limit"`
+	SchedulingPolicy        *CodeReviewSchedulingPolicy   `json:"scheduling_policy,omitempty"`
+	ContinuationPolicy      *CodeReviewContinuationPolicy `json:"continuation_policy,omitempty"`
+	Enabled                 bool                          `json:"enabled"`
+	ApprovalMode            CodeReviewApprovalMode        `json:"approval_mode"`
+	ReviewInstructions      string                        `json:"review_instructions"`
+	AutomatedApprovalPolicy string                        `json:"automated_approval_policy"`
+	DescriptionPolicy       CodeReviewDescriptionPolicy   `json:"description_policy"`
+	RiskPolicy              CodeReviewRiskPolicy          `json:"risk_policy"`
+	AgentRoster             CodeReviewAgentRoster         `json:"agent_roster"`
+	InlineCommentLimit      int                           `json:"inline_comment_limit"`
 }
 
 const CodeReviewPromptMaxRunes = 8000
@@ -636,6 +639,7 @@ Require human review when:
 func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 	return CodeReviewPolicyConfig{
 		Enabled:                 true,
+		ContinuationPolicy:      &CodeReviewContinuationPolicy{},
 		ApprovalMode:            CodeReviewApprovalModeCommentOnly,
 		ReviewInstructions:      "",
 		AutomatedApprovalPolicy: DefaultCodeReviewAutomatedApprovalPolicy,
@@ -718,6 +722,9 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	}
 	defaults.Enabled = config.Enabled
 	defaults.SchedulingPolicy = config.SchedulingPolicy
+	if config.ContinuationPolicy != nil {
+		defaults.ContinuationPolicy = config.ContinuationPolicy
+	}
 	defaults.ReviewInstructions = strings.TrimSpace(config.ReviewInstructions)
 	if config.AutomatedApprovalPolicy != "" {
 		defaults.AutomatedApprovalPolicy = strings.TrimSpace(config.AutomatedApprovalPolicy)
@@ -823,6 +830,9 @@ func normalizeCodeReviewDescriptionPolicy(policy CodeReviewDescriptionPolicy) Co
 
 func (c CodeReviewPolicyConfig) Validate() error {
 	if err := c.SchedulingPolicy.Validate(); err != nil {
+		return err
+	}
+	if err := c.ContinuationPolicy.Validate(); err != nil {
 		return err
 	}
 	if err := c.ApprovalMode.Validate(); err != nil {
@@ -948,27 +958,29 @@ func (c CodeReviewPolicyConfig) ValidatePromptFields() error {
 }
 
 type CodeReviewPolicyRecord struct {
-	SchedulingPolicy        *CodeReviewSchedulingPolicy `db:"-" json:"scheduling_policy,omitempty"`
-	ID                      uuid.UUID                   `db:"id" json:"id"`
-	OrgID                   uuid.UUID                   `db:"org_id" json:"org_id"`
-	RepositoryID            *uuid.UUID                  `db:"repository_id" json:"repository_id,omitempty"`
-	Active                  bool                        `db:"active" json:"active"`
-	Version                 int                         `db:"version" json:"version"`
-	Enabled                 bool                        `db:"enabled" json:"enabled"`
-	ApprovalMode            CodeReviewApprovalMode      `db:"approval_mode" json:"approval_mode"`
-	ReviewInstructions      string                      `db:"review_instructions" json:"review_instructions"`
-	AutomatedApprovalPolicy string                      `db:"automated_approval_policy" json:"automated_approval_policy"`
-	DescriptionPolicy       CodeReviewDescriptionPolicy `db:"-" json:"description_policy"`
-	RiskPolicy              CodeReviewRiskPolicy        `db:"-" json:"risk_policy"`
-	AgentRoster             CodeReviewAgentRoster       `db:"-" json:"agent_roster"`
-	InlineCommentLimit      int                         `db:"inline_comment_limit" json:"inline_comment_limit"`
-	CreatedByUserID         *uuid.UUID                  `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
-	CreatedAt               time.Time                   `db:"created_at" json:"created_at"`
+	SchedulingPolicy        *CodeReviewSchedulingPolicy   `db:"-" json:"scheduling_policy,omitempty"`
+	ContinuationPolicy      *CodeReviewContinuationPolicy `db:"-" json:"continuation_policy,omitempty"`
+	ID                      uuid.UUID                     `db:"id" json:"id"`
+	OrgID                   uuid.UUID                     `db:"org_id" json:"org_id"`
+	RepositoryID            *uuid.UUID                    `db:"repository_id" json:"repository_id,omitempty"`
+	Active                  bool                          `db:"active" json:"active"`
+	Version                 int                           `db:"version" json:"version"`
+	Enabled                 bool                          `db:"enabled" json:"enabled"`
+	ApprovalMode            CodeReviewApprovalMode        `db:"approval_mode" json:"approval_mode"`
+	ReviewInstructions      string                        `db:"review_instructions" json:"review_instructions"`
+	AutomatedApprovalPolicy string                        `db:"automated_approval_policy" json:"automated_approval_policy"`
+	DescriptionPolicy       CodeReviewDescriptionPolicy   `db:"-" json:"description_policy"`
+	RiskPolicy              CodeReviewRiskPolicy          `db:"-" json:"risk_policy"`
+	AgentRoster             CodeReviewAgentRoster         `db:"-" json:"agent_roster"`
+	InlineCommentLimit      int                           `db:"inline_comment_limit" json:"inline_comment_limit"`
+	CreatedByUserID         *uuid.UUID                    `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
+	CreatedAt               time.Time                     `db:"created_at" json:"created_at"`
 }
 
 func (r CodeReviewPolicyRecord) Config() CodeReviewPolicyConfig {
 	config := CodeReviewPolicyConfig{
 		SchedulingPolicy:        r.SchedulingPolicy,
+		ContinuationPolicy:      r.ContinuationPolicy,
 		ApprovalMode:            r.ApprovalMode,
 		Enabled:                 r.Enabled,
 		ReviewInstructions:      r.ReviewInstructions,
@@ -1158,6 +1170,9 @@ type CodeReviewFinding struct {
 }
 
 type CodeReviewListItem struct {
+	CurrentAssessment      *CodeReviewAssessmentSummary `db:"-" json:"current_assessment,omitempty"`
+	ActiveAssessment       *CodeReviewAssessmentSummary `db:"-" json:"active_assessment,omitempty"`
+	LatestFailedAssessment *CodeReviewAssessmentSummary `db:"-" json:"latest_failed_assessment,omitempty"`
 	CodeReviewSessionMetadata
 	RiskReasonDetails json.RawMessage `db:"risk_reason_details" json:"risk_reason_details,omitempty"`
 	RetryEligible     bool            `db:"retry_eligible" json:"retry_eligible"`
@@ -1274,6 +1289,9 @@ type CodeReviewAnalytics struct {
 type CodeReviewEvidence struct {
 	AgentResults           []CodeReviewAgentResult           `json:"agent_results"`
 	Findings               []CodeReviewFinding               `json:"findings"`
+	SourceFindings         []CodeReviewFinding               `json:"source_findings,omitempty"`
+	FindingReassessments   []CodeReviewFindingReassessment   `json:"finding_reassessments,omitempty"`
+	CurrentAssessmentID    *uuid.UUID                        `json:"current_assessment_id,omitempty"`
 	PromptRecords          []CodeReviewPromptRecord          `json:"prompt_records,omitempty"`
 	RiskReasonCodes        []CodeReviewRiskReasonCode        `json:"risk_reason_codes"`
 	VisualEvidence         *CodeReviewVisualEvidenceSnapshot `json:"visual_evidence,omitempty"`

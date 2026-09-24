@@ -481,6 +481,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if stores.CodeReviews != nil {
 		w.Register(models.JobTypeRunCodeReview, newRunCodeReviewHandler(stores, services, logger))
 		w.Register(models.JobTypePrepareCodeReviewWorkspace, newPrepareCodeReviewWorkspaceHandler(stores, services, logger))
+		w.Register(models.JobTypeRunCodeReviewRecheck, newRunCodeReviewRecheckHandler(stores, services, logger))
 		w.Register(models.JobTypeSyncCodeReviewStatusComment, newSyncCodeReviewStatusCommentHandler(stores, services, logger))
 		if services != nil && services.CodeReviewLifecycle != nil {
 			w.Register(models.JobTypeStartCodeReviewReassessment, newStartCodeReviewReassessmentHandler(stores, services, logger))
@@ -637,63 +638,64 @@ func hasServiceHandlersDependencies(services *Services) bool {
 
 // Stores holds all the database stores needed by job handlers.
 type Stores struct {
-	Issues              *db.IssueStore
-	Sessions            *db.SessionStore
-	SessionChangesets   *db.SessionChangesetStore
-	SessionPublications *db.SessionPublicationStore
-	Jobs                *db.JobStore
-	Integrations        *db.IntegrationStore
-	Users               *db.UserStore
-	Memberships         *db.OrganizationMembershipStore
-	Webhooks            *db.WebhookDeliveryStore
-	PriorityScores      *db.PriorityScoreStore
-	ComplexityEstimates *db.ComplexityEstimateStore
-	Projects            *db.ProjectStore         // nil-safe: projects feature disabled if nil
-	ProjectTasks        *db.ProjectTaskStore     // nil-safe
-	Credentials         *db.OrgCredentialStore   // nil-safe: needed for sync_slack
-	AuditLogs           *db.AuditLogStore        // nil-safe: audit retention cleanup
-	Organizations       *db.OrganizationStore    // nil-safe: needed for audit retention
-	SessionLogs         *db.SessionLogStore      // nil-safe: data retention cleanup
-	EvalTasks           *db.EvalTaskStore        // nil-safe: eval feature
-	EvalRuns            *db.EvalRunStore         // nil-safe: eval feature
-	EvalBatches         *db.EvalBatchStore       // nil-safe: eval feature
-	EvalBootstraps      *db.EvalBootstrapStore   // nil-safe: eval bootstrap feature
-	EvalReleaseGates    *db.EvalReleaseGateStore // nil-safe: eval release gates
-	Repositories        *db.RepositoryStore      // nil-safe: needed for eval repo lookup
-	GitHubInstallations *db.GitHubInstallationStore
-	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
-	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
-	ThreadInbox         *db.ThreadInboxStore    // nil-safe: settles queued input when a thread is cancelled
-	ThreadSendTx        db.TxStarter            // nil-safe: enables atomic queued thread-message admission
-	HumanInputRequests  *db.SessionHumanInputRequestStore
-	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
-	SandboxHolders      *db.SessionSandboxHolderStore   // nil-safe: snapshot quiescence for shared sandbox thread runtimes
-	IssueSnapshots      *db.SessionTurnIssueSnapshotStore
-	Automations         *db.AutomationStore       // nil-safe: automations feature disabled if nil
-	AutomationRuns      *db.AutomationRunStore    // nil-safe: automations feature disabled if nil
-	AutomationTargets   *db.AutomationTargetStore // nil-safe: per-target continuity disabled if nil
-	ReviewLoops         *db.SessionReviewLoopStore
-	CodeReviews         *db.CodeReviewStore
-	CodeReviewDisputes  *db.CodeReviewDisputeStore
-	CodeReviewInsights  *db.CodeReviewInsightStore
-	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
-	Previews            *db.PreviewStore
-	PullRequests        *db.PullRequestStore
-	PullRequestFeedback *db.PullRequestFeedbackStore
-	SlackInstallations  *db.SlackInstallationStore
-	SlackOrgSelections  *db.SlackOrgSelectionStore
-	SlackBotSettings    *db.SlackBotSettingsStore
-	SlackUserLinks      *db.SlackUserLinkStore
-	LinearUserLinks     *db.LinearUserLinkStore
-	ExternalUserLinks   *db.ExternalUserLinkStore
-	ExternalSuggestions *db.ExternalUserLinkSuggestionStore
-	SlackChannels       *db.SlackChannelSettingsStore
-	SlackSessionLinks   *db.SlackSessionLinkStore
-	SlackInboundEvents  *db.SlackInboundEventStore
-	SlackOutbound       *db.SlackOutboundMessageStore
-	SessionAttributions *db.SessionAttributionStore
-
-	CodeReviewWorkspaces *db.CodeReviewWorkspaceStore // nil-safe: durable shared review preparation
+	Issues                *db.IssueStore
+	Sessions              *db.SessionStore
+	SessionChangesets     *db.SessionChangesetStore
+	SessionPublications   *db.SessionPublicationStore
+	Jobs                  *db.JobStore
+	Integrations          *db.IntegrationStore
+	Users                 *db.UserStore
+	Memberships           *db.OrganizationMembershipStore
+	Webhooks              *db.WebhookDeliveryStore
+	PriorityScores        *db.PriorityScoreStore
+	ComplexityEstimates   *db.ComplexityEstimateStore
+	Projects              *db.ProjectStore         // nil-safe: projects feature disabled if nil
+	ProjectTasks          *db.ProjectTaskStore     // nil-safe
+	Credentials           *db.OrgCredentialStore   // nil-safe: needed for sync_slack
+	AuditLogs             *db.AuditLogStore        // nil-safe: audit retention cleanup
+	Organizations         *db.OrganizationStore    // nil-safe: needed for audit retention
+	SessionLogs           *db.SessionLogStore      // nil-safe: data retention cleanup
+	EvalTasks             *db.EvalTaskStore        // nil-safe: eval feature
+	EvalRuns              *db.EvalRunStore         // nil-safe: eval feature
+	EvalBatches           *db.EvalBatchStore       // nil-safe: eval feature
+	EvalBootstraps        *db.EvalBootstrapStore   // nil-safe: eval bootstrap feature
+	EvalReleaseGates      *db.EvalReleaseGateStore // nil-safe: eval release gates
+	Repositories          *db.RepositoryStore      // nil-safe: needed for eval repo lookup
+	GitHubInstallations   *db.GitHubInstallationStore
+	SessionMessages       *db.SessionMessageStore // nil-safe: needed for title regeneration
+	SessionThreads        *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
+	ThreadInbox           *db.ThreadInboxStore    // nil-safe: settles queued input when a thread is cancelled
+	ThreadSendTx          db.TxStarter            // nil-safe: enables atomic queued thread-message admission
+	HumanInputRequests    *db.SessionHumanInputRequestStore
+	ThreadFileEvents      *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
+	SandboxHolders        *db.SessionSandboxHolderStore   // nil-safe: snapshot quiescence for shared sandbox thread runtimes
+	IssueSnapshots        *db.SessionTurnIssueSnapshotStore
+	Automations           *db.AutomationStore       // nil-safe: automations feature disabled if nil
+	AutomationRuns        *db.AutomationRunStore    // nil-safe: automations feature disabled if nil
+	AutomationTargets     *db.AutomationTargetStore // nil-safe: per-target continuity disabled if nil
+	ReviewLoops           *db.SessionReviewLoopStore
+	CodeReviews           *db.CodeReviewStore
+	CodeReviewAssessments *db.CodeReviewAssessmentStore
+	CodeReviewRechecks    *db.CodeReviewRecheckStore
+	CodeReviewDisputes    *db.CodeReviewDisputeStore
+	CodeReviewInsights    *db.CodeReviewInsightStore
+	SessionIssueLinks     *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
+	Previews              *db.PreviewStore
+	PullRequests          *db.PullRequestStore
+	PullRequestFeedback   *db.PullRequestFeedbackStore
+	SlackInstallations    *db.SlackInstallationStore
+	SlackOrgSelections    *db.SlackOrgSelectionStore
+	SlackBotSettings      *db.SlackBotSettingsStore
+	SlackUserLinks        *db.SlackUserLinkStore
+	LinearUserLinks       *db.LinearUserLinkStore
+	ExternalUserLinks     *db.ExternalUserLinkStore
+	ExternalSuggestions   *db.ExternalUserLinkSuggestionStore
+	SlackChannels         *db.SlackChannelSettingsStore
+	SlackSessionLinks     *db.SlackSessionLinkStore
+	SlackInboundEvents    *db.SlackInboundEventStore
+	SlackOutbound         *db.SlackOutboundMessageStore
+	SessionAttributions   *db.SessionAttributionStore
+	CodeReviewWorkspaces  *db.CodeReviewWorkspaceStore // nil-safe: durable shared review preparation
 }
 
 // newWorkerThreadService keeps worker-owned thread message paths on the same
@@ -885,36 +887,39 @@ type codeReviewVisualEvidenceProvider interface {
 
 // Services holds the service dependencies needed by job handlers.
 type Services struct {
-	Orchestrator               orchestratorService
-	PR                         prCreator
-	Failure                    *agent.FailureService
-	SandboxProvider            agent.SandboxProvider
-	ProjectTasks               agent.ProjectTaskUpdater   // nil-safe: updates project tasks on terminal session fallback paths
-	AutomationRuns             agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
-	AutomationTargets          automationTargetDispatcher // nil-safe: per-target continuity dispatch disabled if nil
-	AutomationTurns            automationTurnCompleter    // nil-safe: per-target completion, recovery, and wake disabled if nil
-	Prioritization             *prioritization.Service
-	Feedback                   *feedback.Service
-	Memory                     MemoryReinforcer                               // optional — enables memory reinforcement on PR approval
-	SlackSummarizer            *ingestion.SlackSummarizer                     // nil-safe: Slack summarization disabled if nil
-	LLM                        llmClient                                      // nil-safe: needed for eval LLM judge grading
-	GitHub                     agent.GitHubTokenProvider                      // nil-safe: needed for eval repo cloning
-	GitHubOrgRoster            githubOrgRosterService                         // nil-safe: needed for GitHub org auto-join roster sync
-	Snapshots                  storage.SnapshotStore                          // nil-safe: needed for eval code_check grading
-	TitleService               *services.SessionTitleService                  // nil-safe: session title regeneration
-	Linear                     *linear.Service                                // nil-safe: Linear session-linking disabled if nil
-	PagerDuty                  pagerDutyEventProcessor                        // nil-safe: PagerDuty incident ingestion disabled if nil
-	PagerDutySync              pagerDutySyncer                                // nil-safe: PagerDuty reconciliation disabled if nil
-	PagerDutyWrites            pagerDutyPRWritebacker                         // nil-safe: PagerDuty writeback disabled if nil
-	CodeReviews                codeReviewSubmitter                            // nil-safe: GitHub review submission disabled if nil
-	CodeReviewLifecycle        codeReviewLifecycle                            // nil-safe: starts durable follow-up assessments after webhook changes
-	CodeReviewDisputes         codeReviewDisputeService                       // nil-safe: triages and replies to decision disputes
-	CodeReviewInsights         codeReviewInsightService                       // nil-safe: projects outcomes and ranks the policy-owner queue
-	CodeReviewDisputePublisher codeReviewDisputePublisher                     // nil-safe: publishes idempotent GitHub replies
-	CodeReviewVisualEvidence   codeReviewVisualEvidenceProvider               // required for complete code review agent context
-	CodingAgents               codingAgentAvailability                        // nil-safe: code review falls back to the configured roster when nil
-	PublicationIntents         publicationintent.PublicationIntentCoordinator // nil-safe: Slack falls back to an actionable error when publication is unavailable
-	SlackbotMetrics            *metrics.SlackbotMetrics                       // nil-safe: Slackbot observability disabled if nil
+	CodeReviewInputCapture       codereviewsvc.AssessmentInputCapturer
+	CodeReviewAssessmentsEnabled bool
+	CodeReviewRechecksEnabled    bool
+	Orchestrator                 orchestratorService
+	PR                           prCreator
+	Failure                      *agent.FailureService
+	SandboxProvider              agent.SandboxProvider
+	ProjectTasks                 agent.ProjectTaskUpdater   // nil-safe: updates project tasks on terminal session fallback paths
+	AutomationRuns               agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
+	AutomationTargets            automationTargetDispatcher // nil-safe: per-target continuity dispatch disabled if nil
+	AutomationTurns              automationTurnCompleter    // nil-safe: per-target completion, recovery, and wake disabled if nil
+	Prioritization               *prioritization.Service
+	Feedback                     *feedback.Service
+	Memory                       MemoryReinforcer                               // optional — enables memory reinforcement on PR approval
+	SlackSummarizer              *ingestion.SlackSummarizer                     // nil-safe: Slack summarization disabled if nil
+	LLM                          llmClient                                      // nil-safe: needed for eval LLM judge grading
+	GitHub                       agent.GitHubTokenProvider                      // nil-safe: needed for eval repo cloning
+	GitHubOrgRoster              githubOrgRosterService                         // nil-safe: needed for GitHub org auto-join roster sync
+	Snapshots                    storage.SnapshotStore                          // nil-safe: needed for eval code_check grading
+	TitleService                 *services.SessionTitleService                  // nil-safe: session title regeneration
+	Linear                       *linear.Service                                // nil-safe: Linear session-linking disabled if nil
+	PagerDuty                    pagerDutyEventProcessor                        // nil-safe: PagerDuty incident ingestion disabled if nil
+	PagerDutySync                pagerDutySyncer                                // nil-safe: PagerDuty reconciliation disabled if nil
+	PagerDutyWrites              pagerDutyPRWritebacker                         // nil-safe: PagerDuty writeback disabled if nil
+	CodeReviews                  codeReviewSubmitter                            // nil-safe: GitHub review submission disabled if nil
+	CodeReviewLifecycle          codeReviewLifecycle                            // nil-safe: starts durable follow-up assessments after webhook changes
+	CodeReviewDisputes           codeReviewDisputeService                       // nil-safe: triages and replies to decision disputes
+	CodeReviewInsights           codeReviewInsightService                       // nil-safe: projects outcomes and ranks the policy-owner queue
+	CodeReviewDisputePublisher   codeReviewDisputePublisher                     // nil-safe: publishes idempotent GitHub replies
+	CodeReviewVisualEvidence     codeReviewVisualEvidenceProvider               // required for complete code review agent context
+	CodingAgents                 codingAgentAvailability                        // nil-safe: code review falls back to the configured roster when nil
+	PublicationIntents           publicationintent.PublicationIntentCoordinator // nil-safe: Slack falls back to an actionable error when publication is unavailable
+	SlackbotMetrics              *metrics.SlackbotMetrics                       // nil-safe: Slackbot observability disabled if nil
 	// Redis is optional and used for non-authoritative shared caches such as
 	// Slack user display names. Losing it should only increase provider lookups.
 	Redis       *cache.Client
@@ -9728,9 +9733,10 @@ type continueSessionJobInput struct {
 	PostSuccessAuthorMode  string `json:"post_success_author_mode"`
 	// Per-target automation turns (design doc 125); the producer is
 	// automationservice.AutomationTurnJobPayload.
-	AutomationRunID  string `json:"automation_run_id"`
-	TargetGeneration int    `json:"target_generation"`
-	ContinuationMode string `json:"continuation_mode"`
+	AutomationRunID        string `json:"automation_run_id"`
+	CodeReviewAssessmentID string `json:"code_review_assessment_id"`
+	TargetGeneration       int    `json:"target_generation"`
+	ContinuationMode       string `json:"continuation_mode"`
 }
 
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
@@ -9920,6 +9926,37 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				},
 			}
 		}
+		var codeReviewAssessmentID *uuid.UUID
+		if input.CodeReviewAssessmentID != "" {
+			if continueOpts != nil || input.CommandType != "" || input.FeedbackBatchID != "" || input.AutomationRunID != "" || input.PostSuccessAction != "" {
+				return errors.New("code review recheck cannot combine with another continuation mode")
+			}
+			if stores.CodeReviewRechecks == nil {
+				return errors.New("code review recheck store unavailable")
+			}
+			assessmentID, parseErr := uuid.Parse(input.CodeReviewAssessmentID)
+			if parseErr != nil {
+				return fmt.Errorf("parse code review assessment ID: %w", parseErr)
+			}
+			dispatch, loadErr := stores.CodeReviewRechecks.Get(ctx, orgID, assessmentID)
+			if loadErr != nil {
+				return fmt.Errorf("load code review recheck dispatch: %w", loadErr)
+			}
+			jobID, hasJob := jobctx.JobIDFromContext(ctx)
+			if !hasJob || jobID != dispatch.JobID || dispatch.SessionID != sessionID || dispatch.ThreadID.String() != input.ThreadID || queuedMessageID == nil || *queuedMessageID != dispatch.MessageID {
+				return &FatalError{Err: agent.ErrCodeReviewRecheckLeaseLost}
+			}
+			if dispatch.Status == "completed" {
+				// The exact turn receipt committed before this job was acknowledged.
+				// Recovery harvests it without launching the provider again.
+				return nil
+			}
+			if dispatch.Status == "failed" || dispatch.Status == "cancelled" {
+				return &FatalError{Err: agent.ErrCodeReviewRecheckLeaseLost}
+			}
+			codeReviewAssessmentID = &assessmentID
+			continueOpts = &agent.ContinueSessionOptions{CodeReviewTurn: &agent.CodeReviewTurnContinueOptions{AssessmentID: assessmentID, ThreadID: dispatch.ThreadID, ExpectedTurn: dispatch.ExpectedTurn, MessageID: dispatch.MessageID}}
+		}
 		if input.ThreadID != "" && stores.SessionThreads != nil {
 			parsedThreadID, parseErr := uuid.Parse(input.ThreadID)
 			if parseErr != nil {
@@ -9982,11 +10019,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					threadOpts.PRRepair = continueOpts.PRRepair
 					threadOpts.PRFeedback = continueOpts.PRFeedback
 					threadOpts.AutomationTurn = continueOpts.AutomationTurn
+					threadOpts.CodeReviewTurn = continueOpts.CodeReviewTurn
 				}
 				continueOpts = threadOpts
 			}
 		}
-		isSystemContinuation := continueOpts != nil && (continueOpts.PRRepair != nil || continueOpts.PRFeedback != nil || continueOpts.AutomationTurn != nil)
+		isSystemContinuation := continueOpts != nil && (continueOpts.PRRepair != nil || continueOpts.PRFeedback != nil || continueOpts.AutomationTurn != nil || continueOpts.CodeReviewTurn != nil)
 		if humanInputRequestID == nil && queuedMessageID != nil && !isSystemContinuation {
 			answeredID, answerErr := answerQueuedHumanInputForContinue(ctx, stores, orgID, sessionID, threadID, hasThread, *queuedMessageID, logger)
 			if answerErr != nil {
@@ -10102,6 +10140,58 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 		}
 		if err := continueErr; err != nil {
+			if codeReviewAssessmentID != nil {
+				if errors.Is(err, db.ErrCodeReviewRecheckUserCancelled) {
+					return &FatalError{Err: err}
+				}
+				if errors.Is(err, agent.ErrSessionCancelled) || errors.Is(err, agent.ErrThreadCancelledBeforeWorkspaceReady) || errors.Is(context.Cause(jobCtx), agent.ErrUserCancelCause) {
+					jobID, hasJob := jobctx.JobIDFromContext(ctx)
+					lockToken, hasToken := jobctx.LockTokenFromContext(ctx)
+					if !hasJob || !hasToken {
+						return &FatalError{Err: agent.ErrCodeReviewRecheckLeaseLost}
+					}
+					cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+					cancelErr := stores.CodeReviewRechecks.Cancel(cancelCtx, orgID, *codeReviewAssessmentID, jobID, lockToken)
+					cancel()
+					if cancelErr != nil {
+						if errors.Is(cancelErr, db.ErrCodeReviewRecheckFence) {
+							dispatch, dispatchErr := stores.CodeReviewRechecks.Get(ctx, orgID, *codeReviewAssessmentID)
+							current, assessmentErr := stores.CodeReviewAssessments.GetByID(ctx, orgID, *codeReviewAssessmentID)
+							if dispatchErr == nil && assessmentErr == nil && dispatch.JobID == jobID && dispatch.SessionID == sessionID && dispatch.ThreadID == threadID && dispatch.Status == models.CodeReviewRecheckDispatchCancelled && current.Status == models.CodeReviewAssessmentCancelled && current.SessionID == sessionID {
+								return &FatalError{Err: err}
+							}
+						}
+						return cancelErr
+					}
+					return &FatalError{Err: err}
+				}
+				if errors.Is(err, agent.ErrCodeReviewRecheckLeaseLost) {
+					current, loadErr := stores.CodeReviewAssessments.GetByID(ctx, orgID, *codeReviewAssessmentID)
+					if loadErr != nil {
+						return loadErr
+					}
+					if current.Status != models.CodeReviewAssessmentRunning {
+						return &FatalError{Err: err}
+					}
+				}
+				if errors.Is(err, agent.ErrCodeReviewRecheckLeaseLost) || errors.Is(err, agent.ErrSandboxCapacity) || errors.Is(err, agent.ErrSnapshotPending) || errors.Is(err, agent.ErrSessionInterrupted) {
+					retryAfter := 2 * time.Second
+					return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				}
+				// No unfenced generic thread cleanup or blind provider retry: the
+				// assessment supervisor must inspect the durable dispatch and
+				// prove the old runtime has drained before allocating a retry.
+				jobID, hasJob := jobctx.JobIDFromContext(ctx)
+				lockToken, hasToken := jobctx.LockTokenFromContext(ctx)
+				if hasJob && hasToken && !errors.Is(err, agent.ErrCodeReviewRecheckLeaseLost) {
+					failureCtx, cancelFailure := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+					if failureErr := stores.CodeReviewRechecks.Fail(failureCtx, orgID, *codeReviewAssessmentID, jobID, lockToken, err.Error()); failureErr != nil {
+						logger.Warn().Err(failureErr).Str("assessment_id", codeReviewAssessmentID.String()).Msg("failed to record fenced code review recheck failure")
+					}
+					cancelFailure()
+				}
+				return &FatalError{Err: err}
+			}
 			cancellationError := errors.Is(err, agent.ErrSessionCancelled) ||
 				errors.Is(err, agent.ErrThreadCancelledBeforeWorkspaceReady) ||
 				errors.Is(context.Cause(jobCtx), agent.ErrUserCancelCause)
@@ -10361,7 +10451,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 		}
 
-		if hasThread {
+		if hasThread && codeReviewAssessmentID == nil {
 			// The user message was inserted at thread.CurrentTurn + 1, so the
 			// thread's new current_turn is the same value once the assistant
 			// turn completes. The session's CurrentTurn is independent — it

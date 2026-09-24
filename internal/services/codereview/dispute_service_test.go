@@ -10,6 +10,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -103,6 +104,35 @@ type disputeReviewStoreStub struct {
 	reasons  []models.CodeReviewRiskReasonCode
 	details  []models.CodeReviewRiskReason
 	policy   models.CodeReviewPolicyRecord
+}
+
+type disputeAssessmentReviewStub struct {
+	disputeReviewStoreStub
+	assessment models.CodeReviewAssessment
+	source     models.CodeReviewAssessment
+	findings   []models.CodeReviewFinding
+}
+
+func (s disputeAssessmentReviewStub) GetLatestCompletedAssessmentByPullRequest(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewAssessment, error) {
+	return s.assessment, nil
+}
+
+func (s disputeAssessmentReviewStub) GetLatestCompletedAssessmentBySessionID(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewAssessment, error) {
+	return s.assessment, nil
+}
+
+func (s disputeAssessmentReviewStub) GetCompletedAssessmentByID(_ context.Context, _ uuid.UUID, id uuid.UUID) (models.CodeReviewAssessment, error) {
+	if id == s.assessment.ID {
+		return s.assessment, nil
+	}
+	if id == s.source.ID {
+		return s.source, nil
+	}
+	return models.CodeReviewAssessment{}, pgx.ErrNoRows
+}
+
+func (s disputeAssessmentReviewStub) ListAssessmentFindings(_ context.Context, _ uuid.UUID, _ uuid.UUID) ([]models.CodeReviewFinding, error) {
+	return s.findings, nil
 }
 
 func (s disputeReviewStoreStub) GetBySessionID(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
@@ -230,6 +260,62 @@ func TestDisputeService_FileInAppCapturesImmutableSemanticInput(t *testing.T) {
 	require.NoError(t, json.Unmarshal(dispute.QueueSignals, &signals), "queue context should be valid JSON")
 	require.Equal(t, "Fix payment authorization", signals["pull_request_title"], "queue context should preserve the reviewed pull request title")
 	require.Equal(t, "https://github.com/acme/payments/pull/42", signals["github_pr_url"], "queue context should link policy owners to the pull request")
+}
+
+func TestDisputeService_GeneralDisputeSnapshotsAssessmentReasons(t *testing.T) {
+	t.Parallel()
+	orgID, sessionID, prID, repoID, policyID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	assessmentID := uuid.New()
+	legacyDecision, currentDecision := models.CodeReviewDecisionApproved, models.CodeReviewDecisionBlocked
+	body := "Reviewed visual requirement was missing"
+	reviews := disputeAssessmentReviewStub{
+		disputeReviewStoreStub: disputeReviewStoreStub{
+			metadata: models.CodeReviewSessionMetadata{OrgID: orgID, SessionID: sessionID, PullRequestID: prID, RepositoryID: repoID, PolicyID: policyID, HeadSHA: "head", Status: models.CodeReviewSessionStatusCompleted, Decision: &legacyDecision},
+			item:     models.CodeReviewListItem{PullRequestAuthor: "author", PullRequestTitle: "Update visuals", GitHubRepo: "acme/repo", GitHubPRNumber: 7},
+			reasons:  []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings},
+		},
+		assessment: models.CodeReviewAssessment{ID: assessmentID, SessionID: sessionID, Decision: &currentDecision, RenderedBody: &body, RiskReasonDetails: json.RawMessage(`[{"code":"description_failed"}]`)},
+	}
+	store := &captureDisputeStore{}
+	service := NewDisputeService(store, reviews, disputePullRequestStoreStub{pullRequest: models.PullRequest{ID: prID, OrgID: orgID, Title: "Update visuals"}}, &disputeJobStoreStub{}, nil, "", zerolog.Nop())
+	dispute, err := service.FileInApp(context.Background(), FileCodeReviewDisputeInput{OrgID: orgID, SessionID: sessionID, FiledByLogin: "author", AuthorAssociation: "MEMBER", RepositoryVisibility: "private", Body: "The image meets this requirement.", ContestedReasonCodes: []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonDescriptionFailed, models.CodeReviewRiskReasonBlockingFindings}})
+	require.NoError(t, err, "general dispute should be filed against the selected assessment")
+	require.Equal(t, currentDecision, dispute.Decision, "filing should use the assessment's current decision")
+	require.Equal(t, []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonDescriptionFailed}, dispute.ContestedReasonCodes, "filing should accept only the assessment's risk reasons")
+	selected, details, codes, err := disputeAssessmentReasonSnapshot(dispute.QueueSignals)
+	require.NoError(t, err, "assessment reason snapshot should decode")
+	require.Equal(t, &assessmentID, selected, "queue context should pin the selected assessment")
+	require.Equal(t, []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonDescriptionFailed}}, details, "queue context should preserve the exact assessment reasons")
+	require.Equal(t, []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonDescriptionFailed}, codes, "triage should recover the selected reason codes")
+	store.current = dispute
+	store.current.IntakeStatus = models.CodeReviewDisputeIntakePending
+	err = service.Triage(context.Background(), orgID, dispute.ID)
+	require.NoError(t, err, "triage should use the filing-time assessment reason snapshot")
+	require.Equal(t, []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonDescriptionFailed}, store.triage.ContestedReasonCodes, "triage should not restore legacy session reasons")
+}
+
+func TestDisputeService_InlineFilingKeepsOriginalFindingDecisionAndReasons(t *testing.T) {
+	t.Parallel()
+	orgID, sessionID, prID, repoID, policyID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	legacyDecision, currentDecision := models.CodeReviewDecisionBlocked, models.CodeReviewDecisionApproved
+	rootCommentID := int64(72)
+	reviews := disputeAssessmentReviewStub{
+		disputeReviewStoreStub: disputeReviewStoreStub{
+			metadata: models.CodeReviewSessionMetadata{OrgID: orgID, SessionID: sessionID, PullRequestID: prID, RepositoryID: repoID, PolicyID: policyID, HeadSHA: "head", Status: models.CodeReviewSessionStatusCompleted, Decision: &legacyDecision},
+			item:     models.CodeReviewListItem{PullRequestAuthor: "author"},
+			reasons:  []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings},
+		},
+		assessment: models.CodeReviewAssessment{ID: uuid.New(), SessionID: sessionID, Decision: &currentDecision, RiskReasonDetails: json.RawMessage(`[{"code":"description_failed"}]`)},
+	}
+	service := NewDisputeService(&captureDisputeStore{}, reviews, disputePullRequestStoreStub{pullRequest: models.PullRequest{ID: prID, OrgID: orgID}}, &disputeJobStoreStub{}, nil, "", zerolog.Nop())
+	dispute, created, err := service.fileAgainstSessionResult(context.Background(), FileCodeReviewDisputeInput{OrgID: orgID, SessionID: sessionID, FiledByLogin: "author", AuthorAssociation: "MEMBER", RepositoryVisibility: "private", Body: "This inline finding is wrong.", Source: models.CodeReviewDisputeSourceGitHubComment, GitHubThreadRootID: &rootCommentID, ContestedReasonCodes: []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonDescriptionFailed, models.CodeReviewRiskReasonBlockingFindings}})
+	require.NoError(t, err, "inline finding dispute should retain its original review context")
+	require.True(t, created, "inline dispute should be admitted")
+	require.Equal(t, legacyDecision, dispute.Decision, "inline finding should retain its original decision")
+	require.Equal(t, []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings}, dispute.ContestedReasonCodes, "inline finding should use original session reasons")
+	selected, _, _, err := disputeAssessmentReasonSnapshot(dispute.QueueSignals)
+	require.NoError(t, err, "inline queue context should decode")
+	require.Nil(t, selected, "inline finding should not bind a later assessment")
 }
 
 func TestDisputeService_FileFromGitHubAppliesUntrustedIntakeGuard(t *testing.T) {
@@ -563,6 +649,27 @@ func TestDisputeService_TriageAnswerOnlyUsesReviewEvidence(t *testing.T) {
 	require.Equal(t, "The review blocked because the authorization finding is P1.", result.Reply, "the reply should contain the evidence-grounded answer")
 	require.NotContains(t, client.userPrompt, "deterministic_route_hint", "punctuation must not bias the LLM route")
 	require.Contains(t, client.userPrompt, "A P1 authorization finding blocked approval.", "the LLM should receive the bounded review evidence")
+}
+
+func TestDisputeService_TriageUsesFiledAssessmentFindingDisposition(t *testing.T) {
+	t.Parallel()
+	orgID, sessionID, prID, sourceID, assessmentID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	resolvedID, retainedID := uuid.New(), uuid.New()
+	currentBody := "Current review retains one finding."
+	oldBody := "Old review reported the resolved finding as active."
+	source := models.CodeReviewAssessment{ID: sourceID, OrgID: orgID, SessionID: sessionID, PullRequestID: prID, Status: models.CodeReviewAssessmentCompleted, ReviewScope: models.CodeReviewScopeFull}
+	current := models.CodeReviewAssessment{ID: assessmentID, OrgID: orgID, SessionID: sessionID, PullRequestID: prID, SourceAssessmentID: &sourceID, Status: models.CodeReviewAssessmentCompleted, ReviewScope: models.CodeReviewScopeEvidenceOnly, RenderedBody: &currentBody, StructuredOutcome: json.RawMessage(`{"finding_reassessments":[{"finding_id":"` + resolvedID.String() + `","status":"resolved","reason":"Current evidence settles this","evidence_citations":[]},{"finding_id":"` + retainedID.String() + `","status":"retained","reason":"Still open","evidence_citations":[]}]}`)}
+	store := &captureDisputeStore{current: models.CodeReviewDispute{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, PullRequestID: prID, Source: models.CodeReviewDisputeSourceGitHubComment, Decision: models.CodeReviewDecisionBlocked, Body: "Does this finding remain?", QueueSignals: json.RawMessage(`{"finding_assessment_id":"` + assessmentID.String() + `"}`), IntakeStatus: models.CodeReviewDisputeIntakePending}}
+	reviews := disputeAssessmentReviewStub{disputeReviewStoreStub: disputeReviewStoreStub{reasons: []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockingFindings}, item: models.CodeReviewListItem{CodeReviewSessionMetadata: models.CodeReviewSessionMetadata{FinalReviewBody: &oldBody}}}, assessment: current, source: source, findings: []models.CodeReviewFinding{{ID: resolvedID, OrgID: orgID, SessionID: sessionID, Summary: "resolved finding"}, {ID: retainedID, OrgID: orgID, SessionID: sessionID, Summary: "retained finding"}}}
+	client := &disputeLLMStub{response: `{"direction":"should_have_approved","contested_reason_codes":[],"dispute_kind":"explanation_question","asserts_new_information":false,"routing":"answer_only","confidence":0.99,"reply":"The current review retains one finding."}`}
+	service := NewDisputeService(store, reviews, disputePullRequestStoreStub{}, &disputeJobStoreStub{}, client, "", zerolog.Nop())
+
+	err := service.Triage(context.Background(), orgID, store.current.ID)
+	require.NoError(t, err, "triage should project the filed assessment's finding dispositions")
+	require.Contains(t, client.userPrompt, "retained finding", "unresolved source finding should remain in current triage")
+	require.NotContains(t, client.userPrompt, "resolved finding", "resolved source finding should not appear as active in triage")
+	require.Contains(t, client.userPrompt, currentBody, "triage should use the selected assessment's current review summary")
+	require.NotContains(t, client.userPrompt, oldBody, "triage should not present a stale review summary as current")
 }
 
 func TestDisputeService_GitHubCommentMeaningIsClassifiedOnlyByLLM(t *testing.T) {

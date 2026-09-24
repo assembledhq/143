@@ -766,6 +766,13 @@ func (h *SessionHandler) enqueuePublishActionInTx(
 
 	txSessions := db.NewSessionStore(tx)
 	txSessions.SetLogger(h.logger)
+	if _, enabled := h.automationOwners.(interface {
+		RejectIfCodeReviewOwned(context.Context, uuid.UUID, uuid.UUID) error
+	}); enabled {
+		if err := txSessions.LockAndRejectIfCodeReviewOwned(ctx, orgID, sessionID); err != nil {
+			return false, &publishActionTxError{phase: "state", err: err}
+		}
+	}
 	queued, err := markQueued(ctx, txSessions, db.NewSessionChangesetStore(tx))
 	if err != nil {
 		return false, &publishActionTxError{phase: "state", err: err}
@@ -1351,7 +1358,7 @@ func (h *SessionHandler) MaterializeChangeset(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusInternalServerError, "SESSION_LOOKUP_FAILED", "failed to load session", err)
 		return
 	}
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 	if session.ContainerID == nil || strings.TrimSpace(*session.ContainerID) == "" {
@@ -1630,7 +1637,7 @@ func (h *SessionHandler) VerifyChangesetSplit(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
 	}
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 	if session.ContainerID == nil || strings.TrimSpace(*session.ContainerID) == "" {
@@ -2163,7 +2170,7 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 
 	// Retrying or starting over runs the session again, which an owned
 	// session's automation is already doing.
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 
@@ -3107,6 +3114,9 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
 	}
+	if rejectCodeReviewOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+		return
+	}
 	targetChangeset, err := h.requestedChangeset(r.Context(), orgID, sessionID, r.URL.Query().Get("changeset_id"))
 	if err != nil {
 		switch {
@@ -3374,6 +3384,9 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	if err != nil {
+		if writeCodeReviewOwnedError(w, r, err) {
+			return
+		}
 		if txErr := (*publishActionTxError)(nil); errors.As(err, &txErr) && txErr.phase == "state" {
 			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark PR creation as queued", err)
 			return
@@ -3414,6 +3427,9 @@ func (h *SessionHandler) CreateBranch(w http.ResponseWriter, r *http.Request) {
 	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+	if rejectCodeReviewOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
 		return
 	}
 	if session.SandboxState == models.SandboxStateDestroyed {
@@ -3492,6 +3508,9 @@ func (h *SessionHandler) CreateBranch(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	if err != nil {
+		if writeCodeReviewOwnedError(w, r, err) {
+			return
+		}
 		if txErr := (*publishActionTxError)(nil); errors.As(err, &txErr) && txErr.phase == "state" {
 			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark branch creation as queued", err)
 			return
@@ -3535,6 +3554,9 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+	if rejectCodeReviewOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
 		return
 	}
 	targetChangeset, err := h.requestedChangeset(r.Context(), orgID, sessionID, r.URL.Query().Get("changeset_id"))
@@ -3671,6 +3693,9 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		},
 	)
 	if err != nil {
+		if writeCodeReviewOwnedError(w, r, err) {
+			return
+		}
 		if txErr := (*publishActionTxError)(nil); errors.As(err, &txErr) && txErr.phase == "state" {
 			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to mark PR push as queued", err)
 			return
@@ -3835,7 +3860,7 @@ func (h *SessionHandler) AnswerHumanInputRequest(w http.ResponseWriter, r *http.
 	}
 	// An automation-owned session accepts no human turn: this path enqueues
 	// a continuation on it (design doc 125).
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 
@@ -3902,7 +3927,7 @@ func (h *SessionHandler) CancelHumanInputRequest(w http.ResponseWriter, r *http.
 	}
 	// An automation-owned session accepts no human turn: this path enqueues
 	// a continuation on it (design doc 125).
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 
@@ -4012,7 +4037,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotImplemented, "NOT_CONFIGURED", "multi-turn sessions not configured")
 		return
 	}
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 
@@ -5274,7 +5299,7 @@ func (h *SessionHandler) ArchiveSession(w http.ResponseWriter, r *http.Request) 
 
 	// Archiving deletes the session's checkpoint, which is exactly the
 	// continuity an owned session's next turn restores from.
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 

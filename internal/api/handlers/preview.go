@@ -1327,7 +1327,7 @@ func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	// A preview takes the session's container, which an automation-owned
 	// session's turn is using or about to use.
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
 		return
 	}
 
@@ -1939,7 +1939,7 @@ func (h *PreviewHandler) ensurePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	// Every path that takes a session's container is guarded, not only
 	// StartPreview: an automation-owned session's turn is using it.
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
 		return
 	}
 	body, reqErr := h.decodeStartPreviewBody(r)
@@ -2058,7 +2058,7 @@ func (h *PreviewHandler) RestartPreview(w http.ResponseWriter, r *http.Request) 
 	}
 	// Every path that takes a session's container is guarded, not only
 	// StartPreview: an automation-owned session's turn is using it.
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
 		return
 	}
 	body, reqErr := h.decodeStartPreviewBody(r)
@@ -2159,7 +2159,7 @@ func (h *PreviewHandler) UpdatePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	// Every path that takes a session's container is guarded, not only
 	// StartPreview: an automation-owned session's turn is using it.
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
 		return
 	}
 	userID, ok := previewRequestUserID(r.Context(), middleware.UserFromContext(r.Context()))

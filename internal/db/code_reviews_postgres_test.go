@@ -585,6 +585,7 @@ func TestCodeReviewSortRankMatchesPostgresForEveryRow(t *testing.T) {
 			github_review_id bigint
 		)`)
 	require.NoError(t, err, "test should create the columns the rank expressions read")
+	createCodeReviewProjectionFixture(t, ctx, conn, false)
 
 	statuses := []models.CodeReviewSessionStatus{
 		models.CodeReviewSessionStatusQueued, models.CodeReviewSessionStatusRunning,
@@ -630,12 +631,32 @@ func TestCodeReviewSortRankMatchesPostgresForEveryRow(t *testing.T) {
 		}
 	}
 
+	// Keep most combinations as legacy rows and project a few completed rows
+	// through a real assessment whose decision differs from the old metadata.
+	projected := 0
+	for id, item := range expected {
+		if item.Status != models.CodeReviewSessionStatusCompleted || item.Stale || projected == 8 {
+			continue
+		}
+		_, insertErr := conn.Exec(ctx, `INSERT INTO code_review_revision_assessments (
+			org_id, session_id, status, generation, decision, acceptable, github_review_id
+		) SELECT org_id, session_id, 'completed', 1, decision, acceptable, github_review_id
+		FROM code_review_session_metadata WHERE id=$1`, id)
+		require.NoError(t, insertErr, "fixture should add a current assessment for rank projection")
+		// A null decision selects the legacy fallback by contract.
+		if item.Decision != nil {
+			_, updateErr := conn.Exec(ctx, `UPDATE code_review_session_metadata SET decision='comment_only', acceptable=false, github_review_id=NULL WHERE id=$1`, id)
+			require.NoError(t, updateErr, "source metadata should differ from its projected current assessment")
+		}
+		projected++
+	}
+
 	for _, sortBy := range []string{"outcome", "risk", "run_status"} {
 		t.Run(sortBy, func(t *testing.T) {
 			sort, sortErr := codeReviewListSortFor(sortBy)
 			require.NoError(t, sortErr, "the sort should be allowlisted")
 
-			rows, queryErr := conn.Query(ctx, `SELECT m.id, `+sort.expression+` FROM code_review_session_metadata m`)
+			rows, queryErr := conn.Query(ctx, `SELECT m.id, `+sort.expression+` FROM code_review_session_metadata m`+codeReviewCurrentAssessmentJoin)
 			require.NoError(t, queryErr, "the rank expression should execute against PostgreSQL")
 			defer rows.Close()
 
@@ -698,6 +719,7 @@ func TestCodeReviewListWhereReasonFilterMatchesPostgres(t *testing.T) {
 			risk_reason_details jsonb NOT NULL DEFAULT '[]'::jsonb
 		)`)
 	require.NoError(t, err, "test should create the columns the reason predicate reads")
+	createCodeReviewProjectionFixture(t, ctx, conn, true)
 
 	orgID, otherOrgID := uuid.New(), uuid.New()
 	seeded := []struct {
@@ -718,6 +740,19 @@ func TestCodeReviewListWhereReasonFilterMatchesPostgres(t *testing.T) {
 			VALUES ($1, $2, $3::jsonb)`, ids[row.name], row.orgID, row.details)
 		require.NoError(t, insertErr, "test should insert a reason combination")
 	}
+
+	_, err = conn.Exec(ctx, `INSERT INTO code_review_revision_assessments (
+		org_id, session_id, status, generation, decision, risk_reason_details
+	) SELECT org_id, session_id, 'completed', 1, 'blocked', risk_reason_details
+	FROM code_review_session_metadata WHERE id=$1`, ids["blocking only"])
+	require.NoError(t, err, "reason fixture should retain the blocking reason in its current assessment")
+	_, err = conn.Exec(ctx, `UPDATE code_review_session_metadata SET risk_reason_details='[]'::jsonb WHERE id=$1`, ids["blocking only"])
+	require.NoError(t, err, "reason filtering should read the assessment instead of stale legacy reasons")
+	_, err = conn.Exec(ctx, `INSERT INTO code_review_revision_assessments (
+		org_id, session_id, status, generation, decision, risk_reason_details
+	) SELECT $1, session_id, 'completed', 2, 'blocked', '[{"code":"blocking_findings"}]'::jsonb
+	FROM code_review_session_metadata WHERE id=$2`, otherOrgID, ids["no reasons"])
+	require.NoError(t, err, "reason fixture should include a foreign-tenant assessment that must be ignored")
 
 	tests := []struct {
 		name     string
@@ -746,7 +781,7 @@ func TestCodeReviewListWhereReasonFilterMatchesPostgres(t *testing.T) {
 			where, args, whereErr := codeReviewListWhere(orgID, CodeReviewListFilters{Reason: &reason}, false)
 			require.NoError(t, whereErr, "the reason predicate should build")
 
-			rows, queryErr := conn.Query(ctx, `SELECT m.id FROM code_review_session_metadata m`+where+` ORDER BY m.id`, args)
+			rows, queryErr := conn.Query(ctx, `SELECT m.id FROM code_review_session_metadata m`+codeReviewCurrentAssessmentJoin+where+` ORDER BY m.id`, args)
 			require.NoError(t, queryErr, "the reason predicate should execute against PostgreSQL")
 			defer rows.Close()
 
@@ -760,4 +795,24 @@ func TestCodeReviewListWhereReasonFilterMatchesPostgres(t *testing.T) {
 			require.ElementsMatch(t, tt.expected, matched, "only same-org attempts recording the reason should match")
 		})
 	}
+}
+
+// createCodeReviewProjectionFixture supplies the assessment relation used by
+// the production sort/filter expressions in the isolated PostgreSQL fixtures.
+func createCodeReviewProjectionFixture(t *testing.T, ctx context.Context, conn *pgx.Conn, hasOrgID bool) {
+	t.Helper()
+	if !hasOrgID {
+		_, err := conn.Exec(ctx, `ALTER TABLE code_review_session_metadata ADD COLUMN org_id uuid NOT NULL DEFAULT gen_random_uuid()`)
+		require.NoError(t, err, "rank fixture should include tenant identity for the assessment join")
+	}
+	_, err := conn.Exec(ctx, `ALTER TABLE code_review_session_metadata ADD COLUMN session_id uuid NOT NULL DEFAULT gen_random_uuid()`)
+	require.NoError(t, err, "fixture should include session identity for the assessment join")
+	_, err = conn.Exec(ctx, `CREATE TABLE code_review_revision_assessments (
+        org_id uuid NOT NULL, session_id uuid NOT NULL, status text NOT NULL,
+        superseded_by_assessment_id uuid, generation bigint NOT NULL,
+        decision text, acceptable boolean, risk_reason_details jsonb,
+        rendered_body text, github_review_id bigint, github_review_url text,
+        completed_at timestamptz, publication_key text
+    )`)
+	require.NoError(t, err, "fixture should include the immutable assessment projection columns")
 }

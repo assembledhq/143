@@ -65,8 +65,11 @@ type VisualEvidenceService struct {
 }
 
 type CaptureVisualEvidenceInput struct {
+	// Fresh bypasses persisted evidence and does not overwrite its checkpoint.
+	Fresh             bool
 	OrgID             uuid.UUID
 	SessionID         uuid.UUID
+	AssessmentID      *uuid.UUID
 	RepositoryID      uuid.UUID
 	PullRequestNumber int
 	HeadSHA           string
@@ -101,6 +104,9 @@ func (s *VisualEvidenceService) Capture(ctx context.Context, input CaptureVisual
 	if input.OrgID == uuid.Nil || input.SessionID == uuid.Nil || input.RepositoryID == uuid.Nil || input.PullRequestNumber <= 0 || !visualEvidenceHeadSHA.MatchString(input.HeadSHA) {
 		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("org_id, session_id, repository_id, positive pull request number, and a full Git head SHA are required")
 	}
+	if input.AssessmentID != nil && *input.AssessmentID == uuid.Nil {
+		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("assessment_id must be a nonzero UUID when provided")
+	}
 	recordCapture := metrics.RecordCodeReviewVisualEvidenceCapture
 	if s != nil && s.recordCapture != nil {
 		recordCapture = s.recordCapture
@@ -122,19 +128,23 @@ func (s *VisualEvidenceService) Capture(ctx context.Context, input CaptureVisual
 		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("code review visual evidence resource limits are invalid")
 	}
 
-	recordKey := visualEvidenceRecordKey(input.SessionID, input.HeadSHA)
-	record, err := s.prompts.GetPromptRecordByKey(ctx, input.OrgID, recordKey)
-	if err == nil {
-		restoreAttempt = true
-		restoredSnapshot, restoreErr := restoreVisualEvidenceSnapshot(record, input)
-		if restoreErr == nil {
-			recordCapture(ctx, len(restoredSnapshot.Evidence), len(restoredSnapshot.Evidence), restoredSnapshot.Complete, restoredSnapshot.Overflow, true)
-			metricRecorded = true
+	recordKey := visualEvidenceInputRecordKey(input)
+	var record models.CodeReviewPromptRecord
+	if !input.Fresh {
+		record, err := s.prompts.GetPromptRecordByKey(ctx, input.OrgID, recordKey)
+		if err == nil {
+			restoreAttempt = true
+			restoredSnapshot, restoreErr := restoreVisualEvidenceSnapshot(record, input)
+			if restoreErr == nil {
+				recordCapture(ctx, len(restoredSnapshot.Evidence), len(restoredSnapshot.Evidence), restoredSnapshot.Complete, restoredSnapshot.Overflow, true)
+				metricRecorded = true
+			}
+			return restoredSnapshot, restoreErr
 		}
-		return restoredSnapshot, restoreErr
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("load code review visual evidence checkpoint: %w", err)
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("load code review visual evidence checkpoint: %w", err)
+		}
+
 	}
 
 	discovery, err := s.discoverer.DiscoverCodeReviewVisualEvidence(ctx, input.OrgID, input.RepositoryID, input.PullRequestNumber)
@@ -162,6 +172,11 @@ func (s *VisualEvidenceService) Capture(ctx context.Context, input CaptureVisual
 	}
 
 	snapshot := s.materialize(ctx, input, discovery, token)
+	if input.Fresh {
+		recordCapture(ctx, discoveredCount, 0, snapshot.Complete, snapshot.Overflow, false)
+		metricRecorded = true
+		return snapshot, nil
+	}
 	overflow = snapshot.Overflow
 	metadata, err := json.Marshal(snapshot)
 	if err != nil {
@@ -248,7 +263,8 @@ func (s *VisualEvidenceService) materialize(ctx context.Context, input CaptureVi
 	}
 	omittedSourceCount := sourceCount - len(retainedSources)
 	snapshot := models.CodeReviewVisualEvidenceSnapshot{
-		Version: visualEvidenceSnapshotVersion, RepositoryID: input.RepositoryID, Repository: discovery.Repository,
+		AssessmentID: input.AssessmentID,
+		Version:      visualEvidenceSnapshotVersion, RepositoryID: input.RepositoryID, Repository: discovery.Repository,
 		PullRequestNumber: input.PullRequestNumber, HeadSHA: input.HeadSHA, CapturedAt: discovery.CapturedAt,
 		Complete: true, Overflow: omittedSourceCount > 0, OmittedSourceCount: omittedSourceCount,
 		Evidence: make([]models.CodeReviewVisualEvidence, 0, len(retainedSources)),
@@ -377,13 +393,24 @@ func visualEvidenceRecordKey(sessionID uuid.UUID, headSHA string) string {
 	return fmt.Sprintf("code-review-prompts/%s/%s/visual-evidence-v1", sessionID, strings.ToLower(strings.TrimSpace(headSHA)))
 }
 
+func visualEvidenceInputRecordKey(input CaptureVisualEvidenceInput) string {
+	if input.AssessmentID != nil {
+		return fmt.Sprintf("code-review-prompts/%s/assessments/%s/%s/visual-evidence-v1", input.SessionID, *input.AssessmentID, strings.ToLower(strings.TrimSpace(input.HeadSHA)))
+	}
+	return visualEvidenceRecordKey(input.SessionID, input.HeadSHA)
+}
+
 func restoreVisualEvidenceSnapshot(record models.CodeReviewPromptRecord, input CaptureVisualEvidenceInput) (models.CodeReviewVisualEvidenceSnapshot, error) {
-	if record.OrgID != input.OrgID || record.SessionID != input.SessionID || record.RecordKey != visualEvidenceRecordKey(input.SessionID, input.HeadSHA) || record.Role != visualEvidencePromptRole {
+	if record.OrgID != input.OrgID || record.SessionID != input.SessionID || record.RecordKey != visualEvidenceInputRecordKey(input) || record.Role != visualEvidencePromptRole {
 		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("stored code review visual evidence checkpoint identity is invalid")
 	}
 	var snapshot models.CodeReviewVisualEvidenceSnapshot
 	if err := json.Unmarshal(record.Metadata, &snapshot); err != nil {
 		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("decode stored code review visual evidence checkpoint: %w", err)
+	}
+	if (snapshot.AssessmentID == nil) != (input.AssessmentID == nil) ||
+		(snapshot.AssessmentID != nil && *snapshot.AssessmentID != *input.AssessmentID) {
+		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("stored code review visual evidence assessment identity is invalid")
 	}
 	if snapshot.Version != visualEvidenceSnapshotVersion || snapshot.RepositoryID != input.RepositoryID || snapshot.PullRequestNumber != input.PullRequestNumber || !strings.EqualFold(snapshot.HeadSHA, input.HeadSHA) || !snapshot.Complete {
 		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("stored code review visual evidence manifest is incomplete or does not match the assessment")

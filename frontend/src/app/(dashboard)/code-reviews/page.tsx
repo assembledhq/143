@@ -76,6 +76,9 @@ import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
 import { GitHubReviewerConnectionSheet } from "@/components/code-review/github-reviewer-connection-sheet";
 import { ReviewNowFromComment } from "@/components/code-review/review-now-from-comment";
+import { RecheckActions } from "@/components/code-review/recheck-actions";
+import { AssessmentFromLink, AssessmentStatus } from "@/components/code-review/assessment-status";
+import { RecheckFromComment } from "@/components/code-review/recheck-from-comment";
 import { ScheduledReviews } from "@/components/code-review/scheduling";
 import { CodeReviewPolicyHistory } from "@/components/code-review/policy-history";
 import { SortableTableHeader } from "@/components/sortable-table-header";
@@ -375,6 +378,18 @@ function reviewCanBeRetried(review: CodeReviewListItem): boolean {
   return review.retry_eligible;
 }
 
+function assessmentForReviewRow(review: CodeReviewListItem) {
+  const matches = (assessment: CodeReviewListItem["current_assessment"]) => assessment?.session_id === review.session_id && assessment.head_sha === review.head_sha;
+  if (matches(review.active_assessment)) return review.active_assessment;
+  if (matches(review.current_assessment)) return review.current_assessment;
+  return null;
+}
+
+function failedAssessmentForReviewRow(review: CodeReviewListItem) {
+  const failed = review.latest_failed_assessment;
+  return failed?.session_id === review.session_id && failed.head_sha === review.head_sha ? failed : null;
+}
+
 function ReviewActions({
   review,
   canRetry,
@@ -395,6 +410,9 @@ function ReviewActions({
   return (
     <div className={cn("flex w-full items-center gap-1 md:w-auto md:justify-end", className)}>
       <EvidenceButton selected={evidenceSelected} onToggleEvidence={onToggleEvidence} />
+      <AssessmentStatus assessment={assessmentForReviewRow(review)} />
+      <AssessmentStatus assessment={failedAssessmentForReviewRow(review)} />
+      <RecheckActions prID={review.pull_request_id} canManage={canRetry} completed={review.status === "completed"} />
       {canRetry && reviewCanBeRetried(review) ? (
         <Button className="min-h-11 flex-1 justify-center md:min-h-0 md:flex-none" variant="outline" size="sm" disabled={isRetrying} onClick={onRetry}>
           <RefreshCw className={isRetrying ? "animate-spin" : undefined} />
@@ -1367,6 +1385,8 @@ export default function CodeReviewsPage() {
   return (
     <ListPage title="Code reviews" description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes.">
       <ReviewNowFromComment canManage={canRetryReviews} />
+      <RecheckFromComment canManage={canRetryReviews} />
+      <AssessmentFromLink />
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList>
           <TabsTrigger value="reviews">
@@ -1498,6 +1518,8 @@ export default function CodeReviewsPage() {
                     detail={
                       <div className="space-y-2.5 pt-1">
                         <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />
+                        <AssessmentStatus assessment={assessmentForReviewRow(review)} />
+                        <AssessmentStatus assessment={failedAssessmentForReviewRow(review)} />
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                             <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator="none" />
                             {review.completed_at ? <span className="text-foreground">{formatDate(review.completed_at)}</span> : null}
@@ -1690,6 +1712,7 @@ export default function CodeReviewsPage() {
                 />
                 <AdvancedPolicySettings
                   schedulingEnabled={policyQuery.data?.data.capabilities?.scheduling === true}
+                  continuationAvailable={policyQuery.data?.data.capabilities?.conditional_recheck === true}
                   config={config}
                   autosave={autosave}
                   buildConfig={buildConfig}
@@ -2298,6 +2321,7 @@ function CodeReviewPromptExampleDialog({
 
 type AdvancedPolicySettingsProps = {
   schedulingEnabled: boolean;
+  continuationAvailable: boolean;
   config: CodeReviewPolicyConfig | null;
   autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
   buildConfig: (mutate: (next: CodeReviewPolicyConfig) => void) => CodeReviewPolicyConfig;
@@ -2311,6 +2335,7 @@ type AdvancedPolicySettingsProps = {
 
 function AdvancedPolicySettings({
   schedulingEnabled,
+  continuationAvailable,
   config,
   autosave,
   buildConfig,
@@ -2346,8 +2371,12 @@ function AdvancedPolicySettings({
                         <PolicyToggle description="Monitor previously requested PRs when their code changes. Explicit reviews remain available." label="Automatically re-review changed PRs" checked={config?.scheduling_policy?.automatic_re_review ?? true} onCheckedChange={(checked) => commitPolicy((next) => { next.scheduling_policy = { ...next.scheduling_policy, automatic_re_review: checked }; })} />
                         <DurationInput label="Wait after changes" valueSeconds={config?.scheduling_policy?.quiet_period_seconds ?? 60} minSeconds={0} maxSeconds={3600} defaultUnit="minutes" disabled={!config} onChangeSeconds={(seconds) => commitPolicy((next) => { next.scheduling_policy = { ...next.scheduling_policy, quiet_period_seconds: seconds }; })} />
                         <DurationInput label="Minimum interval between automatic reviews" valueSeconds={config?.scheduling_policy?.minimum_interval_seconds ?? 0} minSeconds={0} maxSeconds={86400} defaultUnit="minutes" disabled={!config} onChangeSeconds={(seconds) => commitPolicy((next) => { next.scheduling_policy = { ...next.scheduling_policy, minimum_interval_seconds: seconds }; })} />
-                        <p className="text-xs text-muted-foreground">The latest revision waits for both timers. Review now bypasses these delays.</p>
+                        <p className="text-xs text-muted-foreground">The latest revision waits for both timers. Request Full Re-Review Now bypasses these delays.</p>
                         <Button size="sm" variant="outline" onClick={() => commitPolicy((next) => { next.scheduling_policy = { ...next.scheduling_policy, quiet_period_seconds: 300, minimum_interval_seconds: 900 }; })}>Use 5-minute wait and 15-minute interval</Button>
+                      </div></FineTuningSection> : null}
+                      {continuationAvailable ? <FineTuningSection title="Review continuation" summary="Let authors request a check of updated visual evidence." forceOpen={invalidPolicyField?.startsWith("continuation_policy") === true}><div className="space-y-3">
+                        <PolicyToggle label="Allow PR re-checks" description="When code and review inputs still match a complete review, 143 can check new visual evidence using the previous code review. Other changes run a full review." checked={config?.continuation_policy?.enabled ?? false} onCheckedChange={(checked) => commitPolicy((next) => { next.continuation_policy = { enabled: checked, automatic_evidence_rechecks: false }; })} />
+                        <PolicyToggle label="Automatically re-check new evidence" description="Automatic evidence re-checks are unavailable during the initial rollout. Authors can request a re-check explicitly." checked={false} disabled onCheckedChange={() => {}} />
                       </div></FineTuningSection> : null}
           <FineTuningSection
             title="Approval criteria"
@@ -4786,6 +4815,8 @@ function CodeReviewEvidenceSheet({
           </div>
         </SheetHeader>
         <div className="space-y-6 px-6 py-5">
+          <AssessmentStatus assessment={review ? assessmentForReviewRow(review) : null} />
+          <AssessmentStatus assessment={review ? failedAssessmentForReviewRow(review) : null} />
           {review?.status === "failed" && !isSupersededReview(review) ? (
             <div className="space-y-3">
               <ErrorNotice title="Code review failed" description={reviewStatusMessage(review) ?? "The review stopped before it could finish."} />

@@ -558,6 +558,28 @@ func (s *Service) HandleReviewMentioned(ctx context.Context, input ReviewMention
 		requestKey = fmt.Sprintf("issue_comment:%d", input.CommentID)
 		requested.DeliveryID = requestKey
 	}
+	if s.scheduling != nil && s.scheduling.rechecksEnabled && requestKey != "" {
+		// A bare team mention carries no new review objection. All accompanying
+		// prose stays substantive and is included in the request digest.
+		context := requested.RequestContext
+		owner, _, _ := strings.Cut(strings.TrimSpace(input.GitHubRepo), "/")
+		if strings.EqualFold(strings.TrimSpace(input.CommentBody), "@"+owner+"/"+team) {
+			context = nil
+		}
+		requestID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("code-review-mention:"+requestKey))
+		admitted, err := s.RequestScheduledReview(ctx, ScheduleRequestInput{
+			OrgID: input.OrgID, PullRequestID: input.PullRequestID, RequestID: requestID,
+			Mode: models.CodeReviewRecheck, RequestContext: context, TriggerSource: source,
+		})
+		if err != nil {
+			return ReviewRequestedResult{}, err
+		}
+		result := ReviewRequestedResult{Processed: true, TriggerSource: source, Reused: admitted.Disposition == models.CodeReviewRequestReused || admitted.Disposition == models.CodeReviewRequestJoined, Deferred: admitted.Disposition == models.CodeReviewRequestQueued || admitted.Disposition == models.CodeReviewRequestJoined}
+		if admitted.SessionID != nil {
+			result.SessionID = *admitted.SessionID
+		}
+		return result, nil
+	}
 	return s.handleExplicitReviewRequest(
 		ctx,
 		requested,

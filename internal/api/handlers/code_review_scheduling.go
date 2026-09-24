@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -68,20 +70,27 @@ func (h *CodeReviewHandler) RequestReviewNow(w http.ResponseWriter, r *http.Requ
 	var req struct {
 		RequestID uuid.UUID                    `json:"request_id"`
 		Mode      models.CodeReviewRequestMode `json:"mode"`
+		Reason    string                       `json:"reason,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RequestID == uuid.Nil {
 		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "request_id and mode are required")
 		return
 	}
-	if string(req.Mode) == "force_fresh" {
-		writeError(w, r, 409, "CODE_REVIEW_CAPABILITY_UNAVAILABLE", "force fresh review is not available")
+	if req.Mode == models.CodeReviewRecheck || req.Mode == models.CodeReviewForceFresh {
+		if !h.conditionalRecheckCapability {
+			writeError(w, r, 409, "CODE_REVIEW_CAPABILITY_UNAVAILABLE", "review continuation is not available")
+			return
+		}
+	}
+	if req.Mode == models.CodeReviewForceFresh && (strings.TrimSpace(req.Reason) == "" || utf8.RuneCountInString(req.Reason) > 2000) {
+		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "force_fresh requires a reason of at most 2000 characters")
 		return
 	}
 	if err := req.Mode.Validate(); err != nil {
 		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "invalid request mode", err)
 		return
 	}
-	result, err := s.RequestScheduledReview(r.Context(), codereviewsvc.ScheduleRequestInput{OrgID: middleware.OrgIDFromContext(r.Context()), PullRequestID: id, RequestID: req.RequestID, RequesterID: &user.ID, Mode: req.Mode})
+	result, err := s.RequestScheduledReview(r.Context(), codereviewsvc.ScheduleRequestInput{OrgID: middleware.OrgIDFromContext(r.Context()), PullRequestID: id, RequestID: req.RequestID, RequesterID: &user.ID, Mode: req.Mode, Reason: strings.TrimSpace(req.Reason)})
 	if err != nil {
 		writeScheduleError(w, r, err)
 		return

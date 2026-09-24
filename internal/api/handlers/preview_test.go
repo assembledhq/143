@@ -305,6 +305,27 @@ func TestPreviewHandler_StartPreview_InvalidBody(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+type previewCodeReviewOwnerGuard struct{ prID uuid.UUID }
+
+func (g previewCodeReviewOwnerGuard) RejectIfAutomationOwned(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+func (g previewCodeReviewOwnerGuard) RejectIfCodeReviewOwned(context.Context, uuid.UUID, uuid.UUID) error {
+	return &models.SessionCodeReviewOwnedError{PullRequestID: g.prID}
+}
+
+func TestPreviewHandler_StartPreview_CodeReviewOwned(t *testing.T) {
+	t.Parallel()
+	h := newPreviewTestHandlerWithManager()
+	h.SetAutomationOwnershipGuard(previewCodeReviewOwnerGuard{prID: uuid.New()})
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(`{}`))
+	req = previewTestContextWithIDs(req, uuid.New(), uuid.New(), uuid.New().String())
+	recorder := httptest.NewRecorder()
+	h.StartPreview(recorder, req)
+	require.Equal(t, http.StatusConflict, recorder.Code, "owned review conversation cannot start a competing preview")
+	require.Contains(t, recorder.Body.String(), `"code":"SESSION_CODE_REVIEW_OWNED"`, "preview should use the ownership conflict response")
+}
+
 func TestPreviewHandler_ReservationPlaceholderConfig(t *testing.T) {
 	t.Parallel()
 

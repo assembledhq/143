@@ -867,12 +867,13 @@ const (
 	// ownership transaction inserts for a per-target automation turn
 	// (design doc 125). The turn's prompt travels in the job payload; the
 	// message is the transcript's copy.
-	SessionMessageSourceAutomationTurn SessionMessageSource = "automation_turn"
+	SessionMessageSourceAutomationTurn    SessionMessageSource = "automation_turn"
+	SessionMessageSourceCodeReviewRecheck SessionMessageSource = "code_review_recheck"
 )
 
 func (s SessionMessageSource) Validate() error {
 	switch s {
-	case "", SessionMessageSourceAgentTool, SessionMessageSourceCodeReview, SessionMessageSourceSystemAutoRepair, SessionMessageSourceGitHubPRFeedback, SessionMessageSourceAutomationTurn:
+	case "", SessionMessageSourceAgentTool, SessionMessageSourceCodeReview, SessionMessageSourceSystemAutoRepair, SessionMessageSourceGitHubPRFeedback, SessionMessageSourceAutomationTurn, SessionMessageSourceCodeReviewRecheck:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionMessageSource: %q", s)
@@ -1110,6 +1111,7 @@ const (
 	JobTypePagerDutySync                 = "pagerduty_sync"
 	JobTypeRunCodeReview                 = "run_code_review"
 	JobTypePrepareCodeReviewWorkspace    = "prepare_code_review_workspace"
+	JobTypeRunCodeReviewRecheck          = "run_code_review_recheck"
 	JobTypeStartCodeReviewReassessment   = "start_code_review_reassessment"
 	JobTypeTriageCodeReviewDispute       = "triage_code_review_dispute"
 	JobTypeReplyCodeReviewDispute        = "reply_code_review_dispute"
