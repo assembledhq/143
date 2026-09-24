@@ -26,6 +26,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMaintainCodeReviewWorkspaceHolder(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		releaseRows int64
+		renewRows   int64
+	}{
+		{name: "terminal review releases without renewal", releaseRows: 1},
+		{name: "active review renews", renewRows: 1},
+		{name: "missing holder is harmless"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should be created")
+			defer mock.Close()
+			job := runCodeReviewPayload{OrgID: uuid.New(), SessionID: uuid.New()}
+			mock.ExpectExec(`WITH terminal AS MATERIALIZED[\s\S]+h\.holder_kind = 'code_review'`).
+				WithArgs(job.OrgID, job.SessionID).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.releaseRows))
+			if tt.releaseRows == 0 {
+				mock.ExpectExec(`WITH eligible AS MATERIALIZED[\s\S]+h\.holder_kind = 'code_review'`).
+					WithArgs(job.OrgID, job.SessionID, 60).
+					WillReturnResult(pgxmock.NewResult("UPDATE", tt.renewRows))
+			}
+			maintainCodeReviewWorkspaceHolder(context.Background(), &Stores{SandboxHolders: db.NewSessionSandboxHolderStore(mock)}, zerolog.Nop(), job)
+			require.NoError(t, mock.ExpectationsWereMet(), "controller should release terminal holders or renew active holders")
+		})
+	}
+}
+
 func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testing.T) {
 	t.Parallel()
 

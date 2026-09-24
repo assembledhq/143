@@ -636,6 +636,26 @@ func TestWaitForSandboxWorkspaceReady(t *testing.T) {
 	}
 }
 
+func TestWaitForSandboxWorkspaceReadyStopsWhenGCReclaimsContainer(t *testing.T) {
+	t.Parallel()
+	orgID, sessionID := uuid.New(), uuid.New()
+	containerID := "review-workspace"
+	sessions := &drainStubSessions{session: models.Session{ContainerID: &containerID}}
+	orch := &Orchestrator{sessions: sessions}
+	provider := &testInternalSandboxProvider{execFn: func(_ string, _, _ io.Writer) (int, error) {
+		sessions.session.ContainerID = nil
+		return 1, errors.New("No such container")
+	}}
+	err := waitForSandboxWorkspaceReady(context.Background(), provider,
+		&Sandbox{ID: containerID, WorkDir: "/workspace"}, "review-branch", "head-sha",
+		time.Second, time.Millisecond, 4*time.Millisecond,
+		func(ctx context.Context) error {
+			return orch.stopWorkspaceWaitIfContainerChanged(ctx, orgID, sessionID, containerID)
+		})
+	require.ErrorIs(t, err, ErrStaleSandboxIDCleared, "GC-cleared container should stop readiness polling immediately")
+	require.Equal(t, 1, len(provider.execCalls), "readiness should not retry a container removed after the first probe")
+}
+
 func TestNextSandboxWorkspaceReadyBackoff(t *testing.T) {
 	t.Parallel()
 

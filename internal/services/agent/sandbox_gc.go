@@ -14,6 +14,10 @@ const (
 	defaultSandboxGCPressureGracePeriod = 2 * time.Minute
 	defaultSandboxGCPressureMaxDestroy  = 2
 	defaultSandboxGCHardMaxAge          = 24 * time.Hour
+	// Host GC uses container creation time as a coarse grace period because
+	// Docker inventory does not expose when a holder was last released. This
+	// is only a fallback: synthesis releases its holder before the turn ends.
+	minimumReviewContainerGCGrace = 2 * time.Minute
 )
 
 // ManagedSandboxContainer is the provider-neutral subset of Docker container
@@ -38,8 +42,16 @@ type SandboxGCProvider interface {
 // resources and the GC must decide whether any session row still owns a
 // container before removing it.
 type SandboxReferenceStore interface {
-	ListReferencedContainerIDs(ctx context.Context) ([]string, error)
+	ListContainerReferences(ctx context.Context) (allIDs, reviewIDs []string, err error)
 	FinalizeContainerDestroy(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (cleared bool, err error)
+}
+
+type codeReviewHolderExpirer interface {
+	ExpireCodeReviewHolders(ctx context.Context, limit int) (int64, error)
+}
+
+type idleCodeReviewContainerFinalizer interface {
+	FinalizeIdleCodeReviewContainer(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error)
 }
 
 // SandboxUsageCloser lets the GC close billing rows for containers it destroys
@@ -57,12 +69,21 @@ type SandboxGCConfig struct {
 }
 
 type SandboxGC struct {
-	provider      SandboxGCProvider
-	store         SandboxReferenceStore
-	usage         SandboxUsageCloser
-	cfg           SandboxGCConfig
-	startupCutoff time.Time
-	logger        zerolog.Logger
+	provider          SandboxGCProvider
+	store             SandboxReferenceStore
+	usage             SandboxUsageCloser
+	codeReviewHolders codeReviewHolderExpirer
+	cfg               SandboxGCConfig
+	startupCutoff     time.Time
+	logger            zerolog.Logger
+}
+
+// SetCodeReviewHolderExpirer is configured before Run starts. Expiry is
+// durable and cross-org; physical destruction remains host-local and CAS-safe.
+func (g *SandboxGC) SetCodeReviewHolderExpirer(store codeReviewHolderExpirer) {
+	if g != nil {
+		g.codeReviewHolders = store
+	}
 }
 
 func NewSandboxGC(provider SandboxGCProvider, store SandboxReferenceStore, usage SandboxUsageCloser, cfg SandboxGCConfig, logger zerolog.Logger) *SandboxGC {
@@ -141,15 +162,30 @@ func (g *SandboxGC) reapOnce(ctx context.Context, now time.Time, unreferencedGra
 	if g == nil || g.provider == nil || g.store == nil {
 		return nil
 	}
+	if g.codeReviewHolders != nil {
+		if expired, err := g.codeReviewHolders.ExpireCodeReviewHolders(ctx, 100); err != nil {
+			// Holder expiry is independent of orphan and hard-age cleanup. A
+			// transient store failure must not suppress host capacity recovery.
+			g.logger.Warn().Err(err).Msg("sandbox GC could not expire code review holders")
+		} else if expired > 0 {
+			g.logger.Info().Int64("expired_review_holders", expired).Msg("sandbox GC expired code review holders")
+		}
+	}
 
-	referenced, err := g.store.ListReferencedContainerIDs(ctx)
+	referenced, reviewReferenced, err := g.store.ListContainerReferences(ctx)
 	if err != nil {
-		return fmt.Errorf("list referenced container ids: %w", err)
+		return fmt.Errorf("list container references: %w", err)
 	}
 	refSet := make(map[string]struct{}, len(referenced))
 	for _, id := range referenced {
 		if id != "" {
 			refSet[id] = struct{}{}
+		}
+	}
+	reviewRefSet := make(map[string]struct{}, len(reviewReferenced))
+	for _, id := range reviewReferenced {
+		if id != "" {
+			reviewRefSet[id] = struct{}{}
 		}
 	}
 
@@ -182,6 +218,25 @@ func (g *SandboxGC) reapOnce(ctx context.Context, now time.Time, unreferencedGra
 		}
 
 		if age < g.cfg.HardMaxAge {
+			_, isReview := reviewRefSet[c.ID]
+			if isReview && age >= minimumReviewContainerGCGrace && (maxDestroyAttempts == 0 || destroyAttempts < maxDestroyAttempts) {
+				if finalizer, ok := g.store.(idleCodeReviewContainerFinalizer); ok {
+					orgID, sessionID, parseErr := parseManagedSandboxIDs(c)
+					if parseErr == nil {
+						cleared, finalizeErr := finalizer.FinalizeIdleCodeReviewContainer(ctx, orgID, sessionID, c.ID)
+						if finalizeErr != nil {
+							g.logger.Warn().Err(finalizeErr).Str("container_id", c.ID).Msg("sandbox GC: failed to finalize terminal code review container")
+						} else if cleared {
+							// The CAS cleared the durable reference, so this host owns destruction.
+							destroyAttempts++
+							if g.destroyContainer(ctx, c, now, "sandbox_gc_terminal_code_review") {
+								destroyedExpired++
+							}
+							continue
+						}
+					}
+				}
+			}
 			skippedReferenced++
 			continue
 		}

@@ -158,6 +158,7 @@ const (
 	SessionSandboxHolderKindPreview       SessionSandboxHolderKind = "preview"
 	SessionSandboxHolderKindSnapshot      SessionSandboxHolderKind = "snapshot"
 	SessionSandboxHolderKindOperator      SessionSandboxHolderKind = "operator"
+	SessionSandboxHolderKindCodeReview    SessionSandboxHolderKind = "code_review"
 )
 
 func (k SessionSandboxHolderKind) Validate() error {
@@ -165,7 +166,8 @@ func (k SessionSandboxHolderKind) Validate() error {
 	case SessionSandboxHolderKindThreadRuntime,
 		SessionSandboxHolderKindPreview,
 		SessionSandboxHolderKindSnapshot,
-		SessionSandboxHolderKindOperator:
+		SessionSandboxHolderKindOperator,
+		SessionSandboxHolderKindCodeReview:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionSandboxHolderKind: %q", k)

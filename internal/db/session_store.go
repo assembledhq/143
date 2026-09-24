@@ -3565,6 +3565,41 @@ func (s *SessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID uui
 	return actualContainerID, nil
 }
 
+// AcquireExistingTurnHold attaches only to the container the caller read.
+// Unlike AcquireTurnHold, it cannot resurrect a container_id that a GC or
+// prior turn has already cleared while the caller was preparing to reuse it.
+func (s *SessionStore) AcquireExistingTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE sessions
+		SET turn_holding_container = TRUE
+		WHERE id = @id AND org_id = @org_id
+		  AND container_id = @container_id`, pgx.NamedArgs{
+		"id": sessionID, "org_id": orgID, "container_id": expectedContainerID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("acquire existing turn hold: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ResetAfterLostReuse reopens a turn only if the container was cleared
+// before it could acquire a hold and no replacement has been published.
+func (s *SessionStore) ResetAfterLostReuse(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE sessions
+		SET status = 'idle'
+		WHERE id = @id AND org_id = @org_id
+		  AND status = 'running'
+		  AND container_id IS NULL
+		  AND turn_holding_container = FALSE`, pgx.NamedArgs{
+		"id": sessionID, "org_id": orgID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("reset session after lost container reuse: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // ReleaseTurnHold flips turn_holding_container to false and returns the
 // sibling holder state so the caller can decide whether to destroy the
 // container. The RETURNING clause reads both the container_id and the active
@@ -3868,6 +3903,56 @@ func (s *SessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, sess
 	return tag.RowsAffected() > 0, nil
 }
 
+// FinalizeIdleCodeReviewContainer reclaims an idle review workspace after its
+// bounded holder expires or is released. The same live-holder predicates as
+// FinalizeContainerDestroy protect previews, agent turns, and runtime leases;
+// queued/running agent jobs also block cleanup until they finish or retry.
+func (s *SessionStore) FinalizeIdleCodeReviewContainer(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE sessions
+		SET container_id = NULL,
+		    worker_node_id = NULL,
+		    sandbox_state = CASE
+		        WHEN snapshot_key IS NULL OR snapshot_key = '' THEN 'none'
+		        ELSE 'snapshotted'
+		    END
+		WHERE id = @id AND org_id = @org_id
+		  AND origin = 'code_review'
+		  AND container_id = @expected
+		  AND turn_holding_container = FALSE
+		  AND EXISTS (
+		    SELECT 1 FROM code_review_session_metadata m
+		    WHERE m.org_id = sessions.org_id AND m.session_id = sessions.id
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM jobs j
+		    WHERE j.org_id = sessions.org_id
+		      AND j.payload->>'session_id' = sessions.id::text
+		      AND j.job_type IN ('run_agent', 'continue_session')
+		      AND j.status IN ('pending', 'running')
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM preview_instances p
+		    WHERE p.session_id = sessions.id AND p.org_id = sessions.org_id
+		      AND p.preview_holding_container = TRUE
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM session_sandbox_holders h
+		    WHERE h.session_id = sessions.id AND h.org_id = sessions.org_id
+		      AND h.status IN ('active', 'draining') AND h.expires_at > now()
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM thread_runtimes tr
+		    WHERE tr.session_id = sessions.id AND tr.org_id = sessions.org_id
+		      AND tr.status IN ('starting', 'live', 'paused', 'draining')
+		      AND (tr.lease_expires_at IS NULL OR tr.lease_expires_at > now())
+		  )`, pgx.NamedArgs{"id": sessionID, "org_id": orgID, "expected": expectedContainerID})
+	if err != nil {
+		return false, fmt.Errorf("finalize idle code review container: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // ListOrphanedContainers returns sessions whose container_id is set and no
 // preview currently holds the sandbox. Called on startup to clean up
 // containers that leaked from a crashed server — the reconciler probes each
@@ -3927,34 +4012,39 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 	return sessions, nil
 }
 
-// ListReferencedContainerIDs returns every live container_id currently
-// referenced by a session row. It is used by worker-local Docker GC to avoid
-// deleting a container that any DB row still owns.
+// ListContainerReferences returns both the complete set of session-owned
+// containers and the review-only subset in one GC inventory scan.
 // lint:allow-no-orgid reason="worker-local Docker GC reconciles host containers against all session container references"
-func (s *SessionStore) ListReferencedContainerIDs(ctx context.Context) ([]string, error) {
+func (s *SessionStore) ListContainerReferences(ctx context.Context) (allIDs, reviewIDs []string, err error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT container_id
+		SELECT container_id, COALESCE(origin = 'code_review', false)
 		FROM sessions
 		WHERE container_id IS NOT NULL`)
 	if err != nil {
-		return nil, fmt.Errorf("list referenced container ids: %w", err)
+		return nil, nil, fmt.Errorf("list container references: %w", err)
 	}
 	defer rows.Close()
 
-	ids := make([]string, 0)
+	allIDs = make([]string, 0)
+	reviewIDs = make([]string, 0)
 	for rows.Next() {
 		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan referenced container id: %w", err)
+		var isReview bool
+		if err := rows.Scan(&id, &isReview); err != nil {
+			return nil, nil, fmt.Errorf("scan container reference: %w", err)
 		}
-		if id != "" {
-			ids = append(ids, id)
+		if id == "" {
+			continue
+		}
+		allIDs = append(allIDs, id)
+		if isReview {
+			reviewIDs = append(reviewIDs, id)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate referenced container ids: %w", err)
+		return nil, nil, fmt.Errorf("iterate container references: %w", err)
 	}
-	return ids, nil
+	return allIDs, reviewIDs, nil
 }
 
 // UpdateWorkingBranch sets the working branch name for a session.

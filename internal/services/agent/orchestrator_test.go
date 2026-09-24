@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -339,6 +340,8 @@ type mockSessionStore struct {
 	finalizeFn             func(expectedContainerID string) (bool, error)
 	clearContainerIDFn     func(expectedContainerID string) (bool, error)
 	containerHoldStateFn   func(expectedContainerID string) (bool, bool, error)
+	peekContainerIDFn      func() (string, error)
+	resetAfterLostReuseFn  func() (bool, error)
 	acquireHoldCalls       int
 	releaseHoldCalls       int
 	finalizeCalls          int
@@ -667,6 +670,28 @@ func (m *mockSessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID
 	}
 	// Default: caller's proposal wins.
 	return proposedContainerID, nil
+}
+
+func (m *mockSessionStore) AcquireExistingTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error) {
+	actual, err := m.AcquireTurnHold(ctx, orgID, sessionID, expectedContainerID)
+	return err == nil && actual == expectedContainerID, err
+}
+
+func (m *mockSessionStore) ResetAfterLostReuse(_ context.Context, _, _ uuid.UUID) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.resetAfterLostReuseFn != nil {
+		return m.resetAfterLostReuseFn()
+	}
+	m.statusUpdates = append(m.statusUpdates, string(models.SessionStatusIdle))
+	return true, nil
+}
+
+func (m *mockSessionStore) PeekContainerID(context.Context, uuid.UUID, uuid.UUID) (string, error) {
+	if m.peekContainerIDFn != nil {
+		return m.peekContainerIDFn()
+	}
+	return "test-sandbox", nil
 }
 
 func (m *mockSessionStore) SetWorkerNodeIDForContainer(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID, workerNodeID string) error {
@@ -8149,6 +8174,83 @@ func TestContinueSession_ReusedContainerReopensAuthListener(t *testing.T) {
 	for _, cmd := range d.provider.ExecCalls {
 		require.NotContains(t, cmd, "143-tools git-bootstrap",
 			"git-bootstrap must not re-run on reused containers; original RunAgent already wired git config")
+	}
+}
+
+func TestContinueSession_ReusedContainerHoldLossClassifiesCurrentOwner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		holdActual       string
+		peekValues       []string
+		resetBlocked     bool
+		threadScoped     bool
+		wantErr          error
+		wantIdleReset    bool
+		wantWinnerProbes int
+	}{
+		{name: "cleared container retries without normal retry limit", peekValues: []string{""}, wantErr: agent.ErrStaleSandboxIDCleared, wantIdleReset: true},
+		{name: "replaced live container dead-letters duplicate", holdActual: "winner-container", peekValues: []string{"winner-container"}, wantErr: agent.ErrSandboxRaceLoser, wantWinnerProbes: 1},
+		{name: "replaced live container retries sibling thread", holdActual: "winner-container", peekValues: []string{"winner-container"}, threadScoped: true, wantErr: agent.ErrSandboxSiblingRace, wantWinnerProbes: 1},
+		{name: "successor published after null peek dead-letters duplicate", peekValues: []string{"", "winner-container"}, resetBlocked: true, wantErr: agent.ErrSandboxRaceLoser, wantWinnerProbes: 1},
+		{name: "null persists after reset race retries", peekValues: []string{"", ""}, resetBlocked: true, wantErr: agent.ErrStaleSandboxIDCleared},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			issue.Source = models.IssueSourceManual
+			session := testRun(orgID, issue.ID)
+			session.Status = models.SessionStatusIdle
+			session.CurrentTurn = 1
+			existing := "retired-review-container"
+			session.ContainerID = &existing
+			session.SandboxState = models.SandboxStateRunning
+			d := defaultDeps()
+			d.creds = &mockCredentialProvider{byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderAnthropic: {Provider: models.ProviderAnthropic, Config: models.AnthropicConfig{APIKey: "sk-ant-test"}},
+			}}
+			d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+			d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+			d.users = fakeUserStore{}
+			d.issues.issue = issue
+			d.messages.messages = []models.SessionMessage{{
+				ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2,
+				Role: models.MessageRoleUser, Content: "follow-up",
+			}}
+			var opts *agent.ContinueSessionOptions
+			if tt.threadScoped {
+				threadID := uuid.New()
+				d.messages.messages[0].ThreadID = &threadID
+				opts = &agent.ContinueSessionOptions{ThreadID: &threadID}
+			}
+			d.sessions.acquireHoldFn = func(string) (string, error) { return tt.holdActual, nil }
+			peekIndex := 0
+			d.sessions.peekContainerIDFn = func() (string, error) {
+				if peekIndex >= len(tt.peekValues) {
+					return "", errors.New("unexpected container peek")
+				}
+				value := tt.peekValues[peekIndex]
+				peekIndex++
+				return value, nil
+			}
+			if tt.resetBlocked {
+				d.sessions.resetAfterLostReuseFn = func() (bool, error) { return false, nil }
+			}
+			d.provider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) { return true, nil }
+			d.adapter.executeFn = func(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				t.Fatal("agent must not execute after losing its reused-container hold")
+				return nil, nil
+			}
+			orch := buildOrchestrator(d)
+			err := orch.ContinueSession(context.Background(), session, opts)
+			require.ErrorIs(t, err, tt.wantErr, "lost reuse should classify cleared and replaced containers differently")
+			require.Equal(t, len(tt.peekValues), peekIndex, "lost reuse should re-read the container only when a reset CAS loses")
+			require.Equal(t, tt.wantWinnerProbes, d.sessions.containerStateCalls, "only a replaced container should probe the live winner")
+			require.Equal(t, tt.wantIdleReset, slices.Contains(d.sessions.statusUpdates, string(models.SessionStatusIdle)), "only a cleared container should reopen the turn")
+			require.Equal(t, 0, d.provider.GetDestroyCalls(), "losing reuse must not destroy a container the turn never owned")
+		})
 	}
 }
 
