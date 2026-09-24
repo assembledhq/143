@@ -21,9 +21,9 @@ describe("PR re-check actions", () => {
     }));
     const user = userEvent.setup();
     renderWithProviders(<RecheckActions prID="pr-1" canManage completed />);
-    await user.click(await screen.findByRole("button", { name: "Re-check PR" }));
+    await user.click(await screen.findByRole("button", { name: "Re-check PR evidence" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Retry request");
-    await user.click(screen.getByRole("button", { name: "Re-check PR" }));
+    await user.click(screen.getByRole("button", { name: "Re-check PR evidence" }));
     expect(await screen.findByRole("status")).toHaveTextContent("Existing assessment reused for captured inputs");
     expect(requests).toEqual([{ request_id: expect.any(String), mode: "recheck" }, { request_id: requests[0].request_id, mode: "recheck" }]);
   });
@@ -51,7 +51,7 @@ describe("PR re-check actions", () => {
     server.use(http.post("*/api/v1/pull-requests/:id/code-review/requests", () => HttpResponse.json({ data: { disposition: "queued", assessment_id: "00000000-0000-4000-8000-000000000001" } }, { status: 202 })));
     const user = userEvent.setup();
     renderWithProviders(<RecheckActions prID="pr-1" canManage completed />);
-    await user.click(await screen.findByRole("button", { name: "Re-check PR" }));
+    await user.click(await screen.findByRole("button", { name: "Re-check PR evidence" }));
     expect(await screen.findByRole("status")).toHaveTextContent("Re-check requested. Current inputs determine whether a full review is needed.");
     expect(screen.getByRole("link", { name: "View assessment" })).toHaveAttribute("href", "/code-reviews?assessment=00000000-0000-4000-8000-000000000001");
   });
@@ -86,7 +86,7 @@ describe("PR re-check actions", () => {
     policy(true, false);
     const user = userEvent.setup();
     renderWithProviders(<RecheckActions prID="pr-1" canManage completed />);
-    expect(await screen.findByRole("button", { name: "Re-check PR" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Re-check PR evidence" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "More review actions" }));
     expect(screen.getByRole("menuitem", { name: "Force fresh review" })).toHaveAttribute("aria-disabled", "true");
   });
@@ -98,6 +98,6 @@ describe("PR re-check actions", () => {
   ])("hides unavailable controls: %j", async (state) => {
     policy(state.capability, state.enabled);
     renderWithProviders(<RecheckActions prID="pr-1" canManage={state.canManage} completed={state.completed} />);
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Re-check PR" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Re-check PR evidence" })).not.toBeInTheDocument());
   });
 });

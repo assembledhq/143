@@ -11,7 +11,7 @@ func TestBuildCodeReviewFinalReviewBodyEvidenceRecheck(t *testing.T) {
 	t.Parallel()
 
 	const actionURL = "https://143.test/code-reviews?recheck=90d8a47d-d87e-4780-90af-040f5144685a"
-	const action = "[Re-check PR](" + actionURL + ")"
+	const action = "[Re-check PR evidence](" + actionURL + ")"
 	const suffix = " Open 143 to confirm the request. Any remaining approval requirements still apply."
 	const genericNextSteps = "**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide."
 	const evidenceNextSteps = "**Next steps:** Add the missing evidence under **Testing** or **Evidence** in the PR description or a comment, then " + action + "." + suffix
@@ -107,7 +107,7 @@ func TestBuildCodeReviewFinalReviewBodyEvidenceRecheck(t *testing.T) {
 				}
 			}
 			require.Equal(t, tt.expectedNextSteps, nextSteps, "next steps should explain the applicable evidence action without promising approval")
-			require.Equal(t, tt.expectedActions, strings.Count(body, "[Re-check PR]"), "the comment should offer at most one applicable recheck action")
+			require.Equal(t, tt.expectedActions, strings.Count(body, "[Re-check PR evidence]"), "the comment should offer at most one applicable recheck action")
 			for _, reason := range tt.reasons {
 				if reason.Code == CodeReviewRiskReasonFilesLimitExceeded {
 					require.Contains(t, body, "This change touches 20 files; the policy limit is 10.", "offering an evidence action must preserve unrelated policy blockers")

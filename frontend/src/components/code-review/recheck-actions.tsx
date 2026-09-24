@@ -54,7 +54,7 @@ export function RecheckActions({ prID, canManage, completed, disabledReason }: {
   const result = mutation.data?.data as CodeReviewRequestResponse | undefined;
   return <div className="flex items-center gap-1">
     <DisabledTooltip disabled={Boolean(unavailable)} content={unavailable}>
-      <Button size="sm" variant="outline" disabled={Boolean(unavailable)} onClick={() => mutation.mutate({ mode: "recheck" })}>Re-check PR</Button>
+      <Button size="sm" variant="outline" disabled={Boolean(unavailable)} onClick={() => mutation.mutate({ mode: "recheck" })}>Re-check PR evidence</Button>
     </DisabledTooltip>
     <DropdownMenu>
       <DropdownMenuTrigger asChild><Button size="sm" variant="ghost" aria-label="More review actions" disabled={Boolean(unavailable)}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>

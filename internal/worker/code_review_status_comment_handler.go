@@ -242,7 +242,7 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 		paragraphs = append(paragraphs, fmt.Sprintf("[%s](%s)", label, sessionURL))
 	}
 	if reviewNowURL != "" && metadata.Status != models.CodeReviewSessionStatusStale {
-		paragraphs = append(paragraphs, fmt.Sprintf("[Review now](%s) · Open 143 to request a review of your latest pushed changes. If a running or completed review already covers those changes, 143 may use it instead of starting another.", reviewNowURL))
+		paragraphs = append(paragraphs, fmt.Sprintf("[Request Full Re-Review Now](%s) · Open 143 to request a review of your latest pushed changes. If a running or completed review already covers those changes, 143 may use it instead of starting another.", reviewNowURL))
 	}
 	return strings.Join(paragraphs, "\n\n")
 }

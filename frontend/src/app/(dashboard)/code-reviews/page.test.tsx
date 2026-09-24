@@ -4416,7 +4416,7 @@ it("keeps the queue out of Reviews and opens it from a bookmarkable tab", async 
   await waitFor(() => expect(queryClient.isFetching()).toBe(0));
   expect(queueLoads).toBe(0);
   expect(screen.queryByRole("heading", { name: "Review queue" })).not.toBeInTheDocument();
-  expect(screen.queryAllByRole("button", { name: "Review now" })).toHaveLength(0);
+  expect(screen.queryAllByRole("button", { name: "Request Full Re-Review Now" })).toHaveLength(0);
   // Let the initial debounced search URL write commit before navigating.
   // NuqsTestingAdapter resets pending writes on rerender, so committing that
   // update during the Queue click can cancel its URL write while the UI updates.

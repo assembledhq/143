@@ -5214,7 +5214,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			expected:        models.CodeReviewDecisionNeedsHumanReview,
 			reason:          "PR description policy did not pass",
 			bodyContains:    "Understandable description (The coding agent found the required evidence missing.)",
-			expectedRecheck: "[Re-check PR](https://143.test/code-reviews?recheck=90d8a47d-d87e-4780-90af-040f5144685a)",
+			expectedRecheck: "[Re-check PR evidence](https://143.test/code-reviews?recheck=90d8a47d-d87e-4780-90af-040f5144685a)",
 		},
 		{
 			name: "approves a P2-only review and exposes its structured advisory evidence",
@@ -5752,7 +5752,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			if tt.expectedRecheck != "" {
 				require.Contains(t, body, tt.expectedRecheck, "the initial full review should offer evidence reassessment when available")
 			} else {
-				require.NotContains(t, body, "[Re-check PR]", "reviews without an available evidence action should not advertise one")
+				require.NotContains(t, body, "[Re-check PR evidence]", "reviews without an available evidence action should not advertise one")
 			}
 			if tt.bodyNotContains != "" {
 				require.NotContains(t, body, tt.bodyNotContains, "GitHub summary should not expose advisory finding details")

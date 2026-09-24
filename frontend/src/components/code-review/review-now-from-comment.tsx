@@ -34,7 +34,7 @@ export function ReviewNowFromComment({ canManage }: { canManage: boolean }) {
     <Dialog open={Boolean(sessionID)} onOpenChange={(open) => { if (!open) close(); }}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Review now</DialogTitle>
+          <DialogTitle>Request Full Re-Review Now</DialogTitle>
           <DialogDescription>
             Request a review of your latest pushed changes, skipping the automatic timing delays. If a running or completed review already covers those changes, 143 may use it instead of starting another.
           </DialogDescription>

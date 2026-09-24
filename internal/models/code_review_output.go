@@ -161,7 +161,7 @@ func codeReviewEvidenceRecheckNextSteps(input CodeReviewFinalReviewInput) string
 			findings = true
 		}
 	}
-	action := "[Re-check PR](" + input.EvidenceRecheckURL + ")"
+	action := "[Re-check PR evidence](" + input.EvidenceRecheckURL + ")"
 	var instruction string
 	switch {
 	case missingEvidence:

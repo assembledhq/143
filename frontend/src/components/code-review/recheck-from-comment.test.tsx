@@ -18,7 +18,7 @@ it("opens a linked assessment without sending a review request", async () => {
   expect(posts).toBe(0);
 });
 
-it("submits only after an authorized user clicks Re-check PR", async () => {
+it("submits only after an authorized user clicks Re-check PR evidence", async () => {
   let posts = 0;
   server.use(
     http.get(`*/api/v1/code-review-assessments/${assessmentID}`, () => HttpResponse.json({ data: { id: assessmentID, pull_request_id: "pr-1", status: "completed", review_scope: "full", route_reason: "initial_full", head_sha: "123456789abcdef", pull_request_title: "Add tests" } })),
@@ -29,7 +29,7 @@ it("submits only after an authorized user clicks Re-check PR", async () => {
   renderWithProviders(<RecheckFromComment canManage />, { searchParams: { recheck: assessmentID } });
   await screen.findByText("Add tests");
   expect(posts).toBe(0);
-  await user.click(await screen.findByRole("button", { name: "Re-check PR" }));
+  await user.click(await screen.findByRole("button", { name: "Re-check PR evidence" }));
   expect(await screen.findByRole("status")).toHaveTextContent("Re-check requested.");
   expect(posts).toBe(1);
 });
