@@ -687,7 +687,7 @@ function TriggersEditor({
           </Button>
         </CollapsibleTrigger>
         <CollapsibleContent className="space-y-2.5 border-t border-border p-2.5">
-          <p className="text-xs text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Comma-separated values. PR labels include any match; excluded PR
             labels skip any match.
           </p>
@@ -717,7 +717,7 @@ function TriggersEditor({
           />
           <TriggerFilterField
             id="trigger-excluded-labels"
-            label="Exclude PR labels"
+            label="Excluded PR labels"
             serverValue={(filters.excluded_labels ?? []).join(", ")}
             onCommit={(value) => saveFilter("excluded_labels", value)}
           />

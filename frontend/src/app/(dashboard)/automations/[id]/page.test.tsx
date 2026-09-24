@@ -2871,7 +2871,7 @@ describe("AutomationDetailPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Triggers" }));
     await user.click(screen.getByRole("button", { name: /Trigger filters/ }));
-    fireEvent.change(await screen.findByLabelText("Exclude PR labels"), {
+    fireEvent.change(await screen.findByLabelText("Excluded PR labels"), {
       target: { value: "do-not-run, draft" },
     });
 

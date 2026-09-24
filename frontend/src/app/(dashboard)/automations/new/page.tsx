@@ -1281,7 +1281,7 @@ export default function NewAutomationPage() {
                       <div className="space-y-3 rounded-md border border-border p-3">
                         <div className="space-y-1">
                           <Label>Trigger filters</Label>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-sm text-muted-foreground">
                             Comma-separated values. PR labels include any match;
                             excluded PR labels skip any match.
                           </p>
@@ -1333,7 +1333,7 @@ export default function NewAutomationPage() {
                           </div>
                           <div className="space-y-1.5">
                             <Label htmlFor="trigger-excluded-labels">
-                              Exclude PR labels
+                              Excluded PR labels
                             </Label>
                             <Input
                               id="trigger-excluded-labels"

@@ -1498,7 +1498,7 @@ describe("NewAutomationPage", () => {
       "frontend, Backend",
     );
     await user.type(
-      screen.getByLabelText("Exclude PR labels"),
+      screen.getByLabelText("Excluded PR labels"),
       "do-not-run, draft",
     );
     await user.keyboard("{Escape}");
