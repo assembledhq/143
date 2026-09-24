@@ -587,6 +587,28 @@ describe("CodeReviewsPage", () => {
     expect(within(approval).queryByText(/automated approval policy is required/i)).not.toBeInTheDocument();
   });
 
+  it("groups re-check actions after Session in the row overflow menu", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: {
+      ...policy,
+      capabilities: { conditional_recheck: true },
+      config: { ...policy.config, continuation_policy: { enabled: true, automatic_evidence_rechecks: false } },
+    } })));
+    renderWithProviders(<CodeReviewsPage />);
+    const table = await screen.findByRole("table", { name: "Code reviews" });
+    const row = within(table).getByRole("row", { name: /#428 Fix invoice rounding/i });
+    const moreActions = within(row).getByRole("button", { name: "More review actions" });
+    expect(within(row).getByRole("link", { name: "Session" }).compareDocumentPosition(moreActions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Re-check PR evidence" })).not.toBeInTheDocument();
+    await waitFor(() => expect(moreActions).toBeEnabled());
+    await user.click(moreActions);
+    expect(screen.getByRole("menuitem", { name: "Re-check PR evidence" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Force fresh review" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(moreActions).toHaveFocus();
+  });
+
   it("renders review sessions and policy configuration", async () => {
     const user = userEvent.setup();
     mockCodeReviewBaseHandlers();

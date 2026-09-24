@@ -412,7 +412,6 @@ function ReviewActions({
       <EvidenceButton selected={evidenceSelected} onToggleEvidence={onToggleEvidence} />
       <AssessmentStatus assessment={assessmentForReviewRow(review)} />
       <AssessmentStatus assessment={failedAssessmentForReviewRow(review)} />
-      <RecheckActions prID={review.pull_request_id} canManage={canRetry} completed={review.status === "completed"} />
       {canRetry && reviewCanBeRetried(review) ? (
         <Button className="min-h-11 flex-1 justify-center md:min-h-0 md:flex-none" variant="outline" size="sm" disabled={isRetrying} onClick={onRetry}>
           <RefreshCw className={isRetrying ? "animate-spin" : undefined} />
@@ -425,6 +424,7 @@ function ReviewActions({
           Session
         </Link>
       </Button>
+      <RecheckActions prID={review.pull_request_id} canManage={canRetry} completed={review.status === "completed"} presentation="menu" />
     </div>
   );
 }

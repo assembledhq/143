@@ -23,7 +23,7 @@ function requestResultLabel(result: CodeReviewRequestResponse, mode: "recheck" |
   }
 }
 
-export function RecheckActions({ prID, canManage, completed, disabledReason }: { prID: string; canManage: boolean; completed: boolean; disabledReason?: string }) {
+export function RecheckActions({ prID, canManage, completed, disabledReason, presentation = "inline" }: { prID: string; canManage: boolean; completed: boolean; disabledReason?: string; presentation?: "inline" | "menu" }) {
   const client = useQueryClient();
   const policy = useQuery({ queryKey: queryKeys.codeReviews.policy, queryFn: () => api.codeReviews.getPolicy(), enabled: canManage && completed });
   const [forceOpen, setForceOpen] = useState(false);
@@ -53,12 +53,19 @@ export function RecheckActions({ prID, canManage, completed, disabledReason }: {
   const unavailable = disabledReason ?? (mutation.isPending ? "Your request is being recorded." : policy.isError ? "Review settings could not be loaded." : policy.isPending ? "Loading review settings." : !enabled ? "An administrator must enable review continuation." : undefined);
   const result = mutation.data?.data as CodeReviewRequestResponse | undefined;
   return <div className="flex items-center gap-1">
-    <DisabledTooltip disabled={Boolean(unavailable)} content={unavailable}>
+    {result ? <span role="status" className="text-xs text-muted-foreground">{requestResultLabel(result, mutation.variables?.mode)} {result.assessment_id ? <Button variant="link" size="sm" className="h-auto p-0 text-xs" asChild><Link href={`/code-reviews?assessment=${result.assessment_id}`}>View assessment</Link></Button> : null}</span> : null}
+    {mutation.isError ? <span role="alert" className="text-xs text-destructive">{mutation.error.message}</span> : null}
+    {presentation === "inline" ? <DisabledTooltip disabled={Boolean(unavailable)} content={unavailable}>
       <Button size="sm" variant="outline" disabled={Boolean(unavailable)} onClick={() => mutation.mutate({ mode: "recheck" })}>Re-check PR evidence</Button>
-    </DisabledTooltip>
+    </DisabledTooltip> : null}
     <DropdownMenu>
-      <DropdownMenuTrigger asChild><Button size="sm" variant="ghost" aria-label="More review actions" disabled={Boolean(unavailable)}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
-      <DropdownMenuContent align="end"><DropdownMenuItem disabled={Boolean(unavailable)} onSelect={() => setForceOpen(true)}>Force fresh review</DropdownMenuItem></DropdownMenuContent>
+      <DisabledTooltip disabled={Boolean(unavailable)} content={unavailable}>
+        <DropdownMenuTrigger asChild><Button size="icon-sm" variant="ghost" aria-label="More review actions" title={unavailable ? undefined : "More review actions"} disabled={Boolean(unavailable)}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
+      </DisabledTooltip>
+      <DropdownMenuContent align="end">
+        {presentation === "menu" ? <DropdownMenuItem disabled={Boolean(unavailable)} onSelect={() => mutation.mutate({ mode: "recheck" })}>Re-check PR evidence</DropdownMenuItem> : null}
+        <DropdownMenuItem disabled={Boolean(unavailable)} onSelect={() => setForceOpen(true)}>Force fresh review</DropdownMenuItem>
+      </DropdownMenuContent>
     </DropdownMenu>
     <Dialog open={forceOpen} onOpenChange={setForceOpen}>
       <DialogContent>
@@ -67,7 +74,5 @@ export function RecheckActions({ prID, canManage, completed, disabledReason }: {
         <DialogFooter><Button variant="outline" onClick={() => setForceOpen(false)}>Cancel</Button><DisabledTooltip disabled={!reason.trim() || Boolean(unavailable)} content={!reason.trim() ? "Enter a reason to request a fresh review." : unavailable}><Button disabled={!reason.trim() || Boolean(unavailable)} onClick={() => mutation.mutate({ mode: "force_fresh", reason: reason.trim() })}>Request full review</Button></DisabledTooltip></DialogFooter>
       </DialogContent>
     </Dialog>
-    {result ? <span role="status" className="text-xs text-muted-foreground">{requestResultLabel(result, mutation.variables?.mode)} {result.assessment_id ? <Button variant="link" size="sm" className="h-auto p-0 text-xs" asChild><Link href={`/code-reviews?assessment=${result.assessment_id}`}>View assessment</Link></Button> : null}</span> : null}
-    {mutation.isError ? <span role="alert" className="text-xs text-destructive">{mutation.error.message}</span> : null}
   </div>;
 }
