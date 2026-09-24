@@ -70,7 +70,8 @@ func newReviewWorkspaceFixture(t *testing.T) reviewWorkspaceFixture {
 		CREATE TABLE session_sandbox_holders(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL,
 			session_id uuid NOT NULL,container_id text NOT NULL,holder_kind text NOT NULL,holder_id uuid NOT NULL,
 			owner_node_id text NOT NULL,lease_token uuid NOT NULL,status text NOT NULL,heartbeat_at timestamptz NOT NULL,
-			expires_at timestamptz NOT NULL,created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
+			expires_at timestamptz NOT NULL,created_at timestamptz NOT NULL DEFAULT now(),released_at timestamptz,
+			updated_at timestamptz NOT NULL DEFAULT now());
 		CREATE UNIQUE INDEX idx_workspace_one_active_holder ON session_sandbox_holders(org_id,session_id,holder_kind,holder_id)
 			WHERE status IN ('active','draining');
 		CREATE TABLE preview_instances(org_id uuid NOT NULL,session_id uuid NOT NULL,preview_holding_container boolean NOT NULL);
@@ -203,6 +204,11 @@ func TestCodeReviewWorkspaceMissingContainerRecovery(t *testing.T) {
 	cleared, err := store.ReconcileMissing(ctx, f.org, f.review, f.session, "container-one", f.node, f.node)
 	require.NoError(t, err, "owner should reconcile a physically missing container")
 	require.True(t, cleared, "missing container should be cleared before replacement")
+	var releasedAt time.Time
+	err = f.pool.QueryRow(ctx, `SELECT released_at FROM session_sandbox_holders
+		WHERE org_id=$1 AND session_id=$2 AND container_id='container-one' AND status='expired'`, f.org, f.session).Scan(&releasedAt)
+	require.NoError(t, err, "reconciled holder should record when its container was released")
+	require.False(t, releasedAt.IsZero(), "expired holder should retain its release timestamp")
 	newJob, newToken := uuid.New(), uuid.New()
 	_, err = f.pool.Exec(ctx, `INSERT INTO jobs(id,org_id,queue,job_type,status,locked_by_node_id,lock_token,lease_expires_at)
 		VALUES($1,$2,'agent','prepare_code_review_workspace','running',$3,$4,now()+interval '5 minutes')`, newJob, f.org, f.node, newToken)

@@ -81,10 +81,21 @@ func codeReviewWorkspacePreparationStarted(ctx context.Context, stores *Stores, 
 	return true, nil
 }
 
-// ensureCodeReviewWorkspaceReady runs after deterministic early-stop and
-// before the first reviewer thread is dispatched. A completed init job is not
-// evidence of readiness; every attempt checks the current holder and owner.
 func ensureCodeReviewWorkspaceReady(ctx context.Context, stores *Stores, services *Services, log zerolog.Logger, job runCodeReviewPayload) error {
+	return ensureCodeReviewWorkspaceReadyWithFallback(ctx, stores, services, log, job, false)
+}
+
+// Once the first gate has observed a prepared workspace, the controller runs
+// the live GitHub preflight. If the holder expires during that work, retrying
+// preparation would repeat the whole preflight; reviewer launch can instead
+// use the existing M2 container recovery path.
+func ensureCodeReviewWorkspaceReadyAfterPreflight(ctx context.Context, stores *Stores, services *Services, log zerolog.Logger, job runCodeReviewPayload) error {
+	return ensureCodeReviewWorkspaceReadyWithFallback(ctx, stores, services, log, job, true)
+}
+
+// A completed initializer is not proof of readiness. Both gates check the
+// current holder, review revision, and session before dispatching reviewers.
+func ensureCodeReviewWorkspaceReadyWithFallback(ctx context.Context, stores *Stores, services *Services, log zerolog.Logger, job runCodeReviewPayload, afterPreflight bool) error {
 	if services == nil || !services.CodeReviewWorkspacePreparationEnabled || !services.CodeReviewExecutorPlacementEnabled {
 		return nil
 	}
@@ -124,6 +135,11 @@ func ensureCodeReviewWorkspaceReady(ctx context.Context, stores *Stores, service
 		// ordinary per-reviewer recovery path. The preparation handler makes
 		// the same decision so this gate cannot wait for an impossible job.
 		log.Warn().Str("session_id", session.ID.String()).Msg("using ordinary reviewer workspace path for ineligible preparation session")
+		return nil
+	}
+	if afterPreflight {
+		log.Warn().Str("session_id", session.ID.String()).
+			Msg("prepared workspace lost readiness during preflight; using ordinary reviewer path")
 		return nil
 	}
 	payload := prepareCodeReviewWorkspacePayload{

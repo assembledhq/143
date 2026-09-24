@@ -99,7 +99,7 @@ func (s *CodeReviewWorkspaceStore) PublishPrepared(ctx context.Context, orgID uu
 		DO UPDATE SET container_id = EXCLUDED.container_id,
 			owner_node_id = EXCLUDED.owner_node_id, lease_token = EXCLUDED.lease_token,
 			status = 'active', heartbeat_at = now(), expires_at = EXCLUDED.expires_at,
-			created_at = now(), updated_at = now()
+			created_at = now(), released_at = NULL, updated_at = now()
 		WHERE h.expires_at <= now()
 		RETURNING id`, pgx.NamedArgs{
 		"org_id": orgID, "session_id": p.SessionID, "container_id": p.ContainerID,
@@ -168,7 +168,7 @@ func (s *CodeReviewWorkspaceStore) RearmExisting(ctx context.Context, orgID uuid
 			WHERE status IN ('active', 'draining')
 		DO UPDATE SET container_id = EXCLUDED.container_id, owner_node_id = EXCLUDED.owner_node_id,
 			lease_token = EXCLUDED.lease_token, status = 'active', heartbeat_at = now(),
-			expires_at = EXCLUDED.expires_at, created_at = now(), updated_at = now()
+			expires_at = EXCLUDED.expires_at, created_at = now(), released_at = NULL, updated_at = now()
 		WHERE h.expires_at <= now()
 		RETURNING h.id`, pgx.NamedArgs{
 		"org_id": orgID, "review_id": p.ReviewID, "session_id": p.SessionID,
@@ -258,7 +258,8 @@ func (s *CodeReviewWorkspaceStore) ReconcileMissing(ctx context.Context, orgID, 
 		return false, fmt.Errorf("lock missing review workspace: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE session_sandbox_holders SET status = 'expired', updated_at = now()
+		UPDATE session_sandbox_holders SET status = 'expired',
+			released_at = COALESCE(released_at, now()), updated_at = now()
 		WHERE org_id = @org_id AND session_id = @session_id
 		  AND holder_kind = 'code_review' AND holder_id = @review_id
 		  AND container_id = @container_id AND owner_node_id = @owner_node_id

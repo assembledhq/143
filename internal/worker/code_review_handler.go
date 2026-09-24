@@ -210,6 +210,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				return codeReviewWaitingForOrchestrator(policy.Config())
 			}
 		}
+		avoidReprepareAfterPreflight := false
 		if codeReviewCanRunReviewerThreads(stores) {
 			started, err := codeReviewWorkspacePreparationStarted(ctx, stores, services, job)
 			if err != nil {
@@ -222,6 +223,14 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 					}
 					return err
 				}
+			}
+			avoidReprepareAfterPreflight = started
+			if !started && services != nil && services.CodeReviewWorkspacePreparationEnabled && services.CodeReviewExecutorPlacementEnabled && stores.CodeReviewWorkspaces != nil {
+				ready, err := stores.CodeReviewWorkspaces.Readiness(ctx, job.OrgID, job.MetadataID, job.SessionID, job.HeadSHA)
+				if err != nil {
+					return fmt.Errorf("check review workspace before GitHub preflight: %w", err)
+				}
+				avoidReprepareAfterPreflight = ready.Ready
 			}
 		}
 		if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
@@ -309,7 +318,11 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return completeCodeReviewAfterStableDeterministicFailure(ctx, stores, services, logger, job, metadata, policy.Config(), pr, changedFiles, stableRisk)
 		}
 		if codeReviewCanRunReviewerThreads(stores) {
-			if err := ensureCodeReviewWorkspaceReady(ctx, stores, services, reviewLog, job); err != nil {
+			workspaceGate := ensureCodeReviewWorkspaceReady
+			if avoidReprepareAfterPreflight {
+				workspaceGate = ensureCodeReviewWorkspaceReadyAfterPreflight
+			}
+			if err := workspaceGate(ctx, stores, services, reviewLog, job); err != nil {
 				if errors.Is(err, errCodeReviewWorkspaceStopped) {
 					return nil
 				}
