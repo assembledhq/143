@@ -70,6 +70,7 @@ jobs:
               - 'Dockerfile.*'
               - 'frontend/Dockerfile*'
               - 'sandbox/Dockerfile*'
+              - 'sandbox/versions.json'
               - '.dockerignore'
             deploy:
               - 'deploy/scripts/**'
