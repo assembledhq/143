@@ -538,6 +538,9 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 	if err != nil {
 		return err
 	}
+	if err := s.scheduling.store.ReconcileTerminalReviews(ctx, wake.OrgID, state.RepositoryID, wake.PullRequestID); err != nil {
+		return err
+	}
 	if state.PendingInput != nil {
 		var pending scheduledReviewIntent
 		if err := json.Unmarshal(state.PendingInput, &pending); err != nil {

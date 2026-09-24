@@ -160,6 +160,14 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 						Str("session_id", job.SessionID.String()).
 						Str("status", string(existing.Status)).
 						Msg("skipping terminal code review job")
+					if existing.Status != models.CodeReviewSessionStatusCompleted && stores.CodeReviewAssessments != nil {
+						if stores.ThreadSendTx == nil {
+							return fmt.Errorf("terminal review recovery requires transaction support")
+						}
+						if err := db.NewCodeReviewScheduleStore(stores.ThreadSendTx).ReconcileTerminalReviews(ctx, job.OrgID, job.RepositoryID, job.PullRequestID); err != nil {
+							return fmt.Errorf("reconcile terminal full review: %w", err)
+						}
+					}
 					switch existing.Status {
 					case models.CodeReviewSessionStatusCompleted:
 						if err := reconcileCompletedFullAssessment(ctx, stores, existing); err != nil {

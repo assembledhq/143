@@ -225,7 +225,12 @@ func (s *CodeReviewScheduleStore) SetStreams(streams *cache.CodeReviewStreams, l
 func (s *CodeReviewScheduleStore) RepairMissingWakes(ctx context.Context) error {
 	_, err := s.db.Exec(ctx, `INSERT INTO jobs(org_id,queue,job_type,payload,priority,dedupe_key,run_at,max_attempts)
  SELECT st.org_id,'agent','reconcile_code_review_schedule',jsonb_build_object('org_id',st.org_id,'pull_request_id',st.pull_request_id),5,'code_review_schedule:'||st.pull_request_id::text,GREATEST(now(),COALESCE(st.retry_at,st.eligible_at,now())),8
- FROM code_review_pr_state st WHERE (st.pending_input IS NOT NULL OR EXISTS(SELECT 1 FROM code_review_session_metadata m JOIN session_threads t ON t.org_id=m.org_id AND t.session_id=m.session_id WHERE m.org_id=st.org_id AND m.pull_request_id=st.pull_request_id AND m.status='stale' AND t.status IN ('pending','running','awaiting_input'))) AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.org_id=st.org_id AND j.queue='agent' AND j.dedupe_key='code_review_schedule:'||st.pull_request_id::text AND j.status IN ('pending','running'))
+ FROM code_review_pr_state st WHERE (st.pending_input IS NOT NULL OR EXISTS(
+ SELECT 1 FROM code_review_revision_assessments a JOIN code_review_session_metadata m ON m.org_id=a.org_id AND m.id=a.metadata_id
+ WHERE a.org_id=st.org_id AND a.pull_request_id=st.pull_request_id AND a.review_scope='full'
+ AND m.status IN ('stale','failed','cancelled') AND a.publication_receipt IS NULL AND a.github_review_id IS NULL
+ AND ((a.status IN ('reserved','running') AND a.publication_state='not_started') OR (a.status='publishing' AND a.publication_state='reserved'))
+ ) OR EXISTS(SELECT 1 FROM code_review_session_metadata m JOIN session_threads t ON t.org_id=m.org_id AND t.session_id=m.session_id WHERE m.org_id=st.org_id AND m.pull_request_id=st.pull_request_id AND m.status='stale' AND t.status IN ('pending','running','awaiting_input'))) AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.org_id=st.org_id AND j.queue='agent' AND j.dedupe_key='code_review_schedule:'||st.pull_request_id::text AND j.status IN ('pending','running'))
  ORDER BY st.first_pending_at,st.id LIMIT 100 ON CONFLICT DO NOTHING`)
 	if err != nil {
 		return err
