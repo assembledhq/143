@@ -5797,11 +5797,11 @@ func codeReviewPolicyRowsForTest(t *testing.T, orgID, policyID uuid.UUID, config
 	return pgxmock.NewRows([]string{
 		"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 		"review_instructions", "automated_approval_policy", "description_policy", "risk_policy",
-		"agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
+		"agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy", "continuation_policy",
 	}).AddRow(
 		policyID, orgID, nil, true, 1, config.Enabled, config.ApprovalMode,
 		config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy,
-		agentRoster, config.InlineCommentLimit, nil, createdAt, []byte("{}"),
+		agentRoster, config.InlineCommentLimit, nil, createdAt, []byte("{}"), []byte("{}"),
 	)
 }
 

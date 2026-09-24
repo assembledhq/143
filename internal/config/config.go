@@ -192,6 +192,8 @@ type Config struct {
 	CodeReviewAppReviewerLogins             []string `env:"CODE_REVIEW_APP_REVIEWER_LOGINS" envSeparator:","`
 	CodeReviewAliasLogins                   []string `env:"CODE_REVIEW_ALIAS_LOGINS"        envSeparator:","`
 	CodeReviewTeamSlugs                     []string `env:"CODE_REVIEW_TEAM_SLUGS"          envSeparator:","`
+	CodeReviewAssessmentsEnabled            bool     `env:"CODE_REVIEW_ASSESSMENTS_ENABLED" envDefault:"false"`
+	CodeReviewRechecksEnabled               bool     `env:"CODE_REVIEW_RECHECKS_ENABLED" envDefault:"false"`
 	CodeReviewDisputeReassessmentsEnabled   bool     `env:"CODE_REVIEW_DISPUTE_REASSESSMENTS_ENABLED" envDefault:"true"`
 	CodeReviewDisputeMaxActiveReassessments int      `env:"CODE_REVIEW_DISPUTE_MAX_ACTIVE_REASSESSMENTS" envDefault:"1000"`
 	// Rolling 24h ceilings on dispute intake from untrusted GitHub authors.

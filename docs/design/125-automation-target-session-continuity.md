@@ -4,7 +4,7 @@
 
 > **Depends on:** [overall.md](overall.md), [48-automations-separation.md](implemented/48-automations-separation.md), [119-github-automation-trigger-context.md](implemented/119-github-automation-trigger-context.md), [76-pr-repair-session-continuity.md](implemented/76-pr-repair-session-continuity.md), [82-durable-session-executors.md](implemented/82-durable-session-executors.md), [88-shared-sandbox-thread-runtimes.md](implemented/88-shared-sandbox-thread-runtimes.md), [54-s3-session-snapshots.md](implemented/54-s3-session-snapshots.md), [102-agent-run-capabilities.md](implemented/102-agent-run-capabilities.md)
 >
-> **Related:** [code-review-scheduling-and-reuse.md](code-review-scheduling-and-reuse.md) (result reuse for the built-in reviewer, not session reuse), [116-automatic-pr-feedback-follow-through.md](future/116-automatic-pr-feedback-follow-through.md) (canonical-session continuation for 143-generated PRs)
+> **Related:** [code-review-scheduling-and-reuse.md](code-review-scheduling-and-reuse.md) (assessment identity and result reuse for the built-in reviewer), [conditional code review session continuation](../exec-plans/active/code-review-session-continuation.md) (active plan using existing review-thread continuation and selected checkpoint/recovery primitives from this design), [116-automatic-pr-feedback-follow-through.md](future/116-automatic-pr-feedback-follow-through.md) (canonical-session continuation for 143-generated PRs)
 
 ## Summary
 

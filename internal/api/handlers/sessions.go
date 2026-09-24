@@ -1351,7 +1351,7 @@ func (h *SessionHandler) MaterializeChangeset(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusInternalServerError, "SESSION_LOOKUP_FAILED", "failed to load session", err)
 		return
 	}
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 	if session.ContainerID == nil || strings.TrimSpace(*session.ContainerID) == "" {
@@ -1630,7 +1630,7 @@ func (h *SessionHandler) VerifyChangesetSplit(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
 	}
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 	if session.ContainerID == nil || strings.TrimSpace(*session.ContainerID) == "" {
@@ -2163,7 +2163,7 @@ func (h *SessionHandler) RetrySession(w http.ResponseWriter, r *http.Request) {
 
 	// Retrying or starting over runs the session again, which an owned
 	// session's automation is already doing.
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 
@@ -3835,7 +3835,7 @@ func (h *SessionHandler) AnswerHumanInputRequest(w http.ResponseWriter, r *http.
 	}
 	// An automation-owned session accepts no human turn: this path enqueues
 	// a continuation on it (design doc 125).
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 
@@ -3902,7 +3902,7 @@ func (h *SessionHandler) CancelHumanInputRequest(w http.ResponseWriter, r *http.
 	}
 	// An automation-owned session accepts no human turn: this path enqueues
 	// a continuation on it (design doc 125).
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 
@@ -4012,7 +4012,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotImplemented, "NOT_CONFIGURED", "multi-turn sessions not configured")
 		return
 	}
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 
@@ -5274,7 +5274,7 @@ func (h *SessionHandler) ArchiveSession(w http.ResponseWriter, r *http.Request) 
 
 	// Archiving deletes the session's checkpoint, which is exactly the
 	// continuity an owned session's next turn restores from.
-	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+	if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.runStore, orgID, sessionID) {
 		return
 	}
 

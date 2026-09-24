@@ -40,9 +40,13 @@ func newSchedulingPostgres(t *testing.T) (*pgxpool.Pool, uuid.UUID, uuid.UUID, u
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	require.NoError(t, err, "create concurrent pool")
 	t.Cleanup(pool.Close)
-	_, err = pool.Exec(ctx, `CREATE TABLE organizations(id uuid PRIMARY KEY);CREATE TABLE repositories(id uuid PRIMARY KEY,org_id uuid,full_name text);CREATE TABLE pull_requests(id uuid PRIMARY KEY,org_id uuid,github_repo text,title text,github_pr_url text,github_pr_number integer);CREATE TABLE users(id uuid PRIMARY KEY);CREATE TABLE sessions(id uuid PRIMARY KEY);CREATE TABLE code_review_policies(id uuid PRIMARY KEY);
+	_, err = pool.Exec(ctx, `CREATE TABLE organizations(id uuid PRIMARY KEY);CREATE TABLE repositories(id uuid PRIMARY KEY,org_id uuid,full_name text);CREATE TABLE pull_requests(id uuid PRIMARY KEY,org_id uuid,github_repo text,title text,github_pr_url text,github_pr_number integer);CREATE TABLE users(id uuid PRIMARY KEY);CREATE TABLE sessions(id uuid PRIMARY KEY,org_id uuid,code_review_owner_pr_id uuid,status text,container_id text,turn_holding_container boolean);CREATE TABLE code_review_policies(id uuid PRIMARY KEY);
  CREATE TABLE code_review_session_metadata(org_id uuid,session_id uuid,pull_request_id uuid,status text,created_at timestamptz DEFAULT now(),review_output_key text);
  CREATE TABLE session_threads(org_id uuid,session_id uuid,status text);
+ CREATE TABLE code_review_revision_assessments(id uuid PRIMARY KEY,org_id uuid,repository_id uuid,pull_request_id uuid,session_id uuid,review_scope text,status text,head_sha text DEFAULT '',base_sha text DEFAULT '',base_ref text DEFAULT '',generation bigint DEFAULT 1,failure_detail text,created_at timestamptz DEFAULT now());
+ CREATE TABLE code_review_recheck_dispatches(org_id uuid,session_id uuid,status text);
+ CREATE TABLE thread_runtimes(org_id uuid,session_id uuid,status text);
+ CREATE TABLE session_executors(org_id uuid,session_id uuid,status text);
  CREATE TABLE jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid,queue text,job_type text,payload jsonb,priority int,dedupe_key text,status text DEFAULT 'pending',run_at timestamptz DEFAULT now(),updated_at timestamptz DEFAULT now(),attempts int DEFAULT 0,max_attempts int DEFAULT 8,last_error text,locked_by_node_id text,run_owner_id text,owner_kind text,lock_token uuid,locked_at timestamptz,lease_expires_at timestamptz,completed_at timestamptz);
  CREATE UNIQUE INDEX jobs_dedupe ON jobs(queue,dedupe_key) WHERE status IN ('pending','running');`)
 	require.NoError(t, err, "create scheduling dependencies")
@@ -50,6 +54,8 @@ func newSchedulingPostgres(t *testing.T) (*pgxpool.Pool, uuid.UUID, uuid.UUID, u
 	require.NoError(t, err, "read actual migration")
 	_, err = pool.Exec(ctx, string(up))
 	require.NoError(t, err, "apply scheduling migration")
+	_, err = pool.Exec(ctx, `ALTER TABLE code_review_pr_state ADD COLUMN active_assessment_id uuid, ADD COLUMN current_assessment_id uuid; ALTER TABLE code_review_requests ADD COLUMN assessment_id uuid`)
+	require.NoError(t, err, "add continuation columns to scheduling fixture")
 	orgID, repoID, prID := uuid.New(), uuid.New(), uuid.New()
 	_, err = pool.Exec(ctx, `INSERT INTO organizations VALUES($1)`, orgID)
 	require.NoError(t, err, "seed org")
@@ -66,6 +72,59 @@ func TestCodeReviewSchedulingPostgres(t *testing.T) {
 		name string
 		run  func(*testing.T, *pgxpool.Pool, uuid.UUID, uuid.UUID, uuid.UUID)
 	}{
+		{"active evidence assessment blocks and repair restores supervisor", func(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID) {
+			ctx := context.Background()
+			assessmentID := uuid.New()
+			_, err := pool.Exec(ctx, `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,pull_request_id,review_scope,status,head_sha,base_sha,base_ref) VALUES($1,$2,$3,$4,'evidence_only','publishing','head','base','main')`, assessmentID, org, repo, pr)
+			require.NoError(t, err, "seed uncertain assessment")
+			store := NewCodeReviewScheduleStore(pool)
+			require.NoError(t, store.WithLockedPR(ctx, org, repo, pr, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
+				active, err := HasActiveCodeReview(ctx, tx, org, pr, time.Minute)
+				require.NoError(t, err, "check active assessment")
+				require.True(t, active, "publishing evidence assessment blocks new review")
+				return nil
+			}), "check serialized admission")
+			require.NoError(t, store.RepairMissingWakes(ctx), "repair missing supervisor")
+			require.NoError(t, store.RepairMissingWakes(ctx), "repair remains idempotent")
+			var count int
+			require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE org_id=$1 AND dedupe_key=$2 AND status='pending'`, org, "code_review_recheck:"+assessmentID.String()).Scan(&count), "count supervisor jobs")
+			require.Equal(t, 1, count, "one supervisor resumes uncertain publication")
+			_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status='completed' WHERE org_id=$1 AND id=$2`, org, assessmentID)
+			require.NoError(t, err, "complete assessment")
+			require.NoError(t, store.WithLockedPR(ctx, org, repo, pr, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
+				state.HeadSHA, state.BaseSHA, state.BaseRef = "head", "base", "main"
+				state.ActiveAssessmentID, state.CurrentAssessmentID = &assessmentID, &assessmentID
+				state.State = models.CodeReviewScheduleRunning
+				return nil
+			}), "record running assessment in scheduler")
+			require.NoError(t, store.SettleAssessment(ctx, org, assessmentID), "settle completed assessment")
+			settled, err := store.Get(ctx, org, pr)
+			require.NoError(t, err, "read settled scheduler")
+			require.Nil(t, settled.ActiveAssessmentID, "terminal assessment releases active pointer")
+			require.Equal(t, &assessmentID, settled.CurrentAssessmentID, "completed assessment remains current")
+			require.Equal(t, models.CodeReviewScheduleCovered, settled.State, "matching completed head is covered")
+			require.NoError(t, store.SettleAssessment(ctx, org, assessmentID), "terminal settlement is idempotent")
+			failedID := uuid.New()
+			_, err = pool.Exec(ctx, `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,pull_request_id,review_scope,status,generation) VALUES($1,$2,$3,$4,'evidence_only','failed',2)`, failedID, org, repo, pr)
+			require.NoError(t, err, "seed failed successor")
+			require.NoError(t, store.WithLockedPR(ctx, org, repo, pr, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
+				state.ActiveAssessmentID, state.CurrentAssessmentID = &failedID, &failedID
+				state.State = models.CodeReviewScheduleRunning
+				return nil
+			}), "record failed assessment pointer")
+			require.NoError(t, store.SettleAssessment(ctx, org, failedID), "settle failed successor")
+			settled, err = store.Get(ctx, org, pr)
+			require.NoError(t, err, "read restored scheduler")
+			require.Equal(t, &assessmentID, settled.CurrentAssessmentID, "failed recheck restores completed result")
+			require.Nil(t, settled.ActiveAssessmentID, "failed recheck releases active pointer")
+			require.Equal(t, models.CodeReviewScheduleIdle, settled.State, "failure does not declare latest head covered")
+			require.NoError(t, store.WithLockedPR(ctx, org, repo, pr, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
+				active, err := HasActiveCodeReview(ctx, tx, org, pr, time.Minute)
+				require.NoError(t, err, "check completed assessment")
+				require.False(t, active, "terminal assessment releases review admission")
+				return nil
+			}), "check terminal release")
+		}},
 		{"repair recovers closed PR cancellation and pending requests", func(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID) {
 			ctx := context.Background()
 			store := NewCodeReviewScheduleStore(pool)

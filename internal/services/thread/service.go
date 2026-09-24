@@ -403,6 +403,9 @@ func (s *Service) SetHumanInputRequestStore(store HumanInputRequestStore) {
 
 // CreateThread validates inputs and creates a blank idle thread.
 func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*models.SessionThread, error) {
+	if err := s.rejectIfCodeReviewOwned(ctx, input.OrgID, input.SessionID); err != nil {
+		return nil, err
+	}
 	// A sibling thread on an automation-owned session would share the
 	// checkout the automation's turn is working in.
 	if err := s.sessionStore.RejectIfAutomationOwned(ctx, input.OrgID, input.SessionID); err != nil {
@@ -512,6 +515,9 @@ func (s *Service) createMessage(ctx context.Context, store MessageStore, msg *mo
 }
 
 func (s *Service) UpdateThread(ctx context.Context, input UpdateThreadInput) (*models.SessionThread, error) {
+	if err := s.rejectIfCodeReviewOwned(ctx, input.OrgID, input.SessionID); err != nil {
+		return nil, err
+	}
 	session, err := s.sessionStore.GetByID(ctx, input.OrgID, input.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
@@ -581,6 +587,9 @@ func (s *Service) UpdateThread(ctx context.Context, input UpdateThreadInput) (*m
 }
 
 func (s *Service) ArchiveThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error) {
+	if err := s.rejectIfCodeReviewOwned(ctx, orgID, sessionID); err != nil {
+		return models.SessionThread{}, err
+	}
 	if _, err := s.sessionStore.GetByID(ctx, orgID, sessionID); err != nil {
 		return models.SessionThread{}, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
 	}
@@ -744,6 +753,9 @@ func isActiveStatus(status models.ThreadStatus) bool {
 // answer, enqueue) we best-effort revert the thread to idle and the session
 // to the status it had before the claim.
 func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*SendMessageResult, error) {
+	if err := s.rejectIfCodeReviewOwned(ctx, input.OrgID, input.SessionID); err != nil {
+		return nil, err
+	}
 	// An automation-owned session accepts no human turn. Rejected before any
 	// state mutation, so nothing is claimed or queued for a thread the
 	// automation's next turn owns.
@@ -969,6 +981,16 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		AnsweredQuestion:   answeredQuestion,
 		AnsweredHumanInput: answeredHumanInput,
 	}, nil
+}
+
+func (s *Service) rejectIfCodeReviewOwned(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	owner, ok := s.sessionStore.(interface {
+		RejectIfCodeReviewOwned(context.Context, uuid.UUID, uuid.UUID) error
+	})
+	if !ok {
+		return nil
+	}
+	return owner.RejectIfCodeReviewOwned(ctx, orgID, sessionID)
 }
 
 // queueMessageWaitingForSlot queues a follow-up against a thread that could

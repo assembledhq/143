@@ -416,6 +416,10 @@ func (h *InternalCodeReviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", "invalid policy config", err)
 		return
 	}
+	if merged.ContinuationPolicy.Effective().AutomaticEvidenceRechecks || (merged.ContinuationPolicy.Effective().Enabled && !current.Config.ContinuationPolicy.Effective().Enabled) {
+		writeError(w, r, http.StatusBadRequest, "CODE_REVIEW_POLICY_INVALID", "review continuation must be activated by an administrator when the capability is available")
+		return
+	}
 	record, err := h.store.SavePolicyExpectingVersion(r.Context(), claims.OrgID, merged, *req.ExpectedVersion, nil)
 	if err != nil {
 		if errors.Is(err, db.ErrCodeReviewPolicyVersionConflict) {

@@ -441,6 +441,8 @@ func main() {
 		sessionStore := db.NewSessionStore(pool)
 		jobStore = db.NewJobStore(pool)
 		codeReviewStore.SetJobStore(jobStore)
+		codeReviewRecheckStore := db.NewCodeReviewRecheckStore(pool)
+		codeReviewRecheckStore.SetJobStore(jobStore)
 		orgStore := db.NewOrganizationStore(pool)
 		repoStore := db.NewRepositoryStore(pool)
 		integrationStore := db.NewIntegrationStore(pool)
@@ -484,62 +486,63 @@ func main() {
 		workerCodeReviewDisputeStore.SetJobStore(jobStore)
 		workerCodeReviewInsightStore := db.NewCodeReviewInsightStore(pool)
 		stores := &worker.Stores{
-			Issues:              issueStore,
-			Users:               db.NewUserStore(pool),
-			Sessions:            sessionStore,
-			SessionChangesets:   db.NewSessionChangesetStore(pool),
-			SessionPublications: db.NewSessionPublicationStore(pool),
-			Jobs:                jobStore,
-			Integrations:        integrationStore,
-			Memberships:         db.NewOrganizationMembershipStore(pool),
-			Webhooks:            db.NewWebhookDeliveryStore(pool),
-			PriorityScores:      priorityScoreStore,
-			ComplexityEstimates: complexityEstimateStore,
-			Projects:            projectStore,
-			ProjectTasks:        projectTaskStore,
-			Credentials:         credentialStore,
-			AuditLogs:           auditLogStore,
-			Organizations:       orgStore,
-			SessionLogs:         sessionLogStore,
-			EvalTasks:           db.NewEvalTaskStore(pool),
-			EvalRuns:            db.NewEvalRunStore(pool),
-			EvalBatches:         db.NewEvalBatchStore(pool),
-			EvalBootstraps:      evalBootstrapStore,
-			EvalReleaseGates:    db.NewEvalReleaseGateStore(pool),
-			Repositories:        repoStore,
-			GitHubInstallations: db.NewGitHubInstallationStore(pool),
-			SessionMessages:     sessionMessageStore,
-			SessionThreads:      sessionThreadStore,
-			ThreadInbox:         db.NewThreadInboxStore(pool),
-			ThreadSendTx:        pool,
-			HumanInputRequests:  sessionHumanInputStore,
-			ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
-			SandboxHolders:      db.NewSessionSandboxHolderStore(pool),
-			Automations:         automationStore,
-			AutomationRuns:      automationRunStore,
-			AutomationTargets:   db.NewAutomationTargetStore(pool),
-			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
-			CodeReviews:         codeReviewStore,
-			CodeReviewDisputes:  workerCodeReviewDisputeStore,
-			CodeReviewInsights:  workerCodeReviewInsightStore,
-			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
-			Previews:            previewStore,
-			PullRequests:        pullRequestStore,
-			PullRequestFeedback: workerPullRequestFeedbackStore,
-			SlackInstallations:  db.NewSlackInstallationStore(pool),
-			SlackOrgSelections:  db.NewSlackOrgSelectionStore(pool),
-			SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
-			SlackUserLinks:      db.NewSlackUserLinkStore(pool),
-			LinearUserLinks:     db.NewLinearUserLinkStore(pool),
-			ExternalUserLinks:   db.NewExternalUserLinkStore(pool),
-			ExternalSuggestions: db.NewExternalUserLinkSuggestionStore(pool),
-			SlackChannels:       db.NewSlackChannelSettingsStore(pool),
-			SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
-			SlackInboundEvents:  db.NewSlackInboundEventStore(pool),
-			SlackOutbound:       db.NewSlackOutboundMessageStore(pool),
-			SessionAttributions: db.NewSessionAttributionStore(pool),
-
-			CodeReviewWorkspaces: db.NewCodeReviewWorkspaceStore(pool),
+			Issues:                issueStore,
+			Users:                 db.NewUserStore(pool),
+			Sessions:              sessionStore,
+			SessionChangesets:     db.NewSessionChangesetStore(pool),
+			SessionPublications:   db.NewSessionPublicationStore(pool),
+			Jobs:                  jobStore,
+			Integrations:          integrationStore,
+			Memberships:           db.NewOrganizationMembershipStore(pool),
+			Webhooks:              db.NewWebhookDeliveryStore(pool),
+			PriorityScores:        priorityScoreStore,
+			ComplexityEstimates:   complexityEstimateStore,
+			Projects:              projectStore,
+			ProjectTasks:          projectTaskStore,
+			Credentials:           credentialStore,
+			AuditLogs:             auditLogStore,
+			Organizations:         orgStore,
+			SessionLogs:           sessionLogStore,
+			EvalTasks:             db.NewEvalTaskStore(pool),
+			EvalRuns:              db.NewEvalRunStore(pool),
+			EvalBatches:           db.NewEvalBatchStore(pool),
+			EvalBootstraps:        evalBootstrapStore,
+			EvalReleaseGates:      db.NewEvalReleaseGateStore(pool),
+			Repositories:          repoStore,
+			GitHubInstallations:   db.NewGitHubInstallationStore(pool),
+			SessionMessages:       sessionMessageStore,
+			SessionThreads:        sessionThreadStore,
+			ThreadInbox:           db.NewThreadInboxStore(pool),
+			ThreadSendTx:          pool,
+			HumanInputRequests:    sessionHumanInputStore,
+			ThreadFileEvents:      db.NewSessionThreadFileEventStore(pool),
+			SandboxHolders:        db.NewSessionSandboxHolderStore(pool),
+			Automations:           automationStore,
+			AutomationRuns:        automationRunStore,
+			AutomationTargets:     db.NewAutomationTargetStore(pool),
+			ReviewLoops:           db.NewSessionReviewLoopStore(pool),
+			CodeReviews:           codeReviewStore,
+			CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool),
+			CodeReviewRechecks:    codeReviewRecheckStore,
+			CodeReviewDisputes:    workerCodeReviewDisputeStore,
+			CodeReviewInsights:    workerCodeReviewInsightStore,
+			SessionIssueLinks:     db.NewSessionIssueLinkStore(pool),
+			Previews:              previewStore,
+			PullRequests:          pullRequestStore,
+			PullRequestFeedback:   workerPullRequestFeedbackStore,
+			SlackInstallations:    db.NewSlackInstallationStore(pool),
+			SlackOrgSelections:    db.NewSlackOrgSelectionStore(pool),
+			SlackBotSettings:      db.NewSlackBotSettingsStore(pool),
+			SlackUserLinks:        db.NewSlackUserLinkStore(pool),
+			LinearUserLinks:       db.NewLinearUserLinkStore(pool),
+			ExternalUserLinks:     db.NewExternalUserLinkStore(pool),
+			ExternalSuggestions:   db.NewExternalUserLinkSuggestionStore(pool),
+			SlackChannels:         db.NewSlackChannelSettingsStore(pool),
+			SlackSessionLinks:     db.NewSlackSessionLinkStore(pool),
+			SlackInboundEvents:    db.NewSlackInboundEventStore(pool),
+			SlackOutbound:         db.NewSlackOutboundMessageStore(pool),
+			SessionAttributions:   db.NewSessionAttributionStore(pool),
+			CodeReviewWorkspaces:  db.NewCodeReviewWorkspaceStore(pool),
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -1834,6 +1837,14 @@ func buildServices(
 		uploadStore,
 		logger,
 	)
+	codeReviewInputCapture := codereviewsvc.NewAssessmentInputCaptureService(codeReviewLifecycleStore, pullRequestStore, repoStore, orgStore, prService, codeReviewVisualEvidence, codereviewsvc.NewGitHubSubmitter(ghSvc))
+	codeReviewInputCapture.SetExternalContextResolver(agent.CodeReviewExternalContextResolver{Credentials: credentialStore, Orgs: orgStore, GitHubTools: ghSvc != nil, SessionTools: cfg.BaseURL != "" && cfg.SessionSecret != "", MemoryInjected: orchestrator.CodeReviewMemoryContextConfigured()})
+	codeReviewInputCapture.SetAuthorTeamMembershipChecker(ghSvc)
+	codeReviewLifecycle.SetAssessmentContinuation(codeReviewInputCapture, cfg.CodeReviewAssessmentsEnabled && cfg.CodeReviewRechecksEnabled)
+	codeReviewTurnStore := db.NewCodeReviewRecheckStore(pool)
+	codeReviewTurnStore.SetJobStore(jobStore)
+	orchestrator.SetCodeReviewTurnStore(codeReviewTurnStore)
+	orchestrator.SetCodeReviewInputsStrict(cfg.CodeReviewAssessmentsEnabled)
 	codeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
 	codeReviewDisputeStore.SetJobStore(jobStore)
 	codeReviewDisputes := codereviewsvc.NewDisputeService(
@@ -1868,18 +1879,21 @@ func buildServices(
 		prService.SetAutomationTargetLifecycle(automations.NewTargetLifecycle(pool, db.NewAutomationTargetStore(pool), automationTurnCompleter, logger))
 	}
 	svc := &worker.Services{
-		Orchestrator:      orchestrator,
-		PR:                prService,
-		Failure:           failureSvc,
-		SandboxProvider:   sandboxProvider,
-		ProjectTasks:      projectTaskUpdater,
-		AutomationRuns:    automationRunUpdater,
-		AutomationTargets: automationTargetDispatcher,
-		AutomationTurns:   automationTurnCompleter,
-		Prioritization:    prioritizationSvc,
-		SlackSummarizer:   slackSummarizer,
-		LLM:               llmClient,
-		GitHub:            ghSvc,
+		CodeReviewInputCapture:       codeReviewInputCapture,
+		CodeReviewAssessmentsEnabled: cfg.CodeReviewAssessmentsEnabled,
+		CodeReviewRechecksEnabled:    cfg.CodeReviewAssessmentsEnabled && cfg.CodeReviewRechecksEnabled,
+		Orchestrator:                 orchestrator,
+		PR:                           prService,
+		Failure:                      failureSvc,
+		SandboxProvider:              sandboxProvider,
+		ProjectTasks:                 projectTaskUpdater,
+		AutomationRuns:               automationRunUpdater,
+		AutomationTargets:            automationTargetDispatcher,
+		AutomationTurns:              automationTurnCompleter,
+		Prioritization:               prioritizationSvc,
+		SlackSummarizer:              slackSummarizer,
+		LLM:                          llmClient,
+		GitHub:                       ghSvc,
 		CodeReviews: codereviewsvc.NewGitHubSubmitter(
 			ghSvc,
 			codereviewsvc.WithGitHubSubmitterHTTPClient(githubtelemetry.NewControlledHTTPClient(15*time.Second, logger, githubRateLimitController, "code_review")),

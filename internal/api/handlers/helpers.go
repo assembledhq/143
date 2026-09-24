@@ -328,3 +328,34 @@ func writeAutomationOwnedError(w http.ResponseWriter, r *http.Request, err error
 		owned.Owner)
 	return true
 }
+
+// rejectCodeReviewOwnedSession keeps the reused orchestrator conversation
+// behind review actions, including the period between two assessments.
+func rejectCodeReviewOwnedSession(w http.ResponseWriter, r *http.Request, guard any, orgID, sessionID uuid.UUID) bool {
+	owner, ok := guard.(interface {
+		RejectIfCodeReviewOwned(context.Context, uuid.UUID, uuid.UUID) error
+	})
+	if !ok {
+		return false
+	}
+	err := owner.RejectIfCodeReviewOwned(r.Context(), orgID, sessionID)
+	if err == nil {
+		return false
+	}
+	if writeCodeReviewOwnedError(w, r, err) {
+		return true
+	}
+	writeError(w, r, http.StatusInternalServerError, "SESSION_LOOKUP_FAILED", "failed to check code review ownership", err)
+	return true
+}
+
+func writeCodeReviewOwnedError(w http.ResponseWriter, r *http.Request, err error) bool {
+	var owned *models.SessionCodeReviewOwnedError
+	if !errors.As(err, &owned) {
+		return false
+	}
+	writeErrorWithDetails(w, r, http.StatusConflict, "SESSION_CODE_REVIEW_OWNED",
+		"this session belongs to a code review; use the pull request review actions",
+		map[string]any{"pull_request_id": owned.PullRequestID, "release_pending": false})
+	return true
+}

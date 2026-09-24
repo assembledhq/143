@@ -68,6 +68,11 @@ type DisputeReviewStore interface {
 	ListFindings(ctx context.Context, orgID, sessionID uuid.UUID, selectedOnly bool) ([]models.CodeReviewFinding, error)
 }
 
+type disputeAssessmentReader interface {
+	GetLatestCompletedAssessmentByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (models.CodeReviewAssessment, error)
+	GetLatestCompletedAssessmentBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.CodeReviewAssessment, error)
+}
+
 type disputePolicyStore interface {
 	GetPolicyByID(ctx context.Context, orgID, policyID uuid.UUID) (models.CodeReviewPolicyRecord, error)
 }
@@ -224,7 +229,17 @@ func (s *DisputeService) FileFromGitHub(ctx context.Context, input FileGitHubCod
 	if input.InlineThreadRootID != nil {
 		review, err = s.reviews.GetByGitHubFindingComment(ctx, input.OrgID, *input.InlineThreadRootID)
 	} else {
-		review, err = s.reviews.GetLatestCompletedByPullRequest(ctx, input.OrgID, input.PullRequestID)
+		if assessmentReader, ok := s.reviews.(disputeAssessmentReader); ok {
+			var current models.CodeReviewAssessment
+			current, err = assessmentReader.GetLatestCompletedAssessmentByPullRequest(ctx, input.OrgID, input.PullRequestID)
+			if err == nil {
+				review, err = s.reviews.GetBySessionID(ctx, input.OrgID, current.SessionID)
+			} else if errors.Is(err, pgx.ErrNoRows) {
+				review, err = s.reviews.GetLatestCompletedByPullRequest(ctx, input.OrgID, input.PullRequestID)
+			}
+		} else {
+			review, err = s.reviews.GetLatestCompletedByPullRequest(ctx, input.OrgID, input.PullRequestID)
+		}
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return models.CodeReviewDispute{}, false, nil
@@ -295,6 +310,22 @@ func (s *DisputeService) fileAgainstSessionResult(ctx context.Context, input Fil
 	if err != nil {
 		return models.CodeReviewDispute{}, false, err
 	}
+	var selectedAssessment *models.CodeReviewAssessment
+	if input.GitHubThreadRootID == nil {
+		if assessmentReader, ok := s.reviews.(disputeAssessmentReader); ok {
+			assessment, assessmentErr := assessmentReader.GetLatestCompletedAssessmentBySessionID(ctx, input.OrgID, input.SessionID)
+			if assessmentErr != nil && !errors.Is(assessmentErr, pgx.ErrNoRows) {
+				return models.CodeReviewDispute{}, false, assessmentErr
+			}
+			if assessmentErr == nil {
+				selectedAssessment = &assessment
+				review.Decision = assessment.Decision
+				review.Acceptable = assessment.Acceptable
+				review.FinalReviewBody = assessment.RenderedBody
+				review.GitHubReviewID = assessment.GitHubReviewID
+			}
+		}
+	}
 	if review.Status != models.CodeReviewSessionStatusCompleted || review.Decision == nil {
 		return models.CodeReviewDispute{}, false, ErrCodeReviewDisputeNotReady
 	}
@@ -306,9 +337,18 @@ func (s *DisputeService) fileAgainstSessionResult(ctx context.Context, input Fil
 	if err != nil {
 		return models.CodeReviewDispute{}, false, err
 	}
-	reasonCodes, err := s.reviews.GetRiskReasonCodesBySession(ctx, input.OrgID, input.SessionID)
-	if err != nil {
-		return models.CodeReviewDispute{}, false, err
+	var reasonCodes []models.CodeReviewRiskReasonCode
+	var assessmentReasons []models.CodeReviewRiskReason
+	if selectedAssessment != nil {
+		assessmentReasons, reasonCodes, err = assessmentDisputeReasons(selectedAssessment.RiskReasonDetails)
+		if err != nil {
+			return models.CodeReviewDispute{}, false, err
+		}
+	} else {
+		reasonCodes, err = s.reviews.GetRiskReasonCodesBySession(ctx, input.OrgID, input.SessionID)
+		if err != nil {
+			return models.CodeReviewDispute{}, false, err
+		}
 	}
 	contested := validContestedReasonCodes(input.ContestedReasonCodes, reasonCodes)
 	version := input.SourceVersion
@@ -330,6 +370,10 @@ func (s *DisputeService) fileAgainstSessionResult(ctx context.Context, input Fil
 	if input.Source != models.CodeReviewDisputeSourceGitHubComment && direction != models.CodeReviewDisputeDirectionShouldNotHaveApproved {
 		replyStatus = models.CodeReviewDisputeReplyNotApplicable
 	}
+	var selectedAssessmentID *uuid.UUID
+	if selectedAssessment != nil {
+		selectedAssessmentID = &selectedAssessment.ID
+	}
 	dispute := models.CodeReviewDispute{
 		OrgID: input.OrgID, SessionID: review.SessionID, PullRequestID: review.PullRequestID,
 		RepositoryID: review.RepositoryID, PolicyID: review.PolicyID, ReviewedHeadSHA: review.HeadSHA,
@@ -345,17 +389,19 @@ func (s *DisputeService) fileAgainstSessionResult(ctx context.Context, input Fil
 	}
 	trustedAtFiling, _ := dispute.CurrentTrust()
 	queueSignals, err := json.Marshal(map[string]any{
-		"trusted_at_filing":      trustedAtFiling,
-		"filer_is_pr_author":     dispute.AuthorIsPRAuthor,
-		"pull_request_author":    strings.TrimSpace(item.PullRequestAuthor),
-		"pull_request_title":     strings.TrimSpace(item.PullRequestTitle),
-		"github_pr_number":       item.GitHubPRNumber,
-		"github_pr_url":          strings.TrimSpace(item.GitHubPRURL),
-		"github_repository":      strings.TrimSpace(item.GitHubRepo),
-		"github_comment_url":     strings.TrimSpace(input.GitHubCommentURL),
-		"review_request_allowed": input.ReviewRequestAllowed,
-		"source":                 dispute.Source,
-		"reason_codes":           dispute.ContestedReasonCodes,
+		"trusted_at_filing":              trustedAtFiling,
+		"filer_is_pr_author":             dispute.AuthorIsPRAuthor,
+		"pull_request_author":            strings.TrimSpace(item.PullRequestAuthor),
+		"pull_request_title":             strings.TrimSpace(item.PullRequestTitle),
+		"github_pr_number":               item.GitHubPRNumber,
+		"github_pr_url":                  strings.TrimSpace(item.GitHubPRURL),
+		"github_repository":              strings.TrimSpace(item.GitHubRepo),
+		"github_comment_url":             strings.TrimSpace(input.GitHubCommentURL),
+		"review_request_allowed":         input.ReviewRequestAllowed,
+		"source":                         dispute.Source,
+		"reason_codes":                   dispute.ContestedReasonCodes,
+		"selected_assessment_id":         selectedAssessmentID,
+		"assessment_risk_reason_details": assessmentReasons,
 	})
 	if err != nil {
 		return models.CodeReviewDispute{}, false, fmt.Errorf("marshal code review dispute queue signals: %w", err)
@@ -418,6 +464,48 @@ func validContestedReasonCodes(requested, available []models.CodeReviewRiskReaso
 	return result
 }
 
+func assessmentDisputeReasons(raw json.RawMessage) ([]models.CodeReviewRiskReason, []models.CodeReviewRiskReasonCode, error) {
+	var details []models.CodeReviewRiskReason
+	if len(raw) != 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &details); err != nil {
+			return nil, nil, fmt.Errorf("decode assessment risk reasons: %w", err)
+		}
+	}
+	codes := make([]models.CodeReviewRiskReasonCode, 0, len(details))
+	for _, detail := range details {
+		if detail.Code.Validate() == nil {
+			codes = append(codes, detail.Code)
+		}
+	}
+	return details, codes, nil
+}
+
+func disputeAssessmentReasonSnapshot(signals json.RawMessage) (*uuid.UUID, []models.CodeReviewRiskReason, []models.CodeReviewRiskReasonCode, error) {
+	var snapshot struct {
+		AssessmentID *uuid.UUID                    `json:"selected_assessment_id"`
+		Details      []models.CodeReviewRiskReason `json:"assessment_risk_reason_details"`
+	}
+	if len(signals) == 0 {
+		return nil, nil, nil, nil
+	}
+	if err := json.Unmarshal(signals, &snapshot); err != nil {
+		return nil, nil, nil, fmt.Errorf("decode dispute assessment reason snapshot: %w", err)
+	}
+	if snapshot.AssessmentID == nil {
+		return nil, nil, nil, nil
+	}
+	if *snapshot.AssessmentID == uuid.Nil {
+		return nil, nil, nil, errors.New("dispute assessment reason snapshot has no assessment identity")
+	}
+	codes := make([]models.CodeReviewRiskReasonCode, 0, len(snapshot.Details))
+	for _, detail := range snapshot.Details {
+		if detail.Code.Validate() == nil {
+			codes = append(codes, detail.Code)
+		}
+	}
+	return snapshot.AssessmentID, snapshot.Details, codes, nil
+}
+
 func (s *DisputeService) Triage(ctx context.Context, orgID, disputeID uuid.UUID) error {
 	dispute, err := s.disputes.GetByID(ctx, orgID, disputeID)
 	if err != nil {
@@ -426,13 +514,31 @@ func (s *DisputeService) Triage(ctx context.Context, orgID, disputeID uuid.UUID)
 	if dispute.IntakeStatus != models.CodeReviewDisputeIntakePending {
 		return s.completeTriagedWorkflow(ctx, dispute)
 	}
-	reasons, err := s.reviews.GetRiskReasonCodesBySession(ctx, orgID, dispute.SessionID)
+	selectedAssessmentID, selectedReasonDetails, selectedReasonCodes, err := disputeAssessmentReasonSnapshot(dispute.QueueSignals)
 	if err != nil {
 		return err
+	}
+	var reasons []models.CodeReviewRiskReasonCode
+	if selectedAssessmentID != nil {
+		reasons = selectedReasonCodes
+	} else {
+		reasons, err = s.reviews.GetRiskReasonCodesBySession(ctx, orgID, dispute.SessionID)
+		if err != nil {
+			return err
+		}
 	}
 	reviewContext, err := s.reviews.GetListItemBySessionID(ctx, orgID, dispute.SessionID)
 	if err != nil {
 		return err
+	}
+	if dispute.GitHubThreadRootCommentID != nil {
+		original, originalErr := s.reviews.GetBySessionID(ctx, orgID, dispute.SessionID)
+		if originalErr != nil {
+			return originalErr
+		}
+		reviewContext.Decision = original.Decision
+		reviewContext.Acceptable = original.Acceptable
+		reviewContext.FinalReviewBody = original.FinalReviewBody
 	}
 	existingKinds, err := s.disputes.ListRecentKinds(ctx, orgID, 50)
 	if err != nil {
@@ -489,11 +595,13 @@ func (s *DisputeService) Triage(ctx context.Context, orgID, disputeID uuid.UUID)
 		result.Routing != models.CodeReviewDisputeRoutingReviewRequest &&
 		onlyDeterministicReasons(result.ContestedReasonCodes) {
 		result.Routing = models.CodeReviewDisputeRoutingPolicySignalOnly
-		var details []models.CodeReviewRiskReason
-		if riskReasons, ok := s.reviews.(disputeRiskReasonStore); ok {
-			details, err = riskReasons.GetRiskReasonsBySession(ctx, orgID, dispute.SessionID)
-			if err != nil {
-				return err
+		details := selectedReasonDetails
+		if selectedAssessmentID == nil {
+			if riskReasons, ok := s.reviews.(disputeRiskReasonStore); ok {
+				details, err = riskReasons.GetRiskReasonsBySession(ctx, orgID, dispute.SessionID)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		result.Reply = deterministicPolicySignalReply(result.ContestedReasonCodes, details)

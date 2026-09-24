@@ -177,6 +177,7 @@ type CodeReviewVisualEvidence struct {
 // CodeReviewVisualEvidenceSnapshot is the immutable manifest shared by every
 // reviewer and the orchestrator in one assessment.
 type CodeReviewVisualEvidenceSnapshot struct {
+	AssessmentID       *uuid.UUID                 `json:"assessment_id,omitempty"`
 	Version            int                        `json:"version"`
 	RepositoryID       uuid.UUID                  `json:"repository_id"`
 	Repository         string                     `json:"repository"`

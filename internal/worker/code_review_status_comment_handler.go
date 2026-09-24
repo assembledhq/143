@@ -101,6 +101,17 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 					Msg("skipping superseded code review status comment sync under lock")
 				return nil
 			}
+			var currentAssessment *models.CodeReviewAssessment
+			if stores.CodeReviewAssessments != nil {
+				assessment, loadErr := db.NewCodeReviewAssessmentStore(lockDB).GetLatestForPR(lockCtx, job.OrgID, metadata.PullRequestID)
+				if loadErr != nil && !errors.Is(loadErr, pgx.ErrNoRows) {
+					return loadErr
+				}
+				if loadErr == nil && assessment.SessionID == lockedLatest.SessionID && assessment.ReviewScope == models.CodeReviewScopeEvidenceOnly {
+					currentAssessment = &assessment
+					lockedLatest = codeReviewAssessmentStatusMetadata(lockedLatest, assessment)
+				}
+			}
 			var previousCompleted *models.CodeReviewSessionMetadata
 			if !codeReviewMetadataTerminal(lockedLatest.Status) {
 				previous, previousErr := lockedCodeReviews.GetLatestCompletedByPullRequest(lockCtx, job.OrgID, metadata.PullRequestID)
@@ -115,10 +126,15 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 				return fmt.Errorf("load durable code review status comment id: %w", existingErr)
 			}
 			reviewNowURL := ""
+			detailURL := codeReviewSessionURL(services.FrontendURL, lockedLatest.SessionID)
 			if scheduler, ok := services.CodeReviewLifecycle.(codeReviewScheduler); ok && scheduler.SchedulingEnabled() {
 				reviewNowURL = codeReviewNowURL(services.FrontendURL, lockedLatest.SessionID)
 			}
-			body := codeReviewStatusCommentBody(lockedLatest, previousCompleted, codeReviewSessionURL(services.FrontendURL, lockedLatest.SessionID), reviewNowURL)
+			if currentAssessment != nil {
+				detailURL = codeReviewAssessmentURL(services.FrontendURL, currentAssessment.ID)
+				reviewNowURL = ""
+			}
+			body := codeReviewStatusCommentBody(lockedLatest, previousCompleted, detailURL, reviewNowURL)
 			var updateErr error
 			commentID, updateErr = updater.UpsertReviewStatusComment(lockCtx, codereviewsvc.UpsertReviewStatusCommentRequest{
 				InstallationID:    repository.InstallationID,

@@ -96,7 +96,7 @@ func TestSessionStore_GetByIDScansPRPushErrorCode(t *testing.T) {
 func claimForResumeQueryPattern() string {
 	return `UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+` +
 		sqlFragmentPattern(sessionResumeRuntimeResetAssignments) +
-		`,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`
+		`,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+AND code_review_owner_pr_id IS NULL\s+RETURNING`
 }
 
 // newAgentSessionRow returns a completed-session row for mock queries. The

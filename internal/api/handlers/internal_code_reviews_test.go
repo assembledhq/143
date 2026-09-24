@@ -344,7 +344,7 @@ func TestInternalCodeReviewHandler_PolicyFallsBackToDefault(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
+			"review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy", "continuation_policy",
 		}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/internal/code-reviews/policy", nil)
@@ -374,10 +374,10 @@ func TestInternalCodeReviewHandler_PolicyByIDReturnsHistoricalVersion(t *testing
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
+			"review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy", "continuation_policy",
 		}).AddRow(
 			policyID, fx.orgID, nil, false, 3, true, models.CodeReviewApprovalModeApproveAcceptable,
-			"Focus on tenancy bugs", "Approve doc-only changes", []byte(`{}`), []byte(`{}`), []byte(`{}`), 5, nil, now, []byte(`{}`),
+			"Focus on tenancy bugs", "Approve doc-only changes", []byte(`{}`), []byte(`{}`), []byte(`{}`), 5, nil, now, []byte(`{}`), []byte(`{}`),
 		))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/internal/code-reviews/policies/"+policyID.String(), nil)
@@ -401,14 +401,14 @@ func TestInternalCodeReviewHandler_PolicyByIDReturnsHistoricalVersion(t *testing
 
 var internalCodeReviewPolicyColumns = []string{
 	"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-	"review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
+	"review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy", "continuation_policy",
 }
 
 func internalCodeReviewPolicyRow(orgID uuid.UUID, version int, reviewInstructions, approvalPolicy string) []any {
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	return []any{
 		uuid.New(), orgID, nil, true, version, true, models.CodeReviewApprovalModeApproveAcceptable,
-		reviewInstructions, approvalPolicy, []byte(`{}`), []byte(`{}`), []byte(`{}`), 5, nil, now, []byte(`{}`),
+		reviewInstructions, approvalPolicy, []byte(`{}`), []byte(`{}`), []byte(`{}`), 5, nil, now, []byte(`{}`), []byte(`{}`),
 	}
 }
 
@@ -561,7 +561,7 @@ func TestInternalCodeReviewHandler_UpdatePolicyMergesOntoActiveConfig(t *testing
 		WithArgs(
 			pgxmock.AnyArg(), 3, true, pgxmock.AnyArg(),
 			newInstructions, preservedApproval,
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows(internalCodeReviewPolicyColumns).
 			AddRow(internalCodeReviewPolicyRow(fx.orgID, 3, newInstructions, preservedApproval)...))

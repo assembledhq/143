@@ -222,15 +222,25 @@ func applyCodeReviewSortCursor(filters *db.CodeReviewListFilters, sort *codeRevi
 }
 
 type CodeReviewHandler struct {
-	store         *db.CodeReviewStore
-	repos         *db.RepositoryStore
-	triggerSetup  *codereviewsvc.GitHubTriggerSetupService
-	streams       *cache.CodeReviewStreams
-	audit         *db.AuditEmitter
-	memberships   codeReviewMembershipStore
-	retryService  codeReviewRetryService
-	disputes      codeReviewDisputeService
-	policyHistory codeReviewPolicyHistoryService
+	assessments *db.CodeReviewAssessmentStore
+	rechecks *db.CodeReviewRecheckStore
+	assessmentPRs *db.PullRequestStore
+	store                        *db.CodeReviewStore
+	repos                        *db.RepositoryStore
+	triggerSetup                 *codereviewsvc.GitHubTriggerSetupService
+	streams                      *cache.CodeReviewStreams
+	audit                        *db.AuditEmitter
+	memberships                  codeReviewMembershipStore
+	retryService                 codeReviewRetryService
+	disputes                     codeReviewDisputeService
+	policyHistory                codeReviewPolicyHistoryService
+	conditionalRecheckCapability bool
+}
+
+// SetContinuationCapabilities is wired from the server's staged rollout
+// flags. Assessment capture alone does not expose the recheck action.
+func (h *CodeReviewHandler) SetContinuationCapabilities(assessmentsEnabled, rechecksEnabled bool) {
+	h.conditionalRecheckCapability = assessmentsEnabled && rechecksEnabled
 }
 
 func (h *CodeReviewHandler) SetAuditEmitter(audit *db.AuditEmitter) { h.audit = audit }
@@ -553,6 +563,8 @@ func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	page.Items, err = h.withAssessmentSummaries(r.Context(),orgID,page.Items)
+	if err != nil { writeError(w,r,500,"CODE_REVIEW_ASSESSMENT_FAILED","failed to load current review assessments",err); return }
 	writeJSON(w, http.StatusOK, models.ListResponse[models.CodeReviewListItem]{
 		Data: page.Items,
 		Meta: models.PaginationMeta{NextCursor: nextCursor, TotalCount: &page.TotalCount},
@@ -711,7 +723,9 @@ func (h *CodeReviewHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_LOAD_FAILED", "failed to load code review", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewListItem]{Data: item})
+	items,err:=h.withAssessmentSummaries(r.Context(),orgID,[]models.CodeReviewListItem{item})
+	if err!=nil{writeError(w,r,500,"CODE_REVIEW_ASSESSMENT_FAILED","failed to load current review assessments",err);return}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewListItem]{Data: items[0]})
 }
 
 func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
@@ -735,6 +749,14 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_PROMPTS_LOAD_FAILED", "failed to load code review prompt records", err)
 		return
+	}
+	if h.assessments!=nil {
+		baseline,loadErr:=h.assessments.GetBySessionID(r.Context(),orgID,sessionID)
+		if loadErr!=nil && !errors.Is(loadErr,pgx.ErrNoRows){writeError(w,r,500,"CODE_REVIEW_EVIDENCE_FAILED","failed to load assessment evidence",loadErr);return}
+		if loadErr==nil && baseline.Status==models.CodeReviewAssessmentCompleted {
+			records,err=h.assessments.ListPromptRecords(r.Context(),orgID,baseline.ID)
+			if err!=nil{writeError(w,r,500,"CODE_REVIEW_EVIDENCE_FAILED","failed to load baseline evidence",err);return}
+		}
 	}
 	visualEvidence, citedVisualEvidenceIDs, err := codeReviewVisualEvidenceForAPI(orgID, sessionID, records, results)
 	if err != nil {
@@ -899,7 +921,8 @@ func (h *CodeReviewHandler) GetPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scheduler, ok := h.retryService.(codeReviewSchedulingService)
-	resolved.Capabilities = map[string]bool{"scheduling": ok && scheduler.SchedulingEnabled()}
+	resolved.Capabilities = map[string]bool{"scheduling": ok && scheduler.SchedulingEnabled(),
+		"conditional_recheck": h.conditionalRecheckCapability, "automatic_evidence_recheck": false}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewResolvedPolicy]{Data: resolved})
 }
 
@@ -991,6 +1014,19 @@ func (h *CodeReviewHandler) RestorePolicyVersion(w http.ResponseWriter, r *http.
 		return
 	}
 	orgID := middleware.OrgIDFromContext(r.Context())
+	toRestore, err := h.store.GetPolicyByID(r.Context(), orgID, policyID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "CODE_REVIEW_POLICY_VERSION_NOT_FOUND", "code review policy version not found")
+		} else {
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_LOAD_FAILED", "failed to load code review policy", err)
+		}
+		return
+	}
+	if (toRestore.ContinuationPolicy.Effective().Enabled && !h.conditionalRecheckCapability) || toRestore.ContinuationPolicy.Effective().AutomaticEvidenceRechecks {
+		writeError(w, r, http.StatusConflict, "CODE_REVIEW_CAPABILITY_UNAVAILABLE", "code review continuation is not available")
+		return
+	}
 	result, err := h.policyHistory.Restore(r.Context(), orgID, policyID, user.ID, *req.ExpectedVersion)
 	if err != nil {
 		var conflict *codereviewsvc.CodeReviewPolicyRestoreConflictError
@@ -1055,6 +1091,13 @@ func (h *CodeReviewHandler) PutPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw, present := supplied["scheduling_policy"]; present && string(raw) == "null" {
 		config.SchedulingPolicy = &models.CodeReviewSchedulingPolicy{}
+	}
+	if raw, present := supplied["continuation_policy"]; present && string(raw) == "null" {
+		config.ContinuationPolicy = &models.CodeReviewContinuationPolicy{}
+	}
+	if config.ContinuationPolicy != nil && ((config.ContinuationPolicy.Enabled && !h.conditionalRecheckCapability) || config.ContinuationPolicy.AutomaticEvidenceRechecks) {
+		writeError(w, r, http.StatusConflict, "CODE_REVIEW_CAPABILITY_UNAVAILABLE", "code review continuation is not available")
+		return
 	}
 	_, reviewInstructionsSupplied := supplied["review_instructions"]
 	_, automatedApprovalPolicySupplied := supplied["automated_approval_policy"]

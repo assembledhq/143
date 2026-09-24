@@ -31,6 +31,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func expectUnownedCodeReviewSession(mock pgxmock.PgxPoolIface) {
+	mock.ExpectQuery("SELECT code_review_owner_pr_id FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"code_review_owner_pr_id"}).AddRow(nil))
+}
+
 type stubSessionPRCredentialStore struct {
 	cred *models.DecryptedUserCredential
 	err  error
@@ -6269,7 +6275,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+AND code_review_owner_pr_id IS NULL\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -6349,7 +6355,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+AND code_review_owner_pr_id IS NULL\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -6415,7 +6421,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+AND code_review_owner_pr_id IS NULL\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -6481,7 +6487,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectQuery("UPDATE sessions SET status").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+AND code_review_owner_pr_id IS NULL\s+RETURNING`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -6694,6 +6700,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 			sessionID := uuid.New()
 			userID := uuid.New()
 			handler := newSessionHandler(t, mock)
+			expectUnownedCodeReviewSession(mock)
 			handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
 
 			tt.setupMock(mock, orgID, sessionID, userID)
@@ -6803,6 +6810,7 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 		sessionID := uuid.New()
 		userID := uuid.New()
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		// No DB calls expected — validation rejects before any query.
 
 		req := newSendMessageRequest(sessionID, orgID, userID, `{"message":"hello","resolve_review_comment_ids":["not-a-uuid"]}`)
@@ -6824,6 +6832,7 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 		userID := uuid.New()
 		commentID := uuid.New()
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		handler.SetReviewCommentStore(nil)
 
 		req := newSendMessageRequest(sessionID, orgID, userID, fmt.Sprintf(`{"message":"hello","resolve_review_comment_ids":[%q]}`, commentID.String()))
@@ -6845,6 +6854,7 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 		userID := uuid.New()
 		commentID := uuid.New()
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
 
 		// Session is idle, claim succeeds, message is created, then the lookup
@@ -6887,6 +6897,7 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 		commentUserID := uuid.New()
 		commentID := uuid.New()
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
 
 		mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
@@ -6943,6 +6954,7 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 		commentUserID := uuid.New()
 		commentID := uuid.New()
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
 
 		mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
@@ -6992,6 +7004,7 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 		commentUserID := uuid.New()
 		commentID := uuid.New()
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
 
 		mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
@@ -7039,6 +7052,7 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 		sessionID := uuid.New()
 		userID := uuid.New()
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		// Build a list one over the cap. Validation should reject before any
 		// DB query — keeps audit + resolve work bounded under client misuse.
 		ids := make([]string, 0, maxReviewCommentResolveIDsPerMessage+1)
@@ -7073,6 +7087,7 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 			commentIDs[i] = uuid.New()
 		}
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
 
 		// Build the SELECT response: every requested ID exists, all unresolved.
@@ -7139,6 +7154,7 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 		commentUserID := uuid.New()
 		commentID := uuid.New()
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		handler.audit = db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop())
 
 		// Validation finds the comment (it exists), the resolve UPDATE
@@ -9835,6 +9851,7 @@ func TestSessionHandler_RetrySession_DefaultsToCheckpoint(t *testing.T) {
 	snapshotKey := "snapshots/session.tar"
 	diffStats := json.RawMessage(`{"files_changed":7}`)
 	handler := newSessionHandler(t, mock)
+	expectUnownedCodeReviewSession(mock)
 	handler.SetAuditEmitter(db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop()))
 
 	mock.ExpectQuery("SELECT .+ FROM sessions").
@@ -9909,6 +9926,7 @@ func TestSessionHandler_RetrySession_CheckpointRejectsMissingSnapshot(t *testing
 	sessionID := uuid.New()
 	diffStats := json.RawMessage(`{"files_changed":7}`)
 	handler := newSessionHandler(t, mock)
+	expectUnownedCodeReviewSession(mock)
 
 	mock.ExpectQuery("SELECT .+ FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -9940,6 +9958,7 @@ func TestSessionHandler_RetrySession_StartOverUsesRunAgent(t *testing.T) {
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	handler := newSessionHandler(t, mock)
+	expectUnownedCodeReviewSession(mock)
 	diffStats := json.RawMessage(`{"files_changed":7}`)
 
 	mock.ExpectQuery("SELECT status FROM sessions").
@@ -9991,6 +10010,7 @@ func TestSessionHandler_RetrySession_InvalidMode(t *testing.T) {
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	handler := newSessionHandler(t, mock)
+	expectUnownedCodeReviewSession(mock)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/retry", strings.NewReader(`{"mode":"fresh"}`))
 	rctx := chi.NewRouteContext()
@@ -10885,6 +10905,7 @@ func TestSessionHandler_ArchiveSession(t *testing.T) {
 		defer mock.Close()
 
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		orgID := uuid.New()
 		sessionID := uuid.New()
 		userID := uuid.New()
@@ -10915,6 +10936,7 @@ func TestSessionHandler_ArchiveSession(t *testing.T) {
 		defer mock.Close()
 
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		handler.SetSlackSessionLinkStore(db.NewSlackSessionLinkStore(mock))
 		orgID := uuid.New()
 		sessionID := uuid.New()
@@ -10973,6 +10995,7 @@ func TestSessionHandler_ArchiveSession(t *testing.T) {
 		defer mock.Close()
 
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		sessionID := uuid.New()
 
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/archive", nil)
@@ -10995,6 +11018,7 @@ func TestSessionHandler_ArchiveSession(t *testing.T) {
 		defer mock.Close()
 
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		orgID := uuid.New()
 		sessionID := uuid.New()
 		userID := uuid.New()
@@ -11026,6 +11050,7 @@ func TestSessionHandler_ArchiveSession(t *testing.T) {
 		defer mock.Close()
 
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		snapshotStore := &archiveTestSnapshotStore{}
 		handler.SetSnapshotStore(snapshotStore)
 
@@ -11088,6 +11113,7 @@ func TestSessionHandler_ArchiveSession(t *testing.T) {
 		defer mock.Close()
 
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		handler.SetAuditEmitter(db.NewAuditEmitter(db.NewAuditLogStore(mock), zerolog.Nop()))
 
 		orgID := uuid.New()
@@ -11127,6 +11153,7 @@ func TestSessionHandler_ArchiveSession(t *testing.T) {
 		defer mock.Close()
 
 		handler := newSessionHandler(t, mock)
+		expectUnownedCodeReviewSession(mock)
 		snapshotStore := &archiveTestSnapshotStore{err: errors.New("delete failed")}
 		handler.SetSnapshotStore(snapshotStore)
 

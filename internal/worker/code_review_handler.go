@@ -148,6 +148,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 						Msg("skipping terminal code review job")
 					switch existing.Status {
 					case models.CodeReviewSessionStatusCompleted:
+						if err := reconcileCompletedFullAssessment(ctx, stores, existing); err != nil {
+							return fmt.Errorf("reconcile completed full assessment: %w", err)
+						}
 						reconcileCodeReviewSessionSuccess(ctx, stores, logger, job)
 					case models.CodeReviewSessionStatusStale:
 						if cancelErr := cancelActiveCodeReviewThreads(ctx, stores, services, logger, job); cancelErr != nil {
@@ -262,9 +265,35 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("load code review changed files: %w", err)
 		}
-		visualEvidence, err := captureCodeReviewVisualEvidence(ctx, services, job, pr)
+		assessment, capturedAssessment, err := prepareFullAssessment(ctx, stores, services, job, metadata)
 		if err != nil {
-			return err
+			return fmt.Errorf("capture full code review assessment: %w", err)
+		}
+		var visualEvidence models.CodeReviewVisualEvidenceSnapshot
+		if capturedAssessment != nil {
+			visualEvidence = capturedAssessment.VisualEvidence
+			changedFiles = capturedAssessment.Files
+			changedFilesAvailable = true
+		} else {
+			if assessment != nil {
+				visualEvidence, err = captureCodeReviewVisualEvidence(ctx, services, job, pr, assessment.ID)
+			} else {
+				visualEvidence, err = captureCodeReviewVisualEvidence(ctx, services, job, pr)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		if assessment != nil && assessment.ResultOrigin != nil {
+			if err := resumeStagedFullAssessment(ctx, stores, services, job, metadata, *assessment, changedFiles); err != nil {
+				if errors.Is(err, errCodeReviewPublicationSuperseded) {
+					return nil
+				}
+				return fmt.Errorf("resume staged full assessment: %w", err)
+			}
+			reconcileCodeReviewSessionSuccess(ctx, stores, logger, job)
+			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
+			return nil
 		}
 		stableRisk := codeReviewStableDeterministicRisk(policy.Config(), job, pr, changedFiles, changedFilesAvailable)
 		if !stableRisk.Acceptable && metadata.FinalReviewBody == nil {
@@ -315,7 +344,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if codeReviewHeadChanged(job.HeadSHA, pr, health) {
 				return supersedeCodeReviewForChangedHead(ctx, stores, services, logger, job, pr, health, "PR head changed before deterministic early-stop decision")
 			}
-			return completeCodeReviewAfterStableDeterministicFailure(ctx, stores, services, logger, job, metadata, policy.Config(), pr, changedFiles, stableRisk)
+			return completeCodeReviewAfterStableDeterministicFailure(ctx, stores, services, logger, job, metadata, policy.Config(), pr, changedFiles, stableRisk, assessment)
 		}
 		if codeReviewCanRunReviewerThreads(stores) {
 			workspaceGate := ensureCodeReviewWorkspaceReady
@@ -444,6 +473,32 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			VisualEvidence:        visualEvidence,
 			AssessedAt:            time.Now().UTC(),
 		})
+		var assessmentCoverage bool
+		var assessmentOutcome json.RawMessage
+		if assessment != nil {
+			if err := verifyFullAssessmentFreshness(ctx, services, job, *assessment); err != nil {
+				if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
+					if recoveryErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); recoveryErr != nil {
+						return recoveryErr
+					}
+					return nil
+				}
+				return fmt.Errorf("refresh full assessment before publication: %w", err)
+			}
+			var manifest codereviewsvc.ReviewInputManifest
+			assessmentCoverage = json.Unmarshal(assessment.InputManifest, &manifest) == nil && fullAssessmentCoverage(policy.Config(), agentResults, manifest)
+			assessmentOutcome, err = fullAssessmentOutcome(agentResults, decision.RiskReasonDetails, assessmentCoverage)
+			if err != nil {
+				return fmt.Errorf("encode full assessment outcome: %w", err)
+			}
+			riskJSON, marshalErr := json.Marshal(decision.RiskReasonDetails)
+			if marshalErr != nil {
+				return fmt.Errorf("encode assessment risk reasons: %w", marshalErr)
+			}
+			if err := stores.CodeReviewAssessments.StageOutcome(ctx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest, models.CodeReviewAssessmentCompletion{ResultOrigin: models.CodeReviewResultExecuted, CoverageComplete: assessmentCoverage, Decision: decision.Decision, Acceptable: decision.Acceptable, RiskReasonDetails: riskJSON, StructuredOutcome: assessmentOutcome, RenderedBody: body}); err != nil {
+				return fmt.Errorf("stage full assessment outcome: %w", err)
+			}
+		}
 		if err := ensureCodeReviewInlineSelection(ctx, stores.CodeReviews, job, findings, changedFiles, policy.Config().InlineCommentLimit); err != nil {
 			return fmt.Errorf("select code review inline findings: %w", err)
 		}
@@ -454,9 +509,12 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("set code review publishing phase: %w", err)
 		}
 		publicationStage := observability.BeginStage(true, reviewLog, "github_publication")
-		submission, submitted, err := submitCodeReviewToGitHub(ctx, stores, services, job, metadata, decision.Decision, body)
+		submission, submitted, err := submitFullReviewWithAssessment(ctx, stores, services, job, metadata, assessment, decision.Decision, body)
 		publicationStage.End(codeReviewStageOutcome(ctx, err))
 		if err != nil {
+			if errors.Is(err, errCodeReviewPublicationSuperseded) {
+				return nil
+			}
 			return err
 		}
 		finalReviewBody := body
@@ -470,8 +528,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			deletions = &deletionCount
 		}
 		removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
-		completionStage := observability.BeginStage(true, reviewLog, "review_completion_persist")
-		_, completionErr := stores.CodeReviews.CompleteReview(ctx, job.OrgID, db.CompleteCodeReviewParams{
+		completion := db.CompleteCodeReviewParams{
 			SessionID:         job.SessionID,
 			Decision:          decision.Decision,
 			Acceptable:        decision.Acceptable,
@@ -481,7 +538,14 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			Additions:         additions,
 			Deletions:         deletions,
 			RiskReasonDetails: decision.RiskReasonDetails,
-		})
+		}
+		completionStage := observability.BeginStage(true, reviewLog, "review_completion_persist")
+		var completionErr error
+		if assessment != nil {
+			completionErr = completeFullAssessment(ctx, stores.ThreadSendTx, *assessment, completion, assessmentOutcome, assessmentCoverage, body)
+		} else {
+			_, completionErr = stores.CodeReviews.CompleteReview(ctx, job.OrgID, completion)
+		}
 		completionStage.End(codeReviewStageOutcome(ctx, completionErr))
 		if completionErr != nil {
 			return fmt.Errorf("complete code review: %w", completionErr)
@@ -635,6 +699,9 @@ func failCodeReviewWithoutReviewerOutput(ctx context.Context, stores *Stores, se
 	}); err != nil {
 		return fmt.Errorf("fail code review without usable reviewer output: %w", err)
 	}
+	if err := failFullAssessmentForSession(ctx, stores, job, reason); err != nil {
+		return fmt.Errorf("fail full assessment without reviewer output: %w", err)
+	}
 	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
 	if err := reconcileCodeReviewSessionFailure(ctx, stores, job, reason); err != nil {
 		return err
@@ -754,6 +821,9 @@ func registerCodeReviewDeadLetterReconciliation(ctx context.Context, stores *Sto
 					Str("session_id", job.SessionID.String()).
 					Msg("failed to reconcile dead-lettered code review metadata")
 			}
+		}
+		if err := failFullAssessmentForSession(hookCtx, stores, job, reason); err != nil {
+			logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("failed to reconcile dead-lettered full assessment")
 		}
 		if err := reconcileCodeReviewSessionJobFailure(hookCtx, stores, job, reason); err != nil {
 			logger.Warn().Err(err).
@@ -911,6 +981,9 @@ func supersedeCodeReviewForChangedHead(
 ) error {
 	if err := queueCodeReviewReplacementForChangedHead(ctx, services, logger, job, pr, health); err != nil {
 		return err
+	}
+	if err := supersedeFullAssessmentForSession(ctx, stores, job, reason); err != nil {
+		return fmt.Errorf("supersede changed-head full assessment: %w", err)
 	}
 
 	if _, err := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, reason); err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -2871,41 +2944,60 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 		if err != nil {
 			return fmt.Errorf("resolve code review primary thread for orchestrator: %w", err)
 		}
-		primaryThread, err := stores.SessionThreads.GetByID(ctx, job.OrgID, threadID)
-		if err != nil {
-			return fmt.Errorf("load code review primary thread for orchestrator: %w", err)
-		}
-		if primaryThread.AgentType != agentType ||
-			!codeReviewAgentModelsEqual(primaryThread.ModelOverride, agentModel) ||
-			!codeReviewReasoningEffortsEqual(primaryThread.ReasoningEffort, reasoningEffort) {
-			model := ""
-			if agentModel != nil {
-				model = *agentModel
+		if services.CodeReviewAssessmentsEnabled && stores.CodeReviewAssessments != nil {
+			// A new reusable full baseline needs a verifiably read-only
+			// orchestrator thread. The session's legacy primary thread is not
+			// created with that filesystem contract.
+			label := fmt.Sprintf("Code review synthesis: %s", agentType)
+			thread, createErr := ensureCodeReviewFallbackThread(ctx, threads, threadsvc.CreateThreadInput{
+				SessionID: job.SessionID, OrgID: job.OrgID, AgentType: string(agentType),
+				Model: stringPtrValue(agentModel), ReasoningEffort: reasoningEffort,
+				Label: label, FileScope: codeReviewChangedPaths(changedFiles),
+				ExecutionMode: models.ThreadExecutionModeReview, FilesystemMode: models.ThreadFilesystemModeReadOnly,
+				CreatedBySource: models.ThreadCreatedBySourceSystem,
+			}, threadID, agentResults)
+			if createErr != nil {
+				return fmt.Errorf("create read-only code review orchestrator thread: %w", createErr)
 			}
-			_, updateErr := threads.UpdateThread(ctx, threadsvc.UpdateThreadInput{
-				SessionID:       job.SessionID,
-				OrgID:           job.OrgID,
-				ThreadID:        threadID,
-				AgentType:       string(agentType),
-				Model:           &model,
-				ReasoningEffort: reasoningEffort,
-				Label:           primaryThread.Label,
-			})
-			if updateErr != nil {
-				return fmt.Errorf("retarget code review primary thread to available orchestrator %s: %w", agentType, updateErr)
+			threadID = thread.ID
+			dispatch = thread.Status == models.ThreadStatusIdle && thread.CurrentTurn == 0
+		} else {
+			primaryThread, err := stores.SessionThreads.GetByID(ctx, job.OrgID, threadID)
+			if err != nil {
+				return fmt.Errorf("load code review primary thread for orchestrator: %w", err)
 			}
-			logger.Info().
-				Str("session_id", job.SessionID.String()).
-				Str("thread_id", threadID.String()).
-				Str("orchestrator", string(agentType)).
-				Msg("retargeted code review primary thread to available orchestrator")
+			if primaryThread.AgentType != agentType ||
+				!codeReviewAgentModelsEqual(primaryThread.ModelOverride, agentModel) ||
+				!codeReviewReasoningEffortsEqual(primaryThread.ReasoningEffort, reasoningEffort) {
+				model := ""
+				if agentModel != nil {
+					model = *agentModel
+				}
+				_, updateErr := threads.UpdateThread(ctx, threadsvc.UpdateThreadInput{
+					SessionID:       job.SessionID,
+					OrgID:           job.OrgID,
+					ThreadID:        threadID,
+					AgentType:       string(agentType),
+					Model:           &model,
+					ReasoningEffort: reasoningEffort,
+					Label:           primaryThread.Label,
+				})
+				if updateErr != nil {
+					return fmt.Errorf("retarget code review primary thread to available orchestrator %s: %w", agentType, updateErr)
+				}
+				logger.Info().
+					Str("session_id", job.SessionID.String()).
+					Str("thread_id", threadID.String()).
+					Str("orchestrator", string(agentType)).
+					Msg("retargeted code review primary thread to available orchestrator")
+			}
 		}
 	}
 	structured := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
 		ThreadID:             threadID.String(),
 		PromptRecordKey:      recordKey,
 		DescriptionInputHash: descriptionInputHash,
-		ReadOnly:             attempt > 0,
+		ReadOnly:             attempt > 0 || services.CodeReviewAssessmentsEnabled && stores.CodeReviewAssessments != nil,
 	})
 	// The orchestrator agent result is created only once the thread is actually
 	// dispatched. A transient claim race leaves no result behind, so the next
@@ -3025,6 +3117,7 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 		if err != nil {
 			return fmt.Errorf("load code review orchestrator thread: %w", err)
 		}
+		state.ReadOnly = thread.ExecutionMode == models.ThreadExecutionModeReview && thread.FilesystemMode == models.ThreadFilesystemModeReadOnly
 		deadline := codeReviewOrchestratorResultDeadline(policy.Config(), result)
 		timedOut := time.Now().After(deadline)
 		state.CostCents = thread.CostCents
@@ -3257,9 +3350,11 @@ func codeReviewWaitingForOrchestrator(policy models.CodeReviewPolicyConfig) erro
 }
 
 type codeReviewSubmission struct {
-	GitHubReviewID  *int64
-	GitHubReviewURL *string
-	FinalReviewBody string
+	GitHubReviewID    *int64
+	GitHubReviewURL   *string
+	FormalApprovalID  *int64
+	FormalApprovalURL *string
+	FinalReviewBody   string
 }
 
 type codeReviewRequestedReviewerRemover interface {
@@ -3341,7 +3436,12 @@ func completeCodeReviewAfterStableDeterministicFailure(
 	pr models.PullRequest,
 	changedFiles []codereviewsvc.PullRequestFile,
 	risk models.CodeReviewRiskEvaluation,
+	assessmentOptional ...*models.CodeReviewAssessment,
 ) error {
+	var assessment *models.CodeReviewAssessment
+	if len(assessmentOptional) > 0 {
+		assessment = assessmentOptional[0]
+	}
 	if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
 		return err
 	}
@@ -3361,10 +3461,37 @@ func completeCodeReviewAfterStableDeterministicFailure(
 	if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhasePublishing); err != nil {
 		return fmt.Errorf("set deterministic early-stop publishing phase: %w", err)
 	}
+	var assessmentOutcome json.RawMessage
+	if assessment != nil {
+		if err := verifyFullAssessmentFreshness(ctx, services, job, *assessment); err != nil {
+			if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
+				if recoveryErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); recoveryErr != nil {
+					return recoveryErr
+				}
+				return nil
+			}
+			return fmt.Errorf("refresh early-stop assessment before publication: %w", err)
+		}
+		var outcomeErr error
+		assessmentOutcome, outcomeErr = fullAssessmentOutcome(nil, decision.RiskReasonDetails, false)
+		if outcomeErr != nil {
+			return fmt.Errorf("encode early-stop assessment outcome: %w", outcomeErr)
+		}
+		riskJSON, marshalErr := json.Marshal(decision.RiskReasonDetails)
+		if marshalErr != nil {
+			return fmt.Errorf("encode assessment risk reasons: %w", marshalErr)
+		}
+		if err := stores.CodeReviewAssessments.StageOutcome(ctx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest, models.CodeReviewAssessmentCompletion{ResultOrigin: models.CodeReviewResultExecuted, CoverageComplete: false, Decision: decision.Decision, Acceptable: decision.Acceptable, RiskReasonDetails: riskJSON, StructuredOutcome: assessmentOutcome, RenderedBody: body}); err != nil {
+			return fmt.Errorf("stage early-stop assessment outcome: %w", err)
+		}
+	}
 	publicationStage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "github_publication")
-	submission, submitted, err := submitCodeReviewToGitHub(ctx, stores, services, job, metadata, decision.Decision, body)
+	submission, submitted, err := submitFullReviewWithAssessment(ctx, stores, services, job, metadata, assessment, decision.Decision, body)
 	publicationStage.End(codeReviewStageOutcome(ctx, err))
 	if err != nil {
+		if errors.Is(err, errCodeReviewPublicationSuperseded) {
+			return nil
+		}
 		return err
 	}
 	finalReviewBody := body
@@ -3373,8 +3500,7 @@ func completeCodeReviewAfterStableDeterministicFailure(
 	}
 	additions, deletions := codeReviewLineChanges(changedFiles)
 	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
-	completionStage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "review_completion_persist")
-	_, completionErr := stores.CodeReviews.CompleteReview(ctx, job.OrgID, db.CompleteCodeReviewParams{
+	completion := db.CompleteCodeReviewParams{
 		SessionID:         job.SessionID,
 		Decision:          decision.Decision,
 		Acceptable:        decision.Acceptable,
@@ -3384,7 +3510,14 @@ func completeCodeReviewAfterStableDeterministicFailure(
 		Additions:         &additions,
 		Deletions:         &deletions,
 		RiskReasonDetails: decision.RiskReasonDetails,
-	})
+	}
+	completionStage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "review_completion_persist")
+	var completionErr error
+	if assessment != nil {
+		completionErr = completeFullAssessment(ctx, stores.ThreadSendTx, *assessment, completion, assessmentOutcome, false, body)
+	} else {
+		_, completionErr = stores.CodeReviews.CompleteReview(ctx, job.OrgID, completion)
+	}
 	completionStage.End(codeReviewStageOutcome(ctx, completionErr))
 	if completionErr != nil {
 		return fmt.Errorf("complete deterministic early-stop code review: %w", completionErr)
@@ -3593,13 +3726,18 @@ func loadCodeReviewChangedFiles(ctx context.Context, stores *Stores, services *S
 	return files, true, nil
 }
 
-func captureCodeReviewVisualEvidence(ctx context.Context, services *Services, job runCodeReviewPayload, pr models.PullRequest) (models.CodeReviewVisualEvidenceSnapshot, error) {
+func captureCodeReviewVisualEvidence(ctx context.Context, services *Services, job runCodeReviewPayload, pr models.PullRequest, assessmentIDs ...uuid.UUID) (models.CodeReviewVisualEvidenceSnapshot, error) {
 	if services == nil || services.CodeReviewVisualEvidence == nil {
 		return models.CodeReviewVisualEvidenceSnapshot{}, errors.New("code review visual evidence provider is not configured")
+	}
+	var assessmentID *uuid.UUID
+	if len(assessmentIDs) > 0 {
+		assessmentID = &assessmentIDs[0]
 	}
 	snapshot, err := services.CodeReviewVisualEvidence.Capture(ctx, codereviewsvc.CaptureVisualEvidenceInput{
 		OrgID:             job.OrgID,
 		SessionID:         job.SessionID,
+		AssessmentID:      assessmentID,
 		RepositoryID:      job.RepositoryID,
 		PullRequestNumber: pr.GitHubPRNumber,
 		HeadSHA:           job.HeadSHA,
@@ -3771,18 +3909,7 @@ func codeReviewDescriptionRequirementApplies(requirement models.CodeReviewDescri
 }
 
 func codeReviewApplicableDescriptionRequirements(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile) []models.CodeReviewDescriptionRequirement {
-	policy = models.ResolveCodeReviewPolicyConfig(&policy)
-	requirements := make([]models.CodeReviewDescriptionRequirement, 0, len(policy.DescriptionPolicy.Requirements))
-	for _, requirement := range policy.DescriptionPolicy.Requirements {
-		if !requirement.Required || strings.TrimSpace(requirement.Key) == "" {
-			continue
-		}
-		if !codeReviewDescriptionRequirementApplies(requirement, changedFiles) {
-			continue
-		}
-		requirements = append(requirements, requirement)
-	}
-	return requirements
+	return codereviewsvc.ApplicableDescriptionRequirements(policy, changedFiles)
 }
 
 func codeReviewDescriptionRequirementsForPrompt(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile) []prompts.CodeReviewDescriptionRequirementPromptData {
@@ -4543,13 +4670,17 @@ func codeReviewRecommendedHumanReviewers(reasons []models.CodeReviewRiskReason) 
 }
 
 func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, decision models.CodeReviewDecision, body string) (codeReviewSubmission, bool, error) {
+	return submitCodeReviewToGitHubWithOptions(ctx, stores, services, job, metadata, decision, body, nil, false)
+}
+
+func submitCodeReviewToGitHubWithOptions(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, decision models.CodeReviewDecision, body string, preSubmit func(context.Context, db.DBTX, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error), requirePublicationReceipt bool) (codeReviewSubmission, bool, error) {
 	if services == nil || services.CodeReviews == nil {
 		return codeReviewSubmission{}, false, nil
 	}
 	if stores.Repositories == nil || stores.PullRequests == nil {
 		return codeReviewSubmission{}, false, fmt.Errorf("submit code review: repository and pull request stores are required")
 	}
-	if metadata.GitHubReviewID != nil {
+	if metadata.GitHubReviewID != nil && !requirePublicationReceipt {
 		return codeReviewSubmission{
 			GitHubReviewID:  metadata.GitHubReviewID,
 			GitHubReviewURL: metadata.GitHubReviewURL,
@@ -4579,23 +4710,35 @@ func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Ser
 	}
 	comments := codeReviewInlineComments(findings)
 	submitRequest := codereviewsvc.SubmitReviewRequest{
-		InstallationID:    repo.InstallationID,
-		Repository:        repository,
-		PullNumber:        pr.GitHubPRNumber,
-		HeadSHA:           job.HeadSHA,
-		OutputKey:         job.OutputKey,
-		PreviousOutputKey: job.PreviousOutputKey,
-		ExistingReviewID:  int64PtrValue(job.ExistingGitHubReviewID),
-		ExistingReviewURL: stringPtrValue(job.ExistingGitHubReviewURL),
-		Decision:          codeReviewSubmitDecision(decision),
-		PreviousDecision:  codeReviewSubmitDecisionPtr(job.PreviousReviewDecision),
-		PreviousDecidedAt: timePtrValue(job.PreviousReviewDecidedAt),
-		PreviousBody:      stringPtrValue(job.PreviousReviewBody),
-		Body:              body,
-		Comments:          comments,
+		InstallationID:            repo.InstallationID,
+		Repository:                repository,
+		PullNumber:                pr.GitHubPRNumber,
+		HeadSHA:                   job.HeadSHA,
+		OutputKey:                 job.OutputKey,
+		PreviousOutputKey:         job.PreviousOutputKey,
+		ExistingReviewID:          int64PtrValue(job.ExistingGitHubReviewID),
+		ExistingReviewURL:         stringPtrValue(job.ExistingGitHubReviewURL),
+		Decision:                  codeReviewSubmitDecision(decision),
+		PreviousDecision:          codeReviewSubmitDecisionPtr(job.PreviousReviewDecision),
+		PreviousDecidedAt:         timePtrValue(job.PreviousReviewDecidedAt),
+		PreviousBody:              stringPtrValue(job.PreviousReviewBody),
+		Body:                      body,
+		Comments:                  comments,
+		RequirePublicationReceipt: requirePublicationReceipt,
 	}
 	var result codereviewsvc.SubmitReviewResult
-	err = stores.CodeReviews.RunWithGitHubPublicationLock(ctx, job.OrgID, job.PullRequestID, func(lockCtx context.Context, _ db.DBTX) error {
+	var reconciled bool
+	err = stores.CodeReviews.RunWithGitHubPublicationLock(ctx, job.OrgID, job.PullRequestID, func(lockCtx context.Context, tx db.DBTX) error {
+		if preSubmit != nil {
+			var preSubmitErr error
+			result, reconciled, preSubmitErr = preSubmit(lockCtx, tx, submitRequest)
+			if preSubmitErr != nil {
+				return preSubmitErr
+			}
+			if reconciled {
+				return nil
+			}
+		}
 		var submitErr error
 		result, submitErr = services.CodeReviews.SubmitReview(lockCtx, submitRequest)
 		return submitErr
@@ -4612,10 +4755,12 @@ func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Ser
 	}
 	markPostedCodeReviewFindings(ctx, stores.CodeReviews, job.OrgID, findings, result.Comments)
 	return codeReviewSubmission{
-		GitHubReviewID:  &result.ID,
-		GitHubReviewURL: &result.URL,
-		FinalReviewBody: finalReviewBody,
-	}, true, nil
+		GitHubReviewID:    &result.ID,
+		GitHubReviewURL:   &result.URL,
+		FormalApprovalID:  result.FormalApprovalID,
+		FormalApprovalURL: result.FormalApprovalURL,
+		FinalReviewBody:   finalReviewBody,
+	}, !reconciled, nil
 }
 
 func int64PtrValue(value *int64) int64 {

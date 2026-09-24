@@ -108,10 +108,12 @@ type CodeReviewRequestMode string
 const (
 	CodeReviewEnsureCurrent CodeReviewRequestMode = "ensure_current"
 	CodeReviewReviewNow     CodeReviewRequestMode = "review_now"
+	CodeReviewRecheck       CodeReviewRequestMode = "recheck"
+	CodeReviewForceFresh    CodeReviewRequestMode = "force_fresh"
 )
 
 func (m CodeReviewRequestMode) Validate() error {
-	if m == CodeReviewEnsureCurrent || m == CodeReviewReviewNow {
+	if m == CodeReviewEnsureCurrent || m == CodeReviewReviewNow || m == CodeReviewRecheck || m == CodeReviewForceFresh {
 		return nil
 	}
 	return fmt.Errorf("unsupported review request mode %q", m)
@@ -152,6 +154,8 @@ type CodeReviewPRState struct {
 	EligibleAt           *time.Time              `db:"eligible_at" json:"eligible_at"`
 	RetryAt              *time.Time              `db:"retry_at" json:"retry_at"`
 	ActiveSessionID      *uuid.UUID              `db:"active_session_id" json:"active_session_id"`
+	ActiveAssessmentID   *uuid.UUID              `db:"active_assessment_id" json:"active_assessment_id,omitempty"`
+	CurrentAssessmentID  *uuid.UUID              `db:"current_assessment_id" json:"current_assessment_id,omitempty"`
 	PendingRequestID     *uuid.UUID              `db:"pending_request_id" json:"pending_request_id"`
 	PendingInput         json.RawMessage         `db:"pending_input" json:"-"`
 	State                CodeReviewScheduleState `db:"state" json:"state"`

@@ -5190,8 +5190,11 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 	mock.ExpectQuery(`(?s)SELECT.*FROM pull_requests.*WHERE session_id.*org_id`).
 		WithArgs(workerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(workerPullRequestRow(prID, sessionID, orgID, repo, headRef, now)...))
-	// SendMessage first asks whether a per-target automation generation owns
-	// the session (design doc 125): an owned session accepts no human turn.
+	// SendMessage checks both review and automation ownership before admitting
+	// an ordinary reconciliation turn.
+	mock.ExpectQuery(`SELECT code_review_owner_pr_id FROM sessions WHERE org_id=\$1 AND id=\$2`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"code_review_owner_pr_id"}).AddRow(nil))
 	mock.ExpectQuery(`(?s)SELECT.*FROM sessions s\s+JOIN automation_target_sessions g`).
 		WithArgs(pgx.NamedArgs{"session_id": sessionID, "org_id": orgID}).
 		WillReturnError(pgx.ErrNoRows)

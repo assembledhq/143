@@ -2014,7 +2014,7 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 		    failure_retry_advised = false,
 		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = 'idle'
-		  AND sandbox_state != 'destroyed'
+		  AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL
 		RETURNING ` + sessionSelectColumns
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -2046,7 +2046,7 @@ func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid
 		    %s,
 		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = ANY(@statuses)
-		  AND sandbox_state != 'destroyed'
+		  AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL
 		RETURNING `+sessionSelectColumns, sessionResumeRuntimeResetAssignments)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -3722,7 +3722,7 @@ func (s *SessionStore) PublishHydratedContainerID(ctx context.Context, orgID, se
 	query := `UPDATE sessions
 		SET container_id = COALESCE(container_id, @container_id),
 		    sandbox_state = CASE WHEN container_id IS NULL THEN 'running' ELSE sandbox_state END
-		WHERE id = @id AND org_id = @org_id
+		WHERE id = @id AND org_id = @org_id AND code_review_owner_pr_id IS NULL
 		RETURNING COALESCE(container_id, '')`
 	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"id":           sessionID,

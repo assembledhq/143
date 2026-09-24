@@ -80,20 +80,21 @@ const (
 )
 
 type SubmitReviewRequest struct {
-	InstallationID    int64
-	Repository        string
-	PullNumber        int
-	HeadSHA           string
-	OutputKey         string
-	PreviousOutputKey string
-	ExistingReviewID  int64
-	ExistingReviewURL string
-	Decision          SubmitReviewDecision
-	PreviousDecision  SubmitReviewDecision
-	PreviousDecidedAt time.Time
-	PreviousBody      string
-	Body              string
-	Comments          []SubmitReviewComment
+	RequirePublicationReceipt bool
+	InstallationID            int64
+	Repository                string
+	PullNumber                int
+	HeadSHA                   string
+	OutputKey                 string
+	PreviousOutputKey         string
+	ExistingReviewID          int64
+	ExistingReviewURL         string
+	Decision                  SubmitReviewDecision
+	PreviousDecision          SubmitReviewDecision
+	PreviousDecidedAt         time.Time
+	PreviousBody              string
+	Body                      string
+	Comments                  []SubmitReviewComment
 }
 
 type SubmitReviewComment struct {
@@ -104,10 +105,14 @@ type SubmitReviewComment struct {
 }
 
 type SubmitReviewResult struct {
-	ID       int64
-	URL      string
-	Body     string
-	Comments []SubmitReviewPostedComment
+	SubmittedCommitSHA string  `json:"submitted_commit_sha,omitempty"`
+	ReviewState        string  `json:"review_state,omitempty"`
+	FormalApprovalID   *int64  `json:"formal_approval_id,omitempty"`
+	FormalApprovalURL  *string `json:"formal_approval_url,omitempty"`
+	ID                 int64
+	URL                string
+	Body               string
+	Comments           []SubmitReviewPostedComment
 }
 
 type SubmitReviewPostedComment struct {
@@ -306,6 +311,12 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 		return SubmitReviewResult{}, err
 	}
 	if found {
+		if req.RequirePublicationReceipt && (existing.ID == 0 || !strings.EqualFold(existing.SubmittedCommitSHA, req.HeadSHA) || (req.Decision == SubmitReviewDecisionApproved && !strings.EqualFold(existing.ReviewState, "APPROVED"))) {
+			return SubmitReviewResult{}, errors.New("existing review does not confirm the assessment commit and decision")
+		}
+		if req.RequirePublicationReceipt && req.Decision == SubmitReviewDecisionApproved {
+			existing.FormalApprovalID, existing.FormalApprovalURL = &existing.ID, &existing.URL
+		}
 		existing.Body = visibleReviewBody
 		return existing, nil
 	}
@@ -394,7 +405,14 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	if err := decodeGitHubJSONResponse(ctx, httpReq, resp, &decoded); err != nil {
 		return SubmitReviewResult{}, fmt.Errorf("decode GitHub review response: %w", err)
 	}
+	if req.RequirePublicationReceipt && decoded.ID == 0 {
+		return SubmitReviewResult{}, errors.New("review receipt has no GitHub ID")
+	}
 	result := SubmitReviewResult{ID: decoded.ID, URL: decoded.HTMLURL, Body: visibleReviewBody}
+	if req.RequirePublicationReceipt && req.Decision == SubmitReviewDecisionApproved {
+		result.FormalApprovalID, result.FormalApprovalURL = &result.ID, &result.URL
+		result.SubmittedCommitSHA, result.ReviewState = req.HeadSHA, "APPROVED"
+	}
 	result.Comments = append(result.Comments, knownPostedComments...)
 	if decoded.ID != 0 && len(req.Comments) > 0 {
 		if comments, commentsErr := s.listReviewComments(ctx, token, owner, repo, req.PullNumber, decoded.ID); commentsErr == nil {
@@ -461,8 +479,13 @@ func (s *GitHubSubmitter) updateExistingReview(ctx context.Context, token, owner
 		return SubmitReviewResult{}, err
 	}
 	if req.Decision == SubmitReviewDecisionApproved {
-		if err := s.ensureFormalApproval(ctx, token, owner, repo, req); err != nil {
-			return SubmitReviewResult{}, err
+		approval, approvalErr := s.ensureFormalApprovalReceipt(ctx, token, owner, repo, req)
+		if approvalErr != nil {
+			return SubmitReviewResult{}, approvalErr
+		}
+		if approval.ID > 0 {
+			result.FormalApprovalID = &approval.ID
+			result.FormalApprovalURL = &approval.URL
 		}
 	}
 	if strings.TrimSpace(result.URL) == "" {
@@ -473,14 +496,22 @@ func (s *GitHubSubmitter) updateExistingReview(ctx context.Context, token, owner
 }
 
 func (s *GitHubSubmitter) ensureFormalApproval(ctx context.Context, token, owner, repo string, req SubmitReviewRequest) error {
+	_, err := s.ensureFormalApprovalReceipt(ctx, token, owner, repo, req)
+	return err
+}
+
+func (s *GitHubSubmitter) ensureFormalApprovalReceipt(ctx context.Context, token, owner, repo string, req SubmitReviewRequest) (SubmitReviewResult, error) {
 	approvalOutputKey := strings.TrimSpace(req.OutputKey) + ":formal-approval"
 	if strings.TrimSpace(req.OutputKey) != "" {
-		_, found, err := s.findExistingReview(ctx, token, owner, repo, req.PullNumber, approvalOutputKey)
+		existing, found, err := s.findExistingReview(ctx, token, owner, repo, req.PullNumber, approvalOutputKey)
 		if err != nil {
-			return err
+			return SubmitReviewResult{}, err
 		}
 		if found {
-			return nil
+			if req.RequirePublicationReceipt && (existing.ID == 0 || !strings.EqualFold(existing.SubmittedCommitSHA, req.HeadSHA) || !strings.EqualFold(existing.ReviewState, "APPROVED")) {
+				return SubmitReviewResult{}, errors.New("existing formal approval does not confirm the assessment commit")
+			}
+			return existing, nil
 		}
 	}
 	payload, err := json.Marshal(map[string]any{
@@ -489,12 +520,12 @@ func (s *GitHubSubmitter) ensureFormalApproval(ctx context.Context, token, owner
 		"event":     githubReviewEvent(SubmitReviewDecisionApproved),
 	})
 	if err != nil {
-		return fmt.Errorf("marshal formal approval payload: %w", err)
+		return SubmitReviewResult{}, fmt.Errorf("marshal formal approval payload: %w", err)
 	}
 	reviewURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), req.PullNumber)
 	httpReq, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodPost, reviewURL, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("create formal approval request: %w", err)
+		return SubmitReviewResult{}, fmt.Errorf("create formal approval request: %w", err)
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Accept", "application/vnd.github+json")
@@ -502,14 +533,27 @@ func (s *GitHubSubmitter) ensureFormalApproval(ctx context.Context, token, owner
 	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("submit formal GitHub approval: %w", ghservice.NewGitHubRequestError(ctx, err))
+		return SubmitReviewResult{}, fmt.Errorf("submit formal GitHub approval: %w", ghservice.NewGitHubRequestError(ctx, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("submit formal GitHub approval: %w", readGitHubAPIResponseError(httpReq, resp))
+		return SubmitReviewResult{}, fmt.Errorf("submit formal GitHub approval: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
-	s.observeMutationResponse(ctx, httpReq, resp)
-	return nil
+	if !req.RequirePublicationReceipt {
+		s.observeMutationResponse(ctx, httpReq, resp)
+		return SubmitReviewResult{}, nil
+	}
+	var decoded struct {
+		ID      int64  `json:"id"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := decodeGitHubJSONResponse(ctx, httpReq, resp, &decoded); err != nil {
+		return SubmitReviewResult{}, fmt.Errorf("decode formal approval receipt: %w", err)
+	}
+	if decoded.ID == 0 {
+		return SubmitReviewResult{}, errors.New("formal approval receipt has no GitHub ID")
+	}
+	return SubmitReviewResult{ID: decoded.ID, URL: decoded.HTMLURL}, nil
 }
 
 func (s *GitHubSubmitter) updateReviewSummary(ctx context.Context, token, owner, repo string, pullNumber int, reviewID int64, body string) (SubmitReviewResult, error) {
@@ -643,9 +687,11 @@ func (s *GitHubSubmitter) listReviewComments(ctx context.Context, token, owner, 
 }
 
 type githubReviewListItem struct {
-	ID      int64  `json:"id"`
-	HTMLURL string `json:"html_url"`
-	Body    string `json:"body"`
+	CommitID string `json:"commit_id"`
+	State    string `json:"state"`
+	ID       int64  `json:"id"`
+	HTMLURL  string `json:"html_url"`
+	Body     string `json:"body"`
 }
 
 type githubReviewCommentItem struct {
@@ -763,7 +809,7 @@ func (s *GitHubSubmitter) findExistingReview(ctx context.Context, token, owner, 
 			if review.ID == 0 || !strings.Contains(review.Body, marker) {
 				continue
 			}
-			result := SubmitReviewResult{ID: review.ID, URL: review.HTMLURL}
+			result := SubmitReviewResult{ID: review.ID, URL: review.HTMLURL, SubmittedCommitSHA: review.CommitID, ReviewState: review.State}
 			comments, err := s.listReviewComments(ctx, token, owner, repo, pullNumber, review.ID)
 			if err != nil {
 				return SubmitReviewResult{}, false, err
