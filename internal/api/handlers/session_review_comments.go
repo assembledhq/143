@@ -382,7 +382,7 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 		// going through the guarded message services, so it carries the
 		// owned-session guard itself: an automation-owned session accepts no
 		// human turn (design doc 125).
-		if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+		if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
 			return
 		}
 		session, err := h.sessionStore.ClaimIdle(r.Context(), orgID, sessionID)

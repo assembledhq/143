@@ -990,7 +990,11 @@ func (s *Service) rejectIfCodeReviewOwned(ctx context.Context, orgID, sessionID 
 	if !ok {
 		return nil
 	}
-	return owner.RejectIfCodeReviewOwned(ctx, orgID, sessionID)
+	err := owner.RejectIfCodeReviewOwned(ctx, orgID, sessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: %w", ErrSessionNotFound, err)
+	}
+	return err
 }
 
 // queueMessageWaitingForSlot queues a follow-up against a thread that could
@@ -1604,6 +1608,9 @@ func resolutionPass(session *models.Session) int {
 
 // EndThread transitions an active thread to completed.
 func (s *Service) EndThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error) {
+	if err := s.rejectIfCodeReviewOwned(ctx, orgID, sessionID); err != nil {
+		return models.SessionThread{}, err
+	}
 	thread, err := s.threadStore.GetByID(ctx, orgID, threadID)
 	if err != nil {
 		return models.SessionThread{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)

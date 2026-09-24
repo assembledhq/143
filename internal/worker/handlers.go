@@ -10141,6 +10141,36 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		}
 		if err := continueErr; err != nil {
 			if codeReviewAssessmentID != nil {
+				if errors.Is(err, db.ErrCodeReviewRecheckUserCancelled) {
+					return &FatalError{Err: err}
+				}
+				if errors.Is(err, agent.ErrSessionCancelled) || errors.Is(err, agent.ErrThreadCancelledBeforeWorkspaceReady) || errors.Is(context.Cause(jobCtx), agent.ErrUserCancelCause) {
+					jobID, hasJob := jobctx.JobIDFromContext(ctx)
+					lockToken, hasToken := jobctx.LockTokenFromContext(ctx)
+					if !hasJob || !hasToken {
+						return &FatalError{Err: agent.ErrCodeReviewRecheckLeaseLost}
+					}
+					cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+					cancelErr := stores.CodeReviewRechecks.Cancel(cancelCtx, orgID, *codeReviewAssessmentID, jobID, lockToken)
+					cancel()
+					if cancelErr != nil {
+						return cancelErr
+					}
+					return &FatalError{Err: err}
+				}
+				if errors.Is(err, agent.ErrCodeReviewRecheckLeaseLost) {
+					current, loadErr := stores.CodeReviewAssessments.GetByID(ctx, orgID, *codeReviewAssessmentID)
+					if loadErr != nil {
+						return loadErr
+					}
+					if current.Status != models.CodeReviewAssessmentRunning {
+						return &FatalError{Err: err}
+					}
+				}
+				if errors.Is(err, agent.ErrCodeReviewRecheckLeaseLost) || errors.Is(err, agent.ErrSandboxCapacity) || errors.Is(err, agent.ErrSnapshotPending) || errors.Is(err, agent.ErrSessionInterrupted) {
+					retryAfter := 2 * time.Second
+					return &RetryableError{Err: err, RetryAfter: &retryAfter}
+				}
 				// No unfenced generic thread cleanup or blind provider retry: the
 				// assessment supervisor must inspect the durable dispatch and
 				// prove the old runtime has drained before allocating a retry.

@@ -40,6 +40,8 @@ func TestCodeReviewAssessmentsPostgres(t *testing.T) {
  CREATE TABLE organizations(id uuid PRIMARY KEY);
  CREATE TABLE repositories(id uuid PRIMARY KEY,org_id uuid NOT NULL,full_name text NOT NULL);
  CREATE TABLE pull_requests(id uuid PRIMARY KEY,org_id uuid NOT NULL,github_repo text NOT NULL);
+ CREATE UNIQUE INDEX repositories_org_id_id ON repositories(org_id,id);
+ CREATE UNIQUE INDEX pull_requests_org_id_id ON pull_requests(org_id,id);
  CREATE TABLE code_review_policies(id uuid PRIMARY KEY,org_id uuid NOT NULL,repository_id uuid);
  CREATE TABLE code_review_session_metadata(id uuid PRIMARY KEY,org_id uuid NOT NULL,session_id uuid NOT NULL,repository_id uuid NOT NULL,pull_request_id uuid NOT NULL,policy_id uuid NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
  CREATE TABLE code_review_agent_results(id uuid PRIMARY KEY,org_id uuid NOT NULL,session_id uuid NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
@@ -170,7 +172,7 @@ func TestCodeReviewAssessmentsPostgres(t *testing.T) {
 	recheck.VisualDigest = "new-visual"
 	recheck.InputDigest = "new-all"
 	recheck.InputManifest = json.RawMessage(`{"version":1,"visual":"new"}`)
-	recheck.RouteReason = "visual_changed"
+	recheck.RouteReason = models.CodeReviewRouteEvidenceChanged
 	recheck.PublicationKey = "assessment:" + recheck.ID.String()
 	check, reused, err := store.Create(ctx, recheck)
 	require.NoError(t, err, "complete full baseline can support an evidence-only assessment")
@@ -213,8 +215,22 @@ func TestCodeReviewAssessmentsPostgres(t *testing.T) {
 	require.Equal(t, models.CodeReviewAssessmentSuperseded, unsent.Status, "unsent publication should be terminal")
 	require.Equal(t, result.RenderedBody, *unsent.RenderedBody, "supersede must preserve staged outcome")
 	require.NoError(t, tx.Rollback(ctx), "restore reserved state for attempted-send proof")
+	tx, err = conn.Begin(ctx)
+	require.NoError(t, err, "begin unsent dead-letter proof")
+	require.NoError(t, NewCodeReviewAssessmentStore(tx).Fail(ctx, org, check.ID, check.Generation, check.InputDigest, "job exhausted"), "proven unsent reservation can release admission after dead letter")
+	require.NoError(t, tx.Rollback(ctx), "restore reserved state for uncertain publication proof")
 	require.NoError(t, store.MarkPublicationAttemptUncertain(ctx, org, check.ID, check.Generation, check.InputDigest), "send attempt must durably leave reserved state")
 	require.ErrorIs(t, store.SupersedeUnsentPublication(ctx, org, check.ID, check.Generation, check.InputDigest, "full_review:inputs changed"), ErrCodeReviewAssessmentState, "uncertain publication cannot be assumed unsent")
+	require.ErrorIs(t, store.Fail(ctx, org, check.ID, check.Generation, check.InputDigest, "job exhausted"), ErrCodeReviewAssessmentState, "dead-letter cleanup must preserve uncertain external publication")
+	_, err = conn.Exec(ctx, `UPDATE repositories SET full_name='test/renamed' WHERE org_id=$1 AND id=$2`, org, repo)
+	require.NoError(t, err, "live repository rename must not mutate or invalidate historical assessments")
+	_, err = conn.Exec(ctx, `UPDATE pull_requests SET github_repo='test/renamed' WHERE org_id=$1 AND id=$2`, org, pr)
+	require.NoError(t, err, "PR repository rename must preserve historical assessment provenance")
+	var capturedName string
+	err = conn.QueryRow(ctx, `SELECT repository_full_name FROM code_review_revision_assessments WHERE org_id=$1 AND id=$2`, org, a.ID).Scan(&capturedName)
+	require.NoError(t, err, "read immutable captured repository name after rename")
+	require.Equal(t, "test/repo", capturedName, "historical repository name remains the captured name")
+
 }
 
 func pgConstraint(err error, code string) bool {

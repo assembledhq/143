@@ -1,6 +1,6 @@
 # Conditional code review session continuation
 
-Status: PR #2178 is open; expanding evidence reassessment beyond images following the 2026-09-24 scope correction. Implementation verification is in progress. Activation remains gated on provider, browser, CI, and pilot validation. Last reviewed: 2026-09-24.
+Status: PR #2178 is open; evidence reassessment now covers requirements and original findings following the 2026-09-24 scope correction. Local implementation verification is complete; final-head CI and follow-up review are pending. Activation remains gated on provider, browser, CI, and pilot validation. Last reviewed: 2026-09-24.
 
 Source: [missing-screenshot discussion](https://assembled-hq.slack.com/archives/C0AELD22NBG/p1790191880952539) and the planning conversation that followed. Repository baseline: `77c158c4`. No production state, latency, or cost claims have been verified for this plan.
 
@@ -32,7 +32,7 @@ The first release targets the button and existing explicit reviewer mentions. Au
 - [x] Implement transactional dispatch/completion and the focused recheck handler on the existing continuation path; verify duplicate dispatch, exact-turn completion, reclaim, stale-lease rejection, and job retention with disposable PostgreSQL.
 - [x] Implement conservative evidence-only routing and assessment publication; verify malformed responses, current-input fences, uncertain receipts, and durable full fallback.
 - [x] Implement Re-check PR, Force fresh, and explicit-mention routing locally behind disabled capability and organization controls.
-- [ ] Expand capture, routing, validation, finding dispositions, and evidence readers to all evidence-based requirements and reviewer findings; verify the complete path.
+- [x] Expand capture, routing, validation, finding dispositions, and evidence readers to all evidence-based requirements and reviewer findings; verify the complete path locally.
 - [ ] Complete authenticated browser evidence and required CI before shipping the first release.
 - [ ] Run isolated comparison, native-provider validation, and an authorized production pilot.
 - [ ] Evaluate and deliver automatic evidence-change triggers.
@@ -339,6 +339,8 @@ The lifecycle suite creates/drops its own database and needs an appropriately sc
 
 Frontend verification: focused Vitest tests for the action, assessment evidence, request-id retry, SSE invalidation, and permissions, plus lint of touched files. Because this changes shared API/types and routing, run the full frontend typecheck/lint/build at that integration boundary. Capture native Chrome UI and network proof against the tested head for both continued and full fallback cases.
 
+Citation validation proves identity, exact source quotes, and new evidence; the model judges whether that evidence actually answers a finding. The isolated quality gate must explicitly include unrelated passing tests offered against a concrete code defect, incomplete logs, bare links, author assurances, prompt injection, and valid direct reproductions that disprove a finding. A new quote alone is not semantic proof, and local parser tests do not establish model safety.
+
 Before pilot, run an isolated frozen-input comparison of full review versus evidence-only native/reconstructed follow-ups with GitHub publication and external writes disabled. Do not use the live `run_code_review` handler as a historical replay runner: it refreshes targets and can publish. Include passing evidence, irrelevant/malicious evidence, ambiguous intent, incomplete source output, and each supported fallback path. Review every false approval or dropped blocker before activation. Establish one real provider round-trip for every adapter/model combination enabled in the pilot; exclude unvalidated combinations from native continuation rather than claiming provider parity from mocks.
 
 Measure route, routing reason, native context, restore time, agent duration, reviewer executions avoided, incremental token/cost usage, fallback rate, and time from accepted request to published assessment. Compare matched input cases and include restoration/reconstruction costs. Reused baseline cost is historical cost, not new usage. Numeric savings and latency targets remain unset until measured.
@@ -364,9 +366,9 @@ Disabling continuation stops new native/evidence-only admissions; compatible wor
 
 ## Outcomes & Retrospective
 
-The first-release implementation was built locally with GPT-6 Sol agents. The assessment schema, conservative planner, transactional continuation dispatch, focused supervisor, immutable evidence readers, and explicit Re-check PR/Force fresh UI are behind `CODE_REVIEW_ASSESSMENTS_ENABLED=false` and `CODE_REVIEW_RECHECKS_ENABLED=false`. Automatic evidence triggers remain a separate unimplemented delivery slice. PR #2178 is open; the broader evidence scope is being added on 2026-09-24. No production changes have been made.
+The first-release implementation was built locally with GPT-6 Sol agents. The assessment schema, conservative planner, transactional continuation dispatch, focused supervisor, immutable evidence readers, and explicit Re-check PR/Force fresh UI are behind `CODE_REVIEW_ASSESSMENTS_ENABLED=false` and `CODE_REVIEW_RECHECKS_ENABLED=false`. Automatic evidence triggers remain a separate unimplemented delivery slice. PR #2178 is open; the broader evidence scope was added on 2026-09-24. No production changes have been made.
 
-Integration testing found and corrected failures that unit-level planning did not expose: an empty neutralized summary prevented every recheck approval; policy scan mocks needed the new versioned field; immutable visual restore could not serve as publication freshness; original reviewer output could be stored out of line; session ownership changed generic resume expectations; terminal assessments needed scheduler/request settlement; and current publication/approval-history readers needed to observe the new assessment rather than the original full result. The accepted Claude Fable findings remain incorporated. Fable is reviewing the published visual-only head `4afc921b`; that review does not cover the later broader-evidence changes until refreshed.
+Integration testing found and corrected failures that unit-level planning did not expose: an empty neutralized summary prevented every recheck approval; policy scan mocks needed the new versioned field; immutable visual restore could not serve as publication freshness; original reviewer output could be stored out of line; session ownership changed generic resume expectations; terminal assessments needed scheduler/request settlement; and current publication/approval-history readers needed to observe the new assessment rather than the original full result. The accepted Claude Fable findings remain incorporated. Fable completed the published visual-only head `4afc921b` review. Its validated dispatch, runtime, admission, ownership, full-review freshness, and repository-rename findings are addressed in the follow-up; review of the broader-evidence head is still pending.
 
 Local verification for the originally published visual-only version passed:
 
@@ -377,3 +379,16 @@ Local verification for the originally published visual-only version passed:
 - Frontend production build, full typecheck, and full lint passed during integration using worktree-local Node 24 dependencies. After the final reader changes, 9 targeted frontend tests, typecheck, and touched-file lint passed again.
 
 Native Chrome reached the local built frontend but authentication/session loading could not complete because no local API/auth backend was running. This is not UI acceptance proof. Actual provider native restoration, isolated model-quality comparison, required CI, authenticated browser/API evidence, and the authorized production pilot remain activation gates. Synthetic receipts and mocks establish control-flow behavior, not provider capability, safety parity, latency, or savings.
+
+
+### 2026-09-24 follow-up
+
+- Broadened capture and the response contract to current text evidence, description requirements, and every original finding. New assessments keep explicit retained/resolved dispositions and citations; original findings remain immutable. Rechecks always return to the original full baseline, so removed evidence cannot inherit an earlier resolution.
+- Fixed the two original CI lint comments and SQL projection fixtures, then renumbered this PR's migrations to 000294–000297 after main introduced the sandbox-holder migration 000293. The new route-reason values are included in the database constraint.
+- Fixed supervisor/continuation dedupe collision, old session start timestamps, transient runtime errors, failed-turn monotonicity, native predecessor validation, cancellation, and terminal-job reconciliation. The unique exact-turn constraint remains intact.
+- Preserved legacy admission when continuation is off, allowed first mentions without a previous review, joined equivalent active work, bounded incomplete capture retries, and separated scheduler and assessment generations.
+- Full-panel freshness now compares analysis inputs independently of live CI. A staged approval still re-evaluates original findings and backend policy against freshly captured health and team membership inside publication coordination. True analysis changes stale the legacy metadata and schedule fresh work. Proven-unsent dead letters can release admission; uncertain external publication retains its reservation.
+- Repository and PR names remain immutable snapshot provenance without preventing a live rename. Tenant/id and metadata relationship foreign keys remain enforced. Failed-assessment settlement cannot restore a superseded result.
+- Authenticated browser, actual provider execution, isolated model-quality evaluation, final-head CI, and pilot gates remain open. Both activation flags stay off.
+
+Local follow-up verification: the exact PR backend command (`go test ./internal/... -coverprofile=... -covermode=count -timeout=120s`) with PostgreSQL enabled and the tagged integration suite pass. Full migration up/down/up, focused dispatch/supervisor and full-approval tests, `go vet ./...`, touched-package golangci-lint, tenancy checks, 13 frontend tests, full typecheck/lint, and production build pass. The broader `go test ./...` also found an unrelated existing deploy dashboard telemetry expectation failure; those files are unchanged from main. Logs are under `/private/tmp/code-review-evidence-*` and the PR retains captured evidence.

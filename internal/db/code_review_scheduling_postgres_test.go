@@ -42,9 +42,9 @@ func newSchedulingPostgres(t *testing.T) (*pgxpool.Pool, uuid.UUID, uuid.UUID, u
 	t.Cleanup(pool.Close)
 	_, err = pool.Exec(ctx, `CREATE TABLE organizations(id uuid PRIMARY KEY);CREATE TABLE repositories(id uuid PRIMARY KEY,org_id uuid,full_name text);CREATE TABLE pull_requests(id uuid PRIMARY KEY,org_id uuid,github_repo text,title text,github_pr_url text,github_pr_number integer);CREATE TABLE users(id uuid PRIMARY KEY);CREATE TABLE sessions(id uuid PRIMARY KEY,org_id uuid,code_review_owner_pr_id uuid,status text,container_id text,turn_holding_container boolean);CREATE TABLE code_review_policies(id uuid PRIMARY KEY);
  CREATE TABLE code_review_session_metadata(org_id uuid,session_id uuid,pull_request_id uuid,status text,created_at timestamptz DEFAULT now(),review_output_key text);
- CREATE TABLE session_threads(org_id uuid,session_id uuid,status text);
- CREATE TABLE code_review_revision_assessments(id uuid PRIMARY KEY,org_id uuid,repository_id uuid,pull_request_id uuid,session_id uuid,review_scope text,status text,head_sha text DEFAULT '',base_sha text DEFAULT '',base_ref text DEFAULT '',generation bigint DEFAULT 1,failure_detail text,created_at timestamptz DEFAULT now());
- CREATE TABLE code_review_recheck_dispatches(org_id uuid,session_id uuid,status text);
+ CREATE TABLE session_threads(org_id uuid,session_id uuid,status text,id uuid DEFAULT gen_random_uuid());
+ CREATE TABLE code_review_revision_assessments(id uuid PRIMARY KEY,org_id uuid,repository_id uuid,pull_request_id uuid,session_id uuid,review_scope text,status text,head_sha text DEFAULT '',base_sha text DEFAULT '',base_ref text DEFAULT '',generation bigint DEFAULT 1,superseded_by_assessment_id uuid,failure_detail text,created_at timestamptz DEFAULT now());
+ CREATE TABLE code_review_recheck_dispatches(org_id uuid,session_id uuid,status text,id uuid DEFAULT gen_random_uuid(),assessment_id uuid,thread_id uuid,job_id uuid,created_at timestamptz DEFAULT now());
  CREATE TABLE thread_runtimes(org_id uuid,session_id uuid,status text);
  CREATE TABLE session_executors(org_id uuid,session_id uuid,status text);
  CREATE TABLE jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid,queue text,job_type text,payload jsonb,priority int,dedupe_key text,status text DEFAULT 'pending',run_at timestamptz DEFAULT now(),updated_at timestamptz DEFAULT now(),attempts int DEFAULT 0,max_attempts int DEFAULT 8,last_error text,locked_by_node_id text,run_owner_id text,owner_kind text,lock_token uuid,locked_at timestamptz,lease_expires_at timestamptz,completed_at timestamptz);
@@ -112,6 +112,8 @@ func TestCodeReviewSchedulingPostgres(t *testing.T) {
 				state.State = models.CodeReviewScheduleRunning
 				return nil
 			}), "record failed assessment pointer")
+			_, err = pool.Exec(ctx, `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,pull_request_id,review_scope,status,generation,superseded_by_assessment_id) VALUES($1,$2,$3,$4,'evidence_only','completed',3,$5)`, uuid.New(), org, repo, pr, failedID)
+			require.NoError(t, err, "seed newer completed result that was explicitly superseded")
 			require.NoError(t, store.SettleAssessment(ctx, org, failedID), "settle failed successor")
 			settled, err = store.Get(ctx, org, pr)
 			require.NoError(t, err, "read restored scheduler")

@@ -46,7 +46,7 @@ func (s *CodeReviewScheduleStore) SettleAssessment(ctx context.Context, orgID, a
 			state.CurrentAssessmentID = &assessmentID
 		} else if state.CurrentAssessmentID != nil && *state.CurrentAssessmentID == assessmentID {
 			var completedID uuid.UUID
-			err := tx.QueryRow(ctx, `SELECT id FROM code_review_revision_assessments WHERE org_id=$1 AND pull_request_id=$2 AND status='completed' ORDER BY generation DESC LIMIT 1`, orgID, pullRequestID).Scan(&completedID)
+			err := tx.QueryRow(ctx, `SELECT id FROM code_review_revision_assessments WHERE org_id=$1 AND pull_request_id=$2 AND status='completed' AND superseded_by_assessment_id IS NULL ORDER BY generation DESC LIMIT 1`, orgID, pullRequestID).Scan(&completedID)
 			if errors.Is(err, pgx.ErrNoRows) {
 				state.CurrentAssessmentID = nil
 			} else if err != nil {

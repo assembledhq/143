@@ -1,7 +1,5 @@
 -- Assessment identity is separate from the (possibly reused) review session.
 -- Composite parent keys make tenant and metadata ownership enforceable by FKs.
-CREATE UNIQUE INDEX code_review_repositories_org_id_name ON repositories(org_id, id, full_name);
-CREATE UNIQUE INDEX code_review_pull_requests_org_id_repo ON pull_requests(org_id, id, github_repo);
 CREATE UNIQUE INDEX code_review_policies_org_id ON code_review_policies(org_id, id);
 CREATE UNIQUE INDEX code_review_metadata_identity ON code_review_session_metadata(org_id, id, session_id, repository_id, pull_request_id, policy_id);
 
@@ -33,7 +31,7 @@ CREATE TABLE code_review_revision_assessments (
     input_digest text NOT NULL CHECK (input_digest <> ''),
     input_manifest jsonb NOT NULL CHECK (jsonb_typeof(input_manifest) = 'object'),
     review_scope text NOT NULL CHECK (review_scope IN ('full','evidence_only')),
-    route_reason text NOT NULL CHECK (route_reason IN ('initial_full','visual_changed','code_changed','contract_changed','intent_changed','request_changed','gates_changed','no_complete_baseline','baseline_not_visual_only','evidence_validation_failed','inputs_unavailable','force_fresh','dispute')),
+    route_reason text NOT NULL CHECK (route_reason IN ('initial_full','visual_changed','evidence_changed','checks_changed','no_evidence_change','code_changed','contract_changed','intent_changed','request_changed','gates_changed','no_complete_baseline','baseline_not_visual_only','evidence_validation_failed','inputs_unavailable','force_fresh','dispute')),
     result_origin text CHECK (result_origin IN ('executed','reused','evidence_only')),
     coverage_complete boolean NOT NULL DEFAULT false,
     status text NOT NULL DEFAULT 'reserved' CHECK (status IN ('reserved','running','publishing','completed','superseded','failed','cancelled')),
@@ -52,8 +50,10 @@ CREATE TABLE code_review_revision_assessments (
     created_at timestamptz NOT NULL DEFAULT now(),
     completed_at timestamptz,
     superseded_at timestamptz,
-    CONSTRAINT code_review_assessment_repository_fk FOREIGN KEY (org_id,repository_id,repository_full_name) REFERENCES repositories(org_id,id,full_name),
-    CONSTRAINT code_review_assessment_pr_fk FOREIGN KEY (org_id,pull_request_id,repository_full_name) REFERENCES pull_requests(org_id,id,github_repo),
+    -- Names are immutable capture provenance; live repositories and PRs can be
+    -- renamed. Tenant/id keys and the metadata relationship enforce ownership.
+    CONSTRAINT code_review_assessment_repository_fk FOREIGN KEY (org_id,repository_id) REFERENCES repositories(org_id,id),
+    CONSTRAINT code_review_assessment_pr_fk FOREIGN KEY (org_id,pull_request_id) REFERENCES pull_requests(org_id,id),
     CONSTRAINT code_review_assessment_metadata_fk FOREIGN KEY (org_id,metadata_id,session_id,repository_id,pull_request_id,policy_id) REFERENCES code_review_session_metadata(org_id,id,session_id,repository_id,pull_request_id,policy_id),
     CONSTRAINT code_review_assessment_scope_source CHECK ((review_scope='full' AND source_assessment_id IS NULL) OR (review_scope='evidence_only' AND source_assessment_id IS NOT NULL)),
     CONSTRAINT code_review_assessment_terminal_time CHECK ((status IN ('completed','superseded','failed','cancelled')) = (completed_at IS NOT NULL)),

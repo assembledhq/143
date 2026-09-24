@@ -134,6 +134,41 @@ func TestSessionHandlerCreatePRRejoinsCompletedPublicationBeforeSnapshotChecks(t
 	require.Empty(t, coordinator.requests, "a harmless replay should not enqueue or mutate publication work")
 }
 
+func TestSessionPublicationActionsRejectCodeReviewOwnedSession(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		call func(*SessionHandler, http.ResponseWriter, *http.Request)
+	}{
+		{name: "create PR", call: (*SessionHandler).CreatePR},
+		{name: "create branch", call: (*SessionHandler).CreateBranch},
+		{name: "push PR", call: (*SessionHandler).PushChangesToPR},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create the database mock")
+			t.Cleanup(mock.Close)
+			orgID, sessionID, prID := uuid.New(), uuid.New(), uuid.New()
+			h := newSessionHandler(t, mock)
+			h.SetAutomationOwnershipGuard(codeReviewOwnershipGuardTest{err: &models.SessionCodeReviewOwnedError{PullRequestID: prID}})
+			now := time.Now().UTC()
+			mock.ExpectQuery("SELECT .+ FROM sessions").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(sessionID, orgID, models.SessionStatusIdle, nil, nil, models.SandboxStateSnapshotted, nil, now)...))
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String(), nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("id", sessionID.String())
+			req = req.WithContext(middleware.WithOrgID(context.WithValue(req.Context(), chi.RouteCtxKey, rctx), orgID))
+			recorder := httptest.NewRecorder()
+			tt.call(h, recorder, req)
+			require.Equal(t, http.StatusConflict, recorder.Code, "owned review session must reject competing publication")
+			require.Contains(t, recorder.Body.String(), `"code":"SESSION_CODE_REVIEW_OWNED"`, "publication action should use the ownership conflict")
+			require.NoError(t, mock.ExpectationsWereMet(), "guard should stop before any publication query or mutation")
+		})
+	}
+}
+
 func TestSessionHandlerCreatePRDoesNotRejoinExistingReviewForExplicitAction(t *testing.T) {
 	t.Parallel()
 

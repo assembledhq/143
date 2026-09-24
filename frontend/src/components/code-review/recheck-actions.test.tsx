@@ -43,6 +43,17 @@ describe("PR re-check actions", () => {
     await user.type(screen.getByRole("textbox", { name: "Reason" }), "Please revisit the full code path");
     await user.click(screen.getByRole("button", { name: "Request full review" }));
     await waitFor(() => expect(requests).toEqual([{ request_id: expect.any(String), mode: "force_fresh", reason: "Please revisit the full code path" }]));
+    expect(await screen.findByRole("status")).toHaveTextContent("Full review requested.");
+  });
+
+  it("explains a queued re-check and links its assessment", async () => {
+    policy();
+    server.use(http.post("*/api/v1/pull-requests/:id/code-review/requests", () => HttpResponse.json({ data: { disposition: "queued", assessment_id: "00000000-0000-4000-8000-000000000001" } }, { status: 202 })));
+    const user = userEvent.setup();
+    renderWithProviders(<RecheckActions prID="pr-1" canManage completed />);
+    await user.click(await screen.findByRole("button", { name: "Re-check PR" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Re-check requested. Current inputs determine whether a full review is needed.");
+    expect(screen.getByRole("link", { name: "View assessment" })).toHaveAttribute("href", "/code-reviews?assessment=00000000-0000-4000-8000-000000000001");
   });
 
   it("allocates a new identity when the force reason changes after an uncertain failure", async () => {

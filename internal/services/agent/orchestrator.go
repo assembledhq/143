@@ -1932,7 +1932,7 @@ func reviewTurnPreparationMode(mode repositoryPreparationMode, pending []models.
 		return repositoryPreparationFull
 	}
 	for _, message := range pending {
-		if message.Source != models.SessionMessageSourceCodeReview {
+		if message.Source != models.SessionMessageSourceCodeReview && message.Source != models.SessionMessageSourceCodeReviewRecheck {
 			return repositoryPreparationFull
 		}
 	}
@@ -4269,6 +4269,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		Str("org_id", session.OrgID.String()).
 		Int("turn", session.CurrentTurn).
 		Logger()
+	if codeReviewTurn != nil {
+		log = log.With().Bool("code_review_recheck", true).Str("assessment_id", codeReviewTurn.options.AssessmentID.String()).Logger()
+	}
 
 	// Gate: if a post-PR snapshot upload is still in flight, hydrating from
 	// the prior SnapshotKey would restore stale pre-PR state. Bail out early

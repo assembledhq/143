@@ -156,7 +156,7 @@ func (s *Service) RequestScheduledReview(ctx context.Context, req ScheduleReques
 	} else if err != nil {
 		return ScheduleRequestResult{}, err
 	}
-	input := ReviewChangedInput{OrgID: req.OrgID, RepositoryID: state.RepositoryID, PullRequestID: req.PullRequestID, ExplicitRequest: true, GitHubDeliveryID: req.RequestID.String(), ChangeReason: "ui.review_now", TriggerSource: models.CodeReviewTriggerSourceSlashCommand}
+	input := ReviewChangedInput{OrgID: req.OrgID, RepositoryID: state.RepositoryID, PullRequestID: req.PullRequestID, ExplicitRequest: true, GitHubDeliveryID: req.RequestID.String(), RequestContext: assessmentRequestContext(req), ChangeReason: "ui.review_now", TriggerSource: models.CodeReviewTriggerSourceSlashCommand}
 	result, err := s.scheduleReview(ctx, input, req.Mode, false, req.RequesterID)
 	if err != nil {
 		return ScheduleRequestResult{}, err
@@ -385,6 +385,19 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 			}
 			force = force || string(before) != string(after)
 		}
+		if !force && requestID != uuid.Nil && state.PendingInput == nil && state.ActiveSessionID != nil &&
+			latestErr == nil && latest.SessionID == *state.ActiveSessionID &&
+			(latest.Status == models.CodeReviewSessionStatusQueued || latest.Status == models.CodeReviewSessionStatusRunning) &&
+			latest.HeadSHA == snapshot.HeadSHA && latest.BaseSHA == snapshot.BaseSHA && !baseRefChanged {
+			_, err = tx.Exec(ctx, `UPDATE code_review_requests SET status='joined',session_id=$3,assessment_id=$4,target_generation=$5 WHERE org_id=$1 AND id=$2 AND status='pending'`, input.OrgID, requestID, latest.SessionID, state.ActiveAssessmentID, state.Generation)
+			if err != nil {
+				return err
+			}
+			result.Reused = true
+			result.Deferred = true
+			result.SessionID = latest.SessionID
+			return nil
+		}
 		if force && !pending.Force && !changed && !supersededGeneration {
 			state.Generation++
 		}
@@ -542,7 +555,7 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 			_, err = s.requestAssessmentReview(ctx, ScheduleRequestInput{OrgID: wake.OrgID, PullRequestID: wake.PullRequestID, RequestID: requestID, RequesterID: pending.RequesterID, Mode: models.CodeReviewRecheck, Reason: reason, RequestContext: pending.Input.RequestContext, TriggerSource: pending.Input.TriggerSource}, true)
 		} else if pending.Mode == models.CodeReviewRecheck && !s.scheduling.rechecksEnabled {
 			fallbackID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("code-review-disabled-pending:"+pending.Input.GitHubDeliveryID))
-			_, err = s.scheduleReview(ctx, ReviewChangedInput{OrgID: wake.OrgID, RepositoryID: state.RepositoryID, PullRequestID: wake.PullRequestID, ExplicitRequest: true, GitHubDeliveryID: fallbackID.String(), RequestContext: pending.Input.RequestContext, TriggerSource: pending.Input.TriggerSource, ChangeReason: "assessment.continuation_disabled"}, models.CodeReviewForceFresh, true, pending.RequesterID)
+			_, err = s.scheduleReview(ctx, ReviewChangedInput{OrgID: wake.OrgID, RepositoryID: state.RepositoryID, PullRequestID: wake.PullRequestID, ExplicitRequest: true, GitHubDeliveryID: fallbackID.String(), RequestContext: pending.Input.RequestContext, TriggerSource: pending.Input.TriggerSource, ChangeReason: "assessment.continuation_disabled"}, models.CodeReviewReviewNow, false, pending.RequesterID)
 		} else {
 			_, err = s.scheduleReview(ctx, ReviewChangedInput{OrgID: wake.OrgID, RepositoryID: state.RepositoryID, PullRequestID: wake.PullRequestID}, models.CodeReviewEnsureCurrent, false, nil)
 		}

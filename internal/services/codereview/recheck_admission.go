@@ -29,10 +29,17 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 	state, err := s.GetSchedule(ctx, req.OrgID, req.PullRequestID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		latest, loadErr := s.metadata.GetLatestByPullRequest(ctx, req.OrgID, req.PullRequestID)
-		if loadErr != nil {
+		if errors.Is(loadErr, pgx.ErrNoRows) {
+			repoID, repoErr := s.scheduling.store.GetRepositoryIDForPR(ctx, req.OrgID, req.PullRequestID)
+			if repoErr != nil {
+				return ScheduleRequestResult{}, repoErr
+			}
+			state.RepositoryID = repoID
+		} else if loadErr != nil {
 			return ScheduleRequestResult{}, loadErr
+		} else {
+			state.RepositoryID = latest.RepositoryID
 		}
-		state.RepositoryID = latest.RepositoryID
 	} else if err != nil {
 		return ScheduleRequestResult{}, err
 	}
@@ -45,6 +52,10 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 	if err != nil {
 		return ScheduleRequestResult{}, err
 	}
+	legacyHash, err := reviewRequestHash(req.PullRequestID, models.CodeReviewReviewNow, requestContext, false)
+	if err != nil {
+		return ScheduleRequestResult{}, err
+	}
 	kind := "github"
 	if req.RequesterID != nil {
 		kind = "ui"
@@ -52,7 +63,8 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 	if !recovering {
 		existing, lookupErr := s.scheduling.store.GetRequestByIdentity(ctx, req.OrgID, kind, req.RequestID.String())
 		if lookupErr == nil {
-			if existing.Mode != req.Mode || (existing.InputHash != ordinaryHash && existing.InputHash != forcedHash) {
+			legacyReplay := req.Mode == models.CodeReviewRecheck && existing.Mode == models.CodeReviewReviewNow && existing.InputHash == legacyHash
+			if !legacyReplay && (existing.Mode != req.Mode || (existing.InputHash != ordinaryHash && existing.InputHash != forcedHash)) {
 				return ScheduleRequestResult{}, db.ErrCodeReviewRequestConflict
 			}
 			return s.existingAssessmentRequestResult(ctx, req, existing)
@@ -60,6 +72,16 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 		if !errors.Is(lookupErr, pgx.ErrNoRows) {
 			return ScheduleRequestResult{}, lookupErr
 		}
+	}
+	resolved, err := s.policies.ResolvePolicy(ctx, req.OrgID)
+	if err != nil {
+		return ScheduleRequestResult{}, err
+	}
+	if !resolved.Config.Enabled {
+		return ScheduleRequestResult{}, ErrReviewIneligible
+	}
+	if req.Mode == models.CodeReviewRecheck && !resolved.Config.ContinuationPolicy.Effective().Enabled {
+		return s.requestLegacyAssessmentReview(ctx, req, state.RepositoryID, requestContext, recovering)
 	}
 	if req.Mode == models.CodeReviewForceFresh {
 		return s.requestFullAssessmentReview(ctx, req, state.RepositoryID, requestContext, true, recovering)
@@ -73,7 +95,7 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 	}
 	baseline, baselineErr := s.scheduling.store.GetLatestFullBaseline(ctx, req.OrgID, req.PullRequestID)
 	if errors.Is(baselineErr, pgx.ErrNoRows) {
-		return s.requestFullAssessmentReview(ctx, req, state.RepositoryID, requestContext, true, recovering)
+		return s.requestLegacyAssessmentReview(ctx, req, state.RepositoryID, requestContext, recovering)
 	}
 	if baselineErr != nil {
 		return ScheduleRequestResult{}, baselineErr
@@ -91,6 +113,9 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 		return s.requestFullAssessmentReview(ctx, req, state.RepositoryID, requestContext, true, recovering)
 	}
 	if captureErr != nil {
+		if recovering && state.FirstPendingAt != nil && s.scheduling.now().Sub(*state.FirstPendingAt) >= 15*time.Minute {
+			return s.requestFullAssessmentReview(ctx, req, state.RepositoryID, requestContext, true, recovering)
+		}
 		return s.queuePendingAssessmentCapture(ctx, req, state.RepositoryID, requestContext, ordinaryHash, kind)
 	}
 	latest, err := s.scheduling.store.GetLatestAssessment(ctx, req.OrgID, req.PullRequestID)
@@ -110,14 +135,14 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 	}
 	policy := captured.Policy.Config()
 	if !policy.ContinuationPolicy.Effective().Enabled {
-		return s.requestFullAssessmentReview(ctx, req, state.RepositoryID, requestContext, true, recovering)
+		return s.requestLegacyAssessmentReview(ctx, req, state.RepositoryID, requestContext, recovering)
 	}
 	baselineFacts := baselineForPlanning(baseline, policy, captured.Files)
 	plan := PlanReviewRecheck(RecheckPlanInput{Current: &captured.Manifest, Baseline: baselineFacts, Previous: previous})
 	if plan.Route == RecheckRouteWait {
 		return s.queuePendingAssessmentCapture(ctx, req, state.RepositoryID, requestContext, ordinaryHash, kind)
 	}
-	if plan.Route == RecheckRouteFull {
+	if plan.Route == RecheckRouteFull && !(latest.Status == models.CodeReviewAssessmentReserved || latest.Status == models.CodeReviewAssessmentRunning || latest.Status == models.CodeReviewAssessmentPublishing) {
 		return s.requestFullAssessmentReview(ctx, req, state.RepositoryID, requestContext, true, recovering)
 	}
 	result, err := s.admitCapturedAssessment(ctx, req, captured, baseline, latest, plan, ordinaryHash, kind, requestContext)
@@ -271,6 +296,11 @@ func (s *Service) requestFullAssessmentReview(ctx context.Context, req ScheduleR
 	return ScheduleRequestResult{RequestID: req.RequestID, SessionID: sessionID, Disposition: disposition, Schedule: state}, nil
 }
 
+func (s *Service) requestLegacyAssessmentReview(ctx context.Context, req ScheduleRequestInput, repoID uuid.UUID, requestContext *ReviewRequestContext, recovering bool) (ScheduleRequestResult, error) {
+	req.Mode = models.CodeReviewReviewNow
+	return s.requestFullAssessmentReview(ctx, req, repoID, requestContext, false, recovering)
+}
+
 func (s *Service) queuePendingAssessmentCapture(ctx context.Context, req ScheduleRequestInput, repoID uuid.UUID, context *ReviewRequestContext, hash, kind string) (ScheduleRequestResult, error) {
 	var result ScheduleRequestResult
 	err := s.scheduling.store.WithLockedPR(ctx, req.OrgID, repoID, req.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
@@ -326,7 +356,9 @@ func (s *Service) queuePendingAssessmentCapture(ctx context.Context, req Schedul
 		}
 		state.PendingRequestID = &id
 		now := s.scheduling.now()
-		state.FirstPendingAt = &now
+		if state.FirstPendingAt == nil {
+			state.FirstPendingAt = &now
+		}
 		state.State = models.CodeReviewScheduleWaiting
 		state.WaitReason = models.CodeReviewWaitContext
 		retry := now.Add(15 * time.Second)
@@ -355,11 +387,11 @@ func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleReque
 			return err
 		}
 		if current.ID != previous.ID {
-			return errRecheckAdmissionChanged
+			return fmt.Errorf("%w: predecessor changed", errRecheckAdmissionChanged)
 		}
 		currentBaseline, err := assessments.GetByID(ctx, req.OrgID, baseline.ID)
 		if err != nil || currentBaseline.Status != models.CodeReviewAssessmentCompleted {
-			return errRecheckAdmissionChanged
+			return fmt.Errorf("%w: full baseline changed", errRecheckAdmissionChanged)
 		}
 		resolved, err := db.NewCodeReviewStore(tx).ResolvePolicy(ctx, req.OrgID)
 		if err != nil {
@@ -369,7 +401,7 @@ func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleReque
 			return errRecheckNeedsFull
 		}
 		if state.RepositoryID != captured.Manifest.Code.RepositoryID || captured.Manifest.Code.HeadSHA != captured.Snapshot.HeadSHA || captured.Manifest.Code.BaseSHA != captured.Snapshot.BaseSHA || captured.Manifest.Code.BaseRef != captured.Snapshot.BaseRef {
-			return errRecheckAdmissionChanged
+			return fmt.Errorf("%w: captured revision changed", errRecheckAdmissionChanged)
 		}
 		// The pull request store was refreshed by capture; the admission lock
 		// verifies it still names the same immutable target.
@@ -378,7 +410,7 @@ func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleReque
 			return err
 		}
 		if pr.HeadSHA == nil || *pr.HeadSHA != captured.Manifest.Code.HeadSHA || pr.BaseSHA == nil || *pr.BaseSHA != captured.Manifest.Code.BaseSHA {
-			return errRecheckAdmissionChanged
+			return fmt.Errorf("%w: synchronized pull request changed", errRecheckAdmissionChanged)
 		}
 		requestID, duplicate, err := db.RecordCodeReviewRequest(ctx, tx, req.OrgID, state.RepositoryID, req.PullRequestID, kind, req.RequestID.String(), req.Mode, hash, state.Generation+1, req.RequesterID)
 		if err != nil {
@@ -429,7 +461,7 @@ func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleReque
 		}
 		lockedPlan := PlanReviewRecheck(RecheckPlanInput{Current: &captured.Manifest, Baseline: facts, Previous: predecessor})
 		if lockedPlan != plan {
-			return errRecheckAdmissionChanged
+			return fmt.Errorf("%w: locked plan %s/%s differs from %s/%s", errRecheckAdmissionChanged, lockedPlan.Route, lockedPlan.Reason, plan.Route, plan.Reason)
 		}
 		if lockedPlan.Route == RecheckRouteFull {
 			return errRecheckNeedsFull
@@ -481,14 +513,13 @@ func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleReque
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `UPDATE code_review_requests SET assessment_id=$3,session_id=$4,target_generation=$5 WHERE org_id=$1 AND id=$2`, req.OrgID, requestID, assessmentID, currentBaseline.SessionID, generation)
+		_, err = tx.Exec(ctx, `UPDATE code_review_requests SET assessment_id=$3,session_id=$4,target_generation=$5 WHERE org_id=$1 AND id=$2`, req.OrgID, requestID, assessmentID, currentBaseline.SessionID, state.Generation)
 		if err != nil {
 			return err
 		}
 		state.ActiveAssessmentID = &assessmentID
 		state.CurrentAssessmentID = &assessmentID
 		state.ActiveSessionID = &currentBaseline.SessionID
-		state.Generation = generation
 		state.State = models.CodeReviewScheduleRunning
 		state.WaitReason = models.CodeReviewWaitNone
 		state.PendingInput = nil

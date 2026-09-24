@@ -80,10 +80,10 @@ func (f *assessmentSnapshotFixture) DiscoverCodeReviewTextEvidence(context.Conte
 func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name                                                                 string
-		change, staleHealth, incompleteVisual, overflow, closed, syncFailure bool
+		name                                                                                  string
+		change, staleHealth, incompleteVisual, overflow, closed, syncFailure, invalidSettings bool
 	}{
-		{name: "complete capture"}, {name: "intent changes during capture", change: true}, {name: "health for old head", staleHealth: true}, {name: "incomplete visual discovery", incompleteVisual: true}, {name: "visual source overflow", overflow: true}, {name: "closed target", closed: true}, {name: "failed gate refresh", syncFailure: true},
+		{name: "complete capture"}, {name: "intent changes during capture", change: true}, {name: "health for old head", staleHealth: true}, {name: "incomplete visual discovery", incompleteVisual: true}, {name: "visual source overflow", overflow: true}, {name: "closed target", closed: true}, {name: "failed gate refresh", syncFailure: true}, {name: "invalid settings JSON", invalidSettings: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -107,13 +107,20 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			}
 			prs := &pullRequestStub{result: models.PullRequest{ID: prID, OrgID: orgID, GitHubRepo: "acme/web", GitHubPRNumber: 42}, health: health}
 			visual := &assessmentVisualFixture{snapshot: models.CodeReviewVisualEvidenceSnapshot{AssessmentID: &in.AssessmentID, Complete: !tt.incompleteVisual, Overflow: tt.overflow}}
-			s := NewAssessmentInputCaptureService(policies, prs, &visualEvidenceRepositoryStoreStub{repository: models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/web", InstallationID: 1}}, assessmentOrgFixture{models.Organization{Settings: json.RawMessage(`{}`)}}, snapshots, visual, assessmentFilesFixture{})
+			orgSettings := json.RawMessage(`{}`)
+			if tt.invalidSettings {
+				orgSettings = json.RawMessage(`{broken`)
+			}
+			s := NewAssessmentInputCaptureService(policies, prs, &visualEvidenceRepositoryStoreStub{repository: models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/web", InstallationID: 1}}, assessmentOrgFixture{models.Organization{Settings: orgSettings}}, snapshots, visual, assessmentFilesFixture{})
 			s.SetExternalContextResolver(assessmentExternalFixture{})
 			result, err := s.CaptureAssessmentInputs(context.Background(), in)
-			if tt.change || tt.staleHealth || tt.incompleteVisual || tt.overflow || tt.closed || tt.syncFailure {
+			if tt.change || tt.staleHealth || tt.incompleteVisual || tt.overflow || tt.closed || tt.syncFailure || tt.invalidSettings {
 				require.Error(t, err, "capture must reject mixed, stale, or unavailable inputs")
 				if tt.overflow {
 					require.ErrorIs(t, err, ErrAssessmentReuseUnavailable, "visual source overflow should permit legacy full review without reuse")
+				}
+				if tt.invalidSettings {
+					require.ErrorIs(t, err, ErrAssessmentReuseUnavailable, "invalid raw settings must never hash as an empty contract")
 				}
 				return
 			}
@@ -121,6 +128,8 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			require.NoError(t, ValidateReviewInputManifest(result.Manifest), "persisted manifest must rebuild exactly")
 			require.Equal(t, "main", result.Manifest.Code.BaseRef, "base ref must come from GitHub rather than repository default")
 			require.True(t, result.Manifest.Gates.ChecksVerified, "complete confirmed check inventory should support check-only rechecks")
+			require.Equal(t, head, result.Health.HeadSHA, "captured health must describe the exact reviewed head")
+			require.True(t, result.Health.ChecksConfirmed, "captured health should preserve confirmed check provenance")
 			require.Equal(t, []ReviewTextEvidence{newReviewTextEvidence("pull_request_description", "42", "https://github.com/acme/web/pull/42", "", "Intent stays unchanged", "full")}, result.Manifest.TextEvidence.Items, "full PR description should be immutable citable text")
 			require.Equal(t, 2, snapshots.calls, "provider snapshot must bracket files and visual capture")
 			require.True(t, visual.request.Fresh, "publication refresh must bypass immutable visual snapshot restoration")

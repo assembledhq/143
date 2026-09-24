@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
@@ -17,15 +19,73 @@ import (
 
 var errFullAssessmentInputsChanged = errors.New("full assessment inputs changed before publication")
 
-func verifyFullAssessmentFreshness(ctx context.Context, services *Services, job runCodeReviewPayload, assessment models.CodeReviewAssessment) error {
+// Full reviews may finish after CI changes. Their panel still covers the same
+// analysis inputs; live publication safety is checked separately below.
+func captureFreshFullAssessment(ctx context.Context, services *Services, job runCodeReviewPayload, assessment models.CodeReviewAssessment) (codereviewsvc.AssessmentInputCaptureResult, error) {
 	if services == nil || services.CodeReviewInputCapture == nil {
-		return fmt.Errorf("assessment freshness capture unavailable")
+		return codereviewsvc.AssessmentInputCaptureResult{}, fmt.Errorf("assessment freshness capture unavailable")
 	}
 	fresh, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: job.OrgID, RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, SessionID: job.SessionID, AssessmentID: assessment.ID, RequestContext: job.RequestContext, Fresh: true})
 	if err != nil {
+		return fresh, err
+	}
+	var baseline codereviewsvc.ReviewInputManifest
+	if json.Unmarshal(assessment.InputManifest, &baseline) != nil || baseline.InputDigest != assessment.InputDigest ||
+		!fullAssessmentAnalysisUnchanged(baseline, fresh.Manifest) || fresh.Manifest.Code.HeadSHA != assessment.HeadSHA || fresh.Manifest.Code.BaseSHA != assessment.BaseSHA || fresh.Manifest.Code.BaseRef != assessment.BaseRef || fresh.Policy.ID != assessment.PolicyID {
+		return fresh, errFullAssessmentInputsChanged
+	}
+	return fresh, nil
+}
+
+func verifyFullAssessmentFreshness(ctx context.Context, services *Services, job runCodeReviewPayload, assessment models.CodeReviewAssessment) error {
+	_, err := captureFreshFullAssessment(ctx, services, job, assessment)
+	return err
+}
+
+func fullAssessmentAnalysisUnchanged(before, after codereviewsvc.ReviewInputManifest) bool {
+	if before.InputVersion != codereviewsvc.ReviewInputManifestVersion || before.InputVersion != after.InputVersion || before.ReuseEligible != after.ReuseEligible ||
+		before.CodeDigest == "" || before.CodeDigest != after.CodeDigest || before.ContractDigest == "" || before.ContractDigest != after.ContractDigest ||
+		before.IntentDigest == "" || before.IntentDigest != after.IntentDigest || before.VisualDigest == "" || before.VisualDigest != after.VisualDigest ||
+		before.RequestDigest == "" || before.RequestDigest != after.RequestDigest {
+		return false
+	}
+	withoutChecks := func(input codereviewsvc.ReviewTextInput) codereviewsvc.ReviewTextInput {
+		items := make([]codereviewsvc.ReviewTextEvidence, 0, len(input.Items))
+		for _, item := range input.Items {
+			if item.Surface != "check_status" {
+				items = append(items, item)
+			}
+		}
+		input.Items = items
+		return input
+	}
+	return reflect.DeepEqual(withoutChecks(before.TextEvidence), withoutChecks(after.TextEvidence))
+}
+
+// A staged approval must still pass the backend decision rules at the moment
+// of publication, even when CI, merge eligibility, or team membership changed.
+func verifyFullAssessmentApproval(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, fresh codereviewsvc.AssessmentInputCaptureResult) error {
+	if fresh.Health == nil {
+		return errors.New("fresh full assessment health unavailable")
+	}
+	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
+	if err != nil {
 		return err
 	}
-	if fresh.Manifest.InputDigest != assessment.InputDigest || fresh.Manifest.Code.HeadSHA != assessment.HeadSHA || fresh.Manifest.Code.BaseSHA != assessment.BaseSHA || fresh.Manifest.Code.BaseRef != assessment.BaseRef || fresh.Policy.ID != assessment.PolicyID {
+	findings, err := stores.CodeReviews.ListFindings(ctx, job.OrgID, job.SessionID, false)
+	if err != nil {
+		return err
+	}
+	job.PullRequestAuthorTeams, err = resolveCodeReviewAuthorTeams(ctx, stores, services, fresh.Policy.Config(), job, fresh.PullRequest)
+	if err != nil {
+		return err
+	}
+	decision, _ := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
+		Policy: fresh.Policy.Config(), Job: job, PullRequest: fresh.PullRequest, Health: fresh.Health,
+		AgentResults: results, Findings: findings, ChangedFiles: fresh.Files, ChangedFilesAvailable: true,
+		OrchestratorSynthesis: codeReviewOrchestratorSynthesisFromResults(results), VisualEvidence: fresh.VisualEvidence, AssessedAt: time.Now().UTC(),
+	})
+	if decision.Decision != models.CodeReviewDecisionApproved {
 		return errFullAssessmentInputsChanged
 	}
 	return nil
@@ -78,7 +138,11 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 			if current.Status != models.CodeReviewAssessmentPublishing || current.Generation != assessment.Generation || current.InputDigest != assessment.InputDigest || current.PublicationState != models.CodeReviewPublicationReserved && current.PublicationState != models.CodeReviewPublicationUncertain {
 				return codereviewsvc.SubmitReviewResult{}, false, db.ErrCodeReviewAssessmentState
 			}
-			if err := verifyFullAssessmentFreshness(lockCtx, services, job, current); err != nil {
+			fresh, freshnessErr := captureFreshFullAssessment(lockCtx, services, job, current)
+			if freshnessErr == nil && decision == models.CodeReviewDecisionApproved {
+				freshnessErr = verifyFullAssessmentApproval(lockCtx, stores, services, job, fresh)
+			}
+			if err := freshnessErr; err != nil {
 				if !errors.Is(err, errFullAssessmentInputsChanged) && !errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
 					return codereviewsvc.SubmitReviewResult{}, false, err
 				}
@@ -153,6 +217,9 @@ func supersedeUnsentFullPublication(ctx context.Context, stores *Stores, service
 		}
 	} else if current.Status != models.CodeReviewAssessmentSuperseded || current.FailureDetail == nil || *current.FailureDetail != detail {
 		return db.ErrCodeReviewAssessmentState
+	}
+	if _, err := stores.CodeReviews.MarkStale(ctx, current.OrgID, current.SessionID, reason); err != nil {
+		return err
 	}
 	if err := settleFullAssessmentScheduler(ctx, stores.ThreadSendTx, current); err != nil {
 		return err

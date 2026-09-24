@@ -27,6 +27,7 @@ type AssessmentInputCaptureRequest struct {
 type AssessmentInputCaptureResult struct {
 	Manifest       ReviewInputManifest
 	VisualEvidence models.CodeReviewVisualEvidenceSnapshot
+	Health         *models.PullRequestHealthResponse
 	PullRequest    models.PullRequest
 	Policy         models.CodeReviewPolicyRecord
 	Files          []PullRequestFile
@@ -123,6 +124,9 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	org, err := s.orgs.GetByID(ctx, in.OrgID)
 	if err != nil {
 		return result, err
+	}
+	if len(org.Settings) > 0 && !json.Valid(org.Settings) || len(repo.Settings) > 0 && !json.Valid(repo.Settings) {
+		return result, fmt.Errorf("%w: organization or repository settings contain invalid JSON", ErrAssessmentReuseUnavailable)
 	}
 	reader, err := s.snapshots.PrepareCodeReviewPullRequestSnapshot(ctx, in.OrgID, in.RepositoryID)
 	if err != nil {
@@ -319,7 +323,16 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	pr.Body = &snapshot.Body
 	pr.HeadSHA = &snapshot.HeadSHA
 	pr.BaseSHA = &snapshot.BaseSHA
-	return AssessmentInputCaptureResult{Manifest: manifest, VisualEvidence: visual, PullRequest: pr, Policy: *resolved.Policy, Files: files, Snapshot: snapshot}, nil
+	pr.Status = models.PullRequestStatusOpen
+	capturedHealth := &models.PullRequestHealthResponse{
+		PullRequestID: pr.ID, PullRequestNumber: pr.GitHubPRNumber, Repository: pr.GitHubRepo,
+		URL: pr.GitHubPRURL, Status: models.PullRequestStatusOpen, HeadSHA: health.HeadSHA, BaseSHA: health.BaseSHA,
+		HealthVersion: health.Version, SyncStatus: models.PullRequestHealthSyncStatusSynced,
+		MergeState: summary.MergeState, HasConflicts: summary.HasConflicts, FailingTestCount: summary.FailingTestCount,
+		NeedsAgentAction: summary.NeedsAgentAction, Checks: append([]models.PullRequestCheckSummary(nil), summary.Checks...),
+		ChecksConfirmed: summary.ChecksConfirmed,
+	}
+	return AssessmentInputCaptureResult{Manifest: manifest, VisualEvidence: visual, Health: capturedHealth, PullRequest: pr, Policy: *resolved.Policy, Files: files, Snapshot: snapshot}, nil
 }
 
 func reviewMergeGuard(state models.PullRequestMergeState) string {

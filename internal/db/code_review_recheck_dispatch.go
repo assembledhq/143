@@ -14,6 +14,7 @@ import (
 )
 
 var ErrCodeReviewRecheckFence = errors.New("code review recheck turn lost its assessment or job lease")
+var ErrCodeReviewRecheckUserCancelled = errors.New("code review recheck turn was cancelled by the user")
 
 // RejectIfCodeReviewOwned blocks ordinary conversation mutations after a
 // review has reserved its orchestrator session. It is deliberately separate
@@ -192,7 +193,7 @@ func (s *CodeReviewRecheckStore) Dispatch(ctx context.Context, in models.CodeRev
 	if !ownerReady {
 		return models.CodeReviewRecheckDispatch{}, false, ErrCodeReviewRecheckFence
 	}
-	if _, err = tx.Exec(ctx, `UPDATE sessions SET code_review_owner_pr_id=$3,status='running' WHERE org_id=$1 AND id=$2 AND (code_review_owner_pr_id IS NULL OR code_review_owner_pr_id=$3)`, in.OrgID, in.SessionID, in.PullRequestID); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE sessions SET code_review_owner_pr_id=$3,status='running',started_at=now(),completed_at=NULL WHERE org_id=$1 AND id=$2 AND (code_review_owner_pr_id IS NULL OR code_review_owner_pr_id=$3)`, in.OrgID, in.SessionID, in.PullRequestID); err != nil {
 		return models.CodeReviewRecheckDispatch{}, false, err
 	}
 	var currentTurn int
@@ -227,14 +228,14 @@ func (s *CodeReviewRecheckStore) Dispatch(ctx context.Context, in models.CodeRev
 	if err != nil {
 		return models.CodeReviewRecheckDispatch{}, false, err
 	}
-	tag, err := tx.Exec(ctx, `UPDATE session_threads SET status='running',last_activity_at=now() WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4 AND status='idle'`, in.OrgID, in.ThreadID, in.SessionID, in.ExpectedTurn-1)
+	tag, err := tx.Exec(ctx, `UPDATE session_threads SET status='running',started_at=now(),completed_at=NULL,last_activity_at=now() WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4 AND status='idle'`, in.OrgID, in.ThreadID, in.SessionID, in.ExpectedTurn-1)
 	if err != nil {
 		return models.CodeReviewRecheckDispatch{}, false, err
 	}
 	if tag.RowsAffected() != 1 {
 		return models.CodeReviewRecheckDispatch{}, false, ErrCodeReviewRecheckFence
 	}
-	dedupe := "code_review_recheck:" + in.AssessmentID.String()
+	dedupe := "code_review_recheck_turn:" + in.AssessmentID.String()
 	jobID, err := s.jobs.EnqueueInTxWithOpts(ctx, tx, in.OrgID, EnqueueOpts{Queue: "agent", JobType: "continue_session", Payload: map[string]string{"org_id": in.OrgID.String(), "session_id": in.SessionID.String(), "thread_id": in.ThreadID.String(), "queued_message_id": fmt.Sprint(msg.ID), "code_review_assessment_id": in.AssessmentID.String()}, DedupeKey: &dedupe, Priority: 5, MaxAttempts: 5})
 	if err != nil {
 		return models.CodeReviewRecheckDispatch{}, false, err
@@ -295,6 +296,43 @@ func (s *CodeReviewRecheckStore) Claim(ctx context.Context, orgID, assessmentID,
 			return false, err
 		}
 	}
+	var cancelled bool
+	err = tx.QueryRow(ctx, `SELECT (COALESCE(t.cancel_requested_at >= d.created_at,false) OR EXISTS(
+		SELECT 1 FROM session_cancel_requests c WHERE c.org_id=d.org_id AND c.session_id=d.session_id AND c.requested_at >= d.created_at))
+		FROM code_review_recheck_dispatches d JOIN session_threads t ON t.org_id=d.org_id AND t.id=d.thread_id
+		WHERE d.org_id=$1 AND d.assessment_id=$2`, orgID, assessmentID).Scan(&cancelled)
+	if err != nil {
+		return false, err
+	}
+	if cancelled {
+		if _, err = tx.Exec(ctx, `UPDATE code_review_recheck_dispatches SET status='cancelled',failure_detail='user cancelled recheck turn',completed_at=now(),updated_at=now() WHERE org_id=$1 AND assessment_id=$2 AND status IN ('pending','running')`, orgID, assessmentID); err != nil {
+			return false, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE code_review_revision_assessments SET status='cancelled',failure_detail='user cancelled recheck turn',completed_at=now(),updated_at=now() WHERE org_id=$1 AND id=$2 AND status='running'`, orgID, assessmentID); err != nil {
+			return false, err
+		}
+		var drained bool
+		err = tx.QueryRow(ctx, `SELECT (s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
+			AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
+			AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
+			AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining')))
+			FROM sessions s WHERE s.org_id=$1 AND s.id=$2 FOR UPDATE`, orgID, sessionID).Scan(&drained)
+		if err != nil {
+			return false, err
+		}
+		if drained {
+			if _, err = tx.Exec(ctx, `UPDATE session_threads SET status='idle',current_turn=$4,completed_at=now(),last_activity_at=now() WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4-1 AND status IN ('running','cancelled')`, orgID, threadID, sessionID, expectedTurn); err != nil {
+				return false, err
+			}
+			if _, err = tx.Exec(ctx, `UPDATE sessions SET status='idle',last_activity_at=now() WHERE org_id=$1 AND id=$2 AND status IN ('running','cancelled')`, orgID, sessionID); err != nil {
+				return false, err
+			}
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return false, err
+		}
+		return false, ErrCodeReviewRecheckUserCancelled
+	}
 	tag, err := tx.Exec(ctx, `UPDATE code_review_recheck_dispatches SET status='running',attempt_lock_token=$3,updated_at=now() WHERE org_id=$1 AND assessment_id=$2 AND status IN ('pending','running')`, orgID, assessmentID, lockToken)
 	if err != nil {
 		return false, err
@@ -325,7 +363,7 @@ func (s *CodeReviewRecheckStore) NativeResumeProvider(ctx context.Context, orgID
 		WHERE d.org_id=$1 AND d.assessment_id=$2 AND d.job_id=$3 AND d.attempt_lock_token=$4 AND d.status='running'
 		AND j.status='running' AND j.lock_token=$4 AND a.status='running'
 		AND a.input_digest IS NOT NULL AND pa.head_sha=a.head_sha AND pa.code_digest=a.code_digest AND pa.contract_digest=a.contract_digest
-		AND p.status='completed' AND p.result_message_id IS NOT NULL AND NULLIF(p.provider_session_id,'') IS NOT NULL
+		AND p.status='completed' AND pa.status='completed' AND pa.result_origin='evidence_only' AND p.result_message_id IS NOT NULL AND NULLIF(p.provider_session_id,'') IS NOT NULL
 		AND NULLIF(p.snapshot_key,'') IS NOT NULL AND s.snapshot_key=p.snapshot_key AND s.pending_snapshot_key IS NULL
 		AND s.code_review_owner_pr_id=d.pull_request_id AND s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
 		AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
@@ -507,12 +545,16 @@ func (s *CodeReviewRecheckStore) Fail(ctx context.Context, orgID, assessmentID, 
 		return err
 	}
 	var drained bool
-	err = tx.QueryRow(ctx, `SELECT (s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false) AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))) FROM sessions s WHERE s.org_id=$1 AND s.id=$2 FOR UPDATE`, orgID, sessionID).Scan(&drained)
+	err = tx.QueryRow(ctx, `SELECT (s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
+		AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
+		AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
+		AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining')))
+		FROM sessions s WHERE s.org_id=$1 AND s.id=$2 FOR UPDATE`, orgID, sessionID).Scan(&drained)
 	if err != nil {
 		return err
 	}
 	if drained {
-		if _, err = tx.Exec(ctx, `UPDATE session_threads SET status='idle',last_activity_at=now() WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4 AND status='running'`, orgID, threadID, sessionID, expectedTurn-1); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE session_threads SET status='idle',current_turn=$4,completed_at=now(),last_activity_at=now() WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4-1 AND status='running'`, orgID, threadID, sessionID, expectedTurn); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(ctx, `UPDATE sessions SET status='idle',last_activity_at=now() WHERE org_id=$1 AND id=$2 AND status='running'`, orgID, sessionID); err != nil {
@@ -520,4 +562,166 @@ func (s *CodeReviewRecheckStore) Fail(ctx context.Context, orgID, assessmentID, 
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// FailTerminalJob closes a dispatch whose exact bound queue job has already
+// become terminal without a completion receipt. A stale worker cannot regain
+// authority because Complete requires that same job to be running under its
+// current lock token. The old conversation is released only after drain proof.
+func (s *CodeReviewRecheckStore) FailTerminalJob(ctx context.Context, orgID, assessmentID uuid.UUID, detail string) (bool, error) {
+	if orgID == uuid.Nil || assessmentID == uuid.Nil || detail == "" {
+		return false, fmt.Errorf("invalid terminal recheck reconciliation")
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var jobStatus string
+	var dispatchStatus models.CodeReviewRecheckDispatchStatus
+	var sessionID, threadID uuid.UUID
+	var expectedTurn int
+	err = tx.QueryRow(ctx, `SELECT j.status,d.status,d.session_id,d.thread_id,d.expected_turn
+		FROM code_review_recheck_dispatches d JOIN jobs j ON j.org_id=d.org_id AND j.id=d.job_id
+		WHERE d.org_id=$1 AND d.assessment_id=$2 FOR UPDATE OF j,d`, orgID, assessmentID).Scan(&jobStatus, &dispatchStatus, &sessionID, &threadID, &expectedTurn)
+	if err != nil {
+		return false, err
+	}
+	if jobStatus == "pending" || jobStatus == "running" || dispatchStatus == models.CodeReviewRecheckDispatchCompleted {
+		return false, tx.Commit(ctx)
+	}
+	var cancelled bool
+	err = tx.QueryRow(ctx, `SELECT (COALESCE(t.cancel_requested_at >= d.created_at,false) OR EXISTS(
+		SELECT 1 FROM session_cancel_requests c WHERE c.org_id=d.org_id AND c.session_id=d.session_id AND c.requested_at >= d.created_at))
+		FROM code_review_recheck_dispatches d JOIN session_threads t ON t.org_id=d.org_id AND t.id=d.thread_id
+		WHERE d.org_id=$1 AND d.assessment_id=$2`, orgID, assessmentID).Scan(&cancelled)
+	if err != nil {
+		return false, err
+	}
+	if cancelled && dispatchStatus != models.CodeReviewRecheckDispatchCancelled {
+		_, err = tx.Exec(ctx, `UPDATE code_review_recheck_dispatches SET status='cancelled',failure_detail='user cancelled recheck turn',completed_at=now(),updated_at=now() WHERE org_id=$1 AND assessment_id=$2 AND status IN ('pending','running')`, orgID, assessmentID)
+		if err != nil {
+			return false, err
+		}
+		_, err = tx.Exec(ctx, `UPDATE code_review_revision_assessments SET status='cancelled',failure_detail='user cancelled recheck turn',completed_at=now(),updated_at=now() WHERE org_id=$1 AND id=$2 AND status='running'`, orgID, assessmentID)
+		if err != nil {
+			return false, err
+		}
+	} else if dispatchStatus != models.CodeReviewRecheckDispatchFailed && dispatchStatus != models.CodeReviewRecheckDispatchCancelled {
+		_, err = tx.Exec(ctx, `UPDATE code_review_recheck_dispatches SET status='failed',failure_detail=$3,completed_at=now(),updated_at=now() WHERE org_id=$1 AND assessment_id=$2 AND status IN ('pending','running')`, orgID, assessmentID, detail)
+		if err != nil {
+			return false, err
+		}
+	}
+	var drained bool
+	err = tx.QueryRow(ctx, `SELECT (s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
+		AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
+		AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
+		AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining')))
+		FROM sessions s WHERE s.org_id=$1 AND s.id=$2 FOR UPDATE`, orgID, sessionID).Scan(&drained)
+	if err != nil {
+		return false, err
+	}
+	if drained {
+		if _, err = tx.Exec(ctx, `UPDATE session_threads SET status='idle',current_turn=$4,completed_at=now(),last_activity_at=now() WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4-1 AND status='running'`, orgID, threadID, sessionID, expectedTurn); err != nil {
+			return false, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE sessions SET status='idle',last_activity_at=now() WHERE org_id=$1 AND id=$2 AND status='running'`, orgID, sessionID); err != nil {
+			return false, err
+		}
+	}
+	return true, tx.Commit(ctx)
+}
+
+// Cancel records a user-cancelled exact turn and assessment under the active
+// job lease. Cancellation is terminal without scheduling a forced full review.
+func (s *CodeReviewRecheckStore) Cancel(ctx context.Context, orgID, assessmentID, jobID, lockToken uuid.UUID) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	owned, err := s.LockAttempt(ctx, tx, orgID, assessmentID, jobID, lockToken)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return ErrCodeReviewRecheckFence
+	}
+	var sessionID, threadID uuid.UUID
+	var expectedTurn int
+	err = tx.QueryRow(ctx, `UPDATE code_review_recheck_dispatches SET status='cancelled',failure_detail='user cancelled recheck turn',completed_at=now(),updated_at=now() WHERE org_id=$1 AND assessment_id=$2 AND job_id=$3 AND attempt_lock_token=$4 AND status='running' RETURNING session_id,thread_id,expected_turn`, orgID, assessmentID, jobID, lockToken).Scan(&sessionID, &threadID, &expectedTurn)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE code_review_revision_assessments SET status='cancelled',failure_detail='user cancelled recheck turn',completed_at=now(),updated_at=now() WHERE org_id=$1 AND id=$2 AND status='running' AND review_scope='evidence_only'`, orgID, assessmentID)
+	if err != nil {
+		return err
+	}
+	var drained bool
+	err = tx.QueryRow(ctx, `SELECT (s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
+		AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
+		AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
+		AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining')))
+		FROM sessions s WHERE s.org_id=$1 AND s.id=$2 FOR UPDATE`, orgID, sessionID).Scan(&drained)
+	if err != nil {
+		return err
+	}
+	if drained {
+		if _, err = tx.Exec(ctx, `UPDATE session_threads SET status='idle',current_turn=$4,completed_at=now(),last_activity_at=now() WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4-1 AND status IN ('running','cancelled')`, orgID, threadID, sessionID, expectedTurn); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE sessions SET status='idle',last_activity_at=now() WHERE org_id=$1 AND id=$2 AND status IN ('running','cancelled')`, orgID, sessionID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// ReconcileDrainedTerminalTurn releases a previously terminal turn after its
+// sandbox and executor have visibly stopped. A sweep can call this repeatedly;
+// it never releases a live or nonterminal dispatch.
+func (s *CodeReviewRecheckStore) ReconcileDrainedTerminalTurn(ctx context.Context, orgID, assessmentID uuid.UUID) (bool, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var sessionID, threadID, pullRequestID uuid.UUID
+	var expectedTurn int
+	err = tx.QueryRow(ctx, `SELECT session_id,thread_id,pull_request_id,expected_turn FROM code_review_recheck_dispatches WHERE org_id=$1 AND assessment_id=$2 AND status IN ('failed','cancelled') FOR UPDATE`, orgID, assessmentID).Scan(&sessionID, &threadID, &pullRequestID, &expectedTurn)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var drained bool
+	err = tx.QueryRow(ctx, `SELECT (s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
+		AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
+		AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
+		AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining')))
+		FROM sessions s WHERE s.org_id=$1 AND s.id=$2 AND s.code_review_owner_pr_id=$3 FOR UPDATE`, orgID, sessionID, pullRequestID).Scan(&drained)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil || !drained {
+		return false, err
+	}
+	threadTag, err := tx.Exec(ctx, `UPDATE session_threads SET status='idle',current_turn=$4,completed_at=now(),last_activity_at=now() WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4-1 AND status IN ('running','cancelled')`, orgID, threadID, sessionID, expectedTurn)
+	if err != nil {
+		return false, err
+	}
+	if threadTag.RowsAffected() == 0 {
+		var currentTurn int
+		err = tx.QueryRow(ctx, `SELECT current_turn FROM session_threads WHERE org_id=$1 AND id=$2 AND session_id=$3 AND status='idle'`, orgID, threadID, sessionID).Scan(&currentTurn)
+		if err != nil || currentTurn != expectedTurn {
+			return false, err
+		}
+	}
+	_, err = tx.Exec(ctx, `UPDATE sessions SET status='idle',last_activity_at=now() WHERE org_id=$1 AND id=$2 AND code_review_owner_pr_id=$3 AND status IN ('running','cancelled')`, orgID, sessionID, pullRequestID)
+	if err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
 }

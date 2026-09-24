@@ -175,6 +175,9 @@ func (s *Service) ListRecoverableInboxEntries(ctx context.Context, orgID, sessio
 }
 
 func (s *Service) RetryInboxEntry(ctx context.Context, orgID, sessionID, threadID, entryID uuid.UUID, allowUnknownDelivery bool) (models.ThreadInboxEntry, error) {
+	if err := s.rejectIfCodeReviewOwned(ctx, orgID, sessionID); err != nil {
+		return models.ThreadInboxEntry{}, err
+	}
 	if s.inboxStore == nil {
 		return models.ThreadInboxEntry{}, ErrThreadNotFound
 	}
@@ -346,6 +349,9 @@ type ForkResult struct {
 // reusing the source session's in-progress sandbox state. Use this when a
 // tab's work has diverged enough to deserve a separate PR.
 func (s *Service) ForkThread(ctx context.Context, input ForkInput) (ForkResult, error) {
+	if err := s.rejectIfCodeReviewOwned(ctx, input.OrgID, input.SourceSessionID); err != nil {
+		return ForkResult{}, err
+	}
 	thread, err := s.threadStore.GetByID(ctx, input.OrgID, input.SourceThreadID)
 	if err != nil {
 		return ForkResult{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
@@ -380,6 +386,9 @@ func (s *Service) ForkThread(ctx context.Context, input ForkInput) (ForkResult, 
 // this synchronously because the patch operation runs inside the sandbox
 // and may need a fresh container exec.
 func (s *Service) RevertThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID, userID *uuid.UUID) (ForkResult, error) {
+	if err := s.rejectIfCodeReviewOwned(ctx, orgID, sessionID); err != nil {
+		return ForkResult{}, err
+	}
 	thread, err := s.threadStore.GetByID(ctx, orgID, threadID)
 	if err != nil {
 		return ForkResult{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)

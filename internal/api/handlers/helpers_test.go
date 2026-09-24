@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,9 +10,52 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+type codeReviewOwnershipGuardTest struct{ err error }
+
+func (g codeReviewOwnershipGuardTest) RejectIfAutomationOwned(_ context.Context, _, _ uuid.UUID) error {
+	return nil
+}
+
+func (g codeReviewOwnershipGuardTest) RejectIfCodeReviewOwned(_ context.Context, _, _ uuid.UUID) error {
+	return g.err
+}
+
+func TestRejectCodeReviewOwnedSession(t *testing.T) {
+	t.Parallel()
+	prID := uuid.New()
+	tests := []struct {
+		name    string
+		err     error
+		blocked bool
+		status  int
+		code    string
+	}{
+		{name: "unowned session", status: http.StatusOK},
+		{name: "owned session", err: &models.SessionCodeReviewOwnedError{PullRequestID: prID}, blocked: true, status: http.StatusConflict, code: "SESSION_CODE_REVIEW_OWNED"},
+		{name: "unknown or cross-org session", err: pgx.ErrNoRows, blocked: true, status: http.StatusNotFound, code: "NOT_FOUND"},
+		{name: "database failure", err: errors.New("database unavailable"), blocked: true, status: http.StatusInternalServerError, code: "SESSION_LOOKUP_FAILED"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/guarded", nil)
+			blocked := rejectCodeReviewOwnedSession(recorder, request, codeReviewOwnershipGuardTest{err: tt.err}, uuid.New(), uuid.New())
+			require.Equal(t, tt.blocked, blocked, "ownership check should block only errors")
+			if tt.blocked {
+				require.Equal(t, tt.status, recorder.Code, "ownership error should map to the expected HTTP status")
+				require.Contains(t, recorder.Body.String(), `"code":"`+tt.code+`"`, "ownership error should expose the expected API code")
+			}
+		})
+	}
+}
 
 func TestSetResponseWriteDeadline_ExtendsShortServerDeadline(t *testing.T) {
 	t.Parallel()

@@ -489,7 +489,7 @@ func (s *CodeReviewAssessmentStore) Fail(ctx context.Context, orgID, id uuid.UUI
 	if detail == "" {
 		return fmt.Errorf("failure detail is required")
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE code_review_revision_assessments SET status='failed',failure_detail=$5,completed_at=now() WHERE org_id=$1 AND id=$2 AND generation=$3 AND input_digest=$4 AND status IN ('reserved','running') AND publication_state='not_started'`, orgID, id, generation, inputDigest, detail)
+	tag, err := s.db.Exec(ctx, `UPDATE code_review_revision_assessments SET status='failed',failure_detail=$5,completed_at=now() WHERE org_id=$1 AND id=$2 AND generation=$3 AND input_digest=$4 AND ((status IN ('reserved','running') AND publication_state='not_started') OR (status='publishing' AND publication_state='reserved' AND publication_receipt IS NULL AND github_review_id IS NULL))`, orgID, id, generation, inputDigest, detail)
 	if err != nil {
 		return err
 	}

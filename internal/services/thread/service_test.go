@@ -110,12 +110,61 @@ func (m *mockThreadStore) MarkCancelRequestedBySessions(ctx context.Context, org
 
 type mockSessionStore struct {
 	automationOwner  *models.SessionAutomationOwner
+	codeReviewOwner  *uuid.UUID
+	codeReviewErr    error
 	getByIDFn        func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	listByIDsFn      func(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) ([]models.Session, error)
 	claimIdleFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimForResumeFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
 	updateCalls      []models.SessionStatus
+}
+
+func TestOwnedCodeReviewSessionRejectsCompetingThreadMutations(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		call func(context.Context, *Service, uuid.UUID, uuid.UUID, uuid.UUID) error
+	}{
+		{name: "end", call: func(ctx context.Context, s *Service, org, session, thread uuid.UUID) error {
+			_, err := s.EndThread(ctx, org, session, thread)
+			return err
+		}},
+		{name: "fork", call: func(ctx context.Context, s *Service, org, session, thread uuid.UUID) error {
+			_, err := s.ForkThread(ctx, ForkInput{OrgID: org, SourceSessionID: session, SourceThreadID: thread})
+			return err
+		}},
+		{name: "revert", call: func(ctx context.Context, s *Service, org, session, thread uuid.UUID) error {
+			_, err := s.RevertThread(ctx, org, session, thread, nil)
+			return err
+		}},
+		{name: "inbox retry", call: func(ctx context.Context, s *Service, org, session, thread uuid.UUID) error {
+			_, err := s.RetryInboxEntry(ctx, org, session, thread, uuid.New(), false)
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			svc, deps := newTestService(t)
+			prID := uuid.New()
+			deps.sessionStore.codeReviewOwner = &prID
+			err := tt.call(context.Background(), svc, uuid.New(), uuid.New(), uuid.New())
+			var owned *models.SessionCodeReviewOwnedError
+			require.ErrorAs(t, err, &owned, "competing mutation must report code review ownership before touching the thread")
+			require.Equal(t, prID, owned.PullRequestID, "ownership conflict must identify the PR")
+		})
+	}
+}
+
+func (m *mockSessionStore) RejectIfCodeReviewOwned(_ context.Context, _, _ uuid.UUID) error {
+	if m.codeReviewErr != nil {
+		return m.codeReviewErr
+	}
+	if m.codeReviewOwner != nil {
+		return &models.SessionCodeReviewOwnedError{PullRequestID: *m.codeReviewOwner}
+	}
+	return nil
 }
 
 // automationOwner, when set, makes every human-entry guard reject the

@@ -52,6 +52,14 @@ func (s *CodeReviewScheduleStore) Get(ctx context.Context, orgID, prID uuid.UUID
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.CodeReviewPRState])
 }
 
+// GetRepositoryIDForPR resolves an existing tenant PR before its first review
+// creates either schedule state or legacy session metadata.
+func (s *CodeReviewScheduleStore) GetRepositoryIDForPR(ctx context.Context, orgID, prID uuid.UUID) (uuid.UUID, error) {
+	var repositoryID uuid.UUID
+	err := s.db.QueryRow(ctx, `SELECT r.id FROM pull_requests p JOIN repositories r ON r.org_id=p.org_id AND r.full_name=p.github_repo WHERE p.org_id=$1 AND p.id=$2`, orgID, prID).Scan(&repositoryID)
+	return repositoryID, err
+}
+
 // GetLatestAssessment and GetLatestFullBaseline are read-only hints before
 // network capture. Admission rereads them under WithLockedPR before writing.
 func (s *CodeReviewScheduleStore) GetLatestAssessment(ctx context.Context, orgID, prID uuid.UUID) (models.CodeReviewAssessment, error) {
@@ -234,10 +242,54 @@ func (s *CodeReviewScheduleStore) RepairMissingWakes(ctx context.Context) error 
 	if err != nil {
 		return err
 	}
+	// A bound continuation job may become terminal after its supervisor has
+	// already failed the assessment (for example at the publication deadline).
+	// Close that exact dispatch, then release its old conversation only after
+	// runtime drain is proven. Keep this scan bounded and outside the PR lock.
+	rows, err := s.db.Query(ctx, `SELECT d.org_id,d.assessment_id,d.status
+	 FROM code_review_recheck_dispatches d
+	 JOIN jobs j ON j.org_id=d.org_id AND j.id=d.job_id
+	 JOIN sessions sess ON sess.org_id=d.org_id AND sess.id=d.session_id
+	 JOIN session_threads t ON t.org_id=d.org_id AND t.id=d.thread_id
+	 WHERE (d.status IN ('pending','running') AND j.status IN ('succeeded','failed','cancelled','dead_letter'))
+	    OR (d.status IN ('failed','cancelled') AND (sess.status IN ('running','cancelled') OR t.status IN ('running','cancelled')))
+	 ORDER BY d.created_at,d.assessment_id LIMIT 100`)
+	if err != nil {
+		return err
+	}
+	type terminalTurnCandidate struct {
+		orgID, assessmentID uuid.UUID
+		status              string
+	}
+	var terminalTurns []terminalTurnCandidate
+	for rows.Next() {
+		var candidate terminalTurnCandidate
+		if err := rows.Scan(&candidate.orgID, &candidate.assessmentID, &candidate.status); err != nil {
+			rows.Close()
+			return err
+		}
+		terminalTurns = append(terminalTurns, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	rechecks := NewCodeReviewRecheckStore(s.db)
+	for _, candidate := range terminalTurns {
+		if candidate.status == "pending" || candidate.status == "running" {
+			if _, err := rechecks.FailTerminalJob(ctx, candidate.orgID, candidate.assessmentID, "bound continuation job ended before a validated result"); err != nil {
+				return err
+			}
+		}
+		if _, err := rechecks.ReconcileDrainedTerminalTurn(ctx, candidate.orgID, candidate.assessmentID); err != nil {
+			return err
+		}
+	}
 	// Failed assessments can reach a terminal state through job exhaustion or a
 	// kill switch, outside the normal publication transaction. Reconcile their
 	// scheduler pointer before the next admission or pending wake.
-	rows, err := s.db.Query(ctx, `SELECT a.org_id,a.id FROM code_review_revision_assessments a
+	rows, err = s.db.Query(ctx, `SELECT a.org_id,a.id FROM code_review_revision_assessments a
 	 JOIN code_review_pr_state st ON st.org_id=a.org_id AND st.pull_request_id=a.pull_request_id
 	 WHERE st.active_assessment_id=a.id AND a.status IN ('failed','cancelled','superseded')
 	 ORDER BY a.created_at,a.id LIMIT 100`)

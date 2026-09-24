@@ -400,6 +400,7 @@ export interface CodeReviewAssessmentSummary {
   review_scope: CodeReviewAssessmentScope;
   route_reason: string;
   source_assessment_id?: string | null;
+  previous_assessment_id?: string | null;
   conversation_id?: string | null;
   session_id?: string | null;
   decision?: CodeReviewDecision | null;

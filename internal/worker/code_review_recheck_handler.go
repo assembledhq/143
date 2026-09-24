@@ -196,8 +196,30 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		} else if err != nil {
 			return err
 		}
-		if dispatch.Status == "failed" {
+		if dispatch.Status == models.CodeReviewRecheckDispatchPending || dispatch.Status == models.CodeReviewRecheckDispatchRunning {
+			terminal, reconcileErr := stores.CodeReviewRechecks.FailTerminalJob(ctx, a.OrgID, a.ID, "bound continuation job ended without an exact turn receipt")
+			if reconcileErr != nil {
+				return reconcileErr
+			}
+			if terminal {
+				terminalDispatch, loadErr := stores.CodeReviewRechecks.Get(ctx, a.OrgID, a.ID)
+				if loadErr != nil {
+					return loadErr
+				}
+				if terminalDispatch.Status == models.CodeReviewRecheckDispatchCancelled {
+					return settleCodeReviewAssessment(ctx, stores, a)
+				}
+				return failCodeReviewRecheck(ctx, stores, services, a, "bound continuation job ended without an exact turn receipt", true)
+			}
+			if time.Now().After(codeReviewAgentDeadline(capture.Policy.Config(), dispatch.CreatedAt)) {
+				return failCodeReviewRecheck(ctx, stores, services, a, "orchestrator continuation exceeded review deadline", true)
+			}
+		}
+		if dispatch.Status == models.CodeReviewRecheckDispatchFailed {
 			return failCodeReviewRecheck(ctx, stores, services, a, "orchestrator continuation failed", true)
+		}
+		if dispatch.Status == models.CodeReviewRecheckDispatchCancelled {
+			return settleCodeReviewAssessment(ctx, stores, a)
 		}
 		if dispatch.Status != "completed" || dispatch.ResultMessageID == nil {
 			return codeReviewWaitingForOrchestrator(capture.Policy.Config())

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -48,18 +49,19 @@ CREATE TABLE repositories(id uuid PRIMARY KEY,org_id uuid NOT NULL);
 CREATE UNIQUE INDEX repo_org_id ON repositories(org_id,id);
 CREATE TABLE pull_requests(id uuid PRIMARY KEY,org_id uuid NOT NULL);
 CREATE UNIQUE INDEX pr_org_id ON pull_requests(org_id,id);
-CREATE TABLE sessions(id uuid PRIMARY KEY,org_id uuid NOT NULL,origin text NOT NULL,status text NOT NULL DEFAULT 'idle',container_id text,sandbox_state text NOT NULL DEFAULT 'none',turn_holding_container boolean NOT NULL DEFAULT false,snapshot_key text,pending_snapshot_key text,automation_owner_generation_id uuid,current_turn int NOT NULL DEFAULT 0,last_activity_at timestamptz,workspace_generation bigint NOT NULL DEFAULT 0,agent_session_id text,token_usage jsonb,model_used text,result_summary text,diff text,error text,failure_explanation text,failure_category text,failure_next_steps text,failure_retry_advised boolean NOT NULL DEFAULT false,base_commit_sha text,diff_collected_at timestamptz,diff_stats jsonb,diff_history jsonb NOT NULL DEFAULT '[]');
+CREATE TABLE sessions(id uuid PRIMARY KEY,org_id uuid NOT NULL,origin text NOT NULL,status text NOT NULL DEFAULT 'idle',container_id text,sandbox_state text NOT NULL DEFAULT 'none',turn_holding_container boolean NOT NULL DEFAULT false,snapshot_key text,pending_snapshot_key text,automation_owner_generation_id uuid,current_turn int NOT NULL DEFAULT 0,started_at timestamptz,completed_at timestamptz,last_activity_at timestamptz,workspace_generation bigint NOT NULL DEFAULT 0,agent_session_id text,token_usage jsonb,model_used text,result_summary text,diff text,error text,failure_explanation text,failure_category text,failure_next_steps text,failure_retry_advised boolean NOT NULL DEFAULT false,base_commit_sha text,diff_collected_at timestamptz,diff_stats jsonb,diff_history jsonb NOT NULL DEFAULT '[]');
 CREATE UNIQUE INDEX session_org_id ON sessions(org_id,id);
-CREATE TABLE session_threads(id uuid PRIMARY KEY,org_id uuid NOT NULL,session_id uuid NOT NULL,current_turn int NOT NULL DEFAULT 0,status text NOT NULL DEFAULT 'idle',archived_at timestamptz,pending_message_count int NOT NULL DEFAULT 0,last_activity_at timestamptz,agent_session_id text,result_summary text,diff text,failure_explanation text,failure_category text);
+CREATE TABLE session_threads(id uuid PRIMARY KEY,org_id uuid NOT NULL,session_id uuid NOT NULL,current_turn int NOT NULL DEFAULT 0,status text NOT NULL DEFAULT 'idle',archived_at timestamptz,cancel_requested_at timestamptz,pending_message_count int NOT NULL DEFAULT 0,started_at timestamptz,completed_at timestamptz,last_activity_at timestamptz,agent_session_id text,result_summary text,diff text,failure_explanation text,failure_category text);
 CREATE TABLE session_messages(id bigserial PRIMARY KEY,org_id uuid NOT NULL,session_id uuid NOT NULL,thread_id uuid,user_id uuid,turn_number int NOT NULL,role text NOT NULL,content text NOT NULL,attachments text[],"references" jsonb,commands jsonb,token_usage jsonb,source text NOT NULL DEFAULT '',created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL,queue text NOT NULL,job_type text NOT NULL,payload jsonb NOT NULL,priority int NOT NULL DEFAULT 0,dedupe_key text,status text NOT NULL DEFAULT 'pending',max_attempts int NOT NULL DEFAULT 3,lock_token uuid,updated_at timestamptz NOT NULL DEFAULT now());
 CREATE UNIQUE INDEX jobs_active_dedupe ON jobs(queue,dedupe_key) WHERE status IN ('pending','running');
-CREATE TABLE code_review_revision_assessments(id uuid PRIMARY KEY,org_id uuid NOT NULL,repository_id uuid NOT NULL,pull_request_id uuid NOT NULL,session_id uuid NOT NULL,review_scope text NOT NULL,status text NOT NULL,head_sha text NOT NULL DEFAULT 'head',code_digest text NOT NULL DEFAULT 'code',contract_digest text NOT NULL DEFAULT 'contract',input_digest text NOT NULL DEFAULT 'input');
+CREATE TABLE code_review_revision_assessments(id uuid PRIMARY KEY,org_id uuid NOT NULL,repository_id uuid NOT NULL,pull_request_id uuid NOT NULL,session_id uuid NOT NULL,review_scope text NOT NULL,status text NOT NULL,head_sha text NOT NULL DEFAULT 'head',code_digest text NOT NULL DEFAULT 'code',contract_digest text NOT NULL DEFAULT 'contract',input_digest text NOT NULL DEFAULT 'input',result_origin text,failure_detail text,completed_at timestamptz,updated_at timestamptz);
 CREATE UNIQUE INDEX assessment_org_id ON code_review_revision_assessments(org_id,id);
 CREATE TABLE code_review_session_metadata(org_id uuid NOT NULL,session_id uuid NOT NULL,pull_request_id uuid NOT NULL,status text NOT NULL);
 CREATE TABLE preview_instances(org_id uuid,session_id uuid,preview_holding_container boolean);
 CREATE TABLE thread_runtimes(org_id uuid,session_id uuid,status text);
 CREATE TABLE session_executors(org_id uuid,session_id uuid,status text);
+CREATE TABLE session_cancel_requests(org_id uuid NOT NULL,session_id uuid NOT NULL,requested_at timestamptz NOT NULL,delivered_at timestamptz);
 CREATE TABLE session_publish_state(org_id uuid,session_id uuid,pr_creation_state text,pr_creation_error text,pr_push_state text,pr_push_error text,pr_push_error_code text,branch_creation_state text,branch_creation_error text,updated_at timestamptz);
 CREATE TABLE thread_inbox_entries(id uuid NOT NULL DEFAULT gen_random_uuid(),org_id uuid NOT NULL,session_id uuid NOT NULL,thread_id uuid NOT NULL,sequence_no bigint NOT NULL,message_id bigint,client_message_id text,entry_type text NOT NULL,payload jsonb NOT NULL DEFAULT '{}',delivery_state text NOT NULL,delivery_attempts int NOT NULL DEFAULT 0,last_error text,owner_node_id text,runtime_id uuid,accepted_at timestamptz NOT NULL DEFAULT now(),delivered_at timestamptz,acked_at timestamptz,applied_at timestamptz,created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now());
 CREATE UNIQUE INDEX inbox_client_id ON thread_inbox_entries(org_id,thread_id,client_message_id) WHERE client_message_id IS NOT NULL;
@@ -138,6 +140,11 @@ CREATE UNIQUE INDEX inbox_client_id ON thread_inbox_entries(org_id,thread_id,cli
 	require.Equal(t, 1, messages, "one user message must be durable")
 	require.Equal(t, 1, inbox, "one inbox entry must be durable")
 	require.Equal(t, 1, jobs, "one continue job must be durable")
+	var sessionStarted, threadStarted *time.Time
+	require.NoError(t, pool.QueryRow(ctx, `SELECT started_at FROM sessions WHERE org_id=$1 AND id=$2`, org, session).Scan(&sessionStarted), "read reused session start time")
+	require.NoError(t, pool.QueryRow(ctx, `SELECT started_at FROM session_threads WHERE org_id=$1 AND id=$2`, org, thread).Scan(&threadStarted), "read reused thread start time")
+	require.NotNil(t, sessionStarted, "reused session reaper clock must restart at dispatch")
+	require.NotNil(t, threadStarted, "reused thread reaper clock must restart at dispatch")
 	var ownerErr *models.SessionCodeReviewOwnedError
 	require.ErrorAs(t, NewSessionStore(pool).RejectIfCodeReviewOwned(ctx, org, session), &ownerErr, "conversation must reject ordinary human messages")
 	require.Equal(t, pr, ownerErr.PullRequestID, "owner error must identify the review PR")
@@ -207,6 +214,8 @@ CREATE UNIQUE INDEX inbox_client_id ON thread_inbox_entries(org_id,thread_id,cli
 	var protectedJobCount int
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE id=$1`, d.JobID).Scan(&protectedJobCount), "check referenced job retention")
 	require.Equal(t, 1, protectedJobCount, "dispatch receipt must retain exact job identity")
+	_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status='completed',result_origin='evidence_only' WHERE org_id=$1 AND id=$2`, org, assessment)
+	require.NoError(t, err, "publish previous assessment before its checkpoint can authorize native resume")
 	secondAssessment := uuid.New()
 	_, err = pool.Exec(ctx, `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,pull_request_id,session_id,review_scope,status) VALUES($1,$2,$3,$4,$5,'evidence_only','running')`, secondAssessment, org, repo, pr, session)
 	require.NoError(t, err, "seed next assessment with unchanged code and contract")
@@ -223,9 +232,83 @@ CREATE UNIQUE INDEX inbox_client_id ON thread_inbox_entries(org_id,thread_id,cli
 	require.NoError(t, err, "read exact prior checkpoint provenance")
 	require.True(t, native, "same code and contract with installed snapshot should permit native resume")
 	require.Equal(t, "thread-provider", provider, "native resume must use thread provider rather than parent session provider")
+	_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status='failed' WHERE org_id=$1 AND id=$2`, org, assessment)
+	require.NoError(t, err, "model rejected previous recheck response")
+	_, native, err = store.NativeResumeProvider(ctx, org, secondAssessment, second.JobID, secondToken)
+	require.NoError(t, err, "check previous assessment completion fence")
+	require.False(t, native, "a rejected previous response cannot authorize native resume")
+	_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status='completed' WHERE org_id=$1 AND id=$2`, org, assessment)
+	require.NoError(t, err, "restore published assessment for snapshot mismatch test")
 	_, err = pool.Exec(ctx, `UPDATE sessions SET snapshot_key='different-snapshot' WHERE org_id=$1 AND id=$2`, org, session)
 	require.NoError(t, err, "simulate mismatched installed checkpoint")
 	_, native, err = store.NativeResumeProvider(ctx, org, secondAssessment, second.JobID, secondToken)
 	require.NoError(t, err, "check mismatched checkpoint")
 	require.False(t, native, "a different installed snapshot must force reconstruction")
+	_, err = pool.Exec(ctx, `UPDATE jobs SET status='dead_letter' WHERE org_id=$1 AND id=$2`, org, second.JobID)
+	require.NoError(t, err, "model a bound continuation that dead-lettered without a receipt")
+	terminal, err := store.FailTerminalJob(ctx, org, secondAssessment, "worker ended without receipt")
+	require.NoError(t, err, "reconcile terminal bound job")
+	require.True(t, terminal, "terminal bound job should close the exact dispatch")
+	failedDispatch, err := store.Get(ctx, org, secondAssessment)
+	require.NoError(t, err, "read terminal dispatch")
+	require.Equal(t, models.CodeReviewRecheckDispatchFailed, failedDispatch.Status, "dead-lettered bound job cannot remain running")
+	var failedTurn int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT current_turn FROM session_threads WHERE org_id=$1 AND id=$2`, org, thread).Scan(&failedTurn), "read consumed failed thread turn")
+	require.Equal(t, 2, failedTurn, "failed exact turn must advance monotonically without removing its durable user message")
+	_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status='failed' WHERE org_id=$1 AND id=$2`, org, secondAssessment)
+	require.NoError(t, err, "settle second assessment before a new recheck")
+	thirdAssessment := uuid.New()
+	_, err = pool.Exec(ctx, `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,pull_request_id,session_id,review_scope,status) VALUES($1,$2,$3,$4,$5,'evidence_only','running')`, thirdAssessment, org, repo, pr, session)
+	require.NoError(t, err, "seed next recheck after a failed exact turn")
+	in.AssessmentID, in.ExpectedTurn, in.Prompt = thirdAssessment, 3, "Recheck after the failed turn"
+	third, _, err := store.Dispatch(ctx, in)
+	require.NoError(t, err, "unique turn identity should permit next monotonic turn")
+	thirdToken := uuid.New()
+	_, err = pool.Exec(ctx, `UPDATE jobs SET status='running',lock_token=$2 WHERE org_id=$1 AND id=$3`, org, thirdToken, third.JobID)
+	require.NoError(t, err, "lease cancellable recheck turn")
+	owned, err = store.Claim(ctx, org, thirdAssessment, third.JobID, thirdToken, session, thread, 3, third.MessageID)
+	require.NoError(t, err, "claim cancellable turn")
+	require.True(t, owned, "exact cancellation needs a valid job lease")
+	require.NoError(t, store.Cancel(ctx, org, thirdAssessment, third.JobID, thirdToken), "cancel exact turn and assessment without fallback")
+	cancelledDispatch, err := store.Get(ctx, org, thirdAssessment)
+	require.NoError(t, err, "read cancelled receipt")
+	require.Equal(t, models.CodeReviewRecheckDispatchCancelled, cancelledDispatch.Status, "cancelled turn must not be marked failed")
+	var cancelledAssessmentStatus string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT status FROM code_review_revision_assessments WHERE org_id=$1 AND id=$2`, org, thirdAssessment).Scan(&cancelledAssessmentStatus), "read cancelled assessment")
+	require.Equal(t, "cancelled", cancelledAssessmentStatus, "user cancellation must settle assessment without forced full fallback")
+	fourthAssessment := uuid.New()
+	_, err = pool.Exec(ctx, `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,pull_request_id,session_id,review_scope,status) VALUES($1,$2,$3,$4,$5,'evidence_only','running')`, fourthAssessment, org, repo, pr, session)
+	require.NoError(t, err, "seed pre-claim cancellation assessment")
+	in.AssessmentID, in.ExpectedTurn, in.Prompt = fourthAssessment, 4, "Cancel before provider claim"
+	fourth, _, err := store.Dispatch(ctx, in)
+	require.NoError(t, err, "dispatch cancellable queued turn")
+	fourthToken := uuid.New()
+	_, err = pool.Exec(ctx, `UPDATE jobs SET status='running',lock_token=$2 WHERE org_id=$1 AND id=$3`, org, fourthToken, fourth.JobID)
+	require.NoError(t, err, "lease queued turn before user cancellation")
+	_, err = pool.Exec(ctx, `UPDATE session_threads SET cancel_requested_at=now() WHERE org_id=$1 AND id=$2`, org, thread)
+	require.NoError(t, err, "persist user cancellation before claim")
+	owned, err = store.Claim(ctx, org, fourthAssessment, fourth.JobID, fourthToken, session, thread, 4, fourth.MessageID)
+	require.ErrorIs(t, err, ErrCodeReviewRecheckUserCancelled, "pre-claim user cancellation must be terminal without provider launch")
+	require.False(t, owned, "cancelled queued turn cannot own provider launch")
+	fourthStatus, err := store.Get(ctx, org, fourthAssessment)
+	require.NoError(t, err, "read pre-claim cancellation receipt")
+	require.Equal(t, models.CodeReviewRecheckDispatchCancelled, fourthStatus.Status, "pre-claim cancellation must not fail into full fallback")
+	_, err = pool.Exec(ctx, `UPDATE session_threads SET cancel_requested_at=NULL WHERE org_id=$1 AND id=$2`, org, thread)
+	require.NoError(t, err, "clear old per-turn cancel marker before next assessment")
+	fifthAssessment := uuid.New()
+	_, err = pool.Exec(ctx, `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,pull_request_id,session_id,review_scope,status) VALUES($1,$2,$3,$4,$5,'evidence_only','running')`, fifthAssessment, org, repo, pr, session)
+	require.NoError(t, err, "seed terminal queued-job cancellation assessment")
+	in.AssessmentID, in.ExpectedTurn, in.Prompt = fifthAssessment, 5, "Cancel queued job before claim"
+	fifth, _, err := store.Dispatch(ctx, in)
+	require.NoError(t, err, "dispatch last queued turn")
+	_, err = pool.Exec(ctx, `UPDATE jobs SET status='cancelled' WHERE org_id=$1 AND id=$2`, org, fifth.JobID)
+	require.NoError(t, err, "model queue cancellation before claim")
+	_, err = pool.Exec(ctx, `INSERT INTO session_cancel_requests(org_id,session_id,requested_at) VALUES($1,$2,now())`, org, session)
+	require.NoError(t, err, "persist session-wide user cancellation")
+	terminal, err = store.FailTerminalJob(ctx, org, fifthAssessment, "bound job ended")
+	require.NoError(t, err, "reconcile cancelled bound job")
+	require.True(t, terminal, "terminal cancellation should settle exact dispatch")
+	fifthStatus, err := store.Get(ctx, org, fifthAssessment)
+	require.NoError(t, err, "read terminal cancellation receipt")
+	require.Equal(t, models.CodeReviewRecheckDispatchCancelled, fifthStatus.Status, "cancelled queue job with durable user request cannot force full review")
 }

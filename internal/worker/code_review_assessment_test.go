@@ -94,25 +94,41 @@ func TestVerifyFullAssessmentFreshness(t *testing.T) {
 	t.Parallel()
 	orgID, repoID, prID, sessionID, assessmentID, policyID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	job := runCodeReviewPayload{OrgID: orgID, RepositoryID: repoID, PullRequestID: prID, SessionID: sessionID}
-	assessment := models.CodeReviewAssessment{ID: assessmentID, PolicyID: policyID, InputDigest: "all", HeadSHA: "head", BaseSHA: "base", BaseRef: "main"}
-	valid := codereviewsvc.AssessmentInputCaptureResult{Manifest: codereviewsvc.ReviewInputManifest{InputDigest: "all", Code: codereviewsvc.ReviewCodeInput{HeadSHA: "head", BaseSHA: "base", BaseRef: "main"}}, Policy: models.CodeReviewPolicyRecord{ID: policyID}}
+	manifest := codereviewsvc.ReviewInputManifest{InputVersion: codereviewsvc.ReviewInputManifestVersion, ReuseEligible: true, InputDigest: "all", CodeDigest: "code", ContractDigest: "contract", IntentDigest: "intent", VisualDigest: "visual", RequestDigest: "request", TextDigest: "text", GateDigest: "gates", Code: codereviewsvc.ReviewCodeInput{HeadSHA: "head", BaseSHA: "base", BaseRef: "main"}, TextEvidence: codereviewsvc.ReviewTextInput{Complete: true, SourceProvenanceComplete: true, Items: []codereviewsvc.ReviewTextEvidence{{Surface: "check_status", Content: "pending"}, {Surface: "pull_request_description", Content: "Adds a feature"}}}}
+	manifestJSON, err := json.Marshal(manifest)
+	require.NoError(t, err, "encode captured baseline")
+	assessment := models.CodeReviewAssessment{ID: assessmentID, PolicyID: policyID, InputDigest: "all", InputManifest: manifestJSON, HeadSHA: "head", BaseSHA: "base", BaseRef: "main"}
+	valid := codereviewsvc.AssessmentInputCaptureResult{Manifest: manifest, Policy: models.CodeReviewPolicyRecord{ID: policyID}}
 	tests := []struct {
 		name   string
-		result codereviewsvc.AssessmentInputCaptureResult
+		change func(*codereviewsvc.AssessmentInputCaptureResult)
 		want   error
 	}{
-		{name: "same captured input", result: valid},
-		{name: "changed visual or other input digest", result: func() codereviewsvc.AssessmentInputCaptureResult {
-			r := valid
-			r.Manifest.InputDigest = "changed"
-			return r
-		}(), want: errFullAssessmentInputsChanged},
-		{name: "changed policy", result: func() codereviewsvc.AssessmentInputCaptureResult { r := valid; r.Policy.ID = uuid.New(); return r }(), want: errFullAssessmentInputsChanged},
+		{name: "same captured input"},
+		{name: "CI completion preserves full panel", change: func(r *codereviewsvc.AssessmentInputCaptureResult) {
+			r.Manifest.InputDigest = "new"
+			r.Manifest.GateDigest = "new"
+			r.Manifest.TextDigest = "new"
+			r.Manifest.TextEvidence.Items[0].Content = "success"
+		}},
+		{name: "changed visual evidence", change: func(r *codereviewsvc.AssessmentInputCaptureResult) { r.Manifest.VisualDigest = "new" }, want: errFullAssessmentInputsChanged},
+		{name: "changed code", change: func(r *codereviewsvc.AssessmentInputCaptureResult) { r.Manifest.CodeDigest = "new" }, want: errFullAssessmentInputsChanged},
+		{name: "changed contract", change: func(r *codereviewsvc.AssessmentInputCaptureResult) { r.Manifest.ContractDigest = "new" }, want: errFullAssessmentInputsChanged},
+		{name: "changed description evidence", change: func(r *codereviewsvc.AssessmentInputCaptureResult) {
+			r.Manifest.TextEvidence.Items[1].Content = "New proof"
+		}, want: errFullAssessmentInputsChanged},
+		{name: "changed policy", change: func(r *codereviewsvc.AssessmentInputCaptureResult) { r.Policy.ID = uuid.New() }, want: errFullAssessmentInputsChanged},
+		{name: "missing manifest version", change: func(r *codereviewsvc.AssessmentInputCaptureResult) { r.Manifest.InputVersion = 0 }, want: errFullAssessmentInputsChanged},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			capture := &assessmentFreshnessCapture{result: tt.result}
+			result := valid
+			result.Manifest.TextEvidence.Items = append([]codereviewsvc.ReviewTextEvidence(nil), valid.Manifest.TextEvidence.Items...)
+			if tt.change != nil {
+				tt.change(&result)
+			}
+			capture := &assessmentFreshnessCapture{result: result}
 			err := verifyFullAssessmentFreshness(context.Background(), &Services{CodeReviewInputCapture: capture}, job, assessment)
 			if tt.want != nil {
 				require.ErrorIs(t, err, tt.want, "changed source input should block publication")

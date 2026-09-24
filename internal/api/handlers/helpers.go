@@ -13,6 +13,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -341,6 +342,10 @@ func rejectCodeReviewOwnedSession(w http.ResponseWriter, r *http.Request, guard 
 	err := owner.RejectIfCodeReviewOwned(r.Context(), orgID, sessionID)
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return true
 	}
 	if writeCodeReviewOwnedError(w, r, err) {
 		return true

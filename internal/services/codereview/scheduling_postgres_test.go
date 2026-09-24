@@ -105,6 +105,13 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		name string
 		run  func(*testing.T, *pgxpool.Pool, uuid.UUID, uuid.UUID, uuid.UUID, *schedulingSnapshotFixture)
 	}{
+		{"first recheck request with continuation disabled", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testAssessmentFirstRequestAdmission(t, p, org, pr, snapshot, false)
+		}},
+		{"first recheck request with continuation enabled", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testAssessmentFirstRequestAdmission(t, p, org, pr, snapshot, true)
+		}},
+		{"assessment admission preserves schedule generation", testAssessmentGenerationAdmission},
 		{"push burst restart and manual joining", testSchedulingBurst},
 		{"draft automatic", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testSchedulingDraft(t, p, org, repo, pr, snapshot, "automatic")
@@ -202,6 +209,132 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		})
 	}
 }
+
+type assessmentAdmissionNoCapture struct{}
+
+func (assessmentAdmissionNoCapture) CaptureAssessmentInputs(context.Context, AssessmentInputCaptureRequest) (AssessmentInputCaptureResult, error) {
+	return AssessmentInputCaptureResult{}, fmt.Errorf("capture should not run before the first full baseline")
+}
+
+type assessmentAdmissionFixture struct {
+	pool     *pgxpool.Pool
+	manifest ReviewInputManifest
+	policy   models.CodeReviewPolicyRecord
+	session  uuid.UUID
+	snapshot ghservice.CodeReviewPullRequestSnapshot
+}
+
+func (f assessmentAdmissionFixture) CaptureAssessmentInputs(ctx context.Context, in AssessmentInputCaptureRequest) (AssessmentInputCaptureResult, error) {
+	key := "code-review-prompts/" + f.session.String() + "/assessments/" + in.AssessmentID.String() + "/head/visual-evidence-v1"
+	metadata := json.RawMessage(`{"assessment_id":"` + in.AssessmentID.String() + `"}`)
+	if _, err := f.pool.Exec(ctx, `INSERT INTO code_review_prompt_records(id,org_id,session_id,record_key,role,content,metadata) VALUES($1,$2,$3,$4,'visual_evidence','',$5)`, uuid.New(), in.OrgID, f.session, key, metadata); err != nil {
+		return AssessmentInputCaptureResult{}, err
+	}
+	return AssessmentInputCaptureResult{Manifest: f.manifest, VisualEvidence: models.CodeReviewVisualEvidenceSnapshot{AssessmentID: &in.AssessmentID, Complete: true}, Policy: f.policy, Snapshot: f.snapshot}, nil
+}
+
+func testAssessmentFirstRequestAdmission(t *testing.T, pool *pgxpool.Pool, org, pr uuid.UUID, snapshot *schedulingSnapshotFixture, continuationEnabled bool) {
+	ctx := context.Background()
+	store := db.NewCodeReviewStore(pool)
+	config := models.DefaultCodeReviewPolicyConfig()
+	config.ContinuationPolicy = &models.CodeReviewContinuationPolicy{Enabled: continuationEnabled}
+	_, err := store.SavePolicy(ctx, org, config, nil)
+	require.NoError(t, err, "admission policy should save")
+	service := NewService(store, store, db.NewSessionStore(pool), db.NewJobStore(pool), zerolog.Nop(), Config{})
+	service.SetScheduling(db.NewCodeReviewScheduleStore(pool), snapshot)
+	service.SetAssessmentContinuation(assessmentAdmissionNoCapture{}, true)
+	requestID := uuid.New()
+	result, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: requestID, Mode: models.CodeReviewRecheck})
+	require.NoError(t, err, "first recheck request should start a normal full review without prior metadata")
+	require.Equal(t, models.CodeReviewRequestQueued, result.Disposition, "first request should queue a full review")
+	require.NotNil(t, result.Schedule.PendingInput, "first review should have durable pending intent")
+	var pending scheduledReviewIntent
+	require.NoError(t, json.Unmarshal(result.Schedule.PendingInput, &pending), "pending full intent should decode")
+	require.Equal(t, models.CodeReviewReviewNow, pending.Mode, "no baseline or disabled continuation should use legacy review mode")
+	require.False(t, pending.Force, "first review should not spend a forced duplicate panel")
+	replayed, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: requestID, Mode: models.CodeReviewRecheck})
+	require.NoError(t, err, "same first request ID should replay without conflict")
+	require.Equal(t, result.Schedule.Generation, replayed.Schedule.Generation, "idempotent replay should not advance schedule generation")
+	var wakeID uuid.UUID
+	lease := uuid.New()
+	err = pool.QueryRow(ctx, `UPDATE jobs SET status='running',lock_token=$3,lease_expires_at=now()+interval '5 minutes',attempts=attempts+1 WHERE org_id=$1 AND job_type=$2 AND status='pending' RETURNING id`, org, models.JobTypeReconcileCodeReviewSchedule, lease).Scan(&wakeID)
+	require.NoError(t, err, "first full review wake should be claimable")
+	require.NoError(t, service.ReconcileSchedule(jobctx.WithLockToken(jobctx.WithJobID(ctx, wakeID), lease), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "first full review should start")
+	active, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewRecheck})
+	require.NoError(t, err, "same-head request during active full review should join")
+	require.Equal(t, models.CodeReviewRequestJoined, active.Disposition, "equivalent active review should join rather than force a duplicate")
+	require.Equal(t, result.Schedule.Generation, active.Schedule.Generation, "joining active review should preserve schedule generation")
+	var sessions int
+	err = pool.QueryRow(ctx, `SELECT count(*) FROM code_review_session_metadata WHERE org_id=$1 AND pull_request_id=$2`, org, pr).Scan(&sessions)
+	require.NoError(t, err, "review session count should load")
+	require.Equal(t, 1, sessions, "active join must not allocate a second review session")
+}
+
+func testAssessmentGenerationAdmission(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+	ctx := context.Background()
+	store := db.NewCodeReviewStore(pool)
+	config := models.DefaultCodeReviewPolicyConfig()
+	config.ContinuationPolicy = &models.CodeReviewContinuationPolicy{Enabled: true}
+	zero := 0
+	config.SchedulingPolicy = &models.CodeReviewSchedulingPolicy{QuietPeriodSeconds: &zero, MinimumIntervalSeconds: &zero}
+	policy, err := store.SavePolicy(ctx, org, config, nil)
+	require.NoError(t, err, "continuation policy should save")
+	service := NewService(store, store, db.NewSessionStore(pool), db.NewJobStore(pool), zerolog.Nop(), Config{})
+	service.SetScheduling(db.NewCodeReviewScheduleStore(pool), snapshot)
+	_, err = service.scheduleReview(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr, ExplicitRequest: true, GitHubDeliveryID: uuid.NewString(), TriggerSource: models.CodeReviewTriggerSourceSlashCommand}, models.CodeReviewReviewNow, false, nil)
+	require.NoError(t, err, "initial full review should queue")
+	var wakeID uuid.UUID
+	lease := uuid.New()
+	err = pool.QueryRow(ctx, `UPDATE jobs SET status='running',lock_token=$3,lease_expires_at=now()+interval '5 minutes',attempts=attempts+1 WHERE org_id=$1 AND job_type=$2 AND status='pending' RETURNING id`, org, models.JobTypeReconcileCodeReviewSchedule, lease).Scan(&wakeID)
+	require.NoError(t, err, "initial wake should be claimable")
+	require.NoError(t, service.ReconcileSchedule(jobctx.WithLockToken(jobctx.WithJobID(ctx, wakeID), lease), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "initial full review should start")
+	metadata, err := store.GetLatestByPullRequest(ctx, org, pr)
+	require.NoError(t, err, "full review metadata should exist")
+	baselineInput := reviewTestCapture()
+	baselineInput.Code.OrgID, baselineInput.Code.RepositoryID, baselineInput.Code.PullRequestID = org, repo, pr
+	baselineInput.Code.HeadSHA, baselineInput.Code.BaseSHA, baselineInput.Code.BaseRef = snapshot.snapshot.HeadSHA, snapshot.snapshot.BaseSHA, snapshot.snapshot.BaseRef
+	baselineInput.Contract.PolicyID, baselineInput.Contract.PolicyVersion = policy.ID, int64(policy.Version)
+	baseline, err := BuildReviewInputManifest(baselineInput)
+	require.NoError(t, err, "full baseline manifest should build")
+	baselineRaw, err := json.Marshal(baseline)
+	require.NoError(t, err, "full baseline manifest should marshal")
+	assessmentStore := db.NewCodeReviewAssessmentStore(pool)
+	full, _, err := assessmentStore.Create(ctx, models.CodeReviewAssessmentCapture{OrgID: org, RepositoryID: repo, PullRequestID: pr, PolicyID: policy.ID, SessionID: metadata.SessionID, Generation: 1, BaseSHA: baseline.Code.BaseSHA, BaseRef: baseline.Code.BaseRef, HeadSHA: baseline.Code.HeadSHA, InputVersion: baseline.InputVersion, CodeDigest: baseline.CodeDigest, ContractDigest: baseline.ContractDigest, IntentDigest: baseline.IntentDigest, VisualDigest: baseline.VisualDigest, RequestDigest: baseline.RequestDigest, GateDigest: baseline.GateDigest, InputDigest: baseline.InputDigest, InputManifest: baselineRaw, ReviewScope: models.CodeReviewScopeFull, RouteReason: models.CodeReviewRouteInitialFull, PublicationKey: "generation-baseline:" + pr.String()})
+	require.NoError(t, err, "complete full baseline should insert")
+	reasons := json.RawMessage(`[{"code":"blocking_findings"}]`)
+	outcome := json.RawMessage(`{"description_assessments":[{"key":"description","status":"satisfied"}],"risk_reasons":[{"code":"blocking_findings"}],"coverage_complete":true}`)
+	_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status='completed',result_origin='executed',coverage_complete=true,decision='blocked',acceptable=false,risk_reason_details=$3,structured_outcome=$4,publication_state='not_required',completed_at=now() WHERE org_id=$1 AND id=$2`, org, full.ID, reasons, outcome)
+	require.NoError(t, err, "full assessment should become a complete baseline")
+	_, err = pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='completed',decision='blocked',completed_at=now() WHERE org_id=$1 AND session_id=$2`, org, metadata.SessionID)
+	require.NoError(t, err, "legacy full session should become terminal")
+	_, err = pool.Exec(ctx, `UPDATE sessions SET status='completed' WHERE org_id=$1 AND id=$2`, org, metadata.SessionID)
+	require.NoError(t, err, "underlying full session should become terminal")
+	_, err = pool.Exec(ctx, `UPDATE session_threads SET status='completed' WHERE org_id=$1 AND session_id=$2`, org, metadata.SessionID)
+	require.NoError(t, err, "full reviewer threads should become terminal")
+	_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND job_type=$2`, org, models.JobTypeRunCodeReview)
+	require.NoError(t, err, "full review job should become terminal")
+	_, err = pool.Exec(ctx, `UPDATE code_review_pr_state SET generation=7,state='covered',active_session_id=NULL WHERE org_id=$1 AND pull_request_id=$2`, org, pr)
+	require.NoError(t, err, "schedule should retain independent generation seven")
+	_, err = pool.Exec(ctx, `UPDATE pull_requests SET head_sha=$3,base_sha=$4 WHERE org_id=$1 AND id=$2`, org, pr, snapshot.snapshot.HeadSHA, snapshot.snapshot.BaseSHA)
+	require.NoError(t, err, "provider-synced PR revision should match captured head and base")
+	changedInput := baselineInput
+	changedInput.Visual.Images = []ReviewVisualImage{{SourceID: "new-image", SourceURL: "https://example.test/image.png", ContentDigest: strings.Repeat("c", 64)}}
+	changed, err := BuildReviewInputManifest(changedInput)
+	require.NoError(t, err, "new visual evidence should build")
+	service.SetAssessmentContinuation(assessmentAdmissionFixture{pool: pool, manifest: changed, policy: policy, session: metadata.SessionID, snapshot: snapshot.snapshot}, true)
+	result, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewRecheck})
+	require.NoError(t, err, "new evidence should admit a narrow assessment")
+	require.NotNil(t, result.AssessmentID, "admission should allocate assessment identity")
+	require.Equal(t, int64(7), result.Schedule.Generation, "assessment generation must not overwrite schedule generation")
+	var assessmentGeneration, targetGeneration int64
+	err = pool.QueryRow(ctx, `SELECT generation FROM code_review_revision_assessments WHERE org_id=$1 AND id=$2`, org, *result.AssessmentID).Scan(&assessmentGeneration)
+	require.NoError(t, err, "new assessment generation should load")
+	require.Equal(t, int64(2), assessmentGeneration, "assessment generation should advance from baseline")
+	err = pool.QueryRow(ctx, `SELECT target_generation FROM code_review_requests WHERE org_id=$1 AND assessment_id=$2`, org, *result.AssessmentID).Scan(&targetGeneration)
+	require.NoError(t, err, "request target generation should load")
+	require.Equal(t, int64(7), targetGeneration, "request target should follow schedule generation")
+}
+
 func testSchedulingBurst(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 	ctx := context.Background()
 	now := time.Date(2026, 9, 10, 10, 0, 0, 0, time.UTC)
@@ -275,16 +408,15 @@ func testSchedulingBurst(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UU
 	_, err = pool.Exec(ctx, `INSERT INTO users(id,org_id,email,name) VALUES($1,$2,$3,'Reviewer')`, user, org, user.String()+"@example.test")
 	require.NoError(t, err, "seed requester")
 	request.RequesterID = &user
-	_, err = service.RequestScheduledReview(ctx, request)
+	joined, err := service.RequestScheduledReview(ctx, request)
 	require.NoError(t, err, "manual request joins active target")
+	require.Equal(t, models.CodeReviewRequestJoined, joined.Disposition, "equivalent manual request should join the active session")
 	_, err = service.RequestScheduledReview(ctx, request)
 	require.NoError(t, err, "identical retry preserves request")
-	require.NoError(t, service.ReconcileSchedule(claim(), wake), "manual request serializes behind active work")
 	_, err = pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='completed' WHERE org_id=$1 AND session_id=$2`, org, metadata.SessionID)
 	require.NoError(t, err, "finish assessment")
 	_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND job_type=$2`, org, models.JobTypeRunCodeReview)
 	require.NoError(t, err, "finish reviewer starter")
-	require.NoError(t, service.ReconcileSchedule(claim(), wake), "manual request reuses completed current-head result")
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM code_review_session_metadata WHERE org_id=$1`, org).Scan(&count), "count after manual joins")
 	require.Equal(t, 1, count, "manual joining must not duplicate an equivalent assessment")
 	// A draft conversion missed by webhooks preserves current review authority.
@@ -742,7 +874,7 @@ func testSchedulingSingleConnection(t *testing.T, adminPool *pgxpool.Pool, org, 
 func testSchedulingPreparationRecovery(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 	ctx := context.Background()
 	service, claim, _ := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
-	_, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow})
+	_, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow, RequestContext: &ReviewRequestContext{Source: "ui", Body: "Reassess the new issue"}})
 	require.NoError(t, err, "persist explicit intent before identity outage")
 	before, err := service.GetSchedule(ctx, org, pr)
 	require.NoError(t, err, "read durable pending input")

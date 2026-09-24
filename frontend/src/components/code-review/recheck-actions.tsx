@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { MoreHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -12,6 +13,15 @@ import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import type { CodeReviewRequestResponse } from "@/lib/types";
+
+function requestResultLabel(result: CodeReviewRequestResponse, mode: "recheck" | "force_fresh" | undefined): string {
+  switch (result.disposition) {
+    case "reused": return "Existing assessment reused for captured inputs.";
+    case "joined": return "Joined the review already in progress.";
+    case "cancelled": return "The request was not scheduled.";
+    case "queued": return mode === "force_fresh" ? "Full review requested." : "Re-check requested. Current inputs determine whether a full review is needed.";
+  }
+}
 
 export function RecheckActions({ prID, canManage, completed, disabledReason }: { prID: string; canManage: boolean; completed: boolean; disabledReason?: string }) {
   const client = useQueryClient();
@@ -57,7 +67,7 @@ export function RecheckActions({ prID, canManage, completed, disabledReason }: {
         <DialogFooter><Button variant="outline" onClick={() => setForceOpen(false)}>Cancel</Button><DisabledTooltip disabled={!reason.trim() || Boolean(unavailable)} content={!reason.trim() ? "Enter a reason to request a fresh review." : unavailable}><Button disabled={!reason.trim() || Boolean(unavailable)} onClick={() => mutation.mutate({ mode: "force_fresh", reason: reason.trim() })}>Request full review</Button></DisabledTooltip></DialogFooter>
       </DialogContent>
     </Dialog>
-    {result ? <span role="status" className="text-xs text-muted-foreground">{result.disposition === "reused" ? "Existing assessment reused for captured inputs." : "Review requested."}</span> : null}
+    {result ? <span role="status" className="text-xs text-muted-foreground">{requestResultLabel(result, mutation.variables?.mode)} {result.assessment_id ? <Button variant="link" size="sm" className="h-auto p-0 text-xs" asChild><Link href={`/code-reviews?assessment=${result.assessment_id}`}>View assessment</Link></Button> : null}</span> : null}
     {mutation.isError ? <span role="alert" className="text-xs text-destructive">{mutation.error.message}</span> : null}
   </div>;
 }

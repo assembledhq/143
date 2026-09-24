@@ -173,7 +173,10 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	handler := newRunCodeReviewRecheckHandler(stores, services, zerolog.Nop())
 	jobJSON, err := json.Marshal(codeReviewRecheckJob{OrgID: org, AssessmentID: recheck})
 	require.NoError(t, err, "encode recheck job")
-	err = handler(ctx, "run_code_review_recheck", jobJSON)
+	supervisorJobID, supervisorLease := uuid.New(), uuid.New()
+	_, err = pool.Exec(ctx, `INSERT INTO jobs(id,org_id,queue,job_type,payload,status,lock_token,dedupe_key) VALUES($1,$2,'agent','run_code_review_recheck',$3,'running',$4,$5)`, supervisorJobID, org, jobJSON, supervisorLease, "code_review_recheck:"+recheck.String())
+	require.NoError(t, err, "seed real claimed supervisor job with admission dedupe")
+	err = handler(jobctx.WithJobID(jobctx.WithLockToken(ctx, supervisorLease), supervisorJobID), "run_code_review_recheck", jobJSON)
 	require.Error(t, err, "supervisor should wait for its bounded orchestrator turn")
 	dispatch, err := stores.CodeReviewRechecks.Get(ctx, org, recheck)
 	require.NoError(t, err, "one orchestrator dispatch should be durable")
@@ -181,7 +184,7 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	var reviewerJobs, continuationJobs int
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FILTER (WHERE job_type='run_code_review'),COUNT(*) FILTER (WHERE job_type='continue_session') FROM jobs WHERE org_id=$1`, org).Scan(&reviewerJobs, &continuationJobs), "count reviewer and continuation jobs")
 	require.Equal(t, 0, reviewerJobs, "visual-only recheck must not queue reviewers")
-	require.Equal(t, 1, continuationJobs, "visual-only recheck should queue one orchestrator continuation")
+	require.Equal(t, 1, continuationJobs, "running supervisor dedupe must allow its one orchestrator continuation")
 	lease := uuid.New()
 	_, err = pool.Exec(ctx, `UPDATE jobs SET status='running',lock_token=$2 WHERE org_id=$1 AND id=$3`, org, lease, dispatch.JobID)
 	require.NoError(t, err, "lease orchestrator continuation")
@@ -198,7 +201,7 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.Nil(t, afterMalformed.Decision, "malformed output cannot publish an approval")
 	var totalJobs int
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE org_id=$1`, org).Scan(&totalJobs), "count all jobs after malformed response")
-	require.Equal(t, 1, totalJobs, "malformed result must not enqueue a reviewer or another orchestrator")
+	require.Equal(t, 2, totalJobs, "malformed result must not enqueue a reviewer or another orchestrator")
 	changedAssessment := uuid.New()
 	changedInput := manifestInput
 	changedInput.Visual.Images = []codereviewsvc.ReviewVisualImage{{SourceID: "image-1", SourceURL: "https://example.invalid/image.png", ContentDigest: strings.Repeat("9", 64)}}
@@ -217,7 +220,7 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.Equal(t, models.CodeReviewAssessmentFailed, afterChange.Status, "changed input must close evidence-only assessment")
 	require.Contains(t, *afterChange.FailureDetail, "full_review:inputs changed", "changed input should carry full-review route reason")
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE org_id=$1`, org).Scan(&totalJobs), "count jobs after changed input")
-	require.Equal(t, 1, totalJobs, "changed input must not queue an unsafe continuation")
+	require.Equal(t, 2, totalJobs, "changed input must not queue an unsafe continuation")
 	reviewerResultID, findingID := uuid.New(), uuid.New()
 	_, err = pool.Exec(ctx, `INSERT INTO code_review_agent_results(id,org_id,session_id,agent_provider,role,status,assessment_id) VALUES($1,$2,$3,'codex','reviewer','completed',$4)`, reviewerResultID, org, session, baseline)
 	require.NoError(t, err, "seed one usable original reviewer result")
@@ -381,7 +384,7 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.NoError(t, err, "seed separate force-fresh review conversation")
 	_, err = pool.Exec(ctx, `INSERT INTO code_review_session_metadata(id,org_id,session_id,repository_id,pull_request_id,policy_id,base_sha,head_sha,trigger_source,status,review_output_key) VALUES($1,$2,$3,$4,$5,$6,'base','head','slash_command','completed','replacement-output')`, replacementMetadata, org, replacementSession, repo, pr, policy)
 	require.NoError(t, err, "seed completed replacement metadata")
-	_, err = pool.Exec(ctx, assessmentSQL, replacementAssessment, org, repo, repoName, pr, replacementMetadata, replacementSession, policy, 8, nil, manifest.InputVersion, manifest.CodeDigest, manifest.ContractDigest, manifest.IntentDigest, manifest.VisualDigest, manifest.RequestDigest, manifest.GateDigest, manifest.InputDigest, manifestJSON, "full", "force_fresh", true, "completed", "executed", "approved", true, json.RawMessage(`{}`), "replacement-publication", "not_required", time.Now().UTC())
+	_, err = pool.Exec(ctx, assessmentSQL, replacementAssessment, org, repo, repoName, pr, replacementMetadata, replacementSession, policy, 11, nil, manifest.InputVersion, manifest.CodeDigest, manifest.ContractDigest, manifest.IntentDigest, manifest.VisualDigest, manifest.RequestDigest, manifest.GateDigest, manifest.InputDigest, manifestJSON, "full", "force_fresh", true, "completed", "executed", "approved", true, json.RawMessage(`{}`), "replacement-publication", "not_required", time.Now().UTC())
 	require.NoError(t, err, "seed newer completed full assessment")
 	retireTx, err := pool.Begin(ctx)
 	require.NoError(t, err, "begin old conversation retirement")
