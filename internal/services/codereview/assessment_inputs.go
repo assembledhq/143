@@ -14,7 +14,7 @@ import (
 )
 
 // ReviewInputManifestVersion changes whenever the meaning of a captured field changes.
-const ReviewInputManifestVersion = 2
+const ReviewInputManifestVersion = 3
 
 // ReviewChangedFile binds a path and its exact diff identity. PatchDigest must
 // describe the fetched patch, including its availability; a missing patch is
@@ -85,7 +85,9 @@ type ReviewTextInput struct {
 	UnclassifiedDigest       string               `json:"unclassified_digest"`
 	Complete                 bool                 `json:"complete"`
 	SourceProvenanceComplete bool                 `json:"source_provenance_complete"`
-	ParseAmbiguous           bool                 `json:"parse_ambiguous"`
+	// ParseAmbiguous records sources retained as opaque intent. Their exact
+	// bytes must stay unchanged; it does not disqualify other evidence sources.
+	ParseAmbiguous bool `json:"parse_ambiguous"`
 }
 
 // ReviewRequestInput excludes request UUID, actor, and trigger envelope. A
@@ -194,8 +196,10 @@ func BuildReviewInputManifest(input ReviewInputCapture) (ReviewInputManifest, er
 		}
 	}
 	intent, err := normalizeReviewIntent(input.Description)
-	reuseEligible := err == nil && !input.TextEvidence.ParseAmbiguous
+	opaqueDescription := err != nil
 	if err != nil {
+		// Never guess at unsupported Markdown boundaries. Bind the entire body
+		// byte-for-byte while allowing separately captured evidence to change.
 		intent = input.Description
 	}
 	// GitHub's file order and evidence discovery order are not semantic inputs.
@@ -219,14 +223,14 @@ func BuildReviewInputManifest(input ReviewInputCapture) (ReviewInputManifest, er
 			return ReviewInputManifest{}, errors.New("duplicate text evidence source")
 		}
 	}
-	m := ReviewInputManifest{InputVersion: ReviewInputManifestVersion, ReuseEligible: reuseEligible, Code: input.Code, Contract: input.Contract,
+	m := ReviewInputManifest{InputVersion: ReviewInputManifestVersion, ReuseEligible: true, Code: input.Code, Contract: input.Contract,
 		Title: input.Title, Description: input.Description, Visual: input.Visual, TextEvidence: input.TextEvidence, Request: input.Request, Gates: input.Gates}
 	m.CodeDigest = digestJSON(m.Code)
 	m.ContractDigest = digestJSON(m.Contract)
 	m.IntentDigest = digestJSON(struct {
 		Title, NormalizedDescription string
-		ReuseEligible                bool
-	}{m.Title, intent, reuseEligible})
+		OpaqueDescription            bool
+	}{m.Title, intent, opaqueDescription})
 	m.VisualDigest = digestJSON(m.Visual)
 	m.TextDigest = digestJSON(m.TextEvidence)
 	m.RequestDigest = digestJSON(m.Request)

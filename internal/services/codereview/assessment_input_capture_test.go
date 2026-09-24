@@ -58,6 +58,7 @@ type assessmentSnapshotFixture struct {
 	changeDuringCapture bool
 	calls               int
 	syncErr             error
+	textSources         []ghservice.CodeReviewTextSource
 }
 
 func (f *assessmentSnapshotFixture) PrepareCodeReviewPullRequestSnapshot(context.Context, uuid.UUID, uuid.UUID) (ghservice.CodeReviewPullRequestSnapshotReader, error) {
@@ -74,7 +75,7 @@ func (f *assessmentSnapshotFixture) SyncPullRequestState(context.Context, uuid.U
 	return f.syncErr
 }
 func (f *assessmentSnapshotFixture) DiscoverCodeReviewTextEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewTextDiscovery, error) {
-	return ghservice.CodeReviewTextDiscovery{HeadSHA: f.snapshot.HeadSHA, Body: f.snapshot.Body, Complete: true}, nil
+	return ghservice.CodeReviewTextDiscovery{HeadSHA: f.snapshot.HeadSHA, Body: f.snapshot.Body, Sources: f.textSources, Complete: true}, nil
 }
 
 func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {

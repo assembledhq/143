@@ -32,12 +32,12 @@ func TestBuildReviewInputManifest(t *testing.T) {
 		{"complete", func(*ReviewInputCapture) {}, false, true},
 		{"missing patch", func(c *ReviewInputCapture) { c.Code.Files[0].PatchDigest = "" }, true, false},
 		{"missing gates", func(c *ReviewInputCapture) { c.Gates.Complete = false }, true, false},
-		{"malformed image", func(c *ReviewInputCapture) { c.Description += "![screenshot](bad url)\n" }, false, false},
-		{"HTML image", func(c *ReviewInputCapture) { c.Description += "<img src=x>\n" }, false, false},
-		{"code fence", func(c *ReviewInputCapture) { c.Description += "```md\n![x](url)\n```\n" }, false, false},
+		{"malformed image retained as opaque intent", func(c *ReviewInputCapture) { c.Description += "![screenshot](bad url)\n" }, false, true},
+		{"HTML image retained as opaque intent", func(c *ReviewInputCapture) { c.Description += "<img src=x>\n" }, false, true},
+		{"code fence retained as opaque intent", func(c *ReviewInputCapture) { c.Description += "```md\n![x](url)\n```\n" }, false, true},
 		{"literal inline code", func(c *ReviewInputCapture) { c.Description += "Explain `review.go`\n" }, false, true},
 		{"literal escape", func(c *ReviewInputCapture) { c.Description += "Explain \\*literal\\* text\n" }, false, true},
-		{"single dash setext", func(c *ReviewInputCapture) { c.Description += "## Testing\npassed\n-\nnew purpose\n" }, false, false},
+		{"single dash setext retained as opaque intent", func(c *ReviewInputCapture) { c.Description += "## Testing\npassed\n-\nnew purpose\n" }, false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -52,7 +52,7 @@ func TestBuildReviewInputManifest(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "complete capture should produce a manifest")
-			require.Equal(t, tt.wantEligible, m.ReuseEligible, "Markdown ambiguity must control reuse eligibility")
+			require.Equal(t, tt.wantEligible, m.ReuseEligible, "complete captures should preserve even unsupported Markdown for exact comparison")
 			require.True(t, validManifest(m), "built manifest should validate")
 		})
 	}
