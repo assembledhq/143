@@ -70,6 +70,7 @@ func TestPlanReviewRecheck(t *testing.T) {
 		}, nil, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
 		{"incomplete coverage", withImage, func(b *RecheckBaseline) { b.CoverageComplete = false }, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonNoBaseline}},
 		{"missing baseline", withImage, func(b *RecheckBaseline) { b.Inputs = ReviewInputManifest{} }, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonNoBaseline}},
+		{"old manifest baseline", withImage, func(b *RecheckBaseline) { b.Inputs.InputVersion = 2 }, nil, false, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonNoBaseline}},
 		{"mixed blockers", withImage, func(b *RecheckBaseline) {
 			b.RiskReasons = append(b.RiskReasons, models.CodeReviewRiskReasonBlockingFindings)
 		}, nil, false, false, false, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},

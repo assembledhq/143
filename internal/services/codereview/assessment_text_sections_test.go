@@ -19,6 +19,8 @@ func TestSplitReviewEvidenceSections(t *testing.T) {
 		{"later intent heading", "Purpose\n## Testing\nFailed\n## Design\nOld design\n", "Purpose\n## Testing\nPassed\n## Design\nNew design\n", false, true},
 		{"nested intent heading", "Purpose\n## Testing\nFailed\n### Design\nOld design\n", "Purpose\n## Testing\nPassed\n### Design\nNew design\n", false, true},
 		{"fenced logs", "Purpose\n## Test Logs\n```text\nfail\n```\n", "Purpose\n## Test Logs\n```text\npass\n```\n", true, true},
+		{"screenshot captions with inline code", "Purpose\n## Screenshots\nBefore `Icons`\n![before](a.png)\n## Deploy\nNo steps\n", "Purpose\n## Screenshots\nAfter `Icons`\n![after](b.png)\n## Deploy\nNo steps\n", true, true},
+		{"intent following screenshots changes", "Purpose\n## Screenshots\n![before](a.png)\n## Deploy\nOld steps\n", "Purpose\n## Screenshots\n![after](b.png)\n## Deploy\nNew steps\n", false, true},
 		{"HTML comment boundary", "Purpose\n", "Purpose\n<!--\n## Testing\nnew intent\n-->\n", false, false},
 		{"HTML block boundary", "Purpose\n", "Purpose\n<div>\n## Testing\nnew intent\n</div>\n", false, false},
 		{"fence closer with suffix", "Purpose\n", "Purpose\n## Testing\n```text\nlog\n```more\n## Design\nnew intent\n", false, false},
@@ -38,7 +40,7 @@ func TestSplitReviewEvidenceSections(t *testing.T) {
 			beforeIntent, _, err := splitReviewEvidenceSections(tt.before)
 			require.NoError(t, err, "baseline Markdown should parse")
 			afterIntent, _, err := splitReviewEvidenceSections(tt.after)
-			require.Equal(t, tt.afterEligible, err == nil, "ambiguous Markdown should disable reuse")
+			require.Equal(t, tt.afterEligible, err == nil, "ambiguous Markdown must reject section extraction")
 			require.Equal(t, tt.sameIntent, err == nil && beforeIntent == afterIntent, "only bounded evidence text may change without changing intent")
 		})
 	}

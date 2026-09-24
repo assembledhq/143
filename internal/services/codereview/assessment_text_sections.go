@@ -23,7 +23,7 @@ func reviewEvidenceLabel(raw string) string {
 	label := strings.ToLower(strings.TrimSpace(strings.TrimRight(strings.TrimSpace(raw), "#")))
 	label = strings.TrimSuffix(label, ":")
 	switch label {
-	case "testing", "tests", "evidence", "validation", "test logs", "logs", "benchmarks", "benchmark results":
+	case "testing", "tests", "evidence", "validation", "test logs", "logs", "benchmarks", "benchmark results", "screenshots":
 		return label
 	default:
 		return ""
@@ -33,8 +33,8 @@ func reviewEvidenceLabel(raw string) string {
 // splitReviewEvidenceSections treats ordinary Markdown evidence headings as
 // source boundaries. Everything outside those sections stays byte-significant
 // intent (apart from the existing image-node normalization). Ambiguous fences,
-// HTML headings, duplicate evidence headings, and unsupported Markdown fail
-// reuse rather than guessing where intent ends.
+// HTML headings, duplicate evidence headings, and unsupported Markdown return
+// an error so capture can retain the entire source as opaque intent.
 func splitReviewEvidenceSections(raw string) (string, []reviewEvidenceSection, error) {
 	segments := make([]reviewMarkdownSegment, 0, 8)
 	current := reviewMarkdownSegment{}

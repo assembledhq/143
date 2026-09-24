@@ -222,7 +222,11 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	for _, section := range descriptionSections {
 		textItems = append(textItems, newReviewTextEvidence("pull_request_description", fmt.Sprint(pr.GitHubPRNumber), prURL, snapshot.AuthorLogin, section.Content, section.Label))
 	}
-	var unclassified []struct{ Surface, ProviderObjectID, Intent string }
+	type discussionIntent struct {
+		Surface, ProviderObjectID, Intent string
+		Opaque                            bool
+	}
+	var unclassified []discussionIntent
 	for _, source := range textDiscovery.Sources {
 		if source.SourceURL == "" || source.ProviderObjectID == "" {
 			return result, fmt.Errorf("%w: text source lacks provenance", ErrAssessmentReuseUnavailable)
@@ -233,7 +237,7 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 			intent = source.Body
 		}
 		if strings.TrimSpace(intent) != "" {
-			unclassified = append(unclassified, struct{ Surface, ProviderObjectID, Intent string }{string(source.Surface), source.ProviderObjectID, intent})
+			unclassified = append(unclassified, discussionIntent{string(source.Surface), source.ProviderObjectID, intent, parseErr != nil})
 		}
 		for _, section := range sections {
 			textItems = append(textItems, newReviewTextEvidence(string(source.Surface), source.ProviderObjectID, source.SourceURL, source.AuthorLogin, section.Content, section.Label))
