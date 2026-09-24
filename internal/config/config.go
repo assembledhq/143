@@ -199,7 +199,6 @@ type Config struct {
 	// spend on public repositories.
 	CodeReviewDisputeUntrustedIntakePerLogin       int `env:"CODE_REVIEW_DISPUTE_UNTRUSTED_INTAKE_PER_LOGIN"        envDefault:"5"`
 	CodeReviewDisputeUntrustedIntakePerPullRequest int `env:"CODE_REVIEW_DISPUTE_UNTRUSTED_INTAKE_PER_PULL_REQUEST" envDefault:"20"`
-
 	// CSRF
 	CSRFSigningKey string `env:"CSRF_SIGNING_KEY"`
 

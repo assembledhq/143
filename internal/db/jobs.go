@@ -726,13 +726,14 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 		WITH unavailable_target_nodes AS (
 			SELECT id
 			FROM nodes
-			WHERE status IN ('dead', 'draining') OR last_heartbeat_at < @dead_before
+			WHERE status IN ('dead', 'draining') OR mode NOT IN ('worker', 'all') OR last_heartbeat_at < @dead_before
 		),
 		claiming_node AS (
 			SELECT id
 			FROM nodes
 			WHERE id = @node_id
 			  AND status = 'active'
+			  AND mode IN ('worker', 'all')
 			  AND last_heartbeat_at >= @dead_before
 		),
 		next_job AS (
@@ -1500,6 +1501,61 @@ func (s *JobStore) SelectWorkerWithSandboxCapacity(ctx context.Context, excludeN
 		return nil, fmt.Errorf("select worker with sandbox capacity: %w", err)
 	}
 	return &nodeID, nil
+}
+
+// IsHealthyWorkerNode checks whether a recorded sandbox owner can accept a
+// pinned turn. This is only a placement hint: the sandbox runtime still
+// verifies ownership and container liveness after dispatch.
+// lint:allow-no-orgid reason="nodes is a cluster-scoped table with no org_id"
+func (s *JobStore) IsHealthyWorkerNode(ctx context.Context, nodeID string) (bool, error) {
+	var healthy bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM nodes
+			WHERE id = @node_id
+			  AND mode IN ('worker', 'all')
+			  AND status = 'active'
+			  AND last_heartbeat_at >= @dead_before
+		)`, pgx.NamedArgs{
+		"node_id":     nodeID,
+		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
+	}).Scan(&healthy)
+	if err != nil {
+		return false, fmt.Errorf("check worker node health: %w", err)
+	}
+	return healthy, nil
+}
+
+// WorkerSandboxCapacity reads one worker's heartbeat capacity. Known is false
+// when capacity metadata is absent or its live-container count failed; in
+// that case the executor's local admission gate remains authoritative.
+// lint:allow-no-orgid reason="nodes is a cluster-scoped table with no org_id"
+func (s *JobStore) WorkerSandboxCapacity(ctx context.Context, nodeID string) (known, available bool, err error) {
+	err = s.db.QueryRow(ctx, `
+		SELECT
+			metadata ? 'max_active_sandboxes'
+			  AND metadata ? 'live_sandbox_count'
+			  AND metadata ? 'reserved_sandbox_count'
+			  AND COALESCE(metadata->>'live_sandbox_count_error', '') = ''
+			  AND COALESCE(NULLIF(metadata->>'max_active_sandboxes', '')::int, 0) > 0 AS known,
+			COALESCE(NULLIF(metadata->>'live_sandbox_count', '')::int, 0)
+			  + COALESCE(NULLIF(metadata->>'reserved_sandbox_count', '')::int, 0)
+			  < COALESCE(NULLIF(metadata->>'max_active_sandboxes', '')::int, 0) AS available
+		FROM nodes
+		WHERE id = @node_id
+		  AND mode IN ('worker', 'all')
+		  AND status = 'active'
+		  AND last_heartbeat_at >= @dead_before`, pgx.NamedArgs{
+		"node_id":     nodeID,
+		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
+	}).Scan(&known, &available)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("read worker sandbox capacity: %w", err)
+	}
+	return known, available, nil
 }
 
 // SandboxCapacitySummary returns best-effort aggregate sandbox capacity from

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -273,7 +274,7 @@ func TestMaybeDispatchSessionExecutor_RequiresDispatcherWhenConfigured(t *testin
 	session := models.Session{ID: uuid.New(), OrgID: uuid.New()}
 	services := &Services{RequireSessionExecutorDispatcher: true}
 
-	err := maybeDispatchSessionExecutor(context.Background(), services, "run_agent", session, nil)
+	err := maybeDispatchSessionExecutor(context.Background(), nil, services, "run_agent", session, nil)
 
 	require.Error(t, err, "production-style services should reject inline execution when no dispatcher is wired")
 	require.Contains(t, err.Error(), "session executor dispatcher is required", "error should identify the missing dispatcher")
@@ -285,7 +286,88 @@ func TestMaybeDispatchSessionExecutor_AllowsInlineWhenNotRequired(t *testing.T) 
 	session := models.Session{ID: uuid.New(), OrgID: uuid.New()}
 	services := &Services{}
 
-	err := maybeDispatchSessionExecutor(context.Background(), services, "run_agent", session, nil)
+	err := maybeDispatchSessionExecutor(context.Background(), nil, services, "run_agent", session, nil)
 
 	require.NoError(t, err, "local/dev services should keep the explicit inline fallback")
+}
+
+func TestMaybeDispatchSessionExecutor_CodeReviewPlacementRequiresStores(t *testing.T) {
+	t.Parallel()
+	dispatcher := &fakeSessionExecutorDispatcher{}
+	session := models.Session{ID: uuid.New(), OrgID: uuid.New(), Origin: models.SessionOriginCodeReview}
+	services := &Services{SessionExecutorDispatcher: dispatcher}
+	err := maybeDispatchSessionExecutor(context.Background(), nil, services, "run_agent", session, nil)
+	require.Error(t, err, "missing placement stores should prevent a code review executor launch")
+	require.ErrorContains(t, err, "code review executor placement stores are required", "code review placement should require its stores")
+	require.Equal(t, 0, dispatcher.calls, "missing placement stores should not dispatch an executor")
+}
+
+func TestCodeReviewExecutorPlacement(t *testing.T) {
+	t.Parallel()
+	owner := "owner"
+	container := "sandbox"
+	other := "other"
+	tests := []struct {
+		name             string
+		session          models.Session
+		currentNode      string
+		ownerHealthy     bool
+		deadTarget       string
+		localKnown       bool
+		localAvailable   bool
+		capacityNode     *string
+		wantTarget       *string
+		wantClear        bool
+		wantDelay        time.Duration
+		wantSelectCalled bool
+		wantLocalCalled  bool
+		wantBypass       bool
+		wantWindow       bool
+	}{
+		{name: "live workspace on this node", session: models.Session{ContainerID: &container, WorkerNodeID: &owner}, currentNode: owner, ownerHealthy: true},
+		{name: "live workspace on sibling", session: models.Session{ContainerID: &container, WorkerNodeID: &owner}, currentNode: other, ownerHealthy: true, wantTarget: &owner, wantBypass: true},
+		{name: "dead owner needs a recovery claim", session: models.Session{ContainerID: &container, WorkerNodeID: &owner}, currentNode: other, wantTarget: &owner, wantBypass: true},
+		{name: "dead owner claim performs runtime cleanup", session: models.Session{ContainerID: &container, WorkerNodeID: &owner}, currentNode: other, deadTarget: owner},
+		{name: "container without owner is not redirected", session: models.Session{ContainerID: &container}, currentNode: owner},
+		{name: "cold workspace stays local when capacity exists", currentNode: owner, localKnown: true, localAvailable: true, wantLocalCalled: true},
+		{name: "cold workspace redirects only when local full", currentNode: owner, localKnown: true, capacityNode: &other, wantTarget: &other, wantDelay: 5 * time.Second, wantSelectCalled: true, wantLocalCalled: true, wantWindow: true},
+		{name: "fleet saturation waits without launching", currentNode: owner, localKnown: true, wantClear: true, wantDelay: 10 * time.Second, wantSelectCalled: true, wantLocalCalled: true, wantWindow: true},
+		{name: "unknown metadata falls back to runtime admission", currentNode: owner, capacityNode: &other, wantLocalCalled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			if tt.deadTarget != "" {
+				ctx = jobctx.WithDeadTargetNode(ctx, tt.deadTarget)
+			}
+			selectCalled := false
+			localCalled := false
+			err := codeReviewExecutorPlacement(ctx, tt.session, tt.currentNode,
+				func(context.Context, string) (bool, error) { return tt.ownerHealthy, nil },
+				func(_ context.Context, nodeID string) (bool, bool, error) {
+					localCalled = true
+					require.Equal(t, tt.currentNode, nodeID, "local capacity should be checked on the claiming node")
+					return tt.localKnown, tt.localAvailable, nil
+				},
+				func(_ context.Context, excludedNodeID string) (*string, error) {
+					selectCalled = true
+					require.Equal(t, tt.currentNode, excludedNodeID, "alternate selection should exclude the claiming node")
+					return tt.capacityNode, nil
+				})
+			require.Equal(t, tt.wantSelectCalled, selectCalled, "placement should consult capacity only when no live owner can be used")
+			require.Equal(t, tt.wantLocalCalled, localCalled, "placement should check the claiming node before considering alternates")
+			if tt.wantTarget == nil && !tt.wantClear {
+				require.NoError(t, err, "local placement should allow dispatch")
+				return
+			}
+			var retry *RetryableError
+			require.ErrorAs(t, err, &retry, "remote or saturated placement should defer executor launch")
+			require.Equal(t, tt.wantTarget, retry.TargetNodeID, "placement should select the expected target")
+			require.Equal(t, tt.wantClear, retry.ClearTargetNodeID, "placement should clear a stale target only during fleet saturation")
+			require.Equal(t, tt.wantDelay, *retry.RetryAfter, "placement should use the expected retry delay")
+			require.Equal(t, tt.wantBypass, retry.BypassMaxRetryDuration, "only ownership redirects should bypass the retry window")
+			require.Equal(t, tt.wantWindow, retry.MaxRetryDuration != nil, "capacity waits should start a bounded retry window")
+		})
+	}
 }

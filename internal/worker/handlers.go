@@ -8379,7 +8379,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			return &FatalError{Err: fmt.Errorf("linear pre-start preparation failed")}
 		}
 
-		if err := maybeDispatchSessionExecutor(ctx, services, jobType, run, run.PrimaryThreadID); err != nil {
+		if err := maybeDispatchSessionExecutor(ctx, stores, services, jobType, run, run.PrimaryThreadID); err != nil {
 			return err
 		}
 		// A fresh per-target automation turn executes under an attempt claim
@@ -10052,7 +10052,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			threadIDLocal := threadID
 			dispatchThreadID = &threadIDLocal
 		}
-		if err := maybeDispatchSessionExecutor(ctx, services, jobType, session, dispatchThreadID); err != nil {
+		if err := maybeDispatchSessionExecutor(ctx, stores, services, jobType, session, dispatchThreadID); err != nil {
 			return err
 		}
 		// A per-target automation turn executes under an attempt claim
