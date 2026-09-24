@@ -60,7 +60,7 @@ func codeReviewWorkspaceColdEligible(session models.Session, repositoryID uuid.U
 // checks readiness before repeating expensive GitHub calls. It refreshes
 // GitHub once more after readiness, immediately before reviewer fan-out.
 func codeReviewWorkspacePreparationStarted(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload) (bool, error) {
-	if services == nil || !services.CodeReviewWorkspacePreparationEnabled || !services.CodeReviewExecutorPlacementEnabled {
+	if services == nil || !services.CodeReviewWorkspacePreparationEnabled {
 		return false, nil
 	}
 	if stores == nil || stores.Sessions == nil || stores.Jobs == nil {
@@ -96,7 +96,7 @@ func ensureCodeReviewWorkspaceReadyAfterPreflight(ctx context.Context, stores *S
 // A completed initializer is not proof of readiness. Both gates check the
 // current holder, review revision, and session before dispatching reviewers.
 func ensureCodeReviewWorkspaceReadyWithFallback(ctx context.Context, stores *Stores, services *Services, log zerolog.Logger, job runCodeReviewPayload, afterPreflight bool) error {
-	if services == nil || !services.CodeReviewWorkspacePreparationEnabled || !services.CodeReviewExecutorPlacementEnabled {
+	if services == nil || !services.CodeReviewWorkspacePreparationEnabled {
 		return nil
 	}
 	if stores == nil || stores.CodeReviewWorkspaces == nil || stores.CodeReviews == nil || stores.Sessions == nil || stores.Jobs == nil {
@@ -202,7 +202,7 @@ func ensureCodeReviewWorkspaceReadyWithFallback(ctx context.Context, stores *Sto
 
 func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, log zerolog.Logger) JobHandler {
 	return func(ctx context.Context, _ string, raw json.RawMessage) (returnErr error) {
-		if services != nil && (!services.CodeReviewWorkspacePreparationEnabled || !services.CodeReviewExecutorPlacementEnabled) {
+		if services != nil && !services.CodeReviewWorkspacePreparationEnabled {
 			return nil // a fleet rollout disabled preparation before this queued job claimed
 		}
 		if stores == nil || stores.CodeReviewWorkspaces == nil || stores.CodeReviews == nil || stores.Sessions == nil || stores.Jobs == nil || services == nil || services.CodeReviewWorkspacePreparer == nil || services.SandboxProvider == nil {

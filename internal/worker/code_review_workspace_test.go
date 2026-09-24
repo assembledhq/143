@@ -41,16 +41,14 @@ func TestCodeReviewWorkspaceColdEligible(t *testing.T) {
 func TestCodeReviewWorkspacePreparationStarted(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		placement bool
-		prepare   bool
-		priorJob  bool
-		want      bool
+		name     string
+		prepare  bool
+		priorJob bool
+		want     bool
 	}{
-		{name: "placement disabled", prepare: true},
-		{name: "preparation disabled", placement: true},
-		{name: "first preflight has no preparation checkpoint", placement: true, prepare: true},
-		{name: "prior enqueue skips repeated GitHub preflight", placement: true, prepare: true, priorJob: true, want: true},
+		{name: "preparation disabled"},
+		{name: "first preflight has no preparation checkpoint", prepare: true},
+		{name: "prior enqueue skips repeated GitHub preflight", prepare: true, priorJob: true, want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -60,7 +58,7 @@ func TestCodeReviewWorkspacePreparationStarted(t *testing.T) {
 			defer mock.Close()
 			job := runCodeReviewPayload{OrgID: uuid.New(), SessionID: uuid.New(), MetadataID: uuid.New()}
 			stores := &Stores{Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock)}
-			if tt.placement && tt.prepare {
+			if tt.prepare {
 				mock.ExpectQuery("SELECT workspace_generation FROM sessions").WithArgs(job.OrgID, job.SessionID).
 					WillReturnRows(pgxmock.NewRows([]string{"workspace_generation"}).AddRow(int64(0)))
 				rows := pgxmock.NewRows([]string{"created_at"})
@@ -71,7 +69,7 @@ func TestCodeReviewWorkspacePreparationStarted(t *testing.T) {
 					WillReturnRows(rows)
 			}
 			started, err := codeReviewWorkspacePreparationStarted(context.Background(), stores,
-				&Services{CodeReviewWorkspacePreparationEnabled: tt.prepare, CodeReviewExecutorPlacementEnabled: tt.placement}, job)
+				&Services{CodeReviewWorkspacePreparationEnabled: tt.prepare}, job)
 			require.NoError(t, err, "preparation checkpoint lookup should finish without an error")
 			require.Equal(t, tt.want, started, "a prior durable enqueue should suppress repeated GitHub preflight")
 			require.NoError(t, mock.ExpectationsWereMet(), "checkpoint lookup should read only its tenant and generation")
@@ -79,25 +77,12 @@ func TestCodeReviewWorkspacePreparationStarted(t *testing.T) {
 	}
 }
 
-func TestPrepareCodeReviewWorkspaceHandlerHonorsRolloutSwitches(t *testing.T) {
+func TestPrepareCodeReviewWorkspaceHandlerHonorsPreparationSwitch(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name      string
-		placement bool
-		prepare   bool
-	}{
-		{name: "placement disabled", prepare: true},
-		{name: "preparation disabled", placement: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			err := newPrepareCodeReviewWorkspaceHandler(nil,
-				&Services{CodeReviewWorkspacePreparationEnabled: tt.prepare, CodeReviewExecutorPlacementEnabled: tt.placement},
-				zerolog.Nop())(context.Background(), models.JobTypePrepareCodeReviewWorkspace, nil)
-			require.NoError(t, err, "a queued preparation should no-op if either rollout switch is disabled")
-		})
-	}
+	err := newPrepareCodeReviewWorkspaceHandler(nil,
+		&Services{CodeReviewWorkspacePreparationEnabled: false},
+		zerolog.Nop())(context.Background(), models.JobTypePrepareCodeReviewWorkspace, nil)
+	require.NoError(t, err, "a queued preparation should no-op when the rollout switch is disabled")
 }
 
 func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *testing.T) {
@@ -179,7 +164,7 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 				gate = ensureCodeReviewWorkspaceReadyAfterPreflight
 			}
 			err = gate(context.Background(), stores,
-				&Services{CodeReviewWorkspacePreparationEnabled: true, CodeReviewExecutorPlacementEnabled: true},
+				&Services{CodeReviewWorkspacePreparationEnabled: true},
 				zerolog.Nop(), job)
 			require.NoError(t, err, "ineligible review should use ordinary reviewer workspace recovery without waiting for preparation")
 			require.NoError(t, mock.ExpectationsWereMet(), "workspace gate should stop before enqueuing an impossible preparation")
@@ -228,7 +213,7 @@ func TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation(t *testing.T) {
 		CodeReviews:          db.NewCodeReviewStore(mock), Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock),
 	}
 	err = ensureCodeReviewWorkspaceReady(context.Background(), stores,
-		&Services{CodeReviewWorkspacePreparationEnabled: true, CodeReviewExecutorPlacementEnabled: true},
+		&Services{CodeReviewWorkspacePreparationEnabled: true},
 		zerolog.Nop(), job)
 	var retry *RetryableError
 	require.ErrorAs(t, err, &retry, "a cold workspace should enqueue preparation and defer reviewer fan-out")

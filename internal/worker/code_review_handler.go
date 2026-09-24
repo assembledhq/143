@@ -225,7 +225,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				}
 			}
 			avoidReprepareAfterPreflight = started
-			if !started && services != nil && services.CodeReviewWorkspacePreparationEnabled && services.CodeReviewExecutorPlacementEnabled && stores.CodeReviewWorkspaces != nil {
+			if !started && services != nil && services.CodeReviewWorkspacePreparationEnabled && stores.CodeReviewWorkspaces != nil {
 				ready, err := stores.CodeReviewWorkspaces.Readiness(ctx, job.OrgID, job.MetadataID, job.SessionID, job.HeadSHA)
 				if err != nil {
 					return fmt.Errorf("check review workspace before GitHub preflight: %w", err)
