@@ -70,8 +70,7 @@ CREATE UNIQUE INDEX inbox_client_id ON thread_inbox_entries(org_id,thread_id,cli
 	require.NoError(t, err, "create migration parent shapes")
 	up, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000296_code_review_recheck_runtime.up.sql"))
 	require.NoError(t, err, "read actual runtime migration")
-	_, err = pool.Exec(ctx, string(up))
-	require.NoError(t, err, "apply runtime migration")
+	applyBoundedCodeReviewMigration(t, ctx, pool, string(up))
 	org, repo, pr, session, thread, assessment := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	seed := []struct {
 		query string
