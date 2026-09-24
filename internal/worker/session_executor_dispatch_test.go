@@ -291,15 +291,15 @@ func TestMaybeDispatchSessionExecutor_AllowsInlineWhenNotRequired(t *testing.T) 
 	require.NoError(t, err, "local/dev services should keep the explicit inline fallback")
 }
 
-func TestMaybeDispatchSessionExecutor_CodeReviewPlacementDefaultsOff(t *testing.T) {
+func TestMaybeDispatchSessionExecutor_CodeReviewPlacementRequiresStores(t *testing.T) {
 	t.Parallel()
 	dispatcher := &fakeSessionExecutorDispatcher{}
 	session := models.Session{ID: uuid.New(), OrgID: uuid.New(), Origin: models.SessionOriginCodeReview}
 	services := &Services{SessionExecutorDispatcher: dispatcher}
 	err := maybeDispatchSessionExecutor(context.Background(), nil, services, "run_agent", session, nil)
-	var handoff *HandoffError
-	require.ErrorAs(t, err, &handoff, "disabled placement should preserve ordinary executor handoff")
-	require.Equal(t, 1, dispatcher.calls, "disabled placement should dispatch without requiring placement stores")
+	require.Error(t, err, "missing placement stores should prevent a code review executor launch")
+	require.ErrorContains(t, err, "code review executor placement stores are required", "code review placement should require its stores")
+	require.Equal(t, 0, dispatcher.calls, "missing placement stores should not dispatch an executor")
 }
 
 func TestCodeReviewExecutorPlacement(t *testing.T) {

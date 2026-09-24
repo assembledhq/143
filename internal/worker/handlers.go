@@ -990,8 +990,7 @@ type Services struct {
 	// runtime error for worker-owned run_agent/continue_session jobs. Production
 	// workers set this so a startup wiring regression cannot silently reintroduce
 	// deploy-sensitive inline long-running sessions.
-	RequireSessionExecutorDispatcher   bool
-	CodeReviewExecutorPlacementEnabled bool
+	RequireSessionExecutorDispatcher bool
 }
 
 type githubOrgRosterService interface {

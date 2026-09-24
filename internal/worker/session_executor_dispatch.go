@@ -42,7 +42,7 @@ func maybeDispatchSessionExecutor(ctx context.Context, stores *Stores, services 
 		}
 		return nil
 	}
-	if session.Origin == models.SessionOriginCodeReview && services.CodeReviewExecutorPlacementEnabled {
+	if session.Origin == models.SessionOriginCodeReview {
 		if stores == nil || stores.Sessions == nil || stores.Jobs == nil {
 			return fmt.Errorf("code review executor placement stores are required")
 		}
