@@ -58,6 +58,43 @@ vi.mock('next/image', () => ({
 installSessionDetailPageTestHooks({ toast, routerPush });
 
 describe('SessionDetailPage agent tabs and threads', () => {
+  it('hides an unused code-review Main tab and opens the synthesis thread', async () => {
+    const sessionId = 'session-code-review-synthesis-tabs';
+    const main: SessionThread = {
+      id: 'thread-main', session_id: sessionId, org_id: 'org-1', agent_type: 'codex',
+      label: 'Main', status: 'idle', current_turn: 0, created_at: '2026-09-25T00:00:00Z',
+      cost_cents: 0, pending_message_count: 0,
+    };
+    const synthesis: SessionThread = {
+      ...main, id: 'thread-synthesis', label: 'Code review synthesis: codex',
+      status: 'running', current_turn: 1, created_at: '2026-09-25T00:01:00Z',
+      execution_mode: 'review', filesystem_mode: 'read_only',
+    };
+    const reviewer: SessionThread = {
+      ...synthesis, id: 'thread-reviewer', label: 'Code review: claude_code',
+      agent_type: 'claude_code', status: 'completed',
+    };
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({
+        data: { ...mockSessions[0], id: sessionId, origin: 'code_review', status: 'running', threads: [main, reviewer, synthesis] },
+      } satisfies SingleResponse<Session & { threads: SessionThread[] }>)),
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ params }) => HttpResponse.json(
+        makeTranscriptWindow(params.threadId === synthesis.id ? [{
+          id: 1, session_id: sessionId, org_id: 'org-1', thread_id: synthesis.id,
+          turn_number: 1, role: 'assistant', content: 'Synthesis result', created_at: '2026-09-25T00:02:00Z',
+        }] : [], []),
+      )),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    const synthesisTab = await screen.findByRole('tab', { name: /Code review synthesis: codex/ });
+    expect(screen.queryByRole('tab', { name: /^Main/ })).not.toBeInTheDocument();
+    await user.click(synthesisTab);
+    expect(await screen.findByText('Synthesis result')).toBeInTheDocument();
+  });
+
   it('reconciles duplicated, out-of-order, and missed activity lifecycle events from the durable transcript', async () => {
     const sessionId = 'session-activity-lifecycle';
     const thread: SessionThread = {

@@ -21,6 +21,7 @@ import {
   trackInFlightAgentUpdate,
   shouldInvalidateForActivityLifecycleEvent,
   buildChromeThreads,
+  visibleSessionThreads,
   getPullRequestHealthRefetchInterval,
   deriveSessionDetailLoadState,
 } from "./session-detail-state";
@@ -514,6 +515,32 @@ describe("buildChromeThreads", () => {
     const realThread = { ...baseThread, id: "thread-review-1", label: "Review" };
 
     expect(buildChromeThreads([baseThread, realThread], reviewThread)).toEqual([baseThread, realThread]);
+  });
+});
+
+describe("visibleSessionThreads", () => {
+  const main: SessionThread = {
+    id: "main",
+    session_id: "session-1",
+    org_id: "org-1",
+    agent_type: "codex",
+    label: "Main",
+    status: "idle",
+    current_turn: 0,
+    created_at: "2026-01-01T00:00:00.000Z",
+    cost_cents: 0,
+    pending_message_count: 0,
+  };
+  const reviewer = { ...main, id: "reviewer", label: "Code review: codex", status: "completed" as const, current_turn: 1 };
+
+  it.each([
+    { name: "hides unused Main in code reviews", origin: "code_review", main, expected: [reviewer] },
+    { name: "keeps Main in ordinary sessions", origin: "user", main, expected: [main, reviewer] },
+    { name: "keeps legacy synthesis in Main", origin: "code_review", main: { ...main, current_turn: 1 }, expected: [{ ...main, current_turn: 1 }, reviewer] },
+    { name: "keeps a running Main", origin: "code_review", main: { ...main, status: "running" as const }, expected: [{ ...main, status: "running" as const }, reviewer] },
+    { name: "keeps Main with queued messages", origin: "code_review", main: { ...main, pending_message_count: 1 }, expected: [{ ...main, pending_message_count: 1 }, reviewer] },
+  ])("$name", ({ origin, main: candidate, expected }) => {
+    expect(visibleSessionThreads(origin, [candidate, reviewer])).toEqual(expected);
   });
 });
 

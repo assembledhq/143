@@ -2895,8 +2895,9 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 		return err
 	}
 	threads := newWorkerThreadService(stores, logger)
-	// The first synthesis uses Main. Runtime fallbacks use separate threads
-	// because an agent's provider cannot be edited after its first turn.
+	// Legacy first synthesis uses Main. Assessment-enabled reviews use an
+	// explicit read-only synthesis thread; runtime fallbacks use separate
+	// threads because an agent's provider cannot be edited after its first turn.
 	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
 	if err != nil {
 		return fmt.Errorf("load code review session for orchestrator: %w", err)
@@ -2973,8 +2974,8 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 		}
 		if services.CodeReviewAssessmentsEnabled && stores.CodeReviewAssessments != nil {
 			// A new reusable full baseline needs a verifiably read-only
-			// orchestrator thread. The session's legacy primary thread is not
-			// created with that filesystem contract.
+			// orchestrator thread. Existing sessions may still have a writable
+			// primary thread, so use an explicit synthesis thread consistently.
 			label := fmt.Sprintf("Code review synthesis: %s", agentType)
 			thread, createErr := ensureCodeReviewFallbackThread(ctx, threads, threadsvc.CreateThreadInput{
 				SessionID: job.SessionID, OrgID: job.OrgID, AgentType: string(agentType),

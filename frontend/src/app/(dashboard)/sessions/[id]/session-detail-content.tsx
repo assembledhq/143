@@ -221,6 +221,7 @@ import {
   statusConfig,
   shouldInvalidateForActivityLifecycleEvent,
   trackInFlightAgentUpdate,
+  visibleSessionThreads,
   type PendingThreadPreview,
 } from "./session-detail-state";
 
@@ -4264,10 +4265,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     void refetchDiff();
   }, [diffRevisionKey, isDiffFetchedAfterMount, refetchDiff, sessionDiffPayload, shouldLoadDiff]);
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
+  const visibleThreads = useMemo(() => visibleSessionThreads(session?.origin, threads), [session?.origin, threads]);
   const [pendingThreadPreview, setPendingThreadPreview] = useState<PendingThreadPreview | null>(null);
   const chromeThreads = useMemo(
-    () => buildChromeThreads(threads, pendingThreadPreview),
-    [pendingThreadPreview, threads],
+    () => buildChromeThreads(visibleThreads, pendingThreadPreview),
+    [pendingThreadPreview, visibleThreads],
   );
   const nonInteractiveThreadIds = useMemo(
     () => new Set(pendingThreadPreview?.id === "__pending-thread__" ? [pendingThreadPreview.id] : []),
@@ -4541,12 +4543,12 @@ export function SessionDetailContent({ id }: { id: string }) {
           return;
         }
         setHasResolvedInitialThreadSelection(true);
-        setActiveThreadId(threads[0].id);
+        setActiveThreadId(chromeThreads[0].id);
         return;
       }
 
       const storedThreadId = readStoredSessionActiveThread(window.localStorage, id, viewerScope);
-      const nextThreadId = resolveInitialSessionThreadId(threads, storedThreadId);
+      const nextThreadId = resolveInitialSessionThreadId(chromeThreads, storedThreadId);
       setHasResolvedInitialThreadSelection(true);
       if (activeThreadId !== nextThreadId) {
         setActiveThreadId(nextThreadId);
@@ -4557,7 +4559,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     if (!activeThreadId || !chromeThreads.some((thread) => thread.id === activeThreadId)) {
       setActiveThreadId(chromeThreads[0].id);
     }
-  }, [activeThreadId, chromeThreads, hasResolvedInitialThreadSelection, id, isAuthLoading, session, threads, viewerScope]);
+  }, [activeThreadId, chromeThreads, hasResolvedInitialThreadSelection, id, isAuthLoading, session, viewerScope]);
 
   useEffect(() => {
     if (!hasResolvedInitialThreadSelection || !viewerScope || !activeThreadId || typeof window === "undefined") {
@@ -5960,7 +5962,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         };
       });
       if (activeThreadId === archivedThreadID) {
-        const fallback = threads.find((thread) => thread.id !== archivedThreadID);
+        const fallback = chromeThreads.find((thread) => thread.id !== archivedThreadID);
         setActiveThreadId(fallback?.id ?? null);
       }
       queryClient.invalidateQueries({ queryKey: ["session", id] });
@@ -6336,11 +6338,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     onShowHelp: () => setKeyboardHelpOpen(true),
     onFocusComposer: focusComposerFromKeyboard,
     transcript: chatPanelKeyboardControls,
-    agentTabs: threads.length > 0 && activeThreadIndex >= 0 ? {
+    agentTabs: chromeThreads.length > 0 && activeThreadIndex >= 0 ? {
       activeIndex: activeThreadIndex,
-      count: threads.length,
+      count: chromeThreads.length,
       onChange: (index) => {
-        const next = threads[index];
+        const next = chromeThreads[index];
         if (next) {
           setActiveThreadId(next.id);
           chatPanelKeyboardControls?.focus();

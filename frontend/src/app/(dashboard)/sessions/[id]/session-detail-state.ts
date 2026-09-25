@@ -328,6 +328,19 @@ function threadMatchesPendingPreview(thread: SessionThread, pending: PendingThre
   );
 }
 
+// Built-in code reviews seed a primary thread for backend attribution. Modern
+// reviews run their work in explicit reviewer and synthesis threads, leaving
+// that primary thread empty. Keep older Main tabs that actually ran a turn.
+export function visibleSessionThreads(origin: string | undefined, threads: SessionThread[]): SessionThread[] {
+  if (origin !== "code_review") return threads;
+  return threads.filter((thread) => !(
+    thread.label === "Main" &&
+    thread.status === "idle" &&
+    thread.current_turn === 0 &&
+    thread.pending_message_count === 0
+  ));
+}
+
 export function buildChromeThreads(
   threads: SessionThread[],
   pendingThreadPreview: PendingThreadPreview | null,
