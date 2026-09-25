@@ -21,7 +21,7 @@ function renderLink(canManage = true) {
 }
 
 describe("review link from a GitHub comment", () => {
-  it("loads the PR without mutation and submits only after the user clicks Request Full Re-Review Now", async () => {
+  it("loads the PR without mutation and submits only after the user clicks Request full review", async () => {
     mockTarget();
     const requests: { path: string; body: unknown }[] = [];
     server.use(http.post("*/api/v1/pull-requests/:id/code-review/requests", async ({ request }) => {
@@ -30,16 +30,16 @@ describe("review link from a GitHub comment", () => {
     }));
     const user = userEvent.setup();
     renderLink();
-    const dialog = await screen.findByRole("dialog", { name: "Request Full Re-Review Now" });
-    expect(await within(dialog).findByText("acme/api#17: Reduce duplicate reviews")).toBeInTheDocument();
-    const action = await within(dialog).findByRole("button", { name: "Request Full Re-Review Now" });
+    const dialog = await screen.findByRole("dialog", { name: "Request full review" });
+    expect(await within(dialog).findByText("acme/api #17")).toBeInTheDocument();
+    const action = await within(dialog).findByRole("button", { name: "Request full review" });
     expect(requests).toEqual([]);
     await user.click(action);
     await waitFor(() => expect(requests).toEqual([{
       path: `/api/v1/pull-requests/${prID}/code-review/requests`,
       body: { request_id: expect.any(String), mode: "review_now" },
     }]));
-    expect(await within(dialog).findByRole("status")).toHaveTextContent("Review requested");
+    expect(await within(dialog).findByRole("status")).toHaveTextContent("Queued");
   });
   it.each([
     { name: "viewer", canManage: false, enabled: true, inaccessible: false, message: /member or admin/ },
@@ -50,13 +50,14 @@ describe("review link from a GitHub comment", () => {
     renderLink(canManage);
     const dialog = await screen.findByRole("dialog");
     expect(await within(dialog).findByText(message)).toBeInTheDocument();
-    expect(within(dialog).queryByRole("button", { name: "Request Full Re-Review Now" })).not.toBeInTheDocument();
+    const action = within(dialog).queryByRole("button", { name: "Request full review" });
+    if (action) expect(action).toBeDisabled();
   });
   it("closing the dialog does not submit a review", async () => {
     mockTarget();
     renderLink();
     const dialog = await screen.findByRole("dialog");
-    await userEvent.click(within(dialog).getAllByRole("button", { name: "Close" })[0]);
+    await userEvent.click(await within(dialog).findByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 });

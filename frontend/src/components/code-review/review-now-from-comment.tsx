@@ -2,11 +2,9 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { parseAsString, useQueryState } from "nuqs";
-import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { ReviewNowButton } from "./scheduling";
+import { ReviewRequestDialog } from "./review-request-dialog";
 
 const sessionIDPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -28,29 +26,20 @@ export function ReviewNowFromComment({ canManage }: { canManage: boolean }) {
   const close = () => { void setSessionID(null); };
   const target = review.data?.data;
   const available = policy.data?.data.capabilities?.scheduling === true;
-  const ready = validID && target && available && canManage && !review.isError && !policy.isError;
+  const error = !validID ? "This review link is invalid."
+    : review.isError ? "This review could not be loaded. Check that you have the correct organization selected and access to this PR."
+    : policy.isError ? "Review settings could not be loaded." : undefined;
+  const unavailable = !canManage ? "An organization member or admin must request the review."
+    : !available ? "Review scheduling is not enabled for this installation." : undefined;
 
-  return (
-    <Dialog open={Boolean(sessionID)} onOpenChange={(open) => { if (!open) close(); }}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Request Full Re-Review Now</DialogTitle>
-          <DialogDescription>
-            Request a review of your latest pushed changes, skipping the automatic timing delays. If a running or completed review already covers those changes, 143 may use it instead of starting another.
-          </DialogDescription>
-        </DialogHeader>
-        {!validID ? <p role="alert">This review link is invalid.</p> :
-          review.isPending ? <p role="status">Loading pull request…</p> :
-          review.isError ? <p role="alert">This review could not be loaded. Check that you have the correct organization selected and access to this PR.</p> :
-          target ? <p className="text-sm font-medium">{target.github_repo}#{target.github_pr_number}: {target.pull_request_title}</p> : null}
-        {policy.isError ? <p role="alert">Review settings could not be loaded.</p> :
-          policy.isSuccess && !available ? <p role="status">Review scheduling is not enabled for this installation.</p> : null}
-        {!canManage ? <p className="text-sm text-muted-foreground">An organization member or admin must request the review.</p> : null}
-        <DialogFooter>
-          <Button variant="outline" onClick={close}>Close</Button>
-          {ready ? <ReviewNowButton key={target.pull_request_id} prID={target.pull_request_id} /> : null}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
+  return <ReviewRequestDialog
+    key={sessionID}
+    open={Boolean(sessionID)}
+    onClose={close}
+    mode="review_now"
+    target={target}
+    loading={validID && (review.isPending || policy.isPending)}
+    error={error}
+    unavailable={unavailable}
+  />;
 }
