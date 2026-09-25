@@ -80,6 +80,7 @@ type CodeReviewRecheckTurnCompletion struct {
 	LockToken            uuid.UUID
 	ExpectedTurn         int
 	SessionTurn          int
+	ActivityPhaseID      *uuid.UUID
 	Summary              string
 	Result               *SessionResult
 	ProviderSessionID    string

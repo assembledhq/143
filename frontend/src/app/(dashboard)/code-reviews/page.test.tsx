@@ -42,6 +42,7 @@ vi.mock("@/lib/use-resource-sse", async () => {
 import type {
   CodingCredentialSummary,
   CodeReviewAnalytics,
+  CodeReviewAssessmentSummary,
   CodeReviewEvidence,
   CodeReviewDispute,
   CodeReviewGitHubTriggerResponse,
@@ -2227,6 +2228,58 @@ describe("CodeReviewsPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Show 50 more" }));
     expect(await screen.findByText("Showing 2 of 2")).toBeInTheDocument();
     expect(screen.getAllByText("#429 Recovered history page")).toHaveLength(2);
+  });
+
+  it.each([
+    { status: "reserved", label: "Evidence re-check queued", activity: "none" },
+    { status: "running", label: "Evidence re-check running", activity: "breathing" },
+    { status: "publishing", label: "Evidence re-check publishing", activity: "breathing" },
+  ] as const)("shows a $status evidence re-check on desktop and mobile rows", async ({ status, label, activity }) => {
+    const active: CodeReviewAssessmentSummary = { id: "recheck-1", session_id: review.session_id, head_sha: review.head_sha, review_scope: "evidence_only", route_reason: "checks_changed", status };
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [{ ...review, active_assessment: active }], meta: {} })));
+    renderWithProviders(<CodeReviewsPage />);
+
+    expect(await screen.findAllByText(label)).toHaveLength(2);
+    const table = screen.getByRole("table");
+    const row = within(table).getByRole("row", { name: /#428 Fix invoice rounding/ });
+    const mobile = screen.getByLabelText("Code review activity");
+    for (const surface of [row, mobile]) {
+      const statusLabel = within(surface).getByText(label).closest('[data-slot="status-label"]');
+      expect(statusLabel?.querySelector('[data-slot="status-indicator"]')).toHaveAttribute("data-activity", activity);
+      expect(within(surface).getByText("Previous result")).toBeInTheDocument();
+      expect(within(surface).getByText("Approved")).toBeInTheDocument();
+      expect(within(surface).queryByText("Completed")).not.toBeInTheDocument();
+    }
+  });
+
+  it.each([
+    { name: "another session", assessment: { session_id: "other-session" }, stale: false },
+    { name: "another head", assessment: { head_sha: "other-head" }, stale: false },
+    { name: "a terminal assessment", assessment: { status: "completed" as const }, stale: false },
+    { name: "a superseded row", assessment: {}, stale: true },
+  ])("does not show an active re-check for $name", async ({ assessment, stale }) => {
+    const active: CodeReviewAssessmentSummary = { id: "recheck-1", session_id: review.session_id, head_sha: review.head_sha, review_scope: "evidence_only", route_reason: "checks_changed", status: "running", ...assessment };
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [{ ...review, stale, active_assessment: active }], meta: {} })));
+    renderWithProviders(<CodeReviewsPage />);
+    await screen.findAllByText("#428 Fix invoice rounding");
+    expect(screen.queryByText("Evidence re-check running")).not.toBeInTheDocument();
+    expect(screen.queryByText("Previous result")).not.toBeInTheDocument();
+  });
+
+  it("refreshes a running evidence re-check back to the completed result", async () => {
+    let active: CodeReviewListItem["active_assessment"] = { id: "recheck-1", session_id: review.session_id, head_sha: review.head_sha, review_scope: "evidence_only", route_reason: "checks_changed", status: "running" };
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [{ ...review, active_assessment: active }], meta: {} })));
+    renderWithProviders(<CodeReviewsPage />);
+    expect(await screen.findAllByText("Evidence re-check running")).toHaveLength(2);
+    active = null;
+    act(() => sse.onEvent?.());
+    await waitFor(() => expect(screen.queryByText("Evidence re-check running")).not.toBeInTheDocument());
+    expect(screen.queryByText("Previous result")).not.toBeInTheDocument();
+    const row = within(screen.getByRole("table")).getByRole("row", { name: /#428 Fix invoice rounding/ });
+    expect(within(row).getByText("Completed")).toBeInTheDocument();
   });
 
   it("omits the mobile completion timestamp until a review completes", async () => {

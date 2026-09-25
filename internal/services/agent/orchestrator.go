@@ -6146,7 +6146,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		_, err := o.codeReviewTurns.Complete(ctx, models.CodeReviewRecheckTurnCompletion{
 			OrgID: session.OrgID, AssessmentID: codeReviewTurn.options.AssessmentID, SessionID: session.ID, ThreadID: codeReviewTurn.options.ThreadID,
 			JobID: codeReviewTurn.jobID, LockToken: codeReviewTurn.lockToken, ExpectedTurn: codeReviewTurn.options.ExpectedTurn, SessionTurn: sessionTurnNumber,
-			Summary: result.Summary, Result: runResult, ProviderSessionID: result.AgentSessionID, ParentAgentSessionID: parentAgentSessionID,
+			ActivityPhaseID: activityExecution.phaseID(),
+			Summary:         result.Summary, Result: runResult, ProviderSessionID: result.AgentSessionID, ParentAgentSessionID: parentAgentSessionID,
 			SnapshotKey: newSnapshotKey, NativeContext: prompt != nil && prompt.Continuation && prompt.ResumeSessionID == codeReviewTurn.resumeProviderID && codeReviewTurn.resumeProviderID != "", TokenUsage: runResult.TokenUsage,
 		})
 		if err != nil {
