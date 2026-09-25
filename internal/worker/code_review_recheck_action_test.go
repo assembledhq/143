@@ -71,3 +71,26 @@ func TestCodeReviewEvidenceRecheckURL(t *testing.T) {
 		})
 	}
 }
+
+func TestCodeReviewAvailableReviewNowURL(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		services  *Services
+		sessionID uuid.UUID
+		expected  string
+	}{
+		{name: "enabled scheduler", services: &Services{FrontendURL: "https://143.test", CodeReviewLifecycle: &statusCommentSchedulingStub{enabled: true}}, sessionID: uuid.MustParse("90d8a47d-d87e-4780-90af-040f5144685a"), expected: "https://143.test/code-reviews?review_now=90d8a47d-d87e-4780-90af-040f5144685a"},
+		{name: "services unavailable"},
+		{name: "scheduler unavailable", services: &Services{FrontendURL: "https://143.test"}},
+		{name: "scheduler disabled", services: &Services{FrontendURL: "https://143.test", CodeReviewLifecycle: &statusCommentSchedulingStub{}}},
+		{name: "missing app URL", services: &Services{CodeReviewLifecycle: &statusCommentSchedulingStub{enabled: true}}, sessionID: uuid.New()},
+		{name: "missing session", services: &Services{FrontendURL: "https://143.test", CodeReviewLifecycle: &statusCommentSchedulingStub{enabled: true}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, codeReviewAvailableReviewNowURL(tt.services, tt.sessionID), "new full-review and rolling comments should share scheduler and destination eligibility")
+		})
+	}
+}

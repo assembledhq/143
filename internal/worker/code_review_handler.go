@@ -493,6 +493,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			SessionURL:            codeReviewSessionURL(services.FrontendURL, job.SessionID),
 			PolicySettingsURL:     codeReviewPolicySettingsURL(services.FrontendURL),
 			EvidenceRecheckURL:    evidenceRecheckURL,
+			ReviewNowURL:          codeReviewAvailableReviewNowURL(services, job.SessionID),
 			PullRequest:           pr,
 			Health:                health,
 			AgentResults:          agentResults,
@@ -3399,6 +3400,8 @@ type liveCodeReviewOutcomeInput struct {
 	SessionURL            string
 	PolicySettingsURL     string
 	EvidenceRecheckURL    string
+	ReviewNowURL          string
+	ReviewProvenance      string
 	PullRequest           models.PullRequest
 	Health                *models.PullRequestHealthResponse
 	AgentResults          []models.CodeReviewAgentResult
@@ -3481,6 +3484,7 @@ func completeCodeReviewAfterStableDeterministicFailure(
 		RiskReasons:          decision.RiskReasonDetails,
 		SessionURL:           codeReviewSessionURL(services.FrontendURL, job.SessionID),
 		PolicySettingsURL:    codeReviewPolicySettingsURL(services.FrontendURL),
+		ReviewNowURL:         codeReviewAvailableReviewNowURL(services, job.SessionID),
 		ChangeStatsAvailable: true,
 		FilesChanged:         len(changedFiles),
 		LinesChanged:         codeReviewLinesChanged(changedFiles),
@@ -3640,6 +3644,8 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		SessionURL:                input.SessionURL,
 		PolicySettingsURL:         input.PolicySettingsURL,
 		EvidenceRecheckURL:        input.EvidenceRecheckURL,
+		ReviewNowURL:              input.ReviewNowURL,
+		ReviewProvenance:          input.ReviewProvenance,
 		DescriptionPassed:         descriptionPassed,
 		DescriptionIssues:         codeReviewFailedDescriptionRequirements(descriptionEvaluation.RequirementSummaries),
 		AgentSummaries:            codeReviewAgentSummaries(input.AgentResults, input.Findings),
