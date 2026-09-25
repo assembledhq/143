@@ -88,6 +88,18 @@ func TestWithCodeReviewCommentFooter(t *testing.T) {
 			expected: "<!-- 143-code-review-footer:start -->\n[View full review](https://143.test/sessions/session%281%29)\n<!-- 143-code-review-footer:end -->",
 		},
 		{
+			name:     "app host change replaces stale navigation",
+			body:     "Review result.\n\n<!-- 143-code-review-footer:start -->\n[Re-check evidence](https://old.test/code-reviews?recheck=old) · [View full review](https://old.test/sessions/old)\n<!-- 143-code-review-footer:end -->",
+			footer:   CodeReviewCommentFooter{DetailURL: detail, ReviewNowURL: request},
+			expected: "Review result.\n\n<!-- 143-code-review-footer:start -->\n[Request review](" + request + ") · [View full review](" + detail + ")\n<!-- 143-code-review-footer:end -->",
+		},
+		{
+			name:     "app scheme change replaces stale navigation",
+			body:     "Review result.\n\n<!-- 143-code-review-footer:start -->\n[View full review](http://143.test/sessions/old)\n<!-- 143-code-review-footer:end -->",
+			footer:   CodeReviewCommentFooter{DetailURL: detail},
+			expected: "Review result.\n\n<!-- 143-code-review-footer:start -->\n[View full review](" + detail + ")\n<!-- 143-code-review-footer:end -->",
+		},
+		{
 			name:     "HTML tag mentioned in inline code does not hide the footer",
 			body:     "❌ **143 Code Reviewer needs human review**\n\n**Change:** Adds a `<details>` element.",
 			footer:   CodeReviewCommentFooter{DetailURL: detail},
@@ -120,6 +132,16 @@ func TestSplitCodeReviewCommentFooterPreservesContent(t *testing.T) {
 			body:     heading + "\n\n" + footer + "\n\n<!-- 143-code-review:output -->",
 			expected: heading + "\n\n<!-- 143-code-review:output -->",
 			links:    CodeReviewCommentFooter{DetailURL: "https://143.test/sessions/old", DetailLabel: "View full review"},
+		},
+		{
+			name:     "untrusted marked footer drops all actions and preserves publication marker",
+			body:     heading + "\n\n<!-- 143-code-review-footer:start -->\n[Re-check evidence](https://143.test/code-reviews?recheck=old) · [View full review](https://old.test/sessions/old)\n<!-- 143-code-review-footer:end -->\n\n<!-- 143-code-review:output -->",
+			expected: heading + "\n\n<!-- 143-code-review:output -->",
+		},
+		{
+			name:     "invalid marked footer drops unsafe links",
+			body:     heading + "\n\n<!-- 143-code-review-footer:start -->\n[View full review](javascript:alert(1))\n<!-- 143-code-review-footer:end -->",
+			expected: heading,
 		},
 		{
 			name:     "nested previous footer remains historical",

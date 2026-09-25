@@ -95,10 +95,13 @@ func SplitCodeReviewCommentFooter(body, trustedDetailURL string) (string, CodeRe
 	depth, fenced := 0, false
 	for i, line := range lines {
 		if depth == 0 && !fenced && line == codeReviewFooterStart && i+2 < len(lines) && lines[i+2] == codeReviewFooterEnd {
-			if footer, ok := parseCodeReviewFooter(lines[i+1], trustedDetailURL); ok {
-				before, after := strings.TrimSpace(strings.Join(lines[:i], "\n")), strings.TrimSpace(strings.Join(lines[i+3:], "\n"))
-				return joinCodeReviewCommentParts(before, after), footer
+			footer, ok := parseCodeReviewFooter(lines[i+1], trustedDetailURL)
+			if !ok {
+				// A URL change must not leave stale navigation beside the new footer.
+				footer = CodeReviewCommentFooter{}
 			}
+			before, after := strings.TrimSpace(strings.Join(lines[:i], "\n")), strings.TrimSpace(strings.Join(lines[i+3:], "\n"))
+			return joinCodeReviewCommentParts(before, after), footer
 		}
 		depth, fenced = codeReviewCommentMarkup(line, depth, fenced)
 	}
