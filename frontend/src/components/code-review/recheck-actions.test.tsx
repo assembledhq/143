@@ -10,16 +10,19 @@ function policy(capability = true, enabled = true) {
   } })));
 }
 
-describe.each(["inline", "menu"] as const)("PR re-check actions (%s)", (presentation) => {
+describe.each(["inline", "menu", "footer"] as const)("PR re-check actions (%s)", (presentation) => {
+  const recheckLabel = presentation === "footer" ? "Re-check evidence" : "Re-check PR evidence";
+  const reasonLabel = presentation === "footer" ? "Reason for a fresh review" : "Reason";
+
   async function recheck(user: ReturnType<typeof userEvent.setup>) {
     if (presentation === "menu") {
-      expect(screen.queryByRole("button", { name: "Re-check PR evidence" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: recheckLabel })).not.toBeInTheDocument();
       const trigger = await screen.findByRole("button", { name: "More review actions" });
       await waitFor(() => expect(trigger).toBeEnabled());
       await user.click(trigger);
-      await user.click(screen.getByRole("menuitem", { name: "Re-check PR evidence" }));
+      await user.click(screen.getByRole("menuitem", { name: recheckLabel }));
     } else {
-      const button = await screen.findByRole("button", { name: "Re-check PR evidence" });
+      const button = await screen.findByRole("button", { name: recheckLabel });
       await waitFor(() => expect(button).toBeEnabled());
       await user.click(button);
     }
@@ -51,12 +54,19 @@ describe.each(["inline", "menu"] as const)("PR re-check actions (%s)", (presenta
     }));
     const user = userEvent.setup();
     renderWithProviders(<RecheckActions prID="pr-1" canManage completed presentation={presentation} />);
-    const trigger = await screen.findByRole("button", { name: "More review actions" });
-    await waitFor(() => expect(trigger).toBeEnabled());
-    await user.click(trigger);
-    await user.click(screen.getByRole("menuitem", { name: "Force fresh review" }));
+    if (presentation === "footer") {
+      const trigger = await screen.findByRole("button", { name: "Force fresh review" });
+      await waitFor(() => expect(trigger).toBeEnabled());
+      await user.click(trigger);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    } else {
+      const trigger = await screen.findByRole("button", { name: "More review actions" });
+      await waitFor(() => expect(trigger).toBeEnabled());
+      await user.click(trigger);
+      await user.click(screen.getByRole("menuitem", { name: "Force fresh review" }));
+    }
     expect(screen.getByRole("button", { name: "Request full review" })).toBeDisabled();
-    await user.type(screen.getByRole("textbox", { name: "Reason" }), "Please revisit the full code path");
+    await user.type(screen.getByRole("textbox", { name: reasonLabel }), "Please revisit the full code path");
     await user.click(screen.getByRole("button", { name: "Request full review" }));
     await waitFor(() => expect(requests).toEqual([{ request_id: expect.any(String), mode: "force_fresh", reason: "Please revisit the full code path" }]));
     expect(await screen.findByRole("status")).toHaveTextContent("Full review requested.");
@@ -99,11 +109,18 @@ describe.each(["inline", "menu"] as const)("PR re-check actions (%s)", (presenta
     }));
     const user = userEvent.setup();
     renderWithProviders(<RecheckActions prID="pr-1" canManage completed presentation={presentation} />);
-    const trigger = await screen.findByRole("button", { name: "More review actions" });
-    await waitFor(() => expect(trigger).toBeEnabled());
-    await user.click(trigger);
-    await user.click(screen.getByRole("menuitem", { name: "Force fresh review" }));
-    const reason = screen.getByRole("textbox", { name: "Reason" });
+    if (presentation === "footer") {
+      const trigger = await screen.findByRole("button", { name: "Force fresh review" });
+      await waitFor(() => expect(trigger).toBeEnabled());
+      await user.click(trigger);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    } else {
+      const trigger = await screen.findByRole("button", { name: "More review actions" });
+      await waitFor(() => expect(trigger).toBeEnabled());
+      await user.click(trigger);
+      await user.click(screen.getByRole("menuitem", { name: "Force fresh review" }));
+    }
+    const reason = screen.getByRole("textbox", { name: reasonLabel });
     await user.type(reason, "First reason");
     await user.click(screen.getByRole("button", { name: "Request full review" }));
     await waitFor(() => expect(requests).toHaveLength(1));
@@ -124,8 +141,8 @@ describe.each(["inline", "menu"] as const)("PR re-check actions (%s)", (presenta
     const queryClient = createTestQueryClient();
     renderWithProviders(<RecheckActions prID="pr-1" canManage completed presentation={presentation} />, { queryClient });
     await waitFor(() => expect(queryClient.isFetching()).toBe(0));
-    if (presentation === "inline") expect(screen.getByRole("button", { name: "Re-check PR evidence" })).toBeDisabled();
-    const trigger = screen.getByRole("button", { name: "More review actions" });
+    if (presentation === "inline") expect(screen.getByRole("button", { name: recheckLabel })).toBeDisabled();
+    const trigger = screen.getByRole("button", { name: presentation === "footer" ? "Force fresh review" : "More review actions" });
     expect(trigger).toBeDisabled();
     await user.hover(trigger.parentElement!);
     expect(await screen.findByRole("tooltip")).toHaveTextContent("An administrator must enable review continuation.");
@@ -140,7 +157,7 @@ describe.each(["inline", "menu"] as const)("PR re-check actions (%s)", (presenta
     const queryClient = createTestQueryClient();
     renderWithProviders(<RecheckActions prID="pr-1" canManage={state.canManage} completed={state.completed} presentation={presentation} />, { queryClient });
     await waitFor(() => expect(queryClient.isFetching()).toBe(0));
-    expect(screen.queryByRole("button", { name: "Re-check PR evidence" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: recheckLabel })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "More review actions" })).not.toBeInTheDocument();
   });
 });

@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -15,13 +14,10 @@ import {
   ChevronUp,
   CircleHelp,
   ClipboardCheck,
-  FileSearch,
   Github,
-  Image as ImageIcon,
   MessageSquareText,
   Plus,
   PowerOff,
-  RefreshCw,
   Settings2,
   SquareArrowOutUpRight,
   Trash2,
@@ -44,7 +40,6 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -65,7 +60,7 @@ import { ALL_CODE_REVIEW_REASONS, CODE_REVIEW_REASON_CODES, codeReviewReasonDesc
 import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
 import { useResourceSSE } from "@/lib/use-resource-sse";
 import { pollMs } from "@/lib/poll-intervals";
-import { cn, safeExternalUrl } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { useAutosave, type UseAutosaveResult } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
@@ -76,8 +71,7 @@ import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
 import { GitHubReviewerConnectionSheet } from "@/components/code-review/github-reviewer-connection-sheet";
 import { ReviewNowFromComment } from "@/components/code-review/review-now-from-comment";
-import { RecheckActions } from "@/components/code-review/recheck-actions";
-import { AssessmentFromLink, AssessmentStatus } from "@/components/code-review/assessment-status";
+import { AssessmentFromLink, ReviewAssessmentDialog } from "@/components/code-review/assessment-status";
 import { RecheckFromComment } from "@/components/code-review/recheck-from-comment";
 import { ScheduledReviews } from "@/components/code-review/scheduling";
 import { CodeReviewPolicyHistory } from "@/components/code-review/policy-history";
@@ -104,7 +98,6 @@ import type {
   CodeReviewDispute,
   CodeReviewDescriptionApplicabilityKind,
   CodeReviewDescriptionEvidenceKind,
-  CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
   CodeReviewListOutcome,
@@ -259,13 +252,6 @@ function decisionLabel(review: CodeReviewListItem): string {
   return "Pending";
 }
 
-function statusLabel(status: string): string {
-  return status
-    .split("_")
-    .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
-    .join(" ");
-}
-
 function reviewDecisionTone(review: CodeReviewListItem): StatusTone {
   if (isSupersededReview(review)) return "neutral";
   if (wasAutomaticallyApproved(review)) return "success";
@@ -365,68 +351,8 @@ function ReviewTitle({ review }: { review: CodeReviewListItem }) {
   );
 }
 
-function EvidenceButton({ selected, onToggleEvidence }: { selected: boolean; onToggleEvidence: () => void }) {
-  return (
-    <Button variant={selected ? "secondary" : "ghost"} size="sm" className="h-7 px-2 text-muted-foreground hover:text-foreground" onClick={onToggleEvidence}>
-      <FileSearch className="h-4 w-4" />
-      Evidence
-    </Button>
-  );
-}
-
-function reviewCanBeRetried(review: CodeReviewListItem): boolean {
-  return review.retry_eligible;
-}
-
-function assessmentForReviewRow(review: CodeReviewListItem) {
-  const matches = (assessment: CodeReviewListItem["current_assessment"]) => assessment?.session_id === review.session_id && assessment.head_sha === review.head_sha;
-  if (matches(review.active_assessment)) return review.active_assessment;
-  if (matches(review.current_assessment)) return review.current_assessment;
-  return null;
-}
-
-function failedAssessmentForReviewRow(review: CodeReviewListItem) {
-  const failed = review.latest_failed_assessment;
-  return failed?.session_id === review.session_id && failed.head_sha === review.head_sha ? failed : null;
-}
-
-function ReviewActions({
-  review,
-  canRetry,
-  isRetrying,
-  evidenceSelected,
-  onRetry,
-  onToggleEvidence,
-  className,
-}: {
-  review: CodeReviewListItem;
-  canRetry: boolean;
-  isRetrying: boolean;
-  evidenceSelected: boolean;
-  onRetry: () => void;
-  onToggleEvidence: () => void;
-  className?: string;
-}) {
-  return (
-    <div className={cn("flex w-full items-center gap-1 md:w-auto md:justify-end", className)}>
-      <EvidenceButton selected={evidenceSelected} onToggleEvidence={onToggleEvidence} />
-      <AssessmentStatus assessment={assessmentForReviewRow(review)} />
-      <AssessmentStatus assessment={failedAssessmentForReviewRow(review)} />
-      {canRetry && reviewCanBeRetried(review) ? (
-        <Button className="min-h-11 flex-1 justify-center md:min-h-0 md:flex-none" variant="outline" size="sm" disabled={isRetrying} onClick={onRetry}>
-          <RefreshCw className={isRetrying ? "animate-spin" : undefined} />
-          {isRetrying ? "Retrying…" : "Retry review"}
-        </Button>
-      ) : null}
-      <Button className="h-7 min-h-11 flex-1 justify-center px-2 text-muted-foreground hover:text-foreground md:min-h-0 md:flex-none" variant="ghost" size="sm" asChild>
-        <Link href={`/sessions/${review.session_id}`}>
-          <MessageSquareText className="h-3.5 w-3.5" />
-          Session
-        </Link>
-      </Button>
-      <RecheckActions prID={review.pull_request_id} canManage={canRetry} completed={review.status === "completed"} presentation="menu" />
-    </div>
-  );
+function ReviewActions({ onViewReview, className }: { onViewReview: () => void; className?: string }) {
+  return <Button variant="outline" size="sm" className={className} onClick={onViewReview}>View review</Button>;
 }
 
 const CODE_REVIEW_PHASE_LABELS: Record<NonNullable<CodeReviewListItem["phase"]>, string> = {
@@ -1332,13 +1258,7 @@ export default function CodeReviewsPage() {
       className: "text-right",
       cellClassName: "text-right",
       render: (review) => (
-        <ReviewActions
-          review={review}
-          canRetry={canRetryReviews}
-          isRetrying={retryingReviewSessionIds.has(review.session_id)}
-          evidenceSelected={selectedEvidenceSessionId === review.session_id}
-          onRetry={() => retryReview.mutate(review.session_id)}
-          onToggleEvidence={() => selectEvidenceSession(selectedEvidenceSessionId === review.session_id ? null : review.session_id)}
+        <ReviewActions onViewReview={() => selectEvidenceSession(review.session_id)}
         />
       ),
     },
@@ -1518,8 +1438,6 @@ export default function CodeReviewsPage() {
                     detail={
                       <div className="space-y-2.5 pt-1">
                         <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />
-                        <AssessmentStatus assessment={assessmentForReviewRow(review)} />
-                        <AssessmentStatus assessment={failedAssessmentForReviewRow(review)} />
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                             <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator="none" />
                             {review.completed_at ? <span className="text-foreground">{formatDate(review.completed_at)}</span> : null}
@@ -1529,13 +1447,7 @@ export default function CodeReviewsPage() {
                     }
                     actions={
                       <div className="flex w-full flex-wrap items-center gap-2">
-                        <ReviewActions
-                          review={review}
-                          canRetry={canRetryReviews}
-                          isRetrying={retryingReviewSessionIds.has(review.session_id)}
-                          evidenceSelected={selectedEvidenceSessionId === review.session_id}
-                          onRetry={() => retryReview.mutate(review.session_id)}
-                          onToggleEvidence={() => selectEvidenceSession(selectedEvidenceSessionId === review.session_id ? null : review.session_id)}
+                        <ReviewActions onViewReview={() => selectEvidenceSession(review.session_id)}
                           className="ml-auto w-auto"
                         />
                       </div>
@@ -1556,26 +1468,20 @@ export default function CodeReviewsPage() {
                     dismissLabel="Clear the evidence link"
                   />
                 ) : null}
-                <CodeReviewEvidenceSheet
+                {selectedEvidenceReview ? <ReviewAssessmentDialog
                   key={selectedEvidenceReview?.session_id ?? "no-review"}
                   review={selectedEvidenceReview}
                   evidence={evidenceQuery.data?.data}
                   isLoading={evidenceQuery.isLoading}
                   error={evidenceQuery.error}
-                  nowMs={countdownNowMs}
-                  canRetryReview={canRetryReviews}
-                  canFileDisputes={canFileDisputes}
-                  canManagePolicy={canManagePolicy}
-                  isRetryingReview={Boolean(selectedEvidenceReview && retryingReviewSessionIds.has(selectedEvidenceReview.session_id))}
+                  operationalStatus={selectedEvidenceReview.status === "failed" && !isSupersededReview(selectedEvidenceReview) ? <ErrorNotice title="Code review failed" description={reviewStatusMessage(selectedEvidenceReview) ?? "The review stopped before it could finish."} /> : selectedEvidenceReview.status !== "completed" ? <ReviewOperationalStatus review={selectedEvidenceReview} nowMs={countdownNowMs} /> : undefined}
+                  retryAction={canRetryReviews && selectedEvidenceReview.retry_eligible ? <DisabledTooltip disabled={retryingReviewSessionIds.has(selectedEvidenceReview.session_id)} content="Your retry is being recorded."><Button variant="outline" size="sm" disabled={retryingReviewSessionIds.has(selectedEvidenceReview.session_id)} onClick={() => retryReview.mutate(selectedEvidenceReview.session_id)}>{retryingReviewSessionIds.has(selectedEvidenceReview.session_id) ? "Retrying…" : "Retry review"}</Button></DisabledTooltip> : undefined}
                   onRetryEvidence={() => void evidenceQuery.refetch()}
-                  onRetryReview={() => {
-                    if (selectedEvidenceReview) retryReview.mutate(selectedEvidenceReview.session_id);
-                  }}
                   open={Boolean(selectedEvidenceReview)}
                   onOpenChange={(open) => {
                     if (!open) selectEvidenceSession(null);
                   }}
-                />
+                /> : null}
                 </>
               )}
             </SectionGroup>
@@ -4698,553 +4604,4 @@ function codeReviewDisputePullRequestLabel(dispute: CodeReviewDispute): string {
 function codeReviewDisputeStatusLabel(value: string): string {
   const normalized = value.replaceAll("_", " ");
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
-}
-
-function CodeReviewEvidenceSheet({
-  review,
-  evidence,
-  isLoading,
-  error,
-  nowMs,
-  canRetryReview,
-  canFileDisputes,
-  canManagePolicy,
-  isRetryingReview,
-  onRetryEvidence,
-  onRetryReview,
-  open,
-  onOpenChange,
-}: {
-  review: CodeReviewListItem | null;
-  evidence?: CodeReviewEvidence;
-  isLoading: boolean;
-  error: Error | null;
-  nowMs: number;
-  canRetryReview: boolean;
-  canFileDisputes: boolean;
-  canManagePolicy: boolean;
-  isRetryingReview: boolean;
-  onRetryEvidence: () => void;
-  onRetryReview: () => void;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const queryClient = useQueryClient();
-  const [disputeDialogOpen, setDisputeDialogOpen] = useState(false);
-  const [disputeBody, setDisputeBody] = useState("");
-  const [selectedReasonCodes, setSelectedReasonCodes] = useState<string[]>([]);
-  const agentResults = evidence?.agent_results ?? [];
-  const findings = evidence?.findings ?? [];
-  const records = evidence?.prompt_records ?? evidence?.prompt_artifacts ?? [];
-  const reasonCodes = evidence?.risk_reason_codes ?? [];
-  const visualEvidence = evidence?.visual_evidence?.evidence ?? [];
-  const omittedVisualEvidenceCount = evidence?.visual_evidence?.omitted_source_count ?? 0;
-  const citedVisualEvidenceIDs = useMemo(() => new Set(evidence?.cited_visual_evidence_ids ?? []), [evidence?.cited_visual_evidence_ids]);
-  const approvalReasons = review ? whyNotApprovedReasons(review) : [];
-  const disputesQuery = useInfiniteQuery({
-    queryKey: queryKeys.codeReviews.disputes(review?.session_id ?? ""),
-    queryFn: ({ pageParam }) => api.codeReviews.disputes(review?.session_id ?? "", pageParam),
-    enabled: open && canFileDisputes && Boolean(review?.session_id),
-    // Intake and reassessment states move on their own, so the timeline polls.
-    // React Query refetches *every* loaded page on each interval, so stretch
-    // the interval by the number of loaded pages: the request rate stays flat
-    // as the admin pages into history, and the newest page — the one whose
-    // state is still moving — keeps updating instead of going stale.
-    refetchInterval: (query) => (open && canFileDisputes ? 5000 * Math.max(1, query.state.data?.pages.length ?? 1) : false),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (lastPage) => lastPage.meta?.next_cursor || undefined,
-  });
-  const createDispute = useMutation({
-    mutationFn: () =>
-      api.codeReviews.createDispute(review?.session_id ?? "", {
-        body: disputeBody,
-        contested_reason_codes: selectedReasonCodes,
-      }),
-    onSuccess: () => {
-      if (review)
-        void queryClient.invalidateQueries({
-          queryKey: queryKeys.codeReviews.disputes(review.session_id),
-        });
-      setDisputeDialogOpen(false);
-      setDisputeBody("");
-      setSelectedReasonCodes([]);
-      toast.success("Reconsideration request recorded");
-    },
-    onError: () => toast.error("Reconsideration request could not be recorded"),
-  });
-  const escalateDispute = useMutation({
-    mutationFn: (disputeID: string) => api.codeReviews.escalateDispute(disputeID),
-    onSuccess: () => {
-      if (review)
-        void queryClient.invalidateQueries({
-          queryKey: queryKeys.codeReviews.disputes(review.session_id),
-        });
-      toast.success("Dispute sent to a policy owner");
-    },
-    onError: () => toast.error("Dispute could not be escalated"),
-  });
-  const promoteDispute = useMutation({
-    mutationFn: (dispute: CodeReviewDispute) =>
-      api.codeReviews.adjudicateDispute(dispute.id, {
-      expected_version: dispute.version,
-      trust_override: true,
-    }),
-    onSuccess: () => {
-      if (review)
-        void queryClient.invalidateQueries({
-          queryKey: queryKeys.codeReviews.disputes(review.session_id),
-        });
-      void queryClient.invalidateQueries({
-        queryKey: ["code-reviews", "dispute-queue"],
-      });
-      toast.success("Dispute promoted to the policy queue");
-    },
-    onError: () => toast.error("Dispute could not be promoted"),
-  });
-  const disputes = disputesQuery.data?.pages.flatMap((page) => page.data ?? []) ?? [];
-  return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="w-[calc(100vw-1rem)] p-0 sm:max-w-xl">
-        <SheetHeader className="border-b border-border px-6 py-5">
-          <div className="flex items-start justify-between gap-4 pr-8">
-            <div className="min-w-0 space-y-1">
-              <SheetTitle>Evidence for #{review?.github_pr_number}</SheetTitle>
-              <SheetDescription className="line-clamp-2">{review?.pull_request_title ?? "Review evidence"}</SheetDescription>
-            </div>
-            {review ? <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} /> : null}
-          </div>
-        </SheetHeader>
-        <div className="space-y-6 px-6 py-5">
-          <AssessmentStatus assessment={review ? assessmentForReviewRow(review) : null} />
-          <AssessmentStatus assessment={review ? failedAssessmentForReviewRow(review) : null} />
-          {review?.status === "failed" && !isSupersededReview(review) ? (
-            <div className="space-y-3">
-              <ErrorNotice title="Code review failed" description={reviewStatusMessage(review) ?? "The review stopped before it could finish."} />
-              {canRetryReview && reviewCanBeRetried(review) ? (
-                <Button variant="outline" disabled={isRetryingReview} onClick={onRetryReview}>
-                  <RefreshCw className={isRetryingReview ? "animate-spin" : undefined} />
-                  {isRetryingReview ? "Retrying…" : "Retry review"}
-                </Button>
-              ) : null}
-            </div>
-          ) : review && (review.status === "queued" || review.status === "running") ? (
-            <ReviewOperationalStatus review={review} nowMs={nowMs} />
-          ) : null}
-          {isLoading ? <div className="text-sm text-muted-foreground">Loading evidence...</div> : null}
-          {error ? (
-            <ErrorNotice
-              title="Evidence could not be loaded"
-              description="Retry the request to view this review's evidence."
-              action={{ label: "Retry", onClick: onRetryEvidence }}
-            />
-          ) : null}
-          {!isLoading && !error && !evidence ? <div className="text-sm text-muted-foreground">No evidence recorded for this review.</div> : null}
-          {/* Derived from the review row rather than the evidence payload, so it
-              stays available when the evidence request is empty or failed. */}
-          {approvalReasons.length > 0 ? (
-            <section className="space-y-3">
-              <EvidenceSectionHeader title="Why not approved" empty={false} />
-              <div className="space-y-2">
-                {approvalReasons.map((reason, index) => (
-                  <div key={`${reason}-${index}`} className="border-t border-border pt-2 text-sm leading-6 text-muted-foreground first:border-t-0 first:pt-0">
-                    {reason}
-                  </div>
-                ))}
-              </div>
-            </section>
-          ) : null}
-          {evidence ? (
-            <>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <EvidenceMetric label="Agents" value={agentResults.length} />
-                <EvidenceMetric label="Findings" value={findings.length} />
-                <EvidenceMetric label="Prompts" value={records.length} />
-                <EvidenceMetric label="Images" value={visualEvidence.length + omittedVisualEvidenceCount} />
-              </div>
-
-              {canFileDisputes && review?.status === "completed" && review.decision ? (
-                <section className="space-y-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <EvidenceSectionHeader title="Decision feedback" empty={disputes.length === 0} />
-                    <Button size="sm" variant="outline" onClick={() => setDisputeDialogOpen(true)}>
-                      <MessageSquareText className="h-4 w-4" />
-                      {review.decision === "approved" ? "Report an unsafe approval" : "Ask for reconsideration"}
-                    </Button>
-                  </div>
-                  {disputesQuery.isLoading ? <div className="text-sm text-muted-foreground">Loading decision feedback…</div> : null}
-                  {disputesQuery.error ? (
-                    <ErrorNotice
-                      title="Decision feedback could not be loaded"
-                      description="Retry to view the dispute timeline."
-                      action={{
-                        label: "Retry",
-                        onClick: () => void disputesQuery.refetch(),
-                      }}
-                    />
-                  ) : null}
-                  {!disputesQuery.isLoading && !disputesQuery.error && disputes.length === 0 ? (
-                    <div className="text-sm text-muted-foreground">No one has challenged this decision.</div>
-                  ) : null}
-                  {disputes.map((dispute) => (
-                    <div key={dispute.id} className="space-y-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-sm font-medium text-foreground">{dispute.filed_by_login || "143 user"}</div>
-                          <div className="text-xs text-muted-foreground">
-                            {formatDate(dispute.created_at)} · {codeReviewDisputeStatusLabel(dispute.source)}
-                          </div>
-                        </div>
-                        <StatusLabel
-                          label={dispute.routing === "review_request" && dispute.intake_status === "discarded" ? "Review requested" : codeReviewDisputeStatusLabel(dispute.intake_status)}
-                          tone={dispute.intake_status === "failed" ? "destructive" : "neutral"}
-                        />
-                      </div>
-                      <div className="text-sm leading-6 text-muted-foreground">{dispute.body}</div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant="outline">{dispute.routing === "review_request" ? "Ordinary review request" : dispute.direction ? codeReviewDisputeStatusLabel(dispute.direction) : "Classifying"}</Badge>
-                        <Badge variant="outline">{codeReviewDisputeStatusLabel(dispute.reassessment_status)}</Badge>
-                        {dispute.reassessment_status === "completed" && dispute.reassessment_flipped !== undefined ? (
-                          <Badge variant="outline">{dispute.reassessment_flipped ? "Decision changed" : "Decision unchanged"}</Badge>
-                        ) : null}
-                        {dispute.adjudication_status ? <Badge variant="outline">Policy owner: {codeReviewDisputeStatusLabel(dispute.adjudication_status)}</Badge> : null}
-                        {dispute.reply_status === "failed" ? <Badge variant="destructive">GitHub reply failed</Badge> : null}
-                        {/* Editing a GitHub comment files a new dispute, so the
-                            timeline shows both. Say which one is live. */}
-                        {dispute.superseded_by_dispute_id ? <Badge variant="secondary">Replaced by a later edit</Badge> : null}
-                        <Badge variant="outline">{dispute.trusted ? "Trusted" : "Untrusted"}</Badge>
-                        {dispute.reassessment_session_id ? (
-                          <Button size="sm" variant="ghost" asChild>
-                            <Link href={`/sessions/${dispute.reassessment_session_id}`}>View reassessment</Link>
-                          </Button>
-                        ) : null}
-                        {dispute.routing === "policy_signal_only" && canManagePolicy ? (
-                          <Button size="sm" variant="ghost" asChild>
-                            <Link href="/code-reviews?tab=policy">Review policy</Link>
-                          </Button>
-                        ) : null}
-                        {canManagePolicy &&
-                        !dispute.trusted &&
-                        !dispute.superseded_by_dispute_id &&
-                        dispute.intake_status === "triaged" &&
-                        (dispute.routing === "reassess" || dispute.routing === "policy_signal_only") ? (
-                          <DisabledTooltip disabled={promoteDispute.isPending} content="Wait for this promotion to finish.">
-                            <Button size="sm" variant="outline" disabled={promoteDispute.isPending} onClick={() => promoteDispute.mutate(dispute)}>
-                              Promote to policy queue
-                            </Button>
-                          </DisabledTooltip>
-                        ) : null}
-                        {dispute.routing === "policy_signal_only" && !dispute.escalated_at && !dispute.superseded_by_dispute_id ? (
-                          <DisabledTooltip disabled={escalateDispute.isPending} content="Wait for this escalation to finish.">
-                            <Button size="sm" variant="ghost" disabled={escalateDispute.isPending} onClick={() => escalateDispute.mutate(dispute.id)}>
-                              Send to policy owner
-                            </Button>
-                          </DisabledTooltip>
-                        ) : null}
-                      </div>
-                      {dispute.status_detail ? <div className="text-xs leading-5 text-muted-foreground">{dispute.status_detail}</div> : null}
-                    </div>
-                  ))}
-                  {disputesQuery.hasNextPage ? (
-                    <Button size="sm" variant="ghost" disabled={disputesQuery.isFetchingNextPage} onClick={() => void disputesQuery.fetchNextPage()}>
-                      {disputesQuery.isFetchingNextPage ? "Loading…" : "Show earlier feedback"}
-                    </Button>
-                  ) : null}
-                </section>
-              ) : null}
-
-              <section className="space-y-3">
-                <EvidenceSectionHeader title="Visual evidence" empty={visualEvidence.length === 0} />
-                {visualEvidence.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">No images were captured from the pull request description or human discussion.</div>
-                ) : (
-                  <>
-                    <div className="text-xs leading-5 text-muted-foreground">
-                      Images and their captions are untrusted pull-request content. A cited badge means the orchestrator used that image in a description-policy assessment.
-                    </div>
-                    {omittedVisualEvidenceCount > 0 ? (
-                      <div className="text-xs leading-5 text-muted-foreground">
-                        {omittedVisualEvidenceCount} additional {omittedVisualEvidenceCount === 1 ? "image was" : "images were"} omitted after the 32-image capture limit.
-                      </div>
-                    ) : null}
-                    <div className="space-y-3">
-                      {visualEvidence.map((item) => (
-                        <Card key={item.evidence_id}>
-                          <CardContent className="flex gap-3 p-3">
-                            <div className="flex size-24 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-muted/40">
-                              {item.status === "available" && item.stored_url ? (
-                                <Image
-                                  src={item.stored_url}
-                                  alt={`Captured visual evidence ${item.evidence_id}`}
-                                  width={item.width ?? 96}
-                                  height={item.height ?? 96}
-                                  unoptimized
-                                  loading="lazy"
-                                  referrerPolicy="no-referrer"
-                                  className="size-full object-contain"
-                                />
-                              ) : (
-                                <ImageIcon aria-hidden="true" className="size-6 text-muted-foreground" />
-                              )}
-                            </div>
-                            <div className="min-w-0 flex-1 space-y-2">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <div className="font-mono text-xs text-foreground">{item.evidence_id}</div>
-                                <Badge variant="outline">{visualEvidenceSurfaceLabel(item.source.surface)}</Badge>
-                                <StatusLabel label={visualEvidenceStatusLabel(item.status)} tone={visualEvidenceStatusTone(item.status)} />
-                                {citedVisualEvidenceIDs.has(item.evidence_id) ? <Badge variant="secondary">Cited</Badge> : null}
-                              </div>
-                              <div className="text-xs leading-5 text-muted-foreground">
-                                {item.source.author_login ? `@${item.source.author_login}` : "Pull request author"}
-                                {item.source.created_at || item.source.updated_at ? ` · ${formatDate(item.source.created_at ?? item.source.updated_at ?? "")}` : ""}
-                                {item.width && item.height ? ` · ${item.width}×${item.height}` : ""}
-                              </div>
-                              <div className="flex flex-wrap items-center gap-3 text-xs">
-                                <VisualEvidenceSourceLink sourceURL={item.source.source_url} />
-                                {item.duplicate_of_evidence_id ? <span className="text-muted-foreground">Duplicate of {item.duplicate_of_evidence_id}</span> : null}
-                              </div>
-                              {item.failure_reason ? <div className="text-xs leading-5 text-muted-foreground">{item.failure_reason}</div> : null}
-                            </div>
-                          </CardContent>
-                        </Card>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </section>
-
-              <section className="space-y-3">
-                <EvidenceSectionHeader title="Agent results" empty={agentResults.length === 0} />
-                {agentResults.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">No agent results recorded.</div>
-                ) : (
-                  agentResults.map((result) => (
-                    <div key={result.id} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0 space-y-1">
-                          <div className="truncate text-sm font-medium text-foreground">{result.agent_provider}</div>
-                          <div className="text-xs text-muted-foreground">
-                            {result.role}
-                            {result.agent_model ? ` · ${result.agent_model}` : ""}
-                          </div>
-                        </div>
-                        <StatusLabel
-                          label={statusLabel(result.status)}
-                          tone={reviewStatusTone(result.status)}
-                          activity={result.status === "queued" ? "indeterminate" : result.status === "running" ? "breathing" : "none"}
-                          stateKey={result.status}
-                        />
-                      </div>
-                      {result.raw_output ? (
-                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">{result.raw_output}</pre>
-                      ) : null}
-                      {result.structured_result ? (
-                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
-                          {formatEvidenceJSON(result.structured_result)}
-                        </pre>
-                      ) : null}
-                    </div>
-                  ))
-                )}
-              </section>
-
-              <section className="space-y-3">
-                <EvidenceSectionHeader title="Findings" empty={findings.length === 0} />
-                {findings.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">No findings recorded.</div>
-                ) : (
-                  <>
-                    <div className="text-xs leading-5 text-muted-foreground">
-                      P0 and P1 findings block approval. P2 and P3 findings are advisory and are not posted as inline GitHub comments.
-                    </div>
-                    {findings.map((finding) => (
-                      <div key={finding.id} className="space-y-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0 space-y-1">
-                            <div className="text-sm font-medium text-foreground">{finding.summary}</div>
-                            <div className="text-xs text-muted-foreground">{formatFindingLocation(finding)}</div>
-                          </div>
-                          <Badge variant={findingBlocksApproval(finding.severity) ? "destructive" : "outline"}>{findingPriorityLabel(finding.severity)}</Badge>
-                        </div>
-                        <div className="text-sm leading-6 text-muted-foreground">{finding.body}</div>
-                      </div>
-                    ))}
-                  </>
-                )}
-              </section>
-
-              <section className="space-y-3">
-                <EvidenceSectionHeader title="Prompt records" empty={records.length === 0} />
-                {records.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">No prompt records recorded.</div>
-                ) : (
-                  records.map((record) => (
-                    <div key={record.id} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0 space-y-1">
-                          <div className="truncate text-sm font-medium text-foreground">{record.record_key ?? record.artifact_key}</div>
-                          {record.agent_provider ? <div className="text-xs text-muted-foreground">{record.agent_provider}</div> : null}
-                        </div>
-                        <Badge variant="outline">{record.role}</Badge>
-                      </div>
-                      <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">{record.content}</pre>
-                    </div>
-                  ))
-                )}
-              </section>
-            </>
-          ) : null}
-        </div>
-      </SheetContent>
-      <Dialog open={disputeDialogOpen} onOpenChange={setDisputeDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{review?.decision === "approved" ? "Report an unsafe approval" : "Ask for reconsideration"}</DialogTitle>
-            <DialogDescription>
-              Explain what the reviewer got wrong or what evidence it missed. Reconsideration cannot waive deterministic safeguards; a policy owner must change those rules. The
-              original decision remains part of the record.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="code-review-dispute-body">What should be reconsidered?</Label>
-              <Textarea
-                id="code-review-dispute-body"
-                value={disputeBody}
-                maxLength={8000}
-                rows={5}
-                placeholder="Describe the part of the decision you disagree with…"
-                onChange={(event) => setDisputeBody(event.target.value)}
-              />
-            </div>
-            {reasonCodes.length > 0 ? (
-              <div className="space-y-2">
-                <Label>Contested policy reasons</Label>
-                <div className="space-y-2">
-                  {reasonCodes.map((code) => (
-                    <Label key={code} className="flex items-center gap-2 font-normal">
-                      <Checkbox
-                        checked={selectedReasonCodes.includes(code)}
-                        onCheckedChange={(checked) => setSelectedReasonCodes((current) => (checked ? [...current, code] : current.filter((value) => value !== code)))}
-                      />
-                      {codeReviewDisputeStatusLabel(code)}
-                    </Label>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDisputeDialogOpen(false)}>
-              Cancel
-            </Button>
-            <DisabledTooltip
-              disabled={createDispute.isPending || disputeBody.trim().length === 0}
-              content={createDispute.isPending ? "Wait for the feedback to be recorded." : "Describe what should be reconsidered."}
-            >
-              <Button disabled={createDispute.isPending || disputeBody.trim().length === 0} onClick={() => createDispute.mutate()}>
-                {createDispute.isPending ? "Recording…" : "Record feedback"}
-              </Button>
-            </DisabledTooltip>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </Sheet>
-  );
-}
-
-function EvidenceMetric({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded-md border border-border px-3 py-2">
-      <div className="text-lg font-medium text-foreground">{value}</div>
-      <div className="text-xs text-muted-foreground">{label}</div>
-    </div>
-  );
-}
-
-function EvidenceSectionHeader({ title, empty }: { title: string; empty: boolean }) {
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <div className="text-sm font-medium text-foreground">{title}</div>
-      {empty ? <div className="text-xs text-muted-foreground">None</div> : null}
-    </div>
-  );
-}
-
-function VisualEvidenceSourceLink({ sourceURL }: { sourceURL: string }) {
-  const href = safeExternalUrl(sourceURL);
-  return href ? <ExternalLink href={href}>View source</ExternalLink> : null;
-}
-
-function visualEvidenceSurfaceLabel(surface: "description" | "issue_comment" | "review_body" | "review_comment"): string {
-  switch (surface) {
-    case "description":
-      return "PR description";
-    case "issue_comment":
-      return "PR comment";
-    case "review_body":
-      return "Review body";
-    case "review_comment":
-      return "Review comment";
-  }
-}
-
-function visualEvidenceStatusLabel(status: "available" | "unavailable" | "unsupported" | "over_limit"): string {
-  switch (status) {
-    case "available":
-      return "Available";
-    case "unavailable":
-      return "Unavailable";
-    case "unsupported":
-      return "Unsupported";
-    case "over_limit":
-      return "Over limit";
-  }
-}
-
-function visualEvidenceStatusTone(status: "available" | "unavailable" | "unsupported" | "over_limit"): ComponentProps<typeof StatusLabel>["tone"] {
-  switch (status) {
-    case "available":
-      return "success";
-    case "unavailable":
-      return "destructive";
-    case "unsupported":
-    case "over_limit":
-      return "warning";
-  }
-}
-
-function formatEvidenceJSON(value: unknown): string {
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function formatFindingLocation(finding: NonNullable<CodeReviewEvidence["findings"]>[number]): string {
-  if (!finding.path) return "General finding";
-  if (finding.start_line && finding.end_line && finding.end_line !== finding.start_line) {
-    return `${finding.path}:${finding.start_line}-${finding.end_line}`;
-  }
-  if (finding.start_line) return `${finding.path}:${finding.start_line}`;
-  return finding.path;
-}
-
-function findingBlocksApproval(severity: NonNullable<CodeReviewEvidence["findings"]>[number]["severity"]): boolean {
-  return severity === "critical" || severity === "high";
-}
-
-function findingPriorityLabel(severity: NonNullable<CodeReviewEvidence["findings"]>[number]["severity"]): string {
-  switch (severity) {
-    case "critical":
-      return "P0 · Blocking";
-    case "high":
-      return "P1 · Blocking";
-    case "medium":
-      return "P2 · Advisory";
-    case "low":
-    case "info":
-      return "P3 · Advisory";
-  }
 }
