@@ -19,7 +19,7 @@ function requestResultLabel(result: CodeReviewRequestResponse, mode: "recheck" |
     case "reused": return "Existing assessment reused for captured inputs.";
     case "joined": return "Joined the review already in progress.";
     case "cancelled": return "The request was not scheduled.";
-    case "queued": return mode === "force_fresh" ? "Full review requested." : "Re-check requested. Current inputs determine whether a full review is needed.";
+    case "queued": return mode === "force_fresh" ? "Full review requested." : "Re-check requested. Changes to code or review policy require a full review.";
   }
 }
 

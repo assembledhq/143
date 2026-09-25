@@ -135,18 +135,18 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 					if terminalDispatch.Status == models.CodeReviewRecheckDispatchCancelled {
 						return settleCodeReviewAssessment(ctx, stores, a)
 					}
-					return failCodeReviewRecheck(ctx, stores, services, a, "bound continuation job ended without an exact turn receipt", true)
+					return failCodeReviewRecheck(ctx, stores, services, a, "bound continuation job ended without an exact turn receipt", false)
 				}
 				policy, policyErr := stores.CodeReviews.GetPolicyByID(ctx, a.OrgID, a.PolicyID)
 				if policyErr != nil {
 					return policyErr
 				}
 				if time.Now().After(codeReviewAgentDeadline(policy.Config(), dispatch.CreatedAt)) {
-					return failCodeReviewRecheck(ctx, stores, services, a, "orchestrator continuation exceeded review deadline", true)
+					return failCodeReviewRecheck(ctx, stores, services, a, "orchestrator continuation exceeded review deadline", false)
 				}
 				return codeReviewWaitingForOrchestrator(policy.Config())
 			case models.CodeReviewRecheckDispatchFailed:
-				return failCodeReviewRecheck(ctx, stores, services, a, "orchestrator continuation failed", true)
+				return failCodeReviewRecheck(ctx, stores, services, a, "orchestrator continuation failed", false)
 			case models.CodeReviewRecheckDispatchCancelled:
 				return settleCodeReviewAssessment(ctx, stores, a)
 			}
@@ -182,21 +182,21 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			return err
 		}
 		if err = codereviewsvc.ValidateReviewInputManifest(manifest); err != nil {
-			return failCodeReviewRecheck(ctx, stores, services, a, err.Error(), true)
+			return failCodeReviewRecheck(ctx, stores, services, a, err.Error(), false)
 		}
 		requestContext := &codereviewsvc.ReviewRequestContext{Body: manifest.Request.SubstantiveText}
 		capture, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: a.OrgID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, SessionID: a.SessionID, AssessmentID: a.ID, Fresh: true, RequestContext: requestContext})
 		if err != nil {
 			if errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
-				return failCodeReviewRecheck(ctx, stores, services, a, "assessment inputs cannot establish reusable coverage", true)
+				return failCodeReviewRecheck(ctx, stores, services, a, "assessment inputs cannot establish reusable coverage", false)
 			}
 			return err
 		}
 		if capture.Manifest.InputDigest != a.InputDigest {
 			return refreshUnsentCodeReviewEvidence(ctx, services, a, "inputs changed before evidence assessment")
 		}
-		if capture.Manifest.CodeDigest != baselineManifest.CodeDigest || capture.Manifest.ContractDigest != baselineManifest.ContractDigest || capture.Manifest.IntentDigest != baselineManifest.IntentDigest || capture.Manifest.RequestDigest != baselineManifest.RequestDigest {
-			return failCodeReviewRecheck(ctx, stores, services, a, "baseline code or review contract changed", true)
+		if codereviewsvc.RecheckBaselineChange(capture.Manifest, baselineManifest) != "" {
+			return failCodeReviewRecheck(ctx, stores, services, a, "baseline code or review policy changed", true)
 		}
 		requirements, err := recheckRequirements(capture.Policy.Config(), capture.Files, synthesis)
 		if err != nil {
@@ -204,7 +204,7 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		}
 		if errors.Is(dispatchErr, pgx.ErrNoRows) {
 			if !services.CodeReviewRechecksEnabled || !capture.Policy.Config().ContinuationPolicy.Enabled {
-				return failCodeReviewRecheck(ctx, stores, services, a, "continuation disabled", true)
+				return failCodeReviewRecheck(ctx, stores, services, a, "continuation disabled", false)
 			}
 			thread, loadErr := stores.SessionThreads.GetByID(ctx, a.OrgID, threadID)
 			if loadErr != nil {
@@ -235,13 +235,20 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			if encodeErr != nil {
 				return encodeErr
 			}
+			currentContextJSON, encodeErr := json.Marshal(struct {
+				Title   string                           `json:"title"`
+				Request codereviewsvc.ReviewRequestInput `json:"request"`
+			}{capture.Manifest.Title, capture.Manifest.Request})
+			if encodeErr != nil {
+				return encodeErr
+			}
 			textEvidenceJSON, encodeErr := json.Marshal(capture.Manifest.TextEvidence)
 			if encodeErr != nil {
 				return encodeErr
 			}
-			prompt := prompts.CodeReviewRecheckPrompt(prompts.CodeReviewRecheckPromptData{BaselineID: baseline.ID.String(), InputDigest: a.InputDigest, Baseline: string(baselineContext), Requirements: string(requirementJSON), TextEvidence: string(textEvidenceJSON), VisualEvidence: codeReviewVisualEvidenceForPrompt(capture.VisualEvidence)})
+			prompt := prompts.CodeReviewRecheckPrompt(prompts.CodeReviewRecheckPromptData{BaselineID: baseline.ID.String(), InputDigest: a.InputDigest, Baseline: string(baselineContext), Requirements: string(requirementJSON), CurrentContext: string(currentContextJSON), TextEvidence: string(textEvidenceJSON), VisualEvidence: codeReviewVisualEvidenceForPrompt(capture.VisualEvidence)})
 			if len(prompt) > 128*1024 {
-				return failCodeReviewRecheck(ctx, stores, services, a, "baseline exceeds recheck context budget", true)
+				return failCodeReviewRecheck(ctx, stores, services, a, "baseline exceeds recheck context budget", false)
 			}
 			dispatch, _, err = stores.CodeReviewRechecks.Dispatch(ctx, models.CodeReviewRecheckDispatchInput{OrgID: a.OrgID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, AssessmentID: a.ID, SessionID: a.SessionID, ThreadID: threadID, ExpectedTurn: thread.CurrentTurn + 1, Prompt: prompt, ImageURLs: codeReviewVisualEvidenceImages(capture.VisualEvidence)})
 			if err != nil {
@@ -263,14 +270,14 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			return failCodeReviewRecheck(ctx, stores, services, a, "invalid evidence response: "+err.Error(), false)
 		}
 		if validated.EscalationReason != "" {
-			return failCodeReviewRecheck(ctx, stores, services, a, "new evidence requires full review: "+validated.EscalationReason, true)
+			return failCodeReviewRecheck(ctx, stores, services, a, "evidence recheck needs human review: "+validated.EscalationReason, false)
 		}
 		// Fresh capture rediscovers sources and downloads bytes without restoring
 		// or replacing this assessment's immutable evidence checkpoint.
 		fresh, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: a.OrgID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, SessionID: a.SessionID, AssessmentID: a.ID, Fresh: true, RequestContext: requestContext})
 		if err != nil {
 			if errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
-				return failCodeReviewRecheck(ctx, stores, services, a, "assessment inputs cannot establish reusable coverage", true)
+				return failCodeReviewRecheck(ctx, stores, services, a, "assessment inputs cannot establish reusable coverage", false)
 			}
 			return err
 		}

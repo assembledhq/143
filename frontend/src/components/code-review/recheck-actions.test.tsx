@@ -68,7 +68,7 @@ describe.each(["inline", "menu"] as const)("PR re-check actions (%s)", (presenta
     const user = userEvent.setup();
     renderWithProviders(<RecheckActions prID="pr-1" canManage completed presentation={presentation} />);
     await recheck(user);
-    expect(await screen.findByRole("status")).toHaveTextContent("Re-check requested. Current inputs determine whether a full review is needed.");
+    expect(await screen.findByRole("status")).toHaveTextContent("Re-check requested. Changes to code or review policy require a full review.");
     expect(screen.getByRole("link", { name: "View assessment" })).toHaveAttribute("href", "/code-reviews?assessment=00000000-0000-4000-8000-000000000001");
   });
 

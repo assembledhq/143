@@ -231,6 +231,10 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 		if source.SourceURL == "" || source.ProviderObjectID == "" {
 			return result, fmt.Errorf("%w: text source lacks provenance", ErrAssessmentReuseUnavailable)
 		}
+		// Capture the complete discussion as untrusted evidence, including text
+		// outside recognized sections. Routing no longer treats that text as a
+		// reason to replace the code review, so the recheck must be able to see it.
+		textItems = append(textItems, newReviewTextEvidence(string(source.Surface), source.ProviderObjectID, source.SourceURL, source.AuthorLogin, source.Body, "full"))
 		intent, sections, parseErr := splitReviewEvidenceSections(source.Body)
 		if parseErr != nil {
 			parseAmbiguous = true

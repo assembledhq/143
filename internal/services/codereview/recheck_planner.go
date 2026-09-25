@@ -2,8 +2,9 @@ package codereview
 
 import (
 	"errors"
-	"github.com/assembledhq/143/internal/models"
 	"reflect"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 type RecheckRoute string
@@ -75,8 +76,9 @@ type RecheckPlanInput struct {
 
 // PlanReviewRecheck is pure admission classification. Duplicate request IDs,
 // equivalent active work, eligibility, and authorization are checked under the
-// caller's PR lock. This function never infers continuity from a commit SHA or
-// policy ID alone and never authorizes publication.
+// caller's PR lock. A complete code fingerprint and versioned policy must match;
+// a commit SHA or policy ID alone is insufficient. This function never authorizes
+// publication.
 func PlanReviewRecheck(in RecheckPlanInput) RecheckPlan {
 	if in.CaptureError != nil || in.Current == nil || !validManifest(*in.Current) {
 		return RecheckPlan{RecheckRouteWait, RecheckReasonInputsUnavailable}
@@ -85,59 +87,50 @@ func PlanReviewRecheck(in RecheckPlanInput) RecheckPlan {
 	if in.ForceFresh {
 		return RecheckPlan{RecheckRouteFull, RecheckReasonForceFresh}
 	}
-	if in.DisputeRouted || c.Request.DisputeRouted {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonDispute}
+	b := in.Baseline
+	if b == nil || !b.CompletedFull || !b.CoverageComplete || !validManifest(b.Inputs) || !b.Inputs.ReuseEligible {
+		return RecheckPlan{RecheckRouteFull, RecheckReasonNoBaseline}
 	}
-	if in.Previous != nil && in.Previous.Completed && !in.Previous.EvidenceValidated {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonEvidenceInvalid}
-	}
-	if !c.ReuseEligible {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}
+	if reason := RecheckBaselineChange(c, b.Inputs); reason != "" {
+		return RecheckPlan{RecheckRouteFull, reason}
 	}
 	if in.Previous != nil && in.Previous.Completed && in.Previous.EvidenceValidated &&
 		validManifest(in.Previous.Inputs) && in.Previous.Inputs.ReuseEligible &&
 		c.InputDigest == in.Previous.Inputs.InputDigest {
 		return RecheckPlan{RecheckRouteReuse, RecheckReasonUnchanged}
 	}
-	b := in.Baseline
-	if b == nil || !b.CompletedFull || !b.CoverageComplete || !validManifest(b.Inputs) || !b.Inputs.ReuseEligible {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonNoBaseline}
-	}
-	if c.CodeDigest != b.Inputs.CodeDigest {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonCodeChanged}
-	}
-	if c.ContractDigest != b.Inputs.ContractDigest {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonContractChanged}
-	}
-	if c.IntentDigest != b.Inputs.IntentDigest {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}
-	}
-	if c.RequestDigest != b.Inputs.RequestDigest {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonRequestChanged}
-	}
-	if c.TextEvidence.UnclassifiedDigest != b.Inputs.TextEvidence.UnclassifiedDigest {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}
-	}
-	if c.Gates.EligibilityDigest != b.Inputs.Gates.EligibilityDigest {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonGatesChanged}
-	}
-	checksChanged := c.Gates.ChecksDigest != b.Inputs.Gates.ChecksDigest
-	if checksChanged && (!c.Gates.ChecksVerified || !b.Inputs.Gates.ChecksVerified) {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonGatesChanged}
-	}
-	if c.GateDigest != b.Inputs.GateDigest && !checksChanged {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonGatesChanged}
-	}
-	if c.VisualDigest == b.Inputs.VisualDigest && c.TextDigest == b.Inputs.TextDigest && !checksChanged {
-		return RecheckPlan{RecheckRouteFull, RecheckReasonNoEvidenceChange}
-	}
-	if checksChanged {
+	// All mutable review inputs are reassessed against the same reviewed code
+	// and policy. Their fingerprints still fence dispatch and publication;
+	// they do not invalidate the completed code review.
+	if c.Gates.ChecksDigest != b.Inputs.Gates.ChecksDigest {
 		return RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonChecksChanged}
 	}
-	if c.TextDigest != b.Inputs.TextDigest {
+	if c.GateDigest != b.Inputs.GateDigest {
+		return RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonGatesChanged}
+	}
+	if c.TextDigest != b.Inputs.TextDigest || c.IntentDigest != b.Inputs.IntentDigest || c.RequestDigest != b.Inputs.RequestDigest {
 		return RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}
 	}
+	if c.VisualDigest == b.Inputs.VisualDigest {
+		return RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonNoEvidenceChange}
+	}
 	return RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonVisualChanged}
+}
+
+// RecheckBaselineChange compares valid manifests for code-review reuse. The
+// resolved, versioned policy includes review instructions, approval rules, and
+// the reviewer roster. Auxiliary prompt/runtime fingerprints remain provenance
+// and freshness inputs, not reasons to rerun an unchanged code review.
+func RecheckBaselineChange(current, baseline ReviewInputManifest) RecheckReason {
+	if current.CodeDigest != baseline.CodeDigest {
+		return RecheckReasonCodeChanged
+	}
+	if current.Contract.PolicyID != baseline.Contract.PolicyID ||
+		current.Contract.PolicyVersion != baseline.Contract.PolicyVersion ||
+		current.Contract.PolicyDigest != baseline.Contract.PolicyDigest {
+		return RecheckReasonContractChanged
+	}
+	return ""
 }
 
 func validManifest(m ReviewInputManifest) bool {

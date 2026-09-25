@@ -110,11 +110,11 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 		return ScheduleRequestResult{}, captureErr
 	}
 	if errors.Is(captureErr, ErrAssessmentReuseUnavailable) {
-		return s.requestFullAssessmentReview(ctx, req, state.RepositoryID, requestContext, true, recovering)
+		return ScheduleRequestResult{}, fmt.Errorf("capture evidence for recheck: %w", captureErr)
 	}
 	if captureErr != nil {
 		if recovering && state.FirstPendingAt != nil && s.scheduling.now().Sub(*state.FirstPendingAt) >= 15*time.Minute {
-			return s.requestFullAssessmentReview(ctx, req, state.RepositoryID, requestContext, true, recovering)
+			return ScheduleRequestResult{}, fmt.Errorf("evidence capture remained unavailable: %w", captureErr)
 		}
 		return s.queuePendingAssessmentCapture(ctx, req, state.RepositoryID, requestContext, ordinaryHash, kind)
 	}

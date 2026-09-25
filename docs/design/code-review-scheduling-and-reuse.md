@@ -1,6 +1,6 @@
 # Design: Code Review Scheduling, Reuse, and Usage Controls
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-09-16
+> **Status:** Partially Implemented | **Last reviewed:** 2026-09-25
 
 Stage 1 is implemented in PR #2143 and available automatically when the GitHub review service is configured. There is no scheduling rollout flag. No production configuration or deployment has been changed by this work. The product direction was agreed in discussion; numeric limits below are proposed starting values, not measured capacity recommendations.
 
@@ -188,9 +188,9 @@ These conservative rules catch commit-message amendments, empty commits, and res
 
 Use the PR's actual comparison base rather than always comparing with the default branch. A base-ref change invalidates applicability until re-evaluated. The snapshot service supplies authoritative base-ref information and informational draft status alongside state and SHAs.
 
-Separate the code/reviewer contract from the mutable approval gates. Changes only to quiet time, budgets, or policy audit version must not invalidate code analysis. Changes to review instructions, roster, prompts, analysis-relevant approval policy, PR intent, or visual evidence require appropriate reassessment. Stage 2 can conservatively invalidate all analysis-relevant policy changes; finer reuse belongs in Stage 4.
+Separate the code/reviewer contract from the mutable approval gates. Scheduling controls do not change the captured code. For evidence rechecks, any change to the versioned review policy, including review instructions, roster, and approval rules, invalidates the code-review baseline. PR descriptions, discussion, attribution, visual evidence, and live gates are reassessed as evidence. Auxiliary runtime and template fingerprints remain capture/publication provenance; they do not independently force a new panel. Stage 2 can conservatively invalidate all analysis-relevant policy changes; finer reuse belongs in Stage 4.
 
-Do not hash all discussion indiscriminately: 143's own rolling comment must not invalidate its review. Use the existing trust-filtered request context and visual-evidence snapshot contracts, with their versioned fingerprints. Refresh live checks, author/team eligibility, description applicability, and other approval gates before publication. A new statement of intended behavior can invalidate code conclusions even if no source file changed.
+Do not hash all discussion indiscriminately: 143's own rolling comment must not invalidate its review. Use the existing trust-filtered request context and visual-evidence snapshot contracts, with their versioned fingerprints. Refresh live checks, author/team eligibility, description applicability, and other approval gates before publication. A new statement of intended behavior is evaluated as untrusted evidence against the unchanged code and policy. It can leave the assessment blocked for human judgment, but does not automatically start another code review.
 
 Git documents that `patch-id --stable` ignores whitespace, so it is not a sufficient safety key: [Git patch-id](https://git-scm.com/docs/git-patch-id). GitHub may dismiss approvals after diff or merge-base changes under branch protection: [protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches). Reuse must respect the current repository rules and must not change branch protection settings.
 
@@ -346,11 +346,11 @@ Exit: concurrent workers cannot oversubscribe the configured review allowance; p
 
 The [active conditional session continuation plan](../exec-plans/active/code-review-session-continuation.md) brings the minimum assessment-identity foundation from Stage 2 and unchanged-code evidence reassessment forward as a separate delivery sequence. Broader history-rewrite equivalence and Stage 3 budgets are not prerequisites for that bounded slice. As of 2026-09-24, the local implementation retains the full-review controller and adds a focused recheck supervisor on the existing continuation path. Migrations 000295–000298 add immutable assessments, PR-owned sessions, a narrow transactional dispatch/completion receipt, and policy/admission fields. Re-check PR and trusted direct mentions use conservative routing; both rollout flags default off. The active plan records verification and the remaining provider, authenticated-browser, CI, and pilot gates. The 2026-09-24 scope correction includes nonvisual requirements and reviewer findings resolved by new evidence, with immutable original findings and assessment-specific dispositions/citations. Automatic evidence triggers remain deferred.
 
-Use available attribution and scheduling data to prioritize full reruns caused solely by description/evidence repair. Reuse code reviewers only when source and code-analysis inputs still match; rerun the necessary description/visual assessment and final synthesis with current policy. Changed intent, uncertain coupling, or insufficient coverage falls back to the full review path.
+Use available attribution and scheduling data to prioritize full reruns caused solely by description/evidence repair. For Re-check PR evidence, reuse a complete baseline when the exact code fingerprint and versioned review policy match. Reassess changed descriptions, titles, requests, discussion, images, CI, and eligibility gates. A code or policy change forces a full review. Missing baseline coverage also needs a full review; capture/execution failure or model uncertainty reports a blocked/failed recheck instead of automatically running a panel.
 
 This stage does not introduce general patch-only code review or weaker quorum. Produce calibration cases comparing reused-code outcomes to independent full-review outcomes before activation. Keep prompts in `internal/prompts/templates/` with exported render functions when a new prompt role is needed.
 
-Exit: correcting an evidence-only requirement can produce a current decision without a new code-review panel, and changed behavioral intent reliably takes the full path.
+Exit: correcting evidence can produce a current decision without a new code-review panel, including when generated attribution or CI changed. Changed code or review policy always takes the full path. Evidence findings and fresh approval gates remain enforced.
 
 ## Validation and Acceptance
 
