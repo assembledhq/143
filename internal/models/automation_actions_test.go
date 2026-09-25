@@ -34,6 +34,60 @@ func TestAutomationActionConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestAutomationActionConfigJSONRoundTrip(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		raw      string
+		expected AutomationActionConfig
+	}{
+		{
+			name: "omitted optional properties",
+			raw:  `{"actions":["slack_notification"],"slack_channel_id":"C0123456789"}`,
+			expected: AutomationActionConfig{
+				Actions:        []AutomationActionKind{AutomationActionSlack},
+				SlackChannelID: "C0123456789",
+			},
+		},
+		{
+			name: "empty optional properties from the configuration form",
+			raw:  `{"actions":["slack_notification","github_label"],"repository":"owner/repo","label":"needs-review","slack_channel_id":"C0123456789","notion_properties":{},"notion_data_source_id":""}`,
+			expected: AutomationActionConfig{
+				Actions:        []AutomationActionKind{AutomationActionLabel, AutomationActionSlack},
+				Repository:     "owner/repo",
+				Label:          "needs-review",
+				SlackChannelID: "C0123456789",
+			},
+		},
+		{
+			name: "configured Notion properties are preserved",
+			raw:  `{"actions":["notion_tracking_row"],"notion_data_source_id":"379d5706-2bc0-8021-a0e6-000b04d8902d","notion_properties":{"Report":"title","Summary":"rich_text"}}`,
+			expected: AutomationActionConfig{
+				Actions:            []AutomationActionKind{AutomationActionNotion},
+				NotionDataSourceID: "379d5706-2bc0-8021-a0e6-000b04d8902d",
+				NotionProperties: map[string]AutomationActionPropertyType{
+					"Report":  AutomationActionPropertyTitle,
+					"Summary": AutomationActionPropertyText,
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			config, err := ParseAutomationActionConfig(json.RawMessage(tt.raw))
+			require.NoError(t, err, "the configured destinations should be valid")
+			stored, err := json.Marshal(config)
+			require.NoError(t, err, "the action destination should serialize for storage")
+			var restored AutomationActionConfig
+			require.NoError(t, json.Unmarshal(stored, &restored), "the stored action destination should decode")
+			require.Equal(t, config, restored.Canonical(), "persisting an action must not change its configuration identity")
+			require.Equal(t, tt.expected, config, "canonicalization should preserve configured destinations and normalize empty properties")
+		})
+	}
+}
+
 func TestAutomationActionRequestValidation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

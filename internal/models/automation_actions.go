@@ -122,10 +122,14 @@ func ParseAutomationActionConfig(raw json.RawMessage) (AutomationActionConfig, e
 	return c.Canonical(), c.Validate()
 }
 
-// Canonical returns a copy whose selected action order does not affect policy identity.
+// Canonical keeps policy identity stable across action ordering and JSON storage.
 func (c AutomationActionConfig) Canonical() AutomationActionConfig {
 	c.Actions = slices.Clone(c.Actions)
 	slices.Sort(c.Actions)
+	// JSON omits empty properties, so persisted destinations decode them as nil.
+	if len(c.NotionProperties) == 0 {
+		c.NotionProperties = nil
+	}
 	return c
 }
 
