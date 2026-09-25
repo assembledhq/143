@@ -205,9 +205,50 @@ CREATE UNIQUE INDEX inbox_client_id ON thread_inbox_entries(org_id,thread_id,cli
 	_, err = pool.Exec(ctx, `INSERT INTO session_messages(org_id,session_id,thread_id,turn_number,role,content) VALUES($1,$2,$3,1,'user','human mutation')`, org, session, thread)
 	require.Error(t, err, "review ownership must reject a raced human message")
 	require.NoError(t, store.RecordAttemptUsage(ctx, org, assessment, d.JobID, newToken, newToken.String()+":primary", json.RawMessage(`{"input_tokens":10}`)), "persist measured provider attempt before completion")
+	_, err = pool.Exec(ctx, `
+CREATE TABLE session_activity_phases (
+ id uuid PRIMARY KEY, org_id uuid NOT NULL, session_id uuid NOT NULL, thread_id uuid NOT NULL,
+ turn_number integer NOT NULL, phase_number integer NOT NULL DEFAULT 1, status text NOT NULL,
+ boundary_reason text, started_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz,
+ runtime_id uuid, trigger_kind text NOT NULL DEFAULT 'recovery', trigger_batch_id uuid,
+ trigger_sequence_start bigint, trigger_sequence_end bigint,
+ created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE session_messages ADD COLUMN activity_phase_id uuid REFERENCES session_activity_phases(id)`)
+	require.NoError(t, err, "create transcript phase shape for fenced completion")
+	phaseID := uuid.New()
+	_, err = pool.Exec(ctx, `INSERT INTO session_activity_phases(id,org_id,session_id,thread_id,turn_number,status) VALUES($1,$2,$3,$4,1,'running')`, phaseID, org, session, thread)
+	require.NoError(t, err, "start the recheck transcript phase")
+	// All rejected completions use the same live receipt. Run sequentially to
+	// prove each transaction rolls back without consuming it.
+	for _, tt := range []struct {
+		name     string
+		orgID    uuid.UUID
+		threadID uuid.UUID
+		turn     int
+		status   string
+	}{
+		{name: "another org", orgID: uuid.New(), threadID: thread, turn: 1, status: "running"},
+		{name: "another thread", orgID: org, threadID: uuid.New(), turn: 1, status: "running"},
+		{name: "another turn", orgID: org, threadID: thread, turn: 2, status: "running"},
+		{name: "already interrupted", orgID: org, threadID: thread, turn: 1, status: "interrupted"},
+	} {
+		invalidPhase := uuid.New()
+		_, err = pool.Exec(ctx, `INSERT INTO session_activity_phases(id,org_id,session_id,thread_id,turn_number,status) VALUES($1,$2,$3,$4,$5,$6)`, invalidPhase, tt.orgID, session, tt.threadID, tt.turn, tt.status)
+		require.NoError(t, err, "seed invalid phase: %s", tt.name)
+		_, err = store.Complete(ctx, models.CodeReviewRecheckTurnCompletion{OrgID: org, AssessmentID: assessment, SessionID: session, ThreadID: thread, JobID: d.JobID, LockToken: newToken, ExpectedTurn: 1, SessionTurn: 1, ActivityPhaseID: &invalidPhase, Summary: "must roll back", Result: &models.SessionResult{}})
+		require.Error(t, err, "invalid phase must reject the entire completion: %s", tt.name)
+		var count int
+		require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM session_messages WHERE org_id=$1 AND session_id=$2 AND role='assistant'`, org, session).Scan(&count), "count messages after rejected completion")
+		require.Equal(t, 0, count, "no partial final response may survive: %s", tt.name)
+	}
 	summary := "first recheck result"
-	completedID, err := store.Complete(ctx, models.CodeReviewRecheckTurnCompletion{OrgID: org, AssessmentID: assessment, SessionID: session, ThreadID: thread, JobID: d.JobID, LockToken: newToken, ExpectedTurn: 1, SessionTurn: 1, Summary: summary, Result: &models.SessionResult{ResultSummary: &summary}, ProviderSessionID: "thread-provider", ParentAgentSessionID: "parent-provider", SnapshotKey: "thread-snapshot", TokenUsage: json.RawMessage(`{"input_tokens":10}`)})
+	completedID, err := store.Complete(ctx, models.CodeReviewRecheckTurnCompletion{OrgID: org, AssessmentID: assessment, SessionID: session, ThreadID: thread, JobID: d.JobID, LockToken: newToken, ExpectedTurn: 1, SessionTurn: 1, ActivityPhaseID: &phaseID, Summary: summary, Result: &models.SessionResult{ResultSummary: &summary}, ProviderSessionID: "thread-provider", ParentAgentSessionID: "parent-provider", SnapshotKey: "thread-snapshot", TokenUsage: json.RawMessage(`{"input_tokens":10}`)})
 	require.NoError(t, err, "exact lease should atomically persist assistant and terminal turn")
+	var phaseStatus, phaseReason string
+	var messagePhaseID uuid.UUID
+	require.NoError(t, pool.QueryRow(ctx, `SELECT p.status,p.boundary_reason,m.activity_phase_id FROM session_activity_phases p JOIN session_messages m ON m.org_id=p.org_id AND m.activity_phase_id=p.id WHERE p.org_id=$1 AND p.id=$2 AND m.id=$3 AND p.completed_at=m.created_at`, org, phaseID, completedID).Scan(&phaseStatus, &phaseReason, &messagePhaseID), "read atomic final-response phase and message association")
+	require.Equal(t, []string{"completed", "final_response", phaseID.String()}, []string{phaseStatus, phaseReason, messagePhaseID.String()}, "successful recheck must close its exact phase before runtime teardown")
 	completed, err := store.Get(ctx, org, assessment)
 	require.NoError(t, err, "read committed completion receipt")
 	require.Equal(t, models.CodeReviewRecheckDispatchCompleted, completed.Status, "receipt should become completed")

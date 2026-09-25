@@ -19,10 +19,12 @@ import { ExternalLink } from "@/components/ui/external-link";
 import { DecisionFeedback } from "./decision-feedback";
 import { RecheckActions } from "./recheck-actions";
 import { codeReviewReasonDescription } from "@/lib/code-review-reasons";
+import { activeAssessmentState } from "@/lib/code-review-assessment-state";
 import type { CodeReviewAssessmentSummary, CodeReviewDecision, CodeReviewEvidenceCitation, CodeReviewEvidence, CodeReviewListItem } from "@/lib/types";
 
 function assessmentLabel(assessment: CodeReviewAssessmentSummary): string {
-  if (assessment.status === "reserved" || assessment.status === "running" || assessment.status === "publishing") return "Review in progress";
+  const active = activeAssessmentState(assessment);
+  if (active) return active.label;
   if (assessment.status === "failed") return "Latest attempt failed";
   if (assessment.status === "superseded") return "Latest attempt superseded";
   if (assessment.status === "cancelled") return "Review cancelled";
@@ -43,7 +45,7 @@ const decisionPresentation: Record<CodeReviewDecision, { label: string; tone: St
 
 function assessmentVerdict(assessment: CodeReviewAssessmentSummary): { label: string; tone: StatusTone } {
   if (assessment.status !== "completed") {
-    return { label: assessmentLabel(assessment), tone: assessment.status === "failed" ? "destructive" : "neutral" };
+    return { label: assessmentLabel(assessment), tone: activeAssessmentState(assessment)?.tone ?? (assessment.status === "failed" ? "destructive" : "neutral") };
   }
   return assessment.decision ? decisionPresentation[assessment.decision] : { label: "No verdict recorded", tone: "neutral" };
 }

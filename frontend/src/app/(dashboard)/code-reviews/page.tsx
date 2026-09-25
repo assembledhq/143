@@ -71,7 +71,8 @@ import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
 import { GitHubReviewerConnectionSheet } from "@/components/code-review/github-reviewer-connection-sheet";
 import { ReviewNowFromComment } from "@/components/code-review/review-now-from-comment";
-import { AssessmentFromLink, ReviewAssessmentDialog } from "@/components/code-review/assessment-status";
+import { AssessmentFromLink, ReviewAssessmentDialog, assessmentForReview } from "@/components/code-review/assessment-status";
+import { activeAssessmentState } from "@/lib/code-review-assessment-state";
 import { RecheckFromComment } from "@/components/code-review/recheck-from-comment";
 import { ScheduledReviews } from "@/components/code-review/scheduling";
 import { CodeReviewPolicyHistory } from "@/components/code-review/policy-history";
@@ -267,6 +268,19 @@ function reviewStatusTone(status: string): StatusTone {
   return "neutral";
 }
 
+function activeRecheckForReview(review: CodeReviewListItem) {
+  if (isSupersededReview(review)) return null;
+  const assessment = assessmentForReview(review);
+  return assessment?.review_scope === "evidence_only" && activeAssessmentState(assessment) ? assessment : null;
+}
+
+function ReviewOutcome({ review }: { review: CodeReviewListItem }) {
+  return <div className="space-y-1">
+    {activeRecheckForReview(review) ? <p className="text-xs text-muted-foreground">Previous result</p> : null}
+    <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator="none" />
+  </div>;
+}
+
 // Path-based risk reasons are recorded once per changed path, so a broad PR can
 // produce a very long list. Show a readable slice and summarize the remainder.
 const WHY_NOT_APPROVED_REASON_LIMIT = 10;
@@ -394,6 +408,11 @@ function retryCountdown(retryAt: string | undefined, nowMs: number): string | nu
 }
 
 function ReviewOperationalStatus({ review, nowMs }: { review: CodeReviewListItem; nowMs: number }) {
+  const recheck = activeRecheckForReview(review);
+  const recheckState = activeAssessmentState(recheck);
+  if (recheck && recheckState) {
+    return <StatusLabel label={recheckState.label} tone={recheckState.tone} activity={recheckState.activity} stateKey={`${recheck.id}:${recheck.status}`} />;
+  }
   const waitingForGitHub = review.phase === "waiting_for_github";
   const active = (review.status === "running" || review.status === "queued") && !waitingForGitHub;
   const message = reviewStatusMessage(review);
@@ -1232,7 +1251,7 @@ export default function CodeReviewsPage() {
       id: "outcome",
       header: sortHeader("Outcome", "outcome"),
       sortDirection: reviewSort === "outcome" ? reviewSortOrder : false,
-      render: (review) => <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator="none" />,
+      render: (review) => <ReviewOutcome review={review} />,
     },
     {
       id: "why-not-approved",
@@ -1439,7 +1458,7 @@ export default function CodeReviewsPage() {
                       <div className="space-y-2.5 pt-1">
                         <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                            <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator="none" />
+                            <ReviewOutcome review={review} />
                             {review.completed_at ? <span className="text-foreground">{formatDate(review.completed_at)}</span> : null}
                         </div>
                         <MobileWhyNotApproved review={review} />

@@ -453,9 +453,17 @@ func (s *CodeReviewRecheckStore) Complete(ctx context.Context, c models.CodeRevi
 		return 0, err
 	}
 	id := c.ThreadID
-	msg := &models.SessionMessage{OrgID: c.OrgID, SessionID: c.SessionID, ThreadID: &id, TurnNumber: c.ExpectedTurn, Role: models.MessageRoleAssistant, Content: c.Summary, TokenUsage: c.TokenUsage}
+	msg := &models.SessionMessage{OrgID: c.OrgID, SessionID: c.SessionID, ThreadID: &id, TurnNumber: c.ExpectedTurn, ActivityPhaseID: c.ActivityPhaseID, Role: models.MessageRoleAssistant, Content: c.Summary, TokenUsage: c.TokenUsage}
 	if err = NewSessionMessageStore(tx).Create(ctx, msg); err != nil {
 		return 0, err
+	}
+	// The fenced receipt replaces the ordinary assistant-message writer, so
+	// it must also close the transcript phase in this transaction. Otherwise
+	// runtime cleanup makes a successful recheck look interrupted.
+	if c.ActivityPhaseID != nil {
+		if _, err = completeActivityPhaseInTransaction(ctx, tx, c.OrgID, *c.ActivityPhaseID, models.ActivityPhaseStatusCompleted, models.ActivityPhaseBoundaryFinalResponse, msg.CreatedAt); err != nil {
+			return 0, err
+		}
 	}
 	rootResult := *c.Result
 	rootResult.TokenUsage = rootUsage
