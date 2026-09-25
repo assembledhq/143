@@ -463,6 +463,17 @@ func codeReviewEvidenceAuthorType(raw string) models.CodeReviewEvidenceAuthorTyp
 }
 
 func codeReviewVisualEvidenceSourceID(surface models.CodeReviewEvidenceSurface, providerObjectID string, imageIndex int, imageURL string) string {
+	// GitHub rotates the JWT in rendered private-image URLs independently of
+	// the image. Bind source identity to the asset while retaining the signed
+	// ImageURL for downloading; the captured content digest still detects edits.
+	if parsed, err := url.Parse(imageURL); err == nil && parsed.Scheme == "https" &&
+		strings.EqualFold(parsed.Host, "private-user-images.githubusercontent.com") && parsed.User == nil {
+		if query, err := url.ParseQuery(parsed.RawQuery); err == nil && query.Has("jwt") {
+			query.Del("jwt")
+			parsed.RawQuery = query.Encode()
+			imageURL = parsed.String()
+		}
+	}
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%s", surface, providerObjectID, imageIndex, imageURL)))
 	return "ves_" + hex.EncodeToString(digest[:12])
 }
