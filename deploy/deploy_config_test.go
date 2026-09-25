@@ -2365,6 +2365,8 @@ func TestProductionPostgresConnectionHeadroom(t *testing.T) {
 	require.Contains(t, string(conf), "maintenance_work_mem = 128MB", "maintenance should not consume the old 512MB budget per operation")
 	require.Contains(t, string(conf), "autovacuum_work_mem = 128MB", "autovacuum workers should have an explicit independent memory budget")
 	require.Contains(t, string(conf), "max_parallel_workers_per_gather = 2", "parallel queries should bound multiplication of per-operation memory")
+	require.Contains(t, string(conf), "temp_file_limit = 2GB", "individual backend spills should have a disk budget")
+	require.Contains(t, string(conf), "log_temp_files = 16MB", "large completed temporary files should be visible during the rollout")
 }
 
 func TestDBDeploySyncsMountedPostgresConfig(t *testing.T) {
