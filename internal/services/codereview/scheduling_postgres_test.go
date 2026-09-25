@@ -122,6 +122,7 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 			testRefreshUnsentEvidenceAssessment(t, p, org, repo, pr, snapshot, false, true)
 		}},
 		{"push burst restart and manual joining", testSchedulingBurst},
+		{"terminal full assessment releases replacement", testSchedulingTerminalAssessmentRecovery},
 		{"draft automatic", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testSchedulingDraft(t, p, org, repo, pr, snapshot, "automatic")
 		}},
@@ -1019,4 +1020,39 @@ func testSchedulingDraft(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UU
 	require.True(t, state.IsDraft, "draft observation remains available")
 	require.Equal(t, models.CodeReviewScheduleRunning, state.State, "draft admission has normal running state")
 	require.Equal(t, models.CodeReviewWaitNone, state.WaitReason, "draft leaves no obsolete hold reason")
+}
+
+func testSchedulingTerminalAssessmentRecovery(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+	ctx := context.Background()
+	service, claim, sessionID := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
+	metadata, err := db.NewCodeReviewStore(pool).GetBySessionID(ctx, org, sessionID)
+	require.NoError(t, err, "read initial review metadata")
+	assessments := db.NewCodeReviewAssessmentStore(pool)
+	original, _, err := assessments.Create(ctx, models.CodeReviewAssessmentCapture{
+		OrgID: org, RepositoryID: repo, PullRequestID: pr, PolicyID: metadata.PolicyID, SessionID: sessionID,
+		Generation: 1, BaseSHA: snapshot.snapshot.BaseSHA, BaseRef: snapshot.snapshot.BaseRef, HeadSHA: snapshot.snapshot.HeadSHA,
+		InputVersion: 1, CodeDigest: "code", ContractDigest: "contract", IntentDigest: "intent", VisualDigest: "visual", RequestDigest: "request", GateDigest: "gate", InputDigest: "input", InputManifest: json.RawMessage(`{}`),
+		ReviewScope: models.CodeReviewScopeFull, RouteReason: models.CodeReviewRouteInitialFull, PublicationKey: "terminal-recovery:" + pr.String(),
+	})
+	require.NoError(t, err, "capture the original full assessment")
+	require.NoError(t, assessments.MarkRunning(ctx, org, original.ID, 1, "input"), "start original assessment")
+	_, err = pool.Exec(ctx, `UPDATE code_review_pr_state SET active_assessment_id=$3 WHERE org_id=$1 AND pull_request_id=$2`, org, pr, original.ID)
+	require.NoError(t, err, "bind original assessment to scheduler")
+	snapshot.update(func(s *ghservice.CodeReviewPullRequestSnapshot) { s.HeadSHA = "replacement-head" })
+	_, err = service.scheduleReview(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr, ExplicitRequest: true, GitHubDeliveryID: uuid.NewString(), TriggerSource: models.CodeReviewTriggerSourceSlashCommand}, models.CodeReviewReviewNow, false, nil)
+	require.NoError(t, err, "new push supersedes metadata and queues replacement")
+	_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND job_type=$2`, org, models.JobTypeRunCodeReview)
+	require.NoError(t, err, "represent controller exiting after stale metadata without settling assessment")
+	require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "scheduler must recover stale assessment and dispatch replacement")
+	retired, err := assessments.GetByID(ctx, org, original.ID)
+	require.NoError(t, err, "read retired assessment")
+	require.Equal(t, models.CodeReviewAssessmentSuperseded, retired.Status, "original assessment must release admission")
+	latest, err := db.NewCodeReviewStore(pool).GetLatestByPullRequest(ctx, org, pr)
+	require.NoError(t, err, "read replacement review")
+	require.NotEqual(t, sessionID, latest.SessionID, "replacement must have a distinct session")
+	require.Equal(t, "replacement-head", latest.HeadSHA, "replacement must review latest requested head")
+	schedule, err := service.GetSchedule(ctx, org, pr)
+	require.NoError(t, err, "read settled queue state")
+	require.Nil(t, schedule.PendingInput, "dispatched request must leave the waiting queue")
+	require.Equal(t, &latest.SessionID, schedule.ActiveSessionID, "scheduler must point to replacement")
 }
