@@ -2482,6 +2482,75 @@ func TestHarvestCodeReviewOrchestratorResultPreservesCompletedOutputAfterDeadlin
 	require.NoError(t, mock.ExpectationsWereMet(), "orchestrator harvest should preserve terminal output and findings instead of replacing them with a timeout")
 }
 
+func TestHarvestLegacyCodeReviewSynthesisOnReadOnlyMain(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID, sessionID, mainThreadID, resultID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	raw := `{"approval_recommended":true,"description_assessments":[{"key":"description","status":"satisfied","evidence_basis":"pull_request_description","evidence_ids":[],"reason":"Clear intent."}],"findings":[],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"The change is focused.","review_summary":"The completed review supports the change.","risk_notes":[]}`
+	raw = "```json\n" + raw + "\n```"
+	synthesis, err := parseCodeReviewOrchestratorSynthesis(raw)
+	require.NoError(t, err, "test synthesis should satisfy the output schema")
+	_, err = codeReviewDescriptionEvaluationFromSynthesis(models.DefaultCodeReviewPolicyConfig(), nil, synthesis, models.CodeReviewVisualEvidenceSnapshot{})
+	require.NoError(t, err, "test synthesis should satisfy the default description policy")
+	initialState := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{ThreadID: mainThreadID.String()})
+
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", stringPtr(models.DefaultCodexModel),
+				models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusRunning, nil, initialState, now))
+	mainThreadRow := workerSessionThreadRow(mainThreadID, sessionID, orgID, models.AgentTypeCodex, stringPtr(models.DefaultCodexModel), models.ThreadStatusCompleted)
+	setWorkerSessionThreadColumn(mainThreadRow, "label", "Main")
+	setWorkerSessionThreadColumn(mainThreadRow, "created_by_source", models.ThreadCreatedBySourceSystem)
+	setWorkerSessionThreadColumn(mainThreadRow, "execution_mode", models.ThreadExecutionModeReview)
+	setWorkerSessionThreadColumn(mainThreadRow, "filesystem_mode", models.ThreadFilesystemModeReadOnly)
+	setWorkerSessionThreadColumn(mainThreadRow, "completed_at", &now)
+	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
+		WithArgs(pgx.NamedArgs{"id": mainThreadID, "org_id": orgID}).
+		WillReturnRows(newSessionThreadRows().AddRow(mainThreadRow...))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_messages").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": mainThreadID}).
+		WillReturnRows(newSessionMessageRows().
+			AddRow(int64(1), sessionID, orgID, &mainThreadID, nil, 1, models.MessageRoleAssistant, raw, nil, nil, nil, nil, "", now))
+	mock.ExpectQuery("UPDATE code_review_agent_results").
+		WithArgs(models.CodeReviewAgentResultStatusCompleted, &raw,
+			readOnlyMainSynthesisArg{threadID: mainThreadID, summary: "The change is focused."}, orgID, resultID).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", stringPtr(models.DefaultCodexModel),
+				models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusCompleted, &raw, initialState, now))
+
+	stores := &Stores{
+		CodeReviews:     db.NewCodeReviewStore(mock),
+		SessionThreads:  db.NewSessionThreadStore(mock),
+		SessionMessages: db.NewSessionMessageStore(mock),
+	}
+	err = harvestCodeReviewOrchestratorResult(context.Background(), stores, &Services{CodeReviewAssessmentsEnabled: false}, zerolog.Nop(),
+		runCodeReviewPayload{OrgID: orgID, SessionID: sessionID},
+		codeReviewPolicyRecordForTest(models.DefaultCodeReviewPolicyConfig()), nil, models.CodeReviewVisualEvidenceSnapshot{})
+	require.NoError(t, err, "legacy synthesis should accept valid output from the read-only Main thread")
+	require.NoError(t, mock.ExpectationsWereMet(), "harvest should complete the legacy synthesis without creating a separate thread or marking a read-only violation")
+}
+
+type readOnlyMainSynthesisArg struct {
+	threadID uuid.UUID
+	summary  string
+}
+
+func (matcher readOnlyMainSynthesisArg) Match(value any) bool {
+	raw, ok := value.(json.RawMessage)
+	if !ok {
+		return false
+	}
+	state, ok := parseCodeReviewOrchestratorStructuredResult(raw)
+	return ok && state.ThreadID == matcher.threadID.String() && state.ReadOnly && !state.ReadOnlyViolation &&
+		state.SynthesisValidated && state.Error == "" && state.Synthesis.Summary == matcher.summary
+}
+
 func TestHarvestCodeReviewAgentResultRejectsTerminalOutputAfterDeadline(t *testing.T) {
 	t.Parallel()
 
