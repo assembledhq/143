@@ -12,4 +12,6 @@ For general usage docs that apply regardless of who's hosting, see [`../guides/`
 - **[Platform LLM](platform-llm.md)** — configure the small background-features model (session titles, PR descriptions, validation, prioritization).
 - **[CLI install](../guides/cli-install.md#self-hosting-note-reverse-proxy-rules)** — reverse-proxy rules for the `143-tools` installer/download routes (only needed if you replace the bundled Caddyfile).
 
+- **[Database headroom](database-headroom.md)** — memory budgets, idle connection handling, disk safety, and a staged capacity rollout.
+
 For local development (running 143 on your laptop while working on the codebase), see [`../local-development.md`](../local-development.md) instead.
