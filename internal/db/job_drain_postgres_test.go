@@ -94,6 +94,19 @@ func TestJobAdmissionHonorsDrainIntentPostgres(t *testing.T) {
 				expectedSummary.MaxSandboxes = 10
 			}
 			require.Equal(t, expectedSummary, summary, "prewarm admission must not count drained capacity")
+			health, err := NewNodeStore(pool).WorkerHeartbeatHealth(ctx, time.Now().Add(-time.Minute))
+			require.NoError(t, err, "read heartbeat health for admission monitoring")
+			require.Equal(t, []int64{int64(len(expectedIDs)), int64(len(expectedIDs)), 0}, []int64{health.ActiveWorkers, health.FreshWorkers, health.StaleWorkers}, "health counts must exclude active workers carrying drain intent")
+			_, err = pool.Exec(ctx, `UPDATE nodes SET last_heartbeat_at=CASE WHEN drain_intent='none' THEN now()-interval '10 minutes' ELSE now() END`)
+			require.NoError(t, err, "simulate only drained workers heartbeating freshly")
+			health, err = NewNodeStore(pool).WorkerHeartbeatHealth(ctx, time.Now().Add(-time.Minute))
+			require.NoError(t, err, "read health during admission outage")
+			require.Equal(t, []int64{int64(len(expectedIDs)), 0, int64(len(expectedIDs))}, []int64{health.ActiveWorkers, health.FreshWorkers, health.StaleWorkers}, "drained heartbeats must not conceal stale admitting workers")
+			expectedAge := float64(0)
+			if len(expectedIDs) > 0 {
+				expectedAge = 600
+			}
+			require.InDelta(t, expectedAge, health.NewestHeartbeatAgeSeconds, 2, "newest eligible heartbeat must exclude drained nodes")
 		})
 	}
 }

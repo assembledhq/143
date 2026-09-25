@@ -62,6 +62,8 @@ func reconcileTerminalReviews(ctx context.Context, tx pgx.Tx, orgID, prID uuid.U
 	// A lost executor alone is insufficient: its bounded recovery job must also end.
 	_, err = tx.Exec(ctx, `UPDATE session_threads t
  SET status=CASE WHEN t.cancel_requested_at IS NOT NULL THEN 'cancelled' ELSE 'failed' END,
+     failure_category=CASE WHEN t.cancel_requested_at IS NULL THEN COALESCE(t.failure_category,'stuck_thread') ELSE t.failure_category END,
+     failure_explanation=CASE WHEN t.cancel_requested_at IS NULL THEN COALESCE(t.failure_explanation,'Review controller failed after its executor and job ended; reconciled orphaned thread.') ELSE t.failure_explanation END,
      completed_at=COALESCE(t.completed_at,now()),last_activity_at=now()
  FROM code_review_session_metadata m
  WHERE t.org_id=$1 AND m.org_id=t.org_id AND m.session_id=t.session_id AND m.pull_request_id=$2

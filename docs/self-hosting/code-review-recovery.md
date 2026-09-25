@@ -77,6 +77,14 @@ Drain intent is durable for a node generation. Heartbeats and re-registration pr
 
 Publication timeouts and nonblocking job recovery added in [PR #2195](https://github.com/assembledhq/143/pull/2195) protect the new code paths. They do not retroactively bound an old open transaction or update old worker processes that continue running.
 
+### Resume a deliberately drained generation
+
+Prefer deploying a new generation. If a replacement failed and an existing fixed node ID must be reused, use `worker-deployctl resume --node-id <exact-id> --reason '<rollback reason>' --requested-by '<operator>'` from a configured deploy-control environment. It atomically clears the durable intent and records a `node_drain_cleared` audit event. It **does not resume a live process**: status remains draining/dead until that generation next registers. Local worker queues latch their drain, so changing the database to active alone would advertise capacity that cannot run jobs.
+
+Before restarting, pause further deployments, stop the detached drain monitor for this exact container, and verify it exited. It owns `/var/log/143/drain-worker-<first-12-container-id>.lock` and writes the matching `.log`; inspect the lock owner and process command line before stopping that specific monitor. Never kill all deploy processes or delete a held lock file. An old monitor can reapply drain or stop the resumed container even after intent is cleared.
+
+Use `worker-deployctl status --node-id <exact-id> --json` and `retire-ready --node-id <exact-id>` to verify owned work has finished before stopping/restarting that container. Run `resume` after stopping the generation, then start it with the verified image and configuration. This also supports intentionally drained single-node/local fixed IDs. Verify fresh heartbeats, `status=active`, `drain_intent=none`, and successful job admission afterward. The command never stops agents, restarts containers, or clears executor/runtime ownership itself.
+
 ## Choose which reviews to recover
 
 For each affected PR, check the latest review attempt, current head SHA, saved reviewer/synthesis results, active executors/runtimes, controller state, and GitHub review receipt.

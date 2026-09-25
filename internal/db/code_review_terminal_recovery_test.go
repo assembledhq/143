@@ -24,6 +24,8 @@ func TestReconcileTerminalReviewsPostgres(t *testing.T) {
 		setup       string
 		assessment  string
 		thread      string
+		category    string
+		explanation string
 		request     string
 		keepPointer bool
 		foreignOrg  bool
@@ -52,12 +54,13 @@ func TestReconcileTerminalReviewsPostgres(t *testing.T) {
 		{name: "active recheck protects thread", setup: "INSERT INTO code_review_recheck_dispatches SELECT org_id,session_id,'running' FROM session_threads", assessment: "superseded", thread: "running", request: "failed"},
 		{name: "new continuation protects thread", setup: "INSERT INTO jobs SELECT gen_random_uuid(),org_id,'pending','continue_session',payload FROM jobs", assessment: "superseded", thread: "running", request: "failed"},
 		{name: "cancellation is required", setup: "UPDATE session_threads SET cancel_requested_at=NULL", assessment: "superseded", thread: "running", request: "failed"},
-		{name: "failed synthesis without cancellation", setup: "UPDATE code_review_session_metadata SET status='failed'; UPDATE session_threads SET cancel_requested_at=NULL; INSERT INTO thread_runtimes SELECT org_id,session_id,'failed' FROM session_threads", assessment: "failed", thread: "failed", request: "failed"},
-		{name: "lost reviewer without cancellation", setup: "UPDATE code_review_session_metadata SET status='failed'; UPDATE session_threads SET cancel_requested_at=NULL; UPDATE session_executors SET status='lost'", assessment: "failed", thread: "failed", request: "failed"},
+		{name: "failed synthesis without cancellation", setup: "UPDATE code_review_session_metadata SET status='failed'; UPDATE session_threads SET cancel_requested_at=NULL; INSERT INTO thread_runtimes SELECT org_id,session_id,'failed' FROM session_threads", assessment: "failed", thread: "failed", category: "stuck_thread", explanation: "Review controller failed after its executor and job ended; reconciled orphaned thread.", request: "failed"},
+		{name: "lost reviewer without cancellation", setup: "UPDATE code_review_session_metadata SET status='failed'; UPDATE session_threads SET cancel_requested_at=NULL; UPDATE session_executors SET status='lost'", assessment: "failed", thread: "failed", category: "stuck_thread", explanation: "Review controller failed after its executor and job ended; reconciled orphaned thread.", request: "failed"},
 		{name: "lost executor with pending recovery remains blocked", setup: "UPDATE code_review_session_metadata SET status='failed'; UPDATE session_threads SET cancel_requested_at=NULL; UPDATE session_executors SET status='lost'; UPDATE jobs SET status='pending'", assessment: "failed", thread: "running", request: "failed"},
 		{name: "failed controller cannot retire live runtime", setup: "UPDATE code_review_session_metadata SET status='failed'; UPDATE session_threads SET cancel_requested_at=NULL; INSERT INTO thread_runtimes SELECT org_id,session_id,'live' FROM session_threads", assessment: "failed", thread: "running", request: "failed"},
 		{name: "failed controller cannot retire active sibling executor", setup: "UPDATE code_review_session_metadata SET status='failed'; UPDATE session_threads SET cancel_requested_at=NULL; INSERT INTO session_executors SELECT org_id,session_id,gen_random_uuid(),job_id,'running' FROM session_executors", assessment: "failed", thread: "running", request: "failed"},
 		{name: "failed controller without executor proof remains blocked", setup: "UPDATE code_review_session_metadata SET status='failed'; UPDATE session_threads SET cancel_requested_at=NULL; DELETE FROM session_executors", assessment: "failed", thread: "running", request: "failed"},
+		{name: "preserve existing failure diagnostic", setup: "UPDATE code_review_session_metadata SET status='failed'; UPDATE session_threads SET cancel_requested_at=NULL,failure_category='original',failure_explanation='original detail'", assessment: "failed", thread: "failed", request: "failed", category: "original", explanation: "original detail"},
 		{name: "other tenant untouched", assessment: "running", thread: "running", request: "joined", keepPointer: true, foreignOrg: true},
 		{name: "other PR untouched", assessment: "running", thread: "running", request: "joined", keepPointer: true, foreignPR: true},
 	}
@@ -81,7 +84,7 @@ func TestReconcileTerminalReviewsPostgres(t *testing.T) {
 CREATE TABLE code_review_session_metadata(id uuid,org_id uuid,pull_request_id uuid,session_id uuid,status text);
 CREATE TABLE code_review_revision_assessments(id uuid,org_id uuid,pull_request_id uuid,metadata_id uuid,session_id uuid,review_scope text,status text,publication_state text,publication_receipt jsonb,github_review_id bigint,completed_at timestamptz,superseded_at timestamptz,failure_detail text);
 CREATE TABLE code_review_requests(id uuid,org_id uuid,pull_request_id uuid,assessment_id uuid,status text);
-CREATE TABLE session_threads(id uuid,org_id uuid,session_id uuid,status text,cancel_requested_at timestamptz,completed_at timestamptz,last_activity_at timestamptz);
+CREATE TABLE session_threads(id uuid,org_id uuid,session_id uuid,status text,cancel_requested_at timestamptz,completed_at timestamptz,last_activity_at timestamptz,failure_category text,failure_explanation text);
 CREATE TABLE session_executors(org_id uuid,session_id uuid,thread_id uuid,job_id uuid,status text);
 CREATE TABLE jobs(id uuid,org_id uuid,status text,job_type text,payload jsonb);
 CREATE TABLE thread_runtimes(org_id uuid,session_id uuid,status text);
@@ -95,7 +98,7 @@ CREATE TABLE code_review_recheck_dispatches(org_id uuid,session_id uuid,status t
 				{`INSERT INTO code_review_session_metadata VALUES($1,$2,$3,$4,'stale')`, []any{metadata, org, pr, session}},
 				{`INSERT INTO code_review_revision_assessments(id,org_id,pull_request_id,metadata_id,session_id,review_scope,status,publication_state) VALUES($1,$2,$3,$4,$5,'full','running','not_started')`, []any{assessment, org, pr, metadata, session}},
 				{`INSERT INTO code_review_requests VALUES($1,$2,$3,$4,'joined'),($5,$2,$3,NULL,'pending')`, []any{request, org, pr, assessment, pendingRequest}},
-				{`INSERT INTO session_threads VALUES($1,$2,$3,'running',now()-interval '1 hour',NULL,now()-interval '2 hours')`, []any{thread, org, session}},
+				{`INSERT INTO session_threads(id,org_id,session_id,status,cancel_requested_at,completed_at,last_activity_at) VALUES($1,$2,$3,'running',now()-interval '1 hour',NULL,now()-interval '2 hours')`, []any{thread, org, session}},
 				{`INSERT INTO jobs VALUES($1,$2,'dead_letter','continue_session',jsonb_build_object('session_id',$3::text,'thread_id',$4::text))`, []any{job, org, session, thread}},
 				{`INSERT INTO session_executors VALUES($1,$2,$3,$4,'failed')`, []any{org, session, thread, job}},
 			}
@@ -127,6 +130,9 @@ CREATE TABLE code_review_recheck_dispatches(org_id uuid,session_id uuid,status t
 			require.NoError(t, reconcileTerminalReviews(ctx, tx, queryOrg, queryPR, &state), "recovery should be idempotent")
 			require.NoError(t, tx.Commit(ctx), "commit recovery")
 			require.Equal(t, expected, state, "recovery should release only the retired pointer and preserve the replacement request")
+			var category, explanation string
+			require.NoError(t, conn.QueryRow(ctx, `SELECT COALESCE(failure_category,''),COALESCE(failure_explanation,'') FROM session_threads WHERE org_id=$1 AND id=$2`, org, thread).Scan(&category, &explanation), "read orphan recovery diagnostic")
+			require.Equal(t, []string{tt.category, tt.explanation}, []string{category, explanation}, "only newly failed orphans should receive a failure explanation")
 			var actual struct{ Assessment, Thread, Request, Pending string }
 			err = conn.QueryRow(ctx, `SELECT a.status,t.status,r.status,p.status FROM code_review_revision_assessments a CROSS JOIN session_threads t JOIN code_review_requests r ON r.id=$1 JOIN code_review_requests p ON p.id=$2`, request, pendingRequest).Scan(&actual.Assessment, &actual.Thread, &actual.Request, &actual.Pending)
 			require.NoError(t, err, "read recovered state")

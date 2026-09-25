@@ -1121,7 +1121,7 @@ func TestBranchPreviewHandler_StartLatestRollsBackReservationWhenJobDedupeConfli
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(branchPreviewNodeTestCols).AddRow(
 			workerID, models.NodeModeWorker, "worker-1.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata, now, now, nil, nil, "", "",
 		))
@@ -2880,7 +2880,7 @@ func TestBranchPreviewHandler_SelectWorkerForRestart_DegradesWhenSnapshotWorkerA
 	mock.ExpectQuery("SELECT[\\s\\S]+user_standalone[\\s\\S]+worker_total").
 		WithArgs(branchPreviewAnyArgs(3)...).
 		WillReturnRows(pgxmock.NewRows([]string{"user_standalone", "org_standalone", "worker_total"}).AddRow(0, 0, 3))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(
 			pgxmock.NewRows(branchPreviewNodeTestCols).
 				AddRow(warmWorker, models.NodeModeWorker, "warm.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata("http://warm.local"), now, now, nil, nil, "", "").

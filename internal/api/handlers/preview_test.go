@@ -1828,7 +1828,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(
 			pgxmock.NewRows(handlerNodeTestCols).
 				AddRow("worker-a", "worker", "worker-a", "active", workerMeta, now, now),
@@ -1955,7 +1955,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedClearsDeadLiveSessionOwner(t *t
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(
 			pgxmock.NewRows(handlerNodeTestCols).
 				AddRow("worker-a", "worker", "worker-a", "active", healthyMeta, now, now),
@@ -2090,7 +2090,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedStaticEgressNoCapableWorkers(t 
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(
 			pgxmock.NewRows(handlerNodeTestCols).
 				AddRow("worker-a", "worker", "worker-a", "active", workerMeta, now, now),
@@ -2159,7 +2159,7 @@ func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(
 			pgxmock.NewRows(handlerNodeTestCols).
 				AddRow("worker-a", "worker", "worker-a", "active", workerMeta, now, now),
@@ -2422,7 +2422,7 @@ func TestPreviewHandler_RestartPreview_NoActiveStartsFresh(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(
 			pgxmock.NewRows(handlerNodeTestCols).
 				AddRow("worker-a", "worker", "worker-a", "active", workerMeta, now, now),

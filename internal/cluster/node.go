@@ -44,6 +44,10 @@ func (n *NodeManager) Register(ctx context.Context, host string) error {
 			started_at = now(),
 			last_heartbeat_at = now(),
 			status = CASE WHEN nodes.drain_intent <> 'none' THEN 'draining' ELSE 'active' END,
+			drain_requested_at = CASE WHEN nodes.drain_intent <> 'none' THEN nodes.drain_requested_at END,
+			drain_budget_expires_at = CASE WHEN nodes.drain_intent <> 'none' THEN nodes.drain_budget_expires_at END,
+			drain_requested_by = CASE WHEN nodes.drain_intent <> 'none' THEN nodes.drain_requested_by ELSE '' END,
+			drain_reason = CASE WHEN nodes.drain_intent <> 'none' THEN nodes.drain_reason ELSE '' END,
 			metadata = EXCLUDED.metadata
 	`, n.nodeID, n.mode, host, metadata)
 	return err

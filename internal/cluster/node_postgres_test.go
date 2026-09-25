@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
@@ -52,6 +53,8 @@ func TestNodeDrainSurvivesRecoveryPostgres(t *testing.T) {
 			require.NoError(t, err, "use isolated schema")
 			_, err = conn.Exec(ctx, `CREATE TABLE nodes(id text PRIMARY KEY,mode text,host text,started_at timestamptz,last_heartbeat_at timestamptz,status text,metadata jsonb,drain_intent text NOT NULL DEFAULT 'none',drain_requested_at timestamptz,drain_budget_expires_at timestamptz,drain_requested_by text DEFAULT '',drain_reason text DEFAULT '')`)
 			require.NoError(t, err, "create node table")
+			_, err = conn.Exec(ctx, `CREATE TABLE worker_deploy_events(deploy_id text,node_id text,host text,event_type text,drain_intent text,requested_by text,reason text,metadata jsonb)`)
+			require.NoError(t, err, "create drain audit table")
 			nm := NewNodeManager(conn, zerolog.Nop(), "old-generation", "worker")
 			require.NoError(t, nm.Register(ctx, "worker-host"), "register worker generation")
 			_, err = conn.Exec(ctx, `UPDATE nodes SET status='draining',drain_intent=$1,drain_requested_at='2026-09-25T19:00:00Z',drain_budget_expires_at='2026-09-25T20:00:00Z',drain_requested_by='deploy',drain_reason='rollout',last_heartbeat_at=now()-interval '5 minutes'`, tt.intent)
@@ -70,10 +73,38 @@ func TestNodeDrainSurvivesRecoveryPostgres(t *testing.T) {
 			}
 			var status, intent, requestedBy, reason string
 			var preservedTimes bool
-			err = conn.QueryRow(ctx, `SELECT status,drain_intent,drain_requested_by,drain_reason,drain_requested_at='2026-09-25T19:00:00Z' AND drain_budget_expires_at='2026-09-25T20:00:00Z' FROM nodes WHERE id='old-generation'`).Scan(&status, &intent, &requestedBy, &reason, &preservedTimes)
+			err = conn.QueryRow(ctx, `SELECT status,drain_intent,drain_requested_by,drain_reason,COALESCE(drain_requested_at='2026-09-25T19:00:00Z' AND drain_budget_expires_at='2026-09-25T20:00:00Z',false) FROM nodes WHERE id='old-generation'`).Scan(&status, &intent, &requestedBy, &reason, &preservedTimes)
 			require.NoError(t, err, "read recovered generation")
-			require.Equal(t, []string{tt.expected, tt.intent, "deploy", "rollout"}, []string{status, intent, requestedBy, reason}, "recovery must preserve operator drain intent and attribution")
-			require.True(t, preservedTimes, "recovery must not reset drain timing")
+			expectedBy, expectedReason := "deploy", "rollout"
+			preserve := !(tt.register && tt.intent == "none")
+			if !preserve {
+				expectedBy, expectedReason = "", ""
+			}
+			require.Equal(t, []string{tt.expected, tt.intent, expectedBy, expectedReason}, []string{status, intent, requestedBy, reason}, "recovery must preserve operator drain intent and clear transient drain attribution")
+			require.Equal(t, preserve, preservedTimes, "healthy process restart must clear obsolete drain times")
+			if tt.intent != "none" {
+				store := db.NewNodeStore(conn)
+				params := db.ResumeNodeParams{NodeID: "old-generation", Reason: "replacement failed", RequestedBy: "operator"}
+				_, err = conn.Exec(ctx, `ALTER TABLE worker_deploy_events ADD CONSTRAINT reject_event CHECK(false)`)
+				require.NoError(t, err, "simulate audit storage failure")
+				require.Error(t, store.ResumeOnRestart(ctx, params), "audit failure must roll back drain clearing")
+				require.NoError(t, conn.QueryRow(ctx, `SELECT drain_intent FROM nodes WHERE id='old-generation'`).Scan(&intent), "read drain after audit failure")
+				require.Equal(t, tt.intent, intent, "failed audit must preserve operator drain")
+				_, err = conn.Exec(ctx, `ALTER TABLE worker_deploy_events DROP CONSTRAINT reject_event`)
+				require.NoError(t, err, "restore audit writes")
+				require.NoError(t, store.ResumeOnRestart(ctx, params), "authorize admission on the next restart")
+				require.NoError(t, nm.HeartbeatOnce(ctx), "existing process remains draining after intent is cleared")
+				require.NoError(t, conn.QueryRow(ctx, `SELECT status FROM nodes WHERE id='old-generation'`).Scan(&status), "read status before restart")
+				require.Equal(t, "draining", status, "resume must not advertise a live latched process as admitting")
+				restarted := NewNodeManager(conn, zerolog.Nop(), "old-generation", "worker")
+				require.NoError(t, restarted.Register(ctx, "worker-host"), "restart explicitly resumed generation")
+				require.NoError(t, conn.QueryRow(ctx, `SELECT status,drain_intent FROM nodes WHERE id='old-generation'`).Scan(&status, &intent), "read resumed admission")
+				require.Equal(t, []string{"active", "none"}, []string{status, intent}, "resumed generation should admit only after restart")
+				var eventCount int
+				require.NoError(t, conn.QueryRow(ctx, `SELECT count(*) FROM worker_deploy_events WHERE node_id='old-generation' AND event_type='node_drain_cleared' AND requested_by='operator' AND reason='replacement failed' AND metadata='{"restart_required":true}'::jsonb`).Scan(&eventCount), "read exact resume audit receipt")
+				require.Equal(t, 1, eventCount, "successful resume should have one attributed audit receipt")
+				require.Error(t, store.ResumeOnRestart(ctx, params), "repeated resume must not record another drain clear")
+			}
 			fresh := NewNodeManager(conn, zerolog.Nop(), "new-generation", "worker")
 			require.NoError(t, fresh.Register(ctx, "worker-host"), "register replacement on same host")
 			err = conn.QueryRow(ctx, `SELECT status,drain_intent FROM nodes WHERE id='new-generation'`).Scan(&status, &intent)
