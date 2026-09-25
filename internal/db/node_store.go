@@ -132,7 +132,7 @@ func (s *NodeStore) GetLatestByHost(ctx context.Context, host string) (*models.N
 // lint:allow-no-orgid reason="nodes is a cluster-scoped table with no org_id"
 func (s *NodeStore) ListActive(ctx context.Context) ([]models.Node, error) {
 	rows, err := s.db.Query(ctx,
-		fmt.Sprintf(`SELECT %s FROM nodes WHERE status = 'active' ORDER BY id ASC`, nodeColumns),
+		fmt.Sprintf(`SELECT %s FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC`, nodeColumns),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list active nodes: %w", err)

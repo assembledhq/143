@@ -6,6 +6,8 @@ For general usage docs that apply regardless of who's hosting, see [`../guides/`
 
 ## Guides
 
+- **[Code-review incident recovery](code-review-recovery.md)** — diagnose deployment and database failures, preserve running work, and recover publication safely.
+
 - **[GitHub App setup](github-app-setup.md)** — create your own GitHub OAuth App + GitHub App and wire them into your deployment.
 - **[Single-node deployment](single-node.md)** — run the production-shaped stack on one Linux host with Docker Compose.
 - **[Production deployment checklist](production-deployment-checklist.md)** — minimum steps to deploy the 143 backend + frontend in production.

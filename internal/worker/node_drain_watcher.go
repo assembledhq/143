@@ -45,7 +45,7 @@ func markWorkersDrainingFromDB(ctx context.Context, nodes drainNodeGetter, worke
 		}
 		return false
 	}
-	if node.Status != models.NodeStatusDraining {
+	if node.Status != models.NodeStatusDraining && (node.DrainIntent == "" || node.DrainIntent == models.DrainIntentNone) {
 		return false
 	}
 	for _, w := range workers {
