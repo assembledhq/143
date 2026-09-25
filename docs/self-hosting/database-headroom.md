@@ -18,6 +18,8 @@ The last incident snapshot also showed the root filesystem at 96% utilization. M
 
 These settings do not bound total PostgreSQL memory. Operations, sessions and workers can allocate concurrently. See PostgreSQL's [resource configuration](https://www.postgresql.org/docs/18/runtime-config-resource.html). Pool idle expiry also does not release connections held by open transactions. Publication timeouts and durable worker draining address those separately.
 
+Temporary-file budgets also multiply: a query using a leader and two parallel workers can consume 3 × 2 GB = 6 GB across those processes. Compare the 20 GB disk reserve below against concurrent queries, not just one process's limit.
+
 The connection ceilings remain API 20, worker/executor 4 per process, and PostgreSQL 300. Reducing those requires concurrency and pool-wait measurements because review publication and lease renewal share the pool. Override the worker idle lifetime with `WORKER_DATABASE_MAX_CONN_IDLE_TIME`; new executor containers inherit the worker environment. Existing processes retain their startup configuration.
 
 ## Rollout order
