@@ -81,6 +81,16 @@ func stopFullReviewFallbackLoop(ctx context.Context, tx pgx.Tx, a models.CodeRev
 	if _, err = tx.Exec(ctx, `UPDATE code_review_requests SET status='cancelled' WHERE org_id=$1 AND pull_request_id=$2 AND (assessment_id=$3 OR session_id=$4) AND status IN ('pending','joined')`, a.OrgID, a.PullRequestID, a.ID, a.SessionID); err != nil {
 		return false, err
 	}
+	// Persist the terminal comment with the cancellation so a crash cannot
+	// leave GitHub advertising a review that will never restart.
+	key := "code_review_status_comment:" + a.SessionID.String() + ":loop_stopped"
+	if _, err = enqueueOn(ctx, tx, a.OrgID, EnqueueOpts{
+		Queue: "default", JobType: models.JobTypeSyncCodeReviewStatusComment,
+		Payload:  map[string]uuid.UUID{"org_id": a.OrgID, "repository_id": a.RepositoryID, "pull_request_id": a.PullRequestID, "session_id": a.SessionID},
+		Priority: 3, DedupeKey: &key, MaxAttempts: 3,
+	}); err != nil {
+		return false, fmt.Errorf("enqueue stopped review status comment: %w", err)
+	}
 	if state.ActiveAssessmentID != nil && *state.ActiveAssessmentID == a.ID {
 		state.ActiveAssessmentID = nil
 	}

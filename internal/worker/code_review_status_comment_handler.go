@@ -202,6 +202,9 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 		paragraphs = append(paragraphs, "143 Code Reviewer superseded this assessment because the pull request code changed before publication. A fresh assessment of the latest commit is queued automatically and can still approve the PR.")
 	case models.CodeReviewSessionStatusCancelled:
 		paragraphs = append(paragraphs, "This 143 code review was cancelled.")
+		if message := strings.TrimSpace(stringPtrValue(metadata.StatusMessage)); message != "" {
+			paragraphs = append(paragraphs, message)
+		}
 	default:
 		provisionalBody := strings.TrimSpace(stringPtrValue(metadata.FinalReviewBody))
 		if !strings.HasPrefix(provisionalBody, models.CodeReviewProvisionalReviewHeading) {

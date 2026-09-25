@@ -56,6 +56,14 @@ func testSchedulingRestartLoop(t *testing.T, pool *pgxpool.Pool, org, repo, pr u
 	require.Equal(t, &code, stopped.StatusCode, "loop must have an explicit machine-readable reason")
 	require.False(t, stopped.RetryableFailure, "generic retry polling must not restart the loop")
 	require.NoError(t, service.FallbackAssessmentToFull(ctx, org, last.ID, "inputs changed before publication"), "crash replay must preserve cancellation")
+	var commentJobs int
+	var commentPayload SyncReviewStatusCommentJobPayload
+	err = pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE org_id=$1 AND job_type=$2 AND dedupe_key=$3`, org, models.JobTypeSyncCodeReviewStatusComment, "code_review_status_comment:"+last.SessionID.String()+":loop_stopped").Scan(&commentJobs)
+	require.NoError(t, err, "read terminal comment dispatch count")
+	require.Equal(t, 1, commentJobs, "loop stop and replay must persist exactly one terminal comment job")
+	err = pool.QueryRow(ctx, `SELECT payload FROM jobs WHERE org_id=$1 AND job_type=$2 AND dedupe_key=$3`, org, models.JobTypeSyncCodeReviewStatusComment, "code_review_status_comment:"+last.SessionID.String()+":loop_stopped").Scan(&commentPayload)
+	require.NoError(t, err, "decode terminal comment payload using the worker contract")
+	require.Equal(t, SyncReviewStatusCommentJobPayload{OrgID: org, SessionID: last.SessionID, RepositoryID: repo, PullRequestID: pr}, commentPayload, "durable cancellation must target the stopped review comment")
 	_, err = service.scheduleReview(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr}, models.CodeReviewEnsureCurrent, false, nil)
 	require.NoError(t, err, "automatic observation of unchanged PR should be accepted without work")
 	state, err := service.GetSchedule(ctx, org, pr)
