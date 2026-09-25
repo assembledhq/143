@@ -100,9 +100,7 @@ func (n *NodeManager) SetMetadataProvider(fn func() map[string]any) {
 // RequestDrain stops admission for process shutdown without replacing an
 // operator's durable drain intent. Use NodeStore.MarkDraining for that intent.
 func (n *NodeManager) RequestDrain(ctx context.Context, requestedAt time.Time) error {
-	n.mu.Lock()
-	n.draining = true
-	n.mu.Unlock()
+	n.MarkLocalDraining()
 
 	metadata, err := n.buildMetadata(map[string]any{
 		"drain_requested_at": requestedAt.UTC().Format(time.RFC3339),
@@ -122,6 +120,16 @@ func (n *NodeManager) RequestDrain(ctx context.Context, requestedAt time.Time) e
 		return fmt.Errorf("request node drain: %w", err)
 	}
 	return nil
+}
+
+// MarkLocalDraining latches this process's heartbeat state without writing to
+// the database. It must share the worker queues' lifetime: once they stop
+// admission, a stale-node scan or cleared intent must not advertise capacity
+// until a new process starts with new queues and a new NodeManager.
+func (n *NodeManager) MarkLocalDraining() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.draining = true
 }
 
 func (n *NodeManager) IsDraining() bool {

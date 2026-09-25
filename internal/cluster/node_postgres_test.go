@@ -21,19 +21,22 @@ func TestNodeDrainSurvivesRecoveryPostgres(t *testing.T) {
 		t.Skip("set TEST_DATABASE_URL for durable node drain proof")
 	}
 	tests := []struct {
-		name, intent string
-		register     bool
-		expected     string
-		shutdown     bool
+		name, intent    string
+		register        bool
+		expected        string
+		shutdown        bool
+		resumeWhileDead bool
 	}{
-		{"rollout survives heartbeat gap", "planned_rollout", false, "draining", false},
-		{"maintenance survives heartbeat gap", "host_maintenance", false, "draining", false},
-		{"rollout survives same generation restart", "planned_rollout", true, "draining", false},
-		{"maintenance survives same generation restart", "host_maintenance", true, "draining", false},
-		{"healthy generation recovers heartbeat", "none", false, "active", false},
-		{"healthy generation can restart", "none", true, "active", false},
-		{"ordinary process shutdown can restart same id", "none", true, "active", true},
-		{"shutdown preserves operator rollout intent", "planned_rollout", true, "draining", true},
+		{"rollout survives heartbeat gap", "planned_rollout", false, "draining", false, false},
+		{"maintenance survives heartbeat gap", "host_maintenance", false, "draining", false, false},
+		{"rollout survives same generation restart", "planned_rollout", true, "draining", false, false},
+		{"maintenance survives same generation restart", "host_maintenance", true, "draining", false, false},
+		{"healthy generation recovers heartbeat", "none", false, "active", false, false},
+		{"healthy generation can restart", "none", true, "active", false, false},
+		{"ordinary process shutdown can restart same id", "none", true, "active", true, false},
+		{"shutdown preserves operator rollout intent", "planned_rollout", true, "draining", true, false},
+		{"rollout resume while dead stays locally drained", "planned_rollout", false, "draining", false, true},
+		{"maintenance resume while dead stays locally drained", "host_maintenance", false, "draining", false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -83,6 +86,14 @@ func TestNodeDrainSurvivesRecoveryPostgres(t *testing.T) {
 			require.Equal(t, []string{tt.expected, tt.intent, expectedBy, expectedReason}, []string{status, intent, requestedBy, reason}, "recovery must preserve operator drain intent and clear transient drain attribution")
 			require.Equal(t, preserve, preservedTimes, "healthy process restart must clear obsolete drain times")
 			if tt.intent != "none" {
+				// The DB drain watcher latches the heartbeat manager alongside the
+				// local queues; the process cannot resume those queues in place.
+				nm.MarkLocalDraining()
+				if tt.resumeWhileDead {
+					count, err := nm.MarkStaleNodesDead(ctx, time.Now().Add(time.Minute))
+					require.NoError(t, err, "simulate another heartbeat outage before resume")
+					require.Equal(t, int64(1), count, "resume must exercise a dead generation")
+				}
 				store := db.NewNodeStore(conn)
 				params := db.ResumeNodeParams{NodeID: "old-generation", Reason: "replacement failed", RequestedBy: "operator"}
 				_, err = conn.Exec(ctx, `ALTER TABLE worker_deploy_events ADD CONSTRAINT reject_event CHECK(false)`)
@@ -96,6 +107,14 @@ func TestNodeDrainSurvivesRecoveryPostgres(t *testing.T) {
 				require.NoError(t, nm.HeartbeatOnce(ctx), "existing process remains draining after intent is cleared")
 				require.NoError(t, conn.QueryRow(ctx, `SELECT status FROM nodes WHERE id='old-generation'`).Scan(&status), "read status before restart")
 				require.Equal(t, "draining", status, "resume must not advertise a live latched process as admitting")
+				if tt.resumeWhileDead {
+					count, err := nm.MarkStaleNodesDead(ctx, time.Now().Add(time.Minute))
+					require.NoError(t, err, "simulate a heartbeat outage after intent was cleared")
+					require.Equal(t, int64(1), count, "cleared generation should be marked dead again")
+					require.NoError(t, nm.HeartbeatOnce(ctx), "recover the cleared generation's heartbeat")
+					require.NoError(t, conn.QueryRow(ctx, `SELECT status,drain_intent FROM nodes WHERE id='old-generation'`).Scan(&status, &intent), "read locally latched generation after recovery")
+					require.Equal(t, []string{"draining", "none"}, []string{status, intent}, "stale scans must not erase the process's latched admission drain")
+				}
 				restarted := NewNodeManager(conn, zerolog.Nop(), "old-generation", "worker")
 				require.NoError(t, restarted.Register(ctx, "worker-host"), "restart explicitly resumed generation")
 				require.NoError(t, conn.QueryRow(ctx, `SELECT status,drain_intent FROM nodes WHERE id='old-generation'`).Scan(&status, &intent), "read resumed admission")
