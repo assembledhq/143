@@ -112,13 +112,38 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 			testAssessmentFirstRequestAdmission(t, p, org, pr, snapshot, true)
 		}},
 		{"assessment admission preserves schedule generation", testAssessmentGenerationAdmission},
+		{"capture failure is terminal", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "immediate")
+		}},
+		{"capture failure settles a pending wake", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "permanent wake")
+		}},
+		{"capture deadline settles a pending wake", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "deadline")
+		}},
+		{"capture failure preserves active review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "active")
+		}},
+		{"capture failure preserves automatic pending review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "automatic")
+		}},
+		{"capture failure settles while automatic reviews are paused", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "paused")
+		}},
+		{"capture failure acknowledges mention", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "mention")
+		}},
+		{"capture failure stops superseded publication repair", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "refresh")
+		}},
+		{"capture failure preserves newer pending request", testRecheckFailurePreservesNewerRequest},
 		{"unsent evidence refresh admits another evidence turn", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testRefreshUnsentEvidenceAssessment(t, p, org, repo, pr, snapshot, false, false)
 		}},
 		{"uncertain evidence publication cannot refresh", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testRefreshUnsentEvidenceAssessment(t, p, org, repo, pr, snapshot, true, false)
 		}},
-		{"intent drift refresh routes full", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+		{"intent drift refresh reassesses evidence", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testRefreshUnsentEvidenceAssessment(t, p, org, repo, pr, snapshot, false, true)
 		}},
 		{"push burst restart and manual joining", testSchedulingBurst},

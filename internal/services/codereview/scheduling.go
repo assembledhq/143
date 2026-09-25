@@ -556,6 +556,11 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 				reason = pending.Input.RequestContext.Body
 			}
 			_, err = s.requestAssessmentReview(ctx, ScheduleRequestInput{OrgID: wake.OrgID, PullRequestID: wake.PullRequestID, RequestID: requestID, RequesterID: pending.RequesterID, Mode: models.CodeReviewRecheck, Reason: reason, RequestContext: pending.Input.RequestContext, TriggerSource: pending.Input.TriggerSource}, true)
+			if errors.Is(err, ErrRecheckUnavailable) {
+				// Admission durably settled this request. Finish the wake below;
+				// a concurrently admitted newer request still owns its own state.
+				err = nil
+			}
 		} else if pending.Mode == models.CodeReviewRecheck && !s.scheduling.rechecksEnabled {
 			fallbackID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("code-review-disabled-pending:"+pending.Input.GitHubDeliveryID))
 			_, err = s.scheduleReview(ctx, ReviewChangedInput{OrgID: wake.OrgID, RepositoryID: state.RepositoryID, PullRequestID: wake.PullRequestID, ExplicitRequest: true, GitHubDeliveryID: fallbackID.String(), RequestContext: pending.Input.RequestContext, TriggerSource: pending.Input.TriggerSource, ChangeReason: "assessment.continuation_disabled"}, models.CodeReviewReviewNow, false, pending.RequesterID)

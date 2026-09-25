@@ -69,6 +69,7 @@ func TestCodeReviewAssessmentsPostgres(t *testing.T) {
 	}
 	capture := testAssessmentCapture()
 	capture.OrgID, capture.RepositoryID, capture.PullRequestID, capture.PolicyID, capture.SessionID = org, repo, pr, policy, session
+	capture.InputManifest = json.RawMessage(`{"version":3,"contract":{"policy_id":"` + policy.String() + `","policy_version":1,"policy_digest":"policy-config"}}`)
 	store := NewCodeReviewAssessmentStore(conn)
 	a, reused, err := store.Create(ctx, capture)
 	require.NoError(t, err, "create full baseline assessment")
@@ -170,11 +171,14 @@ func TestCodeReviewAssessmentsPostgres(t *testing.T) {
 	recheck.PreviousPublishedAssessmentID = nil // The full baseline had no GitHub publication.
 	recheck.VisualDigest = "new-visual"
 	recheck.InputDigest = "new-all"
-	recheck.InputManifest = json.RawMessage(`{"version":1,"visual":"new"}`)
+	recheck.InputManifest = json.RawMessage(`{"version":3,"visual":"new","contract":{"policy_id":"` + policy.String() + `","policy_version":1,"policy_digest":"policy-config"}}`)
+	recheck.IntentDigest = "new-description"
+	recheck.ContractDigest = "new-auxiliary-prompt"
 	recheck.RouteReason = models.CodeReviewRouteEvidenceChanged
 	recheck.PublicationKey = "assessment:" + recheck.ID.String()
+	testAssessmentBaselineCompatibility(t, ctx, conn, recheck)
 	check, reused, err := store.Create(ctx, recheck)
-	require.NoError(t, err, "complete full baseline can support an evidence-only assessment")
+	require.NoError(t, err, "same code and policy can reuse full coverage despite changed intent and auxiliary prompt fingerprints")
 	require.False(t, reused, "new evidence creates a distinct assessment")
 	require.Equal(t, &a.ID, check.SourceAssessmentID, "new assessment retains direct code baseline")
 	got, err = store.GetBySessionID(ctx, org, session)
@@ -230,6 +234,54 @@ func TestCodeReviewAssessmentsPostgres(t *testing.T) {
 	require.NoError(t, err, "read immutable captured repository name after rename")
 	require.Equal(t, "test/repo", capturedName, "historical repository name remains the captured name")
 
+}
+
+func testAssessmentBaselineCompatibility(t *testing.T, ctx context.Context, conn *pgx.Conn, recheck models.CodeReviewAssessmentCapture) {
+	t.Helper()
+	tests := []struct {
+		name           string
+		change         func(*models.CodeReviewAssessmentCapture)
+		removeBaseline bool
+	}{
+		{name: "head changed", change: func(c *models.CodeReviewAssessmentCapture) { c.HeadSHA = "new-head" }},
+		{name: "base changed", change: func(c *models.CodeReviewAssessmentCapture) { c.BaseSHA = "new-base" }},
+		{name: "base ref changed", change: func(c *models.CodeReviewAssessmentCapture) { c.BaseRef = "release" }},
+		{name: "files changed", change: func(c *models.CodeReviewAssessmentCapture) { c.CodeDigest = "new-files" }},
+		{name: "other tenant", change: func(c *models.CodeReviewAssessmentCapture) { c.OrgID = uuid.New() }},
+		{name: "other session", change: func(c *models.CodeReviewAssessmentCapture) { c.SessionID = uuid.New() }},
+		{name: "other policy", change: func(c *models.CodeReviewAssessmentCapture) { c.PolicyID = uuid.New() }},
+		{name: "policy version changed", change: func(c *models.CodeReviewAssessmentCapture) {
+			c.InputManifest = json.RawMessage(strings.Replace(string(c.InputManifest), `"policy_version":1`, `"policy_version":2`, 1))
+		}},
+		{name: "policy configuration changed", change: func(c *models.CodeReviewAssessmentCapture) {
+			c.InputManifest = json.RawMessage(strings.Replace(string(c.InputManifest), `policy-config`, `changed-config`, 1))
+		}},
+		{name: "policy digest missing", change: func(c *models.CodeReviewAssessmentCapture) {
+			c.InputManifest = json.RawMessage(strings.Replace(string(c.InputManifest), `policy-config`, ``, 1))
+		}},
+		{name: "policy version malformed", change: func(c *models.CodeReviewAssessmentCapture) {
+			c.InputManifest = json.RawMessage(strings.Replace(string(c.InputManifest), `"policy_version":1`, `"policy_version":"1"`, 1))
+		}},
+		{name: "policy identity missing", change: func(c *models.CodeReviewAssessmentCapture) { c.InputManifest = json.RawMessage(`{}`) }},
+		{name: "baseline policy identity missing", removeBaseline: true},
+	}
+	// Cases share the migration fixture's connection, so execute sequentially
+	// and roll back each transaction to preserve the completed baseline.
+	for _, tt := range tests {
+		candidate := recheck
+		if tt.change != nil {
+			tt.change(&candidate)
+		}
+		tx, err := conn.Begin(ctx)
+		require.NoError(t, err, "begin isolated baseline guard case: %s", tt.name)
+		if tt.removeBaseline {
+			_, err = tx.Exec(ctx, `UPDATE code_review_revision_assessments SET input_manifest='{}' WHERE org_id=$1 AND id=$2`, candidate.OrgID, candidate.SourceAssessmentID)
+			require.NoError(t, err, "represent an unusable baseline: %s", tt.name)
+		}
+		_, _, err = NewCodeReviewAssessmentStore(tx).Create(ctx, candidate)
+		require.ErrorIs(t, err, ErrCodeReviewAssessmentConflict, "baseline compatibility must reject %s", tt.name)
+		require.NoError(t, tx.Rollback(ctx), "restore baseline after rejected capture: %s", tt.name)
+	}
 }
 
 func applyBoundedCodeReviewMigration(t *testing.T, ctx context.Context, database TxStarter, sql string) {

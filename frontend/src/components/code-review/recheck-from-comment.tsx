@@ -24,7 +24,7 @@ export function RecheckFromComment({ canManage }: { canManage: boolean }) {
   const target = assessment.data?.data;
   return <Dialog open={Boolean(assessmentID)} onOpenChange={(open) => { if (!open) close(); }}>
     <DialogContent>
-      <DialogHeader><DialogTitle>Re-check PR evidence</DialogTitle><DialogDescription>Check updated evidence using the previous code review. The current PR and review inputs determine whether a full review is needed.</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>Re-check PR evidence</DialogTitle><DialogDescription>Check updated evidence using the previous code review. Changes to code or review policy require a full review.</DialogDescription></DialogHeader>
       {!validID ? <p role="alert">This re-check link is invalid.</p> : assessment.isPending ? <p role="status">Loading pull request…</p> : assessment.isError ? <p role="alert">This assessment could not be loaded. Check that you have the correct organization selected and access to this PR.</p> : target ? <p className="text-sm font-medium">{target.github_repo && target.github_pr_number ? `${target.github_repo}#${target.github_pr_number}: ` : ""}{target.pull_request_title ?? "Pull request"}</p> : null}
       {target ? <AssessmentStatus assessment={target} /> : null}
       {!canManage ? <p className="text-sm text-muted-foreground">An organization member or admin must request the review.</p> : null}

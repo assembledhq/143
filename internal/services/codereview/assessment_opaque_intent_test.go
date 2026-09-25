@@ -29,20 +29,20 @@ func TestAssessmentOpaqueIntentRouting(t *testing.T) {
 	}{
 		{name: "unchanged template reuses exact result", body: template, newBody: template, wantAmbiguous: true, want: RecheckPlan{RecheckRouteReuse, RecheckReasonUnchanged}},
 		{name: "template permits separate evidence", body: template, newBody: template, addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
-		{name: "opaque body evidence edits require full review", body: template, newBody: strings.Replace(template, "Pending", "Passed", 1), wantAmbiguous: true, want: RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
-		{name: "opaque hidden heading edits require full review", body: template, newBody: strings.Replace(template, "template guidance", "## Testing\nNew intent", 1), addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
-		{name: "opaque whitespace remains significant", body: template, newBody: template + " ", addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
-		{name: "body changes from opaque to parsed", body: template, newBody: strings.Replace(template, "<!-- template guidance -->\n", "", 1), addEvidence: true, wantAmbiguous: false, want: RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
-		{name: "body changes from parsed to opaque", body: "Purpose\n", newBody: template, addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
+		{name: "opaque body evidence edits are reassessed as evidence", body: template, newBody: strings.Replace(template, "Pending", "Passed", 1), wantAmbiguous: true, want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
+		{name: "opaque hidden heading edits are reassessed as evidence", body: template, newBody: strings.Replace(template, "template guidance", "## Testing\nNew intent", 1), addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
+		{name: "opaque whitespace remains significant", body: template, newBody: template + " ", addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
+		{name: "body changes from opaque to parsed", body: template, newBody: strings.Replace(template, "<!-- template guidance -->\n", "", 1), addEvidence: true, wantAmbiguous: false, want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
+		{name: "body changes from parsed to opaque", body: "Purpose\n", newBody: template, addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
 		{name: "opaque discussion permits separate evidence", body: "Purpose\n", newBody: "Purpose\n", discussion: opaqueDiscussion, newDiscussion: opaqueDiscussion, addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
-		{name: "opaque discussion edit requires full review", body: "Purpose\n", newBody: "Purpose\n", discussion: opaqueDiscussion, newDiscussion: opaqueDiscussion + "Changed\n", addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
-		{name: "opaque discussion deletion requires full review", body: "Purpose\n", newBody: "Purpose\n", discussion: opaqueDiscussion, addEvidence: true, want: RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
-		{name: "opaque discussion becomes evidence requires full review", body: "Purpose\n", newBody: "Purpose\n", discussion: opaqueDiscussion, newDiscussion: "## Evidence\nPassed\n", want: RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
-		{name: "new opaque discussion requires full review", body: "Purpose\n", newBody: "Purpose\n", newDiscussion: opaqueDiscussion, addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
+		{name: "opaque discussion edit is reassessed as evidence", body: "Purpose\n", newBody: "Purpose\n", discussion: opaqueDiscussion, newDiscussion: opaqueDiscussion + "Changed\n", addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
+		{name: "opaque discussion deletion is reassessed as evidence", body: "Purpose\n", newBody: "Purpose\n", discussion: opaqueDiscussion, addEvidence: true, want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
+		{name: "opaque discussion becomes evidence is reassessed as evidence", body: "Purpose\n", newBody: "Purpose\n", discussion: opaqueDiscussion, newDiscussion: "## Evidence\nPassed\n", want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
+		{name: "new opaque discussion is reassessed as evidence", body: "Purpose\n", newBody: "Purpose\n", newDiscussion: opaqueDiscussion, addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
 		{name: "screenshot captions and images are evidence", body: screenshots, newBody: strings.ReplaceAll(screenshots, "before", "after"), want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
-		{name: "prose outside screenshots requires full review", body: screenshots, newBody: strings.Replace(screenshots, "No special steps.", "New behavior.", 1), want: RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
+		{name: "prose outside screenshots is reassessed as evidence", body: screenshots, newBody: strings.Replace(screenshots, "No special steps.", "New behavior.", 1), want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
 		{name: "Graphite discussion permits added preview evidence", body: preview, newBody: strings.Replace(preview, "Not verified in the running app.", "https://www.loom.com/share/preview", 1), discussion: stackComment, newDiscussion: stackComment, wantAmbiguous: true, want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
-		{name: "Graphite dependency edit still requires full review", body: preview, newBody: preview, discussion: stackComment, newDiscussion: stackComment + "\n* **#41**", addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteFull, RecheckReasonIntentChanged}},
+		{name: "Graphite dependency edit still is reassessed as evidence", body: preview, newBody: preview, discussion: stackComment, newDiscussion: stackComment + "\n* **#41**", addEvidence: true, wantAmbiguous: true, want: RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -68,6 +68,7 @@ func TestAssessmentOpaqueIntentRouting(t *testing.T) {
 				}
 				result, err := service.CaptureAssessmentInputs(context.Background(), in)
 				require.NoError(t, err, "complete source inventory must remain capturable")
+				require.True(t, result.Manifest.TextEvidence.FullDiscussionCaptured, "new captures must identify the complete discussion archive")
 				require.NoError(t, ValidateReviewInputManifest(result.Manifest), "manifest must rebuild with the current intent contract")
 				if discussion == opaqueDiscussion || discussion == stackComment {
 					var discussionEvidence []ReviewTextEvidence
@@ -76,7 +77,7 @@ func TestAssessmentOpaqueIntentRouting(t *testing.T) {
 							discussionEvidence = append(discussionEvidence, item)
 						}
 					}
-					require.Equal(t, []ReviewTextEvidence(nil), discussionEvidence, "opaque Markdown must not yield citable evidence sections")
+					require.Equal(t, []ReviewTextEvidence{newReviewTextEvidence("issue_comment", "10", "https://github.com/acme/web/pull/42#issuecomment-10", "author", discussion, "full")}, discussionEvidence, "opaque discussion should retain its exact source as untrusted evidence")
 				}
 				return result.Manifest
 			}
@@ -85,7 +86,7 @@ func TestAssessmentOpaqueIntentRouting(t *testing.T) {
 			require.True(t, before.ReuseEligible, "opaque sources must not disable a complete baseline")
 			require.Equal(t, tt.wantAmbiguous, after.TextEvidence.ParseAmbiguous, "unsupported Markdown should remain visible for diagnostics")
 			plan := PlanReviewRecheck(RecheckPlanInput{Current: &after, Baseline: reviewTestBaseline(before), Previous: &RecheckPrevious{Inputs: before, Completed: true, EvidenceValidated: true}})
-			require.Equal(t, tt.want, plan, "only unchanged opaque sources and bounded evidence updates may avoid full review")
+			require.Equal(t, tt.want, plan, "all text changes should use evidence reassessment when code and policy match")
 			if tt.addEvidence {
 				require.Contains(t, after.TextEvidence.Items, newReviewTextEvidence("issue_comment", "11", "https://github.com/acme/web/pull/42#issuecomment-11", "author", "## Evidence\nTest output: passed\n", "evidence"), "separate evidence must retain exact citable provenance")
 			}

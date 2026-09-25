@@ -105,6 +105,31 @@ func TestCodeReviewAssessmentCaptureEquality(t *testing.T) {
 	require.False(t, assessmentCaptureEqual(base, manifest, actual, true), "new visual evidence must conflict with the same assessment identity")
 }
 
+func TestCanonicalAssessmentManifest(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, raw, expected string
+	}{
+		{"nested JSONB order", `{"version":3,"contract":{"policy_version":9007199254740993,"policy_id":"policy","policy_digest":"digest"}}`, `{"contract":{"policy_digest":"digest","policy_id":"policy","policy_version":9007199254740993},"version":3}`},
+		{"objects inside arrays", `{"files":[{"patch":"digest","name":"file.go"}]}`, `{"files":[{"name":"file.go","patch":"digest"}]}`},
+		{"trailing document", `{} {}`, ""},
+		{"null document", `null`, ""},
+		{"array document", `[]`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual, err := canonicalAssessmentManifest(json.RawMessage(tt.raw))
+			if tt.expected == "" {
+				require.Error(t, err, "manifest must be exactly one JSON object")
+				return
+			}
+			require.NoError(t, err, "valid manifest should canonicalize")
+			require.Equal(t, json.RawMessage(tt.expected), actual, "canonical form must preserve exact numbers and sort all object keys")
+		})
+	}
+}
+
 func TestCodeReviewAssessmentCompleteStateFence(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

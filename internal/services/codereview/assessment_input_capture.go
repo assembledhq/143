@@ -231,6 +231,10 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 		if source.SourceURL == "" || source.ProviderObjectID == "" {
 			return result, fmt.Errorf("%w: text source lacks provenance", ErrAssessmentReuseUnavailable)
 		}
+		// Capture the complete discussion as untrusted evidence, including text
+		// outside recognized sections. Routing no longer treats that text as a
+		// reason to replace the code review, so the recheck must be able to see it.
+		textItems = append(textItems, newReviewTextEvidence(string(source.Surface), source.ProviderObjectID, source.SourceURL, source.AuthorLogin, source.Body, "full"))
 		intent, sections, parseErr := splitReviewEvidenceSections(source.Body)
 		if parseErr != nil {
 			parseAmbiguous = true
@@ -300,7 +304,7 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 			Repository                   json.RawMessage
 			ExternalContextDigest        string
 		}{snapshot.HeadSHA, snapshot.BaseSHA, config.ReviewInstructions, config.AutomatedApprovalPolicy, repo.Settings, externalDigest}), ExternalInputsComplete: true},
-		Title: snapshot.Title, Description: snapshot.Body, Visual: ReviewVisualInput{Images: images, CaptureComplete: visual.Complete && !visual.Overflow && visual.OmittedSourceCount == 0, SourceProvenanceComplete: visual.Complete}, TextEvidence: ReviewTextInput{Items: textItems, UnclassifiedDigest: digestJSON(unclassified), Complete: true, SourceProvenanceComplete: true, ParseAmbiguous: parseAmbiguous}, Request: ReviewRequestInput{SubstantiveText: text},
+		Title: snapshot.Title, Description: snapshot.Body, Visual: ReviewVisualInput{Images: images, CaptureComplete: visual.Complete && !visual.Overflow && visual.OmittedSourceCount == 0, SourceProvenanceComplete: visual.Complete}, TextEvidence: ReviewTextInput{Items: textItems, UnclassifiedDigest: digestJSON(unclassified), Complete: true, SourceProvenanceComplete: true, FullDiscussionCaptured: true, ParseAmbiguous: parseAmbiguous}, Request: ReviewRequestInput{SubstantiveText: text},
 		Gates: ReviewGateInput{EligibilityDigest: digestJSON(struct {
 			MergeGuard        string
 			HasConflicts      bool

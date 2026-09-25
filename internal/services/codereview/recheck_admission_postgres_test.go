@@ -62,15 +62,6 @@ func testRefreshUnsentEvidenceAssessment(t *testing.T, pool *pgxpool.Pool, org, 
 	require.NoError(t, err, "read retired evidence assessment")
 	require.Equal(t, models.CodeReviewAssessmentSuperseded, old.Status, "old unsent assessment should be superseded")
 	require.Equal(t, "evidence_recheck_queued:evidence changed", *old.FailureDetail, "durable marker should close after replacement admission")
-	if intentChanged {
-		after, err := db.NewCodeReviewScheduleStore(pool).GetLatestAssessment(ctx, org, pr)
-		require.NoError(t, err, "read latest immutable assessment")
-		require.Equal(t, before.ID, after.ID, "changed intent should not admit another evidence assessment")
-		state, err := service.GetSchedule(ctx, org, pr)
-		require.NoError(t, err, "read full replacement intent")
-		require.NotEmpty(t, state.PendingInput, "changed intent must queue a full panel")
-		return
-	}
 	after, err := db.NewCodeReviewScheduleStore(pool).GetLatestAssessment(ctx, org, pr)
 	require.NoError(t, err, "read replacement assessment")
 	require.NotEqual(t, before.ID, after.ID, "refresh should allocate a new immutable assessment")

@@ -571,6 +571,9 @@ func (s *Service) HandleReviewMentioned(ctx context.Context, input ReviewMention
 			OrgID: input.OrgID, PullRequestID: input.PullRequestID, RequestID: requestID,
 			Mode: models.CodeReviewRecheck, RequestContext: context, TriggerSource: source,
 		})
+		if errors.Is(err, ErrRecheckUnavailable) {
+			return ReviewRequestedResult{Processed: true, TriggerSource: source, IgnoredReason: "recheck_evidence_unavailable"}, nil
+		}
 		if err != nil {
 			return ReviewRequestedResult{}, err
 		}

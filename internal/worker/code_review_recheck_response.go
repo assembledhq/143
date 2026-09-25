@@ -199,15 +199,17 @@ type codeReviewVerifiedCitations struct {
 }
 
 type codeReviewCitationVerifier struct {
-	visual         map[string]models.CodeReviewVisualEvidence
-	currentVisual  map[string]string
-	text           map[string]codereviewsvc.ReviewTextEvidence
-	oldVisual      map[string]string
-	oldTextContent []string
+	visual                 map[string]models.CodeReviewVisualEvidence
+	currentVisual          map[string]string
+	text                   map[string]codereviewsvc.ReviewTextEvidence
+	oldVisual              map[string]string
+	oldTextContent         []string
+	fullDiscussionCaptured bool
 }
 
 func newCodeReviewCitationVerifier(in codeReviewRecheckValidationInput) codeReviewCitationVerifier {
 	v := codeReviewCitationVerifier{visual: make(map[string]models.CodeReviewVisualEvidence), currentVisual: make(map[string]string), text: make(map[string]codereviewsvc.ReviewTextEvidence), oldVisual: make(map[string]string)}
+	v.fullDiscussionCaptured = in.BaselineManifest.TextEvidence.FullDiscussionCaptured
 	for _, image := range in.VisualEvidence.Evidence {
 		v.visual[image.EvidenceID] = image
 	}
@@ -275,7 +277,11 @@ func (v codeReviewCitationVerifier) check(citations []models.CodeReviewEvidenceC
 				break
 			}
 		}
-		if !quotePreviouslyPresent {
+		// Legacy captures omitted prose outside discussion evidence sections.
+		// Absence from that archive cannot prove a discussion quote is new,
+		// even if the author moved the old prose into an evidence section.
+		noveltyVerifiable := v.fullDiscussionCaptured || item.Surface == "pull_request_description" || item.Surface == "check_status"
+		if !quotePreviouslyPresent && noveltyVerifiable {
 			checked.changed = true
 		}
 	}

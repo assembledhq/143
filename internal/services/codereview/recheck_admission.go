@@ -110,11 +110,11 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 		return ScheduleRequestResult{}, captureErr
 	}
 	if errors.Is(captureErr, ErrAssessmentReuseUnavailable) {
-		return s.requestFullAssessmentReview(ctx, req, state.RepositoryID, requestContext, true, recovering)
+		return s.failRecheckCapture(ctx, req, state.RepositoryID, ordinaryHash, kind, captureErr)
 	}
 	if captureErr != nil {
 		if recovering && state.FirstPendingAt != nil && s.scheduling.now().Sub(*state.FirstPendingAt) >= 15*time.Minute {
-			return s.requestFullAssessmentReview(ctx, req, state.RepositoryID, requestContext, true, recovering)
+			return s.failRecheckCapture(ctx, req, state.RepositoryID, ordinaryHash, kind, captureErr)
 		}
 		return s.queuePendingAssessmentCapture(ctx, req, state.RepositoryID, requestContext, ordinaryHash, kind)
 	}
@@ -262,7 +262,11 @@ func (s *Service) existingAssessmentRequestResult(ctx context.Context, req Sched
 	case "cancelled", "superseded", "failed":
 		disposition = models.CodeReviewRequestCancelled
 	}
-	return ScheduleRequestResult{RequestID: req.RequestID, SessionID: record.SessionID, AssessmentID: record.AssessmentID, Disposition: disposition, Schedule: state}, nil
+	result := ScheduleRequestResult{RequestID: req.RequestID, SessionID: record.SessionID, AssessmentID: record.AssessmentID, Disposition: disposition, Schedule: state}
+	if record.Mode == models.CodeReviewRecheck && record.Status == "failed" && record.SessionID == nil && record.AssessmentID == nil {
+		return result, ErrRecheckUnavailable
+	}
+	return result, nil
 }
 
 func (s *Service) requestFullAssessmentReview(ctx context.Context, req ScheduleRequestInput, repoID uuid.UUID, context *ReviewRequestContext, force, recovering bool) (ScheduleRequestResult, error) {
@@ -603,7 +607,7 @@ func (s *Service) RefreshUnsentEvidenceAssessment(ctx context.Context, orgID, as
 		if current.ReviewScope != models.CodeReviewScopeEvidenceOnly || current.Generation != a.Generation || current.InputDigest != a.InputDigest {
 			return db.ErrCodeReviewAssessmentState
 		}
-		if current.Status == models.CodeReviewAssessmentSuperseded && current.FailureDetail != nil && strings.HasPrefix(*current.FailureDetail, "evidence_recheck_queued:") {
+		if current.Status == models.CodeReviewAssessmentSuperseded && current.FailureDetail != nil && (strings.HasPrefix(*current.FailureDetail, "evidence_recheck_queued:") || strings.HasPrefix(*current.FailureDetail, "evidence_recheck_failed:")) {
 			alreadyQueued = true
 			return nil
 		}
@@ -651,6 +655,9 @@ func (s *Service) RefreshUnsentEvidenceAssessment(ctx context.Context, orgID, as
 	requestID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("code-review-evidence-refresh:"+assessmentID.String()))
 	_, err = s.requestAssessmentReview(ctx, ScheduleRequestInput{OrgID: orgID, PullRequestID: a.PullRequestID, RequestID: requestID, Mode: models.CodeReviewRecheck,
 		RequestContext: normalizeReviewRequestContext(&ReviewRequestContext{Source: "assessment_refresh", Body: manifest.Request.SubstantiveText})})
+	if errors.Is(err, ErrRecheckUnavailable) {
+		return s.scheduling.store.MarkEvidenceRefreshFailed(ctx, orgID, assessmentID)
+	}
 	if err != nil {
 		return err
 	}

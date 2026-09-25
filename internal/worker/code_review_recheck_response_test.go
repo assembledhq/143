@@ -25,6 +25,7 @@ func recheckResponseFixture() (codeReviewRecheckValidationInput, codeReviewReche
 		VisualEvidence:   models.CodeReviewVisualEvidenceSnapshot{Complete: true, Evidence: []models.CodeReviewVisualEvidence{{EvidenceID: "image-new", Source: models.CodeReviewVisualEvidenceSource{SourceID: "image-source"}, Status: models.CodeReviewVisualEvidenceFetchStatusAvailable, StoredURL: "https://first-party.test/image", ContentSHA256: strings.Repeat("b", 64)}}},
 	}
 	no := false
+	input.BaselineManifest.TextEvidence.FullDiscussionCaptured = true
 	requirements := []models.CodeReviewRequirementReassessment{
 		{Key: "screenshot", Status: models.CodeReviewRequirementSatisfied, Reason: "Shows current UI", EvidenceCitations: []models.CodeReviewEvidenceCitation{{EvidenceID: "image-new"}}},
 		{Key: "test-plan", Status: models.CodeReviewRequirementSatisfied, Reason: "Shows passing test output", EvidenceCitations: []models.CodeReviewEvidenceCitation{{EvidenceID: "text-new", Quote: "Test run on this commit: PASS"}}},
@@ -44,6 +45,27 @@ func TestValidateCodeReviewRecheckResponse(t *testing.T) {
 		valid  bool
 	}{
 		{"current text and image resolve an original finding", nil, true},
+		{"legacy discussion prose is not new evidence", func(in *codeReviewRecheckValidationInput, _ *codeReviewRecheckResponse) {
+			in.BaselineManifest.TextEvidence.FullDiscussionCaptured = false
+			in.CurrentManifest.TextEvidence.Items[0].Surface = "issue_comment"
+			in.CurrentManifest.TextEvidence.Items[0].Section = "full"
+		}, false},
+		{"moving legacy prose into testing does not make it new", func(in *codeReviewRecheckValidationInput, _ *codeReviewRecheckResponse) {
+			in.BaselineManifest.TextEvidence.FullDiscussionCaptured = false
+			in.CurrentManifest.TextEvidence.Items[0].Surface = "review_body"
+			in.CurrentManifest.TextEvidence.Items[0].Section = "testing"
+		}, false},
+		{"legacy baseline still permits new description evidence", func(in *codeReviewRecheckValidationInput, _ *codeReviewRecheckResponse) {
+			in.BaselineManifest.TextEvidence.FullDiscussionCaptured = false
+			in.CurrentManifest.TextEvidence.Items[0].Surface = "pull_request_description"
+		}, true},
+		{"legacy baseline still permits new check status evidence", func(in *codeReviewRecheckValidationInput, _ *codeReviewRecheckResponse) {
+			in.BaselineManifest.TextEvidence.FullDiscussionCaptured = false
+			in.CurrentManifest.TextEvidence.Items[0].Surface = "check_status"
+		}, true},
+		{"complete empty discussion archive permits a new comment", func(in *codeReviewRecheckValidationInput, _ *codeReviewRecheckResponse) {
+			in.CurrentManifest.TextEvidence.Items[0].Surface = "issue_comment"
+		}, true},
 		{"retained high finding stays in effective set", func(_ *codeReviewRecheckValidationInput, r *codeReviewRecheckResponse) {
 			(*r.Findings)[0].Status = models.CodeReviewFindingRetained
 		}, true},

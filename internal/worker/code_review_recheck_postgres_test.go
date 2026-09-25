@@ -172,8 +172,17 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 		{EvidenceID: "test-log", Surface: "pull_request_comment", ProviderObjectID: "77", SourceURL: "https://example.invalid/pr/7#issuecomment-77", Section: "testing", Content: "The browser test passes with the changed UI.", ContentDigest: fmt.Sprintf("%x", sha256.Sum256([]byte("The browser test passes with the changed UI.")))},
 	}}
 	baselineInput := manifestInput
+	baselineInput.TextEvidence.FullDiscussionCaptured = true
 	baselineInput.Visual.Images = nil
+	baselineInput.Title = "Original title"
+	baselineInput.Description = "Screenshots pending. Requested by: original-author"
+	baselineInput.Contract.PromptContentDigest = strings.Repeat("9", 64)
+	baselineInput.Gates.ChecksVerified = false
+	baselineInput.Gates.ChecksDigest = strings.Repeat("8", 64)
 	baselineInput.TextEvidence.Items = append([]codereviewsvc.ReviewTextEvidence(nil), manifestInput.TextEvidence.Items[:1]...)
+	baselineInput.TextEvidence.Items[0].Content = baselineInput.Description
+	baselineInput.TextEvidence.Items[0].ContentDigest = fmt.Sprintf("%x", sha256.Sum256([]byte(baselineInput.Description)))
+	manifestInput.Request.SubstantiveText = "Check the new evidence."
 	baselineManifest, err := codereviewsvc.BuildReviewInputManifest(baselineInput)
 	require.NoError(t, err, "build prior full-review input manifest")
 	baselineManifestJSON, err := json.Marshal(baselineManifest)
@@ -233,6 +242,42 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	var totalJobs int
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE org_id=$1`, org).Scan(&totalJobs), "count all jobs after malformed response")
 	require.Equal(t, 2, totalJobs, "malformed result must not enqueue a reviewer or another orchestrator")
+	// Admission and execution enforce the same code/policy boundary. Even a
+	// pre-created evidence assessment must start a new full review after drift.
+	guardLifecycle := &fakeRecheckLifecycle{}
+	services.CodeReviewLifecycle = guardLifecycle
+	var expectedFallbacks []uuid.UUID
+	for i, tt := range []struct {
+		name   string
+		change func(*codereviewsvc.ReviewInputCapture)
+	}{
+		{name: "code", change: func(c *codereviewsvc.ReviewInputCapture) { c.Code.HeadSHA = "new-head" }},
+		{name: "policy", change: func(c *codereviewsvc.ReviewInputCapture) { c.Contract.PolicyDigest = strings.Repeat("7", 64) }},
+	} {
+		changed := manifestInput
+		tt.change(&changed)
+		changedManifest, buildErr := codereviewsvc.BuildReviewInputManifest(changed)
+		require.NoError(t, buildErr, "build changed %s inputs", tt.name)
+		changedJSON, marshalErr := json.Marshal(changedManifest)
+		require.NoError(t, marshalErr, "encode changed %s inputs", tt.name)
+		guardAssessment := uuid.New()
+		_, err = pool.Exec(ctx, assessmentSQL, guardAssessment, org, repo, repoName, pr, metadata, session, policy, 20+i, baseline, changedManifest.InputVersion, changedManifest.CodeDigest, changedManifest.ContractDigest, changedManifest.IntentDigest, changedManifest.VisualDigest, changedManifest.RequestDigest, changedManifest.GateDigest, changedManifest.InputDigest, changedJSON, "evidence_only", "evidence_changed", false, "running", nil, nil, nil, nil, "guard-"+tt.name, "not_started", nil)
+		require.NoError(t, err, "seed evidence assessment with changed %s", tt.name)
+		_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET head_sha=$3 WHERE org_id=$1 AND id=$2`, org, guardAssessment, changedManifest.Code.HeadSHA)
+		require.NoError(t, err, "align captured head for changed %s", tt.name)
+		capture.result.Manifest = changedManifest
+		guardJob, marshalErr := json.Marshal(codeReviewRecheckJob{OrgID: org, AssessmentID: guardAssessment})
+		require.NoError(t, marshalErr, "encode changed %s job", tt.name)
+		require.NoError(t, handler(ctx, "run_code_review_recheck", guardJob), "changed %s must settle with a full-review fallback", tt.name)
+		guardOutcome, loadErr := stores.CodeReviewAssessments.GetByID(ctx, org, guardAssessment)
+		require.NoError(t, loadErr, "load changed %s outcome", tt.name)
+		require.Equal(t, models.CodeReviewAssessmentFailed, guardOutcome.Status, "changed %s cannot reuse code coverage", tt.name)
+		require.Equal(t, "full_review:baseline code or review policy changed", *guardOutcome.FailureDetail, "changed %s must force a full review", tt.name)
+		expectedFallbacks = append(expectedFallbacks, guardAssessment)
+	}
+	require.Equal(t, expectedFallbacks, guardLifecycle.fallbacks, "both code and policy changes must request full reviews")
+	capture.result.Manifest = manifest
+	services.CodeReviewLifecycle = nil
 	changedAssessment := uuid.New()
 	changedInput := manifestInput
 	changedInput.Visual.Images = []codereviewsvc.ReviewVisualImage{{SourceID: "image-1", SourceURL: "https://example.invalid/image.png", ContentDigest: strings.Repeat("9", 64)}}
@@ -398,12 +443,12 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	capture.captureErr = codereviewsvc.ErrAssessmentReuseUnavailable
 	services.CodeReviewLifecycle = lifecycle
 	err = handler(ctx, "run_code_review_recheck", incompatibleJob)
-	require.NoError(t, err, "deterministic reuse incompatibility should settle and request a full review")
+	require.NoError(t, err, "unavailable evidence should settle without a full review")
 	incompatibleOutcome, err := stores.CodeReviewAssessments.GetByID(ctx, org, incompatibleAssessment)
 	require.NoError(t, err, "read incompatible recheck assessment")
 	require.Equal(t, models.CodeReviewAssessmentFailed, incompatibleOutcome.Status, "reuse incompatibility must fail the bounded recheck")
-	require.Equal(t, "full_review:assessment inputs cannot establish reusable coverage", *incompatibleOutcome.FailureDetail, "fallback reason should survive retries")
-	require.Equal(t, []uuid.UUID{incompatibleAssessment}, lifecycle.fallbacks, "incompatibility should queue one full review")
+	require.Equal(t, "assessment inputs cannot establish reusable coverage", *incompatibleOutcome.FailureDetail, "fallback reason should survive retries")
+	require.Empty(t, lifecycle.fallbacks, "unavailable evidence must not rerun unchanged code")
 	capture.captureErr = nil
 	services.CodeReviewLifecycle = nil
 	escalatedAssessment := uuid.New()
@@ -429,18 +474,18 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.NoError(t, err, "persist exact escalation turn")
 	services.CodeReviewLifecycle = lifecycle
 	err = handler(ctx, "run_code_review_recheck", escalatedJob)
-	require.NoError(t, err, "concrete new concern should route one full review")
+	require.NoError(t, err, "concrete new concern should stop for human review")
 	escalatedOutcome, err := stores.CodeReviewAssessments.GetByID(ctx, org, escalatedAssessment)
 	require.NoError(t, err, "read durable escalation reason")
-	require.Equal(t, "full_review:new evidence requires full review: "+escalationConcern, *escalatedOutcome.FailureDetail, "assessment must retain model concern for full-review fallback")
-	require.Equal(t, []uuid.UUID{incompatibleAssessment, escalatedAssessment}, lifecycle.fallbacks, "escalation should request exactly one additional full review")
+	require.Equal(t, "evidence recheck needs human review: "+escalationConcern, *escalatedOutcome.FailureDetail, "assessment must retain the model concern for human review")
+	require.Empty(t, lifecycle.fallbacks, "model uncertainty must not automatically rerun unchanged code")
 	services.CodeReviewLifecycle = nil
 	replacementSession, replacementMetadata, replacementAssessment := uuid.New(), uuid.New(), uuid.New()
 	_, err = pool.Exec(ctx, `INSERT INTO sessions(id,org_id,origin,status) VALUES($1,$2,'code_review','idle')`, replacementSession, org)
 	require.NoError(t, err, "seed separate force-fresh review conversation")
 	_, err = pool.Exec(ctx, `INSERT INTO code_review_session_metadata(id,org_id,session_id,repository_id,pull_request_id,policy_id,base_sha,head_sha,trigger_source,status,review_output_key) VALUES($1,$2,$3,$4,$5,$6,'base','head','slash_command','completed','replacement-output')`, replacementMetadata, org, replacementSession, repo, pr, policy)
 	require.NoError(t, err, "seed completed replacement metadata")
-	_, err = pool.Exec(ctx, assessmentSQL, replacementAssessment, org, repo, repoName, pr, replacementMetadata, replacementSession, policy, 11, nil, manifest.InputVersion, manifest.CodeDigest, manifest.ContractDigest, manifest.IntentDigest, manifest.VisualDigest, manifest.RequestDigest, manifest.GateDigest, manifest.InputDigest, manifestJSON, "full", "force_fresh", true, "completed", "executed", "approved", true, json.RawMessage(`{}`), "replacement-publication", "not_required", time.Now().UTC())
+	_, err = pool.Exec(ctx, assessmentSQL, replacementAssessment, org, repo, repoName, pr, replacementMetadata, replacementSession, policy, 22, nil, manifest.InputVersion, manifest.CodeDigest, manifest.ContractDigest, manifest.IntentDigest, manifest.VisualDigest, manifest.RequestDigest, manifest.GateDigest, manifest.InputDigest, manifestJSON, "full", "force_fresh", true, "completed", "executed", "approved", true, json.RawMessage(`{}`), "replacement-publication", "not_required", time.Now().UTC())
 	require.NoError(t, err, "seed newer completed full assessment")
 	retireTx, err := pool.Begin(ctx)
 	require.NoError(t, err, "begin old conversation retirement")
