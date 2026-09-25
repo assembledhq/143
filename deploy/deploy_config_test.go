@@ -42,6 +42,7 @@ func TestProductionComposeCapsDatabasePools(t *testing.T) {
 	require.NoError(t, err, "test should read the worker compose file")
 	workerText := string(workerCompose)
 	require.Contains(t, workerText, "pool_max_conns=${WORKER_DATABASE_POOL_MAX_CONNS:-4}", "worker compose should cap worker and inherited session-executor database pools")
+	require.Contains(t, workerText, "DATABASE_MAX_CONN_IDLE_TIME: ${WORKER_DATABASE_MAX_CONN_IDLE_TIME:-5m}", "worker and inherited executor pools should release unused burst connections within five minutes")
 }
 
 func TestFrontendDockerfileRunsRepoScopedStandaloneServer(t *testing.T) {
@@ -2360,6 +2361,12 @@ func TestProductionPostgresConnectionHeadroom(t *testing.T) {
 	require.NoError(t, err, "test should read production PostgreSQL config")
 
 	require.Contains(t, string(conf), "max_connections = 300", "production Postgres should leave headroom for blue/green worker overlap and deploy-control clients")
+	require.Contains(t, string(conf), "work_mem = 8MB", "per-operation memory should leave room for concurrent review queries")
+	require.Contains(t, string(conf), "maintenance_work_mem = 128MB", "maintenance should not consume the old 512MB budget per operation")
+	require.Contains(t, string(conf), "autovacuum_work_mem = 128MB", "autovacuum workers should have an explicit independent memory budget")
+	require.Contains(t, string(conf), "max_parallel_workers_per_gather = 2", "parallel queries should bound multiplication of per-operation memory")
+	require.Contains(t, string(conf), "temp_file_limit = 2GB", "individual backend spills should have a disk budget")
+	require.Contains(t, string(conf), "log_temp_files = 16MB", "large completed temporary files should be visible during the rollout")
 }
 
 func TestDBDeploySyncsMountedPostgresConfig(t *testing.T) {

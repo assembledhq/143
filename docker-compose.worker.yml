@@ -99,6 +99,9 @@ services:
     # If any error below fires, run: make provision-worker HOST=<this-host>
     environment:
       DATABASE_URL: "postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable&pool_max_conns=${WORKER_DATABASE_POOL_MAX_CONNS:-4}"
+      # Session executors inherit this environment. Release unused burst
+      # connections during long agent turns and overlapping worker generations.
+      DATABASE_MAX_CONN_IDLE_TIME: ${WORKER_DATABASE_MAX_CONN_IDLE_TIME:-5m}
       ENV: production
       MODE: worker
       CHROME_WS_URL: ${CHROME_WS_URL:-ws://chrome:9222}
