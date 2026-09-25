@@ -554,7 +554,8 @@ export type CodeReviewStatusCode =
   | "github_rate_limited"
   | "github_unavailable"
   | "reviewer_failed"
-  | "worker_failed";
+  | "worker_failed"
+  | "review_loop_detected";
 
 export interface CodeReviewRetryResult {
   previous_session_id: string;

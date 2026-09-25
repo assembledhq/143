@@ -390,3 +390,23 @@ func (s *statusCommentSchedulingStub) SchedulingEnabled() bool { return s.enable
 func (s *statusCommentSchedulingStub) ReconcileSchedule(context.Context, models.CodeReviewScheduleWake) error {
 	panic("comment rendering must not execute review scheduling")
 }
+
+func TestCodeReviewStatusCommentCancelledReason(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		message  *string
+		expected string
+	}{
+		{name: "ordinary cancellation", expected: "This 143 code review was cancelled."},
+		{name: "blank cancellation message", message: statusCommentStringPtr("  "), expected: "This 143 code review was cancelled."},
+		{name: "loop cancellation explains recovery", message: statusCommentStringPtr(" Review cancelled after three consecutive attempts could not publish on unchanged analysis inputs. Push a new revision or explicitly request a fresh review to retry. "), expected: "This 143 code review was cancelled.\n\nReview cancelled after three consecutive attempts could not publish on unchanged analysis inputs. Push a new revision or explicitly request a fresh review to retry."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			body := codeReviewStatusCommentBody(models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusCancelled, StatusMessage: tt.message}, nil, "", "")
+			require.Equal(t, tt.expected, body, "cancelled status comment must preserve its actionable reason")
+		})
+	}
+}

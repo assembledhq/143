@@ -148,6 +148,12 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		}},
 		{"push burst restart and manual joining", testSchedulingBurst},
 		{"terminal full assessment releases replacement", testSchedulingTerminalAssessmentRecovery},
+		{"restart loop stops until explicit retry", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingRestartLoop(t, p, org, repo, pr, snapshot, false)
+		}},
+		{"restart loop stops until new head", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingRestartLoop(t, p, org, repo, pr, snapshot, true)
+		}},
 		{"draft automatic", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testSchedulingDraft(t, p, org, repo, pr, snapshot, "automatic")
 		}},

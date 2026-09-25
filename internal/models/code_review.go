@@ -100,12 +100,13 @@ const (
 	CodeReviewStatusCodeGitHubUnavailable CodeReviewStatusCode = "github_unavailable"
 	CodeReviewStatusCodeReviewerFailed    CodeReviewStatusCode = "reviewer_failed"
 	CodeReviewStatusCodeWorkerFailed      CodeReviewStatusCode = "worker_failed"
+	CodeReviewStatusCodeLoopDetected      CodeReviewStatusCode = "review_loop_detected"
 )
 
 func (c CodeReviewStatusCode) Validate() error {
 	switch c {
 	case CodeReviewStatusCodeGitHubRateLimited, CodeReviewStatusCodeGitHubUnavailable,
-		CodeReviewStatusCodeReviewerFailed, CodeReviewStatusCodeWorkerFailed:
+		CodeReviewStatusCodeReviewerFailed, CodeReviewStatusCodeWorkerFailed, CodeReviewStatusCodeLoopDetected:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewStatusCode: %q", c)
