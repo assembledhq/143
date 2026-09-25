@@ -4991,6 +4991,32 @@ func TestCodeReviewThreadCompletionTime(t *testing.T) {
 	}
 }
 
+func TestEvaluateLiveCodeReviewOutcomeCommentNavigation(t *testing.T) {
+	t.Parallel()
+	const provenance = "Code review reused from assessment `baseline`. Updated evidence was checked in this assessment."
+	tests := []struct {
+		name          string
+		detailURL     string
+		reviewNowURL  string
+		provenance    string
+		expectedLinks string
+	}{
+		{name: "new full review supplies scheduler action", detailURL: "https://143.test/sessions/session", reviewNowURL: "https://143.test/code-reviews?review_now=session", expectedLinks: "[Request review](https://143.test/code-reviews?review_now=session) · [View full review](https://143.test/sessions/session)"},
+		{name: "recheck provenance precedes assessment footer", detailURL: "https://143.test/code-reviews?assessment=assessment", provenance: provenance, expectedLinks: "[View assessment](https://143.test/code-reviews?assessment=assessment)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{Policy: models.DefaultCodeReviewPolicyConfig(), SessionURL: tt.detailURL, ReviewNowURL: tt.reviewNowURL, ReviewProvenance: tt.provenance})
+			require.True(t, strings.HasSuffix(body, "<!-- 143-code-review-footer:start -->\n"+tt.expectedLinks+"\n<!-- 143-code-review-footer:end -->"), "new rendered results should carry the correct final navigation footer")
+			if tt.provenance != "" {
+				require.Contains(t, body, tt.provenance+"\n\n<!-- 143-code-review-footer:start -->", "evidence reuse provenance must be part of the result before navigation")
+				require.NotContains(t, body, "?review_now=", "evidence-only results must not gain a full-review request action")
+			}
+		})
+	}
+}
+
 func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 	t.Parallel()
 
@@ -5245,7 +5271,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected:     models.CodeReviewDecisionNeedsHumanReview,
 			reason:       "reviewer quorum 1 is below policy requirement 2",
-			bodyContains: "**Reviewer evidence:** Codex found no blocking issues; Claude Code failed",
+			bodyContains: "**Reviewers:** Codex found no blocking issues; Claude Code failed",
 		},
 		{
 			name: "explains a description requirement the coding agent marked missing",
@@ -5283,7 +5309,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			expected:        models.CodeReviewDecisionNeedsHumanReview,
 			reason:          "PR description policy did not pass",
 			bodyContains:    "Understandable description (The coding agent found the required evidence missing.)",
-			expectedRecheck: "[Re-check PR evidence](https://143.test/code-reviews?recheck=90d8a47d-d87e-4780-90af-040f5144685a)",
+			expectedRecheck: "[Re-check evidence](https://143.test/code-reviews?recheck=90d8a47d-d87e-4780-90af-040f5144685a)",
 		},
 		{
 			name: "approves a P2-only review and exposes its structured advisory evidence",
@@ -5810,7 +5836,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			require.Equal(t, tt.expected, decision.Decision, "live code review outcome should choose the expected decision")
 			if tt.reason != "" {
 				require.Contains(t, decision.RiskReasons, tt.reason, "non-approval should preserve the expected risk reason")
-				require.Contains(t, body, "Why:", "final review body should explain the non-approval reason")
+				require.Contains(t, body, "**Next steps:**", "final review body should explain how to proceed after non-approval")
 			}
 			if tt.riskNotContains != "" {
 				require.NotContains(t, decision.RiskReasons, tt.riskNotContains, "approval should not contain an opaque orchestrator veto")
@@ -5821,7 +5847,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			if tt.expectedRecheck != "" {
 				require.Contains(t, body, tt.expectedRecheck, "the initial full review should offer evidence reassessment when available")
 			} else {
-				require.NotContains(t, body, "[Re-check PR evidence]", "reviews without an available evidence action should not advertise one")
+				require.NotContains(t, body, "[Re-check evidence]", "reviews without an available evidence action should not advertise one")
 			}
 			if tt.bodyNotContains != "" {
 				require.NotContains(t, body, tt.bodyNotContains, "GitHub summary should not expose advisory finding details")

@@ -15,6 +15,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/github/ratelimit"
 	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
@@ -1375,15 +1376,16 @@ func WithCodeReviewReassessmentHistory(body, headSHA string, startedAt time.Time
 }
 
 func withCodeReviewHistoryEntries(body string, entries []string) string {
+	body, footer := models.SplitCodeReviewCommentFooter(body, "")
 	body = stripCodeReviewHistory(body)
 	if len(entries) == 0 {
-		return body
+		return models.WithCodeReviewCommentFooter(body, footer)
 	}
-	history := codeReviewHistoryStartMarker + "\nHistory of 143 code reviews:\n" + strings.Join(entries, "\n") + "\n" + codeReviewHistoryEndMarker
+	history := codeReviewHistoryStartMarker + "\n<details>\n<summary>Review history</summary>\n\n" + strings.Join(entries, "\n") + "\n\n</details>\n" + codeReviewHistoryEndMarker
 	if body == "" {
-		return history
+		return models.WithCodeReviewCommentFooter(history, footer)
 	}
-	return body + "\n\n" + history
+	return models.WithCodeReviewCommentFooter(body+"\n\n"+history, footer)
 }
 
 func codeReviewHistoryEntries(body string) []string {
@@ -1408,6 +1410,23 @@ func codeReviewHistoryEntries(body string) []string {
 }
 
 func normalizeCodeReviewHistoryEntry(entry string) string {
+	const relativeTimePrefix = `- <relative-time datetime="`
+	if rest, ok := strings.CutPrefix(entry, relativeTimePrefix); ok {
+		timestamp, rest, ok := strings.Cut(rest, `">`)
+		if !ok {
+			return entry
+		}
+		_, suffix, ok := strings.Cut(rest, "</relative-time>")
+		if !ok {
+			return entry
+		}
+		parsed, err := time.Parse(time.RFC3339, timestamp)
+		if err != nil {
+			return entry
+		}
+		return "- " + codeReviewHistoryTime(parsed) + suffix
+	}
+
 	const timestampPrefix = "- `"
 	if !strings.HasPrefix(entry, timestampPrefix) {
 		return entry
@@ -1468,12 +1487,7 @@ func codeReviewReassessmentHistoryEntry(headSHA string, startedAt time.Time, ses
 }
 
 func codeReviewHistoryTime(value time.Time) string {
-	utc := value.UTC()
-	return fmt.Sprintf(
-		`<relative-time datetime="%s">%s</relative-time>`,
-		utc.Format(time.RFC3339),
-		utc.Format("Jan 2, 2006 at 3:04 PM MST"),
-	)
+	return models.CodeReviewCommentTime(value)
 }
 
 func codeReviewDecisionLabel(decision SubmitReviewDecision) string {

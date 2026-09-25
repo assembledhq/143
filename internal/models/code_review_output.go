@@ -16,6 +16,8 @@ type CodeReviewFinalReviewInput struct {
 	SessionURL                string
 	PolicySettingsURL         string
 	EvidenceRecheckURL        string
+	ReviewNowURL              string
+	ReviewProvenance          string
 	DescriptionPassed         *bool
 	DescriptionIssues         []string
 	AgentSummaries            []string
@@ -44,10 +46,10 @@ func BuildCodeReviewProvisionalBody(input CodeReviewFinalReviewInput) string {
 	if assessment := codeReviewAssessmentSummary(input.HeadSHA, input.AssessedAt); assessment != "" {
 		paragraphs = append(paragraphs, assessment)
 	}
-	if input.SessionURL != "" {
-		paragraphs = append(paragraphs, "[Follow the review session]("+input.SessionURL+")")
-	}
-	return strings.Join(paragraphs, "\n\n")
+	return WithCodeReviewCommentFooter(strings.Join(paragraphs, "\n\n"), CodeReviewCommentFooter{
+		DetailURL:   input.SessionURL,
+		DetailLabel: CodeReviewCommentDetailLabel(input.SessionURL, true),
+	})
 }
 
 func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
@@ -70,17 +72,12 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	if explanation == "" {
 		explanation = generatedSummary
 	}
-	if explanation == "" {
-		// Without a model-written summary the derived explanation is the same
-		// reason list the grouped sections spell out below, so lead into them
-		// instead of repeating every blocker verbatim.
-		if len(blockerSections) > 0 {
-			explanation = "This PR did not meet the configured approval policy; the blockers are grouped below."
-		} else {
-			explanation = codeReviewDecisionExplanation(input)
-		}
+	if explanation == "" && len(blockerSections) == 0 {
+		explanation = codeReviewDecisionExplanation(input)
 	}
-	paragraphs = append(paragraphs, "**Why:** "+explanation)
+	if explanation != "" {
+		paragraphs = append(paragraphs, "**Why:** "+explanation)
+	}
 
 	if changeSummary := codeReviewGeneratedSummary(input.ChangeSummary); changeSummary != "" {
 		paragraphs = append(paragraphs, "**Change:** "+changeSummary)
@@ -102,7 +99,7 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 		for i := range agentSummaries {
 			agentSummaries[i] = strings.TrimRight(agentSummaries[i], ".")
 		}
-		paragraphs = append(paragraphs, "**Reviewer evidence:** "+strings.Join(agentSummaries, "; ")+".")
+		paragraphs = append(paragraphs, "**Reviewers:** "+strings.Join(agentSummaries, "; ")+".")
 	}
 
 	blockingFindings, advisoryFindings := partitionCodeReviewFindings(input.Findings)
@@ -120,7 +117,12 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	if reviewers := nonEmptyStrings(input.RecommendedHumanReviewers); len(reviewers) > 0 {
 		paragraphs = append(paragraphs, "**Suggested human reviewers:** "+strings.Join(reviewers, ", "))
 	}
-	if !input.Acceptable {
+	footer := CodeReviewCommentFooter{
+		DetailURL:   input.SessionURL,
+		DetailLabel: CodeReviewCommentDetailLabel(input.SessionURL, false),
+	}
+	if !input.Acceptable && input.Decision != CodeReviewDecisionApproved {
+		footer.ReviewNowURL = input.ReviewNowURL
 		if codeReviewBlockerCount(input.RiskReasons, blockingFindings) == 1 {
 			if revision := codeReviewShortSHA(input.HeadSHA); revision != "" {
 				paragraphs = append(paragraphs, "This is the only blocker as of `"+revision+"`.")
@@ -128,19 +130,20 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 		}
 		if nextSteps := codeReviewEvidenceRecheckNextSteps(input); nextSteps != "" && operationalSummary == "" {
 			paragraphs = append(paragraphs, "**Next steps:** "+nextSteps)
+			footer.EvidenceRecheckURL = input.EvidenceRecheckURL
 		} else if operationalSummary != "" {
-			paragraphs = append(paragraphs, "**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.")
+			paragraphs = append(paragraphs, "**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence.")
 		} else {
-			paragraphs = append(paragraphs, "**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.")
+			paragraphs = append(paragraphs, "**Next steps:** Address any blockers, then request another review or ask a human reviewer to decide.")
 		}
+	}
+	if provenance := strings.TrimSpace(input.ReviewProvenance); provenance != "" {
+		paragraphs = append(paragraphs, provenance)
 	}
 	if assessment := codeReviewAssessmentSummary(input.HeadSHA, input.AssessedAt); assessment != "" {
 		paragraphs = append(paragraphs, assessment)
 	}
-	if input.SessionURL != "" {
-		paragraphs = append(paragraphs, "[View the full review]("+input.SessionURL+")")
-	}
-	return strings.Join(paragraphs, "\n\n")
+	return WithCodeReviewCommentFooter(strings.Join(paragraphs, "\n\n"), footer)
 }
 
 // The link offers reassessment, never a promise that evidence can resolve a
@@ -161,19 +164,18 @@ func codeReviewEvidenceRecheckNextSteps(input CodeReviewFinalReviewInput) string
 			findings = true
 		}
 	}
-	action := "[Re-check PR evidence](" + input.EvidenceRecheckURL + ")"
 	var instruction string
 	switch {
 	case missingEvidence:
-		instruction = "Add the missing evidence under **Testing** or **Evidence** in the PR description or a comment, then " + action + "."
+		instruction = "Add the missing evidence under **Testing** or **Evidence** in the PR description or a comment, then request an evidence recheck."
 	case findings:
-		instruction = "If you have evidence that addresses these findings, add it under **Testing** or **Evidence** in the PR description or a comment, then " + action + "."
+		instruction = "If you have evidence that addresses these findings, add it under **Testing** or **Evidence** in the PR description or a comment, then request an evidence recheck."
 	case checks:
-		instruction = "Once updated CI results are available, " + action + "."
+		instruction = "Once updated CI results are available, request an evidence recheck."
 	default:
 		return ""
 	}
-	return instruction + " Open 143 to confirm the request. Any remaining approval requirements still apply."
+	return instruction + " Other approval requirements still apply."
 }
 
 func codeReviewAssessmentSummary(headSHA string, assessedAt time.Time) string {
@@ -181,11 +183,11 @@ func codeReviewAssessmentSummary(headSHA string, assessedAt time.Time) string {
 	if shortSHA == "" {
 		return ""
 	}
-	summary := "**Latest assessment:** `" + shortSHA + "`"
+	summary := "*Assessed `" + shortSHA + "`"
 	if !assessedAt.IsZero() {
-		summary += " at " + assessedAt.UTC().Format(time.RFC3339)
+		summary += " · " + CodeReviewCommentTime(assessedAt)
 	}
-	return summary
+	return summary + "*"
 }
 
 func codeReviewShortSHA(headSHA string) string {
@@ -295,9 +297,6 @@ func codeReviewBlockerSections(input CodeReviewFinalReviewInput) []string {
 			continue
 		}
 		group := codeReviewRiskReasonBlockerGroup(reason.Code)
-		if group == codeReviewBlockerGroupPolicy {
-			explanation = codeReviewExplanationWithSettingsLink(explanation, input.PolicySettingsURL, reason.Code)
-		}
 		grouped[group] = append(grouped[group], explanation)
 	}
 
@@ -406,32 +405,6 @@ func codeReviewReviewIssueSection(reasons []CodeReviewRiskReason, descriptionIss
 		section.WriteString("- " + explanation + "\n")
 	}
 	return strings.TrimSpace(section.String())
-}
-
-func codeReviewExplanationWithSettingsLink(explanation, settingsURL string, code CodeReviewRiskReasonCode) string {
-	settingsURL = strings.TrimSpace(settingsURL)
-	if settingsURL == "" {
-		return explanation
-	}
-	if fragment := codeReviewPolicySettingFragment(code); fragment != "" {
-		settingsURL = strings.SplitN(settingsURL, "#", 2)[0] + "#" + fragment
-	}
-	return explanation + " [View policy setting](" + settingsURL + ")"
-}
-
-func codeReviewPolicySettingFragment(code CodeReviewRiskReasonCode) string {
-	switch code {
-	case CodeReviewRiskReasonFilesLimitExceeded:
-		return "policy-max-files-changed"
-	case CodeReviewRiskReasonLinesLimitExceeded:
-		return "policy-max-lines-changed"
-	case CodeReviewRiskReasonAdditionsLimitExceeded:
-		return "policy-max-additions"
-	case CodeReviewRiskReasonDeletionsLimitExceeded:
-		return "policy-max-deletions"
-	default:
-		return ""
-	}
 }
 
 func codeReviewBlockerCount(reasons []CodeReviewRiskReason, blockingFindings []CodeReviewFinding) int {

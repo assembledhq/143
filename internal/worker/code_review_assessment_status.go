@@ -20,7 +20,7 @@ func codeReviewAssessmentStatusMetadata(previous models.CodeReviewSessionMetadat
 		previous.Status = models.CodeReviewSessionStatusCompleted
 	case models.CodeReviewAssessmentFailed:
 		previous.Status = models.CodeReviewSessionStatusFailed
-		message := "Evidence recheck failed. Open this assessment to retry or request a full review."
+		message := "Evidence recheck failed. Open this assessment for details."
 		previous.StatusMessage = &message
 	case models.CodeReviewAssessmentCancelled, models.CodeReviewAssessmentSuperseded:
 		previous.Status = models.CodeReviewSessionStatusCancelled

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,7 +70,7 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			previousFinalBody:         statusCommentStringPtr("❌ **143 Code Reviewer needs human review**\n\n**Why:** Sensitive workflow changes require a human decision."),
 			previousHeadSHA:           "previous-head-sha",
 			expectedBody:              "❌ **143 Code Reviewer needs human review**\n\n**Why:** Sensitive workflow changes require a human decision.",
-			expectedAdditionalBody:    "History of 143 code reviews:",
+			expectedAdditionalBody:    "<summary>Review history</summary>",
 			expectReassessmentHistory: true,
 			expectedCalls:             []string{"upsert"},
 		},
@@ -142,7 +143,7 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			pullRequestID := uuid.New()
 			policyID := uuid.New()
 			metadataID := uuid.New()
-			now := time.Now().UTC()
+			now := time.Date(2026, time.September, 25, 12, 23, 16, 0, time.UTC)
 			metadataRows := func(status models.CodeReviewSessionStatus, finalBody *string, reviewID *int64) *pgxmock.Rows {
 				var completedAt *time.Time
 				if status == models.CodeReviewSessionStatusCompleted {
@@ -237,18 +238,17 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 				require.Contains(t, submitter.request.Body, tt.expectedAdditionalBody, "status comment should retain the complete previous verdict during reassessment")
 			}
 			if tt.expectReassessmentHistory {
-				expectedEntry := "- <relative-time datetime=\"" + now.Format(time.RFC3339) + "\">" +
-					now.Format("Jan 2, 2006 at 3:04 PM MST") +
+				expectedEntry := "- <relative-time datetime=\"2026-09-25T12:23:16Z\">Sep 25, 2026 at 8:23 AM EDT" +
 					"</relative-time> — **Reassessment started** for `head` — [Follow the review session](https://143.test/sessions/" + sessionID.String() + ")"
 				require.Contains(t, submitter.request.Body, expectedEntry, "reassessment history should identify when the active assessment started and link to its session")
 				require.NotContains(t, submitter.request.Body, "143 Code Reviewer is reassessing this pull request", "reassessment status should appear in history instead of a standalone paragraph")
 				require.NotContains(t, submitter.request.Body, "remains visible until the new review finishes", "reassessment history should replace the redundant visibility explanation")
 			}
 			require.Contains(t, submitter.request.Body, "https://143.test/sessions/"+sessionID.String(), "status comment should link to the review session")
-			if tt.schedulingEnabled {
-				require.Contains(t, submitter.request.Body, "[Request Full Re-Review Now](https://143.test/code-reviews?review_now="+sessionID.String()+")", "enabled worker publishes a usable review action")
+			if tt.schedulingEnabled && codeReviewMetadataTerminal(tt.lockedStatus) && tt.lockedStatus != models.CodeReviewSessionStatusStale {
+				require.Contains(t, submitter.request.Body, "[Request review](https://143.test/code-reviews?review_now="+sessionID.String()+")", "enabled worker publishes a usable review action for a terminal unsuccessful review")
 			} else {
-				require.NotContains(t, submitter.request.Body, "[Request Full Re-Review Now]", "unavailable scheduling service omits the action")
+				require.NotContains(t, submitter.request.Body, "[Request review]", "unavailable scheduling or active review omits the action")
 			}
 			require.Equal(t, tt.expectedCalls, submitter.calls, "fallback summary should only be hidden after the rolling comment is published")
 			if tt.lockedReviewID != nil {
@@ -352,7 +352,8 @@ func TestCodeReviewStatusCommentReviewNowLink(t *testing.T) {
 		enabled bool
 		present bool
 	}{
-		{"running", models.CodeReviewSessionStatusRunning, true, true},
+		{"running", models.CodeReviewSessionStatusRunning, true, false},
+		{"queued", models.CodeReviewSessionStatusQueued, true, false},
 		{"completed", models.CodeReviewSessionStatusCompleted, true, true},
 		{"failed", models.CodeReviewSessionStatusFailed, true, true},
 		{"cancelled", models.CodeReviewSessionStatusCancelled, true, true},
@@ -368,15 +369,128 @@ func TestCodeReviewStatusCommentReviewNowLink(t *testing.T) {
 				link = codeReviewNowURL("https://143.test/", sessionID)
 			}
 			body := codeReviewStatusCommentBody(models.CodeReviewSessionMetadata{SessionID: sessionID, Status: tt.status}, nil, "https://143.test/sessions/"+sessionID.String(), link)
-			expected := "[Request Full Re-Review Now](https://143.test/code-reviews?review_now=" + sessionID.String() + ")"
+			expected := "[Request review](https://143.test/code-reviews?review_now=" + sessionID.String() + ")"
 			if tt.present {
 				require.Contains(t, body, expected, "rolling comment links to the authenticated confirmation for its source session")
-				require.Contains(t, body, "Open 143 to request a review of your latest pushed changes.", "link explains the destination and which changes will be reviewed")
-				require.Contains(t, body, "If a running or completed review already covers those changes, 143 may use it instead of starting another.", "link explains that an existing review may satisfy the request")
 			} else {
-				require.NotContains(t, body, "[Request Full Re-Review Now]", "unsupported or superseded comment must not advertise action")
+				require.NotContains(t, body, "[Request review]", "unsupported or superseded comment must not advertise action")
 			}
+			require.NotContains(t, body, "Open 143 to request", "confirmation explanation belongs in the destination dialog")
 			require.NotContains(t, body, "/api/", "comment link never directly invokes a mutation endpoint")
+		})
+	}
+}
+
+func TestCodeReviewStatusCommentFooterRoutes(t *testing.T) {
+	t.Parallel()
+	const detailURL = "https://143.test/sessions/current"
+	const assessmentURL = "https://143.test/code-reviews?assessment=current"
+	const reviewURL = "https://143.test/code-reviews?review_now=current"
+	const evidenceURL = "https://143.test/code-reviews?recheck=baseline"
+	const start = "<!-- 143-code-review-footer:start -->"
+	const end = "<!-- 143-code-review-footer:end -->"
+	const oldMarkedBody = "Preserved blocker details.\n\n" + start + "\n[Re-check evidence](" + evidenceURL + ") · [View full review](https://143.test/sessions/old)\n" + end
+	const cancellationReason = "Review cancelled after three consecutive attempts could not publish on unchanged analysis inputs. Push a new revision or explicitly request a fresh review to retry."
+	tests := []struct {
+		name            string
+		status          models.CodeReviewSessionStatus
+		body            string
+		statusMessage   string
+		decision        models.CodeReviewDecision
+		acceptable      bool
+		assessment      bool
+		noURLs          bool
+		expectedContent string
+		expectedLinks   string
+	}{
+		{name: "approved removes saved action", status: models.CodeReviewSessionStatusCompleted, body: oldMarkedBody, decision: models.CodeReviewDecisionApproved, expectedContent: "Preserved blocker details.", expectedLinks: "[View full review](" + detailURL + ")"},
+		{name: "acceptable comment is view only", status: models.CodeReviewSessionStatusCompleted, body: oldMarkedBody, decision: models.CodeReviewDecisionNeedsHumanReview, acceptable: true, expectedContent: "Preserved blocker details.", expectedLinks: "[View full review](" + detailURL + ")"},
+		{name: "completed evidence action takes priority", status: models.CodeReviewSessionStatusCompleted, body: oldMarkedBody, expectedContent: "Preserved blocker details.", expectedLinks: "[Re-check evidence](" + evidenceURL + ") · [View full review](" + detailURL + ")"},
+		{name: "completed recheck uses assessment detail", status: models.CodeReviewSessionStatusCompleted, body: oldMarkedBody, assessment: true, expectedContent: "Preserved blocker details.", expectedLinks: "[Re-check evidence](" + evidenceURL + ") · [View assessment](" + assessmentURL + ")"},
+		{name: "completed legacy body receives action footer", status: models.CodeReviewSessionStatusCompleted, body: "❌ **143 Code Reviewer needs human review**\n\nPreserved blocker details.\n\n[View the full review](https://143.test/sessions/old)", expectedContent: "❌ **143 Code Reviewer needs human review**\n\nPreserved blocker details.", expectedLinks: "[Request review](" + reviewURL + ") · [View full review](" + detailURL + ")"},
+		{name: "missing completed body", status: models.CodeReviewSessionStatusCompleted, expectedContent: "143 Code Reviewer completed its review.", expectedLinks: "[Request review](" + reviewURL + ") · [View full review](" + detailURL + ")"},
+		{name: "missing approved body", status: models.CodeReviewSessionStatusCompleted, decision: models.CodeReviewDecisionApproved, expectedContent: "143 Code Reviewer approved this PR.", expectedLinks: "[View full review](" + detailURL + ")"},
+		{name: "failed discards staged result", status: models.CodeReviewSessionStatusFailed, body: oldMarkedBody, expectedContent: "143 Code Reviewer could not complete this review.", expectedLinks: "[Request review](" + reviewURL + ") · [View full review](" + detailURL + ")"},
+		{name: "failed recheck has details only", status: models.CodeReviewSessionStatusFailed, body: oldMarkedBody, assessment: true, expectedContent: "143 Code Reviewer could not complete this review.", expectedLinks: "[View assessment](" + assessmentURL + ")"},
+		{name: "cancelled discards saved evidence action", status: models.CodeReviewSessionStatusCancelled, body: oldMarkedBody, expectedContent: "This 143 code review was cancelled.", expectedLinks: "[Request review](" + reviewURL + ") · [View full review](" + detailURL + ")"},
+		{name: "loop cancellation preserves reason before retry footer", status: models.CodeReviewSessionStatusCancelled, body: oldMarkedBody, statusMessage: " " + cancellationReason + " ", expectedContent: "This 143 code review was cancelled.\n\n" + cancellationReason, expectedLinks: "[Request review](" + reviewURL + ") · [View full review](" + detailURL + ")"},
+		{name: "superseded is view only", status: models.CodeReviewSessionStatusStale, body: oldMarkedBody, expectedContent: "143 Code Reviewer superseded this assessment because the pull request code changed before publication. A fresh assessment of the latest commit is queued automatically and can still approve the PR.", expectedLinks: "[View full review](" + detailURL + ")"},
+		{name: "active staged result remains hidden", status: models.CodeReviewSessionStatusRunning, body: oldMarkedBody, expectedContent: "143 Code Reviewer has started reviewing this pull request.", expectedLinks: "[Follow review](" + detailURL + ")"},
+		{name: "queued uses follow", status: models.CodeReviewSessionStatusQueued, expectedContent: "143 Code Reviewer has started reviewing this pull request.", expectedLinks: "[Follow review](" + detailURL + ")"},
+		{name: "active provisional strips actions", status: models.CodeReviewSessionStatusRunning, body: models.CodeReviewProvisionalReviewHeading + "\n\n" + oldMarkedBody, expectedContent: models.CodeReviewProvisionalReviewHeading + "\n\nPreserved blocker details.", expectedLinks: "[Follow review](" + detailURL + ")"},
+		{name: "empty URLs omit footer", status: models.CodeReviewSessionStatusCompleted, body: "Preserved blocker details.", noURLs: true, expectedContent: "Preserved blocker details."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stored := tt.body
+			metadata := models.CodeReviewSessionMetadata{Status: tt.status, StatusMessage: &tt.statusMessage, FinalReviewBody: &stored, Acceptable: &tt.acceptable}
+			if tt.decision != "" {
+				metadata.Decision = &tt.decision
+			}
+			detail, request := detailURL, reviewURL
+			if tt.assessment {
+				detail, request = assessmentURL, ""
+			}
+			if tt.noURLs {
+				detail, request = "", ""
+			}
+			expected := tt.expectedContent
+			if tt.expectedLinks != "" {
+				expected += "\n\n" + start + "\n" + tt.expectedLinks + "\n" + end
+			}
+			actual := codeReviewStatusCommentBody(metadata, nil, detail, request)
+			require.Equal(t, expected, actual, "status should preserve its relevant result and expose only the applicable grouped footer")
+			require.Equal(t, tt.body, stored, "rolling comment formatting must not rewrite the stored publication body")
+		})
+	}
+}
+
+func TestCodeReviewActiveCommentPreservesHistoricalDetailWithoutActions(t *testing.T) {
+	t.Parallel()
+	const previousURL = "https://143.test/sessions/previous"
+	const currentURL = "https://143.test/sessions/current"
+	tests := []struct{ name, previousBody string }{
+		{name: "legacy links", previousBody: "❌ **143 Code Reviewer needs human review**\n\nPrevious blockers.\n\n[View the full review](" + previousURL + ")\n\n[Request Full Re-Review Now](https://143.test/code-reviews?review_now=previous) · Open 143 to request a review of your latest pushed changes. If a running or completed review already covers those changes, 143 may use it instead of starting another."},
+		{name: "marked evidence footer", previousBody: "❌ **143 Code Reviewer needs human review**\n\nPrevious blockers.\n\n<!-- 143-code-review-footer:start -->\n[Re-check evidence](https://143.test/code-reviews?recheck=previous) · [View full review](" + previousURL + ")\n<!-- 143-code-review-footer:end -->"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stored := tt.previousBody
+			message := "Waiting for GitHub checks."
+			provisional := models.CodeReviewProvisionalReviewHeading + "\n\nCurrent policy blocker."
+			body := codeReviewStatusCommentBody(models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusRunning, StatusMessage: &message, FinalReviewBody: &provisional}, &models.CodeReviewSessionMetadata{FinalReviewBody: &stored}, currentURL, "https://143.test/code-reviews?review_now=current")
+			require.Contains(t, body, provisional+"\n\n"+message, "current blockers and operational progress should precede the prior verdict")
+			require.Contains(t, body, "<summary>Previous review result</summary>\n\n❌ **143 Code Reviewer needs human review**\n\nPrevious blockers.\n\n[View previous review]("+previousURL+")", "prior result and detail navigation should remain explicitly historical")
+			require.NotContains(t, body, "?recheck=", "historical evidence action must not compete with the active review")
+			require.NotContains(t, body, "?review_now=", "active comment must not expose a new review request")
+			require.Equal(t, 1, strings.Count(body, "<!-- 143-code-review-footer:start -->"), "active comment should have exactly one primary footer")
+			require.True(t, strings.HasSuffix(body, "[Follow review]("+currentURL+")\n<!-- 143-code-review-footer:end -->"), "active detail belongs in the final footer")
+			require.Equal(t, tt.previousBody, stored, "history composition must leave the saved previous body unchanged")
+		})
+	}
+}
+
+func TestCodeReviewActiveCommentMissingPreviousBody(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		decision   models.CodeReviewDecision
+		acceptable bool
+		expected   string
+	}{
+		{name: "approved previous review", decision: models.CodeReviewDecisionApproved, acceptable: true, expected: "143 Code Reviewer approved this PR."},
+		{name: "acceptable comment only", decision: models.CodeReviewDecisionCommentOnly, acceptable: true, expected: "143 Code Reviewer completed its previous review."},
+		{name: "blocked previous review", decision: models.CodeReviewDecisionNeedsHumanReview, expected: "143 Code Reviewer completed its previous review."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			previous := models.CodeReviewSessionMetadata{Decision: &tt.decision, Acceptable: &tt.acceptable}
+			actual := codeReviewStatusCommentBody(models.CodeReviewSessionMetadata{Status: models.CodeReviewSessionStatusRunning}, &previous, "", "")
+			expected := "143 Code Reviewer has started reviewing this pull request.\n\n<details>\n<summary>Previous review result</summary>\n\n" + tt.expected + "\n\n</details>"
+			require.Equal(t, expected, actual, "missing previous body must distinguish acceptable comment-only outcomes from an actual approval")
 		})
 	}
 }

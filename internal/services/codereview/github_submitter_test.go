@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/github/ratelimit"
 	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
@@ -434,6 +435,10 @@ func TestGitHubSubmitter_SubmitReviewUpdatesExistingAssessment(t *testing.T) {
 	defer server.Close()
 
 	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+	footer := models.CodeReviewCommentFooter{
+		DetailURL:          "https://143.test/code-reviews?session=updated",
+		EvidenceRecheckURL: "https://143.test/code-reviews?recheck=updated",
+	}
 	result, err := submitter.SubmitReview(context.Background(), SubmitReviewRequest{
 		InstallationID:    99,
 		Repository:        "acme/repo",
@@ -447,7 +452,7 @@ func TestGitHubSubmitter_SubmitReviewUpdatesExistingAssessment(t *testing.T) {
 		PreviousDecision:  SubmitReviewDecisionBlocked,
 		PreviousDecidedAt: previousDecidedAt,
 		PreviousBody:      "143 Code Reviewer did not approve this PR\n\nWhy: blocking findings remained.",
-		Body:              "143 Code Reviewer did not approve this PR\n\nWhy: required checks are failing.",
+		Body:              models.WithCodeReviewCommentFooter("143 Code Reviewer did not approve this PR\n\nWhy: required checks are failing.", footer),
 		Comments: []SubmitReviewComment{{
 			Path: "src/auth/session.go", Line: 42, Body: "Updated finding.", DedupeKey: "finding-key",
 		}},
@@ -457,9 +462,10 @@ func TestGitHubSubmitter_SubmitReviewUpdatesExistingAssessment(t *testing.T) {
 	require.Equal(t, int64(143), result.ID, "updated assessment should retain the original review id")
 	require.Equal(t, "https://github.com/acme/repo/pull/42#pullrequestreview-143", result.URL, "updated assessment should retain the original review URL")
 	expectedVisibleBody := "143 Code Reviewer did not approve this PR\n\nWhy: required checks are failing.\n\n" +
-		codeReviewHistoryStartMarker + "\nHistory of 143 code reviews:\n" +
-		"- <relative-time datetime=\"2026-07-23T02:14:08Z\">Jul 23, 2026 at 2:14 AM UTC</relative-time> — **Not approved — blocked**\n" +
-		codeReviewHistoryEndMarker
+		codeReviewHistoryStartMarker + "\n<details>\n<summary>Review history</summary>\n\n" +
+		"- <relative-time datetime=\"2026-07-23T02:14:08Z\">Jul 22, 2026 at 10:14 PM EDT</relative-time> — **Not approved — blocked**\n" +
+		"\n</details>\n" + codeReviewHistoryEndMarker
+	expectedVisibleBody = models.WithCodeReviewCommentFooter(expectedVisibleBody, footer)
 	require.Equal(t, expectedVisibleBody, result.Body, "updated assessment should return the visible review body with prior decision history")
 	require.Equal(t, withCodeReviewOutputMarker(expectedVisibleBody, "updated-output"), reviewUpdate["body"], "formal review update should retain the visible fallback until the rolling comment is published")
 	require.Equal(t, withCodeReviewFindingMarker("Updated finding.", "finding-key"), commentUpdate["body"], "matching prior inline finding should be updated in place with a stable reassessment marker")
@@ -634,9 +640,9 @@ func TestWithCodeReviewHistory(t *testing.T) {
 	secondDecisionAt := time.Date(2026, time.July, 21, 15, 45, 12, 0, time.UTC)
 	legacyFirstHistory := codeReviewHistoryStartMarker + "\nHistory of 143 code reviews:\n" +
 		"- `2026-07-20T10:30:00Z` — **Not approved — needs human review**\n" + codeReviewHistoryEndMarker
-	firstHistory := codeReviewHistoryStartMarker + "\nHistory of 143 code reviews:\n" +
-		"- <relative-time datetime=\"2026-07-20T10:30:00Z\">Jul 20, 2026 at 10:30 AM UTC</relative-time> — **Not approved — needs human review**\n" +
-		codeReviewHistoryEndMarker
+	firstHistory := codeReviewHistoryStartMarker + "\n<details>\n<summary>Review history</summary>\n\n" +
+		"- <relative-time datetime=\"2026-07-20T10:30:00Z\">Jul 20, 2026 at 6:30 AM EDT</relative-time> — **Not approved — needs human review**\n" +
+		"\n</details>\n" + codeReviewHistoryEndMarker
 	tests := []struct {
 		name         string
 		body         string
@@ -665,10 +671,10 @@ func TestWithCodeReviewHistory(t *testing.T) {
 			previousBody: "Prior assessment.\n\n" + legacyFirstHistory,
 			decision:     SubmitReviewDecisionCommentOnly,
 			decidedAt:    secondDecisionAt,
-			expected: "Newest assessment.\n\n" + codeReviewHistoryStartMarker + "\nHistory of 143 code reviews:\n" +
-				"- <relative-time datetime=\"2026-07-20T10:30:00Z\">Jul 20, 2026 at 10:30 AM UTC</relative-time> — **Not approved — needs human review**\n" +
-				"- <relative-time datetime=\"2026-07-21T15:45:12Z\">Jul 21, 2026 at 3:45 PM UTC</relative-time> — **Not approved**\n" +
-				codeReviewHistoryEndMarker,
+			expected: "Newest assessment.\n\n" + codeReviewHistoryStartMarker + "\n<details>\n<summary>Review history</summary>\n\n" +
+				"- <relative-time datetime=\"2026-07-20T10:30:00Z\">Jul 20, 2026 at 6:30 AM EDT</relative-time> — **Not approved — needs human review**\n" +
+				"- <relative-time datetime=\"2026-07-21T15:45:12Z\">Jul 21, 2026 at 11:45 AM EDT</relative-time> — **Not approved**\n" +
+				"\n</details>\n" + codeReviewHistoryEndMarker,
 		},
 		{
 			name:         "does not duplicate a legacy entry when publishing is retried",
@@ -704,10 +710,10 @@ func TestWithCodeReviewReassessmentHistory(t *testing.T) {
 		"https://143.test/sessions/reassessment",
 	)
 
-	expected := "Previous assessment.\n\n" + codeReviewHistoryStartMarker + "\nHistory of 143 code reviews:\n" +
-		"- <relative-time datetime=\"2026-08-05T18:30:56Z\">Aug 5, 2026 at 6:30 PM UTC</relative-time> — **Not approved — needs human review**\n" +
-		"- <relative-time datetime=\"2026-08-05T20:18:07Z\">Aug 5, 2026 at 8:18 PM UTC</relative-time> — **Reassessment started** for `a38531c` — [Follow the review session](https://143.test/sessions/reassessment)\n" +
-		codeReviewHistoryEndMarker
+	expected := "Previous assessment.\n\n" + codeReviewHistoryStartMarker + "\n<details>\n<summary>Review history</summary>\n\n" +
+		"- <relative-time datetime=\"2026-08-05T18:30:56Z\">Aug 5, 2026 at 2:30 PM EDT</relative-time> — **Not approved — needs human review**\n" +
+		"- <relative-time datetime=\"2026-08-05T20:18:07Z\">Aug 5, 2026 at 4:18 PM EDT</relative-time> — **Reassessment started** for `a38531c` — [Follow the review session](https://143.test/sessions/reassessment)\n" +
+		"\n</details>\n" + codeReviewHistoryEndMarker
 	require.Equal(t, expected, actual, "reassessment history should preserve completed decisions and include the active review's kickoff time, head, and session link")
 }
 
