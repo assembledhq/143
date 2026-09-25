@@ -62,6 +62,24 @@ describe.each(["inline", "menu"] as const)("PR re-check actions (%s)", (presenta
     expect(await screen.findByRole("status")).toHaveTextContent("Full review requested.");
   });
 
+  it("uses a new request ID after a recorded evidence capture failure", async () => {
+    policy();
+    const requests: { request_id: string; mode: string }[] = [];
+    server.use(http.post("*/api/v1/pull-requests/:id/code-review/requests", async ({ request }) => {
+      requests.push(await request.json() as { request_id: string; mode: string });
+      if (requests.length === 1) return HttpResponse.json({ error: { code: "CODE_REVIEW_RECHECK_UNAVAILABLE", message: "Evidence could not be captured. Try again or request a full review." } }, { status: 409 });
+      return HttpResponse.json({ data: { disposition: "queued" } }, { status: 202 });
+    }));
+    const user = userEvent.setup();
+    renderWithProviders(<RecheckActions prID="pr-1" canManage completed presentation={presentation} />);
+    await recheck(user);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Evidence could not be captured");
+    await recheck(user);
+    expect(await screen.findByRole("status")).toHaveTextContent("Re-check requested.");
+    expect(requests).toEqual([{ request_id: expect.any(String), mode: "recheck" }, { request_id: expect.any(String), mode: "recheck" }]);
+    expect(requests[1].request_id).not.toBe(requests[0].request_id);
+  });
+
   it("explains a queued re-check and links its assessment", async () => {
     policy();
     server.use(http.post("*/api/v1/pull-requests/:id/code-review/requests", () => HttpResponse.json({ data: { disposition: "queued", assessment_id: "00000000-0000-4000-8000-000000000001" } }, { status: 202 })));

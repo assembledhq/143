@@ -15,3 +15,12 @@ func (s *CodeReviewScheduleStore) MarkEvidenceRefreshQueued(ctx context.Context,
 	 WHERE org_id=$1 AND id=$2 AND status='superseded' AND failure_detail LIKE 'evidence_recheck:%'`, orgID, assessmentID)
 	return err
 }
+
+// MarkEvidenceRefreshFailed stops repair after replacement admission durably
+// records a failed request. The superseded outcome is never published.
+func (s *CodeReviewScheduleStore) MarkEvidenceRefreshFailed(ctx context.Context, orgID, assessmentID uuid.UUID) error {
+	_, err := s.db.Exec(ctx, `UPDATE code_review_revision_assessments
+	 SET failure_detail='evidence_recheck_failed:Evidence could not be captured. Try again or request a full review.'
+	 WHERE org_id=$1 AND id=$2 AND status='superseded' AND failure_detail LIKE 'evidence_recheck:%'`, orgID, assessmentID)
+	return err
+}

@@ -85,16 +85,20 @@ type ReviewTextInput struct {
 	UnclassifiedDigest       string               `json:"unclassified_digest"`
 	Complete                 bool                 `json:"complete"`
 	SourceProvenanceComplete bool                 `json:"source_provenance_complete"`
+	// Older v3 captures stored only selected discussion sections. Omitting the
+	// false value preserves their fingerprints, while the verifier can avoid
+	// mistaking previously uncaptured prose for newly added evidence.
+	FullDiscussionCaptured bool `json:"full_discussion_captured,omitempty"`
 	// ParseAmbiguous records sources retained as opaque intent. Their exact
-	// bytes must stay unchanged; it does not disqualify other evidence sources.
+	// bytes are fingerprinted even when parsing cannot find evidence sections.
 	ParseAmbiguous bool `json:"parse_ambiguous"`
 }
 
 // ReviewRequestInput excludes request UUID, actor, and trigger envelope. A
-// substantive objection or instruction is included and must change routing.
+// substantive objection or instruction is included for evidence reassessment.
 type ReviewRequestInput struct {
 	SubstantiveText string `json:"substantive_text"`
-	DisputeRouted   bool   `json:"dispute_routed"`
+	DisputeRouted   bool   `json:"dispute_routed"` // Historical fingerprint field; dedicated dispute admission chooses its own route.
 }
 
 type ReviewGateInput struct {

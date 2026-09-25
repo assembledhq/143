@@ -172,6 +172,7 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 		{EvidenceID: "test-log", Surface: "pull_request_comment", ProviderObjectID: "77", SourceURL: "https://example.invalid/pr/7#issuecomment-77", Section: "testing", Content: "The browser test passes with the changed UI.", ContentDigest: fmt.Sprintf("%x", sha256.Sum256([]byte("The browser test passes with the changed UI.")))},
 	}}
 	baselineInput := manifestInput
+	baselineInput.TextEvidence.FullDiscussionCaptured = true
 	baselineInput.Visual.Images = nil
 	baselineInput.Title = "Original title"
 	baselineInput.Description = "Screenshots pending. Requested by: original-author"

@@ -25,8 +25,12 @@ func NewCodeReviewAssessmentStore(conn DBTX) *CodeReviewAssessmentStore {
 }
 
 func canonicalAssessmentManifest(raw json.RawMessage) (json.RawMessage, error) {
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+	// PostgreSQL jsonb reorders nested object keys, too. Canonicalize the
+	// entire manifest without rounding integer identities through float64.
+	var object map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&object); err != nil || object == nil || !json.Valid(raw) {
 		return nil, fmt.Errorf("assessment manifest must be a JSON object")
 	}
 	return json.Marshal(object)
@@ -68,8 +72,25 @@ func (s *CodeReviewAssessmentStore) Create(ctx context.Context, c models.CodeRev
 		return models.CodeReviewAssessment{}, false, err
 	}
 	if c.SourceAssessmentID != nil {
+		// Intent and auxiliary runtime/prompt fingerprints are reassessed by
+		// the evidence turn. Code coverage is bound to the versioned policy.
+		var identity struct {
+			Contract struct {
+				PolicyID      uuid.UUID `json:"policy_id"`
+				PolicyVersion int64     `json:"policy_version"`
+				PolicyDigest  string    `json:"policy_digest"`
+			} `json:"contract"`
+		}
+		if err := json.Unmarshal(manifest, &identity); err != nil || identity.Contract.PolicyID != c.PolicyID || identity.Contract.PolicyVersion < 1 || identity.Contract.PolicyDigest == "" {
+			return models.CodeReviewAssessment{}, false, fmt.Errorf("evidence assessment requires a captured policy identity: %w", ErrCodeReviewAssessmentConflict)
+		}
 		var valid bool
-		err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM code_review_revision_assessments WHERE org_id=$1 AND pull_request_id=$2 AND id=$3 AND review_scope='full' AND status='completed' AND coverage_complete AND session_id=$4 AND repository_id=$5 AND policy_id=$6 AND head_sha=$7 AND base_sha=$8 AND base_ref=$9 AND code_digest=$10 AND contract_digest=$11 AND intent_digest=$12)`, c.OrgID, c.PullRequestID, c.SourceAssessmentID, c.SessionID, c.RepositoryID, c.PolicyID, c.HeadSHA, c.BaseSHA, c.BaseRef, c.CodeDigest, c.ContractDigest, c.IntentDigest).Scan(&valid)
+		err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM code_review_revision_assessments
+ WHERE org_id=$1 AND pull_request_id=$2 AND id=$3 AND review_scope='full' AND status='completed' AND coverage_complete
+ AND session_id=$4 AND repository_id=$5 AND policy_id=$6 AND head_sha=$7 AND base_sha=$8 AND base_ref=$9 AND code_digest=$10
+ AND input_manifest #>> '{contract,policy_id}' = $6::text
+ AND input_manifest #> '{contract,policy_version}' = to_jsonb($11::bigint)
+ AND input_manifest #>> '{contract,policy_digest}' = $12)`, c.OrgID, c.PullRequestID, c.SourceAssessmentID, c.SessionID, c.RepositoryID, c.PolicyID, c.HeadSHA, c.BaseSHA, c.BaseRef, c.CodeDigest, identity.Contract.PolicyVersion, identity.Contract.PolicyDigest).Scan(&valid)
 		if err != nil {
 			return models.CodeReviewAssessment{}, false, err
 		}

@@ -1,12 +1,31 @@
 package codereview
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLegacyDiscussionCaptureCompatibility(t *testing.T) {
+	t.Parallel()
+	capture := reviewTestCapture()
+	legacy, err := BuildReviewInputManifest(capture)
+	require.NoError(t, err, "build legacy v3 manifest without full discussion capture")
+	raw, err := json.Marshal(legacy)
+	require.NoError(t, err, "serialize the historical capture")
+	require.NotContains(t, string(raw), "full_discussion_captured", "legacy serialization and fingerprints must remain unchanged")
+	require.NoError(t, ValidateReviewInputManifest(legacy), "legacy code coverage remains valid")
+	capture.TextEvidence.FullDiscussionCaptured = true
+	current, err := BuildReviewInputManifest(capture)
+	require.NoError(t, err, "build current complete discussion capture")
+	require.Equal(t, legacy.CodeDigest, current.CodeDigest, "capture capability cannot change code identity")
+	require.Equal(t, legacy.ContractDigest, current.ContractDigest, "capture capability cannot change policy identity")
+	require.NotEqual(t, legacy.TextDigest, current.TextDigest, "complete discussion capture must be fingerprinted")
+	require.Equal(t, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}, PlanReviewRecheck(RecheckPlanInput{Current: &current, Baseline: reviewTestBaseline(legacy)}), "upgrading text capture must not rerun unchanged code")
+}
 
 func reviewTestCapture() ReviewInputCapture {
 	d := strings.Repeat("a", 64)

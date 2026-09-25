@@ -175,6 +175,8 @@ func writeScheduleError(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, r, 409, "CODE_REVIEW_REQUEST_ID_CONFLICT", "request ID was already used for different input")
 	case errors.Is(err, codereviewsvc.ErrReviewIneligible):
 		writeError(w, r, 409, "CODE_REVIEW_PR_INELIGIBLE", "Review requires an open pull request and an enabled policy.")
+	case errors.Is(err, codereviewsvc.ErrRecheckUnavailable):
+		writeError(w, r, 409, "CODE_REVIEW_RECHECK_UNAVAILABLE", "Evidence could not be captured. Try again or request a full review.")
 	default:
 		writeError(w, r, 500, "CODE_REVIEW_SCHEDULING_FAILED", "failed to update review scheduling", err)
 	}

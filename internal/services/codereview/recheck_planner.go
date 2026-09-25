@@ -25,16 +25,11 @@ const (
 	RecheckReasonEvidenceChanged   RecheckReason = "evidence_changed"
 	RecheckReasonChecksChanged     RecheckReason = "checks_changed"
 	RecheckReasonForceFresh        RecheckReason = "force_fresh"
-	RecheckReasonDispute           RecheckReason = "dispute"
 	RecheckReasonNoBaseline        RecheckReason = "no_complete_baseline"
 	RecheckReasonCodeChanged       RecheckReason = "code_changed"
 	RecheckReasonContractChanged   RecheckReason = "contract_changed"
-	RecheckReasonIntentChanged     RecheckReason = "intent_changed"
-	RecheckReasonRequestChanged    RecheckReason = "request_changed"
 	RecheckReasonGatesChanged      RecheckReason = "gates_changed"
-	RecheckReasonBaselineBlocked   RecheckReason = "baseline_not_visual_only"
 	RecheckReasonNoEvidenceChange  RecheckReason = "no_evidence_change"
-	RecheckReasonEvidenceInvalid   RecheckReason = "evidence_validation_failed"
 )
 
 type RecheckPlan struct {
@@ -66,12 +61,11 @@ type RecheckPrevious struct {
 }
 
 type RecheckPlanInput struct {
-	Current       *ReviewInputManifest
-	CaptureError  error
-	Baseline      *RecheckBaseline
-	Previous      *RecheckPrevious
-	ForceFresh    bool
-	DisputeRouted bool
+	Current      *ReviewInputManifest
+	CaptureError error
+	Baseline     *RecheckBaseline
+	Previous     *RecheckPrevious
+	ForceFresh   bool
 }
 
 // PlanReviewRecheck is pure admission classification. Duplicate request IDs,

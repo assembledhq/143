@@ -68,6 +68,7 @@ func TestAssessmentOpaqueIntentRouting(t *testing.T) {
 				}
 				result, err := service.CaptureAssessmentInputs(context.Background(), in)
 				require.NoError(t, err, "complete source inventory must remain capturable")
+				require.True(t, result.Manifest.TextEvidence.FullDiscussionCaptured, "new captures must identify the complete discussion archive")
 				require.NoError(t, ValidateReviewInputManifest(result.Manifest), "manifest must rebuild with the current intent contract")
 				if discussion == opaqueDiscussion || discussion == stackComment {
 					var discussionEvidence []ReviewTextEvidence

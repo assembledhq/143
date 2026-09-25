@@ -93,7 +93,7 @@ func TestPlanReviewRecheck(t *testing.T) {
 		{"nonvisual requirement", withImage, func(b *RecheckBaseline) { b.MissingRequirements[0].EvidenceKind = "text" }, nil, false, false, false, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
 		{"failed evidence validation", withImage, nil, &RecheckPrevious{Inputs: base, Completed: true, EvidenceValidated: false}, false, false, false, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
 		{"force fresh", withImage, nil, nil, true, false, false, RecheckPlan{RecheckRouteFull, RecheckReasonForceFresh}},
-		{"dispute", withImage, nil, nil, false, true, false, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
+		{"legacy dispute context", withImage, nil, nil, false, true, false, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
 		{"unavailable", withImage, nil, nil, false, false, true, RecheckPlan{RecheckRouteWait, RecheckReasonInputsUnavailable}},
 		{"malicious malformed image", func(c *ReviewInputCapture) { withImage(c); c.Description += "![x](bad url)\n" }, nil, nil, false, false, false, RecheckPlan{RecheckRouteEvidenceOnly, RecheckReasonEvidenceChanged}},
 	}
@@ -104,6 +104,7 @@ func TestPlanReviewRecheck(t *testing.T) {
 			capture.Code.Files = append([]ReviewChangedFile(nil), baseCapture.Code.Files...)
 			capture.TextEvidence.Items = append([]ReviewTextEvidence(nil), baseCapture.TextEvidence.Items...)
 			tt.change(&capture)
+			capture.Request.DisputeRouted = tt.dispute
 			capture.TextEvidence.Items[0].Content = capture.Description
 			capture.TextEvidence.Items[0].ContentDigest = digestBytes(capture.Description)
 			current, err := BuildReviewInputManifest(capture)
@@ -112,7 +113,7 @@ func TestPlanReviewRecheck(t *testing.T) {
 			if tt.baselineChange != nil {
 				tt.baselineChange(baseline)
 			}
-			input := RecheckPlanInput{Current: &current, Baseline: baseline, Previous: tt.previous, ForceFresh: tt.force, DisputeRouted: tt.dispute}
+			input := RecheckPlanInput{Current: &current, Baseline: baseline, Previous: tt.previous, ForceFresh: tt.force}
 			if tt.unavailable {
 				input.CaptureError = errUnavailableTest{}
 			}

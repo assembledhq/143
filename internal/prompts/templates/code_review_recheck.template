@@ -36,6 +36,8 @@ Open and inspect each cited image. Read the exact captured text for every text c
 
 An originally missing requirement may become satisfied, or a finding resolved, only with at least one new or changed evidence item relative to the full baseline. Do not reverse the baseline using only a new interpretation of its unchanged evidence. For each finding, explain why the evidence resolves the specific failure scenario, or retain it. Findings requiring a code change remain retained. A new concern or an uncertain need for broader code analysis requires human review. Do not modify finding severity, text, identity, nonfinding flags, or policy gates.
 
+If the baseline's prior text evidence lacks full_discussion_captured=true, its discussion archive is incomplete. Current discussion may inform the assessment, but cannot by itself prove that evidence is new or changed. Resolve a baseline blocker only when current PR-description text, check-status evidence, or an image independently meets the new-or-changed requirement; otherwise retain the blocker. Do not request a full code review merely because the older discussion archive is incomplete.
+
 An already satisfied requirement supported by the baseline's repository or diff evidence may remain satisfied without a new citation only when you preserve its exact original reason. The unchanged code supports that limited carryforward. Requirements supported by images, descriptions, text, or preview links must be checked against the current capture; removed evidence cannot silently remain satisfied.
 
 Return exactly one JSON object, without prose or additional fields:

@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import type { CodeReviewRequestResponse } from "@/lib/types";
 
@@ -45,6 +45,12 @@ export function RecheckActions({ prID, canManage, completed, disabledReason, pre
       if (variables.mode === "force_fresh") { setForceOpen(false); setReason(""); }
       void client.invalidateQueries({ queryKey: ["code-reviews"] });
       void client.invalidateQueries({ queryKey: ["code-review-schedules"] });
+    },
+    onError: (error, variables) => {
+      if (error instanceof ApiError && error.code === "CODE_REVIEW_RECHECK_UNAVAILABLE") {
+        requestIDs.current[variables.mode] = undefined;
+        void client.invalidateQueries({ queryKey: ["code-review-schedules"] });
+      }
     },
   });
   const capability = policy.data?.data.capabilities?.conditional_recheck === true;
