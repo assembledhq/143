@@ -777,6 +777,12 @@ func TestSubmitCodeReviewToGitHubUsesPublicationLock(t *testing.T) {
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "selected_only": true}).
 		WillReturnRows(newCodeReviewFindingRows())
 	mock.ExpectBegin()
+	mock.ExpectExec("SET LOCAL lock_timeout").
+		WillReturnResult(pgxmock.NewResult("SET", 0))
+	mock.ExpectExec("SET LOCAL statement_timeout").
+		WillReturnResult(pgxmock.NewResult("SET", 0))
+	mock.ExpectExec("SET LOCAL idle_in_transaction_session_timeout").
+		WillReturnResult(pgxmock.NewResult("SET", 0))
 	mock.ExpectExec("SELECT pg_advisory_xact_lock").
 		WithArgs(pgx.NamedArgs{"lock_key": "code_review_status_comment:" + orgID.String() + ":" + pullRequestID.String()}).
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))

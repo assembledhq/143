@@ -21,6 +21,13 @@ var ErrCodeReviewActiveHeadConflict = errors.New("another code review is active 
 
 const codeReviewActiveHeadConstraint = "idx_code_review_metadata_active_head"
 
+const (
+	codeReviewPublicationLockWaitTimeout = 20 * time.Second
+	codeReviewPublicationLockTimeout     = 5 * time.Minute
+)
+
+var ErrCodeReviewPublicationLockBusy = errors.New("code review GitHub publication lock is busy")
+
 type CodeReviewStore struct {
 	db      DBTX
 	jobs    *JobStore
@@ -2730,21 +2737,58 @@ func (s *CodeReviewStore) RunWithGitHubPublicationLock(ctx context.Context, orgI
 	if !ok {
 		return fmt.Errorf("code review GitHub publication lock requires transaction support")
 	}
-	tx, err := txStarter.Begin(ctx)
+	waitCtx, cancelWait := context.WithTimeout(ctx, codeReviewPublicationLockWaitTimeout)
+	defer cancelWait()
+	tx, err := txStarter.Begin(waitCtx)
 	if err != nil {
+		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("begin code review GitHub publication lock: %w: %w", ErrCodeReviewPublicationLockBusy, err)
+		}
 		return fmt.Errorf("begin code review GitHub publication lock: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() {
+		rollbackCtx, cancelRollback := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancelRollback()
+		_ = tx.Rollback(rollbackCtx)
+	}()
+	// PostgreSQL must enforce these bounds itself: a canceled Go context can
+	// close its socket while a backend is still waiting on a row lock.
+	for _, setting := range []string{
+		`SET LOCAL lock_timeout = '15s'`,
+		`SET LOCAL statement_timeout = '2min'`,
+		`SET LOCAL idle_in_transaction_session_timeout = '6min'`,
+	} {
+		if _, err := tx.Exec(waitCtx, setting); err != nil {
+			return fmt.Errorf("bound code review GitHub publication transaction: %w", err)
+		}
+	}
 	// Keep the legacy key prefix so old and new workers coordinate during a
 	// rolling deployment.
 	lockKey := fmt.Sprintf("code_review_status_comment:%s:%s", orgID, pullRequestID)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(@lock_key, 0))`, pgx.NamedArgs{"lock_key": lockKey}); err != nil {
+	_, err = tx.Exec(waitCtx, `SELECT pg_advisory_xact_lock(hashtextextended(@lock_key, 0))`, pgx.NamedArgs{"lock_key": lockKey})
+	cancelWait()
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if ctx.Err() == nil && (errors.Is(err, context.DeadlineExceeded) || errors.As(err, &pgErr) && pgErr.SQLState() == "55P03") {
+			return fmt.Errorf("acquire code review GitHub publication lock: %w: %w", ErrCodeReviewPublicationLockBusy, err)
+		}
 		return fmt.Errorf("acquire code review GitHub publication lock: %w", err)
 	}
-	if err := fn(ctx, tx); err != nil {
+	workCtx, cancelWork := context.WithTimeout(ctx, codeReviewPublicationLockTimeout)
+	defer cancelWork()
+	if err := fn(workCtx, tx); err != nil {
+		var pgErr *pgconn.PgError
+		if ctx.Err() == nil && errors.As(err, &pgErr) && pgErr.SQLState() == "55P03" {
+			return fmt.Errorf("code review GitHub publication transaction lock timeout: %w: %w", ErrCodeReviewPublicationLockBusy, err)
+		}
 		return err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := workCtx.Err(); err != nil {
+		return fmt.Errorf("code review GitHub publication exceeded work deadline: %w", err)
+	}
+	commitCtx, cancelCommit := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancelCommit()
+	if err := tx.Commit(commitCtx); err != nil {
 		return fmt.Errorf("commit code review GitHub publication lock: %w", err)
 	}
 	return nil

@@ -1069,7 +1069,7 @@ func TestJobStore_ReclaimLostRunningJobs(t *testing.T) {
 	staleBefore := time.Now().Add(-90 * time.Second)
 	mock.ExpectQuery("WITH dead_nodes AS").
 		WithArgs(staleBefore, 100).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(3)))
+		WillReturnRows(pgxmock.NewRows([]string{"reclaimed", "eligible"}).AddRow(int64(3), int64(3)))
 
 	reclaimed, err := store.ReclaimLostRunningJobs(context.Background(), staleBefore, 100)
 	require.NoError(t, err, "ReclaimLostRunningJobs should not return an error")

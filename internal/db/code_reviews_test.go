@@ -216,14 +216,23 @@ func TestCodeReviewStore_RunWithGitHubPublicationLock(t *testing.T) {
 	pullRequestID := uuid.New()
 	lockKey := "code_review_status_comment:" + orgID.String() + ":" + pullRequestID.String()
 	mock.ExpectBegin()
+	mock.ExpectExec("SET LOCAL lock_timeout").
+		WillReturnResult(pgxmock.NewResult("SET", 0))
+	mock.ExpectExec("SET LOCAL statement_timeout").
+		WillReturnResult(pgxmock.NewResult("SET", 0))
+	mock.ExpectExec("SET LOCAL idle_in_transaction_session_timeout").
+		WillReturnResult(pgxmock.NewResult("SET", 0))
 	mock.ExpectExec("SELECT pg_advisory_xact_lock").
 		WithArgs(pgx.NamedArgs{"lock_key": lockKey}).
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectCommit()
 
 	called := false
-	err = NewCodeReviewStore(mock).RunWithGitHubPublicationLock(context.Background(), orgID, pullRequestID, func(_ context.Context, lockDB DBTX) error {
+	err = NewCodeReviewStore(mock).RunWithGitHubPublicationLock(context.Background(), orgID, pullRequestID, func(lockCtx context.Context, lockDB DBTX) error {
 		require.NotNil(t, lockDB, "GitHub publication lock should expose its transaction-bound database handle")
+		deadline, ok := lockCtx.Deadline()
+		require.True(t, ok, "GitHub publication lock should bound its callback duration")
+		require.LessOrEqual(t, time.Until(deadline), codeReviewPublicationLockTimeout, "GitHub publication lock deadline should not exceed its cap")
 		called = true
 		return nil
 	})
@@ -231,6 +240,53 @@ func TestCodeReviewStore_RunWithGitHubPublicationLock(t *testing.T) {
 	require.NoError(t, err, "GitHub publication lock should commit after the protected operation")
 	require.True(t, called, "GitHub publication lock should execute the protected operation")
 	require.NoError(t, mock.ExpectationsWereMet(), "GitHub publication lock should use one transaction-scoped advisory lock")
+}
+
+func TestCodeReviewStore_RunWithGitHubPublicationLockRetriesBusyWait(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	orgID, pullRequestID := uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	for _, setting := range []string{"lock_timeout", "statement_timeout", "idle_in_transaction_session_timeout"} {
+		mock.ExpectExec("SET LOCAL " + setting).WillReturnResult(pgxmock.NewResult("SET", 0))
+	}
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").
+		WithArgs(pgx.NamedArgs{"lock_key": "code_review_status_comment:" + orgID.String() + ":" + pullRequestID.String()}).
+		WillReturnError(&pgconn.PgError{Code: "55P03", Message: "canceling statement due to lock timeout"})
+	mock.ExpectRollback()
+
+	err = NewCodeReviewStore(mock).RunWithGitHubPublicationLock(context.Background(), orgID, pullRequestID, func(context.Context, DBTX) error {
+		t.Error("publication callback should not run without the PR lock")
+		return nil
+	})
+	require.ErrorIs(t, err, ErrCodeReviewPublicationLockBusy, "lock contention should be distinguishable from a publication failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "busy publication should roll back its transaction")
+}
+
+func TestCodeReviewStore_RunWithGitHubPublicationLockRetriesCallbackLockTimeout(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	orgID, pullRequestID := uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	for _, setting := range []string{"lock_timeout", "statement_timeout", "idle_in_transaction_session_timeout"} {
+		mock.ExpectExec("SET LOCAL " + setting).WillReturnResult(pgxmock.NewResult("SET", 0))
+	}
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").
+		WithArgs(pgx.NamedArgs{"lock_key": "code_review_status_comment:" + orgID.String() + ":" + pullRequestID.String()}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectRollback()
+	lockErr := &pgconn.PgError{Code: "55P03", Message: "canceling statement due to lock timeout"}
+	err = NewCodeReviewStore(mock).RunWithGitHubPublicationLock(context.Background(), orgID, pullRequestID, func(context.Context, DBTX) error {
+		return fmt.Errorf("update publication receipt: %w", lockErr)
+	})
+	require.ErrorIs(t, err, ErrCodeReviewPublicationLockBusy, "callback row-lock contention should retry without consuming an attempt")
+	require.NoError(t, mock.ExpectationsWereMet(), "callback lock timeout should roll back its transaction")
 }
 
 func TestCodeReviewStore_CreatePromptRecordPreservesEffectivePrompt(t *testing.T) {
