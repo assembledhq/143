@@ -10,6 +10,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
@@ -49,6 +50,16 @@ func testRecheckCaptureFailure(t *testing.T, pool *pgxpool.Pool, org, repo, pr u
 		return AssessmentInputCaptureResult{}, captureErr
 	}), true)
 	request := ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewRecheck}
+	var automatic models.CodeReviewPRState
+	if mode == "automatic" {
+		snapshot.update(func(s *ghservice.CodeReviewPullRequestSnapshot) { s.HeadSHA = "new-code-head" })
+		_, err := service.scheduleReview(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr}, models.CodeReviewEnsureCurrent, false, nil)
+		require.NoError(t, err, "a push must schedule review of the changed code")
+		automatic, err = service.GetSchedule(ctx, org, pr)
+		require.NoError(t, err, "read automatic review before the failed recheck")
+		require.NotNil(t, automatic.PendingInput, "automatic review must retain pending intent")
+		require.Nil(t, automatic.PendingRequestID, "automatic intent has no explicit request identity")
+	}
 	if mode == "mention" {
 		service.SetGitHubTriggerStore(&triggerStub{setting: models.CodeReviewGitHubTriggerSetting{OrgID: org, RepositoryID: repo, TeamSlug: "reviewers"}})
 		input := ReviewMentionedInput{ReviewRequestedInput: ReviewRequestedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr, GitHubRepo: "test/repo", HeadSHA: snapshot.snapshot.HeadSHA, DeliveryID: request.RequestID.String()}, CommentID: 123, CommentAuthor: "author", CommentBody: "@test/reviewers", CommentURL: "https://github.com/test/repo/pull/17#issuecomment-123"}
@@ -72,12 +83,16 @@ func testRecheckCaptureFailure(t *testing.T, pool *pgxpool.Pool, org, repo, pr u
 		require.Equal(t, models.CodeReviewAssessmentSuperseded, retired.Status, "obsolete publication must stay superseded")
 		require.Equal(t, "evidence_recheck_failed:Evidence could not be captured. Try again or request a full review.", *retired.FailureDetail, "failure must remain visible without a repair-loop prefix")
 		request.RequestID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("code-review-evidence-refresh:"+previous.ID.String()))
-	} else if mode == "permanent wake" || mode == "deadline" {
+	} else if mode == "permanent wake" || mode == "deadline" || mode == "paused" {
+		if mode == "paused" {
+			_, err := pool.Exec(ctx, `UPDATE code_review_pr_state SET automatic_paused=true WHERE org_id=$1 AND pull_request_id=$2`, org, pr)
+			require.NoError(t, err, "pause automatic reviews while retaining explicit recheck support")
+		}
 		captureErr = errors.New("temporary provider outage")
 		queued, err := service.RequestScheduledReview(ctx, request)
 		require.NoError(t, err, "transient failure should retain bounded pending work")
 		require.Equal(t, models.CodeReviewRequestQueued, queued.Disposition, "initial capture failure should wait")
-		if mode == "permanent wake" {
+		if mode == "permanent wake" || mode == "paused" {
 			captureErr = ErrAssessmentReuseUnavailable
 		} else {
 			now = now.Add(16 * time.Minute)
@@ -101,6 +116,22 @@ func testRecheckCaptureFailure(t *testing.T, pool *pgxpool.Pool, org, repo, pr u
 	require.Nil(t, record.AssessmentID, "capture failure cannot allocate an assessment")
 	state, err := service.GetSchedule(ctx, org, pr)
 	require.NoError(t, err, "read terminal scheduling state")
+	if mode == "automatic" {
+		// WithLockedPR updates the observation timestamp even when the
+		// request ledger is the only changed state.
+		state.UpdatedAt = automatic.UpdatedAt
+		require.Equal(t, automatic, state, "failed capture must preserve the entire unrelated automatic schedule")
+		var wakeID uuid.UUID
+		lease := uuid.New()
+		err = pool.QueryRow(ctx, `UPDATE jobs SET status='running',lock_token=$3,lease_expires_at=now()+interval '5 minutes' WHERE org_id=$1 AND dedupe_key=$2 AND status='pending' RETURNING id`, org, "code_review_schedule:"+pr.String(), lease).Scan(&wakeID)
+		require.NoError(t, err, "automatic review wake must survive failed recheck")
+		require.NoError(t, service.ReconcileSchedule(jobctx.WithLockToken(jobctx.WithJobID(ctx, wakeID), lease), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "preserved automatic review must still dispatch")
+		latest, err := store.GetLatestByPullRequest(ctx, org, pr)
+		require.NoError(t, err, "read automatic full review after wake")
+		require.Equal(t, "new-code-head", latest.HeadSHA, "changed code must receive its queued full review")
+		require.NotEqual(t, previous.SessionID, latest.SessionID, "changed code must use a new full-review session")
+		return
+	}
 	require.Nil(t, state.PendingInput, "terminal capture failure must release pending intent")
 	require.Nil(t, state.PendingRequestID, "terminal capture failure must release the pending request")
 	require.Nil(t, state.FirstPendingAt, "terminal capture failure must clear the retry window")
@@ -112,6 +143,9 @@ func testRecheckCaptureFailure(t *testing.T, pool *pgxpool.Pool, org, repo, pr u
 	}
 	require.Equal(t, models.CodeReviewSchedulePaused, state.State, "unavailable evidence should leave a visible stopped schedule")
 	require.Equal(t, models.CodeReviewWaitContext, state.WaitReason, "schedule must explain the capture failure")
+	if mode == "paused" {
+		require.True(t, state.AutomaticPaused, "terminal explicit recheck must preserve the user's automatic pause")
+	}
 	if mode != "mention" && mode != "refresh" {
 		beforeReplay := captures
 		_, err := service.RequestScheduledReview(ctx, request)

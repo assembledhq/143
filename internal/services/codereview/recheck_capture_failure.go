@@ -28,14 +28,15 @@ func (s *Service) failRecheckCapture(ctx context.Context, req ScheduleRequestInp
 		if _, err = tx.Exec(ctx, `UPDATE code_review_requests SET status='failed' WHERE org_id=$1 AND id=$2 AND status='pending'`, req.OrgID, id); err != nil {
 			return err
 		}
-		// Capture runs outside the lock. Never clear a newer request or change
-		// the state of a review that was admitted while this capture was running.
-		if state.PendingRequestID != nil && *state.PendingRequestID != id {
+		// Capture runs outside the lock. Preserve any pending intent owned by
+		// another request, including automatic reviews without a request ID.
+		ownsPending := state.PendingRequestID != nil && *state.PendingRequestID == id
+		if !ownsPending && (state.PendingInput != nil || state.PendingRequestID != nil) {
 			return nil
 		}
 		state.PendingRequestID, state.PendingInput = nil, nil
 		state.FirstPendingAt, state.RetryAt, state.EligibleAt = nil, nil, nil
-		if state.State == models.CodeReviewScheduleClosed || state.AutomaticPaused {
+		if state.State == models.CodeReviewScheduleClosed {
 			return nil
 		}
 		active := state.ActiveAssessmentID != nil

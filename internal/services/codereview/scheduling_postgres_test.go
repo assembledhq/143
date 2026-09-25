@@ -124,6 +124,12 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		{"capture failure preserves active review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "active")
 		}},
+		{"capture failure preserves automatic pending review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "automatic")
+		}},
+		{"capture failure settles while automatic reviews are paused", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "paused")
+		}},
 		{"capture failure acknowledges mention", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "mention")
 		}},
