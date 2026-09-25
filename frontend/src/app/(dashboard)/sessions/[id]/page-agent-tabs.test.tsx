@@ -93,6 +93,7 @@ describe('SessionDetailPage agent tabs and threads', () => {
     expect(screen.queryByRole('tab', { name: /^Main/ })).not.toBeInTheDocument();
     await user.click(synthesisTab);
     expect(await screen.findByText('Synthesis result')).toBeInTheDocument();
+    expect(screen.queryByTestId('session-composer-shell')).not.toBeInTheDocument();
   });
 
   it.each(['running', 'failed'] as const)('shows an empty state when a %s code review has only unused Main', async (status) => {
@@ -110,7 +111,7 @@ describe('SessionDetailPage agent tabs and threads', () => {
 
     expect(await screen.findByText('No agent tabs for this session')).toBeInTheDocument();
     expect(screen.queryByText('Loading thread...')).not.toBeInTheDocument();
-    expect(screen.getByPlaceholderText('No review threads are available.')).toBeDisabled();
+    expect(screen.queryByTestId('session-composer-shell')).not.toBeInTheDocument();
   });
 
   it('falls back to synthesis after closing an active reviewer while Main is hidden', async () => {
@@ -151,6 +152,7 @@ describe('SessionDetailPage agent tabs and threads', () => {
 
     expect(await screen.findByText('Synthesis result')).toBeInTheDocument();
     expect(screen.queryByRole('tab', { name: /^Main/ })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('session-composer-shell')).not.toBeInTheDocument();
   });
 
   it('reconciles duplicated, out-of-order, and missed activity lifecycle events from the durable transcript', async () => {

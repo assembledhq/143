@@ -5559,22 +5559,20 @@ export function SessionDetailContent({ id }: { id: string }) {
     [comments],
   );
   const isRestoringActiveThread = chromeThreads.length > 0 && activeThread === null;
-  const hasNoReviewThreads = session?.origin === "code_review" && chromeThreads.length === 0;
+  const isCodeReviewSession = session?.origin === "code_review";
   // Composer gating: messages may be sent at any point while the session or
   // thread is running. The backend queues mid-turn sends and the orchestrator
   // drains the queue once the in-flight turn completes. Pending/skipped at
   // the session level and a destroyed sandbox still block — those are
   // genuinely unrecoverable, not just busy.
-  const composerCanSendMessage = !isRestoringActiveThread && !hasNoReviewThreads &&
+  const composerCanSendMessage = !isRestoringActiveThread && !isCodeReviewSession &&
     session?.status !== "skipped" &&
     session?.status !== "pending" &&
     session?.sandbox_state !== "destroyed";
   const composerUnavailableReason = isRestoringActiveThread
-    ? "Thread is still loading."
-    : hasNoReviewThreads ? "No review threads are available." : undefined;
+    ? "Thread is still loading." : undefined;
   const composerPlaceholderOverride = isRestoringActiveThread
-    ? "Loading thread..."
-    : hasNoReviewThreads ? "No review threads are available." : undefined;
+    ? "Loading thread..." : undefined;
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const runtimeRecoveryActive = session ? isRuntimeRecoveryActive(session) : false;
   const localStopRequested = sessionStopRequest?.sessionId === id && composerIsRunning;
@@ -6236,10 +6234,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   const isDedicatedMobileReview = centerMode === "review" && isMobileReviewViewport;
 
   useEffect(() => {
-    if (!isDedicatedMobileReview) {
+    if (!isDedicatedMobileReview || isCodeReviewSession) {
       setMobileReviewComposerOpen(false);
     }
-  }, [isDedicatedMobileReview]);
+  }, [isCodeReviewSession, isDedicatedMobileReview]);
 
   const focusActiveDetailTab = useCallback(() => {
     requestAnimationFrame(() => {
@@ -7351,7 +7349,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     onBack={exitReview}
                     isMobile={isMobileReviewViewport}
                     onOpenFileList={openMobileFilesList}
-                    onOpenComposer={session.agent_type !== "pm_agent" ? openMobileReviewComposer : undefined}
+                    onOpenComposer={session.agent_type !== "pm_agent" && !isCodeReviewSession ? openMobileReviewComposer : undefined}
                     commentsByLine={commentsByLine}
                     activeCommentLine={activeCommentLine}
                     onAddComment={handleAddComment}
@@ -7370,7 +7368,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           )}
         </div>
 
-        {session.agent_type !== "pm_agent" && !isDedicatedMobileReview && (
+        {session.agent_type !== "pm_agent" && !isCodeReviewSession && !isDedicatedMobileReview && (
           <>
             {composerIsSnapshotExpired && (
               <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-warning/10 border-warning/30 text-warning">
@@ -7617,7 +7615,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      {session.agent_type !== "pm_agent" ? (
+      {session.agent_type !== "pm_agent" && !isCodeReviewSession ? (
         <Sheet open={mobileReviewComposerOpen} onOpenChange={setMobileReviewComposerOpen}>
           <SheetContent
             side="bottom"
