@@ -134,6 +134,7 @@ interface AgentTabStripProps {
   addTabPending?: boolean;
   onRevertThread: (threadId: string) => void;
   onArchiveThread: (threadId: string) => void;
+  allowCloseTabs?: boolean;
   archivePendingThreadId: string | null;
   addTabButtonRef?: RefObject<HTMLButtonElement | null>;
 }
@@ -184,6 +185,7 @@ export function AgentTabStrip({
   addTabPending = false,
   onRevertThread,
   onArchiveThread,
+  allowCloseTabs = true,
   archivePendingThreadId,
   addTabButtonRef,
 }: AgentTabStripProps) {
@@ -350,7 +352,7 @@ export function AgentTabStrip({
                     isUnread,
                     isActive: isActiveTab,
                   });
-                  const showArchiveButton = canArchiveThread(thread, tabs.length);
+                  const showArchiveButton = allowCloseTabs && canArchiveThread(thread, tabs.length);
                   const isNonInteractive = nonInteractiveThreadIds?.has(thread.id) ?? false;
                   const closeLabel = `Close ${thread.label}${thread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`;
 
