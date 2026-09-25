@@ -58,7 +58,8 @@ func actionPostgres(t *testing.T, continuous bool) (*pgxpool.Pool, models.Automa
 	require.NoError(t, err, "apply actual action migration")
 	a := models.AutomationActionActor{OrgID: uuid.New(), RepositoryID: uuid.New(), SessionID: uuid.New(), ThreadID: uuid.New(), RunID: uuid.New(), AttemptToken: uuid.New(), JobID: uuid.New()}
 	automation, target, generation, policy := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	raw := json.RawMessage(`{"actions":["slack_notification","github_issue_comment"],"repository":"owner/repo","slack_channel_id":"C0123456789"}`)
+	// The configuration form includes empty Notion fields even when Notion is disabled.
+	raw := json.RawMessage(`{"actions":["slack_notification","github_issue_comment"],"repository":"owner/repo","slack_channel_id":"C0123456789","notion_properties":{},"notion_data_source_id":""}`)
 	batch := &pgx.Batch{}
 	batch.Queue(`INSERT INTO organizations VALUES($1)`, a.OrgID)
 	batch.Queue(`INSERT INTO automations(id,org_id) VALUES($1,$2)`, automation, a.OrgID)
