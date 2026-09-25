@@ -561,6 +561,9 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 		}
 		return errCodeReviewPublicationSuperseded
 	}
+	if errors.Is(err, db.ErrCodeReviewPublicationLockBusy) {
+		return classifyGitHubJobError(err, a.SessionID.String())
+	}
 	return err
 }
 

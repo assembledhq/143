@@ -7,8 +7,20 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/services/github/ratelimit"
 )
+
+func TestCodeReviewPublicationLockWaitDoesNotConsumeAttempt(t *testing.T) {
+	t.Parallel()
+
+	err := classifyGitHubJobError(fmt.Errorf("publish review: %w", db.ErrCodeReviewPublicationLockBusy), "review-session")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "busy publication lock should be retryable")
+	require.False(t, retryable.ConsumeAttempt, "waiting on another publisher should not exhaust review attempts")
+	require.Equal(t, 15*time.Second, *retryable.RetryAfter, "busy publication lock should retry after a bounded delay")
+	require.Equal(t, githubRateLimitMaxRetryDuration, *retryable.MaxRetryDuration, "publication lock retries should retain a finite recovery window")
+}
 
 func TestGitHubRateLimitRetryAfter(t *testing.T) {
 	t.Parallel()

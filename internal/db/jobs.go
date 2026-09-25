@@ -1359,6 +1359,8 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 				j.org_id,
 				j.job_type,
 				j.locked_at,
+				j.lock_token,
+				j.lease_expires_at,
 				COALESCE(sess.snapshot_key, '') AS snapshot_key,
 				CASE
 					WHEN j.job_type IN ('run_agent', 'continue_session') THEN
@@ -1383,16 +1385,24 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 				OR d.id IS NOT NULL
 			  )
 		),
-		reclaimable AS (
-			SELECT id, org_id
-			FROM candidates
+		eligible AS (
+			SELECT * FROM candidates
 			WHERE job_type NOT IN ('run_agent', 'continue_session')
 			   OR org_recovery_rank <= 3
+		),
+		reclaimable AS (
+			SELECT j.id, j.org_id
+			FROM eligible c
+			JOIN jobs j ON j.id = c.id AND j.org_id = c.org_id
+			WHERE j.status = 'running'
+			  AND j.lock_token IS NOT DISTINCT FROM c.lock_token
+			  AND j.lease_expires_at IS NOT DISTINCT FROM c.lease_expires_at
 			ORDER BY
-				CASE WHEN job_type IN ('run_agent', 'continue_session') THEN 0 ELSE 1 END,
-				CASE WHEN snapshot_key <> '' THEN 0 ELSE 1 END,
-				locked_at ASC
+				CASE WHEN c.job_type IN ('run_agent', 'continue_session') THEN 0 ELSE 1 END,
+				CASE WHEN c.snapshot_key <> '' THEN 0 ELSE 1 END,
+				c.locked_at ASC
 			LIMIT $2
+			FOR UPDATE OF j SKIP LOCKED
 		),
 		updated_jobs AS (
 			UPDATE jobs j
@@ -1422,12 +1432,15 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 			  AND s.org_id = uj.org_id
 			  AND s.id = uj.session_id::uuid
 		)
-		SELECT COUNT(*) FROM updated_jobs`
+		SELECT (SELECT COUNT(*) FROM updated_jobs), (SELECT COUNT(*) FROM eligible)`
 
-	var reclaimed int64
-	err := s.db.QueryRow(ctx, query, staleBefore, limit).Scan(&reclaimed)
+	var reclaimed, eligible int64
+	err := s.db.QueryRow(ctx, query, staleBefore, limit).Scan(&reclaimed, &eligible)
 	if err != nil {
 		return 0, fmt.Errorf("reclaim lost running jobs: %w", err)
+	}
+	if eligible > reclaimed && reclaimed < int64(limit) {
+		s.logger.Warn().Int64("eligible_expired_jobs", eligible).Int64("reclaimed_jobs", reclaimed).Int("batch_limit", limit).Msg("recovery left expired jobs pending, possibly held by another transaction")
 	}
 	return reclaimed, nil
 }
