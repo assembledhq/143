@@ -7153,6 +7153,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               onAddThread={openAddThreadDialog}
               onRenameSession={openMobileRenameDialog}
               onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+              allowCloseTabs={!isCodeReviewSession}
               onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
               archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             />
@@ -7275,6 +7276,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               onAddTab={handleCreateThread}
               addTabPending={createThreadMutation.isPending}
               onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+              allowCloseTabs={!isCodeReviewSession}
               onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
               archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
               addTabButtonRef={addTabButtonRef}

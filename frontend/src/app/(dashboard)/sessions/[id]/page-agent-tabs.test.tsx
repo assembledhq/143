@@ -114,8 +114,8 @@ describe('SessionDetailPage agent tabs and threads', () => {
     expect(screen.queryByTestId('session-composer-shell')).not.toBeInTheDocument();
   });
 
-  it('falls back to synthesis after closing an active reviewer while Main is hidden', async () => {
-    const sessionId = 'session-code-review-archive-fallback';
+  it.each(['running', 'completed', 'failed'] as const)('keeps %s code-review tabs open on desktop and mobile', async (status) => {
+    const sessionId = `session-code-review-no-close-${status}`;
     const main: SessionThread = {
       id: 'thread-main', session_id: sessionId, org_id: 'org-1', agent_type: 'codex',
       label: 'Main', status: 'idle', current_turn: 0, created_at: '2026-09-25T00:00:00Z',
@@ -123,35 +123,47 @@ describe('SessionDetailPage agent tabs and threads', () => {
     };
     const reviewer: SessionThread = {
       ...main, id: 'thread-reviewer', agent_type: 'claude_code', label: 'Code review: claude_code',
-      status: 'completed', current_turn: 1, created_at: '2026-09-25T00:01:00Z',
+      status, current_turn: 1, created_at: '2026-09-25T00:01:00Z',
     };
     const synthesis: SessionThread = {
       ...reviewer, id: 'thread-synthesis', agent_type: 'codex', label: 'Code review synthesis: codex',
       created_at: '2026-09-25T00:02:00Z',
     };
-    let threads = [main, reviewer, synthesis];
+    const archiveRequest = vi.fn();
     server.use(
       http.get('/api/v1/sessions/:id', () => HttpResponse.json({
-        data: { ...mockSessions[0], id: sessionId, origin: 'code_review', status: 'completed', threads },
+        data: { ...mockSessions[0], id: sessionId, origin: 'code_review', status, threads: [main, reviewer, synthesis] },
       } satisfies SingleResponse<Session & { threads: SessionThread[] }>)),
       http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ params }) => HttpResponse.json(
-        makeTranscriptWindow(params.threadId === synthesis.id ? [{
-          id: 2, session_id: sessionId, org_id: 'org-1', thread_id: synthesis.id,
-          turn_number: 1, role: 'assistant', content: 'Synthesis result', created_at: '2026-09-25T00:03:00Z',
-        }] : [], []),
+        makeTranscriptWindow([{
+          id: 2, session_id: sessionId, org_id: 'org-1', thread_id: params.threadId as string,
+          turn_number: 1, role: 'assistant',
+          content: params.threadId === synthesis.id ? 'Synthesis result' : 'Reviewer result',
+          created_at: '2026-09-25T00:03:00Z',
+        }], []),
       )),
       http.post('/api/v1/sessions/:id/threads/:threadId/archive', () => {
-        threads = [main, synthesis];
-        return HttpResponse.json({ data: { ...reviewer, archived_at: '2026-09-25T00:04:00Z' } } satisfies SingleResponse<SessionThread>);
+        archiveRequest();
+        return HttpResponse.json({}, { status: 409 });
       }),
     );
 
     const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id={sessionId} />);
-    await user.click(await screen.findByRole('button', { name: 'Close Code review: claude_code tab' }));
 
+    await user.click(await screen.findByRole('tab', { name: /Code review: claude_code/ }));
+    expect(await screen.findByText('Reviewer result')).toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: /Code review synthesis: codex/ }));
     expect(await screen.findByText('Synthesis result')).toBeInTheDocument();
+    expect(screen.queryAllByRole('button', { name: /^Close .* tab$/ })).toEqual([]);
     expect(screen.queryByRole('tab', { name: /^Main/ })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Open session actions' }));
+    const actionsSheet = await screen.findByRole('dialog', { name: 'Session actions' });
+    expect(within(actionsSheet).queryAllByRole('button', { name: /^Close .* tab$/ })).toEqual([]);
+    await user.click(within(actionsSheet).getByRole('button', { name: /Switch to Code review: claude_code/ }));
+    expect(await screen.findByText('Reviewer result')).toBeInTheDocument();
+    expect(archiveRequest).not.toHaveBeenCalled();
     expect(screen.queryByTestId('session-composer-shell')).not.toBeInTheDocument();
   });
 
