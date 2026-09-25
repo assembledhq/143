@@ -1041,25 +1041,34 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 		return err
 	}
 
-	// Seed a primary thread row so the multi-tab UI (AgentTabStrip) has
-	// something to render and the worker thread-attribution path has a
-	// destination from turn 1. Done in the same transaction so the invariant
+	// Seed a primary thread row so the worker thread-attribution path has a
+	// destination from turn 1. Code reviews must not inherit the writable
+	// defaults used by ordinary sessions, even when synthesis uses a separate
+	// thread. Done in the same transaction so the invariant
 	// "every session row implies at least one thread row" cannot be violated
 	// by a partial failure between session insert and thread insert.
+	executionMode := models.ThreadExecutionModeWork
+	filesystemMode := models.ThreadFilesystemModeReadWrite
+	if run.Origin == models.SessionOriginCodeReview {
+		executionMode = models.ThreadExecutionModeReview
+		filesystemMode = models.ThreadFilesystemModeReadOnly
+	}
 	var primaryThreadID uuid.UUID
 	if err := q.QueryRow(ctx, `
 		INSERT INTO session_threads (
-			session_id, org_id, agent_type, model_override, label, status
+			session_id, org_id, agent_type, model_override, label, status, execution_mode, filesystem_mode
 		)
-		VALUES (@session_id, @org_id, @agent_type, @model_override, @label, @status)
+		VALUES (@session_id, @org_id, @agent_type, @model_override, @label, @status, @execution_mode, @filesystem_mode)
 		RETURNING id
 	`, pgx.NamedArgs{
-		"session_id":     run.ID,
-		"org_id":         run.OrgID,
-		"agent_type":     run.AgentType,
-		"model_override": run.ModelOverride,
-		"label":          "Main",
-		"status":         models.ThreadStatusIdle,
+		"session_id":      run.ID,
+		"org_id":          run.OrgID,
+		"agent_type":      run.AgentType,
+		"model_override":  run.ModelOverride,
+		"label":           "Main",
+		"status":          models.ThreadStatusIdle,
+		"execution_mode":  executionMode,
+		"filesystem_mode": filesystemMode,
 	}).Scan(&primaryThreadID); err != nil {
 		return fmt.Errorf("insert primary session thread: %w", err)
 	}

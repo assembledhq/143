@@ -58,6 +58,101 @@ vi.mock('next/image', () => ({
 installSessionDetailPageTestHooks({ toast, routerPush });
 
 describe('SessionDetailPage agent tabs and threads', () => {
+  it('hides an unused code-review Main tab and opens the synthesis thread', async () => {
+    const sessionId = 'session-code-review-synthesis-tabs';
+    const main: SessionThread = {
+      id: 'thread-main', session_id: sessionId, org_id: 'org-1', agent_type: 'codex',
+      label: 'Main', status: 'idle', current_turn: 0, created_at: '2026-09-25T00:00:00Z',
+      cost_cents: 0, pending_message_count: 0,
+    };
+    const synthesis: SessionThread = {
+      ...main, id: 'thread-synthesis', label: 'Code review synthesis: codex',
+      status: 'running', current_turn: 1, created_at: '2026-09-25T00:01:00Z',
+      execution_mode: 'review', filesystem_mode: 'read_only',
+    };
+    const reviewer: SessionThread = {
+      ...synthesis, id: 'thread-reviewer', label: 'Code review: claude_code',
+      agent_type: 'claude_code', status: 'completed',
+    };
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({
+        data: { ...mockSessions[0], id: sessionId, origin: 'code_review', status: 'running', threads: [main, reviewer, synthesis] },
+      } satisfies SingleResponse<Session & { threads: SessionThread[] }>)),
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ params }) => HttpResponse.json(
+        makeTranscriptWindow(params.threadId === synthesis.id ? [{
+          id: 1, session_id: sessionId, org_id: 'org-1', thread_id: synthesis.id,
+          turn_number: 1, role: 'assistant', content: 'Synthesis result', created_at: '2026-09-25T00:02:00Z',
+        }] : [], []),
+      )),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    const synthesisTab = await screen.findByRole('tab', { name: /Code review synthesis: codex/ });
+    expect(screen.queryByRole('tab', { name: /^Main/ })).not.toBeInTheDocument();
+    await user.click(synthesisTab);
+    expect(await screen.findByText('Synthesis result')).toBeInTheDocument();
+  });
+
+  it.each(['running', 'failed'] as const)('shows an empty state when a %s code review has only unused Main', async (status) => {
+    const sessionId = `session-code-review-main-only-${status}`;
+    const main: SessionThread = {
+      id: 'thread-main', session_id: sessionId, org_id: 'org-1', agent_type: 'codex',
+      label: 'Main', status: 'idle', current_turn: 0, created_at: '2026-09-25T00:00:00Z',
+      cost_cents: 0, pending_message_count: 0,
+    };
+    server.use(http.get('/api/v1/sessions/:id', () => HttpResponse.json({
+      data: { ...mockSessions[0], id: sessionId, origin: 'code_review', status, threads: [main] },
+    } satisfies SingleResponse<Session & { threads: SessionThread[] }>)));
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    expect(await screen.findByText('No agent tabs for this session')).toBeInTheDocument();
+    expect(screen.queryByText('Loading thread...')).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText('No review threads are available.')).toBeDisabled();
+  });
+
+  it('falls back to synthesis after closing an active reviewer while Main is hidden', async () => {
+    const sessionId = 'session-code-review-archive-fallback';
+    const main: SessionThread = {
+      id: 'thread-main', session_id: sessionId, org_id: 'org-1', agent_type: 'codex',
+      label: 'Main', status: 'idle', current_turn: 0, created_at: '2026-09-25T00:00:00Z',
+      cost_cents: 0, pending_message_count: 0,
+    };
+    const reviewer: SessionThread = {
+      ...main, id: 'thread-reviewer', agent_type: 'claude_code', label: 'Code review: claude_code',
+      status: 'completed', current_turn: 1, created_at: '2026-09-25T00:01:00Z',
+    };
+    const synthesis: SessionThread = {
+      ...reviewer, id: 'thread-synthesis', agent_type: 'codex', label: 'Code review synthesis: codex',
+      created_at: '2026-09-25T00:02:00Z',
+    };
+    let threads = [main, reviewer, synthesis];
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({
+        data: { ...mockSessions[0], id: sessionId, origin: 'code_review', status: 'completed', threads },
+      } satisfies SingleResponse<Session & { threads: SessionThread[] }>)),
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ params }) => HttpResponse.json(
+        makeTranscriptWindow(params.threadId === synthesis.id ? [{
+          id: 2, session_id: sessionId, org_id: 'org-1', thread_id: synthesis.id,
+          turn_number: 1, role: 'assistant', content: 'Synthesis result', created_at: '2026-09-25T00:03:00Z',
+        }] : [], []),
+      )),
+      http.post('/api/v1/sessions/:id/threads/:threadId/archive', () => {
+        threads = [main, synthesis];
+        return HttpResponse.json({ data: { ...reviewer, archived_at: '2026-09-25T00:04:00Z' } } satisfies SingleResponse<SessionThread>);
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+    await user.click(await screen.findByRole('button', { name: 'Close Code review: claude_code tab' }));
+
+    expect(await screen.findByText('Synthesis result')).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: /^Main/ })).not.toBeInTheDocument();
+  });
+
   it('reconciles duplicated, out-of-order, and missed activity lifecycle events from the durable transcript', async () => {
     const sessionId = 'session-activity-lifecycle';
     const thread: SessionThread = {

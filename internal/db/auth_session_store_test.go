@@ -366,7 +366,8 @@ func TestSessionStore_Create(t *testing.T) {
 	// AnyArg() matchers. Order mirrors the named-args block in
 	// SessionStore.Create.
 	mock.ExpectQuery("INSERT INTO session_threads").
-		WithArgs(generatedID, orgID, models.AgentType("claude_code"), &modelOverride, "Main", models.ThreadStatusIdle).
+		WithArgs(generatedID, orgID, models.AgentType("claude_code"), &modelOverride, "Main", models.ThreadStatusIdle,
+			models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(threadID))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -427,7 +428,8 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 	// changes any of these defaults is caught here as well as in the
 	// happy-path Create test.
 	mock.ExpectQuery("INSERT INTO session_threads").
-		WithArgs(generatedID, orgID, models.AgentType("claude_code"), (*string)(nil), "Main", models.ThreadStatusIdle).
+		WithArgs(generatedID, orgID, models.AgentType("claude_code"), (*string)(nil), "Main", models.ThreadStatusIdle,
+			models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 
@@ -437,6 +439,53 @@ func TestSessionStore_Create_AllowsNilIssueID(t *testing.T) {
 	require.Equal(t, now, run.CreatedAt, "should set the created_at timestamp on the agent run")
 	require.Nil(t, run.PrimaryIssueID, "Create should keep the primary issue unset for issue-less sessions")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_Create_CodeReviewPrimaryIsReadOnly(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	now := time.Now()
+	generatedID := uuid.New()
+	threadID := uuid.New()
+	orgID := uuid.New()
+	run := &models.Session{
+		OrgID:         orgID,
+		Origin:        models.SessionOriginCodeReview,
+		AgentType:     models.AgentTypeCodex,
+		Status:        models.SessionStatusIdle,
+		AutonomyLevel: "supervised",
+		TokenMode:     models.SessionTokenModeLow,
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(generatedID, now, now))
+	mock.ExpectQuery("INSERT INTO session_threads").
+		WithArgs(generatedID, orgID, models.AgentTypeCodex, (*string)(nil), "Main", models.ThreadStatusIdle,
+			models.ThreadExecutionModeReview, models.ThreadFilesystemModeReadOnly).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(threadID))
+	mock.ExpectCommit()
+
+	err = store.Create(context.Background(), run)
+	require.NoError(t, err, "code review session creation should succeed")
+	require.Equal(t, &threadID, run.PrimaryThreadID, "code review should keep a primary thread for attribution")
+	require.NoError(t, mock.ExpectationsWereMet(), "code review primary thread should be review-only and read-only")
 }
 
 func TestSessionStore_Create_RollsBackWhenPrimaryLinkInsertFails(t *testing.T) {
@@ -482,7 +531,8 @@ func TestSessionStore_Create_RollsBackWhenPrimaryLinkInsertFails(t *testing.T) {
 	// also corrupts the thread INSERT's defaults (label, status, mirrored
 	// agent_type) is caught here.
 	mock.ExpectQuery("INSERT INTO session_threads").
-		WithArgs(generatedID, orgID, models.AgentType("claude_code"), (*string)(nil), "Main", models.ThreadStatusIdle).
+		WithArgs(generatedID, orgID, models.AgentType("claude_code"), (*string)(nil), "Main", models.ThreadStatusIdle,
+			models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).

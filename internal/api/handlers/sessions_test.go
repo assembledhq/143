@@ -1132,7 +1132,7 @@ func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now t
 		WithArgs(sessionAnyArgs(39)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectQuery("INSERT INTO session_threads").
-		WithArgs(sessionAnyArgs(6)...).
+		WithArgs(sessionAnyArgs(8)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
 }
@@ -1143,7 +1143,7 @@ func expectIssueSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now ti
 		WithArgs(sessionAnyArgs(39)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectQuery("INSERT INTO session_threads").
-		WithArgs(sessionAnyArgs(6)...).
+		WithArgs(sessionAnyArgs(8)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(sessionAnyArgs(4)...).
