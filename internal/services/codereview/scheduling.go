@@ -427,6 +427,19 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 			state.RetryAt = nil
 			return db.ResolveCodeReviewRequests(ctx, tx, input.OrgID, input.PullRequestID, state.Generation, nil, "cancelled")
 		}
+		// A stopped automatic restart chain stays stopped on the same revision.
+		// Explicit requests and a new head/base pass through normal admission.
+		if !input.ExplicitRequest && !changed && latestErr == nil && latest.StatusCode != nil &&
+			*latest.StatusCode == models.CodeReviewStatusCodeLoopDetected && latest.HeadSHA == snapshot.HeadSHA && latest.BaseSHA == snapshot.BaseSHA {
+			state.State = models.CodeReviewScheduleIdle
+			state.WaitReason = models.CodeReviewWaitNone
+			state.PendingInput = nil
+			state.PendingRequestID = nil
+			state.FirstPendingAt = nil
+			state.EligibleAt = nil
+			state.RetryAt = nil
+			return nil
+		}
 		policy, err := scoped.policies.ResolvePolicy(ctx, input.OrgID)
 		if err != nil {
 			return err

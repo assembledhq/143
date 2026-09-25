@@ -678,6 +678,18 @@ func (s *Service) FallbackAssessmentToFull(ctx context.Context, orgID, assessmen
 	if err != nil {
 		return err
 	}
+	if a.ReviewScope == models.CodeReviewScopeFull {
+		const restartLimit = 3
+		const reason = "Review cancelled after three consecutive attempts could not publish on unchanged analysis inputs. Push a new revision or explicitly request a fresh review to retry."
+		stopped, err := s.scheduling.store.StopFullReviewFallbackLoop(ctx, orgID, assessmentID, restartLimit, reason)
+		if err != nil {
+			return err
+		}
+		if stopped {
+			s.logger.Warn().Str("org_id", orgID.String()).Str("assessment_id", assessmentID.String()).Str("pull_request_id", a.PullRequestID.String()).Msg("cancelled automatic code review restart loop")
+			return nil
+		}
+	}
 	if (a.ReviewScope != models.CodeReviewScopeEvidenceOnly && a.ReviewScope != models.CodeReviewScopeFull) || (a.Status != models.CodeReviewAssessmentFailed && a.Status != models.CodeReviewAssessmentCompleted && a.Status != models.CodeReviewAssessmentSuperseded) {
 		return errors.New("assessment must be terminal before a full fallback")
 	}

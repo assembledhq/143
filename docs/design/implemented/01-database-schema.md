@@ -717,7 +717,7 @@ compare decisions against the policy active at the time.
 | trigger_source | text | Explicit reviewer or reserved automatic trigger source |
 | status | text | `queued`, `running`, `completed`, `failed`, `stale`, `cancelled` |
 | phase | text | Current operational phase while active |
-| status_code | text | Machine-readable retry/failure state |
+| status_code | text | Nullable retry/failure state: `github_rate_limited`, `github_unavailable`, `reviewer_failed`, `worker_failed`, or `review_loop_detected` (migration 000299) |
 | status_message | text | Operator-facing operational detail |
 | retry_at | timestamptz | Next automatic retry time |
 | last_error_at | timestamptz | Most recent operational failure |
