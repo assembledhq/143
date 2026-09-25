@@ -542,6 +542,11 @@ describe("visibleSessionThreads", () => {
   ])("$name", ({ origin, main: candidate, expected }) => {
     expect(visibleSessionThreads(origin, [candidate, reviewer])).toEqual(expected);
   });
+
+  it("keeps a later user-created thread named Main", () => {
+    const addedMain = { ...main, id: "added-main", created_at: "2026-01-01T00:02:00.000Z" };
+    expect(visibleSessionThreads("code_review", [main, reviewer, addedMain])).toEqual([reviewer, addedMain]);
+  });
 });
 
 describe("hasCleanReviewLoopForSnapshot", () => {

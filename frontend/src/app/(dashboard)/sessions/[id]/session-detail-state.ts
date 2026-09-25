@@ -330,10 +330,11 @@ function threadMatchesPendingPreview(thread: SessionThread, pending: PendingThre
 
 // Built-in code reviews seed a primary thread for backend attribution. Modern
 // reviews run their work in explicit reviewer and synthesis threads, leaving
-// that primary thread empty. Keep older Main tabs that actually ran a turn.
+// that primary thread empty. The seed is the first thread returned by the API;
+// keep older Main tabs that ran a turn and later user-created tabs named Main.
 export function visibleSessionThreads(origin: string | undefined, threads: SessionThread[]): SessionThread[] {
   if (origin !== "code_review") return threads;
-  return threads.filter((thread) => !(
+  return threads.filter((thread, index) => !(index === 0 &&
     thread.label === "Main" &&
     thread.status === "idle" &&
     thread.current_turn === 0 &&

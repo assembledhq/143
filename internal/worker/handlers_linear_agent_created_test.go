@@ -126,10 +126,7 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(sessionID, now, now))
 		mock.ExpectQuery("INSERT INTO session_threads").
-			WithArgs(
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			).
+			WithArgs(workerAnyArgs(8)...).
 			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(primaryThreadID))
 		mock.ExpectExec("INSERT INTO session_issue_links").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -190,10 +187,7 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(sessionID, now, now))
 		mock.ExpectQuery("INSERT INTO session_threads").
-			WithArgs(
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			).
+			WithArgs(workerAnyArgs(8)...).
 			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 		mock.ExpectExec("INSERT INTO session_issue_links").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -687,10 +681,7 @@ func TestHandleLinearAgentCreatedMapsCreatorEmailToSessionTrigger(t *testing.T) 
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 			AddRow(sessionID, now, now))
 	mock.ExpectQuery("INSERT INTO session_threads").
-		WithArgs(
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-		).
+		WithArgs(workerAnyArgs(8)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(threadID))
 	mock.ExpectExec("INSERT INTO session_issue_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).

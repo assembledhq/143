@@ -5558,18 +5558,23 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
     [comments],
   );
-  const isRestoringActiveThread = threads.length > 0 && activeThread === null;
+  const isRestoringActiveThread = chromeThreads.length > 0 && activeThread === null;
+  const hasNoReviewThreads = session?.origin === "code_review" && chromeThreads.length === 0;
   // Composer gating: messages may be sent at any point while the session or
   // thread is running. The backend queues mid-turn sends and the orchestrator
   // drains the queue once the in-flight turn completes. Pending/skipped at
   // the session level and a destroyed sandbox still block — those are
   // genuinely unrecoverable, not just busy.
-  const composerCanSendMessage = !isRestoringActiveThread &&
+  const composerCanSendMessage = !isRestoringActiveThread && !hasNoReviewThreads &&
     session?.status !== "skipped" &&
     session?.status !== "pending" &&
     session?.sandbox_state !== "destroyed";
-  const composerUnavailableReason = isRestoringActiveThread ? "Thread is still loading." : undefined;
-  const composerPlaceholderOverride = isRestoringActiveThread ? "Loading thread..." : undefined;
+  const composerUnavailableReason = isRestoringActiveThread
+    ? "Thread is still loading."
+    : hasNoReviewThreads ? "No review threads are available." : undefined;
+  const composerPlaceholderOverride = isRestoringActiveThread
+    ? "Loading thread..."
+    : hasNoReviewThreads ? "No review threads are available." : undefined;
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const runtimeRecoveryActive = session ? isRuntimeRecoveryActive(session) : false;
   const localStopRequested = sessionStopRequest?.sessionId === id && composerIsRunning;
@@ -7283,7 +7288,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           {/* Chat panel stays mounted after first chat exposure to preserve scroll and live transcript state. */}
           {hasMountedChatPanel ? (
             <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
-              {threads.length > 0 && activeThread === null ? (
+              {isRestoringActiveThread ? (
                 <div className="flex h-full items-center justify-center">
                   <div className="text-center space-y-2">
                     <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
