@@ -91,7 +91,7 @@ func verifyFullAssessmentApproval(ctx context.Context, stores *Stores, services 
 	return nil
 }
 
-func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, assessment *models.CodeReviewAssessment, decision models.CodeReviewDecision, body string) (codeReviewSubmission, bool, error) {
+func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, assessment *models.CodeReviewAssessment, decision models.CodeReviewDecision, body string, changedFiles []codereviewsvc.PullRequestFile) (codeReviewSubmission, bool, error) {
 	if assessment != nil {
 		job.OutputKey = assessment.PublicationKey
 	}
@@ -177,7 +177,7 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 			return codereviewsvc.SubmitReviewResult{}, false, nil
 		}
 	}
-	submission, submitted, err := submitCodeReviewToGitHubWithOptions(ctx, stores, services, job, metadata, decision, body, preSubmit, assessment != nil)
+	submission, submitted, err := submitCodeReviewToGitHubWithOptions(ctx, stores, services, job, metadata, decision, body, changedFiles, preSubmit, assessment != nil)
 	if err != nil {
 		if assessment != nil && (errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable)) {
 			if supersedeErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); supersedeErr != nil {
@@ -453,7 +453,7 @@ func resumeStagedFullAssessment(ctx context.Context, stores *Stores, services *S
 			return err
 		}
 	}
-	submission, _, err := submitFullReviewWithAssessment(ctx, stores, services, job, metadata, &assessment, *assessment.Decision, *assessment.RenderedBody)
+	submission, _, err := submitFullReviewWithAssessment(ctx, stores, services, job, metadata, &assessment, *assessment.Decision, *assessment.RenderedBody, changedFiles)
 	if err != nil {
 		return err
 	}

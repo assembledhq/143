@@ -473,6 +473,12 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("reload code review changed files before decision: %w", err)
 		}
+		if capturedAssessment != nil {
+			// Anchor findings to the captured review input. The freshness checks
+			// below prevent publishing if that exact diff is no longer current.
+			changedFiles = capturedAssessment.Files
+			changedFilesAvailable = true
+		}
 		// Team membership can change while reviewer agents run. Recheck it
 		// immediately before the final decision instead of treating the
 		// synthesis-time lookup as captured, immutable policy evidence.
@@ -537,7 +543,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("set code review publishing phase: %w", err)
 		}
 		publicationStage := observability.BeginStage(true, reviewLog, "github_publication")
-		submission, submitted, err := submitFullReviewWithAssessment(ctx, stores, services, job, metadata, assessment, decision.Decision, body)
+		submission, submitted, err := submitFullReviewWithAssessment(ctx, stores, services, job, metadata, assessment, decision.Decision, body, changedFiles)
 		publicationStage.End(codeReviewStageOutcome(ctx, err))
 		if err != nil {
 			if errors.Is(err, errCodeReviewPublicationSuperseded) {
@@ -941,7 +947,7 @@ func codeReviewDeadLetterReason(err error) string {
 	} else if err != nil && strings.TrimSpace(err.Error()) != "" {
 		detail = strings.TrimSpace(err.Error())
 	}
-	reason := "code review job exhausted retries: " + detail
+	reason := "code review job failed: " + detail
 	runes := []rune(reason)
 	if len(runes) > maxRunes {
 		reason = string(runes[:maxRunes-1]) + "…"
@@ -3519,7 +3525,7 @@ func completeCodeReviewAfterStableDeterministicFailure(
 		}
 	}
 	publicationStage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "github_publication")
-	submission, submitted, err := submitFullReviewWithAssessment(ctx, stores, services, job, metadata, assessment, decision.Decision, body)
+	submission, submitted, err := submitFullReviewWithAssessment(ctx, stores, services, job, metadata, assessment, decision.Decision, body, changedFiles)
 	publicationStage.End(codeReviewStageOutcome(ctx, err))
 	if err != nil {
 		if errors.Is(err, errCodeReviewPublicationSuperseded) {
@@ -4398,70 +4404,85 @@ func codeReviewFindingsOnChangedLines(findings []models.CodeReviewFinding, chang
 	}
 	out := make([]models.CodeReviewFinding, 0, len(findings))
 	for _, finding := range findings {
-		if codeReviewFindingOnChangedLine(finding, changedLines) {
+		if codeReviewFindingInlineLine(finding, changedLines) > 0 {
 			out = append(out, finding)
 		}
 	}
 	return out
 }
 
-func codeReviewFindingOnChangedLine(finding models.CodeReviewFinding, changedLines map[string]map[int]struct{}) bool {
+// Use the same changed-line anchor for selection and publication. A finding's
+// range may overlap the diff even when its first line is outside every hunk.
+// Keep the original range and dedupe key intact in the stored finding.
+func codeReviewFindingInlineLine(finding models.CodeReviewFinding, changedLines map[string]map[int]struct{}) int {
 	if finding.Path == nil || finding.StartLine == nil || *finding.StartLine <= 0 {
-		return false
+		return 0
 	}
 	lines, ok := changedLines[filepath.ToSlash(strings.TrimSpace(*finding.Path))]
 	if !ok || len(lines) == 0 {
-		return false
+		return 0
 	}
 	start := *finding.StartLine
 	end := start
 	if finding.EndLine != nil && *finding.EndLine >= start {
 		end = *finding.EndLine
 	}
-	for line := start; line <= end; line++ {
-		if _, ok := lines[line]; ok {
-			return true
+	anchor := 0
+	// Iterate the bounded diff instead of a model-provided line range.
+	for line := range lines {
+		if line >= start && line <= end && (anchor == 0 || line < anchor) {
+			anchor = line
 		}
 	}
-	return false
+	return anchor
 }
 
 func codeReviewChangedLineSet(files []codereviewsvc.PullRequestFile) map[string]map[int]struct{} {
 	changed := make(map[string]map[int]struct{})
 	for _, file := range files {
 		path := filepath.ToSlash(strings.TrimSpace(file.Filename))
-		patch := strings.TrimSpace(file.Patch)
-		if path == "" || patch == "" {
+		patch := file.Patch
+		if path == "" || strings.TrimSpace(patch) == "" {
 			continue
 		}
 		lines := make(map[int]struct{})
 		newLine := 0
+		remaining := 0
 		for _, diffLine := range strings.Split(patch, "\n") {
-			if match := codeReviewDiffHunkPattern.FindStringSubmatch(diffLine); len(match) == 2 {
+			if strings.HasPrefix(diffLine, "@@") {
+				newLine, remaining = 0, 0
+			}
+			if match := codeReviewDiffHunkPattern.FindStringSubmatch(diffLine); len(match) == 3 {
 				parsed, err := strconv.Atoi(match[1])
-				if err == nil {
-					newLine = parsed
+				if err != nil {
+					continue
 				}
+				count := 1
+				if match[2] != "" {
+					count, err = strconv.Atoi(match[2])
+					if err != nil {
+						continue
+					}
+				}
+				newLine, remaining = parsed, count
 				continue
 			}
-			if newLine <= 0 || strings.HasPrefix(diffLine, `\`) {
+			if newLine <= 0 || remaining <= 0 || strings.HasPrefix(diffLine, `\`) || diffLine == "" {
 				continue
 			}
-			if strings.HasPrefix(diffLine, "+++") {
-				continue
-			}
-			if strings.HasPrefix(diffLine, "---") {
-				continue
-			}
-			if strings.HasPrefix(diffLine, "+") {
+			switch diffLine[0] {
+			case '+':
 				lines[newLine] = struct{}{}
-				newLine++
+			case ' ':
+				// Context consumes a right-side line but is not a changed line.
+			case '-':
 				continue
-			}
-			if strings.HasPrefix(diffLine, "-") {
+			default:
+				remaining = 0
 				continue
 			}
 			newLine++
+			remaining--
 		}
 		if len(lines) > 0 {
 			changed[path] = lines
@@ -4475,7 +4496,7 @@ var (
 	codeReviewAttributePattern       = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*)=("(?:\\.|[^"\\])*"|[^\s}]+)`)
 	codeReviewPriorityPattern        = regexp.MustCompile(`(?i)\[P([0-3])\]`)
 	codeReviewLeadingPriorityPattern = regexp.MustCompile(`(?i)^\[P[0-3]\]\s*`)
-	codeReviewDiffHunkPattern        = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
+	codeReviewDiffHunkPattern        = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`)
 )
 
 func parseCodeReviewFindings(output string, changedPaths []string) []models.CodeReviewFinding {
@@ -4711,11 +4732,11 @@ func codeReviewRecommendedHumanReviewers(reasons []models.CodeReviewRiskReason) 
 	return out
 }
 
-func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, decision models.CodeReviewDecision, body string) (codeReviewSubmission, bool, error) {
-	return submitCodeReviewToGitHubWithOptions(ctx, stores, services, job, metadata, decision, body, nil, false)
+func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, decision models.CodeReviewDecision, body string, changedFiles []codereviewsvc.PullRequestFile) (codeReviewSubmission, bool, error) {
+	return submitCodeReviewToGitHubWithOptions(ctx, stores, services, job, metadata, decision, body, changedFiles, nil, false)
 }
 
-func submitCodeReviewToGitHubWithOptions(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, decision models.CodeReviewDecision, body string, preSubmit func(context.Context, db.DBTX, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error), requirePublicationReceipt bool) (codeReviewSubmission, bool, error) {
+func submitCodeReviewToGitHubWithOptions(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, decision models.CodeReviewDecision, body string, changedFiles []codereviewsvc.PullRequestFile, preSubmit func(context.Context, db.DBTX, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error), requirePublicationReceipt bool) (codeReviewSubmission, bool, error) {
 	if services == nil || services.CodeReviews == nil {
 		return codeReviewSubmission{}, false, nil
 	}
@@ -4750,7 +4771,15 @@ func submitCodeReviewToGitHubWithOptions(ctx context.Context, stores *Stores, se
 	if err != nil {
 		return codeReviewSubmission{}, false, fmt.Errorf("list selected code review findings: %w", err)
 	}
-	comments := codeReviewInlineComments(findings)
+	// Staged publication recovery runs before the normal diff load. Restore
+	// missing files here so retries use the same inline anchors as first attempts.
+	if changedFiles == nil && len(findings) > 0 {
+		changedFiles, _, err = loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
+		if err != nil {
+			return codeReviewSubmission{}, false, err
+		}
+	}
+	comments := codeReviewInlineComments(findings, changedFiles)
 	submitRequest := codereviewsvc.SubmitReviewRequest{
 		InstallationID:            repo.InstallationID,
 		Repository:                repository,
@@ -4795,7 +4824,7 @@ func submitCodeReviewToGitHubWithOptions(ctx context.Context, stores *Stores, se
 	if _, err := stores.CodeReviews.RecordGitHubReview(ctx, job.OrgID, job.SessionID, result.ID, result.URL, finalReviewBody); err != nil {
 		return codeReviewSubmission{}, true, fmt.Errorf("record submitted code review: %w", err)
 	}
-	markPostedCodeReviewFindings(ctx, stores.CodeReviews, job.OrgID, findings, result.Comments)
+	markPostedCodeReviewFindings(ctx, stores.CodeReviews, job.OrgID, findings, changedFiles, result.Comments)
 	return codeReviewSubmission{
 		GitHubReviewID:    &result.ID,
 		GitHubReviewURL:   &result.URL,
@@ -4830,8 +4859,9 @@ func timePtrValue(value *time.Time) time.Time {
 	return *value
 }
 
-func codeReviewInlineComments(findings []models.CodeReviewFinding) []codereviewsvc.SubmitReviewComment {
+func codeReviewInlineComments(findings []models.CodeReviewFinding, changedFiles []codereviewsvc.PullRequestFile) []codereviewsvc.SubmitReviewComment {
 	comments := make([]codereviewsvc.SubmitReviewComment, 0, len(findings))
+	changedLines := codeReviewChangedLineSet(changedFiles)
 	for _, finding := range findings {
 		if !finding.Severity.IsBlocking() {
 			continue
@@ -4839,7 +4869,8 @@ func codeReviewInlineComments(findings []models.CodeReviewFinding) []codereviews
 		if finding.GitHubCommentID != nil {
 			continue
 		}
-		if finding.Path == nil || strings.TrimSpace(*finding.Path) == "" || finding.StartLine == nil || *finding.StartLine <= 0 {
+		line := codeReviewFindingInlineLine(finding, changedLines)
+		if line == 0 {
 			continue
 		}
 		body := codeReviewInlineCommentBody(finding)
@@ -4847,8 +4878,8 @@ func codeReviewInlineComments(findings []models.CodeReviewFinding) []codereviews
 			continue
 		}
 		comments = append(comments, codereviewsvc.SubmitReviewComment{
-			Path:      *finding.Path,
-			Line:      *finding.StartLine,
+			Path:      filepath.ToSlash(strings.TrimSpace(*finding.Path)),
+			Line:      line,
 			Body:      body,
 			DedupeKey: finding.DedupeKey,
 		})
@@ -4882,27 +4913,31 @@ func codeReviewPriorityPrefix(severity models.CodeReviewFindingSeverity) string 
 	}
 }
 
-func markPostedCodeReviewFindings(ctx context.Context, store *db.CodeReviewStore, orgID uuid.UUID, findings []models.CodeReviewFinding, posted []codereviewsvc.SubmitReviewPostedComment) {
+func markPostedCodeReviewFindings(ctx context.Context, store *db.CodeReviewStore, orgID uuid.UUID, findings []models.CodeReviewFinding, changedFiles []codereviewsvc.PullRequestFile, posted []codereviewsvc.SubmitReviewPostedComment) {
 	if store == nil || len(findings) == 0 || len(posted) == 0 {
 		return
 	}
 	used := make(map[int]struct{})
+	changedLines := codeReviewChangedLineSet(changedFiles)
 	for _, finding := range findings {
 		if finding.ID == uuid.Nil || finding.GitHubCommentID != nil || finding.Path == nil || finding.StartLine == nil {
 			continue
 		}
 		body := codeReviewInlineCommentBody(finding)
+		anchor := codeReviewFindingInlineLine(finding, changedLines)
 		for idx, comment := range posted {
 			if _, ok := used[idx]; ok {
 				continue
 			}
 			if comment.ID == 0 ||
-				comment.Line != *finding.StartLine ||
+				(strings.TrimSpace(comment.DedupeKey) == "" && (anchor == 0 || comment.Line != anchor)) ||
 				!strings.EqualFold(strings.TrimSpace(comment.Path), strings.TrimSpace(*finding.Path)) ||
 				!codeReviewPostedCommentMatchesFinding(comment, finding, body) {
 				continue
 			}
-			if _, err := store.MarkFindingPosted(ctx, orgID, finding.ID, comment.ID); err == nil {
+			if _, err := store.MarkFindingPosted(ctx, orgID, finding.ID, comment.ID); err != nil {
+				zerolog.Ctx(ctx).Warn().Err(err).Str("finding_id", finding.ID.String()).Int64("github_comment_id", comment.ID).Msg("failed to record posted code review finding")
+			} else {
 				used[idx] = struct{}{}
 			}
 			break
@@ -4911,8 +4946,8 @@ func markPostedCodeReviewFindings(ctx context.Context, store *db.CodeReviewStore
 }
 
 func codeReviewPostedCommentMatchesFinding(comment codereviewsvc.SubmitReviewPostedComment, finding models.CodeReviewFinding, body string) bool {
-	if strings.TrimSpace(comment.DedupeKey) != "" && strings.TrimSpace(comment.DedupeKey) == strings.TrimSpace(finding.DedupeKey) {
-		return true
+	if strings.TrimSpace(comment.DedupeKey) != "" {
+		return strings.TrimSpace(comment.DedupeKey) == strings.TrimSpace(finding.DedupeKey)
 	}
 	posted := strings.TrimSpace(comment.Body)
 	body = strings.TrimSpace(body)

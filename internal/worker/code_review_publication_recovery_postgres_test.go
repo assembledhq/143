@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,13 +11,128 @@ import (
 	"testing"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+type inlineRecoveryPublisher struct {
+	files        []codereviewsvc.PullRequestFile
+	fileErr      error
+	fileRequests []codereviewsvc.PullRequestFilesRequest
+	requests     []codereviewsvc.SubmitReviewRequest
+}
+
+func (p *inlineRecoveryPublisher) ListPullRequestFiles(_ context.Context, request codereviewsvc.PullRequestFilesRequest) ([]codereviewsvc.PullRequestFile, error) {
+	p.fileRequests = append(p.fileRequests, request)
+	return p.files, p.fileErr
+}
+
+func (p *inlineRecoveryPublisher) SubmitReview(_ context.Context, request codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, error) {
+	p.requests = append(p.requests, request)
+	comments := make([]codereviewsvc.SubmitReviewPostedComment, 0, len(request.Comments))
+	for _, comment := range request.Comments {
+		comments = append(comments, codereviewsvc.SubmitReviewPostedComment{ID: 123, Path: comment.Path, Line: comment.Line, Body: comment.Body, DedupeKey: comment.DedupeKey})
+	}
+	return codereviewsvc.SubmitReviewResult{ID: 77, URL: "https://example.invalid/review/77", Body: request.Body, Comments: comments}, nil
+}
+
+//nolint:paralleltest // Concurrent full migration chains exhaust the shared PostgreSQL lock budget.
+func TestStagedFullPublicationRecoveryPreservesInlineCommentsPostgres(t *testing.T) {
+	// Each case applies the full migration chain to its own schema, serially.
+	if os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Skip("set TEST_DATABASE_URL for PostgreSQL recovery proof")
+	}
+	tests := []struct {
+		name             string
+		publicationState models.CodeReviewPublicationState
+		fileFailure      bool
+	}{
+		{name: "retry before publication reservation", publicationState: models.CodeReviewPublicationNotStarted},
+		{name: "retry after publication reservation", publicationState: models.CodeReviewPublicationReserved},
+		{name: "retry after uncertain publication", publicationState: models.CodeReviewPublicationUncertain},
+		{name: "diff fetch failure remains retryable", publicationState: models.CodeReviewPublicationUncertain, fileFailure: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := fullRecoveryPostgresPool(t, ctx)
+			org, integration, repo, pr, policy, session, metadata, assessment, findingID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			jobID, lease := uuid.New(), uuid.New()
+			repoName, key := "test/inline-recovery", "inline-publication-key"
+			manifest := codereviewsvc.ReviewInputManifest{
+				InputVersion: codereviewsvc.ReviewInputManifestVersion, ReuseEligible: true,
+				InputDigest: "all", CodeDigest: "code", ContractDigest: "contract", IntentDigest: "intent", VisualDigest: "visual", RequestDigest: "request", GateDigest: "gates",
+				Code: codereviewsvc.ReviewCodeInput{HeadSHA: "head", BaseSHA: "base", BaseRef: "main"},
+			}
+			manifestJSON, err := json.Marshal(manifest)
+			require.NoError(t, err, "encode immutable assessment inputs")
+			finding := models.CodeReviewFinding{Path: stringPtr("file.go"), StartLine: intPtr(347), EndLine: intPtr(354), Severity: models.CodeReviewFindingSeverityHigh, Summary: "Unresolved blocker", Body: "Fix this defect", DedupeKey: "stable-key"}
+			body := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{Decision: models.CodeReviewDecisionNeedsHumanReview, Findings: []models.CodeReviewFinding{finding}})
+			status := models.CodeReviewAssessmentPublishing
+			if tt.publicationState == models.CodeReviewPublicationNotStarted {
+				status = models.CodeReviewAssessmentRunning
+			}
+			for _, seed := range []struct {
+				sql  string
+				args []any
+			}{
+				{`INSERT INTO organizations(id,name) VALUES($1,'Inline Recovery Test')`, []any{org}},
+				{`INSERT INTO integrations(id,org_id,provider) VALUES($1,$2,'github')`, []any{integration, org}},
+				{`INSERT INTO repositories(id,org_id,integration_id,github_id,full_name,clone_url,installation_id) VALUES($1,$2,$3,1,$4,'https://example.invalid/recovery.git',1)`, []any{repo, org, integration, repoName}},
+				{`INSERT INTO sessions(id,org_id,origin,status) VALUES($1,$2,'code_review','idle')`, []any{session, org}},
+				{`INSERT INTO pull_requests(id,org_id,github_pr_number,github_pr_url,github_repo,title,head_sha,base_sha) VALUES($1,$2,7,'https://example.invalid/pr/7',$3,'Inline recovery','head','base')`, []any{pr, org, repoName}},
+				{`INSERT INTO code_review_policies(id,org_id,repository_id,version,approval_mode,description_policy,risk_policy,agent_roster,review_instructions,automated_approval_policy,continuation_policy) VALUES($1,$2,NULL,1,'approve_acceptable','{}','{}','{}','','','{}')`, []any{policy, org}},
+				{`INSERT INTO code_review_session_metadata(id,org_id,session_id,repository_id,pull_request_id,policy_id,base_sha,head_sha,trigger_source,status,review_output_key,additions,deletions) VALUES($1,$2,$3,$4,$5,$6,'base','head','slash_command','failed',$7,1,1)`, []any{metadata, org, session, repo, pr, policy, key}},
+				{`INSERT INTO code_review_revision_assessments(id,org_id,repository_id,repository_full_name,pull_request_id,metadata_id,session_id,policy_id,generation,base_sha,base_ref,head_sha,input_version,code_digest,contract_digest,intent_digest,visual_digest,request_digest,gate_digest,input_digest,input_manifest,review_scope,route_reason,coverage_complete,status,result_origin,decision,acceptable,risk_reason_details,structured_outcome,rendered_body,publication_key,publication_state,submitted_commit_sha) VALUES($1,$2,$3,$4,$5,$6,$7,$8,1,'base','main','head',$9,'code','contract','intent','visual','request','gates','all',$10,'full','initial_full',false,$11,'executed','needs_human_review',false,'[]','{}',$12,$13,$14,'head')`, []any{assessment, org, repo, repoName, pr, metadata, session, policy, manifest.InputVersion, manifestJSON, status, body, key, tt.publicationState}},
+				{`INSERT INTO code_review_findings(id,org_id,session_id,dedupe_key,severity,confidence,path,start_line,end_line,summary,body,selected_for_inline) VALUES($1,$2,$3,'stable-key','high','high','file.go',347,354,'Unresolved blocker','Fix this defect',true)`, []any{findingID, org, session}},
+				{`INSERT INTO code_review_pr_state(org_id,repository_id,pull_request_id,head_sha,base_sha,base_ref,active_session_id,active_assessment_id,state) VALUES($1,$2,$3,'head','base','main',$4,$5,'running')`, []any{org, repo, pr, session, assessment}},
+				{`INSERT INTO jobs(id,org_id,queue,job_type,payload,status,lock_token) VALUES($1,$2,'agent','run_code_review','{}','running',$3)`, []any{jobID, org, lease}},
+			} {
+				_, err := pool.Exec(ctx, seed.sql, seed.args...)
+				require.NoError(t, err, "seed staged publication recovery state")
+			}
+			files := []codereviewsvc.PullRequestFile{{Filename: "file.go", Patch: "@@ -351 +351 @@\n-old\n+new", Additions: 1, Deletions: 1}}
+			publisher := &inlineRecoveryPublisher{files: files}
+			if tt.fileFailure {
+				publisher.fileErr = &ghservice.GitHubAPIError{StatusCode: http.StatusServiceUnavailable}
+			}
+			capture := &fixedRecheckCapture{result: codereviewsvc.AssessmentInputCaptureResult{Manifest: manifest, Policy: models.CodeReviewPolicyRecord{ID: policy}, Files: files}}
+			stores := &Stores{CodeReviews: db.NewCodeReviewStore(pool), CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool), Repositories: db.NewRepositoryStore(pool), PullRequests: db.NewPullRequestStore(pool), ThreadSendTx: pool}
+			services := &Services{CodeReviews: publisher, CodeReviewInputCapture: capture}
+			job := runCodeReviewPayload{OrgID: org, SessionID: session, MetadataID: metadata, RepositoryID: repo, PullRequestID: pr, PolicyID: policy, PolicyVersion: 1, HeadSHA: "head", OutputKey: key}
+			recovered, err := recoverStagedFullAssessment(jobctx.WithJobID(jobctx.WithLockToken(ctx, lease), jobID), stores, services, job)
+			require.True(t, recovered, "staged publication must take the early recovery path")
+			if tt.fileFailure {
+				var retryable *RetryableError
+				require.ErrorAs(t, err, &retryable, "a temporary diff fetch failure must retry instead of publishing without inline comments")
+				require.Empty(t, publisher.requests, "no GitHub publication may occur without the required diff")
+				return
+			}
+			require.NoError(t, err, "staged publication recovery should complete successfully")
+			require.Equal(t, []codereviewsvc.PullRequestFilesRequest{{InstallationID: 1, Repository: repoName, PullNumber: 7}}, publisher.fileRequests, "recovery should restore the missing diff before constructing inline comments")
+			require.Equal(t, []codereviewsvc.SubmitReviewRequest{{
+				InstallationID: 1, Repository: repoName, PullNumber: 7, HeadSHA: "head", OutputKey: key,
+				Decision: codereviewsvc.SubmitReviewDecisionNeedsHumanReview, Body: body, RequirePublicationReceipt: true,
+				Comments: []codereviewsvc.SubmitReviewComment{{Path: "file.go", Line: 351, Body: "[P1] Fix this defect", DedupeKey: "stable-key"}},
+			}}, publisher.requests, "recovery should retain the exact staged decision and publish the blocking finding at its mapped anchor")
+			got, err := stores.CodeReviewAssessments.GetByID(ctx, org, assessment)
+			require.NoError(t, err, "load the completed recovered assessment")
+			require.Equal(t, models.CodeReviewAssessmentCompleted, got.Status, "recovered assessment should complete")
+			require.Equal(t, models.CodeReviewPublicationConfirmed, got.PublicationState, "recovered publication must have a confirmed receipt")
+			var commentID *int64
+			err = pool.QueryRow(ctx, `SELECT github_comment_id FROM code_review_findings WHERE org_id=$1 AND id=$2`, org, findingID).Scan(&commentID)
+			require.NoError(t, err, "load the original finding receipt")
+			require.Equal(t, new(int64(123)), commentID, "the reanchored comment receipt should be stored on the original finding")
+		})
+	}
+}
 
 //nolint:paralleltest // Concurrent full migration chains exhaust the shared PostgreSQL lock budget.
 func TestConfirmedFullPublicationRecoversBeforeTerminalAndHeadChecksPostgres(t *testing.T) {
