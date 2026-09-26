@@ -68,7 +68,7 @@ func TestSessionStreams_CleanupLoopPaginationAndBackoff(t *testing.T) {
 					require.Equal(t, sessionCleanupBatchSize, limit, "every page must remain bounded")
 					deadline, ok := queryCtx.Deadline()
 					require.True(t, ok, "each cleanup page must have a deadline")
-					require.Equal(t, sessionCleanupBatchTimeout, deadline.Sub(time.Now()), "a stalled query must not hold cleanup indefinitely")
+					require.Equal(t, sessionCleanupBatchTimeout, time.Until(deadline), "a stalled query must not hold cleanup indefinitely")
 					if calls == 1 {
 						require.Nil(t, after, "first sweep must start before any cursor")
 						require.Equal(t, sessionCleanupInterval, time.Since(start), "startup must retain the idle delay")
