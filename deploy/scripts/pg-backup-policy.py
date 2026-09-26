@@ -438,8 +438,17 @@ class Policy:
             endpoint = invoke(['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}']).strip()
         require(endpoint.startswith('unix://'), 'restore capacity admission requires a local Docker socket')
         # M2 must use a separate restore host. Even a stopped production
-        # container identifies its Docker daemon as unsafe for this drill.
-        require(not invoke(['docker', 'ps', '-aq', '--filter', 'name=^/' + self.container + '$']).strip(),
+        # container identifies its Docker daemon as unsafe for this drill. List
+        # every name and compare literally, avoiding daemon-side name-filter
+        # regex and leading-slash assumptions. A listing error refuses
+        # admission instead of being interpreted as a missing container.
+        listing = invoke(['docker', 'container', 'ls', '--all', '--format', '{{json .Names}}'])
+        names = set()
+        for line in listing.splitlines():
+            value = json.loads(line)
+            require(isinstance(value, str) and value, 'invalid Docker container name listing')
+            names.update(name.strip().lstrip('/') for name in value.split(','))
+        require(self.container.lstrip('/') not in names,
                 'restore drill requires an isolated Docker host, not the production database host')
         docker_root = Path(invoke(['docker', 'info', '--format', '{{.DockerRootDir}}']).strip())
         require(docker_root.is_absolute() and docker_root.is_dir(), 'cannot inspect local Docker data filesystem')
@@ -463,11 +472,20 @@ class Policy:
         marker = self.state / 'pending.json'
         cleanup = self.state / ('restore-cleanup-' + uuid.uuid4().hex)
         atomic_json(marker, dict(phase='restore', file=archive.name, started_at=now(), cleanup_receipt=cleanup.name))
-        status = run_restore_reader(['bash', str(Path(__file__).with_name('restore-test-body.sh'))],
-                                    dict(os.environ, BACKUP_ARCHIVE=str(archive), RESTORE_CLEANUP_RECEIPT=str(cleanup)))
+        # Replace any previous success before launching the reader. A timeout,
+        # launch failure, or wrapper crash must not leave it as the latest drill.
+        atomic_json(self.state / 'last-restore.json', dict(file=archive.name, started_at=now(),
+                    exit_status=None, cleanup_verified=False, outcome='pending'))
+        try:
+            status = run_restore_reader(['bash', str(Path(__file__).with_name('restore-test-body.sh'))],
+                                        dict(os.environ, BACKUP_ARCHIVE=str(archive), RESTORE_CLEANUP_RECEIPT=str(cleanup)))
+        except (OSError, ValueError, KeyError, TypeError, IndexError, Refused, subprocess.TimeoutExpired) as exc:
+            atomic_json(self.state / 'last-restore.json', dict(file=archive.name, finished_at=now(),
+                        exit_status=1, cleanup_verified=False, outcome='failed', error=str(exc)))
+            raise
         verified = cleanup.exists() and identity(cleanup)['bytes'] == 17 and cleanup.read_text() == 'cleanup-complete\n'
         atomic_json(self.state / 'last-restore.json', dict(file=archive.name, finished_at=now(),
-                    exit_status=status, cleanup_verified=verified))
+                    exit_status=status, cleanup_verified=verified, outcome='succeeded' if status == 0 and verified else 'failed'))
         require(verified, 'restore cleanup unproven; inspect pending operation and owned container')
         # A failed drill with proven cleanup must report failure, but must not
         # suspend unrelated backups indefinitely.

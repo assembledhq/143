@@ -357,7 +357,7 @@ with p.Policy().locked():
 
     def test_restore_admission_refuses_production_and_insufficient_docker_space(self):
         self.archive(1)
-        for present, available, accepted in [('production-id', 100 * policy.GIB, False),
+        for present, available, accepted in [('"143-postgres-1"\n', 100 * policy.GIB, False),
                 ('', 20 * policy.GIB + 199, False), ('', 20 * policy.GIB + 200, True)]:
             with self.subTest(present=present, available=available):
                 p = policy.Policy()
@@ -373,6 +373,32 @@ with p.Policy().locked():
                     reader.assert_not_called()
                     self.assertEqual(invoke.call_count, 1 if present else 2)
                     self.assertFalse((p.state / 'pending.json').exists())
+
+    def test_production_guard_compares_literal_names_and_fails_on_listing_errors(self):
+        self.archive(1)
+        cases = [
+            ('"143-postgres-1"\n', True),
+            ('"/143-postgres-1"\n', True),
+            ('"cache"\n"143-postgres-1,web/db"\n', True),
+            ('"143-postgres-10"\n"unrelated"\n', False),
+            ('', False),
+            ('[]\n', True),
+            ('not-json\n', True),
+            (policy.Refused('listing unavailable'), True),
+        ]
+        for listing, refused in cases:
+            with self.subTest(listing=listing), \
+                    mock.patch.dict(os.environ, DOCKER_HOST='unix:///var/run/docker.sock', DOCKER_CONTEXT=''), \
+                    mock.patch.object(policy, 'invoke', side_effect=[listing, str(self.root)]) as call:
+                record = self.p.inventory(remote=False)[0]
+                if refused:
+                    with self.assertRaises((policy.Refused, ValueError)): self.p.restore_admission(record)
+                    self.assertEqual(call.call_count, 1)
+                else:
+                    self.p.restore_admission(record)
+                self.assertEqual(call.call_args_list[0].args[0],
+                                 ['docker', 'container', 'ls', '--all', '--format', '{{json .Names}}'])
+                self.assertFalse((self.p.state / 'pending.json').exists())
 
     def test_restore_admission_rejects_remote_docker_before_inspecting_local_space(self):
         self.archive(1)
@@ -450,8 +476,9 @@ args = sys.argv[1:]
 with (root / 'calls').open('a') as f: f.write(json.dumps(args) + '\\n')
 cid = 'a' * 64
 if args[0] == 'context': print('unix:///var/run/docker.sock')
-elif args[0] == 'ps':
-    if os.environ['FAKE_CASE'] == 'production': print('production-id')
+elif args[:2] == ['container', 'ls']:
+    assert args == ['container', 'ls', '--all', '--format', '{{json .Names}}']
+    if os.environ['FAKE_CASE'] == 'production': print(json.dumps('143-postgres-1'))
 elif args[0] == 'info': print(root)
 elif args[0] == 'create':
     Path(args[args.index('--cidfile') + 1]).write_text(cid)
@@ -546,11 +573,13 @@ else: sys.exit(99)
                                 capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 1)
         self.assertIn(b'isolated Docker host', result.stdout)
-        self.assertEqual([json.loads(x)[0] for x in (case / 'calls').read_text().splitlines()], ['context', 'ps'])
+        self.assertEqual([json.loads(x)[0] for x in (case / 'calls').read_text().splitlines()], ['context', 'container'])
         self.assertFalse((self.p.state / 'pending.json').exists())
 
     def test_reader_grace_timeout_retains_marker_for_manual_reconciliation(self):
-        self.archive(1)
+        archive = self.archive(1)
+        policy.atomic_json(self.p.state / 'last-restore.json', dict(file='previous.dump', outcome='succeeded',
+                           cleanup_verified=True, exit_status=0))
         case, env = self.wrapper_fixture('cleanup-timeout')
         code = '''import importlib.util, sys
 sys.dont_write_bytecode=True
@@ -576,6 +605,10 @@ sys.exit(p.main())
         self.assertTrue((case / 'cleanup-started').exists())
         self.assertFalse((case / 'cleanup-finished').exists())
         self.assertTrue((self.p.state / 'pending.json').exists())
+        result = policy.read_json(self.p.state / 'last-restore.json')
+        self.assertEqual((result['file'], result['outcome'], result['exit_status'], result['cleanup_verified']),
+                         (archive.name, 'failed', 1, False))
+        self.assertIn('cleanup exceeded grace period', result['error'])
         with self.assertRaisesRegex(policy.Refused, 'incomplete operation'): self.p.no_pending()
 
     def test_wrappers_refuse_disabled_invalid_and_unattended_before_work(self):

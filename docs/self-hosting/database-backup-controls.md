@@ -186,6 +186,9 @@ create a full-restore pin. Moving a pin requires evidence of its replacement.
 
 The restore entry point requires a local Docker socket and refuses a daemon
 containing the configured production database container, including a stopped one.
+It lists all container names and compares exact values, without a name-filter
+regex; listing failures refuse admission. Docker documents the
+[all-container listing and name formatting](https://docs.docker.com/reference/cli/docker/container/ls/).
 Choose a separately verified isolated host; changing the container name to bypass
 this guard is not isolation. Before hashing or allocating a container, it checks
 the Docker data filesystem for **twice the larger of receipt database size and
@@ -201,12 +204,16 @@ volumes. Repeated signals do not interrupt cleanup. After the grace period, it
 kills the remaining local process group and keeps the pending marker: killing a
 Docker client alone cannot prove daemon-side resource removal.
 
-The reader publishes a private cleanup receipt only after successful owned
-container removal and temporary-state cleanup. A failed or cancelled drill with
+The reader publishes a private cleanup receipt only after temporary-state cleanup
+and either successful owned container removal or proof that creation was never
+attempted. A failed or cancelled drill with
 that proof records its nonzero status in `last-restore.json` and releases the
 pending marker, so backups can continue. Missing ownership evidence or failed
 removal preserves the marker and available cidfile for inspection. Basic restore
 success still does not create a known-good pin.
+`last-restore.json` is replaced with a pending result before the reader starts and
+with an unsuccessful result when the reader raises or times out. A previous
+successful drill must not mask the current incomplete one.
 
 ## Interruption and rollback
 
