@@ -25,6 +25,7 @@ fi
 # Keep Docker's ownership receipt in a private directory. Never clean up by
 # name: a failed create (for example, a name collision) does not own that name.
 TEST_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/143-restore-test.XXXXXXXXXX")
+TEST_CONTAINER_NAME="${TEST_STATE_DIR##*/}"
 CID_FILE="$TEST_STATE_DIR/container-id"
 cleanup() {
   local status=$? container_id
@@ -53,17 +54,18 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-echo "$(date -Iseconds) Testing restore of $BACKUP..."
+# Log the unique name before creation so an interrupted Docker CLI that never
+# wrote its cidfile still leaves an operator a way to identify that test.
+echo "$(date -Iseconds) Testing restore of $BACKUP in $TEST_CONTAINER_NAME..."
 
 # Record the created container before starting it, so startup failures also
 # remove its anonymous data volume. Docker writes the cidfile on creation.
-docker create --cidfile "$CID_FILE" --name "${TEST_STATE_DIR##*/}" \
+docker create --cidfile "$CID_FILE" --name "$TEST_CONTAINER_NAME" \
   -e POSTGRES_USER="$DB_USER" \
   -e POSTGRES_PASSWORD=test \
   -e POSTGRES_DB="$DB_NAME" \
   "$POSTGRES_IMAGE"
-TEST_CONTAINER=$(cat "$CID_FILE")
-if ! [[ "$TEST_CONTAINER" =~ ^[0-9a-f]{64}$ ]]; then
+if ! TEST_CONTAINER=$(cat "$CID_FILE") || ! [[ "$TEST_CONTAINER" =~ ^[0-9a-f]{64}$ ]]; then
   echo "ERROR: Docker returned an invalid restore-test container ID" >&2
   exit 1
 fi

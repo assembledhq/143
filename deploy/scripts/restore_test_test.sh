@@ -29,11 +29,13 @@ case "$1" in
     shift 2
     [ "$1" = --name ] || exit 99
     case "$2" in 143-restore-test.*) ;; *) exit 99 ;; esac
+    printf '%s\n' "$2" > "$FAKE_CASE_DIR/container-name"
     shift 2
     # In particular, no live data volume or backup directory can be mounted.
     [ "$*" = '-e POSTGRES_USER=test-user -e POSTGRES_PASSWORD=test -e POSTGRES_DB=test-db postgres:18' ] || exit 99
     case "$FAKE_CASE" in
       create-failure|name-collision) exit 125 ;;
+      create-without-receipt) : > "$cidfile"; exit 137 ;;
       missing-id) exit 0 ;;
       invalid-id) printf '143-postgres-1' > "$cidfile"; exit 0 ;;
     esac
@@ -108,11 +110,13 @@ while read -r name expected_status expected_cleanup expected_start expected_rest
     BACKUP_DIR="$case_dir/backups" \
     POSTGRES_USER=test-user POSTGRES_DB=test-db POSTGRES_IMAGE=postgres:18 \
     MIN_TABLE_COUNT=5 FAKE_CASE="$name" FAKE_CASE_DIR="$case_dir" \
-    bash "$SCRIPT_DIR/restore-test.sh" > "$case_dir/output" 2>&1 || status=$?
+    bash "$SCRIPT_DIR/restore-test.sh" < /dev/null > "$case_dir/output" 2>&1 || status=$?
   if [ "$status" != "$expected_status" ]; then
     cat "$case_dir/output" >&2
     fail "$name: expected status $expected_status, got $status"
   fi
+
+  grep -Fq "in $(cat "$case_dir/container-name")..." "$case_dir/output" || fail "$name: log must identify the unique container even when creation fails"
 
   cleanup_calls=$(grep -c '^rm ' "$case_dir/calls" || true)
   [ "$cleanup_calls" = "$expected_cleanup" ] || fail "$name: incorrect cleanup count"
@@ -135,6 +139,9 @@ while read -r name expected_status expected_cleanup expected_start expected_rest
     invalid-id)
       grep -Fq 'refusing cleanup' "$case_dir/output" || fail "$name: invalid ID must fail closed"
       ;;
+    missing-id)
+      grep -Fq 'Docker returned an invalid restore-test container ID' "$case_dir/output" || fail "$name: missing ID must report the ownership failure"
+      ;;
     readiness-failure)
       [ "$(grep -c ' pg_isready ' "$case_dir/calls")" = 30 ] || fail "$name: readiness must be bounded"
       ;;
@@ -147,6 +154,7 @@ done <<'CASES'
 success 0 1 1 1
 create-failure 125 0 0 0
 name-collision 125 0 0 0
+create-without-receipt 137 0 0 0
 create-receipt-failure 126 1 0 0
 missing-id 1 0 0 0
 invalid-id 1 0 0 0
@@ -163,4 +171,5 @@ restore-int 130 1 1 1
 restore-hup 129 1 1 1
 CASES
 
+[ "$case_count" = 18 ] || fail "all 18 cases must run; stdin consumption must not truncate the suite"
 echo "PASS: restore_test_test.sh ($case_count cases)"
