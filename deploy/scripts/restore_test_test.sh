@@ -127,7 +127,8 @@ while read -r name expected_status expected_cleanup expected_start expected_rest
     BACKUP_DIR="$case_dir/backups" \
     POSTGRES_USER=test-user POSTGRES_DB=test-db POSTGRES_IMAGE=postgres:18 \
     MIN_TABLE_COUNT=5 FAKE_CASE="$name" FAKE_CASE_DIR="$case_dir" \
-    bash "$SCRIPT_DIR/restore-test.sh" < /dev/null > "$case_dir/output" 2>&1 || status=$?
+    BACKUP_ARCHIVE="$case_dir/backups/test.dump" \
+    bash "$SCRIPT_DIR/restore-test-body.sh" < /dev/null > "$case_dir/output" 2>&1 || status=$?
   if [ "$status" != "$expected_status" ]; then
     cat "$case_dir/output" >&2
     fail "$name: expected status $expected_status, got $status"

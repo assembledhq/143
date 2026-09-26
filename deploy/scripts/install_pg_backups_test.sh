@@ -22,6 +22,9 @@ SCRIPTS="$TMP_DIR/scripts"
 mkdir -p "$SCRIPTS"
 : > "$SCRIPTS/pg-backup.sh"
 : > "$SCRIPTS/restore-test.sh"
+: > "$SCRIPTS/restore-test-body.sh"
+: > "$SCRIPTS/pg-backup-policy.py"
+: > "$SCRIPTS/pg-backup-config.py"
 CRON_FILE="$TMP_DIR/143-pg-backup"
 
 # Extra "KEY=val" args (quoted, so values may contain spaces) are forwarded to
@@ -45,7 +48,7 @@ grep -q '^0 \*/6 \* \* \* root '"$SCRIPTS"'/pg-backup.sh >> '"$TMP_DIR"'/pg-back
   || fail "backup cron line missing/wrong:\n$(cat "$CRON_FILE")"
 grep -q '^0 5 \* \* 0 root '"$SCRIPTS"'/restore-test.sh >> '"$TMP_DIR"'/restore-test.log 2>&1$' "$CRON_FILE" \
   || fail "restore-test cron line missing/wrong:\n$(cat "$CRON_FILE")"
-grep -q '^BACKUP_RETENTION_DAYS=7$' "$CRON_FILE" || fail "default retention not 7"
+if grep -q '^BACKUP_RETENTION_DAYS=' "$CRON_FILE"; then fail 'obsolete age-based retention must not be installed'; fi
 grep -q "^BACKUP_DIR=$TMP_DIR/backups$" "$CRON_FILE" || fail "BACKUP_DIR not in cron env"
 [ -d "$TMP_DIR/backups" ] || fail "backup dir not created"
 [ -f "$TMP_DIR/pg-backup.log" ] || fail "pg-backup log not pre-created"
@@ -60,7 +63,7 @@ case "$out" in *"already up to date"*) ;; *) fail "expected up-to-date message, 
 # 3. Env overrides flow into the cron file.
 out="$(run_installer BACKUP_CRON='30 */4 * * *' BACKUP_RETENTION_DAYS=14)"
 grep -q '^30 \*/4 \* \* \* root ' "$CRON_FILE" || fail "custom BACKUP_CRON not applied"
-grep -q '^BACKUP_RETENTION_DAYS=14$' "$CRON_FILE" || fail "custom retention not applied"
+if grep -q '^BACKUP_RETENTION_DAYS=' "$CRON_FILE"; then fail 'legacy retention override must not enable age pruning'; fi
 
 # 4. Holds disable only the selected schedule and survive an omitted override.
 run_installer BACKUP_ENABLED=true RESTORE_TEST_ENABLED=false >/dev/null 2>&1
