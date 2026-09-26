@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,13 +26,19 @@ const (
 	perClientBufferSize      = 256
 	maxRedisLogPayloadBytes  = 4 * 1024
 	sessionStreamExpiryAfter = time.Hour
+
+	sessionCleanupBatchSize     = 500
+	sessionCleanupMaxBatches    = 20
+	sessionCleanupInterval      = 10 * time.Minute
+	sessionCleanupBatchInterval = time.Second
+	sessionCleanupBatchTimeout  = 30 * time.Second
 )
 
 const redisTruncatedLogSuffix = "… [truncated in Redis]"
 
 type SessionTerminalLister interface {
 	// lint:allow-no-orgid reason="cross-org Redis cleanup scans terminal sessions across the whole fleet"
-	ListTerminalEndedBefore(ctx context.Context, before time.Time, limit int) ([]models.Session, error)
+	ListTerminalEndedBefore(ctx context.Context, before time.Time, after *models.SessionStreamCleanupCursor, limit int) ([]models.SessionStreamCleanupCursor, error)
 }
 
 type StreamedLog struct {
@@ -509,8 +516,11 @@ func (s *SessionStreams) StartCleanup(ctx context.Context, lister SessionTermina
 }
 
 func (s *SessionStreams) cleanupLoop(ctx context.Context, lister SessionTerminalLister) {
-	timer := time.NewTimer(10 * time.Minute)
+	timer := time.NewTimer(sessionCleanupInterval)
 	defer timer.Stop()
+	var before time.Time
+	var after *models.SessionStreamCleanupCursor
+	batches := 0
 
 	for {
 		select {
@@ -519,30 +529,69 @@ func (s *SessionStreams) cleanupLoop(ctx context.Context, lister SessionTerminal
 		case <-timer.C:
 		}
 
-		size, err := s.runCleanupBatch(ctx, lister)
+		// Freeze eligibility for this sweep. Retain the cursor across bounded
+		// wakes so a large history cannot starve sessions beyond the batch cap.
+		if before.IsZero() {
+			before = time.Now().Add(-sessionStreamExpiryAfter)
+		}
+		batchCtx, cancel := context.WithTimeout(ctx, sessionCleanupBatchTimeout)
+		size, next, err := s.runCleanupBatch(batchCtx, lister, before, after)
+		cancel()
 		if err != nil {
 			s.logger.Warn().Err(err).Msg("Redis session stream cleanup failed")
 		}
 		s.metrics.RecordCleanupBatch(ctx, size)
-		if size >= 500 {
-			timer.Reset(0)
+		delay := sessionCleanupInterval
+		if err != nil {
+			// Retry the same page after backoff. Redis DEL is idempotent, so
+			// a partially deleted page is safe to retry without skipping keys.
+			batches = 0
+		} else if size < sessionCleanupBatchSize {
+			before = time.Time{}
+			after = nil
+			batches = 0
 		} else {
-			timer.Reset(10 * time.Minute)
+			after = next
+			batches++
+			if batches < sessionCleanupMaxBatches {
+				delay = sessionCleanupBatchInterval
+			} else {
+				batches = 0
+			}
 		}
+		timer.Reset(delay)
 	}
 }
 
-func (s *SessionStreams) runCleanupBatch(ctx context.Context, lister SessionTerminalLister) (int, error) {
-	sessions, err := lister.ListTerminalEndedBefore(ctx, time.Now().Add(-sessionStreamExpiryAfter), 500)
+func (s *SessionStreams) runCleanupBatch(ctx context.Context, lister SessionTerminalLister, before time.Time, after *models.SessionStreamCleanupCursor) (int, *models.SessionStreamCleanupCursor, error) {
+	sessions, err := lister.ListTerminalEndedBefore(ctx, before, after, sessionCleanupBatchSize)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	for _, session := range sessions {
+	if len(sessions) > sessionCleanupBatchSize {
+		return 0, nil, errors.New("session stream cleanup exceeded batch limit")
+	}
+	// Check progress before deleting any keys. A regressed lister must not
+	// turn a full page into an unbounded loop or advance past unordered rows.
+	next := after
+	for i := range sessions {
+		session := &sessions[i]
+		if session.ID == uuid.Nil || session.CompletedAt.IsZero() || !session.CompletedAt.Before(before) ||
+			(next != nil && (session.CompletedAt.Before(next.CompletedAt) ||
+				(session.CompletedAt.Equal(next.CompletedAt) && bytes.Compare(session.ID[:], next.ID[:]) <= 0))) {
+			return 0, nil, errors.New("session stream cleanup page did not advance within its cutoff")
+		}
+		next = session
+	}
+	for i, session := range sessions {
+		if err := ctx.Err(); err != nil {
+			return i, nil, err
+		}
 		if err := s.DeleteSessionStreams(ctx, session.ID); err != nil {
-			s.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to delete orphaned session streams")
+			return i, nil, fmt.Errorf("delete session streams for %s: %w", session.ID, err)
 		}
 	}
-	return len(sessions), nil
+	return len(sessions), next, nil
 }
 
 func (s *SessionStreams) ensureLogFanout(sessionID uuid.UUID) *logFanout {
