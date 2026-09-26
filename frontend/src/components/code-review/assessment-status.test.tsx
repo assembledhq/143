@@ -1,4 +1,4 @@
-import { it, expect } from "vitest";
+import { it, expect, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
@@ -230,4 +230,31 @@ it("uses the selected assessment snapshot and retains raw reviewer and prompt de
   expect(screen.getByText(/"verdict": "blocked"/)).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Prompt records 1" }));
   expect(screen.getByText("Original reviewer instructions")).toBeInTheDocument();
+});
+
+it("uses the shared bottom-sheet treatment for review details on mobile", () => {
+  const originalMatchMedia = window.matchMedia;
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(max-width: 639px)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+
+  const review = reviewFixture();
+  renderWithProviders(<ReviewAssessmentDialog review={review} isLoading={false} error={null} onRetryEvidence={() => {}} open onOpenChange={() => {}} />);
+
+  const dialog = screen.getByRole("dialog", { name: "Review for #42" });
+  expect(dialog).toHaveAttribute("data-slot", "sheet-content");
+  expect(dialog).toHaveClass("bottom-0", "max-h-[100svh]");
+  expect(screen.getByRole("link", { name: "Open session" }).closest('[data-slot="responsive-modal-footer"]')).toHaveClass("pb-[max(1rem,env(safe-area-inset-bottom))]");
+
+  Object.defineProperty(window, "matchMedia", { configurable: true, value: originalMatchMedia });
 });

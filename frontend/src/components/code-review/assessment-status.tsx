@@ -10,7 +10,14 @@ import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  ResponsiveModal,
+  ResponsiveModalBody,
+  ResponsiveModalDescription,
+  ResponsiveModalFooter,
+  ResponsiveModalHeader,
+  ResponsiveModalTitle,
+} from "@/components/ui/responsive-modal";
 import { api } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
 import { queryKeys } from "@/lib/query-keys";
@@ -189,15 +196,14 @@ function AssessmentDialog({ assessmentID, summary, open, onOpenChange, review, e
   const relatedFailedAssessment = failedAssessment && failedAssessment.id !== assessmentID && failedAssessment.session_id === sessionID && failedAssessment.head_sha === value?.head_sha ? failedAssessment : null;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85dvh] w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
-        <DialogHeader className="shrink-0 border-b border-border px-6 py-5 pr-12 text-left">
-          <DialogTitle>{sessionReview ? `Review for #${sessionReview.github_pr_number}` : "Review assessment"}</DialogTitle>
-          <DialogDescription>
-            {sessionReview ? sessionReview.pull_request_title : value ? `${assessmentLabel(value)} for commit ${value.head_sha.slice(0, 7)}.` : "Recorded review outcome and evidence."}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="min-h-0 min-w-0 overflow-y-auto overscroll-contain px-6 pt-4 pb-2 text-sm [overflow-wrap:anywhere]">
+    <ResponsiveModal open={open} onOpenChange={onOpenChange} desktopClassName="sm:max-w-3xl">
+      <ResponsiveModalHeader>
+        <ResponsiveModalTitle>{sessionReview ? `Review for #${sessionReview.github_pr_number}` : "Review assessment"}</ResponsiveModalTitle>
+        <ResponsiveModalDescription>
+          {sessionReview ? sessionReview.pull_request_title : value ? `${assessmentLabel(value)} for commit ${value.head_sha.slice(0, 7)}.` : "Recorded review outcome and evidence."}
+        </ResponsiveModalDescription>
+      </ResponsiveModalHeader>
+      <ResponsiveModalBody className="min-h-0 min-w-0 pt-4 pb-2 text-sm [overflow-wrap:anywhere]">
           {!validID ? <p role="alert" className="text-destructive">This assessment link is invalid.</p> : null}
           {detail.isError ? <p role="alert" className="mb-4 text-destructive">Assessment details could not be loaded.</p> : null}
           {evidenceError ? <ErrorNotice title="Evidence could not be loaded" description="Retry to load the supporting review details." action={{ label: "Retry", onClick: () => { if (assessmentID) void evidence.refetch(); else onRetryEvidence?.(); } }} /> : null}
@@ -358,11 +364,10 @@ function AssessmentDialog({ assessmentID, summary, open, onOpenChange, review, e
               </AssessmentSection>
             </>
           ) : null}
-        </div>
-        {value && validID ? <div className="shrink-0 border-t border-border px-6 py-4">
-          <RecheckActions prID={prID ?? ""} canManage={canManage && Boolean(prID)} completed={value.status === "completed"} presentation="footer" sessionID={value.session_id ?? undefined} onViewAssessment={() => onOpenChange(false)} />
-        </div> : null}
-      </DialogContent>
-    </Dialog>
+      </ResponsiveModalBody>
+      {value && validID ? <ResponsiveModalFooter className="block">
+        <RecheckActions prID={prID ?? ""} canManage={canManage && Boolean(prID)} completed={value.status === "completed"} presentation="footer" sessionID={value.session_id ?? undefined} onViewAssessment={() => onOpenChange(false)} />
+      </ResponsiveModalFooter> : null}
+    </ResponsiveModal>
   );
 }
