@@ -617,6 +617,8 @@ provision-db-backups:
 	export BACKUP_S3_REGION="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_S3_REGION=' | cut -d= -f2-)"; \
 	export BACKUP_AWS_ACCESS_KEY_ID="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_AWS_ACCESS_KEY_ID=' | cut -d= -f2-)"; \
 	export BACKUP_AWS_SECRET_ACCESS_KEY="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_AWS_SECRET_ACCESS_KEY=' | cut -d= -f2-)"; \
+	export BACKUP_ENABLED="$${BACKUP_ENABLED:-$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_ENABLED=' | cut -d= -f2-)}"; \
+	export RESTORE_TEST_ENABLED="$${RESTORE_TEST_ENABLED:-$$(printf '%s\n' "$$ENV_DUMP" | grep '^RESTORE_TEST_ENABLED=' | cut -d= -f2-)}"; \
 	echo "Configuring DB backups on $$HOST..."; \
 	./deploy/scripts/provision-db-backups.sh "$$HOST" "$(SSH_KEY)"
 

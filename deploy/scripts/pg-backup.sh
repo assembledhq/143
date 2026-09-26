@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+case "${BACKUP_ENABLED:-true}" in
+  true) ;;
+  false) echo "ERROR: database backup is HELD (BACKUP_ENABLED=false); no backup was made" >&2; exit 75 ;;
+  *) echo "ERROR: BACKUP_ENABLED must be true or false" >&2; exit 1 ;;
+esac
+
 # Automated pg_dump backup with verification and retention.
 # Installed as a cron job by deploy/scripts/install-pg-backups.sh; runs every
 # 6 hours as root on the db host.

@@ -16,6 +16,8 @@
 # Required env for offsite (all four, or none):
 #   BACKUP_S3_BUCKET, BACKUP_S3_REGION,
 #   BACKUP_AWS_ACCESS_KEY_ID, BACKUP_AWS_SECRET_ACCESS_KEY
+# Optional schedule controls (also exported by provision.sh from private config):
+#   BACKUP_ENABLED, RESTORE_TEST_ENABLED (true/false; omitted preserves host state)
 #
 # Usage:
 #   provision-db-backups.sh <host> [ssh_key]
@@ -26,6 +28,14 @@ HOST="${1:?usage: provision-db-backups.sh <host> [ssh_key]}"
 SSH_KEY="${2:-$HOME/.ssh/143-deploy}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Validate before any SSH/copy, including before changing an offsite config.
+for setting in BACKUP_ENABLED RESTORE_TEST_ENABLED; do
+  case "${!setting:-}" in
+    true|false|'') ;;
+    *) echo "ERROR: $setting must be true or false" >&2; exit 1 ;;
+  esac
+done
 
 SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20)
 SCP_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new)
@@ -61,5 +71,5 @@ else
 fi
 
 ssh "${SSH_OPTS[@]}" root@"$HOST" \
-  "chmod +x /opt/143/deploy/scripts/pg-backup.sh /opt/143/deploy/scripts/restore-test.sh /opt/143/deploy/scripts/install-pg-backups.sh && /opt/143/deploy/scripts/install-pg-backups.sh"
+  "chmod +x /opt/143/deploy/scripts/pg-backup.sh /opt/143/deploy/scripts/restore-test.sh /opt/143/deploy/scripts/install-pg-backups.sh && BACKUP_ENABLED='${BACKUP_ENABLED:-}' RESTORE_TEST_ENABLED='${RESTORE_TEST_ENABLED:-}' /opt/143/deploy/scripts/install-pg-backups.sh"
 echo "--- DB backups configured on $HOST ---"

@@ -25,6 +25,8 @@
 #   SCRIPTS_DIR            (default /opt/143/deploy/scripts)
 #   BACKUP_CRON            (default "0 */6 * * *")
 #   RESTORE_TEST_CRON      (default "0 5 * * 0")
+#   BACKUP_ENABLED / RESTORE_TEST_ENABLED (true/false; otherwise preserve the
+#                           installed value, defaulting to true on first install)
 #   CRON_FILE / PG_BACKUP_LOG / RESTORE_TEST_LOG — overridable for tests
 
 set -euo pipefail
@@ -39,6 +41,34 @@ CRON_FILE="${CRON_FILE:-/etc/cron.d/143-pg-backup}"
 PG_BACKUP_LOG="${PG_BACKUP_LOG:-/var/log/pg-backup.log}"
 RESTORE_TEST_LOG="${RESTORE_TEST_LOG:-/var/log/restore-test.log}"
 
+# Read only the literal boolean fields; never source a cron file as shell.
+# An omitted setting must not undo an operator's previously installed hold.
+resolve_enabled() {
+  local name="$1" value="$2"
+  if [ -z "$value" ] && [ -f "$CRON_FILE" ]; then
+    # Cron accepts whitespace around names/equals; reject noncanonical forms
+    # rather than overlook a hand-written hold and silently enable the job.
+    if ! awk -v key="$name" '
+      $0 ~ "^[[:space:]]*" key "[[:space:]]*=" && $0 !~ "^" key "=" { exit 1 }
+    ' "$CRON_FILE"; then
+      echo "ERROR: installed $name has noncanonical spacing; supply an explicit true or false" >&2
+      return 1
+    fi
+    value="$(awk -F= -v key="$name" '$1 == key { print substr($0, length(key) + 2) }' "$CRON_FILE")"
+    if [ -z "$value" ] && grep -q "^$name=" "$CRON_FILE"; then
+      echo "ERROR: installed $name is empty; supply an explicit true or false" >&2
+      return 1
+    fi
+  fi
+  value="${value:-true}"
+  case "$value" in
+    true|false) printf '%s\n' "$value" ;;
+    *) echo "ERROR: $name must be true or false" >&2; return 1 ;;
+  esac
+}
+BACKUP_ENABLED="$(resolve_enabled BACKUP_ENABLED "${BACKUP_ENABLED:-}")"
+RESTORE_TEST_ENABLED="$(resolve_enabled RESTORE_TEST_ENABLED "${RESTORE_TEST_ENABLED:-}")"
+
 # The backup scripts must already be on the host (provision.sh / the wrapper
 # copy them to SCRIPTS_DIR before invoking this installer).
 for s in pg-backup.sh restore-test.sh; do
@@ -51,6 +81,15 @@ done
 
 mkdir -p "$BACKUP_DIR"
 
+BACKUP_LINE="$BACKUP_CRON root $SCRIPTS_DIR/pg-backup.sh >> $PG_BACKUP_LOG 2>&1"
+RESTORE_LINE="$RESTORE_TEST_CRON root $SCRIPTS_DIR/restore-test.sh >> $RESTORE_TEST_LOG 2>&1"
+if [ "$BACKUP_ENABLED" = false ]; then
+  BACKUP_LINE="# DISABLED: $BACKUP_LINE"
+fi
+if [ "$RESTORE_TEST_ENABLED" = false ]; then
+  RESTORE_LINE="# DISABLED: $RESTORE_LINE"
+fi
+
 # Per-job env (BACKUP_DIR / retention) is set in the cron.d file so the jobs
 # honor the same values configured here. cron.d entries take a user field.
 DESIRED="$(cat <<EOF
@@ -60,9 +99,11 @@ SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BACKUP_DIR=$BACKUP_DIR
 BACKUP_RETENTION_DAYS=$BACKUP_RETENTION_DAYS
+BACKUP_ENABLED=$BACKUP_ENABLED
+RESTORE_TEST_ENABLED=$RESTORE_TEST_ENABLED
 
-$BACKUP_CRON root $SCRIPTS_DIR/pg-backup.sh >> $PG_BACKUP_LOG 2>&1
-$RESTORE_TEST_CRON root $SCRIPTS_DIR/restore-test.sh >> $RESTORE_TEST_LOG 2>&1
+$BACKUP_LINE
+$RESTORE_LINE
 EOF
 )"
 
@@ -88,6 +129,12 @@ touch "$PG_BACKUP_LOG" "$RESTORE_TEST_LOG"
 chmod 0640 "$PG_BACKUP_LOG" "$RESTORE_TEST_LOG"
 
 echo "pg-backups: dumps -> $BACKUP_DIR (retention ${BACKUP_RETENTION_DAYS}d)."
+if [ "$BACKUP_ENABLED" = false ]; then
+  echo "WARNING: database backups are HELD; record the recovery-point gap and an owner to resume them." >&2
+fi
+if [ "$RESTORE_TEST_ENABLED" = false ]; then
+  echo "WARNING: restore testing is DEFERRED, not successful; assign a replacement drill." >&2
+fi
 if [ -f /opt/143/backup-sync.env ]; then
   echo "pg-backups: offsite sync configured (/opt/143/backup-sync.env)."
 else
