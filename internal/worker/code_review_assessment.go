@@ -64,15 +64,15 @@ func fullAssessmentAnalysisUnchanged(before, after codereviewsvc.ReviewInputMani
 
 // A staged approval must still pass the backend decision rules at the moment
 // of publication, even when CI, merge eligibility, or team membership changed.
-func verifyFullAssessmentApproval(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, fresh codereviewsvc.AssessmentInputCaptureResult) error {
+func verifyFullAssessmentApproval(ctx context.Context, reviews *db.CodeReviewStore, stores *Stores, services *Services, job runCodeReviewPayload, fresh codereviewsvc.AssessmentInputCaptureResult) error {
 	if fresh.Health == nil {
 		return errors.New("fresh full assessment health unavailable")
 	}
-	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
+	results, err := reviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
 	if err != nil {
 		return err
 	}
-	findings, err := stores.CodeReviews.ListFindings(ctx, job.OrgID, job.SessionID, false)
+	findings, err := reviews.ListFindings(ctx, job.OrgID, job.SessionID, false)
 	if err != nil {
 		return err
 	}
@@ -128,7 +128,8 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 			if !hasJob || !hasToken {
 				return codereviewsvc.SubmitReviewResult{}, false, errors.New("full assessment publication requires an active job lease")
 			}
-			if err := db.NewCodeReviewStore(lockDB).LockAssessmentPublicationJob(lockCtx, assessment.OrgID, jobID, token); err != nil {
+			lockedReviews := db.NewCodeReviewStore(lockDB)
+			if err := lockedReviews.LockAssessmentPublicationJob(lockCtx, assessment.OrgID, jobID, token); err != nil {
 				return codereviewsvc.SubmitReviewResult{}, false, err
 			}
 			current, err := db.NewCodeReviewAssessmentStore(lockDB).GetByID(lockCtx, assessment.OrgID, assessment.ID)
@@ -140,7 +141,7 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 			}
 			fresh, freshnessErr := captureFreshFullAssessment(lockCtx, services, job, current)
 			if freshnessErr == nil && decision == models.CodeReviewDecisionApproved {
-				freshnessErr = verifyFullAssessmentApproval(lockCtx, stores, services, job, fresh)
+				freshnessErr = verifyFullAssessmentApproval(lockCtx, lockedReviews, stores, services, job, fresh)
 			}
 			if err := freshnessErr; err != nil {
 				if !errors.Is(err, errFullAssessmentInputsChanged) && !errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {

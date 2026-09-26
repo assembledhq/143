@@ -33,6 +33,11 @@ type CodeReviewStore struct {
 	jobs    *JobStore
 	streams *cache.CodeReviewStreams
 	logger  zerolog.Logger
+
+	// Shared by the worker's publication paths. Waiters must stay outside the
+	// pool: a publisher holds a transaction and can also block its lease renewal,
+	// while freshness reads and durable pre-send markers need another connection.
+	publicationSlot chan struct{}
 }
 
 // SetJobStore wires the durable rank refresh triggered by policy supersession.
@@ -40,7 +45,7 @@ type CodeReviewStore struct {
 func (s *CodeReviewStore) SetJobStore(jobs *JobStore) { s.jobs = jobs }
 
 func NewCodeReviewStore(db DBTX) *CodeReviewStore {
-	return &CodeReviewStore{db: db, logger: zerolog.Nop()}
+	return &CodeReviewStore{db: db, logger: zerolog.Nop(), publicationSlot: make(chan struct{}, 1)}
 }
 
 // FirstReviewerThreadStartedAt returns the first durable reviewer claim for
@@ -2730,6 +2735,8 @@ func (s *CodeReviewStore) MarkFindingsSelectedForInline(ctx context.Context, org
 // RunWithGitHubPublicationLock serializes formal review body updates and rolling
 // status comment writes for one pull request across workers. This prevents a
 // delayed terminal sync from hiding the visible fallback for a newer review.
+// It also admits only one publication transaction per shared store, leaving
+// pool headroom for lease renewals and independently committed publication state.
 // The callback receives the transaction so its locked reads and writes do not
 // acquire a second pool connection.
 func (s *CodeReviewStore) RunWithGitHubPublicationLock(ctx context.Context, orgID, pullRequestID uuid.UUID, fn func(context.Context, DBTX) error) error {
@@ -2739,6 +2746,17 @@ func (s *CodeReviewStore) RunWithGitHubPublicationLock(ctx context.Context, orgI
 	}
 	waitCtx, cancelWait := context.WithTimeout(ctx, codeReviewPublicationLockWaitTimeout)
 	defer cancelWait()
+	select {
+	case s.publicationSlot <- struct{}{}:
+		// Registered before rollback so the transaction releases its connection
+		// before another publisher is admitted, including on errors.
+		defer func() { <-s.publicationSlot }()
+	case <-waitCtx.Done():
+		if ctx.Err() != nil {
+			return fmt.Errorf("wait for code review GitHub publication slot: %w", ctx.Err())
+		}
+		return fmt.Errorf("wait for code review GitHub publication slot: %w: %w", ErrCodeReviewPublicationLockBusy, waitCtx.Err())
+	}
 	tx, err := txStarter.Begin(waitCtx)
 	if err != nil {
 		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {

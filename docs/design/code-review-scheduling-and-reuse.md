@@ -210,6 +210,8 @@ For a reused result, create an auditable assessment for the new revision referen
 
 Before publication, refresh the authoritative PR, its eligibility, applicable analysis contract, and relevant evidence. Verify the worker still owns the current PR generation. Publish against the explicitly checked head. Preserve existing rolling-comment and formal-review idempotency; duplicate jobs must not publish twice. A push during the final refresh/publish interval cannot be approved under the wrong commit ID. After publication, reconcile whether newer work is pending without retargeting the old approval to it.
 
+All publication handlers in a worker share one `CodeReviewStore`, which admits one publication transaction at a time before borrowing a database connection. This preserves headroom in the four-connection worker pool: a publisher holds one connection and its fenced job-row lock can block a lease renewal on another, while freshness reads and independently committed pre-send markers need a free connection. Admission uses the existing 20-second lock-wait budget and non-consuming busy retry. The cross-worker PR advisory lock and job-row fence remain in force; approval result and finding reads use the publication transaction, but the uncertain-before-send marker must commit separately. This admission bound changes no database schema or API contract.
+
 ## Capacity and Usage Admission
 
 Keep scheduling admission in `internal/services/codereview`; enforce actual execution admission at the runtime dispatch boundary as well. A panel contains several agents and fallback executions, so limiting only the number of parent review sessions is insufficient.

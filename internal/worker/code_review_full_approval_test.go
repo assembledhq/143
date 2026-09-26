@@ -67,9 +67,11 @@ func TestVerifyFullAssessmentApprovalUsesFreshGatesAndOriginalFindings(t *testin
 				Files:          []codereviewsvc.PullRequestFile{{Filename: "internal/invoices.go", Additions: 3, Deletions: 1}},
 				VisualEvidence: visual,
 			}
-			stores := &Stores{CodeReviews: db.NewCodeReviewStore(mock)}
+			// The shared pool store is intentionally absent: approval reads must
+			// use the supplied transaction-bound review store.
+			stores := &Stores{}
 			job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 1, HeadSHA: "head"}
-			err = verifyFullAssessmentApproval(context.Background(), stores, &Services{}, job, fresh)
+			err = verifyFullAssessmentApproval(context.Background(), db.NewCodeReviewStore(mock), stores, &Services{}, job, fresh)
 			if tt.wantError {
 				require.ErrorIs(t, err, errFullAssessmentInputsChanged, "fresh backend gate or original blocker must prevent staged approval")
 			} else {
