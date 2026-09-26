@@ -690,7 +690,7 @@ START
 # For db nodes: install automated backups (pg_dump every 6h + weekly restore
 # test) and the offsite sync config. The wrapper is idempotent, so this is a
 # no-op on reprovision. BACKUP_* (if present in .env.production.enc) were
-# exported above and drive /opt/143/backup-sync.env. BACKUP_ENABLED and
+# exported above and drive /opt/143/backup-storage.json. BACKUP_ENABLED and
 # RESTORE_TEST_ENABLED are exported by the same private-config loader; the
 # wrapper validates and forwards them to the cron installer.
 if [ "$ROLE" = "db" ]; then
