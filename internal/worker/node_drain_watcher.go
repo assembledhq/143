@@ -14,9 +14,13 @@ type drainNodeGetter interface {
 	GetByID(ctx context.Context, id string) (*models.Node, error)
 }
 
+type nodeDrainLatch interface {
+	MarkLocalDraining()
+}
+
 // RunNodeDrainWatcher turns DB node drain state into local worker admission
-// drain without shutting down owned runtime serving.
-func RunNodeDrainWatcher(ctx context.Context, nodes drainNodeGetter, workers []*Worker, nodeID string, logger zerolog.Logger, interval time.Duration) {
+// and heartbeat drain without shutting down owned runtime serving.
+func RunNodeDrainWatcher(ctx context.Context, nodes drainNodeGetter, node nodeDrainLatch, workers []*Worker, nodeID string, logger zerolog.Logger, interval time.Duration) {
 	if nodes == nil || nodeID == "" || len(workers) == 0 {
 		return
 	}
@@ -26,7 +30,7 @@ func RunNodeDrainWatcher(ctx context.Context, nodes drainNodeGetter, workers []*
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		if markWorkersDrainingFromDB(ctx, nodes, workers, nodeID, logger) {
+		if markWorkersDrainingFromDB(ctx, nodes, node, workers, nodeID, logger) {
 			return
 		}
 		select {
@@ -37,7 +41,7 @@ func RunNodeDrainWatcher(ctx context.Context, nodes drainNodeGetter, workers []*
 	}
 }
 
-func markWorkersDrainingFromDB(ctx context.Context, nodes drainNodeGetter, workers []*Worker, nodeID string, logger zerolog.Logger) bool {
+func markWorkersDrainingFromDB(ctx context.Context, nodes drainNodeGetter, latch nodeDrainLatch, workers []*Worker, nodeID string, logger zerolog.Logger) bool {
 	node, err := nodes.GetByID(ctx, nodeID)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -45,9 +49,12 @@ func markWorkersDrainingFromDB(ctx context.Context, nodes drainNodeGetter, worke
 		}
 		return false
 	}
-	if node.Status != models.NodeStatusDraining {
+	if node.Status != models.NodeStatusDraining && (node.DrainIntent == "" || node.DrainIntent == models.DrainIntentNone) {
 		return false
 	}
+	// Latch heartbeats alongside the queues so clearing durable intent cannot
+	// resurrect capacity when a stale-node scan has replaced draining with dead.
+	latch.MarkLocalDraining()
 	for _, w := range workers {
 		if w != nil {
 			w.RequestDrain()

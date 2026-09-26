@@ -783,13 +783,14 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 		WITH unavailable_target_nodes AS (
 			SELECT id
 			FROM nodes
-			WHERE status IN ('dead', 'draining') OR mode NOT IN ('worker', 'all') OR last_heartbeat_at < @dead_before
+			WHERE status IN ('dead', 'draining') OR drain_intent <> 'none' OR mode NOT IN ('worker', 'all') OR last_heartbeat_at < @dead_before
 		),
 		claiming_node AS (
 			SELECT id
 			FROM nodes
 			WHERE id = @node_id
 			  AND status = 'active'
+			  AND drain_intent = 'none'
 			  AND mode IN ('worker', 'all')
 			  AND last_heartbeat_at >= @dead_before
 		),
@@ -1545,6 +1546,7 @@ func (s *JobStore) SelectWorkerWithSandboxCapacity(ctx context.Context, excludeN
 			FROM nodes
 			WHERE mode IN ('worker', 'all')
 			  AND status = 'active'
+			  AND drain_intent = 'none'
 			  AND last_heartbeat_at >= @dead_before
 			  AND COALESCE(metadata->>'live_sandbox_count_error', '') = ''
 			  AND (@exclude_node_id = '' OR id <> @exclude_node_id)
@@ -1585,6 +1587,7 @@ func (s *JobStore) IsHealthyWorkerNode(ctx context.Context, nodeID string) (bool
 			WHERE id = @node_id
 			  AND mode IN ('worker', 'all')
 			  AND status = 'active'
+			  AND drain_intent = 'none'
 			  AND last_heartbeat_at >= @dead_before
 		)`, pgx.NamedArgs{
 		"node_id":     nodeID,
@@ -1615,6 +1618,7 @@ func (s *JobStore) WorkerSandboxCapacity(ctx context.Context, nodeID string) (kn
 		WHERE id = @node_id
 		  AND mode IN ('worker', 'all')
 		  AND status = 'active'
+		  AND drain_intent = 'none'
 		  AND last_heartbeat_at >= @dead_before`, pgx.NamedArgs{
 		"node_id":     nodeID,
 		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
@@ -1642,6 +1646,7 @@ func (s *JobStore) SandboxCapacitySummary(ctx context.Context) (SandboxCapacityS
 			FROM nodes
 			WHERE mode IN ('worker', 'all')
 			  AND status = 'active'
+			  AND drain_intent = 'none'
 			  AND last_heartbeat_at >= @dead_before
 			  AND COALESCE(metadata->>'live_sandbox_count_error', '') = ''
 		)

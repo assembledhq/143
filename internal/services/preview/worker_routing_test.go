@@ -351,7 +351,7 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		})
 		require.NoError(t, err, "should marshal api metadata")
 
-		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 			WillReturnRows(
 				pgxmock.NewRows(workerNodeTestCols).
 					AddRow("api-1", "api", "api.internal", "active", apiMeta, now, now).
@@ -387,7 +387,7 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		})
 		require.NoError(t, err, "should marshal api metadata")
 
-		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 			WillReturnRows(
 				pgxmock.NewRows(workerNodeTestCols).
 					AddRow("api-1", "api", "api.internal", "active", apiMeta, now, now),
@@ -422,7 +422,7 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		})
 		require.NoError(t, err, "should marshal static egress worker metadata")
 
-		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 			WillReturnRows(
 				pgxmock.NewRows(workerNodeTestCols).
 					AddRow("worker-1", "worker", "worker-1.internal", "active", directOnlyMeta, now, now).
@@ -467,7 +467,7 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		})
 		require.NoError(t, err, "should marshal current static egress worker metadata")
 
-		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 			WillReturnRows(
 				pgxmock.NewRows(workerNodeTestCols).
 					AddRow("worker-1", "worker", "worker-1.internal", "active", staleMeta, now, now).
@@ -502,7 +502,7 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		})
 		require.NoError(t, err, "should marshal worker metadata")
 
-		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 			WillReturnRows(
 				pgxmock.NewRows(workerNodeTestCols).
 					AddRow("worker-1", "worker", "worker-1.internal", "active", workerMeta, now, now),
@@ -589,7 +589,7 @@ func TestWorkerSelector_HasStaticEgressCapableWorker(t *testing.T) {
 				require.NoError(t, err, "should marshal worker metadata")
 				rows.AddRow(fmt.Sprintf("worker-%d", i+1), "worker", fmt.Sprintf("worker-%d.internal", i+1), "active", raw, now, now)
 			}
-			mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+			mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 				WillReturnRows(rows)
 
 			selector := NewWorkerSelector(db.NewNodeStore(mock), db.NewPreviewStore(mock))
@@ -709,7 +709,7 @@ func TestWorkerSelector_StaticEgressWorkerDiagnosticsIdentifiesMismatches(t *tes
 				require.NoError(t, err, "should marshal worker metadata")
 				rows.AddRow(fmt.Sprintf("worker-%d", i+1), item.mode, fmt.Sprintf("worker-%d.internal", i+1), "active", raw, now, now)
 			}
-			mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+			mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 				WillReturnRows(rows)
 
 			selector := NewWorkerSelector(db.NewNodeStore(mock), db.NewPreviewStore(mock))
@@ -731,7 +731,7 @@ func TestWorkerSelector_StaticEgressWorkerDiagnosticsEmptyPublicIP(t *testing.T)
 	now := time.Now().UTC()
 	raw, err := json.Marshal(WorkerNodeMetadata{StaticEgressCapable: true, StaticEgressPublicIP: ""})
 	require.NoError(t, err, "should marshal worker metadata")
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("worker-1", "worker", "worker-1.internal", "active", raw, now, now))
 
@@ -768,7 +768,7 @@ func TestWorkerSelector_SelectCachePlacementWorkerBatchesCapacityChecks(t *testi
 		}).
 			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "placement", "worker-1", int64(10), now, now).
 			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "placement", "worker-2", int64(10), now, now))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("worker-1", "worker", "worker-1.internal", "active", metadata, now, now).
 			AddRow("worker-2", "worker", "worker-2.internal", "active", metadata, now, now))
@@ -813,7 +813,7 @@ func TestWorkerSelector_SelectCachePlacementWorkerChoosesLeastLoadedHolder(t *te
 		}).
 			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "placement", "worker-busy", int64(10), now, now).
 			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "placement", "worker-idle", int64(10), now.Add(-time.Minute), now))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("worker-busy", "worker", "worker-busy.internal", "active", metadata, now, now).
 			AddRow("worker-idle", "worker", "worker-idle.internal", "active", metadata, now, now))
@@ -862,7 +862,7 @@ func TestWorkerSelector_SelectStartNodeWithCachePlacementsUsesPackageManagerHold
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
 		}).AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindPackageManager, "pm-cache-key", "pm-placement", "worker-pm", int64(10), now, now))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("worker-pm", "worker", "worker-pm.internal", "active", metadata, now, now))
 	mock.ExpectQuery("SELECT worker_node_id, COUNT").
@@ -910,7 +910,7 @@ func TestWorkerSelector_SelectLeastLoadedNodeInPreferredRegionIgnoresUnknownRegi
 	})
 	require.NoError(t, err, "east metadata should marshal")
 
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("unknown-worker", "worker", "unknown.internal", "active", unknownMeta, now, now).
 			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now).
@@ -961,7 +961,7 @@ func TestWorkerSelector_SelectStartNodeFallsBackToRecentRepoCacheHolder(t *testi
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
 		}).AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "other-placement", "worker-warm", int64(10), now, now))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("worker-warm", "worker", "worker-warm.internal", "active", metadata, now, now))
 	mock.ExpectQuery("SELECT worker_node_id, COUNT").
@@ -1013,11 +1013,11 @@ func TestWorkerSelector_SelectStartNodeWithPlacementPrefersRegionThenCrossRegion
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
 		}).
 			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "placement", "west-worker", int64(10), now, now))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("east-worker", "worker", "east.internal", "active", eastMeta, now, now).
 			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("east-worker", "worker", "east.internal", "active", eastMeta, now, now).
 			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
@@ -1025,7 +1025,7 @@ func TestWorkerSelector_SelectStartNodeWithPlacementPrefersRegionThenCrossRegion
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}).
 			AddRow("east-worker", 3))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("east-worker", "worker", "east.internal", "active", eastMeta, now, now).
 			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
@@ -1039,7 +1039,7 @@ func TestWorkerSelector_SelectStartNodeWithPlacementPrefersRegionThenCrossRegion
 			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
 		}).
 			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallOutput, "cache-key", "placement", "west-worker", int64(10), now, now))
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("east-worker", "worker", "east.internal", "active", eastMeta, now, now).
 			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
@@ -1098,12 +1098,12 @@ func TestWorkerSelector_SelectStartNodeWithPlacement_NoPreferredRegionWorkers(t 
 		}))
 
 	// 3. selectRendezvousWorker(preferredOnly=true): only west workers — no east workers eligible.
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
 
 	// 4. SelectLeastLoadedNodeInPreferredRegion: no preferred-region workers.
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
 
@@ -1115,7 +1115,7 @@ func TestWorkerSelector_SelectStartNodeWithPlacement_NoPreferredRegionWorkers(t 
 		}))
 
 	// 6. Cross-region: selectRendezvousWorker(preferredOnly=false): west worker is eligible, at capacity=0.
-	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
 			AddRow("west-worker", "worker", "west.internal", "active", westMeta, now, now))
 	mock.ExpectQuery("SELECT worker_node_id, COUNT").
