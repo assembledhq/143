@@ -67,6 +67,20 @@ assert_no_dump_artifacts() {
   fi
 }
 
+# A hold must stop before retention can delete anything or a dump can start.
+case_dir="$(new_case_dir held)"
+printf 'preserved backup' > "$case_dir/backups/preserved.dump"
+touch -t 202001010000 "$case_dir/backups/preserved.dump"
+status=0
+run_backup "$case_dir" BACKUP_ENABLED=false >"$case_dir/output" 2>&1 || status=$?
+[ "$status" = 75 ] || fail "held backup must report a deferred outcome"
+[ "$(cat "$case_dir/backups/preserved.dump")" = 'preserved backup' ] || fail "hold must not prune archives"
+[ ! -e "$case_dir/restore-input" ] || fail "hold must not invoke verification"
+grep -q 'HELD' "$case_dir/output" || fail "hold must be visible in logs"
+if run_backup "$case_dir" BACKUP_ENABLED=invalid >/dev/null 2>&1; then
+  fail "invalid backup switch must fail"
+fi
+
 # A pg_dump failure must remove the bytes already streamed to the temporary
 # file. Retention must also run before pg_dump, even though the new dump fails.
 case_dir="$(new_case_dir pg-dump-failure)"

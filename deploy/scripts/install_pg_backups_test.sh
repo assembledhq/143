@@ -62,7 +62,50 @@ out="$(run_installer BACKUP_CRON='30 */4 * * *' BACKUP_RETENTION_DAYS=14)"
 grep -q '^30 \*/4 \* \* \* root ' "$CRON_FILE" || fail "custom BACKUP_CRON not applied"
 grep -q '^BACKUP_RETENTION_DAYS=14$' "$CRON_FILE" || fail "custom retention not applied"
 
-# 4. Missing backup script is a hard error.
+# 4. Holds disable only the selected schedule and survive an omitted override.
+run_installer BACKUP_ENABLED=true RESTORE_TEST_ENABLED=false >/dev/null 2>&1
+grep -q '^0 \*/6 .*pg-backup.sh' "$CRON_FILE" || fail "restore hold must retain backup schedule"
+grep -q '^# DISABLED: 0 5 .*restore-test.sh' "$CRON_FILE" || fail "restore schedule must be commented out"
+grep -q '^RESTORE_TEST_ENABLED=false$' "$CRON_FILE" || fail "restore hold must persist as a literal field"
+run_installer >/dev/null 2>&1
+grep -q '^# DISABLED: .*restore-test.sh' "$CRON_FILE" || fail "reinstallation must preserve restore hold"
+run_installer BACKUP_ENABLED=false >/dev/null 2>&1
+grep -q '^# DISABLED: .*pg-backup.sh' "$CRON_FILE" || fail "backup hold must disable backup schedule"
+grep -q '^# DISABLED: .*restore-test.sh' "$CRON_FILE" || fail "backup hold must preserve restore hold"
+
+# Invalid or duplicate settings must fail without changing the installed cron.
+for invalid in 'yes' 'false; echo unsafe' $'false\ntrue'; do
+  before="$(cat "$CRON_FILE")"
+  if run_installer RESTORE_TEST_ENABLED="$invalid" >/dev/null 2>&1; then
+    fail "invalid restore setting must fail"
+  fi
+  [ "$(cat "$CRON_FILE")" = "$before" ] || fail "invalid setting changed cron"
+done
+printf 'RESTORE_TEST_ENABLED=true\n' >> "$CRON_FILE"
+before="$(cat "$CRON_FILE")"
+if run_installer >/dev/null 2>&1; then fail "duplicate installed setting must fail"; fi
+[ "$(cat "$CRON_FILE")" = "$before" ] || fail "duplicate setting changed cron"
+
+# Empty installed settings must not silently turn held work back on.
+printf 'RESTORE_TEST_ENABLED=\n' > "$CRON_FILE"
+before="$(cat "$CRON_FILE")"
+if run_installer >/dev/null 2>&1; then fail "empty installed setting must fail"; fi
+[ "$(cat "$CRON_FILE")" = "$before" ] || fail "empty setting changed cron"
+
+# Cron-legal hand edits must never be mistaken for an omitted setting.
+for noncanonical in ' RESTORE_TEST_ENABLED=false' 'RESTORE_TEST_ENABLED = false'; do
+  printf '%s\n' "$noncanonical" > "$CRON_FILE"
+  before="$(cat "$CRON_FILE")"
+  if run_installer >/dev/null 2>&1; then fail "spaced installed setting must fail closed"; fi
+  [ "$(cat "$CRON_FILE")" = "$before" ] || fail "spaced setting changed cron"
+done
+
+# Explicit booleans may repair a bad prior field and resume the schedule.
+run_installer BACKUP_ENABLED=true RESTORE_TEST_ENABLED=true >/dev/null
+grep -q '^0 \*/6 .*pg-backup.sh' "$CRON_FILE" || fail "explicit backup resume must restore its schedule"
+grep -q '^0 5 .*restore-test.sh' "$CRON_FILE" || fail "explicit restore resume must restore its schedule"
+
+# 5. Missing backup script is a hard error.
 rm -f "$SCRIPTS/restore-test.sh"
 if run_installer >/dev/null 2>&1; then
   fail "expected non-zero exit when restore-test.sh is missing"

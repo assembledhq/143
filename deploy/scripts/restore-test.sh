@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+case "${RESTORE_TEST_ENABLED:-true}" in
+  true) ;;
+  false) echo "ERROR: restore test is DEFERRED (RESTORE_TEST_ENABLED=false); recovery was not verified" >&2; exit 75 ;;
+  *) echo "ERROR: RESTORE_TEST_ENABLED must be true or false" >&2; exit 1 ;;
+esac
+
 # Automated backup restore verification.
 # Run weekly via cron (installed by install-pg-backups.sh) to confirm backups
 # are actually restorable.

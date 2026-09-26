@@ -98,6 +98,23 @@ exit 0
 EOF
 chmod +x "$FAKE_BIN/docker" "$FAKE_BIN/sleep"
 
+# Disabled/invalid states must stop before opening an archive or allocating any
+# Docker resources, even when the configured backup directory does not exist.
+for mode in false invalid; do
+  case_dir="$TEST_ROOT/guard-$mode"
+  mkdir -p "$case_dir"
+  : > "$case_dir/calls"
+  status=0
+  env PATH="$FAKE_BIN:$PATH" RESTORE_TEST_ENABLED="$mode" \
+    BACKUP_DIR="$case_dir/missing" FAKE_CASE_DIR="$case_dir" \
+    bash "$SCRIPT_DIR/restore-test.sh" >"$case_dir/output" 2>&1 || status=$?
+  expected=1
+  if [ "$mode" = false ]; then expected=75; fi
+  [ "$status" = "$expected" ] || fail "$mode guard must return expected non-success status"
+  [ ! -s "$case_dir/calls" ] || fail "$mode guard must not call Docker"
+  [ ! -e "$case_dir/missing" ] || fail "$mode guard must not create backup state"
+done
+
 case_count=0
 while read -r name expected_status expected_cleanup expected_start expected_restore; do
   case_dir="$TEST_ROOT/$name"
