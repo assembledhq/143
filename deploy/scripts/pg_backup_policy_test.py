@@ -8,9 +8,11 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -181,6 +183,10 @@ class PolicyTests(unittest.TestCase):
         self.canary()
         self.dump()
         self.assertFalse(old.exists())
+        self.assertFalse((self.p.state / (old.name + '.json')).exists())
+        retired = list((self.p.state / 'retired').glob(old.name + '.*.json'))
+        self.assertEqual(len(retired), 1)
+        self.assertEqual(policy.read_json(retired[0])['file'], old.name)
         self.assertTrue(latest.exists())
         uploads = [x for x in self.p.operations if x[0] == 'upload']
         self.assertEqual(len(uploads), 1)
@@ -325,16 +331,252 @@ with p.Policy().locked():
                 child.kill()
             child.communicate()
 
-    def test_restore_selects_verified_archive_and_preserves_failure_marker(self):
+    def test_restore_selects_verified_archive_and_requires_cleanup_proof(self):
         paths = [self.archive(n) for n in (1, 2)]
-        for status in [0, 42]:
-            with self.subTest(status=status):
-                with mock.patch.object(policy.subprocess, 'run', return_value=types.SimpleNamespace(returncode=status)) as call:
-                    self.assertEqual(self.p.restore(), status)
-                    self.assertEqual(call.call_args.kwargs['env']['BACKUP_ARCHIVE'], str(paths[1]))
-                    self.assertTrue(call.call_args.args[0][1].endswith('restore-test-body.sh'))
-                self.assertEqual((self.p.state / 'pending.json').exists(), status != 0)
-        with self.assertRaisesRegex(policy.Refused, 'incomplete operation'): self.p.prune()
+        for status, proof in [(0, True), (42, True), (143, True), (42, False), (0, False)]:
+            with self.subTest(status=status, proof=proof):
+                def reader(command, env):
+                    self.assertEqual(env['BACKUP_ARCHIVE'], str(paths[1]))
+                    self.assertTrue(command[1].endswith('restore-test-body.sh'))
+                    if proof:
+                        receipt = Path(env['RESTORE_CLEANUP_RECEIPT'])
+                        receipt.write_text('cleanup-complete\n')
+                        receipt.chmod(0o600)
+                    return status
+                with mock.patch.object(self.p, 'restore_admission'), mock.patch.object(policy, 'run_restore_reader', side_effect=reader):
+                    if proof:
+                        self.assertEqual(self.p.restore(), status)
+                        self.p.no_pending()
+                    else:
+                        with self.assertRaisesRegex(policy.Refused, 'cleanup unproven'): self.p.restore()
+                        with self.assertRaisesRegex(policy.Refused, 'incomplete operation'): self.p.prune()
+                self.assertEqual((self.p.state / 'pending.json').exists(), not proof)
+                result = policy.read_json(self.p.state / 'last-restore.json')
+                self.assertEqual((result['exit_status'], result['cleanup_verified']), (status, proof))
+                (self.p.state / 'pending.json').unlink(missing_ok=True)  # Fixture only.
+
+    def test_restore_admission_refuses_production_and_insufficient_docker_space(self):
+        self.archive(1)
+        for present, available, accepted in [('production-id', 100 * policy.GIB, False),
+                ('', 20 * policy.GIB + 199, False), ('', 20 * policy.GIB + 200, True)]:
+            with self.subTest(present=present, available=available):
+                p = policy.Policy()
+                with mock.patch.dict(os.environ, DOCKER_HOST='unix:///var/run/docker.sock', DOCKER_CONTEXT=''), \
+                        mock.patch.object(policy, 'invoke', side_effect=[present, str(self.root)]) as invoke, \
+                        mock.patch.object(policy.os, 'statvfs', return_value=types.SimpleNamespace(f_bavail=available, f_frsize=1)) as space, \
+                        mock.patch.object(policy, 'run_restore_reader') as reader:
+                    if accepted:
+                        p.restore_admission(p.inventory(remote=False)[0])
+                        space.assert_called_once_with(self.root)
+                    else:
+                        with self.assertRaisesRegex(policy.Refused, 'isolated Docker host|insufficient Docker'): p.restore()
+                    reader.assert_not_called()
+                    self.assertEqual(invoke.call_count, 1 if present else 2)
+                    self.assertFalse((p.state / 'pending.json').exists())
+
+    def test_restore_admission_rejects_remote_docker_before_inspecting_local_space(self):
+        self.archive(1)
+        for host, context in [('tcp://remote:2376', ''), ('', 'remote')]:
+            with self.subTest(host=host, context=context), \
+                    mock.patch.dict(os.environ, DOCKER_HOST=host, DOCKER_CONTEXT=context), \
+                    mock.patch.object(policy, 'invoke', return_value='ssh://remote') as call, \
+                    mock.patch.object(policy.os, 'statvfs') as space:
+                with self.assertRaisesRegex(policy.Refused, 'local Docker socket'): self.p.restore()
+                space.assert_not_called()
+                self.assertEqual(call.call_count, 1 if context else 0)
+
+    def test_structural_verification_has_configurable_bounded_timeout(self):
+        archive = self.archive(1)
+        for seconds in [None, '3600', '86400', '59', '86401']:
+            with self.subTest(seconds=seconds), mock.patch.dict(os.environ):
+                if seconds is None: os.environ.pop('BACKUP_VERIFY_TIMEOUT_SECONDS', None)
+                else: os.environ['BACKUP_VERIFY_TIMEOUT_SECONDS'] = seconds
+                if seconds in ('59', '86401'):
+                    with self.assertRaisesRegex(policy.Refused, 'verification timeout'): policy.Policy()
+                    continue
+                p = policy.Policy()
+                with mock.patch.object(policy, 'invoke') as call:
+                    p.structural_check(archive)
+                    self.assertEqual(call.call_args.kwargs['timeout'], int(seconds or '7200'))
+
+    def test_verification_timeout_keeps_uncertain_reader_marker(self):
+        path = self.archive(1)
+        receipt = self.p.state / (path.name + '.json')
+        receipt.unlink()
+        remote = self.p.objects[path.name]
+        args = argparse.Namespace(file=path.name, sha256=policy.sha256(path), etag=remote['etag'],
+                 last_modified=remote['last_modified'], version_id='v', evidence='independent')
+        with mock.patch.object(self.p, 'structural_check', side_effect=subprocess.TimeoutExpired('reader', 7200)):
+            with self.assertRaises(subprocess.TimeoutExpired): self.p.import_receipt(args)
+        self.assertFalse(receipt.exists())
+        self.assertEqual(policy.read_json(self.p.state / 'pending.json')['phase'], 'verify')
+
+    def test_dump_partial_is_private_at_creation_with_permissive_umask(self):
+        self.archive(1)
+        self.archive(2)
+        self.canary()
+        original = os.open
+        def opening(path, flags, mode=0o777):
+            fd = original(path, flags, mode)
+            if '.partial.' in str(path):
+                self.assertEqual(os.fstat(fd).st_mode & 0o777, 0o600)
+            return fd
+        previous = os.umask(0)
+        try:
+            with mock.patch.object(policy.os, 'open', side_effect=opening): self.dump()
+        finally:
+            os.umask(previous)
+
+    def wrapper_fixture(self, name):
+        case = self.root / name
+        case.mkdir()
+        (case / 'tmp').mkdir()
+        (case / 'bin').mkdir()
+        # Only virtualize capacity; execute the real shell entry point, policy,
+        # signal handlers, Popen, reader, and cleanup together.
+        python = case / 'bin' / 'python3'
+        python.write_text(f'''#!{sys.executable}
+import os, runpy, sys, types
+os.statvfs = lambda path: types.SimpleNamespace(f_bavail=100 * 1024**3, f_frsize=1)
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+''')
+        python.chmod(0o700)
+        docker = case / 'bin' / 'docker'
+        docker.write_text(f'#!{sys.executable}\n' + '''import json, os, sys, time
+from pathlib import Path
+root = Path(os.environ['FAKE_CASE_DIR'])
+args = sys.argv[1:]
+with (root / 'calls').open('a') as f: f.write(json.dumps(args) + '\\n')
+cid = 'a' * 64
+if args[0] == 'context': print('unix:///var/run/docker.sock')
+elif args[0] == 'ps':
+    if os.environ['FAKE_CASE'] == 'production': print('production-id')
+elif args[0] == 'info': print(root)
+elif args[0] == 'create':
+    Path(args[args.index('--cidfile') + 1]).write_text(cid)
+    print(cid)
+elif args[0] == 'start':
+    assert args == ['start', cid]
+elif args[0] == 'exec':
+    assert cid in args
+    if 'pg_restore' in args:
+        (root / 'restored').write_bytes(sys.stdin.buffer.read())
+        (root / 'reading').touch()
+        if os.environ['FAKE_CASE'] in ('signal', 'cleanup-timeout'): time.sleep(30)
+        if os.environ['FAKE_CASE'] == 'restore-failure': sys.exit(42)
+    elif 'psql' in args:
+        print(2 if os.environ['FAKE_CASE'] == 'few-tables' else 10)
+    else: assert 'pg_isready' in args
+elif args[0] == 'rm':
+    assert args == ['rm', '-f', '-v', cid]
+    (root / 'cleanup-started').touch()
+    time.sleep(30 if os.environ['FAKE_CASE'] == 'cleanup-timeout' else 0.4)
+    if os.environ['FAKE_CASE'] == 'cleanup-failure': sys.exit(55)
+    (root / 'cleanup-finished').touch()
+else: sys.exit(99)
+''')
+        docker.chmod(0o700)
+        env = dict(os.environ, PATH=str(case / 'bin') + os.pathsep + os.environ['PATH'],
+                   TMPDIR=str(case / 'tmp'), FAKE_CASE_DIR=str(case), FAKE_CASE=name,
+                   DOCKER_HOST='', DOCKER_CONTEXT='',
+                   BACKUP_ATTENDED='true', BACKUP_OBSERVER='test operator', RESTORE_TEST_ENABLED='true')
+        return case, env
+
+    def wait_for_file(self, path, child):
+        deadline = time.monotonic() + 8
+        while not path.exists() and child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(path.exists(), f'child did not reach {path.name}; status {child.poll()}')
+
+    def test_real_wrapper_signal_waits_for_owned_cleanup_and_retains_lock(self):
+        archive = self.archive(1)
+        for sig, group in [(signal.SIGTERM, False), (signal.SIGHUP, False),
+                           (signal.SIGINT, False), (signal.SIGINT, True)]:
+            with self.subTest(signal=sig, group=group):
+                case, env = self.wrapper_fixture(f'signal-{sig}-{group}')
+                env['FAKE_CASE'] = 'signal'
+                with (case / 'output').open('w+') as output:
+                    child = subprocess.Popen(['bash', str(SCRIPT_DIR / 'restore-test.sh')],
+                                             env=env, stdout=output, stderr=output, start_new_session=True)
+                    try:
+                        self.wait_for_file(case / 'reading', child)
+                        if group: os.killpg(child.pid, sig)
+                        else: child.send_signal(sig)
+                        self.wait_for_file(case / 'cleanup-started', child)
+                        # A second signal must not interrupt Docker rm either.
+                        child.send_signal(signal.SIGTERM)
+                        with self.assertRaisesRegex(policy.Refused, 'lock timeout'):
+                            with self.p.locked(): self.fail('reader released lock before cleanup')
+                        status = child.wait(timeout=8)
+                        output.seek(0)
+                        self.assertEqual(status, 128 + sig, output.read())
+                    finally:
+                        if child.poll() is None: child.kill()
+                        child.wait(timeout=8)
+                self.assertTrue((case / 'cleanup-finished').exists())
+                self.assertEqual((case / 'restored').read_bytes(), archive.read_bytes())
+                self.assertFalse((self.p.state / 'pending.json').exists())
+                self.assertEqual(list((case / 'tmp').iterdir()), [])
+                result = policy.read_json(self.p.state / 'last-restore.json')
+                self.assertEqual((result['exit_status'], result['cleanup_verified']), (128 + sig, True))
+                self.p.no_pending()
+
+    def test_real_wrapper_failure_clears_only_proven_cleanup(self):
+        archive = self.archive(1)
+        for scenario, status, clean in [('success', 0, True), ('restore-failure', 42, True),
+                                        ('few-tables', 1, True), ('cleanup-failure', 1, False)]:
+            with self.subTest(scenario=scenario):
+                case, env = self.wrapper_fixture(scenario)
+                result = subprocess.run(['bash', str(SCRIPT_DIR / 'restore-test.sh')], env=env,
+                                        capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                self.assertEqual((case / 'cleanup-finished').exists(), clean)
+                self.assertEqual((self.p.state / 'pending.json').exists(), not clean)
+                self.assertEqual(policy.read_json(self.p.state / 'last-restore.json')['cleanup_verified'], clean)
+                self.assertEqual(archive.read_bytes(), b'verified dump')
+                if not clean:
+                    self.assertEqual(len(list((case / 'tmp').glob('*/container-id'))), 1)
+                    with self.assertRaisesRegex(policy.Refused, 'incomplete operation'): self.p.prune()
+
+    def test_real_wrapper_refuses_production_before_allocation(self):
+        self.archive(1)
+        case, env = self.wrapper_fixture('production')
+        result = subprocess.run(['bash', str(SCRIPT_DIR / 'restore-test.sh')], env=env,
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b'isolated Docker host', result.stdout)
+        self.assertEqual([json.loads(x)[0] for x in (case / 'calls').read_text().splitlines()], ['context', 'ps'])
+        self.assertFalse((self.p.state / 'pending.json').exists())
+
+    def test_reader_grace_timeout_retains_marker_for_manual_reconciliation(self):
+        self.archive(1)
+        case, env = self.wrapper_fixture('cleanup-timeout')
+        code = '''import importlib.util, sys
+sys.dont_write_bytecode=True
+spec=importlib.util.spec_from_file_location('p', sys.argv[1]); p=importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
+reader=p.run_restore_reader
+p.run_restore_reader=lambda command, env: reader(command, env, cleanup_timeout=0.2)
+p.os.statvfs=lambda path: type('FS', (), dict(f_bavail=100 * p.GIB, f_frsize=1))()
+sys.argv=[sys.argv[1], 'restore']
+sys.exit(p.main())
+'''
+        with (case / 'output').open('w+') as output:
+            child = subprocess.Popen([sys.executable, '-c', code, str(SCRIPT_DIR / 'pg-backup-policy.py')],
+                                     env=env, stdout=output, stderr=output, start_new_session=True)
+            try:
+                self.wait_for_file(case / 'reading', child)
+                child.send_signal(signal.SIGTERM)
+                self.assertEqual(child.wait(timeout=8), 1)
+                output.seek(0)
+                self.assertIn('cleanup exceeded grace period', output.read())
+            finally:
+                if child.poll() is None: child.kill()
+                child.wait(timeout=8)
+        self.assertTrue((case / 'cleanup-started').exists())
+        self.assertFalse((case / 'cleanup-finished').exists())
+        self.assertTrue((self.p.state / 'pending.json').exists())
+        with self.assertRaisesRegex(policy.Refused, 'incomplete operation'): self.p.no_pending()
 
     def test_wrappers_refuse_disabled_invalid_and_unattended_before_work(self):
         for script, flag in [('pg-backup.sh', 'BACKUP_ENABLED'), ('restore-test.sh', 'RESTORE_TEST_ENABLED')]:

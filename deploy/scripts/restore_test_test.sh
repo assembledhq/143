@@ -149,7 +149,12 @@ while read -r name expected_status expected_cleanup expected_start expected_rest
     cmp "$case_dir/backups/test.dump" "$case_dir/restored-input" || fail "$name: restore should receive all backup bytes"
   fi
   [ "$(cat "$case_dir/backups/test.dump")" = 'backup bytes to preserve' ] || fail "$name: must not alter the backup"
-  [ -z "$(ls -A "$case_dir/tmp")" ] || fail "$name: temporary state must be cleaned up"
+  case "$name" in
+    create-failure|name-collision|create-without-receipt|missing-id|invalid-id|cleanup-failure|restore-and-cleanup-failure)
+      [ -n "$(ls -A "$case_dir/tmp")" ] || fail "$name: uncertain cleanup must preserve ownership state"
+      ;;
+    *) [ -z "$(ls -A "$case_dir/tmp")" ] || fail "$name: completed cleanup must remove temporary state" ;;
+  esac
   case "$name" in
     cleanup-failure|restore-and-cleanup-failure)
       grep -Fq "ERROR: Cleanup failed for restore-test container $FAKE_CONTAINER_ID" "$case_dir/output" || fail "$name: cleanup failure must identify the remaining container"

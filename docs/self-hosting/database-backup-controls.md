@@ -63,6 +63,8 @@ qualified copy and the last fully restored known-good copy. If no distinct
 known-good copy is pinned, it keeps the two newest qualified copies. A pin uses
 one of these two slots. An old archive is not deleted merely because of its age.
 The old `BACKUP_RETENTION_DAYS` setting is no longer used.
+After a successful archive deletion, its receipt moves to `.backup-state/retired/`
+for audit instead of remaining in the active receipt directory.
 
 Pruning requires private per-file receipts in `BACKUP_DIR/.backup-state`, a
 matching local inode/size/mtime/ctime identity, and a fresh exact S3 key, size,
@@ -93,6 +95,10 @@ failures to that operator's terminal. Do not set these variables in cron to
 simulate an observer, and do not resume unattended schedules. The observer must
 watch disk and memory and have a separately approved stop procedure. M1a does not
 claim automated alert delivery or four successful scheduled runs.
+**Installing M1a does not resume scheduled backups.** Until M1b is installed and
+validated, an assigned human must arrange each approved, attended backup at the
+six-hour target cadence, or explicitly record the growing recovery-point gap and
+the next decision time. A healthy installer result is not a successful backup.
 
 ## Data-only offsite configuration
 
@@ -104,12 +110,17 @@ credentials to the AWS CLI container through environment variables, never comman
 arguments. The old executable `backup-sync.env` is left untouched for rollback
 but is never sourced or evaluated by this policy. Missing JSON configuration
 fails closed. No additional IAM permission is required beyond listing and upload.
+After the rollback window, remove the old executable configuration only under a
+separate, explicit host-change approval.
 
 Keep both schedule holds while installing this revision. Verify helper hashes,
 Python 3 availability, JSON configuration permissions, and the continued presence
 of the previous owned-container restore cleanup. The provisioning wrapper also
 updates scripts and storage configuration; approval must cover that whole scope.
 Do not use an old checkout's provisioning command because it can replace held cron.
+This installer omits the obsolete retention-days field, so even a held cron file
+will have a new hash. Record the new bytes/hash at installation; do not reuse
+one-time incident helpers whose preconditions pin the previous cron hash.
 
 ## Qualify existing copies and run a canary
 
@@ -128,6 +139,12 @@ python3 /opt/143/deploy/scripts/pg-backup-policy.py import-receipt \
 
 This command performs its own local full-file hash and structural check and
 fresh metadata comparisons. It never downloads or uploads a legacy object.
+The version ID is an **operator attestation**, not an API-verified value: the
+writer's ListObjectsV2 permission does not expose version IDs. The receipt's
+`database_bytes` is measured from the current database at import, not at the
+legacy dump's creation time. Structural verification defaults to a two-hour
+timeout for large archives; `BACKUP_VERIFY_TIMEOUT_SECONDS` may set 60–86400
+seconds. A timeout retains the pending marker for reader reconciliation.
 Import receipts for **every** local completed copy; normal admission also
 requires at least two qualified copies. `plan` checks the inventory and current
 admission without pruning or creating a dump:
@@ -165,11 +182,38 @@ restore**, `pin-restored --file ... --sha256 ... --evidence ...` records the kno
 selection. The local restore helper's basic table checks do not automatically
 create a full-restore pin. Moving a pin requires evidence of its replacement.
 
+## Restore admission and cleanup
+
+The restore entry point requires a local Docker socket and refuses a daemon
+containing the configured production database container, including a stopped one.
+Choose a separately verified isolated host; changing the container name to bypass
+this guard is not isolation. Before hashing or allocating a container, it checks
+the Docker data filesystem for **twice the larger of receipt database size and
+archive size, plus the 20 GiB reserve**. This is a conservative admission estimate,
+not a runtime resource limit. Isolated host provisioning, memory limits, complete
+application checks, and independent offsite recovery remain M2 work. Keep the
+production restore schedule held.
+
+TERM, HUP, and INT sent to the wrapper are forwarded once as TERM to the reader's
+separate process group. The wrapper keeps the shared lock and gives cleanup 120
+seconds to remove only the recorded disposable container and its anonymous
+volumes. Repeated signals do not interrupt cleanup. After the grace period, it
+kills the remaining local process group and keeps the pending marker: killing a
+Docker client alone cannot prove daemon-side resource removal.
+
+The reader publishes a private cleanup receipt only after successful owned
+container removal and temporary-state cleanup. A failed or cancelled drill with
+that proof records its nonzero status in `last-restore.json` and releases the
+pending marker, so backups can continue. Missing ownership evidence or failed
+removal preserves the marker and available cidfile for inspection. Basic restore
+success still does not create a known-good pin.
+
 ## Interruption and rollback
 
 Before dump/restore work starts, the policy saves `pending.json` with the archive,
-phase and (for a dump) unique `PGAPPNAME`. Failed or interrupted work preserves
-this marker and any partial/completed output. The next operation refuses to
+phase and (for a dump) unique `PGAPPNAME`. Failed or interrupted backup work, or
+restore work without proven cleanup, preserves this marker and any
+partial/completed output. The next operation refuses to
 proceed. There is deliberately no age-only partial sweep: a dead Docker client
 does not prove its database backend or upload container is gone.
 
@@ -179,8 +223,8 @@ object under a separately approved recovery procedure. Establish that no owned
 writer/reader remains before removing only a proven abandoned partial; preserve
 completed uncertain archives until independently verified. Inspect a failed
 restore's cidfile/logged container identity before cleanup. Reconcile the receipt
-and clear the marker only after those checks. Automatic cancellation/recovery is
-deferred to the runtime-protection milestone.
+and clear the marker only after those checks. Automatic backup cancellation and
+recovery are deferred to the runtime-protection milestone.
 
 Keep cron held when rolling code back. Reinstalling the historical age-pruning
 script is unsafe on a disk that cannot hold its retention window. Preserve

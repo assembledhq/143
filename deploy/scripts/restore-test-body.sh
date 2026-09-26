@@ -28,8 +28,9 @@ fi
 TEST_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/143-restore-test.XXXXXXXXXX")
 TEST_CONTAINER_NAME="${TEST_STATE_DIR##*/}"
 CID_FILE="$TEST_STATE_DIR/container-id"
+CREATE_ATTEMPTED=false
 cleanup() {
-  local status=$? container_id
+  local status=$? container_id cleanup_ok=true
   trap - EXIT
   trap '' HUP INT TERM
   if [ -s "$CID_FILE" ]; then
@@ -37,17 +38,31 @@ cleanup() {
       # -v removes only this disposable container's anonymous volumes. The
       # production volume and backup directory are never mounted here.
       if ! docker rm -f -v "$container_id"; then
+        cleanup_ok=false
         echo "ERROR: Cleanup failed for restore-test container $container_id; manual inspection required" >&2
         if [ "$status" -eq 0 ]; then status=1; fi
       fi
     else
+      cleanup_ok=false
       echo "ERROR: Invalid restore-test container ID in $CID_FILE; refusing cleanup" >&2
       if [ "$status" -eq 0 ]; then status=1; fi
     fi
+  elif [ "$CREATE_ATTEMPTED" = true ]; then
+    cleanup_ok=false
+    echo "ERROR: Container creation had no ownership receipt; inspect $TEST_CONTAINER_NAME" >&2
+    if [ "$status" -eq 0 ]; then status=1; fi
   fi
-  if ! rm -f "$CID_FILE" || ! rmdir "$TEST_STATE_DIR"; then
+  # Preserve ownership evidence when removal is uncertain.
+  if [ "$cleanup_ok" = true ] && { ! rm -f "$CID_FILE" || ! rmdir "$TEST_STATE_DIR"; }; then
+    cleanup_ok=false
     echo "ERROR: Failed to remove restore-test state directory $TEST_STATE_DIR" >&2
     if [ "$status" -eq 0 ]; then status=1; fi
+  fi
+  if [ "$cleanup_ok" = true ] && [ -n "${RESTORE_CLEANUP_RECEIPT:-}" ]; then
+    if ! (umask 077; set -o noclobber; printf 'cleanup-complete\n' > "$RESTORE_CLEANUP_RECEIPT"); then
+      echo "ERROR: Failed to publish restore cleanup receipt" >&2
+      if [ "$status" -eq 0 ]; then status=1; fi
+    fi
   fi
   exit "$status"
 }
@@ -61,6 +76,7 @@ echo "$(date -Iseconds) Testing restore of $BACKUP in $TEST_CONTAINER_NAME..."
 
 # Record the created container before starting it, so startup failures also
 # remove its anonymous data volume. Docker writes the cidfile on creation.
+CREATE_ATTEMPTED=true
 docker create --cidfile "$CID_FILE" --name "$TEST_CONTAINER_NAME" \
   -e POSTGRES_USER="$DB_USER" \
   -e POSTGRES_PASSWORD=test \

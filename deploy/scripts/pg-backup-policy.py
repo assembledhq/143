@@ -109,6 +109,59 @@ def invoke(args, *, env=None, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, 
     return (result.stdout or b'').decode()
 
 
+def run_restore_reader(command, env, cleanup_timeout=120):
+    """Forward cancellation once, allowing the shell's EXIT cleanup to finish.
+
+    subprocess.run kills its child when a Python signal handler raises. Use a
+    separate process group and non-raising handlers instead, retaining the lock
+    until cleanup exits or its bounded grace period is exhausted.
+    """
+    child = None
+    cancelled = None
+    deadline = None
+
+    def cancel(signum, frame):
+        nonlocal cancelled
+        if cancelled is None:
+            cancelled = signum
+
+    signals = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    previous = {sig: signal.signal(sig, cancel) for sig in signals}
+    try:
+        child = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL, start_new_session=True)
+        while True:
+            if cancelled is not None and deadline is None:
+                deadline = time.monotonic() + cleanup_timeout
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass  # Already terminal; wait still reaps the exact child.
+            try:
+                status = child.wait(timeout=0.1)
+                return 128 + cancelled if cancelled else (status if status >= 0 else 128 - status)
+            except subprocess.TimeoutExpired:
+                if deadline is not None and time.monotonic() >= deadline:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait(timeout=10)
+                    raise Refused('restore cleanup exceeded grace period; inspect pending operation and owned container')
+    finally:
+        # On an unexpected Python exception do not strand or immediately kill
+        # the reader. Its cleanup may still establish a receipt for inspection.
+        try:
+            if child is not None and child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                    child.wait(timeout=cleanup_timeout)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait(timeout=10)
+                except ProcessLookupError:
+                    child.wait(timeout=10)
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+
+
 class Policy:
     def __init__(self):
         self.root = Path(os.environ.get('BACKUP_DIR', '/backups/postgres'))
@@ -119,8 +172,10 @@ class Policy:
         require(re.fullmatch(r'[a-zA-Z0-9_]+', self.database), 'invalid database name')
         self.reserve = int(os.environ.get('BACKUP_RESERVE_BYTES', str(20 * GIB)))
         self.wait = float(os.environ.get('BACKUP_LOCK_TIMEOUT_SECONDS', '60'))
+        self.verify_timeout = int(os.environ.get('BACKUP_VERIFY_TIMEOUT_SECONDS', '7200'))
         require(self.reserve >= 20 * GIB, 'reserve cannot be below 20 GiB')
         require(math.isfinite(self.wait) and 0 <= self.wait <= 3600, 'invalid lock timeout')
+        require(60 <= self.verify_timeout <= 86400, 'invalid verification timeout')
         self.storage = None
 
     @contextmanager
@@ -206,7 +261,7 @@ class Policy:
     def structural_check(self, path):
         with path.open('rb') as f:
             invoke(['docker', 'exec', '-i', self.container, 'pg_restore', '--list'], stdin=f,
-                   stdout=subprocess.DEVNULL, timeout=300)
+                   stdout=subprocess.DEVNULL, timeout=self.verify_timeout)
 
     def inventory(self, remote=True):
         records = []
@@ -273,6 +328,13 @@ class Policy:
             require(identity(path) == r['identity'], 'archive changed before unlink')
             path.unlink()
             sync_dir(self.root)
+            retired = self.state / 'retired'
+            retired.mkdir(mode=0o700, exist_ok=True)
+            require(not retired.is_symlink() and retired.stat().st_uid == os.geteuid()
+                    and not retired.stat().st_mode & 0o077, 'unsafe retired receipt directory')
+            os.rename(self.state / (path.name + '.json'), retired / (path.name + '.' + uuid.uuid4().hex + '.json'))
+            sync_dir(retired)
+            sync_dir(self.state)
             emit('pruned', file=r['file'], kept=keep)
 
     def admission(self, records, database_bytes):
@@ -341,8 +403,8 @@ class Policy:
         # Keep marker and partial on *any* failure: a failed Docker client or
         # signal is not proof that its server-side pg_dump stopped. M1b adds
         # owned-backend cancellation; M1a requires attended reconciliation.
-        with partial.open('xb') as f:
-            os.chmod(partial, 0o600)
+        fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'wb') as f:
             env = dict(self.db_env(), PGAPPNAME=app_name)
             invoke(['docker', 'exec', '-e', 'PGPASSWORD', '-e', 'PGAPPNAME', self.container,
                     'pg_dump', '-U', self.user, '-Fc', self.database], env=env, stdout=f, timeout=7200)
@@ -370,23 +432,50 @@ class Policy:
             self.prune()
         emit('backup_completed', file=name, canary=args.canary, retained=[r['file'] for r in self.inventory()])
 
+    def restore_admission(self, record):
+        endpoint = os.environ.get('DOCKER_HOST', '')
+        if os.environ.get('DOCKER_CONTEXT') or not endpoint:
+            endpoint = invoke(['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}']).strip()
+        require(endpoint.startswith('unix://'), 'restore capacity admission requires a local Docker socket')
+        # M2 must use a separate restore host. Even a stopped production
+        # container identifies its Docker daemon as unsafe for this drill.
+        require(not invoke(['docker', 'ps', '-aq', '--filter', 'name=^/' + self.container + '$']).strip(),
+                'restore drill requires an isolated Docker host, not the production database host')
+        docker_root = Path(invoke(['docker', 'info', '--format', '{{.DockerRootDir}}']).strip())
+        require(docker_root.is_absolute() and docker_root.is_dir(), 'cannot inspect local Docker data filesystem')
+        fs = os.statvfs(docker_root)
+        available = fs.f_bavail * fs.f_frsize
+        estimate = 2 * max(record['database_bytes'], record['identity']['bytes'])
+        emit('restore_admission', available_bytes=available, estimated_restore_bytes=estimate,
+             required_bytes=estimate + self.reserve, docker_root=str(docker_root))
+        require(available >= estimate + self.reserve, 'insufficient Docker filesystem space for restore plus reserve')
+
     def restore(self):
         self.no_pending()
         records = self.inventory(remote=False)
         require(records, 'no receipt-qualified local archive')
+        self.restore_admission(records[0])
         archive = self.root / records[0]['file']
         require(sha256(archive) == records[0]['sha256'], 'restore archive checksum mismatch')
         # Hold the common lock through the reader and its owned-container
         # cleanup. A crashed wrapper leaves a marker, so another backup cannot
         # prune while a surviving Docker client is reading this archive.
         marker = self.state / 'pending.json'
-        atomic_json(marker, dict(phase='restore', file=archive.name, started_at=now()))
-        result = subprocess.run(['bash', str(Path(__file__).with_name('restore-test-body.sh'))],
-                                env=dict(os.environ, BACKUP_ARCHIVE=str(archive)), stdin=subprocess.DEVNULL)
-        if result.returncode == 0:
-            marker.unlink()
-            sync_dir(self.state)
-        return result.returncode if result.returncode >= 0 else 128 - result.returncode
+        cleanup = self.state / ('restore-cleanup-' + uuid.uuid4().hex)
+        atomic_json(marker, dict(phase='restore', file=archive.name, started_at=now(), cleanup_receipt=cleanup.name))
+        status = run_restore_reader(['bash', str(Path(__file__).with_name('restore-test-body.sh'))],
+                                    dict(os.environ, BACKUP_ARCHIVE=str(archive), RESTORE_CLEANUP_RECEIPT=str(cleanup)))
+        verified = cleanup.exists() and identity(cleanup)['bytes'] == 17 and cleanup.read_text() == 'cleanup-complete\n'
+        atomic_json(self.state / 'last-restore.json', dict(file=archive.name, finished_at=now(),
+                    exit_status=status, cleanup_verified=verified))
+        require(verified, 'restore cleanup unproven; inspect pending operation and owned container')
+        # A failed drill with proven cleanup must report failure, but must not
+        # suspend unrelated backups indefinitely.
+        marker.unlink()
+        cleanup.unlink()
+        sync_dir(self.state)
+        emit('restore_completed', file=archive.name, exit_status=status, cleanup_verified=True)
+        return status
 
 
 def main():
