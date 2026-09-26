@@ -583,15 +583,31 @@ func (s *SessionStreams) runCleanupBatch(ctx context.Context, lister SessionTerm
 		}
 		next = session
 	}
-	for i, session := range sessions {
-		if err := ctx.Err(); err != nil {
-			return i, nil, err
-		}
-		if err := s.DeleteSessionStreams(ctx, session.ID); err != nil {
-			return i, nil, fmt.Errorf("delete session streams for %s: %w", session.ID, err)
-		}
+	if err := s.deleteCleanupSessionStreams(ctx, sessions); err != nil {
+		// A pipeline can partially succeed. Retry the whole idempotent page
+		// without advancing past any command whose outcome is uncertain.
+		return 0, nil, fmt.Errorf("delete cleanup session streams: %w", err)
 	}
 	return len(sessions), next, nil
+}
+
+func (s *SessionStreams) deleteCleanupSessionStreams(ctx context.Context, sessions []models.SessionStreamCleanupCursor) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s == nil || s.client == nil || len(sessions) == 0 {
+		return nil
+	}
+	return s.client.doCommand(ctx, "del_pipeline", func() error {
+		pipe := s.client.raw().Pipeline()
+		for _, session := range sessions {
+			// Keep each DEL within one session's hash slot so Cluster clients
+			// can route the bounded page by shard without CROSSSLOT errors.
+			pipe.Del(ctx, logStreamKey(session.ID), statusStreamKey(session.ID), eventStreamKey(session.ID))
+		}
+		_, err := pipe.Exec(ctx)
+		return err
+	})
 }
 
 func (s *SessionStreams) ensureLogFanout(sessionID uuid.UUID) *logFanout {
