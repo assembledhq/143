@@ -22,24 +22,66 @@ if [ -z "$BACKUP" ]; then
   exit 1
 fi
 
-TEST_CONTAINER="143-restore-test-$(date +%s)"
-trap 'docker rm -f "$TEST_CONTAINER" 2>/dev/null' EXIT
+# Keep Docker's ownership receipt in a private directory. Never clean up by
+# name: a failed create (for example, a name collision) does not own that name.
+TEST_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/143-restore-test.XXXXXXXXXX")
+CID_FILE="$TEST_STATE_DIR/container-id"
+cleanup() {
+  local status=$? container_id
+  trap - EXIT
+  trap '' HUP INT TERM
+  if [ -s "$CID_FILE" ]; then
+    if container_id=$(cat "$CID_FILE") && [[ "$container_id" =~ ^[0-9a-f]{64}$ ]]; then
+      # -v removes only this disposable container's anonymous volumes. The
+      # production volume and backup directory are never mounted here.
+      if ! docker rm -f -v "$container_id"; then
+        echo "ERROR: Cleanup failed for restore-test container $container_id; manual inspection required" >&2
+        if [ "$status" -eq 0 ]; then status=1; fi
+      fi
+    else
+      echo "ERROR: Invalid restore-test container ID in $CID_FILE; refusing cleanup" >&2
+      if [ "$status" -eq 0 ]; then status=1; fi
+    fi
+  fi
+  if ! rm -f "$CID_FILE" || ! rmdir "$TEST_STATE_DIR"; then
+    echo "ERROR: Failed to remove restore-test state directory $TEST_STATE_DIR" >&2
+    if [ "$status" -eq 0 ]; then status=1; fi
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 echo "$(date -Iseconds) Testing restore of $BACKUP..."
 
-# Start a temporary Postgres for the test
-docker run -d --name "$TEST_CONTAINER" \
+# Record the created container before starting it, so startup failures also
+# remove its anonymous data volume. Docker writes the cidfile on creation.
+docker create --cidfile "$CID_FILE" --name "${TEST_STATE_DIR##*/}" \
   -e POSTGRES_USER="$DB_USER" \
   -e POSTGRES_PASSWORD=test \
   -e POSTGRES_DB="$DB_NAME" \
   "$POSTGRES_IMAGE"
+TEST_CONTAINER=$(cat "$CID_FILE")
+if ! [[ "$TEST_CONTAINER" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "ERROR: Docker returned an invalid restore-test container ID" >&2
+  exit 1
+fi
+docker start "$TEST_CONTAINER"
 
 # Wait for Postgres to be ready
+READY=false
 for i in $(seq 1 30); do
   if docker exec "$TEST_CONTAINER" pg_isready -U "$DB_USER" > /dev/null 2>&1; then
+    READY=true
     break
   fi
   sleep 1
 done
+if [ "$READY" != true ]; then
+  echo "ERROR: Restore-test Postgres did not become ready" >&2
+  exit 1
+fi
 
 # Restore
 docker exec -i "$TEST_CONTAINER" \
