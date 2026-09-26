@@ -67,9 +67,10 @@ func TestMultiTenancyAudit(t *testing.T) {
 	exemptions := []exemption{
 		{"sessions", "where token"},
 		{"sessions", "where user_id"},
-		{"sessions", "where status = 'idle'"},                         // ListStaleIdleSessions: system-wide cleanup across all orgs
-		{"sessions", "where status = 'pending'"},                      // ListStalePendingSessions: system-wide cleanup across all orgs
-		{"sessions", "where status = 'running'"},                      // ListStaleRunningSessions: system-wide cleanup across all orgs
+		{"sessions", "where status = 'idle'"},    // ListStaleIdleSessions: system-wide cleanup across all orgs
+		{"sessions", "where status = 'pending'"}, // ListStalePendingSessions: system-wide cleanup across all orgs
+		{"sessions", "where status = 'running'"}, // ListStaleRunningSessions: system-wide cleanup across all orgs
+		{"sessions", "where status in ('completed', 'failed', 'cancelled', 'pr_created', 'skipped')"}, // ListTerminalEndedBefore: cross-org Redis key cleanup, identifiers only
 		{"sessions", "where sandbox_state"},                           // ListExpiredSnapshots: system-wide snapshot cleanup across all orgs
 		{"sessions", "where pending_snapshot_key is not null"},        // ReapStrandedPendingSnapshots: system-wide cross-org sweep run by leader-elected scheduler; per-org fanout adds no security and would require listing every org each tick
 		{"sessions", "where container_id is not null"},                // ListContainerReferences: worker-local Docker GC must compare host containers against all DB-owned container references
