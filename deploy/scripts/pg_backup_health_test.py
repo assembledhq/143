@@ -23,6 +23,10 @@ class HealthTests(unittest.TestCase):
         patch = mock.patch.object(health.os, 'statvfs', return_value=types.SimpleNamespace(f_bavail=50 * health.GIB, f_frsize=1))
         patch.start()
         self.addCleanup(patch.stop)
+        self._real_swap_usage = health.swap_usage
+        patch = mock.patch.object(health, 'swap_usage', return_value=0)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def record(self, timestamp='20260927-060000', **extra):
         name = 'onefortythree-' + timestamp + '.dump'
@@ -108,6 +112,59 @@ class HealthTests(unittest.TestCase):
         atomic_json(self.state / 'known-good.json', dict(evidence='isolated full restore checks',
                     file=record['file'], sha256=record['sha256'], restored_at='2026-09-27T01:00:00+00:00'))
         self.assertFalse(health.collect(self.root, self.current)['restore_overdue'])
+
+    def test_postdump_watchdog_cannot_hide_behind_successful_dump(self):
+        app = '143-backup-' + 'a' * 32
+        run = self.state / app
+        (run / 'postdump').mkdir(parents=True)
+        atomic_json(run / 'result.json', {'status': 'completed'})
+        for phase in ('verification', 'upload'):
+            for heartbeat, result, expected in [(None, None, True),
+                    ('2026-09-27T11:59:59+00:00', None, False),
+                    ('2026-09-27T11:58:00+00:00', None, True),
+                    ('2026-09-27T11:59:59+00:00', 'failed', True)]:
+                with self.subTest(phase=phase, heartbeat=heartbeat, result=result):
+                    atomic_json(self.state / 'pending.json', dict(phase=phase, app_name=app,
+                                runtime='postdump', started_at='2026-09-27T11:30:00+00:00'))
+                    hp, rp = run / 'postdump' / 'heartbeat.json', run / 'postdump' / 'result.json'
+                    hp.unlink(missing_ok=True)
+                    rp.unlink(missing_ok=True)
+                    if heartbeat: atomic_json(hp, {'at': heartbeat})
+                    if result: atomic_json(rp, {'status': result})
+                    self.assertEqual(health.collect(self.root, self.current)['watchdog_stale'], expected)
+
+    def test_orphaned_attempt_includes_postdump_failure(self):
+        atomic_json(self.state / 'attempt-test.json', dict(action='backup', status='running',
+                    started_at='2026-09-27T11:50:00+00:00'))
+        run = self.state / ('143-backup-' + 'a' * 32) / 'postdump'
+        run.mkdir(parents=True)
+        atomic_json(run / 'result.json', dict(status='failed', cleanup_verified=True,
+                    at='2026-09-27T11:51:00+00:00'))
+        self.assertTrue(health.collect(self.root, self.current)['backup_failed'])
+
+    def test_live_swap_and_receipt_resources_remain_visible_after_success(self):
+        phases = {'upload_completed': {'at': '2026-09-27T11:59:00+00:00',
+                                      'resources': {'db_swap_bytes': 7, 'swap_bytes': 10}}}
+        self.record(timeline={'recovery_point_basis': 'pre_dump_lower_bound',
+                    'dump_started_at': '2026-09-27T11:30:00+00:00', 'resources': phases})
+        for used, high in [(health.GIB // 4, False), (health.GIB // 4 + 1, True)]:
+            with self.subTest(used=used), mock.patch.object(health, 'swap_usage', return_value=used):
+                report = health.collect(self.root, self.current)
+            self.assertEqual(report['swap_bytes'], used)
+            self.assertEqual(report['swap_high'], high)
+            self.assertEqual(report['latest_backup_resources'], phases)
+
+    def test_swap_reader_rejects_invalid_kernel_sample(self):
+        for text, expected in [('SwapTotal: 1024 kB\nSwapFree: 512 kB\n', 512 * 1024),
+                               ('SwapTotal: 0 kB\nSwapFree: 0 kB\n', 0),
+                               ('SwapTotal: 0 kB\nSwapFree: 1 kB\n', None)]:
+            with self.subTest(text=text), mock.patch.object(Path, 'read_text', return_value=text):
+                # setUp mocks the call site for platform-independent health tests.
+                real = self._real_swap_usage
+                if expected is None:
+                    with self.assertRaises(Refused): real()
+                else:
+                    self.assertEqual(real(), expected)
 
 
 if __name__ == '__main__':

@@ -177,19 +177,24 @@ class Policy:
             self.storage = data
         return self.storage
 
-    def aws(self, args, archive=None, timeout=120):
+    def aws_spec(self, args, archive=None):
         cfg = self.load_storage()
         env = dict(os.environ, AWS_ACCESS_KEY_ID=cfg['access_key_id'],
                    AWS_SECRET_ACCESS_KEY=cfg['secret_access_key'], AWS_DEFAULT_REGION=cfg['region'])
-        command = ['docker', 'run', '--rm', '-e', 'AWS_ACCESS_KEY_ID', '-e', 'AWS_SECRET_ACCESS_KEY',
+        command = ['-e', 'AWS_ACCESS_KEY_ID', '-e', 'AWS_SECRET_ACCESS_KEY',
                    '-e', 'AWS_DEFAULT_REGION', '-e', 'AWS_EC2_METADATA_DISABLED=true']
         if archive is not None:
             command += ['--mount', 'type=bind,src=' + str(archive) + ',dst=/backup.dump,readonly']
-        return invoke(command + [AWS_IMAGE] + args, env=env, timeout=timeout)
+        return command + [AWS_IMAGE] + args, env
 
-    def remote(self, name):
+    def aws(self, args, archive=None, timeout=120):
+        command, env = self.aws_spec(args, archive)
+        return invoke(['docker', 'run', '--rm', '--memory=1g', '--memory-swap=1g',
+                       '--cpus=1', '--pids-limit=64'] + command, env=env, timeout=timeout)
+
+    def remote(self, name, aws=None):
         key = 'postgres/' + name
-        result = json.loads(self.aws(['s3api', 'list-objects-v2', '--bucket', self.load_storage()['bucket'],
+        result = json.loads((aws or self.aws)(['s3api', 'list-objects-v2', '--bucket', self.load_storage()['bucket'],
                                      '--prefix', key, '--max-keys', '2', '--no-paginate', '--output', 'json']))
         matches = [x for x in result.get('Contents', []) if x['Key'] == key]
         require(len(matches) <= 1, 'ambiguous object listing')
@@ -350,6 +355,10 @@ class Policy:
         from pg_backup_runtime import protect_dump
         return protect_dump(self, partial, app_name, estimate, exercise)
 
+    def transfer_archive(self, partial, app_name, timeline, measured_db, version):
+        from pg_backup_runtime import protect_transfer
+        return protect_transfer(self, partial, app_name, timeline, measured_db, version)
+
     def backup(self, args):
         self.no_pending()
         records = self.inventory()
@@ -377,13 +386,27 @@ class Policy:
         self.dump_archive(partial, app_name, admission['estimated_dump_bytes'], getattr(args, 'exercise_stop_after', None))
         timeline['dump_completed_at'] = now()
         pending = read_json(marker)
-        atomic_json(marker, dict(pending, timeline=timeline, phase='verification'))
+        atomic_json(marker, dict(pending, timeline=timeline, phase='verification', runtime='postdump'))
+        result = self.transfer_archive(partial, app_name, timeline, measured_db, version)
+        emit('dump_completed', file=result['file'], bytes=result['bytes'], sha256=result['sha256'])
+        if not args.canary:
+            self.prune()
+        emit('backup_completed', file=name, canary=args.canary, retained=[r['file'] for r in self.inventory()])
+
+    def finish_archive(self, partial, app_name, timeline, measured_db, version, guard):
+        marker = self.state / 'pending.json'
+        pending = read_json(marker)
+        require(pending.get('app_name') == app_name and pending.get('partial') == partial.name and
+                pending.get('phase') == 'verification', 'pending verification changed')
+        name = pending['file']
+        final = self.root / name
+        require(final.parent == self.root and not final.exists(), 'archive publication target changed')
         with partial.open('rb') as f:
             os.fsync(f.fileno())
-        self.structural_check(partial)
+        guard.structural_check(partial)
         timeline['structural_verified_at'] = now()
         atomic_json(marker, dict(pending, timeline=timeline, phase='verification'))
-        checksum = sha256(partial)
+        checksum = guard.checksum(partial)
         timeline['local_sha256_at'] = now()
         require(partial.stat().st_size > 0, 'empty dump')
         # link + unlink publishes atomically without replacing any existing file.
@@ -392,23 +415,23 @@ class Policy:
         sync_dir(self.root)
         file_id = identity(final)
         timeline['upload_started_at'] = now()
+        guard.checkpoint('upload_started')
         atomic_json(marker, dict(file=name, app_name=app_name, started_at=timeline['dump_started_at'],
-                                phase='upload', identity=file_id, sha256=checksum, timeline=timeline))
-        emit('dump_completed', file=name, bytes=file_id['bytes'], sha256=checksum)
-        self.aws(['s3', 'cp', '/backup.dump', 's3://' + self.load_storage()['bucket'] + '/postgres/' + name,
+                                phase='upload', runtime='postdump', identity=file_id, sha256=checksum, timeline=timeline))
+        guard.aws(['s3', 'cp', '/backup.dump', 's3://' + self.load_storage()['bucket'] + '/postgres/' + name,
                   '--checksum-algorithm', 'CRC64NVME', '--only-show-errors', '--no-follow-symlinks'], archive=final, timeout=7200)
         require(identity(final) == file_id, 'archive changed during upload')
-        remote = self.remote(name)
         timeline['upload_completed_at'] = now()
+        guard.checkpoint('upload_completed')
+        remote = self.remote(name, aws=guard.aws)
+        guard.checkpoint('integrity_verified')
         timeline['integrity_verified_at'] = now()
         timeline['integrity_basis'] = 'checksum_upload_not_independent_download'
         self.record(final, remote, checksum, dict(kind='checksum_upload', cli_image=AWS_IMAGE,
                     cli_version=version, algorithm='CRC64NVME', uploaded_at=now()), measured_db, file_id, timeline)
         marker.unlink()
         sync_dir(self.state)
-        if not args.canary:
-            self.prune()
-        emit('backup_completed', file=name, canary=args.canary, retained=[r['file'] for r in self.inventory()])
+        return dict(file=name, bytes=file_id['bytes'], sha256=checksum)
 
     def restore_admission(self, record):
         endpoint = os.environ.get('DOCKER_HOST', '')

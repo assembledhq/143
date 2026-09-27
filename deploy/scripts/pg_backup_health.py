@@ -33,6 +33,14 @@ def recovery_start(receipt):
     return dt.datetime.strptime(match[1], '%Y%m%d-%H%M%S').replace(tzinfo=dt.timezone.utc).isoformat()
 
 
+def swap_usage():
+    memory = {k: int(v.split()[0]) * 1024 for k, v in
+              (line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())}
+    used = memory['SwapTotal'] - memory['SwapFree']
+    require(0 <= used <= memory['SwapTotal'], 'invalid swap telemetry')
+    return used
+
+
 def collect(root, current=None):
     current = time.time() if current is None else current
     state = root / '.backup-state'
@@ -72,17 +80,21 @@ def collect(root, current=None):
     if latest and latest['status'] == 'running':
         # The parent can disappear before updating its attempt, while its
         # detached watchdog completes safe cleanup. Do not hide that failure.
-        for path in state.glob('143-backup-*/result.json'):
+        for path in [*state.glob('143-backup-*/result.json'), *state.glob('143-backup-*/postdump/result.json')]:
             result = read_json(path)
             if result['status'] == 'failed' and age(result['at'], current) <= age(latest['started_at'], current):
                 failed = True
     pending = read_json(state / 'pending.json') if (state / 'pending.json').exists() else None
     stalled = False
-    if pending and pending['phase'] == 'dump':
+    if pending and (pending['phase'] == 'dump' or pending.get('runtime') == 'postdump'):
         app = pending.get('app_name', '')
         require(re.fullmatch(r'143-backup-[a-f0-9]{32}', app), 'invalid pending dump identity')
-        heartbeat = state / app / 'heartbeat.json'
-        result = state / app / 'result.json'
+        run = state / app
+        if pending.get('runtime') == 'postdump':
+            require(pending['phase'] in ('verification', 'upload'), 'invalid post-dump phase')
+            run = run / 'postdump'
+        heartbeat = run / 'heartbeat.json'
+        result = run / 'result.json'
         stalled = (result.exists() and read_json(result)['status'] != 'completed') or (
             age(read_json(heartbeat)['at'], current) > 90 if heartbeat.exists()
             else age(pending['started_at'], current) > 90)
@@ -94,6 +106,8 @@ def collect(root, current=None):
                 'full restore pin lacks matching retained archive')
     restored = bool(restore and restore.get('evidence') and restore.get('restored_at'))
     restore_age = age(restore['restored_at'], current) if restored else None
+    swap = swap_usage()
+    newest = max(records, key=recovery_start) if records else {}
     return dict(time=now(), service='database-backup', event='backup_health', message='Database backup health',
                 backup_held=os.environ.get('BACKUP_ENABLED') != 'true',
                 restore_held=os.environ.get('RESTORE_TEST_ENABLED') != 'true',
@@ -103,6 +117,8 @@ def collect(root, current=None):
                 qualified_copies=len(records), free_bytes=free,
                 capacity_low=len(records) < 2 or free < reserve + 5 * GIB + int(largest * 1.25),
                 reserve_at_risk=free < reserve + 4 * GIB,
+                swap_bytes=swap, swap_high=swap > GIB / 4,
+                latest_backup_resources=newest.get('timeline', {}).get('resources'),
                 last_attempt=latest, pending_phase=pending['phase'] if pending else None)
 
 

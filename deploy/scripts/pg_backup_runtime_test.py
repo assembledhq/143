@@ -182,6 +182,8 @@ class RuntimeTests(unittest.TestCase):
         cg.mkdir()
         for field, value in [('current', 700 * 1024 ** 2), ('peak', 900 * 1024 ** 2), ('max', 2 * runtime.GIB)]:
             (cg / ('memory.' + field)).write_text(str(value))
+        (cg / 'memory.stat').write_text('anon 104857600\nfile 629145600\n')
+        (cg / 'memory.swap.current').write_text('0')
         with mock.patch.object(runtime, 'cgroup_path', return_value=cg):
             self.guard.observe_client_memory({'Id': 'c' * 64, 'State': {'Pid': 123}})
         self.guard.cleanup_beat('test')
@@ -191,6 +193,9 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(report['current_bytes'], 700 * 1024 ** 2)
             self.assertEqual(report['peak_observed_bytes'], 900 * 1024 ** 2)
             self.assertEqual(report['limit_bytes'], 2 * runtime.GIB)
+            self.assertEqual(report['anon_bytes'], 100 * 1024 ** 2)
+            self.assertEqual(report['file_bytes'], 600 * 1024 ** 2)
+            self.assertEqual(report['swap_bytes'], 0)
             self.assertTrue(report['observed_at'])
 
     def test_cleanup_continues_when_heartbeat_cannot_be_written(self):
