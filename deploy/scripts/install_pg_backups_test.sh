@@ -25,6 +25,7 @@ mkdir -p "$SCRIPTS"
 : > "$SCRIPTS/restore-test-body.sh"
 : > "$SCRIPTS/pg-backup-policy.py"
 : > "$SCRIPTS/pg-backup-config.py"
+for helper in pg_backup_state.py pg_backup_runtime.py pg_backup_health.py; do : > "$SCRIPTS/$helper"; done
 CRON_FILE="$TMP_DIR/143-pg-backup"
 
 # Extra "KEY=val" args (quoted, so values may contain spaces) are forwarded to

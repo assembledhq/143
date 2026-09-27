@@ -66,7 +66,7 @@ with open(sys.argv[1]) as f:
 assert actual == dict(bucket='test-backups', region='us-east-1', access_key_id='test-key', secret_access_key='literal-$not-shell')
 PY
 if grep -q 'literal-' "$FAKE_SSH_LOG"; then fail 'credentials must not become shell command arguments'; fi
-for helper in pg-backup.sh restore-test.sh restore-test-body.sh pg-backup-policy.py pg-backup-config.py install-pg-backups.sh; do
+for helper in pg-backup.sh restore-test.sh restore-test-body.sh pg-backup-policy.py pg-backup-config.py pg_backup_state.py pg_backup_runtime.py pg_backup_health.py install-pg-backups.sh; do
   grep -Fq "$helper" "$FAKE_SCP_LOG" || fail "missing installed helper $helper"
 done
 

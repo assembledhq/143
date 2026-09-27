@@ -1,0 +1,86 @@
+"""Private, atomic backup evidence and bounded command helpers."""
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import tempfile
+
+class Refused(RuntimeError):
+    pass
+
+
+def require(ok, message):
+    if not ok:
+        raise Refused(message)
+
+
+def now():
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def emit(event, **fields):
+    print(json.dumps(dict(at=now(), event=event, **fields)), flush=True)
+
+
+def identity(path):
+    s = path.lstat()
+    require(stat.S_ISREG(s.st_mode) and s.st_nlink == 1, 'unsafe file: ' + path.name)
+    require(s.st_uid == os.geteuid() and not s.st_mode & 0o077, 'file must be private and owned by operator: ' + path.name)
+    return dict(device=s.st_dev, inode=s.st_ino, bytes=s.st_size, mtime_ns=s.st_mtime_ns, ctime_ns=s.st_ctime_ns)
+
+
+def read_json(path):
+    identity(path)
+    require(path.stat().st_size < 1024 * 1024, 'oversized JSON record')
+    def unique_fields(pairs):
+        data = {}
+        for key, value in pairs:
+            require(key not in data, 'duplicate JSON field')
+            data[key] = value
+        return data
+    return json.loads(path.read_text(), object_pairs_hook=unique_fields)
+
+
+def sync_dir(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic_json(path, data):
+    fd, temporary = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, sort_keys=True)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+        sync_dir(path.parent)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def sha256(path):
+    before = identity(path)
+    h = hashlib.sha256()
+    with path.open('rb') as f:
+        for block in iter(lambda: f.read(8 * 1024 * 1024), b''):
+            h.update(block)
+    require(identity(path) == before, 'archive changed while hashing')
+    return h.hexdigest()
+
+
+def invoke(args, *, env=None, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, timeout=120):
+    # Do not include raw command output/credentials in an exception or receipt.
+    result = subprocess.run(args, env=env, stdin=stdin, stdout=stdout,
+                            stderr=subprocess.PIPE, timeout=timeout, check=False)
+    require(result.returncode == 0, 'command failed: ' + Path(args[0]).name + ' (exit ' + str(result.returncode) + ')')
+    return (result.stdout or b'').decode()
+
