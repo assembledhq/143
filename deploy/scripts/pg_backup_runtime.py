@@ -18,6 +18,8 @@ from pg_backup_state import (Refused, require, now, identity, read_json,
 GIB = 1024 ** 3
 INTERVAL = 5
 MAX_DUMP_SECONDS = 45 * 60
+WATCHDOG_TIMEOUT = 45
+CLEANUP_TIMEOUT = 120
 LABEL = 'dev.143.backup-run'
 
 
@@ -40,16 +42,22 @@ def pressure(path):
     return rows
 
 
-def resources(root, db_pid):
-    memory = {k: int(v.split()[0]) * 1024 for k, v in
-              (line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())}
-    vm = dict(line.split() for line in Path('/proc/vmstat').read_text().splitlines())
-    groups = Path(f'/proc/{db_pid}/cgroup').read_text().splitlines()
+def cgroup_path(pid):
+    require(isinstance(pid, int) and pid > 0, 'invalid cgroup process id')
+    groups = Path(f'/proc/{pid}/cgroup').read_text().splitlines()
     group = [line[3:] for line in groups if line.startswith('0::')]
     require(len(group) == 1, 'cgroup v2 required')
     base = Path('/sys/fs/cgroup')
     cg = base / group[0].lstrip('/')
-    require(cg.resolve().is_relative_to(base) and cg != base, 'invalid database cgroup')
+    require(cg.resolve().is_relative_to(base) and cg != base, 'invalid process cgroup')
+    return cg
+
+
+def resources(root, db_pid):
+    memory = {k: int(v.split()[0]) * 1024 for k, v in
+              (line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())}
+    vm = dict(line.split() for line in Path('/proc/vmstat').read_text().splitlines())
+    cg = cgroup_path(db_pid)
     maximum = int((cg / 'memory.max').read_text())
     current = int((cg / 'memory.current').read_text())
     fs = os.statvfs(root)
@@ -94,11 +102,24 @@ class Guard:
         self.cancel = self.run / 'cancel.json'
         self.owner_pid = os.getpid()
         self.owner_identity = proc_identity(self.owner_pid)
+        self.cleanup_telemetry_error = None
+        self.client_memory = None
 
     def inspect(self, target):
         # Absence must be proven by successful inventory, not a failed inspect
         # (daemon/network errors are not evidence that a container is gone).
-        ids = invoke(['docker', 'ps', '-aq', '--no-trunc', '--filter', 'name=^/' + self.app + '$'], timeout=5).split()
+        listing = invoke(['docker', 'container', 'ls', '-a', '--no-trunc',
+                          '--format', '{{json .Names}}\t{{.ID}}'], timeout=5)
+        ids = []
+        for line in listing.splitlines():
+            name_json, cid = line.split('\t')
+            name = json.loads(name_json)
+            require(isinstance(name, str), 'invalid container name listing')
+            # Docker's CLI presents names without '/', inspect uses '/'.
+            # Accept either literal form; regex filters never prove absence.
+            if name in (self.app, '/' + self.app) or cid == target:
+                require(len(cid) == 64 and all(c in '0123456789abcdef' for c in cid), 'invalid listed container id')
+                ids.append(cid)
         if not ids:
             return None
         require(len(ids) == 1, 'ambiguous dump container')
@@ -139,13 +160,17 @@ class Guard:
         return found
 
     def stop(self, owned):
+        self.cleanup_beat('inspect')
         data = self.inspect(owned.get('container_id'))
+        self.cleanup_beat('stop_client')
         if data and data['State']['Running']:
             # Exact client container only; production PostgreSQL is never stopped.
             invoke(['docker', 'stop', '--time', '5', data['Id']], timeout=12)
+        self.cleanup_beat('confirm_client_stopped')
         data = self.inspect(owned.get('container_id'))
         require(data is None or not data['State']['Running'], 'dump client still running')
         for action in ('pg_cancel_backend', 'pg_terminate_backend'):
+            self.cleanup_beat(action)
             found = self.backends(owned)
             if not found:
                 break
@@ -156,12 +181,40 @@ class Guard:
                        f"AND backend_start='{started}'::timestamptz AND application_name='{self.app}' "
                        f"AND usename='{self.policy.user}' AND datname='{self.policy.database}'", owned)
             time.sleep(0.2)
+        self.cleanup_beat('confirm_backend_stopped')
         require(not self.backends(owned), 'dump backend still running')
+        self.cleanup_beat('remove_container')
         if data:
             invoke(['docker', 'rm', '-v', data['Id']], timeout=8)
+        self.cleanup_beat('confirm_container_removed')
         require(self.inspect(owned.get('container_id')) is None, 'owned container cleanup unproven')
 
+    def cleanup_beat(self, stage):
+        # Lack of disk space for telemetry must not prevent stopping the writer.
+        # Preserve the error in the terminal evidence if writes become possible.
+        try:
+            if self.client_memory is None and self.heartbeat.exists():
+                self.client_memory = read_json(self.heartbeat).get('client_memory')
+            atomic_json(self.heartbeat, dict(at=now(), phase='cleanup', stage=stage, client_memory=self.client_memory))
+        except (OSError, ValueError, KeyError, TypeError, Refused) as exc:
+            self.cleanup_telemetry_error = str(exc)
+
+    def observe_client_memory(self, data):
+        cg = cgroup_path(data['State']['Pid'])
+        require(data['Id'] in cg.name, 'dump client cgroup identity mismatch')
+        current = int((cg / 'memory.current').read_text())
+        peak = int((cg / 'memory.peak').read_text())
+        maximum = int((cg / 'memory.max').read_text())
+        require(0 <= current <= peak and maximum == 2 * GIB, 'invalid dump client memory telemetry')
+        self.client_memory = dict(current_bytes=current, peak_observed_bytes=peak,
+                                  limit_bytes=maximum, observed_at=now())
+
+    def terminal(self, result):
+        atomic_json(self.result, dict(result, client_memory=self.client_memory,
+                                      cleanup_telemetry_error=self.cleanup_telemetry_error))
+
     def cleanup_partial(self, owned):
+        self.cleanup_beat('remove_partial')
         current = identity(self.partial)
         require(all(current[k] == owned['partial'][k] for k in ('device', 'inode')), 'partial file replaced')
         marker = self.policy.state / 'pending.json'
@@ -197,7 +250,7 @@ class Guard:
         command = ['docker', 'create', '--name', self.app, '--label', LABEL + '=' + self.app,
                    '--pull=never', '--network', 'container:' + generation['id'], '--restart=no',
                    '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
-                   '--memory=1g', '--memory-swap=1g', '--cpus=1', '--pids-limit=32',
+                   '--memory=2g', '--memory-swap=2g', '--cpus=1', '--pids-limit=32',
                    '--ulimit', 'fsize=' + limit + ':' + limit,
                    '--mount', 'type=bind,src=' + str(self.partial) + ',dst=/backup.dump',
                    '-e', 'PGPASSWORD', '-e', 'PGAPPNAME', '-e', 'PGOPTIONS', '-e', 'PGCONNECT_TIMEOUT',
@@ -221,6 +274,7 @@ class Guard:
         return owned
 
     def fail(self, reason):
+        self.cleanup_beat('begin_failure_cleanup')
         result = dict(status='failed', at=now(), error=reason, cleanup_verified=False)
         try:
             if self.record.exists():
@@ -232,7 +286,7 @@ class Guard:
                 result['cleanup_verified'] = True
         except (OSError, ValueError, KeyError, TypeError, Refused, subprocess.TimeoutExpired) as exc:
             result['cleanup_error'] = str(exc)
-        atomic_json(self.result, result)
+        self.terminal(result)
         return result
 
     def supervise(self):
@@ -250,17 +304,27 @@ class Guard:
                 if data['State']['Status'] == 'exited':
                     require(data['State']['ExitCode'] == 0 and not data['State']['OOMKilled'], 'dump failed or reached its size limit')
                     self.stop(owned)
-                    atomic_json(self.result, dict(status='completed', at=now(), cleanup_verified=True))
+                    self.terminal(dict(status='completed', at=now(), cleanup_verified=True))
                     return
                 require(data['State']['Running'], 'dump client not running')
                 elapsed = time.monotonic() - started
                 require(elapsed <= MAX_DUMP_SECONDS, 'dump exceeded 45 minutes')
                 require(self.exercise is None or elapsed < self.exercise, 'controlled stop exercise')
                 self.database(owned['database'])
+                try:
+                    self.observe_client_memory(data)
+                except FileNotFoundError:
+                    # A successful exit may remove /proc and its cgroup between
+                    # inspect and sampling. Only a fresh exact-ID exit permits
+                    # retrying the terminal path; other telemetry loss fails.
+                    latest = self.inspect(owned['container_id'])
+                    if latest and latest['State']['Status'] == 'exited':
+                        continue
+                    raise
                 sample = resources(self.policy.root, owned['database']['pid'])
                 check_resources(sample, previous, self.policy.reserve)
                 self.backends(owned)
-                atomic_json(self.heartbeat, dict(at=now(), phase='dump', resources=sample))
+                atomic_json(self.heartbeat, dict(at=now(), phase='dump', resources=sample, client_memory=self.client_memory))
                 previous = sample
                 time.sleep(INTERVAL)
         except (OSError, ValueError, KeyError, TypeError, Refused, subprocess.TimeoutExpired) as exc:
@@ -281,6 +345,7 @@ def protect_dump(policy, partial, app, estimate, exercise=None):
     old = {sig: signal.signal(sig, cancel) for sig in signals}
     child = None
     last_heartbeat = None
+    cleanup_deadline = None
     try:
         child = os.fork()
         if child == 0:
@@ -297,10 +362,12 @@ def protect_dump(policy, partial, app, estimate, exercise=None):
                 guard.supervise()
             finally:
                 os._exit(0)
-        deadline = time.monotonic() + 45
+        deadline = time.monotonic() + WATCHDOG_TIMEOUT
         while True:
             if cancelled is not None and not guard.cancel.exists():
                 atomic_json(guard.cancel, dict(at=now(), signal=cancelled))
+                if cleanup_deadline is None:
+                    cleanup_deadline = time.monotonic() + CLEANUP_TIMEOUT
             pid, status = os.waitpid(child, os.WNOHANG)
             if pid:
                 child = None
@@ -313,12 +380,18 @@ def protect_dump(policy, partial, app, estimate, exercise=None):
                 changed = guard.heartbeat.stat().st_mtime_ns
                 if changed != last_heartbeat:
                     last_heartbeat = changed
-                    deadline = time.monotonic() + 45
-            if time.monotonic() > deadline:
+                    heartbeat = read_json(guard.heartbeat)
+                    if heartbeat['phase'] == 'cleanup' and cleanup_deadline is None:
+                        cleanup_deadline = time.monotonic() + CLEANUP_TIMEOUT
+                    deadline = time.monotonic() + WATCHDOG_TIMEOUT
+            if time.monotonic() > (cleanup_deadline or deadline):
                 os.kill(child, signal.SIGKILL)
                 os.waitpid(child, 0)
                 child = None
-                guard.fail('dump watchdog heartbeat expired')
+                # It may have finished after our last waitpid but before SIGKILL.
+                # A durable terminal result must not be overwritten by a retry.
+                if not guard.result.exists():
+                    guard.fail('dump watchdog heartbeat expired')
                 break
             time.sleep(0.2)
         result = read_json(guard.result)

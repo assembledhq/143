@@ -107,10 +107,16 @@ The dump runs in a dedicated, named client container using the running database'
 immutable image ID and network namespace. It connects through the database's
 existing Docker-network address, since the installed HBA rejects loopback TCP.
 There is no production data-volume mount or database restart. The client mounts
-only its private partial archive and has a 1 GiB memory limit, no swap allowance,
+only its private partial archive and has a 2 GiB memory limit, no swap allowance,
 one CPU, 32-process limit, read-only root filesystem, dropped capabilities and
 a hard file-size limit. Image-declared data volumes are masked by small tmpfs
 mounts instead of creating anonymous restore volumes.
+The higher client limit leaves room for large COPY rows and libpq buffering;
+the attended canary must measure actual usage. Heartbeats and terminal results
+record `memory.current` and the kernel's `memory.peak`, with the observation time.
+This is the peak through the last live sample, not a claim to have measured a
+spike between that sample and process exit. Host commitment and memory guards
+remain in force independently of the client limit.
 
 A detached watchdog inherits the common backup lock. It samples disk, available
 memory, commitment headroom, swap activity, database cgroup headroom and host/DB
@@ -130,10 +136,14 @@ available memory, 1 GiB commitment headroom, 0.5 GiB database cgroup headroom,
 `pg_backup_runtime.py`. The default reserve remains 20 GiB and can only increase.
 
 Samples normally run five seconds apart. A sample interval exceeding 30 seconds
-fails closed; the caller detects a stuck watchdog after 45 seconds and then
-attempts bounded owned cleanup. Budget at least 60 seconds for delayed detection
-and client stopping: the 4 GiB margin tolerates roughly 68 MiB/s of unrelated
-growth over that interval. This is a capacity assumption to validate, not a
+fails closed; the caller detects a stuck monitoring watchdog after 45 seconds.
+Cancellation or an explicit cleanup heartbeat starts a separate 120-second
+cleanup budget; each bounded stop stage emits progress. The parent preserves a
+terminal result if completion races with its deadline. The common lock stays
+held through cleanup, so a competing invocation can report a lock timeout.
+Budget at least 150 seconds for a watchdog stalled at cleanup entry followed
+by caller takeover and client stopping: the 4 GiB margin tolerates roughly
+27 MiB/s of unrelated growth over that interval. This is a capacity assumption to validate, not a
 guarantee against unbounded concurrent writes or an unresponsive Docker daemon.
 Use separate storage or a larger validated reserve if that margin is inadequate.
 
@@ -142,12 +152,19 @@ Only the exact labelled client ID and captured PostgreSQL backend identity
 must prove that both client and backend are gone before unlinking the exact
 partial inode and its matching dump marker. Ambiguous Docker creation, changed
 identities, failed queries, changed database generations, or failed cleanup keep
-the marker and partial for investigation. Completed archives are not failure
+the marker and partial for investigation. An ambiguous create may retain its
+partial even after its labelled client has been safely removed. Completed archives are not failure
 cleanup targets. A proven failed dump clears its marker but records failure.
 
 Per-run ownership, watchdog heartbeat and result files are private under
 `.backup-state/143-backup-<uuid>/`. Separate attempt records include admission and
-lock failures. New receipts preserve dump start, completion, structural check,
+lock failures. Mutating policy operations retire older finished attempts under
+the common lock, retaining the newest 200, every unfinished attempt, and the
+latest result for each operation in the hot directory. Retired attempts remain
+under `.backup-state/retired/attempts/`; no audit evidence is deleted. Operator
+helpers that validate exact state-directory contents must allow these records
+and `health.json` rather than reusing a historical directory snapshot.
+New receipts preserve dump start, completion, structural check,
 local SHA-256, upload and integrity-verification timestamps; a full restore starts
 as `not_verified`. An imported independent receipt preserves an existing timeline.
 The dump-start timestamp is a conservative lower bound before snapshot acquisition,

@@ -100,6 +100,44 @@ class PolicyTests(unittest.TestCase):
                       100, policy.identity(path))
         return path
 
+    def test_operator_can_load_policy_and_health_by_absolute_path(self):
+        # No PYTHONPATH or test-side sys.path assistance; model the installed
+        # helpers loaded by a root operator from an unrelated current directory.
+        code = '''import importlib.util, sys
+sys.dont_write_bytecode=True
+for path in sys.argv[1:]:
+ spec=importlib.util.spec_from_file_location('operator_loaded',path)
+ module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+ if hasattr(module,'Policy'):
+  from pg_backup_runtime import protect_dump
+  assert callable(protect_dump)
+print('loaded')
+'''
+        env = dict(os.environ)
+        env.pop('PYTHONPATH', None)
+        paths = [str(SCRIPT_DIR / name) for name in ['pg-backup-policy.py', 'pg_backup_health.py']]
+        for path in paths:
+            result = subprocess.run([sys.executable, '-c', code, path], cwd=self.root,
+                                    env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, 'loaded\n')
+
+    def test_attempt_retirement_preserves_active_and_latest_per_action(self):
+        for index in range(205):
+            action = 'backup' if index == 0 else 'prune'
+            status = 'running' if index == 1 else 'failed'
+            policy.atomic_json(self.p.state / f'attempt-{index:032x}.json',
+                               dict(action=action, status=status, started_at=f'{index:04d}'))
+        old = self.archive(1)
+        with self.p.locked():
+            self.p.retire_attempts()
+        hot = {path.name for path in self.p.state.glob('attempt-*.json')}
+        self.assertEqual(hot, {f'attempt-{index:032x}.json' for index in [0, 1, *range(5, 205)]})
+        retired = {path.name for path in (self.p.state / 'retired' / 'attempts').glob('*.json')}
+        self.assertEqual(retired, {f'attempt-{index:032x}.json' for index in range(2, 5)})
+        self.assertEqual(old.read_bytes(), b'verified dump')
+        self.assertTrue((self.p.state / (old.name + '.json')).exists())
+
     def canary(self):
         policy.atomic_json(self.p.state / 'checksum-canary.json', dict(cli_image=policy.AWS_IMAGE,
                            cli_version=policy.AWS_VERSION, evidence='isolated checksum canary'))
@@ -316,7 +354,6 @@ class PolicyTests(unittest.TestCase):
         path = self.archive(1)
         code = '''import importlib.util, sys
 sys.dont_write_bytecode=True
-sys.path.insert(0, __import__('os').path.dirname(sys.argv[1]))
 spec=importlib.util.spec_from_file_location('p',sys.argv[1]); p=importlib.util.module_from_spec(spec);spec.loader.exec_module(p)
 with p.Policy().locked():
  print('locked',flush=True)
@@ -471,7 +508,6 @@ with p.Policy().locked():
 import os, runpy, sys, types
 os.statvfs = lambda path: types.SimpleNamespace(f_bavail=100 * 1024**3, f_frsize=1)
 sys.argv = sys.argv[1:]
-sys.path.insert(0, os.path.dirname(sys.argv[0]))
 runpy.run_path(sys.argv[0], run_name='__main__')
 ''')
         python.chmod(0o700)
@@ -590,7 +626,6 @@ else: sys.exit(99)
         case, env = self.wrapper_fixture('cleanup-timeout')
         code = '''import importlib.util, sys
 sys.dont_write_bytecode=True
-sys.path.insert(0, __import__('os').path.dirname(sys.argv[1]))
 spec=importlib.util.spec_from_file_location('p', sys.argv[1]); p=importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
 reader=p.run_restore_reader
 p.run_restore_reader=lambda command, env: reader(command, env, cleanup_timeout=0.2)

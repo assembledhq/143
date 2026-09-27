@@ -25,6 +25,9 @@ AWS_VERSION = 'aws-cli/2.35.11'
 GIB = 1024 ** 3
 
 
+# Operator recovery helpers load this file via importlib from /root or stdin.
+# Resolve the co-installed helpers without requiring callers to edit sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pg_backup_state import (Refused, require, now, emit, identity, read_json,
                              sync_dir, atomic_json, sha256, invoke)
 
@@ -133,6 +136,34 @@ class Policy:
     def no_pending(self):
         require(not (self.state / 'pending.json').exists(), 'incomplete operation: reconcile pending.json and its owned processes before retrying')
         require(not list(self.root.glob('.*.dump.partial.*')), 'unreconciled partial archive; preserve it until writer state is proven')
+
+    def retire_attempts(self):
+        """Bound the hot journal without deleting audit records or active runs."""
+        require(self.lock_fd is not None, 'attempt retirement requires the common lock')
+        records = [(path, read_json(path)) for path in self.state.glob('attempt-*.json')]
+        records.sort(key=lambda item: item[1]['started_at'], reverse=True)
+        keep = {path.name for path, _ in records[:200]}
+        latest_actions = set()
+        for path, record in records:
+            if record['action'] not in latest_actions:
+                keep.add(path.name)
+                latest_actions.add(record['action'])
+            if record['status'] not in ('completed', 'failed', 'interrupted'):
+                keep.add(path.name)
+        old = [path for path, _ in records if path.name not in keep]
+        if not old:
+            return
+        retired = self.state / 'retired'
+        for directory in (retired, retired / 'attempts'):
+            directory.mkdir(mode=0o700, exist_ok=True)
+            require(not directory.is_symlink() and directory.stat().st_uid == os.geteuid()
+                    and not directory.stat().st_mode & 0o077, 'unsafe retired attempt directory')
+        for path in old:
+            destination = retired / 'attempts' / path.name
+            require(not destination.exists(), 'attempt retirement collision')
+            path.rename(destination)
+        sync_dir(retired / 'attempts')
+        sync_dir(self.state)
 
     def load_storage(self):
         if self.storage is None:
@@ -478,6 +509,8 @@ def main():
                     'stop exercise requires --canary and a duration of 5..300 seconds')
         policy = Policy()
         with policy.locked():
+            if args.action in ('backup', 'restore', 'prune'):
+                policy.retire_attempts()
             if args.action == 'backup':
                 policy.backup(args)
             elif args.action == 'prune':

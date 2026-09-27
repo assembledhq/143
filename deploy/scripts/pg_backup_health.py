@@ -5,8 +5,10 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pg_backup_state import Refused, require, now, identity, read_json, atomic_json
 
 GIB = 1024 ** 3

@@ -28,6 +28,28 @@ def safe_resources():
                 db_io=dict(pressure), db_memory=dict(pressure))
 
 
+class KernelParsingTests(unittest.TestCase):
+    def test_process_identity_handles_parentheses_and_rejects_zombie(self):
+        for state in ['S', 'Z']:
+            with self.subTest(state=state):
+                stat = '42 (dump (worker)) ' + state + ' ' + ' '.join(['0'] * 18 + ['12345'])
+                with mock.patch.object(Path, 'read_text', side_effect=[stat, 'boot-id\n']):
+                    if state == 'Z':
+                        with self.assertRaisesRegex(Refused, 'zombie'): runtime.proc_identity(42)
+                    else:
+                        self.assertEqual(runtime.proc_identity(42), ['boot-id', '12345'])
+
+    def test_cgroup_path_requires_bounded_v2_process_group(self):
+        cases = [('0::/system.slice/docker-c.scope\n', '/sys/fs/cgroup/system.slice/docker-c.scope'),
+                 ('2:memory:/docker/c\n', None), ('0::/\n', None), ('0::/../../etc\n', None)]
+        for text, expected in cases:
+            with self.subTest(text=text), mock.patch.object(Path, 'read_text', return_value=text):
+                if expected:
+                    self.assertEqual(runtime.cgroup_path(42), Path(expected))
+                else:
+                    with self.assertRaises(Refused): runtime.cgroup_path(42)
+
+
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -138,11 +160,66 @@ class RuntimeTests(unittest.TestCase):
         with mock.patch.object(runtime, 'invoke', return_value=''):
             self.assertIsNone(self.guard.inspect('c' * 64))
 
+    def test_literal_container_listing_finds_both_name_forms(self):
+        data = dict(Id='c' * 64, Name='/' + self.app, Config={'Labels': {runtime.LABEL: self.app}})
+        for name in [self.app, '/' + self.app]:
+            with self.subTest(name=name):
+                listing = json.dumps('unrelated') + '\t' + 'f' * 64 + '\n' + json.dumps(name) + '\t' + 'c' * 64 + '\n'
+                with mock.patch.object(runtime, 'invoke', side_effect=[listing, json.dumps([data])]) as call:
+                    self.assertEqual(self.guard.inspect('c' * 64), data)
+                self.assertEqual(call.call_args_list[0].args[0], ['docker', 'container', 'ls', '-a',
+                                 '--no-trunc', '--format', '{{json .Names}}\t{{.ID}}'])
+        with mock.patch.object(runtime, 'invoke', return_value=json.dumps(self.app + '-different') + '\t' + 'f' * 64):
+            self.assertIsNone(self.guard.inspect('c' * 64))
+
+    def test_renamed_owned_id_is_not_absence(self):
+        data = dict(Id='c' * 64, Name='/renamed', Config={'Labels': {runtime.LABEL: self.app}})
+        with mock.patch.object(runtime, 'invoke', side_effect=['"renamed"\t' + 'c' * 64, json.dumps([data])]):
+            with self.assertRaisesRegex(Refused, 'ownership mismatch'): self.guard.inspect('c' * 64)
+
+    def test_client_peak_memory_is_recorded_with_sample_time(self):
+        cg = self.root / ('docker-' + 'c' * 64 + '.scope')
+        cg.mkdir()
+        for field, value in [('current', 700 * 1024 ** 2), ('peak', 900 * 1024 ** 2), ('max', 2 * runtime.GIB)]:
+            (cg / ('memory.' + field)).write_text(str(value))
+        with mock.patch.object(runtime, 'cgroup_path', return_value=cg):
+            self.guard.observe_client_memory({'Id': 'c' * 64, 'State': {'Pid': 123}})
+        self.guard.cleanup_beat('test')
+        self.guard.terminal(dict(status='completed', cleanup_verified=True))
+        for path in [self.guard.heartbeat, self.guard.result]:
+            report = read_json(path)['client_memory']
+            self.assertEqual(report['current_bytes'], 700 * 1024 ** 2)
+            self.assertEqual(report['peak_observed_bytes'], 900 * 1024 ** 2)
+            self.assertEqual(report['limit_bytes'], 2 * runtime.GIB)
+            self.assertTrue(report['observed_at'])
+
+    def test_cleanup_continues_when_heartbeat_cannot_be_written(self):
+        original = runtime.atomic_json
+        def write(path, value):
+            if path == self.guard.heartbeat: raise OSError(errno.ENOSPC, 'heartbeat disk full')
+            return original(path, value)
+        with mock.patch.object(runtime, 'atomic_json', side_effect=write), mock.patch.object(self.guard, 'stop') as stop:
+            self.guard.fail('resource limit')
+        stop.assert_called_once_with(self.owned)
+        result = read_json(self.guard.result)
+        self.assertTrue(result['cleanup_verified'])
+        self.assertIn('heartbeat disk full', result['cleanup_telemetry_error'])
+
+    def test_corrupt_heartbeat_cannot_prevent_owned_stop(self):
+        self.guard.heartbeat.write_text('{bad json')
+        self.guard.heartbeat.chmod(0o600)
+        with mock.patch.object(self.guard, 'stop') as stop:
+            self.guard.fail('telemetry corrupt')
+        stop.assert_called_once_with(self.owned)
+        result = read_json(self.guard.result)
+        self.assertTrue(result['cleanup_verified'])
+        self.assertTrue(result['cleanup_telemetry_error'])
+
     def test_container_replacement_and_label_mismatch_refused(self):
         for label, cid in [(self.app, 'e' * 64), ('another-run', 'c' * 64)]:
             with self.subTest(label=label, cid=cid):
                 data = dict(Id=cid, Name='/' + self.app, Config={'Labels': {runtime.LABEL: label}})
-                with mock.patch.object(runtime, 'invoke', side_effect=['c' * 64, json.dumps([data])]):
+                with mock.patch.object(runtime, 'invoke', side_effect=[json.dumps(self.app) + '\t' + 'c' * 64, json.dumps([data])]):
                     with self.assertRaises(Refused): self.guard.inspect('c' * 64)
 
     def test_backend_pid_reuse_is_not_cancelled(self):
@@ -182,6 +259,7 @@ class RuntimeTests(unittest.TestCase):
                         mock.patch.object(runtime, 'proc_identity', return_value=['other'] if cause == 'owner' else ['boot', 'start']), \
                         mock.patch.object(self.guard, 'inspect', return_value=running), \
                         mock.patch.object(self.guard, 'database'), \
+                        mock.patch.object(self.guard, 'observe_client_memory'), \
                         mock.patch.object(runtime, 'resources', side_effect=problem, return_value=safe_resources()), \
                         mock.patch.object(self.guard, 'fail') as fail:
                     self.guard.supervise()
@@ -208,7 +286,7 @@ class RuntimeTests(unittest.TestCase):
                 mock.patch.object(runtime, 'invoke', side_effect=['unix:///var/run/docker.sock', 'c' * 64]) as run:
             result = self.guard.prepare()
         command = run.call_args.args[0]
-        for expected in ['--memory=1g', '--memory-swap=1g', '--pids-limit=32', '--cpus=1',
+        for expected in ['--memory=2g', '--memory-swap=2g', '--pids-limit=32', '--cpus=1',
                          '--pull=never', '--read-only', 'sha256:immutable', 'container:' + 'd' * 64]:
             self.assertIn(expected, command)
         self.assertIn('fsize=' + str(26 * runtime.GIB) + ':' + str(26 * runtime.GIB), command)
@@ -226,6 +304,46 @@ class RuntimeTests(unittest.TestCase):
                 runtime.protect_dump(self.p, self.partial, self.app, 18 * runtime.GIB)
         self.assertTrue(self.partial.exists())
         self.assertEqual(self.completed.read_bytes(), b'previous verified backup')
+
+    def test_slow_cleanup_gets_separate_deadline_and_keeps_terminal_result(self):
+        # Scale the budgets down but really fork/wait: cleanup exceeds the
+        # ordinary heartbeat timeout and must not be killed or retried.
+        def cleanup(g):
+            g.cleanup_beat('slow_cleanup')
+            time.sleep(1.2)
+            g.terminal(dict(status='completed', at=runtime.now(), cleanup_verified=True))
+        app = '143-backup-' + 'e' * 32
+        with mock.patch.object(runtime.Guard, 'supervise', cleanup), \
+                mock.patch.object(runtime.Guard, 'fail', side_effect=AssertionError('must not retry successful cleanup')), \
+                mock.patch.object(runtime, 'WATCHDOG_TIMEOUT', .5), \
+                mock.patch.object(runtime, 'CLEANUP_TIMEOUT', 3):
+            result = runtime.protect_dump(self.p, self.partial, app, 18 * runtime.GIB)
+        self.assertEqual(result['status'], 'completed')
+        self.assertTrue(result['cleanup_verified'])
+
+    def test_terminal_result_wins_a_watchdog_timeout_race(self):
+        def complete(g):
+            g.terminal(dict(status='completed', at=runtime.now(), cleanup_verified=True))
+            time.sleep(2)  # Durable result exists but child has not exited.
+        app = '143-backup-' + 'f' * 32
+        with mock.patch.object(runtime.Guard, 'supervise', complete), \
+                mock.patch.object(runtime.Guard, 'fail', side_effect=AssertionError('must preserve completed result')), \
+                mock.patch.object(runtime, 'WATCHDOG_TIMEOUT', .5):
+            result = runtime.protect_dump(self.p, self.partial, app, 18 * runtime.GIB)
+        self.assertEqual(result['status'], 'completed')
+
+    def test_client_exit_during_memory_sample_uses_fresh_terminal_state(self):
+        running = {'State': {'Status': 'running', 'Running': True}}
+        completed = {'State': {'Status': 'exited', 'ExitCode': 0, 'OOMKilled': False}}
+        with mock.patch.object(self.guard, 'prepare', return_value=self.owned), \
+                mock.patch.object(runtime, 'invoke', return_value=''), \
+                mock.patch.object(self.guard, 'inspect', side_effect=[running, completed, completed]), \
+                mock.patch.object(self.guard, 'database'), \
+                mock.patch.object(self.guard, 'observe_client_memory', side_effect=FileNotFoundError('exited')), \
+                mock.patch.object(self.guard, 'stop') as stop:
+            self.guard.supervise()
+        stop.assert_called_once_with(self.owned)
+        self.assertEqual(read_json(self.guard.result)['status'], 'completed')
 
     def test_real_process_signals_and_parent_death_retain_lock_until_cleanup(self):
         # Real fork, signals and flock, with only external Docker/DB/proc data
@@ -261,6 +379,7 @@ with mock.patch.object(r,'proc_identity',side_effect=process), mock.patch.object
  mock.patch.object(r.Guard,'stop',stop), mock.patch.object(r,'invoke',return_value=''), \
  mock.patch.object(r.Guard,'inspect',return_value={'State':{'Running':True,'Status':'running'}}), \
  mock.patch.object(r.Guard,'database'), mock.patch.object(r.Guard,'backends'), \
+ mock.patch.object(r.Guard,'observe_client_memory'), \
  mock.patch.object(r,'resources',side_effect=sample), mock.patch.object(r,'INTERVAL',.05):
  r.protect_dump(p,partial,app,18*r.GIB)
 '''
