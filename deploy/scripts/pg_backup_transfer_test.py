@@ -145,7 +145,8 @@ class TransferTests(unittest.TestCase):
                     output = self.guard.client(stage, ['image', 'command'], capture=stage == 'metadata')
                 create = calls[0]
                 for flag in ('--memory=1g', '--memory-swap=1g', '--cpus=1', '--pids-limit=64',
-                             '--read-only', '--pull=never', '--cap-drop=ALL', '--security-opt=no-new-privileges'):
+                             '--read-only', '--pull=never', '--cap-drop=ALL', '--security-opt=no-new-privileges',
+                             '/tmp:rw,noexec,nosuid,size=64m'):
                     self.assertIn(flag, create)
                 self.assertIn(self.app + '-' + stage, create)
                 self.assertIn(runtime.LABEL + '=' + self.app, create)
@@ -163,15 +164,14 @@ class TransferTests(unittest.TestCase):
         self.assertNotIn(self.p.container, args)
 
     def test_failed_or_ambiguous_upload_keeps_marker_archive_and_identity(self):
-        for fault in ('create', 'start', 'exit', 'pressure_after_exit'):
+        for fault in ('create', 'start', 'exit'):
             with self.subTest(fault=fault):
                 def invoke(command, **kwargs):
                     if command[1] == fault: raise subprocess.TimeoutExpired('docker', 5)
                     return 'c' * 64 if command[1] == 'create' else ''
-                tick_effect = [None, None, state.Refused('swap usage at risk')] if fault == 'pressure_after_exit' else None
                 exited = {'State': {'Status': 'exited', 'ExitCode': 9 if fault == 'exit' else 0, 'OOMKilled': False}}
                 with mock.patch.object(runtime, 'invoke', side_effect=invoke), \
-                        mock.patch.object(self.guard, 'tick', side_effect=tick_effect), \
+                        mock.patch.object(self.guard, 'tick'), \
                         mock.patch.object(self.guard, 'inspect', return_value=exited), \
                         mock.patch.object(self.guard, 'stop') as stop:
                     with self.assertRaises((state.Refused, subprocess.TimeoutExpired)):
@@ -180,9 +180,87 @@ class TransferTests(unittest.TestCase):
                 stop.assert_called_once()
                 self.assertEqual(result['cleanup_verified'], fault != 'create')
                 self.assertTrue(result['reconciliation_required'])
-                if fault == 'pressure_after_exit':
-                    self.assertEqual(state.read_json(self.guard.run / 'upload.json')['exit']['code'], 0)
                 self.assert_preserved()
+
+    def test_successful_reader_records_residual_pressure_without_failing(self):
+        for stage in ('structural', 'upload', 'metadata'):
+            with self.subTest(stage=stage):
+                self.guard.previous = None
+                count = 0
+                def sample(*args):
+                    nonlocal count
+                    count += 1
+                    value = dict(safe_resources(), monotonic=time.monotonic())
+                    if count >= 3:
+                        value.update(swap_bytes=runtime.GIB, host_memory={'some': 4, 'full': 4})
+                    return value
+                exited = {'State': {'Status': 'exited', 'ExitCode': 0, 'OOMKilled': False}}
+                with mock.patch.object(runtime, 'invoke', return_value='c' * 64), \
+                        mock.patch.object(self.guard, 'database'), mock.patch.object(runtime, 'resources', side_effect=sample), \
+                        mock.patch.object(self.guard, 'inspect', return_value=exited), mock.patch.object(self.guard, 'stop'):
+                    self.guard.client(stage, ['image', 'command'])
+                self.assertEqual(state.read_json(self.guard.run / (stage + '.json'))['exit']['code'], 0)
+                self.assertEqual(self.guard.phase_resources['last_observation']['resources']['swap_bytes'], runtime.GIB)
+                self.assertGreater(count, 2)
+
+    def test_active_reader_still_stops_on_pressure(self):
+        count = 0
+        def sample(*args):
+            nonlocal count
+            count += 1
+            return dict(safe_resources(), monotonic=count * 10,
+                        swap_bytes=runtime.GIB if count >= 3 else 0)
+        running = {'Id': 'c' * 64, 'State': {'Status': 'running', 'Running': True, 'Pid': 42}}
+        with mock.patch.object(runtime, 'invoke', return_value='c' * 64), \
+                mock.patch.object(runtime.time, 'monotonic', return_value=100), \
+                mock.patch.object(self.guard, 'database'), mock.patch.object(runtime, 'resources', side_effect=sample), \
+                mock.patch.object(self.guard, 'inspect', return_value=running), mock.patch.object(self.guard, 'stop') as stop:
+            with self.assertRaisesRegex(state.Refused, 'swap usage'):
+                self.guard.client('upload', ['image', 'command'])
+            self.guard.fail('swap usage at risk')
+        stop.assert_called_once()
+        self.assert_preserved()
+
+    def test_listing_allows_residual_pressure_but_retains_hard_capacity_gates(self):
+        self.guard.phase = 'metadata'
+        for field, value, allowed in [('swap_bytes', runtime.GIB, True),
+                                     ('host_memory', {'some': 4, 'full': 4}, True),
+                                     ('available_bytes', 1, False), ('free_bytes', 1, False),
+                                     ('commit_headroom', 1, False), ('db_headroom', 1, False)]:
+            with self.subTest(field=field):
+                sample = dict(safe_resources(), monotonic=time.monotonic(), **{field: value})
+                with mock.patch.object(self.guard, 'database'), mock.patch.object(runtime, 'resources', return_value=sample):
+                    if allowed: self.guard.tick(force=True)
+                    else:
+                        with self.assertRaises(state.Refused): self.guard.tick(force=True)
+
+    def test_slow_create_is_resampled_before_start_without_waiving_capacity(self):
+        for bad_capacity in (False, True):
+            with self.subTest(bad_capacity=bad_capacity):
+                self.guard.previous = None
+                clock = [100.0]
+                commands, sampled_at = [], []
+                def sample(*args):
+                    sampled_at.append(clock[0])
+                    return dict(safe_resources(), monotonic=clock[0],
+                                available_bytes=1 if bad_capacity and clock[0] >= 120 else 4 * runtime.GIB)
+                def invoke(command, **kwargs):
+                    commands.append(command[1])
+                    if command[1] == 'create': clock[0] += 20
+                    if command[1] == 'start': clock[0] += 12
+                    return 'c' * 64
+                exited = {'State': {'Status': 'exited', 'ExitCode': 0, 'OOMKilled': False}}
+                with mock.patch.object(runtime.time, 'monotonic', side_effect=lambda: clock[0]), \
+                        mock.patch.object(runtime, 'invoke', side_effect=invoke), \
+                        mock.patch.object(self.guard, 'database'), mock.patch.object(runtime, 'resources', side_effect=sample), \
+                        mock.patch.object(self.guard, 'inspect', return_value=exited), mock.patch.object(self.guard, 'stop'):
+                    if bad_capacity:
+                        with self.assertRaisesRegex(state.Refused, 'available memory'):
+                            self.guard.client('upload', ['image', 'command'])
+                    else:
+                        self.guard.client('upload', ['image', 'command'])
+                self.assertEqual(sampled_at, [100.0, 120.0] if bad_capacity else [100.0, 120.0, 132.0])
+                self.assertEqual('start' in commands, not bad_capacity)
 
     def test_reader_stop_uses_exact_id_and_never_contacts_database_backend(self):
         owned = dict(self.owned, client_name=self.app + '-upload', container_id='c' * 64)

@@ -131,12 +131,13 @@ both processes is not claimed safe: hard limits bound the writer, and a pending
 marker prevents a second backup until an operator reconciles ownership.
 
 After the dump stops, a second detached watchdog protects structural verification,
-SHA-256, upload and the confirming S3 listing with the same resource thresholds
-and caller/heartbeat checks. Structural verification uses a separate PostgreSQL
+SHA-256, upload and the confirming S3 listing with caller/heartbeat checks.
+Active verification/hash/upload use the dump's resource thresholds. Structural
+verification uses a separate PostgreSQL
 client container with no network or live data volume. Upload and listing use
 the pinned AWS image on the bridge network. Each reader has an exact recorded
 container ID and run label, a 1 GiB memory limit with no container swap, one CPU,
-64 PIDs, a read-only root filesystem and no capabilities. Only the small S3
+64 PIDs, a read-only root filesystem, 64 MiB writable `/tmp` and no capabilities. Only the small S3
 listing retains bounded Docker logs; TOC output and upload diagnostics are not
 stored. The limits require an attended production canary before acceptance.
 
@@ -145,7 +146,10 @@ Hashing reads 8 MiB chunks in the supervised process, uses Linux
 cache, and checks cancellation and resources between reads. Cache advice is not
 a kernel-enforced memory cap; resource monitoring still applies. Verification
 and hashing honor `BACKUP_VERIFY_TIMEOUT_SECONDS`; upload has a two-hour limit,
-and the listing has a two-minute limit. The external watchdog detects a hung
+and the listing has a two-minute limit. Reader polling follows the five-second
+sampling interval. Capacity is resampled after Docker creation and before start;
+time spent in bounded setup/cleanup commands is not treated as a missed active
+reader sample. The external watchdog detects a hung
 hash/read even when the hashing process cannot emit its next heartbeat.
 
 Post-dump failure cleanup stops only the owned reader and preserves the completed
@@ -153,6 +157,16 @@ dump, pending marker and earlier archives. It never cancels a database backend
 or discards a completed dump. Uploader exit status is recorded before container
 removal. A zero exit and matching listing are both required for a receipt;
 an uncertain upload is never automatically retried or qualified from size alone.
+Completion samples remain in the receipt even if they show residual swap or
+pressure. They do not invalidate an already proven successful reader exit.
+The small confirming S3 listing still checks free disk, available memory,
+commitment and database cgroup headroom, but can run despite residual swap/PSI.
+Caller identity, cancellation, deadlines, database generation and telemetry
+availability remain enforced. A completed backup with recorded pressure is
+usable recovery evidence, not a successful resource-behavior canary.
+If the DB generation changes after dumping, the archive is preserved for
+reconciliation: this conservative guard cannot follow its old cgroup identity
+across a restart, even though the completed dump itself is independent of it.
 
 Admission requires the estimated dump plus the configured reserve plus **5 GiB**,
 at least 3 GiB available memory and commitment headroom, and 1.5 GiB database
