@@ -113,7 +113,9 @@ a hard file-size limit. Image-declared data volumes are masked by small tmpfs
 mounts instead of creating anonymous restore volumes.
 The higher client limit leaves room for large COPY rows and libpq buffering;
 the attended canary must measure actual usage. Heartbeats and terminal results
-record `memory.current` and the kernel's `memory.peak`, with the observation time.
+record `memory.current` and the kernel's `memory.peak`, with the observation time,
+plus anonymous memory, file cache and swap separately. A peak at the cgroup cap
+can reflect reclaimable file cache and does not by itself imply an OOM.
 This is the peak through the last live sample, not a claim to have measured a
 spike between that sample and process exit. Host commitment and memory guards
 remain in force independently of the client limit.
@@ -127,6 +129,44 @@ Killing the calling SSH session does not release the lock while its watchdog
 is still supervising or cleaning up. A host failure or simultaneous death of
 both processes is not claimed safe: hard limits bound the writer, and a pending
 marker prevents a second backup until an operator reconciles ownership.
+
+After the dump stops, a second detached watchdog protects structural verification,
+SHA-256, upload and the confirming S3 listing with caller/heartbeat checks.
+Active verification/hash/upload use the dump's resource thresholds. Structural
+verification uses a separate PostgreSQL
+client container with no network or live data volume. Upload and listing use
+the pinned AWS image on the bridge network. Each reader has an exact recorded
+container ID and run label, a 1 GiB memory limit with no container swap, one CPU,
+64 PIDs, a read-only root filesystem, 64 MiB writable `/tmp` and no capabilities. Only the small S3
+listing retains bounded Docker logs; TOC output and upload diagnostics are not
+stored. The limits require an attended production canary before acceptance.
+
+Hashing reads 8 MiB chunks in the supervised process, uses Linux
+`POSIX_FADV_DONTNEED` before reading and behind each chunk to release clean file
+cache, and checks cancellation and resources between reads. Cache advice is not
+a kernel-enforced memory cap; resource monitoring still applies. Verification
+and hashing honor `BACKUP_VERIFY_TIMEOUT_SECONDS`; upload has a two-hour limit,
+and the listing has a two-minute limit. Reader polling follows the five-second
+sampling interval. Capacity is resampled after Docker creation and before start;
+time spent in bounded setup/cleanup commands is not treated as a missed active
+reader sample. The external watchdog detects a hung
+hash/read even when the hashing process cannot emit its next heartbeat.
+
+Post-dump failure cleanup stops only the owned reader and preserves the completed
+dump, pending marker and earlier archives. It never cancels a database backend
+or discards a completed dump. Uploader exit status is recorded before container
+removal. A zero exit and matching listing are both required for a receipt;
+an uncertain upload is never automatically retried or qualified from size alone.
+Completion samples remain in the receipt even if they show residual swap or
+pressure. They do not invalidate an already proven successful reader exit.
+The small confirming S3 listing still checks free disk, available memory,
+commitment and database cgroup headroom, but can run despite residual swap/PSI.
+Caller identity, cancellation, deadlines, database generation and telemetry
+availability remain enforced. A completed backup with recorded pressure is
+usable recovery evidence, not a successful resource-behavior canary.
+If the DB generation changes after dumping, the archive is preserved for
+reconciliation: this conservative guard cannot follow its old cgroup identity
+across a restart, even though the completed dump itself is independent of it.
 
 Admission requires the estimated dump plus the configured reserve plus **5 GiB**,
 at least 3 GiB available memory and commitment headroom, and 1.5 GiB database
@@ -164,11 +204,19 @@ latest result for each operation in the hot directory. Retired attempts remain
 under `.backup-state/retired/attempts/`; no audit evidence is deleted. Operator
 helpers that validate exact state-directory contents must allow these records
 and `health.json` rather than reusing a historical directory snapshot.
+Post-dump ownership, heartbeat, result and per-reader exit evidence live in that
+run's `postdump/` subdirectory. Health checks inspect this watchdog during
+verification and upload instead of treating successful dump cleanup as overall
+completion.
 New receipts preserve dump start, completion, structural check,
 local SHA-256, upload and integrity-verification timestamps; a full restore starts
 as `not_verified`. An imported independent receipt preserves an existing timeline.
 The dump-start timestamp is a conservative lower bound before snapshot acquisition,
 not a claim to the exact PostgreSQL snapshot time.
+They also retain resource observations at verification/hash/upload boundaries,
+including database cgroup memory and swap. These are sampled observations, not
+continuous maxima. Health reports current host swap and a `swap_high` flag above
+256 MiB, along with the newest receipt's resource evidence.
 
 The independent `pg_backup_health.py` computes freshness from that lower bound,
 or the original timestamp in a recognized legacy filename. Receipt-import and
@@ -326,8 +374,12 @@ object under a separately approved recovery procedure. Establish that no owned
 writer/reader remains before removing only a proven abandoned partial; preserve
 completed uncertain archives until independently verified. Inspect a failed
 restore's cidfile/logged container identity before cleanup. Reconcile the receipt
-and clear the marker only after those checks. Automatic backup cancellation and
-recovery are deferred to the runtime-protection milestone.
+and clear the marker only after those checks. For a post-dump interruption,
+inspect `postdump/ownership.json`, `upload.json` when present, the exact owned
+container and a fresh object listing. A missing exit record, nonzero exit or
+ambiguous command completion requires independent integrity verification before
+receipt import; matching object size alone is insufficient. Automatic uncertain
+upload recovery remains deliberately unavailable.
 
 Keep cron held when rolling code back. Reinstalling the historical age-pruning
 script is unsafe on a disk that cannot hold its retention window. Preserve

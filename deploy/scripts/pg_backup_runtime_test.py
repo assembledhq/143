@@ -182,6 +182,8 @@ class RuntimeTests(unittest.TestCase):
         cg.mkdir()
         for field, value in [('current', 700 * 1024 ** 2), ('peak', 900 * 1024 ** 2), ('max', 2 * runtime.GIB)]:
             (cg / ('memory.' + field)).write_text(str(value))
+        (cg / 'memory.stat').write_text('anon 104857600\nfile 629145600\n')
+        (cg / 'memory.swap.current').write_text('0')
         with mock.patch.object(runtime, 'cgroup_path', return_value=cg):
             self.guard.observe_client_memory({'Id': 'c' * 64, 'State': {'Pid': 123}})
         self.guard.cleanup_beat('test')
@@ -191,6 +193,9 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(report['current_bytes'], 700 * 1024 ** 2)
             self.assertEqual(report['peak_observed_bytes'], 900 * 1024 ** 2)
             self.assertEqual(report['limit_bytes'], 2 * runtime.GIB)
+            self.assertEqual(report['anon_bytes'], 100 * 1024 ** 2)
+            self.assertEqual(report['file_bytes'], 600 * 1024 ** 2)
+            self.assertEqual(report['swap_bytes'], 0)
             self.assertTrue(report['observed_at'])
 
     def test_cleanup_continues_when_heartbeat_cannot_be_written(self):
@@ -375,11 +380,18 @@ def stop(g,owned):
  (root/'stopped').write_text('yes')
 def sample(*args):
  s=safe_resources();s['monotonic']=time.monotonic();return s
+original_terminal=r.Guard.terminal
+def terminal(g,result):
+ # Force both windows: marker removal before result, and result before exit.
+ # Neither event alone permits removal of the detached child's directory.
+ time.sleep(.1)
+ original_terminal(g,result)
+ time.sleep(.1)
 with mock.patch.object(r,'proc_identity',side_effect=process), mock.patch.object(r.Guard,'prepare',prepare), \
  mock.patch.object(r.Guard,'stop',stop), mock.patch.object(r,'invoke',return_value=''), \
  mock.patch.object(r.Guard,'inspect',return_value={'State':{'Running':True,'Status':'running'}}), \
  mock.patch.object(r.Guard,'database'), mock.patch.object(r.Guard,'backends'), \
- mock.patch.object(r.Guard,'observe_client_memory'), \
+ mock.patch.object(r.Guard,'observe_client_memory'), mock.patch.object(r.Guard,'terminal',terminal), \
  mock.patch.object(r,'resources',side_effect=sample), mock.patch.object(r,'INTERVAL',.05):
  r.protect_dump(p,partial,app,18*r.GIB)
 '''
@@ -414,6 +426,24 @@ with mock.patch.object(r,'proc_identity',side_effect=process), mock.patch.object
                     self.assertFalse(marker.exists(), 'proven cleanup must release only this marker')
                     self.assertFalse((root / '.new.dump.partial.test').exists())
                     self.assertNotEqual(child.wait(timeout=2), 0, 'a cancelled dump must fail')
+                    # The killed caller cannot reap its detached watchdog. Wait
+                    # for its durable result AND release of the inherited lock
+                    # before TemporaryDirectory starts deleting evidence files.
+                    result_path = root / '.backup-state' / ('143-backup-' + 'b' * 32) / 'result.json'
+                    deadline = time.monotonic() + 5
+                    while not result_path.exists() and time.monotonic() < deadline: time.sleep(.01)
+                    self.assertTrue(result_path.exists(), 'watchdog must persist its terminal result')
+                    result = read_json(result_path)
+                    self.assertEqual(result['status'], 'failed')
+                    self.assertTrue(result['cleanup_verified'])
+                    with (root / 'lock').open('rb') as lock:
+                        while True:
+                            try:
+                                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                break
+                            except BlockingIOError:
+                                self.assertLess(time.monotonic(), deadline, 'watchdog must release the lock after its final write')
+                                time.sleep(.01)
                 finally:
                     if child.poll() is None: child.kill()
                     child.communicate(timeout=2)

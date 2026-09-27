@@ -1,4 +1,4 @@
-"""Linux-only dump supervisor. No remote Docker endpoints or production restarts.
+"""Linux-only backup supervisors. No remote Docker endpoints or production restarts.
 
 The detached supervisor inherits the common flock. Its caller watches it in
 turn. Both persist evidence; neither equates a dead Docker CLI with stopped work.
@@ -13,7 +13,7 @@ import subprocess
 import time
 
 from pg_backup_state import (Refused, require, now, identity, read_json,
-                             atomic_json, sync_dir, invoke)
+                             atomic_json, sync_dir, invoke, sha256)
 
 GIB = 1024 ** 3
 INTERVAL = 5
@@ -60,6 +60,7 @@ def resources(root, db_pid):
     cg = cgroup_path(db_pid)
     maximum = int((cg / 'memory.max').read_text())
     current = int((cg / 'memory.current').read_text())
+    stats = dict(line.split() for line in (cg / 'memory.stat').read_text().splitlines())
     fs = os.statvfs(root)
     return dict(free_bytes=fs.f_bavail * fs.f_frsize,
                 available_bytes=memory['MemAvailable'],
@@ -67,18 +68,23 @@ def resources(root, db_pid):
                 swap_bytes=memory['SwapTotal'] - memory['SwapFree'],
                 swap_out_bytes=int(vm['pswpout']) * os.sysconf('SC_PAGE_SIZE'),
                 db_headroom=maximum - current,
+                db_current_bytes=current, db_anon_bytes=int(stats['anon']),
+                db_shmem_bytes=int(stats['shmem']),
+                db_swap_bytes=int((cg / 'memory.swap.current').read_text()),
                 host_io=pressure(Path('/proc/pressure/io')),
                 host_memory=pressure(Path('/proc/pressure/memory')),
                 db_io=pressure(cg / 'io.pressure'), db_memory=pressure(cg / 'memory.pressure'),
                 monotonic=time.monotonic())
 
 
-def check_resources(sample, previous, reserve, *, admission=False, estimate=0):
+def check_resources(sample, previous, reserve, *, admission=False, estimate=0, capacity_only=False):
     margin = 5 * GIB if admission else 4 * GIB
     require(sample['free_bytes'] >= reserve + margin + (estimate if admission else 0), 'disk reserve at risk')
     require(sample['available_bytes'] >= (3 if admission else 1.5) * GIB, 'available memory at risk')
     require(sample['commit_headroom'] >= (3 if admission else 1) * GIB, 'commit headroom at risk')
     require(sample['db_headroom'] >= (1.5 if admission else 0.5) * GIB, 'database memory limit at risk')
+    if capacity_only:
+        return  # A tiny confirming listing may proceed despite residual swap/PSI.
     require(sample['swap_bytes'] <= GIB / 4, 'swap usage at risk')
     for field, part, limit in [('host_io', 'some', 20), ('host_io', 'full', 20),
             ('host_memory', 'full', 1), ('db_io', 'some', 20),
@@ -104,6 +110,8 @@ class Guard:
         self.owner_identity = proc_identity(self.owner_pid)
         self.cleanup_telemetry_error = None
         self.client_memory = None
+        self.client_name = app
+        self.client_limit = 2 * GIB
 
     def inspect(self, target):
         # Absence must be proven by successful inventory, not a failed inspect
@@ -117,7 +125,7 @@ class Guard:
             require(isinstance(name, str), 'invalid container name listing')
             # Docker's CLI presents names without '/', inspect uses '/'.
             # Accept either literal form; regex filters never prove absence.
-            if name in (self.app, '/' + self.app) or cid == target:
+            if name in (self.client_name, '/' + self.client_name) or cid == target:
                 require(len(cid) == 64 and all(c in '0123456789abcdef' for c in cid), 'invalid listed container id')
                 ids.append(cid)
         if not ids:
@@ -125,7 +133,7 @@ class Guard:
         require(len(ids) == 1, 'ambiguous dump container')
         data = json.loads(invoke(['docker', 'inspect', ids[0]], timeout=5))[0]
         require(data['Config']['Labels'].get(LABEL) == self.app and
-                data['Name'] == '/' + self.app, 'dump ownership mismatch')
+                data['Name'] == '/' + self.client_name, 'dump ownership mismatch')
         require(not target or data['Id'] == target, 'dump container was replaced')
         return data
 
@@ -189,13 +197,13 @@ class Guard:
         self.cleanup_beat('confirm_container_removed')
         require(self.inspect(owned.get('container_id')) is None, 'owned container cleanup unproven')
 
-    def cleanup_beat(self, stage):
+    def cleanup_beat(self, stage, phase='cleanup'):
         # Lack of disk space for telemetry must not prevent stopping the writer.
         # Preserve the error in the terminal evidence if writes become possible.
         try:
             if self.client_memory is None and self.heartbeat.exists():
                 self.client_memory = read_json(self.heartbeat).get('client_memory')
-            atomic_json(self.heartbeat, dict(at=now(), phase='cleanup', stage=stage, client_memory=self.client_memory))
+            atomic_json(self.heartbeat, dict(at=now(), phase=phase, stage=stage, client_memory=self.client_memory))
         except (OSError, ValueError, KeyError, TypeError, Refused) as exc:
             self.cleanup_telemetry_error = str(exc)
 
@@ -205,8 +213,11 @@ class Guard:
         current = int((cg / 'memory.current').read_text())
         peak = int((cg / 'memory.peak').read_text())
         maximum = int((cg / 'memory.max').read_text())
-        require(0 <= current <= peak and maximum == 2 * GIB, 'invalid dump client memory telemetry')
+        stats = dict(line.split() for line in (cg / 'memory.stat').read_text().splitlines())
+        require(0 <= current <= peak and maximum == self.client_limit, 'invalid backup client memory telemetry')
         self.client_memory = dict(current_bytes=current, peak_observed_bytes=peak,
+                                  anon_bytes=int(stats['anon']), file_bytes=int(stats['file']),
+                                  swap_bytes=int((cg / 'memory.swap.current').read_text()),
                                   limit_bytes=maximum, observed_at=now())
 
     def terminal(self, result):
@@ -332,8 +343,207 @@ class Guard:
 
 
 def protect_dump(policy, partial, app, estimate, exercise=None):
-    require(policy.lock_fd is not None, 'dump requires the common lock')
-    guard = Guard(policy, partial, app, estimate, exercise)
+    return run_guard(Guard(policy, partial, app, estimate, exercise))
+
+
+class TransferGuard(Guard):
+    """Guard a completed dump through verification and upload; never delete it.
+
+    Hashing runs in the supervised process with drop-behind reads. Every Docker
+    reader is bounded and durably owned before creation/start, including the
+    final S3 listing. An uncertain upload keeps its pending marker for a human
+    to reconcile; LIST size alone cannot establish checksum upload success.
+    """
+    def __init__(self, policy, partial, app, timeline, measured_db, version):
+        super().__init__(policy, partial, app, 0)
+        self.run = self.run / 'postdump'
+        self.record = self.run / 'ownership.json'
+        self.result = self.run / 'result.json'
+        self.heartbeat = self.run / 'heartbeat.json'
+        self.cancel = self.run / 'cancel.json'
+        self.timeline, self.measured_db, self.version = timeline, measured_db, version
+        self.client_limit = GIB
+        self.previous = None
+        self.phase = 'verification'
+        self.phase_deadline = time.monotonic() + policy.verify_timeout
+        self.phase_resources = {}
+
+    def prepare(self):
+        dump = read_json(self.run.parent / 'ownership.json')
+        result = read_json(self.run.parent / 'result.json')
+        require(result['status'] == 'completed' and result['cleanup_verified'], 'dump cleanup unproven')
+        require(dump['app'] == self.app and all(identity(self.partial)[k] == dump['partial'][k]
+                for k in ('device', 'inode')), 'completed dump identity changed')
+        require(os.environ.get('DOCKER_HOST', '') in ('', 'unix:///var/run/docker.sock') and
+                not os.environ.get('DOCKER_CONTEXT'), 'local default Docker endpoint required')
+        endpoint = invoke(['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], timeout=5).strip()
+        require(endpoint == 'unix:///var/run/docker.sock', 'local Linux Docker socket required')
+        self.db, generation = self.database(dump['database'])
+        self.owned = dict(app=self.app, database=generation, partial=identity(self.partial),
+                          owner_pid=self.owner_pid, owner_identity=self.owner_identity,
+                          creation_started=False, creation_complete=False)
+        atomic_json(self.record, self.owned)
+        self.checkpoint('verification_started')
+
+    def tick(self, force=False, *, enforce=True, reset_interval=False):
+        require(proc_identity(self.owner_pid) == self.owner_identity, 'backup owner disappeared')
+        require(not self.cancel.exists(), 'backup cancelled')
+        require(time.monotonic() <= self.phase_deadline, 'backup ' + self.phase + ' timed out')
+        if not force and self.previous and time.monotonic() - self.previous['monotonic'] < INTERVAL:
+            return
+        self.database(self.owned['database'])
+        sample = resources(self.policy.root, self.owned['database']['pid'])
+        # Persist the violating sample too, so a stop is diagnosable.
+        atomic_json(self.heartbeat, dict(at=now(), phase=self.phase, resources=sample,
+                                        client_memory=self.client_memory))
+        self.phase_resources['last_observation'] = dict(at=now(), phase=self.phase, resources=sample)
+        if enforce:
+            check_resources(sample, None if reset_interval else self.previous, self.policy.reserve,
+                            capacity_only=self.phase == 'metadata')
+        self.previous = sample
+
+    def checkpoint(self, name, *, enforce=True):
+        self.tick(force=True, enforce=enforce)
+        self.phase_resources[name] = dict(at=now(), resources=self.previous)
+        self.timeline['resources'] = self.phase_resources
+
+    def stop(self, owned):
+        require(owned['app'] == self.app and owned['client_name'] in
+                [self.app + '-' + stage for stage in ('structural', 'upload', 'metadata')],
+                'transfer ownership mismatch')
+        self.client_name = owned['client_name']
+        self.cleanup_beat('inspect_reader', phase=self.phase)
+        data = self.inspect(owned.get('container_id'))
+        if data and data['State']['Running']:
+            self.cleanup_beat('stop_reader', phase=self.phase)
+            invoke(['docker', 'stop', '--time', '5', data['Id']], timeout=12)
+        self.cleanup_beat('confirm_reader_stopped', phase=self.phase)
+        data = self.inspect(owned.get('container_id'))
+        require(data is None or not data['State']['Running'], 'backup reader still running')
+        if data:
+            self.cleanup_beat('remove_reader', phase=self.phase)
+            invoke(['docker', 'rm', '-v', data['Id']], timeout=8)
+        self.cleanup_beat('confirm_reader_removed', phase=self.phase)
+        require(self.inspect(owned.get('container_id')) is None, 'owned reader cleanup unproven')
+
+    def client(self, stage, args, *, env=None, network='none', capture=False, timeout=120):
+        self.phase = stage
+        self.phase_deadline = time.monotonic() + timeout
+        self.client_memory = None
+        # No reader is active during the preceding stage's cleanup. Rebase the
+        # sample interval, but enforce every entry resource threshold.
+        self.tick(force=True, reset_interval=True)
+        self.client_name = self.app + '-' + stage
+        self.owned.update(client_name=self.client_name, creation_started=True, creation_complete=False)
+        self.owned.pop('container_id', None)
+        self.owned.pop('exit', None)
+        atomic_json(self.record, self.owned)
+        command = ['docker', 'create', '--name', self.client_name, '--label', LABEL + '=' + self.app,
+                   '--pull=never', '--network', network, '--restart=no', '--read-only',
+                   '--cap-drop=ALL', '--security-opt=no-new-privileges', '--memory=1g',
+                   '--memory-swap=1g', '--cpus=1', '--pids-limit=64',
+                   '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m']
+        # Only the bounded S3 metadata JSON needs stdout. Dump TOCs and uploader
+        # diagnostics are not retained in Docker's disk-backed log stream.
+        command += (['--log-driver=json-file', '--log-opt=max-size=1m', '--log-opt=max-file=1']
+                    if capture else ['--log-driver=none'])
+        cid = invoke(command + args, env=env, timeout=15).strip()
+        require(len(cid) == 64 and all(c in '0123456789abcdef' for c in cid), 'invalid backup reader id')
+        self.owned.update(container_id=cid, creation_complete=True)
+        atomic_json(self.record, self.owned)
+        # Docker create is a bounded command window with no active reader.
+        # Recheck capacity immediately before start, independently of its lag.
+        self.tick(force=True, reset_interval=True)
+        invoke(['docker', 'start', cid], timeout=10)
+        while True:
+            data = self.inspect(cid)
+            require(data is not None, 'owned backup reader disappeared')
+            if data['State']['Status'] == 'exited':
+                # Save the exact terminal status BEFORE removal or receipt
+                # creation. A lost acknowledgement must never be auto-retried.
+                self.owned['exit'] = dict(code=data['State']['ExitCode'], oom=data['State']['OOMKilled'], at=now())
+                atomic_json(self.record, self.owned)
+                atomic_json(self.run / (stage + '.json'), self.owned)
+                require(data['State']['ExitCode'] == 0 and not data['State']['OOMKilled'], stage + ' client failed')
+                # A successful exit is a known outcome. Residual pressure is
+                # recorded, not mistaken for an uncertain/failed upload.
+                self.tick(force=True, enforce=False)
+                output = invoke(['docker', 'logs', '--tail', '100', cid], timeout=5) if capture else ''
+                self.stop(self.owned)
+                self.owned['creation_started'] = False
+                atomic_json(self.record, self.owned)
+                return output
+            require(data['State']['Running'], 'backup reader not running')
+            self.tick()
+            try:
+                self.observe_client_memory(data)
+            except FileNotFoundError:
+                latest = self.inspect(cid)
+                if latest and latest['State']['Status'] == 'exited':
+                    continue
+                raise
+            time.sleep(INTERVAL)
+
+    def structural_check(self, path):
+        args = ['--mount', 'type=bind,src=' + str(path) + ',dst=/backup.dump,readonly',
+                '--entrypoint', 'pg_restore']
+        for volume in (self.db['Config'].get('Volumes') or {}):
+            require(volume.startswith('/var/lib/postgresql') and ':' not in volume, 'unexpected image volume')
+            args += ['--tmpfs', volume + ':rw,noexec,nosuid,size=1m']
+        self.client('structural', args + [self.db['Image'], '--list', '/backup.dump'],
+                    timeout=self.policy.verify_timeout)
+
+    def checksum(self, path):
+        self.phase = 'checksum'
+        self.phase_deadline = time.monotonic() + self.policy.verify_timeout
+        self.checkpoint('checksum_started')
+        checksum = sha256(path, tick=self.tick, drop_cache=True)
+        self.checkpoint('checksum_completed', enforce=False)
+        return checksum
+
+    def aws(self, args, archive=None, timeout=120):
+        spec, env = self.policy.aws_spec(args, archive)
+        return self.client('upload' if archive else 'metadata', spec, env=env,
+                           network='bridge', capture=archive is None, timeout=timeout)
+
+    def fail(self, reason):
+        failed_phase = self.phase
+        self.phase = 'cleanup'
+        self.cleanup_beat('stop_reader')
+        result = dict(status='failed', at=now(), error=reason, cleanup_verified=False,
+                      archive_preserved=True, reconciliation_required=True,
+                      phase_resources=self.phase_resources, failed_phase=failed_phase)
+        try:
+            if self.record.exists():
+                owned = read_json(self.record)
+                if owned['creation_started']:
+                    self.stop(owned)
+                    require(owned['creation_complete'], 'Docker create outcome ambiguous; reconcile before retry')
+                result['cleanup_verified'] = True
+        except (OSError, ValueError, KeyError, TypeError, Refused, subprocess.TimeoutExpired) as exc:
+            result['cleanup_error'] = str(exc)
+        # Never delete the archive, the verification partial or pending marker.
+        # Even a matching LIST cannot prove a killed uploader finished checksum validation.
+        self.terminal(result)
+        return result
+
+    def supervise(self):
+        try:
+            self.prepare()
+            result = self.policy.finish_archive(self.partial, self.app, self.timeline,
+                                                self.measured_db, self.version, self)
+            self.terminal(dict(status='completed', at=now(), cleanup_verified=True,
+                               phase_resources=self.phase_resources, **result))
+        except (OSError, ValueError, KeyError, TypeError, Refused, subprocess.TimeoutExpired) as exc:
+            self.fail(str(exc))
+
+
+def protect_transfer(policy, partial, app, timeline, measured_db, version):
+    return run_guard(TransferGuard(policy, partial, app, timeline, measured_db, version))
+
+
+def run_guard(guard):
+    require(guard.policy.lock_fd is not None, 'backup requires the common lock')
     guard.run.mkdir(mode=0o700)
     cancelled = None
 
@@ -372,7 +582,7 @@ def protect_dump(policy, partial, app, estimate, exercise=None):
             if pid:
                 child = None
                 if not guard.result.exists():
-                    guard.fail('dump watchdog exited without a result')
+                    guard.fail('backup watchdog exited without a result')
                 break
             if guard.heartbeat.exists():
                 # Wall clock file age is avoided here; the contents are written
@@ -391,7 +601,7 @@ def protect_dump(policy, partial, app, estimate, exercise=None):
                 # It may have finished after our last waitpid but before SIGKILL.
                 # A durable terminal result must not be overwritten by a retry.
                 if not guard.result.exists():
-                    guard.fail('dump watchdog heartbeat expired')
+                    guard.fail('backup watchdog heartbeat expired')
                 break
             time.sleep(0.2)
         result = read_json(guard.result)

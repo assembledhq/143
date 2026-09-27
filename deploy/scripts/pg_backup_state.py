@@ -67,12 +67,26 @@ def atomic_json(path, data):
             os.unlink(temporary)
 
 
-def sha256(path):
+def sha256(path, *, tick=None, drop_cache=False):
     before = identity(path)
     h = hashlib.sha256()
     with path.open('rb') as f:
-        for block in iter(lambda: f.read(8 * 1024 * 1024), b''):
+        if drop_cache:
+            require(hasattr(os, 'posix_fadvise'), 'cache-aware hashing requires Linux posix_fadvise')
+            os.fsync(f.fileno())
+            os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_SEQUENTIAL)
+        offset = 0
+        while True:
+            if tick:
+                tick()
+            block = f.read(8 * 1024 * 1024)
+            if not block:
+                break
             h.update(block)
+            if drop_cache:
+                os.posix_fadvise(f.fileno(), offset, len(block), os.POSIX_FADV_DONTNEED)
+            offset += len(block)
     require(identity(path) == before, 'archive changed while hashing')
     return h.hexdigest()
 
@@ -83,4 +97,3 @@ def invoke(args, *, env=None, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, 
                             stderr=subprocess.PIPE, timeout=timeout, check=False)
     require(result.returncode == 0, 'command failed: ' + Path(args[0]).name + ' (exit ' + str(result.returncode) + ')')
     return (result.stdout or b'').decode()
-

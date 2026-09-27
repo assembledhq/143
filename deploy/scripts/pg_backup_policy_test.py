@@ -38,7 +38,7 @@ class FakePolicy(policy.Policy):
     def load_storage(self):
         return {'bucket': 'example-backups'}
 
-    def remote(self, name):
+    def remote(self, name, aws=None):
         self.operations.append(('list', name))
         if self.remote_failure:
             raise policy.Refused('listing denied')
@@ -149,7 +149,12 @@ print('loaded')
             if fail:
                 raise policy.Refused('dump client failed')
             return {'status': 'completed'}
-        with mock.patch.object(self.p, 'dump_archive', side_effect=fake_dump):
+        def fake_transfer(partial, app, timeline, measured_db, version):
+            guard = types.SimpleNamespace(structural_check=self.p.structural_check, checksum=policy.sha256,
+                                          aws=self.p.aws, checkpoint=lambda name, **kwargs: None)
+            return self.p.finish_archive(partial, app, timeline, measured_db, version, guard)
+        with mock.patch.object(self.p, 'dump_archive', side_effect=fake_dump), \
+                mock.patch.object(self.p, 'transfer_archive', side_effect=fake_transfer):
             self.p.backup(args or argparse.Namespace(bootstrap=False, canary=False))
 
     def test_retention_floor_and_known_good_slot(self):
@@ -305,6 +310,30 @@ print('loaded')
                 for f in self.root.glob('.*.partial.*'): f.unlink()
                 (self.p.state / 'pending.json').unlink()
                 setattr(self.p, defect, False)
+
+    def test_post_upload_pressure_preserves_success_receipt_and_pressure_evidence(self):
+        paths = [self.archive(n) for n in (1, 2)]
+        self.canary()
+        def transfer(partial, app, timeline, measured_db, version):
+            def checkpoint(name, *, enforce=True):
+                if name in ('upload_completed', 'integrity_verified'):
+                    self.assertFalse(enforce, 'completed work must record residual pressure without failing')
+                    timeline.setdefault('resources', {})[name] = {'resources': {'swap_bytes': policy.GIB}}
+            guard = types.SimpleNamespace(structural_check=self.p.structural_check, checksum=policy.sha256,
+                                          aws=self.p.aws, checkpoint=checkpoint)
+            return self.p.finish_archive(partial, app, timeline, measured_db, version, guard)
+        def dump(partial, *args): partial.write_bytes(b'new completed dump')
+        with mock.patch.object(self.p, 'dump_archive', side_effect=dump), \
+                mock.patch.object(self.p, 'transfer_archive', side_effect=transfer):
+            self.p.backup(argparse.Namespace(bootstrap=False, canary=True))
+        records = self.p.inventory()
+        new = next(r for r in records if r['file'] not in [p.name for p in paths])
+        self.assertEqual((self.root / new['file']).read_bytes(), b'new completed dump')
+        self.assertEqual(new['timeline']['resources'], {
+            'upload_completed': {'resources': {'swap_bytes': policy.GIB}},
+            'integrity_verified': {'resources': {'swap_bytes': policy.GIB}}})
+        self.assertTrue(all(p.exists() for p in paths))
+        self.p.no_pending()
 
     def test_partial_without_marker_also_blocks_admission(self):
         partial = self.root / '.onefortythree-old.dump.partial.abandoned'
