@@ -59,6 +59,9 @@ scp "${SCP_OPTS[@]}" \
   "$SCRIPT_DIR/restore-test-body.sh" \
   "$SCRIPT_DIR/pg-backup-policy.py" \
   "$SCRIPT_DIR/pg-backup-config.py" \
+  "$SCRIPT_DIR/pg_backup_state.py" \
+  "$SCRIPT_DIR/pg_backup_runtime.py" \
+  "$SCRIPT_DIR/pg_backup_health.py" \
   "$SCRIPT_DIR/install-pg-backups.sh" \
   root@"$HOST":/opt/143/deploy/scripts/
 

@@ -71,7 +71,7 @@ RESTORE_TEST_ENABLED="$(resolve_enabled RESTORE_TEST_ENABLED "${RESTORE_TEST_ENA
 # The backup scripts must already be on the host (provision.sh / the wrapper
 # copy them to SCRIPTS_DIR before invoking this installer).
 command -v python3 >/dev/null || { echo "ERROR: Python 3 is required" >&2; exit 1; }
-for s in pg-backup.sh restore-test.sh restore-test-body.sh pg-backup-policy.py pg-backup-config.py; do
+for s in pg-backup.sh restore-test.sh restore-test-body.sh pg-backup-policy.py pg-backup-config.py pg_backup_state.py pg_backup_runtime.py pg_backup_health.py; do
   if [ ! -f "$SCRIPTS_DIR/$s" ]; then
     echo "ERROR: $SCRIPTS_DIR/$s not found — copy the deploy scripts to this host first." >&2
     exit 1

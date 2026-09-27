@@ -37,8 +37,9 @@ Record the operator, reason, held schedule, latest verified recovery point, next
 reassessment deadline, and rollback contents. Confirm alerting or an explicit
 operator follow-up; commented cron entries will not themselves produce alerts.
 The schedule switches alone do not prove backup health. The policy described
-below adds retention/admission/serialization, but runtime capacity monitoring and
-independent offsite restoration remain separate operational gates.
+below adds retention/admission/serialization and a dump supervisor. Production
+validation of that supervisor, alert delivery, and independent offsite restoration
+remain separate operational gates.
 
 Validation uses mocked transports and temporary files:
 
@@ -88,7 +89,7 @@ from the full database size. This is preflight admission, not a hard dump-size
 limit. `BACKUP_RESERVE_BYTES` can increase the reserve but cannot lower it below
 20 GiB. `BACKUP_LOCK_TIMEOUT_SECONDS` defaults to 60 seconds, maximum 3600.
 
-Until runtime cancellation/monitoring is implemented, backup, prune, and local
+Until runtime cancellation and alert delivery have been validated, backup, prune, and local
 restore commands require both `BACKUP_ATTENDED=true` and a nonempty
 `BACKUP_OBSERVER` identifying the operator. They report JSON events and nonzero
 failures to that operator's terminal. Do not set these variables in cron to
@@ -99,6 +100,84 @@ claim automated alert delivery or four successful scheduled runs.
 validated, an assigned human must arrange each approved, attended backup at the
 six-hour target cadence, or explicitly record the growing recovery-point gap and
 the next decision time. A healthy installer result is not a successful backup.
+
+## Runtime protection and rollout
+
+The dump runs in a dedicated, named client container using the running database's
+immutable image ID and network namespace. It connects through the database's
+existing Docker-network address, since the installed HBA rejects loopback TCP.
+There is no production data-volume mount or database restart. The client mounts
+only its private partial archive and has a 1 GiB memory limit, no swap allowance,
+one CPU, 32-process limit, read-only root filesystem, dropped capabilities and
+a hard file-size limit. Image-declared data volumes are masked by small tmpfs
+mounts instead of creating anonymous restore volumes.
+
+A detached watchdog inherits the common backup lock. It samples disk, available
+memory, commitment headroom, swap activity, database cgroup headroom and host/DB
+pressure while the dump is active. It stops on missing telemetry, a changed
+database generation, a disappeared caller, a cancellation request, a 45-minute
+dump timeout or unsafe resources. The caller watches the watchdog in turn.
+Killing the calling SSH session does not release the lock while its watchdog
+is still supervising or cleaning up. A host failure or simultaneous death of
+both processes is not claimed safe: hard limits bound the writer, and a pending
+marker prevents a second backup until an operator reconciles ownership.
+
+Admission requires the estimated dump plus the configured reserve plus **5 GiB**,
+at least 3 GiB available memory and commitment headroom, and 1.5 GiB database
+cgroup headroom. Runtime stopping begins at reserve plus **4 GiB**, 1.5 GiB
+available memory, 1 GiB commitment headroom, 0.5 GiB database cgroup headroom,
+256 MiB swap use, or 4 MiB/s swap-out. Pressure thresholds are explicit in
+`pg_backup_runtime.py`. The default reserve remains 20 GiB and can only increase.
+
+Samples normally run five seconds apart. A sample interval exceeding 30 seconds
+fails closed; the caller detects a stuck watchdog after 45 seconds and then
+attempts bounded owned cleanup. Budget at least 60 seconds for delayed detection
+and client stopping: the 4 GiB margin tolerates roughly 68 MiB/s of unrelated
+growth over that interval. This is a capacity assumption to validate, not a
+guarantee against unbounded concurrent writes or an unresponsive Docker daemon.
+Use separate storage or a larger validated reserve if that margin is inadequate.
+
+Only the exact labelled client ID and captured PostgreSQL backend identity
+(PID, backend-start time, application, database and role) may be stopped. Cleanup
+must prove that both client and backend are gone before unlinking the exact
+partial inode and its matching dump marker. Ambiguous Docker creation, changed
+identities, failed queries, changed database generations, or failed cleanup keep
+the marker and partial for investigation. Completed archives are not failure
+cleanup targets. A proven failed dump clears its marker but records failure.
+
+Per-run ownership, watchdog heartbeat and result files are private under
+`.backup-state/143-backup-<uuid>/`. Separate attempt records include admission and
+lock failures. New receipts preserve dump start, completion, structural check,
+local SHA-256, upload and integrity-verification timestamps; a full restore starts
+as `not_verified`. An imported independent receipt preserves an existing timeline.
+The dump-start timestamp is a conservative lower bound before snapshot acquisition,
+not a claim to the exact PostgreSQL snapshot time.
+
+The independent `pg_backup_health.py` computes freshness from that lower bound,
+or the original timestamp in a recognized legacy filename. Receipt-import and
+upload times never reset recovery-point age. It reads atomic evidence without
+taking the common lock and emits JSON for failure, stale telemetry, reserve
+pressure, missed six-hour recovery targets and overdue full restore evidence.
+It has no database, Docker or S3 access. **Scheduling and central transport are
+not installed by this revision**; see the separately reviewed
+[monitoring proposal](database-backup-monitoring-proposal.md). Operator checks
+and both schedule holds remain necessary.
+
+Before unattended operation, obtain approval for installation with rollback copies,
+run a controlled owned-stop exercise and a complete attended backup, and prove
+independent heartbeat/alert delivery through the approved destination. This
+explicitly induced failure runs only as an attended canary and skips pruning:
+
+```sh
+BACKUP_ENABLED=true BACKUP_ATTENDED=true BACKUP_OBSERVER='named operator' \
+  /opt/143/deploy/scripts/pg-backup.sh --canary --exercise-stop-after 30
+```
+
+Expect failure, a terminal result with `cleanup_verified=true`, no remaining
+owned client/backend, identical prior archives, and no owned partial/marker.
+Inspect these independently; a nonzero command exit alone is not proof. Do not
+run this command or clear uncertain markers merely because code/tests passed.
+An isolated full restore remains a separate gate; no on-host restore is authorized.
 
 ## Data-only offsite configuration
 

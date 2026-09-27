@@ -9,17 +9,14 @@ import argparse
 from contextlib import contextmanager
 import datetime as dt
 import fcntl
-import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import re
 import signal
-import stat
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 
@@ -28,85 +25,12 @@ AWS_VERSION = 'aws-cli/2.35.11'
 GIB = 1024 ** 3
 
 
-class Refused(RuntimeError):
-    pass
-
-
-def require(ok, message):
-    if not ok:
-        raise Refused(message)
-
-
-def now():
-    return dt.datetime.now(dt.timezone.utc).isoformat()
-
-
-def emit(event, **fields):
-    print(json.dumps(dict(at=now(), event=event, **fields)), flush=True)
+from pg_backup_state import (Refused, require, now, emit, identity, read_json,
+                             sync_dir, atomic_json, sha256, invoke)
 
 
 def expected_cli_version(value):
     return isinstance(value, str) and value.split()[:1] == [AWS_VERSION]
-
-
-def identity(path):
-    s = path.lstat()
-    require(stat.S_ISREG(s.st_mode) and s.st_nlink == 1, 'unsafe file: ' + path.name)
-    require(s.st_uid == os.geteuid() and not s.st_mode & 0o077, 'file must be private and owned by operator: ' + path.name)
-    return dict(device=s.st_dev, inode=s.st_ino, bytes=s.st_size, mtime_ns=s.st_mtime_ns, ctime_ns=s.st_ctime_ns)
-
-
-def read_json(path):
-    identity(path)
-    require(path.stat().st_size < 1024 * 1024, 'oversized JSON record')
-    def unique_fields(pairs):
-        data = {}
-        for key, value in pairs:
-            require(key not in data, 'duplicate JSON field')
-            data[key] = value
-        return data
-    return json.loads(path.read_text(), object_pairs_hook=unique_fields)
-
-
-def sync_dir(path):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def atomic_json(path, data):
-    fd, temporary = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w') as f:
-            json.dump(data, f, sort_keys=True)
-            f.write('\n')
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temporary, path)
-        sync_dir(path.parent)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
-def sha256(path):
-    before = identity(path)
-    h = hashlib.sha256()
-    with path.open('rb') as f:
-        for block in iter(lambda: f.read(8 * 1024 * 1024), b''):
-            h.update(block)
-    require(identity(path) == before, 'archive changed while hashing')
-    return h.hexdigest()
-
-
-def invoke(args, *, env=None, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, timeout=120):
-    # Do not include raw command output/credentials in an exception or receipt.
-    result = subprocess.run(args, env=env, stdin=stdin, stdout=stdout,
-                            stderr=subprocess.PIPE, timeout=timeout, check=False)
-    require(result.returncode == 0, 'command failed: ' + Path(args[0]).name + ' (exit ' + str(result.returncode) + ')')
-    return (result.stdout or b'').decode()
 
 
 def run_restore_reader(command, env, cleanup_timeout=120):
@@ -170,6 +94,7 @@ class Policy:
         self.user = os.environ.get('POSTGRES_USER', 'onefortythree')
         self.database = os.environ.get('POSTGRES_DB', 'onefortythree')
         require(re.fullmatch(r'[a-zA-Z0-9_]+', self.database), 'invalid database name')
+        require(re.fullmatch(r'[a-zA-Z0-9_]+', self.user), 'invalid database user')
         self.reserve = int(os.environ.get('BACKUP_RESERVE_BYTES', str(20 * GIB)))
         self.wait = float(os.environ.get('BACKUP_LOCK_TIMEOUT_SECONDS', '60'))
         self.verify_timeout = int(os.environ.get('BACKUP_VERIFY_TIMEOUT_SECONDS', '7200'))
@@ -177,6 +102,7 @@ class Policy:
         require(math.isfinite(self.wait) and 0 <= self.wait <= 3600, 'invalid lock timeout')
         require(60 <= self.verify_timeout <= 86400, 'invalid verification timeout')
         self.storage = None
+        self.lock_fd = None
 
     @contextmanager
     def locked(self):
@@ -198,8 +124,10 @@ class Policy:
             self.state.mkdir(mode=0o700, exist_ok=True)
             require(not self.state.is_symlink() and self.state.stat().st_uid == os.geteuid()
                     and not self.state.stat().st_mode & 0o077, 'unsafe state directory')
+            self.lock_fd = fd
             yield
         finally:
+            self.lock_fd = None
             os.close(fd)
 
     def no_pending(self):
@@ -353,11 +281,13 @@ class Policy:
         require(available >= estimate + self.reserve, 'insufficient free space for estimated dump plus reserve')
         return result
 
-    def record(self, path, remote, checksum, integrity, database_bytes, expected_identity):
+    def record(self, path, remote, checksum, integrity, database_bytes, expected_identity, timeline=None):
         require(identity(path) == expected_identity, 'archive changed before receipt publication')
         r = dict(schema=1, file=path.name, identity=expected_identity, sha256=checksum,
                  structural_verified=True, verified_at=now(), database_bytes=database_bytes,
                  remote=remote, integrity=integrity)
+        if timeline is not None:
+            r['timeline'] = timeline
         require(remote and remote['bytes'] == r['identity']['bytes'], 'uploaded object size mismatch')
         atomic_json(self.state / (path.name + '.json'), r)
         return r
@@ -375,11 +305,19 @@ class Policy:
         atomic_json(marker, dict(phase='verify', file=path.name, started_at=now()))
         self.structural_check(path)
         require(identity(path) == before and self.remote(path.name) == remote, 'archive/object changed during verification')
+        previous = self.state / (path.name + '.json')
+        timeline = read_json(previous).get('timeline') if previous.exists() else None
+        if timeline:
+            timeline['independent_verification_recorded_at'] = now()
         self.record(path, remote, args.sha256, dict(kind='operator_sha256', version_id=args.version_id,
-                    evidence=args.evidence, verified_at=now()), self.database_bytes(), before)
+                    evidence=args.evidence, verified_at=now()), self.database_bytes(), before, timeline)
         marker.unlink()
         sync_dir(self.state)
         emit('independent_receipt_recorded', file=path.name)
+
+    def dump_archive(self, partial, app_name, estimate, exercise):
+        from pg_backup_runtime import protect_dump
+        return protect_dump(self, partial, app_name, estimate, exercise)
 
     def backup(self, args):
         self.no_pending()
@@ -390,7 +328,7 @@ class Policy:
             self.prune()
         records = self.inventory()
         measured_db = self.database_bytes()
-        self.admission(records, measured_db)
+        admission = self.admission(records, measured_db)
         version = self.aws(['--version']).strip()
         require(expected_cli_version(version), 'unexpected AWS CLI version')
         name = self.database + '-' + dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex + '.dump'
@@ -399,33 +337,42 @@ class Policy:
         partial = self.root / ('.' + name + '.partial.' + uuid.uuid4().hex)
         marker = self.state / 'pending.json'
         app_name = '143-backup-' + uuid.uuid4().hex
-        atomic_json(marker, dict(file=name, partial=partial.name, app_name=app_name, started_at=now(), phase='dump'))
-        # Keep marker and partial on *any* failure: a failed Docker client or
-        # signal is not proof that its server-side pg_dump stopped. M1b adds
-        # owned-backend cancellation; M1a requires attended reconciliation.
+        timeline = dict(dump_started_at=now(), recovery_point_basis='pre_dump_lower_bound',
+                        full_restore=dict(status='not_verified'))
+        atomic_json(marker, dict(file=name, partial=partial.name, app_name=app_name,
+                                started_at=timeline['dump_started_at'], phase='dump'))
         fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, 'wb') as f:
-            env = dict(self.db_env(), PGAPPNAME=app_name)
-            invoke(['docker', 'exec', '-e', 'PGPASSWORD', '-e', 'PGAPPNAME', self.container,
-                    'pg_dump', '-U', self.user, '-Fc', self.database], env=env, stdout=f, timeout=7200)
-            f.flush()
+        os.close(fd)
+        self.dump_archive(partial, app_name, admission['estimated_dump_bytes'], getattr(args, 'exercise_stop_after', None))
+        timeline['dump_completed_at'] = now()
+        pending = read_json(marker)
+        atomic_json(marker, dict(pending, timeline=timeline, phase='verification'))
+        with partial.open('rb') as f:
             os.fsync(f.fileno())
         self.structural_check(partial)
+        timeline['structural_verified_at'] = now()
+        atomic_json(marker, dict(pending, timeline=timeline, phase='verification'))
         checksum = sha256(partial)
+        timeline['local_sha256_at'] = now()
         require(partial.stat().st_size > 0, 'empty dump')
         # link + unlink publishes atomically without replacing any existing file.
         os.link(partial, final)
         partial.unlink()
         sync_dir(self.root)
         file_id = identity(final)
-        atomic_json(marker, dict(file=name, app_name=app_name, started_at=now(), phase='upload', identity=file_id, sha256=checksum))
+        timeline['upload_started_at'] = now()
+        atomic_json(marker, dict(file=name, app_name=app_name, started_at=timeline['dump_started_at'],
+                                phase='upload', identity=file_id, sha256=checksum, timeline=timeline))
         emit('dump_completed', file=name, bytes=file_id['bytes'], sha256=checksum)
         self.aws(['s3', 'cp', '/backup.dump', 's3://' + self.load_storage()['bucket'] + '/postgres/' + name,
                   '--checksum-algorithm', 'CRC64NVME', '--only-show-errors', '--no-follow-symlinks'], archive=final, timeout=7200)
         require(identity(final) == file_id, 'archive changed during upload')
         remote = self.remote(name)
+        timeline['upload_completed_at'] = now()
+        timeline['integrity_verified_at'] = now()
+        timeline['integrity_basis'] = 'checksum_upload_not_independent_download'
         self.record(final, remote, checksum, dict(kind='checksum_upload', cli_image=AWS_IMAGE,
-                    cli_version=version, algorithm='CRC64NVME', uploaded_at=now()), measured_db, file_id)
+                    cli_version=version, algorithm='CRC64NVME', uploaded_at=now()), measured_db, file_id, timeline)
         marker.unlink()
         sync_dir(self.state)
         if not args.canary:
@@ -502,6 +449,7 @@ def main():
     backup = sub.add_parser('backup')
     backup.add_argument('--bootstrap', action='store_true')
     backup.add_argument('--canary', action='store_true')
+    backup.add_argument('--exercise-stop-after', type=int, help='attended canary: intentionally stop this dump after 5..300 seconds')
     sub.add_parser('prune')
     sub.add_parser('plan')
     sub.add_parser('restore')
@@ -513,15 +461,21 @@ def main():
         for field in ('file', 'sha256', 'evidence'):
             command.add_argument('--' + field, required=True)
     args = parser.parse_args()
+    attempt = None
     try:
         flag = 'RESTORE_TEST_ENABLED' if args.action == 'restore' else 'BACKUP_ENABLED'
         # Receipt/plan commands are permitted while schedules are held.
         if args.action in ('backup', 'restore', 'prune'):
             require(os.environ.get(flag, 'true') == 'true', flag + ' is not true; operation held')
         if args.action in ('backup', 'restore', 'prune'):
-            require(os.environ.get('BACKUP_ATTENDED') == 'true', 'M1a requires BACKUP_ATTENDED=true and a named observer; unattended runtime protection is not implemented')
+            require(os.environ.get('BACKUP_ATTENDED') == 'true', 'BACKUP_ATTENDED=true is required until runtime stop and alert delivery are validated')
             require(os.environ.get('BACKUP_OBSERVER', '').strip(), 'BACKUP_OBSERVER must name the attending operator')
             emit('attended_operation', action=args.action, observer=os.environ['BACKUP_OBSERVER'])
+        # Outside the common lock so contention/admission failures are durable.
+        attempt = start_attempt(args.action)
+        if args.action == 'backup' and args.exercise_stop_after is not None:
+            require(args.canary and 5 <= args.exercise_stop_after <= 300,
+                    'stop exercise requires --canary and a duration of 5..300 seconds')
         policy = Policy()
         with policy.locked():
             if args.action == 'backup':
@@ -532,7 +486,9 @@ def main():
                 policy.no_pending()
                 policy.admission(policy.inventory(), policy.database_bytes())
             elif args.action == 'restore':
-                return policy.restore()
+                status = policy.restore()
+                finish_attempt(attempt, 'completed' if status == 0 else 'failed')
+                return status
             elif args.action == 'import-receipt':
                 policy.import_receipt(args)
             else:
@@ -550,11 +506,45 @@ def main():
                 else:
                     atomic_json(policy.state / 'known-good.json', dict(file=args.file, sha256=args.sha256,
                                 evidence=args.evidence, restored_at=now()))
+                    if record.get('timeline'):
+                        record['timeline']['full_restore'] = dict(status='operator_verified',
+                                                                recorded_at=now(), evidence=args.evidence)
+                        atomic_json(policy.state / (args.file + '.json'), record)
                 emit(args.action, file=args.file)
+        if attempt:
+            finish_attempt(attempt, 'completed')
         return 0
     except (OSError, ValueError, KeyError, TypeError, IndexError, Refused, subprocess.TimeoutExpired) as exc:
+        if attempt:
+            finish_attempt(attempt, 'failed', str(exc))
         emit('failed', action=args.action, error=str(exc))
         return 1
+    except SystemExit:
+        if attempt:
+            finish_attempt(attempt, 'interrupted')
+        raise
+
+
+def start_attempt(action):
+    if action not in ('backup', 'prune', 'restore'):
+        return None
+    root = Path(os.environ.get('BACKUP_DIR', '/backups/postgres'))
+    # Use the same private directory validation without taking the writer lock.
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    require(root.resolve() == root.absolute() and root.stat().st_uid == os.geteuid()
+            and not root.stat().st_mode & 0o022, 'unsafe backup root')
+    state = root / '.backup-state'
+    state.mkdir(mode=0o700, exist_ok=True)
+    require(not state.is_symlink() and state.stat().st_uid == os.geteuid()
+            and not state.stat().st_mode & 0o077, 'unsafe state directory')
+    path = state / ('attempt-' + uuid.uuid4().hex + '.json')
+    atomic_json(path, dict(action=action, status='running', started_at=now(), pid=os.getpid()))
+    return path
+
+
+def finish_attempt(path, status, error=None):
+    data = read_json(path)
+    atomic_json(path, dict(data, status=status, finished_at=now(), error=error))
 
 
 if __name__ == '__main__':

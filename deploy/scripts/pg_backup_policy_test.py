@@ -105,14 +105,13 @@ class PolicyTests(unittest.TestCase):
                            cli_version=policy.AWS_VERSION, evidence='isolated checksum canary'))
 
     def dump(self, args=None, fail=False):
-        def fake_invoke(command, **kwargs):
-            self.assertIn('pg_dump', command)
-            self.assertIn('PGAPPNAME', command)
-            kwargs['stdout'].write(b'new verified dump')
+        def fake_dump(partial, app, estimate, exercise):
+            self.assertTrue(app.startswith('143-backup-'))
+            partial.write_bytes(b'new verified dump')
             if fail:
                 raise policy.Refused('dump client failed')
-            return ''
-        with mock.patch.object(policy, 'invoke', side_effect=fake_invoke):
+            return {'status': 'completed'}
+        with mock.patch.object(self.p, 'dump_archive', side_effect=fake_dump):
             self.p.backup(args or argparse.Namespace(bootstrap=False, canary=False))
 
     def test_retention_floor_and_known_good_slot(self):
@@ -196,6 +195,12 @@ class PolicyTests(unittest.TestCase):
         records = self.p.inventory()
         self.assertEqual(len(records), 2)
         self.assertEqual(records[0]['integrity']['kind'], 'checksum_upload')
+        timeline = records[0]['timeline']
+        self.assertEqual(timeline['recovery_point_basis'], 'pre_dump_lower_bound')
+        self.assertEqual(timeline['full_restore'], {'status': 'not_verified'})
+        points = [timeline[k] for k in ('dump_started_at', 'dump_completed_at', 'structural_verified_at',
+                  'local_sha256_at', 'upload_started_at', 'upload_completed_at', 'integrity_verified_at')]
+        self.assertEqual(points, sorted(points), 'receipt stages must retain their own ordered timestamps')
         self.assertFalse((self.p.state / 'pending.json').exists())
         self.assertEqual(list(self.root.glob('.*.partial.*')), [])
 
@@ -311,6 +316,7 @@ class PolicyTests(unittest.TestCase):
         path = self.archive(1)
         code = '''import importlib.util, sys
 sys.dont_write_bytecode=True
+sys.path.insert(0, __import__('os').path.dirname(sys.argv[1]))
 spec=importlib.util.spec_from_file_location('p',sys.argv[1]); p=importlib.util.module_from_spec(spec);spec.loader.exec_module(p)
 with p.Policy().locked():
  print('locked',flush=True)
@@ -465,6 +471,7 @@ with p.Policy().locked():
 import os, runpy, sys, types
 os.statvfs = lambda path: types.SimpleNamespace(f_bavail=100 * 1024**3, f_frsize=1)
 sys.argv = sys.argv[1:]
+sys.path.insert(0, os.path.dirname(sys.argv[0]))
 runpy.run_path(sys.argv[0], run_name='__main__')
 ''')
         python.chmod(0o700)
@@ -583,6 +590,7 @@ else: sys.exit(99)
         case, env = self.wrapper_fixture('cleanup-timeout')
         code = '''import importlib.util, sys
 sys.dont_write_bytecode=True
+sys.path.insert(0, __import__('os').path.dirname(sys.argv[1]))
 spec=importlib.util.spec_from_file_location('p', sys.argv[1]); p=importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
 reader=p.run_restore_reader
 p.run_restore_reader=lambda command, env: reader(command, env, cleanup_timeout=0.2)
