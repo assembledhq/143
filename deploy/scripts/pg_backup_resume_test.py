@@ -84,7 +84,12 @@ class ResumeTests(unittest.TestCase):
         if args[:3] == ['docker', 'context', 'inspect']: return 'unix:///var/run/docker.sock'
         if args[:3] == ['docker', 'container', 'ls']:
             self.assertNotIn('--filter', args, 'absence inventory must be unfiltered')
-            return json.dumps('c' * 64) + '\t' + json.dumps(self.old_app) if self.old_reader else ''
+            # The live DB is present but has no backup label. Its JSON empty
+            # string must parse successfully without proving a backup reader.
+            lines = [json.dumps('d' * 64) + '\t' + json.dumps('')]
+            if self.old_reader:
+                lines.append(json.dumps('c' * 64) + '\t' + json.dumps(self.old_app))
+            return '\n'.join(lines)
         raise AssertionError('unexpected command: ' + str(args))
 
     def client(self, guard, stage, args, **kwargs):
@@ -142,13 +147,31 @@ class ResumeTests(unittest.TestCase):
         args = argparse.Namespace(file=self.archive.name, etag=receipt['remote']['etag'],
                                   last_modified=receipt['remote']['last_modified'], sha256=self.hash,
                                   version_id='downloaded-version', evidence='independent checksum download')
-        with mock.patch.object(self.p, 'aws', side_effect=self.guard.aws), \
-                mock.patch.object(self.p, 'structural_check'), mock.patch.object(self.p, 'database_bytes', return_value=1000):
-            with self.p.locked(): self.p.import_receipt(args)
-        updated = read_json(self.p.state / (self.archive.name + '.json'))
-        self.assertEqual(updated['remote'], receipt['remote'])
-        self.assertEqual(updated['integrity']['kind'], 'operator_sha256')
-        self.assertEqual(updated['timeline']['dump_started_at'], self.timeline['dump_started_at'])
+        for key in (None, receipt['remote']['key']):
+            with self.subTest(key=key), mock.patch.object(self.p, 'aws', side_effect=self.guard.aws), \
+                    mock.patch.object(self.p, 'structural_check'), mock.patch.object(self.p, 'database_bytes', return_value=1000):
+                args.key = key
+                with self.p.locked(): self.p.import_receipt(args)
+                updated = read_json(self.p.state / (self.archive.name + '.json'))
+                self.assertEqual(updated['remote'], receipt['remote'])
+                self.assertEqual(updated['integrity']['kind'], 'operator_sha256')
+                self.assertEqual(updated['timeline']['dump_started_at'], self.timeline['dump_started_at'])
+
+    def test_non_pending_import_cannot_replace_the_prior_receipt_key(self):
+        self.resume()
+        receipt_path = self.p.state / (self.archive.name + '.json')
+        original_receipt = receipt_path.read_bytes()
+        receipt = read_json(receipt_path)
+        args = argparse.Namespace(file=self.archive.name, etag=receipt['remote']['etag'],
+                                  last_modified=receipt['remote']['last_modified'], sha256=self.hash,
+                                  version_id='downloaded-version', evidence='independent checksum download',
+                                  key='postgres/' + self.archive.name)
+        with mock.patch.object(self.p, 'remote', side_effect=AssertionError('must refuse before reading remote')):
+            with self.p.locked(), self.assertRaisesRegex(Refused, 'cannot replace prior receipt object key'):
+                self.p.import_receipt(args)
+        self.assertEqual(receipt_path.read_bytes(), original_receipt)
+        self.assertFalse(self.marker.exists())
+        self.assert_preserved()
 
     def test_recovery_refuses_ambiguous_or_unproven_state_without_upload(self):
         for fault in ('cleanup', 'dump_result', 'dump_identity', 'reader', 'backend', 'remote', 'listing', 'hash', 'version', 'creation'):

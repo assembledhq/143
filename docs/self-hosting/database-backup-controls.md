@@ -213,7 +213,9 @@ the common lock, retaining the newest 200, every unfinished attempt, and the
 latest result for each operation in the hot directory. Retired attempts remain
 under `.backup-state/retired/attempts/`; no audit evidence is deleted. Operator
 helpers that validate exact state-directory contents must allow these records
-and `health.json` rather than reusing a historical directory snapshot.
+and `health.json` and `recovery.json` rather than reusing a historical directory
+snapshot. The recovery pointer is retained as evidence after success; health
+ignores it when its pending marker is absent, and a later recovery replaces it.
 Post-dump ownership, heartbeat, result and per-reader exit evidence live in that
 run's `postdump/` subdirectory. Health checks inspect this watchdog during
 verification and upload instead of treating successful dump cleanup as overall
