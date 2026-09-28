@@ -88,6 +88,55 @@ class TransferTests(unittest.TestCase):
         state.atomic_json(self.state / 'pending.json', dict(app_name=self.app, partial=self.partial.name,
                                                           phase='verification', runtime='postdump'))
 
+    def test_paced_upload_forces_classic_and_readonly_private_config(self):
+        import configparser
+        self.p.aws_spec = mock.Mock(return_value=(['image', 's3', 'cp'], {'credential': 'private'}))
+        with mock.patch.object(self.guard, 'client') as client:
+            self.guard.aws(['s3', 'cp'], self.partial)
+            self.guard.aws(['s3', 'cp'], self.partial)
+        path = self.guard.run / 'aws-config'
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        config = configparser.ConfigParser()
+        config.read(path)
+        settings = dict(line.strip().split(' = ') for line in config['default']['s3'].splitlines() if line.strip())
+        self.assertEqual(settings, dict(preferred_transfer_client='classic', max_concurrent_requests='2',
+                                       max_bandwidth='100MB/s', multipart_chunksize='16MB'))
+        spec = client.call_args.args[1]
+        self.assertIn('type=bind,src=' + str(path) + ',dst=/aws-config,readonly', spec)
+        self.assertIn('AWS_CONFIG_FILE=/aws-config', spec)
+        self.assertNotIn('private', path.read_text())
+        path.write_bytes(b'changed')
+        with self.assertRaisesRegex(state.Refused, 'configuration changed'):
+            self.guard.aws(['s3', 'cp'], self.partial)
+
+    def test_reader_pressure_and_events_survive_threshold_stop_in_bounded_history(self):
+        cg = self.root / ('docker-' + 'c' * 64 + '.scope')
+        cg.mkdir()
+        files = {'memory.current': '100', 'memory.peak': '200', 'memory.max': str(runtime.GIB),
+                 'memory.stat': 'anon 20\nfile 80\n', 'memory.swap.current': '0',
+                 'memory.events': 'low 0\nhigh 0\nmax 12\noom 0\noom_kill 0\n',
+                 'memory.pressure': 'some avg10=2.1\nfull avg10=1.9\n',
+                 'io.pressure': 'some avg10=0.5\nfull avg10=0.2\n'}
+        for name, content in files.items(): (cg / name).write_text(content)
+        with mock.patch.object(runtime, 'cgroup_path', return_value=cg):
+            self.guard.observe_client_memory({'Id': 'c' * 64, 'State': {'Pid': 42}})
+        with mock.patch.object(self.guard, 'database'), mock.patch.object(runtime, 'resources',
+                return_value=dict(safe_resources(), monotonic=10)), mock.patch.object(runtime, 'SAMPLE_LIMIT', 3):
+            for _ in range(4): self.guard.tick(force=True, reset_interval=True)
+        violating = dict(safe_resources(), monotonic=15, host_memory={'some': 2, 'full': 1.1})
+        with mock.patch.object(self.guard, 'database'), mock.patch.object(runtime, 'resources', return_value=violating), \
+                mock.patch.object(runtime, 'SAMPLE_LIMIT', 3):
+            with self.assertRaisesRegex(state.Refused, 'host_memory'): self.guard.tick(force=True)
+        self.guard.fail('host_memory pressure at risk')
+        samples = state.read_json(self.guard.run / 'samples.json')
+        self.assertEqual(len(samples), 3)
+        self.assertEqual(samples[-1]['resources']['host_memory']['full'], 1.1)
+        reader = samples[-1]['client_memory']
+        self.assertEqual(reader['memory_pressure'], {'some': 2.1, 'full': 1.9})
+        self.assertEqual(reader['io_pressure'], {'some': 0.5, 'full': 0.2})
+        self.assertEqual(reader['events']['max'], 12)
+        self.assertEqual(state.read_json(self.guard.result)['client_memory'], reader)
+
     def assert_preserved(self):
         self.assertEqual(self.partial.read_bytes(), b'completed dump')
         self.assertEqual(self.old.read_bytes(), b'older verified backup')
@@ -214,11 +263,13 @@ class TransferTests(unittest.TestCase):
         with mock.patch.object(runtime, 'invoke', return_value='c' * 64), \
                 mock.patch.object(runtime.time, 'monotonic', return_value=100), \
                 mock.patch.object(self.guard, 'database'), mock.patch.object(runtime, 'resources', side_effect=sample), \
-                mock.patch.object(self.guard, 'inspect', return_value=running), mock.patch.object(self.guard, 'stop') as stop:
+                mock.patch.object(self.guard, 'inspect', return_value=running), mock.patch.object(self.guard, 'stop') as stop, \
+                mock.patch.object(self.guard, 'observe_client_memory') as observe:
             with self.assertRaisesRegex(state.Refused, 'swap usage'):
                 self.guard.client('upload', ['image', 'command'])
             self.guard.fail('swap usage at risk')
         stop.assert_called_once()
+        observe.assert_called_once()
         self.assert_preserved()
 
     def test_listing_allows_residual_pressure_but_retains_hard_capacity_gates(self):

@@ -38,7 +38,7 @@ class FakePolicy(policy.Policy):
     def load_storage(self):
         return {'bucket': 'example-backups'}
 
-    def remote(self, name, aws=None):
+    def remote(self, name, aws=None, key=None):
         self.operations.append(('list', name))
         if self.remote_failure:
             raise policy.Refused('listing denied')

@@ -1,12 +1,18 @@
-# Holding database backups and restore tests
+# Database backups and recovery
+
+This guide describes the backup scripts shipped with 143. Validate them on your
+own deployment before relying on them for recovery. Keep deployment inventories,
+incident timelines, verification receipts and access details in your private
+operations records; examples here use repository defaults and placeholders.
+
+## Schedule controls
 
 Use `BACKUP_ENABLED=false` to hold scheduled full backups and
 `RESTORE_TEST_ENABLED=false` to defer the weekly restore drill. Both default to
 `true` on first installation. These are operational holds: a backup hold creates
 a recovery-point gap, and a deferred restore has not verified recovery.
 
-The canonical values belong in the private production configuration. Obtain
-approval for that configuration change and the database-host installation.
+Store the canonical values in your private deployment configuration.
 `make provision-db-backups` reads both values from that configuration; the full
 `provision.sh db ...` path exports and forwards them too. An explicit environment
 value overrides the private value. This provisioning command also copies backup
@@ -19,8 +25,8 @@ of silently enabling the job. To resume, explicitly set the relevant value to
 installed fields fail before the cron file is replaced. A deliberate explicit
 boolean can repair an invalid installed value.
 
-An authorized root operator who only needs to update cron can run the **reviewed,
-already-installed** `install-pg-backups.sh` with the chosen booleans, without
+An operator with root access who only needs to update cron can run the
+already-installed `install-pg-backups.sh` with the chosen booleans, without
 running the full provisioning path. Save the current cron, ensure no dump/restore
 is active, and verify the resulting entries and script hashes. The installer
 atomically replaces `/etc/cron.d/143-pg-backup`; no Docker or PostgreSQL restart
@@ -89,23 +95,24 @@ from the full database size. This is preflight admission, not a hard dump-size
 limit. `BACKUP_RESERVE_BYTES` can increase the reserve but cannot lower it below
 20 GiB. `BACKUP_LOCK_TIMEOUT_SECONDS` defaults to 60 seconds, maximum 3600.
 
-Until runtime cancellation and alert delivery have been validated, backup, prune, and local
-restore commands require both `BACKUP_ATTENDED=true` and a nonempty
+The current backup, prune, resume-upload and local restore commands require
+both `BACKUP_ATTENDED=true` and a nonempty
 `BACKUP_OBSERVER` identifying the operator. They report JSON events and nonzero
 failures to that operator's terminal. Do not set these variables in cron to
 simulate an observer, and do not resume unattended schedules. The observer must
-watch disk and memory and have a separately approved stop procedure. M1a does not
-claim automated alert delivery or four successful scheduled runs.
-**Installing M1a does not resume scheduled backups.** Until M1b is installed and
-validated, an assigned human must arrange each approved, attended backup at the
-six-hour target cadence, or explicitly record the growing recovery-point gap and
-the next decision time. A healthy installer result is not a successful backup.
+watch disk and memory and have an ownership-checked stop procedure. The current
+helpers do not provide unattended scheduling with verified alert delivery.
+Keep schedules held while validating a deployment and assign an operator to
+arrange attended backups at the six-hour target cadence. If that cannot be met,
+record the recovery-point gap and next reassessment time. Installing helpers
+does not establish backup coverage.
 
 ## Runtime protection and rollout
 
 The dump runs in a dedicated, named client container using the running database's
 immutable image ID and network namespace. It connects through the database's
-existing Docker-network address, since the installed HBA rejects loopback TCP.
+existing Docker-network address. The database's HBA rules must permit this
+connection; loopback TCP access is not assumed.
 There is no production data-volume mount or database restart. The client mounts
 only its private partial archive and has a 2 GiB memory limit, no swap allowance,
 one CPU, 32-process limit, read-only root filesystem, dropped capabilities and
@@ -140,6 +147,16 @@ container ID and run label, a 1 GiB memory limit with no container swap, one CPU
 64 PIDs, a read-only root filesystem, 64 MiB writable `/tmp` and no capabilities. Only the small S3
 listing retains bounded Docker logs; TOC output and upload diagnostics are not
 stored. The limits require an attended production canary before acceptance.
+
+Uploads use a private, credential-free AWS config mounted read-only into the
+reader: the classic transfer client, two concurrent requests, 16 MiB multipart
+chunks and a 100 MiB/s bandwidth cap. Selecting classic explicitly matters:
+[the CRT client ignores concurrency and bandwidth settings](https://docs.aws.amazon.com/cli/latest/topic/s3-config.html#preferred-transfer-client).
+These settings pace reads; they do not guarantee that the host's pressure limits
+will pass. The 1 GiB reader limit and all host/database stop thresholds remain.
+Post-dump telemetry includes reader memory/IO pressure and memory events, sampled
+before checking host thresholds. `postdump/samples.json` retains the latest 240
+samples, including the violating sample, separately from cleanup heartbeats.
 
 Hashing reads 8 MiB chunks in the supervised process, uses Linux
 `POSIX_FADV_DONTNEED` before reading and behind each chunk to release clean file
@@ -203,7 +220,9 @@ the common lock, retaining the newest 200, every unfinished attempt, and the
 latest result for each operation in the hot directory. Retired attempts remain
 under `.backup-state/retired/attempts/`; no audit evidence is deleted. Operator
 helpers that validate exact state-directory contents must allow these records
-and `health.json` rather than reusing a historical directory snapshot.
+and `health.json` and `recovery.json` rather than reusing a historical directory
+snapshot. The recovery pointer is retained as evidence after success; health
+ignores it when its pending marker is absent, and a later recovery replaces it.
 Post-dump ownership, heartbeat, result and per-reader exit evidence live in that
 run's `postdump/` subdirectory. Health checks inspect this watchdog during
 verification and upload instead of treating successful dump cleanup as overall
@@ -223,14 +242,14 @@ or the original timestamp in a recognized legacy filename. Receipt-import and
 upload times never reset recovery-point age. It reads atomic evidence without
 taking the common lock and emits JSON for failure, stale telemetry, reserve
 pressure, missed six-hour recovery targets and overdue full restore evidence.
-It has no database, Docker or S3 access. **Scheduling and central transport are
-not installed by this revision**; see the separately reviewed
+It has no database, Docker or S3 access. **The shipped helpers do not install
+scheduled health collection or central transport**; see the
 [monitoring proposal](database-backup-monitoring-proposal.md). Operator checks
 and both schedule holds remain necessary.
 
-Before unattended operation, obtain approval for installation with rollback copies,
-run a controlled owned-stop exercise and a complete attended backup, and prove
-independent heartbeat/alert delivery through the approved destination. This
+Before considering unattended operation, save installation rollback copies,
+run a controlled owned-stop exercise and a complete attended backup, and verify
+independent heartbeat/alert delivery through your monitoring destination. This
 explicitly induced failure runs only as an attended canary and skips pruning:
 
 ```sh
@@ -242,7 +261,8 @@ Expect failure, a terminal result with `cleanup_verified=true`, no remaining
 owned client/backend, identical prior archives, and no owned partial/marker.
 Inspect these independently; a nonzero command exit alone is not proof. Do not
 run this command or clear uncertain markers merely because code/tests passed.
-An isolated full restore remains a separate gate; no on-host restore is authorized.
+Full recovery verification requires an isolated restore host. The restore helper
+refuses a Docker daemon containing the configured production database container.
 
 ## Data-only offsite configuration
 
@@ -254,13 +274,13 @@ credentials to the AWS CLI container through environment variables, never comman
 arguments. The old executable `backup-sync.env` is left untouched for rollback
 but is never sourced or evaluated by this policy. Missing JSON configuration
 fails closed. No additional IAM permission is required beyond listing and upload.
-After the rollback window, remove the old executable configuration only under a
-separate, explicit host-change approval.
+After the rollback window, remove the old executable configuration as a separate
+maintenance action once it is no longer needed.
 
-Keep both schedule holds while installing this revision. Verify helper hashes,
+Keep both schedule holds while installing or upgrading the helpers. Verify helper hashes,
 Python 3 availability, JSON configuration permissions, and the continued presence
 of the previous owned-container restore cleanup. The provisioning wrapper also
-updates scripts and storage configuration; approval must cover that whole scope.
+updates scripts and storage configuration; review all of those changes before running it.
 Do not use an old checkout's provisioning command because it can replace held cron.
 This installer omits the obsolete retention-days field, so even a held cron file
 will have a new hash. Record the new bytes/hash at installation; do not reuse
@@ -269,9 +289,9 @@ one-time incident helpers whose preconditions pin the previous cron hash.
 ## Qualify existing copies and run a canary
 
 First inventory every completed local archive. Independently stream each exact
-offsite key/version through SHA-256 using an approved restore identity on separate
+offsite key/version through SHA-256 using your restore identity on separate
 capacity. Record unchanged size, version ID, ETag, last-modified, and full-file hash.
-Then, under explicit operator approval, import its receipt on the database host:
+Then import its receipt on the database host:
 
 ```sh
 python3 /opt/143/deploy/scripts/pg-backup-policy.py import-receipt \
@@ -297,7 +317,7 @@ admission without pruning or creating a dump:
 python3 /opt/143/deploy/scripts/pg-backup-policy.py plan
 ```
 
-For an explicitly approved, attended canary, leave cron held and override only
+For an attended canary, leave cron held and override only
 this invocation. The first canary skips both pre/post pruning and preserves all
 existing copies:
 
@@ -312,7 +332,7 @@ legacy files or bypasses capacity admission. This is not a migration shortcut.
 
 Independently verify the new canary's exact offsite object/hash using the restore
 identity. Validate the pinned CLI's checksum behavior in the canary record; do
-not infer it from an opaque multipart ETag. Under explicit approval record it:
+not infer it from an opaque multipart ETag. Record the verification:
 
 ```sh
 python3 /opt/143/deploy/scripts/pg-backup-policy.py approve-checksums \
@@ -321,7 +341,7 @@ python3 /opt/143/deploy/scripts/pg-backup-policy.py approve-checksums \
 ```
 
 Only then may an attended `prune` command or normal attended backup reduce excess
-qualified files to the selected pair. After a separately approved **full isolated
+qualified files to the selected pair. After a **full isolated
 restore**, `pin-restored --file ... --sha256 ... --evidence ...` records the known-good
 selection. The local restore helper's basic table checks do not automatically
 create a full-restore pin. Moving a pin requires evidence of its replacement.
@@ -338,8 +358,8 @@ this guard is not isolation. Before hashing or allocating a container, it checks
 the Docker data filesystem for **twice the larger of receipt database size and
 archive size, plus the 20 GiB reserve**. This is a conservative admission estimate,
 not a runtime resource limit. Isolated host provisioning, memory limits, complete
-application checks, and independent offsite recovery remain M2 work. Keep the
-production restore schedule held.
+application checks, and independent offsite recovery must be validated separately.
+Keep the production restore schedule held; run drills on isolated capacity.
 
 TERM, HUP, and INT sent to the wrapper are forwarded once as TERM to the reader's
 separate process group. The wrapper keeps the shared lock and gives cleanup 120
@@ -370,7 +390,7 @@ does not prove its database backend or upload container is gone.
 
 Do not simply remove the marker or re-upload an uncertain archive. Inspect the
 exact tagged database backend, Docker activity, archive identity, and remote
-object under a separately approved recovery procedure. Establish that no owned
+object under your recovery procedure. Establish that no owned
 writer/reader remains before removing only a proven abandoned partial; preserve
 completed uncertain archives until independently verified. Inspect a failed
 restore's cidfile/logged container identity before cleanup. Reconcile the receipt
@@ -381,10 +401,80 @@ ambiguous command completion requires independent integrity verification before
 receipt import; matching object size alone is insufficient. Automatic uncertain
 upload recovery remains deliberately unavailable.
 
+An attended recovery can use `resume-upload` when
+the archive is complete, unchanged, and its previous runtime has a failed result
+with verified cleanup. This is a manual action; it does not resume cron:
+
+```sh
+BACKUP_ENABLED=true BACKUP_ATTENDED=true BACKUP_OBSERVER='<attending operator>' \
+  python3 /opt/143/deploy/scripts/pg-backup-policy.py resume-upload
+```
+
+The command holds the common lock, preserves the old pending marker and runtime
+evidence in a new attempt, confirms the absence of old labeled containers and
+the original dump backend, and refuses an already completed S3 object. It repeats
+structural and SHA-256 checks under resource supervision, then uploads to a new
+unique key under `postgres/resumed/<attempt-uuid>/<original-filename>`. Verify
+that the writer IAM policy and retention lifecycle cover this prefix before
+operational use. Each attempt uses a different key so a delayed old completion
+cannot overwrite its object. Incomplete multipart uploads remain a separate
+reconciliation task; this command never deletes remote data.
+
+A receipt requires a successful checksum upload and matching listing, and keeps
+the original dump start as its recovery point. Inventory, pruning verification
+and independent receipt import use its recorded remote key. A resumed upload
+does not make an old snapshot fresh, prove a full restore, prune local files, or
+run another dump. Failure preserves the archive and pending marker. A completed
+remote object with missing upload acknowledgement still requires independent
+verification, not another upload.
+
+For that case, independently download and hash the exact pending object/version
+using the restore identity on separate capacity. Record its unchanged metadata
+and compare the full hash with the preserved local archive. Reconcile the
+pending upload using its exact key:
+
+```sh
+BACKUP_ENABLED=false RESTORE_TEST_ENABLED=false \
+  BACKUP_ATTENDED=true BACKUP_OBSERVER='<attending operator>' \
+  python3 /opt/143/deploy/scripts/pg-backup-policy.py import-receipt \
+  --file EXACT_PENDING_FILENAME --key EXACT_PENDING_S3_KEY \
+  --sha256 VERIFIED_FULL_FILE_SHA256 --version-id VERIFIED_S3_VERSION_ID \
+  --etag '"EXACT_ETAG"' --last-modified EXACT_LISTING_TIMESTAMP \
+  --evidence 'Private record identifying the independent object/version verification'
+```
+
+The common lock covers ownership and cleanup validation, fresh metadata checks,
+and supervised local structure/hash verification. The command records the receipt
+durably before consuming the matching pending marker. An interruption between
+those writes permits the same verified import again. Wrong identity, key, checksum
+or metadata, a live old reader/backend, or unproven cleanup leaves the marker in
+place. It never uploads, deletes an object, prunes, or runs another dump. As for
+other independent imports, the version ID is an operator attestation because the
+writer can list objects but cannot read their versions. Unlike legacy imports
+without a pending upload, this path preserves the original admission database
+size and original dump timeline.
+
+During recovery preparation, `.backup-state/recovery.json` links the unchanged
+pending marker to the new supervised attempt. Health follows that watchdog while
+continuing to calculate recovery age from qualified receipts. Successful import
+does not erase the previous failed backup attempt; a fresh successful backup is
+still needed to establish normal operation.
+
+Early post-dump markers lack `database_bytes`. For those only, recover the exact
+original admission measurement from the private run log and pass
+`--original-database-bytes <bytes> --size-evidence '<log path and admission entry>'`.
+Do not substitute today's database size. New markers store the measurement and
+reject overrides. The evidence reference is retained in the new receipt.
+
 Keep cron held when rolling code back. Reinstalling the historical age-pruning
 script is unsafe on a disk that cannot hold its retention window. Preserve
 receipts and the known-good pair, and add capacity if admission cannot be met.
+Once a receipt points under `postgres/resumed/`, older policy versions that assume
+`postgres/<filename>` cannot validate that copy. Keep a compatible receipt
+reader available for recovery, or use a validated restore procedure
+that follows the recorded key. Do not run an older retention policy, rewrite the
+receipt key, or re-upload the object to make an older version accept it.
 Before routine schedules resume, complete runtime monitoring/alert delivery,
-independent restoration, the attended upload/prune canary, and the planned 24-hour
-observation. Assign a daily owner to track free bytes, selected/pinned archives,
+independent restoration, an attended upload/prune canary, and observation across
+multiple backup cycles. Assign an owner to track free bytes, selected/pinned archives,
 the next-dump estimate, and the seven-day capacity forecast.
