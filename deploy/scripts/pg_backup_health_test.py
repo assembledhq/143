@@ -52,6 +52,22 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(report['recovery_age_seconds'], 6.5 * 3600)
         self.assertTrue(report['recovery_stale'])
 
+    def test_upload_resume_updates_attempt_but_keeps_original_recovery_age(self):
+        self.record('20260927-050000', timeline={
+            'recovery_point_basis': 'pre_dump_lower_bound', 'dump_started_at': '2026-09-27T05:00:00+00:00',
+            'upload_resumed_at': '2026-09-27T11:59:00+00:00'})
+        atomic_json(self.state / 'attempt-old.json', dict(action='backup', status='failed',
+                    started_at='2026-09-27T05:00:00+00:00'))
+        for status, failed in [('failed', True), ('completed', False)]:
+            with self.subTest(status=status):
+                atomic_json(self.state / 'attempt-resume.json', dict(action='resume-upload', status=status,
+                            started_at='2026-09-27T11:00:00+00:00'))
+                report = health.collect(self.root, self.current)
+                self.assertEqual(report['backup_failed'], failed)
+                self.assertEqual(report['last_attempt']['action'], 'resume-upload')
+                self.assertEqual(report['recovery_age_seconds'], 7 * 3600)
+                self.assertTrue(report['recovery_stale'])
+
     def test_holds_do_not_suppress_stale_or_overdue_or_capacity(self):
         with mock.patch.dict(os.environ, BACKUP_ENABLED='false', RESTORE_TEST_ENABLED='false'):
             report = health.collect(self.root, self.current)

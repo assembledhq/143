@@ -90,6 +90,8 @@ def run_restore_reader(command, env, cleanup_timeout=120):
 
 
 class Policy:
+    aws_cli_version = AWS_VERSION
+
     def __init__(self):
         self.root = Path(os.environ.get('BACKUP_DIR', '/backups/postgres'))
         self.state = self.root / '.backup-state'
@@ -192,8 +194,10 @@ class Policy:
         return invoke(['docker', 'run', '--rm', '--memory=1g', '--memory-swap=1g',
                        '--cpus=1', '--pids-limit=64'] + command, env=env, timeout=timeout)
 
-    def remote(self, name, aws=None):
-        key = 'postgres/' + name
+    def remote(self, name, aws=None, key=None):
+        key = key or 'postgres/' + name
+        require(key == 'postgres/' + name or re.fullmatch(
+                r'postgres/resumed/[a-f0-9]{32}/' + re.escape(name), key), 'invalid archive object key')
         result = json.loads((aws or self.aws)(['s3api', 'list-objects-v2', '--bucket', self.load_storage()['bucket'],
                                      '--prefix', key, '--max-keys', '2', '--no-paginate', '--output', 'json']))
         matches = [x for x in result.get('Contents', []) if x['Key'] == key]
@@ -247,7 +251,7 @@ class Policy:
                 require(r['integrity'].get('version_id') and r['integrity'].get('evidence'), 'incomplete independent receipt')
             require(r.get('remote', {}).get('bytes') == current['bytes'] and current['bytes'] > 0, 'receipt size mismatch')
             if remote:
-                require(self.remote(path.name) == r['remote'], 'remote object missing or changed: ' + path.name)
+                require(self.remote(path.name, key=r['remote']['key']) == r['remote'], 'remote object missing or changed: ' + path.name)
             records.append(r)
         return sorted(records, key=lambda r: r['file'], reverse=True)
 
@@ -333,16 +337,21 @@ class Policy:
         path = self.root / args.file
         require(path.parent == self.root and path.name.endswith('.dump'), 'invalid archive path')
         before = identity(path)
-        remote = self.remote(path.name)
+        previous = self.state / (path.name + '.json')
+        prior = read_json(previous) if previous.exists() else None
+        if prior:
+            require(prior.get('file') == path.name and prior.get('identity') == before,
+                    'prior receipt identity changed')
+        remote = self.remote(path.name, key=prior['remote']['key'] if prior else None)
         require(remote and remote['etag'] == args.etag and remote['last_modified'] == args.last_modified,
                 'operator object metadata does not match fresh listing')
         require(sha256(path) == args.sha256, 'independent SHA-256 does not match local archive')
         marker = self.state / 'pending.json'
         atomic_json(marker, dict(phase='verify', file=path.name, started_at=now()))
         self.structural_check(path)
-        require(identity(path) == before and self.remote(path.name) == remote, 'archive/object changed during verification')
-        previous = self.state / (path.name + '.json')
-        timeline = read_json(previous).get('timeline') if previous.exists() else None
+        require(identity(path) == before and self.remote(path.name, key=remote['key']) == remote,
+                'archive/object changed during verification')
+        timeline = prior.get('timeline') if prior else None
         if timeline:
             timeline['independent_verification_recorded_at'] = now()
         self.record(path, remote, args.sha256, dict(kind='operator_sha256', version_id=args.version_id,
@@ -417,13 +426,25 @@ class Policy:
         timeline['upload_started_at'] = now()
         guard.checkpoint('upload_started')
         atomic_json(marker, dict(file=name, app_name=app_name, started_at=timeline['dump_started_at'],
-                                phase='upload', runtime='postdump', identity=file_id, sha256=checksum, timeline=timeline))
-        guard.aws(['s3', 'cp', '/backup.dump', 's3://' + self.load_storage()['bucket'] + '/postgres/' + name,
+                                phase='upload', runtime='postdump', identity=file_id, sha256=checksum,
+                                timeline=timeline, database_bytes=measured_db))
+        return self.upload_archive(final, app_name, timeline, measured_db, version, guard)
+
+    def upload_archive(self, final, app_name, timeline, measured_db, version, guard):
+        marker = self.state / 'pending.json'
+        pending = read_json(marker)
+        require(pending.get('app_name') == app_name and pending.get('file') == final.name and
+                pending.get('phase') == 'upload' and identity(final) == pending['identity'],
+                'pending upload changed')
+        file_id, checksum = pending['identity'], pending['sha256']
+        key = pending.get('remote_key', 'postgres/' + final.name)
+        require(self.remote(final.name, aws=guard.aws, key=key) is None, 'upload key exists; reconcile instead of overwriting')
+        guard.aws(['s3', 'cp', '/backup.dump', 's3://' + self.load_storage()['bucket'] + '/' + key,
                   '--checksum-algorithm', 'CRC64NVME', '--only-show-errors', '--no-follow-symlinks'], archive=final, timeout=7200)
         require(identity(final) == file_id, 'archive changed during upload')
         timeline['upload_completed_at'] = now()
         guard.checkpoint('upload_completed', enforce=False)
-        remote = self.remote(name, aws=guard.aws)
+        remote = self.remote(final.name, aws=guard.aws, key=key)
         guard.checkpoint('integrity_verified', enforce=False)
         timeline['integrity_verified_at'] = now()
         timeline['integrity_basis'] = 'checksum_upload_not_independent_download'
@@ -431,7 +452,45 @@ class Policy:
                     cli_version=version, algorithm='CRC64NVME', uploaded_at=now()), measured_db, file_id, timeline)
         marker.unlink()
         sync_dir(self.state)
-        return dict(file=name, bytes=file_id['bytes'], sha256=checksum)
+        return dict(file=final.name, bytes=file_id['bytes'], sha256=checksum)
+
+    def resume_upload(self, args):
+        """Explicit attended recovery only; never dump, prune or overwrite."""
+        require(self.lock_fd is not None, 'upload recovery requires the common lock')
+        pending = read_json(self.state / 'pending.json')
+        name, app = pending.get('file', ''), pending.get('app_name', '')
+        require(re.fullmatch(re.escape(self.database) + r'-\d{8}-\d{6}-[a-f0-9]{32}\.dump', name)
+                and re.fullmatch(r'143-backup-[a-f0-9]{32}', app), 'invalid upload recovery identity')
+        require(pending.get('phase') == 'upload' and pending.get('runtime') == 'postdump',
+                'only a completed local archive with failed upload can resume')
+        require(not list(self.root.glob('.*.dump.partial.*')), 'unreconciled partial archive')
+        require(not (self.state / (name + '.json')).exists(), 'archive already has a receipt; reconcile instead')
+        require(identity(self.root / name) == pending['identity'] and
+                re.fullmatch(r'[a-f0-9]{64}', pending['sha256']), 'preserved archive changed')
+        timeline = pending['timeline']
+        require(timeline.get('recovery_point_basis') == 'pre_dump_lower_bound' and
+                timeline.get('dump_started_at') == pending.get('started_at') and
+                all(timeline.get(k) for k in ('dump_completed_at', 'structural_verified_at', 'local_sha256_at')),
+                'original recovery point or verification evidence missing')
+        measured = pending.get('database_bytes')
+        if measured is None:
+            # Early post-dump markers omitted this field. An operator must
+            # recover the original measurement from the private admission log;
+            # measuring today's DB would silently change retention's baseline.
+            measured = args.original_database_bytes
+            require(args.size_evidence and args.size_evidence.strip(), 'legacy marker requires original database size evidence')
+            pending = dict(pending, database_size_evidence=args.size_evidence)
+        else:
+            require(args.original_database_bytes is None and args.size_evidence is None,
+                    'cannot override the recorded database size')
+        require(type(measured) is int and measured > 0, 'original database size required')
+        from pg_backup_runtime import ResumeTransferGuard, run_guard
+        new_app = '143-backup-' + uuid.uuid4().hex
+        directory = self.state / new_app
+        directory.mkdir(mode=0o700)
+        atomic_json(directory / 'pending-before.json', read_json(self.state / 'pending.json'))
+        result = run_guard(ResumeTransferGuard(self, self.root / name, new_app, pending, measured))
+        emit('upload_resumed', file=result['file'], bytes=result['bytes'], sha256=result['sha256'])
 
     def restore_admission(self, record):
         endpoint = os.environ.get('DOCKER_HOST', '')
@@ -504,6 +563,9 @@ def main():
     backup.add_argument('--bootstrap', action='store_true')
     backup.add_argument('--canary', action='store_true')
     backup.add_argument('--exercise-stop-after', type=int, help='attended canary: intentionally stop this dump after 5..300 seconds')
+    resume = sub.add_parser('resume-upload', help='attended recovery of a preserved failed upload; no dump or prune')
+    resume.add_argument('--original-database-bytes', type=int, help='legacy marker only: original admission-log measurement')
+    resume.add_argument('--size-evidence', help='legacy marker only: source of the original database-size measurement')
     sub.add_parser('prune')
     sub.add_parser('plan')
     sub.add_parser('restore')
@@ -519,9 +581,9 @@ def main():
     try:
         flag = 'RESTORE_TEST_ENABLED' if args.action == 'restore' else 'BACKUP_ENABLED'
         # Receipt/plan commands are permitted while schedules are held.
-        if args.action in ('backup', 'restore', 'prune'):
+        if args.action in ('backup', 'restore', 'prune', 'resume-upload'):
             require(os.environ.get(flag, 'true') == 'true', flag + ' is not true; operation held')
-        if args.action in ('backup', 'restore', 'prune'):
+        if args.action in ('backup', 'restore', 'prune', 'resume-upload'):
             require(os.environ.get('BACKUP_ATTENDED') == 'true', 'BACKUP_ATTENDED=true is required until runtime stop and alert delivery are validated')
             require(os.environ.get('BACKUP_OBSERVER', '').strip(), 'BACKUP_OBSERVER must name the attending operator')
             emit('attended_operation', action=args.action, observer=os.environ['BACKUP_OBSERVER'])
@@ -532,10 +594,12 @@ def main():
                     'stop exercise requires --canary and a duration of 5..300 seconds')
         policy = Policy()
         with policy.locked():
-            if args.action in ('backup', 'restore', 'prune'):
+            if args.action in ('backup', 'restore', 'prune', 'resume-upload'):
                 policy.retire_attempts()
             if args.action == 'backup':
                 policy.backup(args)
+            elif args.action == 'resume-upload':
+                policy.resume_upload(args)
             elif args.action == 'prune':
                 policy.prune()
             elif args.action == 'plan':
@@ -582,7 +646,7 @@ def main():
 
 
 def start_attempt(action):
-    if action not in ('backup', 'prune', 'restore'):
+    if action not in ('backup', 'prune', 'restore', 'resume-upload'):
         return None
     root = Path(os.environ.get('BACKUP_DIR', '/backups/postgres'))
     # Use the same private directory validation without taking the writer lock.

@@ -141,6 +141,16 @@ container ID and run label, a 1 GiB memory limit with no container swap, one CPU
 listing retains bounded Docker logs; TOC output and upload diagnostics are not
 stored. The limits require an attended production canary before acceptance.
 
+Uploads use a private, credential-free AWS config mounted read-only into the
+reader: the classic transfer client, two concurrent requests, 16 MiB multipart
+chunks and a 100 MiB/s bandwidth cap. Selecting classic explicitly matters:
+[the CRT client ignores concurrency and bandwidth settings](https://docs.aws.amazon.com/cli/latest/topic/s3-config.html#preferred-transfer-client).
+These settings pace reads; they do not guarantee that the host's pressure limits
+will pass. The 1 GiB reader limit and all host/database stop thresholds remain.
+Post-dump telemetry includes reader memory/IO pressure and memory events, sampled
+before checking host thresholds. `postdump/samples.json` retains the latest 240
+samples, including the violating sample, separately from cleanup heartbeats.
+
 Hashing reads 8 MiB chunks in the supervised process, uses Linux
 `POSIX_FADV_DONTNEED` before reading and behind each chunk to release clean file
 cache, and checks cancellation and resources between reads. Cache advice is not
@@ -380,6 +390,39 @@ container and a fresh object listing. A missing exit record, nonzero exit or
 ambiguous command completion requires independent integrity verification before
 receipt import; matching object size alone is insufficient. Automatic uncertain
 upload recovery remains deliberately unavailable.
+
+An explicitly approved, attended recovery can instead use `resume-upload` when
+the archive is complete, unchanged, and its previous runtime has a failed result
+with verified cleanup. This is a manual action; it does not resume cron:
+
+```sh
+BACKUP_ENABLED=true BACKUP_ATTENDED=true BACKUP_OBSERVER='<attending operator>' \
+  python3 /opt/143/deploy/scripts/pg-backup-policy.py resume-upload
+```
+
+The command holds the common lock, preserves the old pending marker and runtime
+evidence in a new attempt, confirms the absence of old labeled containers and
+the original dump backend, and refuses an already completed S3 object. It repeats
+structural and SHA-256 checks under resource supervision, then uploads to a new
+unique key under `postgres/resumed/<attempt-uuid>/<original-filename>`. Verify
+that the writer IAM policy and retention lifecycle cover this prefix before
+operational use. Each attempt uses a different key so a delayed old completion
+cannot overwrite its object. Incomplete multipart uploads remain a separate
+reconciliation task; this command never deletes remote data.
+
+A receipt requires a successful checksum upload and matching listing, and keeps
+the original dump start as its recovery point. Inventory, pruning verification
+and independent receipt import use its recorded remote key. A resumed upload
+does not make an old snapshot fresh, prove a full restore, prune local files, or
+run another dump. Failure preserves the archive and pending marker. A completed
+remote object with missing upload acknowledgement still requires independent
+verification, not another upload.
+
+Early post-dump markers lack `database_bytes`. For those only, recover the exact
+original admission measurement from the private run log and pass
+`--original-database-bytes <bytes> --size-evidence '<log path and admission entry>'`.
+Do not substitute today's database size. New markers store the measurement and
+reject overrides. The evidence reference is retained in the new receipt.
 
 Keep cron held when rolling code back. Reinstalling the historical age-pruning
 script is unsafe on a disk that cannot hold its retention window. Preserve

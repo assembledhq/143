@@ -7,6 +7,7 @@ import json
 import ipaddress
 import math
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -21,6 +22,14 @@ MAX_DUMP_SECONDS = 45 * 60
 WATCHDOG_TIMEOUT = 45
 CLEANUP_TIMEOUT = 120
 LABEL = 'dev.143.backup-run'
+TRANSFER_CONFIG = b'''[default]
+s3 =
+    preferred_transfer_client = classic
+    max_concurrent_requests = 2
+    max_bandwidth = 100MB/s
+    multipart_chunksize = 16MB
+'''
+SAMPLE_LIMIT = 240
 
 
 def proc_identity(pid):
@@ -367,6 +376,33 @@ class TransferGuard(Guard):
         self.phase = 'verification'
         self.phase_deadline = time.monotonic() + policy.verify_timeout
         self.phase_resources = {}
+        self.samples = []
+
+    def observe_client_memory(self, data):
+        super().observe_client_memory(data)
+        cg = cgroup_path(data['State']['Pid'])
+        require(data['Id'] in cg.name, 'reader cgroup identity mismatch')
+        events = {k: int(v) for k, v in (line.split() for line in (cg / 'memory.events').read_text().splitlines())}
+        require({'low', 'high', 'max', 'oom', 'oom_kill'} <= events.keys() and
+                all(value >= 0 for value in events.values()), 'invalid reader memory events')
+        self.client_memory.update(memory_pressure=pressure(cg / 'memory.pressure'),
+                                  io_pressure=pressure(cg / 'io.pressure'), events=events)
+
+    def transfer_config(self):
+        # Select classic explicitly: CRT ignores the concurrency/bandwidth
+        # settings. This per-attempt file contains no credentials.
+        path = self.run / 'aws-config'
+        if path.exists():
+            require(identity(path)['bytes'] == len(TRANSFER_CONFIG) and path.read_bytes() == TRANSFER_CONFIG,
+                    'transfer configuration changed')
+        else:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, 'wb') as output:
+                output.write(TRANSFER_CONFIG)
+                output.flush()
+                os.fsync(output.fileno())
+            sync_dir(self.run)
+        return path
 
     def prepare(self):
         dump = read_json(self.run.parent / 'ownership.json')
@@ -394,8 +430,13 @@ class TransferGuard(Guard):
         self.database(self.owned['database'])
         sample = resources(self.policy.root, self.owned['database']['pid'])
         # Persist the violating sample too, so a stop is diagnosable.
-        atomic_json(self.heartbeat, dict(at=now(), phase=self.phase, resources=sample,
-                                        client_memory=self.client_memory))
+        observation = dict(at=now(), phase=self.phase, resources=sample, client_memory=self.client_memory)
+        atomic_json(self.heartbeat, observation)
+        # Bound the history to twenty minutes at the normal cadence. Retain the
+        # threshold-crossing sample before raising, not just cleanup telemetry.
+        self.samples.append(observation)
+        self.samples = self.samples[-SAMPLE_LIMIT:]
+        atomic_json(self.run / 'samples.json', self.samples)
         self.phase_resources['last_observation'] = dict(at=now(), phase=self.phase, resources=sample)
         if enforce:
             check_resources(sample, None if reset_interval else self.previous, self.policy.reserve,
@@ -474,7 +515,6 @@ class TransferGuard(Guard):
                 atomic_json(self.record, self.owned)
                 return output
             require(data['State']['Running'], 'backup reader not running')
-            self.tick()
             try:
                 self.observe_client_memory(data)
             except FileNotFoundError:
@@ -482,6 +522,7 @@ class TransferGuard(Guard):
                 if latest and latest['State']['Status'] == 'exited':
                     continue
                 raise
+            self.tick()
             time.sleep(INTERVAL)
 
     def structural_check(self, path):
@@ -503,6 +544,10 @@ class TransferGuard(Guard):
 
     def aws(self, args, archive=None, timeout=120):
         spec, env = self.policy.aws_spec(args, archive)
+        if archive is not None:
+            config = self.transfer_config()
+            spec = ['--mount', 'type=bind,src=' + str(config) + ',dst=/aws-config,readonly',
+                    '-e', 'AWS_CONFIG_FILE=/aws-config'] + spec
         return self.client('upload' if archive else 'metadata', spec, env=env,
                            network='bridge', capture=archive is None, timeout=timeout)
 
@@ -540,6 +585,85 @@ class TransferGuard(Guard):
 
 def protect_transfer(policy, partial, app, timeline, measured_db, version):
     return run_guard(TransferGuard(policy, partial, app, timeline, measured_db, version))
+
+
+class ResumeTransferGuard(TransferGuard):
+    """Resume an attested failed upload in a fresh owned attempt and object key."""
+    def __init__(self, policy, archive, app, pending, measured_db):
+        # Keep the original dump times; a later upload never refreshes its RPO.
+        super().__init__(policy, archive, app, dict(pending['timeline']), measured_db, '')
+        self.pending = pending
+
+    def prepare(self):
+        p = self.policy
+        before = read_json(self.run.parent / 'pending-before.json')
+        require(read_json(p.state / 'pending.json') == before, 'pending upload changed before recovery')
+        old_app = self.pending['app_name']
+        dump_app = self.pending.get('dump_app', old_app)
+        require(re.fullmatch(r'143-backup-[a-f0-9]{32}', dump_app), 'invalid original dump identity')
+        dump = read_json(p.state / dump_app / 'ownership.json')
+        dump_result = read_json(p.state / dump_app / 'result.json')
+        previous = p.state / old_app / 'postdump'
+        owner, result = read_json(previous / 'ownership.json'), read_json(previous / 'result.json')
+        require(dump['app'] == dump_app and dump_result['status'] == 'completed' and
+                dump_result['cleanup_verified'] is True and
+                all(dump['partial'][k] == self.pending['identity'][k] for k in ('device', 'inode')),
+                'original dump completion or identity unproven')
+        require(owner['app'] == old_app and result['status'] == 'failed' and result['cleanup_verified'] is True,
+                'prior upload cleanup unproven')
+        require(not owner.get('creation_started') or owner.get('creation_complete') is True,
+                'prior reader creation outcome ambiguous')
+        require(os.environ.get('DOCKER_HOST', '') in ('', 'unix:///var/run/docker.sock') and
+                not os.environ.get('DOCKER_CONTEXT'), 'local default Docker endpoint required')
+        endpoint = invoke(['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], timeout=5).strip()
+        require(endpoint == 'unix:///var/run/docker.sock', 'local Linux Docker socket required')
+        # Enumerate every container, including renamed/stopped readers. Neither
+        # elapsed time nor an old cleanup receipt proves their current absence.
+        for prior_app in {old_app, dump_app}:
+            listing = invoke(['docker', 'container', 'ls', '-a', '--no-trunc', '--filter',
+                              'label=' + LABEL + '=' + prior_app, '--format', '{{.ID}}'], timeout=5)
+            require(not listing.strip(), 'prior owned reader still exists; reconcile before retry')
+        self.db, generation = self.database()
+        self.owned = dict(app=self.app, database=generation, partial=identity(self.partial),
+                          owner_pid=self.owner_pid, owner_identity=self.owner_identity,
+                          creation_started=False, creation_complete=False, resumed_from=old_app)
+        require(self.owned['partial'] == self.pending['identity'], 'preserved archive changed')
+        atomic_json(self.record, self.owned)
+        self.checkpoint('resume_started')
+        require(not json.loads(self.query(
+            "SELECT coalesce(json_agg(pid), '[]') FROM pg_stat_activity WHERE application_name='" + dump_app + "'",
+            self.owned)), 'original dump backend still exists')
+        # A completed remote object needs reconciliation, even if its size
+        # matches. This path cannot independently download it to prove content.
+        old_key = self.pending.get('remote_key', 'postgres/' + self.partial.name)
+        require(p.remote(self.partial.name, aws=self.aws, key=old_key) is None,
+                'prior object exists; reconcile instead of retrying')
+        self.version = self.aws(['--version']).strip()
+        require(self.version.split()[:1] == [p.aws_cli_version], 'unexpected AWS CLI version')
+        self.structural_check(self.partial)
+        require(self.checksum(self.partial) == self.pending['sha256'] and
+                identity(self.partial) == self.pending['identity'], 'preserved archive checksum changed')
+        require(read_json(p.state / 'pending.json') == before, 'pending upload changed during recovery')
+        self.timeline['upload_resumed_at'] = now()
+        self.timeline['resumed_from'] = old_app
+        if self.pending.get('database_size_evidence'):
+            self.timeline['database_size_evidence'] = self.pending['database_size_evidence']
+        # A new unique key prevents a delayed completion from the old uploader
+        # or another retry from overwriting this attempt's object.
+        pending = dict(self.pending, app_name=self.app, dump_app=dump_app,
+                       remote_key='postgres/resumed/' + self.app.removeprefix('143-backup-') + '/' + self.partial.name,
+                       database_bytes=self.measured_db, timeline=self.timeline)
+        atomic_json(p.state / 'pending.json', pending)
+
+    def supervise(self):
+        try:
+            self.prepare()
+            result = self.policy.upload_archive(self.partial, self.app, self.timeline,
+                                                self.measured_db, self.version, self)
+            self.terminal(dict(status='completed', at=now(), cleanup_verified=True,
+                               phase_resources=self.phase_resources, **result))
+        except (OSError, ValueError, KeyError, TypeError, Refused, subprocess.TimeoutExpired) as exc:
+            self.fail(str(exc))
 
 
 def run_guard(guard):

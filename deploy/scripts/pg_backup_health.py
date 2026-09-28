@@ -73,7 +73,7 @@ def collect(root, current=None):
     freshness = min((age(recovery_start(r), current) for r in records), default=None)
     largest = max((r['identity']['bytes'] for r in records), default=0)
     attempts = [read_json(p) for p in state.glob('attempt-*.json')]
-    relevant = [a for a in attempts if a['action'] == 'backup']
+    relevant = [a for a in attempts if a['action'] in ('backup', 'resume-upload')]
     latest = max(relevant, key=lambda a: a['started_at']) if relevant else None
     failed = bool(latest and (latest['status'] in ('failed', 'interrupted') or
                   (latest['status'] == 'running' and age(latest['started_at'], current) > 3 * 3600)))
