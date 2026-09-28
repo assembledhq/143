@@ -18,14 +18,10 @@ const (
 )
 
 func (p IntegrationProvider) Validate() error {
-	switch p {
-	case IntegrationProviderGitHub, IntegrationProviderSentry, IntegrationProviderLinear, IntegrationProviderPagerDuty,
+	return validateIntegrationEnum("IntegrationProvider", p,
+		IntegrationProviderGitHub, IntegrationProviderSentry, IntegrationProviderLinear, IntegrationProviderPagerDuty,
 		IntegrationProviderSlack, IntegrationProviderNotion, IntegrationProviderCircleCI,
-		IntegrationProviderVictoriaLogs, IntegrationProviderMezmo:
-		return nil
-	default:
-		return fmt.Errorf("invalid IntegrationProvider: %q", p)
-	}
+		IntegrationProviderVictoriaLogs, IntegrationProviderMezmo)
 }
 
 // IntegrationStatus captures lifecycle state for an integration.
@@ -38,12 +34,8 @@ const (
 )
 
 func (s IntegrationStatus) Validate() error {
-	switch s {
-	case IntegrationStatusActive, IntegrationStatusInactive, IntegrationStatusError:
-		return nil
-	default:
-		return fmt.Errorf("invalid IntegrationStatus: %q", s)
-	}
+	return validateIntegrationEnum("IntegrationStatus", s,
+		IntegrationStatusActive, IntegrationStatusInactive, IntegrationStatusError)
 }
 
 // GitHubRepositoryClaimStatus describes a repository's active ownership from
@@ -58,13 +50,18 @@ const (
 )
 
 func (s GitHubRepositoryClaimStatus) Validate() error {
-	switch s {
-	case GitHubRepositoryClaimStatusUnclaimed,
+	return validateIntegrationEnum("GitHubRepositoryClaimStatus", s,
+		GitHubRepositoryClaimStatusUnclaimed,
 		GitHubRepositoryClaimStatusOwnedByCurrentOrg,
 		GitHubRepositoryClaimStatusOwnedByOtherOrg,
-		GitHubRepositoryClaimStatusDisconnectedInCurrentOrg:
-		return nil
-	default:
-		return fmt.Errorf("invalid GitHubRepositoryClaimStatus: %q", s)
+		GitHubRepositoryClaimStatusDisconnectedInCurrentOrg)
+}
+
+func validateIntegrationEnum[T ~string](typeName string, value T, valid ...T) error {
+	for _, candidate := range valid {
+		if value == candidate {
+			return nil
+		}
 	}
+	return fmt.Errorf("invalid %s: %q", typeName, value)
 }
