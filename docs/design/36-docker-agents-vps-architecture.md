@@ -913,7 +913,7 @@ Use this as a deployment checklist, not a record of the hosted service's status.
 - [ ] Configure and verify offsite permissions, retention and recovery access.
 - [ ] Run an attended canary and verify the exact remote object independently.
 - [ ] Exercise guarded stopping and confirm owned-resource cleanup and retained evidence.
-- [ ] Validate health delivery and alert routing; [central monitoring remains a proposal](../self-hosting/database-backup-monitoring-proposal.md).
+- [ ] Install and validate [opt-in backup health delivery and alert routing](../self-hosting/database-backup-monitoring.md).
 - [ ] Complete an isolated full restore and record recovery time and validation results.
 - [ ] Establish a backup cadence and observation period that meet the deployment's recovery objectives.
 - [ ] If continuous WAL recovery is required, implement and test it separately.

@@ -242,10 +242,10 @@ or the original timestamp in a recognized legacy filename. Receipt-import and
 upload times never reset recovery-point age. It reads atomic evidence without
 taking the common lock and emits JSON for failure, stale telemetry, reserve
 pressure, missed six-hour recovery targets and overdue full restore evidence.
-It has no database, Docker or S3 access. **The shipped helpers do not install
-scheduled health collection or central transport**; see the
-[monitoring proposal](database-backup-monitoring-proposal.md). Operator checks
-and both schedule holds remain necessary.
+It has no database, Docker or S3 access. Scheduled collection and central alerts
+have a separate opt-in [monitoring installation](database-backup-monitoring.md).
+The backup installer alone does not enable them. Keep operator checks and both
+schedule holds until the deployment's acceptance gates pass.
 
 Before considering unattended operation, save installation rollback copies,
 run a controlled owned-stop exercise and a complete attended backup, and verify
