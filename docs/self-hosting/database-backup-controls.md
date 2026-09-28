@@ -418,6 +418,38 @@ run another dump. Failure preserves the archive and pending marker. A completed
 remote object with missing upload acknowledgement still requires independent
 verification, not another upload.
 
+For that case, independently download and hash the exact pending object/version
+using the restore identity on separate capacity. Record its unchanged metadata
+and compare the full hash with the preserved local archive. Under explicit
+approval, reconcile the pending upload using its exact key:
+
+```sh
+BACKUP_ENABLED=false RESTORE_TEST_ENABLED=false \
+  BACKUP_ATTENDED=true BACKUP_OBSERVER='<attending operator>' \
+  python3 /opt/143/deploy/scripts/pg-backup-policy.py import-receipt \
+  --file EXACT_PENDING_FILENAME --key EXACT_PENDING_S3_KEY \
+  --sha256 VERIFIED_FULL_FILE_SHA256 --version-id VERIFIED_S3_VERSION_ID \
+  --etag '"EXACT_ETAG"' --last-modified EXACT_LISTING_TIMESTAMP \
+  --evidence 'Private record identifying the independent object/version verification'
+```
+
+The common lock covers ownership and cleanup validation, fresh metadata checks,
+and supervised local structure/hash verification. The command records the receipt
+durably before consuming the matching pending marker. An interruption between
+those writes permits the same verified import again. Wrong identity, key, checksum
+or metadata, a live old reader/backend, or unproven cleanup leaves the marker in
+place. It never uploads, deletes an object, prunes, or runs another dump. As for
+other independent imports, the version ID is an operator attestation because the
+writer can list objects but cannot read their versions. Unlike legacy imports
+without a pending upload, this path preserves the original admission database
+size and original dump timeline.
+
+During recovery preparation, `.backup-state/recovery.json` links the unchanged
+pending marker to the new supervised attempt. Health follows that watchdog while
+continuing to calculate recovery age from qualified receipts. Successful import
+does not erase the previous failed backup attempt; a fresh successful backup is
+still needed to establish normal operation.
+
 Early post-dump markers lack `database_bytes`. For those only, recover the exact
 original admission measurement from the private run log and pass
 `--original-database-bytes <bytes> --size-evidence '<log path and admission entry>'`.
@@ -427,6 +459,11 @@ reject overrides. The evidence reference is retained in the new receipt.
 Keep cron held when rolling code back. Reinstalling the historical age-pruning
 script is unsafe on a disk that cannot hold its retention window. Preserve
 receipts and the known-good pair, and add capacity if admission cannot be met.
+Once a receipt points under `postgres/resumed/`, older policy versions that assume
+`postgres/<filename>` cannot validate that copy. Keep this revision's receipt
+reader available for recovery, or use a separately reviewed restore procedure
+that follows the recorded key. Do not run an older retention policy, rewrite the
+receipt key, or re-upload the object to make an older version accept it.
 Before routine schedules resume, complete runtime monitoring/alert delivery,
 independent restoration, the attended upload/prune canary, and the planned 24-hour
 observation. Assign a daily owner to track free bytes, selected/pinned archives,

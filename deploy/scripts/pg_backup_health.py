@@ -93,6 +93,16 @@ def collect(root, current=None):
         if pending.get('runtime') == 'postdump':
             require(pending['phase'] in ('verification', 'upload'), 'invalid post-dump phase')
             run = run / 'postdump'
+            recovery_path = state / 'recovery.json'
+            if recovery_path.exists():
+                recovery = read_json(recovery_path)
+                if recovery.get('source_app') == app and recovery.get('file') == pending['file']:
+                    recovering_app = recovery.get('app_name', '')
+                    require(re.fullmatch(r'143-backup-[a-f0-9]{32}', recovering_app), 'invalid recovery identity')
+                    # Preparation preserves the old marker for reconciliation.
+                    # Follow the fresh watchdog without changing snapshot age.
+                    run = state / recovering_app / 'postdump'
+                    pending = dict(pending, started_at=recovery['started_at'])
         heartbeat = run / 'heartbeat.json'
         result = run / 'result.json'
         stalled = (result.exists() and read_json(result)['status'] != 'completed') or (

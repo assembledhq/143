@@ -82,7 +82,9 @@ class ResumeTests(unittest.TestCase):
 
     def docker(self, args, **kwargs):
         if args[:3] == ['docker', 'context', 'inspect']: return 'unix:///var/run/docker.sock'
-        if args[:3] == ['docker', 'container', 'ls']: return 'c' * 64 if self.old_reader else ''
+        if args[:3] == ['docker', 'container', 'ls']:
+            self.assertNotIn('--filter', args, 'absence inventory must be unfiltered')
+            return json.dumps('c' * 64) + '\t' + json.dumps(self.old_app) if self.old_reader else ''
         raise AssertionError('unexpected command: ' + str(args))
 
     def client(self, guard, stage, args, **kwargs):
@@ -199,6 +201,126 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(self.objects, existing)
         self.assertEqual(read_json(self.marker), pending)
         self.assertFalse((self.p.state / (self.archive.name + '.json')).exists())
+        self.assert_preserved()
+
+    def import_args(self):
+        pending = read_json(self.marker)
+        key = pending.get('remote_key', 'postgres/' + self.archive.name)
+        obj = self.objects[key]
+        return argparse.Namespace(file=self.archive.name, sha256=self.hash, key=key,
+                                  etag=obj['ETag'], last_modified=obj['LastModified'],
+                                  version_id='independently-downloaded-version', evidence='operator streamed exact version and hash')
+
+    def import_pending(self, args):
+        with mock.patch.dict(os.environ, BACKUP_ATTENDED='true', BACKUP_OBSERVER='operator'):
+            with self.p.locked(): self.p.import_receipt(args)
+
+    def test_lost_ack_can_import_verified_key_and_then_inventory_without_another_upload(self):
+        self.upload_ambiguous = True
+        with self.assertRaises(Refused): self.resume()
+        pending = read_json(self.marker)
+        with self.assertRaisesRegex(Refused, 'prior object exists'): self.resume()
+        before_objects = copy.deepcopy(self.objects)
+        before_uploads = sum(stage == 'upload' for stage, _ in self.calls)
+        self.import_pending(self.import_args())
+        self.assertFalse(self.marker.exists())
+        receipt = read_json(self.p.state / (self.archive.name + '.json'))
+        self.assertEqual(receipt['remote']['key'], pending['remote_key'])
+        self.assertEqual(receipt['integrity']['kind'], 'operator_sha256')
+        self.assertEqual(receipt['timeline']['dump_started_at'], self.timeline['dump_started_at'])
+        self.assertEqual(receipt['database_bytes'], 1000)
+        self.assertEqual(self.objects, before_objects)
+        self.assertEqual(sum(stage == 'upload' for stage, _ in self.calls), before_uploads)
+        # Qualify the unrelated protected fixture so the real full inventory can run.
+        self.p.record(self.prior, dict(key='postgres/' + self.prior.name, bytes=self.prior.stat().st_size),
+                      sha256(self.prior), dict(kind='operator_sha256', version_id='v', evidence='original'),
+                      1000, identity(self.prior))
+        with mock.patch.object(self.p, 'remote', side_effect=lambda name, **kwargs: read_json(self.p.state / (name + '.json'))['remote']):
+            self.assertEqual(len(self.p.inventory()), 2)
+        self.assert_preserved()
+
+    def test_import_does_not_consume_marker_on_wrong_evidence_or_live_reader(self):
+        self.upload_ambiguous = True
+        with self.assertRaises(Refused): self.resume()
+        pending = read_json(self.marker)
+        args = self.import_args()
+        for fault in ('file', 'key', 'sha256', 'etag', 'last_modified', 'version_id', 'evidence', 'reader', 'hash', 'cleanup'):
+            with self.subTest(fault=fault):
+                candidate = copy.copy(args)
+                if fault in ('file', 'key', 'sha256', 'etag', 'last_modified'): setattr(candidate, fault, 'wrong')
+                if fault in ('version_id', 'evidence'): setattr(candidate, fault, '')
+                self.old_reader = fault == 'reader'
+                self.hash_failure = fault == 'hash'
+                if fault == 'cleanup':
+                    atomic_json(self.p.state / pending['app_name'] / 'postdump' / 'result.json',
+                                dict(status='failed', cleanup_verified=False))
+                with self.assertRaises(Refused): self.import_pending(candidate)
+                self.assertEqual(read_json(self.marker), pending)
+                self.assertFalse((self.p.state / (self.archive.name + '.json')).exists())
+        self.assert_preserved()
+
+    def test_receipt_publication_crash_leaves_marker_and_reimport_is_safe(self):
+        self.upload_ambiguous = True
+        with self.assertRaises(Refused): self.resume()
+        pending = read_json(self.marker)
+        args = self.import_args()
+        unlink = Path.unlink
+        def fail_marker(path, *a, **kw):
+            if path == self.marker: raise OSError('crash before marker removal')
+            return unlink(path, *a, **kw)
+        with mock.patch.object(Path, 'unlink', fail_marker):
+            with self.assertRaisesRegex(Refused, 'crash before'): self.import_pending(args)
+        self.assertTrue((self.p.state / (self.archive.name + '.json')).exists())
+        self.assertEqual(read_json(self.marker), pending)
+        self.import_pending(args)
+        self.assertFalse(self.marker.exists())
+        self.assert_preserved()
+
+    def test_pending_import_requires_attendance_but_allows_both_schedule_holds(self):
+        self.upload_ambiguous = True
+        with self.assertRaises(Refused): self.resume()
+        pending = read_json(self.marker)
+        args = self.import_args()
+        for attended, observer in [('false', 'operator'), ('true', '  ')]:
+            with self.subTest(attended=attended, observer=observer), \
+                    mock.patch.dict(os.environ, BACKUP_ATTENDED=attended, BACKUP_OBSERVER=observer):
+                with self.p.locked(), self.assertRaisesRegex(Refused, 'requires BACKUP_ATTENDED'):
+                    self.p.import_receipt(args)
+                self.assertEqual(read_json(self.marker), pending)
+        with mock.patch.dict(os.environ, BACKUP_ENABLED='false', RESTORE_TEST_ENABLED='false'):
+            self.import_pending(args)
+        self.assertFalse(self.marker.exists())
+        self.assert_preserved()
+
+    def test_pending_import_rechecks_remote_after_local_verification(self):
+        self.upload_ambiguous = True
+        with self.assertRaises(Refused): self.resume()
+        pending, args = read_json(self.marker), self.import_args()
+        def change_remote(path):
+            self.objects[args.key]['ETag'] = 'changed-during-local-verification'
+            return self.hash
+        with mock.patch.object(runtime.TransferGuard, 'checksum', side_effect=change_remote):
+            with self.assertRaisesRegex(Refused, 'remote object changed'):
+                self.import_pending(args)
+        self.assertEqual(read_json(self.marker), pending)
+        self.assertFalse((self.p.state / (self.archive.name + '.json')).exists())
+        self.assert_preserved()
+
+    def test_pending_legacy_import_preserves_original_database_size_evidence(self):
+        legacy = dict(self.pending)
+        del legacy['database_bytes']
+        atomic_json(self.marker, legacy)
+        key = 'postgres/' + self.archive.name
+        self.objects[key] = dict(Key=key, Size=self.file_id['bytes'], ETag='verified-etag',
+                                 LastModified='2026-09-27T16:00:00+00:00')
+        args = self.import_args()
+        args.original_database_bytes, args.size_evidence = 900, '/root/canary/policy.log original admission'
+        self.import_pending(args)
+        receipt = read_json(self.p.state / (self.archive.name + '.json'))
+        self.assertEqual(receipt['database_bytes'], 900)
+        self.assertEqual(receipt['timeline']['database_size_evidence'], args.size_evidence)
+        self.assertEqual(receipt['timeline']['dump_started_at'], self.timeline['dump_started_at'])
+        self.assertFalse(any(stage == 'upload' for stage, _ in self.calls))
         self.assert_preserved()
 
     def test_legacy_size_requires_explicit_original_evidence_and_cannot_override_new_marker(self):

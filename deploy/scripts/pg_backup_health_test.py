@@ -149,6 +149,21 @@ class HealthTests(unittest.TestCase):
                     if result: atomic_json(rp, {'status': result})
                     self.assertEqual(health.collect(self.root, self.current)['watchdog_stale'], expected)
 
+    def test_pending_recovery_follows_new_watchdog_during_preparation(self):
+        old, new = '143-backup-' + 'a' * 32, '143-backup-' + 'b' * 32
+        for app in (old, new): (self.state / app / 'postdump').mkdir(parents=True)
+        atomic_json(self.state / old / 'postdump' / 'result.json', dict(status='failed'))
+        atomic_json(self.state / new / 'postdump' / 'heartbeat.json', dict(at='2026-09-27T11:59:59+00:00'))
+        atomic_json(self.state / 'pending.json', dict(phase='upload', runtime='postdump', file='saved.dump',
+                    app_name=old, started_at='2026-09-27T06:00:00+00:00'))
+        self.assertTrue(health.collect(self.root, self.current)['watchdog_stale'])
+        atomic_json(self.state / 'recovery.json', dict(app_name=new, source_app=old, file='saved.dump',
+                    started_at='2026-09-27T11:59:00+00:00'))
+        self.assertFalse(health.collect(self.root, self.current)['watchdog_stale'])
+        self.assertTrue(health.collect(self.root, self.current)['recovery_stale'], 'no upload receipt exists yet')
+        atomic_json(self.state / new / 'postdump' / 'result.json', dict(status='failed'))
+        self.assertTrue(health.collect(self.root, self.current)['watchdog_stale'])
+
     def test_orphaned_attempt_includes_postdump_failure(self):
         atomic_json(self.state / 'attempt-test.json', dict(action='backup', status='running',
                     started_at='2026-09-27T11:50:00+00:00'))

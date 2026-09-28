@@ -587,12 +587,13 @@ def protect_transfer(policy, partial, app, timeline, measured_db, version):
     return run_guard(TransferGuard(policy, partial, app, timeline, measured_db, version))
 
 
-class ResumeTransferGuard(TransferGuard):
-    """Resume an attested failed upload in a fresh owned attempt and object key."""
-    def __init__(self, policy, archive, app, pending, measured_db):
+class RecoveryTransferGuard(TransferGuard):
+    """Guard an upload retry or independent receipt reconciliation."""
+    def __init__(self, policy, archive, app, pending, measured_db, receipt_args=None):
         # Keep the original dump times; a later upload never refreshes its RPO.
         super().__init__(policy, archive, app, dict(pending['timeline']), measured_db, '')
         self.pending = pending
+        self.receipt_args = receipt_args
 
     def prepare(self):
         p = self.policy
@@ -619,10 +620,14 @@ class ResumeTransferGuard(TransferGuard):
         require(endpoint == 'unix:///var/run/docker.sock', 'local Linux Docker socket required')
         # Enumerate every container, including renamed/stopped readers. Neither
         # elapsed time nor an old cleanup receipt proves their current absence.
-        for prior_app in {old_app, dump_app}:
-            listing = invoke(['docker', 'container', 'ls', '-a', '--no-trunc', '--filter',
-                              'label=' + LABEL + '=' + prior_app, '--format', '{{.ID}}'], timeout=5)
-            require(not listing.strip(), 'prior owned reader still exists; reconcile before retry')
+        listing = invoke(['docker', 'container', 'ls', '-a', '--no-trunc',
+                          '--format', '{{json .ID}}\t{{json (.Label "' + LABEL + '")}}'], timeout=5)
+        for line in listing.splitlines():
+            cid_json, label_json = line.split('\t')
+            cid, label = json.loads(cid_json), json.loads(label_json)
+            require(isinstance(cid, str) and re.fullmatch(r'[a-f0-9]{64}', cid)
+                    and isinstance(label, str), 'invalid reader inventory')
+            require(label not in {old_app, dump_app}, 'prior owned reader still exists; reconcile before retry')
         self.db, generation = self.database()
         self.owned = dict(app=self.app, database=generation, partial=identity(self.partial),
                           owner_pid=self.owner_pid, owner_identity=self.owner_identity,
@@ -636,14 +641,23 @@ class ResumeTransferGuard(TransferGuard):
         # A completed remote object needs reconciliation, even if its size
         # matches. This path cannot independently download it to prove content.
         old_key = self.pending.get('remote_key', 'postgres/' + self.partial.name)
-        require(p.remote(self.partial.name, aws=self.aws, key=old_key) is None,
-                'prior object exists; reconcile instead of retrying')
-        self.version = self.aws(['--version']).strip()
-        require(self.version.split()[:1] == [p.aws_cli_version], 'unexpected AWS CLI version')
+        remote = p.remote(self.partial.name, aws=self.aws, key=old_key)
+        if self.receipt_args is None:
+            require(remote is None, 'prior object exists; reconcile instead of retrying')
+            self.version = self.aws(['--version']).strip()
+            require(self.version.split()[:1] == [p.aws_cli_version], 'unexpected AWS CLI version')
+        else:
+            require(remote and remote['etag'] == self.receipt_args.etag and
+                    remote['last_modified'] == self.receipt_args.last_modified and
+                    remote['bytes'] == self.pending['identity']['bytes'],
+                    'independent object metadata does not match pending upload')
+            self.verified_remote = remote
         self.structural_check(self.partial)
         require(self.checksum(self.partial) == self.pending['sha256'] and
                 identity(self.partial) == self.pending['identity'], 'preserved archive checksum changed')
         require(read_json(p.state / 'pending.json') == before, 'pending upload changed during recovery')
+        if self.receipt_args is not None:
+            return  # Keep the failed-upload marker intact until the receipt is durable.
         self.timeline['upload_resumed_at'] = now()
         self.timeline['resumed_from'] = old_app
         if self.pending.get('database_size_evidence'):
@@ -655,11 +669,30 @@ class ResumeTransferGuard(TransferGuard):
                        database_bytes=self.measured_db, timeline=self.timeline)
         atomic_json(p.state / 'pending.json', pending)
 
+    def publish_independent_receipt(self):
+        p, args = self.policy, self.receipt_args
+        require(p.remote(self.partial.name, aws=self.aws, key=args.key) == self.verified_remote,
+                'remote object changed during independent verification')
+        before = read_json(self.run.parent / 'pending-before.json')
+        require(read_json(p.state / 'pending.json') == before, 'pending upload changed during import')
+        self.timeline['independent_verification_recorded_at'] = now()
+        if self.pending.get('database_size_evidence'):
+            self.timeline['database_size_evidence'] = self.pending['database_size_evidence']
+        p.record(self.partial, self.verified_remote, args.sha256,
+                 dict(kind='operator_sha256', version_id=args.version_id, evidence=args.evidence, verified_at=now()),
+                 self.measured_db, self.pending['identity'], self.timeline)
+        (p.state / 'pending.json').unlink()
+        sync_dir(p.state)
+        return dict(file=self.partial.name, bytes=self.pending['identity']['bytes'], sha256=args.sha256)
+
     def supervise(self):
         try:
             self.prepare()
-            result = self.policy.upload_archive(self.partial, self.app, self.timeline,
-                                                self.measured_db, self.version, self)
+            if self.receipt_args is None:
+                result = self.policy.upload_archive(self.partial, self.app, self.timeline,
+                                                    self.measured_db, self.version, self)
+            else:
+                result = self.publish_independent_receipt()
             self.terminal(dict(status='completed', at=now(), cleanup_verified=True,
                                phase_resources=self.phase_resources, **result))
         except (OSError, ValueError, KeyError, TypeError, Refused, subprocess.TimeoutExpired) as exc:

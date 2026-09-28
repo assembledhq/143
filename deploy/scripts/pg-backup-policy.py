@@ -333,6 +333,8 @@ class Policy:
         return r
 
     def import_receipt(self, args):
+        if (self.state / 'pending.json').exists():
+            return self.reconcile_upload_receipt(args)
         self.no_pending()
         path = self.root / args.file
         require(path.parent == self.root and path.name.endswith('.dump'), 'invalid archive path')
@@ -342,7 +344,9 @@ class Policy:
         if prior:
             require(prior.get('file') == path.name and prior.get('identity') == before,
                     'prior receipt identity changed')
-        remote = self.remote(path.name, key=prior['remote']['key'] if prior else None)
+        key = getattr(args, 'key', None) or (prior['remote']['key'] if prior else None)
+        require(not prior or key == prior['remote']['key'], 'cannot replace prior receipt object key')
+        remote = self.remote(path.name, key=key)
         require(remote and remote['etag'] == args.etag and remote['last_modified'] == args.last_modified,
                 'operator object metadata does not match fresh listing')
         require(sha256(path) == args.sha256, 'independent SHA-256 does not match local archive')
@@ -454,8 +458,8 @@ class Policy:
         sync_dir(self.state)
         return dict(file=final.name, bytes=file_id['bytes'], sha256=checksum)
 
-    def resume_upload(self, args):
-        """Explicit attended recovery only; never dump, prune or overwrite."""
+    def pending_upload(self, args, *, allow_receipt=False):
+        """Validate immutable local recovery evidence under the common lock."""
         require(self.lock_fd is not None, 'upload recovery requires the common lock')
         pending = read_json(self.state / 'pending.json')
         name, app = pending.get('file', ''), pending.get('app_name', '')
@@ -464,7 +468,14 @@ class Policy:
         require(pending.get('phase') == 'upload' and pending.get('runtime') == 'postdump',
                 'only a completed local archive with failed upload can resume')
         require(not list(self.root.glob('.*.dump.partial.*')), 'unreconciled partial archive')
-        require(not (self.state / (name + '.json')).exists(), 'archive already has a receipt; reconcile instead')
+        receipt = self.state / (name + '.json')
+        if receipt.exists():
+            require(allow_receipt, 'archive already has a receipt; reconcile instead')
+            prior = read_json(receipt)
+            require(prior.get('file') == name and prior.get('identity') == pending['identity'] and
+                    prior.get('sha256') == pending['sha256'] and
+                    prior.get('remote', {}).get('key') == pending.get('remote_key', 'postgres/' + name),
+                    'published receipt does not match pending upload')
         require(identity(self.root / name) == pending['identity'] and
                 re.fullmatch(r'[a-f0-9]{64}', pending['sha256']), 'preserved archive changed')
         timeline = pending['timeline']
@@ -477,20 +488,40 @@ class Policy:
             # Early post-dump markers omitted this field. An operator must
             # recover the original measurement from the private admission log;
             # measuring today's DB would silently change retention's baseline.
-            measured = args.original_database_bytes
-            require(args.size_evidence and args.size_evidence.strip(), 'legacy marker requires original database size evidence')
+            measured = getattr(args, 'original_database_bytes', None)
+            require(getattr(args, 'size_evidence', None) and args.size_evidence.strip(), 'legacy marker requires original database size evidence')
             pending = dict(pending, database_size_evidence=args.size_evidence)
         else:
-            require(args.original_database_bytes is None and args.size_evidence is None,
+            require(getattr(args, 'original_database_bytes', None) is None and getattr(args, 'size_evidence', None) is None,
                     'cannot override the recorded database size')
         require(type(measured) is int and measured > 0, 'original database size required')
-        from pg_backup_runtime import ResumeTransferGuard, run_guard
+        return pending, measured
+
+    def resume_upload(self, args):
+        pending, measured = self.pending_upload(args)
+        result = self.recover_upload(pending, measured)
+        emit('upload_resumed', file=result['file'], bytes=result['bytes'], sha256=result['sha256'])
+
+    def reconcile_upload_receipt(self, args):
+        require(os.environ.get('BACKUP_ATTENDED') == 'true' and os.environ.get('BACKUP_OBSERVER', '').strip(),
+                'pending receipt reconciliation requires BACKUP_ATTENDED and BACKUP_OBSERVER')
+        pending, measured = self.pending_upload(args, allow_receipt=True)
+        require(args.file == pending['file'] and args.sha256 == pending['sha256'] and
+                getattr(args, 'key', None) == pending.get('remote_key', 'postgres/' + pending['file']),
+                'independent receipt must name the exact pending file, key and checksum')
+        require(args.version_id.strip() and args.evidence.strip(), 'independent object version and evidence required')
+        result = self.recover_upload(pending, measured, receipt_args=args)
+        emit('independent_receipt_recorded', file=result['file'])
+
+    def recover_upload(self, pending, measured, receipt_args=None):
+        from pg_backup_runtime import RecoveryTransferGuard, run_guard
         new_app = '143-backup-' + uuid.uuid4().hex
         directory = self.state / new_app
         directory.mkdir(mode=0o700)
         atomic_json(directory / 'pending-before.json', read_json(self.state / 'pending.json'))
-        result = run_guard(ResumeTransferGuard(self, self.root / name, new_app, pending, measured))
-        emit('upload_resumed', file=result['file'], bytes=result['bytes'], sha256=result['sha256'])
+        atomic_json(self.state / 'recovery.json', dict(app_name=new_app, source_app=pending['app_name'],
+                    file=pending['file'], started_at=now()))
+        return run_guard(RecoveryTransferGuard(self, self.root / pending['file'], new_app, pending, measured, receipt_args))
 
     def restore_admission(self, record):
         endpoint = os.environ.get('DOCKER_HOST', '')
@@ -570,6 +601,9 @@ def main():
     sub.add_parser('plan')
     sub.add_parser('restore')
     verify = sub.add_parser('import-receipt')
+    verify.add_argument('--key', help='exact S3 key; required to reconcile a pending upload')
+    verify.add_argument('--original-database-bytes', type=int, help='legacy pending marker only: original admission measurement')
+    verify.add_argument('--size-evidence', help='legacy pending marker only: source of original size measurement')
     for field in ('file', 'sha256', 'version-id', 'etag', 'last-modified', 'evidence'):
         verify.add_argument('--' + field, required=True)
     for action in ('approve-checksums', 'pin-restored'):
