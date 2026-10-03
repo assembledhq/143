@@ -44,6 +44,44 @@ func (c *emitOnceRetryClient) AgentActivityCreate(context.Context, linear.AgentA
 	return linear.AgentActivityResult{}, c.err
 }
 
+func TestLinearAgentCreatorID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		payload  linearAgentEventPayload
+		row      *db.LinearAgentSession
+		expected string
+	}{
+		{
+			name:     "payload creator takes precedence",
+			payload:  linearAgentEventPayload{LinearCreatorUserID: " payload-user "},
+			row:      &db.LinearAgentSession{LinearCreatorUserID: "row-user"},
+			expected: "payload-user",
+		},
+		{
+			name:     "blank payload falls back to persisted creator",
+			payload:  linearAgentEventPayload{LinearCreatorUserID: "  "},
+			row:      &db.LinearAgentSession{LinearCreatorUserID: " row-user "},
+			expected: "row-user",
+		},
+		{
+			name:     "missing row returns no creator",
+			payload:  linearAgentEventPayload{},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := linearAgentCreatorID(tt.payload, tt.row)
+			require.Equal(t, tt.expected, actual, "creator resolution should preserve payload-first fallback behavior")
+		})
+	}
+}
+
 // These tests cover the pure helpers in handlers_linear_agent_helpers.go.
 // The full created-path closure relies on too many concrete stores to
 // unit-test cleanly without a Postgres harness; these tests pin the

@@ -232,10 +232,7 @@ func emitLinearIdentityClaim(ctx context.Context, deps LinearAgentEventHandlerDe
 	if deps.Stores == nil || deps.Stores.ExternalUserLinks == nil || deps.Linear == nil || session == nil || row == nil {
 		return
 	}
-	creatorID := strings.TrimSpace(payload.LinearCreatorUserID)
-	if creatorID == "" {
-		creatorID = strings.TrimSpace(row.LinearCreatorUserID)
-	}
+	creatorID := linearAgentCreatorID(payload, row)
 	if creatorID == "" && fetched != nil {
 		creatorID = strings.TrimSpace(fetched.CreatorID)
 	}
@@ -280,10 +277,7 @@ func persistLinearExternalAttribution(ctx context.Context, stores *Stores, sessi
 	if stores == nil || stores.SessionAttributions == nil || session == nil {
 		return
 	}
-	creatorID := strings.TrimSpace(payload.LinearCreatorUserID)
-	if creatorID == "" && row != nil {
-		creatorID = strings.TrimSpace(row.LinearCreatorUserID)
-	}
+	creatorID := linearAgentCreatorID(payload, row)
 	if creatorID == "" && fetched != nil {
 		creatorID = strings.TrimSpace(fetched.CreatorID)
 	}

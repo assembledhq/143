@@ -100,6 +100,14 @@ func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issu
 	}
 }
 
+func linearAgentCreatorID(payload linearAgentEventPayload, row *db.LinearAgentSession) string {
+	creatorID := strings.TrimSpace(payload.LinearCreatorUserID)
+	if creatorID == "" && row != nil {
+		creatorID = strings.TrimSpace(row.LinearCreatorUserID)
+	}
+	return creatorID
+}
+
 func applyLinearAgentCreatorAttribution(
 	ctx context.Context,
 	stores *Stores,
@@ -117,10 +125,7 @@ func applyLinearAgentCreatorAttribution(
 		return applyLegacyLinearAgentCreatorAttribution(ctx, stores, client, session, row, payload, fetched, logger)
 	}
 	workspaceID := linearAttributionWorkspaceID(fetched)
-	creatorID := strings.TrimSpace(payload.LinearCreatorUserID)
-	if creatorID == "" && row != nil {
-		creatorID = strings.TrimSpace(row.LinearCreatorUserID)
-	}
+	creatorID := linearAgentCreatorID(payload, row)
 	if creatorID != "" {
 		if matched, err := applyExternalLinearUserAttribution(ctx, stores, session, workspaceID, creatorID, payload.LinearCreatorEmail, payload.LinearCreatorName); err != nil || matched {
 			return err
@@ -159,10 +164,7 @@ func applyLinearAgentCreatorAttribution(
 
 func applyLegacyLinearAgentCreatorAttribution(ctx context.Context, stores *Stores, client linear.Client, session *models.Session, row *db.LinearAgentSession, payload linearAgentEventPayload, fetched *linear.FetchedIssue, logger zerolog.Logger) error {
 	workspaceID := linearAttributionWorkspaceID(fetched)
-	creatorID := strings.TrimSpace(payload.LinearCreatorUserID)
-	if creatorID == "" && row != nil {
-		creatorID = strings.TrimSpace(row.LinearCreatorUserID)
-	}
+	creatorID := linearAgentCreatorID(payload, row)
 	if creatorID != "" {
 		if stores.LinearUserLinks != nil {
 			link, err := stores.LinearUserLinks.GetByLinearUser(ctx, session.OrgID, workspaceID, creatorID)
