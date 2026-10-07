@@ -115,8 +115,8 @@ class TransferTests(unittest.TestCase):
         files = {'memory.current': '100', 'memory.peak': '200', 'memory.max': str(runtime.GIB),
                  'memory.stat': 'anon 20\nfile 80\n', 'memory.swap.current': '0',
                  'memory.events': 'low 0\nhigh 0\nmax 12\noom 0\noom_kill 0\n',
-                 'memory.pressure': 'some avg10=2.1\nfull avg10=1.9\n',
-                 'io.pressure': 'some avg10=0.5\nfull avg10=0.2\n'}
+                 'memory.pressure': 'some avg10=2.1 total=2100\nfull avg10=1.9 total=1900\n',
+                 'io.pressure': 'some avg10=0.5 total=500\nfull avg10=0.2 total=200\n'}
         for name, content in files.items(): (cg / name).write_text(content)
         with mock.patch.object(runtime, 'cgroup_path', return_value=cg):
             self.guard.observe_client_memory({'Id': 'c' * 64, 'State': {'Pid': 42}})
@@ -132,8 +132,8 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(len(samples), 3)
         self.assertEqual(samples[-1]['resources']['host_memory']['full'], 1.1)
         reader = samples[-1]['client_memory']
-        self.assertEqual(reader['memory_pressure'], {'some': 2.1, 'full': 1.9})
-        self.assertEqual(reader['io_pressure'], {'some': 0.5, 'full': 0.2})
+        self.assertEqual(reader['memory_pressure'], {'some': 2.1, 'full': 1.9, 'some_total_us': 2100, 'full_total_us': 1900})
+        self.assertEqual(reader['io_pressure'], {'some': 0.5, 'full': 0.2, 'some_total_us': 500, 'full_total_us': 200})
         self.assertEqual(reader['events']['max'], 12)
         self.assertEqual(state.read_json(self.guard.result)['client_memory'], reader)
 

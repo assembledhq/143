@@ -43,11 +43,16 @@ def pressure(path):
     rows = {}
     for line in path.read_text().splitlines():
         parts = line.split()
+        require(parts and parts[0] in ('some', 'full') and parts[0] not in rows,
+                'invalid PSI row')
         values = dict(p.split('=', 1) for p in parts[1:])
         value = float(values['avg10'])
         require(math.isfinite(value) and 0 <= value <= 100, 'invalid PSI telemetry')
+        total = values.get('total', '')
+        require(re.fullmatch(r'[0-9]+', total), 'invalid PSI total')
         rows[parts[0]] = value
-    require(set(rows) == {'some', 'full'}, 'incomplete PSI telemetry')
+        rows[parts[0] + '_total_us'] = int(total)
+    require(set(rows) == {'some', 'full', 'some_total_us', 'full_total_us'}, 'incomplete PSI telemetry')
     return rows
 
 
@@ -121,6 +126,9 @@ class Guard:
         self.client_memory = None
         self.client_name = app
         self.client_limit = 2 * GIB
+        self.samples = []
+        self.last_dump_sample = None
+        self.violating_sample = None
 
     def inspect(self, target):
         # Absence must be proven by successful inventory, not a failed inspect
@@ -210,9 +218,20 @@ class Guard:
         # Lack of disk space for telemetry must not prevent stopping the writer.
         # Preserve the error in the terminal evidence if writes become possible.
         try:
-            if self.client_memory is None and self.heartbeat.exists():
-                self.client_memory = read_json(self.heartbeat).get('client_memory')
-            atomic_json(self.heartbeat, dict(at=now(), phase=phase, stage=stage, client_memory=self.client_memory))
+            if self.heartbeat.exists() and (self.client_memory is None or self.last_dump_sample is None):
+                heartbeat = read_json(self.heartbeat)
+                if self.client_memory is None:
+                    self.client_memory = heartbeat.get('client_memory')
+                # The caller can take over after a watchdog dies. Recover its
+                # last observation before replacing the heartbeat with cleanup.
+                if self.last_dump_sample is None:
+                    self.last_dump_sample = heartbeat.get('last_dump_sample')
+                    if heartbeat.get('phase') in ('admission', 'dump') and 'resources' in heartbeat:
+                        self.last_dump_sample = heartbeat
+                if self.violating_sample is None:
+                    self.violating_sample = heartbeat.get('violating_sample')
+            atomic_json(self.heartbeat, dict(at=now(), phase=phase, stage=stage,
+                                            client_memory=self.client_memory, **self.dump_evidence()))
         except (OSError, ValueError, KeyError, TypeError, Refused) as exc:
             self.cleanup_telemetry_error = str(exc)
 
@@ -231,7 +250,31 @@ class Guard:
 
     def terminal(self, result):
         atomic_json(self.result, dict(result, client_memory=self.client_memory,
-                                      cleanup_telemetry_error=self.cleanup_telemetry_error))
+                                      cleanup_telemetry_error=self.cleanup_telemetry_error,
+                                      **self.dump_evidence()))
+
+    def dump_evidence(self):
+        return {key: value for key, value in (
+            ('last_dump_sample', self.last_dump_sample), ('violating_sample', self.violating_sample)
+        ) if value is not None}
+
+    def observe_dump_resources(self, sample, previous, database, *, admission=False):
+        observation = dict(at=now(), phase='admission' if admission else 'dump',
+                           resources=sample, client_memory=self.client_memory,
+                           database=database, boot_id=self.owner_identity[0])
+        # Keep the triggering sample even if enforcement or a later backend
+        # query fails. In-memory evidence also survives a failed history write.
+        self.last_dump_sample = observation
+        atomic_json(self.heartbeat, observation)
+        self.samples.append(observation)
+        self.samples = self.samples[-SAMPLE_LIMIT:]
+        atomic_json(self.run / 'samples.json', self.samples)
+        try:
+            check_resources(sample, previous, self.policy.reserve, admission=admission,
+                            estimate=self.estimate if admission else 0)
+        except Refused:
+            self.violating_sample = observation
+            raise
 
     def cleanup_partial(self, owned):
         self.cleanup_beat('remove_partial')
@@ -264,7 +307,7 @@ class Guard:
         parsed = ipaddress.ip_address(address)
         require(parsed.version == 4 and parsed.is_private and not parsed.is_loopback, 'invalid database Docker address')
         sample = resources(self.policy.root, generation['pid'])
-        check_resources(sample, None, self.policy.reserve, admission=True, estimate=self.estimate)
+        self.observe_dump_resources(sample, None, generation, admission=True)
         owned.update(database=generation, file_limit=sample['free_bytes'] - self.policy.reserve - 4 * GIB)
         limit = str(owned['file_limit'])
         command = ['docker', 'create', '--name', self.app, '--label', LABEL + '=' + self.app,
@@ -313,7 +356,7 @@ class Guard:
         try:
             owned = self.prepare()
             started = time.monotonic()
-            atomic_json(self.heartbeat, dict(at=now(), phase='starting'))
+            atomic_json(self.heartbeat, dict(at=now(), phase='starting', **self.dump_evidence()))
             invoke(['docker', 'start', owned['container_id']], timeout=10)
             previous = None
             while True:
@@ -342,9 +385,8 @@ class Guard:
                         continue
                     raise
                 sample = resources(self.policy.root, owned['database']['pid'])
-                check_resources(sample, previous, self.policy.reserve)
+                self.observe_dump_resources(sample, previous, owned['database'])
                 self.backends(owned)
-                atomic_json(self.heartbeat, dict(at=now(), phase='dump', resources=sample, client_memory=self.client_memory))
                 previous = sample
                 time.sleep(INTERVAL)
         except (OSError, ValueError, KeyError, TypeError, Refused, subprocess.TimeoutExpired) as exc:

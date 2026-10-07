@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Owned-writer failure tests; all Docker/database/resource calls are fake."""
 import errno
+from contextlib import ExitStack
 import fcntl
 import json
 import os
@@ -29,6 +30,29 @@ def safe_resources():
 
 
 class KernelParsingTests(unittest.TestCase):
+    def test_pressure_preserves_raw_microsecond_counters(self):
+        cases = [(0, 0), (123456, 98765), (123480, 98780), (2 ** 63, 2 ** 63 - 1)]
+        for some, full in cases:
+            with self.subTest(some=some, full=full):
+                text = (f'some avg10=1.25 avg60=0.5 avg300=0.2 total={some}\n'
+                        f'full avg10=0.75 avg60=0.1 avg300=0.0 total={full}\n')
+                with mock.patch.object(Path, 'read_text', return_value=text):
+                    self.assertEqual(runtime.pressure(Path('psi')), {
+                        'some': 1.25, 'full': 0.75,
+                        'some_total_us': some, 'full_total_us': full,
+                    }, 'raw stall counters must retain integer precision alongside avg10')
+
+    def test_pressure_refuses_invalid_or_missing_totals_and_duplicate_rows(self):
+        cases = ['some avg10=0\nfull avg10=0 total=0\n',
+                 'some avg10=0 total=-1\nfull avg10=0 total=0\n',
+                 'some avg10=0 total=1.5\nfull avg10=0 total=0\n',
+                 'some avg10=0 total=nan\nfull avg10=0 total=0\n',
+                 'some avg10=0 total=0\nsome avg10=0 total=0\nfull avg10=0 total=0\n']
+        for text in cases:
+            with self.subTest(text=text), mock.patch.object(Path, 'read_text', return_value=text):
+                with self.assertRaises(Refused, msg='incomplete or ambiguous PSI evidence must fail closed'):
+                    runtime.pressure(Path('psi'))
+
     def test_process_identity_handles_parentheses_and_rejects_zombie(self):
         for state in ['S', 'Z']:
             with self.subTest(state=state):
@@ -101,7 +125,8 @@ class RuntimeTests(unittest.TestCase):
                 with self.assertRaises(Refused): runtime.check_resources(s, prev, self.p.reserve)
 
     def test_pressure_missing_invalid_and_over_limit(self):
-        for contents in ['some avg10=0', 'some avg10=nan\nfull avg10=0', 'some avg10=0\nfull avg10=-1']:
+        for contents in ['some avg10=0 total=0', 'some avg10=nan total=0\nfull avg10=0 total=0',
+                         'some avg10=0 total=0\nfull avg10=-1 total=0']:
             with self.subTest(contents=contents):
                 path = self.root / 'psi'
                 path.write_text(contents)
@@ -111,6 +136,135 @@ class RuntimeTests(unittest.TestCase):
                 s = safe_resources()
                 s[field][part] = 21
                 with self.assertRaisesRegex(Refused, 'pressure'): runtime.check_resources(s, None, self.p.reserve)
+
+    def supervise_samples(self, samples):
+        """Run the real supervisor and failure cleanup with fake external work."""
+        running = {'State': {'Status': 'running', 'Running': True}}
+        complete = {'State': {'Status': 'exited', 'ExitCode': 0, 'OOMKilled': False}}
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(self.guard, 'prepare', return_value=self.owned))
+            stack.enter_context(mock.patch.object(runtime, 'invoke', return_value=''))
+            stack.enter_context(mock.patch.object(self.guard, 'inspect', side_effect=[running] * len(samples) + [complete]))
+            stack.enter_context(mock.patch.object(self.guard, 'database'))
+            stack.enter_context(mock.patch.object(self.guard, 'backends'))
+            stack.enter_context(mock.patch.object(self.guard, 'observe_client_memory'))
+            stack.enter_context(mock.patch.object(runtime, 'resources', side_effect=samples))
+            stack.enter_context(mock.patch.object(runtime.time, 'sleep'))
+            stop = stack.enter_context(mock.patch.object(self.guard, 'stop',
+                side_effect=lambda owned: self.guard.cleanup_beat('confirm_owned_stop')))
+            self.guard.supervise()
+        stop.assert_called_once_with(self.owned)
+
+    def test_dump_violation_survives_bounded_history_cleanup_and_terminal(self):
+        samples = [dict(safe_resources(), monotonic=10 + 5 * i,
+                        host_memory={'some': 0, 'full': 0, 'some_total_us': 100 + i, 'full_total_us': 50 + i})
+                   for i in range(5)]
+        samples[-1]['host_memory'].update(some=1.01, full=1.01)
+        observed_at = '2026-01-01T00:00:00+00:00'
+        expected = [dict(at=observed_at, phase='dump', resources=s, client_memory=None,
+                         database=self.db, boot_id='boot') for s in samples]
+        original_check = runtime.check_resources
+        def check(sample, previous, reserve, **kwargs):
+            self.assertEqual(read_json(self.guard.heartbeat)['resources'], sample,
+                             'the current sample must be durable before its limit is checked')
+            self.assertEqual(read_json(self.guard.run / 'samples.json')[-1]['resources'], sample,
+                             'bounded history must include the sample before enforcement')
+            return original_check(sample, previous, reserve, **kwargs)
+        with mock.patch.object(runtime, 'now', return_value=observed_at), \
+                mock.patch.object(runtime, 'SAMPLE_LIMIT', 3), \
+                mock.patch.object(runtime, 'check_resources', side_effect=check):
+            self.supervise_samples(samples)
+        self.assertEqual(read_json(self.guard.run / 'samples.json'), expected[-3:],
+                         'history must retain the latest samples including the violation')
+        result = read_json(self.guard.result)
+        self.assertEqual(result['error'], 'host_memory pressure at risk', 'the existing pressure limit must still stop work')
+        self.assertTrue(result['cleanup_verified'], 'only proven owned cleanup may clear the pending marker')
+        for path in [self.guard.result, self.guard.heartbeat]:
+            report = read_json(path)
+            self.assertEqual(report['last_dump_sample'], expected[-1], 'cleanup must retain the last full observation')
+            self.assertEqual(report['violating_sample'], expected[-1], 'the terminal evidence must identify the trigger')
+        self.assertEqual(read_json(self.guard.heartbeat)['phase'], 'cleanup', 'cleanup liveness must remain visible')
+        self.assertFalse(self.partial.exists(), 'the stopped dump partial must be removed')
+        self.assertFalse((self.state / 'pending.json').exists(), 'proven cleanup must release the pending marker')
+        self.assertEqual(self.completed.read_bytes(), b'previous verified backup', 'prior backup must remain untouched')
+
+    def test_completed_dump_retains_last_observation_without_false_violation(self):
+        sample = safe_resources()
+        self.supervise_samples([sample])
+        result = read_json(self.guard.result)
+        self.assertEqual(result['status'], 'completed', 'healthy dump completion must remain successful')
+        self.assertEqual(result['last_dump_sample']['resources'], sample, 'successful dump must retain its last observation')
+        self.assertIsNone(result.get('violating_sample'), 'a healthy sample must not be called a violation')
+        self.assertTrue(self.partial.exists(), 'completed dump must remain for verification and upload')
+
+    def test_sample_write_failure_still_stops_owned_writer_and_retains_memory_evidence(self):
+        original = runtime.atomic_json
+        def write(path, value):
+            if path == self.guard.run / 'samples.json':
+                raise OSError(errno.ENOSPC, 'sample history disk full')
+            return original(path, value)
+        sample = safe_resources()
+        with mock.patch.object(runtime, 'atomic_json', side_effect=write):
+            self.supervise_samples([sample])
+        result = read_json(self.guard.result)
+        self.assertTrue(result['cleanup_verified'], 'telemetry failure must not prevent stopping the writer')
+        self.assertIn('sample history disk full', result['error'], 'the evidence failure must be reported')
+        self.assertEqual(result['last_dump_sample']['resources'], sample, 'in-memory observation must survive failed history write')
+        self.assertIsNone(result.get('violating_sample'), 'an unwritten sample must not imply a resource violation')
+
+    def test_parent_cleanup_recovers_child_dump_sample(self):
+        observation = dict(at='2026-01-01T00:00:00+00:00', phase='dump', resources=safe_resources(),
+                           client_memory={'current_bytes': 123}, database=self.db, boot_id='boot')
+        atomic_json(self.guard.heartbeat, observation)
+        with mock.patch.object(self.guard, 'stop'):
+            self.guard.fail('backup watchdog exited without a result')
+        for path in [self.guard.heartbeat, self.guard.result]:
+            report = read_json(path)
+            self.assertEqual(report['last_dump_sample'], observation, 'parent cleanup must recover the child observation')
+            self.assertEqual(report['client_memory'], observation['client_memory'], 'parent must retain child client telemetry')
+            self.assertIsNone(report.get('violating_sample'), 'watchdog death must not imply a measured resource violation')
+
+    def test_parent_cleanup_preserves_violation_from_interrupted_cleanup(self):
+        observation = dict(at='2026-01-01T00:00:00+00:00', phase='dump', resources=safe_resources(),
+                           client_memory=None, database=self.db, boot_id='boot')
+        observation['resources']['host_memory']['full'] = 2
+        atomic_json(self.guard.heartbeat, dict(at=observation['at'], phase='cleanup', stage='stop_client',
+                                             last_dump_sample=observation, violating_sample=observation))
+        with mock.patch.object(self.guard, 'stop'):
+            self.guard.fail('backup watchdog heartbeat expired')
+        for path in [self.guard.heartbeat, self.guard.result]:
+            report = read_json(path)
+            self.assertEqual(report['last_dump_sample'], observation, 'parent must preserve interrupted cleanup evidence')
+            self.assertEqual(report['violating_sample'], observation, 'a previously recorded violation must survive takeover')
+
+    def test_admission_violation_is_recorded_before_any_client_creation(self):
+        db = dict(Image='sha256:immutable', Config={'Volumes': {}},
+                  NetworkSettings={'Networks': {'default': {'IPAddress': '172.18.0.2'}}})
+        sample = dict(safe_resources(), available_bytes=2 * runtime.GIB)
+        with mock.patch.object(self.guard, 'database', return_value=(db, self.db)), \
+                mock.patch.object(runtime, 'resources', return_value=sample), \
+                mock.patch.dict(os.environ, {'DOCKER_HOST': '', 'DOCKER_CONTEXT': ''}), \
+                mock.patch.object(runtime, 'invoke', return_value='unix:///var/run/docker.sock') as run:
+            self.guard.supervise()
+        run.assert_called_once_with(['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], timeout=5)
+        result = read_json(self.guard.result)
+        observation = result['violating_sample']
+        self.assertEqual(observation['phase'], 'admission', 'admission pressure must not be mistaken for a running dump')
+        self.assertEqual(observation['resources'], sample, 'the admission refusal must retain its measurements')
+        self.assertEqual(result['last_dump_sample'], observation, 'cleanup must preserve the admission observation')
+        self.assertEqual(read_json(self.guard.run / 'samples.json'), [observation], 'admission must be durably sampled')
+        self.assertTrue(result['cleanup_verified'], 'admission refusal must clean only its partial and pending marker')
+
+    def test_host_memory_pressure_threshold_is_unchanged(self):
+        for full, refused in [(0, False), (1, False), (1.01, True)]:
+            with self.subTest(full=full):
+                sample = safe_resources()
+                sample['host_memory'].update(full=full, full_total_us=123456)
+                if refused:
+                    with self.assertRaisesRegex(Refused, 'host_memory pressure at risk'):
+                        runtime.check_resources(sample, None, self.p.reserve)
+                else:
+                    runtime.check_resources(sample, None, self.p.reserve)
 
     def test_admission_enospc_never_touches_completed_archive(self):
         owned = dict(self.owned, creation_started=False, creation_complete=False)
