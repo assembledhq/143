@@ -192,6 +192,21 @@ available memory, 1 GiB commitment headroom, 0.5 GiB database cgroup headroom,
 256 MiB swap use, or 4 MiB/s swap-out. Pressure thresholds are explicit in
 `pg_backup_runtime.py`. The default reserve remains 20 GiB and can only increase.
 
+An explicitly attended `backup --canary --host-memory-full-percent 5` permits
+host memory **full PSI avg10 up to 5%** during the dump, verification and upload.
+The default is 1%; admission still requires 1% or less. This invocation-only
+option requires `--canary`, `BACKUP_ATTENDED=true` and a named `BACKUP_OBSERVER`.
+It does not alter cron or persist a new default. Database pressure, available
+memory, commitment, swap, disk and timeout limits remain unchanged. Observations
+record the effective host pressure limit before enforcement, including any
+triggering sample; a null limit means that observation did not enforce PSI
+(for example, the small metadata listing described above).
+
+The higher limit accepts more memory stalls and can increase application latency;
+5% is an operator-selected ceiling, not a demonstrated safe latency budget or a
+guarantee that a backup will finish. Use it only for an attended canary after
+reviewing current workload and capacity, keeping the existing stop controls.
+
 Samples normally run five seconds apart. A sample interval exceeding 30 seconds
 fails closed; the caller detects a stuck monitoring watchdog after 45 seconds.
 Cancellation or an explicit cleanup heartbeat starts a separate 120-second

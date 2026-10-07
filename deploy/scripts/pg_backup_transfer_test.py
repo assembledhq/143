@@ -168,6 +168,31 @@ class TransferTests(unittest.TestCase):
                 self.assertTrue(result['cleanup_verified'])
                 self.assert_preserved()
 
+    def test_attended_transfer_uses_same_limit_and_preserves_failed_archive(self):
+        self.p.host_memory_full_percent = 5
+        self.guard = runtime.TransferGuard(self.p, self.partial, self.app, {}, 100, 'test-cli')
+        self.guard.owned = self.owned
+        for index, value in enumerate([2, 5, 5.01]):
+            sample = dict(safe_resources(), monotonic=10 + 5 * index,
+                          host_memory={'some': value, 'full': value})
+            with self.subTest(value=value), mock.patch.object(self.guard, 'database'), \
+                    mock.patch.object(runtime, 'resources', return_value=sample):
+                if value > 5:
+                    with self.assertRaisesRegex(state.Refused, 'host_memory'):
+                        self.guard.tick(force=True)
+                else:
+                    self.guard.tick(force=True)
+        history = state.read_json(self.guard.run / 'samples.json')
+        self.assertEqual([row['host_memory_full_limit_percent'] for row in history], [5, 5, 5],
+                         'post-dump samples must record the effective limit before enforcing it')
+        result = self.guard.fail('host_memory pressure at risk')
+        self.assertEqual(result['phase_resources']['last_observation'], {
+            'at': history[-1]['at'], 'phase': 'verification', 'resources': sample,
+            'host_memory_full_limit_percent': 5,
+        }, 'cleanup must retain both the triggering sample and its limit')
+        self.assertTrue(result['cleanup_verified'], 'the owned reader cleanup must remain required')
+        self.assert_preserved()
+
     def test_readers_are_owned_bounded_and_success_is_saved_before_removal(self):
         for stage in ('structural', 'upload', 'metadata'):
             with self.subTest(stage=stage):

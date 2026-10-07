@@ -91,7 +91,13 @@ def resources(root, db_pid):
                 monotonic=time.monotonic())
 
 
-def check_resources(sample, previous, reserve, *, admission=False, estimate=0, capacity_only=False):
+def check_resources(sample, previous, reserve, *, admission=False, estimate=0, capacity_only=False,
+                    host_memory_full_percent=1):
+    require(type(host_memory_full_percent) is int and host_memory_full_percent in (1, 5),
+            'unsupported host memory pressure limit')
+    # The attended canary override permits moderate stalls during work, never
+    # admission into an already pressured host or weaker actual-memory limits.
+    host_memory_limit = 1 if admission else host_memory_full_percent
     margin = 5 * GIB if admission else 4 * GIB
     require(sample['free_bytes'] >= reserve + margin + (estimate if admission else 0), 'disk reserve at risk')
     require(sample['available_bytes'] >= (3 if admission else 1.5) * GIB, 'available memory at risk')
@@ -101,7 +107,7 @@ def check_resources(sample, previous, reserve, *, admission=False, estimate=0, c
         return  # A tiny confirming listing may proceed despite residual swap/PSI.
     require(sample['swap_bytes'] <= GIB / 4, 'swap usage at risk')
     for field, part, limit in [('host_io', 'some', 20), ('host_io', 'full', 20),
-            ('host_memory', 'full', 1), ('db_io', 'some', 20),
+            ('host_memory', 'full', host_memory_limit), ('db_io', 'some', 20),
             ('db_memory', 'some', 10), ('db_memory', 'full', 1)]:
         require(sample[field][part] <= limit, field + ' pressure at risk')
     if previous:
@@ -115,6 +121,7 @@ class Guard:
     def __init__(self, policy, partial, app, estimate, exercise=None):
         self.policy, self.partial, self.app = policy, partial, app
         self.estimate, self.exercise = estimate, exercise
+        self.host_memory_full_percent = getattr(policy, 'host_memory_full_percent', 1)
         self.run = policy.state / app
         self.record = self.run / 'ownership.json'
         self.result = self.run / 'result.json'
@@ -261,7 +268,8 @@ class Guard:
     def observe_dump_resources(self, sample, previous, database, *, admission=False):
         observation = dict(at=now(), phase='admission' if admission else 'dump',
                            resources=sample, client_memory=self.client_memory,
-                           database=database, boot_id=self.owner_identity[0])
+                           database=database, boot_id=self.owner_identity[0],
+                           host_memory_full_limit_percent=1 if admission else self.host_memory_full_percent)
         # Keep the triggering sample even if enforcement or a later backend
         # query fails. In-memory evidence also survives a failed history write.
         self.last_dump_sample = observation
@@ -271,7 +279,8 @@ class Guard:
         atomic_json(self.run / 'samples.json', self.samples)
         try:
             check_resources(sample, previous, self.policy.reserve, admission=admission,
-                            estimate=self.estimate if admission else 0)
+                            estimate=self.estimate if admission else 0,
+                            host_memory_full_percent=self.host_memory_full_percent)
         except Refused:
             self.violating_sample = observation
             raise
@@ -472,17 +481,21 @@ class TransferGuard(Guard):
         self.database(self.owned['database'])
         sample = resources(self.policy.root, self.owned['database']['pid'])
         # Persist the violating sample too, so a stop is diagnosable.
-        observation = dict(at=now(), phase=self.phase, resources=sample, client_memory=self.client_memory)
+        limit = self.host_memory_full_percent if enforce and self.phase != 'metadata' else None
+        observation = dict(at=now(), phase=self.phase, resources=sample, client_memory=self.client_memory,
+                           host_memory_full_limit_percent=limit)
         atomic_json(self.heartbeat, observation)
         # Bound the history to twenty minutes at the normal cadence. Retain the
         # threshold-crossing sample before raising, not just cleanup telemetry.
         self.samples.append(observation)
         self.samples = self.samples[-SAMPLE_LIMIT:]
         atomic_json(self.run / 'samples.json', self.samples)
-        self.phase_resources['last_observation'] = dict(at=now(), phase=self.phase, resources=sample)
+        self.phase_resources['last_observation'] = dict(at=observation['at'], phase=self.phase, resources=sample,
+                                                       host_memory_full_limit_percent=limit)
         if enforce:
             check_resources(sample, None if reset_interval else self.previous, self.policy.reserve,
-                            capacity_only=self.phase == 'metadata')
+                            capacity_only=self.phase == 'metadata',
+                            host_memory_full_percent=self.host_memory_full_percent)
         self.previous = sample
 
     def checkpoint(self, name, *, enforce=True):

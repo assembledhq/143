@@ -124,6 +124,57 @@ class RuntimeTests(unittest.TestCase):
                 s = dict(prev, monotonic=prev['monotonic'] + elapsed, swap_out_bytes=delta)
                 with self.assertRaises(Refused): runtime.check_resources(s, prev, self.p.reserve)
 
+    def test_attended_pressure_limit_changes_only_runtime_host_memory_pressure(self):
+        cases = [
+            ('default', {}, 'host_memory', {'some': 5, 'full': 5}, 'host_memory'),
+            ('at attended limit', {'host_memory_full_percent': 5}, 'host_memory', {'some': 5, 'full': 5}, None),
+            ('over attended limit', {'host_memory_full_percent': 5}, 'host_memory', {'some': 5.01, 'full': 5.01}, 'host_memory'),
+            ('strict admission', {'host_memory_full_percent': 5, 'admission': True}, 'host_memory', {'some': 2, 'full': 2}, 'host_memory'),
+            ('DB pressure unchanged', {'host_memory_full_percent': 5}, 'db_memory', {'some': 2, 'full': 1.01}, 'db_memory'),
+            ('RAM unchanged', {'host_memory_full_percent': 5}, 'available_bytes', 1.5 * runtime.GIB - 1, 'available memory'),
+            ('commit unchanged', {'host_memory_full_percent': 5}, 'commit_headroom', runtime.GIB - 1, 'commit'),
+            ('DB headroom unchanged', {'host_memory_full_percent': 5}, 'db_headroom', runtime.GIB / 2 - 1, 'database memory'),
+            ('swap unchanged', {'host_memory_full_percent': 5}, 'swap_bytes', runtime.GIB / 4 + 1, 'swap usage'),
+            ('disk unchanged', {'host_memory_full_percent': 5}, 'free_bytes', 24 * runtime.GIB - 1, 'disk'),
+            ('IO unchanged', {'host_memory_full_percent': 5}, 'host_io', {'some': 20.01, 'full': 0}, 'host_io'),
+        ]
+        for name, options, field, value, error in cases:
+            with self.subTest(name=name):
+                sample = safe_resources()
+                sample[field] = value
+                if error:
+                    with self.assertRaisesRegex(Refused, error):
+                        runtime.check_resources(sample, None, self.p.reserve, **options)
+                else:
+                    runtime.check_resources(sample, None, self.p.reserve, **options)
+        for limit in (0, 2, 6, float('nan'), True, '5'):
+            with self.subTest(invalid_limit=limit), self.assertRaisesRegex(Refused, 'pressure limit'):
+                runtime.check_resources(safe_resources(), None, self.p.reserve, host_memory_full_percent=limit)
+        for delta, elapsed in [(21 * 1024 ** 2, 5), (0, 31), (-1, 5)]:
+            with self.subTest(delta=delta, elapsed=elapsed):
+                previous = safe_resources()
+                sample = dict(previous, monotonic=previous['monotonic'] + elapsed, swap_out_bytes=delta)
+                with self.assertRaises(Refused, msg='attended override must preserve swap and monitor-liveness limits'):
+                    runtime.check_resources(sample, previous, self.p.reserve, host_memory_full_percent=5)
+
+    def test_attended_dump_continues_then_stops_with_limit_and_trigger_recorded(self):
+        self.p.host_memory_full_percent = 5
+        self.guard = runtime.Guard(self.p, self.partial, self.app, 18 * runtime.GIB)
+        samples = [dict(safe_resources(), monotonic=10 + 5 * index,
+                        host_memory={'some': value, 'full': value})
+                   for index, value in enumerate([2, 5, 5.01])]
+        self.supervise_samples(samples)
+        history = read_json(self.guard.run / 'samples.json')
+        self.assertEqual([row['resources'] for row in history], samples,
+                         'moderate pressure must continue until the bounded higher limit is exceeded')
+        self.assertEqual([row['host_memory_full_limit_percent'] for row in history], [5, 5, 5],
+                         'every observation must identify the enforced threshold')
+        result = read_json(self.guard.result)
+        self.assertEqual(result['violating_sample'], history[-1], 'terminal evidence must preserve the exact trigger and limit')
+        self.assertTrue(result['cleanup_verified'], 'the existing owned cleanup must still run')
+        self.assertFalse(self.partial.exists(), 'only the stopped attempt partial should be removed')
+        self.assertEqual(self.completed.read_bytes(), b'previous verified backup', 'old backups must remain intact')
+
     def test_pressure_missing_invalid_and_over_limit(self):
         for contents in ['some avg10=0 total=0', 'some avg10=nan total=0\nfull avg10=0 total=0',
                          'some avg10=0 total=0\nfull avg10=-1 total=0']:
@@ -162,7 +213,7 @@ class RuntimeTests(unittest.TestCase):
         samples[-1]['host_memory'].update(some=1.01, full=1.01)
         observed_at = '2026-01-01T00:00:00+00:00'
         expected = [dict(at=observed_at, phase='dump', resources=s, client_memory=None,
-                         database=self.db, boot_id='boot') for s in samples]
+                         database=self.db, boot_id='boot', host_memory_full_limit_percent=1) for s in samples]
         original_check = runtime.check_resources
         def check(sample, previous, reserve, **kwargs):
             self.assertEqual(read_json(self.guard.heartbeat)['resources'], sample,

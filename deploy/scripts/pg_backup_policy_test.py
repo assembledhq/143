@@ -693,6 +693,33 @@ sys.exit(p.main())
                     self.assertEqual(r.returncode, status, r.stderr)
                     self.assertFalse(missing.exists())
 
+    def test_cli_pressure_override_requires_canary_and_attendance_and_does_not_persist(self):
+        cases = [
+            ('override', ['backup', '--canary', '--host-memory-full-percent', '5'], 'true', 'operator', 0, 5),
+            ('default after override', ['backup', '--canary'], 'true', 'operator', 0, 1),
+            ('non-canary', ['backup', '--host-memory-full-percent', '5'], 'true', 'operator', 1, None),
+            ('unattended', ['backup', '--canary', '--host-memory-full-percent', '5'], 'false', 'operator', 1, None),
+            ('unnamed operator', ['backup', '--canary', '--host-memory-full-percent', '5'], 'true', '', 1, None),
+            ('over ceiling', ['backup', '--canary', '--host-memory-full-percent', '6'], 'true', 'operator', 2, None),
+            ('wrong action', ['resume-upload', '--host-memory-full-percent', '5'], 'true', 'operator', 2, None),
+        ]
+        for name, args, attended, observer, status, limit in cases:
+            with self.subTest(name=name), mock.patch.object(sys, 'argv', ['pg-backup-policy.py', *args]), \
+                    mock.patch.dict(os.environ, BACKUP_ENABLED='true', BACKUP_ATTENDED=attended, BACKUP_OBSERVER=observer), \
+                    mock.patch.object(policy.Policy, 'backup', autospec=True) as backup, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                if status == 2:
+                    with self.assertRaises(SystemExit) as error: policy.main()
+                    self.assertEqual(error.exception.code, 2, 'invalid scope or value must fail argument parsing')
+                else:
+                    self.assertEqual(policy.main(), status, 'only an explicitly attended canary may opt in')
+                if limit is None:
+                    backup.assert_not_called()
+                else:
+                    backup.assert_called_once()
+                    self.assertEqual(backup.call_args.args[0].host_memory_full_percent, limit,
+                                     'the pressure choice must apply only to this invocation')
+
     def test_aws_transport_does_not_expose_credentials_or_use_sync(self):
         p = policy.Policy()
         p.storage = dict(bucket='test-backups', region='us-east-1', access_key_id='test-id', secret_access_key='literal-$secret')
