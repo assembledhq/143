@@ -142,7 +142,8 @@ print('loaded')
         policy.atomic_json(self.p.state / 'checksum-canary.json', dict(cli_image=policy.AWS_IMAGE,
                            cli_version=policy.AWS_VERSION, evidence='isolated checksum canary'))
 
-    def dump(self, args=None, fail=False):
+    @contextlib.contextmanager
+    def simulated_io(self, fail=False):
         def fake_dump(partial, app, estimate, exercise):
             self.assertTrue(app.startswith('143-backup-'))
             partial.write_bytes(b'new verified dump')
@@ -155,7 +156,215 @@ print('loaded')
             return self.p.finish_archive(partial, app, timeline, measured_db, version, guard)
         with mock.patch.object(self.p, 'dump_archive', side_effect=fake_dump), \
                 mock.patch.object(self.p, 'transfer_archive', side_effect=fake_transfer):
+            yield
+
+    def dump(self, args=None, fail=False):
+        with self.simulated_io(fail):
             self.p.backup(args or argparse.Namespace(bootstrap=False, canary=False))
+
+    def schedule_profile(self, **overrides):
+        current = policy.dt.datetime.now(policy.dt.timezone.utc)
+        profile = dict(schema=1, owner='test operator', evidence='private acceptance record',
+                       starts_at=(current - policy.dt.timedelta(hours=1)).isoformat(),
+                       expires_at=(current + policy.dt.timedelta(hours=1)).isoformat(),
+                       host_memory_full_percent=5, db_memory_full_percent=5)
+        profile.update(overrides)
+        policy.atomic_json(self.p.state / 'scheduled-backup.json', profile)
+        return profile
+
+    def scheduled(self, *args, enabled='true'):
+        with mock.patch.object(sys, 'argv', ['pg-backup-policy.py', 'backup', '--scheduled', *args]), \
+                mock.patch.dict(os.environ, BACKUP_ENABLED=enabled, BACKUP_ATTENDED='false', BACKUP_OBSERVER=''), \
+                mock.patch.object(policy, 'Policy', return_value=self.p):
+            return policy.main()
+
+    def test_schedule_profile_window_boundaries_and_exact_schema(self):
+        start = policy.dt.datetime(2026, 1, 1, tzinfo=policy.dt.timezone.utc)
+        end = start + policy.dt.timedelta(hours=24)
+        profile = self.schedule_profile(starts_at=start.isoformat(), expires_at=end.isoformat())
+        for current, accepted in [(start.timestamp() - 1, False), (start.timestamp(), True),
+                                  (end.timestamp() - 0.001, True), (end.timestamp(), False)]:
+            with self.subTest(current=current):
+                if accepted:
+                    self.assertEqual(policy.scheduled_backup_profile(self.p.state, current), profile)
+                else:
+                    with self.assertRaisesRegex(policy.Refused, 'not active'):
+                        policy.scheduled_backup_profile(self.p.state, current)
+        invalid = [dict(owner=' '), dict(evidence=''), dict(owner='x' * 1025), dict(schema=True),
+                   dict(schema=2), dict(host_memory_full_percent=True), dict(db_memory_full_percent=6),
+                   dict(starts_at='2026-01-01T00:00:00'), dict(expires_at='invalid'), dict(expires_at=None),
+                   dict(expires_at=(end + policy.dt.timedelta(seconds=1)).isoformat()),
+                   dict(expires_at=start.isoformat()), dict(allow_swap_bursts=True)]
+        for overrides in invalid:
+            with self.subTest(overrides=overrides):
+                policy.atomic_json(self.p.state / 'scheduled-backup.json', dict(profile, **overrides))
+                with self.assertRaises((policy.Refused, ValueError)):
+                    policy.scheduled_backup_profile(self.p.state, start.timestamp())
+
+    def test_scheduled_refusals_preserve_archives_and_record_failed_attempt(self):
+        paths = [self.archive(n) for n in (1, 2)]
+        target = self.p.state / 'scheduled-backup.json'
+        for defect in ('missing', 'malformed', 'duplicate', 'nonobject', 'public', 'symlink', 'hardlink', 'expired'):
+            with self.subTest(defect=defect):
+                target.unlink(missing_ok=True)
+                self.schedule_profile()
+                if defect == 'missing': target.unlink()
+                elif defect == 'malformed': target.write_text('{')
+                elif defect == 'duplicate': target.write_text('{"schema":1,"schema":1}')
+                elif defect == 'nonobject': target.write_text('[]')
+                elif defect == 'public': target.chmod(0o644)
+                elif defect in ('symlink', 'hardlink'):
+                    other = self.p.state / ('profile-' + defect)
+                    target.rename(other)
+                    if defect == 'symlink': target.symlink_to(other)
+                    else: os.link(other, target)
+                elif defect == 'expired':
+                    self.schedule_profile(starts_at='2026-01-01T00:00:00+00:00', expires_at='2026-01-01T01:00:00+00:00')
+                with mock.patch.object(self.p, 'backup') as backup, mock.patch.object(self.p, 'prune') as prune:
+                    before = set(self.p.state.glob('attempt-*.json'))
+                    self.assertEqual(self.scheduled(), 1, 'invalid approval must refuse work')
+                    backup.assert_not_called()
+                    prune.assert_not_called()
+                    created = set(self.p.state.glob('attempt-*.json')) - before
+                    self.assertEqual(len(created), 1, 'a refusal must have durable attempt evidence')
+                    self.assertEqual(policy.read_json(created.pop())['status'], 'failed')
+                self.assertEqual([p.read_bytes() for p in paths], [b'verified dump'] * 2)
+
+    def test_scheduled_scope_and_hold_cannot_authorize_other_operations(self):
+        self.schedule_profile()
+        for args in [('--bootstrap',), ('--canary',), ('--allow-swap-bursts',),
+                     ('--exercise-stop-after', '5'), ('--host-memory-full-percent', '1'),
+                     ('--host-memory-full-percent', '5'), ('--db-memory-full-percent', '5')]:
+            with self.subTest(args=args), mock.patch.object(self.p, 'backup') as backup:
+                self.assertEqual(self.scheduled(*args), 1)
+                backup.assert_not_called()
+        for enabled in ('false', 'invalid'):
+            with self.subTest(enabled=enabled), mock.patch.object(self.p, 'locked') as locked:
+                before = set(self.p.state.iterdir())
+                self.assertEqual(self.scheduled(enabled=enabled), 1)
+                locked.assert_not_called()
+                self.assertEqual(set(self.p.state.iterdir()), before, 'a hold must precede state creation')
+        with mock.patch.dict(os.environ), mock.patch.object(sys, 'argv', ['policy', 'backup', '--scheduled']), \
+                mock.patch.object(policy, 'Policy') as factory:
+            os.environ.pop('BACKUP_ENABLED', None)
+            self.assertEqual(policy.main(), 1, 'scheduled mode requires an explicit enable flag')
+            factory.assert_not_called()
+        for action in ('backup', 'prune', 'resume-upload', 'restore'):
+            with self.subTest(action=action), \
+                    mock.patch.object(sys, 'argv', ['pg-backup-policy.py', action]), \
+                    mock.patch.dict(os.environ, BACKUP_ENABLED='true', RESTORE_TEST_ENABLED='true',
+                                    BACKUP_ATTENDED='false'), mock.patch.object(policy, 'Policy') as factory:
+                self.assertEqual(policy.main(), 1, 'a profile must not replace manual attendance')
+                factory.assert_not_called()
+            if action != 'backup':
+                with self.subTest(action=action, scheduled=True), contextlib.redirect_stderr(io.StringIO()), \
+                        mock.patch.object(sys, 'argv', ['pg-backup-policy.py', action, '--scheduled']):
+                    with self.assertRaises(SystemExit) as error: policy.main()
+                    self.assertEqual(error.exception.code, 2, 'only backup accepts scheduled mode')
+
+    def test_schedule_is_revalidated_after_lock_wait(self):
+        self.schedule_profile()
+        @contextlib.contextmanager
+        def delayed_lock():
+            self.schedule_profile(starts_at='2026-01-01T00:00:00+00:00', expires_at='2026-01-01T01:00:00+00:00')
+            yield
+        with mock.patch.object(self.p, 'locked', side_effect=delayed_lock), \
+                mock.patch.object(self.p, 'backup') as backup, mock.patch.object(self.p, 'retire_attempts') as retire:
+            self.assertEqual(self.scheduled(), 1)
+            backup.assert_not_called()
+            retire.assert_not_called()
+
+    def test_scheduled_lock_contention_is_durable_and_does_not_launch_work(self):
+        self.schedule_profile()
+        with self.p.locked(), mock.patch.object(self.p, 'backup') as backup:
+            self.assertEqual(self.scheduled(), 1)
+            backup.assert_not_called()
+        attempt = policy.read_json(next(self.p.state.glob('attempt-*.json')))
+        self.assertEqual(attempt['status'], 'failed')
+        self.assertIn('lock', attempt['error'])
+
+    def test_scheduled_effective_limits_are_audited_and_manual_defaults_remain(self):
+        for host, database in ((1, 1), (5, 1), (1, 5), (5, 5)):
+            with self.subTest(host=host, database=database):
+                profile = self.schedule_profile(host_memory_full_percent=host, db_memory_full_percent=database)
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output), mock.patch.object(self.p, 'backup') as backup:
+                    self.assertEqual(self.scheduled(), 0)
+                    backup.assert_called_once()
+                    self.assertFalse(backup.call_args.args[0].canary, 'scheduled backups must retain qualified copies')
+                self.assertEqual((self.p.host_memory_full_percent, self.p.db_memory_full_percent,
+                                  self.p.allow_swap_bursts), (host, database, False))
+                events = [json.loads(line) for line in output.getvalue().splitlines()]
+                self.assertFalse(any(e['event'] == 'attended_operation' for e in events))
+                limits = next(e for e in events if e['event'] == 'backup_pressure_policy')
+                self.assertEqual((limits['host_memory_full_limit_percent'], limits['db_memory_full_limit_percent'],
+                                  limits['admission_host_memory_full_limit_percent'], limits['admission_db_memory_full_limit_percent'],
+                                  limits['swap_usage_limit_bytes'], limits['swap_out_limit_bytes_per_second']),
+                                 (host, database, 1, 1, 256 * 1024 ** 2, 4 * 1024 ** 2))
+                latest = max((policy.read_json(p) for p in self.p.state.glob('attempt-*.json')), key=lambda a: a['started_at'])
+                self.assertEqual((latest['execution_mode'], latest['schedule'], latest['status']),
+                                 ('scheduled', profile, 'completed'))
+        with mock.patch.object(sys, 'argv', ['pg-backup-policy.py', 'backup']), \
+                mock.patch.dict(os.environ, BACKUP_ENABLED='true', BACKUP_ATTENDED='true', BACKUP_OBSERVER='operator'), \
+                mock.patch.object(policy, 'Policy', return_value=self.p), mock.patch.object(self.p, 'backup'):
+            self.assertEqual(policy.main(), 0)
+            self.assertEqual((self.p.host_memory_full_percent, self.p.db_memory_full_percent, self.p.allow_swap_bursts),
+                             (1, 1, False), 'scheduled selections cannot persist into manual runs')
+
+    def test_scheduled_success_qualifies_upload_then_keeps_two_and_finishes_after_expiry(self):
+        old, newer = [self.archive(n) for n in (1, 2)]
+        profile = self.schedule_profile()
+        self.canary()
+        with self.simulated_io():
+            finish = self.p.finish_archive
+            def expire_during_upload(*args):
+                self.schedule_profile(starts_at='2026-01-01T00:00:00+00:00', expires_at='2026-01-01T01:00:00+00:00')
+                return finish(*args)
+            with mock.patch.object(self.p, 'finish_archive', side_effect=expire_during_upload):
+                self.assertEqual(self.scheduled(), 0, 'expiry must not interrupt admitted work or cleanup')
+        records = self.p.inventory()
+        self.assertEqual([r['file'] for r in records[1:]], [newer.name])
+        self.assertEqual(records[0]['integrity']['kind'], 'checksum_upload')
+        self.assertEqual(records[0]['timeline']['full_restore'], {'status': 'not_verified'})
+        self.assertFalse(old.exists())
+        self.assertEqual(set(self.p.objects), {old.name, newer.name, records[0]['file']}, 'remote copies must remain')
+        self.assertFalse((self.p.state / 'pending.json').exists())
+        self.assertEqual(list(self.root.glob('.*.partial.*')), [])
+        attempt = policy.read_json(next(self.p.state.glob('attempt-*.json')))
+        self.assertEqual((attempt['status'], attempt['schedule']), ('completed', profile))
+        with mock.patch.object(self.p, 'backup') as backup:
+            self.assertEqual(self.scheduled(), 1, 'next start must refuse the expired window')
+            backup.assert_not_called()
+
+    def test_scheduled_capacity_refusal_does_not_launch_io(self):
+        self.schedule_profile()
+        paths = [self.archive(n) for n in (1, 2)]
+        self.canary()
+        with mock.patch.object(policy.os, 'statvfs', return_value=types.SimpleNamespace(f_bavail=20 * policy.GIB, f_frsize=1)), \
+                mock.patch.object(self.p, 'dump_archive') as dump, mock.patch.object(self.p, 'transfer_archive') as transfer:
+            self.assertEqual(self.scheduled(), 1)
+            dump.assert_not_called()
+            transfer.assert_not_called()
+        self.assertEqual([p.read_bytes() for p in paths], [b'verified dump'] * 2)
+        self.assertFalse((self.p.state / 'pending.json').exists())
+
+    def test_scheduled_failed_upload_is_preserved_and_never_retried(self):
+        self.schedule_profile()
+        paths = [self.archive(n) for n in (1, 2)]
+        self.canary()
+        self.p.upload_failure = True
+        with self.simulated_io():
+            self.assertEqual(self.scheduled(), 1)
+        pending = (self.p.state / 'pending.json').read_bytes()
+        archives = {p.name: policy.identity(p) for p in self.root.glob('*.dump')}
+        self.assertEqual(len(archives), 3, 'failed upload must preserve the new local archive and both older copies')
+        self.assertEqual([p.read_bytes() for p in paths], [b'verified dump'] * 2)
+        with mock.patch.object(self.p, 'dump_archive') as dump, mock.patch.object(self.p, 'aws') as aws:
+            self.assertEqual(self.scheduled(), 1, 'pending work requires attended reconciliation')
+            dump.assert_not_called()
+            aws.assert_not_called()
+        self.assertEqual({p.name: policy.identity(p) for p in self.root.glob('*.dump')}, archives)
+        self.assertEqual((self.p.state / 'pending.json').read_bytes(), pending)
 
     def test_retention_floor_and_known_good_slot(self):
         for pin, expected in [(None, [2, 3]), (1, [1, 3]), (3, [2, 3])]:

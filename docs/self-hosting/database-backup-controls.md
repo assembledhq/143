@@ -37,7 +37,8 @@ The backup and restore entry points also reject an explicit `false` environment
 value before touching archives or Docker, exiting with status 75. Direct manual
 invocations do not automatically inherit cron's environment: pass the setting
 explicitly and inspect the installed cron before running anything. An absent
-value permits a direct invocation for backward compatibility.
+value permits a direct manual invocation for backward compatibility; scheduled
+mode requires an explicit `BACKUP_ENABLED=true`.
 
 Record the operator, reason, held schedule, latest verified recovery point, next
 reassessment deadline, and rollback contents. Confirm alerting or an explicit
@@ -56,7 +57,7 @@ bash deploy/scripts/pg_backup_test.sh
 bash deploy/scripts/restore_test_test.sh
 ```
 
-## Attended backup policy
+## Backup admission and retention
 
 `pg-backup.sh` and `restore-test.sh` call the Python 3 standard-library policy in
 `deploy/scripts/pg-backup-policy.py`. Install all helpers from the same revision.
@@ -95,17 +96,77 @@ from the full database size. This is preflight admission, not a hard dump-size
 limit. `BACKUP_RESERVE_BYTES` can increase the reserve but cannot lower it below
 20 GiB. `BACKUP_LOCK_TIMEOUT_SECONDS` defaults to 60 seconds, maximum 3600.
 
-The current backup, prune, resume-upload and local restore commands require
+Manual backup, prune, resume-upload and local restore commands require
 both `BACKUP_ATTENDED=true` and a nonempty
 `BACKUP_OBSERVER` identifying the operator. They report JSON events and nonzero
 failures to that operator's terminal. Do not set these variables in cron to
-simulate an observer, and do not resume unattended schedules. The observer must
-watch disk and memory and have an ownership-checked stop procedure. The current
-helpers do not provide unattended scheduling with verified alert delivery.
+simulate an observer. The observer must watch disk and memory and have an
+ownership-checked stop procedure. Scheduled backups use a separately approved
+start window as described below; installing helpers does not validate alert delivery.
 Keep schedules held while validating a deployment and assign an operator to
 arrange attended backups at the six-hour target cadence. If that cannot be met,
 record the recovery-point gap and next reassessment time. Installing helpers
 does not establish backup coverage.
+
+## Time-limited scheduled backups
+
+The backup installer renders `pg-backup.sh --scheduled` for cron. It preserves
+the existing backup and restore holds. Scheduled execution requires both
+`BACKUP_ENABLED=true` and a private approval profile at
+`$BACKUP_DIR/.backup-state/scheduled-backup.json`. Code installation and cron
+refresh do not create, modify or renew this file.
+
+An operator must separately approve and atomically install a profile owned by
+the account running the backup (root for the installed cron), with mode 0600
+inside the existing private state directory. The profile has this shape;
+replace the placeholders with the approved owner, evidence reference and
+timezone-aware ISO-8601 timestamps:
+
+```json
+{
+  "schema": 1,
+  "owner": "<responsible operator>",
+  "evidence": "<private rollout acceptance record>",
+  "starts_at": "<approved start with timezone>",
+  "expires_at": "<approved expiry with timezone>",
+  "host_memory_full_percent": 1,
+  "db_memory_full_percent": 1
+}
+```
+
+The start is inclusive, expiry exclusive, and the window cannot exceed 24 hours.
+Missing, unsafe, malformed, future or expired profiles refuse new work. The
+policy validates the window after acquiring the existing writer lock, before
+retention or backup work. Once an operation is admitted, expiry does not cancel
+its verification, upload, retention or cleanup. A subsequent invocation refuses
+the expired window. Each admitted scheduled attempt records the approved profile;
+failed starts record durable failures. Health reports `backup_held=true` for an
+unavailable window even when the cron enable flag remains true, without hiding
+stale recovery points or overdue restores. Expiry does not rewrite cron.
+
+Scheduled mode uses normal two-copy receipt-qualified retention. It cannot
+bootstrap, act as a canary, run a stop exercise, opt into higher swap limits,
+restore, or retry an ambiguous upload. Standalone prune, upload recovery and
+restore remain attended commands. Common locking, strict admission, runtime
+resource guards, owned cleanup, checksum qualification and preservation of
+uncertain archives are unchanged. Expiry limits the start window, not the number
+of invocations; select the cron cadence and window together for the intended trial.
+
+Each profile's host and database memory-full PSI limit must be exactly 1% or 5%.
+Higher values accept more stalls and possible application latency; use evidence
+from an attended run when approving them. Admission remains at 1% for both,
+and scheduled swap limits remain 256 MiB total and 4 MiB/s. CLI pressure and
+swap overrides cannot be combined with `--scheduled`. Effective limits are
+logged after loading the profile and retained with runtime observations.
+
+Before enabling a window, verify runtime protection and independent monitoring,
+save rollback copies, and identify the operator who will inspect each outcome.
+If external notifications or a full isolated restore are deliberately deferred,
+record those gaps and their reassessment in the private acceptance record.
+A profile is operational authorization, not proof that delivery or restoration
+passed. A backup can stop safely without notifying a human. Observe completed
+cycles, receipt integrity, retained copies and capacity before approving another
+window; there is no automatic renewal or indefinite scheduling mode.
 
 ## Runtime protection and rollout
 
@@ -204,8 +265,9 @@ triggering sample; a null limit means that observation did not enforce PSI
 
 The higher limit accepts more memory stalls and can increase application latency;
 5% is an operator-selected ceiling, not a demonstrated safe latency budget or a
-guarantee that a backup will finish. Use it only for an attended canary after
-reviewing current workload and capacity, keeping the existing stop controls.
+guarantee that a backup will finish. Use this CLI option only for an attended
+canary after reviewing current workload and capacity, keeping the existing stop
+controls. A scheduled window selects its limits through its approved profile.
 
 `--db-memory-full-percent 5` independently permits database memory full PSI
 avg10 up to 5% under the same attended-canary requirements. Its default and
@@ -280,9 +342,10 @@ have a separate opt-in [monitoring installation](database-backup-monitoring.md).
 The backup installer alone does not enable them. Keep operator checks and both
 schedule holds until the deployment's acceptance gates pass.
 
-Before considering unattended operation, save installation rollback copies,
+Before approving a scheduled window, save installation rollback copies,
 run a controlled owned-stop exercise and a complete attended backup, and verify
-independent heartbeat/alert delivery through your monitoring destination. This
+independent heartbeat/alert delivery through your monitoring destination, or
+explicitly record deferred delivery as a rollout risk. This
 explicitly induced failure runs only as an attended canary and skips pruning:
 
 ```sh
@@ -508,7 +571,8 @@ Once a receipt points under `postgres/resumed/`, older policy versions that assu
 reader available for recovery, or use a validated restore procedure
 that follows the recorded key. Do not run an older retention policy, rewrite the
 receipt key, or re-upload the object to make an older version accept it.
-Before routine schedules resume, complete runtime monitoring/alert delivery,
-independent restoration, an attended upload/prune canary, and observation across
-multiple backup cycles. Assign an owner to track free bytes, selected/pinned archives,
-the next-dump estimate, and the seven-day capacity forecast.
+Routine operation needs runtime monitoring/alert delivery, independent restoration,
+an attended upload/prune canary, and observation across multiple backup cycles.
+A time-limited trial may carry explicitly accepted gaps as described above;
+it does not complete those checks. Assign an owner to track free bytes,
+selected/pinned archives, the next-dump estimate, and the seven-day capacity forecast.

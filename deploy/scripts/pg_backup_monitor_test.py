@@ -78,6 +78,20 @@ class MonitorTests(unittest.TestCase):
                 self.assertNotIn('secret', json.dumps(result))
                 send.assert_called_once_with(self.config, result)
 
+    def test_expired_schedule_delivers_held_flag_without_profile_details(self):
+        backups = self.root / 'backups'
+        state = backups / '.backup-state'
+        state.mkdir(mode=0o700, parents=True)
+        self.cron.write_text(f'BACKUP_DIR={backups}\nBACKUP_ENABLED=true\nRESTORE_TEST_ENABLED=false\n')
+        atomic_json(state / 'scheduled-backup.json', dict(schema=1, owner='private operator',
+                    evidence='private approval reference', starts_at='2020-01-01T00:00:00+00:00',
+                    expires_at='2020-01-01T01:00:00+00:00', host_memory_full_percent=1, db_memory_full_percent=1))
+        with mock.patch.object(monitor.health, 'swap_usage', return_value=0), mock.patch.object(monitor, 'deliver') as send:
+            event = monitor.run(self.config_path, self.cron)
+        self.assertEqual((event['backup_held'], event['restore_held'], event['telemetry_failed']), (1, 1, 0))
+        self.assertNotIn('private', json.dumps(event), 'profile details must stay out of central events')
+        send.assert_called_once_with(self.config, event)
+
     def test_event_is_scalar_bounded_and_snapshot_freshness_has_dump_grace(self):
         for age, missed in ((None, 1), (21600, 0), (24300, 0), (24301, 1)):
             with self.subTest(age=age):

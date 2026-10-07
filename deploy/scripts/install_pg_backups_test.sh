@@ -45,13 +45,15 @@ run_installer() {
 # 1. Fresh install renders the expected cron file.
 out="$(run_installer)"
 [ -f "$CRON_FILE" ] || fail "cron file not created"
-grep -q '^0 \*/6 \* \* \* root '"$SCRIPTS"'/pg-backup.sh >> '"$TMP_DIR"'/pg-backup.log 2>&1$' "$CRON_FILE" \
+grep -q '^0 \*/6 \* \* \* root '"$SCRIPTS"'/pg-backup.sh --scheduled >> '"$TMP_DIR"'/pg-backup.log 2>&1$' "$CRON_FILE" \
   || fail "backup cron line missing/wrong:\n$(cat "$CRON_FILE")"
 grep -q '^0 5 \* \* 0 root '"$SCRIPTS"'/restore-test.sh >> '"$TMP_DIR"'/restore-test.log 2>&1$' "$CRON_FILE" \
   || fail "restore-test cron line missing/wrong:\n$(cat "$CRON_FILE")"
 if grep -q '^BACKUP_RETENTION_DAYS=' "$CRON_FILE"; then fail 'obsolete age-based retention must not be installed'; fi
 grep -q "^BACKUP_DIR=$TMP_DIR/backups$" "$CRON_FILE" || fail "BACKUP_DIR not in cron env"
 [ -d "$TMP_DIR/backups" ] || fail "backup dir not created"
+[ ! -e "$TMP_DIR/backups/.backup-state/scheduled-backup.json" ] || fail "installer must not approve a schedule window"
+if grep -q 'BACKUP_ATTENDED\|BACKUP_OBSERVER' "$CRON_FILE"; then fail "cron must not manufacture attendance"; fi
 [ -f "$TMP_DIR/pg-backup.log" ] || fail "pg-backup log not pre-created"
 case "$out" in *"installed $CRON_FILE"*) ;; *) fail "expected install message, got: $out" ;; esac
 
@@ -60,6 +62,13 @@ before="$(cat "$CRON_FILE")"
 out="$(run_installer)"
 [ "$(cat "$CRON_FILE")" = "$before" ] || fail "cron file changed on idempotent re-run"
 case "$out" in *"already up to date"*) ;; *) fail "expected up-to-date message, got: $out" ;; esac
+
+# Reinstalling code/cron must neither renew nor change a private approval window.
+mkdir -p "$TMP_DIR/backups/.backup-state"
+printf '%s\n' '{"expires_at":"2000-01-01T00:00:00+00:00"}' > "$TMP_DIR/backups/.backup-state/scheduled-backup.json"
+profile_before="$(cat "$TMP_DIR/backups/.backup-state/scheduled-backup.json")"
+run_installer >/dev/null 2>&1
+[ "$(cat "$TMP_DIR/backups/.backup-state/scheduled-backup.json")" = "$profile_before" ] || fail "installer changed private schedule approval"
 
 # 3. Env overrides flow into the cron file.
 out="$(run_installer BACKUP_CRON='30 */4 * * *' BACKUP_RETENTION_DAYS=14)"

@@ -44,6 +44,35 @@ def read_json(path):
     return json.loads(path.read_text(), object_pairs_hook=unique_fields)
 
 
+def scheduled_backup_profile(state, current=None):
+    """Read a private approval window for new starts, without claiming attendance.
+
+    Code/cron installation never creates or renews this profile. Expiry blocks
+    new starts, not completion or cleanup of an already admitted operation.
+    """
+    profile = read_json(state / 'scheduled-backup.json')
+    require(isinstance(profile, dict) and set(profile) == {
+        'schema', 'owner', 'evidence', 'starts_at', 'expires_at',
+        'host_memory_full_percent', 'db_memory_full_percent'}, 'invalid scheduled backup profile fields')
+    require(type(profile['schema']) is int and profile['schema'] == 1, 'invalid schedule schema')
+    for key in ('owner', 'evidence'):
+        require(isinstance(profile[key], str) and 0 < len(profile[key].strip()) <= 1024,
+                'scheduled backup requires ' + key)
+    for key in ('host_memory_full_percent', 'db_memory_full_percent'):
+        require(type(profile[key]) is int and profile[key] in (1, 5), 'invalid scheduled pressure limit')
+    times = []
+    for key in ('starts_at', 'expires_at'):
+        require(isinstance(profile[key], str), 'invalid schedule timestamp')
+        parsed = dt.datetime.fromisoformat(profile[key])
+        require(parsed.tzinfo is not None, 'schedule timestamp requires timezone')
+        times.append(parsed.timestamp())
+    start, end = times
+    require(0 < end - start <= 24 * 3600, 'scheduled backup window must be at most 24 hours')
+    current = dt.datetime.now(dt.timezone.utc).timestamp() if current is None else current
+    require(start <= current < end, 'scheduled backup window is not active')
+    return profile
+
+
 def sync_dir(path):
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:

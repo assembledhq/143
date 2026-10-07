@@ -74,6 +74,33 @@ class HealthTests(unittest.TestCase):
         for key in ['backup_held', 'restore_held', 'recovery_stale', 'restore_overdue', 'capacity_low']:
             self.assertTrue(report[key], key)
 
+    def test_scheduled_window_health_reports_holds_without_resetting_recovery_age(self):
+        self.record('20260927-050000')
+        profile = dict(schema=1, owner='test operator', evidence='private acceptance',
+                       starts_at='2026-09-27T11:00:00+00:00', expires_at='2026-09-27T13:00:00+00:00',
+                       host_memory_full_percent=5, db_memory_full_percent=5)
+        target = self.state / 'scheduled-backup.json'
+        cases = [('active', 'true', self.current, False, False),
+                 ('explicit hold', 'false', self.current, True, False),
+                 ('future', 'true', self.current - 3601, True, True),
+                 ('expired', 'true', self.current + 3600, True, True),
+                 ('missing', 'true', self.current, True, True),
+                 ('malformed', 'true', self.current, True, True),
+                 ('unsafe', 'true', self.current, True, True)]
+        for name, enabled, current, held, error in cases:
+            with self.subTest(name=name), mock.patch.dict(os.environ, BACKUP_ENABLED=enabled, RESTORE_TEST_ENABLED='false'):
+                atomic_json(target, profile)
+                if name == 'missing': target.unlink()
+                elif name == 'malformed': target.write_text('{')
+                elif name == 'unsafe': target.chmod(0o644)
+                report = health.collect(self.root, current)
+                self.assertEqual(report['backup_held'], held)
+                self.assertEqual(report['scheduled_backup_error'] is not None, error)
+                self.assertEqual(report['recovery_age_seconds'], 7 * 3600 + current - self.current)
+                self.assertTrue(report['restore_held'])
+                self.assertTrue(report['restore_overdue'], 'a scheduling approval must never imply restore proof')
+                self.assertFalse(report['telemetry_failed'], 'profile refusal must not suppress other health evidence')
+
     def test_failed_or_stuck_attempt_visible_even_without_pending_marker(self):
         for status in ['failed', 'interrupted', 'running']:
             with self.subTest(status=status):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Attended PostgreSQL backup admission and receipt-qualified local retention.
+"""Guarded PostgreSQL backup admission and receipt-qualified local retention.
 
 Uses only Python's standard library. Never downloads/deletes remote objects or
 sources shell configuration. An interrupted run leaves a reconciliation marker;
@@ -29,7 +29,7 @@ GIB = 1024 ** 3
 # Resolve the co-installed helpers without requiring callers to edit sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pg_backup_state import (Refused, require, now, emit, identity, read_json,
-                             sync_dir, atomic_json, sha256, invoke)
+                             sync_dir, atomic_json, sha256, invoke, scheduled_backup_profile)
 from pg_backup_runtime import swap_limits
 
 
@@ -592,11 +592,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='action', required=True)
     backup = sub.add_parser('backup')
+    backup.add_argument('--scheduled', action='store_true',
+                        help='use a separately approved private start window; no attendance claim')
     backup.add_argument('--bootstrap', action='store_true')
     backup.add_argument('--canary', action='store_true')
-    backup.add_argument('--host-memory-full-percent', type=int, choices=(1, 5), default=1,
+    backup.add_argument('--host-memory-full-percent', type=int, choices=(1, 5),
                         help='attended canary only: runtime host memory full PSI avg10 limit; admission stays at 1%%')
-    backup.add_argument('--db-memory-full-percent', type=int, choices=(1, 5), default=1,
+    backup.add_argument('--db-memory-full-percent', type=int, choices=(1, 5),
                         help='attended canary only: runtime database memory full PSI avg10 limit; admission stays at 1%%')
     backup.add_argument('--allow-swap-bursts', action='store_true',
                         help='attended canary only: runtime swap up to 512 MiB and 8 MiB/s; admission stays at 256 MiB and 4 MiB/s')
@@ -618,37 +620,55 @@ def main():
         for field in ('file', 'sha256', 'evidence'):
             command.add_argument('--' + field, required=True)
     args = parser.parse_args()
+    scheduled = args.action == 'backup' and args.scheduled
     attempt = None
     try:
         flag = 'RESTORE_TEST_ENABLED' if args.action == 'restore' else 'BACKUP_ENABLED'
         # Receipt/plan commands are permitted while schedules are held.
         if args.action in ('backup', 'restore', 'prune', 'resume-upload'):
-            require(os.environ.get(flag, 'true') == 'true', flag + ' is not true; operation held')
-        if args.action in ('backup', 'restore', 'prune', 'resume-upload'):
-            require(os.environ.get('BACKUP_ATTENDED') == 'true', 'BACKUP_ATTENDED=true is required until runtime stop and alert delivery are validated')
+            require(os.environ.get(flag, 'false' if scheduled else 'true') == 'true', flag + ' is not true; operation held')
+        if args.action in ('backup', 'restore', 'prune', 'resume-upload') and not scheduled:
+            require(os.environ.get('BACKUP_ATTENDED') == 'true', 'BACKUP_ATTENDED=true is required for manual operations')
             require(os.environ.get('BACKUP_OBSERVER', '').strip(), 'BACKUP_OBSERVER must name the attending operator')
             emit('attended_operation', action=args.action, observer=os.environ['BACKUP_OBSERVER'])
         # Outside the common lock so contention/admission failures are durable.
         attempt = start_attempt(args.action)
+        if scheduled:
+            require(not (args.bootstrap or args.canary or args.allow_swap_bursts or
+                         args.exercise_stop_after is not None or args.host_memory_full_percent is not None or
+                         args.db_memory_full_percent is not None),
+                    'scheduled backups use only the approved profile, without canary or CLI overrides')
         if args.action == 'backup' and args.exercise_stop_after is not None:
             require(args.canary and 5 <= args.exercise_stop_after <= 300,
                     'stop exercise requires --canary and a duration of 5..300 seconds')
         policy = Policy()
         if args.action == 'backup':
+            args.host_memory_full_percent = args.host_memory_full_percent or 1
+            args.db_memory_full_percent = args.db_memory_full_percent or 1
             require(args.canary or not args.allow_swap_bursts, 'swap tolerance requires --canary')
             policy.allow_swap_bursts = args.allow_swap_bursts
             require(args.canary or (args.host_memory_full_percent == 1 and args.db_memory_full_percent == 1),
                     'higher memory pressure limits require --canary')
             policy.host_memory_full_percent = args.host_memory_full_percent
             policy.db_memory_full_percent = args.db_memory_full_percent
-            emit('backup_pressure_policy', host_memory_full_limit_percent=args.host_memory_full_percent,
-                 db_memory_full_limit_percent=args.db_memory_full_percent,
-                 admission_host_memory_full_limit_percent=1, admission_db_memory_full_limit_percent=1,
-                 allow_swap_bursts=args.allow_swap_bursts,
-                 **swap_limits(args.allow_swap_bursts),
-                 admission_swap_usage_limit_bytes=256 * 1024 ** 2,
-                 admission_swap_out_limit_bytes_per_second=4 * 1024 ** 2)
         with policy.locked():
+            if scheduled:
+                # Validate after waiting for the writer lock, before retention
+                # or backup work. A rollout may expire while waiting.
+                profile = scheduled_backup_profile(policy.state)
+                policy.host_memory_full_percent = profile['host_memory_full_percent']
+                policy.db_memory_full_percent = profile['db_memory_full_percent']
+                data = read_json(attempt)
+                atomic_json(attempt, dict(data, execution_mode='scheduled', schedule=profile))
+                emit('scheduled_operation', action='backup', profile=profile)
+            if args.action == 'backup':
+                emit('backup_pressure_policy', host_memory_full_limit_percent=policy.host_memory_full_percent,
+                     db_memory_full_limit_percent=policy.db_memory_full_percent,
+                     admission_host_memory_full_limit_percent=1, admission_db_memory_full_limit_percent=1,
+                     allow_swap_bursts=policy.allow_swap_bursts,
+                     **swap_limits(policy.allow_swap_bursts),
+                     admission_swap_usage_limit_bytes=256 * 1024 ** 2,
+                     admission_swap_out_limit_bytes_per_second=4 * 1024 ** 2)
             if args.action in ('backup', 'restore', 'prune', 'resume-upload'):
                 policy.retire_attempts()
             if args.action == 'backup':

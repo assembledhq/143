@@ -9,7 +9,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pg_backup_state import Refused, require, now, identity, read_json, atomic_json
+from pg_backup_state import Refused, require, now, identity, read_json, atomic_json, scheduled_backup_profile
 
 GIB = 1024 ** 3
 
@@ -118,8 +118,16 @@ def collect(root, current=None):
     restore_age = age(restore['restored_at'], current) if restored else None
     swap = swap_usage()
     newest = max(records, key=recovery_start) if records else {}
+    schedule_active = False
+    schedule_error = None
+    if os.environ.get('BACKUP_ENABLED') == 'true':
+        try:
+            scheduled_backup_profile(state, current)
+            schedule_active = True
+        except (OSError, ValueError, KeyError, TypeError, Refused) as exc:
+            schedule_error = str(exc)
     return dict(time=now(), service='database-backup', event='backup_health', message='Database backup health',
-                backup_held=os.environ.get('BACKUP_ENABLED') != 'true',
+                backup_held=not schedule_active, scheduled_backup_error=schedule_error,
                 restore_held=os.environ.get('RESTORE_TEST_ENABLED') != 'true',
                 telemetry_failed=False, backup_failed=failed, watchdog_stale=bool(stalled),
                 recovery_age_seconds=freshness, recovery_stale=freshness is None or freshness > 6 * 3600,

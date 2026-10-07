@@ -81,7 +81,7 @@ done
 
 mkdir -p "$BACKUP_DIR"
 
-BACKUP_LINE="$BACKUP_CRON root $SCRIPTS_DIR/pg-backup.sh >> $PG_BACKUP_LOG 2>&1"
+BACKUP_LINE="$BACKUP_CRON root $SCRIPTS_DIR/pg-backup.sh --scheduled >> $PG_BACKUP_LOG 2>&1"
 RESTORE_LINE="$RESTORE_TEST_CRON root $SCRIPTS_DIR/restore-test.sh >> $RESTORE_TEST_LOG 2>&1"
 if [ "$BACKUP_ENABLED" = false ]; then
   BACKUP_LINE="# DISABLED: $BACKUP_LINE"
@@ -140,4 +140,4 @@ else
   echo "WARNING: no JSON offsite configuration; backup admission will fail closed." >&2
 fi
 
-echo "WARNING: M1a requires attended runs; cron alone does not authorize admission or retention. See docs/self-hosting/database-backup-controls.md." >&2
+echo "WARNING: scheduled backups require a separately approved private scheduled-backup.json start window; cron alone does not authorize work. Restore testing remains attended. See docs/self-hosting/database-backup-controls.md." >&2
