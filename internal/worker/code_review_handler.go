@@ -4733,10 +4733,10 @@ func codeReviewRecommendedHumanReviewers(reasons []models.CodeReviewRiskReason) 
 }
 
 func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, decision models.CodeReviewDecision, body string, changedFiles []codereviewsvc.PullRequestFile) (codeReviewSubmission, bool, error) {
-	return submitCodeReviewToGitHubWithOptions(ctx, stores, services, job, metadata, decision, body, changedFiles, nil, false)
+	return submitCodeReviewToGitHubWithOptions(ctx, stores, services, job, metadata, decision, body, changedFiles, nil, nil, false)
 }
 
-func submitCodeReviewToGitHubWithOptions(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, decision models.CodeReviewDecision, body string, changedFiles []codereviewsvc.PullRequestFile, preSubmit func(context.Context, db.DBTX, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error), requirePublicationReceipt bool) (codeReviewSubmission, bool, error) {
+func submitCodeReviewToGitHubWithOptions(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, decision models.CodeReviewDecision, body string, changedFiles []codereviewsvc.PullRequestFile, preSubmit func(context.Context, db.DBTX, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error), onSubmitError func(context.Context, error) error, requirePublicationReceipt bool) (codeReviewSubmission, bool, error) {
 	if services == nil || services.CodeReviews == nil {
 		return codeReviewSubmission{}, false, nil
 	}
@@ -4812,6 +4812,9 @@ func submitCodeReviewToGitHubWithOptions(ctx context.Context, stores *Stores, se
 		}
 		var submitErr error
 		result, submitErr = services.CodeReviews.SubmitReview(lockCtx, submitRequest)
+		if submitErr != nil && onSubmitError != nil {
+			return onSubmitError(lockCtx, submitErr)
+		}
 		return submitErr
 	})
 	if err != nil {

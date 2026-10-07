@@ -397,7 +397,7 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return SubmitReviewResult{}, fmt.Errorf("submit GitHub review: %w", readGitHubAPIResponseError(httpReq, resp))
+		return SubmitReviewResult{}, reviewPublicationRejection(fmt.Errorf("submit GitHub review: %w", readGitHubAPIResponseError(httpReq, resp)))
 	}
 	var decoded struct {
 		ID      int64  `json:"id"`
@@ -429,7 +429,7 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 func (s *GitHubSubmitter) updateExistingReview(ctx context.Context, token, owner, repo string, req SubmitReviewRequest, reviewBody string) (SubmitReviewResult, error) {
 	comments, err := s.listPullRequestReviewComments(ctx, token, owner, repo, req.PullNumber)
 	if err != nil {
-		return SubmitReviewResult{}, err
+		return SubmitReviewResult{}, reviewPublicationRejection(err)
 	}
 	existingByMarker := codeReviewCommentsByMarker(comments)
 	posted := make([]SubmitReviewPostedComment, 0, len(req.Comments))
@@ -460,7 +460,7 @@ func (s *GitHubSubmitter) updateExistingReview(ctx context.Context, token, owner
 		if found {
 			if strings.TrimSpace(existing.Body) != strings.TrimSpace(body) {
 				if err := s.updateReviewComment(ctx, token, owner, repo, existing.ID, body); err != nil {
-					return SubmitReviewResult{}, err
+					return SubmitReviewResult{}, reviewPublicationRejection(err)
 				}
 			}
 			posted = append(posted, SubmitReviewPostedComment{
@@ -470,14 +470,14 @@ func (s *GitHubSubmitter) updateExistingReview(ctx context.Context, token, owner
 		}
 		created, err := s.createReviewComment(ctx, token, owner, repo, req.PullNumber, req.HeadSHA, comment, body)
 		if err != nil {
-			return SubmitReviewResult{}, err
+			return SubmitReviewResult{}, reviewPublicationRejection(err)
 		}
 		posted = append(posted, created)
 	}
 
 	result, err := s.updateReviewSummary(ctx, token, owner, repo, req.PullNumber, req.ExistingReviewID, reviewBody)
 	if err != nil {
-		return SubmitReviewResult{}, err
+		return SubmitReviewResult{}, reviewPublicationRejection(err)
 	}
 	if req.Decision == SubmitReviewDecisionApproved {
 		approval, approvalErr := s.ensureFormalApprovalReceipt(ctx, token, owner, repo, req)

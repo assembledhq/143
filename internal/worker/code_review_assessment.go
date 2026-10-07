@@ -120,8 +120,13 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 		assessment.Status = models.CodeReviewAssessmentPublishing
 		assessment.PublicationState = models.CodeReviewPublicationReserved
 	}
+	attemptStartedReserved := false
+	var onSubmitError func(context.Context, error) error
 	var preSubmit func(context.Context, db.DBTX, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error)
 	if assessment != nil {
+		onSubmitError = func(lockCtx context.Context, submitErr error) error {
+			return reconcileRejectedCodeReviewPublication(lockCtx, stores, *assessment, attemptStartedReserved, submitErr)
+		}
 		preSubmit = func(lockCtx context.Context, lockDB db.DBTX, request codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error) {
 			jobID, hasJob := jobctx.JobIDFromContext(ctx)
 			token, hasToken := jobctx.LockTokenFromContext(ctx)
@@ -174,11 +179,12 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 				if err := stores.CodeReviewAssessments.MarkPublicationAttemptUncertain(lockCtx, current.OrgID, current.ID, current.Generation, current.InputDigest); err != nil {
 					return codereviewsvc.SubmitReviewResult{}, false, err
 				}
+				attemptStartedReserved = true
 			}
 			return codereviewsvc.SubmitReviewResult{}, false, nil
 		}
 	}
-	submission, submitted, err := submitCodeReviewToGitHubWithOptions(ctx, stores, services, job, metadata, decision, body, changedFiles, preSubmit, assessment != nil)
+	submission, submitted, err := submitCodeReviewToGitHubWithOptions(ctx, stores, services, job, metadata, decision, body, changedFiles, preSubmit, onSubmitError, assessment != nil)
 	if err != nil {
 		if assessment != nil && (errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable)) {
 			if supersedeErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); supersedeErr != nil {

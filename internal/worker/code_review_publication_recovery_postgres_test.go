@@ -3,12 +3,15 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
@@ -25,6 +28,8 @@ import (
 type inlineRecoveryPublisher struct {
 	files        []codereviewsvc.PullRequestFile
 	fileErr      error
+	submitErr    error
+	cancelSubmit context.CancelFunc
 	fileRequests []codereviewsvc.PullRequestFilesRequest
 	requests     []codereviewsvc.SubmitReviewRequest
 }
@@ -36,6 +41,12 @@ func (p *inlineRecoveryPublisher) ListPullRequestFiles(_ context.Context, reques
 
 func (p *inlineRecoveryPublisher) SubmitReview(_ context.Context, request codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, error) {
 	p.requests = append(p.requests, request)
+	if p.submitErr != nil {
+		if p.cancelSubmit != nil {
+			p.cancelSubmit()
+		}
+		return codereviewsvc.SubmitReviewResult{}, p.submitErr
+	}
 	comments := make([]codereviewsvc.SubmitReviewPostedComment, 0, len(request.Comments))
 	for _, comment := range request.Comments {
 		comments = append(comments, codereviewsvc.SubmitReviewPostedComment{ID: 123, Path: comment.Path, Line: comment.Line, Body: comment.Body, DedupeKey: comment.DedupeKey})
@@ -53,11 +64,19 @@ func TestStagedFullPublicationRecoveryPreservesInlineCommentsPostgres(t *testing
 		name             string
 		publicationState models.CodeReviewPublicationState
 		fileFailure      bool
+		submitErr        error
+		retired          bool
+		cancelOnReject   bool
 	}{
 		{name: "retry before publication reservation", publicationState: models.CodeReviewPublicationNotStarted},
 		{name: "retry after publication reservation", publicationState: models.CodeReviewPublicationReserved},
 		{name: "retry after uncertain publication", publicationState: models.CodeReviewPublicationUncertain},
 		{name: "diff fetch failure remains retryable", publicationState: models.CodeReviewPublicationUncertain, fileFailure: true},
+		{name: "definitive first rejection releases admission", publicationState: models.CodeReviewPublicationReserved, submitErr: fmt.Errorf("%w: %w", codereviewsvc.ErrReviewPublicationRejected, &ghservice.GitHubAPIError{StatusCode: 422}), retired: true},
+		{name: "cancellation after rejection still releases admission", publicationState: models.CodeReviewPublicationReserved, submitErr: fmt.Errorf("%w: %w", codereviewsvc.ErrReviewPublicationRejected, &ghservice.GitHubAPIError{StatusCode: 422}), retired: true, cancelOnReject: true},
+		{name: "later rejection cannot erase earlier uncertainty", publicationState: models.CodeReviewPublicationUncertain, submitErr: fmt.Errorf("%w: %w", codereviewsvc.ErrReviewPublicationRejected, &ghservice.GitHubAPIError{StatusCode: 422})},
+		{name: "first ambiguous send remains blocked", publicationState: models.CodeReviewPublicationReserved, submitErr: errors.New("connection lost after send")},
+		{name: "unclassified rejection remains blocked", publicationState: models.CodeReviewPublicationReserved, submitErr: &ghservice.GitHubAPIError{StatusCode: 422}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -99,7 +118,7 @@ func TestStagedFullPublicationRecoveryPreservesInlineCommentsPostgres(t *testing
 				require.NoError(t, err, "seed staged publication recovery state")
 			}
 			files := []codereviewsvc.PullRequestFile{{Filename: "file.go", Patch: "@@ -351 +351 @@\n-old\n+new", Additions: 1, Deletions: 1}}
-			publisher := &inlineRecoveryPublisher{files: files}
+			publisher := &inlineRecoveryPublisher{files: files, submitErr: tt.submitErr}
 			if tt.fileFailure {
 				publisher.fileErr = &ghservice.GitHubAPIError{StatusCode: http.StatusServiceUnavailable}
 			}
@@ -107,12 +126,63 @@ func TestStagedFullPublicationRecoveryPreservesInlineCommentsPostgres(t *testing
 			stores := &Stores{CodeReviews: db.NewCodeReviewStore(pool), CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool), Repositories: db.NewRepositoryStore(pool), PullRequests: db.NewPullRequestStore(pool), ThreadSendTx: pool}
 			services := &Services{CodeReviews: publisher, CodeReviewInputCapture: capture}
 			job := runCodeReviewPayload{OrgID: org, SessionID: session, MetadataID: metadata, RepositoryID: repo, PullRequestID: pr, PolicyID: policy, PolicyVersion: 1, HeadSHA: "head", OutputKey: key}
-			recovered, err := recoverStagedFullAssessment(jobctx.WithJobID(jobctx.WithLockToken(ctx, lease), jobID), stores, services, job)
-			require.True(t, recovered, "staged publication must take the early recovery path")
+			handlerCtx, cancelHandler := context.WithCancel(jobctx.WithDeadLetterHooks(jobctx.WithJobID(jobctx.WithLockToken(ctx, lease), jobID)))
+			defer cancelHandler()
+			if tt.cancelOnReject {
+				publisher.cancelSubmit = cancelHandler
+			}
+			if tt.retired {
+				_, err = pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='running' WHERE org_id=$1 AND id=$2`, org, metadata)
+				require.NoError(t, err, "start with active metadata to exercise the full terminal hook")
+				payload, marshalErr := json.Marshal(job)
+				require.NoError(t, marshalErr, "encode full review controller job")
+				err = newRunCodeReviewHandler(stores, services, zerolog.Nop())(handlerCtx, "run_code_review", payload)
+				var fatal *FatalError
+				require.ErrorAs(t, err, &fatal, "definitive rejection should immediately invoke the worker terminal path")
+				jobctx.RunDeadLetterHooks(context.WithoutCancel(handlerCtx), err)
+				currentMetadata, metadataErr := stores.CodeReviews.GetBySessionID(ctx, org, session)
+				require.NoError(t, metadataErr, "read metadata after full review terminal hook")
+				require.Equal(t, models.CodeReviewSessionStatusFailed, currentMetadata.Status, "terminal hook must fail the running review metadata")
+				terminalAssessment, assessmentErr := stores.CodeReviewAssessments.GetByID(ctx, org, assessment)
+				require.NoError(t, assessmentErr, "read assessment before the recovery sweeper")
+				require.Equal(t, models.CodeReviewAssessmentFailed, terminalAssessment.Status, "full terminal hook must retire the rejected assessment without relying on a sweep")
+				terminalSchedule, scheduleErr := db.NewCodeReviewScheduleStore(pool).Get(ctx, org, pr)
+				require.NoError(t, scheduleErr, "read scheduler before the recovery sweeper")
+				require.Nil(t, terminalSchedule.ActiveAssessmentID, "full terminal hook must release the scheduler reservation")
+
+			} else {
+				var recovered bool
+				recovered, err = recoverStagedFullAssessment(handlerCtx, stores, services, job)
+				require.True(t, recovered, "staged publication must take the early recovery path")
+			}
 			if tt.fileFailure {
 				var retryable *RetryableError
 				require.ErrorAs(t, err, &retryable, "a temporary diff fetch failure must retry instead of publishing without inline comments")
 				require.Empty(t, publisher.requests, "no GitHub publication may occur without the required diff")
+				return
+			}
+			if tt.submitErr != nil {
+				require.ErrorIs(t, err, tt.submitErr, "original publication failure should reach the controller")
+				terminalReason := codeReviewDeadLetterReason(err)
+				schedule := db.NewCodeReviewScheduleStore(pool)
+				require.NoError(t, schedule.ReconcileTerminalReviews(ctx, org, repo, pr), "reconcile failed controller after publication outcome")
+				got, err := stores.CodeReviewAssessments.GetByID(ctx, org, assessment)
+				require.NoError(t, err, "read reconciled assessment")
+				wantStatus, wantPublication := models.CodeReviewAssessmentPublishing, models.CodeReviewPublicationUncertain
+				if tt.retired {
+					wantStatus, wantPublication = models.CodeReviewAssessmentFailed, models.CodeReviewPublicationReserved
+					require.Equal(t, terminalReason, *got.FailureDetail, "retain the terminal rejection diagnostic")
+				}
+				require.Equal(t, wantStatus, got.Status, "retire only the definitely rejected assessment")
+				require.Equal(t, wantPublication, got.PublicationState, "ambiguous sends must retain their publication fence")
+				require.Equal(t, body, *got.RenderedBody, "recovery must preserve the staged review")
+				require.Nil(t, got.PublicationReceipt, "rejection must not invent a successful receipt")
+				tx, err := pool.Begin(ctx)
+				require.NoError(t, err, "begin admission check")
+				defer func() { _ = tx.Rollback(ctx) }()
+				active, err := db.HasActiveCodeReview(ctx, tx, org, pr, time.Minute)
+				require.NoError(t, err, "check replacement admission")
+				require.Equal(t, !tt.retired, active, "only a definitive first-attempt rejection should unblock the queued review")
 				return
 			}
 			require.NoError(t, err, "staged publication recovery should complete successfully")

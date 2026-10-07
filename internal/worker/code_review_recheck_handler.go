@@ -66,7 +66,8 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 				logger.Warn().Err(loadErr).Str("assessment_id", a.ID.String()).Msg("load dead-lettered assessment failed")
 				return
 			}
-			if current.Status != models.CodeReviewAssessmentRunning && current.Status != models.CodeReviewAssessmentReserved {
+			if current.Status != models.CodeReviewAssessmentRunning && current.Status != models.CodeReviewAssessmentReserved &&
+				!(current.Status == models.CodeReviewAssessmentPublishing && current.PublicationState == models.CodeReviewPublicationReserved) {
 				return
 			}
 			if failErr := stores.CodeReviewAssessments.Fail(hookCtx, current.OrgID, current.ID, current.Generation, current.InputDigest, codeReviewDeadLetterReason(deadLetterErr)); failErr != nil {
@@ -518,6 +519,9 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 				}
 			}
 			result, err = services.CodeReviews.SubmitReview(lockCtx, request)
+			if err != nil {
+				return reconcileRejectedCodeReviewPublication(lockCtx, stores, current, current.PublicationState == models.CodeReviewPublicationReserved, err)
+			}
 		} else {
 			reconciler, ok := services.CodeReviews.(interface {
 				ReconcileAssessmentPublication(context.Context, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error)
@@ -561,7 +565,7 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 		}
 		return errCodeReviewPublicationSuperseded
 	}
-	if errors.Is(err, db.ErrCodeReviewPublicationLockBusy) {
+	if errors.Is(err, db.ErrCodeReviewPublicationLockBusy) || errors.Is(err, codereviewsvc.ErrReviewPublicationRejected) {
 		return classifyGitHubJobError(err, a.SessionID.String())
 	}
 	return err
