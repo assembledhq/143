@@ -207,6 +207,14 @@ The higher limit accepts more memory stalls and can increase application latency
 guarantee that a backup will finish. Use it only for an attended canary after
 reviewing current workload and capacity, keeping the existing stop controls.
 
+`--db-memory-full-percent 5` independently permits database memory full PSI
+avg10 up to 5% under the same attended-canary requirements. Its default and
+admission limit remain 1%; database memory **some** PSI remains capped at 10%.
+This accepts more stalls affecting database work. The effective database limit
+is recorded alongside the host limit, and actual memory headroom, swap, disk
+and time limits remain unchanged. Both options must be supplied explicitly to
+relax both stall thresholds for a single invocation.
+
 Samples normally run five seconds apart. A sample interval exceeding 30 seconds
 fails closed; the caller detects a stuck monitoring watchdog after 45 seconds.
 Cancellation or an explicit cleanup heartbeat starts a separate 120-second

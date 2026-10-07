@@ -159,9 +159,10 @@ class RuntimeTests(unittest.TestCase):
 
     def test_attended_dump_continues_then_stops_with_limit_and_trigger_recorded(self):
         self.p.host_memory_full_percent = 5
+        self.p.db_memory_full_percent = 5
         self.guard = runtime.Guard(self.p, self.partial, self.app, 18 * runtime.GIB)
         samples = [dict(safe_resources(), monotonic=10 + 5 * index,
-                        host_memory={'some': value, 'full': value})
+                        db_memory={'some': value, 'full': value})
                    for index, value in enumerate([2, 5, 5.01])]
         self.supervise_samples(samples)
         history = read_json(self.guard.run / 'samples.json')
@@ -169,11 +170,35 @@ class RuntimeTests(unittest.TestCase):
                          'moderate pressure must continue until the bounded higher limit is exceeded')
         self.assertEqual([row['host_memory_full_limit_percent'] for row in history], [5, 5, 5],
                          'every observation must identify the enforced threshold')
+        self.assertEqual([row['db_memory_full_limit_percent'] for row in history], [5, 5, 5],
+                         'the database pressure override must be explicit in the retained evidence')
         result = read_json(self.guard.result)
         self.assertEqual(result['violating_sample'], history[-1], 'terminal evidence must preserve the exact trigger and limit')
         self.assertTrue(result['cleanup_verified'], 'the existing owned cleanup must still run')
         self.assertFalse(self.partial.exists(), 'only the stopped attempt partial should be removed')
         self.assertEqual(self.completed.read_bytes(), b'previous verified backup', 'old backups must remain intact')
+
+    def test_db_pressure_override_is_bounded_and_keeps_admission_and_other_pressure_guards(self):
+        cases = [
+            ('allow bounded stalls', 'db_memory', {'some': 5, 'full': 5}, False, None),
+            ('over ceiling', 'db_memory', {'some': 5.01, 'full': 5.01}, False, 'db_memory'),
+            ('some pressure unchanged', 'db_memory', {'some': 10.01, 'full': 5}, False, 'db_memory'),
+            ('strict admission', 'db_memory', {'some': 2, 'full': 2}, True, 'db_memory'),
+            ('host unchanged', 'host_memory', {'some': 2, 'full': 2}, False, 'host_memory'),
+            ('IO unchanged', 'db_io', {'some': 20.01, 'full': 20.01}, False, 'db_io'),
+            ('headroom unchanged', 'db_headroom', runtime.GIB / 2 - 1, False, 'database memory'),
+        ]
+        for name, field, value, admission, error in cases:
+            with self.subTest(name=name):
+                sample = dict(safe_resources(), **{field: value})
+                if error:
+                    with self.assertRaisesRegex(Refused, error):
+                        runtime.check_resources(sample, None, self.p.reserve, admission=admission, db_memory_full_percent=5)
+                else:
+                    runtime.check_resources(sample, None, self.p.reserve, db_memory_full_percent=5)
+        for limit in (0, 2, 6, float('nan'), True, '5'):
+            with self.subTest(invalid_limit=limit), self.assertRaisesRegex(Refused, 'pressure limit'):
+                runtime.check_resources(safe_resources(), None, self.p.reserve, db_memory_full_percent=limit)
 
     def test_pressure_missing_invalid_and_over_limit(self):
         for contents in ['some avg10=0 total=0', 'some avg10=nan total=0\nfull avg10=0 total=0',
@@ -213,7 +238,8 @@ class RuntimeTests(unittest.TestCase):
         samples[-1]['host_memory'].update(some=1.01, full=1.01)
         observed_at = '2026-01-01T00:00:00+00:00'
         expected = [dict(at=observed_at, phase='dump', resources=s, client_memory=None,
-                         database=self.db, boot_id='boot', host_memory_full_limit_percent=1) for s in samples]
+                         database=self.db, boot_id='boot', host_memory_full_limit_percent=1,
+                         db_memory_full_limit_percent=1) for s in samples]
         original_check = runtime.check_resources
         def check(sample, previous, reserve, **kwargs):
             self.assertEqual(read_json(self.guard.heartbeat)['resources'], sample,

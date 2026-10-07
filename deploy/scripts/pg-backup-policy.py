@@ -595,6 +595,8 @@ def main():
     backup.add_argument('--canary', action='store_true')
     backup.add_argument('--host-memory-full-percent', type=int, choices=(1, 5), default=1,
                         help='attended canary only: runtime host memory full PSI avg10 limit; admission stays at 1%%')
+    backup.add_argument('--db-memory-full-percent', type=int, choices=(1, 5), default=1,
+                        help='attended canary only: runtime database memory full PSI avg10 limit; admission stays at 1%%')
     backup.add_argument('--exercise-stop-after', type=int, help='attended canary: intentionally stop this dump after 5..300 seconds')
     resume = sub.add_parser('resume-upload', help='attended recovery of a preserved failed upload; no dump or prune')
     resume.add_argument('--original-database-bytes', type=int, help='legacy marker only: original admission-log measurement')
@@ -630,11 +632,13 @@ def main():
                     'stop exercise requires --canary and a duration of 5..300 seconds')
         policy = Policy()
         if args.action == 'backup':
-            require(args.canary or args.host_memory_full_percent == 1,
-                    'higher host memory pressure limit requires --canary')
+            require(args.canary or (args.host_memory_full_percent == 1 and args.db_memory_full_percent == 1),
+                    'higher memory pressure limits require --canary')
             policy.host_memory_full_percent = args.host_memory_full_percent
+            policy.db_memory_full_percent = args.db_memory_full_percent
             emit('backup_pressure_policy', host_memory_full_limit_percent=args.host_memory_full_percent,
-                 admission_host_memory_full_limit_percent=1)
+                 db_memory_full_limit_percent=args.db_memory_full_percent,
+                 admission_host_memory_full_limit_percent=1, admission_db_memory_full_limit_percent=1)
         with policy.locked():
             if args.action in ('backup', 'restore', 'prune', 'resume-upload'):
                 policy.retire_attempts()
