@@ -101,6 +101,57 @@ class RuntimeTests(unittest.TestCase):
                           container_id='c' * 64, creation_started=True, creation_complete=True)
         atomic_json(self.guard.record, self.owned)
 
+    def test_swap_tolerance_boundaries_keep_strict_admission_and_memory_floors(self):
+        mib = 1024 ** 2
+        cases = [
+            ('default rejects burst', False, False, 214 * mib, 5 * 5 * mib, 5, {}, 'swap-out'),
+            ('approved boundaries', True, False, 512 * mib, 5 * 8 * mib, 5, {}, None),
+            ('usage over ceiling', True, False, 512 * mib + 1, 0, 5, {}, 'swap usage'),
+            ('rate over ceiling', True, False, 214 * mib, 5 * 8 * mib + 1, 5, {}, 'swap-out'),
+            ('admission usage', True, True, 256 * mib + 1, 0, 5, {}, 'swap usage'),
+            ('admission rate', True, True, 214 * mib, 5 * 4 * mib + 1, 5, {}, 'swap-out'),
+            ('negative counter', True, False, 0, -1, 5, {}, 'swap-out'),
+            ('delayed monitor', True, False, 0, 0, 31, {}, 'monitor delayed'),
+            ('RAM floor', True, False, 0, 0, 5, {'available_bytes': 1.5 * runtime.GIB - 1}, 'available memory'),
+            ('commit floor', True, False, 0, 0, 5, {'commit_headroom': runtime.GIB - 1}, 'commit'),
+            ('DB floor', True, False, 0, 0, 5, {'db_headroom': runtime.GIB / 2 - 1}, 'database memory'),
+            ('disk floor', True, False, 0, 0, 5, {'free_bytes': 24 * runtime.GIB - 1}, 'disk'),
+            ('PSI unchanged', True, False, 0, 0, 5, {'db_memory': {'some': 2, 'full': 2}}, 'db_memory'),
+        ]
+        for name, allow, admission, used, delta, seconds, fields, error in cases:
+            with self.subTest(name=name):
+                previous = safe_resources()
+                sample = dict(previous, swap_bytes=used, swap_out_bytes=delta,
+                              monotonic=previous['monotonic'] + seconds, **fields)
+                options = dict(allow_swap_bursts=allow, admission=admission)
+                if error:
+                    with self.assertRaisesRegex(Refused, error):
+                        runtime.check_resources(sample, previous, self.p.reserve, **options)
+                else:
+                    runtime.check_resources(sample, previous, self.p.reserve, **options)
+        for invalid in (1, 2, 'true', None):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(Refused, 'unsupported swap'):
+                runtime.check_resources(safe_resources(), None, self.p.reserve, allow_swap_bursts=invalid)
+
+    def test_dump_swap_override_records_trigger_and_cleans_only_owned_partial(self):
+        self.p.allow_swap_bursts = True
+        self.guard = runtime.Guard(self.p, self.partial, self.app, 18 * runtime.GIB)
+        mib = 1024 ** 2
+        samples = [dict(safe_resources(), monotonic=10 + i * 5,
+                        swap_bytes=512 * mib, swap_out_bytes=delta)
+                   for i, delta in enumerate([0, 40 * mib, 80 * mib + 1])]
+        self.supervise_samples(samples)
+        history = read_json(self.guard.run / 'samples.json')
+        self.assertEqual([x['resources'] for x in history], samples, 'continue through approved boundary then stop')
+        self.assertEqual([(x['swap_usage_limit_bytes'], x['swap_out_limit_bytes_per_second']) for x in history],
+                         [(512 * mib, 8 * mib)] * 3, 'record both effective swap ceilings')
+        result = read_json(self.guard.result)
+        self.assertEqual(result['error'], 'swap-out rate at risk', 'stop at the approved ceiling')
+        self.assertEqual(result['violating_sample'], history[-1], 'retain exact trigger through cleanup')
+        self.assertTrue(result['cleanup_verified'], 'owned cleanup must still be proven')
+        self.assertFalse(self.partial.exists(), 'remove only stopped partial')
+        self.assertEqual(self.completed.read_bytes(), b'previous verified backup', 'retain old backup')
+
     def test_resource_boundaries_and_growth(self):
         for field, value, reason in [
                 ('free_bytes', 24 * runtime.GIB - 1, 'disk'),
@@ -239,7 +290,8 @@ class RuntimeTests(unittest.TestCase):
         observed_at = '2026-01-01T00:00:00+00:00'
         expected = [dict(at=observed_at, phase='dump', resources=s, client_memory=None,
                          database=self.db, boot_id='boot', host_memory_full_limit_percent=1,
-                         db_memory_full_limit_percent=1) for s in samples]
+                         db_memory_full_limit_percent=1, swap_usage_limit_bytes=256 * 1024 ** 2,
+                         swap_out_limit_bytes_per_second=4 * 1024 ** 2) for s in samples]
         original_check = runtime.check_resources
         def check(sample, previous, reserve, **kwargs):
             self.assertEqual(read_json(self.guard.heartbeat)['resources'], sample,

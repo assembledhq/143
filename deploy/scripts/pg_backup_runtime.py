@@ -91,10 +91,18 @@ def resources(root, db_pid):
                 monotonic=time.monotonic())
 
 
+def swap_limits(allow_swap_bursts=False, *, admission=False):
+    require(type(allow_swap_bursts) is bool, 'unsupported swap tolerance')
+    multiplier = 2 if allow_swap_bursts and not admission else 1
+    return dict(swap_usage_limit_bytes=multiplier * 256 * 1024 ** 2,
+                swap_out_limit_bytes_per_second=multiplier * 4 * 1024 ** 2)
+
+
 def check_resources(sample, previous, reserve, *, admission=False, estimate=0, capacity_only=False,
-                    host_memory_full_percent=1, db_memory_full_percent=1):
+                    host_memory_full_percent=1, db_memory_full_percent=1, allow_swap_bursts=False):
     for limit in (host_memory_full_percent, db_memory_full_percent):
         require(type(limit) is int and limit in (1, 5), 'unsupported memory pressure limit')
+    swap = swap_limits(allow_swap_bursts, admission=admission)
     # The attended canary override permits moderate stalls during work, never
     # admission into an already pressured host or weaker actual-memory limits.
     host_memory_limit = 1 if admission else host_memory_full_percent
@@ -106,7 +114,7 @@ def check_resources(sample, previous, reserve, *, admission=False, estimate=0, c
     require(sample['db_headroom'] >= (1.5 if admission else 0.5) * GIB, 'database memory limit at risk')
     if capacity_only:
         return  # A tiny confirming listing may proceed despite residual swap/PSI.
-    require(sample['swap_bytes'] <= GIB / 4, 'swap usage at risk')
+    require(sample['swap_bytes'] <= swap['swap_usage_limit_bytes'], 'swap usage at risk')
     for field, part, limit in [('host_io', 'some', 20), ('host_io', 'full', 20),
             ('host_memory', 'full', host_memory_limit), ('db_io', 'some', 20),
             ('db_memory', 'some', 10), ('db_memory', 'full', db_memory_limit)]:
@@ -115,7 +123,7 @@ def check_resources(sample, previous, reserve, *, admission=False, estimate=0, c
         seconds = sample['monotonic'] - previous['monotonic']
         require(0 < seconds <= 30, 'resource monitor delayed')
         delta = sample['swap_out_bytes'] - previous['swap_out_bytes']
-        require(0 <= delta <= seconds * 4 * 1024 ** 2, 'swap-out rate at risk')
+        require(0 <= delta <= seconds * swap['swap_out_limit_bytes_per_second'], 'swap-out rate at risk')
 
 
 class Guard:
@@ -124,6 +132,7 @@ class Guard:
         self.estimate, self.exercise = estimate, exercise
         self.host_memory_full_percent = getattr(policy, 'host_memory_full_percent', 1)
         self.db_memory_full_percent = getattr(policy, 'db_memory_full_percent', 1)
+        self.allow_swap_bursts = getattr(policy, 'allow_swap_bursts', False)
         self.run = policy.state / app
         self.record = self.run / 'ownership.json'
         self.result = self.run / 'result.json'
@@ -272,7 +281,8 @@ class Guard:
                            resources=sample, client_memory=self.client_memory,
                            database=database, boot_id=self.owner_identity[0],
                            host_memory_full_limit_percent=1 if admission else self.host_memory_full_percent,
-                           db_memory_full_limit_percent=1 if admission else self.db_memory_full_percent)
+                           db_memory_full_limit_percent=1 if admission else self.db_memory_full_percent,
+                           **swap_limits(self.allow_swap_bursts, admission=admission))
         # Keep the triggering sample even if enforcement or a later backend
         # query fails. In-memory evidence also survives a failed history write.
         self.last_dump_sample = observation
@@ -284,7 +294,8 @@ class Guard:
             check_resources(sample, previous, self.policy.reserve, admission=admission,
                             estimate=self.estimate if admission else 0,
                             host_memory_full_percent=self.host_memory_full_percent,
-                            db_memory_full_percent=self.db_memory_full_percent)
+                            db_memory_full_percent=self.db_memory_full_percent,
+                            allow_swap_bursts=self.allow_swap_bursts)
         except Refused:
             self.violating_sample = observation
             raise
@@ -487,8 +498,11 @@ class TransferGuard(Guard):
         # Persist the violating sample too, so a stop is diagnosable.
         limit = self.host_memory_full_percent if enforce and self.phase != 'metadata' else None
         db_limit = self.db_memory_full_percent if enforce and self.phase != 'metadata' else None
+        swap = swap_limits(self.allow_swap_bursts)
+        if not enforce or self.phase == 'metadata':
+            swap = dict.fromkeys(swap)
         observation = dict(at=now(), phase=self.phase, resources=sample, client_memory=self.client_memory,
-                           host_memory_full_limit_percent=limit, db_memory_full_limit_percent=db_limit)
+                           host_memory_full_limit_percent=limit, db_memory_full_limit_percent=db_limit, **swap)
         atomic_json(self.heartbeat, observation)
         # Bound the history to twenty minutes at the normal cadence. Retain the
         # threshold-crossing sample before raising, not just cleanup telemetry.
@@ -497,12 +511,13 @@ class TransferGuard(Guard):
         atomic_json(self.run / 'samples.json', self.samples)
         self.phase_resources['last_observation'] = dict(at=observation['at'], phase=self.phase, resources=sample,
                                                        host_memory_full_limit_percent=limit,
-                                                       db_memory_full_limit_percent=db_limit)
+                                                       db_memory_full_limit_percent=db_limit, **swap)
         if enforce:
             check_resources(sample, None if reset_interval else self.previous, self.policy.reserve,
                             capacity_only=self.phase == 'metadata',
                             host_memory_full_percent=self.host_memory_full_percent,
-                            db_memory_full_percent=self.db_memory_full_percent)
+                            db_memory_full_percent=self.db_memory_full_percent,
+                            allow_swap_bursts=self.allow_swap_bursts)
         self.previous = sample
 
     def checkpoint(self, name, *, enforce=True):

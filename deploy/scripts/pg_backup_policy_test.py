@@ -747,6 +747,32 @@ sys.exit(p.main())
                     self.assertEqual(backup.call_args.args[0].db_memory_full_percent, limit,
                                      'the database pressure choice must apply only to this invocation')
 
+    def test_cli_swap_override_is_attended_canary_only_and_resets_each_invocation(self):
+        cases = [
+            ('opt in', ['backup', '--canary', '--allow-swap-bursts'], 'true', 'operator', 0, True),
+            ('default afterwards', ['backup', '--canary'], 'true', 'operator', 0, False),
+            ('non canary', ['backup', '--allow-swap-bursts'], 'true', 'operator', 1, None),
+            ('unattended', ['backup', '--canary', '--allow-swap-bursts'], 'false', 'operator', 1, None),
+            ('unnamed', ['backup', '--canary', '--allow-swap-bursts'], 'true', '', 1, None),
+            ('wrong action', ['resume-upload', '--allow-swap-bursts'], 'true', 'operator', 2, None),
+        ]
+        for name, args, attended, observer, status, expected in cases:
+            with self.subTest(name=name), mock.patch.object(sys, 'argv', ['pg-backup-policy.py', *args]), \
+                    mock.patch.dict(os.environ, BACKUP_ENABLED='true', BACKUP_ATTENDED=attended, BACKUP_OBSERVER=observer), \
+                    mock.patch.object(policy.Policy, 'backup', autospec=True) as backup, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                if status == 2:
+                    with self.assertRaises(SystemExit) as error: policy.main()
+                    self.assertEqual(error.exception.code, 2, 'other actions cannot opt in')
+                else:
+                    self.assertEqual(policy.main(), status, 'enforce attended canary scope')
+                if expected is None:
+                    backup.assert_not_called()
+                else:
+                    backup.assert_called_once()
+                    self.assertIs(backup.call_args.args[0].allow_swap_bursts, expected,
+                                  'the opt-in must not persist between invocations')
+
     def test_aws_transport_does_not_expose_credentials_or_use_sync(self):
         p = policy.Policy()
         p.storage = dict(bucket='test-backups', region='us-east-1', access_key_id='test-id', secret_access_key='literal-$secret')

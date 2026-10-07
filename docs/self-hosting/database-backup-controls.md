@@ -215,6 +215,16 @@ is recorded alongside the host limit, and actual memory headroom, swap, disk
 and time limits remain unchanged. Both options must be supplied explicitly to
 relax both stall thresholds for a single invocation.
 
+`--allow-swap-bursts` permits up to **512 MiB total host swap and 8 MiB/s
+swap-out** during an attended canary's dump, verification and upload. It requires
+`--canary`, `BACKUP_ATTENDED=true` and a named `BACKUP_OBSERVER`. Admission and
+subsequent invocations retain the default 256 MiB and 4 MiB/s limits. Each
+resource observation records the effective byte and byte-per-second ceilings;
+metadata-only checks record null ceilings because they enforce capacity only.
+The option accepts additional paging and possible application latency, while
+preserving memory headroom, disk, PSI, IO, timeout and cleanup controls. It does
+not change cron or persist a new policy.
+
 Samples normally run five seconds apart. A sample interval exceeding 30 seconds
 fails closed; the caller detects a stuck monitoring watchdog after 45 seconds.
 Cancellation or an explicit cleanup heartbeat starts a separate 120-second
@@ -286,6 +296,7 @@ Inspect these independently; a nonzero command exit alone is not proof. Do not
 run this command or clear uncertain markers merely because code/tests passed.
 Full recovery verification requires an isolated restore host. The restore helper
 refuses a Docker daemon containing the configured production database container.
+
 
 ## Data-only offsite configuration
 

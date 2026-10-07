@@ -192,9 +192,36 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(result['phase_resources']['last_observation'], {
             'at': history[-1]['at'], 'phase': 'verification', 'resources': sample,
             'host_memory_full_limit_percent': 5, 'db_memory_full_limit_percent': 5,
+            'swap_usage_limit_bytes': 256 * 1024 ** 2, 'swap_out_limit_bytes_per_second': 4 * 1024 ** 2,
         }, 'cleanup must retain both the triggering sample and its limit')
         self.assertTrue(result['cleanup_verified'], 'the owned reader cleanup must remain required')
         self.assert_preserved()
+
+    def test_transfer_swap_override_retains_trigger_and_archive(self):
+        self.p.allow_swap_bursts = True
+        self.guard = runtime.TransferGuard(self.p, self.partial, self.app, {}, 100, 'test-cli')
+        self.guard.owned = self.owned
+        mib = 1024 ** 2
+        for i, delta in enumerate([0, 40 * mib, 80 * mib + 1]):
+            sample = dict(safe_resources(), monotonic=10 + i * 5, swap_bytes=512 * mib, swap_out_bytes=delta)
+            with mock.patch.object(self.guard, 'database'), mock.patch.object(runtime, 'resources', return_value=sample):
+                if i == 2:
+                    with self.assertRaisesRegex(state.Refused, 'swap-out'): self.guard.tick(force=True)
+                else:
+                    self.guard.tick(force=True)
+        result = self.guard.fail('swap-out rate at risk')
+        last = result['phase_resources']['last_observation']
+        self.assertEqual(last['resources'], sample, 'retain triggering transfer resources')
+        self.assertEqual((last['swap_usage_limit_bytes'], last['swap_out_limit_bytes_per_second']),
+                         (512 * mib, 8 * mib), 'inherit approved swap ceilings into transfer')
+        self.assertTrue(result['cleanup_verified'], 'owned reader cleanup must remain enforced')
+        self.assert_preserved()
+        self.guard.phase = 'metadata'
+        with mock.patch.object(self.guard, 'database'), mock.patch.object(runtime, 'resources', return_value=sample):
+            self.guard.tick(force=True)
+        last = state.read_json(self.guard.heartbeat)
+        self.assertIsNone(last['swap_usage_limit_bytes'], 'metadata capacity check must not claim swap enforcement')
+        self.assertIsNone(last['swap_out_limit_bytes_per_second'], 'metadata capacity check must not claim rate enforcement')
 
     def test_readers_are_owned_bounded_and_success_is_saved_before_removal(self):
         for stage in ('structural', 'upload', 'metadata'):
