@@ -995,7 +995,10 @@ func syncCodeReviewPullRequestState(ctx context.Context, services *Services, log
 	if err := services.PR.SyncPullRequestState(syncCtx, job.OrgID, job.PullRequestID); err != nil {
 		if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
 			delay := 5 * time.Second
-			return &RetryableError{Err: err, RetryAfter: &delay, BypassMaxRetryDuration: true}
+			// GitHub can remain indeterminate indefinitely. Bound this external
+			// wait with the same durable recovery window as other GitHub failures.
+			retryWindow := githubRateLimitMaxRetryDuration
+			return &RetryableError{Err: err, RetryAfter: &delay, MaxRetryDuration: &retryWindow}
 		}
 		if errors.Is(err, ghservice.ErrPullRequestRepositoryDisconnected) {
 			logger.Info().
@@ -2822,6 +2825,7 @@ func codeReviewWaitingForReviewers(policy models.CodeReviewPolicyConfig) error {
 		Err:                    errors.New("waiting for code review reviewer agents"),
 		RetryAfter:             &delay,
 		BypassMaxRetryDuration: true,
+		ResetRetryWindow:       true,
 	}
 }
 
@@ -3393,6 +3397,7 @@ func codeReviewWaitingForOrchestrator(policy models.CodeReviewPolicyConfig) erro
 		Err:                    errors.New("waiting for code review orchestrator agent"),
 		RetryAfter:             &delay,
 		BypassMaxRetryDuration: true,
+		ResetRetryWindow:       true,
 	}
 }
 

@@ -179,7 +179,7 @@ func TestRetryScheduledHookRequiresLeaseOwnedUpdate(t *testing.T) {
 				hookRunAt = runAt
 			})
 
-			runAt, scheduled := worker.retryJobWithDelayAt(ctx, now, jobID, lockToken, "GitHub rate limited", 1, true, &delay, nil, false)
+			runAt, scheduled := worker.retryJobWithDelayAt(ctx, now, jobID, lockToken, "GitHub rate limited", 1, true, &delay, nil, false, false)
 			if scheduled {
 				worker.runRetryScheduledHooks(ctx, errors.New("GitHub rate limited"), runAt)
 			}

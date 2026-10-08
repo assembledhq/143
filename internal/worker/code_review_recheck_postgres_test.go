@@ -584,6 +584,9 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	capture.flipOnCall = capture.calls + 1
 	err = handler(jobctx.WithJobID(jobctx.WithLockToken(ctx, uncertainLease), uncertainJobID), "run_code_review_recheck", uncertainJob)
 	require.Error(t, err, "unresolved uncertain publication should request another reconciliation")
+	var publicationWait *RetryableError
+	require.ErrorAs(t, err, &publicationWait, "missing publication marker should defer reconciliation")
+	require.False(t, publicationWait.ResetRetryWindow, "publication lookup is not agent progress and must preserve the dependency deadline")
 	uncertainOutcome, err := stores.CodeReviewAssessments.GetByID(ctx, org, uncertainAssessment)
 	require.NoError(t, err, "read uncertain assessment after changed input")
 	require.Equal(t, models.CodeReviewAssessmentPublishing, uncertainOutcome.Status, "uncertain external send cannot be declared unsent")
