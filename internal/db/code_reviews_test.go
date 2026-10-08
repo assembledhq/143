@@ -45,8 +45,8 @@ func TestCodeReviewStore_ResolvePolicyUsesOrganizationPolicy(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 			"review_instructions", "automated_approval_policy",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
-		}).AddRow(policyID, orgID, nil, true, 3, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now, []byte("{}")))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy", "continuation_policy",
+		}).AddRow(policyID, orgID, nil, true, 3, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now, []byte("{}"), []byte("{}")))
 
 	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID)
 
@@ -71,7 +71,7 @@ func TestCodeReviewStore_ResolvePolicyUsesDefaultWhenMissing(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 			"review_instructions", "automated_approval_policy",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy", "continuation_policy",
 		}))
 
 	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID)
@@ -105,8 +105,8 @@ func TestCodeReviewStore_GetPolicyByID(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 			"review_instructions", "automated_approval_policy",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
-		}).AddRow(policyID, orgID, &repoID, true, 2, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now, []byte("{}")))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy", "continuation_policy",
+		}).AddRow(policyID, orgID, &repoID, true, 2, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now, []byte("{}"), []byte("{}")))
 
 	record, err := NewCodeReviewStore(mock).GetPolicyByID(context.Background(), orgID, policyID)
 
@@ -148,13 +148,13 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			config.ReviewInstructions, config.AutomatedApprovalPolicy,
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 			"review_instructions", "automated_approval_policy",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
-		}).AddRow(policyID, orgID, nil, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now, []byte("{}")))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy", "continuation_policy",
+		}).AddRow(policyID, orgID, nil, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now, []byte("{}"), []byte("{}")))
 	mock.ExpectCommit()
 
 	var logOutput bytes.Buffer
@@ -191,10 +191,10 @@ func TestCodeReviewStore_ListPolicyVersionsScopesAndPaginatesHistory(t *testing.
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 			"review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster",
-			"inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
+			"inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy", "continuation_policy",
 		}).AddRow(uuid.New(), orgID, nil, false, 8, config.Enabled, config.ApprovalMode,
 			config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster,
-			config.InlineCommentLimit, nil, now, []byte("{}")))
+			config.InlineCommentLimit, nil, now, []byte("{}"), []byte("{}")))
 
 	versions, err := NewCodeReviewStore(mock).ListPolicyVersions(context.Background(), orgID, &beforeVersion, 2)
 
@@ -216,14 +216,23 @@ func TestCodeReviewStore_RunWithGitHubPublicationLock(t *testing.T) {
 	pullRequestID := uuid.New()
 	lockKey := "code_review_status_comment:" + orgID.String() + ":" + pullRequestID.String()
 	mock.ExpectBegin()
+	mock.ExpectExec("SET LOCAL lock_timeout").
+		WillReturnResult(pgxmock.NewResult("SET", 0))
+	mock.ExpectExec("SET LOCAL statement_timeout").
+		WillReturnResult(pgxmock.NewResult("SET", 0))
+	mock.ExpectExec("SET LOCAL idle_in_transaction_session_timeout").
+		WillReturnResult(pgxmock.NewResult("SET", 0))
 	mock.ExpectExec("SELECT pg_advisory_xact_lock").
 		WithArgs(pgx.NamedArgs{"lock_key": lockKey}).
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectCommit()
 
 	called := false
-	err = NewCodeReviewStore(mock).RunWithGitHubPublicationLock(context.Background(), orgID, pullRequestID, func(_ context.Context, lockDB DBTX) error {
+	err = NewCodeReviewStore(mock).RunWithGitHubPublicationLock(context.Background(), orgID, pullRequestID, func(lockCtx context.Context, lockDB DBTX) error {
 		require.NotNil(t, lockDB, "GitHub publication lock should expose its transaction-bound database handle")
+		deadline, ok := lockCtx.Deadline()
+		require.True(t, ok, "GitHub publication lock should bound its callback duration")
+		require.LessOrEqual(t, time.Until(deadline), codeReviewPublicationLockTimeout, "GitHub publication lock deadline should not exceed its cap")
 		called = true
 		return nil
 	})
@@ -231,6 +240,53 @@ func TestCodeReviewStore_RunWithGitHubPublicationLock(t *testing.T) {
 	require.NoError(t, err, "GitHub publication lock should commit after the protected operation")
 	require.True(t, called, "GitHub publication lock should execute the protected operation")
 	require.NoError(t, mock.ExpectationsWereMet(), "GitHub publication lock should use one transaction-scoped advisory lock")
+}
+
+func TestCodeReviewStore_RunWithGitHubPublicationLockRetriesBusyWait(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	orgID, pullRequestID := uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	for _, setting := range []string{"lock_timeout", "statement_timeout", "idle_in_transaction_session_timeout"} {
+		mock.ExpectExec("SET LOCAL " + setting).WillReturnResult(pgxmock.NewResult("SET", 0))
+	}
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").
+		WithArgs(pgx.NamedArgs{"lock_key": "code_review_status_comment:" + orgID.String() + ":" + pullRequestID.String()}).
+		WillReturnError(&pgconn.PgError{Code: "55P03", Message: "canceling statement due to lock timeout"})
+	mock.ExpectRollback()
+
+	err = NewCodeReviewStore(mock).RunWithGitHubPublicationLock(context.Background(), orgID, pullRequestID, func(context.Context, DBTX) error {
+		t.Error("publication callback should not run without the PR lock")
+		return nil
+	})
+	require.ErrorIs(t, err, ErrCodeReviewPublicationLockBusy, "lock contention should be distinguishable from a publication failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "busy publication should roll back its transaction")
+}
+
+func TestCodeReviewStore_RunWithGitHubPublicationLockRetriesCallbackLockTimeout(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	orgID, pullRequestID := uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	for _, setting := range []string{"lock_timeout", "statement_timeout", "idle_in_transaction_session_timeout"} {
+		mock.ExpectExec("SET LOCAL " + setting).WillReturnResult(pgxmock.NewResult("SET", 0))
+	}
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").
+		WithArgs(pgx.NamedArgs{"lock_key": "code_review_status_comment:" + orgID.String() + ":" + pullRequestID.String()}).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectRollback()
+	lockErr := &pgconn.PgError{Code: "55P03", Message: "canceling statement due to lock timeout"}
+	err = NewCodeReviewStore(mock).RunWithGitHubPublicationLock(context.Background(), orgID, pullRequestID, func(context.Context, DBTX) error {
+		return fmt.Errorf("update publication receipt: %w", lockErr)
+	})
+	require.ErrorIs(t, err, ErrCodeReviewPublicationLockBusy, "callback row-lock contention should retry without consuming an attempt")
+	require.NoError(t, mock.ExpectationsWereMet(), "callback lock timeout should roll back its transaction")
 }
 
 func TestCodeReviewStore_CreatePromptRecordPreservesEffectivePrompt(t *testing.T) {
@@ -805,6 +861,34 @@ func TestCodeReviewStore_CompleteReviewPublishesUpdate(t *testing.T) {
 	}, 2*time.Second, 20*time.Millisecond, "CompleteReview should publish a code review update event to subscribers")
 }
 
+func TestCodeReviewStore_FirstReviewerThreadStartedAt(t *testing.T) {
+	t.Parallel()
+	started := time.Date(2026, time.September, 23, 18, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		started  *time.Time
+		wantTime *time.Time
+	}{
+		{name: "reviewer started", started: &started, wantTime: &started},
+		{name: "deterministic review never started a reviewer", started: nil, wantTime: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create a fresh review timing database mock")
+			defer mock.Close()
+			orgID, sessionID := uuid.New(), uuid.New()
+			mock.ExpectQuery(`SELECT MIN\(started_at\)`).WithArgs(orgID, sessionID).
+				WillReturnRows(pgxmock.NewRows([]string{"min"}).AddRow(tt.started))
+			actual, err := NewCodeReviewStore(mock).FirstReviewerThreadStartedAt(context.Background(), orgID, sessionID)
+			require.NoError(t, err, "reviewer timing query should return the tenant's first reviewer claim")
+			require.Equal(t, tt.wantTime, actual, "reviewer timing should preserve the exact first claim or its absence")
+			require.NoError(t, mock.ExpectationsWereMet(), "reviewer timing query should filter by organization and session")
+		})
+	}
+}
+
 func TestCodeReviewStore_CompleteReviewRejectsInvalidChangeBreakdown(t *testing.T) {
 	t.Parallel()
 
@@ -883,8 +967,8 @@ func TestCodeReviewStore_CompleteReviewWritesOnlyMigratedSizeColumns(t *testing.
 	completion = completion[:strings.Index(completion, "RETURNING ")]
 	require.NotEmpty(t, completion, "test should isolate the completion UPDATE")
 
-	require.Contains(t, completion, "additions = @additions", "completion should persist additions for author analytics")
-	require.Contains(t, completion, "deletions = @deletions", "completion should persist deletions for author analytics")
+	require.Contains(t, completion, "additions = COALESCE(@additions, additions)", "completion should persist additions or preserve the recorded value during recovery")
+	require.Contains(t, completion, "deletions = COALESCE(@deletions, deletions)", "completion should persist deletions or preserve the recorded value during recovery")
 	for _, column := range []string{"files_changed", "lines_changed"} {
 		require.NotContainsf(
 			t, completion, column,
@@ -1244,7 +1328,7 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery("(?s)m.status = 'failed'.*pr.status = 'open'.*current_health.head_sha = m.head_sha.*FROM code_review_session_metadata newer.*approved.status = 'completed'.*policy.active = true.*AS retry_eligible.*m.decision = @decision.*risk_reason->>'code' = @reason.*LOWER\\(COALESCE\\(NULLIF\\(s.revision_context->>'pull_request_author', ''\\), 'Unknown'\\)\\) = LOWER\\(@author\\)").
+	mock.ExpectQuery("(?s)m.status = 'failed'.*pr.status = 'open'.*current_health.head_sha = m.head_sha.*FROM code_review_session_metadata newer.*approved.status = 'completed'.*policy.active = true.*AS retry_eligible.*COALESCE\\(ca\\.decision,m\\.decision\\) = @decision.*risk_reason->>'code' = @reason.*LOWER\\(COALESCE\\(NULLIF\\(s.revision_context->>'pull_request_author', ''\\), 'Unknown'\\)\\) = LOWER\\(@author\\)").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -1294,12 +1378,12 @@ func TestCodeReviewStore_ListReviewsAppliesOutcomeFilters(t *testing.T) {
 		{
 			name:            "automatically approved requires a completed posted approval",
 			outcome:         models.CodeReviewListOutcomeAutomaticallyApproved,
-			expectedPattern: `m\.status = 'completed'\s+AND m\.decision = 'approved'\s+AND m\.github_review_id IS NOT NULL`,
+			expectedPattern: `m\.status = 'completed'\s+AND COALESCE\(ca\.decision,m\.decision\) = 'approved'\s+AND .*github_review_id.* IS NOT NULL`,
 		},
 		{
 			name:            "completed not approved includes approval decisions that were not posted",
 			outcome:         models.CodeReviewListOutcomeCompletedNotApproved,
-			expectedPattern: `m\.status = 'completed'\s+AND \(m\.decision IS DISTINCT FROM 'approved'\s+OR m\.github_review_id IS NULL\)`,
+			expectedPattern: `m\.status = 'completed'\s+AND \(COALESCE\(ca\.decision,m\.decision\) IS DISTINCT FROM 'approved'\s+OR .*github_review_id.* IS NULL\)`,
 		},
 	}
 
@@ -1389,13 +1473,13 @@ func TestCodeReviewStore_SavePolicyExpectingVersionIncrementsFromCurrent(t *test
 		WithArgs(
 			pgxmock.AnyArg(), 4, pgxmock.AnyArg(), pgxmock.AnyArg(),
 			config.ReviewInstructions, config.AutomatedApprovalPolicy,
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 			"review_instructions", "automated_approval_policy",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
-		}).AddRow(policyID, orgID, nil, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, nil, now, []byte("{}")))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy", "continuation_policy",
+		}).AddRow(policyID, orgID, nil, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, nil, now, []byte("{}"), []byte("{}")))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(orgID, "feedback", models.JobTypeRankCodeReviewDispute, pgxmock.AnyArg(), 2, pgxmock.AnyArg(), 6).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -1785,7 +1869,7 @@ func TestCodeReviewListOrderBy(t *testing.T) {
 		// newest-first order instead of falling back to the random UUID key, and
 		// NULLS LAST appears only for the one sort that can produce a null.
 		{name: "repository ascending", sortBy: "repository", sortOrder: "asc", expected: " ORDER BY r.full_name ASC, m.created_at DESC, m.id DESC"},
-		{name: "completed descending", sortBy: "completed", sortOrder: "desc", expected: " ORDER BY m.completed_at DESC NULLS LAST, m.created_at DESC, m.id DESC"},
+		{name: "completed descending", sortBy: "completed", sortOrder: "desc", expected: " ORDER BY COALESCE(ca.completed_at,m.completed_at) DESC NULLS LAST, m.created_at DESC, m.id DESC"},
 		{name: "rank sorts break ties by recency", sortBy: "risk", sortOrder: "asc", expected: " ORDER BY " + codeReviewRiskRankSQL + " ASC, m.created_at DESC, m.id DESC"},
 		{name: "rejects unknown column", sortBy: "created_at; DROP TABLE sessions", expectErr: true},
 		{name: "rejects unknown direction", sortBy: "outcome", sortOrder: "sideways", expectErr: true},
@@ -1830,7 +1914,7 @@ func TestCodeReviewSortedCursorPredicate(t *testing.T) {
 			filters: CodeReviewListFilters{
 				SortBy: "completed", SortOrder: "desc", CursorSortValue: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 			},
-			expectedWhere:  "m.completed_at < @cursor_sort_value",
+			expectedWhere:  "COALESCE(ca.completed_at,m.completed_at) < @cursor_sort_value",
 			expectedValue:  time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 			expectsNullArm: true,
 		},
@@ -1839,14 +1923,14 @@ func TestCodeReviewSortedCursorPredicate(t *testing.T) {
 			filters: CodeReviewListFilters{
 				SortBy: "completed", SortOrder: "asc", CursorSortNull: true,
 			},
-			expectedWhere: "m.completed_at IS NULL AND (m.created_at, m.id) < (@cursor_created_at, @cursor)",
+			expectedWhere: "COALESCE(ca.completed_at,m.completed_at) IS NULL AND (m.created_at, m.id) < (@cursor_created_at, @cursor)",
 		},
 		{
 			name: "label-derived sort anchors on the displayed rank",
 			filters: CodeReviewListFilters{
 				SortBy: "risk", SortOrder: "asc", CursorSortValue: 1,
 			},
-			expectedWhere: "WHEN m.acceptable THEN 0",
+			expectedWhere: "WHEN COALESCE(ca.acceptable,m.acceptable) THEN 0",
 			expectedValue: 1,
 		},
 	}
@@ -1873,7 +1957,7 @@ func TestCodeReviewSortedCursorPredicate(t *testing.T) {
 			}
 			// Only completed_at can be null, so only it should widen the page to
 			// the trailing null partition.
-			require.Equal(t, tt.expectsNullArm, strings.Contains(where, "OR m.completed_at IS NULL"),
+			require.Equal(t, tt.expectsNullArm, strings.Contains(where, "OR COALESCE(ca.completed_at,m.completed_at) IS NULL"),
 				"the trailing null partition should appear only for a nullable sort")
 		})
 	}
@@ -2222,12 +2306,12 @@ func TestCodeReviewStore_ListReviewsPageAppliesOutcomeToCountAndRows(t *testing.
 		{
 			name:    "automatically approved",
 			outcome: models.CodeReviewListOutcomeAutomaticallyApproved,
-			pattern: `m\.status = 'completed' AND m\.decision = 'approved' AND m\.github_review_id IS NOT NULL`,
+			pattern: `m\.status = 'completed' AND COALESCE\(ca\.decision,m\.decision\) = 'approved' AND .*github_review_id.* IS NOT NULL`,
 		},
 		{
 			name:    "completed not approved",
 			outcome: models.CodeReviewListOutcomeCompletedNotApproved,
-			pattern: `m\.status = 'completed' AND \(m\.decision IS DISTINCT FROM 'approved' OR m\.github_review_id IS NULL\)`,
+			pattern: `m\.status = 'completed' AND \(COALESCE\(ca\.decision,m\.decision\) IS DISTINCT FROM 'approved' OR .*github_review_id.* IS NULL\)`,
 		},
 	}
 

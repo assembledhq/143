@@ -221,6 +221,7 @@ import {
   statusConfig,
   shouldInvalidateForActivityLifecycleEvent,
   trackInFlightAgentUpdate,
+  visibleSessionThreads,
   type PendingThreadPreview,
 } from "./session-detail-state";
 
@@ -4264,10 +4265,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     void refetchDiff();
   }, [diffRevisionKey, isDiffFetchedAfterMount, refetchDiff, sessionDiffPayload, shouldLoadDiff]);
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
+  const visibleThreads = useMemo(() => visibleSessionThreads(session?.origin, threads), [session?.origin, threads]);
   const [pendingThreadPreview, setPendingThreadPreview] = useState<PendingThreadPreview | null>(null);
   const chromeThreads = useMemo(
-    () => buildChromeThreads(threads, pendingThreadPreview),
-    [pendingThreadPreview, threads],
+    () => buildChromeThreads(visibleThreads, pendingThreadPreview),
+    [pendingThreadPreview, visibleThreads],
   );
   const nonInteractiveThreadIds = useMemo(
     () => new Set(pendingThreadPreview?.id === "__pending-thread__" ? [pendingThreadPreview.id] : []),
@@ -4541,12 +4543,12 @@ export function SessionDetailContent({ id }: { id: string }) {
           return;
         }
         setHasResolvedInitialThreadSelection(true);
-        setActiveThreadId(threads[0].id);
+        setActiveThreadId(chromeThreads[0].id);
         return;
       }
 
       const storedThreadId = readStoredSessionActiveThread(window.localStorage, id, viewerScope);
-      const nextThreadId = resolveInitialSessionThreadId(threads, storedThreadId);
+      const nextThreadId = resolveInitialSessionThreadId(chromeThreads, storedThreadId);
       setHasResolvedInitialThreadSelection(true);
       if (activeThreadId !== nextThreadId) {
         setActiveThreadId(nextThreadId);
@@ -4557,7 +4559,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     if (!activeThreadId || !chromeThreads.some((thread) => thread.id === activeThreadId)) {
       setActiveThreadId(chromeThreads[0].id);
     }
-  }, [activeThreadId, chromeThreads, hasResolvedInitialThreadSelection, id, isAuthLoading, session, threads, viewerScope]);
+  }, [activeThreadId, chromeThreads, hasResolvedInitialThreadSelection, id, isAuthLoading, session, viewerScope]);
 
   useEffect(() => {
     if (!hasResolvedInitialThreadSelection || !viewerScope || !activeThreadId || typeof window === "undefined") {
@@ -5556,18 +5558,21 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => comments.filter((comment) => !comment.resolved).slice(0, MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE),
     [comments],
   );
-  const isRestoringActiveThread = threads.length > 0 && activeThread === null;
+  const isRestoringActiveThread = chromeThreads.length > 0 && activeThread === null;
+  const isCodeReviewSession = session?.origin === "code_review";
   // Composer gating: messages may be sent at any point while the session or
   // thread is running. The backend queues mid-turn sends and the orchestrator
   // drains the queue once the in-flight turn completes. Pending/skipped at
   // the session level and a destroyed sandbox still block — those are
   // genuinely unrecoverable, not just busy.
-  const composerCanSendMessage = !isRestoringActiveThread &&
+  const composerCanSendMessage = !isRestoringActiveThread && !isCodeReviewSession &&
     session?.status !== "skipped" &&
     session?.status !== "pending" &&
     session?.sandbox_state !== "destroyed";
-  const composerUnavailableReason = isRestoringActiveThread ? "Thread is still loading." : undefined;
-  const composerPlaceholderOverride = isRestoringActiveThread ? "Loading thread..." : undefined;
+  const composerUnavailableReason = isRestoringActiveThread
+    ? "Thread is still loading." : undefined;
+  const composerPlaceholderOverride = isRestoringActiveThread
+    ? "Loading thread..." : undefined;
   const composerIsRunning = activeThread ? activeThread.status === "running" : session?.status === "running";
   const runtimeRecoveryActive = session ? isRuntimeRecoveryActive(session) : false;
   const localStopRequested = sessionStopRequest?.sessionId === id && composerIsRunning;
@@ -5960,7 +5965,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         };
       });
       if (activeThreadId === archivedThreadID) {
-        const fallback = threads.find((thread) => thread.id !== archivedThreadID);
+        const fallback = chromeThreads.find((thread) => thread.id !== archivedThreadID);
         setActiveThreadId(fallback?.id ?? null);
       }
       queryClient.invalidateQueries({ queryKey: ["session", id] });
@@ -6229,10 +6234,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   const isDedicatedMobileReview = centerMode === "review" && isMobileReviewViewport;
 
   useEffect(() => {
-    if (!isDedicatedMobileReview) {
+    if (!isDedicatedMobileReview || isCodeReviewSession) {
       setMobileReviewComposerOpen(false);
     }
-  }, [isDedicatedMobileReview]);
+  }, [isCodeReviewSession, isDedicatedMobileReview]);
 
   const focusActiveDetailTab = useCallback(() => {
     requestAnimationFrame(() => {
@@ -6336,11 +6341,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     onShowHelp: () => setKeyboardHelpOpen(true),
     onFocusComposer: focusComposerFromKeyboard,
     transcript: chatPanelKeyboardControls,
-    agentTabs: threads.length > 0 && activeThreadIndex >= 0 ? {
+    agentTabs: chromeThreads.length > 0 && activeThreadIndex >= 0 ? {
       activeIndex: activeThreadIndex,
-      count: threads.length,
+      count: chromeThreads.length,
       onChange: (index) => {
-        const next = threads[index];
+        const next = chromeThreads[index];
         if (next) {
           setActiveThreadId(next.id);
           chatPanelKeyboardControls?.focus();
@@ -7148,6 +7153,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               onAddThread={openAddThreadDialog}
               onRenameSession={openMobileRenameDialog}
               onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+              allowCloseTabs={!isCodeReviewSession}
               onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
               archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             />
@@ -7270,6 +7276,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               onAddTab={handleCreateThread}
               addTabPending={createThreadMutation.isPending}
               onRevertThread={(tid) => revertThreadMutation.mutate(tid)}
+              allowCloseTabs={!isCodeReviewSession}
               onArchiveThread={(tid) => archiveThreadMutation.mutate(tid)}
               archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
               addTabButtonRef={addTabButtonRef}
@@ -7281,7 +7288,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           {/* Chat panel stays mounted after first chat exposure to preserve scroll and live transcript state. */}
           {hasMountedChatPanel ? (
             <div className={cn("h-full", centerMode !== "chat" && "hidden")}>
-              {threads.length > 0 && activeThread === null ? (
+              {isRestoringActiveThread ? (
                 <div className="flex h-full items-center justify-center">
                   <div className="text-center space-y-2">
                     <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
@@ -7344,7 +7351,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     onBack={exitReview}
                     isMobile={isMobileReviewViewport}
                     onOpenFileList={openMobileFilesList}
-                    onOpenComposer={session.agent_type !== "pm_agent" ? openMobileReviewComposer : undefined}
+                    onOpenComposer={session.agent_type !== "pm_agent" && !isCodeReviewSession ? openMobileReviewComposer : undefined}
                     commentsByLine={commentsByLine}
                     activeCommentLine={activeCommentLine}
                     onAddComment={handleAddComment}
@@ -7363,7 +7370,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           )}
         </div>
 
-        {session.agent_type !== "pm_agent" && !isDedicatedMobileReview && (
+        {session.agent_type !== "pm_agent" && !isCodeReviewSession && !isDedicatedMobileReview && (
           <>
             {composerIsSnapshotExpired && (
               <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-warning/10 border-warning/30 text-warning">
@@ -7610,7 +7617,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      {session.agent_type !== "pm_agent" ? (
+      {session.agent_type !== "pm_agent" && !isCodeReviewSession ? (
         <Sheet open={mobileReviewComposerOpen} onOpenChange={setMobileReviewComposerOpen}>
           <SheetContent
             side="bottom"

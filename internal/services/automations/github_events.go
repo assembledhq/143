@@ -50,13 +50,20 @@ type GitHubEventTriggerRequest struct {
 	HeadSHA           string
 	Actor             string
 	ActorType         string
-	Body              string
-	ProviderEventID   string
-	EventID           string
-	DedupeGroupID     string
-	BaseBranch        string
-	Path              string
-	ReviewState       string
+	// OwnAppComment is derived from GitHub app provenance after webhook verification.
+	OwnAppComment   bool
+	CommentID       int64
+	Body            string
+	ProviderEventID string
+	EventID         string
+	DedupeGroupID   string
+	BaseBranch      string
+	Path            string
+	ReviewState     string
+	// PullRequestUpdatedAt is GitHub's pull_request.updated_at for the
+	// delivery. It orders pushes for per-target continuity (design doc 125,
+	// "Head Authority"); nil when the payload omitted it.
+	PullRequestUpdatedAt *time.Time
 	// RequireLabelFilter marks pull_request labeled deliveries. These
 	// deliveries re-evaluate lifecycle triggers only for automations whose
 	// label filter contains ChangedLabel.
@@ -81,12 +88,23 @@ type GitHubEventTriggerService struct {
 	txStarter    githubEventTxStarter
 	capabilities githubCapabilityResolver
 	labels       githubLabelResolver
+	targets      githubAutomationTargetStore
+	arrivalRuns  githubAutomationArrivalRunStore
+	actions      githubAutomationActionLookup
 	logger       zerolog.Logger
 	now          func() time.Time
 
 	labelMemoMu sync.Mutex
 	labelMemo   map[githubLabelMemoKey]githubLabelMemoEntry
 	labelGroup  singleflight.Group
+}
+
+type githubAutomationActionLookup interface {
+	ListAutomationActionCommentOwners(context.Context, uuid.UUID, uuid.UUID, int, int64, string) ([]uuid.UUID, error)
+}
+
+func (s *GitHubEventTriggerService) SetActions(store githubAutomationActionLookup) {
+	s.actions = store
 }
 
 type githubCapabilityResolver interface {
@@ -166,7 +184,20 @@ func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req 
 	}
 	s.rememberKnownLabels(req)
 	var resolvedLabelReq *GitHubEventTriggerRequest
+	commentOwners := map[uuid.UUID]bool{}
+	if req.OwnAppComment && req.CommentID > 0 && s.actions != nil {
+		owners, err := s.actions.ListAutomationActionCommentOwners(ctx, req.OrgID, req.RepositoryID, req.PullRequestNumber, req.CommentID, req.Body)
+		if err != nil {
+			return fmt.Errorf("check automation action webhook: %w", err)
+		}
+		for _, id := range owners {
+			commentOwners[id] = true
+		}
+	}
 	for _, automation := range automations {
+		if commentOwners[automation.ID] {
+			continue
+		}
 		filters, err := decodeGitHubEventFilters(automation)
 		if err != nil {
 			return err
@@ -175,7 +206,7 @@ func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req 
 			continue
 		}
 		automationReq := req
-		if len(filters.Labels) > 0 && !req.LabelsKnown {
+		if (len(filters.Labels) > 0 || len(filters.ExcludedLabels) > 0) && !req.LabelsKnown {
 			if resolvedLabelReq == nil {
 				resolved := s.withResolvedLabels(ctx, req)
 				resolvedLabelReq = &resolved
@@ -192,8 +223,8 @@ func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req 
 
 // withResolvedLabels fills in PR labels for one label-filtered automation.
 // The caller invokes it inside the per-automation loop and reuses the result
-// for other label-filtered siblings; automations without that filter keep the
-// original request and do not receive resolved labels in their snapshots.
+// for other label-filtered siblings; automations without either label filter
+// keep the original request and do not receive resolved labels in snapshots.
 func (s *GitHubEventTriggerService) withResolvedLabels(ctx context.Context, req GitHubEventTriggerRequest) GitHubEventTriggerRequest {
 	if req.LabelsKnown || s.labels == nil || req.PullRequestNumber <= 0 {
 		return req
@@ -396,6 +427,16 @@ func (s *GitHubEventTriggerService) triggerAutomation(ctx context.Context, autom
 	if !created {
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit duplicate github automation run tx: %w", err)
+		}
+		return nil
+	}
+	dispatchable, err := s.recordTargetArrival(ctx, tx, automation, run, req)
+	if err != nil {
+		return fmt.Errorf("record automation target arrival: %w", err)
+	}
+	if !dispatchable {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit terminalized github automation run tx: %w", err)
 		}
 		return nil
 	}
@@ -709,10 +750,15 @@ func automationMatchesGitHubEventFilters(automation models.Automation, req GitHu
 	if len(filters.Paths) > 0 && req.Path != "" && !matchesPathFilter(filters.Paths, req.Path) {
 		return false, nil
 	}
-	// Labels are matched strictly: an event whose labels are unknown (payload
-	// carried none and the API lookup was unavailable or failed) cannot satisfy
-	// a label filter.
-	if len(filters.Labels) > 0 && (!req.LabelsKnown || !matchesAnyFold(filters.Labels, req.Labels)) {
+	// Both label filters require known labels. Otherwise an unavailable API
+	// lookup could let an excluded PR through.
+	if (len(filters.Labels) > 0 || len(filters.ExcludedLabels) > 0) && !req.LabelsKnown {
+		return false, nil
+	}
+	if len(filters.Labels) > 0 && !matchesAnyFold(filters.Labels, req.Labels) {
+		return false, nil
+	}
+	if len(filters.ExcludedLabels) > 0 && matchesAnyFold(filters.ExcludedLabels, req.Labels) {
 		return false, nil
 	}
 	if len(filters.FeedbackTypes) > 0 && isGitHubFeedbackEvent(req.Event) && !containsFold(filters.FeedbackTypes, githubFeedbackType(req.Event)) {

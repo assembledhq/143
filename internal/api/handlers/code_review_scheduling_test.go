@@ -60,6 +60,7 @@ func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 		{name: "scheduling service unavailable", mode: "review_now", disabled: true, status: 503, code: "CODE_REVIEW_SCHEDULING_UNAVAILABLE"},
 		{name: "closed or policy disabled", mode: "review_now", err: codereviewsvc.ErrReviewIneligible, status: 409, code: "CODE_REVIEW_PR_INELIGIBLE"},
 		{name: "conflicting request identity", mode: "review_now", err: db.ErrCodeReviewRequestConflict, status: 409, code: "CODE_REVIEW_REQUEST_ID_CONFLICT"},
+		{name: "terminal evidence capture failure", mode: "review_now", err: codereviewsvc.ErrRecheckUnavailable, status: 409, code: "CODE_REVIEW_RECHECK_UNAVAILABLE"},
 		{name: "foreign target", mode: "review_now", err: pgx.ErrNoRows, status: 404, code: "CODE_REVIEW_NOT_FOUND"},
 	}
 	for _, tt := range tests {

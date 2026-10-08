@@ -121,6 +121,18 @@ func (s *drainStubSessions) UpdateRevisionContext(context.Context, uuid.UUID, uu
 func (s *drainStubSessions) AcquireTurnHold(context.Context, uuid.UUID, uuid.UUID, string) (string, error) {
 	return "", nil
 }
+func (s *drainStubSessions) AcquireExistingTurnHold(context.Context, uuid.UUID, uuid.UUID, string) (bool, error) {
+	return true, nil
+}
+func (s *drainStubSessions) ResetAfterLostReuse(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
+}
+func (s *drainStubSessions) PeekContainerID(context.Context, uuid.UUID, uuid.UUID) (string, error) {
+	if s.session.ContainerID != nil {
+		return *s.session.ContainerID, nil
+	}
+	return "", nil
+}
 func (s *drainStubSessions) SetWorkerNodeIDForContainer(context.Context, uuid.UUID, uuid.UUID, string, string) error {
 	return nil
 }

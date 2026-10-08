@@ -1504,6 +1504,165 @@ describe("AutomationDetailPage", () => {
     );
   });
 
+  it("saves session continuity inline when the automation qualifies", async () => {
+    const user = userEvent.setup();
+    const updateBodies: Record<string, unknown>[] = [];
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Front-end review",
+            goal: "Review against the design principles",
+            scope: "",
+            identity_scope: "org",
+            publish_policy: "none",
+            session_continuity: "per_run",
+            schedule_type: "none",
+            github_event_triggers: ["github.pull_request.updated"],
+            base_branch: "main",
+            enabled: true,
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBodies.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Front-end review")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.queryByTestId("automation-session-continuity-hint"),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("combobox", { name: "Session continuity" }),
+    );
+    await user.click(
+      await screen.findByRole("option", {
+        name: "Continue one session per pull request",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(updateBodies).toContainEqual({ session_continuity: "per_target" }),
+    );
+  });
+
+  it("warns that per-pull-request sessions cannot be messaged", async () => {
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Front-end review",
+            goal: "Review against the design principles",
+            scope: "",
+            identity_scope: "org",
+            publish_policy: "none",
+            session_continuity: "per_target",
+            schedule_type: "none",
+            github_event_triggers: ["github.pull_request.updated"],
+            base_branch: "main",
+            enabled: true,
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Front-end review")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByRole("combobox", { name: "Session continuity" }),
+    ).toHaveTextContent("Continue one session per pull request");
+    expect(
+      screen.getByTestId("automation-session-continuity-hint"),
+    ).toHaveTextContent("cannot message these sessions");
+  });
+
+  it("explains why per-pull-request continuity is unavailable", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            identity_scope: "org",
+            publish_policy: "pull_request",
+            interval_value: 1,
+            interval_unit: "weeks",
+            base_branch: "main",
+            enabled: true,
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByTestId("automation-session-continuity-hint"),
+    ).toHaveTextContent("needs a pull request trigger");
+
+    await user.click(
+      screen.getByRole("combobox", { name: "Session continuity" }),
+    );
+    expect(
+      await screen.findByRole("option", {
+        name: "Continue one session per pull request",
+      }),
+    ).toHaveAttribute("aria-disabled", "true");
+  });
+
   it("saves the selected automation emoji inline", async () => {
     const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;
@@ -2696,7 +2855,7 @@ describe("AutomationDetailPage", () => {
             next_run_at: null,
             priority: 50,
             github_event_triggers: ["github.pr.merged"],
-            github_event_filters: { authors: [] },
+            github_event_filters: { excluded_labels: [] },
             created_at: "2026-01-01T00:00:00Z",
             updated_at: "2026-01-01T00:00:00Z",
           },
@@ -2716,8 +2875,8 @@ describe("AutomationDetailPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Triggers" }));
     await user.click(screen.getByRole("button", { name: /Trigger filters/ }));
-    fireEvent.change(await screen.findByLabelText("Authors"), {
-      target: { value: "octocat" },
+    fireEvent.change(await screen.findByLabelText("Exclude PR labels"), {
+      target: { value: "do-not-run, draft" },
     });
 
     // Closing the popover removes the focused input from the DOM, which does
@@ -2727,7 +2886,7 @@ describe("AutomationDetailPage", () => {
 
     await waitFor(() =>
       expect(updateBodies).toContainEqual({
-        github_event_filters: { authors: ["octocat"] },
+        github_event_filters: { excluded_labels: ["do-not-run", "draft"] },
       }),
     );
   });
@@ -3255,7 +3414,7 @@ describe("AutomationDetailPage", () => {
               completed_at: "2026-01-02T00:00:30Z",
               created_at: "2026-01-02T00:00:00Z",
               updated_at: "2026-01-02T00:00:30Z",
-              
+
               session: {
                 id: "sess-1",
                 title: "Checked release health",
@@ -3394,4 +3553,36 @@ describe("AutomationDetailPage", () => {
       ),
     );
   });
+  it("explains that fallback models are inactive for reused sessions and does not mislabel their runs", async () => {
+    mockAutomationWithChain({
+      agent_type: "codex",
+      model_override: "gpt-5.4",
+      publish_policy: "none",
+      github_event_triggers: ["github.pull_request.updated"],
+      session_continuity: "per_target",
+      fallback_models: { models: ["claude-sonnet-4-6"], agent_types: ["claude_code"] },
+    });
+    server.use(
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({
+          data: [{
+            id: "run-1", automation_id: "auto-1", triggered_at: "2026-01-02T00:00:00Z",
+            triggered_by: "github", goal_snapshot: "Check release health", status: "completed",
+            result_summary: "Checked release health", created_at: "2026-01-02T00:00:00Z",
+            updated_at: "2026-01-02T00:00:30Z", primary_model: "gpt-5.4", session_id: "sess-1",
+            session: { id: "sess-1", title: "Checked release health", status: "idle",
+              failure_retry_advised: false, pr_creation_state: "idle", model_override: "claude-sonnet-4-6" },
+          }], meta: {},
+        }),
+      ),
+    );
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Advanced" }));
+    expect(await screen.findByText(/Fallback models are inactive while sessions are reused/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Add fallback model/ })).not.toBeInTheDocument();
+    await screen.findAllByText("Checked release health");
+    expect(screen.queryByText(/Fallback model:/)).not.toBeInTheDocument();
+  });
+
 });

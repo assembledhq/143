@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
@@ -338,6 +340,8 @@ type mockSessionStore struct {
 	finalizeFn             func(expectedContainerID string) (bool, error)
 	clearContainerIDFn     func(expectedContainerID string) (bool, error)
 	containerHoldStateFn   func(expectedContainerID string) (bool, bool, error)
+	peekContainerIDFn      func() (string, error)
+	resetAfterLostReuseFn  func() (bool, error)
 	acquireHoldCalls       int
 	releaseHoldCalls       int
 	finalizeCalls          int
@@ -666,6 +670,28 @@ func (m *mockSessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID
 	}
 	// Default: caller's proposal wins.
 	return proposedContainerID, nil
+}
+
+func (m *mockSessionStore) AcquireExistingTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error) {
+	actual, err := m.AcquireTurnHold(ctx, orgID, sessionID, expectedContainerID)
+	return err == nil && actual == expectedContainerID, err
+}
+
+func (m *mockSessionStore) ResetAfterLostReuse(_ context.Context, _, _ uuid.UUID) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.resetAfterLostReuseFn != nil {
+		return m.resetAfterLostReuseFn()
+	}
+	m.statusUpdates = append(m.statusUpdates, string(models.SessionStatusIdle))
+	return true, nil
+}
+
+func (m *mockSessionStore) PeekContainerID(context.Context, uuid.UUID, uuid.UUID) (string, error) {
+	if m.peekContainerIDFn != nil {
+		return m.peekContainerIDFn()
+	}
+	return "test-sandbox", nil
 }
 
 func (m *mockSessionStore) SetWorkerNodeIDForContainer(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID, workerNodeID string) error {
@@ -1374,6 +1400,8 @@ func boolPtr(v bool) *bool {
 }
 
 type testDeps struct {
+	internalAPIURL            string
+	internalAPISecret         string
 	provider                  *testutil.MockSandboxProvider
 	adapter                   *mockAgentAdapter
 	sessions                  *mockSessionStore
@@ -1675,6 +1703,8 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		sessionThreads = d.sessionThreads
 	}
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
+		InternalAPIURL:            d.internalAPIURL,
+		InternalAPISecret:         d.internalAPISecret,
 		Provider:                  d.provider,
 		Adapters:                  map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
 		Sessions:                  d.sessions,
@@ -4365,25 +4395,41 @@ func TestRunAgent_PendingCancelIsDeliveredAfterSetup(t *testing.T) {
 
 func TestRunAgent_CapturesAndPersistsBaseCommitSHA(t *testing.T) {
 	t.Parallel()
-
-	orgID := testOrg()
-	issue := testIssue(orgID)
-	run := testRun(orgID, issue.ID)
-
-	d := defaultDeps()
-	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-		if cmd == "git rev-parse HEAD" {
-			_, _ = io.WriteString(stdout, "abc123\n")
-		}
-		return 0, nil
+	tests := []struct {
+		name           string
+		origin         models.SessionOrigin
+		expectedTarget string
+	}{
+		{name: "coding session", origin: models.SessionOriginManual, expectedTarget: "main"},
+		{name: "review session", origin: models.SessionOriginCodeReview},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			run := testRun(orgID, issue.ID)
+			run.Origin = tt.origin
+			d := defaultDeps()
+			d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+				if cmd == "git rev-parse HEAD" {
+					_, err := io.WriteString(stdout, "abc123\n")
+					return 0, err
+				}
+				return 0, nil
+			}
+			d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				require.Equal(t, "abc123", sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA], "adapter should receive the captured starting commit")
+				require.Equal(t, tt.expectedTarget, sandbox.Metadata[agent.SandboxMetadataTargetBranch], "review diffs should exclude the target branch")
+				return &agent.AgentResult{Summary: "done"}, nil
+			}
 
-	orch := buildOrchestrator(d)
-	err := orch.RunAgent(context.Background(), run)
-	require.NoError(t, err, "RunAgent should succeed")
-	require.Equal(t, []string{"abc123"}, d.sessions.getBaseCommitSHAs(), "RunAgent should persist the captured base commit sha")
-	require.NotNil(t, run.BaseCommitSHA, "RunAgent should populate the in-memory session base commit sha")
-	require.Equal(t, "abc123", *run.BaseCommitSHA, "RunAgent should store the captured base commit sha on the session")
+			err := buildOrchestrator(d).RunAgent(context.Background(), run)
+			require.NoError(t, err, "RunAgent should succeed")
+			require.Equal(t, []string{"abc123"}, d.sessions.getBaseCommitSHAs(), "RunAgent should persist the captured base commit sha")
+			require.Equal(t, strPtr("abc123"), run.BaseCommitSHA, "RunAgent should store the captured base commit sha on the session")
+		})
+	}
 }
 
 func TestRunAgent_PersistsDiffHeadCommitSHAOnResult(t *testing.T) {
@@ -7992,76 +8038,84 @@ func TestContinueSession_ReusesExistingContainer(t *testing.T) {
 	require.GreaterOrEqual(t, d.sessions.releaseHoldCalls, 1)
 }
 
-// TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata is the
-// regression test for the "Changes tab goes blank after PR push / resolve
-// conflicts" and "Changes tab inflates with target-branch commits after
-// merging main" bugs. ContinueSession previously left sandbox.Metadata
-// empty in every setup branch (reuse / hydrate / fresh-clone), so
-// sessiondiff.Collect fell back to plain `git diff` and returned an empty
-// string for any clean working tree (post-push, post-merge). That empty
-// diff overwrote the authoritative session diff in the DB, blanking the
-// Changes tab even though the PR itself was healthy. With the fix, the
-// orchestrator copies session.BaseCommitSHA AND the resolved target branch
-// back onto sandbox.Metadata after every setup branch, so the diff
-// collector has both the immutable base SHA (fallback) and the target
-// branch (for the merge-base-style diff that excludes commits brought in
-// by integrating the target branch back into the working branch). We
-// exercise the reuse path here because it's the simplest setup that goes
-// through the post-switch metadata restore.
+// Every continuation path must restore the pinned base. Coding sessions also
+// need the target branch for the Changes tab, while review sessions must measure
+// only edits made after the pinned PR head, excluding the PR's existing changes.
 func TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata(t *testing.T) {
 	t.Parallel()
-
-	orgID := testOrg()
-	issue := testIssue(orgID)
-	issue.Source = models.IssueSourceManual
-	session := testRun(orgID, issue.ID)
-	session.Origin = models.SessionOriginManual
-	session.InteractionMode = models.SessionInteractionModeInteractive
-	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
-	session.Status = models.SessionStatusIdle
-	session.CurrentTurn = 1
-	existing := "preview-container-base-sha"
-	session.ContainerID = &existing
-	session.SandboxState = models.SandboxStateRunning
-
-	const expectedBaseSHA = "feedfacecafe1234"
-	baseSHA := expectedBaseSHA
-	session.BaseCommitSHA = &baseSHA
-
-	d := defaultDeps()
-	d.issues.issue = issue
-	d.messages.messages = []models.SessionMessage{
-		{
-			ID:         1,
-			SessionID:  session.ID,
-			OrgID:      orgID,
-			TurnNumber: 2,
-			Role:       models.MessageRoleUser,
-			Content:    "follow-up after PR push",
-		},
+	tests := []struct {
+		name           string
+		origin         models.SessionOrigin
+		targetBranch   *string
+		expectedTarget string
+		restore        bool
+	}{
+		{name: "coding session uses repository default", origin: models.SessionOriginManual, expectedTarget: "main"},
+		{name: "coding session uses explicit target", origin: models.SessionOriginManual, targetBranch: strPtr("release"), expectedTarget: "release"},
+		{name: "code review excludes repository default", origin: models.SessionOriginCodeReview},
+		{name: "code review excludes explicit target", origin: models.SessionOriginCodeReview, targetBranch: strPtr("release")},
+		{name: "restored code review clears inherited target", origin: models.SessionOriginCodeReview, restore: true},
+		{name: "restored coding session replaces inherited target", origin: models.SessionOriginManual, restore: true, expectedTarget: "main"},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			issue.Source = models.IssueSourceManual
+			session := testRun(orgID, issue.ID)
+			session.Origin = tt.origin
+			session.InteractionMode = models.SessionInteractionModeInteractive
+			session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+			if tt.origin == models.SessionOriginCodeReview {
+				session.InteractionMode = models.SessionInteractionModeSingleRun
+				session.ValidationPolicy = models.SessionValidationPolicySkip
+			}
+			session.Status = models.SessionStatusIdle
+			session.CurrentTurn = 1
+			session.ContainerID = strPtr("preview-container-base-sha")
+			session.SandboxState = models.SandboxStateRunning
+			session.BaseCommitSHA = strPtr("feedfacecafe1234")
+			session.TargetBranch = tt.targetBranch
 
-	var observedBaseSHA, observedTargetBranch string
-	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		require.NotNil(t, sandbox.Metadata, "ContinueSession must populate sandbox.Metadata before the agent runs")
-		observedBaseSHA = sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA]
-		observedTargetBranch = sandbox.Metadata[agent.SandboxMetadataTargetBranch]
-		return &agent.AgentResult{
-			Summary:  "done",
-			ExitCode: 0,
-		}, nil
+			d := defaultDeps()
+			d.issues.issue = issue
+			if tt.restore {
+				session.ContainerID = nil
+				session.SandboxState = models.SandboxStateSnapshotted
+				session.SnapshotKey = strPtr("snapshots/review-diff.tar")
+				d.snapshots.data = map[string][]byte{*session.SnapshotKey: []byte("snapshot")}
+				d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+					return &agent.Sandbox{ID: "restored", WorkDir: cfg.WorkDir, Metadata: map[string]string{
+						agent.SandboxMetadataTargetBranch: "inherited-target",
+					}}, nil
+				}
+				d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+					_, err := io.Copy(io.Discard, reader)
+					return err
+				}
+			}
+			d.messages.messages = []models.SessionMessage{{
+				ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2,
+				Role: models.MessageRoleUser, Content: "Continue the session.",
+			}}
+			var observedBaseSHA, observedTargetBranch string
+			d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				require.NotNil(t, sandbox.Metadata, "continuation should populate diff metadata before execution")
+				observedBaseSHA = sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA]
+				observedTargetBranch = sandbox.Metadata[agent.SandboxMetadataTargetBranch]
+				return &agent.AgentResult{Summary: "done", ExitCode: 0}, nil
+			}
+			d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader([]byte("snap"))), nil
+			}
+
+			err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+			require.NoError(t, err, "continuation should complete with restored diff metadata")
+			require.Equal(t, "feedfacecafe1234", observedBaseSHA, "continuation should preserve the pinned session base")
+			require.Equal(t, tt.expectedTarget, observedTargetBranch, "only coding sessions should collect the PR diff against the target branch")
+		})
 	}
-	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader([]byte("snap"))), nil
-	}
-
-	orch := buildOrchestrator(d)
-	require.NoError(t, orch.ContinueSession(context.Background(), session, nil))
-
-	require.Equal(t, expectedBaseSHA, observedBaseSHA,
-		"ContinueSession must restore session.BaseCommitSHA onto sandbox.Metadata so sessiondiff.Collect can run `git diff <base> -- .` instead of falling back to plain `git diff`")
-	require.Equal(t, "main", observedTargetBranch,
-		"ContinueSession must stamp the resolved target branch onto sandbox.Metadata so sessiondiff.Collect can compute a merge-base diff against origin/<branch> instead of inflating the diff with target-branch changes after a merge")
 }
 
 // TestContinueSession_ReusedContainerReopensAuthListener locks in the
@@ -8144,6 +8198,83 @@ func TestContinueSession_ReusedContainerReopensAuthListener(t *testing.T) {
 	for _, cmd := range d.provider.ExecCalls {
 		require.NotContains(t, cmd, "143-tools git-bootstrap",
 			"git-bootstrap must not re-run on reused containers; original RunAgent already wired git config")
+	}
+}
+
+func TestContinueSession_ReusedContainerHoldLossClassifiesCurrentOwner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		holdActual       string
+		peekValues       []string
+		resetBlocked     bool
+		threadScoped     bool
+		wantErr          error
+		wantIdleReset    bool
+		wantWinnerProbes int
+	}{
+		{name: "cleared container retries without normal retry limit", peekValues: []string{""}, wantErr: agent.ErrStaleSandboxIDCleared, wantIdleReset: true},
+		{name: "replaced live container dead-letters duplicate", holdActual: "winner-container", peekValues: []string{"winner-container"}, wantErr: agent.ErrSandboxRaceLoser, wantWinnerProbes: 1},
+		{name: "replaced live container retries sibling thread", holdActual: "winner-container", peekValues: []string{"winner-container"}, threadScoped: true, wantErr: agent.ErrSandboxSiblingRace, wantWinnerProbes: 1},
+		{name: "successor published after null peek dead-letters duplicate", peekValues: []string{"", "winner-container"}, resetBlocked: true, wantErr: agent.ErrSandboxRaceLoser, wantWinnerProbes: 1},
+		{name: "null persists after reset race retries", peekValues: []string{"", ""}, resetBlocked: true, wantErr: agent.ErrStaleSandboxIDCleared},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			issue.Source = models.IssueSourceManual
+			session := testRun(orgID, issue.ID)
+			session.Status = models.SessionStatusIdle
+			session.CurrentTurn = 1
+			existing := "retired-review-container"
+			session.ContainerID = &existing
+			session.SandboxState = models.SandboxStateRunning
+			d := defaultDeps()
+			d.creds = &mockCredentialProvider{byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderAnthropic: {Provider: models.ProviderAnthropic, Config: models.AnthropicConfig{APIKey: "sk-ant-test"}},
+			}}
+			d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+			d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+			d.users = fakeUserStore{}
+			d.issues.issue = issue
+			d.messages.messages = []models.SessionMessage{{
+				ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2,
+				Role: models.MessageRoleUser, Content: "follow-up",
+			}}
+			var opts *agent.ContinueSessionOptions
+			if tt.threadScoped {
+				threadID := uuid.New()
+				d.messages.messages[0].ThreadID = &threadID
+				opts = &agent.ContinueSessionOptions{ThreadID: &threadID}
+			}
+			d.sessions.acquireHoldFn = func(string) (string, error) { return tt.holdActual, nil }
+			peekIndex := 0
+			d.sessions.peekContainerIDFn = func() (string, error) {
+				if peekIndex >= len(tt.peekValues) {
+					return "", errors.New("unexpected container peek")
+				}
+				value := tt.peekValues[peekIndex]
+				peekIndex++
+				return value, nil
+			}
+			if tt.resetBlocked {
+				d.sessions.resetAfterLostReuseFn = func() (bool, error) { return false, nil }
+			}
+			d.provider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) { return true, nil }
+			d.adapter.executeFn = func(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				t.Fatal("agent must not execute after losing its reused-container hold")
+				return nil, nil
+			}
+			orch := buildOrchestrator(d)
+			err := orch.ContinueSession(context.Background(), session, opts)
+			require.ErrorIs(t, err, tt.wantErr, "lost reuse should classify cleared and replaced containers differently")
+			require.Equal(t, len(tt.peekValues), peekIndex, "lost reuse should re-read the container only when a reset CAS loses")
+			require.Equal(t, tt.wantWinnerProbes, d.sessions.containerStateCalls, "only a replaced container should probe the live winner")
+			require.Equal(t, tt.wantIdleReset, slices.Contains(d.sessions.statusUpdates, string(models.SessionStatusIdle)), "only a cleared container should reopen the turn")
+			require.Equal(t, 0, d.provider.GetDestroyCalls(), "losing reuse must not destroy a container the turn never owned")
+		})
 	}
 }
 
@@ -11240,4 +11371,49 @@ func TestContinueSession_AmpMissingAPIKeyFailsFast(t *testing.T) {
 		"assistant message should surface the actionable error text to the user")
 	require.Equal(t, session.CurrentTurn+1, assistantMessages[0].TurnNumber,
 		"assistant error message belongs on the attempted turn, not the prior one")
+}
+
+func TestRecoverSession_PreservesAutomationActionAuthority(t *testing.T) {
+	t.Parallel()
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	run, thread, job, attempt := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	session.Origin = models.SessionOriginAutomation
+	session.AutomationRunID = &run
+	session.PrimaryThreadID = &thread
+	session.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{{ID: models.AgentCapabilityAutomationActions, AccessLevel: models.AgentCapabilityAccessWrite, Config: json.RawMessage(`{"actions":["slack_notification"],"slack_channel_id":"C0123456789"}`)}}
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusRunning
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/action-session.tar")
+	session.AgentSessionID = strPtr("agent-action-session-1")
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.internalAPIURL, d.internalAPISecret = "https://platform.test", "recovery-action-test-secret"
+	d.messages.messages = []models.SessionMessage{{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "Continue the automation goal from the checkpoint."}}
+	d.snapshots.data = map[string][]byte{*session.SnapshotKey: []byte("checkpoint-bytes")}
+	d.provider.RestoreFn = func(_ context.Context, _ *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	executed := false
+	d.adapter.executeFn = func(_ context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, _ chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		executed = true
+		require.True(t, prompt.Continuation, "exercise checkpoint recovery's nil-options continuation path")
+		claims, err := auth.ValidateInternalToken(d.internalAPISecret, sandbox.Env["INTERNAL_API_TOKEN"])
+		require.NoError(t, err, "restored sandbox must receive a valid replacement token")
+		require.Equal(t, &thread, claims.ThreadID, "recovery must preserve the stored executing thread")
+		require.Equal(t, &run, claims.AutomationRunID, "recovery retains its automation run")
+		require.Equal(t, &job, claims.AutomationJobID, "recovery binds the new job")
+		require.Equal(t, &attempt, claims.AutomationAttemptToken, "recovery binds the new attempt")
+		require.Contains(t, claims.AllowedToolScopes, models.ToolScope("automation:execute-action"), "pending action resumption remains callable")
+		require.Contains(t, claims.AllowedToolScopes, models.ToolScope("automation:action-status"), "receipt inspection remains callable")
+		return &agent.AgentResult{Summary: "Recovered", ExitCode: 0}, nil
+	}
+	ctx := jobctx.WithJobID(jobctx.WithLockToken(context.Background(), attempt), job)
+	require.NoError(t, buildOrchestrator(d).RecoverSession(ctx, session), "recover an action-enabled session from its checkpoint")
+	require.True(t, executed, "regression must reach the recovered agent")
 }

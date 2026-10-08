@@ -1,6 +1,6 @@
 # Design: Code Review Scheduling, Reuse, and Usage Controls
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-09-16
+> **Status:** Partially Implemented | **Last reviewed:** 2026-10-08
 
 Stage 1 is implemented in PR #2143 and available automatically when the GitHub review service is configured. There is no scheduling rollout flag. No production configuration or deployment has been changed by this work. The product direction was agreed in discussion; numeric limits below are proposed starting values, not measured capacity recommendations.
 
@@ -41,7 +41,7 @@ Current delivery unit: Stage 1. Later reuse, resource accounting, and post-appro
 1. Review every eligible open PR independently, including drafts. Do not restrict reviews to the bottom of a stack, automatically replace constituent reviews with a combined review, or infer readiness from a branch-name pattern.
 2. Keep the existing requirement that review is requested before automatic monitoring starts. Do not turn all repository webhook traffic into automatic review.
 3. Propose a **five-minute quiet window** after the latest meaningful update and a **15-minute minimum interval between automatic review starts per PR**. An explicit first review or **Review now** bypasses timing delays, subject to eligibility and capacity.
-4. Consolidate ordinary equivalent requests. A separate **Force fresh review** action intentionally bypasses content reuse, records a reason, and still respects authorization and resource limits.
+4. Consolidate ordinary equivalent requests. A separate **Force fresh review** action intentionally bypasses content reuse, records a reason, and cancels active full reviews or evidence-only rechecks after its replacement intent is durable. It still respects authorization and resource limits. Publication already sent to GitHub must be reconciled before replacement admission.
 5. Content equivalence and request consolidation are built-in behavior. Do not expose hash algorithms or a collection of cache toggles in the product UI.
 6. Preserve approval criteria, reviewer quorum, evidence requirements, and author/fork safeguards. Changing scheduling must not silently loosen them.
 7. Reuse analysis separately from publishing an approval for a revision. Historical approval is not evidence that later code is covered.
@@ -69,6 +69,20 @@ Stage 1 API details intentionally precede the broader assessment API proposed be
 | `POST /api/v1/pull-requests/{id}/code-review/requests` | `{request_id, mode}` with `ensure_current` or `review_now`; returns `{data: {request_id, session_id, disposition, schedule}}`. No assessment IDs exist yet. `cancelled` identifies redelivery of a cancelled request, alongside queued/joined/reused outcomes. |
 
 The pending queue is a deliberate compatibility choice: this slice does not synthesize session-less rows in legacy attempt responses or silently change existing analytics/filter meanings. Assessment/current-coverage readers and the Evidence-panel action move with Stage 2. GitHub request source and requester context remain audit information and do not change credential ownership.
+
+### Automatic restart loop protection
+
+A full-review fallback stops after three consecutive unsent attempts on the same head, base, code, policy/prompt contract, and PR intent. Only a chain connected by `previous_assessment_id` and internal `assessment_fallback` request provenance counts; explicit user requests, changed analysis inputs, completed publication, and evidence-only assessments break the chain. The transaction cancels the last assessment and its metadata with `review_loop_detected`, requests cancellation of any remaining threads in that chain, closes attached pending requests, and atomically enqueues a GitHub status-comment update explaining the cancellation and recovery action. It preserves newer pending requests and active sessions, and never discards uncertain/confirmed publications or receipts.
+
+Automatic observations of that stopped revision do not enqueue more work. A new head/base or an explicit review request passes through normal scheduling. The cancellation reason tells users to push a new revision or explicitly request another review; it does not claim that the PR is approved or covered. Migration `000299` adds `review_loop_detected` to the existing nullable `code_review_session_metadata.status_code` constraint; the existing tenant-scoped review API returns that value and the cancellation message. There are no new routes, columns, indexes, or auth changes. Operators can search for `cancelled automatic code review restart loop` in worker logs. No production configuration change is needed.
+
+### Input invalidation and forced replacement
+
+An active full review is bound to its captured PR title and description as well as its head, base, and base branch. A changed title or description advances the pending generation and quiet-period deadline, commits replacement intent, and then cancels obsolete threads. Duplicate observations do not restart the quiet period. Equivalent automatic requests join genuinely active work; stranded metadata still enters normal recovery. Completed full baselines continue to use the evidence-recheck planner.
+
+Force-fresh intent also cancels an active evidence-only assessment without changing its completed full baseline. Cancellation targets the assessment's execution, preserves newer pending requests, and keeps replacement admission blocked until execution drains. An uncertain GitHub send or confirmed receipt must retain its reconciliation path. Settled recheck requests clear only their own pending scheduler slot, and terminal full-review fallback markers remain recoverable if the original controller disappears.
+
+There are no schema or API changes. Snapshot provenance is stored in the existing tenant-scoped pending-intent and session revision-context JSON. Existing request modes, authorization, response shapes, and scheduling events are unchanged. These changes require deployment before affecting running reviews.
 
 ### Local validation and rollout
 
@@ -131,7 +145,7 @@ Admission means deciding whether to reuse, defer, or execute a review before cre
 | Description or visual evidence changes | Refresh applicability. Stage 2 falls back to a full review if review inputs differ; Stage 4 may rerun only affected evidence/synthesis. |
 | CI/check/status-only update | Refresh applicable deterministic gates without starting a reviewer panel. Do not introduce an unconditional passing-CI prerequisite; current review policy can deliberately evaluate code independently of CI. |
 | Review now | Bypass quiet/cadence delays and ensure coverage of the current revision. Reuse equivalent work. |
-| Force fresh review | Record a new authorized request and reason; bypass completed-result reuse. Serialize behind active work and obey capacity/budget limits. |
+| Force fresh review | Record a new authorized request and reason; bypass completed-result reuse and cancel active full reviews or evidence-only rechecks. Start the replacement after cancelled execution drains. Preserve uncertain or confirmed publication for reconciliation, and obey capacity/budget limits. |
 | Rate limit, capacity shortage, or exhausted review budget | Keep one latest pending target with an explanation and retry time when known. Recheck eligibility and coverage on wake. |
 
 ### Timing and progress guarantees
@@ -188,9 +202,9 @@ These conservative rules catch commit-message amendments, empty commits, and res
 
 Use the PR's actual comparison base rather than always comparing with the default branch. A base-ref change invalidates applicability until re-evaluated. The snapshot service supplies authoritative base-ref information and informational draft status alongside state and SHAs.
 
-Separate the code/reviewer contract from the mutable approval gates. Changes only to quiet time, budgets, or policy audit version must not invalidate code analysis. Changes to review instructions, roster, prompts, analysis-relevant approval policy, PR intent, or visual evidence require appropriate reassessment. Stage 2 can conservatively invalidate all analysis-relevant policy changes; finer reuse belongs in Stage 4.
+Separate the code/reviewer contract from the mutable approval gates. Scheduling controls do not change the captured code. For evidence rechecks, any change to the versioned review policy, including review instructions, roster, and approval rules, invalidates the code-review baseline. PR descriptions, discussion, attribution, visual evidence, and live gates are reassessed as evidence. Auxiliary runtime and template fingerprints remain capture/publication provenance; they do not independently force a new panel. Stage 2 can conservatively invalidate all analysis-relevant policy changes; finer reuse belongs in Stage 4.
 
-Do not hash all discussion indiscriminately: 143's own rolling comment must not invalidate its review. Use the existing trust-filtered request context and visual-evidence snapshot contracts, with their versioned fingerprints. Refresh live checks, author/team eligibility, description applicability, and other approval gates before publication. A new statement of intended behavior can invalidate code conclusions even if no source file changed.
+Do not hash all discussion indiscriminately: 143's own rolling comment must not invalidate its review. Use the existing trust-filtered request context and visual-evidence snapshot contracts, with their versioned fingerprints. Refresh live checks, author/team eligibility, description applicability, and other approval gates before publication. A new statement of intended behavior is evaluated as untrusted evidence against the unchanged code and policy. It can leave the assessment blocked for human judgment, but does not automatically start another code review.
 
 Git documents that `patch-id --stable` ignores whitespace, so it is not a sufficient safety key: [Git patch-id](https://git-scm.com/docs/git-patch-id). GitHub may dismiss approvals after diff or merge-base changes under branch protection: [protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches). Reuse must respect the current repository rules and must not change branch protection settings.
 
@@ -203,6 +217,8 @@ Use only complete, usable reviewer results that satisfy the current contract. A 
 For a reused result, create an auditable assessment for the new revision referencing the immutable source session. Do not relabel or mutate the original session's SHAs or pretend to run agents. A fresh force request bypasses reuse of an already completed result but does not erase history.
 
 Before publication, refresh the authoritative PR, its eligibility, applicable analysis contract, and relevant evidence. Verify the worker still owns the current PR generation. Publish against the explicitly checked head. Preserve existing rolling-comment and formal-review idempotency; duplicate jobs must not publish twice. A push during the final refresh/publish interval cannot be approved under the wrong commit ID. After publication, reconcile whether newer work is pending without retargeting the old approval to it.
+
+All publication handlers in a worker share one `CodeReviewStore`, which admits one publication transaction at a time before borrowing a database connection. This preserves headroom in the four-connection worker pool: a publisher holds one connection and its fenced job-row lock can block a lease renewal on another, while freshness reads and independently committed pre-send markers need a free connection. Admission uses the existing 20-second lock-wait budget and non-consuming busy retry. The cross-worker PR advisory lock and job-row fence remain in force; approval result and finding reads use the publication transaction, but the uncertain-before-send marker must commit separately. This admission bound changes no database schema or API contract.
 
 ## Capacity and Usage Admission
 
@@ -344,11 +360,15 @@ Exit: concurrent workers cannot oversubscribe the configured review allowance; p
 
 ### Stage 4 — Evidence-only follow-ups and evaluation
 
-Use Stage 0–3 data to prioritize full reruns caused solely by description/evidence repair. Reuse code reviewers only when source and code-analysis inputs still match; rerun the necessary description/visual assessment and final synthesis with current policy. Changed intent, uncertain coupling, or insufficient coverage falls back to the full review path.
+The [active conditional session continuation plan](../exec-plans/active/code-review-session-continuation.md) brings the minimum assessment-identity foundation from Stage 2 and unchanged-code evidence reassessment forward as a separate delivery sequence. Broader history-rewrite equivalence and Stage 3 budgets are not prerequisites for that bounded slice. As of 2026-09-24, the local implementation retains the full-review controller and adds a focused recheck supervisor on the existing continuation path. Migrations 000295–000298 add immutable assessments, PR-owned sessions, a narrow transactional dispatch/completion receipt, and policy/admission fields. Re-check PR and trusted direct mentions use conservative routing; both rollout flags default off. The active plan records verification and the remaining provider, authenticated-browser, CI, and pilot gates. The 2026-09-24 scope correction includes nonvisual requirements and reviewer findings resolved by new evidence, with immutable original findings and assessment-specific dispositions/citations. Automatic evidence triggers remain deferred.
+
+Use available attribution and scheduling data to prioritize full reruns caused solely by description/evidence repair. For Re-check PR evidence, reuse a complete baseline when the exact code fingerprint and versioned review policy match. Reassess changed descriptions, titles, requests, discussion, images, CI, and eligibility gates. A code or policy change forces a full review. Missing baseline coverage also needs a full review; capture/execution failure or model uncertainty reports a blocked/failed recheck instead of automatically running a panel.
+
+Terminal capture failures persist in the request ledger and clear only their own pending work. The manual API returns `409 CODE_REVIEW_RECHECK_UNAVAILABLE` with retry/full-review guidance; transient capture retries stop after 15 minutes. A later explicit request can retry. Webhook delivery and obsolete unsent-publication repair acknowledge a recorded failure instead of recreating it indefinitely. Older v3 manifests remain valid code baselines, but uncaptured discussion text cannot be treated as newly added evidence: new captures explicitly record full discussion coverage, and the citation validator otherwise requires independently new description, check, or image evidence to resolve a blocker.
 
 This stage does not introduce general patch-only code review or weaker quorum. Produce calibration cases comparing reused-code outcomes to independent full-review outcomes before activation. Keep prompts in `internal/prompts/templates/` with exported render functions when a new prompt role is needed.
 
-Exit: correcting an evidence-only requirement can produce a current decision without a new code-review panel, and changed behavioral intent reliably takes the full path.
+Exit: correcting evidence can produce a current decision without a new code-review panel, including when generated attribution or CI changed. Changed code or review policy always takes the full path. Evidence findings and fresh approval gates remain enforced.
 
 ## Validation and Acceptance
 

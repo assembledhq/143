@@ -93,12 +93,14 @@ func (s CodeReviewVisualEvidenceFetchStatus) Validate() error {
 }
 
 // CodeReviewDescriptionEvidenceBasis identifies the evidence class the
-// orchestrator used for one description-policy assessment. Image-backed
-// assessments are the only basis that may carry visual evidence IDs.
+// orchestrator used for one description-policy assessment. Captured text and
+// image bases require backend-validated citation to the current snapshot.
 type CodeReviewDescriptionEvidenceBasis string
 
 const (
 	CodeReviewDescriptionEvidenceBasisImage                  CodeReviewDescriptionEvidenceBasis = "image"
+	CodeReviewDescriptionEvidenceBasisText                   CodeReviewDescriptionEvidenceBasis = "captured_text"
+	CodeReviewDescriptionEvidenceBasisCapturedText           CodeReviewDescriptionEvidenceBasis = CodeReviewDescriptionEvidenceBasisText
 	CodeReviewDescriptionEvidenceBasisPreviewLink            CodeReviewDescriptionEvidenceBasis = "preview_link"
 	CodeReviewDescriptionEvidenceBasisRepository             CodeReviewDescriptionEvidenceBasis = "repository"
 	CodeReviewDescriptionEvidenceBasisPullRequestDescription CodeReviewDescriptionEvidenceBasis = "pull_request_description"
@@ -110,6 +112,7 @@ const (
 func (b CodeReviewDescriptionEvidenceBasis) Validate() error {
 	switch b {
 	case CodeReviewDescriptionEvidenceBasisImage,
+		CodeReviewDescriptionEvidenceBasisText,
 		CodeReviewDescriptionEvidenceBasisPreviewLink,
 		CodeReviewDescriptionEvidenceBasisRepository,
 		CodeReviewDescriptionEvidenceBasisPullRequestDescription,
@@ -177,6 +180,7 @@ type CodeReviewVisualEvidence struct {
 // CodeReviewVisualEvidenceSnapshot is the immutable manifest shared by every
 // reviewer and the orchestrator in one assessment.
 type CodeReviewVisualEvidenceSnapshot struct {
+	AssessmentID       *uuid.UUID                 `json:"assessment_id,omitempty"`
 	Version            int                        `json:"version"`
 	RepositoryID       uuid.UUID                  `json:"repository_id"`
 	Repository         string                     `json:"repository"`

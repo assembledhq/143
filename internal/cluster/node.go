@@ -33,6 +33,8 @@ func (n *NodeManager) Register(ctx context.Context, host string) error {
 		return err
 	}
 
+	// An operator drain belongs to this generation, even after a restart. A
+	// plain process shutdown has no durable intent and may register again.
 	_, err = n.pool.Exec(ctx, `
 		INSERT INTO nodes (id, mode, host, started_at, last_heartbeat_at, status, metadata)
 		VALUES ($1, $2, $3, now(), now(), 'active', $4)
@@ -41,12 +43,11 @@ func (n *NodeManager) Register(ctx context.Context, host string) error {
 			host = EXCLUDED.host,
 			started_at = now(),
 			last_heartbeat_at = now(),
-			status = 'active',
-			drain_intent = 'none',
-			drain_requested_at = NULL,
-			drain_budget_expires_at = NULL,
-			drain_requested_by = '',
-			drain_reason = '',
+			status = CASE WHEN nodes.drain_intent <> 'none' THEN 'draining' ELSE 'active' END,
+			drain_requested_at = CASE WHEN nodes.drain_intent <> 'none' THEN nodes.drain_requested_at END,
+			drain_budget_expires_at = CASE WHEN nodes.drain_intent <> 'none' THEN nodes.drain_budget_expires_at END,
+			drain_requested_by = CASE WHEN nodes.drain_intent <> 'none' THEN nodes.drain_requested_by ELSE '' END,
+			drain_reason = CASE WHEN nodes.drain_intent <> 'none' THEN nodes.drain_reason ELSE '' END,
 			metadata = EXCLUDED.metadata
 	`, n.nodeID, n.mode, host, metadata)
 	return err
@@ -83,7 +84,7 @@ func (n *NodeManager) HeartbeatOnce(ctx context.Context) error {
 	_, err = n.pool.Exec(ctx, `
 		UPDATE nodes
 		SET last_heartbeat_at = now(),
-			status = CASE WHEN status = 'draining' THEN 'draining' ELSE $2 END,
+			status = CASE WHEN drain_intent <> 'none' OR status = 'draining' THEN 'draining' ELSE $2 END,
 			metadata = $3
 		WHERE id = $1
 	`, n.nodeID, status, metadata)
@@ -96,10 +97,10 @@ func (n *NodeManager) SetMetadataProvider(fn func() map[string]any) {
 	n.metadataProvider = fn
 }
 
+// RequestDrain stops admission for process shutdown without replacing an
+// operator's durable drain intent. Use NodeStore.MarkDraining for that intent.
 func (n *NodeManager) RequestDrain(ctx context.Context, requestedAt time.Time) error {
-	n.mu.Lock()
-	n.draining = true
-	n.mu.Unlock()
+	n.MarkLocalDraining()
 
 	metadata, err := n.buildMetadata(map[string]any{
 		"drain_requested_at": requestedAt.UTC().Format(time.RFC3339),
@@ -111,8 +112,7 @@ func (n *NodeManager) RequestDrain(ctx context.Context, requestedAt time.Time) e
 	_, err = n.pool.Exec(ctx, `
 		UPDATE nodes
 		SET status = 'draining',
-			drain_intent = 'host_maintenance',
-			drain_requested_at = $3,
+			drain_requested_at = COALESCE(drain_requested_at, $3),
 			metadata = $2
 		WHERE id = $1
 	`, n.nodeID, metadata, requestedAt.UTC())
@@ -120,6 +120,16 @@ func (n *NodeManager) RequestDrain(ctx context.Context, requestedAt time.Time) e
 		return fmt.Errorf("request node drain: %w", err)
 	}
 	return nil
+}
+
+// MarkLocalDraining latches this process's heartbeat state without writing to
+// the database. It must share the worker queues' lifetime: once they stop
+// admission, a stale-node scan or cleared intent must not advertise capacity
+// until a new process starts with new queues and a new NodeManager.
+func (n *NodeManager) MarkLocalDraining() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.draining = true
 }
 
 func (n *NodeManager) IsDraining() bool {

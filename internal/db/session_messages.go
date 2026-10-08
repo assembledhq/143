@@ -157,6 +157,16 @@ func (s *SessionMessageStore) CreateWithSource(ctx context.Context, msg *models.
 		"token_usage":     msg.TokenUsage,
 		"source":          msg.Source,
 	}
+	if msg.AutomationRunID != nil {
+		// A per-target automation turn's message is attributed to its run
+		// (design doc 125); the column is written only when set so ordinary
+		// inserts keep their statement.
+		query = `
+		INSERT INTO session_messages (session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", commands, token_usage, source, automation_run_id)
+		VALUES (@session_id, @org_id, @thread_id, @user_id, @turn_number, @role, @content, @attachments, @references_data, @commands, @token_usage, @source, @automation_run_id)
+		RETURNING id, created_at`
+		args["automation_run_id"] = msg.AutomationRunID
+	}
 	if msg.ActivityPhaseID != nil {
 		query = phaseValidatedMessageInsertWithSource()
 		args["activity_phase_id"] = msg.ActivityPhaseID
@@ -663,4 +673,38 @@ func prefixedSessionMessageSelectColumns(prefix string) string {
 		prefix + `.token_usage, ` +
 		prefix + `.source, ` +
 		prefix + `.created_at`
+}
+
+// UpdateAutomationTurnPrompt replaces the content of the per-target turn's
+// visible user message, the row the ownership transaction inserted with
+// source automation_turn for runID. The orchestrator writes the rendered
+// prompt here once the workspace delta is known. Returns whether a row was
+// updated.
+func (s *SessionMessageStore) UpdateAutomationTurnPrompt(ctx context.Context, orgID, runID uuid.UUID, content string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_messages
+		SET content = @content
+		WHERE org_id = @org_id AND automation_run_id = @run_id
+		  AND role = 'user' AND source = @source`,
+		pgx.NamedArgs{"org_id": orgID, "run_id": runID, "content": content, "source": models.SessionMessageSourceAutomationTurn})
+	if err != nil {
+		return false, fmt.Errorf("update automation turn prompt: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// TagAutomationTurnAssistantMessage attributes the assistant message of a
+// per-target turn (thread and turn number) to its run, so per-turn usage
+// rolls up by automation_run_id.
+func (s *SessionMessageStore) TagAutomationTurnAssistantMessage(ctx context.Context, orgID, sessionID, threadID uuid.UUID, turnNumber int, runID uuid.UUID) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE session_messages
+		SET automation_run_id = @run_id
+		WHERE org_id = @org_id AND session_id = @session_id AND thread_id = @thread_id
+		  AND turn_number = @turn_number AND role = 'assistant' AND automation_run_id IS NULL`,
+		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "thread_id": threadID, "turn_number": turnNumber, "run_id": runID})
+	if err != nil {
+		return fmt.Errorf("tag automation turn assistant message: %w", err)
+	}
+	return nil
 }

@@ -2,8 +2,11 @@ package github
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -324,4 +327,36 @@ func newVisualEvidenceTestService(t *testing.T, server *httptest.Server, orgID, 
 
 func ptrVisualEvidenceTime(value time.Time) *time.Time {
 	return &value
+}
+
+func TestVisualEvidenceSourceIdentityIgnoresGitHubDownloadToken(t *testing.T) {
+	t.Parallel()
+	const imageURL = "https://private-user-images.githubusercontent.com/123/asset.png"
+	tests := []struct {
+		name        string
+		url         string
+		identityURL string
+	}{
+		{name: "unsigned asset", url: imageURL, identityURL: imageURL},
+		{name: "initial token", url: imageURL + "?jwt=first", identityURL: imageURL},
+		{name: "rotated token", url: imageURL + "?jwt=second", identityURL: imageURL},
+		{name: "preserves content parameters", url: imageURL + "?size=large&jwt=third", identityURL: imageURL + "?size=large"},
+		{name: "preserves other hosts", url: "https://example.com/asset.png?jwt=first", identityURL: "https://example.com/asset.png?jwt=first"},
+		{name: "preserves lookalike hosts", url: "https://private-user-images.githubusercontent.com.example.com/asset.png?jwt=first", identityURL: "https://private-user-images.githubusercontent.com.example.com/asset.png?jwt=first"},
+		{name: "preserves other schemes", url: "http://private-user-images.githubusercontent.com/123/asset.png?jwt=first", identityURL: "http://private-user-images.githubusercontent.com/123/asset.png?jwt=first"},
+		{name: "preserves invalid query", url: imageURL + "?jwt=first&size=%zz", identityURL: imageURL + "?jwt=first&size=%zz"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			metadata := visualEvidenceSourceMetadata{Surface: models.CodeReviewEvidenceSurfaceDescription, ProviderObjectID: "42"}
+			digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%s", metadata.Surface, metadata.ProviderObjectID, 1, tt.identityURL)))
+			expected := []models.CodeReviewVisualEvidenceSource{{
+				SourceID: "ves_" + hex.EncodeToString(digest[:12]), Surface: metadata.Surface, ProviderObjectID: "42",
+				ImageIndex: 1, ImageURL: tt.url, AltText: "Screenshot", ContextText: "Evidence", Untrusted: true,
+			}}
+			actual := visualEvidenceSourcesFromHTML(metadata, `<p>Evidence<img src="`+html.EscapeString(tt.url)+`" alt="Screenshot"></p>`)
+			require.Equal(t, expected, actual, "source identity should ignore only GitHub's rotating download token while preserving the signed fetch URL")
+		})
+	}
 }

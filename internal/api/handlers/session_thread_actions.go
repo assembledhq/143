@@ -131,10 +131,11 @@ func (h *SessionThreadHandler) ForkThread(w http.ResponseWriter, r *http.Request
 	})
 	if err != nil {
 		switch {
-		case errors.Is(err, thread.ErrThreadNotFound):
-			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
+		case writeCodeReviewOwnedError(w, r, err):
 		case errors.Is(err, thread.ErrSessionNotFound):
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		case errors.Is(err, thread.ErrThreadNotFound):
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 		case errors.Is(err, thread.ErrEnqueueFailed):
 			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue fork job", err)
 		default:
@@ -167,6 +168,9 @@ func (h *SessionThreadHandler) RevertThread(w http.ResponseWriter, r *http.Reque
 	result, err := h.svc.RevertThread(r.Context(), orgID, sessionID, threadID, userID)
 	if err != nil {
 		switch {
+		case writeCodeReviewOwnedError(w, r, err):
+		case errors.Is(err, thread.ErrSessionNotFound):
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		case errors.Is(err, thread.ErrThreadNotFound):
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 		case errors.Is(err, thread.ErrEnqueueFailed):

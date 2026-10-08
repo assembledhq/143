@@ -15,6 +15,7 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
@@ -22,7 +23,16 @@ type sessionExecutorDispatcher interface {
 	Dispatch(ctx context.Context, jobType string, session models.Session, threadID *uuid.UUID) (uuid.UUID, error)
 }
 
-func maybeDispatchSessionExecutor(ctx context.Context, services *Services, jobType string, session models.Session, threadID *uuid.UUID) error {
+var (
+	errReviewOwnerRedirect    = errors.New("code review workspace owned by another worker")
+	errReviewOwnerUnavailable = errors.New("code review workspace owner unavailable")
+	errReviewCapacityRedirect = errors.New("code review worker capacity available on another node")
+	errReviewNoCapacity       = errors.New("no code review worker advertises sandbox capacity")
+)
+
+const codeReviewPlacementRetryWindow = 8 * time.Minute
+
+func maybeDispatchSessionExecutor(ctx context.Context, stores *Stores, services *Services, jobType string, session models.Session, threadID *uuid.UUID) error {
 	if services == nil {
 		return nil
 	}
@@ -32,11 +42,119 @@ func maybeDispatchSessionExecutor(ctx context.Context, services *Services, jobTy
 		}
 		return nil
 	}
+	if session.Origin == models.SessionOriginCodeReview {
+		if stores == nil || stores.Sessions == nil || stores.Jobs == nil {
+			return fmt.Errorf("code review executor placement stores are required")
+		}
+		currentNodeID, ok := jobctx.WorkerNodeIDFromContext(ctx)
+		if !ok || currentNodeID == "" {
+			return fmt.Errorf("worker node id missing for code review executor placement")
+		}
+		freshSession, err := stores.Sessions.GetByID(ctx, session.OrgID, session.ID)
+		if err != nil {
+			return fmt.Errorf("reload code review session before executor dispatch: %w", err)
+		}
+		if freshSession.Origin != models.SessionOriginCodeReview {
+			return fmt.Errorf("code review session origin changed before executor dispatch")
+		}
+		placementErr := codeReviewExecutorPlacement(ctx, freshSession, currentNodeID, stores.Jobs.IsHealthyWorkerNode, stores.Jobs.WorkerSandboxCapacity, stores.Jobs.SelectWorkerWithSandboxCapacity)
+		if placementErr != nil {
+			var retry *RetryableError
+			if errors.As(placementErr, &retry) {
+				if errors.Is(placementErr, errReviewCapacityRedirect) || errors.Is(placementErr, errReviewNoCapacity) {
+					registerSandboxCapacityDeadLetter(ctx, stores, services, *zerolog.Ctx(ctx), freshSession, threadID, jobType)
+				}
+				reason := "unknown"
+				switch {
+				case errors.Is(placementErr, errReviewOwnerRedirect):
+					reason = "owner_redirect"
+				case errors.Is(placementErr, errReviewOwnerUnavailable):
+					reason = "owner_recovery"
+				case errors.Is(placementErr, errReviewCapacityRedirect):
+					reason = "capacity_redirect"
+				case errors.Is(placementErr, errReviewNoCapacity):
+					reason = "capacity_wait"
+				}
+				event := zerolog.Ctx(ctx).Info().Str("org_id", session.OrgID.String()).Str("session_id", session.ID.String()).Str("placement_reason", reason).Str("current_node_id", currentNodeID)
+				if retry.TargetNodeID != nil {
+					event = event.Str("target_node_id", *retry.TargetNodeID)
+				}
+				event.Msg("code review executor placement deferred before launch")
+			}
+			return placementErr
+		}
+		freshSession.PrimaryThreadID = session.PrimaryThreadID
+		session = freshSession
+	}
 	executorID, err := services.SessionExecutorDispatcher.Dispatch(ctx, jobType, session, threadID)
 	if err != nil {
 		return fmt.Errorf("dispatch session executor: %w", err)
 	}
 	return &HandoffError{Err: fmt.Errorf("session executor %s owns %s job for session %s", executorID, jobType, session.ID)}
+}
+
+func durationPtr(d time.Duration) *time.Duration { return &d }
+
+// codeReviewExecutorPlacement makes the best available dispatch decision from
+// freshly loaded session ownership. A stale heartbeat cannot grant sandbox
+// admission: the executor still performs local capacity and ownership checks.
+func codeReviewExecutorPlacement(
+	ctx context.Context,
+	session models.Session,
+	currentNodeID string,
+	isHealthy func(context.Context, string) (bool, error),
+	localCapacity func(context.Context, string) (bool, bool, error),
+	selectCapacity func(context.Context, string) (*string, error),
+) error {
+	// A published container with no owner is a transient legacy handshake.
+	// Do not route it to a different Docker daemon based on capacity metadata.
+	if session.ContainerID != nil && *session.ContainerID != "" && (session.WorkerNodeID == nil || *session.WorkerNodeID == "") {
+		return nil
+	}
+	if owner := models.SessionWorkerTarget(&session); owner != nil {
+		healthy, err := isHealthy(ctx, *owner)
+		if err != nil {
+			return fmt.Errorf("check review workspace owner: %w", err)
+		}
+		if healthy {
+			if *owner != currentNodeID {
+				return &RetryableError{Err: fmt.Errorf("%w: %s", errReviewOwnerRedirect, *owner), TargetNodeID: owner, RetryAfter: durationPtr(0), BypassMaxRetryDuration: true}
+			}
+			return nil
+		}
+		// A dead owner's container ID must be cleared by the runtime using
+		// the queue's dead-target context. Route through that target once so
+		// the subsequent claim carries the identity needed for safe cleanup.
+		if deadTarget, ok := jobctx.DeadTargetNodeFromContext(ctx); !ok || deadTarget != *owner {
+			return &RetryableError{Err: fmt.Errorf("%w: %s", errReviewOwnerUnavailable, *owner), TargetNodeID: owner, RetryAfter: durationPtr(0), BypassMaxRetryDuration: true}
+		}
+		return nil
+	}
+	known, available, err := localCapacity(ctx, currentNodeID)
+	if err != nil {
+		return fmt.Errorf("read local review sandbox capacity: %w", err)
+	}
+	if known && available {
+		return nil
+	}
+	if !known {
+		// Missing heartbeat metadata is not evidence of a full host. The
+		// executor's local admission gate will make the authoritative call.
+		return nil
+	}
+	// Heartbeat capacity is advisory. A worker-local reservation and
+	// ownership CAS remain the hard admission gates inside the executor.
+	target, err := selectCapacity(ctx, currentNodeID)
+	if err != nil {
+		return fmt.Errorf("select review executor worker: %w", err)
+	}
+	if target == nil {
+		return &RetryableError{Err: errReviewNoCapacity, RetryAfter: durationPtr(10 * time.Second), MaxRetryDuration: durationPtr(codeReviewPlacementRetryWindow), ClearTargetNodeID: true}
+	}
+	if *target != currentNodeID {
+		return &RetryableError{Err: errReviewCapacityRedirect, TargetNodeID: target, RetryAfter: durationPtr(5 * time.Second), MaxRetryDuration: durationPtr(codeReviewPlacementRetryWindow)}
+	}
+	return nil
 }
 
 type ExecutorLaunchSpec struct {
@@ -83,7 +201,7 @@ type DurableSessionExecutorDispatcher struct {
 	Logger                zerolog.Logger
 }
 
-func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType string, session models.Session, threadID *uuid.UUID) (uuid.UUID, error) {
+func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType string, session models.Session, threadID *uuid.UUID) (resultID uuid.UUID, returnErr error) {
 	if d == nil {
 		return uuid.Nil, fmt.Errorf("session executor dispatcher is nil")
 	}
@@ -112,7 +230,13 @@ func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType
 		Str("job_type", jobType).
 		Str("lock_token", lockToken.String()).
 		Str("host_node_id", d.NodeID).
+		Str("build_sha", d.BuildSHA).
 		Logger()
+	if threadID != nil {
+		logger = logger.With().Str("thread_id", threadID.String()).Logger()
+	}
+	dispatchStage := observability.BeginStage(session.Origin == models.SessionOriginCodeReview, logger, "executor_dispatch")
+	defer func() { dispatchStage.End(observability.StageOutcome(ctx, returnErr)) }()
 	logger.Info().Msg("session executor dispatch starting")
 	logSessionExecutorHostResourceSnapshot(ctx, logger, "dispatch_start")
 
@@ -173,19 +297,21 @@ func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType
 	}
 	logger.Info().Msg("session executor container launch starting")
 	logSessionExecutorHostResourceSnapshot(ctx, logger, "pre_container_launch")
+	launchStage := observability.BeginStage(session.Origin == models.SessionOriginCodeReview, logger, "executor_container_launch")
 	launchResult, err := d.Launcher.Launch(ctx, spec)
+	launchStage.End(observability.StageOutcome(ctx, err))
 	if err != nil {
 		dispatchErr := fmt.Errorf("launch session executor: %w", err)
 		logger.Error().Err(dispatchErr).Msg("session executor container launch failed")
 		return uuid.Nil, errors.Join(dispatchErr, d.markExecutorDispatchFailed(ctx, session.OrgID, executorID, lockToken, dispatchErr))
 	}
-	logger.Info().Str("container_id", launchResult.ContainerID).Msg("session executor container launch returned")
+	logger.Info().Str("container_id", launchResult.ContainerID).Str("executor_container_id", launchResult.ContainerID).Msg("session executor container launch returned")
 	logSessionExecutorHostResourceSnapshot(ctx, logger, "post_container_launch")
 	if launchResult.ContainerID != "" {
 		ok, err := d.Executors.RecordContainerIDWithLease(ctx, session.OrgID, executorID, lockToken, launchResult.ContainerID)
 		if err != nil {
 			dispatchErr := fmt.Errorf("record session executor container id: %w", err)
-			logger.Error().Err(dispatchErr).Str("container_id", launchResult.ContainerID).Msg("session executor container id recording failed")
+			logger.Error().Err(dispatchErr).Str("container_id", launchResult.ContainerID).Str("executor_container_id", launchResult.ContainerID).Msg("session executor container id recording failed")
 			return uuid.Nil, errors.Join(
 				dispatchErr,
 				d.cleanupLaunchedExecutor(ctx, spec),
@@ -194,20 +320,22 @@ func (d *DurableSessionExecutorDispatcher) Dispatch(ctx context.Context, jobType
 		}
 		if !ok {
 			dispatchErr := fmt.Errorf("record session executor container id lost fencing race")
-			logger.Warn().Str("container_id", launchResult.ContainerID).Msg("session executor container id recording lost fencing race")
+			logger.Warn().Str("container_id", launchResult.ContainerID).Str("executor_container_id", launchResult.ContainerID).Msg("session executor container id recording lost fencing race")
 			return uuid.Nil, errors.Join(
 				dispatchErr,
 				d.cleanupLaunchedExecutor(ctx, spec),
 				d.markExecutorDispatchFailed(ctx, session.OrgID, executorID, lockToken, dispatchErr),
 			)
 		}
-		logger.Info().Str("container_id", launchResult.ContainerID).Msg("session executor container id recorded")
+		logger.Info().Str("container_id", launchResult.ContainerID).Str("executor_container_id", launchResult.ContainerID).Msg("session executor container id recorded")
 	} else {
 		logger.Warn().Msg("session executor launch returned without a container id")
 	}
 
 	logger.Info().Msg("session executor job handoff starting")
+	handoffStage := observability.BeginStage(session.Origin == models.SessionOriginCodeReview, logger, "executor_job_handoff")
 	ok, err = d.Jobs.HandoffToSessionExecutorWithLease(ctx, session.OrgID, jobID, lockToken, executorID)
+	handoffStage.End(observability.StageOutcome(ctx, err))
 	if err != nil {
 		dispatchErr := fmt.Errorf("job handoff failed: %w", err)
 		logger.Error().Err(dispatchErr).Msg("session executor job handoff failed")

@@ -13,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agentcapabilities"
+	"github.com/assembledhq/143/internal/services/automations"
 )
 
 type schedulerJobStore interface {
@@ -44,6 +45,14 @@ type schedulerAutomationRunStore interface {
 	CreateRunInTx(ctx context.Context, tx pgx.Tx, r *models.AutomationRun) (bool, error)
 	ListOrgsWithStuckRuns(ctx context.Context, threshold time.Duration) ([]uuid.UUID, error)
 	ReapStuckRuns(ctx context.Context, orgID uuid.UUID, threshold time.Duration) (int64, error)
+}
+
+// schedulerAutomationTargetSweeper runs the per-target continuity sweeps
+// (design doc 125): recovery of runs whose job died, wait timeouts,
+// ambiguity deadlines, and wake reconciliation.
+type schedulerAutomationTargetSweeper interface {
+	ListOrgsWithWork(ctx context.Context) ([]uuid.UUID, error)
+	Sweep(ctx context.Context, orgID uuid.UUID) (automations.SweepReport, error)
 }
 
 type schedulerCapabilityResolver interface {
@@ -109,6 +118,9 @@ type Scheduler struct {
 	audit          *db.AuditEmitter        // nil-safe: recheck disable events unlogged if nil
 	githubOrgs     schedulerGitHubOrgStore // nil-safe: GitHub org roster reconciliation disabled if nil
 
+	targetSweeps    schedulerAutomationTargetSweeper // nil-safe: per-target sweeps disabled if nil
+	targetSweepLock schedulerLock                    // serializes the sweep loop across replicas
+
 	lastDailyJobDates map[string]string // tracks UTC date of last daily scheduling per job type
 }
 
@@ -170,6 +182,59 @@ func (s *Scheduler) SetAutomationStores(automations schedulerAutomationStore, ru
 	s.automations = automations
 	s.automationRuns = runs
 	s.pool = pool
+}
+
+// SetAutomationTargetSweeps injects the per-target continuity sweeper and
+// the lock its loop holds. StartAutomationTargetSweeps runs the loop.
+func (s *Scheduler) SetAutomationTargetSweeps(sweeper schedulerAutomationTargetSweeper, lock schedulerLock) {
+	s.targetSweeps = sweeper
+	s.targetSweepLock = lock
+}
+
+// StartAutomationTargetSweeps runs the per-target sweeps every interval
+// until ctx ends. It is separate from Start because reconciliation needs a
+// tighter cadence than the ten-minute scheduler tick (design doc 125,
+// "Target Wake-up": every minute).
+func (s *Scheduler) StartAutomationTargetSweeps(ctx context.Context, interval time.Duration) {
+	if s.targetSweeps == nil || s.targetSweepLock == nil {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.sweepAutomationTargetsOnce(ctx)
+		}
+	}
+}
+
+func (s *Scheduler) sweepAutomationTargetsOnce(ctx context.Context) {
+	acquired, err := s.targetSweepLock.TryAcquire(ctx)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("automation target sweep failed to acquire lock")
+		return
+	}
+	if !acquired {
+		return
+	}
+	defer func() {
+		if err := s.targetSweepLock.Release(ctx); err != nil {
+			s.logger.Error().Err(err).Msg("automation target sweep failed to release lock")
+		}
+	}()
+	orgIDs, err := s.targetSweeps.ListOrgsWithWork(ctx)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("failed to list orgs with per-target automation work")
+		return
+	}
+	for _, orgID := range orgIDs {
+		if _, err := s.targetSweeps.Sweep(ctx, orgID); err != nil {
+			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("per-target automation sweep reported errors")
+		}
+	}
 }
 
 func (s *Scheduler) SetCapabilityResolver(resolver schedulerCapabilityResolver) {

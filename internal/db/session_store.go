@@ -54,6 +54,32 @@ func (s *SessionStore) Begin(ctx context.Context) (pgx.Tx, error) {
 	return txStarter.Begin(ctx)
 }
 
+// WithTx returns a store whose writes run on tx, so a session status write
+// can share a transaction with rows in other tables (an automation turn's
+// result marker, design doc 125 "Result marker"). Stream publication still
+// goes through the parent's streams; callers publish after commit.
+//
+// lint:allow-no-orgid reason="transaction binding only; every write made through the returned store is org-scoped by its own method"
+func (s *SessionStore) WithTx(tx pgx.Tx) *SessionStore {
+	return &SessionStore{db: tx, streams: s.streams, logger: s.logger}
+}
+
+// InTransaction runs fn inside one transaction with a tx-bound store and
+// commits when fn returns nil.
+//
+// lint:allow-no-orgid reason="transaction plumbing; every write fn makes through the bound store is org-scoped by its own method"
+func (s *SessionStore) InTransaction(ctx context.Context, fn func(ctx context.Context, tx pgx.Tx, store *SessionStore) error) error {
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(ctx, tx, s.WithTx(tx)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 type SessionFilters struct {
 	Statuses []models.SessionStatus // When non-empty, filter to sessions matching any of these statuses.
 	Limit    int
@@ -540,12 +566,22 @@ func (s *SessionStore) CountsByOrg(ctx context.Context, orgID uuid.UUID, filters
 }
 
 func (s *SessionStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (models.Session, error) {
+	return getSessionByID(ctx, s.db, orgID, runID)
+}
+
+// GetByIDInTx is GetByID inside an existing transaction, for callers that
+// must read the row under locks they already hold.
+func (s *SessionStore) GetByIDInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (models.Session, error) {
+	return getSessionByID(ctx, tx, orgID, sessionID)
+}
+
+func getSessionByID(ctx context.Context, q DBTX, orgID, runID uuid.UUID) (models.Session, error) {
 	query := `
 		SELECT ` + sessionSelectColumns + `
 		FROM sessions
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+	rows, err := q.Query(ctx, query, pgx.NamedArgs{
 		"id":     runID,
 		"org_id": orgID,
 	})
@@ -1005,25 +1041,34 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 		return err
 	}
 
-	// Seed a primary thread row so the multi-tab UI (AgentTabStrip) has
-	// something to render and the worker thread-attribution path has a
-	// destination from turn 1. Done in the same transaction so the invariant
+	// Seed a primary thread row so the worker thread-attribution path has a
+	// destination from turn 1. Code reviews must not inherit the writable
+	// defaults used by ordinary sessions, even when synthesis uses a separate
+	// thread. Done in the same transaction so the invariant
 	// "every session row implies at least one thread row" cannot be violated
 	// by a partial failure between session insert and thread insert.
+	executionMode := models.ThreadExecutionModeWork
+	filesystemMode := models.ThreadFilesystemModeReadWrite
+	if run.Origin == models.SessionOriginCodeReview {
+		executionMode = models.ThreadExecutionModeReview
+		filesystemMode = models.ThreadFilesystemModeReadOnly
+	}
 	var primaryThreadID uuid.UUID
 	if err := q.QueryRow(ctx, `
 		INSERT INTO session_threads (
-			session_id, org_id, agent_type, model_override, label, status
+			session_id, org_id, agent_type, model_override, label, status, execution_mode, filesystem_mode
 		)
-		VALUES (@session_id, @org_id, @agent_type, @model_override, @label, @status)
+		VALUES (@session_id, @org_id, @agent_type, @model_override, @label, @status, @execution_mode, @filesystem_mode)
 		RETURNING id
 	`, pgx.NamedArgs{
-		"session_id":     run.ID,
-		"org_id":         run.OrgID,
-		"agent_type":     run.AgentType,
-		"model_override": run.ModelOverride,
-		"label":          "Main",
-		"status":         models.ThreadStatusIdle,
+		"session_id":      run.ID,
+		"org_id":          run.OrgID,
+		"agent_type":      run.AgentType,
+		"model_override":  run.ModelOverride,
+		"label":           "Main",
+		"status":          models.ThreadStatusIdle,
+		"execution_mode":  executionMode,
+		"filesystem_mode": filesystemMode,
 	}).Scan(&primaryThreadID); err != nil {
 		return fmt.Errorf("insert primary session thread: %w", err)
 	}
@@ -1407,21 +1452,10 @@ func (s *SessionStore) BumpWorkspaceRevision(ctx context.Context, orgID, session
 	return row.Revision, row.UpdatedAt, nil
 }
 
-func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, checkpointErr *string, stopReason models.RuntimeStopReason) (bool, error) {
-	args := pgx.NamedArgs{
-		"id":                    sessionID,
-		"org_id":                orgID,
-		"agent_session_id":      agentSessionID,
-		"snapshot_key":          snapshotKey,
-		"checkpoint_kind":       string(kind),
-		"checkpoint_capability": string(capability),
-		"checkpoint_size_bytes": sizeBytes,
-		"checkpointed_at":       checkpointedAt.UTC(),
-		"checkpoint_error":      checkpointErr,
-		"runtime_stop_reason":   string(stopReason),
-	}
-
-	query := `
+// publishCheckpointUpdate is the session-side checkpoint publication,
+// shared by PublishCheckpoint and PublishCheckpointWithProvenance; callers
+// append their ownership predicate and the job fence.
+const publishCheckpointUpdate = `
 		UPDATE sessions s
 		SET agent_session_id = CASE
 		        WHEN @agent_session_id = '' THEN agent_session_id
@@ -1456,8 +1490,10 @@ func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID u
 		WHERE s.id = @id
 		  AND s.org_id = @org_id
 		  AND s.deleted_at IS NULL`
-	if lockToken != uuid.Nil {
-		query += `
+
+// publishCheckpointJobFence restricts a publication to the worker holding
+// the session's running job lease.
+const publishCheckpointJobFence = `
 		  AND EXISTS (
 			SELECT 1
 			FROM jobs j
@@ -1466,6 +1502,30 @@ func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID u
 			  AND j.lock_token = @lock_token
 			  AND NULLIF(j.payload->>'session_id', '')::uuid = s.id
 		  )`
+
+// PublishCheckpoint installs a checkpoint on an ordinary session. An
+// automation-owned session (automation_owner_generation_id set) is matched
+// only for a publication without a key (a recorded snapshot failure): its
+// checkpoints go through PublishCheckpointWithProvenance so the key and
+// the generation's provenance move together.
+func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, checkpointErr *string, stopReason models.RuntimeStopReason) (bool, error) {
+	args := pgx.NamedArgs{
+		"id":                    sessionID,
+		"org_id":                orgID,
+		"agent_session_id":      agentSessionID,
+		"snapshot_key":          snapshotKey,
+		"checkpoint_kind":       string(kind),
+		"checkpoint_capability": string(capability),
+		"checkpoint_size_bytes": sizeBytes,
+		"checkpointed_at":       checkpointedAt.UTC(),
+		"checkpoint_error":      checkpointErr,
+		"runtime_stop_reason":   string(stopReason),
+	}
+
+	query := publishCheckpointUpdate + `
+		  AND (s.automation_owner_generation_id IS NULL OR @snapshot_key = '')`
+	if lockToken != uuid.Nil {
+		query += publishCheckpointJobFence
 		args["lock_token"] = lockToken
 	}
 
@@ -1490,6 +1550,86 @@ func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID u
 		s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, row.Revision, row.UpdatedAt, "checkpoint")
 	}
 	return true, nil
+}
+
+// PublishCheckpointWithProvenance is the only writer of an automation-owned
+// session's snapshot key (design doc 125, "Checkpoint coherence"). In one
+// statement it installs the checkpoint on the session, exactly as
+// PublishCheckpoint does, and records on the owning generation the key it
+// applies to, the head the workspace was at, the dependency input
+// fingerprint, and whether the producing turn completed its review. A
+// failure leaves the previous key and provenance installed together.
+// Returns false when the session is not owned by provenance.GenerationID
+// or the lock fence rejects the write.
+func (s *SessionStore) PublishCheckpointWithProvenance(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, stopReason models.RuntimeStopReason, provenance models.CheckpointProvenance) (bool, error) {
+	if strings.TrimSpace(snapshotKey) == "" {
+		return false, fmt.Errorf("publish checkpoint with provenance: snapshot key is required")
+	}
+	if provenance.GenerationID == uuid.Nil {
+		return false, fmt.Errorf("publish checkpoint with provenance: generation is required")
+	}
+	args := pgx.NamedArgs{
+		"id":                     sessionID,
+		"org_id":                 orgID,
+		"generation_id":          provenance.GenerationID,
+		"agent_session_id":       agentSessionID,
+		"snapshot_key":           snapshotKey,
+		"checkpoint_kind":        string(kind),
+		"checkpoint_capability":  string(capability),
+		"checkpoint_size_bytes":  sizeBytes,
+		"checkpointed_at":        checkpointedAt.UTC(),
+		"checkpoint_error":       nil,
+		"runtime_stop_reason":    string(stopReason),
+		"checkpoint_head_sha":    nullIfEmpty(provenance.HeadSHA),
+		"dependency_fingerprint": provenance.DependencyFingerprint,
+		"review_complete":        provenance.ReviewComplete && kind == models.CheckpointKindTurnComplete,
+	}
+	query := `WITH published AS (` + publishCheckpointUpdate + `
+		  AND s.automation_owner_generation_id = @generation_id`
+	if lockToken != uuid.Nil {
+		query += publishCheckpointJobFence
+		args["lock_token"] = lockToken
+	}
+	query += `
+			RETURNING s.id, s.org_id, s.workspace_revision, s.workspace_revision_updated_at
+		), provenance AS (
+			UPDATE automation_target_sessions g
+			SET checkpoint_snapshot_key = @snapshot_key,
+			    checkpoint_head_sha = @checkpoint_head_sha,
+			    checkpoint_dependency_fingerprint = @dependency_fingerprint,
+			    checkpoint_review_complete = @review_complete,
+			    updated_at = now()
+			FROM published p
+			WHERE g.id = @generation_id AND g.org_id = p.org_id AND g.session_id = p.id
+			RETURNING g.id
+		)
+		SELECT p.workspace_revision, p.workspace_revision_updated_at
+		FROM published p
+		JOIN provenance g ON true`
+	rows, err := s.db.Query(ctx, query, args)
+	if err != nil {
+		return false, fmt.Errorf("publish checkpoint with provenance: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[struct {
+		Revision  int64
+		UpdatedAt time.Time
+	}])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("collect published checkpoint with provenance: %w", err)
+	}
+	s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, row.Revision, row.UpdatedAt, "checkpoint")
+	return true, nil
+}
+
+func nullIfEmpty(v string) *string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	return &v
 }
 
 func (s *SessionStore) UpdateRecoveryState(ctx context.Context, orgID, sessionID uuid.UUID, state models.RecoveryState, queuedAt, startedAt *time.Time, incrementAttempt bool) error {
@@ -1839,33 +1979,33 @@ func (s *SessionStore) publishWorkspaceGenerationChanged(ctx context.Context, or
 	}
 }
 
-// ListTerminalEndedBefore returns terminal sessions whose completed_at is older than before.
+// ListTerminalEndedBefore returns only cleanup identifiers, ordered by a stable
+// keyset. Full session payloads can be hundreds of megabytes and are not needed
+// to delete Redis keys. Soft-deleted sessions are included so their keys expire too.
 // lint:allow-no-orgid reason="cross-org Redis cleanup scans terminal sessions across all orgs"
-func (s *SessionStore) ListTerminalEndedBefore(ctx context.Context, before time.Time, limit int) ([]models.Session, error) {
+func (s *SessionStore) ListTerminalEndedBefore(ctx context.Context, before time.Time, after *models.SessionStreamCleanupCursor, limit int) ([]models.SessionStreamCleanupCursor, error) {
 	query := `
-		SELECT ` + sessionSelectColumns + `
+		SELECT id, completed_at
 		FROM sessions
 		WHERE status IN ('completed', 'failed', 'cancelled', 'pr_created', 'skipped')
 		  AND completed_at IS NOT NULL
-		  AND completed_at < @before
-		ORDER BY completed_at ASC
-		LIMIT @limit`
-
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		  AND completed_at < @before`
+	args := pgx.NamedArgs{
 		"before": before,
 		"limit":  limit,
-	})
+	}
+	if after != nil {
+		query += ` AND (completed_at, id) > (@after_completed_at, @after_id)`
+		args["after_completed_at"] = after.CompletedAt
+		args["after_id"] = after.ID
+	}
+	query += ` ORDER BY completed_at ASC, id ASC LIMIT @limit`
+
+	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
 		return nil, fmt.Errorf("list terminal sessions before: %w", err)
 	}
-	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
-	if err != nil {
-		return nil, err
-	}
-	for i := range sessions {
-		hydrateSessionPolicy(&sessions[i])
-	}
-	return sessions, nil
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionStreamCleanupCursor])
 }
 
 // ClaimIdle atomically transitions an idle session to running and returns the
@@ -1883,7 +2023,7 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 		    failure_retry_advised = false,
 		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = 'idle'
-		  AND sandbox_state != 'destroyed'
+		  AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL
 		RETURNING ` + sessionSelectColumns
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -1915,7 +2055,7 @@ func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid
 		    %s,
 		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = ANY(@statuses)
-		  AND sandbox_state != 'destroyed'
+		  AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL
 		RETURNING `+sessionSelectColumns, sessionResumeRuntimeResetAssignments)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -2351,8 +2491,22 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    -- them to the same value.
 		    current_turn = GREATEST(current_turn + 1, @current_turn),
 		    last_activity_at = now(),
-		    agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
-		    sandbox_state = 'snapshotted',
+		    -- An empty snapshot key completes the turn's bookkeeping without a
+		    -- new checkpoint (the turn succeeded but its snapshot failed): the
+		    -- previously published checkpoint is retained as the restore
+		    -- source, and the sandbox state is left to the runtime that owns
+		    -- it. An automation-owned session's snapshot key is written only
+		    -- by PublishCheckpointWithProvenance, so this statement never
+		    -- replaces it (design doc 125, "Checkpoint coherence").
+		    agent_session_id = @agent_session_id,
+		    snapshot_key = CASE
+		        WHEN automation_owner_generation_id IS NOT NULL THEN snapshot_key
+		        ELSE COALESCE(NULLIF(@snapshot_key::text, ''), snapshot_key)
+		    END,
+		    sandbox_state = CASE
+		        WHEN automation_owner_generation_id IS NOT NULL OR @snapshot_key::text = '' THEN sandbox_state
+		        ELSE 'snapshotted'
+		    END,
 		    workspace_generation = workspace_generation + 1,
 		    token_usage = @token_usage,
 		    model_used = COALESCE(@model_used, model_used),
@@ -2595,8 +2749,9 @@ func (s *SessionStore) SetGitIdentity(ctx context.Context, orgID, sessionID uuid
 func (s *SessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error {
 	query := `
 		UPDATE sessions
-		SET agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
-		    sandbox_state = 'snapshotted'
+		SET agent_session_id = @agent_session_id,
+		    snapshot_key = CASE WHEN automation_owner_generation_id IS NOT NULL THEN snapshot_key ELSE @snapshot_key END,
+		    sandbox_state = CASE WHEN automation_owner_generation_id IS NOT NULL THEN sandbox_state ELSE 'snapshotted' END
 		WHERE id = @id AND org_id = @org_id`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -2613,10 +2768,12 @@ func (s *SessionStore) UpdateSnapshotInfo(ctx context.Context, orgID, sessionID 
 // tab". Unlike UpdateTurnComplete, this intentionally leaves status, current
 // turn and summary untouched.
 func (s *SessionStore) UpdateWorkspaceSnapshot(ctx context.Context, orgID, sessionID uuid.UUID, snapshotKey string, result *models.SessionResult) error {
+	// An automation-owned session's snapshot key is written only by
+	// PublishCheckpointWithProvenance; the diff bookkeeping still applies.
 	query := `
 		UPDATE sessions
-		SET snapshot_key = @snapshot_key,
-		    sandbox_state = 'snapshotted',
+		SET snapshot_key = CASE WHEN automation_owner_generation_id IS NOT NULL THEN snapshot_key ELSE @snapshot_key END,
+		    sandbox_state = CASE WHEN automation_owner_generation_id IS NOT NULL THEN sandbox_state ELSE 'snapshotted' END,
 		    last_activity_at = now(),
 		    diff = COALESCE(@diff, diff),
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
@@ -3268,7 +3425,14 @@ func (s *SessionStore) SetPendingSnapshotKey(ctx context.Context, orgID, session
 // UpdateSnapshotInfo. pending_snapshot_set_at is cleared in lockstep so the
 // stranded-pending reaper does not see a phantom timestamp.
 func (s *SessionStore) PromotePendingSnapshot(ctx context.Context, orgID, sessionID uuid.UUID, expectedKey string) error {
-	query := `UPDATE sessions
+	// Promotion installs a key no provenance was captured for. For an
+	// automation-owned session the owning generation's checkpoint
+	// provenance is cleared in the same statement, so the next turn treats
+	// the promoted checkpoint as reconstructed context rather than trusting
+	// provenance that described the previous key (design doc 125,
+	// "Checkpoint coherence").
+	query := `WITH promoted AS (
+		UPDATE sessions
 		SET snapshot_key = pending_snapshot_key,
 		    pending_snapshot_key = NULL,
 		    pending_snapshot_set_at = NULL,
@@ -3276,7 +3440,19 @@ func (s *SessionStore) PromotePendingSnapshot(ctx context.Context, orgID, sessio
 		    workspace_revision = workspace_revision + 1,
 		    workspace_revision_updated_at = NOW()
 		WHERE id = @id AND org_id = @org_id AND pending_snapshot_key = @expected_key
-		RETURNING workspace_revision, workspace_revision_updated_at`
+		RETURNING id, org_id, automation_owner_generation_id, workspace_revision, workspace_revision_updated_at
+	), cleared AS (
+		UPDATE automation_target_sessions g
+		SET checkpoint_snapshot_key = NULL,
+		    checkpoint_head_sha = NULL,
+		    checkpoint_dependency_fingerprint = NULL,
+		    checkpoint_review_complete = NULL,
+		    updated_at = now()
+		FROM promoted p
+		WHERE g.id = p.automation_owner_generation_id AND g.org_id = p.org_id
+		RETURNING g.id
+	)
+	SELECT p.workspace_revision, p.workspace_revision_updated_at FROM promoted p`
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":           sessionID,
 		"org_id":       orgID,
@@ -3396,6 +3572,41 @@ func (s *SessionStore) AcquireTurnHold(ctx context.Context, orgID, sessionID uui
 		return "", fmt.Errorf("acquire turn hold: %w", err)
 	}
 	return actualContainerID, nil
+}
+
+// AcquireExistingTurnHold attaches only to the container the caller read.
+// Unlike AcquireTurnHold, it cannot resurrect a container_id that a GC or
+// prior turn has already cleared while the caller was preparing to reuse it.
+func (s *SessionStore) AcquireExistingTurnHold(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE sessions
+		SET turn_holding_container = TRUE
+		WHERE id = @id AND org_id = @org_id
+		  AND container_id = @container_id`, pgx.NamedArgs{
+		"id": sessionID, "org_id": orgID, "container_id": expectedContainerID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("acquire existing turn hold: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ResetAfterLostReuse reopens a turn only if the container was cleared
+// before it could acquire a hold and no replacement has been published.
+func (s *SessionStore) ResetAfterLostReuse(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE sessions
+		SET status = 'idle'
+		WHERE id = @id AND org_id = @org_id
+		  AND status = 'running'
+		  AND container_id IS NULL
+		  AND turn_holding_container = FALSE`, pgx.NamedArgs{
+		"id": sessionID, "org_id": orgID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("reset session after lost container reuse: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // ReleaseTurnHold flips turn_holding_container to false and returns the
@@ -3520,7 +3731,7 @@ func (s *SessionStore) PublishHydratedContainerID(ctx context.Context, orgID, se
 	query := `UPDATE sessions
 		SET container_id = COALESCE(container_id, @container_id),
 		    sandbox_state = CASE WHEN container_id IS NULL THEN 'running' ELSE sandbox_state END
-		WHERE id = @id AND org_id = @org_id
+		WHERE id = @id AND org_id = @org_id AND code_review_owner_pr_id IS NULL
 		RETURNING COALESCE(container_id, '')`
 	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"id":           sessionID,
@@ -3701,6 +3912,56 @@ func (s *SessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, sess
 	return tag.RowsAffected() > 0, nil
 }
 
+// FinalizeIdleCodeReviewContainer reclaims an idle review workspace after its
+// bounded holder expires or is released. The same live-holder predicates as
+// FinalizeContainerDestroy protect previews, agent turns, and runtime leases;
+// queued/running agent jobs also block cleanup until they finish or retry.
+func (s *SessionStore) FinalizeIdleCodeReviewContainer(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE sessions
+		SET container_id = NULL,
+		    worker_node_id = NULL,
+		    sandbox_state = CASE
+		        WHEN snapshot_key IS NULL OR snapshot_key = '' THEN 'none'
+		        ELSE 'snapshotted'
+		    END
+		WHERE id = @id AND org_id = @org_id
+		  AND origin = 'code_review'
+		  AND container_id = @expected
+		  AND turn_holding_container = FALSE
+		  AND EXISTS (
+		    SELECT 1 FROM code_review_session_metadata m
+		    WHERE m.org_id = sessions.org_id AND m.session_id = sessions.id
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM jobs j
+		    WHERE j.org_id = sessions.org_id
+		      AND j.payload->>'session_id' = sessions.id::text
+		      AND j.job_type IN ('run_agent', 'continue_session')
+		      AND j.status IN ('pending', 'running')
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM preview_instances p
+		    WHERE p.session_id = sessions.id AND p.org_id = sessions.org_id
+		      AND p.preview_holding_container = TRUE
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM session_sandbox_holders h
+		    WHERE h.session_id = sessions.id AND h.org_id = sessions.org_id
+		      AND h.status IN ('active', 'draining') AND h.expires_at > now()
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM thread_runtimes tr
+		    WHERE tr.session_id = sessions.id AND tr.org_id = sessions.org_id
+		      AND tr.status IN ('starting', 'live', 'paused', 'draining')
+		      AND (tr.lease_expires_at IS NULL OR tr.lease_expires_at > now())
+		  )`, pgx.NamedArgs{"id": sessionID, "org_id": orgID, "expected": expectedContainerID})
+	if err != nil {
+		return false, fmt.Errorf("finalize idle code review container: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // ListOrphanedContainers returns sessions whose container_id is set and no
 // preview currently holds the sandbox. Called on startup to clean up
 // containers that leaked from a crashed server — the reconciler probes each
@@ -3760,34 +4021,82 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 	return sessions, nil
 }
 
-// ListReferencedContainerIDs returns every live container_id currently
-// referenced by a session row. It is used by worker-local Docker GC to avoid
-// deleting a container that any DB row still owns.
+// ListContainerReferences returns both the complete set of session-owned
+// containers and the review-only subset in one GC inventory scan.
 // lint:allow-no-orgid reason="worker-local Docker GC reconciles host containers against all session container references"
-func (s *SessionStore) ListReferencedContainerIDs(ctx context.Context) ([]string, error) {
+func (s *SessionStore) ListContainerReferences(ctx context.Context) (allIDs, reviewIDs []string, err error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT container_id
+		SELECT container_id, COALESCE(origin = 'code_review', false)
 		FROM sessions
 		WHERE container_id IS NOT NULL`)
 	if err != nil {
-		return nil, fmt.Errorf("list referenced container ids: %w", err)
+		return nil, nil, fmt.Errorf("list container references: %w", err)
 	}
 	defer rows.Close()
 
-	ids := make([]string, 0)
+	allIDs = make([]string, 0)
+	reviewIDs = make([]string, 0)
 	for rows.Next() {
 		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan referenced container id: %w", err)
+		var isReview bool
+		if err := rows.Scan(&id, &isReview); err != nil {
+			return nil, nil, fmt.Errorf("scan container reference: %w", err)
 		}
-		if id != "" {
-			ids = append(ids, id)
+		if id == "" {
+			continue
+		}
+		allIDs = append(allIDs, id)
+		if isReview {
+			reviewIDs = append(reviewIDs, id)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate referenced container ids: %w", err)
+		return nil, nil, fmt.Errorf("iterate container references: %w", err)
 	}
-	return ids, nil
+	return allIDs, reviewIDs, nil
+}
+
+// ListActiveCodeReviewPreparations returns live initializer lease tokens.
+// Their Docker labels identify only unpublished containers from the current
+// attempt; siblings from expired leases remain reclaimable.
+// lint:allow-no-orgid reason="host-local Docker GC inventories cross-org preparation jobs"
+func (s *SessionStore) ListActiveCodeReviewPreparations(ctx context.Context) ([]string, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT lock_token::text
+		FROM jobs
+		WHERE job_type = 'prepare_code_review_workspace'
+		  AND status = 'running'
+		  AND lock_token IS NOT NULL
+		  AND lease_expires_at > now()`)
+	if err != nil {
+		return nil, fmt.Errorf("list active code review preparations: %w", err)
+	}
+	defer rows.Close()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("scan code review preparation: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate code review preparations: %w", err)
+	}
+	return refs, nil
+}
+
+// WorkspaceGenerationForReview locates the current preparation generation
+// without loading the full session during frequent controller polls.
+func (s *SessionStore) WorkspaceGenerationForReview(ctx context.Context, orgID, sessionID uuid.UUID) (int64, error) {
+	var generation int64
+	err := s.db.QueryRow(ctx, `
+		SELECT workspace_generation FROM sessions
+		WHERE org_id = $1 AND id = $2`, orgID, sessionID).Scan(&generation)
+	if err != nil {
+		return 0, fmt.Errorf("read review workspace generation: %w", err)
+	}
+	return generation, nil
 }
 
 // UpdateWorkingBranch sets the working branch name for a session.

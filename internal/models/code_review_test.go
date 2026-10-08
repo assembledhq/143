@@ -24,6 +24,7 @@ func TestCodeReviewEnumsValidate(t *testing.T) {
 		{name: "phase waiting for GitHub", validate: CodeReviewPhaseWaitingGitHub.Validate},
 		{name: "phase invalid", validate: CodeReviewPhase("bogus").Validate, expectErr: true},
 		{name: "status code GitHub rate limited", validate: CodeReviewStatusCodeGitHubRateLimited.Validate},
+		{name: "status code review loop", validate: CodeReviewStatusCodeLoopDetected.Validate},
 		{name: "status code invalid", validate: CodeReviewStatusCode("bogus").Validate, expectErr: true},
 		{name: "decision approved", validate: CodeReviewDecisionApproved.Validate},
 		{name: "decision invalid", validate: CodeReviewDecision("bogus").Validate, expectErr: true},
@@ -181,6 +182,7 @@ func TestCodeReviewDescriptionEvidenceBasisValidate(t *testing.T) {
 		expectErr bool
 	}{
 		{name: "image", basis: CodeReviewDescriptionEvidenceBasisImage},
+		{name: "captured text", basis: CodeReviewDescriptionEvidenceBasisText},
 		{name: "preview link", basis: CodeReviewDescriptionEvidenceBasisPreviewLink},
 		{name: "repository", basis: CodeReviewDescriptionEvidenceBasisRepository},
 		{name: "pull request description", basis: CodeReviewDescriptionEvidenceBasisPullRequestDescription},

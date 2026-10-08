@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/assembledhq/143/internal/db"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 )
 
@@ -135,6 +136,11 @@ func githubRateLimitJitter(retryKey string) time.Duration {
 }
 
 func classifyGitHubJobError(err error, retryKey string) error {
+	if errors.Is(err, db.ErrCodeReviewPublicationLockBusy) {
+		delay := 15 * time.Second
+		retryWindow := githubRateLimitMaxRetryDuration
+		return &RetryableError{Err: err, ConsumeAttempt: false, RetryAfter: &delay, MaxRetryDuration: &retryWindow}
+	}
 	if retryable := githubRetryableError(err, retryKey); retryable != nil {
 		return retryable
 	}

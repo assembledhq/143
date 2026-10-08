@@ -45,6 +45,15 @@ func main() {
 		runPreviewAuthCheck(ctx, store, cfg, os.Args[2:])
 	case "mark-draining":
 		runMarkDraining(ctx, store, os.Args[2:], models.DrainIntentPlannedRollout)
+	case "resume":
+		params, err := parseResumeArgs(os.Args[2:])
+		if err != nil {
+			exitErr("%v", err)
+		}
+		if err := store.ResumeOnRestart(ctx, params); err != nil {
+			exitErr("%v", err)
+		}
+		writeOutput(map[string]any{"node_id": params.NodeID, "restart_required": true}, true)
 	case "force-maintenance":
 		runMarkDraining(ctx, store, os.Args[2:], models.DrainIntentHostMaintenance)
 	case "status":
@@ -534,6 +543,21 @@ func runMarkDraining(ctx context.Context, store *db.NodeStore, args []string, de
 	writeOutput(status, *jsonOut)
 }
 
+func parseResumeArgs(args []string) (db.ResumeNodeParams, error) {
+	fs := flag.NewFlagSet("resume", flag.ContinueOnError)
+	var params db.ResumeNodeParams
+	fs.StringVar(&params.NodeID, "node-id", "", "exact generation to resume on next restart")
+	fs.StringVar(&params.Reason, "reason", "", "reason for clearing the durable drain")
+	fs.StringVar(&params.RequestedBy, "requested-by", "", "requesting operator")
+	if err := fs.Parse(args); err != nil {
+		return db.ResumeNodeParams{}, err
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(params.NodeID) == "" || strings.TrimSpace(params.Reason) == "" || strings.TrimSpace(params.RequestedBy) == "" {
+		return db.ResumeNodeParams{}, fmt.Errorf("resume requires --node-id, --reason and --requested-by; stop the generation's drain monitor before restarting it")
+	}
+	return params, nil
+}
+
 func runStatus(ctx context.Context, store *db.NodeStore, args []string) db.WorkerDeployStatus {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	nodeID := fs.String("node-id", "", "node id")
@@ -758,7 +782,7 @@ func writeOutput(v any, jsonOut bool) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: worker-deployctl preflight|preview-auth-check|mark-draining|status|impact|retire-ready|expire-budget|extend-drain|retain-images|release-retained-images|force-maintenance|wave [flags]")
+	fmt.Fprintln(os.Stderr, "usage: worker-deployctl preflight|preview-auth-check|mark-draining|resume|status|impact|retire-ready|expire-budget|extend-drain|retain-images|release-retained-images|force-maintenance|wave [flags]")
 }
 
 func exitErr(format string, args ...any) {

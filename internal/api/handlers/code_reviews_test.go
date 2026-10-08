@@ -375,8 +375,8 @@ func TestCodeReviewHandler_PutPolicyRetainsEachOmittedPromptIndependently(t *tes
 			mock.ExpectExec("UPDATE code_review_policies").WithArgs(pgxmock.AnyArg()).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			mock.ExpectQuery("INSERT INTO code_review_policies").WithArgs(
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				current.ReviewInstructions, current.AutomatedApprovalPolicy, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			).WillReturnRows(codeReviewPolicyRowsForHandlerTest().AddRow(policyID, orgID, nil, true, 2, requested.Enabled, requested.ApprovalMode, current.ReviewInstructions, current.AutomatedApprovalPolicy, description, risk, roster, requested.InlineCommentLimit, &userID, time.Now().UTC(), []byte("{}")))
+				current.ReviewInstructions, current.AutomatedApprovalPolicy, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).WillReturnRows(codeReviewPolicyRowsForHandlerTest().AddRow(policyID, orgID, nil, true, 2, requested.Enabled, requested.ApprovalMode, current.ReviewInstructions, current.AutomatedApprovalPolicy, description, risk, roster, requested.InlineCommentLimit, &userID, time.Now().UTC(), []byte("{}"), []byte("{}")))
 			mock.ExpectCommit()
 			handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
 			req := httptest.NewRequest(http.MethodPut, "/api/v1/code-review-policies", bytes.NewReader(body))
@@ -397,12 +397,21 @@ func expectCodeReviewResolvedPolicy(t *testing.T, mock pgxmock.PgxPoolIface, org
 	t.Helper()
 	description, risk, roster := marshalCodeReviewPolicyPartsForHandlerTest(t, config)
 	mock.ExpectQuery("FROM code_review_policies").WithArgs(pgxmock.AnyArg()).WillReturnRows(
-		codeReviewPolicyRowsForHandlerTest().AddRow(uuid.New(), orgID, nil, true, 1, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, description, risk, roster, config.InlineCommentLimit, nil, time.Now().UTC(), []byte("{}")),
+		codeReviewPolicyRowsForHandlerTest().AddRow(uuid.New(), orgID, nil, true, 1, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, description, risk, roster, config.InlineCommentLimit, nil, time.Now().UTC(), []byte("{}"), []byte("{}")),
 	)
 }
 
 func codeReviewPolicyRowsForHandlerTest() *pgxmock.Rows {
-	return pgxmock.NewRows([]string{"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode", "review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy"})
+	return pgxmock.NewRows([]string{"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode", "review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy", "continuation_policy"})
+}
+
+func expectHistoricalPolicyForHandlerTest(t *testing.T, mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+	t.Helper()
+	config := models.DefaultCodeReviewPolicyConfig()
+	description, risk, roster := marshalCodeReviewPolicyPartsForHandlerTest(t, config)
+	mock.ExpectQuery("FROM code_review_policies").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(
+		codeReviewPolicyRowsForHandlerTest().AddRow(uuid.New(), orgID, nil, false, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, description, risk, roster, config.InlineCommentLimit, nil, time.Now().UTC(), []byte("{}"), []byte("{}")),
+	)
 }
 
 func marshalCodeReviewPolicyPartsForHandlerTest(t *testing.T, config models.CodeReviewPolicyConfig) ([]byte, []byte, []byte) {
@@ -474,7 +483,11 @@ func TestCodeReviewHandler_RestorePolicyVersionUsesExpectedVersionAndActor(t *te
 		RestoredFrom: models.CodeReviewPolicyRecord{ID: policyID, OrgID: orgID, Version: 4},
 	}
 	service := &codeReviewPolicyHistoryHandlerStub{restoreResult: result}
-	handler := NewCodeReviewHandler(nil, nil)
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	expectHistoricalPolicyForHandlerTest(t, mock, orgID)
+	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
 	handler.policyHistory = service
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/code-review-policies/versions/"+policyID.String()+"/restore", strings.NewReader(`{"expected_version":8}`))
 	ctx := middleware.WithOrgID(req.Context(), orgID)
@@ -486,7 +499,7 @@ func TestCodeReviewHandler_RestorePolicyVersionUsesExpectedVersionAndActor(t *te
 
 	handler.RestorePolicyVersion(rr, req)
 
-	require.Equal(t, http.StatusOK, rr.Code, "restoring a historical policy should succeed")
+	require.Equal(t, http.StatusOK, rr.Code, "restoring a historical policy should succeed: %s", rr.Body.String())
 	require.Equal(t, policyID, service.restorePolicy, "the selected historical policy should be restored")
 	require.Equal(t, userID, service.restoreUserID, "the restore should be attributed to the authenticated user")
 	require.Equal(t, 8, service.expected, "the restore should use the caller's active version guard")
@@ -500,7 +513,11 @@ func TestCodeReviewHandler_RestorePolicyVersionMapsValidationError(t *testing.T)
 		Field:   "agent_roster.reviewers",
 		Message: "agent is no longer supported",
 	}}
-	handler := NewCodeReviewHandler(nil, nil)
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	expectHistoricalPolicyForHandlerTest(t, mock, orgID)
+	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
 	handler.policyHistory = service
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/code-review-policies/versions/"+policyID.String()+"/restore", strings.NewReader(`{"expected_version":8}`))
 	ctx := middleware.WithOrgID(req.Context(), orgID)

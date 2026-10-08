@@ -18,7 +18,11 @@ If you need the operator path, start with the public self-hosting docs:
 - [Quickstart: single-node](../public/self-hosting/single-node.mdx)
 - [Production deployment checklist](../public/self-hosting/production-deployment-checklist.mdx)
 
-Use this design doc for historical context, scaling rationale, and lower-level operational tradeoffs that are too detailed for public docs.
+Use this design doc for historical context, scaling rationale, and lower-level
+operational tradeoffs. This repository and its design documents are public; keep
+deployment inventories, access details and incident evidence in private operations
+records. The backup sections describe the current helper contracts; other sections
+retain their original design scope.
 
 ### Design Principles
 
@@ -617,7 +621,7 @@ only becomes relevant in Phase 3c (multiple API nodes).
 
 #### 3. `deploy/postgres/postgresql.conf`
 
-Production-tuned Postgres configuration. See the [PostgreSQL Configuration](#production-postgres-configuration) section below.
+Production-tuned Postgres configuration. See [Self-Hosted PostgreSQL Operations](#self-hosted-postgresql-operations) below.
 
 #### 4. `Dockerfile.agent`
 
@@ -817,200 +821,117 @@ health monitoring, and a tested restore procedure.
 
 **When to do this:** Immediately after Phase 1, before accepting real users.
 
-### Code Changes Required
+### Backup implementation
 
-**None.** Phase 2 is entirely new deploy scripts and config files checked into
-the repo. No Go or frontend code changes.
+The shipped entry points are `deploy/scripts/pg-backup.sh` and
+`deploy/scripts/restore-test.sh`. Both delegate to the Python backup policy and
+its co-installed helpers. Use the [backup and recovery guide](../self-hosting/database-backup-controls.md)
+for commands, capacity thresholds, receipt verification, interrupted-upload
+recovery and rollback. This section describes the architecture; deployment
+status and execution evidence belong in private operations records.
 
-### New Files to Create
+The policy creates compressed, full logical `pg_dump` archives. A common lock
+serializes writers, receipt changes, retention and restore readers. Capacity
+admission and runtime resource guards protect the host, while uncertain work
+leaves a pending marker for reconciliation.
 
-#### 1. `deploy/scripts/pg-backup.sh`
+Local retention keeps two receipt-qualified archives: the newest copy and a
+pinned fully restored copy, or the two newest copies when no distinct pin exists.
+The policy verifies the protected pair and remote evidence before pruning.
+`BACKUP_RETENTION_DAYS` is obsolete; do not install an age-based deletion job.
 
-Automated `pg_dump` backups with verification and retention.
+Each archive is uploaded individually with the pinned AWS CLI and a full-object
+checksum, then qualified by a successful transfer and matching object listing.
+The helpers never delete remote objects. Offsite retention, versioning and
+incomplete-multipart cleanup belong in the operator's bucket configuration and
+must cover both `postgres/` and `postgres/resumed/` keys. Store bucket names,
+account identifiers, access details and verification records privately.
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
+Provisioning writes private data-only configuration to
+`/opt/143/backup-storage.json`. The current policy does not source the historical
+`backup-sync.env` or use directory-wide `s3 sync`/`rclone sync`. Limit the backup
+writer to the listing and upload permissions needed for its bucket and prefix;
+use a separate restore identity for reading objects. Confirm effective IAM and
+bucket policies on each deployment.
 
-BACKUP_DIR="${BACKUP_DIR:-/backups/postgres}"
-RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
-CONTAINER_NAME="${POSTGRES_CONTAINER:-143-postgres-1}"
-DB_USER="${POSTGRES_USER:-onefortythree}"
-DB_NAME="${POSTGRES_DB:-onefortythree}"
+The installer supplies a six-hour backup cadence and a weekly restore cadence,
+with independent hold flags. These schedules express intended frequency, not a
+recovery guarantee. The current policy requires an attending operator and does
+not install central health transport or alert delivery. Keep jobs held until the
+relevant operational checks pass; do not set attendance variables in cron to
+bypass the manual-operation requirement.
 
-mkdir -p "$BACKUP_DIR"
+### Optional point-in-time recovery
 
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-BACKUP_FILE="$BACKUP_DIR/$DB_NAME-$TIMESTAMP.dump"
-
-# Custom format: compressed, supports selective restore
-docker exec "$CONTAINER_NAME" \
-  pg_dump -U "$DB_USER" -Fc "$DB_NAME" > "$BACKUP_FILE"
-
-# Verify the backup is valid
-pg_restore --list "$BACKUP_FILE" > /dev/null 2>&1 || {
-  echo "ERROR: Backup verification failed for $BACKUP_FILE" >&2
-  rm -f "$BACKUP_FILE"
-  exit 1
-}
-
-BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
-echo "Backup complete: $BACKUP_FILE ($BACKUP_SIZE)"
-
-# Clean up old backups
-find "$BACKUP_DIR" -name "*.dump" -mtime +$RETENTION_DAYS -delete
-echo "Cleaned backups older than $RETENTION_DAYS days"
-```
-
-**Cron schedule** (add to host crontab):
-
-```cron
-# Every 6 hours: dump the database
-0 */6 * * * /opt/143/deploy/scripts/pg-backup.sh >> /var/log/pg-backup.log 2>&1
-
-# Daily: sync backups offsite to S3-compatible storage
-30 2 * * * rclone sync /backups/postgres s3:143-backups/postgres/ --log-file=/var/log/pg-backup-sync.log
-```
-
-> **`[PROVIDER-SPECIFIC]` Offsite backup target:**
->
-> | Provider | S3-Compatible Storage | Notes |
-> |----------|----------------------|-------|
-> | Hetzner | Hetzner Object Storage | Cheapest if VPS is also Hetzner |
-> | AWS | S3 | Native; use `aws s3 sync` instead of `rclone` if preferred |
-> | GCP | Cloud Storage | Use `gsutil rsync` or `rclone` with GCS backend |
-> | Any | MinIO (self-hosted) | If you want to avoid cloud storage entirely |
->
-> `rclone` works with all of the above — configure the remote once, the backup
-> script doesn't change.
-
-**RPO:** 6 hours worst case. **RTO:** 15-30 minutes (spin up new VPS, restore from dump).
-
-#### 2. WAL Archiving (Required — Near-Zero Data Loss)
-
-WAL-G provides continuous WAL streaming to object storage. This is required for
-production — 6 hours of potential data loss from pg_dump alone is not acceptable
-for paying customers.
-
-**Changes to `deploy/postgres/postgresql.conf`** (append):
-
-```ini
-# WAL archiving (enable when Layer 3 backups are needed)
-wal_level = replica
-archive_mode = on
-archive_command = 'wal-g wal-push %p'
-archive_timeout = 60   # force archive every 60s even if segment isn't full
-```
-
-**WAL-G environment** (add to Postgres container or sidecar):
-
-```bash
-# These use the S3 API — works with any S3-compatible provider
-export WALG_S3_PREFIX=s3://143-backups/wal-g
-export AWS_ACCESS_KEY_ID=your-key
-export AWS_SECRET_ACCESS_KEY=your-secret
-export AWS_ENDPOINT=https://your-s3-endpoint.com   # omit for real AWS S3
-export AWS_REGION=us-east-1
-```
-
-**Point-in-time restore:**
-
-```bash
-# Fetch latest base backup
-wal-g backup-fetch /var/lib/postgresql/data LATEST
-
-# Set recovery target
-cat > /var/lib/postgresql/data/recovery.signal <<EOF
-EOF
-cat >> /var/lib/postgresql/data/postgresql.conf <<EOF
-restore_command = 'wal-g wal-fetch %f %p'
-recovery_target_time = '2025-07-15 14:47:00 UTC'
-recovery_target_action = 'promote'
-EOF
-
-# Start Postgres — it replays WAL up to the target time
-pg_ctl start -D /var/lib/postgresql/data
-```
-
-**RPO:** ~60 seconds. **RTO:** 15-30 minutes.
+Continuous WAL archiving and tested base backups can provide a shorter recovery
+window than periodic logical dumps. WAL-G is a possible integration, but the
+backup helpers described above do not install or enable it. Treat it as separate
+work: configure archival, offsite retention, missing-WAL alerts, and isolated
+point-in-time restore tests before relying on it. Measure recovery-point age and
+restore duration for the chosen deployment; this design does not promise a fixed
+RPO or RTO.
 
 ### Backup Layers Summary
 
-| Layer | What | Protects Against | Does NOT Protect Against |
-|-------|------|-----------------|------------------------|
-| 1. Docker volume (`pgdata`) | Data persists across container restarts | Container crashes, restarts, upgrades, `docker compose down` | Disk failure, `DROP TABLE`, VPS deletion |
-| 2. Scheduled `pg_dump` | Offsite logical backups every 6 hours | Disk failure, VPS deletion, accidental data deletion | Last 6 hours of data |
-| 3. WAL-G archiving | Continuous WAL streaming to object storage | Everything — restore to any second | Nothing (this is the comprehensive layer) |
+| Layer | Purpose | Limits |
+|-------|---------|--------|
+| Docker data volume | Persist data across container replacement | Same-host storage does not survive host or volume loss |
+| Qualified logical archives | Restore a completed database snapshot | Coverage starts at the latest verified dump's recovery point; upload time does not refresh it |
+| Optional continuous WAL archive | Recover between base-backup snapshots | Requires a complete retained WAL chain, separate configuration and tested recovery |
 
 ### Restore Procedures
 
-**From pg_dump** (Layer 2):
+Restore onto isolated capacity using the correct PostgreSQL version and a
+verified archive. The shipped restore helper refuses a Docker daemon containing
+the configured production database container, even if stopped. It also checks
+available storage before creating the temporary reader and records cleanup of
+its owned container and anonymous volumes.
 
-```bash
-docker compose -f docker-compose.prod.yml up -d postgres
-docker exec -i 143-postgres-1 \
-  pg_restore -U onefortythree -d onefortythree --clean --if-exists \
-  < /backups/postgres/onefortythree-YYYYMMDD-HHMMSS.dump
-```
-
-**From WAL-G** (Layer 3): See point-in-time restore procedure above.
-
-**Test your restore procedure.** Run a restore drill before going to production,
-and monthly afterward. An untested backup is not a backup.
+A table-of-contents check or a few restored table counts cannot establish full
+application recovery. Validate schema, representative data, application startup
+and required workflows before recording a known-good restore pin. Keep the
+original archives and uncertain evidence until recovery is independently verified.
+See [restore admission and cleanup](../self-hosting/database-backup-controls.md#restore-admission-and-cleanup).
 
 ### Postgres Health Monitoring
 
-These checks are provider-agnostic — they query Postgres directly.
-
-| Check | Query / Method | Alert Threshold |
-|-------|---------------|-----------------|
-| Connection count | `SELECT count(*) FROM pg_stat_activity` | > 80% of `max_connections` |
-| Disk usage | `SELECT pg_database_size('onefortythree')` | > 80% of available disk |
-| Long-running queries | `pg_stat_activity WHERE state = 'active' AND now() - query_start > interval '5 min'` | Any |
-| Dead tuples | `pg_stat_user_tables ORDER BY n_dead_tup DESC` | > 100K dead tuples |
-| Backup freshness | Check latest `.dump` file mtime | > 12 hours old |
-| WAL archiving status | `pg_stat_archiver` — check `last_failed_wal` | Any failed WAL |
+| Check | Method | Interpretation |
+|-------|--------|----------------|
+| Connection pressure | `pg_stat_activity` and configured connection limits | Alert before pool or server capacity is exhausted |
+| Host disk capacity | Filesystem free bytes plus the next-dump estimate and reserve | Database size alone does not measure remaining host capacity |
+| Long-running or blocked queries | Bounded `pg_stat_activity` and lock checks | Investigate blockers before cancelling identified work |
+| Backup freshness | Qualified receipt's original dump timestamp | Report age against the deployment's recovery-point target, including while held |
+| Watchdog and collector freshness | Runtime heartbeats and independent delivery checks | Missing telemetry must remain visible when no job is running |
+| Restore verification | Recorded independent full-restore evidence | A deferred drill is overdue; local structural checks are insufficient |
+| WAL archival, if enabled | `pg_stat_archiver` and offsite WAL continuity | Monitor both archival failures and gaps in recoverable history |
 
 ### Phase 2 Checklist
 
-- [x] Set up `pg-backup.sh` cron (Layer 2) — automated via
-      `deploy/scripts/install-pg-backups.sh`, run at the end of `make
-      provision-db` and re-runnable standalone with `make provision-db-backups`.
-      Installs `/etc/cron.d/143-pg-backup`: `pg-backup.sh` every 6h (verified
-      pg_dump, 7-day local retention) + `restore-test.sh` weekly. Note: local
-      retention is 7 days (not 30) so 6-hourly ~900 MB dumps don't fill the disk.
-- [x] Configure offsite backup sync — `pg-backup.sh` ships each verified dump
-      to S3 after every run, via `BACKUP_SYNC_CMD` in `/opt/143/backup-sync.env`
-      (the official `aws-cli` Docker image, so no host package installs).
-      `provision-db-backups.sh` writes that file from the `BACKUP_*` vars in
-      `.env.production.enc`, so reprovision recreates it. Bucket
-      `143-prod-db-backups-407539787773-us-east-1` lives in the **isolated
-      143.dev account (407539787773)**, not the shared prod account — DR
-      blast-radius isolation. Versioning on, public access blocked, SSE-S3,
-      30-day lifecycle (offsite retention is independent of the 7-day local
-      retention because `s3 sync` never deletes). Scoped IAM user
-      `143-db-backup-bot` is **write-only** — `s3:ListBucket` + `s3:PutObject`
-      on that bucket only (no GetObject/Delete), so the creds (which propagate
-      to app/worker hosts via the enc bundle) can't exfiltrate or destroy
-      backups; restores use admin creds. The `aws-cli` image is pinned by
-      digest. Verified 2026-06-27.
-- [ ] Enable WAL-G archiving (Layer 3) — **required before accepting users**
-- [x] Run a restore drill — `restore-test.sh` runs weekly and restores the
-      newest dump into a throwaway Postgres (image pinned to the prod major,
-      `postgres:18`); verified manually on 2026-06-27. WAL-G restore still
-      pending Layer 3.
-- [ ] Set up monitoring and alerts through VictoriaLogs/Grafana/vmalert, or an equivalent provider-backed stack.
+Use this as a deployment checklist, not a record of the hosted service's status.
+
+- [ ] Install a consistent helper revision and verify hashes, configuration permissions and both hold values.
+- [ ] Configure and verify offsite permissions, retention and recovery access.
+- [ ] Run an attended canary and verify the exact remote object independently.
+- [ ] Exercise guarded stopping and confirm owned-resource cleanup and retained evidence.
+- [ ] Install and validate [opt-in backup health delivery and alert routing](../self-hosting/database-backup-monitoring.md).
+- [ ] Complete an isolated full restore and record recovery time and validation results.
+- [ ] Establish a backup cadence and observation period that meet the deployment's recovery objectives.
+- [ ] If continuous WAL recovery is required, implement and test it separately.
 
 ### Environment Variables (Backup & Recovery)
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `BACKUP_DIR` | No | `/backups/postgres` | Directory for pg_dump files |
-| `BACKUP_RETENTION_DAYS` | No | `30` | Days to retain local backups |
-| `WALG_S3_PREFIX` | No (Layer 3) | - | S3 path for WAL-G archives |
-| `AWS_ACCESS_KEY_ID` | No (Layer 3) | - | S3 credentials for WAL-G |
-| `AWS_SECRET_ACCESS_KEY` | No (Layer 3) | - | S3 credentials for WAL-G |
-| `AWS_ENDPOINT` | No (Layer 3) | - | S3-compatible endpoint (omit for real AWS) |
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `BACKUP_DIR` | `/backups/postgres` | Archive and private receipt directory |
+| `BACKUP_ENABLED`, `RESTORE_TEST_ENABLED` | Preserve installed values; `true` on first installation | Independent schedule holds; explicitly hold during setup |
+| `BACKUP_ATTENDED`, `BACKUP_OBSERVER` | Unset | Required attendance flag and operator identity for writer/restore operations |
+| `BACKUP_RESERVE_BYTES` | 20 GiB | Minimum free-space reserve; may only be increased |
+| `BACKUP_LOCK_TIMEOUT_SECONDS` | `60` | Bounded common-lock wait |
+| `BACKUP_VERIFY_TIMEOUT_SECONDS` | `7200` | Structural/hash verification timeout |
+| `BACKUP_CRON` | `0 */6 * * *` | Backup schedule rendered by the installer |
+| `RESTORE_TEST_CRON` | `0 5 * * 0` | Restore schedule rendered by the installer; drills require isolated capacity |
+| `BACKUP_S3_BUCKET`, `BACKUP_S3_REGION` | Required for offsite configuration | Operator-owned bucket and region |
+| `BACKUP_AWS_ACCESS_KEY_ID`, `BACKUP_AWS_SECRET_ACCESS_KEY` | Required for offsite configuration | Private writer credentials used by provisioning; never put values in public docs |
 
 ---
 
@@ -1539,7 +1460,7 @@ internet — only allow it from the private network CIDR (e.g., `10.0.0.0/16`).
 
 **Move to managed Redis when:** you need HA (automatic failover), or you're
 managing 10+ nodes and want one fewer thing to operate. See
-[52-redis.md Section 6](../implemented/52-redis.md#6-production-migrating-to-hosted-redis)
+[52-redis.md Section 6.2](implemented/52-redis.md#62-migrating-to-hostedmanaged-redis)
 for the migration path — it's a config change (update `REDIS_URL`), not a code
 change.
 
@@ -2490,51 +2411,12 @@ server_check_delay = 30
 
 ### Backup Verification
 
-Beyond the `pg_restore --list` check in the backup script, run automated restore
-tests weekly:
-
-```bash
-#!/usr/bin/env bash
-# deploy/scripts/restore-test.sh
-set -euo pipefail
-
-BACKUP=$(ls -t /backups/postgres/*.dump | head -1)
-TEST_CONTAINER="143-restore-test-$(date +%s)"
-
-# Start a temporary Postgres for the test
-docker run -d --name "$TEST_CONTAINER" \
-  -e POSTGRES_USER=onefortythree \
-  -e POSTGRES_PASSWORD=test \
-  -e POSTGRES_DB=onefortythree \
-  postgres:18.0
-
-sleep 5  # wait for startup
-
-# Restore
-docker exec -i "$TEST_CONTAINER" \
-  pg_restore -U onefortythree -d onefortythree --clean --if-exists < "$BACKUP"
-
-# Verify critical tables have data
-for TABLE in organizations users projects sessions jobs; do
-  COUNT=$(docker exec "$TEST_CONTAINER" \
-    psql -U onefortythree -tAc "SELECT count(*) FROM $TABLE" 2>/dev/null)
-  if [ -z "$COUNT" ] || [ "$COUNT" -eq 0 ]; then
-    echo "FAIL: $TABLE is empty after restore"
-    docker rm -f "$TEST_CONTAINER"
-    exit 1
-  fi
-  echo "OK: $TABLE has $COUNT rows"
-done
-
-echo "Restore test PASSED"
-docker rm -f "$TEST_CONTAINER"
-```
-
-**Schedule:** Weekly via cron. Alert if it fails.
-
-```cron
-0 4 * * 0 /opt/143/deploy/scripts/restore-test.sh >> /var/log/restore-test.log 2>&1
-```
+Use the shipped receipt-aware restore helper on isolated capacity, following
+[restore admission and cleanup](../self-hosting/database-backup-controls.md#restore-admission-and-cleanup).
+Avoid ad hoc restore containers on the production database host: they bypass
+capacity admission, ownership checks and recorded cleanup. Confirm the helper's
+terminal result against the owned container and volume inventory, then perform
+application-level recovery checks before recording a known-good pin.
 
 ### Upgrade Strategy (Postgres 18 → 19+)
 
@@ -2630,7 +2512,7 @@ Everything in this design uses standard, portable technology:
 | TLS termination | Caddy | Yes | Auto Let's Encrypt on any public IP |
 | Sandbox isolation | gVisor (runsc) | Yes | Works on any Linux kernel 4.4+ |
 | Database | Postgres 18 in Docker (self-hosted) | Yes | Same Docker image works on any VPS provider |
-| Backup storage | S3-compatible via rclone | Yes | AWS S3, GCS, Hetzner Object Storage, MinIO |
+| Backup storage | AWS S3 via the pinned AWS CLI | Storage integration required | Alternative endpoints need configuration and checksum/receipt compatibility validation |
 | WAL archiving | WAL-G | Yes | Supports S3, GCS, Azure Blob, local filesystem |
 | Node provisioning | cloud-init | Yes | Supported by every major cloud provider |
 | CI/CD | GitHub Actions + SSH | Yes | Just needs SSH access to the target VPS |
@@ -2642,8 +2524,8 @@ Everything in this design uses standard, portable technology:
 1. Provision new VPSes on the new provider (same specs)
 2. Set up a private network (different API, same concept)
 3. Update `DEPLOY_HOST` in GitHub Actions secrets
-4. Update `rclone` config if backup storage endpoint changes
+4. Validate the backup storage integration, permissions and integrity checks if the object-storage provider changes
 5. (Phase 4 only) Implement the `CloudProvider` interface for the new provider
 
-Application code, Docker Compose files, Caddy config, Postgres config, backup
-scripts, and CI/CD workflows all stay identical.
+Compute deployment uses portable components. Provider changes still require
+validation of private networking, object-storage compatibility and recovery procedures.

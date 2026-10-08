@@ -1853,7 +1853,7 @@ func TestAutomationFallbackModelsMigrationPostgresBehavior(t *testing.T) {
 		existingID, uuid.New())
 	require.NoError(t, err, "test should seed an automation that predates the fallback chain")
 
-	upBody, err := os.ReadFile("../../migrations/000290_automation_fallback_models.up.sql")
+	upBody, err := os.ReadFile("../../migrations/000300_automation_fallback_models.up.sql")
 	require.NoError(t, err, "test should read the automation fallback models up migration")
 	_, err = conn.Exec(ctx, string(upBody))
 	require.NoError(t, err, "fallback models migration should apply to the pre-migration schema")
@@ -1906,7 +1906,7 @@ func TestAutomationFallbackModelsMigrationPostgresBehavior(t *testing.T) {
 		require.Error(t, execErr, "a non-object fallback chain value (%s) should be rejected", nonObject)
 	}
 
-	downBody, err := os.ReadFile("../../migrations/000290_automation_fallback_models.down.sql")
+	downBody, err := os.ReadFile("../../migrations/000300_automation_fallback_models.down.sql")
 	require.NoError(t, err, "test should read the automation fallback models down migration")
 	_, err = conn.Exec(ctx, string(downBody))
 	require.NoError(t, err, "down migration should roll the fallback chain back")

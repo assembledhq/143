@@ -221,11 +221,13 @@ func TestSandboxPreviewRoutesUseInternalSessionScope(t *testing.T) {
 	t.Parallel()
 	source, err := os.ReadFile("router.go")
 	require.NoError(t, err, "router.go should be readable for sandbox preview route regression test")
-	ensureRoute := strings.Index(string(source), `r.Post("/sessions/{id}/preview/ensure", internalAgentPreviewHandler.Ensure)`)
-	observeRoute := strings.Index(string(source), `r.Post("/sessions/{id}/preview/observe", internalAgentPreviewHandler.Observe)`)
-	actRoute := strings.Index(string(source), `r.Post("/sessions/{id}/preview/act", internalAgentPreviewHandler.Act)`)
-	controlRoute := strings.Index(string(source), `r.Get("/sessions/{id}/preview/control", internalAgentPreviewHandler.BrowserControl)`)
-	handoffRoute := strings.Index(string(source), `r.Post("/sessions/{id}/preview/control/request-handoff", internalAgentPreviewHandler.RequestHumanHandoff)`)
+	// Every internal route is wrapped by the per-target tool gate (design
+	// doc 125), so the registration names the gate and the tool.
+	ensureRoute := strings.Index(string(source), `r.Post("/sessions/{id}/preview/ensure", toolGate.Require("preview:ensure", internalAgentPreviewHandler.Ensure))`)
+	observeRoute := strings.Index(string(source), `r.Post("/sessions/{id}/preview/observe", toolGate.Require("preview:observe", internalAgentPreviewHandler.Observe))`)
+	actRoute := strings.Index(string(source), `r.Post("/sessions/{id}/preview/act", toolGate.Require("preview:act", internalAgentPreviewHandler.Act))`)
+	controlRoute := strings.Index(string(source), `r.Get("/sessions/{id}/preview/control", toolGate.Require("preview:control", internalAgentPreviewHandler.BrowserControl))`)
+	handoffRoute := strings.Index(string(source), `r.Post("/sessions/{id}/preview/control/request-handoff", toolGate.Require("preview:request_handoff", internalAgentPreviewHandler.RequestHumanHandoff))`)
 	require.NotEqual(t, -1, ensureRoute, "sandbox ensure route should be registered")
 	require.NotEqual(t, -1, observeRoute, "sandbox observe route should be registered")
 	require.NotEqual(t, -1, actRoute, "sandbox act route should be registered")
@@ -731,4 +733,29 @@ func TestNewRouterUsesInjectedGitHubController(t *testing.T) {
 	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexauth.NewService(nil, zerolog.Nop()), claudecodeauth.NewService(nil, zerolog.Nop()), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, RouterSharedDependencies{GitHubRateLimitController: controller})
 	require.NoError(t, err, "router should reuse the injected controller without rebuilding policy")
 	require.NotNil(t, router, "shared controller should support ordinary router construction")
+}
+
+// TestInternalRoutesAreToolGated pins that every route under
+// /api/v1/internal is registered through the per-target tool gate, so a
+// new internal route cannot bypass the allowlist by omission.
+func TestInternalRoutesAreToolGated(t *testing.T) {
+	t.Parallel()
+	source, err := os.ReadFile("router.go")
+	require.NoError(t, err, "router.go should be readable")
+	text := string(source)
+	start := strings.Index(text, `r.Route("/api/v1/internal", func(r chi.Router) {`)
+	require.NotEqual(t, -1, start, "internal route group exists")
+	end := strings.Index(text[start:], "\n\t\t})")
+	require.NotEqual(t, -1, end, "internal route group closes")
+	group := text[start : start+end]
+	registrations := 0
+	for _, line := range strings.Split(group, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "r.Get(") && !strings.HasPrefix(trimmed, "r.Post(") && !strings.HasPrefix(trimmed, "r.Put(") && !strings.HasPrefix(trimmed, "r.Patch(") && !strings.HasPrefix(trimmed, "r.Delete(") {
+			continue
+		}
+		registrations++
+		require.Contains(t, trimmed, `toolGate.Require("`, "internal route is tool-gated: %s", trimmed)
+	}
+	require.Greater(t, registrations, 50, "the internal route group was found and scanned")
 }

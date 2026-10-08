@@ -67,12 +67,13 @@ func TestMultiTenancyAudit(t *testing.T) {
 	exemptions := []exemption{
 		{"sessions", "where token"},
 		{"sessions", "where user_id"},
-		{"sessions", "where status = 'idle'"},                         // ListStaleIdleSessions: system-wide cleanup across all orgs
-		{"sessions", "where status = 'pending'"},                      // ListStalePendingSessions: system-wide cleanup across all orgs
-		{"sessions", "where status = 'running'"},                      // ListStaleRunningSessions: system-wide cleanup across all orgs
+		{"sessions", "where status = 'idle'"},    // ListStaleIdleSessions: system-wide cleanup across all orgs
+		{"sessions", "where status = 'pending'"}, // ListStalePendingSessions: system-wide cleanup across all orgs
+		{"sessions", "where status = 'running'"}, // ListStaleRunningSessions: system-wide cleanup across all orgs
+		{"sessions", "where status in ('completed', 'failed', 'cancelled', 'pr_created', 'skipped')"}, // ListTerminalEndedBefore: cross-org Redis key cleanup, identifiers only
 		{"sessions", "where sandbox_state"},                           // ListExpiredSnapshots: system-wide snapshot cleanup across all orgs
 		{"sessions", "where pending_snapshot_key is not null"},        // ReapStrandedPendingSnapshots: system-wide cross-org sweep run by leader-elected scheduler; per-org fanout adds no security and would require listing every org each tick
-		{"sessions", "where container_id is not null"},                // ListReferencedContainerIDs: worker-local Docker GC must compare host containers against all DB-owned container references
+		{"sessions", "where container_id is not null"},                // ListContainerReferences: worker-local Docker GC must compare host containers against all DB-owned container references
 		{"sessions", "where worker_node_id = @node_id"},               // WorkerDeployStatus: node-scoped deploy drain status
 		{"sessions", "diff_history"},                                  // UpdateResult/UpdateTurnComplete: org_id is in a concatenated string fragment
 		{"sessions", "exists(select 1 from sessions where id = @id)"}, // SessionLogStore.Create: cross-org check to distinguish org mismatch from missing session
@@ -87,6 +88,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"jobs", "group by coalesce(nullif(locked_by_node_id"},          // RunningJobSamples: platform-wide running jobs grouped by worker and type
 		{"jobs", "left join dead_nodes"},                                // ReclaimLostRunningJobs: cross-org recovery loop
 		{"jobs", "where status = 'running' and locked_by_node_id = $1"}, // CountRunningOwnedByNode: node-scoped drain status
+		{"jobs", "where job_type = 'prepare_code_review_workspace'"},    // ListActiveCodeReviewPreparations: host-local GC must find live leases across organizations by lock token
 		{"jobs", "locked_by_node_id = @node_id"},                        // WorkerDeployStatus: node-scoped deploy drain status
 		{"session_sandbox_holders", "owner_node_id = @node_id"},         // WorkerDeployStatus: node-scoped sandbox holder drain status
 		{"session_logs", "from session_logs"},                           // no org_id column; scoped via session_id FK

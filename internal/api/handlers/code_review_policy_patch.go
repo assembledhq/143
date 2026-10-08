@@ -39,6 +39,19 @@ func (h *CodeReviewHandler) PatchPolicy(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+	if raw, present := supplied["continuation_policy"]; present {
+		var requested models.CodeReviewContinuationPolicy
+		if string(raw) != "null" {
+			if err := json.Unmarshal(raw, &requested); err != nil {
+				writeError(w, r, 400, "CODE_REVIEW_POLICY_INVALID", "invalid continuation policy", err)
+				return
+			}
+		}
+		if (requested.Enabled && !h.conditionalRecheckCapability) || requested.AutomaticEvidenceRechecks {
+			writeError(w, r, 409, "CODE_REVIEW_CAPABILITY_UNAVAILABLE", "code review continuation is not available")
+			return
+		}
+	}
 	if req.Source == "" {
 		req.Source = models.CodeReviewPolicyEditSourceManual
 	}

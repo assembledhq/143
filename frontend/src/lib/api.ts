@@ -357,6 +357,10 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').CodeReviewListItem>>(`/api/v1/code-reviews/${sessionId}`),
     evidence: (sessionId: string) =>
       get<import('./types').SingleResponse<import('./types').CodeReviewEvidence>>(`/api/v1/code-reviews/${sessionId}/evidence`),
+    assessment: (assessmentId: string) =>
+      get<import('./types').SingleResponse<import('./types').CodeReviewAssessmentDetail>>(`/api/v1/code-review-assessments/${assessmentId}`),
+    assessmentEvidence: (assessmentId: string) =>
+      get<import('./types').SingleResponse<import('./types').CodeReviewAssessmentEvidence>>(`/api/v1/code-review-assessments/${assessmentId}/evidence`),
     disputes: (sessionId: string, cursor?: string) =>
       get<import('./types').ListResponse<import('./types').CodeReviewDispute>>(`/api/v1/code-reviews/${sessionId}/disputes${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`),
     createDispute: (sessionId: string, body: { body: string; contested_reason_codes?: string[] }) =>
@@ -408,7 +412,9 @@ export const api = {
     deleteGitHubTrigger: (repositoryId: string) =>
       del<void>(`/api/v1/code-review-github-trigger?repository_id=${encodeURIComponent(repositoryId)}`),
     pendingSchedules: (cursor?: string, limit = 25) => get<import('./types').ListResponse<import('./types').CodeReviewScheduledTarget>>(`/api/v1/code-review-targets?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
-    reviewNow: (prID: string, requestID: string) => post<import('./types').SingleResponse<{ disposition: string; schedule: import('./types').CodeReviewSchedule }>>(`/api/v1/pull-requests/${prID}/code-review/requests`, { request_id: requestID, mode: 'review_now' }),
+    requestReview: (prID: string, body: { request_id: string; mode: 'review_now' | 'recheck' | 'force_fresh'; reason?: string }) =>
+      post<import('./types').SingleResponse<import('./types').CodeReviewRequestResponse>>(`/api/v1/pull-requests/${prID}/code-review/requests`, body),
+    reviewNow: (prID: string, requestID: string) => api.codeReviews.requestReview(prID, { request_id: requestID, mode: 'review_now' }),
     pauseSchedule: (prID: string, paused: boolean) => request<import('./types').SingleResponse<import('./types').CodeReviewSchedule>>(`/api/v1/pull-requests/${prID}/code-review`, { method: 'PATCH', body: JSON.stringify({ automatic_paused: paused }) }),
     patchPolicy: (body: { config: import('./code-review-autosave').PolicyPatch; expected_version: number; source?: import('./types').CodeReviewPolicyEditSource }) => request<import('./types').SingleResponse<import('./types').CodeReviewPolicyRecord>>('/api/v1/code-review-policies', { method: 'PATCH', body: JSON.stringify(body) }),
     updatePolicy: (body: { config: import('./types').CodeReviewPolicyConfig; source?: import('./types').CodeReviewPolicyEditSource }) =>

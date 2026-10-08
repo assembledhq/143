@@ -33,9 +33,25 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 			},
 			expected: "❌ **143 Code Reviewer needs human review**\n\n" +
 				"**Why:** The available review evidence did not meet the configured approval policy.\n\n" +
-				"**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.\n\n" +
-				"**Latest assessment:** `696c4a2` at 2026-07-22T23:42:57Z\n\n" +
-				"[View the full review](https://143.dev/sessions/sess_latest)",
+				"**Next steps:** Address any blockers, then request another review or ask a human reviewer to decide.\n\n" +
+				"*Assessed `696c4a2` · <relative-time datetime=\"2026-07-22T23:42:57Z\">Jul 22, 2026 at 7:42 PM EDT</relative-time>*\n\n" +
+				"<!-- 143-code-review-footer:start -->\n[View full review](https://143.dev/sessions/sess_latest)\n<!-- 143-code-review-footer:end -->",
+		},
+		{
+			name: "keeps reassessment provenance before localized assessment metadata",
+			input: CodeReviewFinalReviewInput{
+				Decision:         CodeReviewDecisionApproved,
+				Acceptable:       true,
+				HeadSHA:          "52f25630123456789",
+				AssessedAt:       time.Date(2026, time.September, 25, 8, 23, 16, 0, time.FixedZone("EDT", -4*60*60)),
+				ReviewProvenance: "**Evidence recheck:** Reused the completed code review for this commit.",
+				SessionURL:       "https://143.dev/code-reviews?assessment=90d8a47d-d87e-4780-90af-040f5144685a",
+			},
+			expected: "✅ **143 Code Reviewer approved this PR**\n\n" +
+				"**Why:** It met the configured policy.\n\n" +
+				"**Evidence recheck:** Reused the completed code review for this commit.\n\n" +
+				"*Assessed `52f2563` · <relative-time datetime=\"2026-09-25T12:23:16Z\">Sep 25, 2026 at 8:23 AM EDT</relative-time>*\n\n" +
+				"<!-- 143-code-review-footer:start -->\n[View assessment](https://143.dev/code-reviews?assessment=90d8a47d-d87e-4780-90af-040f5144685a)\n<!-- 143-code-review-footer:end -->",
 		},
 		{
 			name: "uses generated narrative with typed policy blockers",
@@ -61,16 +77,18 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 **Why:** The change is focused, but the description does not explain the testing evidence and only one review agent returned usable output. Add that context and rerun the missing review before asking for approval.
 
 **Policy thresholds:**
-- The PR description did not meet the configured requirements: Testing evidence (say how the change was tested); Screenshots or preview link (add a before/after screenshot). [View policy setting](https://143.dev/code-reviews?tab=policy)
+- The PR description did not meet the configured requirements: Testing evidence (say how the change was tested); Screenshots or preview link (add a before/after screenshot).
 
 **Human judgment needed:**
 - Only 1 of 2 required review agents completed a usable review.
 
-**Reviewer evidence:** Codex found no blocking issues; Claude Code timed out.
+**Reviewers:** Codex found no blocking issues; Claude Code timed out.
 
-**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.
+**Next steps:** Address any blockers, then request another review or ask a human reviewer to decide.
 
-[View the full review](https://143.dev/sessions/sess_123)`,
+<!-- 143-code-review-footer:start -->
+[View full review](https://143.dev/sessions/sess_123)
+<!-- 143-code-review-footer:end -->`,
 		},
 		{
 			name: "explains an incomplete review when final synthesis times out",
@@ -88,9 +106,9 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 **143 review issues:**
 - The orchestrator did not produce a valid structured synthesis.
 
-**Reviewer evidence:** Codex found no blocking issues; Claude Code found no blocking issues.
+**Reviewers:** Codex found no blocking issues; Claude Code found no blocking issues.
 
-**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.`,
+**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence.`,
 		},
 		{
 			name: "keeps real policy blockers alongside an operational failure",
@@ -109,12 +127,12 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 **Why:** 143 received reviewer output, but the final synthesis did not match the required response format. The automated review is incomplete; this is not a code-quality finding.
 
 **Policy thresholds:**
-- Required GitHub checks are not passing. [View policy setting](https://143.dev/code-reviews?tab=policy)
+- Required GitHub checks are not passing.
 
 **143 review issues:**
 - The orchestrator did not produce a valid structured synthesis.
 
-**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence directly.`,
+**Next steps:** Retry the automated review to regenerate the final synthesis, or ask a human reviewer to review the available evidence.`,
 		},
 		{
 			name: "uses generated approval narrative with compact review facts",
@@ -138,9 +156,11 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 
 **Review facts:** 180 changed lines across 4 files · required checks passed · reviewer quorum 2/2
 
-**Reviewer evidence:** Codex found no blocking issues; Claude Code found no blocking issues.
+**Reviewers:** Codex found no blocking issues; Claude Code found no blocking issues.
 
-[View the full review](https://143.dev/sessions/sess_approved)`,
+<!-- 143-code-review-footer:start -->
+[View full review](https://143.dev/sessions/sess_approved)
+<!-- 143-code-review-footer:end -->`,
 		},
 		{
 			name: "explains acceptable comment-only review",
@@ -174,8 +194,6 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 			},
 			expected: `❌ **143 Code Reviewer needs human review**
 
-**Why:** This PR did not meet the configured approval policy; the blockers are grouped below.
-
 **Review findings:**
 - Review agents reported blocking findings.
 
@@ -185,7 +203,7 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 
 **Suggested human reviewers:** security/platform
 
-**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.`,
+**Next steps:** Address any blockers, then request another review or ask a human reviewer to decide.`,
 		},
 		{
 			name: "shows advisory findings in a collapsed non-blocking section",
@@ -234,13 +252,11 @@ P2 and P3 observations do not affect the approval decision.
 			},
 			expected: `❌ **143 Code Reviewer needs human review**
 
-**Why:** This PR did not meet the configured approval policy; the blockers are grouped below.
-
 **Policy thresholds:**
-- This change has 1842 changed lines; the policy limit is 1000. [View policy setting](https://143.dev/code-reviews?tab=policy#policy-max-lines-changed)
-- This change touches 34 files; the policy limit is 20. [View policy setting](https://143.dev/code-reviews?tab=policy#policy-max-files-changed)
+- This change has 1842 changed lines; the policy limit is 1000.
+- This change touches 34 files; the policy limit is 20.
 
-**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.`,
+**Next steps:** Address any blockers, then request another review or ask a human reviewer to decide.`,
 		},
 		{
 			name: "calls out the only blocker at the reviewed revision",
@@ -252,12 +268,11 @@ P2 and P3 observations do not affect the approval decision.
 				HeadSHA:           "abcdef1234567890",
 			},
 			expected: "❌ **143 Code Reviewer needs human review**\n\n" +
-				"**Why:** This PR did not meet the configured approval policy; the blockers are grouped below.\n\n" +
 				"**Policy thresholds:**\n" +
-				"- This change has 301 changed lines; the policy limit is 300. [View policy setting](https://143.dev/code-reviews?tab=policy#policy-max-lines-changed)\n\n" +
+				"- This change has 301 changed lines; the policy limit is 300.\n\n" +
 				"This is the only blocker as of `abcdef1`.\n\n" +
-				"**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.\n\n" +
-				"**Latest assessment:** `abcdef1`",
+				"**Next steps:** Address any blockers, then request another review or ask a human reviewer to decide.\n\n" +
+				"*Assessed `abcdef1`*",
 		},
 		{
 			name: "separates context failures from human judgment blockers",
@@ -271,15 +286,13 @@ P2 and P3 observations do not affect the approval decision.
 			},
 			expected: `❌ **143 Code Reviewer needs human review**
 
-**Why:** This PR did not meet the configured approval policy; the blockers are grouped below.
-
 **Human judgment needed:**
 - Human review is required for architectural judgment: database boundary.
 
 **143 review issues:**
 - Required PR context could not be fetched.
 
-**Next steps:** Review the explanation and evidence above, address any blockers, then request another automated review or ask a human reviewer to decide.`,
+**Next steps:** Address any blockers, then request another review or ask a human reviewer to decide.`,
 		},
 	}
 
@@ -302,21 +315,23 @@ func TestBuildCodeReviewProvisionalBody(t *testing.T) {
 			{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: 6, Limit: 5},
 			{Code: CodeReviewRiskReasonBlockedPath, Subject: "migrations/**"},
 		},
-		PolicySettingsURL: "https://143.dev/code-reviews?tab=policy",
-		SessionURL:        "https://143.dev/sessions/session-1",
-		HeadSHA:           "1234567890abcdef",
-		AssessedAt:        time.Date(2026, time.August, 5, 18, 0, 0, 0, time.UTC),
+		PolicySettingsURL:  "https://143.dev/code-reviews?tab=policy",
+		SessionURL:         "https://143.dev/sessions/session-1",
+		EvidenceRecheckURL: "https://143.dev/code-reviews?recheck=90d8a47d-d87e-4780-90af-040f5144685a",
+		ReviewNowURL:       "https://143.dev/code-reviews?review_now=90d8a47d-d87e-4780-90af-040f5144685a",
+		HeadSHA:            "1234567890abcdef",
+		AssessedAt:         time.Date(2026, time.August, 5, 18, 0, 0, 0, time.UTC),
 	}
 
 	actual := BuildCodeReviewProvisionalBody(input)
 
 	require.Equal(t, "⚠️ **143 Code Reviewer found stable policy blockers**\n\n"+
 		"**Policy thresholds:**\n"+
-		"- This change touches 6 files; the policy limit is 5. [View policy setting](https://143.dev/code-reviews?tab=policy#policy-max-files-changed)\n"+
-		"- Repository policy blocks automated approval for changes to `migrations/**`. [View policy setting](https://143.dev/code-reviews?tab=policy)\n\n"+
+		"- This change touches 6 files; the policy limit is 5.\n"+
+		"- Repository policy blocks automated approval for changes to `migrations/**`.\n\n"+
 		"These blockers are stable for this commit. The substantive code review is still running and may identify additional findings.\n\n"+
-		"**Latest assessment:** `1234567` at 2026-08-05T18:00:00Z\n\n"+
-		"[Follow the review session](https://143.dev/sessions/session-1)", actual, "provisional review should explain stable blockers without claiming a terminal decision")
+		"*Assessed `1234567` · <relative-time datetime=\"2026-08-05T18:00:00Z\">Aug 5, 2026 at 2:00 PM EDT</relative-time>*\n\n"+
+		"<!-- 143-code-review-footer:start -->\n[Follow review](https://143.dev/sessions/session-1)\n<!-- 143-code-review-footer:end -->", actual, "provisional review should explain stable blockers without claiming a terminal decision")
 }
 
 func TestBuildCodeReviewFinalReviewBodyEscapesUntrustedFindingText(t *testing.T) {

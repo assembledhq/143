@@ -26,11 +26,14 @@ type sendToAgentResponse struct {
 type SessionReviewCommentHandler struct {
 	store        *db.SessionReviewCommentStore
 	sessionStore *db.SessionStore
-	messageStore *db.SessionMessageStore
-	threadStore  *db.SessionThreadStore
-	jobStore     *db.JobStore
-	logger       zerolog.Logger
-	audit        *db.AuditEmitter
+	// automationOwners rejects a human turn on a session a per-target
+	// automation generation owns. Nil-safe: skipped when not wired.
+	automationOwners automationOwnershipGuard
+	messageStore     *db.SessionMessageStore
+	threadStore      *db.SessionThreadStore
+	jobStore         *db.JobStore
+	logger           zerolog.Logger
+	audit            *db.AuditEmitter
 }
 
 func NewSessionReviewCommentHandler(store *db.SessionReviewCommentStore, sessionStore *db.SessionStore, logger zerolog.Logger) *SessionReviewCommentHandler {
@@ -324,6 +327,11 @@ func (h *SessionReviewCommentHandler) Delete(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// SetAutomationOwnershipGuard wires the per-target continuity guard.
+func (h *SessionReviewCommentHandler) SetAutomationOwnershipGuard(guard automationOwnershipGuard) {
+	h.automationOwners = guard
+}
+
 // SendToAgent compiles open review comments into a structured message and
 // sends it to the session as a follow-up message, enqueuing a continue_session job.
 // If messageStore/jobStore are not configured, it falls back to returning the
@@ -370,6 +378,13 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 
 	// If message and job stores are available, send the message directly.
 	if h.messageStore != nil && h.jobStore != nil && h.sessionStore != nil {
+		// This path claims the session and enqueues a continuation without
+		// going through the guarded message services, so it carries the
+		// owned-session guard itself: an automation-owned session accepts no
+		// human turn (design doc 125).
+		if rejectAutomationOwnedSession(w, r, h.automationOwners, orgID, sessionID) || rejectCodeReviewOwnedSession(w, r, h.automationOwners, orgID, sessionID) {
+			return
+		}
 		session, err := h.sessionStore.ClaimIdle(r.Context(), orgID, sessionID)
 		if err != nil {
 			// Distinguish "session not idle" (no row updated → pgx.ErrNoRows) from real DB errors.

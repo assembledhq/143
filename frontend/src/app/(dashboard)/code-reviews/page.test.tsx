@@ -42,6 +42,7 @@ vi.mock("@/lib/use-resource-sse", async () => {
 import type {
   CodingCredentialSummary,
   CodeReviewAnalytics,
+  CodeReviewAssessmentSummary,
   CodeReviewEvidence,
   CodeReviewDispute,
   CodeReviewGitHubTriggerResponse,
@@ -428,6 +429,7 @@ function mockCodeReviewBaseHandlers(
         data: reviewAnalytics,
       } satisfies SingleResponse<CodeReviewAnalytics>),
     ),
+    http.get("/api/v1/code-reviews/session-1", () => HttpResponse.json({ data: review })),
     http.get("/api/v1/code-reviews/session-1/evidence", () =>
       HttpResponse.json({
         data: evidence,
@@ -587,6 +589,26 @@ describe("CodeReviewsPage", () => {
     expect(within(approval).queryByText(/automated approval policy is required/i)).not.toBeInTheDocument();
   });
 
+  it("shows one row action and puts re-check controls in the review modal", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: {
+      ...policy, capabilities: { conditional_recheck: true }, config: { ...policy.config, continuation_policy: { enabled: true } },
+    } })));
+    renderWithProviders(<CodeReviewsPage />);
+    await screen.findAllByText("#428 Fix invoice rounding");
+    const row = within(screen.getByRole("table")).getByRole("row", { name: /#428 Fix invoice rounding/ });
+    expect(within(row).getAllByRole("button")).toHaveLength(1);
+    expect(within(row).queryByRole("link", { name: "Session" })).not.toBeInTheDocument();
+    await user.click(within(row).getByRole("button", { name: "View review" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review for #428" });
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Re-check evidence" })).toBeEnabled());
+    expect(within(dialog).getByRole("link", { name: "Open session" })).toHaveAttribute("href", "/sessions/session-1");
+    await user.click(within(dialog).getByRole("button", { name: "Force fresh review" }));
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(within(dialog).getByRole("textbox", { name: "Reason for a fresh review" })).toBeInTheDocument();
+  });
+
   it("renders review sessions and policy configuration", async () => {
     const user = userEvent.setup();
     mockCodeReviewBaseHandlers();
@@ -667,13 +689,16 @@ describe("CodeReviewsPage", () => {
     expect(within(reviewCells[3]).getByText("Completed").closest('[data-slot="status-label"]')).not.toBeNull();
     expect(within(reviewCells[0]).getByText(/api · anya · abcdef1/)).toBeInTheDocument();
     expect(within(reviewCells[2]).getByText("—")).toBeInTheDocument();
-    expect(within(reviewCells[5]).getByRole("button", { name: "Evidence" })).toBeInTheDocument();
-    expect(within(reviewCells[5]).getByRole("link", { name: "Session" }).querySelector("svg")).toBeInTheDocument();
-    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
+    expect(within(reviewCells[5]).getByRole("button", { name: "View review" })).toBeInTheDocument();
+    expect(within(reviewCells[5]).queryByRole("link", { name: "Session" })).not.toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: /View review/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", {
-      name: /Evidence for #428/i,
+      name: /Review for #428/i,
     });
     expect(evidenceSheet).toBeInTheDocument();
+    for (const title of ["Reviewer findings", "Reviewer outputs", "Prompt records", "Visual evidence", "Assessment details"]) {
+      await user.click(await within(evidenceSheet).findByRole("button", { name: new RegExp(`^${title}`) }));
+    }
     expect(within(evidenceSheet).getByText("No blocking issues found.")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Clarify branch name")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("P2 · Advisory")).toBeInTheDocument();
@@ -684,12 +709,10 @@ describe("CodeReviewsPage", () => {
     ).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Review this PR.")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Visual evidence")).toBeInTheDocument();
-    const imageMetric = within(evidenceSheet).getByText("Images").parentElement;
-    expect(imageMetric).not.toBeNull();
-    expect(within(imageMetric!).getByText("5")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByRole("button", { name: "Visual evidence 5" })).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("3 additional images were omitted after the 32-image capture limit.")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("ve_comment")).toBeInTheDocument();
-    expect(within(evidenceSheet).getByText("PR comment")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("PR comment", { exact: false })).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("@outside-contributor", { exact: false })).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Cited")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("ve_review_comment")).toBeInTheDocument();
@@ -701,7 +724,7 @@ describe("CodeReviewsPage", () => {
     const visualEvidenceSourceLinks = within(evidenceSheet).getAllByRole("link", { name: "View source" });
     expect(visualEvidenceSourceLinks).toHaveLength(1);
     expect(visualEvidenceSourceLinks[0]).toHaveAttribute("href", "https://github.com/acme/api/pull/428#issuecomment-991");
-    expect(within(evidenceSheet).getByText("Completed")).toBeInTheDocument();
+    expect(within(evidenceSheet).getAllByText("Completed").length).toBeGreaterThan(0);
     await user.click(within(evidenceSheet).getByRole("button", { name: "Close" }));
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
@@ -817,9 +840,9 @@ describe("CodeReviewsPage", () => {
     expect(within(mobileNeedsReview).queryByText("Risk")).not.toBeInTheDocument();
 
     await user.keyboard("{Escape}");
-    await user.click(within(needsReviewCells[5]).getByRole("button", { name: "Evidence" }));
-    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
-    expect(within(evidenceSheet).getByText("Why not approved")).toBeInTheDocument();
+    await user.click(within(needsReviewCells[5]).getByRole("button", { name: "View review" }));
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Review for #428/i });
+    expect(within(evidenceSheet).getByText("Why this verdict")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Reviewers found a blocking issue")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("File-count limit exceeded (34 of 25)")).toBeInTheDocument();
   });
@@ -876,10 +899,10 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await screen.findAllByText("#428 Fix invoice rounding");
-    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
-    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    await user.click(screen.getAllByRole("button", { name: /View review/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Review for #428/i });
     expect(await within(evidenceSheet).findByText("Evidence could not be loaded")).toBeInTheDocument();
-    expect(within(evidenceSheet).getByText("Why not approved")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Why this verdict")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Required checks were not passing")).toBeInTheDocument();
   });
 
@@ -1498,7 +1521,7 @@ describe("CodeReviewsPage", () => {
       nuqsHasMemory: true,
     });
 
-    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #311/i });
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Review for #311/i });
     expect(within(evidenceSheet).getByText("Archived rounding fix")).toBeInTheDocument();
     expect(detailRequests).toBe(1);
   });
@@ -1541,8 +1564,8 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
 
-    await user.click((await screen.findAllByRole("button", { name: /Evidence/i }))[0]);
-    expect(await screen.findByRole("dialog", { name: /Evidence for #428/i })).toBeInTheDocument();
+    await user.click((await screen.findAllByRole("button", { name: /View review/i }))[0]);
+    expect(await screen.findByRole("dialog", { name: /Review for #428/i })).toBeInTheDocument();
     expect(detailRequests).toBe(0);
   });
 
@@ -1573,14 +1596,15 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
-    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
+    await user.click(screen.getAllByRole("button", { name: /View review/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", {
-      name: /Evidence for #428/i,
+      name: /Review for #428/i,
     });
     expect(within(evidenceSheet).getByRole("alert")).toHaveTextContent("Evidence could not be loaded");
 
     await user.click(within(evidenceSheet).getByRole("button", { name: "Retry" }));
 
+    await user.click(await within(evidenceSheet).findByRole("button", { name: /^Reviewer outputs/ }));
     expect(await within(evidenceSheet).findByText("No blocking issues found.")).toBeInTheDocument();
     expect(evidenceRequests).toBe(2);
   });
@@ -1592,9 +1616,10 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
-    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
-    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
-    await user.click(within(evidenceSheet).getByRole("button", { name: "Report an unsafe approval" }));
+    await user.click(screen.getAllByRole("button", { name: /View review/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Review for #428/i });
+    await user.click(within(evidenceSheet).getByRole("button", { name: "Decision feedback" }));
+    await user.click(await within(evidenceSheet).findByRole("button", { name: "Report an unsafe approval" }));
 
     const feedbackDialog = await screen.findByRole("dialog", { name: "Report an unsafe approval" });
     await user.type(within(feedbackDialog).getByLabelText("What should be reconsidered?"), "This approval missed an authorization bypass.");
@@ -1627,9 +1652,10 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
-    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
-    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
-    expect(within(evidenceSheet).getByText("Review requested")).toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: /View review/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Review for #428/i });
+    await user.click(within(evidenceSheet).getByRole("button", { name: "Decision feedback" }));
+    expect(await within(evidenceSheet).findByText("Review requested")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Ordinary review request")).toBeInTheDocument();
     expect(within(evidenceSheet).queryByText("Discarded")).not.toBeInTheDocument();
   });
@@ -1658,8 +1684,8 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
-    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
-    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    await user.click(screen.getAllByRole("button", { name: /View review/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Review for #428/i });
 
     expect(within(evidenceSheet).queryByText("Decision feedback")).not.toBeInTheDocument();
     expect(disputeRequests).toBe(0);
@@ -1670,7 +1696,7 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />, { searchParams: { evidence: "session-1" } });
 
-    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Review for #428/i });
     expect(within(evidenceSheet).getByText("Decision feedback")).toBeInTheDocument();
   });
 
@@ -2019,8 +2045,9 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
-    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
-    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    await user.click(screen.getAllByRole("button", { name: /View review/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Review for #428/i });
+    await user.click(within(evidenceSheet).getByRole("button", { name: "Decision feedback" }));
     await user.click(await within(evidenceSheet).findByRole("button", { name: "Promote to policy queue" }));
 
     await waitFor(() => expect(updateBody).toEqual({ expected_version: 2, trust_override: true }));
@@ -2203,6 +2230,58 @@ describe("CodeReviewsPage", () => {
     expect(screen.getAllByText("#429 Recovered history page")).toHaveLength(2);
   });
 
+  it.each([
+    { status: "reserved", label: "Evidence re-check queued", activity: "none" },
+    { status: "running", label: "Evidence re-check running", activity: "breathing" },
+    { status: "publishing", label: "Evidence re-check publishing", activity: "breathing" },
+  ] as const)("shows a $status evidence re-check on desktop and mobile rows", async ({ status, label, activity }) => {
+    const active: CodeReviewAssessmentSummary = { id: "recheck-1", session_id: review.session_id, head_sha: review.head_sha, review_scope: "evidence_only", route_reason: "checks_changed", status };
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [{ ...review, active_assessment: active }], meta: {} })));
+    renderWithProviders(<CodeReviewsPage />);
+
+    expect(await screen.findAllByText(label)).toHaveLength(2);
+    const table = screen.getByRole("table");
+    const row = within(table).getByRole("row", { name: /#428 Fix invoice rounding/ });
+    const mobile = screen.getByLabelText("Code review activity");
+    for (const surface of [row, mobile]) {
+      const statusLabel = within(surface).getByText(label).closest('[data-slot="status-label"]');
+      expect(statusLabel?.querySelector('[data-slot="status-indicator"]')).toHaveAttribute("data-activity", activity);
+      expect(within(surface).getByText("Previous result")).toBeInTheDocument();
+      expect(within(surface).getByText("Approved")).toBeInTheDocument();
+      expect(within(surface).queryByText("Completed")).not.toBeInTheDocument();
+    }
+  });
+
+  it.each([
+    { name: "another session", assessment: { session_id: "other-session" }, stale: false },
+    { name: "another head", assessment: { head_sha: "other-head" }, stale: false },
+    { name: "a terminal assessment", assessment: { status: "completed" as const }, stale: false },
+    { name: "a superseded row", assessment: {}, stale: true },
+  ])("does not show an active re-check for $name", async ({ assessment, stale }) => {
+    const active: CodeReviewAssessmentSummary = { id: "recheck-1", session_id: review.session_id, head_sha: review.head_sha, review_scope: "evidence_only", route_reason: "checks_changed", status: "running", ...assessment };
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [{ ...review, stale, active_assessment: active }], meta: {} })));
+    renderWithProviders(<CodeReviewsPage />);
+    await screen.findAllByText("#428 Fix invoice rounding");
+    expect(screen.queryByText("Evidence re-check running")).not.toBeInTheDocument();
+    expect(screen.queryByText("Previous result")).not.toBeInTheDocument();
+  });
+
+  it("refreshes a running evidence re-check back to the completed result", async () => {
+    let active: CodeReviewListItem["active_assessment"] = { id: "recheck-1", session_id: review.session_id, head_sha: review.head_sha, review_scope: "evidence_only", route_reason: "checks_changed", status: "running" };
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [{ ...review, active_assessment: active }], meta: {} })));
+    renderWithProviders(<CodeReviewsPage />);
+    expect(await screen.findAllByText("Evidence re-check running")).toHaveLength(2);
+    active = null;
+    act(() => sse.onEvent?.());
+    await waitFor(() => expect(screen.queryByText("Evidence re-check running")).not.toBeInTheDocument());
+    expect(screen.queryByText("Previous result")).not.toBeInTheDocument();
+    const row = within(screen.getByRole("table")).getByRole("row", { name: /#428 Fix invoice rounding/ });
+    expect(within(row).getByText("Completed")).toBeInTheDocument();
+  });
+
   it("omits the mobile completion timestamp until a review completes", async () => {
     const queuedReview: CodeReviewListItem = {
       ...review,
@@ -2351,8 +2430,8 @@ describe("CodeReviewsPage", () => {
     const failedRow = within(reviewTable).getByRole("row", { name: /#428 Fix invoice rounding/i });
     expect(within(failedRow).getByText("Reviewer agents did not produce usable output.")).toBeInTheDocument();
 
-    await user.click(within(failedRow).getByRole("button", { name: "Evidence" }));
-    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    await user.click(within(failedRow).getByRole("button", { name: "View review" }));
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Review for #428/i });
     expect(within(evidenceSheet).getByRole("alert")).toHaveTextContent("Reviewer agents did not produce usable output.");
 
     await user.click(within(evidenceSheet).getByRole("button", { name: "Retry review" }));
@@ -2361,7 +2440,7 @@ describe("CodeReviewsPage", () => {
 
     releaseRetry();
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Code review retry started"));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: /Evidence for #428/i })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: /Review for #428/i })).not.toBeInTheDocument());
   });
 
   it("refreshes the review list when retry dispatch fails", async () => {
@@ -2408,7 +2487,9 @@ describe("CodeReviewsPage", () => {
 
     const reviewTable = await screen.findByRole("table");
     const failedRow = within(reviewTable).getByRole("row", { name: /#428 Fix invoice rounding/i });
-    await user.click(within(failedRow).getByRole("button", { name: "Retry review" }));
+    await user.click(within(failedRow).getByRole("button", { name: "View review" }));
+    const retryDialog = await screen.findByRole("dialog", { name: "Review for #428" });
+    await user.click(within(retryDialog).getByRole("button", { name: "Retry review" }));
 
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith("Code review could not be retried", {
@@ -2416,7 +2497,7 @@ describe("CodeReviewsPage", () => {
       }),
     );
     await waitFor(() => expect(listRequests).toBeGreaterThanOrEqual(2));
-    expect(within(failedRow).getByRole("button", { name: "Retry review" })).toBeEnabled();
+    expect(within(retryDialog).getByRole("button", { name: "Retry review" })).toBeEnabled();
   });
 
   it("does not offer retry for a historical failure the server marks ineligible", async () => {
@@ -4416,7 +4497,7 @@ it("keeps the queue out of Reviews and opens it from a bookmarkable tab", async 
   await waitFor(() => expect(queryClient.isFetching()).toBe(0));
   expect(queueLoads).toBe(0);
   expect(screen.queryByRole("heading", { name: "Review queue" })).not.toBeInTheDocument();
-  expect(screen.queryAllByRole("button", { name: "Review now" })).toHaveLength(0);
+  expect(screen.queryAllByRole("button", { name: "Request Full Re-Review Now" })).toHaveLength(0);
   // Let the initial debounced search URL write commit before navigating.
   // NuqsTestingAdapter resets pending writes on rerender, so committing that
   // update during the Queue click can cancel its URL write while the UI updates.

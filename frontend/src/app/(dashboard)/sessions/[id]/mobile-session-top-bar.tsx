@@ -49,6 +49,7 @@ interface MobileSessionTopBarProps {
   onRenameSession: () => void;
   onRevertThread: (threadId: string) => void;
   onArchiveThread: (threadId: string) => void;
+  allowCloseTabs?: boolean;
   archivePendingThreadId: string | null;
 }
 
@@ -70,6 +71,7 @@ export function MobileSessionTopBar({
   onRenameSession,
   onRevertThread,
   onArchiveThread,
+  allowCloseTabs = true,
   archivePendingThreadId,
 }: MobileSessionTopBarProps) {
   const [actionsOpen, setActionsOpen] = useState(false);
@@ -144,7 +146,7 @@ export function MobileSessionTopBar({
                   const operationalStatus = deriveSessionStatusPresentation(thread.status);
                   const indicatorTone = threadIndicatorTone(operationalStatus, needsAttention);
                   const isLabelProminent = isThreadLabelProminent(thread, { isUnread, isActive });
-                  const showArchiveButton = canArchiveThread(thread, threads.length);
+                  const showArchiveButton = allowCloseTabs && canArchiveThread(thread, threads.length);
                   const isNonInteractive = nonInteractiveThreadIds?.has(thread.id) ?? false;
                   const closeLabel = `Close ${thread.label}${thread.label.toLowerCase().endsWith(" tab") ? "" : " tab"}`;
                   return (

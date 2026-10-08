@@ -1497,6 +1497,10 @@ describe("NewAutomationPage", () => {
       await screen.findByLabelText("PR labels"),
       "frontend, Backend",
     );
+    await user.type(
+      screen.getByLabelText("Exclude PR labels"),
+      "do-not-run, draft",
+    );
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "Create automation" }));
 
@@ -1507,7 +1511,10 @@ describe("NewAutomationPage", () => {
           "github.pr.ready_for_review",
           "github.pr.feedback",
         ],
-        github_event_filters: { labels: ["frontend", "Backend"] },
+        github_event_filters: {
+          labels: ["frontend", "Backend"],
+          excluded_labels: ["do-not-run", "draft"],
+        },
       });
     });
   }, 20000);

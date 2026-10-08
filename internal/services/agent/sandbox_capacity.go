@@ -11,8 +11,13 @@ import (
 )
 
 // ErrSandboxCapacity is returned when a worker node cannot safely start one
-// more sandbox container right now. Callers should treat it as transient.
+// more sandbox container right now. It also wraps configuration/count failures.
 var ErrSandboxCapacity = errors.New("sandbox capacity reached")
+
+// ErrSandboxCapacityReached identifies actual local capacity pressure, as
+// opposed to a configuration or live-counter failure. It preserves the broad
+// ErrSandboxCapacity match used by existing callers.
+var ErrSandboxCapacityReached = fmt.Errorf("%w: active sandbox limit reached", ErrSandboxCapacity)
 
 const (
 	defaultSandboxCapacityCountTimeout   = 2 * time.Second
@@ -175,7 +180,7 @@ func (g *SandboxCapacityGate) Acquire(ctx context.Context, req SandboxCapacityRe
 				}
 				continue
 			}
-			err := fmt.Errorf("%w: %d/%d sandboxes active or reserved", ErrSandboxCapacity, total, g.maxActive)
+			err := fmt.Errorf("%w: %d/%d sandboxes active or reserved", ErrSandboxCapacityReached, total, g.maxActive)
 			g.logCapacity(req, live, reserved).Msg("sandbox capacity reached; rejecting sandbox admission")
 			return nil, err
 		}

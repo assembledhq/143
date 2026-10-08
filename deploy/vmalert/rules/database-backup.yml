@@ -1,0 +1,128 @@
+# Opt-in: BACKUP_MONITOR_ID is a validated deployment setting. "disabled"
+# produces no alerts, including absence alerts. One explicit expected host;
+# another collector cannot mask it, and no first heartbeat is required.
+groups:
+  - name: database-backup
+    type: vlogs
+    interval: 1m
+    rules:
+      - alert: DatabaseBackupTelemetryMissing
+        expr: '_time:5m service:="database-backup" event:="backup_health" schema:="1" monitor_id:="%{BACKUP_MONITOR_ID}" | stats count() as heartbeats | format "%{BACKUP_MONITOR_ID}" as monitor_id | filter NOT monitor_id:="disabled" AND heartbeats:=0 | fields monitor_id, heartbeats'
+        for: 1m
+        labels:
+          service: database-backup
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Backup telemetry missing for {{ $labels.monitor_id }}'
+          description: 'No heartbeat arrived for the expected backup monitor in five minutes, including if it never started.'
+          runbook: 'Inspect the collector cron, its private log and private logging connectivity. This covers host failure, collection failure and delivery failure.'
+      - alert: DatabaseBackupTelemetryInvalid
+        expr: '_time:5m service:="database-backup" event:="backup_health" schema:="1" monitor_id:="%{BACKUP_MONITOR_ID}" NOT monitor_id:="disabled" | stats row_max(_time) as latest | unpack_json latest | filter telemetry_failed:>0 | stats by (monitor_id) count() as unhealthy | filter unhealthy:>0 | fields monitor_id, unhealthy'
+        for: 1m
+        labels:
+          service: database-backup
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Backup health collection failed'
+          description: 'The latest report from {{ $labels.monitor_id }} reports telemetry_failed.'
+          runbook: 'Inspect the private collector log and receipt permissions; do not treat missing measurements as healthy.'
+      - alert: DatabaseBackupAttemptFailed
+        expr: '_time:5m service:="database-backup" event:="backup_health" schema:="1" monitor_id:="%{BACKUP_MONITOR_ID}" NOT monitor_id:="disabled" | stats row_max(_time) as latest | unpack_json latest | filter backup_failed:>0 | stats by (monitor_id) count() as unhealthy | filter unhealthy:>0 | fields monitor_id, unhealthy'
+        for: 1m
+        labels:
+          service: database-backup
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'The latest backup attempt failed'
+          description: 'The latest report from {{ $labels.monitor_id }} reports backup_failed.'
+          runbook: 'Inspect the latest attempt, admission and lock evidence. Reconcile owned work before retrying.'
+      - alert: DatabaseBackupWatchdogStale
+        expr: '_time:5m service:="database-backup" event:="backup_health" schema:="1" monitor_id:="%{BACKUP_MONITOR_ID}" NOT monitor_id:="disabled" | stats row_max(_time) as latest | unpack_json latest | filter watchdog_stale:>0 | stats by (monitor_id) count() as unhealthy | filter unhealthy:>0 | fields monitor_id, unhealthy'
+        for: 1m
+        labels:
+          service: database-backup
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Backup watchdog is stale or reported failure'
+          description: 'The latest report from {{ $labels.monitor_id }} reports watchdog_stale.'
+          runbook: 'Inspect pending and runtime evidence. Verify exact backend/container ownership before recovery.'
+      - alert: DatabaseBackupRecoveryPointStale
+        expr: '_time:5m service:="database-backup" event:="backup_health" schema:="1" monitor_id:="%{BACKUP_MONITOR_ID}" NOT monitor_id:="disabled" | stats row_max(_time) as latest | unpack_json latest | filter recovery_target_missed:>0 | stats by (monitor_id) count() as unhealthy | filter unhealthy:>0 | fields monitor_id, unhealthy'
+        for: 1m
+        labels:
+          service: database-backup
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'The configured recovery target plus 45-minute dump budget was missed'
+          description: 'The latest report from {{ $labels.monitor_id }} reports recovery_target_missed.'
+          runbook: 'Check snapshot-based freshness and offsite receipts. A held schedule does not provide fresh recovery coverage.'
+      - alert: DatabaseBackupCapacityLow
+        expr: '_time:5m service:="database-backup" event:="backup_health" schema:="1" monitor_id:="%{BACKUP_MONITOR_ID}" NOT monitor_id:="disabled" | stats row_max(_time) as latest | unpack_json latest | filter capacity_low:>0 | stats by (monitor_id) count() as unhealthy | filter unhealthy:>0 | fields monitor_id, unhealthy'
+        for: 5m
+        labels:
+          service: database-backup
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Capacity is below the next-backup admission budget'
+          description: 'The latest report from {{ $labels.monitor_id }} reports capacity_low.'
+          runbook: 'Review qualified retention and free space. This includes space before normal retention; never bypass admission or delete unverified copies.'
+      - alert: DatabaseBackupReserveLow
+        expr: '_time:5m service:="database-backup" event:="backup_health" schema:="1" monitor_id:="%{BACKUP_MONITOR_ID}" NOT monitor_id:="disabled" | stats row_max(_time) as latest | unpack_json latest | filter reserve_at_risk:>0 | stats by (monitor_id) count() as unhealthy | filter unhealthy:>0 | fields monitor_id, unhealthy'
+        for: 1m
+        labels:
+          service: database-backup
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Free space is approaching the backup reserve'
+          description: 'The latest report from {{ $labels.monitor_id }} reports reserve_at_risk.'
+          runbook: 'Inspect filesystem growth and the owned runtime watchdog. Preserve completed backups and database storage.'
+      - alert: DatabaseBackupRestoreOverdue
+        expr: '_time:5m service:="database-backup" event:="backup_health" schema:="1" monitor_id:="%{BACKUP_MONITOR_ID}" NOT monitor_id:="disabled" | stats row_max(_time) as latest | unpack_json latest | filter restore_overdue:>0 | stats by (monitor_id) count() as unhealthy | filter unhealthy:>0 | fields monitor_id, unhealthy'
+        for: 15m
+        labels:
+          service: database-backup
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Independent full restore verification is overdue'
+          description: 'The latest report from {{ $labels.monitor_id }} reports restore_overdue.'
+          runbook: 'Arrange an isolated full restore drill. A deferred restore is not a successful verification.'
+      - alert: DatabaseBackupSwapHigh
+        expr: '_time:5m service:="database-backup" event:="backup_health" schema:="1" monitor_id:="%{BACKUP_MONITOR_ID}" NOT monitor_id:="disabled" | stats row_max(_time) as latest | unpack_json latest | filter swap_high:>0 | stats by (monitor_id) count() as unhealthy | filter unhealthy:>0 | fields monitor_id, unhealthy'
+        for: 5m
+        labels:
+          service: database-backup
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Backup host swap usage is elevated'
+          description: 'The latest report from {{ $labels.monitor_id }} reports swap_high.'
+          runbook: 'Inspect memory pressure and recent runtime resource samples before admitting more work.'
+      - alert: DatabaseBackupScheduleHeld
+        expr: '_time:5m service:="database-backup" event:="backup_health" schema:="1" monitor_id:="%{BACKUP_MONITOR_ID}" NOT monitor_id:="disabled" | stats row_max(_time) as latest | unpack_json latest | filter backup_held:>0 | stats by (monitor_id) count() as unhealthy | filter unhealthy:>0 | fields monitor_id, unhealthy'
+        for: 15m
+        labels:
+          service: database-backup
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'The backup schedule is held'
+          description: 'The latest report from {{ $labels.monitor_id }} reports backup_held.'
+          runbook: 'Record the recovery gap and assign an owner to restore coverage after its safety gates pass.'

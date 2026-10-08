@@ -638,6 +638,40 @@ func TestGitHubEventTriggerService_LabelFilter(t *testing.T) {
 			labelsKnown: true,
 			expectRuns:  1,
 		},
+		{
+			name:        "excludes a pull request with a blocked label",
+			filters:     json.RawMessage(`{"excluded_labels":["do-not-run"]}`),
+			labels:      []string{"frontend", "Do-Not-Run"},
+			labelsKnown: true,
+			expectRuns:  0,
+		},
+		{
+			name:        "runs when none of the excluded labels are present",
+			filters:     json.RawMessage(`{"excluded_labels":["do-not-run","draft"]}`),
+			labels:      []string{"frontend"},
+			labelsKnown: true,
+			expectRuns:  1,
+		},
+		{
+			name:        "runs on an unlabelled pull request with exclusions only",
+			filters:     json.RawMessage(`{"excluded_labels":["do-not-run"]}`),
+			labels:      []string{},
+			labelsKnown: true,
+			expectRuns:  1,
+		},
+		{
+			name:        "exclusion takes precedence over an included label",
+			filters:     json.RawMessage(`{"labels":["frontend"],"excluded_labels":["do-not-run"]}`),
+			labels:      []string{"frontend", "do-not-run"},
+			labelsKnown: true,
+			expectRuns:  0,
+		},
+		{
+			name:        "skips when excluded labels cannot be determined",
+			filters:     json.RawMessage(`{"excluded_labels":["do-not-run"]}`),
+			labelsKnown: false,
+			expectRuns:  0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -703,6 +737,28 @@ func TestGitHubEventTriggerService_ResolvesLabelsWhenPayloadOmitsThem(t *testing
 			name:        "skips the run when the resolved labels do not match",
 			filters:     json.RawMessage(`{"labels":["frontend"]}`),
 			resolver:    &fakeGitHubLabelResolver{labels: []string{"backend"}},
+			expectCalls: 1,
+			expectRuns:  0,
+		},
+		{
+			name:         "resolves labels for an exclusion-only check event",
+			filters:      json.RawMessage(`{"excluded_labels":["do-not-run"]}`),
+			resolver:     &fakeGitHubLabelResolver{labels: []string{"frontend"}},
+			expectCalls:  1,
+			expectRuns:   1,
+			expectLabels: []string{"frontend"},
+		},
+		{
+			name:        "skips an excluded check event after label resolution",
+			filters:     json.RawMessage(`{"excluded_labels":["do-not-run"]}`),
+			resolver:    &fakeGitHubLabelResolver{labels: []string{"do-not-run"}},
+			expectCalls: 1,
+			expectRuns:  0,
+		},
+		{
+			name:        "skips an exclusion-only check event when resolution fails",
+			filters:     json.RawMessage(`{"excluded_labels":["do-not-run"]}`),
+			resolver:    &fakeGitHubLabelResolver{err: errors.New("github unavailable")},
 			expectCalls: 1,
 			expectRuns:  0,
 		},
@@ -1299,4 +1355,42 @@ func TestGitHubEventTriggerService_ReadyForReviewSnapshot(t *testing.T) {
 	require.Equal(t, "github.pull_request.ready_for_review", snapshot.Event, "snapshot should record the raw event")
 	require.Equal(t, []string{"frontend"}, snapshot.GitHub.Labels, "blank label names should be dropped from the snapshot")
 	require.Contains(t, runs.runs[0].GoalSnapshot, "- Labels: frontend", "goal snapshot should describe the PR labels")
+}
+
+type reviewCommentLookup struct {
+	found bool
+	owner uuid.UUID
+	calls int
+}
+
+func (s *reviewCommentLookup) ListAutomationActionCommentOwners(context.Context, uuid.UUID, uuid.UUID, int, int64, string) ([]uuid.UUID, error) {
+	s.calls++
+	if s.found {
+		return []uuid.UUID{s.owner}, nil
+	}
+	return nil, nil
+}
+func TestOwnReviewCommentDoesNotTriggerContinuousAutomation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		own, recorded bool
+		lookups, runs int
+	}{{"own recorded", true, true, 1, 0}, {"own unrelated", true, false, 1, 1}, {"copied user marker", false, true, 0, 1}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, repoID := uuid.New(), uuid.New()
+			auto := models.Automation{ID: uuid.New(), OrgID: orgID, RepositoryID: &repoID, Name: "Review", Goal: "Review", SessionContinuity: models.AutomationSessionContinuityPerTarget, ExecutionMode: models.AutomationExecutionModeSequential, MaxConcurrent: 1, BaseBranch: "main", IdentityScope: models.AutomationIdentityScopeOrg}
+			runs := &fakeGitHubAutomationRunStore{}
+			jobs := &fakeGitHubAutomationJobStore{}
+			svc := newTestService(&fakeGitHubAutomationStore{automations: []models.Automation{auto}}, runs, jobs)
+			lookup := &reviewCommentLookup{found: tt.recorded, owner: auto.ID}
+			svc.SetActions(lookup)
+			err := svc.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{OrgID: orgID, RepositoryID: repoID, Event: models.AutomationGitHubEventIssueCommentCreated, Repository: "owner/repo", PullRequestNumber: 42, OwnAppComment: tt.own, CommentID: 123, Body: "comment", ProviderEventID: "delivery"})
+			require.NoError(t, err, "process trusted event")
+			require.Equal(t, tt.lookups, lookup.calls, "only verified own app comments consult action receipts")
+			require.Equal(t, tt.runs, len(runs.runs), "only this automation's own recorded effect is a no-op")
+		})
+	}
 }

@@ -43,6 +43,7 @@ func TestSessionMessageSourceValidate(t *testing.T) {
 	}{
 		{name: "empty is valid for normal messages", value: ""},
 		{name: "agent tool", value: SessionMessageSourceAgentTool},
+		{name: "code review", value: SessionMessageSourceCodeReview},
 		{name: "system auto repair", value: SessionMessageSourceSystemAutoRepair},
 		{name: "invalid", value: SessionMessageSource("bot"), wantErr: true},
 	}

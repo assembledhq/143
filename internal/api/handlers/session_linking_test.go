@@ -239,6 +239,7 @@ func TestSessionHandler_RetrySession_EnrichesLinks(t *testing.T) {
 	sessionID := uuid.New()
 	issueID := uuid.New()
 	handler := newSessionHandler(t, mock)
+	expectUnownedCodeReviewSession(mock)
 	handler.SetIssueLinkStore(db.NewSessionIssueLinkStore(mock))
 
 	mock.ExpectQuery("SELECT status FROM sessions").

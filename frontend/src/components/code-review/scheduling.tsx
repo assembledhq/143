@@ -36,7 +36,7 @@ export function ReviewNowButton({ prID, disabledReason }: { prID: string; disabl
   const reason = disabledReason ?? (mutation.isPending ? "Your request is being recorded." : undefined);
   return <div className="space-y-1">
     <DisabledTooltip disabled={Boolean(reason)} content={reason}>
-      <Button size="sm" variant="outline" disabled={Boolean(reason)} onClick={() => mutation.mutate()}>{mutation.isPending ? "Requesting…" : "Review now"}</Button>
+      <Button size="sm" variant="outline" disabled={Boolean(reason)} onClick={() => mutation.mutate()}>{mutation.isPending ? "Requesting…" : "Request Full Re-Review Now"}</Button>
     </DisabledTooltip>
     {mutation.isSuccess ? <p role="status" className="text-xs text-muted-foreground">Review requested.</p> : null}
     {mutation.isError ? <p role="alert" className="text-xs text-destructive">{mutation.error.message}</p> : null}
@@ -98,7 +98,7 @@ export function ScheduledReviews({ canManage, enabled }: { canManage: boolean; e
     ...(canManage ? [{ id: "actions", header: "Actions", render: (target: CodeReviewScheduledTarget) => <ScheduleActions schedule={target.schedule} /> }] : []),
   ];
   if (!enabled) return <EmptyState icon={CalendarClock} title="Review queue unavailable" description="The GitHub review service must be configured before reviews can be scheduled." />;
-  return <SectionGroup title="Review queue" description="Pending review requests across repositories. Review now skips timing delays; pause holds automatic reviews for that PR.">
+  return <SectionGroup title="Review queue" description="Pending review requests across repositories. Request Full Re-Review Now skips timing delays; pause holds automatic reviews for that PR.">
     {query.isPending ? <p role="status" className="text-sm text-muted-foreground">Loading review queue…</p> : query.isError ? (
       <ErrorNotice title="Review queue could not be loaded" action={{ label: "Retry", onClick: () => void query.refetch() }} />
     ) : <ResponsiveResourceList

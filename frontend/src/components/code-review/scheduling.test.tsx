@@ -8,7 +8,7 @@ function enableScheduling(enabled = true) {
   server.use(http.get("*/api/v1/code-review-policies", () => HttpResponse.json({ data: { capabilities: { scheduling: enabled } } })));
 }
 
-describe("Review now", () => {
+describe("Request Full Re-Review Now", () => {
   it("retries an uncertain response with the same request ID, then uses a new ID for new intent", async () => {
     enableScheduling();
     const requests: { request_id: string; mode: string }[] = [];
@@ -19,11 +19,11 @@ describe("Review now", () => {
     }));
     const user = userEvent.setup();
     renderWithProviders(<ReviewNowButton prID="pr-1" />);
-    await user.click(await screen.findByRole("button", { name: "Review now" }));
+    await user.click(await screen.findByRole("button", { name: "Request Full Re-Review Now" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Please retry");
-    await user.click(screen.getByRole("button", { name: "Review now" }));
+    await user.click(screen.getByRole("button", { name: "Request Full Re-Review Now" }));
     expect(await screen.findByRole("status")).toHaveTextContent("Review requested");
-    await user.click(screen.getByRole("button", { name: "Review now" }));
+    await user.click(screen.getByRole("button", { name: "Request Full Re-Review Now" }));
     await waitFor(() => expect(requests).toHaveLength(3));
     expect(requests[0]).toEqual({ request_id: expect.any(String), mode: "review_now" });
     expect(requests[1]).toEqual(requests[0]);
@@ -34,12 +34,12 @@ describe("Review now", () => {
     const queryClient = createTestQueryClient();
     renderWithProviders(<ReviewNowButton prID="pr-1" />, { queryClient });
     await waitFor(() => expect(queryClient.isFetching()).toBe(0));
-    expect(screen.queryByRole("button", { name: "Review now" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Request Full Re-Review Now" })).not.toBeInTheDocument();
   });
   it("explains and disables an ineligible request", async () => {
     enableScheduling();
     renderWithProviders(<ReviewNowButton prID="pr-1" disabledReason="This PR is closed." />);
-    expect(await screen.findByRole("button", { name: "Review now" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Request Full Re-Review Now" })).toBeDisabled();
   });
 });
 
@@ -54,8 +54,8 @@ describe("pending reviews", () => {
     const queue = within(await screen.findByRole("table", { name: "Review queue" }));
     expect(queue.getByText("Automatic reviews paused")).toBeInTheDocument();
     expect(queue.getByRole("link", { name: /Reduce duplicate reviews/ })).toHaveAttribute("href", "https://github.com/acme/api/pull/17");
-    if (canManage) expect(await queue.findByRole("button", { name: "Review now" })).toBeEnabled();
-    else expect(screen.queryByRole("button", { name: "Review now" })).not.toBeInTheDocument();
+    if (canManage) expect(await queue.findByRole("button", { name: "Request Full Re-Review Now" })).toBeEnabled();
+    else expect(screen.queryByRole("button", { name: "Request Full Re-Review Now" })).not.toBeInTheDocument();
     expect(screen.queryByText(/session/i)).not.toBeInTheDocument();
   });
 });
@@ -130,7 +130,7 @@ describe("draft eligibility", () => {
     { name: "legacy draft hold", state: "paused", wait_reason: "draft", enabled: true },
     { name: "closed draft", state: "closed", wait_reason: "", enabled: false },
     { name: "disabled policy", state: "paused", wait_reason: "policy_disabled", enabled: false },
-  ])("preserves Review now eligibility for $name", async ({ state, wait_reason, enabled }) => {
+  ])("preserves Request Full Re-Review Now eligibility for $name", async ({ state, wait_reason, enabled }) => {
     enableScheduling();
     const target = queuedTarget(1);
     server.use(http.get("*/api/v1/code-review-targets", () => HttpResponse.json({ data: [{ ...target,
@@ -144,7 +144,7 @@ describe("draft eligibility", () => {
     const user = userEvent.setup();
     renderWithProviders(<ScheduledReviews enabled canManage />);
     const queue = within(await screen.findByRole("table", { name: "Review queue" }));
-    const button = await queue.findByRole("button", { name: "Review now" });
+    const button = await queue.findByRole("button", { name: "Request Full Re-Review Now" });
     if (enabled) {
       expect(button).toBeEnabled();
       await user.click(button);

@@ -681,14 +681,14 @@ func TestAutomationRunHandler_FailsRunWhenNoModelRankIsAvailable(t *testing.T) {
 	// so the chain comes from the live automation row below.
 	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+		WillReturnRows(automationRunRows(
 			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
 			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
 			models.AutomationRunStatusPending, nil, nil, nil, now, now,
 		))
 	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
+		WillReturnRows(automationRows(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
 			&agentType, stringPtr(models.DefaultCodexModel), nil, fallbacks, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
@@ -704,8 +704,8 @@ func TestAutomationRunHandler_FailsRunWhenNoModelRankIsAvailable(t *testing.T) {
 
 	// The run is claimed first, so the failure below has to be written from
 	// running rather than pending.
-	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+	mock.ExpectExec(`UPDATE automation_runs\s+SET status = 'running',\s+dispatch_state = NULL.+WHERE id = @id AND org_id = @org_id\s+AND status = 'pending'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	// TransitionStatusIf's named arguments expand in order of first appearance

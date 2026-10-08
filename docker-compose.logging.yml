@@ -87,10 +87,13 @@ services:
 
   vmalert:
     image: victoriametrics/vmalert:v1.117.1
+    environment:
+      BACKUP_MONITOR_ID: ${BACKUP_MONITOR_ID:-disabled}
     command:
       - -datasource.url=http://victorialogs:9428
       - -notifier.url=http://alertmanager:9093
       - -rule=/etc/vmalert/rules/production-alerts.yml
+      - -rule=/etc/vmalert/rules/database-backup.yml
       - -rule.defaultRuleType=vlogs
       - -rule.evalDelay=10s
       - -httpListenAddr=:8880

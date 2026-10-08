@@ -650,6 +650,49 @@ and repository, updates GitHub with the server-held App installation, preserves
 agent audit event. The sandbox's raw GitHub token remains read-only for Pull
 Requests, so `gh pr edit` is intentionally not a substitute for this command.
 
+### `automation execute-action` and `automation action-status`
+
+Available to automation runs with the admin-configured **Resumable automation actions** capability (`automation_actions`), including scheduled, manual, event-triggered, and continuous target runs. Each call executes one configured action. There is no required bundle or provider order.
+
+```bash
+143-tools automation action-status --operation_key daily-report:2026-09-22
+143-tools automation execute-action --file /tmp/notification.json
+143-tools automation execute-action --resume --operation_key daily-report:2026-09-22 --action_key notify
+```
+
+For a Slack-only workflow, the request file can contain:
+
+```json
+{
+  "operation_key": "daily-report:2026-09-22",
+  "action_key": "notify",
+  "kind": "slack_notification",
+  "text": "The daily report is ready."
+}
+```
+
+| Kind | Request content | Admin-configured destination |
+|---|---|---|
+| `github_label` | `pr_number`, `head_sha` | Repository and label |
+| `github_team_review` | `pr_number`, `head_sha` | Repository and team slug |
+| `github_issue_comment` | `pr_number`, `head_sha`, `text` | Repository |
+| `notion_tracking_row` | `properties`: property names mapped to string values | Data source and allowed property names/types |
+| `slack_notification` | `text` | Channel ID |
+
+GitHub actions require an open PR at the supplied full lowercase head SHA in the session's configured repository. Slack and Notion can omit PR/head preconditions in every run mode, allowing pending steps to resume across pushes. Supply a precondition when the content must remain valid for a specific commit; it is always enforced on resume. In continuous target sessions, any supplied PR must match that target.
+
+Notion supports `title`, `rich_text`, `url`, `date` (`YYYY-MM-DD`), and `select` properties. Include the configured title property; select options must already exist. No schema changes are made. Slack text is escaped to prevent mention/link markup injection.
+
+Keys contain 1–160 letters, digits, periods, underscores, colons, slashes, or hyphens, beginning with a letter or digit. Reuse an operation key for the same logical workflow and an action key for the same step. Distinct steps can use the same kind. Separate scheduled occurrences should use separate operation keys. Per-target sessions isolate keys by target; other runs isolate keys by automation and repository. Keys survive job retries, later runs, and session reconstruction.
+
+An operation has at most 100 recorded steps. Slack text is limited to 4 KiB, GitHub comments to 32 KiB, and Notion content to 32 KiB across at most 20 properties (8 KiB each). The whole request is limited to 64 KiB. `--file` cannot be combined with `--resume` or `--request`. MCP clients supply the same object as `request`; resume supplies `resume: true`, `operation_key`, and `action_key`.
+
+Responses include `data.status` and per-action keys, IDs, states, destinations, and provider receipts. Status is `not_started`, `partial`, `in_progress`, `needs_attention`, or `delivered`. Execution returns the selected step; status returns all recorded steps for the operation. `delivered` describes those recorded steps, not completion of the entire automation goal. Execution prints JSON and exits nonzero for incomplete delivery or an error.
+
+After interruption, inspect status and resume with the original keys. Successful actions return their stored receipts with `reused: true`, without sending again. Receipts include their creation/completion timestamps and originating/last sending run IDs. Use a distinct operation key for each new occurrence, such as a dated daily report. Pending actions and definite provider rejections can be retried with frozen content. Changed content or destinations under an existing key are rejected. A changed PR head blocks unfinished work with the old precondition.
+
+`needs_attention` means an uncertain send may have succeeded without a receipt. Report its action ID for operator reconciliation. Never retry using direct provider APIs or new keys. Other independent steps remain callable. Continuous sessions keep their normal read allowlist plus these explicitly granted commands; general provider write tools remain unavailable.
+
 ### `eval add`
 
 Add a candidate eval task from a session launched by the eval settings bootstrap flow. This namespace is not exposed to ordinary coding sessions.

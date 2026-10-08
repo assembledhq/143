@@ -441,7 +441,7 @@ func TestAutomationHandler_Update_FallbackModelsAudit(t *testing.T) {
 			WithArgs(testAnyArgs(2)...).
 			WillReturnRows(newAutomationRow(mock, storedAutomation(id, orgID, models.AutomationFallbackModels{})))
 		mock.ExpectExec("UPDATE automations SET").
-			WithArgs(testAnyArgs(32)...).
+			WithArgs(testAnyArgs(33)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		var details any
@@ -489,7 +489,7 @@ func TestAutomationHandler_Update_FallbackModelsAudit(t *testing.T) {
 			WithArgs(testAnyArgs(2)...).
 			WillReturnRows(newAutomationRow(mock, storedAutomation(id, orgID, stored)))
 		mock.ExpectExec("UPDATE automations SET").
-			WithArgs(testAnyArgs(32)...).
+			WithArgs(testAnyArgs(33)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 		// Deliberately no audit expectation. pgxmock only reports UNMET
 		// expectations, so an unexpected INSERT would not fail

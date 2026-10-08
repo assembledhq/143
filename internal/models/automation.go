@@ -25,21 +25,24 @@ type Automation struct {
 	AgentType       *string            `db:"agent_type"       json:"agent_type,omitempty"`
 	ModelOverride   *string            `db:"model_override"   json:"model_override,omitempty"`
 	ReasoningEffort *ReasoningEffort   `db:"reasoning_effort" json:"reasoning_effort,omitempty"`
-	// FallbackModels holds ranks 1..N of the model chain; rank 0 is the
-	// AgentType/ModelOverride/ReasoningEffort trio above. Read the whole chain
-	// through ModelRanks rather than these fields directly.
-	FallbackModels   AutomationFallbackModels `db:"fallback_models"  json:"fallback_models,omitzero"`
-	ExecutionMode    AutomationExecutionMode  `db:"execution_mode"   json:"execution_mode"`
-	MaxConcurrent    int                      `db:"max_concurrent"   json:"max_concurrent"`
-	BaseBranch       string                   `db:"base_branch"      json:"base_branch"`
-	IdentityScope    AutomationIdentityScope  `db:"identity_scope"   json:"identity_scope"`
-	PublishPolicy    AutomationPublishPolicy  `db:"publish_policy"   json:"publish_policy"`
-	PrePRReviewLoops int                      `db:"pre_pr_review_loops" json:"pre_pr_review_loops"`
-	ScheduleType     AutomationScheduleType   `db:"schedule_type"    json:"schedule_type"`
-	IntervalValue    *int                     `db:"interval_value"   json:"interval_value,omitempty"`
-	IntervalUnit     *ScheduleUnit            `db:"interval_unit"    json:"interval_unit,omitempty"`
-	IntervalRunAt    *string                  `db:"interval_run_at"  json:"interval_run_at,omitempty"`
-	CronExpression   *string                  `db:"cron_expression"  json:"cron_expression,omitempty"`
+	// FallbackModels applies to separate-session (per-run) execution only.
+	FallbackModels AutomationFallbackModels `db:"fallback_models" json:"fallback_models,omitzero"`
+	ExecutionMode  AutomationExecutionMode  `db:"execution_mode"   json:"execution_mode"`
+	MaxConcurrent  int                      `db:"max_concurrent"   json:"max_concurrent"`
+	BaseBranch     string                   `db:"base_branch"      json:"base_branch"`
+	IdentityScope  AutomationIdentityScope  `db:"identity_scope"   json:"identity_scope"`
+	PublishPolicy  AutomationPublishPolicy  `db:"publish_policy"   json:"publish_policy"`
+	// SessionContinuity is read from the automation row at dispatch time, not
+	// from a run's config_snapshot (which keeps it for audit only). per_target
+	// requires a GitHub event trigger and publish_policy=none; see
+	// ValidateAutomationSessionContinuity.
+	SessionContinuity AutomationSessionContinuity `db:"session_continuity" json:"session_continuity"`
+	PrePRReviewLoops  int                         `db:"pre_pr_review_loops" json:"pre_pr_review_loops"`
+	ScheduleType      AutomationScheduleType      `db:"schedule_type"    json:"schedule_type"`
+	IntervalValue     *int                        `db:"interval_value"   json:"interval_value,omitempty"`
+	IntervalUnit      *ScheduleUnit               `db:"interval_unit"    json:"interval_unit,omitempty"`
+	IntervalRunAt     *string                     `db:"interval_run_at"  json:"interval_run_at,omitempty"`
+	CronExpression    *string                     `db:"cron_expression"  json:"cron_expression,omitempty"`
 	// Timezone is the IANA zone used to evaluate wall-clock schedule targets:
 	// cron_expression for cron rows, and interval_run_at for interval rows
 	// that specify one. An interval row without interval_run_at uses pure
@@ -425,6 +428,41 @@ type AutomationRun struct {
 	CreatedAt          time.Time                     `db:"created_at"            json:"created_at"`
 	UpdatedAt          time.Time                     `db:"updated_at"            json:"updated_at"`
 
+	// Per-target continuity fields (design doc 125). All nil or zero on
+	// per-run rows and on rows created before continuity existed. SessionID
+	// is the executing session for the turn; session_automation_links keeps
+	// its meaning as the run that created a session.
+	TargetID             *uuid.UUID                       `db:"target_id"               json:"target_id,omitempty"`
+	TargetGeneration     *int                             `db:"target_generation"       json:"target_generation,omitempty"`
+	SessionID            *uuid.UUID                       `db:"session_id"              json:"session_id,omitempty"`
+	ThreadID             *uuid.UUID                       `db:"thread_id"               json:"thread_id,omitempty"`
+	TurnNumber           *int                             `db:"turn_number"             json:"turn_number,omitempty"`
+	GitHubAction         *string                          `db:"github_action"           json:"github_action,omitempty"`
+	PullRequestUpdatedAt *time.Time                       `db:"pull_request_updated_at" json:"pull_request_updated_at,omitempty"`
+	HeadEpoch            *int                             `db:"head_epoch"              json:"head_epoch,omitempty"`
+	HeadResolution       *AutomationRunHeadResolution     `db:"head_resolution"         json:"head_resolution,omitempty"`
+	ResolvedHeadSHA      *string                          `db:"resolved_head_sha"       json:"resolved_head_sha,omitempty"`
+	ContinuationMode     *AutomationRunContinuationMode   `db:"continuation_mode"       json:"continuation_mode,omitempty"`
+	ContinuationReason   *AutomationRunContinuationReason `db:"continuation_reason"     json:"continuation_reason,omitempty"`
+	NativeContext        *bool                            `db:"native_context"          json:"native_context,omitempty"`
+	PreviousHeadSHA      *string                          `db:"previous_head_sha"       json:"previous_head_sha,omitempty"`
+	BaseSHA              *string                          `db:"base_sha"                json:"base_sha,omitempty"`
+	DispatchState        *AutomationRunDispatchState      `db:"dispatch_state"          json:"dispatch_state,omitempty"`
+	WaitReason           *AutomationRunWaitReason         `db:"wait_reason"             json:"wait_reason,omitempty"`
+	WaitStartedAt        *time.Time                       `db:"wait_started_at"         json:"wait_started_at,omitempty"`
+	ExecutionStartedAt   *time.Time                       `db:"execution_started_at"    json:"execution_started_at,omitempty"`
+	JobID                *uuid.UUID                       `db:"job_id"                  json:"-"`
+	Attempt              int                              `db:"attempt"                 json:"attempt"`
+	AttemptLockToken     *uuid.UUID                       `db:"attempt_lock_token"      json:"-"`
+	AttemptStartedAt     *time.Time                       `db:"attempt_started_at"      json:"-"`
+	SupersededByRunID    *uuid.UUID                       `db:"superseded_by_run_id"    json:"superseded_by_run_id,omitempty"`
+	OutcomeReason        *AutomationRunOutcomeReason      `db:"outcome_reason"          json:"outcome_reason,omitempty"`
+	HeadLookupDegraded   bool                             `db:"head_lookup_degraded"    json:"head_lookup_degraded"`
+	WorkerNodeID         *string                          `db:"worker_node_id"          json:"-"`
+	RestoreSnapshotBytes *int64                           `db:"restore_snapshot_bytes"  json:"restore_snapshot_bytes,omitempty"`
+	RestoreDurationMS    *int                             `db:"restore_duration_ms"     json:"restore_duration_ms,omitempty"`
+	TurnDurationMS       *int                             `db:"turn_duration_ms"        json:"turn_duration_ms,omitempty"`
+
 	// Session is a compact view of the session this run spawned, populated
 	// only by list/detail endpoints that join sessions (currently
 	// ListByAutomation). It is left nil by single-row fetches like GetByID
@@ -680,12 +718,14 @@ type AutomationGitHubEventFilters struct {
 	Paths        []string `json:"paths,omitempty"`
 	// Labels matches the pull request's GitHub labels. An event passes when the
 	// PR carries at least one of the configured labels (case-insensitive).
-	// Unlike the other filters this one is strict: an event whose labels could
-	// not be determined is filtered out rather than allowed through, so a
+	// An event whose labels could not be determined is filtered out, so a
 	// "frontend"-scoped automation never fires on an unlabelled PR.
-	Labels        []string `json:"labels,omitempty"`
-	FeedbackTypes []string `json:"feedback_types,omitempty"`
-	ReviewStates  []string `json:"review_states,omitempty"`
+	Labels []string `json:"labels,omitempty"`
+	// ExcludedLabels blocks an event when the PR carries any configured label.
+	// Like Labels, this requires the PR labels to be known before a run starts.
+	ExcludedLabels []string `json:"excluded_labels,omitempty"`
+	FeedbackTypes  []string `json:"feedback_types,omitempty"`
+	ReviewStates   []string `json:"review_states,omitempty"`
 }
 
 type AutomationScheduleType string
@@ -822,6 +862,7 @@ func (a *Automation) BuildConfigSnapshot() (json.RawMessage, error) {
 		"scope":               a.Scope,
 		"identity_scope":      a.IdentityScope.OrDefault(),
 		"publish_policy":      a.PublishPolicy.OrDefault(),
+		"session_continuity":  a.SessionContinuity.OrDefault(),
 		"pre_pr_review_loops": a.PrePRReviewLoops,
 		"base_branch":         a.BaseBranch,
 		"previous_run_at":     previousRunAt,

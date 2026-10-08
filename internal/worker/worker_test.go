@@ -240,6 +240,14 @@ func TestEnsureRetryWindowStartedAt(t *testing.T) {
 			expectedOK:    true,
 		},
 		{
+			name:          "phase-specific window overrides an earlier job retry window",
+			job:           &models.Job{ID: uuid.New(), LockToken: &lockToken, CreatedAt: createdAt, RetryWindowStartedAt: &persistedStart},
+			retryable:     &RetryableError{Err: errors.New("preparation pending"), MaxRetryDuration: &customWindow, RetryWindowStartedAt: &now},
+			store:         &retryWindowLeaseStoreStub{},
+			expectedStart: now,
+			expectedOK:    true,
+		},
+		{
 			name:      "bounded retry requires a fencing token",
 			job:       &models.Job{ID: uuid.New(), CreatedAt: createdAt},
 			retryable: &RetryableError{Err: errors.New("rate limited"), MaxRetryDuration: &customWindow},

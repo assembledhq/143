@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_jobs_org_queue_dedupe_created;

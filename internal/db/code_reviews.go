@@ -21,11 +21,23 @@ var ErrCodeReviewActiveHeadConflict = errors.New("another code review is active 
 
 const codeReviewActiveHeadConstraint = "idx_code_review_metadata_active_head"
 
+const (
+	codeReviewPublicationLockWaitTimeout = 20 * time.Second
+	codeReviewPublicationLockTimeout     = 5 * time.Minute
+)
+
+var ErrCodeReviewPublicationLockBusy = errors.New("code review GitHub publication lock is busy")
+
 type CodeReviewStore struct {
 	db      DBTX
 	jobs    *JobStore
 	streams *cache.CodeReviewStreams
 	logger  zerolog.Logger
+
+	// Shared by the worker's publication paths. Waiters must stay outside the
+	// pool: a publisher holds a transaction and can also block its lease renewal,
+	// while freshness reads and durable pre-send markers need another connection.
+	publicationSlot chan struct{}
 }
 
 // SetJobStore wires the durable rank refresh triggered by policy supersession.
@@ -33,7 +45,22 @@ type CodeReviewStore struct {
 func (s *CodeReviewStore) SetJobStore(jobs *JobStore) { s.jobs = jobs }
 
 func NewCodeReviewStore(db DBTX) *CodeReviewStore {
-	return &CodeReviewStore{db: db, logger: zerolog.Nop()}
+	return &CodeReviewStore{db: db, logger: zerolog.Nop(), publicationSlot: make(chan struct{}, 1)}
+}
+
+// FirstReviewerThreadStartedAt returns the first durable reviewer claim for
+// completion telemetry. A review with no reviewer execution returns nil.
+func (s *CodeReviewStore) FirstReviewerThreadStartedAt(ctx context.Context, orgID, sessionID uuid.UUID) (*time.Time, error) {
+	var startedAt *time.Time
+	err := s.db.QueryRow(ctx, `
+		SELECT MIN(started_at)
+		FROM session_threads
+		WHERE org_id = $1 AND session_id = $2
+		  AND execution_mode = 'review'`, orgID, sessionID).Scan(&startedAt)
+	if err != nil {
+		return nil, fmt.Errorf("first reviewer thread start: %w", err)
+	}
+	return startedAt, nil
 }
 
 // SetStreams injects the Redis helper used to fan code review lifecycle changes
@@ -78,7 +105,7 @@ func (s *CodeReviewStore) publishUpdated(ctx context.Context, metadata models.Co
 }
 
 const codeReviewPolicyColumns = `id, org_id, repository_id, active, version, enabled, approval_mode,
-		review_instructions, automated_approval_policy, description_policy, risk_policy, agent_roster, inline_comment_limit, created_by_user_id, created_at, scheduling_policy`
+		review_instructions, automated_approval_policy, description_policy, risk_policy, agent_roster, inline_comment_limit, created_by_user_id, created_at, scheduling_policy, continuation_policy`
 
 const codeReviewMetadataColumns = `id, org_id, session_id, repository_id, pull_request_id, policy_id,
 	base_sha, head_sha, from_fork, trigger_source, status, phase, status_code, status_message, retry_at,
@@ -413,7 +440,7 @@ func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, confi
 	if expectedVersion != nil && *expectedVersion != currentVersion {
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("%w: active version is %d, expected %d", ErrCodeReviewPolicyVersionConflict, currentVersion, *expectedVersion)
 	}
-	// Preserve scheduling overrides for legacy whole-config writers and restore.
+	// Preserve opt-in overrides for legacy whole-config writers and restore.
 	current, err := NewCodeReviewStore(tx).ResolvePolicy(ctx, orgID)
 	if err != nil {
 		return models.CodeReviewPolicyRecord{}, err
@@ -425,6 +452,9 @@ func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, confi
 		}
 	} else if config.SchedulingPolicy == nil {
 		config.SchedulingPolicy = current.Config.SchedulingPolicy
+	}
+	if patch == nil && config.ContinuationPolicy == nil {
+		config.ContinuationPolicy = current.Config.ContinuationPolicy
 	}
 	config.ReviewInstructions = strings.TrimSpace(config.ReviewInstructions)
 	config.AutomatedApprovalPolicy = strings.TrimSpace(config.AutomatedApprovalPolicy)
@@ -454,6 +484,10 @@ func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, confi
 	if err != nil {
 		return models.CodeReviewPolicyRecord{}, err
 	}
+	continuationPolicy, err := json.Marshal(config.ContinuationPolicy.Effective())
+	if err != nil {
+		return models.CodeReviewPolicyRecord{}, fmt.Errorf("marshal code review continuation policy: %w", err)
+	}
 	descriptionPolicy, riskPolicy, agentRoster, err := marshalCodeReviewPolicyParts(config)
 	if err != nil {
 		return models.CodeReviewPolicyRecord{}, err
@@ -461,10 +495,10 @@ func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, confi
 	rows, err := tx.Query(ctx, `
 			INSERT INTO code_review_policies (
 				org_id, repository_id, active, version, enabled, approval_mode, review_instructions, automated_approval_policy, description_policy,
-				risk_policy, agent_roster, inline_comment_limit, created_by_user_id, scheduling_policy
+				risk_policy, agent_roster, inline_comment_limit, created_by_user_id, scheduling_policy, continuation_policy
 			) VALUES (
 				@org_id, NULL, true, @version, @enabled, @approval_mode, @review_instructions, @automated_approval_policy, @description_policy,
-				@risk_policy, @agent_roster, @inline_comment_limit, @created_by_user_id, @scheduling_policy
+				@risk_policy, @agent_roster, @inline_comment_limit, @created_by_user_id, @scheduling_policy, @continuation_policy
 			)
 			RETURNING `+codeReviewPolicyColumns, pgx.NamedArgs{
 		"org_id":                    orgID,
@@ -474,6 +508,7 @@ func (s *CodeReviewStore) savePolicy(ctx context.Context, orgID uuid.UUID, confi
 		"review_instructions":       config.ReviewInstructions,
 		"automated_approval_policy": config.AutomatedApprovalPolicy,
 		"scheduling_policy":         schedulingPolicy,
+		"continuation_policy":       continuationPolicy,
 		"description_policy":        descriptionPolicy,
 		"risk_policy":               riskPolicy,
 		"agent_roster":              agentRoster,
@@ -792,6 +827,11 @@ func (s *CodeReviewStore) HasApprovedByPullRequest(ctx context.Context, orgID, p
 			  AND status = 'completed'
 			  AND decision = 'approved'
 			  AND github_review_id IS NOT NULL
+			UNION ALL
+			SELECT 1 FROM code_review_revision_assessments
+			WHERE org_id = @org_id AND pull_request_id = @pull_request_id
+			  AND status = 'completed' AND decision = 'approved'
+			  AND publication_state = 'confirmed' AND github_review_id IS NOT NULL
 		)`, pgx.NamedArgs{
 		"org_id":          orgID,
 		"pull_request_id": pullRequestID,
@@ -1191,8 +1231,8 @@ func (s *CodeReviewStore) CompleteReview(ctx context.Context, orgID uuid.UUID, p
 		    github_review_id = @github_review_id,
 		    github_review_url = @github_review_url,
 		    final_review_body = @final_review_body,
-		    additions = @additions,
-		    deletions = @deletions,
+		    additions = COALESCE(@additions, additions),
+		    deletions = COALESCE(@deletions, deletions),
 		    risk_reason_details = @risk_reason_details,
 		    failure_reason = NULL,
 		    status_code = NULL,
@@ -1360,12 +1400,28 @@ func (s *CodeReviewStore) CancelReview(ctx context.Context, orgID, sessionID uui
 	return metadata, nil
 }
 
+// A session may have several immutable assessments. Project its latest
+// completed assessment for current result fields while preserving the session
+// row as the history and pagination identity.
+const codeReviewCurrentAssessmentJoin = `
+			LEFT JOIN LATERAL (
+				SELECT a.decision,a.acceptable,a.risk_reason_details,a.rendered_body,a.github_review_id,a.github_review_url,a.completed_at,a.publication_key
+				FROM code_review_revision_assessments a
+				WHERE a.org_id=m.org_id AND a.session_id=m.session_id AND a.status='completed' AND a.superseded_by_assessment_id IS NULL
+				ORDER BY a.generation DESC LIMIT 1
+			) ca ON true`
+
+const codeReviewCurrentGitHubReviewID = `(CASE WHEN ca.decision IS NOT NULL THEN ca.github_review_id ELSE m.github_review_id END)`
+const codeReviewCurrentRiskReasons = `(CASE WHEN ca.decision IS NOT NULL THEN ca.risk_reason_details ELSE m.risk_reason_details END)`
+
 const codeReviewListItemSelect = `
 			SELECT m.id, m.org_id, m.session_id, m.repository_id, m.pull_request_id, m.policy_id,
 			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.phase, m.status_code,
-			       m.status_message, m.retry_at, m.last_error_at, m.retryable_failure, m.decision, m.acceptable, m.stale,
-			       m.superseded_by_session_id, m.review_output_key, m.prompt_record_key, m.github_review_id,
-			       m.github_review_url, m.final_review_body, m.failure_reason, m.risk_reason_details, m.completed_at, m.created_at,
+			       m.status_message, m.retry_at, m.last_error_at, m.retryable_failure, COALESCE(ca.decision,m.decision) AS decision, COALESCE(ca.acceptable,m.acceptable) AS acceptable, m.stale,
+			       m.superseded_by_session_id, COALESCE(ca.publication_key,m.review_output_key) AS review_output_key, m.prompt_record_key, ` + codeReviewCurrentGitHubReviewID + ` AS github_review_id,
+			       (CASE WHEN ca.decision IS NOT NULL THEN ca.github_review_url ELSE m.github_review_url END) AS github_review_url,
+			       (CASE WHEN ca.decision IS NOT NULL THEN ca.rendered_body ELSE m.final_review_body END) AS final_review_body,
+			       m.failure_reason, ` + codeReviewCurrentRiskReasons + ` AS risk_reason_details, COALESCE(ca.completed_at,m.completed_at) AS completed_at, m.created_at,
 			       (
 			           m.status = 'failed'
 			           AND m.retryable_failure = true
@@ -1406,13 +1462,13 @@ const codeReviewListItemSelect = `
 			JOIN repositories r ON r.id = m.repository_id AND r.org_id = m.org_id
 			JOIN pull_requests pr ON pr.id = m.pull_request_id AND pr.org_id = m.org_id
 			LEFT JOIN pull_request_health_current current_health
-			       ON current_health.pull_request_id = m.pull_request_id AND current_health.org_id = m.org_id`
+			       ON current_health.pull_request_id = m.pull_request_id AND current_health.org_id = m.org_id` + codeReviewCurrentAssessmentJoin
 
 const codeReviewListCountFrom = `
 		FROM code_review_session_metadata m
 		JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
 		JOIN repositories r ON r.id = m.repository_id AND r.org_id = m.org_id
-		JOIN pull_requests pr ON pr.id = m.pull_request_id AND pr.org_id = m.org_id`
+		JOIN pull_requests pr ON pr.id = m.pull_request_id AND pr.org_id = m.org_id` + codeReviewCurrentAssessmentJoin
 
 // GetListItemBySessionID returns one review with the same joined pull request
 // and repository context as ListReviews rows. Used by the internal (sandbox)
@@ -1433,6 +1489,24 @@ func (s *CodeReviewStore) GetListItemBySessionID(ctx context.Context, orgID, ses
 		return models.CodeReviewListItem{}, err
 	}
 	return item, nil
+}
+
+// GetLatestCompletedAssessmentByPullRequest selects the current completed
+// result for general PR feedback. It leaves historical session rows intact.
+func (s *CodeReviewStore) GetLatestCompletedAssessmentByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (models.CodeReviewAssessment, error) {
+	rows, err := s.db.Query(ctx, `SELECT * FROM code_review_revision_assessments WHERE org_id=$1 AND pull_request_id=$2 AND status='completed' AND superseded_by_assessment_id IS NULL ORDER BY generation DESC LIMIT 1`, orgID, pullRequestID)
+	if err != nil {
+		return models.CodeReviewAssessment{}, err
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.CodeReviewAssessment])
+}
+
+func (s *CodeReviewStore) GetLatestCompletedAssessmentBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.CodeReviewAssessment, error) {
+	rows, err := s.db.Query(ctx, `SELECT * FROM code_review_revision_assessments WHERE org_id=$1 AND session_id=$2 AND status='completed' AND superseded_by_assessment_id IS NULL ORDER BY generation DESC LIMIT 1`, orgID, sessionID)
+	if err != nil {
+		return models.CodeReviewAssessment{}, err
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.CodeReviewAssessment])
 }
 
 type CodeReviewListFilters struct {
@@ -1509,7 +1583,7 @@ func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, include
 		if err := filters.Decision.Validate(); err != nil {
 			return "", nil, err
 		}
-		query += ` AND m.decision = @decision`
+		query += ` AND COALESCE(ca.decision,m.decision) = @decision`
 		args["decision"] = *filters.Decision
 	}
 	if filters.Outcome != nil {
@@ -1518,9 +1592,9 @@ func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, include
 		}
 		switch *filters.Outcome {
 		case models.CodeReviewListOutcomeAutomaticallyApproved:
-			query += ` AND m.status = 'completed' AND m.decision = 'approved' AND m.github_review_id IS NOT NULL`
+			query += ` AND m.status = 'completed' AND COALESCE(ca.decision,m.decision) = 'approved' AND ` + codeReviewCurrentGitHubReviewID + ` IS NOT NULL`
 		case models.CodeReviewListOutcomeCompletedNotApproved:
-			query += ` AND m.status = 'completed' AND (m.decision IS DISTINCT FROM 'approved' OR m.github_review_id IS NULL)`
+			query += ` AND m.status = 'completed' AND (COALESCE(ca.decision,m.decision) IS DISTINCT FROM 'approved' OR ` + codeReviewCurrentGitHubReviewID + ` IS NULL)`
 		}
 	}
 	activityPredicate, err := codeReviewActivityStatusPredicate(filters.ActivityStatus)
@@ -1536,7 +1610,7 @@ func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, include
 		args["status"] = *filters.Status
 	}
 	if filters.Acceptable != nil {
-		query += ` AND m.acceptable = @acceptable`
+		query += ` AND COALESCE(ca.acceptable,m.acceptable) = @acceptable`
 		args["acceptable"] = *filters.Acceptable
 	}
 	if filters.Reason != nil {
@@ -1545,7 +1619,7 @@ func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, include
 		}
 		query += ` AND EXISTS (
 			SELECT 1
-			FROM jsonb_array_elements(m.risk_reason_details) AS risk_reason
+			FROM jsonb_array_elements(COALESCE(` + codeReviewCurrentRiskReasons + `,'[]'::jsonb)) AS risk_reason
 			WHERE risk_reason->>'code' = @reason
 		)`
 		args["reason"] = *filters.Reason
@@ -1628,16 +1702,16 @@ const codeReviewSupersededSQL = `(m.stale OR m.status = 'stale' OR m.superseded_
 const (
 	codeReviewOutcomeRankSQL = `(CASE
 			WHEN ` + codeReviewSupersededSQL + ` THEN 6
-			WHEN m.status = 'completed' AND m.decision = 'approved' AND m.github_review_id IS NOT NULL THEN 0
-			WHEN m.decision = 'approved' THEN 1
-			WHEN m.decision = 'needs_human_review' THEN 2
-			WHEN m.decision = 'blocked' THEN 3
-			WHEN m.decision = 'comment_only' THEN 4
+			WHEN m.status = 'completed' AND COALESCE(ca.decision,m.decision) = 'approved' AND ` + codeReviewCurrentGitHubReviewID + ` IS NOT NULL THEN 0
+			WHEN COALESCE(ca.decision,m.decision) = 'approved' THEN 1
+			WHEN COALESCE(ca.decision,m.decision) = 'needs_human_review' THEN 2
+			WHEN COALESCE(ca.decision,m.decision) = 'blocked' THEN 3
+			WHEN COALESCE(ca.decision,m.decision) = 'comment_only' THEN 4
 			ELSE 5
 		END)`
 	codeReviewRiskRankSQL = `(CASE
 			WHEN ` + codeReviewSupersededSQL + ` THEN 2
-			WHEN m.acceptable THEN 0
+			WHEN COALESCE(ca.acceptable,m.acceptable) THEN 0
 			ELSE 1
 		END)`
 	// Queued and running rows label themselves with their phase; the phase
@@ -1671,7 +1745,7 @@ var codeReviewListSorts = map[string]codeReviewListSort{
 	"risk":         {expression: codeReviewRiskRankSQL},
 	"run_status":   {expression: codeReviewRunStatusRankSQL},
 	"repository":   {expression: "r.full_name"},
-	"completed":    {expression: "m.completed_at", nullable: true},
+	"completed":    {expression: "COALESCE(ca.completed_at,m.completed_at)", nullable: true},
 }
 
 // CodeReviewListSortIsNullable reports whether a page cursor for this sort may
@@ -1873,6 +1947,8 @@ func (s *CodeReviewStore) ListReviewsPage(ctx context.Context, orgID uuid.UUID, 
 }
 
 func (s *CodeReviewStore) GetReviewStats(ctx context.Context, orgID uuid.UUID, filters CodeReviewStatsFilters) (models.CodeReviewStats, error) {
+	// Stats measure historical session rounds. The list's current assessment
+	// projection is a separate decision view and does not rewrite round counts.
 	args := pgx.NamedArgs{"org_id": orgID}
 	query := `
 		SELECT
@@ -2009,6 +2085,8 @@ func codeReviewOptionalMetric(value float64) *float64 {
 // selected by the first attempt's creation time; every later attempt is then
 // considered when deriving the PR's eventual outcome.
 func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUID, filters CodeReviewAnalyticsFilters) (models.CodeReviewAnalytics, error) {
+	// Analytics intentionally cohorts and counts historical session attempts.
+	// A later assessment on the same session is evidence usage, not a new round.
 	authorOrder, err := codeReviewAuthorAnalyticsOrder(filters.AuthorSortBy, filters.AuthorSortOrder)
 	if err != nil {
 		return models.CodeReviewAnalytics{}, err
@@ -2368,6 +2446,39 @@ func (s *CodeReviewStore) ListAgentResults(ctx context.Context, orgID, sessionID
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewAgentResult])
 }
 
+// ResolveAgentRoleForThread returns a role only when an active, non-stale code
+// review owns the thread through a persisted agent result. Missing or
+// ambiguous ownership is a miss so callers retain full repository setup.
+func (s *CodeReviewStore) ResolveAgentRoleForThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.CodeReviewAgentRole, bool, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT DISTINCT r.role
+		FROM code_review_agent_results r
+		JOIN code_review_session_metadata m
+		  ON m.org_id = r.org_id AND m.session_id = r.session_id
+		WHERE r.org_id = @org_id
+		  AND r.session_id = @session_id
+		  AND r.structured_result->>'thread_id' = @thread_id
+		  AND m.stale = false
+		  AND m.status IN ('queued', 'running')`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "thread_id": threadID.String(),
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("resolve code review agent role: %w", err)
+	}
+	roles, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return "", false, fmt.Errorf("collect code review agent roles: %w", err)
+	}
+	if len(roles) != 1 {
+		return "", false, nil
+	}
+	role := models.CodeReviewAgentRole(roles[0])
+	if err := role.Validate(); err != nil {
+		return "", false, fmt.Errorf("resolve invalid code review agent role: %w", err)
+	}
+	return role, true, nil
+}
+
 func (s *CodeReviewStore) UpdateAgentResultOutcome(ctx context.Context, orgID, resultID uuid.UUID, status models.CodeReviewAgentResultStatus, rawOutput *string, structuredResult json.RawMessage) (models.CodeReviewAgentResult, error) {
 	if err := status.Validate(); err != nil {
 		return models.CodeReviewAgentResult{}, err
@@ -2624,6 +2735,8 @@ func (s *CodeReviewStore) MarkFindingsSelectedForInline(ctx context.Context, org
 // RunWithGitHubPublicationLock serializes formal review body updates and rolling
 // status comment writes for one pull request across workers. This prevents a
 // delayed terminal sync from hiding the visible fallback for a newer review.
+// It also admits only one publication transaction per shared store, leaving
+// pool headroom for lease renewals and independently committed publication state.
 // The callback receives the transaction so its locked reads and writes do not
 // acquire a second pool connection.
 func (s *CodeReviewStore) RunWithGitHubPublicationLock(ctx context.Context, orgID, pullRequestID uuid.UUID, fn func(context.Context, DBTX) error) error {
@@ -2631,21 +2744,69 @@ func (s *CodeReviewStore) RunWithGitHubPublicationLock(ctx context.Context, orgI
 	if !ok {
 		return fmt.Errorf("code review GitHub publication lock requires transaction support")
 	}
-	tx, err := txStarter.Begin(ctx)
+	waitCtx, cancelWait := context.WithTimeout(ctx, codeReviewPublicationLockWaitTimeout)
+	defer cancelWait()
+	select {
+	case s.publicationSlot <- struct{}{}:
+		// Registered before rollback so the transaction releases its connection
+		// before another publisher is admitted, including on errors.
+		defer func() { <-s.publicationSlot }()
+	case <-waitCtx.Done():
+		if ctx.Err() != nil {
+			return fmt.Errorf("wait for code review GitHub publication slot: %w", ctx.Err())
+		}
+		return fmt.Errorf("wait for code review GitHub publication slot: %w: %w", ErrCodeReviewPublicationLockBusy, waitCtx.Err())
+	}
+	tx, err := txStarter.Begin(waitCtx)
 	if err != nil {
+		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("begin code review GitHub publication lock: %w: %w", ErrCodeReviewPublicationLockBusy, err)
+		}
 		return fmt.Errorf("begin code review GitHub publication lock: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() {
+		rollbackCtx, cancelRollback := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancelRollback()
+		_ = tx.Rollback(rollbackCtx)
+	}()
+	// PostgreSQL must enforce these bounds itself: a canceled Go context can
+	// close its socket while a backend is still waiting on a row lock.
+	for _, setting := range []string{
+		`SET LOCAL lock_timeout = '15s'`,
+		`SET LOCAL statement_timeout = '2min'`,
+		`SET LOCAL idle_in_transaction_session_timeout = '6min'`,
+	} {
+		if _, err := tx.Exec(waitCtx, setting); err != nil {
+			return fmt.Errorf("bound code review GitHub publication transaction: %w", err)
+		}
+	}
 	// Keep the legacy key prefix so old and new workers coordinate during a
 	// rolling deployment.
 	lockKey := fmt.Sprintf("code_review_status_comment:%s:%s", orgID, pullRequestID)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(@lock_key, 0))`, pgx.NamedArgs{"lock_key": lockKey}); err != nil {
+	_, err = tx.Exec(waitCtx, `SELECT pg_advisory_xact_lock(hashtextextended(@lock_key, 0))`, pgx.NamedArgs{"lock_key": lockKey})
+	cancelWait()
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if ctx.Err() == nil && (errors.Is(err, context.DeadlineExceeded) || errors.As(err, &pgErr) && pgErr.SQLState() == "55P03") {
+			return fmt.Errorf("acquire code review GitHub publication lock: %w: %w", ErrCodeReviewPublicationLockBusy, err)
+		}
 		return fmt.Errorf("acquire code review GitHub publication lock: %w", err)
 	}
-	if err := fn(ctx, tx); err != nil {
+	workCtx, cancelWork := context.WithTimeout(ctx, codeReviewPublicationLockTimeout)
+	defer cancelWork()
+	if err := fn(workCtx, tx); err != nil {
+		var pgErr *pgconn.PgError
+		if ctx.Err() == nil && errors.As(err, &pgErr) && pgErr.SQLState() == "55P03" {
+			return fmt.Errorf("code review GitHub publication transaction lock timeout: %w: %w", ErrCodeReviewPublicationLockBusy, err)
+		}
 		return err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := workCtx.Err(); err != nil {
+		return fmt.Errorf("code review GitHub publication exceeded work deadline: %w", err)
+	}
+	commitCtx, cancelCommit := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancelCommit()
+	if err := tx.Commit(commitCtx); err != nil {
 		return fmt.Errorf("commit code review GitHub publication lock: %w", err)
 	}
 	return nil
@@ -2693,14 +2854,19 @@ func collectOneCodeReviewGitHubTriggerSetting(rows pgx.Rows) (models.CodeReviewG
 
 func scanCodeReviewPolicy(rows pgx.Rows) (models.CodeReviewPolicyRecord, error) {
 	var record models.CodeReviewPolicyRecord
-	var descriptionPolicy, riskPolicy, agentRoster, schedulingPolicy []byte
+	var descriptionPolicy, riskPolicy, agentRoster, schedulingPolicy, continuationPolicy []byte
 	if err := rows.Scan(&record.ID, &record.OrgID, &record.RepositoryID, &record.Active, &record.Version, &record.Enabled, &record.ApprovalMode,
-		&record.ReviewInstructions, &record.AutomatedApprovalPolicy, &descriptionPolicy, &riskPolicy, &agentRoster, &record.InlineCommentLimit, &record.CreatedByUserID, &record.CreatedAt, &schedulingPolicy); err != nil {
+		&record.ReviewInstructions, &record.AutomatedApprovalPolicy, &descriptionPolicy, &riskPolicy, &agentRoster, &record.InlineCommentLimit, &record.CreatedByUserID, &record.CreatedAt, &schedulingPolicy, &continuationPolicy); err != nil {
 		return models.CodeReviewPolicyRecord{}, err
 	}
 	if string(schedulingPolicy) != "{}" {
 		if err := json.Unmarshal(schedulingPolicy, &record.SchedulingPolicy); err != nil {
 			return models.CodeReviewPolicyRecord{}, fmt.Errorf("decode scheduling policy: %w", err)
+		}
+	}
+	if string(continuationPolicy) != "{}" {
+		if err := json.Unmarshal(continuationPolicy, &record.ContinuationPolicy); err != nil {
+			return models.CodeReviewPolicyRecord{}, fmt.Errorf("decode continuation policy: %w", err)
 		}
 	}
 	if err := json.Unmarshal(descriptionPolicy, &record.DescriptionPolicy); err != nil {

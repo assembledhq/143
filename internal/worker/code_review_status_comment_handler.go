@@ -101,6 +101,17 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 					Msg("skipping superseded code review status comment sync under lock")
 				return nil
 			}
+			var currentAssessment *models.CodeReviewAssessment
+			if stores.CodeReviewAssessments != nil {
+				assessment, loadErr := db.NewCodeReviewAssessmentStore(lockDB).GetLatestForPR(lockCtx, job.OrgID, metadata.PullRequestID)
+				if loadErr != nil && !errors.Is(loadErr, pgx.ErrNoRows) {
+					return loadErr
+				}
+				if loadErr == nil && assessment.SessionID == lockedLatest.SessionID && assessment.ReviewScope == models.CodeReviewScopeEvidenceOnly {
+					currentAssessment = &assessment
+					lockedLatest = codeReviewAssessmentStatusMetadata(lockedLatest, assessment)
+				}
+			}
 			var previousCompleted *models.CodeReviewSessionMetadata
 			if !codeReviewMetadataTerminal(lockedLatest.Status) {
 				previous, previousErr := lockedCodeReviews.GetLatestCompletedByPullRequest(lockCtx, job.OrgID, metadata.PullRequestID)
@@ -114,11 +125,13 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 			if existingErr != nil {
 				return fmt.Errorf("load durable code review status comment id: %w", existingErr)
 			}
-			reviewNowURL := ""
-			if scheduler, ok := services.CodeReviewLifecycle.(codeReviewScheduler); ok && scheduler.SchedulingEnabled() {
-				reviewNowURL = codeReviewNowURL(services.FrontendURL, lockedLatest.SessionID)
+			reviewNowURL := codeReviewAvailableReviewNowURL(services, lockedLatest.SessionID)
+			detailURL := codeReviewSessionURL(services.FrontendURL, lockedLatest.SessionID)
+			if currentAssessment != nil {
+				detailURL = codeReviewAssessmentURL(services.FrontendURL, currentAssessment.ID)
+				reviewNowURL = ""
 			}
-			body := codeReviewStatusCommentBody(lockedLatest, previousCompleted, codeReviewSessionURL(services.FrontendURL, lockedLatest.SessionID), reviewNowURL)
+			body := codeReviewStatusCommentBody(lockedLatest, previousCompleted, detailURL, reviewNowURL)
 			var updateErr error
 			commentID, updateErr = updater.UpsertReviewStatusComment(lockCtx, codereviewsvc.UpsertReviewStatusCommentRequest{
 				InstallationID:    repository.InstallationID,
@@ -168,73 +181,93 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 
 func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, previousCompleted *models.CodeReviewSessionMetadata, sessionURL, reviewNowURL string) string {
 	var paragraphs []string
+	footer := models.CodeReviewCommentFooter{
+		DetailURL:   sessionURL,
+		DetailLabel: models.CodeReviewCommentDetailLabel(sessionURL, !codeReviewMetadataTerminal(metadata.Status)),
+	}
 	switch metadata.Status {
 	case models.CodeReviewSessionStatusCompleted:
-		if body := strings.TrimSpace(stringPtrValue(metadata.FinalReviewBody)); body != "" {
+		body, savedFooter := models.SplitCodeReviewCommentFooter(stringPtrValue(metadata.FinalReviewBody), sessionURL)
+		if body != "" {
 			paragraphs = append(paragraphs, body)
 		} else if metadata.Decision != nil && *metadata.Decision == models.CodeReviewDecisionApproved {
 			paragraphs = append(paragraphs, "143 Code Reviewer approved this PR.")
 		} else {
 			paragraphs = append(paragraphs, "143 Code Reviewer completed its review.")
 		}
+		if !codeReviewCommentNeedsNoAction(metadata) {
+			footer.EvidenceRecheckURL = savedFooter.EvidenceRecheckURL
+			if footer.EvidenceRecheckURL == "" {
+				footer.ReviewNowURL = reviewNowURL
+			}
+		}
 	case models.CodeReviewSessionStatusFailed:
 		paragraphs = append(paragraphs, "143 Code Reviewer could not complete this review.")
 		if message := strings.TrimSpace(stringPtrValue(metadata.StatusMessage)); message != "" {
 			paragraphs = append(paragraphs, message)
 		}
+		footer.ReviewNowURL = reviewNowURL
 	case models.CodeReviewSessionStatusStale:
 		paragraphs = append(paragraphs, "143 Code Reviewer superseded this assessment because the pull request code changed before publication. A fresh assessment of the latest commit is queued automatically and can still approve the PR.")
 	case models.CodeReviewSessionStatusCancelled:
 		paragraphs = append(paragraphs, "This 143 code review was cancelled.")
+		if message := strings.TrimSpace(stringPtrValue(metadata.StatusMessage)); message != "" {
+			paragraphs = append(paragraphs, message)
+		}
+		footer.ReviewNowURL = reviewNowURL
 	default:
 		provisionalBody := strings.TrimSpace(stringPtrValue(metadata.FinalReviewBody))
 		if !strings.HasPrefix(provisionalBody, models.CodeReviewProvisionalReviewHeading) {
 			provisionalBody = ""
 		}
-		previousBody := ""
+		if provisionalBody != "" {
+			provisionalBody, _ = models.SplitCodeReviewCommentFooter(provisionalBody, sessionURL)
+			paragraphs = append(paragraphs, provisionalBody)
+		} else {
+			paragraphs = append(paragraphs, "143 Code Reviewer has started reviewing this pull request.")
+		}
+		if message := strings.TrimSpace(stringPtrValue(metadata.StatusMessage)); message != "" {
+			paragraphs = append(paragraphs, message)
+		}
 		if previousCompleted != nil {
-			previousBody = strings.TrimSpace(stringPtrValue(previousCompleted.FinalReviewBody))
+			previousBody, previousFooter := models.SplitCodeReviewCommentFooter(stringPtrValue(previousCompleted.FinalReviewBody), sessionURL)
 			if previousBody == "" && previousCompleted.Decision != nil && *previousCompleted.Decision == models.CodeReviewDecisionApproved {
 				previousBody = "143 Code Reviewer approved this PR."
 			} else if previousBody == "" {
 				previousBody = "143 Code Reviewer completed its previous review."
 			}
-		}
-		if previousBody == "" {
-			if provisionalBody != "" {
-				paragraphs = append(paragraphs, provisionalBody)
-			} else {
-				paragraphs = append(paragraphs, "143 Code Reviewer has started reviewing this pull request.")
+			if previousFooter.DetailURL != "" {
+				previousBody += fmt.Sprintf("\n\n[View previous review](%s)", previousFooter.DetailURL)
 			}
-			break
-		}
-		paragraphs = append(paragraphs, codereviewsvc.WithCodeReviewReassessmentHistory(
-			previousBody,
-			metadata.HeadSHA,
-			metadata.CreatedAt,
-			sessionURL,
-		))
-		if provisionalBody != "" {
-			paragraphs = append(paragraphs, provisionalBody)
+			previousBody = codereviewsvc.WithCodeReviewReassessmentHistory(previousBody, metadata.HeadSHA, metadata.CreatedAt, sessionURL)
+			paragraphs = append(paragraphs, "<details>\n<summary>Previous review result</summary>\n\n"+previousBody+"\n\n</details>")
 		}
 	}
-	if sessionURL != "" && !strings.Contains(strings.Join(paragraphs, "\n\n"), sessionURL) {
-		label := "Follow the review session"
-		if codeReviewMetadataTerminal(metadata.Status) {
-			label = "View the review session"
-		}
-		paragraphs = append(paragraphs, fmt.Sprintf("[%s](%s)", label, sessionURL))
+	return models.WithCodeReviewCommentFooter(strings.Join(paragraphs, "\n\n"), footer)
+}
+
+func codeReviewCommentNeedsNoAction(metadata models.CodeReviewSessionMetadata) bool {
+	return metadata.Decision != nil && *metadata.Decision == models.CodeReviewDecisionApproved || metadata.Acceptable != nil && *metadata.Acceptable
+}
+
+func codeReviewAvailableReviewNowURL(services *Services, sessionID uuid.UUID) string {
+	if services == nil {
+		return ""
 	}
-	if reviewNowURL != "" && metadata.Status != models.CodeReviewSessionStatusStale {
-		paragraphs = append(paragraphs, fmt.Sprintf("[Review now](%s) · Request review of the latest revision in 143. Existing applicable work may be reused.", reviewNowURL))
+	if scheduler, ok := services.CodeReviewLifecycle.(codeReviewScheduler); ok && scheduler.SchedulingEnabled() {
+		return codeReviewNowURL(services.FrontendURL, sessionID)
 	}
-	return strings.Join(paragraphs, "\n\n")
+	return ""
 }
 
 // This is a read-only destination. The authenticated page requires a separate
 // button click to POST, so GitHub link previews cannot spend review capacity.
 func codeReviewNowURL(frontendURL string, sessionID uuid.UUID) string {
-	if strings.TrimSpace(frontendURL) == "" || sessionID == uuid.Nil {
+	return codeReviewRequestURL(frontendURL, sessionID, "review_now")
+}
+
+func codeReviewRequestURL(frontendURL string, id uuid.UUID, action string) string {
+	if strings.TrimSpace(frontendURL) == "" || id == uuid.Nil {
 		return ""
 	}
 	target, err := url.Parse(strings.TrimRight(strings.TrimSpace(frontendURL), "/"))
@@ -243,9 +276,16 @@ func codeReviewNowURL(frontendURL string, sessionID uuid.UUID) string {
 	}
 	target.Path = strings.TrimRight(target.Path, "/") + "/code-reviews"
 	target.RawPath = ""
-	target.RawQuery = url.Values{"review_now": {sessionID.String()}}.Encode()
+	target.RawQuery = url.Values{action: {id.String()}}.Encode()
 	target.Fragment = ""
 	return target.String()
+}
+
+func codeReviewEvidenceRecheckURL(services *Services, policy models.CodeReviewPolicyConfig, assessmentID uuid.UUID, coverageComplete bool) string {
+	if services == nil || !services.CodeReviewAssessmentsEnabled || !services.CodeReviewRechecksEnabled || !policy.ContinuationPolicy.Effective().Enabled || !coverageComplete {
+		return ""
+	}
+	return codeReviewRequestURL(services.FrontendURL, assessmentID, "recheck")
 }
 
 func enqueueCodeReviewStatusCommentSync(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, stage string) {

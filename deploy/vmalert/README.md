@@ -18,3 +18,11 @@ The logging compose stack now includes both `vmalert` and `Alertmanager`. Notifi
 Alertmanager now posts to an internal `alert-slack-relay` service, and that relay translates Alertmanager webhook payloads into the plain `{"text": ...}` shape Slack incoming webhooks expect.
 
 If either webhook URL is omitted, the relay falls back to a disabled localhost endpoint instead of failing provisioning or rollout. Alerts for that severity will be dropped until a real webhook URL is configured.
+
+`database-backup.yml` adds opt-in backup monitoring. `BACKUP_MONITOR_ID=disabled`
+is the default and suppresses these rules, including missing-heartbeat alerts.
+Set a persistent, validated expected ID matching the separately installed backup
+collector to activate them. The expected identity lets a collector that never
+starts alert, and prevents another host's heartbeat from hiding its outage. See
+[backup monitoring](../../docs/self-hosting/database-backup-monitoring.md) for
+installation, transport limits, delivery validation and rollback.

@@ -31,6 +31,9 @@ type internalCapabilityResponse struct {
 	Catalog      []models.AgentCapabilityDefinition   `json:"catalog"`
 	SessionID    uuid.UUID                            `json:"session_id"`
 	RepositoryID uuid.UUID                            `json:"repository_id"`
+	// ToolAllowlist is the positive tool list of an allowlisted session
+	// token (a per-target automation turn); absent otherwise.
+	ToolAllowlist []string `json:"tool_allowlist,omitempty"`
 }
 
 func NewInternalAgentCapabilitiesHandler(svc *agentcapabilities.Service, sessionStore *db.SessionStore, signingSecret string) *InternalAgentCapabilitiesHandler {
@@ -43,10 +46,11 @@ func (h *InternalAgentCapabilitiesHandler) Effective(w http.ResponseWriter, r *h
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[internalCapabilityResponse]{Data: internalCapabilityResponse{
-		Snapshot:     session.CapabilitySnapshot,
-		Catalog:      h.svc.Definitions(),
-		SessionID:    *claims.SessionID,
-		RepositoryID: claims.RepoID,
+		Snapshot:      session.CapabilitySnapshot,
+		Catalog:       h.svc.Definitions(),
+		SessionID:     *claims.SessionID,
+		RepositoryID:  claims.RepoID,
+		ToolAllowlist: models.ToolAllowlistFromScopes(claims.AllowedToolScopes),
 	}})
 }
 
@@ -136,6 +140,12 @@ func (h *AgentCapabilitiesHandler) PatchSessionDefault(w http.ResponseWriter, r 
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "invalid request body", err)
 		return
 	}
+	for _, grant := range body.Capabilities {
+		if grant.CapabilityID == models.AgentCapabilityAutomationActions && grant.Enabled {
+			writeError(w, r, http.StatusBadRequest, "AUTOMATION_ONLY", "Configure automation actions on an automation, not session defaults")
+			return
+		}
+	}
 	if err := h.validateGrants(body.Capabilities); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_CAPABILITY", err.Error(), err)
 		return
@@ -182,6 +192,9 @@ func (h *AgentCapabilitiesHandler) PatchAutomationPolicy(w http.ResponseWriter, 
 		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "invalid request body", err)
 		return
 	}
+	if !authorizeAutomationActionGrants(w, r, body.Capabilities) {
+		return
+	}
 	if err := h.validateGrants(body.Capabilities); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_CAPABILITY", err.Error(), err)
 		return
@@ -209,4 +222,15 @@ func (h *AgentCapabilitiesHandler) validateGrants(grants []models.AgentCapabilit
 		}
 	}
 	return nil
+}
+
+// Every user-facing policy mutation path uses this guard before writing.
+func authorizeAutomationActionGrants(w http.ResponseWriter, r *http.Request, grants []models.AgentCapabilityPolicyGrantInput) bool {
+	for _, grant := range grants {
+		if grant.CapabilityID == models.AgentCapabilityAutomationActions && grant.Enabled && middleware.ActiveRoleFromContext(r.Context()) != string(models.RoleAdmin) {
+			writeError(w, r, http.StatusForbidden, "ADMIN_REQUIRED", "Only organization admins can enable or configure automation actions")
+			return false
+		}
+	}
+	return true
 }

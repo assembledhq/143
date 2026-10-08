@@ -269,8 +269,8 @@ export function AutomationFallbackModelsEditor({
         </DisabledTooltip>
       </div>
       <p className="text-xs text-muted-foreground">
-        Tried in order when a rank has no usable credential or fails because the model is
-        overloaded. Each retry starts a new session.
+        For separate-session runs, tried in order when a rank has no usable credential or
+        the model is overloaded. Each retry starts a new session.
       </p>
 
       <div className="divide-y divide-border rounded-md border border-border">

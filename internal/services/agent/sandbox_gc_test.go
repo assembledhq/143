@@ -49,23 +49,38 @@ func (f *fakeSandboxGCProvider) destroyedIDs() []string {
 }
 
 type fakeSandboxGCStore struct {
-	references []string
-	listErr    error
-	finalize   map[string]bool
-	finalErr   error
+	references         []string
+	reviewReferences   []string
+	activePreparations []string
+	listErr            error
+	finalize           map[string]bool
+	finalErr           error
+	reviewFinalize     map[string]bool
 
-	mu         sync.Mutex
-	finalized  []string
-	finalOrgID []uuid.UUID
+	mu              sync.Mutex
+	finalized       []string
+	finalOrgID      []uuid.UUID
+	reviewFinalized []string
 }
 
-func (f *fakeSandboxGCStore) ListReferencedContainerIDs(context.Context) ([]string, error) {
+func (f *fakeSandboxGCStore) FinalizeIdleCodeReviewContainer(_ context.Context, _ uuid.UUID, _ uuid.UUID, expectedContainerID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reviewFinalized = append(f.reviewFinalized, expectedContainerID)
+	return f.reviewFinalize[expectedContainerID], nil
+}
+
+func (f *fakeSandboxGCStore) ListContainerReferences(context.Context) ([]string, []string, error) {
 	if f.listErr != nil {
-		return nil, f.listErr
+		return nil, nil, f.listErr
 	}
-	out := make([]string, len(f.references))
-	copy(out, f.references)
-	return out, nil
+	all := append([]string(nil), f.references...)
+	review := append([]string(nil), f.reviewReferences...)
+	return all, review, nil
+}
+
+func (f *fakeSandboxGCStore) ListActiveCodeReviewPreparations(context.Context) ([]string, error) {
+	return append([]string(nil), f.activePreparations...), nil
 }
 
 func (f *fakeSandboxGCStore) FinalizeContainerDestroy(_ context.Context, orgID, _ uuid.UUID, expectedContainerID string) (bool, error) {
@@ -92,6 +107,45 @@ type fakeSandboxGCUsageCloser struct {
 
 	mu     sync.Mutex
 	closed []string
+}
+
+type fakeCodeReviewHolderExpirer struct {
+	calls int
+	limit int
+	err   error
+}
+
+func (f *fakeCodeReviewHolderExpirer) ExpireCodeReviewHolders(_ context.Context, limit int) (int64, error) {
+	f.calls++
+	f.limit = limit
+	if f.err != nil {
+		return 0, f.err
+	}
+	return 2, nil
+}
+
+func TestSandboxGC_HolderExpiryErrorDoesNotBlockOrphanCleanup(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	provider := &fakeSandboxGCProvider{containers: []agent.ManagedSandboxContainer{{ID: "orphan", CreatedAt: now.Add(-time.Hour)}}}
+	gc := agent.NewSandboxGC(provider, &fakeSandboxGCStore{}, nil, agent.SandboxGCConfig{UnreferencedGracePeriod: time.Minute}, zerolog.Nop())
+	gc.SetCodeReviewHolderExpirer(&fakeCodeReviewHolderExpirer{err: errors.New("holder query unavailable")})
+	require.NoError(t, gc.ReapOnce(context.Background(), now), "holder expiry failure should not stop unrelated sandbox GC")
+	require.Equal(t, []string{"orphan"}, provider.destroyedIDs(), "unreferenced container should still be reclaimed")
+}
+
+func TestSandboxGC_ExpiresCodeReviewHoldersBeforeReferenceSweep(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeSandboxGCProvider{}
+	store := &fakeSandboxGCStore{}
+	expirer := &fakeCodeReviewHolderExpirer{}
+	gc := agent.NewSandboxGC(provider, store, nil, agent.SandboxGCConfig{}, zerolog.Nop())
+	gc.SetCodeReviewHolderExpirer(expirer)
+	err := gc.ReapOnce(context.Background(), time.Now())
+	require.NoError(t, err, "GC should expire stale review leases before it reads live container references")
+	require.Equal(t, 1, expirer.calls, "each GC pass should perform one bounded review-holder expiration batch")
+	require.Equal(t, 100, expirer.limit, "review-holder expiration should be bounded per pass")
 }
 
 func (f *fakeSandboxGCUsageCloser) CloseOpenByContainerID(_ context.Context, containerID string, _ time.Time, _ string) (int64, error) {
@@ -248,6 +302,76 @@ func TestSandboxGC_ReapOnceKeepsReferencedContainerUntilHardMaxAge(t *testing.T)
 	require.NoError(t, err, "sandbox GC should complete when referenced containers are below the hard max age")
 	require.Empty(t, provider.destroyedIDs(), "sandbox GC should not destroy referenced containers below the hard max age")
 	require.Empty(t, store.finalizedIDs(), "sandbox GC should not touch DB ownership for referenced containers below the hard max age")
+	require.Empty(t, store.reviewFinalized, "ordinary referenced containers should skip the review-only finalizer")
+}
+
+func TestSandboxGC_ReapOnceCleansTerminalCodeReviewContainer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		finalized  bool
+		wantDelete bool
+	}{
+		{name: "terminal unheld review", finalized: true, wantDelete: true},
+		{name: "review still held"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+			provider := &fakeSandboxGCProvider{containers: []agent.ManagedSandboxContainer{{
+				ID: "review-container", OrgID: uuid.NewString(), SessionID: uuid.NewString(),
+				CreatedAt: now.Add(-3 * time.Minute), Purpose: "agent_run",
+			}}}
+			store := &fakeSandboxGCStore{
+				references:       []string{"review-container"},
+				reviewReferences: []string{"review-container"},
+				reviewFinalize:   map[string]bool{"review-container": tt.finalized},
+			}
+			gc := agent.NewSandboxGC(provider, store, nil, agent.SandboxGCConfig{HardMaxAge: 24 * time.Hour}, zerolog.Nop())
+			err := gc.ReapOnce(context.Background(), now)
+			require.NoError(t, err, "GC should finish after checking the terminal review's holder state")
+			require.Equal(t, []string{"review-container"}, store.reviewFinalized, "GC should ask the database to finalize only an unheld terminal review container")
+			if tt.wantDelete {
+				require.Equal(t, []string{"review-container"}, provider.destroyedIDs(), "GC should destroy the terminal review container after the database CAS succeeds")
+			} else {
+				require.Empty(t, provider.destroyedIDs(), "GC should preserve a container still held by an active review")
+			}
+		})
+	}
+}
+
+func TestSandboxGC_YoungReviewContainerSkipsIdleFinalization(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	provider := &fakeSandboxGCProvider{containers: []agent.ManagedSandboxContainer{{
+		ID: "young-review", OrgID: uuid.NewString(), SessionID: uuid.NewString(),
+		CreatedAt: now.Add(-time.Minute), Purpose: "agent_run",
+	}}}
+	store := &fakeSandboxGCStore{
+		references: []string{"young-review"}, reviewReferences: []string{"young-review"},
+		reviewFinalize: map[string]bool{"young-review": true},
+	}
+	gc := agent.NewSandboxGC(provider, store, nil, agent.SandboxGCConfig{HardMaxAge: 24 * time.Hour}, zerolog.Nop())
+	require.NoError(t, gc.ReapOnce(context.Background(), now), "GC should leave a young review workspace alone")
+	require.Empty(t, store.reviewFinalized, "review workspace younger than two minutes should not be probed for finalization")
+	require.Empty(t, provider.destroyedIDs(), "young review workspace should remain available for handoff")
+}
+
+func TestSandboxGC_ContainerInventoryErrorFailsClosed(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	provider := &fakeSandboxGCProvider{containers: []agent.ManagedSandboxContainer{{
+		ID: "review-container", OrgID: uuid.NewString(), SessionID: uuid.NewString(),
+		CreatedAt: now.Add(-3 * time.Minute), Purpose: "agent_run",
+	}}}
+	store := &fakeSandboxGCStore{listErr: errors.New("inventory unavailable")}
+	gc := agent.NewSandboxGC(provider, store, nil, agent.SandboxGCConfig{HardMaxAge: 24 * time.Hour}, zerolog.Nop())
+	err := gc.ReapOnce(context.Background(), now)
+	require.ErrorContains(t, err, "list container references", "failed inventory must stop cleanup before ownership is known")
+	require.Empty(t, store.reviewFinalized, "failed inventory must not probe a review workspace")
+	require.Empty(t, provider.destroyedIDs(), "failed inventory must not destroy a potentially referenced container")
 }
 
 func TestSandboxGC_ReapOnceExpiresReferencedContainerOnlyAfterFinalizeCAS(t *testing.T) {
@@ -332,4 +456,23 @@ func TestSandboxGC_ReapOnceReturnsListErrors(t *testing.T) {
 	err := gc.ReapOnce(context.Background(), time.Now())
 	require.Error(t, err, "sandbox GC should surface provider list failures")
 	require.Contains(t, err.Error(), "list managed sandbox containers", "sandbox GC should wrap provider list failures with context")
+}
+
+func TestSandboxGC_PressurePreservesActiveUnpublishedReviewPreparation(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	orgID, sessionID := uuid.New().String(), uuid.New().String()
+	oldLease, liveLease := uuid.New().String(), uuid.New().String()
+	provider := &fakeSandboxGCProvider{containers: []agent.ManagedSandboxContainer{
+		{ID: "orphaned-sibling", OrgID: orgID, SessionID: sessionID, Purpose: "prepare_code_review_workspace", PreparationLeaseToken: oldLease, CreatedAt: now.Add(-10 * time.Minute)},
+		{ID: "preparing", OrgID: orgID, SessionID: sessionID, Purpose: "prepare_code_review_workspace", PreparationLeaseToken: liveLease, CreatedAt: now.Add(-10 * time.Minute)},
+	}}
+	store := &fakeSandboxGCStore{activePreparations: []string{liveLease}}
+	gc := agent.NewSandboxGC(provider, store, nil, agent.SandboxGCConfig{}, zerolog.Nop())
+	require.NoError(t, gc.ReapForCapacity(context.Background(), now), "pressure GC should inspect an active preparation")
+	require.Equal(t, []string{"orphaned-sibling"}, provider.destroyedIDs(), "a live preparation must protect only its own container")
+	provider.containers = provider.containers[1:] // Docker no longer inventories the reclaimed sibling.
+	store.activePreparations = nil
+	require.NoError(t, gc.ReapForCapacity(context.Background(), now), "pressure GC should inspect an expired preparation")
+	require.Equal(t, []string{"orphaned-sibling", "preparing"}, provider.destroyedIDs(), "an unreferenced preparation may be reclaimed after its lease expires")
 }

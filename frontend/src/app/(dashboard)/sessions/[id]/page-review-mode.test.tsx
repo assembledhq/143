@@ -448,6 +448,38 @@ describe('SessionDetailPage review mode and mobile diff', () => {
     expect(screen.getByTitle('Send message')).toBeInTheDocument();
   });
 
+  it('does not offer a message composer in a code review or its mobile diff reader', async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(max-width: 767px)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    const codeReviewSession: Session = {
+      ...mockSessions[0],
+      origin: 'code_review',
+      status: 'completed',
+      current_turn: 1,
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+    mockSessionDetailWithLazyDiff(codeReviewSession);
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findByText('1 file changed');
+    expect(screen.queryByTestId('session-composer-shell')).not.toBeInTheDocument();
+
+    await userEvent.setup().click(screen.getByText('1 file changed'));
+    expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: 'Message agent' })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('session-composer-shell')).not.toBeInTheDocument();
+  });
+
   it('shows the session warning state inside the mobile composer sheet while reviewing', async () => {
     vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
       matches: query === '(max-width: 767px)',

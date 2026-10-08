@@ -196,7 +196,7 @@ Create a GitHub App with these settings:
 |------------|--------|---------|
 | **Contents** | Read & Write | Clone repos, create branches, push commits |
 | **Pull requests** | Read & Write | Create PRs, read PR reviews and comments |
-| **Issues** | Read | Read issue references from commits/PRs |
+| **Issues** | Read & Write | Read issue references from commits/PRs; apply and remove PR labels (GitHub governs PR labels under Issues) |
 | **Checks** | Read | Monitor CI status on PRs |
 | **Deployments** | Read | Detect deploys after PR merge |
 | **Metadata** | Read | Required for all GitHub Apps (repo name, default branch, etc.) |
@@ -527,7 +527,7 @@ echo ""
 echo "3. Set permissions:"
 echo "   - Contents: Read & Write"
 echo "   - Pull requests: Read & Write"
-echo "   - Issues: Read"
+echo "   - Issues: Read & Write"
 echo "   - Checks: Read"
 echo "   - Deployments: Read"
 echo "   - Metadata: Read"
@@ -565,7 +565,7 @@ func (h *SetupHandler) CreateAppFromManifest(w http.ResponseWriter, r *http.Requ
         "default_permissions": map[string]string{
             "contents":      "write",
             "pull_requests": "write",
-            "issues":        "read",
+            "issues":        "write",
             "checks":        "read",
             "deployments":   "read",
             "metadata":      "read",

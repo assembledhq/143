@@ -24,13 +24,24 @@ type scheduleSnapshotter interface {
 }
 
 type schedulingDependencies struct {
-	store     *db.CodeReviewScheduleStore
-	snapshots scheduleSnapshotter
-	now       func() time.Time
+	store             *db.CodeReviewScheduleStore
+	snapshots         scheduleSnapshotter
+	assessmentCapture AssessmentInputCapturer
+	rechecksEnabled   bool
+	now               func() time.Time
 }
 
 func (s *Service) SetScheduling(store *db.CodeReviewScheduleStore, snapshots scheduleSnapshotter) {
 	s.scheduling = &schedulingDependencies{store: store, snapshots: snapshots, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// SetAssessmentContinuation enables admission only after compatible capture,
+// assessment readers, the recheck worker, and its handler are deployed.
+func (s *Service) SetAssessmentContinuation(capturer AssessmentInputCapturer, enabled bool) {
+	if s.scheduling != nil {
+		s.scheduling.assessmentCapture = capturer
+		s.scheduling.rechecksEnabled = enabled && capturer != nil
+	}
 }
 func (s *Service) SetSchedulingStreams(streams *cache.CodeReviewStreams) {
 	if s.scheduling != nil {
@@ -57,24 +68,44 @@ func (s *Service) prepareScheduleSnapshot(ctx context.Context, orgID, repository
 }
 
 type scheduledReviewIntent struct {
-	Input ReviewChangedInput           `json:"input"`
-	Mode  models.CodeReviewRequestMode `json:"mode"`
-	Force bool                         `json:"force"`
+	Input       ReviewChangedInput           `json:"input"`
+	Mode        models.CodeReviewRequestMode `json:"mode"`
+	Force       bool                         `json:"force"`
+	RequesterID *uuid.UUID                   `json:"requester_id,omitempty"`
+	Inputs      *scheduledReviewInputs       `json:"inputs,omitempty"`
+}
+
+func reviewRequestHash(prID uuid.UUID, mode models.CodeReviewRequestMode, context *ReviewRequestContext, force bool) (string, error) {
+	raw, err := json.Marshal(struct {
+		PR      uuid.UUID
+		Mode    models.CodeReviewRequestMode
+		Context *ReviewRequestContext
+		Force   bool
+	}{prID, mode, context, force})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(raw)), nil
 }
 
 type ScheduleRequestInput struct {
-	OrgID         uuid.UUID
-	PullRequestID uuid.UUID
-	RequestID     uuid.UUID
-	RequesterID   *uuid.UUID
-	Mode          models.CodeReviewRequestMode
+	OrgID          uuid.UUID
+	PullRequestID  uuid.UUID
+	RequestID      uuid.UUID
+	RequesterID    *uuid.UUID
+	Mode           models.CodeReviewRequestMode
+	Reason         string
+	RequestContext *ReviewRequestContext
+	TriggerSource  models.CodeReviewTriggerSource
 }
 
 type ScheduleRequestResult struct {
-	RequestID   uuid.UUID                           `json:"request_id"`
-	SessionID   *uuid.UUID                          `json:"session_id"`
-	Disposition models.CodeReviewRequestDisposition `json:"disposition"`
-	Schedule    models.CodeReviewPRState            `json:"schedule"`
+	RequestID          uuid.UUID                           `json:"request_id"`
+	SessionID          *uuid.UUID                          `json:"session_id"`
+	Disposition        models.CodeReviewRequestDisposition `json:"disposition"`
+	Schedule           models.CodeReviewPRState            `json:"schedule"`
+	AssessmentID       *uuid.UUID                          `json:"assessment_id,omitempty"`
+	SourceAssessmentID *uuid.UUID                          `json:"source_assessment_id,omitempty"`
 }
 
 var ErrReviewIneligible = errors.New("pull request is not eligible for review")
@@ -85,7 +116,7 @@ func (s *Service) GetSchedule(ctx context.Context, orgID, prID uuid.UUID) (model
 		return models.CodeReviewPRState{}, fmt.Errorf("review scheduling unavailable")
 	}
 	state, err := s.scheduling.store.Get(ctx, orgID, prID)
-	if err != nil || state.PendingInput != nil || state.State != models.CodeReviewScheduleRunning || state.ActiveSessionID == nil {
+	if err != nil || state.PendingInput != nil || state.ActiveAssessmentID != nil || state.State != models.CodeReviewScheduleRunning || state.ActiveSessionID == nil {
 		return state, err
 	}
 	metadata, err := s.metadata.GetBySessionID(ctx, orgID, *state.ActiveSessionID)
@@ -111,6 +142,9 @@ func (s *Service) RequestScheduledReview(ctx context.Context, req ScheduleReques
 	if req.RequestID == uuid.Nil {
 		return ScheduleRequestResult{}, fmt.Errorf("request_id is required")
 	}
+	if req.Mode == models.CodeReviewRecheck || req.Mode == models.CodeReviewForceFresh {
+		return s.requestAssessmentReview(ctx, req)
+	}
 	// A UI request operates on a previously monitored PR; it cannot turn an
 	// arbitrary tenant PR UUID into a new review without the existing trigger.
 	state, err := s.GetSchedule(ctx, req.OrgID, req.PullRequestID)
@@ -123,7 +157,7 @@ func (s *Service) RequestScheduledReview(ctx context.Context, req ScheduleReques
 	} else if err != nil {
 		return ScheduleRequestResult{}, err
 	}
-	input := ReviewChangedInput{OrgID: req.OrgID, RepositoryID: state.RepositoryID, PullRequestID: req.PullRequestID, ExplicitRequest: true, GitHubDeliveryID: req.RequestID.String(), ChangeReason: "ui.review_now", TriggerSource: models.CodeReviewTriggerSourceSlashCommand}
+	input := ReviewChangedInput{OrgID: req.OrgID, RepositoryID: state.RepositoryID, PullRequestID: req.PullRequestID, ExplicitRequest: true, GitHubDeliveryID: req.RequestID.String(), RequestContext: assessmentRequestContext(req), ChangeReason: "ui.review_now", TriggerSource: models.CodeReviewTriggerSourceSlashCommand}
 	result, err := s.scheduleReview(ctx, input, req.Mode, false, req.RequesterID)
 	if err != nil {
 		return ScheduleRequestResult{}, err
@@ -202,16 +236,10 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 			if identity == "" {
 				return fmt.Errorf("explicit review requires delivery identity")
 			}
-			raw, err := json.Marshal(struct {
-				PR      uuid.UUID
-				Mode    models.CodeReviewRequestMode
-				Context *ReviewRequestContext
-				Force   bool
-			}{input.PullRequestID, mode, input.RequestContext, force})
+			hash, err := reviewRequestHash(input.PullRequestID, mode, input.RequestContext, force)
 			if err != nil {
 				return err
 			}
-			hash := fmt.Sprintf("%x", sha256.Sum256(raw))
 			kind := "github"
 			if requesterID != nil {
 				kind = "ui"
@@ -237,6 +265,19 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 				}
 				return nil
 			}
+			if mode == models.CodeReviewRecheck {
+				forcedPending, err := pendingForcedFull(state.PendingInput)
+				if err != nil {
+					return err
+				}
+				if forcedPending {
+					if _, err := tx.Exec(ctx, `UPDATE code_review_requests SET status='superseded' WHERE org_id=$1 AND id=$2 AND status='pending'`, input.OrgID, requestID); err != nil {
+						return err
+					}
+					result.IgnoredReason = "cancelled"
+					return nil
+				}
+			}
 		}
 		now := s.scheduling.now()
 		pr, err := db.NewPullRequestStore(tx).GetByID(ctx, input.OrgID, input.PullRequestID)
@@ -255,8 +296,42 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 				return err
 			}
 		}
+		var pending scheduledReviewIntent
+		if state.PendingInput != nil {
+			if err := json.Unmarshal(state.PendingInput, &pending); err != nil {
+				return err
+			}
+		}
+		inputs := reviewSnapshotInputs(snapshot)
+		var latestInputs *scheduledReviewInputs
+		activeFull := latestErr == nil && (latest.Status == models.CodeReviewSessionStatusQueued || latest.Status == models.CodeReviewSessionStatusRunning)
+		if activeFull {
+			previous, err := scoped.sessions.GetByID(ctx, input.OrgID, latest.SessionID)
+			if err != nil {
+				return err
+			}
+			latestInputs, err = scheduledSessionInputs(ctx, tx, input.OrgID, latest.SessionID, previous.RevisionContext)
+			if err != nil {
+				return err
+			}
+		}
+		observedInputs := latestInputs
+		if state.PendingInput != nil {
+			observedInputs = pending.Inputs
+			if observedInputs == nil && pending.Input.PullRequestTitle != "" {
+				observedInputs = &scheduledReviewInputs{Title: pending.Input.PullRequestTitle}
+				if latestInputs != nil {
+					observedInputs.BodyDigest = latestInputs.BodyDigest
+				}
+			}
+		}
 		baseRefChanged := state.BaseRef != snapshot.BaseRef
-		changed := state.HeadSHA != snapshot.HeadSHA || state.BaseSHA != snapshot.BaseSHA || baseRefChanged
+		// Completed full baselines can support newer evidence-only assessments.
+		// Their title/body changes remain governed by recheck admission; only
+		// active full analysis and its pending replacement need this fence.
+		trackInputs := activeFull || pending.Force || errors.Is(latestErr, pgx.ErrNoRows)
+		changed := state.HeadSHA != snapshot.HeadSHA || state.BaseSHA != snapshot.BaseSHA || baseRefChanged || (trackInputs && observedInputs.changed(inputs))
+		analysisChanged := latestInputs.changed(inputs)
 		if changed || state.LastMaterialChangeAt == nil {
 			state.LastMaterialChangeAt = &now
 			state.Generation++
@@ -281,12 +356,6 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 		if err != nil {
 			return err
 		}
-		var pending scheduledReviewIntent
-		if state.PendingInput != nil {
-			if err = json.Unmarshal(state.PendingInput, &pending); err != nil {
-				return err
-			}
-		}
 		// Automated updates move the target but preserve a pending explicit request.
 		if pending.Input.ExplicitRequest && !input.ExplicitRequest {
 			input.ExplicitRequest = true
@@ -296,9 +365,9 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 			input.TriggeringDisputeID = pending.Input.TriggeringDisputeID
 			input.ReviewRequestDisputeID = pending.Input.ReviewRequestDisputeID
 			mode = pending.Mode
-			force = pending.Force
+			force = force || pending.Force
 		}
-		if pending.Mode == models.CodeReviewReviewNow {
+		if !input.ExplicitRequest && (pending.Mode == models.CodeReviewReviewNow || pending.Mode == models.CodeReviewRecheck || pending.Mode == models.CodeReviewForceFresh) {
 			mode = pending.Mode
 		}
 		// Generation binds the complete target, including its base branch.
@@ -316,7 +385,7 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 			}
 			supersededGeneration = bound && generation != state.Generation
 		}
-		force = force || pending.Force || supersededGeneration || (latestErr == nil && latest.HeadSHA == snapshot.HeadSHA && (latest.BaseSHA != snapshot.BaseSHA || baseRefChanged))
+		force = force || pending.Force || supersededGeneration || analysisChanged || (latestErr == nil && latest.HeadSHA == snapshot.HeadSHA && (latest.BaseSHA != snapshot.BaseSHA || baseRefChanged))
 		if input.ExplicitRequest && latestErr == nil && latest.HeadSHA == snapshot.HeadSHA {
 			var hasResults bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM code_review_agent_results WHERE org_id=$1 AND session_id=$2)`, input.OrgID, latest.SessionID).Scan(&hasResults); err != nil {
@@ -345,6 +414,27 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 			}
 			force = force || string(before) != string(after)
 		}
+		if !force && snapshot.State == "open" && state.PendingInput == nil &&
+			latestErr == nil && (state.ActiveSessionID == nil || latest.SessionID == *state.ActiveSessionID) &&
+			(latest.Status == models.CodeReviewSessionStatusQueued || latest.Status == models.CodeReviewSessionStatusRunning) &&
+			latest.HeadSHA == snapshot.HeadSHA && latest.BaseSHA == snapshot.BaseSHA && !baseRefChanged {
+			active, err := db.HasActiveCodeReviewSession(ctx, tx, input.OrgID, input.PullRequestID, latest.SessionID, codeReviewJobEnqueueGracePeriod)
+			if err != nil {
+				return err
+			}
+			if active {
+				if requestID != uuid.Nil {
+					_, err = tx.Exec(ctx, `UPDATE code_review_requests SET status='joined',session_id=$3,assessment_id=$4,target_generation=$5 WHERE org_id=$1 AND id=$2 AND status='pending'`, input.OrgID, requestID, latest.SessionID, state.ActiveAssessmentID, state.Generation)
+					if err != nil {
+						return err
+					}
+				}
+				result.Reused = true
+				result.Deferred = true
+				result.SessionID = latest.SessionID
+				return nil
+			}
+		}
 		if force && !pending.Force && !changed && !supersededGeneration {
 			state.Generation++
 		}
@@ -357,13 +447,12 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 		if _, err = tx.Exec(ctx, `UPDATE code_review_requests SET target_generation=$3 WHERE org_id=$1 AND pull_request_id=$2 AND status IN ('pending','joined')`, input.OrgID, input.PullRequestID, state.Generation); err != nil {
 			return err
 		}
-		state.PendingInput, err = db.EncodeCodeReviewScheduleInput(scheduledReviewIntent{Input: input, Mode: mode, Force: force})
+		state.PendingInput, err = db.EncodeCodeReviewScheduleInput(scheduledReviewIntent{Input: input, Mode: mode, Force: force, RequesterID: requesterID, Inputs: inputs})
 		if err != nil {
 			return err
 		}
 		if snapshot.State != "open" {
-			_, err := scoped.metadata.MarkStaleForPullRequestExceptHead(ctx, input.OrgID, input.PullRequestID, "", nil)
-			if err != nil {
+			if err := db.RevokeScheduledCodeReviews(ctx, tx, input.OrgID, input.PullRequestID, "", nil, state); err != nil {
 				return err
 			}
 			state.State = models.CodeReviewScheduleClosed
@@ -373,6 +462,19 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 			state.EligibleAt = nil
 			state.RetryAt = nil
 			return db.ResolveCodeReviewRequests(ctx, tx, input.OrgID, input.PullRequestID, state.Generation, nil, "cancelled")
+		}
+		// A stopped automatic restart chain stays stopped on the same revision.
+		// Explicit requests and a new head/base pass through normal admission.
+		if !input.ExplicitRequest && !changed && latestErr == nil && latest.StatusCode != nil &&
+			*latest.StatusCode == models.CodeReviewStatusCodeLoopDetected && latest.HeadSHA == snapshot.HeadSHA && latest.BaseSHA == snapshot.BaseSHA {
+			state.State = models.CodeReviewScheduleIdle
+			state.WaitReason = models.CodeReviewWaitNone
+			state.PendingInput = nil
+			state.PendingRequestID = nil
+			state.FirstPendingAt = nil
+			state.EligibleAt = nil
+			state.RetryAt = nil
+			return nil
 		}
 		policy, err := scoped.policies.ResolvePolicy(ctx, input.OrgID)
 		if err != nil {
@@ -388,13 +490,12 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 		applyScheduleWait(state, policy.Config, input.ExplicitRequest, approved, mode, now)
 		// Revoke obsolete target revisions in the same transaction as replacement
 		// intent. Actual thread cancellation follows commit.
-		if latestErr == nil && (latest.HeadSHA != snapshot.HeadSHA || latest.BaseSHA != snapshot.BaseSHA || baseRefChanged) {
+		if latestErr == nil && (latest.HeadSHA != snapshot.HeadSHA || latest.BaseSHA != snapshot.BaseSHA || baseRefChanged || analysisChanged || force) {
 			head := snapshot.HeadSHA
-			if latest.BaseSHA != snapshot.BaseSHA || baseRefChanged {
+			if latest.BaseSHA != snapshot.BaseSHA || baseRefChanged || analysisChanged || force {
 				head = ""
 			}
-			_, err := scoped.metadata.MarkStaleForPullRequestExceptHead(ctx, input.OrgID, input.PullRequestID, head, nil)
-			if err != nil {
+			if err := db.RevokeScheduledCodeReviews(ctx, tx, input.OrgID, input.PullRequestID, head, nil, state); err != nil {
 				return err
 			}
 		}
@@ -412,6 +513,9 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 	})
 	if err != nil {
 		return ReviewRequestedResult{}, err
+	}
+	if err := s.cancelForcedEvidenceAssessment(ctx, input.OrgID, input.PullRequestID); err != nil {
+		return result, err
 	}
 	if err := s.cancelStaleScheduledThreads(ctx, input.OrgID, input.PullRequestID); err != nil {
 		return result, err
@@ -465,7 +569,7 @@ func applyScheduleWait(state *models.CodeReviewPRState, policy models.CodeReview
 		return
 	}
 	due := now
-	if mode != models.CodeReviewReviewNow && state.LastMaterialChangeAt != nil {
+	if mode != models.CodeReviewReviewNow && mode != models.CodeReviewRecheck && mode != models.CodeReviewForceFresh && state.LastMaterialChangeAt != nil {
 		due = settings.EligibleAt(*state.LastMaterialChangeAt, state.LastAgentStartAt)
 	}
 	state.EligibleAt = &due
@@ -485,14 +589,44 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 	if err != nil {
 		return err
 	}
+	if err := s.scheduling.store.ReconcileTerminalReviews(ctx, wake.OrgID, state.RepositoryID, wake.PullRequestID); err != nil {
+		return err
+	}
 	if state.PendingInput != nil {
-		_, err = s.scheduleReview(ctx, ReviewChangedInput{OrgID: wake.OrgID, RepositoryID: state.RepositoryID, PullRequestID: wake.PullRequestID}, models.CodeReviewEnsureCurrent, false, nil)
+		var pending scheduledReviewIntent
+		if err := json.Unmarshal(state.PendingInput, &pending); err != nil {
+			return err
+		}
+		if pending.Mode == models.CodeReviewRecheck && !pending.Force && s.scheduling.rechecksEnabled {
+			requestID, parseErr := uuid.Parse(pending.Input.GitHubDeliveryID)
+			if parseErr != nil {
+				return parseErr
+			}
+			reason := ""
+			if pending.Input.RequestContext != nil {
+				reason = pending.Input.RequestContext.Body
+			}
+			_, err = s.requestAssessmentReview(ctx, ScheduleRequestInput{OrgID: wake.OrgID, PullRequestID: wake.PullRequestID, RequestID: requestID, RequesterID: pending.RequesterID, Mode: models.CodeReviewRecheck, Reason: reason, RequestContext: pending.Input.RequestContext, TriggerSource: pending.Input.TriggerSource}, true)
+			if errors.Is(err, ErrRecheckUnavailable) {
+				// Admission durably settled this request. Finish the wake below;
+				// a concurrently admitted newer request still owns its own state.
+				err = nil
+			}
+		} else if pending.Mode == models.CodeReviewRecheck && !s.scheduling.rechecksEnabled {
+			fallbackID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("code-review-disabled-pending:"+pending.Input.GitHubDeliveryID))
+			_, err = s.scheduleReview(ctx, ReviewChangedInput{OrgID: wake.OrgID, RepositoryID: state.RepositoryID, PullRequestID: wake.PullRequestID, ExplicitRequest: true, GitHubDeliveryID: fallbackID.String(), RequestContext: pending.Input.RequestContext, TriggerSource: pending.Input.TriggerSource, ChangeReason: "assessment.continuation_disabled"}, models.CodeReviewReviewNow, false, pending.RequesterID)
+		} else {
+			_, err = s.scheduleReview(ctx, ReviewChangedInput{OrgID: wake.OrgID, RepositoryID: state.RepositoryID, PullRequestID: wake.PullRequestID}, models.CodeReviewEnsureCurrent, false, nil)
+		}
 		if err != nil {
 			if errors.Is(err, errScheduleSnapshotUnavailable) {
 				return s.deferUnavailableSchedule(ctx, wake, state, err)
 			}
 			return err
 		}
+	}
+	if err := s.cancelForcedEvidenceAssessment(ctx, wake.OrgID, wake.PullRequestID); err != nil {
+		return err
 	}
 	if err := s.cancelStaleScheduledThreads(ctx, wake.OrgID, wake.PullRequestID); err != nil {
 		return err
@@ -538,6 +672,12 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 		var intent scheduledReviewIntent
 		if err := json.Unmarshal(current.PendingInput, &intent); err != nil {
 			return err
+		}
+		if intent.Mode == models.CodeReviewRecheck && !intent.Force {
+			at := now.Add(15 * time.Second)
+			current.RetryAt = &at
+			current.WaitReason = models.CodeReviewWaitContext
+			return wait(at)
 		}
 		scoped := s.transactionalService(tx)
 		policy, err := scoped.policies.ResolvePolicy(ctx, wake.OrgID)
@@ -616,6 +756,9 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 		}
 		if !result.Reused {
 			if err := bindScheduledSession(ctx, tx, in.OrgID, result.SessionID, current.Generation); err != nil {
+				return err
+			}
+			if err := bindScheduledInputs(ctx, tx, in.OrgID, result.SessionID, intent.Inputs); err != nil {
 				return err
 			}
 		}
@@ -715,6 +858,9 @@ func (s *Service) retryScheduledReview(ctx context.Context, input RetryReviewInp
 		if err := bindScheduledSession(ctx, tx, input.OrgID, result.SessionID, state.Generation); err != nil {
 			return err
 		}
+		if err := bindScheduledInputs(ctx, tx, input.OrgID, result.SessionID, reviewSnapshotInputs(snapshot)); err != nil {
+			return err
+		}
 		state.ActiveSessionID = &result.SessionID
 		state.State = models.CodeReviewScheduleRunning
 		_, _, err = db.RecordCodeReviewRequest(ctx, tx, input.OrgID, source.RepositoryID, source.PullRequestID, "retry", identity, models.CodeReviewReviewNow, identity, state.Generation, nil)
@@ -759,6 +905,9 @@ func (s *Service) handleSerializedReviewChanged(ctx context.Context, input Revie
 		if result.SessionID != uuid.Nil && !result.Reused {
 			observeScheduledStart(state, snapshot, s.scheduling.now())
 			if err := bindScheduledSession(ctx, tx, input.OrgID, result.SessionID, state.Generation); err != nil {
+				return err
+			}
+			if err := bindScheduledInputs(ctx, tx, input.OrgID, result.SessionID, reviewSnapshotInputs(snapshot)); err != nil {
 				return err
 			}
 			state.ActiveSessionID = &result.SessionID
@@ -902,7 +1051,14 @@ func (s *Service) ValidateScheduledExecution(ctx context.Context, orgID, prID, s
 		if err != nil {
 			return err
 		}
-		refreshTarget = snapshot.State != "open" || snapshot.HeadSHA != metadata.HeadSHA || snapshot.BaseSHA != metadata.BaseSHA || snapshot.BaseRef != state.BaseRef
+		var inputs *scheduledReviewInputs
+		if metadata.Status == models.CodeReviewSessionStatusQueued || metadata.Status == models.CodeReviewSessionStatusRunning {
+			inputs, err = scheduledSessionInputs(ctx, tx, orgID, sessionID, session.RevisionContext)
+			if err != nil {
+				return err
+			}
+		}
+		refreshTarget = snapshot.State != "open" || snapshot.HeadSHA != metadata.HeadSHA || snapshot.BaseSHA != metadata.BaseSHA || snapshot.BaseRef != state.BaseRef || inputs.changed(reviewSnapshotInputs(snapshot))
 		valid = !refreshTarget && bound && generation == state.Generation
 		if valid {
 			now := s.scheduling.now()
@@ -910,7 +1066,7 @@ func (s *Service) ValidateScheduledExecution(ctx context.Context, orgID, prID, s
 			state.SnapshotObservedAt = &now
 		}
 		if !valid && !refreshTarget && (metadata.Status == models.CodeReviewSessionStatusQueued || metadata.Status == models.CodeReviewSessionStatusRunning) {
-			_, err = store.MarkStale(ctx, orgID, sessionID, "review scheduling target superseded")
+			err = db.RevokeScheduledCodeReviews(ctx, tx, orgID, prID, "", &sessionID, state)
 		}
 		return err
 	})
@@ -923,7 +1079,7 @@ func (s *Service) ValidateScheduledExecution(ctx context.Context, orgID, prID, s
 		if _, err = s.scheduleReview(ctx, ReviewChangedInput{OrgID: orgID, RepositoryID: metadata.RepositoryID, PullRequestID: prID}, models.CodeReviewEnsureCurrent, false, nil); err != nil {
 			return false, err
 		}
-		err = s.scheduling.store.WithLockedPR(ctx, orgID, metadata.RepositoryID, prID, func(tx pgx.Tx, _ *models.CodeReviewPRState) error {
+		err = s.scheduling.store.WithLockedPR(ctx, orgID, metadata.RepositoryID, prID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
 			store := db.NewCodeReviewStore(tx)
 			current, err := store.GetBySessionID(ctx, orgID, sessionID)
 			if err != nil {
@@ -932,7 +1088,7 @@ func (s *Service) ValidateScheduledExecution(ctx context.Context, orgID, prID, s
 			if current.Status != models.CodeReviewSessionStatusQueued && current.Status != models.CodeReviewSessionStatusRunning {
 				return nil
 			}
-			_, err = store.MarkStale(ctx, orgID, sessionID, "review scheduling target superseded")
+			err = db.RevokeScheduledCodeReviews(ctx, tx, orgID, prID, "", &sessionID, state)
 			return err
 		})
 		if err != nil {

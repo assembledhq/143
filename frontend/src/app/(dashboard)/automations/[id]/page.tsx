@@ -100,6 +100,7 @@ import type {
   AutomationFallbackModels,
   AutomationGitHubEventFilters,
   AutomationRun,
+  AutomationSessionContinuity,
   ListResponse,
   Repository,
 } from "@/lib/types";
@@ -314,6 +315,93 @@ function StaticPropertyRow({ label, value }: { label: string; value: string }) {
         {value}
       </span>
     </div>
+  );
+}
+
+// sessionContinuityAllowsPerTarget mirrors the API rule
+// (INVALID_SESSION_CONTINUITY): continuing one session per pull request needs
+// a pull request trigger and a "do not publish" policy, because the session
+// is a review conversation that never opens pull requests.
+function sessionContinuityAllowsPerTarget(automation: Automation): boolean {
+  return (
+    (automation.github_event_triggers?.length ?? 0) > 0 &&
+    automation.publish_policy === "none"
+  );
+}
+
+const sessionContinuityLabels: Record<AutomationSessionContinuity, string> = {
+  per_run: "New session per run",
+  per_target: "Continue one session per pull request",
+};
+
+function SessionContinuityProperty({
+  automation,
+  canManage,
+  uid,
+  onChange,
+}: {
+  automation: Automation;
+  canManage: boolean;
+  uid: string;
+  onChange: (value: AutomationSessionContinuity) => void;
+}) {
+  const value = automation.session_continuity ?? "per_run";
+  const perTargetAllowed = sessionContinuityAllowsPerTarget(automation);
+  const hint =
+    value === "per_target"
+      ? "People cannot message these sessions while a pull request conversation is active. Explicitly granted automation actions are supported; other external-write tools remain unavailable."
+      : perTargetAllowed
+        ? null
+        : "Continuing one session per pull request needs a pull request trigger and “Do not publish”.";
+
+  return (
+    <>
+      {canManage ? (
+        <PropertyRow
+          label="Conversation"
+          htmlFor={`automation-session-continuity-${uid}`}
+        >
+          <Select
+            value={value}
+            onValueChange={(next) => {
+              if (next !== "per_run" && next !== "per_target") return;
+              if (next === value) return;
+              onChange(next);
+            }}
+          >
+            <SelectTrigger
+              id={`automation-session-continuity-${uid}`}
+              aria-label="Session continuity"
+              density="dense"
+              className={inlineControlClass}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="per_run">
+                {sessionContinuityLabels.per_run}
+              </SelectItem>
+              <SelectItem value="per_target" disabled={!perTargetAllowed}>
+                {sessionContinuityLabels.per_target}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </PropertyRow>
+      ) : (
+        <StaticPropertyRow
+          label="Conversation"
+          value={sessionContinuityLabels[value]}
+        />
+      )}
+      {hint ? (
+        <p
+          data-testid="automation-session-continuity-hint"
+          className="ml-[7rem] px-1.5 text-xs text-muted-foreground"
+        >
+          {hint}
+        </p>
+      ) : null}
+    </>
   );
 }
 
@@ -642,7 +730,8 @@ function TriggersEditor({
         </CollapsibleTrigger>
         <CollapsibleContent className="space-y-2.5 border-t border-border p-2.5">
           <p className="text-xs text-muted-foreground">
-            Comma-separated filters applied when GitHub sends matching context.
+            Comma-separated values. PR labels include any match; excluded PR
+            labels skip any match.
           </p>
           <TriggerFilterField
             id="trigger-base-branches"
@@ -667,6 +756,12 @@ function TriggersEditor({
             label="PR labels"
             serverValue={(filters.labels ?? []).join(", ")}
             onCommit={(value) => saveFilter("labels", value)}
+          />
+          <TriggerFilterField
+            id="trigger-excluded-labels"
+            label="Exclude PR labels"
+            serverValue={(filters.excluded_labels ?? []).join(", ")}
+            onCommit={(value) => saveFilter("excluded_labels", value)}
           />
           <TriggerFilterField
             id="trigger-feedback-types"
@@ -810,6 +905,7 @@ function CapabilitiesProperty({
   automation: Automation;
   canManage: boolean;
 }) {
+  const { user } = useAuth();
   const { data: capabilityCatalogResponse } = useQuery<
     ListResponse<AgentCapabilityDefinition>
   >({
@@ -858,6 +954,8 @@ function CapabilitiesProperty({
         grants={grants}
         onChange={(next) => autosave.save(next)}
         disabled={!canManage}
+        allowActions
+        canConfigureActions={user?.role === "admin"}
       />
     </div>
   );
@@ -1759,6 +1857,18 @@ function AutomationDetailRail({
             />
           )}
 
+          <SessionContinuityProperty
+            automation={automation}
+            canManage={canManage}
+            uid={uid}
+            onChange={(session_continuity) =>
+              save({
+                body: { session_continuity },
+                optimistic: { session_continuity },
+              })
+            }
+          />
+
           <StaticPropertyRow
             label="Priority"
             value={priorityLabel(automation.priority)}
@@ -1800,7 +1910,7 @@ function AutomationDetailRail({
               supported={supportsNativeReviewLoop}
               canManage={canManage}
             />
-            {canManage ? (
+            {canManage && automation.session_continuity !== "per_target" ? (
               <AutomationFallbackModelsEditor
                 value={automation.fallback_models}
                 primaryModel={model}
@@ -1824,6 +1934,12 @@ function AutomationDetailRail({
                 primaryAgentType={effectiveAgentType}
               />
             )}
+            {automation.session_continuity === "per_target" ? (
+              <p className="text-xs text-muted-foreground">
+                Fallback models are inactive while sessions are reused per pull request.
+                Switch session continuity to a new session per run to use them.
+              </p>
+            ) : null}
             <CapabilitiesProperty
               automation={automation}
               canManage={canManage}
@@ -1875,17 +1991,8 @@ function LatestRunSummary({ automationId }: { automationId: string }) {
   );
 }
 
-// A run that failed over to a fallback rank looks identical to one that ran on
-// the preferred model, so it would be worth a badge here — but only a run's OWN
-// frozen primary can say whether it fell back. Comparing the run's session
-// model against the automation's LIVE model_override, which is what this used
-// to do, is wrong in both directions: editing the primary relabels every
-// historical run as a fallback, and a run never gets labelled at all while the
-// automation's primary is "Auto". The run list projection
-// (db.listByAutomationSelectColumns) does not expose the frozen primary, so
-// there is nothing honest to compare against and the badge is omitted rather
-// than shown wrong. Restoring it needs a run-level primary column in that
-// projection plus the matching field on the AutomationRun type.
+// Compare separate-session runs against their frozen primary. Reused target
+// sessions follow the live continuity configuration and are not fallback attempts.
 function LatestRunBody({ run }: { run: AutomationRun }) {
   const summary =
     run.result_summary || run.session?.title || statusLabel(run.status);
@@ -1896,7 +2003,7 @@ function LatestRunBody({ run }: { run: AutomationRun }) {
   // editing the automation later cannot relabel a historical run.
   const sessionModel = run.session?.model_override;
   const ranOnFallback =
-    Boolean(sessionModel) && sessionModel !== run.primary_model;
+    run.session_id == null && Boolean(sessionModel) && sessionModel !== run.primary_model;
   return (
     <div className="mt-3 space-y-2">
       <div className="flex flex-wrap items-center gap-2">

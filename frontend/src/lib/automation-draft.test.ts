@@ -57,6 +57,7 @@ const FORM_STATE_KEYS = [
   "triggerBaseBranches",
   "triggerFeedbackTypes",
   "triggerLabels",
+  "triggerExcludedLabels",
   "triggerPaths",
   "triggerReviewStates",
 ].sort();
@@ -79,6 +80,7 @@ function populatedDraft(overrides: Partial<AutomationFormState> = {}): Automatio
     triggerAuthors: "dependabot[bot]",
     triggerPaths: "src/",
     triggerLabels: "frontend",
+    triggerExcludedLabels: "do-not-run",
     triggerFeedbackTypes: "Inline review comment",
     triggerReviewStates: "changes_requested",
     pagerDutyEnabled: true,
@@ -144,6 +146,14 @@ describe("automation-draft storage", () => {
     saveAutomationDraft(defaultAutomationFormState());
 
     expect(window.sessionStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
+
+  it("persists a draft containing only excluded PR labels", () => {
+    const draft = defaultAutomationFormState({ triggerExcludedLabels: "do-not-run" });
+
+    saveAutomationDraft(draft);
+
+    expect(loadAutomationDraft()).toEqual(draft);
   });
 
   it("normalizes the detected timezone out of stored drafts", () => {
@@ -214,6 +224,7 @@ describe("automation-draft storage", () => {
         triggerAuthors: "",
         triggerPaths: "",
         triggerLabels: "",
+        triggerExcludedLabels: "",
         triggerFeedbackTypes: "",
         triggerReviewStates: "",
         pagerDutyEnabled: false,

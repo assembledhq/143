@@ -102,7 +102,9 @@ func TestCodeReviewSchedulingEnums(t *testing.T) {
 		{"quiet", func() error { return CodeReviewWaitQuiet.Validate() }, true},
 		{"unknown reason", func() error { return CodeReviewWaitReason("other").Validate() }, false},
 		{"review now", func() error { return CodeReviewReviewNow.Validate() }, true},
-		{"force unavailable", func() error { return CodeReviewRequestMode("force_fresh").Validate() }, false},
+		{"recheck", func() error { return CodeReviewRecheck.Validate() }, true},
+		{"force fresh", func() error { return CodeReviewForceFresh.Validate() }, true},
+		{"unknown mode", func() error { return CodeReviewRequestMode("other").Validate() }, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

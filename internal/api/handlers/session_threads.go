@@ -230,6 +230,7 @@ func (h *SessionThreadHandler) CreateThread(w http.ResponseWriter, r *http.Reque
 	})
 	if err != nil {
 		switch {
+		case writeAutomationOwnedError(w, r, err), writeCodeReviewOwnedError(w, r, err):
 		case errors.Is(err, db.ErrThreadLimitReached):
 			writeError(w, r, http.StatusConflict, "THREAD_LIMIT", "maximum of 4 threads per session")
 		case errors.Is(err, thread.ErrSessionNotFound):
@@ -313,6 +314,7 @@ func (h *SessionThreadHandler) UpdateThread(w http.ResponseWriter, r *http.Reque
 	})
 	if err != nil {
 		switch {
+		case writeAutomationOwnedError(w, r, err), writeCodeReviewOwnedError(w, r, err):
 		case errors.Is(err, thread.ErrSessionNotFound), errors.Is(err, thread.ErrThreadNotFound):
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session or thread not found")
 		case errors.Is(err, thread.ErrSessionTerminal):
@@ -348,6 +350,7 @@ func (h *SessionThreadHandler) ArchiveThread(w http.ResponseWriter, r *http.Requ
 	result, err := h.svc.ArchiveThread(r.Context(), orgID, sessionID, threadID)
 	if err != nil {
 		switch {
+		case writeCodeReviewOwnedError(w, r, err):
 		case errors.Is(err, thread.ErrSessionNotFound), errors.Is(err, thread.ErrThreadNotFound):
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session or thread not found")
 		case errors.Is(err, thread.ErrCannotArchiveLastThread):
@@ -428,7 +431,7 @@ func (h *SessionThreadHandler) ListRecoverableInboxEntries(w http.ResponseWriter
 
 	entries, err := h.svc.ListRecoverableInboxEntries(r.Context(), orgID, sessionID, threadID)
 	if err != nil {
-		if errors.Is(err, thread.ErrThreadNotFound) {
+		if errors.Is(err, thread.ErrSessionNotFound) || errors.Is(err, thread.ErrThreadNotFound) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 			return
 		}
@@ -471,7 +474,10 @@ func (h *SessionThreadHandler) RetryInboxEntry(w http.ResponseWriter, r *http.Re
 
 	entry, err := h.svc.RetryInboxEntry(r.Context(), orgID, sessionID, threadID, entryID, body.ReplayUnknownDelivery)
 	if err != nil {
-		if errors.Is(err, thread.ErrThreadNotFound) {
+		if writeCodeReviewOwnedError(w, r, err) {
+			return
+		}
+		if errors.Is(err, thread.ErrSessionNotFound) || errors.Is(err, thread.ErrThreadNotFound) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread or inbox entry not found")
 			return
 		}
@@ -604,7 +610,8 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 			return
 		}
 		switch {
-		case errors.Is(err, thread.ErrThreadNotFound):
+		case writeAutomationOwnedError(w, r, err), writeCodeReviewOwnedError(w, r, err):
+		case errors.Is(err, thread.ErrSessionNotFound), errors.Is(err, thread.ErrThreadNotFound):
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 		case errors.Is(err, thread.ErrThreadInboxBackpressure):
 			writeError(w, r, http.StatusTooManyRequests, "THREAD_INBOX_BACKPRESSURE", "this tab has too many undelivered messages; wait for delivery to catch up")
@@ -802,7 +809,8 @@ func (h *SessionThreadHandler) EndThread(w http.ResponseWriter, r *http.Request)
 	t, err := h.svc.EndThread(r.Context(), orgID, sessionID, threadID)
 	if err != nil {
 		switch {
-		case errors.Is(err, thread.ErrThreadNotFound):
+		case writeCodeReviewOwnedError(w, r, err):
+		case errors.Is(err, thread.ErrSessionNotFound), errors.Is(err, thread.ErrThreadNotFound):
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 		case errors.Is(err, thread.ErrThreadCannotBeEnded):
 			writeError(w, r, http.StatusConflict, "INVALID_STATUS", "thread cannot be ended in its current state")

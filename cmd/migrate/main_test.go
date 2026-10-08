@@ -225,11 +225,18 @@ func TestMigrationVersionsAreUnique(t *testing.T) {
 	}
 }
 
-func TestMigrationsDoNotUseConcurrentIndexes(t *testing.T) {
+func TestMigrationsRestrictConcurrentIndexes(t *testing.T) {
 	t.Parallel()
 
 	files, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.sql"))
 	require.NoError(t, err, "should glob migration files without error")
+	// golang-migrate v4.19.1 executes each file without an explicit transaction.
+	// PostgreSQL accepts CONCURRENTLY only when the file contains one statement.
+	// Keep this exception scoped to the jobs lookup index on the hot table.
+	allowedStandalone := map[string]string{
+		"000294_code_review_preparation_job_lookup.up.sql":   "CREATE INDEX CONCURRENTLY idx_jobs_org_queue_dedupe_created",
+		"000294_code_review_preparation_job_lookup.down.sql": "DROP INDEX CONCURRENTLY idx_jobs_org_queue_dedupe_created",
+	}
 
 	for _, path := range files {
 		path := path
@@ -238,18 +245,26 @@ func TestMigrationsDoNotUseConcurrentIndexes(t *testing.T) {
 
 			contents, err := os.ReadFile(path)
 			require.NoError(t, err, "migration file should be readable")
-			sql := stripSQLLineComments(string(contents))
+			sql := strings.TrimSpace(stripSQLLineComments(string(contents)))
+			upperSQL := strings.ToUpper(sql)
+			if statement, ok := allowedStandalone[filepath.Base(path)]; ok {
+				require.True(t, strings.HasPrefix(upperSQL, strings.ToUpper(statement)), "allowlisted concurrent migration should start with its expected index statement")
+				require.Equal(t, 1, strings.Count(sql, ";"), "concurrent index migration should contain exactly one SQL statement")
+				require.True(t, strings.HasSuffix(sql, ";"), "concurrent index migration should end after its sole statement")
+				require.NotContains(t, upperSQL, "IF NOT EXISTS", "concurrent index migration should fail on a leftover invalid index")
+				return
+			}
 			require.NotContains(
 				t,
-				strings.ToUpper(sql),
+				upperSQL,
 				"CREATE INDEX CONCURRENTLY",
-				"migration files run inside a transaction and must not create indexes concurrently",
+				"new concurrent index migrations require an explicit single-statement exception",
 			)
 			require.NotContains(
 				t,
-				strings.ToUpper(sql),
+				upperSQL,
 				"DROP INDEX CONCURRENTLY",
-				"migration files run inside a transaction and must not drop indexes concurrently",
+				"new concurrent index migrations require an explicit single-statement exception",
 			)
 		})
 	}

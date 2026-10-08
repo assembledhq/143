@@ -9,11 +9,18 @@ import (
 
 type ToolCapabilityPolicy struct {
 	Capabilities []models.AgentCapabilitySnapshotItem
+	// ToolAllowlist, when non-nil, is a positive list of "namespace:action"
+	// tools (design doc 125): a tool is callable only when it is in the
+	// list and its capability is granted, and the namespaces that bypass
+	// the capability check (capability, goal improvement, preview) are
+	// subject to the list too.
+	ToolAllowlist []string
 }
 
 type capabilityFilteredToolSource struct {
-	base    ToolSource
-	allowed map[string]bool
+	base      ToolSource
+	allowed   map[string]bool
+	allowlist map[string]bool
 }
 
 func NewCapabilityFilteredToolSource(base ToolSource, policy ToolCapabilityPolicy) ToolSource {
@@ -21,7 +28,14 @@ func NewCapabilityFilteredToolSource(base ToolSource, policy ToolCapabilityPolic
 	for _, capability := range policy.Capabilities {
 		addAllowedToolPaths(allowed, capability)
 	}
-	return &capabilityFilteredToolSource{base: base, allowed: allowed}
+	var allowlist map[string]bool
+	if policy.ToolAllowlist != nil {
+		allowlist = make(map[string]bool, len(policy.ToolAllowlist))
+		for _, tool := range policy.ToolAllowlist {
+			allowlist[tool] = true
+		}
+	}
+	return &capabilityFilteredToolSource{base: base, allowed: allowed, allowlist: allowlist}
 }
 
 func (s *capabilityFilteredToolSource) ListTools() []Tool {
@@ -47,6 +61,18 @@ func (s *capabilityFilteredToolSource) toolAllowed(name string) bool {
 	if !ok {
 		return false
 	}
+	if s.allowlist != nil {
+		if !s.allowlist[string(namespace)+":"+string(action)] {
+			return false
+		}
+		// capability:list is the only bypass namespace the allowlist keeps
+		// and needs no grant; every other allowlisted tool still needs its
+		// capability.
+		if namespace == NamespaceCapability {
+			return true
+		}
+		return s.allowed[string(namespace)+" "+string(action)]
+	}
 	if namespace == NamespaceCapability {
 		return true
 	}
@@ -68,6 +94,10 @@ func addAllowedToolPaths(allowed map[string]bool, capability models.AgentCapabil
 		}
 	}
 	switch capability.ID {
+	case models.AgentCapabilityAutomationActions:
+		if capability.AccessLevel == models.AgentCapabilityAccessWrite {
+			add(NamespaceAutomation, CLIAction("execute-action"), CLIAction("action-status"))
+		}
 	case models.AgentCapabilitySessionHistory:
 		add(NamespaceSessionHistory, ActionSearch, ActionGet, ActionMessages)
 	case models.AgentCapabilityReviewFeedback:

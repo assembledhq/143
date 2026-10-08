@@ -103,10 +103,28 @@ func (m *mockThreadStore) MarkCancelRequestedBySessions(context.Context, uuid.UU
 }
 
 type mockSessionStoreForThread struct {
+	automationOwner  *models.SessionAutomationOwner
+	codeReviewOwner  *uuid.UUID
 	getByIDFn        func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimIdleFn      func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	claimForResumeFn func(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	updateStatusFn   func(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
+}
+
+func (m *mockSessionStoreForThread) RejectIfCodeReviewOwned(_ context.Context, _, _ uuid.UUID) error {
+	if m.codeReviewOwner != nil {
+		return &models.SessionCodeReviewOwnedError{PullRequestID: *m.codeReviewOwner}
+	}
+	return nil
+}
+
+// automationOwner, when set, makes every human-entry guard reject the
+// session as automation-owned.
+func (m *mockSessionStoreForThread) RejectIfAutomationOwned(_ context.Context, _, _ uuid.UUID) error {
+	if m.automationOwner == nil {
+		return nil
+	}
+	return &models.SessionAutomationOwnedError{Owner: *m.automationOwner}
 }
 
 func (m *mockSessionStoreForThread) GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
@@ -701,6 +719,17 @@ func TestSessionThreadHandler_ArchiveThread(t *testing.T) {
 			setupDeps:      func(deps *threadTestDeps) {},
 			expectedCode:   http.StatusBadRequest,
 			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "code review owned session",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				owner := uuid.New()
+				deps.sessionStore.codeReviewOwner = &owner
+			},
+			expectedCode:  http.StatusConflict,
+			expectedError: "SESSION_CODE_REVIEW_OWNED",
 		},
 		{
 			name:           "cannot archive last thread",

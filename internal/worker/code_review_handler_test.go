@@ -26,6 +26,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMaintainCodeReviewWorkspaceHolder(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		releaseRows int64
+		renewRows   int64
+	}{
+		{name: "terminal review releases without renewal", releaseRows: 1},
+		{name: "active review renews", renewRows: 1},
+		{name: "missing holder is harmless"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should be created")
+			defer mock.Close()
+			job := runCodeReviewPayload{OrgID: uuid.New(), SessionID: uuid.New()}
+			mock.ExpectExec(`WITH terminal AS MATERIALIZED[\s\S]+h\.holder_kind = 'code_review'`).
+				WithArgs(job.OrgID, job.SessionID).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.releaseRows))
+			if tt.releaseRows == 0 {
+				mock.ExpectExec(`WITH eligible AS MATERIALIZED[\s\S]+h\.holder_kind = 'code_review'`).
+					WithArgs(job.OrgID, job.SessionID, 60).
+					WillReturnResult(pgxmock.NewResult("UPDATE", tt.renewRows))
+			}
+			maintainCodeReviewWorkspaceHolder(context.Background(), &Stores{SandboxHolders: db.NewSessionSandboxHolderStore(mock)}, zerolog.Nop(), job)
+			require.NoError(t, mock.ExpectationsWereMet(), "controller should release terminal holders or renew active holders")
+		})
+	}
+}
+
 func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testing.T) {
 	t.Parallel()
 
@@ -714,81 +746,109 @@ func TestCodeReviewSubmitDecision(t *testing.T) {
 
 func TestSubmitCodeReviewToGitHubUsesPublicationLock(t *testing.T) {
 	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock should initialize")
-	defer mock.Close()
-
-	orgID := uuid.New()
-	sessionID := uuid.New()
-	repositoryID := uuid.New()
-	pullRequestID := uuid.New()
-	policyID := uuid.New()
-	metadataID := uuid.New()
-	now := time.Now().UTC()
-	reviewID := int64(9001)
-	reviewURL := "https://github.com/acme/repo/pull/42#pullrequestreview-9001"
-	finalBody := "Visible fallback summary"
-
-	mock.ExpectQuery("(?s)FROM repositories.*WHERE id = @id AND org_id = @org_id").
-		WithArgs(pgx.NamedArgs{"id": repositoryID, "org_id": orgID}).
-		WillReturnRows(workerRepositoryRows(models.Repository{
-			ID: repositoryID, OrgID: orgID, IntegrationID: uuid.New(), FullName: "acme/repo",
-			InstallationID: 143, Status: models.RepositoryStatusActive, Settings: json.RawMessage(`{}`),
-			CreatedAt: now, UpdatedAt: now,
-		}))
-	mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
-		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID}).
-		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).
-			AddRow(workerPullRequestRow(pullRequestID, sessionID, orgID, "acme/repo", "feature/review", now)...))
-	mock.ExpectQuery("(?s)FROM code_review_findings.*selected_for_inline").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "selected_only": true}).
-		WillReturnRows(newCodeReviewFindingRows())
-	mock.ExpectBegin()
-	mock.ExpectExec("SELECT pg_advisory_xact_lock").
-		WithArgs(pgx.NamedArgs{"lock_key": "code_review_status_comment:" + orgID.String() + ":" + pullRequestID.String()}).
-		WillReturnResult(pgxmock.NewResult("SELECT", 1))
-	mock.ExpectCommit()
-	mock.ExpectQuery("(?s)UPDATE code_review_session_metadata.*github_review_id = @github_review_id").
-		WithArgs(pgx.NamedArgs{
-			"org_id":            orgID,
-			"session_id":        sessionID,
-			"github_review_id":  int64(9001),
-			"github_review_url": reviewURL,
-			"final_review_body": finalBody,
-		}).
-		WillReturnRows(newCodeReviewMetadataRows().AddRow(
-			metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
-			"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
-			models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, nil, nil,
-			false, nil, "output-key", nil, &reviewID, &reviewURL, &finalBody, nil, &now, now,
-		))
-
-	submitter := &capturingCodeReviewSubmitter{
-		submitResult: codereview.SubmitReviewResult{ID: 9001, URL: reviewURL, Body: finalBody},
+	tests := []struct {
+		name     string
+		patch    string
+		expected []codereview.SubmitReviewComment
+	}{
+		{name: "maps selected range to a changed line", patch: "@@ -351 +351 @@\n-old\n+new", expected: []codereview.SubmitReviewComment{{Path: "file.go", Line: 351, Body: "[P1] Fix this defect", DedupeKey: "stable-key"}}},
+		{name: "preserves summary when selected finding has no anchor", patch: "@@ -400 +400 @@\n-old\n+new", expected: []codereview.SubmitReviewComment{}},
+		{name: "preserves summary when patch is unavailable", expected: []codereview.SubmitReviewComment{}},
 	}
-	submission, submitted, err := submitCodeReviewToGitHub(
-		context.Background(),
-		&Stores{
-			CodeReviews:  db.NewCodeReviewStore(mock),
-			Repositories: db.NewRepositoryStore(mock),
-			PullRequests: db.NewPullRequestStore(mock),
-		},
-		&Services{CodeReviews: submitter},
-		runCodeReviewPayload{
-			OrgID: orgID, SessionID: sessionID, RepositoryID: repositoryID, PullRequestID: pullRequestID,
-			HeadSHA: "head", OutputKey: "output-key",
-		},
-		models.CodeReviewSessionMetadata{},
-		models.CodeReviewDecisionCommentOnly,
-		finalBody,
-	)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	require.NoError(t, err, "GitHub review submission should succeed under the publication lock")
-	require.True(t, submitted, "GitHub review submission should report a new review")
-	require.Equal(t, int64(9001), *submission.GitHubReviewID, "submission should return the persisted GitHub review id")
-	require.Equal(t, "output-key", submitter.submitRequest.OutputKey, "submission should retain the stable output marker")
-	require.NoError(t, mock.ExpectationsWereMet(), "formal review submission should use the same per-PR advisory lock as status publication")
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			repositoryID := uuid.New()
+			pullRequestID := uuid.New()
+			policyID := uuid.New()
+			metadataID := uuid.New()
+			now := time.Now().UTC()
+			reviewID := int64(9001)
+			reviewURL := "https://github.com/acme/repo/pull/42#pullrequestreview-9001"
+			findingID := uuid.New()
+			path := "file.go"
+			finding := models.CodeReviewFinding{ID: findingID, Path: &path, StartLine: intPtr(347), EndLine: intPtr(354), Severity: models.CodeReviewFindingSeverityHigh, Summary: "Unresolved blocker", Body: "Fix this defect", DedupeKey: "stable-key", SelectedForInline: true}
+			finalBody := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{Decision: models.CodeReviewDecisionNeedsHumanReview, Findings: []models.CodeReviewFinding{finding}})
+
+			mock.ExpectQuery("(?s)FROM repositories.*WHERE id = @id AND org_id = @org_id").
+				WithArgs(pgx.NamedArgs{"id": repositoryID, "org_id": orgID}).
+				WillReturnRows(workerRepositoryRows(models.Repository{
+					ID: repositoryID, OrgID: orgID, IntegrationID: uuid.New(), FullName: "acme/repo",
+					InstallationID: 143, Status: models.RepositoryStatusActive, Settings: json.RawMessage(`{}`),
+					CreatedAt: now, UpdatedAt: now,
+				}))
+			mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
+				WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID}).
+				WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).
+					AddRow(workerPullRequestRow(pullRequestID, sessionID, orgID, "acme/repo", "feature/review", now)...))
+			mock.ExpectQuery("(?s)FROM code_review_findings.*selected_for_inline").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "selected_only": true}).
+				WillReturnRows(newCodeReviewFindingRows().AddRow(findingID, orgID, sessionID, nil, "stable-key", "high", "high", &path, intPtr(347), intPtr(354), "Unresolved blocker", "Fix this defect", true, nil, now))
+			mock.ExpectBegin()
+			mock.ExpectExec("SET LOCAL lock_timeout").
+				WillReturnResult(pgxmock.NewResult("SET", 0))
+			mock.ExpectExec("SET LOCAL statement_timeout").
+				WillReturnResult(pgxmock.NewResult("SET", 0))
+			mock.ExpectExec("SET LOCAL idle_in_transaction_session_timeout").
+				WillReturnResult(pgxmock.NewResult("SET", 0))
+			mock.ExpectExec("SELECT pg_advisory_xact_lock").
+				WithArgs(pgx.NamedArgs{"lock_key": "code_review_status_comment:" + orgID.String() + ":" + pullRequestID.String()}).
+				WillReturnResult(pgxmock.NewResult("SELECT", 1))
+			mock.ExpectCommit()
+			mock.ExpectQuery("(?s)UPDATE code_review_session_metadata.*github_review_id = @github_review_id").
+				WithArgs(pgx.NamedArgs{
+					"org_id":            orgID,
+					"session_id":        sessionID,
+					"github_review_id":  int64(9001),
+					"github_review_url": reviewURL,
+					"final_review_body": finalBody,
+				}).
+				WillReturnRows(newCodeReviewMetadataRows().AddRow(
+					metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
+					"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
+					models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, nil, nil,
+					false, nil, "output-key", nil, &reviewID, &reviewURL, &finalBody, nil, &now, now,
+				))
+
+			submitter := &capturingCodeReviewSubmitter{
+				submitResult: codereview.SubmitReviewResult{ID: 9001, URL: reviewURL, Body: finalBody},
+			}
+			submission, submitted, err := submitCodeReviewToGitHub(
+				context.Background(),
+				&Stores{
+					CodeReviews:  db.NewCodeReviewStore(mock),
+					Repositories: db.NewRepositoryStore(mock),
+					PullRequests: db.NewPullRequestStore(mock),
+				},
+				&Services{CodeReviews: submitter},
+				runCodeReviewPayload{
+					OrgID: orgID, SessionID: sessionID, RepositoryID: repositoryID, PullRequestID: pullRequestID,
+					HeadSHA: "head", OutputKey: "output-key",
+				},
+				models.CodeReviewSessionMetadata{},
+				models.CodeReviewDecisionNeedsHumanReview,
+				finalBody,
+				[]codereview.PullRequestFile{{Filename: path, Patch: tt.patch}},
+			)
+
+			require.NoError(t, err, "GitHub review submission should succeed under the publication lock")
+			require.True(t, submitted, "GitHub review submission should report a new review")
+			require.Equal(t, int64(9001), *submission.GitHubReviewID, "submission should return the persisted GitHub review id")
+			require.Equal(t, tt.expected, submitter.submitRequest.Comments, "publication should validate even previously selected findings against the reviewed diff")
+			require.Equal(t, finalBody, submitter.submitRequest.Body, "summary must retain the original blocking finding regardless of inline eligibility")
+			require.Equal(t, codereview.SubmitReviewDecisionNeedsHumanReview, submitter.submitRequest.Decision, "omitting an invalid inline anchor must not relax the review decision")
+			require.Equal(t, "head", submitter.submitRequest.HeadSHA, "publication should retain the reviewed head")
+			require.Equal(t, "output-key", submitter.submitRequest.OutputKey, "submission should retain the stable output marker")
+			require.NoError(t, mock.ExpectationsWereMet(), "formal review submission should use the same per-PR advisory lock as status publication")
+		})
+	}
 }
 
 type capturingCodeReviewSubmitter struct {
@@ -896,7 +956,8 @@ func TestCodeReviewInlineComments(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			actual := codeReviewInlineComments(tt.findings)
+			files := []codereview.PullRequestFile{{Filename: path, Patch: "@@ -42 +42 @@\n-old\n+new"}}
+			actual := codeReviewInlineComments(tt.findings, files)
 			require.Equal(t, tt.expected, actual, "codeReviewInlineComments should return deterministic GitHub comments")
 		})
 	}
@@ -1352,7 +1413,7 @@ func TestCodeReviewVisualEvidencePromptProjection(t *testing.T) {
 	require.Equal(t, threadID, input.ThreadID, "agent message should target the selected reviewer or orchestrator thread")
 	require.Equal(t, commands, input.Commands, "reviewer message should retain native command metadata")
 	require.Equal(t, codeReviewVisualEvidenceImages(snapshot), input.Images, "every agent message should receive the same ordered first-party images")
-	require.Equal(t, models.SessionMessageSourceAgentTool, input.MessageSource, "visual evidence should enter the thread through the system agent-tool source")
+	require.Equal(t, models.SessionMessageSourceCodeReview, input.MessageSource, "review input should carry trusted code-review provenance")
 }
 
 func TestCodeReviewVisualEvidencePromptProjectionDeduplicatesContentHashes(t *testing.T) {
@@ -2450,6 +2511,75 @@ func TestHarvestCodeReviewOrchestratorResultPreservesCompletedOutputAfterDeadlin
 	require.NoError(t, mock.ExpectationsWereMet(), "orchestrator harvest should preserve terminal output and findings instead of replacing them with a timeout")
 }
 
+func TestHarvestLegacyCodeReviewSynthesisOnReadOnlyMain(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID, sessionID, mainThreadID, resultID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	raw := `{"approval_recommended":true,"description_assessments":[{"key":"description","status":"satisfied","evidence_basis":"pull_request_description","evidence_ids":[],"reason":"Clear intent."}],"findings":[],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"The change is focused.","review_summary":"The completed review supports the change.","risk_notes":[]}`
+	raw = "```json\n" + raw + "\n```"
+	synthesis, err := parseCodeReviewOrchestratorSynthesis(raw)
+	require.NoError(t, err, "test synthesis should satisfy the output schema")
+	_, err = codeReviewDescriptionEvaluationFromSynthesis(models.DefaultCodeReviewPolicyConfig(), nil, synthesis, models.CodeReviewVisualEvidenceSnapshot{})
+	require.NoError(t, err, "test synthesis should satisfy the default description policy")
+	initialState := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{ThreadID: mainThreadID.String()})
+
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", stringPtr(models.DefaultCodexModel),
+				models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusRunning, nil, initialState, now))
+	mainThreadRow := workerSessionThreadRow(mainThreadID, sessionID, orgID, models.AgentTypeCodex, stringPtr(models.DefaultCodexModel), models.ThreadStatusCompleted)
+	setWorkerSessionThreadColumn(mainThreadRow, "label", "Main")
+	setWorkerSessionThreadColumn(mainThreadRow, "created_by_source", models.ThreadCreatedBySourceSystem)
+	setWorkerSessionThreadColumn(mainThreadRow, "execution_mode", models.ThreadExecutionModeReview)
+	setWorkerSessionThreadColumn(mainThreadRow, "filesystem_mode", models.ThreadFilesystemModeReadOnly)
+	setWorkerSessionThreadColumn(mainThreadRow, "completed_at", &now)
+	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
+		WithArgs(pgx.NamedArgs{"id": mainThreadID, "org_id": orgID}).
+		WillReturnRows(newSessionThreadRows().AddRow(mainThreadRow...))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_messages").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": mainThreadID}).
+		WillReturnRows(newSessionMessageRows().
+			AddRow(int64(1), sessionID, orgID, &mainThreadID, nil, 1, models.MessageRoleAssistant, raw, nil, nil, nil, nil, "", now))
+	mock.ExpectQuery("UPDATE code_review_agent_results").
+		WithArgs(models.CodeReviewAgentResultStatusCompleted, &raw,
+			readOnlyMainSynthesisArg{threadID: mainThreadID, summary: "The change is focused."}, orgID, resultID).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", stringPtr(models.DefaultCodexModel),
+				models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusCompleted, &raw, initialState, now))
+
+	stores := &Stores{
+		CodeReviews:     db.NewCodeReviewStore(mock),
+		SessionThreads:  db.NewSessionThreadStore(mock),
+		SessionMessages: db.NewSessionMessageStore(mock),
+	}
+	err = harvestCodeReviewOrchestratorResult(context.Background(), stores, &Services{CodeReviewAssessmentsEnabled: false}, zerolog.Nop(),
+		runCodeReviewPayload{OrgID: orgID, SessionID: sessionID},
+		codeReviewPolicyRecordForTest(models.DefaultCodeReviewPolicyConfig()), nil, models.CodeReviewVisualEvidenceSnapshot{})
+	require.NoError(t, err, "legacy synthesis should accept valid output from the read-only Main thread")
+	require.NoError(t, mock.ExpectationsWereMet(), "harvest should complete the legacy synthesis without creating a separate thread or marking a read-only violation")
+}
+
+type readOnlyMainSynthesisArg struct {
+	threadID uuid.UUID
+	summary  string
+}
+
+func (matcher readOnlyMainSynthesisArg) Match(value any) bool {
+	raw, ok := value.(json.RawMessage)
+	if !ok {
+		return false
+	}
+	state, ok := parseCodeReviewOrchestratorStructuredResult(raw)
+	return ok && state.ThreadID == matcher.threadID.String() && state.ReadOnly && !state.ReadOnlyViolation &&
+		state.SynthesisValidated && state.Error == "" && state.Synthesis.Summary == matcher.summary
+}
+
 func TestHarvestCodeReviewAgentResultRejectsTerminalOutputAfterDeadline(t *testing.T) {
 	t.Parallel()
 
@@ -2915,6 +3045,7 @@ func TestRequestCodeReviewOrchestratorSynthesisRepair(t *testing.T) {
 	require.True(t, started, "repair request should start one bounded correction turn")
 	require.Len(t, sender.inputs, 1, "repair request should dispatch exactly one correction message")
 	require.Equal(t, threadID, sender.inputs[0].ThreadID, "repair request should continue the existing orchestrator thread")
+	require.Equal(t, models.SessionMessageSourceCodeReview, sender.inputs[0].MessageSource, "repair input should retain platform code-review provenance")
 	require.Contains(t, sender.inputs[0].Message, `"approval_recommended": false`, "correction message should require the omitted approval field with valid JSON")
 	require.Contains(t, sender.inputs[0].Message, `"findings":`, "correction message should preserve structured findings")
 	require.Contains(t, sender.inputs[0].Message, `"human_review_reasons":`, "correction message should require explicit escalation reasons")
@@ -3268,6 +3399,32 @@ func TestParseCodeReviewOrchestratorSynthesis(t *testing.T) {
 			require.Equal(t, tt.expected, actual, "parser should preserve every synthesis field")
 		})
 	}
+}
+
+func TestCodeReviewMissingArtifactSynthesisBlocksApproval(t *testing.T) {
+	t.Parallel()
+
+	// A frozen reviewer replay reported that a generated role map was required
+	// to assess an authorization change but absent from the review workspace.
+	raw := `{"approval_recommended":false,"description_assessments":[],"findings":[],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":true,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Review authorization capability changed.","review_summary":"The generated role map is unavailable, so the authorization change cannot be assessed.","risk_notes":["Generated role map is missing."]}`
+	synthesis, err := parseCodeReviewOrchestratorSynthesis(raw)
+	require.NoError(t, err, "missing-artifact synthesis should satisfy the structured output contract")
+	require.False(t, synthesis.ApprovalRecommended, "missing-artifact synthesis should not recommend approval")
+	require.True(t, synthesis.UnresolvedUncertainty, "missing-artifact synthesis should preserve the evidence gap")
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	policy.Enabled = true
+	risk := models.EvaluateCodeReviewRisk(policy, models.CodeReviewRiskInput{
+		FilesChanged:          1,
+		Additions:             1,
+		Deletions:             1,
+		ChecksPassing:         true,
+		DescriptionPassed:     true,
+		UpToDate:              true,
+		UnresolvedUncertainty: synthesis.UnresolvedUncertainty,
+	})
+	require.Equal(t, []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonUnresolvedUncertainty}}, risk.ReasonDetails, "backend risk evaluation should withhold approval for incomplete generated evidence")
+	require.False(t, risk.Acceptable, "unresolved uncertainty should block automated approval")
 }
 
 func TestCodeReviewFindingsFromSynthesis(t *testing.T) {
@@ -4863,6 +5020,32 @@ func TestCodeReviewThreadCompletionTime(t *testing.T) {
 	}
 }
 
+func TestEvaluateLiveCodeReviewOutcomeCommentNavigation(t *testing.T) {
+	t.Parallel()
+	const provenance = "Code review reused from assessment `baseline`. Updated evidence was checked in this assessment."
+	tests := []struct {
+		name          string
+		detailURL     string
+		reviewNowURL  string
+		provenance    string
+		expectedLinks string
+	}{
+		{name: "new full review supplies scheduler action", detailURL: "https://143.test/sessions/session", reviewNowURL: "https://143.test/code-reviews?review_now=session", expectedLinks: "[Request review](https://143.test/code-reviews?review_now=session) · [View full review](https://143.test/sessions/session)"},
+		{name: "recheck provenance precedes assessment footer", detailURL: "https://143.test/code-reviews?assessment=assessment", provenance: provenance, expectedLinks: "[View assessment](https://143.test/code-reviews?assessment=assessment)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{Policy: models.DefaultCodeReviewPolicyConfig(), SessionURL: tt.detailURL, ReviewNowURL: tt.reviewNowURL, ReviewProvenance: tt.provenance})
+			require.True(t, strings.HasSuffix(body, "<!-- 143-code-review-footer:start -->\n"+tt.expectedLinks+"\n<!-- 143-code-review-footer:end -->"), "new rendered results should carry the correct final navigation footer")
+			if tt.provenance != "" {
+				require.Contains(t, body, tt.provenance+"\n\n<!-- 143-code-review-footer:start -->", "evidence reuse provenance must be part of the result before navigation")
+				require.NotContains(t, body, "?review_now=", "evidence-only results must not gain a full-review request action")
+			}
+		})
+	}
+}
+
 func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 	t.Parallel()
 
@@ -4939,6 +5122,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 		riskNotContains       string
 		bodyContains          string
 		bodyNotContains       string
+		expectedRecheck       string
 	}{
 		{
 			name: "approves when live reviewer quorum and PR health satisfy policy",
@@ -5116,13 +5300,14 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected:     models.CodeReviewDecisionNeedsHumanReview,
 			reason:       "reviewer quorum 1 is below policy requirement 2",
-			bodyContains: "**Reviewer evidence:** Codex found no blocking issues; Claude Code failed",
+			bodyContains: "**Reviewers:** Codex found no blocking issues; Claude Code failed",
 		},
 		{
 			name: "explains a description requirement the coding agent marked missing",
 			input: liveCodeReviewOutcomeInput{
-				Policy: policy,
-				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				Policy:             policy,
+				EvidenceRecheckURL: "https://143.test/code-reviews?recheck=90d8a47d-d87e-4780-90af-040f5144685a",
+				Job:                runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
 				PullRequest: models.PullRequest{
 					OrgID:   orgID,
 					Body:    &prBody,
@@ -5150,9 +5335,10 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 					"description": codeReviewDescriptionAssessmentMissing,
 				})
 			},
-			expected:     models.CodeReviewDecisionNeedsHumanReview,
-			reason:       "PR description policy did not pass",
-			bodyContains: "Understandable description (The coding agent found the required evidence missing.)",
+			expected:        models.CodeReviewDecisionNeedsHumanReview,
+			reason:          "PR description policy did not pass",
+			bodyContains:    "Understandable description (The coding agent found the required evidence missing.)",
+			expectedRecheck: "[Re-check evidence](https://143.test/code-reviews?recheck=90d8a47d-d87e-4780-90af-040f5144685a)",
 		},
 		{
 			name: "approves a P2-only review and exposes its structured advisory evidence",
@@ -5679,13 +5865,18 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			require.Equal(t, tt.expected, decision.Decision, "live code review outcome should choose the expected decision")
 			if tt.reason != "" {
 				require.Contains(t, decision.RiskReasons, tt.reason, "non-approval should preserve the expected risk reason")
-				require.Contains(t, body, "Why:", "final review body should explain the non-approval reason")
+				require.Contains(t, body, "**Next steps:**", "final review body should explain how to proceed after non-approval")
 			}
 			if tt.riskNotContains != "" {
 				require.NotContains(t, decision.RiskReasons, tt.riskNotContains, "approval should not contain an opaque orchestrator veto")
 			}
 			if tt.bodyContains != "" {
 				require.Contains(t, body, tt.bodyContains, "final review body should include expected evidence")
+			}
+			if tt.expectedRecheck != "" {
+				require.Contains(t, body, tt.expectedRecheck, "the initial full review should offer evidence reassessment when available")
+			} else {
+				require.NotContains(t, body, "[Re-check evidence]", "reviews without an available evidence action should not advertise one")
 			}
 			if tt.bodyNotContains != "" {
 				require.NotContains(t, body, tt.bodyNotContains, "GitHub summary should not expose advisory finding details")
@@ -5738,11 +5929,11 @@ func codeReviewPolicyRowsForTest(t *testing.T, orgID, policyID uuid.UUID, config
 	return pgxmock.NewRows([]string{
 		"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
 		"review_instructions", "automated_approval_policy", "description_policy", "risk_policy",
-		"agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy",
+		"agent_roster", "inline_comment_limit", "created_by_user_id", "created_at", "scheduling_policy", "continuation_policy",
 	}).AddRow(
 		policyID, orgID, nil, true, 1, config.Enabled, config.ApprovalMode,
 		config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy,
-		agentRoster, config.InlineCommentLimit, nil, createdAt, []byte("{}"),
+		agentRoster, config.InlineCommentLimit, nil, createdAt, []byte("{}"), []byte("{}"),
 	)
 }
 

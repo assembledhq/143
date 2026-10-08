@@ -860,13 +860,20 @@ type SessionMessageSource string
 
 const (
 	SessionMessageSourceAgentTool        SessionMessageSource = "agent_tool"
+	SessionMessageSourceCodeReview       SessionMessageSource = "code_review"
 	SessionMessageSourceSystemAutoRepair SessionMessageSource = "system_auto_repair"
 	SessionMessageSourceGitHubPRFeedback SessionMessageSource = "github_pr_feedback"
+	// SessionMessageSourceAutomationTurn marks the visible user message the
+	// ownership transaction inserts for a per-target automation turn
+	// (design doc 125). The turn's prompt travels in the job payload; the
+	// message is the transcript's copy.
+	SessionMessageSourceAutomationTurn    SessionMessageSource = "automation_turn"
+	SessionMessageSourceCodeReviewRecheck SessionMessageSource = "code_review_recheck"
 )
 
 func (s SessionMessageSource) Validate() error {
 	switch s {
-	case "", SessionMessageSourceAgentTool, SessionMessageSourceSystemAutoRepair, SessionMessageSourceGitHubPRFeedback:
+	case "", SessionMessageSourceAgentTool, SessionMessageSourceCodeReview, SessionMessageSourceSystemAutoRepair, SessionMessageSourceGitHubPRFeedback, SessionMessageSourceAutomationTurn, SessionMessageSourceCodeReviewRecheck:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionMessageSource: %q", s)
@@ -889,6 +896,11 @@ type SessionMessage struct {
 	Source          SessionMessageSource   `db:"source" json:"source,omitempty"`
 	CreatedAt       time.Time              `db:"created_at" json:"created_at"`
 	ActivityPhaseID *uuid.UUID             `db:"activity_phase_id" json:"activity_phase_id,omitempty"`
+	// AutomationRunID attributes a per-target automation turn's user and
+	// assistant messages to the run that produced them (design doc 125). It
+	// is written at insert and read by usage rollups in SQL; message reads
+	// do not hydrate it.
+	AutomationRunID *uuid.UUID `db:"-" json:"automation_run_id,omitempty"`
 }
 
 // ThreadCreatedBySource identifies what or who created a session thread.
@@ -1085,6 +1097,7 @@ type LatestJobError struct {
 // Job type constants for async work queue items.
 const (
 	JobTypeAutomationRun                 = "automation_run"
+	JobTypeAutomationTargetWake          = "automation_target_wake"
 	JobTypeStartPreview                  = "start_preview"
 	JobTypeStartBranchPreview            = "start_branch_preview"
 	JobTypeAutoPreviewDeferred           = "auto_preview_deferred"
@@ -1097,6 +1110,8 @@ const (
 	JobTypePagerDutyIngestEvent          = "pagerduty_ingest_event"
 	JobTypePagerDutySync                 = "pagerduty_sync"
 	JobTypeRunCodeReview                 = "run_code_review"
+	JobTypePrepareCodeReviewWorkspace    = "prepare_code_review_workspace"
+	JobTypeRunCodeReviewRecheck          = "run_code_review_recheck"
 	JobTypeStartCodeReviewReassessment   = "start_code_review_reassessment"
 	JobTypeTriageCodeReviewDispute       = "triage_code_review_dispute"
 	JobTypeReplyCodeReviewDispute        = "reply_code_review_dispute"

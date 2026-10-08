@@ -16,6 +16,8 @@ type tokenRate struct {
 }
 
 var openAIAPIRates = map[string]tokenRate{
+	models.CodexModelGPT6Sol:        {inputPerMTok: 2.00, cachedInputPerMTok: 0.20, cacheCreationPerMTok: 2.50, outputPerMTok: 10.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT6Luna:       {inputPerMTok: 0.10, cachedInputPerMTok: 0.01, cacheCreationPerMTok: 0.125, outputPerMTok: 0.50, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
 	models.CodexModelGPT56Sol:       {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 30.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
 	models.CodexModelGPT56SolFast:   {inputPerMTok: 10.00, cachedInputPerMTok: 1.00, cacheCreationPerMTok: 12.50, outputPerMTok: 60.00, unit: TokenCostUnitUSD, detail: "openai_priority_pricing"},
 	models.CodexModelGPT56Terra:     {inputPerMTok: 2.50, cachedInputPerMTok: 0.25, cacheCreationPerMTok: 3.125, outputPerMTok: 15.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
@@ -50,6 +52,7 @@ var codexCreditRates = map[string]tokenRate{
 }
 
 var anthropicRates = map[string]tokenRate{
+	models.ClaudeCodeModelOpus55:   {inputPerMTok: 4.00, cachedInputPerMTok: 0.20, cacheCreationPerMTok: 5.00, outputPerMTok: 20.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},
 	models.ClaudeCodeModelFable5:   {inputPerMTok: 10.00, cachedInputPerMTok: 1.00, cacheCreationPerMTok: 12.50, outputPerMTok: 50.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},
 	models.ClaudeCodeModelOpus5:    {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 25.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},
 	models.ClaudeCodeModelOpus48:   {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 25.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},

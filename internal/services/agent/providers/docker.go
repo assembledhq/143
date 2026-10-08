@@ -31,6 +31,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 )
@@ -53,12 +54,13 @@ const (
 	defaultHealthCheckImage     = "busybox:1.36.1"
 	healthCheckImagePullTimeout = 2 * time.Minute
 
-	SandboxLabelManaged   = "com.assembledhq.143.managed"
-	SandboxLabelType      = "com.assembledhq.143.type"
-	SandboxLabelSessionID = "com.assembledhq.143.session_id"
-	SandboxLabelOrgID     = "com.assembledhq.143.org_id"
-	SandboxLabelPurpose   = "com.assembledhq.143.purpose"
-	SandboxLabelCreatedAt = "com.assembledhq.143.created_at"
+	SandboxLabelManaged               = "com.assembledhq.143.managed"
+	SandboxLabelType                  = "com.assembledhq.143.type"
+	SandboxLabelSessionID             = "com.assembledhq.143.session_id"
+	SandboxLabelOrgID                 = "com.assembledhq.143.org_id"
+	SandboxLabelPurpose               = "com.assembledhq.143.purpose"
+	SandboxLabelPreparationLeaseToken = "com.assembledhq.143.preparation_lease_token" // #nosec G101 -- Docker label key, not a credential
+	SandboxLabelCreatedAt             = "com.assembledhq.143.created_at"
 
 	sandboxLabelLegacySandbox   = "143.sandbox"
 	sandboxLabelLegacySessionID = "143.session_id"
@@ -541,7 +543,7 @@ func (d *DockerProvider) Name() string {
 // to emit provider log lines so every sandbox-lifecycle event is greppable by
 // session in Grafana.
 func (d *DockerProvider) scopedLogger(sb *agent.Sandbox) zerolog.Logger {
-	lc := d.logger.With().Str("container_id", sb.ID)
+	lc := d.logger.With().Str("container_id", sb.ID).Str("sandbox_container_id", sb.ID)
 	if sb.SessionID != "" {
 		lc = lc.Str("session_id", sb.SessionID)
 	}
@@ -578,7 +580,7 @@ func (d *DockerProvider) configLogger(cfg agent.SandboxConfig) zerolog.Logger {
 // Runtime apt-get is not supported — every dependency is baked into the
 // sandbox image — because sudo's setuid bit is stripped under gVisor /
 // nosuid mounts and the provider runs with CapDrop=ALL.
-func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (created *agent.Sandbox, returnErr error) {
 	networkName := cfg.NetworkName
 	if networkName == "" {
 		networkName = d.network
@@ -592,6 +594,8 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		egressMode = agent.SandboxEgressModeDirect
 	}
 	log := d.configLogger(cfg)
+	createStage := observability.BeginStage(true, log, "sandbox_provider_create")
+	defer func() { createStage.End(observability.StageOutcome(ctx, returnErr)) }()
 	log.Info().
 		Str("image", cfg.Image).
 		Float64("cpu_limit", cfg.CPULimit).
@@ -745,13 +749,14 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		// Best-effort cleanup on start failure
 		removeErr := d.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 		if removeErr != nil {
-			log.Error().Err(removeErr).Str("container_id", resp.ID).Msg("failed to remove container after start failure")
+			log.Error().Err(removeErr).Str("container_id", resp.ID).Str("sandbox_container_id", resp.ID).Msg("failed to remove container after start failure")
 		}
 		return nil, fmt.Errorf("start container: %w", err)
 	}
 
 	log.Info().
 		Str("container_id", resp.ID).
+		Str("sandbox_container_id", resp.ID).
 		Msg("sandbox container started")
 
 	sb := &agent.Sandbox{
@@ -786,7 +791,7 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	if code, err := d.Exec(ctx, bootstrapSB, bootstrapCmd, io.Discard, &bootErr); err != nil || code != 0 {
 		removeErr := d.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 		if removeErr != nil {
-			log.Error().Err(removeErr).Str("container_id", resp.ID).Msg("failed to remove container after bootstrap failure")
+			log.Error().Err(removeErr).Str("container_id", resp.ID).Str("sandbox_container_id", resp.ID).Msg("failed to remove container after bootstrap failure")
 		}
 		// Split the error construction so %w only wraps a non-nil error.
 		// When the exec itself succeeds but the command returns a non-zero
@@ -819,6 +824,9 @@ func sandboxContainerLabels(cfg agent.SandboxConfig, createdAt time.Time) map[st
 	if cfg.Purpose != "" {
 		labels[sandboxLabelLegacyPurpose] = cfg.Purpose
 		labels[SandboxLabelPurpose] = cfg.Purpose
+	}
+	if cfg.PreparationLeaseToken != "" {
+		labels[SandboxLabelPreparationLeaseToken] = cfg.PreparationLeaseToken
 	}
 	return labels
 }
@@ -886,11 +894,12 @@ func (d *DockerProvider) ListManagedSandboxes(ctx context.Context) ([]agent.Mana
 			}
 		}
 		out = append(out, agent.ManagedSandboxContainer{
-			ID:        c.ID,
-			SessionID: firstLabelValue(c.Labels, SandboxLabelSessionID, sandboxLabelLegacySessionID),
-			OrgID:     firstLabelValue(c.Labels, SandboxLabelOrgID, sandboxLabelLegacyOrgID),
-			Purpose:   firstLabelValue(c.Labels, SandboxLabelPurpose, sandboxLabelLegacyPurpose),
-			CreatedAt: createdAt,
+			ID:                    c.ID,
+			SessionID:             firstLabelValue(c.Labels, SandboxLabelSessionID, sandboxLabelLegacySessionID),
+			OrgID:                 firstLabelValue(c.Labels, SandboxLabelOrgID, sandboxLabelLegacyOrgID),
+			Purpose:               firstLabelValue(c.Labels, SandboxLabelPurpose, sandboxLabelLegacyPurpose),
+			PreparationLeaseToken: c.Labels[SandboxLabelPreparationLeaseToken],
+			CreatedAt:             createdAt,
 		})
 	}
 	return out, nil
@@ -1368,6 +1377,7 @@ func tarStdinDecompressFlag(magic []byte) string {
 func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
 	d.logger.Info().
 		Str("container_id", sb.ID).
+		Str("sandbox_container_id", sb.ID).
 		Msg("snapshotting sandbox")
 
 	// Tar workspace + agent state. --ignore-failed-read handles missing paths gracefully.
@@ -1440,9 +1450,12 @@ func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.Re
 // when tar exits non-zero. Without that, callers see only "exited with
 // code N" and have to guess whether the archive is corrupt, the path is
 // missing, or the container ran out of disk.
-func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader io.Reader) (returnErr error) {
+	restoreStage := observability.BeginStage(true, d.scopedLogger(sb), "sandbox_provider_restore")
+	defer func() { restoreStage.End(observability.StageOutcome(ctx, returnErr)) }()
 	d.logger.Info().
 		Str("container_id", sb.ID).
+		Str("sandbox_container_id", sb.ID).
 		Msg("restoring snapshot into sandbox")
 
 	// GNU tar will NOT auto-detect compression on a streamed stdin — it errors
@@ -1636,6 +1649,7 @@ func (b *cappedBuffer) String() string {
 func (d *DockerProvider) ExecStream(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
 	d.logger.Debug().
 		Str("container_id", sb.ID).
+		Str("sandbox_container_id", sb.ID).
 		Str("cmd", cmd).
 		Msg("exec-stream command in sandbox")
 
@@ -1662,6 +1676,7 @@ func (d *DockerProvider) ExecStreamWithOptions(ctx context.Context, sb *agent.Sa
 	sort.Strings(envKeys)
 	d.logger.Debug().
 		Str("container_id", sb.ID).
+		Str("sandbox_container_id", sb.ID).
 		Str("cmd", strings.Join(opts.Cmd, " ")).
 		Strs("env_keys", envKeys).
 		Str("working_dir", workingDir).

@@ -690,6 +690,7 @@ func TestSessionHandler_SendMessage_FiresMidSessionLinker(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
+	expectUnownedCodeReviewSession(mock)
 
 	now := time.Now()
 	orgID := uuid.New()
@@ -772,6 +773,7 @@ func TestSessionHandler_SendMessage_PassesStructuredLinearReferencesToMidSession
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
+	expectUnownedCodeReviewSession(mock)
 
 	now := time.Now()
 	orgID := uuid.New()
@@ -844,6 +846,7 @@ func TestSessionHandler_SendMessage_AllowsStructuredLinearReferenceWithoutMessag
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
+	expectUnownedCodeReviewSession(mock)
 
 	now := time.Now()
 	orgID := uuid.New()
@@ -921,6 +924,7 @@ func TestSessionHandler_SendMessage_SwallowsMidSessionLinkerError(t *testing.T) 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	defer mock.Close()
+	expectUnownedCodeReviewSession(mock)
 
 	now := time.Now()
 	orgID := uuid.New()

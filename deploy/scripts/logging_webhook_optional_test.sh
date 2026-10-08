@@ -52,6 +52,7 @@ run_case() {
   local script_path="$1"
   local expected_warning_url="$2"
   local expected_critical_url="$3"
+  local monitor_id="${4:-disabled}"
 
   local home_dir="$TMP_DIR/home"
   mkdir -p "$home_dir/.config/sops/age"
@@ -82,6 +83,7 @@ run_case() {
     export SSH_COUNTER_FILE="$counter_file"
     export GRAFANA_ADMIN_PASSWORD="admin-secret"
     export VICTORIALOGS_HOST="10.0.0.9"
+    export BACKUP_MONITOR_ID="$monitor_id"
     unset GRAFANA_ALERTS_WARNING_WEBHOOK_URL
     unset GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL
 
@@ -90,12 +92,19 @@ run_case() {
 
   grep -R -q "GRAFANA_ALERTS_WARNING_WEBHOOK_URL=${expected_warning_url}" "$stdin_dir"
   grep -R -q "GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL=${expected_critical_url}" "$stdin_dir"
+  grep -R -q "BACKUP_MONITOR_ID=${monitor_id}" "$stdin_dir"
 }
 
 run_case \
   "$ROOT_DIR/deploy/scripts/deploy.sh" \
   "http://localhost:65535/disabled-warning" \
   "http://localhost:65535/disabled-critical"
+
+run_case \
+  "$ROOT_DIR/deploy/scripts/deploy.sh" \
+  "http://localhost:65535/disabled-warning" \
+  "http://localhost:65535/disabled-critical" \
+  "primary-db"
 
 grep -q 'GRAFANA_ALERTS_WARNING_WEBHOOK_URL="${GRAFANA_ALERTS_WARNING_WEBHOOK_URL:-\$DISABLED_WARNING_WEBHOOK_URL}"' \
   "$ROOT_DIR/deploy/scripts/provision.sh"

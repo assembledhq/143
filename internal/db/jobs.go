@@ -265,6 +265,63 @@ func (s *JobStore) GetActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, qu
 	return active, nil
 }
 
+// FirstJobCreatedAtByDedupeKey anchors a phase-specific retry budget to the
+// first durable enqueue. A failed preparation may be re-enqueued, but that
+// must not restart the controller's workspace wait window.
+func (s *JobStore) FirstJobCreatedAtByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (time.Time, error) {
+	var createdAt time.Time
+	err := s.db.QueryRow(ctx, `
+		SELECT created_at
+		FROM jobs
+		WHERE org_id = $1 AND queue = $2 AND dedupe_key = $3
+		ORDER BY created_at ASC LIMIT 1`, orgID, queue, dedupeKey).Scan(&createdAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("first job creation by dedupe key: %w", err)
+	}
+	return createdAt, nil
+}
+
+// LatestJobStatusByDedupeKey distinguishes an active preparation from a
+// terminal failure, so the controller does not spawn another failed job on
+// every workspace poll. A succeeded job may be re-enqueued for recovery if
+// its published workspace has since disappeared.
+func (s *JobStore) LatestJobStatusByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (models.JobStatus, error) {
+	var status models.JobStatus
+	err := s.db.QueryRow(ctx, `
+		SELECT status FROM jobs
+		WHERE org_id = $1 AND queue = $2 AND dedupe_key = $3
+		ORDER BY created_at DESC, id DESC LIMIT 1`, orgID, queue, dedupeKey).Scan(&status)
+	if err != nil {
+		return "", fmt.Errorf("latest job status by dedupe key: %w", err)
+	}
+	return status, nil
+}
+
+// CancelActiveCodeReviewPreparation fences a timed-out initializer before the
+// controller falls back to the ordinary reviewer workspace path. A running
+// worker may still finish an in-flight Docker operation, but it cannot renew
+// its lease or publish the container after this update.
+func (s *JobStore) CancelActiveCodeReviewPreparation(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE jobs
+		SET status = 'cancelled',
+			completed_at = now(),
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			owner_kind = 'worker',
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			updated_at = now()
+		WHERE org_id = $1 AND queue = $2 AND dedupe_key = $3
+		  AND job_type = 'prepare_code_review_workspace'
+		  AND status IN ('pending', 'running')`, orgID, queue, dedupeKey)
+	if err != nil {
+		return 0, fmt.Errorf("cancel timed-out code review preparation: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // QueueChangesetPRCreation atomically reserves a changeset's PR slot when
 // needed and ensures it has an active open_pr job. A queued or pushing slot
 // may outlive the job that started a pre-publication review, so those states
@@ -726,13 +783,15 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 		WITH unavailable_target_nodes AS (
 			SELECT id
 			FROM nodes
-			WHERE status IN ('dead', 'draining') OR last_heartbeat_at < @dead_before
+			WHERE status IN ('dead', 'draining') OR drain_intent <> 'none' OR mode NOT IN ('worker', 'all') OR last_heartbeat_at < @dead_before
 		),
 		claiming_node AS (
 			SELECT id
 			FROM nodes
 			WHERE id = @node_id
 			  AND status = 'active'
+			  AND drain_intent = 'none'
+			  AND mode IN ('worker', 'all')
 			  AND last_heartbeat_at >= @dead_before
 		),
 		next_job AS (
@@ -1301,6 +1360,8 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 				j.org_id,
 				j.job_type,
 				j.locked_at,
+				j.lock_token,
+				j.lease_expires_at,
 				COALESCE(sess.snapshot_key, '') AS snapshot_key,
 				CASE
 					WHEN j.job_type IN ('run_agent', 'continue_session') THEN
@@ -1325,16 +1386,24 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 				OR d.id IS NOT NULL
 			  )
 		),
-		reclaimable AS (
-			SELECT id, org_id
-			FROM candidates
+		eligible AS (
+			SELECT * FROM candidates
 			WHERE job_type NOT IN ('run_agent', 'continue_session')
 			   OR org_recovery_rank <= 3
+		),
+		reclaimable AS (
+			SELECT j.id, j.org_id
+			FROM eligible c
+			JOIN jobs j ON j.id = c.id AND j.org_id = c.org_id
+			WHERE j.status = 'running'
+			  AND j.lock_token IS NOT DISTINCT FROM c.lock_token
+			  AND j.lease_expires_at IS NOT DISTINCT FROM c.lease_expires_at
 			ORDER BY
-				CASE WHEN job_type IN ('run_agent', 'continue_session') THEN 0 ELSE 1 END,
-				CASE WHEN snapshot_key <> '' THEN 0 ELSE 1 END,
-				locked_at ASC
+				CASE WHEN c.job_type IN ('run_agent', 'continue_session') THEN 0 ELSE 1 END,
+				CASE WHEN c.snapshot_key <> '' THEN 0 ELSE 1 END,
+				c.locked_at ASC
 			LIMIT $2
+			FOR UPDATE OF j SKIP LOCKED
 		),
 		updated_jobs AS (
 			UPDATE jobs j
@@ -1364,12 +1433,15 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 			  AND s.org_id = uj.org_id
 			  AND s.id = uj.session_id::uuid
 		)
-		SELECT COUNT(*) FROM updated_jobs`
+		SELECT (SELECT COUNT(*) FROM updated_jobs), (SELECT COUNT(*) FROM eligible)`
 
-	var reclaimed int64
-	err := s.db.QueryRow(ctx, query, staleBefore, limit).Scan(&reclaimed)
+	var reclaimed, eligible int64
+	err := s.db.QueryRow(ctx, query, staleBefore, limit).Scan(&reclaimed, &eligible)
 	if err != nil {
 		return 0, fmt.Errorf("reclaim lost running jobs: %w", err)
+	}
+	if eligible > reclaimed && reclaimed < int64(limit) {
+		s.logger.Warn().Int64("eligible_expired_jobs", eligible).Int64("reclaimed_jobs", reclaimed).Int("batch_limit", limit).Msg("recovery left expired jobs pending, possibly held by another transaction")
 	}
 	return reclaimed, nil
 }
@@ -1474,6 +1546,7 @@ func (s *JobStore) SelectWorkerWithSandboxCapacity(ctx context.Context, excludeN
 			FROM nodes
 			WHERE mode IN ('worker', 'all')
 			  AND status = 'active'
+			  AND drain_intent = 'none'
 			  AND last_heartbeat_at >= @dead_before
 			  AND COALESCE(metadata->>'live_sandbox_count_error', '') = ''
 			  AND (@exclude_node_id = '' OR id <> @exclude_node_id)
@@ -1502,6 +1575,63 @@ func (s *JobStore) SelectWorkerWithSandboxCapacity(ctx context.Context, excludeN
 	return &nodeID, nil
 }
 
+// IsHealthyWorkerNode checks whether a recorded sandbox owner can accept a
+// pinned turn. This is only a placement hint: the sandbox runtime still
+// verifies ownership and container liveness after dispatch.
+// lint:allow-no-orgid reason="nodes is a cluster-scoped table with no org_id"
+func (s *JobStore) IsHealthyWorkerNode(ctx context.Context, nodeID string) (bool, error) {
+	var healthy bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM nodes
+			WHERE id = @node_id
+			  AND mode IN ('worker', 'all')
+			  AND status = 'active'
+			  AND drain_intent = 'none'
+			  AND last_heartbeat_at >= @dead_before
+		)`, pgx.NamedArgs{
+		"node_id":     nodeID,
+		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
+	}).Scan(&healthy)
+	if err != nil {
+		return false, fmt.Errorf("check worker node health: %w", err)
+	}
+	return healthy, nil
+}
+
+// WorkerSandboxCapacity reads one worker's heartbeat capacity. Known is false
+// when capacity metadata is absent or its live-container count failed; in
+// that case the executor's local admission gate remains authoritative.
+// lint:allow-no-orgid reason="nodes is a cluster-scoped table with no org_id"
+func (s *JobStore) WorkerSandboxCapacity(ctx context.Context, nodeID string) (known, available bool, err error) {
+	err = s.db.QueryRow(ctx, `
+		SELECT
+			metadata ? 'max_active_sandboxes'
+			  AND metadata ? 'live_sandbox_count'
+			  AND metadata ? 'reserved_sandbox_count'
+			  AND COALESCE(metadata->>'live_sandbox_count_error', '') = ''
+			  AND COALESCE(NULLIF(metadata->>'max_active_sandboxes', '')::int, 0) > 0 AS known,
+			COALESCE(NULLIF(metadata->>'live_sandbox_count', '')::int, 0)
+			  + COALESCE(NULLIF(metadata->>'reserved_sandbox_count', '')::int, 0)
+			  < COALESCE(NULLIF(metadata->>'max_active_sandboxes', '')::int, 0) AS available
+		FROM nodes
+		WHERE id = @node_id
+		  AND mode IN ('worker', 'all')
+		  AND status = 'active'
+		  AND drain_intent = 'none'
+		  AND last_heartbeat_at >= @dead_before`, pgx.NamedArgs{
+		"node_id":     nodeID,
+		"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold),
+	}).Scan(&known, &available)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("read worker sandbox capacity: %w", err)
+	}
+	return known, available, nil
+}
+
 // SandboxCapacitySummary returns best-effort aggregate sandbox capacity from
 // fresh worker heartbeat metadata.
 // lint:allow-no-orgid reason="cross-org worker capacity summary for speculative prewarm classification"
@@ -1516,6 +1646,7 @@ func (s *JobStore) SandboxCapacitySummary(ctx context.Context) (SandboxCapacityS
 			FROM nodes
 			WHERE mode IN ('worker', 'all')
 			  AND status = 'active'
+			  AND drain_intent = 'none'
 			  AND last_heartbeat_at >= @dead_before
 			  AND COALESCE(metadata->>'live_sandbox_count_error', '') = ''
 		)

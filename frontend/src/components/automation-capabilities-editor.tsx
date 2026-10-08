@@ -1,6 +1,8 @@
 "use client";
 
 import { useMemo } from "react";
+import { AutomationActionsConfig, actionConfigError } from "@/components/automation-actions-config";
+import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ShieldAlert } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -71,21 +73,28 @@ export function AutomationCapabilitiesEditor({
   grants,
   onChange,
   disabled = false,
+  allowActions = false,
+  canConfigureActions = false,
 }: {
   catalog: AgentCapabilityDefinition[];
   grants: AgentCapabilityGrant[];
   onChange: (grants: AgentCapabilityGrant[]) => void;
   disabled?: boolean;
+  allowActions?: boolean;
+  canConfigureActions?: boolean;
 }) {
   const groups = useMemo(() => {
     const byCategory = new Map<string, AgentCapabilityDefinition[]>();
     for (const definition of catalog) {
+      if (definition.id === "automation_actions" && !allowActions && !grants.some((grant) => grant.capability_id === definition.id && grant.enabled)) continue;
       const current = byCategory.get(definition.category) ?? [];
       current.push(definition);
       byCategory.set(definition.category, current);
     }
     return [...byCategory.entries()];
-  }, [catalog]);
+  }, [catalog, allowActions, grants]);
+
+  const policyNeedsAdmin = !canConfigureActions && grants.some((grant) => grant.capability_id === "automation_actions" && grant.enabled);
 
   const grantByID = useMemo(() => new Map(grants.map((grant) => [grant.capability_id, grant])), [grants]);
 
@@ -103,6 +112,7 @@ export function AutomationCapabilitiesEditor({
 
   return (
     <div className="space-y-4">
+      {policyNeedsAdmin ? <p className="text-xs text-muted-foreground">An admin must edit capabilities while resumable automation actions are enabled. You can still disable resumable automation actions.</p> : null}
       {groups.map(([category, definitions]) => (
         <div key={category} className="space-y-2">
           <div className="text-xs font-medium uppercase text-muted-foreground">{category}</div>
@@ -110,6 +120,9 @@ export function AutomationCapabilitiesEditor({
             {definitions.map((definition) => {
               const grant = grantByID.get(definition.id);
               const unavailable = definition.availability?.available === false;
+              const actions = definition.id === "automation_actions";
+              const cannotEnableActions = actions && !grant?.enabled && (!allowActions || !canConfigureActions || !!actionConfigError(grant?.config ?? {}));
+              const switchDisabled = disabled || (unavailable && !(actions && grant?.enabled)) || cannotEnableActions || (policyNeedsAdmin && !actions);
               return (
                 <div key={definition.id} className="flex items-start justify-between gap-3 px-3 py-3">
                   <div className="min-w-0 space-y-1">
@@ -126,17 +139,23 @@ export function AutomationCapabilitiesEditor({
                       {unavailable ? <Badge variant="secondary">Unavailable</Badge> : null}
                     </div>
                     <p className="text-sm text-muted-foreground">{definition.description}</p>
+                    {actions ? (
+                      <AutomationActionsConfig config={grant?.config ?? {}} disabled={disabled || !allowActions || !canConfigureActions}
+                        onSave={(config) => onChange(grants.map((item) => item.capability_id === definition.id ? { ...item, config } : item))} />
+                    ) : null}
                     {unavailable && definition.availability?.reason ? (
                       <p className="text-xs text-muted-foreground">{definition.availability.reason}</p>
                     ) : null}
                   </div>
-                  <Switch
-                    id={`capability-${definition.id}`}
-                    checked={grant?.enabled ?? false}
-                    disabled={disabled || unavailable}
-                    onCheckedChange={(checked) => setEnabled(definition, checked)}
-                    aria-label={definition.display_name}
-                  />
+                  <DisabledTooltip disabled={switchDisabled} content={cannotEnableActions ? "An organization admin must configure the selected actions before enabling automation actions." : "You need permission and an available integration to change this capability."}>
+                    <Switch
+                      id={`capability-${definition.id}`}
+                      checked={grant?.enabled ?? false}
+                      disabled={switchDisabled}
+                      onCheckedChange={(checked) => setEnabled(definition, checked)}
+                      aria-label={definition.display_name}
+                    />
+                  </DisabledTooltip>
                 </div>
               );
             })}

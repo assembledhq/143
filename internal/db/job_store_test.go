@@ -17,6 +17,61 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestJobStore_IsHealthyWorkerNode(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		healthy bool
+	}{
+		{name: "active worker is healthy", healthy: true},
+		{name: "stale or draining worker is unavailable", healthy: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "job store mock should initialize")
+			defer mock.Close()
+			mock.ExpectQuery(`SELECT EXISTS[\s\S]+status = 'active'[\s\S]+last_heartbeat_at >= @dead_before`).
+				WithArgs("worker-1", pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.healthy))
+			got, err := NewJobStore(mock).IsHealthyWorkerNode(context.Background(), "worker-1")
+			require.NoError(t, err, "worker health lookup should succeed")
+			require.Equal(t, tt.healthy, got, "worker health should reflect the database observation")
+			require.NoError(t, mock.ExpectationsWereMet(), "all worker health queries should be made")
+		})
+	}
+}
+
+func TestJobStore_WorkerSandboxCapacity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		known     bool
+		available bool
+	}{
+		{name: "local worker has a free slot", known: true, available: true},
+		{name: "local worker is full", known: true, available: false},
+		{name: "heartbeat capacity is unknown", known: false, available: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "capacity store mock should initialize")
+			defer mock.Close()
+			mock.ExpectQuery(`SELECT[\s\S]+metadata \? 'max_active_sandboxes'[\s\S]+last_heartbeat_at >= @dead_before`).
+				WithArgs("worker-1", pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{"known", "available"}).AddRow(tt.known, tt.available))
+			known, available, err := NewJobStore(mock).WorkerSandboxCapacity(context.Background(), "worker-1")
+			require.NoError(t, err, "worker capacity lookup should succeed")
+			require.Equal(t, tt.known, known, "known should reflect heartbeat metadata validity")
+			require.Equal(t, tt.available, available, "available should reflect free sandbox slots")
+			require.NoError(t, mock.ExpectationsWereMet(), "all local capacity queries should be made")
+		})
+	}
+}
+
 func TestJobStore_Enqueue(t *testing.T) {
 	t.Parallel()
 
@@ -1014,7 +1069,7 @@ func TestJobStore_ReclaimLostRunningJobs(t *testing.T) {
 	staleBefore := time.Now().Add(-90 * time.Second)
 	mock.ExpectQuery("WITH dead_nodes AS").
 		WithArgs(staleBefore, 100).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(3)))
+		WillReturnRows(pgxmock.NewRows([]string{"reclaimed", "eligible"}).AddRow(int64(3), int64(3)))
 
 	reclaimed, err := store.ReclaimLostRunningJobs(context.Background(), staleBefore, 100)
 	require.NoError(t, err, "ReclaimLostRunningJobs should not return an error")

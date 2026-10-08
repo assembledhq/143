@@ -1424,3 +1424,14 @@ func TestAutomationHooks_OnSessionComplete_PromotesRankDifferingOnlyInReasoningE
 	require.Len(t, f.jobs.calls, 1,
 		"a rank that differs only in reasoning effort must still get its own session; treating it as spent silently drops a model the user configured")
 }
+
+func TestAutomationHooks_OnSessionComplete_InteractiveSessionDoesNotPromote(t *testing.T) {
+	t.Parallel()
+	snapshot := twoRankModelChainSnapshot
+	fixture := newPromotionFixture(t, snapshot, attemptsForRanks(t, snapshot, 1))
+	fixture.session.InteractionMode = models.SessionInteractionModeInteractive
+	err := fixture.hooks.OnSessionComplete(context.Background(), fixture.session, models.SessionStatusFailed)
+	require.NoError(t, err)
+	require.Empty(t, fixture.runs.calls, "reusable sessions are completed by the turn completer, not session hooks")
+	require.Empty(t, fixture.jobs.calls, "a failed reusable session must not enqueue a separate-session fallback")
+}

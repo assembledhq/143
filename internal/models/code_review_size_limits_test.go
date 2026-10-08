@@ -92,12 +92,12 @@ func TestCodeReviewSizeLimitValidation(t *testing.T) {
 func TestCodeReviewSizeLimitFeedback(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name                           string
-		code                           CodeReviewRiskReasonCode
-		message, explanation, fragment string
+		name                 string
+		code                 CodeReviewRiskReasonCode
+		message, explanation string
 	}{
-		{"additions", CodeReviewRiskReasonAdditionsLimitExceeded, "additions 301 exceeds policy limit 300", "This change has 301 additions; the policy limit is 300.", "policy-max-additions"},
-		{"deletions", CodeReviewRiskReasonDeletionsLimitExceeded, "deletions 301 exceeds policy limit 300", "This change has 301 deletions; the policy limit is 300.", "policy-max-deletions"},
+		{"additions", CodeReviewRiskReasonAdditionsLimitExceeded, "additions 301 exceeds policy limit 300", "This change has 301 additions; the policy limit is 300."},
+		{"deletions", CodeReviewRiskReasonDeletionsLimitExceeded, "deletions 301 exceeds policy limit 300", "This change has 301 deletions; the policy limit is 300."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -108,7 +108,7 @@ func TestCodeReviewSizeLimitFeedback(t *testing.T) {
 			require.Equal(t, tt.message, reason.Message(), "risk message should identify the relevant limit")
 			require.Equal(t, codeReviewBlockerGroupPolicy, codeReviewRiskReasonBlockerGroup(tt.code), "size blockers belong to policy requirements")
 			require.Equal(t, tt.explanation, humanizeCodeReviewRiskReason(reason, nil), "GitHub feedback should explain the individual measurement")
-			require.Equal(t, tt.explanation+" [View policy setting](https://143.dev/code-reviews?tab=policy#"+tt.fragment+")", codeReviewExplanationWithSettingsLink(tt.explanation, "https://143.dev/code-reviews?tab=policy", tt.code), "feedback should link to the matching control")
+			require.Equal(t, []string{"**Policy thresholds:**\n- " + tt.explanation}, codeReviewBlockerSections(CodeReviewFinalReviewInput{RiskReasons: []CodeReviewRiskReason{reason}, PolicySettingsURL: "https://143.dev/code-reviews?tab=policy"}), "feedback should preserve the limit without adding a policy link")
 		})
 	}
 }
