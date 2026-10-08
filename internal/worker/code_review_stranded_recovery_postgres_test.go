@@ -361,8 +361,6 @@ func TestStrandedFullControllerSweepPostgres(t *testing.T) {
 			ctx := f.ctx()
 			original, err := json.Marshal(f.job)
 			require.NoError(t, err, "encode expected original payload")
-			_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.jobID)
-			require.NoError(t, err, "end original controller")
 			if tt.receipt {
 				_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status='publishing',publication_state='uncertain',result_origin='executed',decision='approved',acceptable=true,risk_reason_details='[]',structured_outcome='{}',rendered_body='immutable review',created_at=now()-interval '3 hours',failure_detail=$3 WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.assessment, db.CodeReviewPublicationOperatorRequired)
 				require.NoError(t, err, "seed expired known legacy publication")
@@ -371,6 +369,10 @@ func TestStrandedFullControllerSweepPostgres(t *testing.T) {
 				_, err = pool.Exec(ctx, `UPDATE repositories SET installation_id=0 WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.job.RepositoryID)
 				require.NoError(t, err, "force a failure before the publication callback")
 			}
+			// Keep the original controller active until receipt protections are
+			// visible to every parallel case's cross-tenant repair sweep.
+			_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.jobID)
+			require.NoError(t, err, "end original controller")
 			sweep := db.NewCodeReviewScheduleStore(pool)
 			require.NoError(t, sweep.RepairMissingWakes(ctx), "restore ended original controller")
 			require.NoError(t, sweep.RepairMissingWakes(ctx), "sweep should be idempotent")

@@ -40,6 +40,10 @@ type RetryableError struct {
 	// successful retry is expected immediately after the current attempt repaired
 	// durable state, not for capacity/backlog gates.
 	BypassMaxRetryDuration bool
+	// ResetRetryWindow clears the previous external-dependency window when
+	// requeueing an agent-progress checkpoint. Only use with non-consuming,
+	// untargeted waits whose own durable phase deadlines bound execution.
+	ResetRetryWindow bool
 	// MaxRetryDuration overrides the default retry window for a bounded external
 	// wait. Unlike BypassMaxRetryDuration, the job is still guaranteed to
 	// terminate if the dependency does not recover.
@@ -132,6 +136,10 @@ type retryWindowLeaseStore interface {
 type targetRetryLeaseStore interface {
 	RetryWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error)
 	RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error)
+}
+
+type retryWindowResetLeaseStore interface {
+	RetryWithoutConsumingAttemptWithLeaseAndResetWindow(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error)
 }
 
 // maxRetryableDuration is the maximum wall-clock time a retryable job is
@@ -332,7 +340,7 @@ func (w *Worker) poll(ctx context.Context) {
 			return
 		}
 		w.logger.Info().Err(err).Str("job_id", job.ID.String()).Msg("job deferred (retryable)")
-		runAt, scheduled := w.retryJobWithDelayAt(ctx, now, job.ID, *job.LockToken, err.Error(), job.Attempts, !retryable.ConsumeAttempt, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID)
+		runAt, scheduled := w.retryJobWithDelayAt(ctx, now, job.ID, *job.LockToken, err.Error(), job.Attempts, !retryable.ConsumeAttempt, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID, retryable.ResetRetryWindow)
 		if scheduled {
 			w.runRetryScheduledHooks(handlerCtx, err, runAt)
 		}
@@ -483,10 +491,10 @@ func (w *Worker) retryJob(ctx context.Context, jobID, lockToken uuid.UUID, errMs
 }
 
 func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override *time.Duration, targetNodeID *string, clearTargetNodeID bool) {
-	w.retryJobWithDelayAt(ctx, time.Now(), jobID, lockToken, errMsg, attempt, preserveAttempts, override, targetNodeID, clearTargetNodeID)
+	w.retryJobWithDelayAt(ctx, time.Now(), jobID, lockToken, errMsg, attempt, preserveAttempts, override, targetNodeID, clearTargetNodeID, false)
 }
 
-func (w *Worker) retryJobWithDelayAt(ctx context.Context, now time.Time, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override *time.Duration, targetNodeID *string, clearTargetNodeID bool) (time.Time, bool) {
+func (w *Worker) retryJobWithDelayAt(ctx context.Context, now time.Time, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override *time.Duration, targetNodeID *string, clearTargetNodeID, resetRetryWindow bool) (time.Time, bool) {
 	var backoff time.Duration
 	if override != nil {
 		backoff = *override
@@ -500,7 +508,13 @@ func (w *Worker) retryJobWithDelayAt(ctx context.Context, now time.Time, jobID, 
 		err error
 	)
 	updateTarget := targetNodeID != nil || clearTargetNodeID
-	if updateTarget {
+	if resetRetryWindow {
+		if resetStore, supported := w.jobs.(retryWindowResetLeaseStore); supported && preserveAttempts && !updateTarget {
+			ok, err = resetStore.RetryWithoutConsumingAttemptWithLeaseAndResetWindow(ctx, jobID, lockToken, errMsg, runAt)
+		} else {
+			err = errors.New("retry window reset requires an untargeted non-consuming retry and reset-capable store")
+		}
+	} else if updateTarget {
 		if targetStore, supportsTargetRetry := w.jobs.(targetRetryLeaseStore); supportsTargetRetry {
 			if preserveAttempts {
 				ok, err = targetStore.RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx, jobID, lockToken, errMsg, runAt, targetNodeID)

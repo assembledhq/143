@@ -543,7 +543,14 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 						return noteErr
 					}
 				}
-				return codeReviewWaitingForOrchestrator(models.DefaultCodeReviewPolicyConfig())
+				// A publication lookup is not agent progress: keep any existing
+				// dependency retry window instead of granting a new budget.
+				delay := 10 * time.Second
+				return &RetryableError{
+					Err:                    errors.New("waiting for code review publication reconciliation"),
+					RetryAfter:             &delay,
+					BypassMaxRetryDuration: true,
+				}
 			}
 		}
 		if err != nil {
