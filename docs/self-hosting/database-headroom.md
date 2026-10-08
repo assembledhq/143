@@ -1,8 +1,8 @@
 # Database headroom and safe rollout
 
-The September 25, 2026 incident reached PostgreSQL allocation failures on an 8 GB host despite positive `MemAvailable`. Linux used strict overcommit accounting (`vm.overcommit_memory=2`, ratio 80), and `Committed_AS` approached `CommitLimit`. Old worker generations and blocked publication transactions overlapped. Their individual contributions were not measured; this does not establish an M3 memory leak.
+PostgreSQL memory budgets multiply across operations, connections and worker processes. On hosts using strict Linux overcommit accounting, allocation can fail as `Committed_AS` approaches `CommitLimit` even while `MemAvailable` remains positive. Measure both commitment and resident memory before changing limits.
 
-The last incident snapshot also showed the root filesystem at 96% utilization. Memory tuning that increases temporary files must be preceded by disk capacity work. The numbers below describe that incident, not current production health.
+Reducing query memory can increase temporary-file I/O. Check disk capacity before applying the prepared settings, and keep deployment inventories, measurements and rollout records in your private operations documentation.
 
 ## Prepared defaults
 
@@ -18,18 +18,55 @@ The last incident snapshot also showed the root filesystem at 96% utilization. M
 
 These settings do not bound total PostgreSQL memory. Operations, sessions and workers can allocate concurrently. See PostgreSQL's [resource configuration](https://www.postgresql.org/docs/18/runtime-config-resource.html). Pool idle expiry also does not release connections held by open transactions. Publication timeouts and durable worker draining address those separately.
 
-Temporary-file budgets also multiply: a query using a leader and two parallel workers can consume 3 × 2 GB = 6 GB across those processes. Compare the 20 GB disk reserve below against concurrent queries, not just one process's limit.
+Temporary-file budgets also multiply: a query using a leader and two parallel workers can consume 3 × 2 GB = 6 GB across those processes. Size a disk reserve for concurrent queries, backup retention and ordinary filesystem growth.
 
 The connection ceilings remain API 20, worker/executor 4 per process, and PostgreSQL 300. Reducing those requires concurrency and pool-wait measurements because review publication and lease renewal share the pool. Override the worker idle lifetime with `WORKER_DATABASE_MAX_CONN_IDLE_TIME`; new executor containers inherit the worker environment. Existing processes retain their startup configuration.
 
 ## Rollout order
 
 1. Deploy the drain-intent and terminal-review recovery fixes first. Verify old generations are draining and no longer claim jobs, while their owned work can finish. Avoid overlapping fleet retries.
-2. Roll one worker generation with the five-minute pool idle lifetime. Observe for at least 15 minutes with completed reviews, checking connection counts, pool acquisition waits, lease renewal, queue delay and publication errors. Continue across workers if those remain healthy. The API already uses five minutes.
-3. Resolve disk headroom before reducing query memory. Inventory `df -h`, `df -i`, `docker system df -v`, all containers including stopped containers, volume mounts, and backup retention. The incident snapshot had about 67 GB of unattached volumes and 27 GB of backups, but neither category is automatically disposable. Identify owners, confirm snapshots/restores and retention, then approve a named removal list. Do not run blanket volume pruning. Aim for at least 20 GB free on the 150 GB filesystem and verify inode headroom.
+2. Complete the [pre-merge worker canary](#pre-merge-worker-canary) below before merging the idle-lifetime default change. Observe for at least 15 minutes with completed reviews. Normal merge deployment rolls app nodes first, then workers on up to four hosts concurrently; it has no observation pause between workers. `DEPLOY_JOBS=1` serializes deployments but still targets the fleet. The API already uses five minutes.
+3. Resolve disk headroom before reducing query memory. Inventory `df -h`, `df -i`, `docker system df -v`, all containers including stopped containers, volume mounts, and backup retention. Identify owners, confirm snapshots/restores and retention, then approve a named removal list. Do not run blanket volume pruning. Set a free-space reserve for the host's workload and verify inode headroom.
 4. Record a fresh database baseline: connection counts by state/application, blocking graph, idle transaction age, `Committed_AS`/`CommitLimit`, `MemAvailable`, PostgreSQL cgroup usage, `pg_stat_database.temp_bytes`/`temp_files` deltas, current temporary-file sizes, autovacuum progress and query/review latency. Keep timestamps and sample counts.
 5. Stage the reviewed PostgreSQL config on the database host and use the reload procedure below. **Do not use a general database redeploy for this step**: it may recreate the container. Preserve the previous config for rollback, validate the staged file, and inspect `pg_file_settings` for errors before reload. Read back `pg_settings` afterward, including `source`, `sourcefile` and `pending_restart`; verify the effective settings from a new application connection. Role/database or session overrides can take precedence. All changed PostgreSQL settings here support reload; startup-only limits remain unchanged.
 6. Observe a comparable workload window after reload. Sample `df` alongside `pg_stat_database` deltas and, with monitoring privileges, `SELECT COALESCE(sum(size),0) FROM pg_ls_tmpdir()` for current spills in the default tablespace. Inspect other temporary tablespaces if configured. `log_temp_files` reports files when removed, not live disk use. The 2 GB cap applies per backend process, including parallel workers, and excludes explicit temporary tables; it cannot guarantee a database-wide reserve. If aggregate temp-file growth threatens the disk reserve or queries start failing on the temporary-file limit, autovacuum falls behind, or query latency regresses materially, restore the previous config and reload. Do not count idle snapshots as proof of improvement. Compare connection peaks and commitment headroom during one controlled worker rollover as well as ordinary reviews.
+
+## Pre-merge worker canary
+
+This is a separately approved production rollout. Keep the PR unmerged and prevent overlapping deployments during the canary. Select one existing worker host and record its previous source revision, image digests and pool configuration for rollback. Confirm that the candidate's migrations are already deployed and that its worker remains compatible with the running app; worker-only deployment does not run migrations. Stop if the routine deploy's schema or support-service preflight rejects the candidate.
+
+CI publishes images only after a successful push to `main`, so a PR's reviewed SHA is not automatically available in GHCR. In a clean checkout of that exact reviewed commit, use an authorized GHCR account to publish the two images consumed by workers and new executors. Set `REVIEWED_SHA` to the full reviewed commit and `CANARY_PLATFORM` to the worker's platform, such as `linux/amd64`. Record the resulting registry digests; keep the SHA tags unchanged through the canary. These commands publish SHA tags only:
+
+```bash
+set -euo pipefail
+: "${REVIEWED_SHA:?set the full reviewed commit SHA}"
+: "${CANARY_PLATFORM:?set the worker platform}"
+[[ "$REVIEWED_SHA" =~ ^[0-9a-f]{40}$ ]]
+test "$(git rev-parse HEAD)" = "$REVIEWED_SHA"
+test -z "$(git status --porcelain)"
+docker buildx build --platform "$CANARY_PLATFORM" --build-arg BUILD_SHA="$REVIEWED_SHA" \
+  -f Dockerfile -t "ghcr.io/assembledhq/143-server:$REVIEWED_SHA" --push .
+docker buildx build --platform "$CANARY_PLATFORM" \
+  -f sandbox/Dockerfile -t "ghcr.io/assembledhq/143-sandbox:$REVIEWED_SHA" --push .
+```
+
+From the same checkout, set `CANARY_HOST` to the single approved worker and `CANARY_SSH_KEY` to the approved SSH key. Supply the usual secrets checkout and SOPS access described in [secrets setup](../secrets/README.md). Explicit `HOST` selects one worker; an empty `WORKER_DEPLOY_DETACH` keeps rollover in the foreground. Setting it to `0` would still detach because the script treats any nonempty value as enabled.
+
+```bash
+set -euo pipefail
+: "${REVIEWED_SHA:?set the full reviewed commit SHA}"
+: "${CANARY_HOST:?set exactly one approved worker host}"
+: "${CANARY_SSH_KEY:?set the approved SSH key path}"
+make deploy-worker-preflight HOST="$CANARY_HOST" SSH_KEY="$CANARY_SSH_KEY"
+WORKER_DEPLOY_DETACH= make deploy-worker \
+  HOST="$CANARY_HOST" SSH_KEY="$CANARY_SSH_KEY" TAG="$REVIEWED_SHA"
+```
+
+Require successful foreground completion, then identify the new worker generation on that host. Verify its running server image against the recorded digest and its startup `server build version` log against the full reviewed SHA. Check the effective pool idle lifetime is five minutes for the worker and a newly started executor; inspect only the relevant setting, since complete process environments contain secrets. Existing processes retain their startup configuration. The deployment checks container health, a database heartbeat and preview RPC authentication; those checks do not prove review completion.
+
+Start a 15-minute observation window only after those checks pass. During the window, require reviews to complete and publish through the new generation, and compare connection counts, pool acquisition waits, lease renewal, queue delay and publication errors with the baseline. Keep the PR unmerged until the full window and workload checks pass. On regression, hold the merge and restore the previous reviewed worker configuration and images on the same host through the routine deploy path; let owned work drain without forced interruption. Revalidate any later code/config changes before continuing the rollout.
+
+After a successful canary, merging applies the worker idle-lifetime default through the normal app-and-worker deployment. PostgreSQL changes remain a separate maintenance step: normal deployment excludes the database role and does not reload its settings.
 
 ## Reload without recreating the database container
 
@@ -74,7 +111,7 @@ Temporary-file caps cancel queries; they are not a substitute for disk capacity.
 
 ## Resize plan
 
-Prepare a move from 8 GB to at least 16 GB RAM. Confirm the provider's exact machine type, cost, resize downtime, disk behavior, and rollback constraints before execution. A larger host improves the strict commitment budget; do not simultaneously raise `shared_buffers`, connection ceilings, or worker concurrency. Keep the existing PostgreSQL container memory limit at 8 GB initially so the host gains reserve.
+Size any RAM increase using measured commitment peaks and the host reserve required by the workload. Confirm the provider's exact machine type, cost, resize downtime, disk behavior, and rollback constraints before execution. A larger host improves the strict commitment budget; initially keep PostgreSQL's container memory limit, `shared_buffers`, connection ceilings and worker concurrency at their previous values so the host gains reserve.
 
 Treat a stop/start resize as a database outage. Stop new review admission through supported operational controls, let active executors and database-dependent work finish, and verify zero active leases before stopping PostgreSQL. Include other product workflows, not just code reviews. Take and verify a restorable backup off the affected root disk, save configuration, record the exact target and a maintenance window, and have a recovery plan before the resize. Confirm that storage growth is reversible or explicitly accept that it is not.
 
@@ -84,4 +121,4 @@ After startup, verify clean schema state, PostgreSQL recovery completion, applic
 
 Add host alerts for commitment above 85% (warning) / 95% (critical), filesystem use above 85% / 90%, and sustained low `MemAvailable`. Pair them with database connection utilization, blocked-session count, idle transaction age and allocation errors. Start with five-minute sustained windows for capacity signals; page immediately on allocation failures. Thresholds need tuning against workload history. These alerts and the resize are operational follow-ups, not installed by this configuration change.
 
-Success means reviews complete and publish, worker rollover remains healthy, and measured memory/disk reserves survive a comparable load window. This change alone does not establish a production speedup or resolve the host capacity problem.
+Success means reviews complete and publish, worker rollover remains healthy, and measured memory/disk reserves survive a comparable load window. Claims about speed or required host capacity need workload measurements.
