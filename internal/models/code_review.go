@@ -1170,6 +1170,14 @@ type CodeReviewFinding struct {
 	CreatedAt         time.Time                   `db:"created_at" json:"created_at"`
 }
 
+type CodeReviewPriorFinding struct {
+	CodeReviewFinding
+	ReviewedHeadSHA       string  `db:"reviewed_head_sha" json:"reviewed_head_sha"`
+	ReplyBody             *string `db:"reply_body" json:"reply_body,omitempty"`
+	ReplyAuthorLogin      *string `db:"reply_author_login" json:"reply_author_login,omitempty"`
+	ReplyAuthorIsPRAuthor *bool   `db:"reply_author_is_pr_author" json:"reply_author_is_pr_author,omitempty"`
+}
+
 type CodeReviewListItem struct {
 	CurrentAssessment      *CodeReviewAssessmentSummary `db:"-" json:"current_assessment,omitempty"`
 	ActiveAssessment       *CodeReviewAssessmentSummary `db:"-" json:"active_assessment,omitempty"`

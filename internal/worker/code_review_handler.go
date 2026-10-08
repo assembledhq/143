@@ -57,6 +57,8 @@ const codeReviewOrchestratorSynthesisRepairLimit = 1
 const codeReviewOrchestratorFindingLimit = 50
 const codeReviewOrchestratorHumanReviewReasonLimit = 10
 const codeReviewOrchestratorFindingSummaryLimit = 500
+const codeReviewPriorFindingPromptLimit = 20
+const codeReviewPriorFindingTextLimit = 1500
 const codeReviewOrchestratorFindingBodyLimit = 2_000
 const codeReviewOrchestratorHumanReviewSummaryLimit = 500
 
@@ -1835,7 +1837,7 @@ func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, c
 	}))
 }
 
-func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
+func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, priorFindings []models.CodeReviewPriorFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
 	return prompts.CodeReviewOrchestratorPrompt(prompts.CodeReviewOrchestratorPromptData{
 		Repository:                 pr.GitHubRepo,
 		PullNumber:                 pr.GitHubPRNumber,
@@ -1853,6 +1855,7 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 		RiskReasons:                models.CodeReviewRiskReasonMessages(codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, agentResults, findings, visualEvidence)),
 		ReviewerOutputs:            codeReviewReviewerOutputsForPrompt(agentResults),
 		Findings:                   codeReviewFindingsForPrompt(findings),
+		PriorFindings:              codeReviewPriorFindingsForPrompt(priorFindings),
 		ChangedFiles:               codeReviewChangedPaths(changedFiles),
 		RequestContextAuthor:       codeReviewRequestContextAuthor(job.RequestContext),
 		RequestContextBody:         codeReviewRequestContextBody(job.RequestContext),
@@ -1921,13 +1924,7 @@ func codeReviewReviewerOutputsForPrompt(results []models.CodeReviewAgentResult) 
 func codeReviewFindingsForPrompt(findings []models.CodeReviewFinding) []string {
 	out := make([]string, 0, len(findings))
 	for _, finding := range findings {
-		location := ""
-		if finding.Path != nil {
-			location = *finding.Path
-			if finding.StartLine != nil {
-				location = fmt.Sprintf("%s:%d", location, *finding.StartLine)
-			}
-		}
+		location := codeReviewFindingLocation(finding)
 		if location != "" {
 			out = append(out, fmt.Sprintf("%s %s - %s", finding.Severity, location, finding.Summary))
 		} else {
@@ -1935,6 +1932,53 @@ func codeReviewFindingsForPrompt(findings []models.CodeReviewFinding) []string {
 		}
 	}
 	return out
+}
+
+func codeReviewFindingLocation(finding models.CodeReviewFinding) string {
+	if finding.Path == nil {
+		return ""
+	}
+	if finding.StartLine == nil {
+		return *finding.Path
+	}
+	return fmt.Sprintf("%s:%d", *finding.Path, *finding.StartLine)
+}
+
+func listCodeReviewPriorFindings(ctx context.Context, stores *Stores, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata) ([]models.CodeReviewPriorFinding, error) {
+	if stores == nil || stores.CodeReviews == nil || metadata.PullRequestID == uuid.Nil {
+		return nil, nil
+	}
+	priorFindings, err := stores.CodeReviews.ListPublishedFindingsForPullRequest(ctx, job.OrgID, metadata.PullRequestID, job.SessionID, codeReviewPriorFindingPromptLimit)
+	if err != nil {
+		return nil, fmt.Errorf("list prior code review findings: %w", err)
+	}
+	return priorFindings, nil
+}
+
+func codeReviewPriorFindingsForPrompt(priorFindings []models.CodeReviewPriorFinding) []prompts.CodeReviewPriorFindingPromptData {
+	out := make([]prompts.CodeReviewPriorFindingPromptData, 0, len(priorFindings))
+	for _, finding := range priorFindings {
+		out = append(out, prompts.CodeReviewPriorFindingPromptData{
+			ReviewedHeadSHA: finding.ReviewedHeadSHA,
+			Severity:        string(finding.Severity),
+			Location:        codeReviewFindingLocation(finding.CodeReviewFinding),
+			Summary:         finding.Summary,
+			Body:            truncateCodeReviewPriorFindingText(finding.Body),
+			ReplyAuthor:     stringPtrValue(finding.ReplyAuthorLogin),
+			ReplyIsPRAuthor: finding.ReplyAuthorIsPRAuthor != nil && *finding.ReplyAuthorIsPRAuthor,
+			ReplyBody:       truncateCodeReviewPriorFindingText(stringPtrValue(finding.ReplyBody)),
+		})
+	}
+	return out
+}
+
+func truncateCodeReviewPriorFindingText(text string) string {
+	text = strings.TrimSpace(text)
+	runes := []rune(text)
+	if len(runes) <= codeReviewPriorFindingTextLimit {
+		return text
+	}
+	return string(runes[:codeReviewPriorFindingTextLimit]) + "…"
 }
 
 func codeReviewDescriptionInputHash(pr models.PullRequest, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
@@ -2894,7 +2938,11 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	if attempt > 0 {
 		recordKey = fmt.Sprintf("%s/orchestrator-fallback-%02d-%s", rootKey, attempt, agentType)
 	}
-	promptText := codeReviewOrchestratorPrompt(job, pr, health, cfg, policy.Version, metadata.BaseSHA, changedFiles, agentResults, findings, visualEvidence)
+	priorFindings, err := listCodeReviewPriorFindings(ctx, stores, job, metadata)
+	if err != nil {
+		return err
+	}
+	promptText := codeReviewOrchestratorPrompt(job, pr, health, cfg, policy.Version, metadata.BaseSHA, changedFiles, agentResults, findings, priorFindings, visualEvidence)
 	descriptionInputHash := codeReviewDescriptionInputHash(pr, visualEvidence)
 	if err := storeCodeReviewPromptRecord(ctx, stores, models.CodeReviewPromptRecord{
 		OrgID:         job.OrgID,

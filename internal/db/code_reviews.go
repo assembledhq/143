@@ -2694,6 +2694,48 @@ func (s *CodeReviewStore) ListFindings(ctx context.Context, orgID, sessionID uui
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewFinding])
 }
 
+func (s *CodeReviewStore) ListPublishedFindingsForPullRequest(ctx context.Context, orgID, pullRequestID, excludeSessionID uuid.UUID, limit int) ([]models.CodeReviewPriorFinding, error) {
+	if limit <= 0 {
+		return []models.CodeReviewPriorFinding{}, nil
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT f.id, f.org_id, f.session_id, f.agent_result_id, f.dedupe_key, f.severity,
+		       f.confidence, f.path, f.start_line, f.end_line, f.summary, f.body,
+		       f.selected_for_inline, f.github_comment_id, f.created_at,
+		       m.head_sha AS reviewed_head_sha,
+		       reply.body AS reply_body,
+		       reply.filed_by_login AS reply_author_login,
+		       reply.author_is_pr_author AS reply_author_is_pr_author
+		FROM code_review_session_metadata m
+		JOIN code_review_findings f
+		  ON f.org_id = m.org_id
+		 AND f.session_id = m.session_id
+		LEFT JOIN LATERAL (
+			SELECT d.body, d.filed_by_login, d.author_is_pr_author
+			FROM code_review_decision_disputes d
+			WHERE d.org_id = f.org_id
+			  AND d.session_id = f.session_id
+			  AND d.github_thread_root_comment_id = f.github_comment_id
+			ORDER BY d.created_at DESC, d.id DESC
+			LIMIT 1
+		) reply ON true
+		WHERE m.org_id = @org_id
+		  AND m.pull_request_id = @pull_request_id
+		  AND m.session_id <> @exclude_session_id
+		  AND f.github_comment_id IS NOT NULL
+		ORDER BY f.created_at DESC, f.id DESC
+		LIMIT @limit`, pgx.NamedArgs{
+		"org_id":             orgID,
+		"pull_request_id":    pullRequestID,
+		"exclude_session_id": excludeSessionID,
+		"limit":              limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list published code review findings for pull request: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewPriorFinding])
+}
+
 func (s *CodeReviewStore) MarkFindingPosted(ctx context.Context, orgID, findingID uuid.UUID, githubCommentID int64) (models.CodeReviewFinding, error) {
 	rows, err := s.db.Query(ctx, `
 		UPDATE code_review_findings
