@@ -137,7 +137,8 @@ def main():
                         def local_connection(_host, _port, **kwargs):
                             return real_connection('127.0.0.1', port, **kwargs)
                         config = dict(logging_host='10.23.0.9', monitor_id='pipeline')
-                        report = {**dict.fromkeys(monitor.FLAGS, False), **dict.fromkeys(monitor.NUMBERS, 1)}
+                        report = {**dict.fromkeys(monitor.FLAGS, False), **dict.fromkeys(monitor.NUMBERS, 1),
+                                  'recovery_target_seconds': 6 * 3600}
                         with mock.patch.object(monitor.http.client, 'HTTPConnection', side_effect=local_connection):
                             monitor.deliver(config, monitor.event_for(config, report))
                         request('/internal/force_flush')
