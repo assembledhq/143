@@ -1990,6 +1990,8 @@ func TestGitHubAPIHealthDashboardUsesFocusedStructuredTelemetry(t *testing.T) {
 		"Top API routes":                              false,
 		"Rate-limit sources":                          false,
 		"Recent rate-limit responses":                 false,
+		"Locally deferred requests":                   false,
+		"Principal attribution gaps":                  false,
 	}
 	nonRowPanels := 0
 	for _, panel := range dashboard.Panels {
@@ -2001,12 +2003,23 @@ func TestGitHubAPIHealthDashboardUsesFocusedStructuredTelemetry(t *testing.T) {
 		if _, ok := expectedPanels[panel.Title]; ok {
 			expectedPanels[panel.Title] = true
 		}
+		require.NotEmpty(t, panel.Targets, "panel %q should query structured telemetry", panel.Title)
 		for _, target := range panel.Targets {
-			require.Contains(t, target.Expr, `_msg:"github api request"`, "panel %q should use the canonical structured telemetry event", panel.Title)
+			if panel.Title == "Locally deferred requests" {
+				require.Contains(t, target.Expr, `_msg:"github request deferred"`, "local deferrals should use their dedicated structured event")
+				require.NotContains(t, target.Expr, `_msg:"github api request"`, "local deferrals should exclude completed API requests")
+				require.Contains(t, target.Expr, "github_request_suppressed", "local deferrals should retain suppression attribution")
+			} else {
+				require.Contains(t, target.Expr, `_msg:"github api request"`, "panel %q should use the canonical structured telemetry event", panel.Title)
+				require.NotContains(t, target.Expr, `_msg:"github request deferred"`, "panel %q should exclude local deferrals from API request metrics", panel.Title)
+			}
+			if panel.Title == "Principal attribution gaps" {
+				require.Contains(t, target.Expr, "github_principal_unresolved:true", "attribution gaps should select unresolved principals")
+			}
 			require.NotContains(t, target.Expr, "API rate limit exceeded", "panel %q should not scrape unstable GitHub error prose", panel.Title)
 		}
 	}
-	require.Equal(t, 11, nonRowPanels, "dashboard should stay focused instead of accumulating low-value panels")
+	require.Equal(t, 13, nonRowPanels, "dashboard should stay focused instead of accumulating low-value panels")
 	require.Equal(t, map[string]bool{
 		"API requests":                                true,
 		"Rate limits hit":                             true,
@@ -2019,6 +2032,8 @@ func TestGitHubAPIHealthDashboardUsesFocusedStructuredTelemetry(t *testing.T) {
 		"Top API routes":                              true,
 		"Rate-limit sources":                          true,
 		"Recent rate-limit responses":                 true,
+		"Locally deferred requests":                   true,
+		"Principal attribution gaps":                  true,
 	}, expectedPanels, "dashboard should contain the complete curated panel set")
 }
 
