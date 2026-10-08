@@ -33,9 +33,27 @@ The connection ceilings remain API 20, worker/executor 4 per process, and Postgr
 
 ## Pre-merge worker canary
 
-This is a separately approved production rollout. Keep the PR unmerged and prevent overlapping deployments during the canary. Select one existing worker host and record its previous source revision, image digests and pool configuration for rollback. Confirm that the candidate's migrations are already deployed and that its worker remains compatible with the running app; worker-only deployment does not run migrations. Stop if the routine deploy's schema or support-service preflight rejects the candidate.
+This is a separately approved production rollout. Keep the PR unmerged and prevent overlapping deployments during the canary. Select one existing worker host and record its previous configuration revision, server/sandbox image source revision, image digests and effective pool configuration for rollback. A rollback must restore both configuration and images; changing only the image tag leaves the candidate compose default in place. Confirm that the candidate's migrations are already deployed and that its worker remains compatible with the running app; worker-only deployment does not run migrations. Stop if the routine deploy's schema or support-service preflight rejects the candidate.
 
-CI publishes images only after a successful push to `main`, so a PR's reviewed SHA is not automatically available in GHCR. In a clean checkout of that exact reviewed commit, use an authorized GHCR account to publish the two images consumed by workers and new executors. Set `REVIEWED_SHA` to the full reviewed commit and `CANARY_PLATFORM` to the worker's platform, such as `linux/amd64`. Record the resulting registry digests; keep the SHA tags unchanged through the canary. These commands publish SHA tags only:
+Use a clean checkout of the reviewed configuration commit, refreshed onto the current deployed application revision. Do not roll production worker code backward merely to test a pool setting. Record `REVIEWED_SHA` (configuration) and `CANARY_IMAGE_SHA` (server/sandbox image source) separately.
+
+For this configuration-only PR, existing production images can be reused when all runtime source, dependencies, build instructions, entrypoints and migrations are identical. Compare the entire tree against the image source revision. The only permitted differences are this PR's worker compose setting, PostgreSQL config, deployment-config test, CI wiring and self-hosting documentation. Inspect the worker compose diff and require only the reviewed idle-lifetime setting. Stop if any runtime/build input or migration differs. Verify both registry digests and that the app uses the same compatible revision:
+
+```bash
+set -euo pipefail
+: "${REVIEWED_SHA:?set the full reviewed configuration commit}"
+: "${DEPLOYED_IMAGE_SHA:?set the verified deployed image source commit}"
+[[ "$REVIEWED_SHA" =~ ^[0-9a-f]{40}$ ]]
+[[ "$DEPLOYED_IMAGE_SHA" =~ ^[0-9a-f]{40}$ ]]
+test "$(git rev-parse HEAD)" = "$REVIEWED_SHA"
+test -z "$(git status --porcelain)"
+git diff --name-status "$DEPLOYED_IMAGE_SHA" "$REVIEWED_SHA"
+git diff "$DEPLOYED_IMAGE_SHA" "$REVIEWED_SHA" -- docker-compose.worker.yml
+# Proceed only after the source-equivalence and compose-diff checks above pass.
+export CANARY_IMAGE_SHA="$DEPLOYED_IMAGE_SHA"
+```
+
+If source equivalence cannot be established, build the reviewed images instead. CI publishes images only after a successful push to `main`, so a PR's SHA is not automatically available in GHCR. Use an authorized GHCR account and set `CANARY_PLATFORM` to the worker's platform, such as `linux/amd64`. Record the resulting registry digests; keep the SHA tags unchanged through the canary. These commands publish SHA tags only:
 
 ```bash
 set -euo pipefail
@@ -48,6 +66,7 @@ docker buildx build --platform "$CANARY_PLATFORM" --build-arg BUILD_SHA="$REVIEW
   -f Dockerfile -t "ghcr.io/assembledhq/143-server:$REVIEWED_SHA" --push .
 docker buildx build --platform "$CANARY_PLATFORM" \
   -f sandbox/Dockerfile -t "ghcr.io/assembledhq/143-sandbox:$REVIEWED_SHA" --push .
+export CANARY_IMAGE_SHA="$REVIEWED_SHA"
 ```
 
 From the same checkout, set `CANARY_HOST` to the single approved worker and `CANARY_SSH_KEY` to the approved SSH key. Supply the usual secrets checkout and SOPS access described in [secrets setup](../secrets/README.md). Explicit `HOST` selects one worker; an empty `WORKER_DEPLOY_DETACH` keeps rollover in the foreground. Setting it to `0` would still detach because the script treats any nonempty value as enabled.
@@ -57,14 +76,19 @@ set -euo pipefail
 : "${REVIEWED_SHA:?set the full reviewed commit SHA}"
 : "${CANARY_HOST:?set exactly one approved worker host}"
 : "${CANARY_SSH_KEY:?set the approved SSH key path}"
+: "${CANARY_IMAGE_SHA:?set the selected pinned image source commit}"
 make deploy-worker-preflight HOST="$CANARY_HOST" SSH_KEY="$CANARY_SSH_KEY"
-WORKER_DEPLOY_DETACH= make deploy-worker \
-  HOST="$CANARY_HOST" SSH_KEY="$CANARY_SSH_KEY" TAG="$REVIEWED_SHA"
+DEPLOY_MODE=routine WORKER_DEPLOY_DETACH= \
+DEPLOY_DOCKER_PRUNE=0 DEPLOY_DOCKER_VOLUME_PRUNE=0 \
+ALLOW_DEPLOY_DOCKER_DAEMON_RESTART=0 \
+FORCE_DEPLOY_WITH_ACTIVE_SESSIONS= FORCE_INTERRUPT_ACTIVE_RUNTIMES= \
+make deploy-worker \
+  HOST="$CANARY_HOST" SSH_KEY="$CANARY_SSH_KEY" TAG="$CANARY_IMAGE_SHA"
 ```
 
-Require successful foreground completion, then identify the new worker generation on that host. Verify its running server image against the recorded digest and its startup `server build version` log against the full reviewed SHA. Check the effective pool idle lifetime is five minutes for the worker and a newly started executor; inspect only the relevant setting, since complete process environments contain secrets. Existing processes retain their startup configuration. The deployment checks container health, a database heartbeat and preview RPC authentication; those checks do not prove review completion.
+Require successful foreground completion, then identify the new worker generation on that host. Verify its running server image against the recorded digest and its startup `server build version` log against `CANARY_IMAGE_SHA`. Check the effective pool idle lifetime is five minutes for the worker and a newly started executor; inspect only the relevant setting, since complete process environments contain secrets. Check the actual process environment and startup configuration: encrypted entrypoint variables can override compose values. A local `WORKER_DATABASE_MAX_CONN_IDLE_TIME` shell override is not forwarded by the deploy script. Existing processes retain their startup configuration. The deployment checks container health, a database heartbeat and preview RPC authentication; those checks do not prove review completion.
 
-Start a 15-minute observation window only after those checks pass. During the window, require reviews to complete and publish through the new generation, and compare connection counts, pool acquisition waits, lease renewal, queue delay and publication errors with the baseline. Keep the PR unmerged until the full window and workload checks pass. On regression, hold the merge and restore the previous reviewed worker configuration and images on the same host through the routine deploy path; let owned work drain without forced interruption. Revalidate any later code/config changes before continuing the rollout.
+Start a 15-minute observation window only after those checks pass. During the window, require reviews to complete and publish through the new generation, and compare connection counts, pool acquisition waits, lease renewal, queue delay and publication errors with the baseline. Keep the PR unmerged until the full window and workload checks pass. On regression, hold the merge and restore the previous reviewed worker configuration checkout and image source SHA on the same host through the same routine deploy path with pruning disabled; let owned work drain without forced interruption. Revalidate any later code/config changes before continuing the rollout.
 
 After a successful canary, merging applies the worker idle-lifetime default through the normal app-and-worker deployment. PostgreSQL changes remain a separate maintenance step: normal deployment excludes the database role and does not reload its settings.
 
