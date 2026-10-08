@@ -931,7 +931,7 @@ func (s *AutomationRunStore) ListSessionAttempts(ctx context.Context, orgID, run
 		 AND sessions.id = sal.session_id
 		 AND sessions.deleted_at IS NULL
 		WHERE sal.automation_run_id = @run_id AND sal.org_id = @org_id
-		ORDER BY sessions.created_at DESC`,
+		ORDER BY sessions.created_at DESC, sessions.id DESC`,
 		pgx.NamedArgs{"run_id": runID, "org_id": orgID},
 	)
 	if err != nil {
@@ -1342,6 +1342,63 @@ func (s *AutomationRunStore) TransitionStatusIf(ctx context.Context, orgID, runI
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// TransitionStatusForSession fences completion and fallback promotion to the
+// newest linked session. Lock before reading links in a separate statement:
+// a callback waiting behind a successor's claim must see that committed
+// successor, rather than the snapshot from before it acquired the lock.
+// A nil sessionID is reserved for pending dispatch failures with no attempts.
+func (s *AutomationRunStore) TransitionStatusForSession(ctx context.Context, orgID, runID, sessionID uuid.UUID, fromStatus, toStatus models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) (bool, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin session-owned automation transition: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var status models.AutomationRunStatus
+	if err := tx.QueryRow(ctx, `SELECT status FROM automation_runs WHERE id = @id AND org_id = @org_id FOR UPDATE`, pgx.NamedArgs{"id": runID, "org_id": orgID}).Scan(&status); err != nil {
+		return false, fmt.Errorf("lock automation run for session completion: %w", err)
+	}
+	if status != fromStatus {
+		return false, nil
+	}
+	current, err := automationSessionIsCurrent(ctx, tx, orgID, runID, sessionID)
+	if err != nil || !current {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE automation_runs
+		SET status = @to_status,
+			completed_at = COALESCE(@completed_at, completed_at),
+			result_summary = COALESCE(@result_summary, result_summary), updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND status = @from_status`, pgx.NamedArgs{
+		"id": runID, "org_id": orgID, "from_status": fromStatus, "to_status": toStatus,
+		"completed_at": completedAt, "result_summary": resultSummary,
+	})
+	if err != nil {
+		return false, fmt.Errorf("transition session-owned automation run: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit session-owned automation transition: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// automationSessionIsCurrent must run after locking the automation run row.
+// A nil UUID represents a dispatch snapshot with no previous attempts.
+func automationSessionIsCurrent(ctx context.Context, q DBTX, orgID, runID, sessionID uuid.UUID) (bool, error) {
+	var newestSessionID uuid.UUID
+	err := q.QueryRow(ctx, `SELECT sessions.id
+		FROM session_automation_links sal
+		JOIN sessions ON sessions.id = sal.session_id AND sessions.org_id = sal.org_id
+		WHERE sal.automation_run_id = @run_id AND sal.org_id = @org_id AND sessions.deleted_at IS NULL
+		ORDER BY sessions.created_at DESC, sessions.id DESC LIMIT 1`, pgx.NamedArgs{"run_id": runID, "org_id": orgID}).Scan(&newestSessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sessionID == uuid.Nil, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read current automation session: %w", err)
+	}
+	return newestSessionID == sessionID, nil
 }
 
 // MarkCompletedNoop records the authoritative no-changes outcome reported by

@@ -10,6 +10,10 @@ import (
 	"github.com/gorhill/cronexpr"
 )
 
+// AutomationRunExecutionBudget is shared by the reaper and all separate-session
+// attempts of a logical automation run, including time spent in job queues.
+const AutomationRunExecutionBudget = time.Hour
+
 // Automation is a recurring, team-owned agent process.
 // Unlike projects (which are finite and goal-oriented), automations run on a
 // schedule and never "complete" — they are enabled or paused.

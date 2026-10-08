@@ -17,6 +17,20 @@ import (
 const defaultExtensionQueueAgeThreshold = 2 * time.Minute
 const runtimeStopPersistenceTimeout = 2 * time.Second
 
+type runtimeDeadlineContextKey struct{}
+
+// WithRuntimeDeadline caps the runtime controller and automatic extensions to
+// an owning operation's deadline, while reserving time for graceful cleanup.
+func WithRuntimeDeadline(ctx context.Context, deadline time.Time) context.Context {
+	return context.WithValue(ctx, runtimeDeadlineContextKey{}, deadline)
+}
+
+// RuntimeDeadlineFromContext returns the owning operation's execution deadline.
+func RuntimeDeadlineFromContext(ctx context.Context) (time.Time, bool) {
+	deadline, ok := ctx.Value(runtimeDeadlineContextKey{}).(time.Time)
+	return deadline, ok
+}
+
 type runtimeConfig struct {
 	SoftBudget               time.Duration
 	NoProgressTimeout        time.Duration
@@ -399,12 +413,26 @@ func (c *runtimeController) Begin(ctx context.Context, startedAt time.Time, capa
 	c.startedAt = startedAt
 	c.softDeadline = startedAt.Add(c.cfg.SoftBudget)
 	c.hardDeadline = startedAt.Add(c.cfg.AbsoluteRuntimeCeiling)
+	if deadline, ok := RuntimeDeadlineFromContext(ctx); ok {
+		// Per-org graceful windows must also fit the parent's cleanup reserve.
+		c.cfg.GracefulShutdownWindow = min(c.cfg.GracefulShutdownWindow, (HandlerCleanupBuffer-30*time.Second)/2)
+		c.cfg.CheckpointFinalizeWindow = min(c.cfg.CheckpointFinalizeWindow, (HandlerCleanupBuffer-30*time.Second)/2)
+		c.hardDeadline = minTime(c.hardDeadline, deadline.Add(-HandlerCleanupBuffer))
+		c.softDeadline = minTime(c.softDeadline, c.hardDeadline)
+	}
 	c.mu.Unlock()
 
 	if token, ok := jobctx.LockTokenFromContext(ctx); ok {
 		c.lockToken = token
 	}
 	return c.sessions.BeginRuntime(ctx, c.orgID, c.sessionID, capability, c.softDeadline, c.hardDeadline, startedAt)
+}
+
+func minTime(left, right time.Time) time.Time {
+	if right.Before(left) {
+		return right
+	}
+	return left
 }
 
 func (c *runtimeController) Run(ctx context.Context) {

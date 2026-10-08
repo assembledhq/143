@@ -21,7 +21,7 @@ import (
 // an interface here (rather than taking *db.AutomationRunStore) so hook tests
 // don't have to stand up a Postgres pool.
 type automationRunStore interface {
-	TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) (bool, error)
+	TransitionStatusForSession(ctx context.Context, orgID, runID, sessionID uuid.UUID, fromStatus, toStatus models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) (bool, error)
 	GetByRunID(ctx context.Context, orgID, runID uuid.UUID) (models.AutomationRun, error)
 }
 
@@ -45,7 +45,7 @@ const (
 	// internal/cluster/scheduler.go: how long a pending/running automation_run
 	// may sit before the reaper marks it failed. Every attempt in a fallback
 	// chain shares it, because promotion preserves the run's triggered_at.
-	automationRunExecutionBudget = time.Hour
+	automationRunExecutionBudget = models.AutomationRunExecutionBudget
 	// automationAttemptBudgetReserve is the slice of that budget one more
 	// session needs, matching models.DefaultMaxSessionDurationSeconds.
 	automationAttemptBudgetReserve = 20 * time.Minute
@@ -168,7 +168,7 @@ func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Ses
 
 	now := time.Now().UTC()
 	summary := deriveSummary(run, status)
-	transitioned, err := h.runs.TransitionStatusIf(ctx, run.OrgID, *run.AutomationRunID, models.AutomationRunStatusRunning, runStatus, &now, summary)
+	transitioned, err := h.runs.TransitionStatusForSession(ctx, run.OrgID, *run.AutomationRunID, run.ID, models.AutomationRunStatusRunning, runStatus, &now, summary)
 	if err != nil {
 		return fmt.Errorf("update automation run status: %w", err)
 	}
@@ -260,7 +260,7 @@ func (h *AutomationHooks) promoteToNextModelRank(ctx context.Context, session *m
 	// second dispatch, leaving two agent sessions doing the same work. The
 	// status CAS alone cannot catch it: "running" is true for the successor too.
 	if len(attempts) > 0 && attempts[0].SessionID != session.ID {
-		return false, nil
+		return true, nil
 	}
 	// Whether anything is left to try is decided the same way the worker
 	// decides it — by dropping the (agent, model) pairs already spent — so the
@@ -297,7 +297,7 @@ func (h *AutomationHooks) promoteToNextModelRank(ctx context.Context, session *m
 	// what the unchanged worker guard (run.Status != pending -> skip) needs to
 	// accept the re-dispatch. Enqueueing first would let the worker read a
 	// still-running row and early-exit, dropping the run on the floor.
-	transitioned, err := h.runs.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusRunning, models.AutomationRunStatusPending, nil, nil)
+	transitioned, err := h.runs.TransitionStatusForSession(ctx, orgID, runID, session.ID, models.AutomationRunStatusRunning, models.AutomationRunStatusPending, nil, nil)
 	if err != nil {
 		h.logger.Warn().
 			Err(err).
@@ -328,7 +328,7 @@ func (h *AutomationHooks) promoteToNextModelRank(ctx context.Context, session *m
 			Int("attempt", len(attempts)).
 			Msg("failed to enqueue automation model fallback run; failing run")
 		now := time.Now().UTC()
-		if _, failErr := h.runs.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusFailed, &now, deriveSummary(session, models.SessionStatusFailed)); failErr != nil {
+		if _, failErr := h.runs.TransitionStatusForSession(ctx, orgID, runID, session.ID, models.AutomationRunStatusPending, models.AutomationRunStatusFailed, &now, deriveSummary(session, models.SessionStatusFailed)); failErr != nil {
 			return false, fmt.Errorf("fail automation run after fallback enqueue error: %w", failErr)
 		}
 		return true, nil
@@ -369,10 +369,9 @@ func sessionModelUnavailable(session *models.Session) bool {
 // automationRunBudgetFitsAnotherAttempt reports whether a run still has room
 // for one more session inside the window the reaper allows it.
 //
-// Both bounds are deliberately the conservative defaults rather than the org's
-// configured session timeout: this only has to stop the chain from starting
-// work it cannot finish, and reading per-org settings here would put a second
-// lookup on every failed automation session.
+// The reserve is a minimum useful retry window, not a maximum session duration.
+// The worker rechecks after queueing and caps actual runtime (including automatic
+// extensions) to the original run deadline.
 func automationRunBudgetFitsAnotherAttempt(triggeredAt, now time.Time) bool {
 	return now.Add(automationAttemptBudgetReserve).Before(triggeredAt.Add(automationRunExecutionBudget))
 }

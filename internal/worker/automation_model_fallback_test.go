@@ -702,16 +702,15 @@ func TestAutomationRunHandler_FailsRunWhenNoModelRankIsAvailable(t *testing.T) {
 	// whole chain, primary first.
 	expectAutomationRunSessionAttempts(mock)
 
-	// The run is claimed first, so the failure below has to be written from
-	// running rather than pending.
-	mock.ExpectExec(`UPDATE automation_runs\s+SET status = 'running',\s+dispatch_state = NULL.+WHERE id = @id AND org_id = @org_id\s+AND status = 'pending'`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// An unavailable chain fails the same pending generation that was
+	// inspected; a stale job cannot fail a newer fallback generation.
 
 	// TransitionStatusIf's named arguments expand in order of first appearance
 	// in the SQL: to_status, completed_at, result_summary, id, org_id,
 	// from_status.
 	var summary string
+	mock.ExpectBegin()
+	expectCurrentAutomationSession(mock, models.AutomationRunStatusPending, uuid.Nil)
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
 		WithArgs(
 			models.AutomationRunStatusFailed,
@@ -719,9 +718,10 @@ func TestAutomationRunHandler_FailsRunWhenNoModelRankIsAvailable(t *testing.T) {
 			automationRunSummaryCaptureArg{captured: &summary},
 			pgxmock.AnyArg(),
 			pgxmock.AnyArg(),
-			models.AutomationRunStatusRunning,
+			models.AutomationRunStatusPending,
 		).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
 
 	availability := &automationModelAvailabilityStub{unavailable: map[string]bool{
 		automationModelAvailabilityKey(string(models.AgentTypeCodex), models.DefaultCodexModel):           true,

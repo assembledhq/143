@@ -42,6 +42,10 @@ func (f *fakeAutomationRunStore) TransitionStatusIf(_ context.Context, orgID, ru
 	return f.transitioned, f.err
 }
 
+func (f *fakeAutomationRunStore) TransitionStatusForSession(ctx context.Context, orgID, runID, sessionID uuid.UUID, fromStatus, toStatus models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) (bool, error) {
+	return f.TransitionStatusIf(ctx, orgID, runID, fromStatus, toStatus, completedAt, resultSummary)
+}
+
 func (f *fakeAutomationRunStore) GetByRunID(_ context.Context, orgID, runID uuid.UUID) (models.AutomationRun, error) {
 	if f.getErr != nil {
 		return models.AutomationRun{}, f.getErr
@@ -435,6 +439,13 @@ func (f *fakeFallbackRunStore) TransitionStatusIf(_ context.Context, orgID, runI
 	return f.transition(fromStatus, toStatus)
 }
 
+func (f *fakeFallbackRunStore) TransitionStatusForSession(ctx context.Context, orgID, runID, sessionID uuid.UUID, fromStatus, toStatus models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) (bool, error) {
+	if len(f.attempts) > 0 && f.attempts[0].SessionID != sessionID {
+		return false, nil
+	}
+	return f.TransitionStatusIf(ctx, orgID, runID, fromStatus, toStatus, completedAt, resultSummary)
+}
+
 func (f *fakeFallbackRunStore) GetByRunID(_ context.Context, orgID, runID uuid.UUID) (models.AutomationRun, error) {
 	if f.getErr != nil {
 		return models.AutomationRun{}, f.getErr
@@ -794,8 +805,8 @@ func TestAutomationHooks_OnSessionComplete_OnlyNewestSessionPromotes(t *testing.
 	require.NoError(t, err, "a duplicate delivery must land cleanly, not error")
 	require.Equal(t, 1, f.runs.attemptCalls,
 		"the guard must consult the attempt history; it cannot be decided from the session alone")
-	requireFailedExactlyOnce(t, f,
-		"a duplicate delivery for a superseded session would otherwise yank the legitimately-running attempt back to pending and start a second concurrent agent session on the same run")
+	require.Empty(t, f.runs.calls, "a superseded session cannot change its successor's run")
+	require.Empty(t, f.jobs.calls, "a superseded session cannot enqueue another fallback")
 }
 
 // TestAutomationHooks_OnSessionComplete_DoesNotPromoteLegacySnapshot covers
@@ -1434,4 +1445,30 @@ func TestAutomationHooks_OnSessionComplete_InteractiveSessionDoesNotPromote(t *t
 	require.NoError(t, err)
 	require.Empty(t, fixture.runs.calls, "reusable sessions are completed by the turn completer, not session hooks")
 	require.Empty(t, fixture.jobs.calls, "a failed reusable session must not enqueue a separate-session fallback")
+}
+
+func TestAutomationHooks_OnSessionComplete_SupersededSessionCannotFinishSuccessor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		status models.SessionStatus
+		diff   *string
+	}{
+		{name: "failed", status: models.SessionStatusFailed},
+		{name: "completed with diff", status: models.SessionStatusCompleted, diff: stringPointer("diff")},
+		{name: "completed no-op", status: models.SessionStatusCompleted},
+		{name: "needs guidance", status: models.SessionStatusNeedsHumanGuidance},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			attempts := attemptsForRanks(t, threeRankModelChainSnapshot, 2)
+			f := newPromotionFixture(t, threeRankModelChainSnapshot, attempts)
+			f.session.ID = attempts[1].SessionID
+			f.session.Diff = tt.diff
+			require.NoError(t, f.hooks.OnSessionComplete(context.Background(), f.session, tt.status), "superseded callback should be acknowledged without changing the successor")
+			require.Empty(t, f.runs.calls, "superseded callbacks must not complete, fail, or promote the current attempt")
+			require.Empty(t, f.jobs.calls, "superseded callbacks must not enqueue another attempt")
+		})
+	}
 }

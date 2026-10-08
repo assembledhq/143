@@ -75,7 +75,7 @@ type schedulerSessionStore interface {
 // legitimate run. If legitimate long runs start to exist, raise this bound
 // (or make it per-automation) rather than lower it — false-positive reaping
 // is worse than a delayed retry.
-const stuckAutomationRunThreshold = 1 * time.Hour
+const stuckAutomationRunThreshold = models.AutomationRunExecutionBudget
 
 const pullRequestReconcileBatch = 50
 
