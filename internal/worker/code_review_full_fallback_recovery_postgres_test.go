@@ -54,6 +54,8 @@ func TestFullAssessmentFallbackSupervisorRecoveryPostgres(t *testing.T) {
 			store := db.NewCodeReviewStore(pool)
 			policy, err := store.SavePolicy(ctx, org, models.DefaultCodeReviewPolicyConfig(), nil)
 			require.NoError(t, err, "save the replacement review policy")
+			// Parallel cases sweep this shared schema, so publication protection
+			// must be visible as soon as the assessment is inserted.
 			for _, seed := range []struct {
 				sql  string
 				args []any
@@ -63,15 +65,13 @@ func TestFullAssessmentFallbackSupervisorRecoveryPostgres(t *testing.T) {
 				{`INSERT INTO sessions(id,org_id,origin,status,revision_context) VALUES($1,$2,'code_review','completed','{}')`, []any{session, org}},
 				{`INSERT INTO pull_requests(id,org_id,github_pr_number,github_pr_url,github_repo,title,head_sha,base_sha) VALUES($1,$2,7,'https://example.test/pr/7','test/fallback','Fallback recovery','head','base')`, []any{pr, org}},
 				{`INSERT INTO code_review_session_metadata(id,org_id,session_id,repository_id,pull_request_id,policy_id,base_sha,head_sha,trigger_source,status,review_output_key) VALUES($1,$2,$3,$4,$5,$6,'base','head','slash_command','failed','fallback-output')`, []any{metadata, org, session, repo, pr, policy.ID}},
-				{`INSERT INTO code_review_revision_assessments(id,org_id,repository_id,repository_full_name,pull_request_id,metadata_id,session_id,policy_id,generation,base_sha,base_ref,head_sha,input_version,code_digest,contract_digest,intent_digest,visual_digest,request_digest,gate_digest,input_digest,input_manifest,review_scope,route_reason,status,publication_key,publication_state,failure_detail,completed_at) VALUES($1,$2,$3,'test/fallback',$4,$5,$6,$7,1,'base','main','head',1,'code','contract','intent','visual','request','gates','input','{}','full','initial_full',$8,'fallback-publication',$9,'full_review:inputs changed before publication',now())`, []any{assessment, org, repo, pr, metadata, session, policy.ID, tt.status, tt.publication}},
+				{`INSERT INTO code_review_revision_assessments(id,org_id,repository_id,repository_full_name,pull_request_id,metadata_id,session_id,policy_id,generation,base_sha,base_ref,head_sha,input_version,code_digest,contract_digest,intent_digest,visual_digest,request_digest,gate_digest,input_digest,input_manifest,review_scope,route_reason,status,publication_key,publication_state,failure_detail,completed_at,publication_receipt,github_review_id) VALUES($1,$2,$3,'test/fallback',$4,$5,$6,$7,1,'base','main','head',1,'code','contract','intent','visual','request','gates','input','{}','full','initial_full',$8,'fallback-publication',$9,'full_review:inputs changed before publication',now(),CASE WHEN $10 THEN '{}'::jsonb ELSE NULL END,CASE WHEN $11 THEN 123 ELSE NULL END)`, []any{assessment, org, repo, pr, metadata, session, policy.ID, tt.status, tt.publication, tt.receipt, tt.reviewID}},
 				{`INSERT INTO code_review_pr_state(org_id,repository_id,pull_request_id,head_sha,base_sha,base_ref,active_session_id,active_assessment_id,state) VALUES($1,$2,$3,'head','base','main',$4,$5,'running')`, []any{org, repo, pr, session, assessment}},
 				{`INSERT INTO jobs(id,org_id,queue,job_type,payload,dedupe_key,status,max_attempts,attempts) VALUES($1,$2,'agent','run_code_review',jsonb_build_object('session_id',$3::text,'review_output_key','fallback-publication'),'code_review:fallback-publication','dead_letter',8,8)`, []any{controller, org, session}},
 			} {
 				_, err := pool.Exec(ctx, seed.sql, seed.args...)
 				require.NoError(t, err, "seed interrupted full fallback after original controller exhaustion")
 			}
-			_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET publication_receipt=CASE WHEN $3 THEN '{}'::jsonb ELSE NULL END,github_review_id=CASE WHEN $4 THEN 123 ELSE NULL END WHERE org_id=$1 AND id=$2`, org, assessment, tt.receipt, tt.reviewID)
-			require.NoError(t, err, "seed independent publication receipt fences")
 			schedules := db.NewCodeReviewScheduleStore(pool)
 			require.NoError(t, schedules.RepairMissingWakes(ctx), "sweep should recreate the lost full fallback recovery wake")
 			var recoveryJob uuid.UUID
