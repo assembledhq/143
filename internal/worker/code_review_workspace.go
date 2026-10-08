@@ -28,6 +28,8 @@ type prepareCodeReviewWorkspacePayload struct {
 const codeReviewWorkspaceWait = 3 * time.Second
 const codeReviewWorkspaceWaitLimit = 8 * time.Minute
 
+var errCodeReviewEndedParentRecovery = errors.New("ended review recovery could not prove exclusive ownership")
+
 var errCodeReviewWorkspaceStopped = errors.New("code review stopped before workspace readiness")
 
 func codeReviewWorkspaceWaitError(reason string) *RetryableError {
@@ -374,4 +376,47 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 		log.Info().Str("session_id", input.SessionID.String()).Str("container_id", sandbox.ID).Msg("published prepared code review workspace")
 		return nil
 	}
+}
+
+// Saved work from a completed parent can finish through the normal live gates
+// without reopening its workspace or launching any reviewer/synthesis thread.
+func recoverEndedCodeReviewParent(ctx context.Context, stores *Stores, job runCodeReviewPayload, policy models.CodeReviewPolicyConfig) (resumeSaved, settled bool, err error) {
+	if stores.Sessions == nil || stores.CodeReviewAssessments == nil {
+		return false, false, nil
+	}
+	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return false, false, err
+	}
+	if session.Status != models.SessionStatusCompleted && session.Status != models.SessionStatusFailed {
+		return false, false, nil
+	}
+	// Legacy reviews without an assessment retain their existing path.
+	if _, err := stores.CodeReviewAssessments.GetBySessionID(ctx, job.OrgID, job.SessionID); errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	} else if err != nil {
+		return false, false, err
+	}
+	if stores.ThreadSendTx == nil {
+		return false, false, fmt.Errorf("ended full review recovery requires transaction support")
+	}
+	jobID, _ := jobctx.JobIDFromContext(ctx)
+	token, _ := jobctx.LockTokenFromContext(ctx)
+	resumed, err := db.NewCodeReviewScheduleStore(stores.ThreadSendTx).ReconcileEndedFullReview(ctx, job.OrgID, db.EndedFullReviewParams{
+		RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, SessionID: job.SessionID, MetadataID: job.MetadataID, PolicyID: job.PolicyID,
+		JobID: jobID, JobLockToken: token, HeadSHA: job.HeadSHA, OutputKey: job.OutputKey, SessionStatus: session.Status, SessionTurn: session.CurrentTurn, TriggeringDisputeID: job.TriggeringDisputeID,
+	}, func(results []models.CodeReviewAgentResult) bool {
+		return codeReviewSavedResultsComplete(policy, results)
+	})
+	return resumed, err == nil && !resumed, err
+}
+
+func codeReviewSavedResultsComplete(policy models.CodeReviewPolicyConfig, results []models.CodeReviewAgentResult) bool {
+	for _, result := range results {
+		if !codeReviewReviewerResultTerminal(result.Status) {
+			return false
+		}
+	}
+	_, usableSynthesis := codeReviewOrchestratorEvidence(results)
+	return codeReviewReviewerRosterTerminal(policy, results, false) && codeReviewHasUsableReviewerOutput(results) && usableSynthesis
 }

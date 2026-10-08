@@ -205,12 +205,20 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
 			return err
 		}
+		resumeSaved, settledEnded, err := recoverEndedCodeReviewParent(ctx, stores, job, policy.Config())
+		if err != nil {
+			return fmt.Errorf("%w: %w", errCodeReviewEndedParentRecovery, err)
+		}
+		if settledEnded {
+			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
+			return nil
+		}
 		// Reviewer and orchestrator waits requeue this job every few seconds. Use
 		// their durable result/thread state as a phase checkpoint so polling does
 		// not repeat the expensive GitHub preflight. Terminal or inconsistent
 		// state falls through, preserving the live refresh before every phase
 		// transition and final decision.
-		if codeReviewCanRunReviewerThreads(stores) {
+		if codeReviewCanRunReviewerThreads(stores) && !resumeSaved {
 			phase, phaseErr := codeReviewInFlightAgentPhase(ctx, stores, job, pr, policy.Config(), metadata)
 			if phaseErr != nil {
 				return phaseErr
@@ -236,7 +244,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 		}
 		avoidReprepareAfterPreflight := false
-		if codeReviewCanRunReviewerThreads(stores) {
+		if codeReviewCanRunReviewerThreads(stores) && !resumeSaved {
 			started, err := codeReviewWorkspacePreparationStarted(ctx, stores, services, job)
 			if err != nil {
 				return err
@@ -244,7 +252,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if started {
 				if err := ensureCodeReviewWorkspaceReady(ctx, stores, services, reviewLog, job); err != nil {
 					if errors.Is(err, errCodeReviewWorkspaceStopped) {
-						return nil
+						return fmt.Errorf("%w: reconcile stopped review on next controller attempt: %w", errCodeReviewEndedParentRecovery, err)
 					}
 					return err
 				}
@@ -368,14 +376,14 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 			return completeCodeReviewAfterStableDeterministicFailure(ctx, stores, services, logger, job, metadata, policy.Config(), pr, changedFiles, stableRisk, assessment)
 		}
-		if codeReviewCanRunReviewerThreads(stores) {
+		if codeReviewCanRunReviewerThreads(stores) && !resumeSaved {
 			workspaceGate := ensureCodeReviewWorkspaceReady
 			if avoidReprepareAfterPreflight {
 				workspaceGate = ensureCodeReviewWorkspaceReadyAfterPreflight
 			}
 			if err := workspaceGate(ctx, stores, services, reviewLog, job); err != nil {
 				if errors.Is(err, errCodeReviewWorkspaceStopped) {
-					return nil
+					return fmt.Errorf("%w: reconcile stopped review on next controller attempt: %w", errCodeReviewEndedParentRecovery, err)
 				}
 				return err
 			}
@@ -841,6 +849,10 @@ func reconcileCodeReviewSessionFailureWithDetails(ctx context.Context, stores *S
 
 func registerCodeReviewDeadLetterReconciliation(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload) {
 	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		if errors.Is(deadLetterErr, errCodeReviewEndedParentRecovery) {
+			logger.Warn().Err(deadLetterErr).Str("session_id", job.SessionID.String()).Msg("ended review recovery remains fenced after controller exhaustion")
+			return
+		}
 		reason := codeReviewDeadLetterReason(deadLetterErr)
 		if stores != nil && stores.CodeReviews != nil {
 			code, message, retryable := codeReviewTerminalFailureStatus(deadLetterErr)

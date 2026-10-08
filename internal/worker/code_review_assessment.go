@@ -144,6 +144,30 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 			if current.Status != models.CodeReviewAssessmentPublishing || current.Generation != assessment.Generation || current.InputDigest != assessment.InputDigest || current.PublicationState != models.CodeReviewPublicationReserved && current.PublicationState != models.CodeReviewPublicationUncertain {
 				return codereviewsvc.SubmitReviewResult{}, false, db.ErrCodeReviewAssessmentState
 			}
+			if current.PublicationState == models.CodeReviewPublicationUncertain && metadata.GitHubReviewID != nil {
+				// Persist a bounded repair attempt before networking. The current job
+				// may retry transient failures, but the sweeper must not recreate it
+				// forever when the known legacy receipt cannot be verified.
+				if err := stores.CodeReviewAssessments.NoteUncertainPublication(lockCtx, current.OrgID, current.ID, current.Generation, current.InputDigest, db.CodeReviewPublicationLegacyReceiptAttempted); err != nil {
+					return codereviewsvc.SubmitReviewResult{}, false, err
+				}
+				reconciler, ok := services.CodeReviews.(interface {
+					ReconcileAssessmentPublication(context.Context, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error)
+				})
+				if !ok {
+					return codereviewsvc.SubmitReviewResult{}, false, errCodeReviewPublicationPaused
+				}
+				result, found, err := reconciler.ReconcileAssessmentPublication(lockCtx, request)
+				if err != nil {
+					return codereviewsvc.SubmitReviewResult{}, false, err
+				}
+				if !found || result.ID != *metadata.GitHubReviewID ||
+					(request.ExistingReviewID == 0 && result.SubmittedCommitSHA != current.HeadSHA) ||
+					(request.Decision == codereviewsvc.SubmitReviewDecisionApproved && result.FormalApprovalID == nil) {
+					return codereviewsvc.SubmitReviewResult{}, false, errCodeReviewPublicationPaused
+				}
+				return result, true, nil
+			}
 			fresh, freshnessErr := captureFreshFullAssessment(lockCtx, services, job, current)
 			if freshnessErr == nil && decision == models.CodeReviewDecisionApproved {
 				freshnessErr = verifyFullAssessmentApproval(lockCtx, lockedReviews, stores, services, job, fresh)
@@ -183,6 +207,10 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 			}
 			return codereviewsvc.SubmitReviewResult{}, false, nil
 		}
+	}
+	if assessment != nil && assessment.PublicationState == models.CodeReviewPublicationUncertain && metadata.GitHubReviewID != nil {
+		// Receipt lookup does not need to reconstruct comments or fetch a diff.
+		changedFiles = []codereviewsvc.PullRequestFile{}
 	}
 	submission, submitted, err := submitCodeReviewToGitHubWithOptions(ctx, stores, services, job, metadata, decision, body, changedFiles, preSubmit, onSubmitError, assessment != nil)
 	if err != nil {

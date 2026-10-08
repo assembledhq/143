@@ -97,6 +97,32 @@ For each affected PR, check the latest review attempt, current head SHA, saved r
 
 Do not manually reset job or assessment rows to bypass publication fencing or deduplication.
 
+### Automatic recovery of ended full-review sessions
+
+A terminal session does not by itself mean its code review finished. The review
+controller must also settle the review metadata, assessment, and scheduler
+reservation. The repair sweep can restore a missing controller using its
+original payload when a full review has an ended parent, unfinished review
+state, and no remaining execution or sandbox owner. It does not reopen the
+session or launch another reviewer turn merely to repair bookkeeping.
+
+If a completed parent has validated reviewer and synthesis results, recovery
+can finish from those saved results. Current PR inputs, policy checks, and
+publication fences still apply. An ended review without usable completed work
+is recorded as a failure, preserving its saved results and failure diagnostics.
+Request a new review through the product when a fresh attempt is needed.
+
+A saved GitHub review ID is a candidate receipt, not proof that an assessment
+was published successfully. Recovery of an expired uncertain publication checks
+the original publication marker, commit, and approval evidence read-only before
+settling local state. It never resends an uncertain publication just because an
+ID exists. If the receipt cannot be verified, the publication fence remains and
+bounded automatic recovery stops for operator investigation.
+
+Older reviews may own the scheduler through a session pointer without an
+assessment pointer. Recovery releases only the matching full-review reservation
+and preserves newer assessments, pending requests, and evidence rechecks.
+
 ### A recovery request remains blocked by an active review
 
 The scheduler's `HasActiveCodeReview` check includes active thread records, even when their review metadata is already failed. A session page can therefore say "Running" or "Reconnecting after maintenance" after its controller, executor, and runtime have stopped. Check those records independently; the page alone does not establish a live agent.

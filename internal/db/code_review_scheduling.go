@@ -267,7 +267,7 @@ func (s *CodeReviewScheduleStore) RepairMissingWakes(ctx context.Context) error 
 	// Full-review publication uses its original controller payload. Reuse all
 	// captured provenance, including request/dispute identity and fork context;
 	// never construct a new review or infer that an uncertain send was absent.
-	_, err = s.db.Exec(ctx, `INSERT INTO jobs(org_id,queue,job_type,payload,priority,dedupe_key,run_at,max_attempts)
+	_, err = s.db.Exec(ctx, `WITH enqueued AS (INSERT INTO jobs(org_id,queue,job_type,payload,priority,dedupe_key,run_at,max_attempts)
  SELECT a.org_id,'agent','run_code_review',original.payload,5,original.dedupe_key,now(),8
  FROM code_review_revision_assessments a
  JOIN LATERAL (SELECT j.payload,j.dedupe_key FROM jobs j
@@ -275,11 +275,32 @@ func (s *CodeReviewScheduleStore) RepairMissingWakes(ctx context.Context) error 
    AND j.payload->>'session_id'=a.session_id::text AND j.payload->>'review_output_key'=a.publication_key
    AND j.dedupe_key='code_review:'||a.publication_key
    ORDER BY j.created_at DESC,j.id DESC LIMIT 1) original ON true
- WHERE a.review_scope='full' AND a.status IN ('running','publishing') AND a.result_origin IS NOT NULL
- AND COALESCE(a.failure_detail,'') NOT LIKE 'operator_reconciliation_required:%'
+ WHERE a.review_scope='full' AND a.status IN ('running','publishing')
+ AND ((a.result_origin IS NOT NULL AND (
+   COALESCE(a.failure_detail,'') NOT LIKE 'operator_reconciliation_required:%'
+   OR (a.publication_state='uncertain' AND COALESCE(a.failure_detail,'')<>$1
+    AND EXISTS(SELECT 1 FROM code_review_session_metadata m WHERE m.org_id=a.org_id AND m.id=a.metadata_id AND m.session_id=a.session_id AND m.github_review_id IS NOT NULL))))
+ OR (a.result_origin IS NULL AND a.status='running' AND a.publication_state='not_started'
+   AND a.publication_receipt IS NULL AND a.github_review_id IS NULL
+   AND EXISTS(SELECT 1 FROM code_review_session_metadata m
+     JOIN sessions s ON s.org_id=m.org_id AND s.id=m.session_id
+     JOIN code_review_pr_state st ON st.org_id=m.org_id AND st.pull_request_id=m.pull_request_id
+     WHERE m.org_id=a.org_id AND m.id=a.metadata_id AND m.session_id=a.session_id
+       AND m.pull_request_id=a.pull_request_id AND m.status='running' AND m.github_review_id IS NULL
+       AND s.origin='code_review' AND s.status IN ('failed','completed')
+       AND st.active_session_id=a.session_id AND (st.active_assessment_id IS NULL OR st.active_assessment_id=a.id)
+       AND (`+codeReviewRecheckSessionDrainedSQL+`)
+       AND NOT EXISTS(SELECT 1 FROM session_threads t WHERE t.org_id=s.org_id AND t.session_id=s.id AND t.status IN ('pending','running','awaiting_input'))
+       AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.org_id=s.org_id AND j.status IN ('pending','running') AND j.payload->>'session_id'=s.id::text
+         AND j.job_type IN ('run_agent','continue_session','fork_session_thread','revert_session_thread','deliver_thread_inbox','prepare_code_review_workspace'))
+       AND NOT EXISTS(SELECT 1 FROM code_review_recheck_dispatches d WHERE d.org_id=s.org_id AND d.session_id=s.id AND d.status IN ('pending','running')))))
  AND NOT EXISTS(SELECT 1 FROM jobs active WHERE active.org_id=a.org_id AND active.queue='agent'
    AND active.dedupe_key=original.dedupe_key AND active.status IN ('pending','running'))
- ORDER BY a.created_at,a.id LIMIT 100 ON CONFLICT DO NOTHING`)
+ ORDER BY a.created_at,a.id LIMIT 100 ON CONFLICT DO NOTHING RETURNING org_id,payload)
+ UPDATE code_review_revision_assessments a SET failure_detail=$1 FROM enqueued e
+ WHERE a.org_id=e.org_id AND a.session_id::text=e.payload->>'session_id'
+ AND a.publication_key=e.payload->>'review_output_key' AND a.publication_state='uncertain'
+ AND EXISTS(SELECT 1 FROM code_review_session_metadata m WHERE m.org_id=a.org_id AND m.id=a.metadata_id AND m.session_id=a.session_id AND m.github_review_id IS NOT NULL)`, CodeReviewPublicationLegacyReceiptAttempted)
 	if err != nil {
 		return err
 	}

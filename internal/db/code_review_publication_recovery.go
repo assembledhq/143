@@ -14,6 +14,10 @@ const CodeReviewPublicationReconciliationWindow = 2 * time.Hour
 
 const CodeReviewPublicationOperatorRequired = "operator_reconciliation_required: automatic reconciliation stopped after the assessment exceeded two hours; verify the original GitHub publication key and commit before resolving this reservation"
 
+// CodeReviewPublicationLegacyReceiptAttempted fences repeated sweep attempts;
+// the original controller retains its ordinary bounded retry budget.
+const CodeReviewPublicationLegacyReceiptAttempted = "operator_reconciliation_required: legacy receipt lookup attempted; no verified receipt recorded"
+
 // PauseExpiredPublication changes only the operational detail, never the
 // immutable outcome, publication receipt, or active assessment reservation.
 func (s *CodeReviewAssessmentStore) PauseExpiredPublication(ctx context.Context, orgID, id uuid.UUID, generation int64, inputDigest string) (bool, error) {

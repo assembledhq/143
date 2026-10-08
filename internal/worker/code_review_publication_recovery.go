@@ -48,15 +48,22 @@ func recoverStagedFullAssessment(ctx context.Context, stores *Stores, services *
 	if a.RepositoryID != job.RepositoryID || a.PullRequestID != job.PullRequestID || a.PolicyID != job.PolicyID || a.HeadSHA != job.HeadSHA || a.PublicationKey != job.OutputKey {
 		return true, fmt.Errorf("staged assessment differs from original controller identity: %w", db.ErrCodeReviewAssessmentState)
 	}
-	if paused, err := pauseExpiredCodeReviewPublication(ctx, stores, a); paused || err != nil {
-		if paused && err == nil {
-			return true, errCodeReviewPublicationPaused
-		}
-		return true, err
-	}
 	metadata, err := stores.CodeReviews.GetBySessionID(ctx, job.OrgID, job.SessionID)
 	if err != nil {
 		return true, err
+	}
+	if metadata.ID != job.MetadataID || metadata.ID != a.MetadataID || metadata.RepositoryID != a.RepositoryID || metadata.PullRequestID != a.PullRequestID || metadata.PolicyID != a.PolicyID || metadata.HeadSHA != a.HeadSHA || metadata.ReviewOutputKey != a.PublicationKey {
+		return true, fmt.Errorf("staged metadata differs from original controller identity: %w", db.ErrCodeReviewAssessmentState)
+	}
+	// A legacy receipt is a reason to look up the exact publication, not proof
+	// of success. The publication callback performs only that read-only lookup.
+	if metadata.GitHubReviewID == nil {
+		if paused, err := pauseExpiredCodeReviewPublication(ctx, stores, a); paused || err != nil {
+			if paused && err == nil {
+				return true, errCodeReviewPublicationPaused
+			}
+			return true, err
+		}
 	}
 	return true, resumeStagedFullAssessment(ctx, stores, services, job, metadata, a, nil)
 }
