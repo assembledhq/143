@@ -79,14 +79,23 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			}
 			stores.CodeReviews.PublishAssessmentUpdated(hookCtx, current)
 		})
-		if a.ReviewScope != models.CodeReviewScopeEvidenceOnly || a.SourceAssessmentID == nil {
-			return errors.New("recheck requires an evidence-only assessment and full baseline")
-		}
-		if a.Status == models.CodeReviewAssessmentSuperseded && a.FailureDetail != nil && strings.HasPrefix(*a.FailureDetail, "full_review:") {
+		// The repair sweep also sends terminal full assessments here when their
+		// original controller stopped before persisting the replacement request.
+		if (a.Status == models.CodeReviewAssessmentSuperseded || a.Status == models.CodeReviewAssessmentFailed) && a.FailureDetail != nil &&
+			(strings.HasPrefix(*a.FailureDetail, "full_review:") || strings.HasPrefix(*a.FailureDetail, "full_review_queued:")) {
+			if a.PublicationState == models.CodeReviewPublicationUncertain || a.PublicationState == models.CodeReviewPublicationConfirmed || a.PublicationReceipt != nil || a.GitHubReviewID != nil {
+				return errors.New("full fallback requires reconciliation of assessment publication")
+			}
 			if err := settleCodeReviewAssessment(ctx, stores, a); err != nil {
 				return err
 			}
+			if strings.HasPrefix(*a.FailureDetail, "full_review_queued:") {
+				return nil
+			}
 			return queueCodeReviewRecheckFallback(ctx, services, a, strings.TrimPrefix(*a.FailureDetail, "full_review:"))
+		}
+		if a.ReviewScope != models.CodeReviewScopeEvidenceOnly || a.SourceAssessmentID == nil {
+			return errors.New("recheck requires an evidence-only assessment and full baseline")
 		}
 		if a.Status == models.CodeReviewAssessmentSuperseded && a.FailureDetail != nil && strings.HasPrefix(*a.FailureDetail, "evidence_recheck:") {
 			return refreshUnsentCodeReviewEvidence(ctx, services, a, strings.TrimPrefix(*a.FailureDetail, "evidence_recheck:"))
@@ -97,9 +106,6 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		if a.Status == models.CodeReviewAssessmentFailed {
 			if err := settleCodeReviewAssessment(ctx, stores, a); err != nil {
 				return err
-			}
-			if a.FailureDetail != nil && strings.HasPrefix(*a.FailureDetail, "full_review:") {
-				return queueCodeReviewRecheckFallback(ctx, services, a, strings.TrimPrefix(*a.FailureDetail, "full_review:"))
 			}
 			return nil
 		}

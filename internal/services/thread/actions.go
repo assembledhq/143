@@ -64,6 +64,34 @@ func (s *Service) CancelThread(ctx context.Context, orgID, sessionID, threadID u
 	return updated, nil
 }
 
+// CancelThreadTurn carries the original turn through durable marking, local
+// interruption, and remote delivery. A later turn cannot inherit this request.
+func (s *Service) CancelThreadTurn(ctx context.Context, orgID, sessionID, threadID uuid.UUID, expectedTurn int) (models.SessionThread, error) {
+	store, ok := s.threadStore.(interface {
+		MarkCancelRequestedForTurn(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int) (bool, error)
+	})
+	if !ok {
+		return models.SessionThread{}, errors.New("exact-turn cancellation store unavailable")
+	}
+	marked, err := store.MarkCancelRequestedForTurn(ctx, orgID, sessionID, threadID, expectedTurn)
+	if err != nil {
+		return models.SessionThread{}, fmt.Errorf("mark turn cancellation: %w", err)
+	}
+	if !marked {
+		return models.SessionThread{}, ErrThreadNotCancellable
+	}
+	local, ok := s.canceller.(interface{ CancelThreadTurn(uuid.UUID, int) bool })
+	if !ok || !local.CancelThreadTurn(threadID, expectedTurn) {
+		if s.jobStore == nil {
+			return models.SessionThread{}, errors.New("exact-turn cancellation queue unavailable")
+		}
+		if err := s.enqueueCancelThread(ctx, orgID, sessionID, threadID, expectedTurn); err != nil {
+			return models.SessionThread{}, err
+		}
+	}
+	return s.threadStore.GetByID(ctx, orgID, threadID)
+}
+
 // CancelActiveThreads requests cancellation for all active threads in the
 // selected sessions. Session and thread state are loaded in batches. At most
 // one worker job is queued for each owning worker node.
@@ -217,16 +245,26 @@ func (s *Service) RetryInboxEntry(ctx context.Context, orgID, sessionID, threadI
 	return entry, nil
 }
 
-func (s *Service) enqueueCancelThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) error {
+const cancelThreadTurnJobType = "cancel_thread_turn"
+
+func (s *Service) enqueueCancelThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID, expectedTurn ...int) error {
 	if s.jobStore == nil {
 		return nil
 	}
-	payload := map[string]string{
+	var payload any = map[string]string{
 		"session_id": sessionID.String(),
 		"thread_id":  threadID.String(),
 		"org_id":     orgID.String(),
 	}
 	dedupeKey := cancelThreadJobType + ":" + threadID.String()
+	jobType := cancelThreadJobType
+	if len(expectedTurn) > 0 {
+		// Older workers must reject this new job type, never silently discard
+		// its fence and run the legacy generic cancellation handler.
+		jobType = cancelThreadTurnJobType
+		payload = map[string]any{"session_id": sessionID.String(), "thread_id": threadID.String(), "org_id": orgID.String(), "expected_turn": expectedTurn[0]}
+		dedupeKey = fmt.Sprintf("%s:%s:turn:%d", jobType, threadID, expectedTurn[0])
+	}
 	var targetNodeID *string
 	if s.runtimeOwnerStore != nil {
 		runtime, err := s.runtimeOwnerStore.GetActiveByThread(ctx, orgID, threadID)
@@ -240,7 +278,7 @@ func (s *Service) enqueueCancelThread(ctx context.Context, orgID, sessionID, thr
 	}
 	_, err := s.jobStore.EnqueueWithOpts(ctx, orgID, db.EnqueueOpts{
 		Queue:        deliverThreadInboxQueue,
-		JobType:      cancelThreadJobType,
+		JobType:      jobType,
 		Payload:      payload,
 		Priority:     9,
 		DedupeKey:    &dedupeKey,

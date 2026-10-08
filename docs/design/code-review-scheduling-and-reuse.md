@@ -1,6 +1,6 @@
 # Design: Code Review Scheduling, Reuse, and Usage Controls
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-09-25
+> **Status:** Partially Implemented | **Last reviewed:** 2026-10-08
 
 Stage 1 is implemented in PR #2143 and available automatically when the GitHub review service is configured. There is no scheduling rollout flag. No production configuration or deployment has been changed by this work. The product direction was agreed in discussion; numeric limits below are proposed starting values, not measured capacity recommendations.
 
@@ -41,7 +41,7 @@ Current delivery unit: Stage 1. Later reuse, resource accounting, and post-appro
 1. Review every eligible open PR independently, including drafts. Do not restrict reviews to the bottom of a stack, automatically replace constituent reviews with a combined review, or infer readiness from a branch-name pattern.
 2. Keep the existing requirement that review is requested before automatic monitoring starts. Do not turn all repository webhook traffic into automatic review.
 3. Propose a **five-minute quiet window** after the latest meaningful update and a **15-minute minimum interval between automatic review starts per PR**. An explicit first review or **Review now** bypasses timing delays, subject to eligibility and capacity.
-4. Consolidate ordinary equivalent requests. A separate **Force fresh review** action intentionally bypasses content reuse, records a reason, and still respects authorization and resource limits.
+4. Consolidate ordinary equivalent requests. A separate **Force fresh review** action intentionally bypasses content reuse, records a reason, and cancels active full reviews or evidence-only rechecks after its replacement intent is durable. It still respects authorization and resource limits. Publication already sent to GitHub must be reconciled before replacement admission.
 5. Content equivalence and request consolidation are built-in behavior. Do not expose hash algorithms or a collection of cache toggles in the product UI.
 6. Preserve approval criteria, reviewer quorum, evidence requirements, and author/fork safeguards. Changing scheduling must not silently loosen them.
 7. Reuse analysis separately from publishing an approval for a revision. Historical approval is not evidence that later code is covered.
@@ -75,6 +75,14 @@ The pending queue is a deliberate compatibility choice: this slice does not synt
 A full-review fallback stops after three consecutive unsent attempts on the same head, base, code, policy/prompt contract, and PR intent. Only a chain connected by `previous_assessment_id` and internal `assessment_fallback` request provenance counts; explicit user requests, changed analysis inputs, completed publication, and evidence-only assessments break the chain. The transaction cancels the last assessment and its metadata with `review_loop_detected`, requests cancellation of any remaining threads in that chain, closes attached pending requests, and atomically enqueues a GitHub status-comment update explaining the cancellation and recovery action. It preserves newer pending requests and active sessions, and never discards uncertain/confirmed publications or receipts.
 
 Automatic observations of that stopped revision do not enqueue more work. A new head/base or an explicit review request passes through normal scheduling. The cancellation reason tells users to push a new revision or explicitly request another review; it does not claim that the PR is approved or covered. Migration `000299` adds `review_loop_detected` to the existing nullable `code_review_session_metadata.status_code` constraint; the existing tenant-scoped review API returns that value and the cancellation message. There are no new routes, columns, indexes, or auth changes. Operators can search for `cancelled automatic code review restart loop` in worker logs. No production configuration change is needed.
+
+### Input invalidation and forced replacement
+
+An active full review is bound to its captured PR title and description as well as its head, base, and base branch. A changed title or description advances the pending generation and quiet-period deadline, commits replacement intent, and then cancels obsolete threads. Duplicate observations do not restart the quiet period. Equivalent automatic requests join genuinely active work; stranded metadata still enters normal recovery. Completed full baselines continue to use the evidence-recheck planner.
+
+Force-fresh intent also cancels an active evidence-only assessment without changing its completed full baseline. Cancellation targets the assessment's execution, preserves newer pending requests, and keeps replacement admission blocked until execution drains. An uncertain GitHub send or confirmed receipt must retain its reconciliation path. Settled recheck requests clear only their own pending scheduler slot, and terminal full-review fallback markers remain recoverable if the original controller disappears.
+
+There are no schema or API changes. Snapshot provenance is stored in the existing tenant-scoped pending-intent and session revision-context JSON. Existing request modes, authorization, response shapes, and scheduling events are unchanged. These changes require deployment before affecting running reviews.
 
 ### Local validation and rollout
 
@@ -137,7 +145,7 @@ Admission means deciding whether to reuse, defer, or execute a review before cre
 | Description or visual evidence changes | Refresh applicability. Stage 2 falls back to a full review if review inputs differ; Stage 4 may rerun only affected evidence/synthesis. |
 | CI/check/status-only update | Refresh applicable deterministic gates without starting a reviewer panel. Do not introduce an unconditional passing-CI prerequisite; current review policy can deliberately evaluate code independently of CI. |
 | Review now | Bypass quiet/cadence delays and ensure coverage of the current revision. Reuse equivalent work. |
-| Force fresh review | Record a new authorized request and reason; bypass completed-result reuse. Serialize behind active work and obey capacity/budget limits. |
+| Force fresh review | Record a new authorized request and reason; bypass completed-result reuse and cancel active full reviews or evidence-only rechecks. Start the replacement after cancelled execution drains. Preserve uncertain or confirmed publication for reconciliation, and obey capacity/budget limits. |
 | Rate limit, capacity shortage, or exhausted review budget | Keep one latest pending target with an explanation and retry time when known. Recheck eligibility and coverage on wake. |
 
 ### Timing and progress guarantees

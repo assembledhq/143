@@ -137,7 +137,7 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 		return result, err
 	}
 	if snapshot.State != "open" {
-		return result, ErrReviewIneligible
+		return AssessmentInputCaptureResult{Snapshot: snapshot}, ErrReviewIneligible
 	}
 	if err = s.snapshots.SyncPullRequestState(ctx, in.OrgID, in.PullRequestID); err != nil {
 		return result, err

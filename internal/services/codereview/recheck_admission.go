@@ -11,6 +11,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	threadsvc "github.com/assembledhq/143/internal/services/thread"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -107,6 +108,9 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 		SessionID: baseline.SessionID, AssessmentID: uuid.New(), RequestContext: requestContext,
 	})
 	if errors.Is(captureErr, ErrReviewIneligible) {
+		if recovering && captured.Snapshot.State != "" && captured.Snapshot.State != "open" {
+			return s.cancelClosedPendingAssessment(ctx, req, state.RepositoryID, ordinaryHash, kind)
+		}
 		return ScheduleRequestResult{}, captureErr
 	}
 	if errors.Is(captureErr, ErrAssessmentReuseUnavailable) {
@@ -428,7 +432,7 @@ func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleReque
 			}
 			if status != "pending" {
 				result = ScheduleRequestResult{RequestID: req.RequestID, AssessmentID: existingAssessment, SessionID: sessionID, Disposition: models.CodeReviewRequestJoined}
-				return nil
+				return settleCapturedAssessmentPending(ctx, tx, state, requestID, current)
 			}
 		}
 		forcePending, err := pendingForcedFull(state.PendingInput)
@@ -443,8 +447,11 @@ func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleReque
 		if current.Status == models.CodeReviewAssessmentReserved || current.Status == models.CodeReviewAssessmentRunning || current.Status == models.CodeReviewAssessmentPublishing {
 			if current.InputDigest == captured.Manifest.InputDigest {
 				_, err = tx.Exec(ctx, `UPDATE code_review_requests SET status='joined',assessment_id=$3,session_id=$4 WHERE org_id=$1 AND id=$2 AND status='pending'`, req.OrgID, requestID, current.ID, current.SessionID)
+				if err != nil {
+					return err
+				}
 				result = ScheduleRequestResult{RequestID: req.RequestID, AssessmentID: &current.ID, SessionID: &current.SessionID, Disposition: models.CodeReviewRequestJoined}
-				return err
+				return settleCapturedAssessmentPending(ctx, tx, state, requestID, current)
 			}
 			result = ScheduleRequestResult{RequestID: req.RequestID, Disposition: models.CodeReviewRequestQueued}
 			return queuePendingAssessmentInTx(ctx, s, tx, state, req, requestContext, requestID)
@@ -477,7 +484,7 @@ func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleReque
 			}
 			state.CurrentAssessmentID = &current.ID
 			result = ScheduleRequestResult{RequestID: req.RequestID, AssessmentID: &current.ID, SessionID: &current.SessionID, Disposition: models.CodeReviewRequestReused}
-			return nil
+			return settleCapturedAssessmentPending(ctx, tx, state, requestID, current)
 		}
 		if lockedPlan.Route != RecheckRouteEvidenceOnly {
 			return errRecheckAdmissionChanged
@@ -546,6 +553,168 @@ func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleReque
 }
 
 func recheckDedupePtr(v string) *string { return &v }
+
+type evidenceReviewThreadCanceller interface {
+	CancelThreadTurn(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int) (models.SessionThread, error)
+}
+
+// Force fresh is already durable before this runs. The marker and exact-turn
+// cancellation remain recoverable if delivering the interrupt fails or the
+// process stops before delivery. The completed full baseline is never changed.
+func (s *Service) cancelForcedEvidenceAssessment(ctx context.Context, orgID, prID uuid.UUID) error {
+	state, err := s.scheduling.store.Get(ctx, orgID, prID)
+	if err != nil {
+		return err
+	}
+	var assessmentID uuid.UUID
+	var dispatch *models.CodeReviewRecheckDispatch
+	err = s.scheduling.store.WithLockedPR(ctx, orgID, state.RepositoryID, prID, func(tx pgx.Tx, current *models.CodeReviewPRState) error {
+		if current.PendingRequestID == nil || current.PendingInput == nil {
+			return nil
+		}
+		var pending scheduledReviewIntent
+		if err := json.Unmarshal(current.PendingInput, &pending); err != nil {
+			return err
+		}
+		if pending.Mode != models.CodeReviewForceFresh || !pending.Force {
+			return nil
+		}
+		err := tx.QueryRow(ctx, `SELECT a.id FROM code_review_revision_assessments a
+ WHERE a.org_id=$1 AND a.pull_request_id=$2 AND a.review_scope='evidence_only'
+ AND ((a.id=$3 AND a.status IN ('reserved','running','publishing')) OR
+ (a.status='cancelled' AND a.failure_detail LIKE 'force_fresh:%' AND EXISTS(
+ SELECT 1 FROM code_review_recheck_dispatches d
+ JOIN session_threads t ON t.org_id=d.org_id AND t.id=d.thread_id AND t.session_id=d.session_id
+ JOIN sessions s ON s.org_id=d.org_id AND s.id=d.session_id
+ WHERE d.org_id=a.org_id AND d.assessment_id=a.id AND d.status='cancelled'
+ AND s.code_review_owner_pr_id=a.pull_request_id AND t.current_turn=d.expected_turn-1
+ AND t.status IN ('pending','running','awaiting_input','cancelled'))))
+ ORDER BY a.generation DESC LIMIT 1`, orgID, prID, current.ActiveAssessmentID).Scan(&assessmentID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		// Match the dispatch completion lock order before changing its assessment.
+		rows, err := tx.Query(ctx, `SELECT j.id FROM jobs j JOIN code_review_recheck_dispatches d ON d.org_id=j.org_id AND d.job_id=j.id WHERE d.org_id=$1 AND d.assessment_id=$2 FOR UPDATE OF j,d`, orgID, assessmentID)
+		if err != nil {
+			return err
+		}
+		if _, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID]); err != nil {
+			return err
+		}
+		marker := "force_fresh:" + current.PendingRequestID.String()
+		tag, err := tx.Exec(ctx, `UPDATE code_review_revision_assessments SET status='cancelled',failure_detail=$3,completed_at=now()
+ WHERE org_id=$1 AND id=$2 AND review_scope='evidence_only' AND publication_receipt IS NULL AND github_review_id IS NULL
+ AND ((status IN ('reserved','running') AND publication_state='not_started') OR (status='publishing' AND publication_state='reserved'))`, orgID, assessmentID, marker)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			// Recovery retains the request that originally cancelled this turn,
+			// even if a newer force request now owns replacement admission.
+			err := tx.QueryRow(ctx, `SELECT failure_detail FROM code_review_revision_assessments WHERE org_id=$1 AND id=$2 AND status='cancelled' AND failure_detail LIKE 'force_fresh:%'`, orgID, assessmentID).Scan(&marker)
+			if errors.Is(err, pgx.ErrNoRows) {
+				assessmentID = uuid.Nil
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+		}
+		turn, err := db.NewCodeReviewRecheckStore(tx).Get(ctx, orgID, assessmentID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if turn.Status != models.CodeReviewRecheckDispatchPending && turn.Status != models.CodeReviewRecheckDispatchRunning && turn.Status != models.CodeReviewRecheckDispatchCancelled {
+			return nil
+		}
+		if _, err := tx.Exec(ctx, `UPDATE code_review_recheck_dispatches SET status='cancelled',failure_detail=$3,completed_at=COALESCE(completed_at,now()),updated_at=now() WHERE org_id=$1 AND assessment_id=$2 AND status IN ('pending','running')`, orgID, assessmentID, marker); err != nil {
+			return err
+		}
+		tag, err = tx.Exec(ctx, `UPDATE session_threads SET cancel_requested_at=COALESCE(cancel_requested_at,now()) WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4-1 AND status IN ('pending','running','awaiting_input')`, orgID, turn.ThreadID, turn.SessionID, turn.ExpectedTurn)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() > 0 {
+			dispatch = &turn
+		}
+		return nil
+	})
+	if err != nil || assessmentID == uuid.Nil {
+		return err
+	}
+	if dispatch != nil {
+		canceller, ok := s.threadCanceller.(evidenceReviewThreadCanceller)
+		if !ok {
+			return errors.New("evidence review thread cancellation unavailable")
+		}
+		if _, err := canceller.CancelThreadTurn(ctx, orgID, dispatch.SessionID, dispatch.ThreadID, dispatch.ExpectedTurn); err != nil && !errors.Is(err, threadsvc.ErrThreadNotCancellable) {
+			return err
+		}
+	}
+	if err := s.scheduling.store.WithLockedPR(ctx, orgID, state.RepositoryID, prID, func(tx pgx.Tx, _ *models.CodeReviewPRState) error {
+		_, err := db.NewCodeReviewRecheckStore(tx).ReconcileDrainedTerminalTurn(ctx, orgID, assessmentID)
+		return err
+	}); err != nil {
+		return err
+	}
+	return s.scheduling.store.SettleAssessment(ctx, orgID, assessmentID)
+}
+
+// The caller holds the PR lock. Mutate only that request's pending state so a
+// capture finishing after a newer admission cannot erase the newer intent.
+func clearAssessmentPendingRequest(state *models.CodeReviewPRState, requestID uuid.UUID) bool {
+	if state.PendingRequestID == nil || *state.PendingRequestID != requestID {
+		return false
+	}
+	state.PendingInput, state.PendingRequestID = nil, nil
+	state.FirstPendingAt, state.EligibleAt, state.RetryAt = nil, nil, nil
+	return true
+}
+
+func settleCapturedAssessmentPending(ctx context.Context, tx pgx.Tx, state *models.CodeReviewPRState, requestID uuid.UUID, current models.CodeReviewAssessment) error {
+	if !clearAssessmentPendingRequest(state, requestID) || state.State == models.CodeReviewScheduleClosed {
+		return nil
+	}
+	active, err := db.HasActiveCodeReview(ctx, tx, state.OrgID, state.PullRequestID, codeReviewJobEnqueueGracePeriod)
+	if err != nil {
+		return err
+	}
+	state.State, state.WaitReason = models.CodeReviewScheduleIdle, models.CodeReviewWaitNone
+	if active {
+		state.State = models.CodeReviewScheduleRunning
+	} else if current.Status == models.CodeReviewAssessmentCompleted && current.HeadSHA == state.HeadSHA && current.BaseSHA == state.BaseSHA && current.BaseRef == state.BaseRef {
+		state.State = models.CodeReviewScheduleCovered
+	}
+	return nil
+}
+
+func (s *Service) cancelClosedPendingAssessment(ctx context.Context, req ScheduleRequestInput, repoID uuid.UUID, hash, kind string) (ScheduleRequestResult, error) {
+	var record db.CodeReviewRequestRecord
+	err := s.scheduling.store.WithLockedPR(ctx, req.OrgID, repoID, req.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
+		requestID, _, err := db.RecordCodeReviewRequest(ctx, tx, req.OrgID, repoID, req.PullRequestID, kind, req.RequestID.String(), req.Mode, hash, state.Generation+1, req.RequesterID)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE code_review_requests SET status='cancelled' WHERE org_id=$1 AND id=$2 AND status='pending'`, req.OrgID, requestID); err != nil {
+			return err
+		}
+		if clearAssessmentPendingRequest(state, requestID) {
+			state.State, state.WaitReason = models.CodeReviewScheduleClosed, models.CodeReviewWaitNone
+		}
+		record, err = db.NewCodeReviewScheduleStore(tx).GetRequestByIdentity(ctx, req.OrgID, kind, req.RequestID.String())
+		return err
+	})
+	if err != nil {
+		return ScheduleRequestResult{}, err
+	}
+	return s.existingAssessmentRequestResult(ctx, req, record)
+}
 
 func queuePendingAssessmentInTx(ctx context.Context, s *Service, tx pgx.Tx, state *models.CodeReviewPRState, req ScheduleRequestInput, requestContext *ReviewRequestContext, requestID uuid.UUID) error {
 	if state.PendingRequestID != nil && *state.PendingRequestID != requestID {
