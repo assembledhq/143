@@ -20,7 +20,8 @@ spec.loader.exec_module(installer)
 
 def healthy_report():
     return {**dict.fromkeys(monitor.FLAGS, False),
-            **dict.fromkeys(monitor.NUMBERS, 1), 'last_attempt': {'error': 'secret should not escape'}}
+            **dict.fromkeys(monitor.NUMBERS, 1), 'recovery_target_seconds': 21600,
+            'last_attempt': {'error': 'secret should not escape'}}
 
 
 class MonitorTests(unittest.TestCase):
@@ -62,12 +63,34 @@ class MonitorTests(unittest.TestCase):
                     self.assertEqual(os.environ['BACKUP_ENABLED'], value)
                     self.assertEqual(os.environ['RESTORE_TEST_ENABLED'], 'false')
                     self.assertNotIn('BACKUP_RESERVE_BYTES', os.environ)
+                    self.assertNotIn('BACKUP_RECOVERY_TARGET_HOURS', os.environ)
                     return healthy_report()
-                with mock.patch.dict(os.environ, BACKUP_ENABLED='ambient', BACKUP_RESERVE_BYTES='0'), \
+                with mock.patch.dict(os.environ, BACKUP_ENABLED='ambient', BACKUP_RESERVE_BYTES='0', BACKUP_RECOVERY_TARGET_HOURS='24'), \
                      mock.patch.object(monitor.health, 'collect', side_effect=collect):
                     self.assertEqual(monitor.snapshot(self.cron), healthy_report())
                     self.assertEqual(os.environ['BACKUP_ENABLED'], 'ambient')
                     self.assertEqual(os.environ['BACKUP_RESERVE_BYTES'], '0')
+                    self.assertEqual(os.environ['BACKUP_RECOVERY_TARGET_HOURS'], '24')
+
+    def test_recovery_target_is_literal_and_comes_from_current_cron(self):
+        original = self.cron.read_text()
+        self.cron.write_text(original + 'BACKUP_RECOVERY_TARGET_HOURS=12\n')
+        def collect(_root):
+            self.assertEqual(os.environ['BACKUP_RECOVERY_TARGET_HOURS'], '12')
+            return healthy_report()
+        with mock.patch.dict(os.environ, BACKUP_RECOVERY_TARGET_HOURS='6'), \
+             mock.patch.object(monitor.health, 'collect', side_effect=collect):
+            monitor.snapshot(self.cron)
+            self.assertEqual(os.environ['BACKUP_RECOVERY_TARGET_HOURS'], '6')
+        for line in ('BACKUP_RECOVERY_TARGET_HOURS=25', 'BACKUP_RECOVERY_TARGET_HOURS=',
+                     ' BACKUP_RECOVERY_TARGET_HOURS=12', 'BACKUP_RECOVERY_TARGET_HOURS=$(false)',
+                     'BACKUP_RECOVERY_TARGET_HOURS=12\nBACKUP_RECOVERY_TARGET_HOURS=6'):
+            with self.subTest(line=line):
+                self.cron.write_text(original + line + '\n')
+                with mock.patch.object(monitor, 'deliver') as send:
+                    event = monitor.run(self.config_path, self.cron)
+                self.assertEqual(event['telemetry_failed'], 1)
+                send.assert_called_once_with(self.config, event)
 
     def test_failed_collector_still_delivers_an_explicit_failure(self):
         for exc in (Refused('secret'), TimeoutError('secret'), FileNotFoundError('secret'), KeyError('secret')):
@@ -93,18 +116,25 @@ class MonitorTests(unittest.TestCase):
         send.assert_called_once_with(self.config, event)
 
     def test_event_is_scalar_bounded_and_snapshot_freshness_has_dump_grace(self):
-        for age, missed in ((None, 1), (21600, 0), (24300, 0), (24301, 1)):
-            with self.subTest(age=age):
+        for target, age, missed in ((21600, None, 1), (21600, 21600, 0), (21600, 24300, 0),
+                                   (21600, 24301, 1), (43200, None, 1), (43200, 43200, 0),
+                                   (43200, 45900, 0), (43200, 45901, 1)):
+            with self.subTest(target=target, age=age):
                 report = healthy_report()
                 report['recovery_age_seconds'] = age
+                report['recovery_target_seconds'] = target
                 event = monitor.event_for(self.config, report)
                 self.assertEqual(event['recovery_target_missed'], missed)
+                self.assertEqual(event['recovery_target_seconds'], target)
                 self.assertNotIn('last_attempt', event)
                 self.assertNotIn('secret', json.dumps(event))
                 self.assertTrue(all(type(v) in (str, int, float) for v in event.values()))
         for invalid in (float('inf'), -1, True, '100'):
             with self.subTest(invalid=invalid), self.assertRaises(Refused):
                 monitor.event_for(self.config, dict(healthy_report(), free_bytes=invalid))
+        for invalid in (None, True, 0, 3601, 90000, '43200'):
+            with self.subTest(invalid=invalid), self.assertRaises(Refused):
+                monitor.event_for(self.config, dict(healthy_report(), recovery_target_seconds=invalid))
 
     def test_transport_does_not_follow_redirects_retry_or_read_bodies(self):
         for status, success in ((200, True), (204, True), (302, False), (429, False), (500, False)):

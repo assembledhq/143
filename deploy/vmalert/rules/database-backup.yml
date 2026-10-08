@@ -63,7 +63,7 @@ groups:
           team: platform
           signal: logs
         annotations:
-          summary: 'The six-hour recovery target plus 45-minute dump budget was missed'
+          summary: 'The configured recovery target plus 45-minute dump budget was missed'
           description: 'The latest report from {{ $labels.monitor_id }} reports recovery_target_missed.'
           runbook: 'Check snapshot-based freshness and offsite receipts. A held schedule does not provide fresh recovery coverage.'
       - alert: DatabaseBackupCapacityLow

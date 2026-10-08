@@ -18,6 +18,7 @@
 #   BACKUP_AWS_ACCESS_KEY_ID, BACKUP_AWS_SECRET_ACCESS_KEY
 # Optional schedule controls (also exported by provision.sh from private config):
 #   BACKUP_ENABLED, RESTORE_TEST_ENABLED (true/false; omitted preserves host state)
+#   BACKUP_CRON, BACKUP_RECOVERY_TARGET_HOURS (omitted preserves host state)
 #
 # Usage:
 #   provision-db-backups.sh <host> [ssh_key]
@@ -36,6 +37,14 @@ for setting in BACKUP_ENABLED RESTORE_TEST_ENABLED; do
     *) echo "ERROR: $setting must be true or false" >&2; exit 1 ;;
   esac
 done
+if [[ -n "${BACKUP_CRON:-}" && ! "$BACKUP_CRON" =~ ^[0-9*,/-]+\ [0-9*,/-]+\ [0-9*,/-]+\ [0-9*,/-]+\ [0-9*,/-]+$ ]]; then
+  echo 'ERROR: BACKUP_CRON must contain five numeric cron fields' >&2
+  exit 1
+fi
+if [[ -n "${BACKUP_RECOVERY_TARGET_HOURS:-}" && ! "$BACKUP_RECOVERY_TARGET_HOURS" =~ ^([1-9]|1[0-9]|2[0-4])$ ]]; then
+  echo 'ERROR: BACKUP_RECOVERY_TARGET_HOURS must be an integer from 1 to 24' >&2
+  exit 1
+fi
 
 # Validate all storage fields before copying anything to a host. JSON escaping
 # preserves literal credential bytes; no credential becomes shell program text.
@@ -75,5 +84,5 @@ else
 fi
 
 ssh "${SSH_OPTS[@]}" root@"$HOST" \
-  "chmod +x /opt/143/deploy/scripts/pg-backup.sh /opt/143/deploy/scripts/restore-test.sh /opt/143/deploy/scripts/install-pg-backups.sh && BACKUP_ENABLED='${BACKUP_ENABLED:-}' RESTORE_TEST_ENABLED='${RESTORE_TEST_ENABLED:-}' /opt/143/deploy/scripts/install-pg-backups.sh"
+  "chmod +x /opt/143/deploy/scripts/pg-backup.sh /opt/143/deploy/scripts/restore-test.sh /opt/143/deploy/scripts/install-pg-backups.sh && BACKUP_CRON='${BACKUP_CRON:-}' BACKUP_RECOVERY_TARGET_HOURS='${BACKUP_RECOVERY_TARGET_HOURS:-}' BACKUP_ENABLED='${BACKUP_ENABLED:-}' RESTORE_TEST_ENABLED='${RESTORE_TEST_ENABLED:-}' /opt/143/deploy/scripts/install-pg-backups.sh"
 echo "--- DB backups configured on $HOST ---"

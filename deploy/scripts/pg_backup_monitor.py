@@ -22,7 +22,8 @@ PRIVATE_NETWORKS = tuple(ipaddress.IPv4Network(n) for n in
                          ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
 FLAGS = ('backup_held', 'restore_held', 'backup_failed', 'watchdog_stale',
          'recovery_stale', 'restore_overdue', 'capacity_low', 'reserve_at_risk', 'swap_high')
-NUMBERS = ('recovery_age_seconds', 'restore_age_seconds', 'qualified_copies', 'free_bytes', 'swap_bytes')
+NUMBERS = ('recovery_age_seconds', 'recovery_target_seconds', 'restore_age_seconds',
+           'qualified_copies', 'free_bytes', 'swap_bytes')
 
 
 def validate_config(config):
@@ -40,7 +41,8 @@ def schedule_settings(path):
     # Never source cron or the host .env (which also contains credentials).
     require(path.is_file() and not path.is_symlink() and path.stat().st_size < 16384,
             'backup schedule unavailable')
-    wanted = {'BACKUP_DIR', 'BACKUP_ENABLED', 'RESTORE_TEST_ENABLED', 'BACKUP_RESERVE_BYTES'}
+    wanted = {'BACKUP_DIR', 'BACKUP_ENABLED', 'RESTORE_TEST_ENABLED', 'BACKUP_RESERVE_BYTES',
+              'BACKUP_RECOVERY_TARGET_HOURS'}
     settings = {}
     for line in path.read_text().splitlines():
         match = re.match(r'^\s*([A-Z_]+)\s*=(.*)$', line)
@@ -55,14 +57,17 @@ def schedule_settings(path):
             'invalid backup directory')
     if 'BACKUP_RESERVE_BYTES' in settings:
         require(settings['BACKUP_RESERVE_BYTES'].isdigit(), 'invalid backup reserve')
+    health.recovery_target_seconds(settings.get('BACKUP_RECOVERY_TARGET_HOURS', '6'))
     return settings
 
 
 def snapshot(cron):
     settings = schedule_settings(cron)
-    original = {k: os.environ.get(k) for k in (*settings, 'BACKUP_RESERVE_BYTES')}
+    optional = ('BACKUP_RESERVE_BYTES', 'BACKUP_RECOVERY_TARGET_HOURS')
+    original = {k: os.environ.get(k) for k in (*settings, *optional)}
     try:
-        os.environ.pop('BACKUP_RESERVE_BYTES', None)
+        for key in optional:
+            os.environ.pop(key, None)
         os.environ.update(settings)
         return health.collect(Path(settings['BACKUP_DIR']))
     finally:
@@ -89,8 +94,11 @@ def event_for(config, report):
         if value is not None:
             event[key] = value
     age = report['recovery_age_seconds']
-    # Report the six-hour objective separately; alert after the dump budget.
-    event['recovery_target_missed'] = int(age is None or age > 6 * 3600 + 45 * 60)
+    target = report['recovery_target_seconds']
+    require(type(target) is int and 3600 <= target <= 86400 and target % 3600 == 0,
+            'invalid recovery target')
+    # Report the configured objective separately; alert after the dump budget.
+    event['recovery_target_missed'] = int(age is None or age > target + 45 * 60)
     return event
 
 

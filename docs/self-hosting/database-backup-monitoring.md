@@ -81,7 +81,7 @@ The rules in `deploy/vmalert/rules/database-backup.yml` cover:
 | Invalid health evidence or failed collection | Critical | 1 minute |
 | Latest backup/resume attempt failed, including admission or lock refusal | Warning | 1 minute |
 | Stale/failed owned watchdog | Critical | 1 minute |
-| Recovery point older than six hours plus a 45-minute dump budget, or no qualified copy | Critical | 1 minute |
+| Recovery point older than the configured target plus a 45-minute dump budget, or no qualified copy | Critical | 1 minute |
 | Capacity below the next admission budget | Warning | 5 minutes |
 | Free disk approaching the reserved floor | Critical | 1 minute |
 | Independent full restore overdue | Warning | 15 minutes |
@@ -93,6 +93,12 @@ State alerts use the latest report, so a healthy report resolves prior failures.
 Capacity includes space before normal verified retention; three retained copies
 can therefore produce a warning even when an attended retention step would make
 room. Recovery age always uses dump start, not import/upload completion.
+`BACKUP_RECOVERY_TARGET_HOURS` in the backup cron file controls this objective
+(default 6; integer 1–24). The collector emits `recovery_target_seconds` alongside
+actual snapshot age. Local health marks the objective missed at that age; central
+alerts retain the additional 45-minute dump budget. Missing or invalid receipts
+still alert, and malformed target settings report telemetry failure. Match this
+setting to the approved schedule without changing snapshot timestamps.
 
 Before relying on this integration, confirm current central events for the exact
 expected ID. In an approved window, demonstrate collector/delivery failure,

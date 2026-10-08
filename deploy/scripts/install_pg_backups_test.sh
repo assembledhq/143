@@ -71,9 +71,20 @@ run_installer >/dev/null 2>&1
 [ "$(cat "$TMP_DIR/backups/.backup-state/scheduled-backup.json")" = "$profile_before" ] || fail "installer changed private schedule approval"
 
 # 3. Env overrides flow into the cron file.
-out="$(run_installer BACKUP_CRON='30 */4 * * *' BACKUP_RETENTION_DAYS=14)"
+out="$(run_installer BACKUP_CRON='30 */4 * * *' BACKUP_RECOVERY_TARGET_HOURS=4 BACKUP_RETENTION_DAYS=14)"
 grep -q '^30 \*/4 \* \* \* root ' "$CRON_FILE" || fail "custom BACKUP_CRON not applied"
 if grep -q '^BACKUP_RETENTION_DAYS=' "$CRON_FILE"; then fail 'legacy retention override must not enable age pruning'; fi
+
+grep -q '^BACKUP_RECOVERY_TARGET_HOURS=4$' "$CRON_FILE" || fail "target override not applied"
+before="$(cat "$CRON_FILE")"
+run_installer >/dev/null 2>&1
+[ "$(cat "$CRON_FILE")" = "$before" ] || fail "omitted schedule/target must preserve installed settings"
+for setting in 'BACKUP_CRON=0 */12 * * *; false' $'BACKUP_CRON=0 */12 * * *\n0 * * * * root false' 'BACKUP_RECOVERY_TARGET_HOURS=25' 'BACKUP_RECOVERY_TARGET_HOURS=0' 'BACKUP_RECOVERY_TARGET_HOURS=012'; do
+  if run_installer "$setting" >/dev/null 2>&1; then fail "invalid schedule/target accepted"; fi
+  [ "$(cat "$CRON_FILE")" = "$before" ] || fail "invalid schedule/target changed cron"
+done
+# Explicitly reset test cadence before testing the independent holds.
+run_installer BACKUP_CRON='0 */6 * * *' BACKUP_RECOVERY_TARGET_HOURS=6 >/dev/null 2>&1
 
 # 4. Holds disable only the selected schedule and survive an omitted override.
 run_installer BACKUP_ENABLED=true RESTORE_TEST_ENABLED=false >/dev/null 2>&1
@@ -117,6 +128,16 @@ done
 run_installer BACKUP_ENABLED=true RESTORE_TEST_ENABLED=true >/dev/null
 grep -q '^0 \*/6 .*pg-backup.sh' "$CRON_FILE" || fail "explicit backup resume must restore its schedule"
 grep -q '^0 5 .*restore-test.sh' "$CRON_FILE" || fail "explicit restore resume must restore its schedule"
+
+# Duplicate or noncanonical persisted schedule fields fail closed.
+for bad in 'BACKUP_CRON=0 */12 * * *' ' BACKUP_CRON=0 */12 * * *' 'BACKUP_RECOVERY_TARGET_HOURS=12' ' BACKUP_RECOVERY_TARGET_HOURS=12'; do
+  prior="$(cat "$CRON_FILE")"
+  printf '%s\n' "$bad" >> "$CRON_FILE"
+  before="$(cat "$CRON_FILE")"
+  if run_installer >/dev/null 2>&1; then fail "ambiguous installed schedule accepted"; fi
+  [ "$(cat "$CRON_FILE")" = "$before" ] || fail "ambiguous schedule changed cron"
+  printf '%s\n' "$prior" > "$CRON_FILE"
+done
 
 # 5. Missing backup script is a hard error.
 rm -f "$SCRIPTS/restore-test.sh"

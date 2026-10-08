@@ -104,7 +104,7 @@ simulate an observer. The observer must watch disk and memory and have an
 ownership-checked stop procedure. Scheduled backups use a separately approved
 start window as described below; installing helpers does not validate alert delivery.
 Keep schedules held while validating a deployment and assign an operator to
-arrange attended backups at the six-hour target cadence. If that cannot be met,
+arrange attended backups at the configured target cadence (six hours by default). If that cannot be met,
 record the recovery-point gap and next reassessment time. Installing helpers
 does not establish backup coverage.
 
@@ -115,6 +115,16 @@ the existing backup and restore holds. Scheduled execution requires both
 `BACKUP_ENABLED=true` and a private approval profile at
 `$BACKUP_DIR/.backup-state/scheduled-backup.json`. Code installation and cron
 refresh do not create, modify or renew this file.
+
+`BACKUP_CRON` sets the five-field schedule in the **host's cron timezone**
+(default `0 */6 * * *`). `BACKUP_RECOVERY_TARGET_HOURS` sets the snapshot-age
+objective, an integer from 1 to 24 (default 6). Choose both together: changing
+cron does not automatically change the recovery objective. Persist them in
+private deployment configuration; provisioning forwards them and the installer
+preserves installed values when an override is omitted. Neither setting renews
+the approval window or changes resource guards. For a bounded window, convert
+local start times to the host timezone and check daylight-saving transitions.
+A missed start extends the recovery gap until another backup succeeds.
 
 An operator must separately approve and atomically install a profile owned by
 the account running the backup (root for the installed cron), with mode 0600
@@ -336,7 +346,7 @@ The independent `pg_backup_health.py` computes freshness from that lower bound,
 or the original timestamp in a recognized legacy filename. Receipt-import and
 upload times never reset recovery-point age. It reads atomic evidence without
 taking the common lock and emits JSON for failure, stale telemetry, reserve
-pressure, missed six-hour recovery targets and overdue full restore evidence.
+pressure, missed configured recovery targets and overdue full restore evidence.
 It has no database, Docker or S3 access. Scheduled collection and central alerts
 have a separate opt-in [monitoring installation](database-backup-monitoring.md).
 The backup installer alone does not enable them. Keep operator checks and both

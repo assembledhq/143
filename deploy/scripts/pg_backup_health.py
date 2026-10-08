@@ -14,6 +14,12 @@ from pg_backup_state import Refused, require, now, identity, read_json, atomic_j
 GIB = 1024 ** 3
 
 
+def recovery_target_seconds(value):
+    require(isinstance(value, str) and re.fullmatch(r'(?:[1-9]|1[0-9]|2[0-4])', value),
+            'recovery target must be an integer from 1 to 24 hours')
+    return int(value) * 3600
+
+
 def age(value, current):
     parsed = dt.datetime.fromisoformat(value)
     require(parsed.tzinfo is not None, 'timestamp lacks timezone')
@@ -43,6 +49,7 @@ def swap_usage():
 
 def collect(root, current=None):
     current = time.time() if current is None else current
+    recovery_target = recovery_target_seconds(os.environ.get('BACKUP_RECOVERY_TARGET_HOURS', '6'))
     state = root / '.backup-state'
     require(root.resolve() == root.absolute() and state.is_dir() and not state.is_symlink()
             and state.stat().st_uid == os.geteuid() and not state.stat().st_mode & 0o077,
@@ -130,7 +137,8 @@ def collect(root, current=None):
                 backup_held=not schedule_active, scheduled_backup_error=schedule_error,
                 restore_held=os.environ.get('RESTORE_TEST_ENABLED') != 'true',
                 telemetry_failed=False, backup_failed=failed, watchdog_stale=bool(stalled),
-                recovery_age_seconds=freshness, recovery_stale=freshness is None or freshness > 6 * 3600,
+                recovery_age_seconds=freshness, recovery_target_seconds=recovery_target,
+                recovery_stale=freshness is None or freshness > recovery_target,
                 restore_age_seconds=restore_age, restore_overdue=restore_age is None or restore_age > 8 * 86400,
                 qualified_copies=len(records), free_bytes=free,
                 capacity_low=len(records) < 2 or free < reserve + 5 * GIB + int(largest * 1.25),

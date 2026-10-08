@@ -23,7 +23,8 @@
 #   BACKUP_DIR             (default /backups/postgres)
 #   Retention is two receipt-qualified copies, not an age window.
 #   SCRIPTS_DIR            (default /opt/143/deploy/scripts)
-#   BACKUP_CRON            (default "0 */6 * * *")
+#   BACKUP_CRON            (preserve installed; default "0 */6 * * *")
+#   BACKUP_RECOVERY_TARGET_HOURS (preserve installed; default 6; integer 1–24)
 #   RESTORE_TEST_CRON      (default "0 5 * * 0")
 #   BACKUP_ENABLED / RESTORE_TEST_ENABLED (true/false; otherwise preserve the
 #                           installed value, defaulting to true on first install)
@@ -33,33 +34,36 @@ set -euo pipefail
 
 BACKUP_DIR="${BACKUP_DIR:-/backups/postgres}"
 SCRIPTS_DIR="${SCRIPTS_DIR:-/opt/143/deploy/scripts}"
-BACKUP_CRON="${BACKUP_CRON:-0 */6 * * *}"
 RESTORE_TEST_CRON="${RESTORE_TEST_CRON:-0 5 * * 0}"
 
 CRON_FILE="${CRON_FILE:-/etc/cron.d/143-pg-backup}"
 PG_BACKUP_LOG="${PG_BACKUP_LOG:-/var/log/pg-backup.log}"
 RESTORE_TEST_LOG="${RESTORE_TEST_LOG:-/var/log/restore-test.log}"
 
-# Read only the literal boolean fields; never source a cron file as shell.
+# Read only literal settings; never source a cron file as shell.
 # An omitted setting must not undo an operator's previously installed hold.
-resolve_enabled() {
-  local name="$1" value="$2"
+resolve_setting() {
+  local name="$1" value="$2" default="$3"
   if [ -z "$value" ] && [ -f "$CRON_FILE" ]; then
     # Cron accepts whitespace around names/equals; reject noncanonical forms
     # rather than overlook a hand-written hold and silently enable the job.
     if ! awk -v key="$name" '
       $0 ~ "^[[:space:]]*" key "[[:space:]]*=" && $0 !~ "^" key "=" { exit 1 }
     ' "$CRON_FILE"; then
-      echo "ERROR: installed $name has noncanonical spacing; supply an explicit true or false" >&2
+      echo "ERROR: installed $name has noncanonical spacing; supply an explicit value" >&2
       return 1
     fi
     value="$(awk -F= -v key="$name" '$1 == key { print substr($0, length(key) + 2) }' "$CRON_FILE")"
     if [ -z "$value" ] && grep -q "^$name=" "$CRON_FILE"; then
-      echo "ERROR: installed $name is empty; supply an explicit true or false" >&2
+      echo "ERROR: installed $name is empty; supply an explicit value" >&2
       return 1
     fi
   fi
-  value="${value:-true}"
+  printf '%s\n' "${value:-$default}"
+}
+resolve_enabled() {
+  local name="$1" value
+  value="$(resolve_setting "$name" "$2" true)"
   case "$value" in
     true|false) printf '%s\n' "$value" ;;
     *) echo "ERROR: $name must be true or false" >&2; return 1 ;;
@@ -67,6 +71,16 @@ resolve_enabled() {
 }
 BACKUP_ENABLED="$(resolve_enabled BACKUP_ENABLED "${BACKUP_ENABLED:-}")"
 RESTORE_TEST_ENABLED="$(resolve_enabled RESTORE_TEST_ENABLED "${RESTORE_TEST_ENABLED:-}")"
+BACKUP_CRON="$(resolve_setting BACKUP_CRON "${BACKUP_CRON:-}" '0 */6 * * *')"
+BACKUP_RECOVERY_TARGET_HOURS="$(resolve_setting BACKUP_RECOVERY_TARGET_HOURS "${BACKUP_RECOVERY_TARGET_HOURS:-}" 6)"
+if [[ ! "$BACKUP_CRON" =~ ^[0-9*,/-]+\ [0-9*,/-]+\ [0-9*,/-]+\ [0-9*,/-]+\ [0-9*,/-]+$ ]]; then
+  echo 'ERROR: BACKUP_CRON must contain five numeric cron fields' >&2
+  exit 1
+fi
+if [[ ! "$BACKUP_RECOVERY_TARGET_HOURS" =~ ^([1-9]|1[0-9]|2[0-4])$ ]]; then
+  echo 'ERROR: BACKUP_RECOVERY_TARGET_HOURS must be an integer from 1 to 24' >&2
+  exit 1
+fi
 
 # The backup scripts must already be on the host (provision.sh / the wrapper
 # copy them to SCRIPTS_DIR before invoking this installer).
@@ -98,6 +112,8 @@ DESIRED="$(cat <<EOF
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BACKUP_DIR=$BACKUP_DIR
+BACKUP_CRON=$BACKUP_CRON
+BACKUP_RECOVERY_TARGET_HOURS=$BACKUP_RECOVERY_TARGET_HOURS
 BACKUP_ENABLED=$BACKUP_ENABLED
 RESTORE_TEST_ENABLED=$RESTORE_TEST_ENABLED
 

@@ -68,6 +68,18 @@ class HealthTests(unittest.TestCase):
                 self.assertEqual(report['recovery_age_seconds'], 7 * 3600)
                 self.assertTrue(report['recovery_stale'])
 
+    def test_configured_recovery_target_uses_snapshot_age(self):
+        self.record('20260927-000000')
+        for hours, elapsed, stale in [('6', 0, True), ('12', 0, False), ('12', 1, True)]:
+            with self.subTest(hours=hours, elapsed=elapsed), mock.patch.dict(os.environ, BACKUP_RECOVERY_TARGET_HOURS=hours):
+                report = health.collect(self.root, self.current + elapsed)
+                self.assertEqual(report['recovery_target_seconds'], int(hours) * 3600)
+                self.assertEqual(report['recovery_age_seconds'], 12 * 3600 + elapsed)
+                self.assertEqual(report['recovery_stale'], stale)
+        for value in ('', '0', '25', '-1', '12.5', '012', ' 12', '12\n', 'nan', '12; echo unsafe'):
+            with self.subTest(value=value), mock.patch.dict(os.environ, BACKUP_RECOVERY_TARGET_HOURS=value):
+                with self.assertRaises(Refused): health.collect(self.root, self.current)
+
     def test_holds_do_not_suppress_stale_or_overdue_or_capacity(self):
         with mock.patch.dict(os.environ, BACKUP_ENABLED='false', RESTORE_TEST_ENABLED='false'):
             report = health.collect(self.root, self.current)
