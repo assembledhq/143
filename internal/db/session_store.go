@@ -1979,33 +1979,33 @@ func (s *SessionStore) publishWorkspaceGenerationChanged(ctx context.Context, or
 	}
 }
 
-// ListTerminalEndedBefore returns terminal sessions whose completed_at is older than before.
+// ListTerminalEndedBefore returns only cleanup identifiers, ordered by a stable
+// keyset. Full session payloads can be hundreds of megabytes and are not needed
+// to delete Redis keys. Soft-deleted sessions are included so their keys expire too.
 // lint:allow-no-orgid reason="cross-org Redis cleanup scans terminal sessions across all orgs"
-func (s *SessionStore) ListTerminalEndedBefore(ctx context.Context, before time.Time, limit int) ([]models.Session, error) {
+func (s *SessionStore) ListTerminalEndedBefore(ctx context.Context, before time.Time, after *models.SessionStreamCleanupCursor, limit int) ([]models.SessionStreamCleanupCursor, error) {
 	query := `
-		SELECT ` + sessionSelectColumns + `
+		SELECT id, completed_at
 		FROM sessions
 		WHERE status IN ('completed', 'failed', 'cancelled', 'pr_created', 'skipped')
 		  AND completed_at IS NOT NULL
-		  AND completed_at < @before
-		ORDER BY completed_at ASC
-		LIMIT @limit`
-
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		  AND completed_at < @before`
+	args := pgx.NamedArgs{
 		"before": before,
 		"limit":  limit,
-	})
+	}
+	if after != nil {
+		query += ` AND (completed_at, id) > (@after_completed_at, @after_id)`
+		args["after_completed_at"] = after.CompletedAt
+		args["after_id"] = after.ID
+	}
+	query += ` ORDER BY completed_at ASC, id ASC LIMIT @limit`
+
+	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
 		return nil, fmt.Errorf("list terminal sessions before: %w", err)
 	}
-	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
-	if err != nil {
-		return nil, err
-	}
-	for i := range sessions {
-		hydrateSessionPolicy(&sessions[i])
-	}
-	return sessions, nil
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionStreamCleanupCursor])
 }
 
 // ClaimIdle atomically transitions an idle session to running and returns the

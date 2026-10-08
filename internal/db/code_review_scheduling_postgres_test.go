@@ -41,13 +41,15 @@ func newSchedulingPostgres(t *testing.T) (*pgxpool.Pool, uuid.UUID, uuid.UUID, u
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	require.NoError(t, err, "create concurrent pool")
 	t.Cleanup(pool.Close)
-	_, err = pool.Exec(ctx, `CREATE TABLE organizations(id uuid PRIMARY KEY);CREATE TABLE repositories(id uuid PRIMARY KEY,org_id uuid,full_name text);CREATE TABLE pull_requests(id uuid PRIMARY KEY,org_id uuid,github_repo text,title text,github_pr_url text,github_pr_number integer);CREATE TABLE users(id uuid PRIMARY KEY);CREATE TABLE sessions(id uuid PRIMARY KEY,org_id uuid,code_review_owner_pr_id uuid,status text,container_id text,turn_holding_container boolean);CREATE TABLE code_review_policies(id uuid PRIMARY KEY);
- CREATE TABLE code_review_session_metadata(org_id uuid,session_id uuid,pull_request_id uuid,status text,created_at timestamptz DEFAULT now(),review_output_key text,id uuid DEFAULT gen_random_uuid());
- CREATE TABLE session_threads(org_id uuid,session_id uuid,status text,id uuid DEFAULT gen_random_uuid(),cancel_requested_at timestamptz,completed_at timestamptz,last_activity_at timestamptz);
+	_, err = pool.Exec(ctx, `CREATE TABLE organizations(id uuid PRIMARY KEY);CREATE TABLE repositories(id uuid PRIMARY KEY,org_id uuid,full_name text);CREATE TABLE pull_requests(id uuid PRIMARY KEY,org_id uuid,github_repo text,title text,github_pr_url text,github_pr_number integer);CREATE TABLE users(id uuid PRIMARY KEY);CREATE TABLE sessions(id uuid PRIMARY KEY,org_id uuid,code_review_owner_pr_id uuid,status text,origin text,container_id text,turn_holding_container boolean);CREATE TABLE code_review_policies(id uuid PRIMARY KEY);
+ CREATE TABLE code_review_session_metadata(org_id uuid,session_id uuid,pull_request_id uuid,status text,created_at timestamptz DEFAULT now(),review_output_key text,github_review_id bigint,id uuid DEFAULT gen_random_uuid());
+ CREATE TABLE session_threads(org_id uuid,session_id uuid,status text,id uuid DEFAULT gen_random_uuid(),cancel_requested_at timestamptz,completed_at timestamptz,last_activity_at timestamptz,failure_category text,failure_explanation text,current_turn integer);
  CREATE TABLE code_review_revision_assessments(id uuid PRIMARY KEY,org_id uuid,repository_id uuid,pull_request_id uuid,session_id uuid,review_scope text,status text,head_sha text DEFAULT '',base_sha text DEFAULT '',base_ref text DEFAULT '',generation bigint DEFAULT 1,superseded_by_assessment_id uuid,failure_detail text,created_at timestamptz DEFAULT now(),publication_state text DEFAULT 'not_started',result_origin text,publication_key text DEFAULT '',metadata_id uuid,publication_receipt jsonb,github_review_id bigint,completed_at timestamptz,superseded_at timestamptz);
- CREATE TABLE code_review_recheck_dispatches(org_id uuid,session_id uuid,status text,id uuid DEFAULT gen_random_uuid(),assessment_id uuid,thread_id uuid,job_id uuid,created_at timestamptz DEFAULT now());
+ CREATE TABLE code_review_recheck_dispatches(org_id uuid,session_id uuid,status text,id uuid DEFAULT gen_random_uuid(),assessment_id uuid,thread_id uuid,job_id uuid,created_at timestamptz DEFAULT now(),pull_request_id uuid,failure_detail text,expected_turn integer);
  CREATE TABLE thread_runtimes(org_id uuid,session_id uuid,status text);
  CREATE TABLE session_executors(org_id uuid,session_id uuid,status text,thread_id uuid,job_id uuid);
+ CREATE TABLE preview_instances(org_id uuid,session_id uuid,preview_holding_container boolean);
+ CREATE TABLE session_sandbox_holders(org_id uuid,session_id uuid,status text,expires_at timestamptz);
  CREATE TABLE jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid,queue text,job_type text,payload jsonb,priority int,dedupe_key text,status text DEFAULT 'pending',run_at timestamptz DEFAULT now(),created_at timestamptz DEFAULT now(),updated_at timestamptz DEFAULT now(),attempts int DEFAULT 0,max_attempts int DEFAULT 8,last_error text,locked_by_node_id text,run_owner_id text,owner_kind text,lock_token uuid,locked_at timestamptz,lease_expires_at timestamptz,completed_at timestamptz);
  CREATE UNIQUE INDEX jobs_dedupe ON jobs(queue,dedupe_key) WHERE status IN ('pending','running');`)
 	require.NoError(t, err, "create scheduling dependencies")
@@ -152,7 +154,7 @@ func TestCodeReviewSchedulingPostgres(t *testing.T) {
 		{"active evidence assessment blocks and repair restores supervisor", func(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID) {
 			ctx := context.Background()
 			assessmentID := uuid.New()
-			_, err := pool.Exec(ctx, `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,pull_request_id,review_scope,status,head_sha,base_sha,base_ref) VALUES($1,$2,$3,$4,'evidence_only','publishing','head','base','main')`, assessmentID, org, repo, pr)
+			_, err := pool.Exec(ctx, `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,pull_request_id,review_scope,status,publication_state,head_sha,base_sha,base_ref) VALUES($1,$2,$3,$4,'evidence_only','publishing','uncertain','head','base','main')`, assessmentID, org, repo, pr)
 			require.NoError(t, err, "seed uncertain assessment")
 			store := NewCodeReviewScheduleStore(pool)
 			require.NoError(t, store.WithLockedPR(ctx, org, repo, pr, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
@@ -166,7 +168,7 @@ func TestCodeReviewSchedulingPostgres(t *testing.T) {
 			var count int
 			require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE org_id=$1 AND dedupe_key=$2 AND status='pending'`, org, "code_review_recheck:"+assessmentID.String()).Scan(&count), "count supervisor jobs")
 			require.Equal(t, 1, count, "one supervisor resumes uncertain publication")
-			_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status='completed' WHERE org_id=$1 AND id=$2`, org, assessmentID)
+			_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status='completed',publication_state='confirmed' WHERE org_id=$1 AND id=$2`, org, assessmentID)
 			require.NoError(t, err, "complete assessment")
 			require.NoError(t, store.WithLockedPR(ctx, org, repo, pr, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
 				state.HeadSHA, state.BaseSHA, state.BaseRef = "head", "base", "main"

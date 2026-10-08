@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
@@ -75,6 +76,46 @@ type MarkNodeDrainingParams struct {
 	Metadata        map[string]any
 }
 
+type ResumeNodeParams struct {
+	NodeID      string
+	Reason      string
+	RequestedBy string
+}
+
+// ResumeOnRestart clears operator drain intent, but leaves admission closed
+// until a new process registers. Live worker queues latch their drain locally.
+// lint:allow-no-orgid reason="node admission and deploy audit events are cluster-scoped"
+func (s *NodeStore) ResumeOnRestart(ctx context.Context, params ResumeNodeParams) error {
+	if strings.TrimSpace(params.NodeID) == "" || strings.TrimSpace(params.Reason) == "" || strings.TrimSpace(params.RequestedBy) == "" {
+		return fmt.Errorf("resume requires node id, reason and requesting operator")
+	}
+	// Keep clearing and its audit receipt atomic; an audit failure must not
+	// silently remove the durable drain. Never advertise a live process active.
+	tag, err := s.db.Exec(ctx, `
+		WITH resumed AS (
+			UPDATE nodes
+			SET drain_intent = 'none',
+				status = CASE WHEN status = 'dead' THEN 'dead' ELSE 'draining' END,
+				drain_requested_at = NULL, drain_budget_expires_at = NULL,
+				drain_requested_by = '', drain_reason = ''
+			WHERE id = @node_id AND drain_intent <> 'none'
+			RETURNING id, host
+		)
+		INSERT INTO worker_deploy_events(deploy_id,node_id,host,event_type,drain_intent,requested_by,reason,metadata)
+		SELECT @deploy_id,id,COALESCE(host,''),'node_drain_cleared','none',@requested_by,@reason,
+			'{"restart_required":true}'::jsonb FROM resumed`, pgx.NamedArgs{
+		"node_id": params.NodeID, "reason": params.Reason,
+		"requested_by": params.RequestedBy, "deploy_id": uuid.NewString(),
+	})
+	if err != nil {
+		return fmt.Errorf("clear node drain for restart: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("node %q not found or has no durable drain intent", params.NodeID)
+	}
+	return nil
+}
+
 type RetainWorkerImagesParams struct {
 	NodeID    string
 	DeployID  string
@@ -132,7 +173,7 @@ func (s *NodeStore) GetLatestByHost(ctx context.Context, host string) (*models.N
 // lint:allow-no-orgid reason="nodes is a cluster-scoped table with no org_id"
 func (s *NodeStore) ListActive(ctx context.Context) ([]models.Node, error) {
 	rows, err := s.db.Query(ctx,
-		fmt.Sprintf(`SELECT %s FROM nodes WHERE status = 'active' ORDER BY id ASC`, nodeColumns),
+		fmt.Sprintf(`SELECT %s FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC`, nodeColumns),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list active nodes: %w", err)
@@ -174,10 +215,10 @@ func (s *NodeStore) WorkerHeartbeatHealth(ctx context.Context, staleBefore time.
 	var health WorkerHeartbeatHealth
 	err := s.db.QueryRow(ctx, `
 		SELECT
-			COUNT(*) FILTER (WHERE mode IN ('worker', 'all') AND status = 'active') AS active_workers,
-			COUNT(*) FILTER (WHERE mode IN ('worker', 'all') AND status = 'active' AND last_heartbeat_at >= @stale_before) AS fresh_workers,
-			COUNT(*) FILTER (WHERE mode IN ('worker', 'all') AND status = 'active' AND last_heartbeat_at < @stale_before) AS stale_workers,
-			COALESCE(EXTRACT(EPOCH FROM now() - MAX(last_heartbeat_at) FILTER (WHERE mode IN ('worker', 'all') AND status = 'active'))::double precision, 0) AS newest_heartbeat_age_seconds
+			COUNT(*) FILTER (WHERE mode IN ('worker', 'all') AND status = 'active' AND drain_intent = 'none') AS active_workers,
+			COUNT(*) FILTER (WHERE mode IN ('worker', 'all') AND status = 'active' AND drain_intent = 'none' AND last_heartbeat_at >= @stale_before) AS fresh_workers,
+			COUNT(*) FILTER (WHERE mode IN ('worker', 'all') AND status = 'active' AND drain_intent = 'none' AND last_heartbeat_at < @stale_before) AS stale_workers,
+			COALESCE(EXTRACT(EPOCH FROM now() - MAX(last_heartbeat_at) FILTER (WHERE mode IN ('worker', 'all') AND status = 'active' AND drain_intent = 'none'))::double precision, 0) AS newest_heartbeat_age_seconds
 		FROM nodes`,
 		pgx.NamedArgs{"stale_before": staleBefore},
 	).Scan(

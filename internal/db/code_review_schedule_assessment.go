@@ -21,7 +21,9 @@ func (s *CodeReviewScheduleStore) SettleAssessment(ctx context.Context, orgID, a
 	return s.WithLockedPR(ctx, orgID, repositoryID, pullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
 		var status models.CodeReviewAssessmentStatus
 		var headSHA, baseSHA, baseRef string
-		err := tx.QueryRow(ctx, `SELECT status,head_sha,base_sha,base_ref FROM code_review_revision_assessments WHERE org_id=$1 AND id=$2 AND repository_id=$3 AND pull_request_id=$4`, orgID, assessmentID, repositoryID, pullRequestID).Scan(&status, &headSHA, &baseSHA, &baseRef)
+		var sessionID uuid.UUID
+		var scope models.CodeReviewScope
+		err := tx.QueryRow(ctx, `SELECT status,head_sha,base_sha,base_ref,session_id,review_scope FROM code_review_revision_assessments WHERE org_id=$1 AND id=$2 AND repository_id=$3 AND pull_request_id=$4`, orgID, assessmentID, repositoryID, pullRequestID).Scan(&status, &headSHA, &baseSHA, &baseRef, &sessionID, &scope)
 		if err != nil {
 			return err
 		}
@@ -37,7 +39,9 @@ func (s *CodeReviewScheduleStore) SettleAssessment(ctx context.Context, orgID, a
 		if _, err := tx.Exec(ctx, `UPDATE code_review_requests SET status=$3 WHERE org_id=$1 AND assessment_id=$2 AND status IN ('pending','joined')`, orgID, assessmentID, requestStatus); err != nil {
 			return err
 		}
-		if state.ActiveAssessmentID == nil || *state.ActiveAssessmentID != assessmentID {
+		ownsAssessment := state.ActiveAssessmentID != nil && *state.ActiveAssessmentID == assessmentID
+		ownsLegacySession := state.ActiveAssessmentID == nil && scope == models.CodeReviewScopeFull && state.ActiveSessionID != nil && *state.ActiveSessionID == sessionID
+		if !ownsAssessment && !ownsLegacySession {
 			return nil
 		}
 		state.ActiveAssessmentID = nil

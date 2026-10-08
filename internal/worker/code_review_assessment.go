@@ -64,15 +64,15 @@ func fullAssessmentAnalysisUnchanged(before, after codereviewsvc.ReviewInputMani
 
 // A staged approval must still pass the backend decision rules at the moment
 // of publication, even when CI, merge eligibility, or team membership changed.
-func verifyFullAssessmentApproval(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, fresh codereviewsvc.AssessmentInputCaptureResult) error {
+func verifyFullAssessmentApproval(ctx context.Context, reviews *db.CodeReviewStore, stores *Stores, services *Services, job runCodeReviewPayload, fresh codereviewsvc.AssessmentInputCaptureResult) error {
 	if fresh.Health == nil {
 		return errors.New("fresh full assessment health unavailable")
 	}
-	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
+	results, err := reviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
 	if err != nil {
 		return err
 	}
-	findings, err := stores.CodeReviews.ListFindings(ctx, job.OrgID, job.SessionID, false)
+	findings, err := reviews.ListFindings(ctx, job.OrgID, job.SessionID, false)
 	if err != nil {
 		return err
 	}
@@ -91,7 +91,7 @@ func verifyFullAssessmentApproval(ctx context.Context, stores *Stores, services 
 	return nil
 }
 
-func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, assessment *models.CodeReviewAssessment, decision models.CodeReviewDecision, body string) (codeReviewSubmission, bool, error) {
+func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, assessment *models.CodeReviewAssessment, decision models.CodeReviewDecision, body string, changedFiles []codereviewsvc.PullRequestFile) (codeReviewSubmission, bool, error) {
 	if assessment != nil {
 		job.OutputKey = assessment.PublicationKey
 	}
@@ -120,15 +120,21 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 		assessment.Status = models.CodeReviewAssessmentPublishing
 		assessment.PublicationState = models.CodeReviewPublicationReserved
 	}
+	attemptStartedReserved := false
+	var onSubmitError func(context.Context, error) error
 	var preSubmit func(context.Context, db.DBTX, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error)
 	if assessment != nil {
+		onSubmitError = func(lockCtx context.Context, submitErr error) error {
+			return reconcileRejectedCodeReviewPublication(lockCtx, stores, *assessment, attemptStartedReserved, submitErr)
+		}
 		preSubmit = func(lockCtx context.Context, lockDB db.DBTX, request codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error) {
 			jobID, hasJob := jobctx.JobIDFromContext(ctx)
 			token, hasToken := jobctx.LockTokenFromContext(ctx)
 			if !hasJob || !hasToken {
 				return codereviewsvc.SubmitReviewResult{}, false, errors.New("full assessment publication requires an active job lease")
 			}
-			if err := db.NewCodeReviewStore(lockDB).LockAssessmentPublicationJob(lockCtx, assessment.OrgID, jobID, token); err != nil {
+			lockedReviews := db.NewCodeReviewStore(lockDB)
+			if err := lockedReviews.LockAssessmentPublicationJob(lockCtx, assessment.OrgID, jobID, token); err != nil {
 				return codereviewsvc.SubmitReviewResult{}, false, err
 			}
 			current, err := db.NewCodeReviewAssessmentStore(lockDB).GetByID(lockCtx, assessment.OrgID, assessment.ID)
@@ -138,9 +144,33 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 			if current.Status != models.CodeReviewAssessmentPublishing || current.Generation != assessment.Generation || current.InputDigest != assessment.InputDigest || current.PublicationState != models.CodeReviewPublicationReserved && current.PublicationState != models.CodeReviewPublicationUncertain {
 				return codereviewsvc.SubmitReviewResult{}, false, db.ErrCodeReviewAssessmentState
 			}
+			if current.PublicationState == models.CodeReviewPublicationUncertain && metadata.GitHubReviewID != nil {
+				// Persist a bounded repair attempt before networking. The current job
+				// may retry transient failures, but the sweeper must not recreate it
+				// forever when the known legacy receipt cannot be verified.
+				if err := stores.CodeReviewAssessments.NoteUncertainPublication(lockCtx, current.OrgID, current.ID, current.Generation, current.InputDigest, db.CodeReviewPublicationLegacyReceiptAttempted); err != nil {
+					return codereviewsvc.SubmitReviewResult{}, false, err
+				}
+				reconciler, ok := services.CodeReviews.(interface {
+					ReconcileAssessmentPublication(context.Context, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error)
+				})
+				if !ok {
+					return codereviewsvc.SubmitReviewResult{}, false, errCodeReviewPublicationPaused
+				}
+				result, found, err := reconciler.ReconcileAssessmentPublication(lockCtx, request)
+				if err != nil {
+					return codereviewsvc.SubmitReviewResult{}, false, err
+				}
+				if !found || result.ID != *metadata.GitHubReviewID ||
+					(request.ExistingReviewID == 0 && result.SubmittedCommitSHA != current.HeadSHA) ||
+					(request.Decision == codereviewsvc.SubmitReviewDecisionApproved && result.FormalApprovalID == nil) {
+					return codereviewsvc.SubmitReviewResult{}, false, errCodeReviewPublicationPaused
+				}
+				return result, true, nil
+			}
 			fresh, freshnessErr := captureFreshFullAssessment(lockCtx, services, job, current)
 			if freshnessErr == nil && decision == models.CodeReviewDecisionApproved {
-				freshnessErr = verifyFullAssessmentApproval(lockCtx, stores, services, job, fresh)
+				freshnessErr = verifyFullAssessmentApproval(lockCtx, lockedReviews, stores, services, job, fresh)
 			}
 			if err := freshnessErr; err != nil {
 				if !errors.Is(err, errFullAssessmentInputsChanged) && !errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
@@ -173,11 +203,16 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 				if err := stores.CodeReviewAssessments.MarkPublicationAttemptUncertain(lockCtx, current.OrgID, current.ID, current.Generation, current.InputDigest); err != nil {
 					return codereviewsvc.SubmitReviewResult{}, false, err
 				}
+				attemptStartedReserved = true
 			}
 			return codereviewsvc.SubmitReviewResult{}, false, nil
 		}
 	}
-	submission, submitted, err := submitCodeReviewToGitHubWithOptions(ctx, stores, services, job, metadata, decision, body, preSubmit, assessment != nil)
+	if assessment != nil && assessment.PublicationState == models.CodeReviewPublicationUncertain && metadata.GitHubReviewID != nil {
+		// Receipt lookup does not need to reconstruct comments or fetch a diff.
+		changedFiles = []codereviewsvc.PullRequestFile{}
+	}
+	submission, submitted, err := submitCodeReviewToGitHubWithOptions(ctx, stores, services, job, metadata, decision, body, changedFiles, preSubmit, onSubmitError, assessment != nil)
 	if err != nil {
 		if assessment != nil && (errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable)) {
 			if supersedeErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); supersedeErr != nil {
@@ -453,7 +488,7 @@ func resumeStagedFullAssessment(ctx context.Context, stores *Stores, services *S
 			return err
 		}
 	}
-	submission, _, err := submitFullReviewWithAssessment(ctx, stores, services, job, metadata, &assessment, *assessment.Decision, *assessment.RenderedBody)
+	submission, _, err := submitFullReviewWithAssessment(ctx, stores, services, job, metadata, &assessment, *assessment.Decision, *assessment.RenderedBody, changedFiles)
 	if err != nil {
 		return err
 	}

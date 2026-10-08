@@ -242,7 +242,10 @@ func (s *CodeReviewRecheckStore) Dispatch(ctx context.Context, in models.CodeRev
 	if err != nil {
 		return models.CodeReviewRecheckDispatch{}, false, err
 	}
-	tag, err := tx.Exec(ctx, `UPDATE session_threads SET status='running',started_at=now(),completed_at=NULL,last_activity_at=now() WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4 AND status='idle'`, in.OrgID, in.ThreadID, in.SessionID, in.ExpectedTurn-1)
+	// This locked idle-to-running transition owns the new turn. Retire only the
+	// previous turn's cancellation; replay returns above without clearing a new
+	// cancellation, and an exact-turn interrupt cannot mark a later turn.
+	tag, err := tx.Exec(ctx, `UPDATE session_threads SET status='running',started_at=now(),completed_at=NULL,last_activity_at=now(),cancel_requested_at=NULL WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4 AND status='idle'`, in.OrgID, in.ThreadID, in.SessionID, in.ExpectedTurn-1)
 	if err != nil {
 		return models.CodeReviewRecheckDispatch{}, false, err
 	}
@@ -716,8 +719,14 @@ func (s *CodeReviewRecheckStore) ReconcileDrainedTerminalTurn(ctx context.Contex
 	}
 	if threadTag.RowsAffected() == 0 {
 		var currentTurn int
-		err = tx.QueryRow(ctx, `SELECT current_turn FROM session_threads WHERE org_id=$1 AND id=$2 AND session_id=$3 AND status='idle'`, orgID, threadID, sessionID).Scan(&currentTurn)
-		if err != nil || currentTurn != expectedTurn {
+		var status models.ThreadStatus
+		err = tx.QueryRow(ctx, `SELECT current_turn,status FROM session_threads WHERE org_id=$1 AND id=$2 AND session_id=$3 FOR UPDATE`, orgID, threadID, sessionID).Scan(&currentTurn, &status)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		// A later dispatch may already own this conversation. Only the idle
+		// boundary of this exact old turn can still release its session.
+		if err != nil || currentTurn != expectedTurn || status != models.ThreadStatusIdle {
 			return false, err
 		}
 	}

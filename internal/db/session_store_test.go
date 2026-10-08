@@ -1530,13 +1530,13 @@ func TestSessionStore_UpdateStatus_PublishesAndQueriesTerminalCleanup(t *testing
 
 	require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, models.SessionStatusCompleted), "UpdateStatus should succeed for terminal transitions")
 
-	mock.ExpectQuery("SELECT .+ FROM sessions").
+	mock.ExpectQuery("SELECT id, completed_at FROM sessions").
 		WithArgs(pgxmock.AnyArg(), 10).
-		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "completed_at"}).AddRow(sessionID, now.Add(-time.Hour)))
 
-	rows, err := store.ListTerminalEndedBefore(context.Background(), now, 10)
+	rows, err := store.ListTerminalEndedBefore(context.Background(), now, nil, 10)
 	require.NoError(t, err, "ListTerminalEndedBefore should succeed")
-	require.Len(t, rows, 1, "ListTerminalEndedBefore should return the matching session")
+	require.Equal(t, []models.SessionStreamCleanupCursor{{ID: sessionID, CompletedAt: now.Add(-time.Hour)}}, rows, "ListTerminalEndedBefore should return only the matching cleanup cursor")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1804,7 +1804,7 @@ func TestSessionStore_ListTerminalEndedBefore_Error(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), 10).
 		WillReturnError(context.DeadlineExceeded)
 
-	rows, err := store.ListTerminalEndedBefore(context.Background(), time.Now(), 10)
+	rows, err := store.ListTerminalEndedBefore(context.Background(), time.Now(), nil, 10)
 	require.Error(t, err, "ListTerminalEndedBefore should surface query failures")
 	require.Nil(t, rows, "query failures should not return rows")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")

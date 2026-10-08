@@ -525,6 +525,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("continue_session", newContinueSessionHandler(stores, services, logger))
 		w.Register("cancel_session", newCancelSessionHandler(stores, services, logger))
 		w.Register("cancel_thread", newCancelThreadHandler(stores, services, logger))
+		w.Register("cancel_thread_turn", newCancelThreadHandler(stores, services, logger))
 		w.Register("deliver_thread_inbox", newDeliverThreadInboxHandler(services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
 		w.Register("create_branch", newCreateBranchHandler(stores, services, logger))
@@ -9485,14 +9486,18 @@ func newCancelThreadHandler(stores *Stores, services *Services, logger zerolog.L
 			return &FatalError{Err: fmt.Errorf("orchestrator is not configured")}
 		}
 		var input struct {
-			SessionID  string   `json:"session_id"`
-			SessionIDs []string `json:"session_ids"`
-			ThreadID   string   `json:"thread_id"`
-			ThreadIDs  []string `json:"thread_ids"`
-			OrgID      string   `json:"org_id"`
+			SessionID    string   `json:"session_id"`
+			SessionIDs   []string `json:"session_ids"`
+			ThreadID     string   `json:"thread_id"`
+			ThreadIDs    []string `json:"thread_ids"`
+			OrgID        string   `json:"org_id"`
+			ExpectedTurn *int     `json:"expected_turn,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal cancel_thread payload: %w", err)
+		}
+		if jobType == "cancel_thread_turn" && input.ExpectedTurn == nil {
+			return fmt.Errorf("cancel_thread_turn requires expected_turn")
 		}
 		orgID, err := parseOrgID(input.OrgID, ctx)
 		if err != nil {
@@ -9522,7 +9527,19 @@ func newCancelThreadHandler(stores *Stores, services *Services, logger zerolog.L
 			if err != nil {
 				return fmt.Errorf("parse thread ID: %w", err)
 			}
-			accepted := services.Orchestrator.CancelThreadByID(threadID)
+			var accepted bool
+			if input.ExpectedTurn != nil {
+				if *input.ExpectedTurn < 1 || len(rawThreadIDs) != 1 || len(rawSessionIDs) != 1 {
+					return fmt.Errorf("exact-turn cancellation requires one session, one thread, and a positive expected_turn")
+				}
+				canceller, ok := services.Orchestrator.(interface{ CancelThreadTurnByID(uuid.UUID, int) bool })
+				if !ok {
+					return errors.New("exact-turn orchestrator cancellation unavailable")
+				}
+				accepted = canceller.CancelThreadTurnByID(threadID, *input.ExpectedTurn)
+			} else {
+				accepted = services.Orchestrator.CancelThreadByID(threadID)
+			}
 			if !accepted {
 				logger.Warn().
 					Strs("session_ids", rawSessionIDs).

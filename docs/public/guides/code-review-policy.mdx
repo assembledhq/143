@@ -20,7 +20,7 @@ Open **Code reviews** and select **Policy**. The organization has one policy tha
 
 Turning code reviews off pauses new reviewer-triggered runs without forgetting the selected outcome.
 
-After someone requests 143 Code Reviewer once, new commits pushed to the pull request durably trigger a new assessment until 143 approves the PR. Automatic commit reassessments wait for a 60-second quiet window, so a rapid sequence of pushes collapses onto the newest head instead of spending reviewer capacity on commits that have already been replaced. If the active assessment notices the new head before the webhook handoff completes, it also queues the latest-head assessment as a fallback; the old attempt is shown as superseded rather than as a failed verdict, and the fresh assessment can still approve. Once 143 approves, later code changes continue through normal PR synchronization without starting another automatic reviewer session. Human review submissions, edits, and dismissals; inline review comment changes; resolved or reopened review threads; PR title or description edits; readiness changes; completed checks; and commit-status updates also synchronize without triggering a review. Title or description edits do not by themselves invalidate otherwise usable coding-agent evidence or block approval; description evaluation is best effort against the text captured by that assessment, while live checks and other deterministic approval gates are still refreshed before publication.
+After someone requests 143 Code Reviewer once, new commits pushed to the pull request durably trigger a new assessment until 143 approves the PR. Automatic commit reassessments wait for a 60-second quiet window, so a rapid sequence of pushes collapses onto the newest head instead of spending reviewer capacity on commits that have already been replaced. If the active assessment notices the new head before the webhook handoff completes, it also queues the latest-head assessment as a fallback; the old attempt is shown as superseded rather than as a failed verdict, and the fresh assessment can still approve. Once 143 approves, later code changes continue through normal PR synchronization without starting another automatic reviewer session. Human review submissions, edits, and dismissals; inline review comment changes; resolved or reopened review threads; PR title or description edits; readiness changes; completed checks; and commit-status updates also synchronize without triggering a review. After a full review completes, title or description edits can be assessed through an evidence recheck without rerunning the code reviewers. While a full review is active, durable scheduling replaces it when its captured title or description changes. Live checks and other deterministic approval gates are refreshed before publication.
 
 ## Supply visual evidence
 
@@ -38,7 +38,7 @@ Where durable review scheduling is enabled, an explicit reviewer request ensures
 
 When **Allow PR re-checks** is enabled, choose **Re-check PR evidence** from a completed review's overflow menu or follow the link in its review comment. With a complete prior review, unchanged code and an unchanged review policy, 143 reassesses screenshots, test results, logs, descriptions, discussion, and existing findings without rerunning the code reviewers. Updates to the title, generated attribution, or CI status also use this evidence path.
 
-**Any code change requires a new full review.** Changes to the versioned review policy also require a full review. A missing or incomplete prior review must establish a full baseline first. Use **Request Full Re-Review Now** when you explicitly want a new code review of unchanged code.
+**Any code change requires a new full review.** Changes to the versioned review policy also require a full review. A missing or incomplete prior review must establish a full baseline first. Use **Request Full Re-Review Now** when you explicitly want a new code review of unchanged code. This cancels an active full review or evidence recheck and starts the replacement once that execution has stopped. If the previous assessment has already sent its result to GitHub, 143 reconciles that publication before starting the replacement.
 
 An evidence recheck does not guarantee approval. 143 preserves unresolved findings, checks current approval gates, and requires evidence to resolve a blocker. Missing or invalid evidence remains blocking. If the recheck cannot complete or raises a new concern requiring human judgment, it reports that condition without automatically starting another code review.
 
@@ -73,6 +73,11 @@ interval** applies those values explicitly. These controls autosave for the
 organization. The **Dispute reassessment cooldown** is separate and applies to
 repeated objections.
 
+While a full review is running, a title or description change replaces that
+review so its analysis uses the current PR context. The replacement follows
+the automatic scheduling delays. Completed full reviews remain available as
+baselines for evidence rechecks.
+
 The **Queue** tab shows pending work before a session exists, including timing,
 paused, active-review, and GitHub availability waits. It displays 25 PRs per page
 with Previous and Next controls, separately from the executed activity on the
@@ -89,8 +94,8 @@ Converting a PR to draft does not stop an active review. Closed PRs cannot start
 new review work. Historical approval still stops automatic re-review; use an
 explicit request when another review is needed after approval.
 
-Content reuse across rebases or restacks, review-specific usage budgets, reserved
-interactive capacity, and forced fresh review are not part of this scheduling
+Content reuse across rebases or restacks, review-specific usage budgets, and reserved
+interactive capacity are not part of this scheduling
 release. Scheduling is available automatically when the installation's GitHub
 review service is configured; no separate rollout flag is required.
 

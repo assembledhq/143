@@ -146,6 +146,100 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		{"intent drift refresh reassesses evidence", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testRefreshUnsentEvidenceAssessment(t, p, org, repo, pr, snapshot, false, true)
 		}},
+		{"equivalent automatic event joins active review", testSchedulingEquivalentAutomaticJoin},
+		{"title drift webhook", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingInputDrift(t, p, org, repo, pr, snapshot, "title", "webhook")
+		}},
+		{"body drift webhook", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingInputDrift(t, p, org, repo, pr, snapshot, "body", "webhook")
+		}},
+		{"title drift missed", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingInputDrift(t, p, org, repo, pr, snapshot, "title", "missed")
+		}},
+		{"body drift missed", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingInputDrift(t, p, org, repo, pr, snapshot, "body", "missed")
+		}},
+		{"body drift legacy", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingInputDrift(t, p, org, repo, pr, snapshot, "body", "legacy")
+		}},
+		{"title drift captured", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingInputDrift(t, p, org, repo, pr, snapshot, "title", "captured")
+		}},
+		{"queued recheck capture settles join", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckPendingSettlement(t, p, org, repo, pr, snapshot, "join")
+		}},
+		{"queued recheck capture settles reuse", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckPendingSettlement(t, p, org, repo, pr, snapshot, "reuse")
+		}},
+		{"queued recheck capture settles replay_join", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckPendingSettlement(t, p, org, repo, pr, snapshot, "replay_join")
+		}},
+		{"queued recheck capture settles replay_reuse", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckPendingSettlement(t, p, org, repo, pr, snapshot, "replay_reuse")
+		}},
+		{"queued recheck capture settles newer", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckPendingSettlement(t, p, org, repo, pr, snapshot, "newer")
+		}},
+		{"queued recheck capture settles closed", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckPendingSettlement(t, p, org, repo, pr, snapshot, "closed")
+		}},
+		{"queued recheck capture settles closed_newer", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckPendingSettlement(t, p, org, repo, pr, snapshot, "closed_newer")
+		}},
+		{"stranded join explicit true", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingStrandedJoin(t, p, org, repo, pr, snapshot, true)
+		}},
+		{"stranded join explicit false", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingStrandedJoin(t, p, org, repo, pr, snapshot, false)
+		}},
+		{"input drift publication Reserved", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingProtectedPublication(t, p, org, repo, pr, snapshot, models.CodeReviewPublicationReserved, false)
+		}},
+		{"input drift publication Uncertain", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingProtectedPublication(t, p, org, repo, pr, snapshot, models.CodeReviewPublicationUncertain, false)
+		}},
+		{"input drift publication Confirmed", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingProtectedPublication(t, p, org, repo, pr, snapshot, models.CodeReviewPublicationConfirmed, false)
+		}},
+		{"completed baseline newer evidence completed true", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingCompletedBaselineInputs(t, p, org, repo, pr, snapshot, true)
+		}},
+		{"completed baseline newer evidence completed false", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingCompletedBaselineInputs(t, p, org, repo, pr, snapshot, false)
+		}},
+		{"input drift racing publication", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingProtectedPublication(t, p, org, repo, pr, snapshot, models.CodeReviewPublicationReserved, true)
+		}},
+		{"force fresh evidence reserved", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testForceFreshEvidenceCancellation(t, p, org, repo, pr, snapshot, "reserved")
+		}},
+		{"force fresh evidence queued", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testForceFreshEvidenceCancellation(t, p, org, repo, pr, snapshot, "queued")
+		}},
+		{"force fresh evidence running", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testForceFreshEvidenceCancellation(t, p, org, repo, pr, snapshot, "running")
+		}},
+		{"force fresh evidence draining", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testForceFreshEvidenceCancellation(t, p, org, repo, pr, snapshot, "draining")
+		}},
+		{"force fresh evidence retry", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testForceFreshEvidenceCancellation(t, p, org, repo, pr, snapshot, "retry")
+		}},
+		{"force fresh evidence publication_reserved", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testForceFreshEvidenceCancellation(t, p, org, repo, pr, snapshot, "publication_reserved")
+		}},
+		{"force fresh evidence uncertain", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testForceFreshEvidenceCancellation(t, p, org, repo, pr, snapshot, "uncertain")
+		}},
+		{"force fresh evidence confirmed", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testForceFreshEvidenceCancellation(t, p, org, repo, pr, snapshot, "confirmed")
+		}},
+		{"force fresh evidence receipt", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testForceFreshEvidenceCancellation(t, p, org, repo, pr, snapshot, "receipt")
+		}},
+		{"force fresh completed evidence runtime drains", testSchedulingCompletedRecheckDrain},
+		{"force fresh baseline redispatch", testForceFreshBaselineRedispatch},
+		{"force fresh historical cancellation", testForceFreshHistoricalCancellation},
 		{"push burst restart and manual joining", testSchedulingBurst},
 		{"terminal full assessment releases replacement", testSchedulingTerminalAssessmentRecovery},
 		{"restart loop stops until explicit retry", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
@@ -585,6 +679,7 @@ func testSchedulingGenerationPath(t *testing.T, pool *pgxpool.Pool, org, repo, p
 	changed := ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr, ExplicitRequest: true, GitHubDeliveryID: uuid.NewString(), TriggerSource: models.CodeReviewTriggerSourceSlashCommand, RequestContext: &ReviewRequestContext{Source: "github_comment", Body: "Please focus on the authorization boundary."}}
 	_, err = service.scheduleReview(ctx, changed, models.CodeReviewReviewNow, false, nil)
 	require.NoError(t, err, "persist changed request context on identical head and base")
+	require.Equal(t, []uuid.UUID{sessionID}, canceller.cancelled, "changed explicit context cancels obsolete reviewers before worker validation")
 	pending, err := service.GetSchedule(ctx, org, pr)
 	require.NoError(t, err, "read replacement intent before fence")
 	if path == "legacy_pending" {

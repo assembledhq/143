@@ -15,6 +15,7 @@ import (
 )
 
 var ErrCodeReviewRequestConflict = errors.New("review request identity already belongs to different input")
+var ErrCodeReviewPublicationPending = errors.New("review publication must reconcile before revocation")
 
 type CodeReviewRequestRecord struct {
 	ID           uuid.UUID
@@ -254,7 +255,9 @@ func (s *CodeReviewScheduleStore) RepairMissingWakes(ctx context.Context) error 
 	_, err = s.db.Exec(ctx, `INSERT INTO jobs(org_id,queue,job_type,payload,priority,dedupe_key,run_at,max_attempts)
  SELECT a.org_id,'agent','run_code_review_recheck',jsonb_build_object('org_id',a.org_id,'assessment_id',a.id),5,'code_review_recheck:'||a.id::text,now(),8
  FROM code_review_revision_assessments a
- WHERE ((a.review_scope='evidence_only' AND a.status IN ('reserved','running','publishing')) OR (a.status IN ('failed','superseded') AND (a.failure_detail LIKE 'full_review:%' OR a.failure_detail LIKE 'evidence_recheck:%')))
+ WHERE ((a.review_scope='evidence_only' AND a.status IN ('reserved','running','publishing')) OR (a.status IN ('failed','superseded')
+ AND a.publication_state NOT IN ('uncertain','confirmed') AND a.publication_receipt IS NULL AND a.github_review_id IS NULL
+ AND (a.failure_detail LIKE 'full_review:%' OR a.failure_detail LIKE 'evidence_recheck:%')))
  AND COALESCE(a.failure_detail,'') NOT LIKE 'operator_reconciliation_required:%'
  AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.org_id=a.org_id AND j.queue='agent' AND j.dedupe_key='code_review_recheck:'||a.id::text AND j.status IN ('pending','running'))
  ORDER BY a.created_at,a.id LIMIT 100 ON CONFLICT DO NOTHING`)
@@ -264,7 +267,7 @@ func (s *CodeReviewScheduleStore) RepairMissingWakes(ctx context.Context) error 
 	// Full-review publication uses its original controller payload. Reuse all
 	// captured provenance, including request/dispute identity and fork context;
 	// never construct a new review or infer that an uncertain send was absent.
-	_, err = s.db.Exec(ctx, `INSERT INTO jobs(org_id,queue,job_type,payload,priority,dedupe_key,run_at,max_attempts)
+	_, err = s.db.Exec(ctx, `WITH enqueued AS (INSERT INTO jobs(org_id,queue,job_type,payload,priority,dedupe_key,run_at,max_attempts)
  SELECT a.org_id,'agent','run_code_review',original.payload,5,original.dedupe_key,now(),8
  FROM code_review_revision_assessments a
  JOIN LATERAL (SELECT j.payload,j.dedupe_key FROM jobs j
@@ -272,11 +275,32 @@ func (s *CodeReviewScheduleStore) RepairMissingWakes(ctx context.Context) error 
    AND j.payload->>'session_id'=a.session_id::text AND j.payload->>'review_output_key'=a.publication_key
    AND j.dedupe_key='code_review:'||a.publication_key
    ORDER BY j.created_at DESC,j.id DESC LIMIT 1) original ON true
- WHERE a.review_scope='full' AND a.status IN ('running','publishing') AND a.result_origin IS NOT NULL
- AND COALESCE(a.failure_detail,'') NOT LIKE 'operator_reconciliation_required:%'
+ WHERE a.review_scope='full' AND a.status IN ('running','publishing')
+ AND ((a.result_origin IS NOT NULL AND (
+   COALESCE(a.failure_detail,'') NOT LIKE 'operator_reconciliation_required:%'
+   OR (a.publication_state='uncertain' AND COALESCE(a.failure_detail,'')<>$1
+    AND EXISTS(SELECT 1 FROM code_review_session_metadata m WHERE m.org_id=a.org_id AND m.id=a.metadata_id AND m.session_id=a.session_id AND m.github_review_id IS NOT NULL))))
+ OR (a.result_origin IS NULL AND a.status='running' AND a.publication_state='not_started'
+   AND a.publication_receipt IS NULL AND a.github_review_id IS NULL
+   AND EXISTS(SELECT 1 FROM code_review_session_metadata m
+     JOIN sessions s ON s.org_id=m.org_id AND s.id=m.session_id
+     JOIN code_review_pr_state st ON st.org_id=m.org_id AND st.pull_request_id=m.pull_request_id
+     WHERE m.org_id=a.org_id AND m.id=a.metadata_id AND m.session_id=a.session_id
+       AND m.pull_request_id=a.pull_request_id AND m.status='running' AND m.github_review_id IS NULL
+       AND s.origin='code_review' AND s.status IN ('failed','completed')
+       AND st.active_session_id=a.session_id AND (st.active_assessment_id IS NULL OR st.active_assessment_id=a.id)
+       AND (`+codeReviewRecheckSessionDrainedSQL+`)
+       AND NOT EXISTS(SELECT 1 FROM session_threads t WHERE t.org_id=s.org_id AND t.session_id=s.id AND t.status IN ('pending','running','awaiting_input'))
+       AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.org_id=s.org_id AND j.status IN ('pending','running') AND j.payload->>'session_id'=s.id::text
+         AND j.job_type IN ('run_agent','continue_session','fork_session_thread','revert_session_thread','deliver_thread_inbox','prepare_code_review_workspace'))
+       AND NOT EXISTS(SELECT 1 FROM code_review_recheck_dispatches d WHERE d.org_id=s.org_id AND d.session_id=s.id AND d.status IN ('pending','running')))))
  AND NOT EXISTS(SELECT 1 FROM jobs active WHERE active.org_id=a.org_id AND active.queue='agent'
    AND active.dedupe_key=original.dedupe_key AND active.status IN ('pending','running'))
- ORDER BY a.created_at,a.id LIMIT 100 ON CONFLICT DO NOTHING`)
+ ORDER BY a.created_at,a.id LIMIT 100 ON CONFLICT DO NOTHING RETURNING org_id,payload)
+ UPDATE code_review_revision_assessments a SET failure_detail=$1 FROM enqueued e
+ WHERE a.org_id=e.org_id AND a.session_id::text=e.payload->>'session_id'
+ AND a.publication_key=e.payload->>'review_output_key' AND a.publication_state='uncertain'
+ AND EXISTS(SELECT 1 FROM code_review_session_metadata m WHERE m.org_id=a.org_id AND m.id=a.metadata_id AND m.session_id=a.session_id AND m.github_review_id IS NOT NULL)`, CodeReviewPublicationLegacyReceiptAttempted)
 	if err != nil {
 		return err
 	}
@@ -290,7 +314,8 @@ func (s *CodeReviewScheduleStore) RepairMissingWakes(ctx context.Context) error 
 	 JOIN sessions sess ON sess.org_id=d.org_id AND sess.id=d.session_id
 	 JOIN session_threads t ON t.org_id=d.org_id AND t.id=d.thread_id
 	 WHERE (d.status IN ('pending','running') AND j.status IN ('succeeded','failed','cancelled','dead_letter'))
-	    OR (d.status IN ('failed','cancelled') AND (sess.status IN ('running','cancelled') OR t.status IN ('running','cancelled')))
+	    OR (d.status IN ('failed','cancelled') AND t.current_turn=d.expected_turn-1
+	      AND (sess.status IN ('running','cancelled') OR t.status IN ('running','cancelled')))
 	 ORDER BY d.created_at,d.assessment_id LIMIT 100`)
 	if err != nil {
 		return err
@@ -421,9 +446,80 @@ func (s *CodeReviewScheduleStore) StaleActiveSessions(ctx context.Context, orgID
 // stranded metadata row with no starter job or threads must not block forever;
 // startReview retains its existing failed-attempt recovery for that case.
 func HasActiveCodeReview(ctx context.Context, tx pgx.Tx, orgID, prID uuid.UUID, enqueueGrace time.Duration) (bool, error) {
+	return hasActiveCodeReview(ctx, tx, orgID, prID, nil, enqueueGrace)
+}
+
+// HasActiveCodeReviewSession prevents joining stranded metadata that needs a
+// recovery wake instead. It uses the same durable execution criteria as PR
+// admission, narrowed to the session being offered for reuse.
+func HasActiveCodeReviewSession(ctx context.Context, tx pgx.Tx, orgID, prID, sessionID uuid.UUID, enqueueGrace time.Duration) (bool, error) {
+	return hasActiveCodeReview(ctx, tx, orgID, prID, &sessionID, enqueueGrace)
+}
+
+func hasActiveCodeReview(ctx context.Context, tx pgx.Tx, orgID, prID uuid.UUID, sessionID *uuid.UUID, enqueueGrace time.Duration) (bool, error) {
 	var active bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM code_review_revision_assessments a WHERE a.org_id=$1 AND a.pull_request_id=$2 AND a.status IN ('reserved','running','publishing')) OR EXISTS(SELECT 1 FROM code_review_session_metadata m WHERE m.org_id=$1 AND m.pull_request_id=$2 AND (
+	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM code_review_revision_assessments a WHERE a.org_id=$1 AND a.pull_request_id=$2 AND ($4::uuid IS NULL OR a.session_id=$4) AND a.status IN ('reserved','running','publishing')) OR EXISTS(SELECT 1 FROM code_review_session_metadata m WHERE m.org_id=$1 AND m.pull_request_id=$2 AND ($4::uuid IS NULL OR m.session_id=$4) AND (
  EXISTS(SELECT 1 FROM session_threads t WHERE t.org_id=m.org_id AND t.session_id=m.session_id AND t.status IN ('pending','running','awaiting_input')) OR
- (m.status IN ('queued','running') AND (m.created_at > now()-$3::interval OR EXISTS(SELECT 1 FROM jobs j WHERE j.org_id=m.org_id AND j.queue='agent' AND j.dedupe_key='code_review:'||m.review_output_key AND j.status IN ('pending','running'))))))`, orgID, prID, enqueueGrace.String()).Scan(&active)
+ (m.status IN ('queued','running') AND (m.created_at > now()-$3::interval OR EXISTS(SELECT 1 FROM jobs j WHERE j.org_id=m.org_id AND j.queue='agent' AND j.dedupe_key='code_review:'||m.review_output_key AND j.status IN ('pending','running')))))) OR EXISTS(SELECT 1 FROM sessions s JOIN code_review_recheck_dispatches d ON d.org_id=s.org_id AND d.session_id=s.id
+ JOIN session_threads t ON t.org_id=d.org_id AND t.id=d.thread_id AND t.session_id=d.session_id
+ JOIN code_review_revision_assessments a ON a.org_id=d.org_id AND a.id=d.assessment_id AND a.session_id=d.session_id
+ WHERE s.org_id=$1 AND d.pull_request_id=$2 AND s.code_review_owner_pr_id=$2 AND ($4::uuid IS NULL OR s.id=$4)
+ AND ((d.status='cancelled' AND d.failure_detail LIKE 'force_fresh:%' AND t.current_turn=d.expected_turn-1)
+ OR (d.status='completed' AND t.current_turn=d.expected_turn AND a.status='cancelled' AND a.failure_detail LIKE 'force_fresh:%'))
+ AND NOT (`+codeReviewRecheckSessionDrainedSQL+`))`, orgID, prID, enqueueGrace.String(), sessionID).Scan(&active)
 	return active, err
+}
+
+// RevokeScheduledCodeReviews runs under the PR lock, after replacement intent
+// has been recorded. A send whose outcome is unknown retains its metadata for
+// reconciliation. Reserved but unsent assessments retire in the same transaction. sessionID optionally limits fencing to
+// one obsolete worker, so a newer same-head replacement is never revoked.
+func RevokeScheduledCodeReviews(ctx context.Context, tx pgx.Tx, orgID, prID uuid.UUID, keepHead string, sessionID *uuid.UUID, state *models.CodeReviewPRState) error {
+	// The external send transitions reserved -> uncertain outside the PR lock.
+	// Lock assessments first, then reread their publication state in the update
+	// below. Revocation and retirement commit together, so that transition can
+	// never start a send after metadata was revoked.
+	rows, err := tx.Query(ctx, `SELECT a.id FROM code_review_revision_assessments a
+ JOIN code_review_session_metadata m ON m.org_id=a.org_id AND m.session_id=a.session_id
+ WHERE m.org_id=$1 AND m.pull_request_id=$2 AND m.head_sha<>$3
+ AND ($4::uuid IS NULL OR m.session_id=$4) AND m.status IN ('queued','running')
+ AND a.review_scope='full' FOR UPDATE OF a`, orgID, prID, keepHead, sessionID)
+	if err != nil {
+		return err
+	}
+	if _, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID]); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE code_review_session_metadata m
+ SET status='stale',stale=true,phase=NULL,decision='blocked',acceptable=false,
+     failure_reason='review scheduling target superseded',status_code=NULL,status_message=NULL,
+     retry_at=NULL,last_error_at=NULL,retryable_failure=false,completed_at=COALESCE(completed_at,now())
+ WHERE m.org_id=$1 AND m.pull_request_id=$2 AND m.head_sha<>$3
+   AND ($4::uuid IS NULL OR m.session_id=$4) AND m.status IN ('queued','running')
+   AND NOT EXISTS(SELECT 1 FROM code_review_revision_assessments a
+     WHERE a.org_id=m.org_id AND a.session_id=m.session_id
+       AND (a.publication_state IN ('uncertain','confirmed') OR a.publication_receipt IS NOT NULL OR a.github_review_id IS NOT NULL))`, orgID, prID, keepHead, sessionID)
+	if err != nil {
+		return err
+	}
+	if err := reconcileTerminalReviews(ctx, tx, orgID, prID, state); err != nil {
+		return err
+	}
+	if sessionID == nil {
+		return nil
+	}
+	// A worker cannot acknowledge a revoked generation if its publication
+	// needs reconciliation. Retry into staged publication recovery instead.
+	var protected bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM code_review_session_metadata m
+ WHERE m.org_id=$1 AND m.pull_request_id=$2 AND m.session_id=$3 AND m.status IN ('queued','running')
+ AND EXISTS(SELECT 1 FROM code_review_revision_assessments a WHERE a.org_id=m.org_id AND a.session_id=m.session_id
+ AND (a.publication_state IN ('uncertain','confirmed') OR a.publication_receipt IS NOT NULL OR a.github_review_id IS NOT NULL)))`, orgID, prID, sessionID).Scan(&protected)
+	if err != nil {
+		return err
+	}
+	if protected {
+		return ErrCodeReviewPublicationPending
+	}
+	return nil
 }

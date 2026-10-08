@@ -217,6 +217,10 @@ if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" != "db" ] && [ "$ROLE" != "log
   : "${DB_HOST:?DB_HOST is required for $ROLE role (set it or add to .env.production.enc)}"
 fi
 if [ "$MODE" != "--tailscale-only" ] && [ "$ROLE" = "logging" ]; then
+  BACKUP_MONITOR_ID="${BACKUP_MONITOR_ID:-disabled}"
+  if [[ ! "$BACKUP_MONITOR_ID" =~ ^[a-z][a-z0-9_-]{0,62}$ ]]; then
+    echo "ERROR: invalid BACKUP_MONITOR_ID" >&2; exit 1
+  fi
   : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
   GRAFANA_ALERTS_WARNING_WEBHOOK_URL="${GRAFANA_ALERTS_WARNING_WEBHOOK_URL:-$DISABLED_WARNING_WEBHOOK_URL}"
   GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL="${GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL:-$DISABLED_CRITICAL_WEBHOOK_URL}"
@@ -586,8 +590,8 @@ SECRETS_DIR="$SECRETS_DIR" "$SCRIPT_DIR/sync-keys.sh" --apply "$SSH_KEY" "$HOST"
 echo "--- Step 3/5: Writing secrets ---"
 if [ "$ROLE" = "logging" ]; then
   # Logging nodes need the Grafana admin password and the private IP for binding VictoriaLogs
-  printf 'GRAFANA_ADMIN_PASSWORD=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nGRAFANA_ALERTS_WARNING_WEBHOOK_URL=%s\nGRAFANA_ALERTS_CRITICAL_WEBHOOK_URL=%s\n' \
-    "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" "logging" "$GRAFANA_ALERTS_WARNING_WEBHOOK_URL" "$GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL" \
+  printf 'GRAFANA_ADMIN_PASSWORD=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nGRAFANA_ALERTS_WARNING_WEBHOOK_URL=%s\nGRAFANA_ALERTS_CRITICAL_WEBHOOK_URL=%s\nBACKUP_MONITOR_ID=%s\n' \
+    "$GRAFANA_ADMIN_PASSWORD" "$VICTORIALOGS_HOST" "logging" "$GRAFANA_ALERTS_WARNING_WEBHOOK_URL" "$GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL" "$BACKUP_MONITOR_ID" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
 elif [ "$ROLE" = "db" ]; then
   printf 'DB_PASSWORD=%s\nDB_BIND_IP=%s\n' "$DB_PASSWORD" "$DB_BIND_IP" \
@@ -690,7 +694,9 @@ START
 # For db nodes: install automated backups (pg_dump every 6h + weekly restore
 # test) and the offsite sync config. The wrapper is idempotent, so this is a
 # no-op on reprovision. BACKUP_* (if present in .env.production.enc) were
-# exported above and drive /opt/143/backup-sync.env.
+# exported above and drive /opt/143/backup-storage.json. BACKUP_ENABLED and
+# RESTORE_TEST_ENABLED are exported by the same private-config loader; the
+# wrapper validates and forwards them to the cron installer.
 if [ "$ROLE" = "db" ]; then
   echo "Configuring DB backups..."
   "$SCRIPT_DIR/provision-db-backups.sh" "$HOST" "$SSH_KEY"

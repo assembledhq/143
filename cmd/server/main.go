@@ -784,7 +784,7 @@ func main() {
 			go runPreviewRuntimeHeartbeat(ctx, workerPreviewStore, cfg.NodeID, logger, 30*time.Second, 90*time.Second)
 		}
 		if cfg.NodeID != "" {
-			go worker.RunNodeDrainWatcher(ctx, db.NewNodeStore(pool), processWorkers, cfg.NodeID, logger, 5*time.Second)
+			go worker.RunNodeDrainWatcher(ctx, db.NewNodeStore(pool), nodeManager, processWorkers, cfg.NodeID, logger, 5*time.Second)
 		}
 
 		recoveryLoop := cluster.NewRecoveryLoop(nodeManager, jobStore, logger, 90*time.Second, 100)

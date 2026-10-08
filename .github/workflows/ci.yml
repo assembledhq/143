@@ -146,6 +146,22 @@ jobs:
       - name: Wait for Postgres
         run: go run ./cmd/wait-postgres
 
+      - name: Size Postgres lock table for parallel schema tests
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        # Parallel fixtures apply the full migration chain in isolated schemas.
+        # Dropping those schemas together can exhaust the default lock table.
+        # This setting requires a restart; verify it before running migrations.
+        run: |
+          docker exec "$POSTGRES_CONTAINER" psql -U onefortythree -d onefortythree -v ON_ERROR_STOP=1 \
+            -c 'ALTER SYSTEM SET max_locks_per_transaction = 256'
+          docker restart "$POSTGRES_CONTAINER"
+          go run ./cmd/wait-postgres
+          actual=$(docker exec "$POSTGRES_CONTAINER" psql -U onefortythree -d onefortythree -At \
+            -c 'SHOW max_locks_per_transaction')
+          echo "max_locks_per_transaction=$actual"
+          test "$actual" = "256"
+
       - name: Run go vet and migrations
         run: |
           go run cmd/migrate/main.go up

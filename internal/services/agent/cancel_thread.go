@@ -13,8 +13,9 @@ import (
 // threadCancelEntry holds the run-context cancel func that unwinds the
 // in-flight turn for one tab.
 type threadCancelEntry struct {
-	ctxCancel context.CancelFunc
-	cancel    CancellationSpec
+	ctxCancel    context.CancelFunc
+	cancel       CancellationSpec
+	expectedTurn int
 
 	mu     sync.Mutex
 	handle InteractiveCommandHandle
@@ -51,13 +52,19 @@ func (r *ThreadCancelRegistry) Register(threadID uuid.UUID, ctxCancel context.Ca
 }
 
 func (r *ThreadCancelRegistry) RegisterWithSpec(threadID uuid.UUID, ctxCancel context.CancelFunc, cancelSpec CancellationSpec) {
+	r.RegisterTurnWithSpec(threadID, 0, ctxCancel, cancelSpec)
+}
+
+// RegisterTurnWithSpec binds exact-turn interrupts to this immutable registry
+// entry. Zero retains generic cancellation without accepting a fenced request.
+func (r *ThreadCancelRegistry) RegisterTurnWithSpec(threadID uuid.UUID, expectedTurn int, ctxCancel context.CancelFunc, cancelSpec CancellationSpec) {
 	if threadID == uuid.Nil {
 		return
 	}
 	if cancelSpec.Method == "" {
 		cancelSpec = DefaultCancellationSpec
 	}
-	r.mu.Store(threadID, &threadCancelEntry{ctxCancel: ctxCancel, cancel: cancelSpec})
+	r.mu.Store(threadID, &threadCancelEntry{ctxCancel: ctxCancel, cancel: cancelSpec, expectedTurn: expectedTurn})
 }
 
 // Deregister removes the entry. Call from a defer at the end of the agent
@@ -128,6 +135,24 @@ func (r *ThreadCancelRegistry) DeliverInput(ctx context.Context, threadID uuid.U
 // sync.Once guarantees the cancel goroutine fires at most once per entry.
 func (r *ThreadCancelRegistry) CancelThread(threadID uuid.UUID) bool {
 	return r.requestStop(threadID, 30*time.Second)
+}
+
+// CancelThreadTurn never falls back to another turn. Once loaded, the captured
+// entry owns the interrupt even if a later registration replaces the map entry.
+func (r *ThreadCancelRegistry) CancelThreadTurn(threadID uuid.UUID, expectedTurn int) bool {
+	if expectedTurn < 1 {
+		return false
+	}
+	val, ok := r.mu.Load(threadID)
+	if !ok {
+		return false
+	}
+	entry := val.(*threadCancelEntry)
+	if entry.expectedTurn != expectedTurn {
+		return false
+	}
+	entry.once.Do(func() { go r.doCancel(threadID, entry, 30*time.Second) })
+	return true
 }
 
 func (r *ThreadCancelRegistry) requestStop(threadID uuid.UUID, graceWindow time.Duration) bool {

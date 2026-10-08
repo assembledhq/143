@@ -441,8 +441,28 @@ func (s *CodeReviewAssessmentStore) NoteUncertainPublication(ctx context.Context
 	return nil
 }
 
-// SupersedeUnsentPublication is legal only while no send was started. The
-// caller must hold the PR publication lock when deciding freshness.
+// RestoreRejectedPublication clears send uncertainty only after a definitive
+// rejection before summary publication. The caller must hold the PR publication
+// lock and have transitioned reserved to uncertain in this same attempt. Never
+// use a later rejection to clear uncertainty from an earlier attempt. Inline
+// comments may already exist; their provider dedupe markers remain intact.
+func (s *CodeReviewAssessmentStore) RestoreRejectedPublication(ctx context.Context, orgID, id uuid.UUID, generation int64, inputDigest, detail string) error {
+	if detail == "" {
+		return fmt.Errorf("publication rejection detail is required")
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE code_review_revision_assessments SET publication_state='reserved',failure_detail=$5 WHERE org_id=$1 AND id=$2 AND generation=$3 AND input_digest=$4 AND status='publishing' AND publication_state='uncertain' AND result_origin IS NOT NULL AND submitted_commit_sha=head_sha AND publication_receipt IS NULL AND github_review_id IS NULL`, orgID, id, generation, inputDigest, detail)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrCodeReviewAssessmentState
+	}
+	return nil
+}
+
+// SupersedeUnsentPublication requires no possible summary or approval send.
+// Inline comments from a definitively rejected attempt retain their dedupe keys.
+// The caller must hold the PR publication lock when deciding freshness.
 func (s *CodeReviewAssessmentStore) SupersedeUnsentPublication(ctx context.Context, orgID, id uuid.UUID, generation int64, inputDigest, detail string) error {
 	if detail == "" {
 		return fmt.Errorf("supersede detail is required")

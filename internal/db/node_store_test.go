@@ -111,7 +111,7 @@ func TestNodeStore_ListActive(t *testing.T) {
 		secondMeta, err := json.Marshal(map[string]any{"preview_capable": false})
 		require.NoError(t, err, "second metadata should marshal")
 
-		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 			WillReturnRows(
 				pgxmock.NewRows(nodeStoreTestCols).
 					AddRow("worker-1", "worker", "worker-1.internal", "active", "none", firstMeta, now, now, nil, nil, "", "").
@@ -134,7 +134,7 @@ func TestNodeStore_ListActive(t *testing.T) {
 		require.NoError(t, err, "pgxmock pool should be created")
 		defer mock.Close()
 
-		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 			WillReturnError(errors.New("db unavailable"))
 
 		store := NewNodeStore(mock)
@@ -155,7 +155,7 @@ func TestNodeStore_ListActive(t *testing.T) {
 		metadata, err := json.Marshal(map[string]any{"preview_capable": true})
 		require.NoError(t, err, "metadata should marshal")
 
-		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 			WillReturnRows(
 				pgxmock.NewRows(nodeStoreTestCols).
 					AddRow("worker-1", "worker", "worker-1.internal", "active", "none", metadata, "not-a-time", now, nil, nil, "", ""),

@@ -1160,6 +1160,11 @@ func (o *Orchestrator) CancelThreadByID(threadID uuid.UUID) bool {
 	return o.threadCancels.CancelThread(threadID)
 }
 
+// CancelThreadTurnByID delivers a delayed interrupt only to its original turn.
+func (o *Orchestrator) CancelThreadTurnByID(threadID uuid.UUID, expectedTurn int) bool {
+	return o.threadCancels != nil && o.threadCancels.CancelThreadTurn(threadID, expectedTurn)
+}
+
 // CancelSessionByID asks the session-scoped cancel registry to interrupt the
 // in-flight agent for the given session. It is used by worker-targeted cancel
 // jobs when the public API process is not the worker that owns the live handle.
@@ -5424,7 +5429,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// cancel can unwind just this thread's run context. The session-level
 	// registry remains the legacy path for whole-sandbox cancels.
 	if o.threadCancels != nil && opts != nil && opts.ThreadID != nil {
-		o.threadCancels.RegisterWithSpec(*opts.ThreadID, func() { cancel(ErrUserCancelCause) }, ResolveCancellationSpec(adapter))
+		if codeReviewTurn != nil {
+			o.threadCancels.RegisterTurnWithSpec(*opts.ThreadID, codeReviewTurn.options.ExpectedTurn, func() { cancel(ErrUserCancelCause) }, ResolveCancellationSpec(adapter))
+		} else {
+			o.threadCancels.RegisterWithSpec(*opts.ThreadID, func() { cancel(ErrUserCancelCause) }, ResolveCancellationSpec(adapter))
+		}
 		defer o.threadCancels.Deregister(*opts.ThreadID)
 	}
 	var threadRuntimeCtl *threadRuntimeControl

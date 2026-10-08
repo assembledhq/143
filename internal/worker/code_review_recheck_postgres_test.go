@@ -16,6 +16,7 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -44,6 +45,7 @@ func (f *fixedRecheckCapture) CaptureAssessmentInputs(context.Context, coderevie
 }
 
 type fakeRecheckPublisher struct {
+	submitErr       error
 	requests        []codereviewsvc.SubmitReviewRequest
 	reconciliations []codereviewsvc.SubmitReviewRequest
 }
@@ -94,6 +96,9 @@ func (f *fakeRecheckLifecycle) RefreshUnsentEvidenceAssessment(ctx context.Conte
 
 func (f *fakeRecheckPublisher) SubmitReview(_ context.Context, req codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, error) {
 	f.requests = append(f.requests, req)
+	if f.submitErr != nil {
+		return codereviewsvc.SubmitReviewResult{}, f.submitErr
+	}
 	return codereviewsvc.SubmitReviewResult{ID: 77, URL: "https://example.invalid/review/77", SubmittedCommitSHA: req.HeadSHA}, nil
 }
 
@@ -105,6 +110,8 @@ func (f *fakeRecheckPublisher) ReconcileAssessmentPublication(_ context.Context,
 // This fixture deliberately uses the complete migration chain. It checks the
 // supervisor against real assessment, dispatch, message, inbox, and job rows;
 // adapter execution and GitHub publication are separate boundaries.
+//
+//nolint:paralleltest // Rejection subtests share one supervisor fixture and PR reservation.
 func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	t.Parallel()
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -501,6 +508,66 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	err = pool.QueryRow(ctx, `SELECT code_review_owner_pr_id FROM sessions WHERE org_id=$1 AND id=$2`, org, session).Scan(&retiredOwner)
 	require.NoError(t, err, "read retired session owner")
 	require.Nil(t, retiredOwner, "completed replacement should release the drained old session")
+
+	for i, tt := range []struct {
+		name             string
+		priorUncertainty bool
+	}{
+		{name: "first evidence publication rejection"},
+		{name: "rejection following an uncertain evidence send", priorUncertainty: true},
+	} {
+		// This scenario shares the supervisor fixture and runs serially because
+		// only one active assessment per PR is allowed.
+		t.Run(tt.name, func(t *testing.T) {
+			rejectedID, rejectedJobID, rejectedLease := uuid.New(), uuid.New(), uuid.New()
+			generation := int64(30 + i)
+			_, err := pool.Exec(ctx, assessmentSQL, rejectedID, org, repo, repoName, pr, metadata, session, policy, generation, baseline, manifest.InputVersion, manifest.CodeDigest, manifest.ContractDigest, manifest.IntentDigest, manifest.VisualDigest, manifest.RequestDigest, manifest.GateDigest, manifest.InputDigest, manifestJSON, "evidence_only", "visual_changed", false, "running", nil, nil, nil, nil, rejectedID.String(), "not_started", nil)
+			require.NoError(t, err, "seed evidence publication rejection")
+			completion := models.CodeReviewAssessmentCompletion{ResultOrigin: models.CodeReviewResultEvidenceOnly, Decision: models.CodeReviewDecisionNeedsHumanReview, StructuredOutcome: json.RawMessage(`{}`), RenderedBody: "saved evidence review"}
+			require.NoError(t, stores.CodeReviewAssessments.StageOutcome(ctx, org, rejectedID, generation, manifest.InputDigest, completion), "stage rejected evidence outcome")
+			require.NoError(t, stores.CodeReviewAssessments.ReservePublication(ctx, org, rejectedID, generation, manifest.InputDigest, "head"), "reserve evidence publication")
+			if tt.priorUncertainty {
+				require.NoError(t, stores.CodeReviewAssessments.MarkPublicationAttemptUncertain(ctx, org, rejectedID, generation, manifest.InputDigest), "retain earlier send uncertainty")
+			}
+			_, err = pool.Exec(ctx, `UPDATE code_review_pr_state SET active_assessment_id=$3,active_session_id=$4 WHERE org_id=$1 AND pull_request_id=$2`, org, pr, rejectedID, session)
+			require.NoError(t, err, "point scheduler at the evidence review")
+			_, err = pool.Exec(ctx, `INSERT INTO jobs(id,org_id,queue,job_type,payload,status,lock_token) VALUES($1,$2,'agent','run_code_review_recheck','{}','running',$3)`, rejectedJobID, org, rejectedLease)
+			require.NoError(t, err, "lease rejected evidence supervisor")
+			payload, err := json.Marshal(codeReviewRecheckJob{OrgID: org, AssessmentID: rejectedID})
+			require.NoError(t, err, "encode evidence supervisor payload")
+			capture.changedManifest = nil
+			publisher.submitErr = fmt.Errorf("%w: %w", codereviewsvc.ErrReviewPublicationRejected, &ghservice.GitHubAPIError{StatusCode: 422})
+			hookCtx := jobctx.WithDeadLetterHooks(jobctx.WithJobID(jobctx.WithLockToken(ctx, rejectedLease), rejectedJobID))
+			err = handler(hookCtx, "run_code_review_recheck", payload)
+			require.ErrorIs(t, err, codereviewsvc.ErrReviewPublicationRejected, "rejection should reach the supervisor")
+			var fatal *FatalError
+			require.ErrorAs(t, err, &fatal, "definitive rejection must dead-letter on the first attempt instead of retrying eight times")
+			jobctx.RunDeadLetterHooks(hookCtx, err)
+			got, err := stores.CodeReviewAssessments.GetByID(ctx, org, rejectedID)
+			require.NoError(t, err, "read evidence assessment after terminal hooks")
+			wantStatus, wantPublication := models.CodeReviewAssessmentFailed, models.CodeReviewPublicationReserved
+			if tt.priorUncertainty {
+				wantStatus, wantPublication = models.CodeReviewAssessmentPublishing, models.CodeReviewPublicationUncertain
+			}
+			require.Equal(t, wantStatus, got.Status, "only definite first rejection should retire evidence assessment")
+			require.Equal(t, wantPublication, got.PublicationState, "prior uncertain publication must remain fenced")
+			require.Equal(t, completion.RenderedBody, *got.RenderedBody, "terminal hooks must retain saved evidence")
+			state, err := db.NewCodeReviewScheduleStore(pool).Get(ctx, org, pr)
+			require.NoError(t, err, "read scheduler after evidence rejection")
+			if tt.priorUncertainty {
+				require.Equal(t, &rejectedID, state.ActiveAssessmentID, "uncertain assessment must retain its scheduler reservation")
+			} else {
+				require.Nil(t, state.ActiveAssessmentID, "terminal evidence rejection must release the active assessment pointer")
+			}
+
+			if tt.priorUncertainty {
+				// Test-fixture cleanup only: release this PR for the subsequent scenario.
+				_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status='failed',completed_at=now() WHERE org_id=$1 AND id=$2`, org, rejectedID)
+				require.NoError(t, err, "release isolated fixture reservation")
+			}
+		})
+	}
+	publisher.submitErr = nil
 	uncertainAssessment := uuid.New()
 	_, err = pool.Exec(ctx, assessmentSQL, uncertainAssessment, org, repo, repoName, pr, metadata, session, policy, 9, baseline, manifest.InputVersion, manifest.CodeDigest, manifest.ContractDigest, manifest.IntentDigest, manifest.VisualDigest, manifest.RequestDigest, manifest.GateDigest, manifest.InputDigest, manifestJSON, "evidence_only", "visual_changed", false, "running", nil, nil, nil, nil, "uncertain-publication", "not_started", nil)
 	require.NoError(t, err, "seed assessment with a prior unresolved external send")
@@ -523,7 +590,7 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.Equal(t, models.CodeReviewPublicationUncertain, uncertainOutcome.PublicationState, "uncertain receipt must remain unresolved")
 	require.Equal(t, "review marker not found after input change; pending reconciliation", *uncertainOutcome.FailureDetail, "persist actionable no-marker detail for operators")
 	require.Equal(t, 1, len(publisher.reconciliations), "changed input should only read the GitHub review marker")
-	require.Equal(t, 2, len(publisher.requests), "changed input must not retry an uncertain write")
+	require.Equal(t, 4, len(publisher.requests), "changed input must not retry an uncertain write")
 	_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET created_at=now()-interval '3 hours' WHERE org_id=$1 AND id=$2`, org, uncertainAssessment)
 	require.NoError(t, err, "age unresolved send past bounded reconciliation window")
 	otherOrgPaused, err := stores.CodeReviewAssessments.PauseExpiredPublication(ctx, uuid.New(), uncertainAssessment, 9, manifest.InputDigest)

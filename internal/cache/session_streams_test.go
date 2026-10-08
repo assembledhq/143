@@ -340,7 +340,7 @@ func TestSessionStreams_RunCleanupBatch_ListError(t *testing.T) {
 	client, _ := testRedisClient(t)
 	streams := NewSessionStreams(client, zerolog.Nop(), nil)
 
-	count, err := streams.runCleanupBatch(context.Background(), cleanupTestLister{err: context.DeadlineExceeded})
+	count, _, err := streams.runCleanupBatch(context.Background(), cleanupTestLister{err: context.DeadlineExceeded}, time.Now(), nil)
 	require.Error(t, err, "cleanup batch should surface lister failures")
 	require.Equal(t, 0, count, "cleanup batch should report zero work when listing fails")
 }
@@ -435,11 +435,11 @@ func TestSessionStreams_NilAndDecodeHelpers(t *testing.T) {
 }
 
 type cleanupTestLister struct {
-	sessions []models.Session
+	sessions []models.SessionStreamCleanupCursor
 	err      error
 }
 
-func (l cleanupTestLister) ListTerminalEndedBefore(context.Context, time.Time, int) ([]models.Session, error) {
+func (l cleanupTestLister) ListTerminalEndedBefore(context.Context, time.Time, *models.SessionStreamCleanupCursor, int) ([]models.SessionStreamCleanupCursor, error) {
 	return l.sessions, l.err
 }
 
@@ -457,9 +457,12 @@ func TestSessionStreams_RunCleanupBatch(t *testing.T) {
 	_, err = mr.XAdd(eventStreamKey(sessionID), "1-0", []string{"json", `{"type":"thread.inbox.queued","session_id":"` + sessionID.String() + `","org_id":"` + uuid.New().String() + `","data":{}}`})
 	require.NoError(t, err, "test should seed the event stream")
 
-	count, err := streams.runCleanupBatch(context.Background(), cleanupTestLister{
-		sessions: []models.Session{{ID: sessionID}},
-	})
+	before := time.Now()
+	want := models.SessionStreamCleanupCursor{ID: sessionID, CompletedAt: before.Add(-time.Hour)}
+	count, next, err := streams.runCleanupBatch(context.Background(), cleanupTestLister{
+		sessions: []models.SessionStreamCleanupCursor{want},
+	}, before, nil)
+	require.Equal(t, &want, next, "cleanup should return the last processed cursor")
 	require.NoError(t, err, "cleanup batch should succeed")
 	require.Equal(t, 1, count, "cleanup batch should report the deleted session stream count")
 	require.False(t, mr.Exists(logStreamKey(sessionID)), "cleanup should delete the log stream")
