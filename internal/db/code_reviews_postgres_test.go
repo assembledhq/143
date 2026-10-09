@@ -17,68 +17,9 @@ import (
 func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	t.Parallel()
 
-	databaseURL := os.Getenv("TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("set TEST_DATABASE_URL to run the PostgreSQL analytics behavior test")
-	}
-
 	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, databaseURL)
-	require.NoError(t, err, "test should connect to TEST_DATABASE_URL")
-	defer func() {
-		require.NoError(t, conn.Close(context.Background()), "test should close the PostgreSQL connection")
-	}()
-
-	schema := "test_code_review_analytics_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
-	_, err = conn.Exec(ctx, `CREATE SCHEMA `+schema)
-	require.NoError(t, err, "test should create an isolated analytics schema")
-	defer func() {
-		_, cleanupErr := conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
-		require.NoError(t, cleanupErr, "test should remove the isolated analytics schema")
-	}()
-	_, err = conn.Exec(ctx, `SET search_path TO `+schema+`, public`)
-	require.NoError(t, err, "test should isolate analytics objects")
-
-	_, err = conn.Exec(ctx, `
-		CREATE TABLE sessions (
-			id uuid PRIMARY KEY,
-			org_id uuid NOT NULL,
-			title text,
-			revision_context jsonb
-		);
-		CREATE TABLE pull_requests (
-			id uuid PRIMARY KEY,
-			org_id uuid NOT NULL,
-			title text NOT NULL,
-			github_repo text NOT NULL,
-			github_pr_number int NOT NULL
-		);
-		CREATE TABLE code_review_session_metadata (
-			id uuid PRIMARY KEY,
-			org_id uuid NOT NULL,
-			session_id uuid NOT NULL,
-			repository_id uuid NOT NULL,
-			pull_request_id uuid NOT NULL,
-			status text NOT NULL,
-			head_sha text NOT NULL,
-			stale boolean NOT NULL DEFAULT false,
-			superseded_by_session_id uuid,
-			acceptable boolean,
-			decision text,
-			github_review_id bigint,
-			additions integer,
-			deletions integer,
-			risk_reason_details jsonb NOT NULL DEFAULT '[]',
-			completed_at timestamptz,
-			created_at timestamptz NOT NULL
-		);
-		CREATE TABLE code_review_findings (
-			org_id uuid NOT NULL,
-			session_id uuid NOT NULL,
-			severity text NOT NULL
-		);
-	`)
-	require.NoError(t, err, "test should create the minimal analytics schema")
+	conn := codeReviewAnalyticsPostgresConn(t)
+	var err error
 
 	orgID := uuid.New()
 	otherOrgID := uuid.New()
@@ -207,6 +148,8 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 			NotApproved:             1,
 			ApprovedFirstRound:      2,
 			MedianRoundsToApproval:  func() *float64 { value := 1.0; return &value }(),
+			AverageRoundsToApproval: func() *float64 { value := 1.0; return &value }(),
+			P95RoundsToApproval:     func() *float64 { value := 1.0; return &value }(),
 			NeedsHumanReview:        1,
 			PRsWithChangeBreakdown:  2,
 			MedianAdditions:         &medianAdditions,
@@ -284,6 +227,8 @@ func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 			ApprovedBy143:           1,
 			ApprovedFirstRound:      1,
 			MedianRoundsToApproval:  func() *float64 { value := 1.0; return &value }(),
+			AverageRoundsToApproval: func() *float64 { value := 1.0; return &value }(),
+			P95RoundsToApproval:     func() *float64 { value := 1.0; return &value }(),
 			PRsWithChangeBreakdown:  1,
 			MedianAdditions:         &otherAdditions,
 			MedianDeletions:         &otherDeletions,
@@ -382,7 +327,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPRJourneys(t *testing.T) {
 
 	orgID, otherOrgID := uuid.New(), uuid.New()
 	repositoryID, otherRepositoryID := uuid.New(), uuid.New()
-	immediatePRID, iteratedPRID, internalApprovalPRID, operationalPRID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	rerunPRID, iteratedPRID, internalApprovalPRID, operationalPRID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	otherPRID := uuid.New()
 	cohortStart := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	cohortEnd := time.Date(2026, 7, 31, 23, 59, 59, 0, time.UTC)
@@ -390,12 +335,12 @@ func TestCodeReviewStore_GetReviewAnalyticsPRJourneys(t *testing.T) {
 
 	_, err = conn.Exec(ctx, `
 		INSERT INTO pull_requests (id, org_id, title, github_repo, github_pr_number) VALUES
-			($1, $2, 'Immediate approval', 'acme/api', 1),
+			($1, $2, 'Same-head rerun approval', 'acme/api', 1),
 			($3, $2, 'Iterated approval', 'acme/api', 2),
 			($4, $2, 'Internal approval', 'acme/api', 3),
 			($5, $2, 'Operational only', 'acme/api', 4),
 			($6, $7, 'Other tenant', 'other/api', 1)`,
-		immediatePRID, orgID, iteratedPRID, internalApprovalPRID, operationalPRID,
+		rerunPRID, orgID, iteratedPRID, internalApprovalPRID, operationalPRID,
 		otherPRID, otherOrgID,
 	)
 	require.NoError(t, err, "test should insert tenant-scoped PR-journey parents")
@@ -411,10 +356,10 @@ func TestCodeReviewStore_GetReviewAnalyticsPRJourneys(t *testing.T) {
 	postedReviewID := int64(143)
 	value := func(number int) *int { return &number }
 	facts := []reviewFact{
-		// Same-head reruns collapse to the earliest posted approval.
-		{orgID, uuid.New(), repositoryID, immediatePRID, "alice", "completed", "a1", "needs_human_review", nil, value(20), value(10), `[{"code":"blocking_findings"}]`, baseTime, baseTime.Add(time.Minute)},
-		{orgID, uuid.New(), repositoryID, immediatePRID, "alice", "completed", "a1", "approved", &postedReviewID, value(30), value(10), `[]`, baseTime.Add(time.Minute), baseTime.Add(2 * time.Minute)},
-		{orgID, uuid.New(), repositoryID, immediatePRID, "alice", "completed", "a1", "approved", &postedReviewID, value(70), value(20), `[]`, baseTime.Add(2 * time.Minute), baseTime.Add(3 * time.Minute)},
+		// Same-head reruns count separately through the earliest posted approval.
+		{orgID, uuid.New(), repositoryID, rerunPRID, "alice", "completed", "a1", "needs_human_review", nil, value(20), value(10), `[{"code":"blocking_findings"}]`, baseTime, baseTime.Add(time.Minute)},
+		{orgID, uuid.New(), repositoryID, rerunPRID, "alice", "completed", "a1", "approved", &postedReviewID, value(30), value(10), `[]`, baseTime.Add(time.Minute), baseTime.Add(2 * time.Minute)},
+		{orgID, uuid.New(), repositoryID, rerunPRID, "alice", "completed", "a1", "approved", &postedReviewID, value(70), value(20), `[]`, baseTime.Add(2 * time.Minute), baseTime.Add(3 * time.Minute)},
 		// The first attempt has no author. Later attribution must supply octocat.
 		{orgID, uuid.New(), repositoryID, iteratedPRID, "", "completed", "b1", "needs_human_review", nil, value(80), value(20), `[{"code":"blocking_findings"}]`, baseTime, baseTime.Add(4 * time.Minute)},
 		{orgID, uuid.New(), repositoryID, iteratedPRID, "octocat", "completed", "b1", "blocked", nil, value(90), value(30), `[{"code":"blocking_findings"},{"code":"lines_limit_exceeded"}]`, baseTime.Add(time.Minute), baseTime.Add(5 * time.Minute)},
@@ -503,11 +448,11 @@ func TestCodeReviewStore_GetReviewAnalyticsPRJourneys(t *testing.T) {
 	})
 	require.NoError(t, err, "PR-journey analytics should execute against PostgreSQL")
 
-	two := 2.0
+	three, four := 3.0, 4.0
 	thirtyFive, fifteen := 35.0, 15.0
 	require.Equal(t, models.CodeReviewAnalyticsSummary{
 		PRsReviewed: 4, PRsWithCompletedRound: 3, ApprovedBy143: 2, NotApproved: 1,
-		ApprovedFirstRound: 1, MedianRoundsToApproval: &two,
+		MedianRoundsToApproval: &three, AverageRoundsToApproval: &three, P95RoundsToApproval: &four,
 		PRsWithFailedAttempt: 2, PRsWithStaleAttempt: 2,
 		PRsWithChangeBreakdown: 3,
 		MedianAdditions:        &thirtyFive,
@@ -516,14 +461,14 @@ func TestCodeReviewStore_GetReviewAnalyticsPRJourneys(t *testing.T) {
 		ApprovalNotPosted: 1,
 	}, analytics.Summary, "summary should derive unique PR outcomes from representative rounds")
 	require.Equal(t, []models.CodeReviewApprovalRoundAnalytics{
-		{Bucket: models.CodeReviewApprovalRound1, PRs: 1},
-		{Bucket: models.CodeReviewApprovalRound2, PRs: 0},
-		{Bucket: models.CodeReviewApprovalRound3, PRs: 1},
-		{Bucket: models.CodeReviewApprovalRound4Plus, PRs: 0},
+		{Bucket: models.CodeReviewApprovalRound1, PRs: 0},
+		{Bucket: models.CodeReviewApprovalRound2, PRs: 1},
+		{Bucket: models.CodeReviewApprovalRound3, PRs: 0},
+		{Bucket: models.CodeReviewApprovalRound4Plus, PRs: 1},
 		{Bucket: models.CodeReviewApprovalRoundNotYet, PRs: 2},
-	}, analytics.ApprovalRounds, "approval distribution should ignore duplicate heads and post-approval rounds")
+	}, analytics.ApprovalRounds, "approval distribution should include repeat completed reviews and exclude post-approval rounds")
 	require.Equal(t, []models.CodeReviewNonApprovalReasonAnalytics{
-		{Code: models.CodeReviewRiskReasonBlockingFindings, PRs: 1},
+		{Code: models.CodeReviewRiskReasonBlockingFindings, PRs: 2},
 		{Code: models.CodeReviewRiskReasonChecksFailing, PRs: 1},
 		{Code: models.CodeReviewRiskReasonLinesLimitExceeded, PRs: 1},
 	}, analytics.NonApprovalReasons, "reasons should deduplicate per PR and exclude post-approval rounds")
@@ -815,4 +760,264 @@ func createCodeReviewProjectionFixture(t *testing.T, ctx context.Context, conn *
         completed_at timestamptz, publication_key text
     )`)
 	require.NoError(t, err, "fixture should include the immutable assessment projection columns")
+}
+
+func TestCodeReviewStore_GetReviewAnalyticsCompletedRoundsPostgres(t *testing.T) {
+	t.Parallel()
+
+	type review struct {
+		metadataID  uuid.UUID
+		head        string
+		status      string
+		decision    string
+		posted      bool
+		finishOrder int
+	}
+	metric := func(value float64) *float64 { return &value }
+	tests := []struct {
+		name            string
+		prs             [][]review
+		expectedSummary models.CodeReviewAnalyticsSummary
+		expectedBuckets [5]int64
+		expectedReasons []models.CodeReviewNonApprovalReasonAnalytics
+	}{
+		{
+			name: "same revision reviews count separately and stop at first posted approval",
+			prs: [][]review{{
+				{head: "same", status: "completed", decision: "needs_human_review"},
+				{head: "same", status: "completed", decision: "approved", posted: true},
+				{head: "same", status: "completed", decision: "approved", posted: true},
+				{head: "later", status: "completed", decision: "needs_human_review"},
+			}},
+			expectedSummary: models.CodeReviewAnalyticsSummary{
+				PRsReviewed: 1, PRsWithCompletedRound: 1, ApprovedBy143: 1,
+				MedianRoundsToApproval: metric(2), AverageRoundsToApproval: metric(2), P95RoundsToApproval: metric(2),
+			},
+			expectedBuckets: [5]int64{0, 1, 0, 0, 0},
+			expectedReasons: []models.CodeReviewNonApprovalReasonAnalytics{{Code: models.CodeReviewRiskReasonBlockingFindings, PRs: 1}},
+		},
+		{
+			name: "completion order determines rounds even when requests finish out of order",
+			prs: [][]review{{
+				{head: "first-request", status: "completed", decision: "needs_human_review", finishOrder: 2},
+				{head: "second-request", status: "completed", decision: "approved", posted: true, finishOrder: 1},
+			}},
+			expectedSummary: models.CodeReviewAnalyticsSummary{
+				PRsReviewed: 1, PRsWithCompletedRound: 1, ApprovedBy143: 1, ApprovedFirstRound: 1,
+				MedianRoundsToApproval: metric(1), AverageRoundsToApproval: metric(1), P95RoundsToApproval: metric(1),
+			},
+			expectedBuckets: [5]int64{1, 0, 0, 0, 0},
+			expectedReasons: []models.CodeReviewNonApprovalReasonAnalytics{},
+		},
+		{
+			name: "metadata ID breaks ties when reviews complete at the same timestamp",
+			prs: [][]review{{
+				{metadataID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), head: "same", status: "completed", decision: "needs_human_review", finishOrder: 1},
+				{metadataID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), head: "same", status: "completed", decision: "approved", posted: true, finishOrder: 1},
+			}},
+			expectedSummary: models.CodeReviewAnalyticsSummary{
+				PRsReviewed: 1, PRsWithCompletedRound: 1, ApprovedBy143: 1, ApprovedFirstRound: 1,
+				MedianRoundsToApproval: metric(1), AverageRoundsToApproval: metric(1), P95RoundsToApproval: metric(1),
+			},
+			expectedBuckets: [5]int64{1, 0, 0, 0, 0},
+			expectedReasons: []models.CodeReviewNonApprovalReasonAnalytics{},
+		},
+		{
+			name: "failed stale cancelled and unfinished attempts do not count as rounds",
+			prs: [][]review{{
+				{head: "failed", status: "failed"},
+				{head: "stale", status: "stale"},
+				{head: "cancelled", status: "cancelled"},
+				{head: "running", status: "running"},
+				{head: "first", status: "completed", decision: "needs_human_review"},
+				{head: "second", status: "completed", decision: "approved", posted: true},
+			}},
+			expectedSummary: models.CodeReviewAnalyticsSummary{
+				PRsReviewed: 1, PRsWithCompletedRound: 1, ApprovedBy143: 1,
+				PRsWithFailedAttempt: 1, PRsWithStaleAttempt: 1,
+				MedianRoundsToApproval: metric(2), AverageRoundsToApproval: metric(2), P95RoundsToApproval: metric(2),
+			},
+			expectedBuckets: [5]int64{0, 1, 0, 0, 0},
+			expectedReasons: []models.CodeReviewNonApprovalReasonAnalytics{{Code: models.CodeReviewRiskReasonBlockingFindings, PRs: 1}},
+		},
+		{
+			name: "an unposted approval has no rounds to approval",
+			prs:  [][]review{{{head: "unposted", status: "completed", decision: "approved"}}},
+			expectedSummary: models.CodeReviewAnalyticsSummary{
+				PRsReviewed: 1, PRsWithCompletedRound: 1, NotApproved: 1, ApprovalNotPosted: 1,
+			},
+			expectedBuckets: [5]int64{0, 0, 0, 0, 1},
+			expectedReasons: []models.CodeReviewNonApprovalReasonAnalytics{},
+		},
+		{
+			name: "median average and discrete p95 use approved PRs only",
+			prs: [][]review{
+				{{head: "one", status: "completed", decision: "approved", posted: true}},
+				{
+					{head: "two", status: "completed", decision: "needs_human_review"},
+					{head: "two", status: "completed", decision: "approved", posted: true},
+				},
+				{
+					{head: "four", status: "completed", decision: "needs_human_review"},
+					{head: "four", status: "completed", decision: "needs_human_review"},
+					{head: "four", status: "completed", decision: "needs_human_review"},
+					{head: "four", status: "completed", decision: "approved", posted: true},
+				},
+				{
+					{head: "pending", status: "completed", decision: "needs_human_review"},
+					{head: "pending", status: "completed", decision: "needs_human_review"},
+					{head: "pending", status: "completed", decision: "needs_human_review"},
+				},
+			},
+			expectedSummary: models.CodeReviewAnalyticsSummary{
+				PRsReviewed: 4, PRsWithCompletedRound: 4, ApprovedBy143: 3, NotApproved: 1, ApprovedFirstRound: 1,
+				NeedsHumanReview:       1,
+				MedianRoundsToApproval: metric(2), AverageRoundsToApproval: metric(7.0 / 3.0), P95RoundsToApproval: metric(4),
+			},
+			expectedBuckets: [5]int64{1, 1, 0, 1, 1},
+			expectedReasons: []models.CodeReviewNonApprovalReasonAnalytics{{Code: models.CodeReviewRiskReasonBlockingFindings, PRs: 3}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			conn := codeReviewAnalyticsPostgresConn(t)
+			orgID, repositoryID := uuid.New(), uuid.New()
+			firstRequestedAt := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+			createdBefore := firstRequestedAt.Add(time.Minute)
+			for prIndex, reviews := range tt.prs {
+				prID := uuid.New()
+				_, err := conn.Exec(ctx, `INSERT INTO pull_requests (id, org_id, title, github_repo, github_pr_number)
+					VALUES ($1, $2, 'Review rounds fixture', 'acme/api', $3)`, prID, orgID, prIndex+1)
+				require.NoError(t, err, "fixture should create an organization-scoped PR")
+				for reviewIndex, attempt := range reviews {
+					metadataID := attempt.metadataID
+					if metadataID == uuid.Nil {
+						metadataID = uuid.New()
+					}
+					sessionID := uuid.New()
+					_, err = conn.Exec(ctx, `INSERT INTO sessions (id, org_id, revision_context)
+						VALUES ($1, $2, '{"pull_request_author":"author"}')`, sessionID, orgID)
+					require.NoError(t, err, "each completed review should have its own session")
+					var reviewID *int64
+					if attempt.posted {
+						value := int64(reviewIndex + 1)
+						reviewID = &value
+					}
+					order := attempt.finishOrder
+					if order == 0 {
+						order = reviewIndex + 1
+					}
+					var completedAt *time.Time
+					if attempt.status == "completed" {
+						value := firstRequestedAt.Add(48*time.Hour + time.Duration(order)*time.Minute)
+						completedAt = &value
+					}
+					reasons := "[]"
+					if attempt.decision == "needs_human_review" {
+						reasons = `[{"code":"blocking_findings"}]`
+					}
+					_, err = conn.Exec(ctx, `INSERT INTO code_review_session_metadata
+						(id, org_id, session_id, repository_id, pull_request_id, head_sha, status,
+						 decision, github_review_id, risk_reason_details, created_at, completed_at)
+						VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8::text, ''), $9, $10::jsonb, $11, $12)`,
+						metadataID, orgID, sessionID, repositoryID, prID, attempt.head, attempt.status,
+						attempt.decision, reviewID, reasons, firstRequestedAt.Add(time.Duration(reviewIndex)*time.Hour), completedAt)
+					require.NoError(t, err, "fixture should persist the complete review history including later rounds outside the cohort window")
+				}
+			}
+			analytics, err := NewCodeReviewStore(conn).GetReviewAnalytics(ctx, orgID, CodeReviewAnalyticsFilters{
+				RepositoryID: &repositoryID, CreatedAfter: &firstRequestedAt, CreatedBefore: &createdBefore,
+			})
+			require.NoError(t, err, "round analytics should execute against PostgreSQL")
+			expectedRounds := make([]models.CodeReviewApprovalRoundAnalytics, len(models.CodeReviewApprovalRoundBuckets))
+			for index, bucket := range models.CodeReviewApprovalRoundBuckets {
+				expectedRounds[index] = models.CodeReviewApprovalRoundAnalytics{Bucket: bucket, PRs: tt.expectedBuckets[index]}
+			}
+			expected := models.CodeReviewAnalytics{
+				Summary:        tt.expectedSummary,
+				ApprovalRounds: expectedRounds,
+				Authors: []models.CodeReviewAuthorAnalytics{{
+					Author: "author", PRsReviewed: tt.expectedSummary.PRsReviewed,
+					ApprovedBy143: tt.expectedSummary.ApprovedBy143, NotApproved: tt.expectedSummary.NotApproved,
+					ApprovedFirstRound:     tt.expectedSummary.ApprovedFirstRound,
+					MedianRoundsToApproval: tt.expectedSummary.MedianRoundsToApproval,
+				}},
+				NonApprovalReasons:    tt.expectedReasons,
+				CommentRequestsByUser: []models.CodeReviewCommentRequestUserAnalytics{},
+			}
+			require.Equal(t, expected, analytics, "all summary, author, reason, and round metrics should use completed reviews through the first posted approval")
+		})
+	}
+}
+
+func codeReviewAnalyticsPostgresConn(t *testing.T) *pgx.Conn {
+	t.Helper()
+
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run the PostgreSQL analytics behavior test")
+	}
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	require.NoError(t, err, "test should connect to TEST_DATABASE_URL")
+	t.Cleanup(func() {
+		require.NoError(t, conn.Close(context.Background()), "test should close the PostgreSQL connection")
+	})
+
+	schema := "test_code_review_analytics_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+	_, err = conn.Exec(ctx, `CREATE SCHEMA `+schema)
+	require.NoError(t, err, "test should create an isolated analytics schema")
+	t.Cleanup(func() {
+		_, cleanupErr := conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
+		require.NoError(t, cleanupErr, "test should remove the isolated analytics schema")
+	})
+	_, err = conn.Exec(ctx, `SET search_path TO `+schema+`, public`)
+	require.NoError(t, err, "test should isolate analytics objects")
+
+	_, err = conn.Exec(ctx, `
+		CREATE TABLE sessions (
+			id uuid PRIMARY KEY,
+			org_id uuid NOT NULL,
+			title text,
+			revision_context jsonb
+		);
+		CREATE TABLE pull_requests (
+			id uuid PRIMARY KEY,
+			org_id uuid NOT NULL,
+			title text NOT NULL,
+			github_repo text NOT NULL,
+			github_pr_number int NOT NULL
+		);
+		CREATE TABLE code_review_session_metadata (
+			id uuid PRIMARY KEY,
+			org_id uuid NOT NULL,
+			session_id uuid NOT NULL,
+			repository_id uuid NOT NULL,
+			pull_request_id uuid NOT NULL,
+			status text NOT NULL,
+			head_sha text NOT NULL,
+			stale boolean NOT NULL DEFAULT false,
+			superseded_by_session_id uuid,
+			acceptable boolean,
+			decision text,
+			github_review_id bigint,
+			additions integer,
+			deletions integer,
+			risk_reason_details jsonb NOT NULL DEFAULT '[]',
+			completed_at timestamptz,
+			created_at timestamptz NOT NULL
+		);
+		CREATE TABLE code_review_findings (
+			org_id uuid NOT NULL,
+			session_id uuid NOT NULL,
+			severity text NOT NULL
+		);
+	`)
+	require.NoError(t, err, "test should create the minimal analytics schema")
+
+	return conn
 }

@@ -2085,8 +2085,8 @@ func codeReviewOptionalMetric(value float64) *float64 {
 // selected by the first attempt's creation time; every later attempt is then
 // considered when deriving the PR's eventual outcome.
 func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUID, filters CodeReviewAnalyticsFilters) (models.CodeReviewAnalytics, error) {
-	// Analytics intentionally cohorts and counts historical session attempts.
-	// A later assessment on the same session is evidence usage, not a new round.
+	// Every completed review session is a round, including repeat reviews of
+	// the same head. A later assessment on that session is evidence usage.
 	authorOrder, err := codeReviewAuthorAnalyticsOrder(filters.AuthorSortBy, filters.AuthorSortOrder)
 	if err != nil {
 		return models.CodeReviewAnalytics{}, err
@@ -2187,36 +2187,24 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		FROM attempts
 		GROUP BY pull_request_id
 	),
-	completed_ranked AS (
+	completed_rounds AS (
 		SELECT a.*,
 			ROW_NUMBER() OVER (
-				PARTITION BY a.pull_request_id, a.head_sha
-				ORDER BY
-					(a.decision = 'approved' AND a.github_review_id IS NOT NULL) IS TRUE DESC,
-					CASE WHEN a.decision = 'approved' AND a.github_review_id IS NOT NULL THEN a.completed_at END ASC,
-					a.completed_at DESC, a.id DESC
-			) AS duplicate_rank
+				PARTITION BY a.pull_request_id ORDER BY a.completed_at, a.id
+			)::bigint AS round_number
 		FROM attempts a
 		WHERE a.status = 'completed' AND a.completed_at IS NOT NULL
-	),
-	distinct_heads AS (
-		SELECT r.*,
-			ROW_NUMBER() OVER (
-				PARTITION BY r.pull_request_id ORDER BY r.completed_at, r.id
-			)::bigint AS round_number
-		FROM completed_ranked r
-		WHERE r.duplicate_rank = 1
 	),
 	first_approvals AS (
 		SELECT DISTINCT ON (pull_request_id)
 			pull_request_id, round_number, session_id
-		FROM distinct_heads
+		FROM completed_rounds
 		WHERE decision = 'approved' AND github_review_id IS NOT NULL
 		ORDER BY pull_request_id, round_number
 	),
 	representatives AS (
 		SELECT DISTINCT ON (h.pull_request_id) h.*
-		FROM distinct_heads h
+		FROM completed_rounds h
 		LEFT JOIN first_approvals approval ON approval.pull_request_id = h.pull_request_id
 		ORDER BY h.pull_request_id,
 			(h.session_id = approval.session_id) DESC,
@@ -2252,6 +2240,10 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 			COUNT(*) FILTER (WHERE approval_round = 1)::bigint AS approved_first_round,
 			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY approval_round)
 				FILTER (WHERE approval_round IS NOT NULL), -1)::double precision AS median_rounds_to_approval,
+			COALESCE(AVG(approval_round)
+				FILTER (WHERE approval_round IS NOT NULL), -1)::double precision AS average_rounds_to_approval,
+			COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY approval_round)
+				FILTER (WHERE approval_round IS NOT NULL), -1)::double precision AS p95_rounds_to_approval,
 			COUNT(*) FILTER (WHERE had_failed)::bigint AS prs_with_failed_attempt,
 			COUNT(*) FILTER (WHERE had_stale)::bigint AS prs_with_stale_attempt,
 			COUNT(*) FILTER (WHERE session_id IS NOT NULL AND additions IS NOT NULL AND deletions IS NOT NULL)::bigint AS prs_with_change_breakdown,
@@ -2279,7 +2271,7 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 	),
 	reasons AS (
 		SELECT reason->>'code' AS code, COUNT(DISTINCT h.pull_request_id)::bigint AS prs
-		FROM distinct_heads h
+		FROM completed_rounds h
 		LEFT JOIN first_approvals approval ON approval.pull_request_id = h.pull_request_id
 		CROSS JOIN LATERAL jsonb_array_elements(h.risk_reason_details) reason
 		WHERE (approval.round_number IS NULL OR h.round_number <= approval.round_number)
@@ -2312,12 +2304,12 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 	FROM summary s`
 
 	var analytics models.CodeReviewAnalytics
-	var medianRounds, medianAdditions, medianDeletions float64
+	var medianRounds, averageRounds, p95Rounds, medianAdditions, medianDeletions float64
 	var roundsJSON, authorsJSON, reasonsJSON, commentRequestUsersJSON []byte
 	err = s.db.QueryRow(ctx, query, args).Scan(
 		&analytics.Summary.PRsReviewed, &analytics.Summary.PRsWithCompletedRound,
 		&analytics.Summary.ApprovedBy143, &analytics.Summary.NotApproved,
-		&analytics.Summary.ApprovedFirstRound, &medianRounds,
+		&analytics.Summary.ApprovedFirstRound, &medianRounds, &averageRounds, &p95Rounds,
 		&analytics.Summary.PRsWithFailedAttempt, &analytics.Summary.PRsWithStaleAttempt,
 		&analytics.Summary.PRsWithChangeBreakdown,
 		&medianAdditions, &medianDeletions,
@@ -2331,6 +2323,8 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		return models.CodeReviewAnalytics{}, fmt.Errorf("query PR-centric code review analytics: %w", err)
 	}
 	analytics.Summary.MedianRoundsToApproval = codeReviewOptionalMetric(medianRounds)
+	analytics.Summary.AverageRoundsToApproval = codeReviewOptionalMetric(averageRounds)
+	analytics.Summary.P95RoundsToApproval = codeReviewOptionalMetric(p95Rounds)
 	analytics.Summary.MedianAdditions = codeReviewOptionalMetric(medianAdditions)
 	analytics.Summary.MedianDeletions = codeReviewOptionalMetric(medianDeletions)
 	for _, section := range []struct {

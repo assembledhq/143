@@ -26,8 +26,8 @@ export const COMPLETED_NOT_APPROVED = "completed_not_approved" satisfies CodeRev
 
 const REVIEW_SUMMARY_DEFINITIONS = {
   "Reviews completed": "Review sessions matching the selected filters that finished successfully.",
-  "Automatically approved": "Completed review sessions where 143 posted an approval on GitHub.",
-  "Approval rate": "The percentage of completed review sessions where 143 posted an approval on GitHub.",
+  "Automatically approved": "Completed review sessions where 143 posted an approval on GitHub. Evidence-only rechecks are excluded.",
+  "Review approval rate": "Automatically approved review sessions divided by completed review sessions matching all selected filters. Each completed review counts separately, so a PR can count more than once.",
   "Median turnaround": "The median time from a review being queued to that review finishing successfully.",
 } as const;
 
@@ -61,27 +61,32 @@ export function CodeReviewSummaryCards({
         {
           label: "Reviews completed",
           value: stats.reviews_completed.toLocaleString(),
+          context: "Completed review sessions",
           definition: REVIEW_SUMMARY_DEFINITIONS["Reviews completed"],
         },
         {
           label: "Automatically approved",
           value: stats.automatically_approved.toLocaleString(),
+          context: "Review sessions with a posted approval",
           definition: REVIEW_SUMMARY_DEFINITIONS["Automatically approved"],
         },
         {
-          label: "Approval rate",
+          label: "Review approval rate",
           value: percentage(stats.automatically_approved, stats.reviews_completed),
-          definition: REVIEW_SUMMARY_DEFINITIONS["Approval rate"],
+          context: `${stats.automatically_approved.toLocaleString()} of ${stats.reviews_completed.toLocaleString()} completed reviews`,
+          definition: REVIEW_SUMMARY_DEFINITIONS["Review approval rate"],
         },
         {
           label: "Median turnaround",
           value: formatReviewTurnaround(stats.median_turnaround_seconds),
+          context: undefined,
           definition: REVIEW_SUMMARY_DEFINITIONS["Median turnaround"],
         },
       ]
     : (Object.keys(REVIEW_SUMMARY_DEFINITIONS) as Array<keyof typeof REVIEW_SUMMARY_DEFINITIONS>).map((label) => ({
         label,
         value: "—",
+        context: undefined,
         definition: REVIEW_SUMMARY_DEFINITIONS[label],
       }));
 
@@ -103,6 +108,7 @@ export function CodeReviewSummaryCards({
                 <MetricInfoTooltip label={card.label} definition={card.definition} />
               </div>
               <p className="text-2xl font-semibold tabular-nums text-foreground">{card.value}</p>
+              {card.context ? <p className="text-xs text-muted-foreground">{card.context}</p> : null}
             </CardContent>
           </Card>
         ))}

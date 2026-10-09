@@ -45,7 +45,7 @@ async function changeViewport(matches: boolean) {
 }
 
 describe("CodeReviewSummaryCards", () => {
-  it("moves metric definitions from subdescriptions into heading tooltips", async () => {
+  it("identifies the review-session approval denominator and explains repeated PRs", async () => {
     const user = userEvent.setup();
     render(
       <CodeReviewSummaryCards
@@ -65,11 +65,13 @@ describe("CodeReviewSummaryCards", () => {
     expect(within(summary).queryByText("72% of completed reviews")).not.toBeInTheDocument();
     expect(within(summary).queryByText("21 need human review")).not.toBeInTheDocument();
     expect(within(summary).queryByText("Queued to completed")).not.toBeInTheDocument();
+    expect(within(summary).getByText("92 of 128 completed reviews")).toBeInTheDocument();
+    expect(within(summary).getByText("72%")).toBeInTheDocument();
 
-    const trigger = within(summary).getByRole("button", { name: "About Approval rate" });
+    const trigger = within(summary).getByRole("button", { name: "About Review approval rate" });
     await user.hover(trigger);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      "The percentage of completed review sessions where 143 posted an approval on GitHub.",
+      "Automatically approved review sessions divided by completed review sessions matching all selected filters. Each completed review counts separately, so a PR can count more than once.",
     );
 
     expect(within(summary).getByRole("button", { name: "About Reviews completed" })).toBeInTheDocument();

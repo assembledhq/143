@@ -98,21 +98,22 @@ whose attempts only failed or became stale visible in the operational metrics.
 
 ### Review round
 
-A review round is a completed 143 assessment of a distinct PR head SHA.
+A review round is a completed 143 review session.
 
-- The first completed assessment is round 1.
-- A completed assessment of a new head SHA is the next round.
+- The first completed review is round 1, ordered by completion time and ID.
+- Each subsequent completed review is another round, including a repeat review
+  of the same head SHA.
 - Failed, stale, cancelled, or still-running sessions do not count.
-- Retries or duplicate completed sessions for the same head SHA count once.
 - A completed non-approval counts as a round.
 - Rounds after the first posted 143 approval are ignored.
-
-If duplicate completed assessments exist for one head SHA, use the earliest
-completed assessment with a posted approval; otherwise use the latest completed
-assessment as that head's result. This makes an approval visible without allowing
-same-head reruns to inflate the round count.
+- Evidence assessments within an existing session do not create another review
+  session and do not add a round.
 
 ### 143 approval
+
+This report uses completed review-session results. Evidence-only rechecks within
+an existing session do not update that historical result, so approvals posted
+only by those rechecks are excluded from both tabs' approval counts.
 
 A PR is approved by 143 only when a completed review has:
 
@@ -124,8 +125,12 @@ This matches the existing product distinction.
 
 ### Rounds to approval
 
-For an approved PR, rounds to approval is the ordinal number of the first round
-that posted a 143 approval.
+For an approved PR, rounds to approval is the number of completed reviews up to
+and including the first review that posted a 143 approval. Median and average
+use approved PRs only. p95 uses PostgreSQL's discrete 95th percentile, so it
+reports an observed integer review count within which at least 95% of approved
+PRs received their first approval. All three metrics are null when no PR is
+approved.
 
 Example:
 
@@ -133,7 +138,7 @@ Example:
 | --- | --- |
 | Assessment becomes stale after the head changes | Not a round |
 | New head receives a completed non-approval | Round 1 |
-| Infrastructure retry on the same head | No additional round |
+| Failed infrastructure retry on the same head | No additional round |
 | Author pushes fixes; completed non-approval | Round 2 |
 | Author pushes again; 143 posts approval | Round 3 |
 
@@ -182,19 +187,27 @@ this design.
 
 ### 2. Headline cards
 
-Show four cards. Each card is a label and a value with no subdescription; the
-definition is reachable from an info tooltip on the label, so the cards stay
-scannable and the wording lives in one place.
+Show six cards, ordered as PR counts and approval rate followed by median,
+average, and P95 rounds to approval. Each card has a label, value, and brief
+counting-unit or population context. The full definition is reachable from an
+info tooltip.
 
 | Card | Definition | Tooltip |
 | --- | --- | --- |
 | **PRs reviewed** | Unique PRs in the cohort | Unique pull requests first sent to 143 during the selected time period |
-| **Approved by 143** | Cohort PRs with a posted 143 approval | Reviewed pull requests where 143 posted an approval on GitHub |
-| **Approval rate** | Approved by 143 / PRs reviewed | The percentage of reviewed pull requests where 143 posted an approval on GitHub |
-| **Median rounds to approval** | Median among approved cohort PRs | The median number of distinct completed revisions before 143 first posted an approval, among approved pull requests |
+| **Automatically approved** | Cohort PRs with a posted 143 approval | Unique PRs with approval from a completed review, including reviews after the selected period; evidence-only rechecks are excluded |
+| **PR approval rate** | Automatically approved / PRs reviewed | Unique approved PRs divided by all cohort PRs, including PRs still awaiting approval |
+| **Median rounds to approval** | Median among approved cohort PRs | Completed reviews through the first posted approval; repeat reviews of a revision count separately |
+| **Average rounds to approval** | Arithmetic mean among approved cohort PRs | Completed reviews through the first posted approval; repeat reviews of a revision count separately |
+| **P95 rounds to approval** | Discrete 95th percentile among approved cohort PRs | At least 95% of approved PRs received their first approval within this many completed reviews |
 
 If no PRs are in the cohort, show the existing analytics empty state with PR-based
-copy. If PRs exist but none are approved, show `—` for median rounds.
+copy. If PRs exist but none are approved, show `—` for all three rounds metrics.
+Show "Approved PRs only" on each rounds card and a numerator/denominator on
+both approval-rate cards. The Reviews tab labels its rate "Review approval
+rate" and counts completed sessions matching all its filters; Analytics labels
+its rate "PR approval rate" and counts each cohort PR once. Both tabs label the
+posted-approval count "Automatically approved" and expose its counting unit.
 
 ### 3. Direct review requests by user
 
@@ -269,7 +282,8 @@ Analytics
 Usage by PR author
 Author       PRs   Approved   Not approved   First-round approval   Median rounds
 
-[PRs reviewed] [Approved by 143] [Approval rate] [Median rounds]
+[PRs reviewed] [Automatically approved] [PR approval rate]
+[Median rounds] [Average rounds] [P95 rounds]
 
 Direct review requests by user
 GitHub user                                  Direct comment requests
@@ -306,7 +320,9 @@ filters. Change the response contract to PR-oriented fields:
       "approved_by_143": 31,
       "not_approved": 8,
       "approved_first_round": 20,
-      "median_rounds_to_approval": 2,
+      "median_rounds_to_approval": 1,
+      "average_rounds_to_approval": 1.4838709677419355,
+      "p95_rounds_to_approval": 3,
       "prs_with_failed_attempt": 2,
       "prs_with_stale_attempt": 5,
       "prs_with_change_breakdown": 36,
@@ -356,8 +372,8 @@ The implementation should derive this in one org-scoped PostgreSQL query:
 1. identify PRs by their first review-attempt creation time and apply the cohort
    filters;
 2. load all attempts for those PRs, including attempts after the cohort window;
-3. collapse duplicate completed sessions to one result per PR and head SHA;
-4. order distinct completed heads by completion time to assign round numbers;
+3. select completed review sessions with a completion timestamp;
+4. order every completed session by completion time and ID to assign round numbers;
 5. select one representative assessment per PR;
 6. aggregate PR outcomes, rounds, authors, representative change-distribution
    and finding metrics, distinct per-PR reason codes, and direct comment-request
@@ -383,7 +399,7 @@ must be reflected in handler, store, and frontend tests.
 - **Only failed or stale attempts:** the PR is included and contributes to the
   corresponding operational PR metric.
 - **Approval decision was not posted:** the PR remains not yet approved.
-- **Same SHA reviewed more than once:** it is one round.
+- **Same SHA reviewed more than once:** each completed review is a round.
 - **PR receives approval after the selected window:** it is approved in its
   original cohort.
 - **PR remains open or is closed without 143 approval:** it is not yet approved.
@@ -414,7 +430,7 @@ Add focused store tests covering:
 
 Update handler contract tests and frontend component tests for:
 
-- the four headline cards;
+- the six headline cards;
 - all approval-round buckets;
 - no-PR and no-approval empty values;
 - non-approval reasons;
@@ -432,10 +448,11 @@ the report is derived from current durable review and PR records.
 
 ## Success criteria
 
-- A user can explain the four headline metrics without knowing what a review
-  session is.
+- A user can explain the six headline metrics and distinguish PR counts from
+  review-session counts.
 - Each PR contributes once to PR counts and outcome rates.
-- Failed, stale, and same-head retries do not inflate rounds.
+- Failed, stale, cancelled, and unfinished attempts do not count as rounds;
+  repeat completed reviews of the same revision do count.
 - The page directly answers how many rounds approval took.
 - The PR-author usage table is the primary report immediately after the filters.
 - Existing author, finding, non-approval, and operational

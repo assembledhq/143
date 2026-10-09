@@ -288,6 +288,8 @@ const reviewAnalytics: CodeReviewAnalytics = {
     not_approved: 11,
     approved_first_round: 10,
     median_rounds_to_approval: 2,
+    average_rounds_to_approval: 2.5,
+    p95_rounds_to_approval: 4,
     needs_human_review: 8,
     comment_only: 2,
     blocked: 0,
@@ -625,9 +627,9 @@ describe("CodeReviewsPage", () => {
     expect(within(stats).getByText("Automatically approved")).toBeInTheDocument();
     expect(within(stats).getByText("92")).toBeInTheDocument();
     expect(within(stats).getByRole("button", { name: "About Automatically approved" })).toBeInTheDocument();
-    expect(within(stats).getByText("Approval rate")).toBeInTheDocument();
+    expect(within(stats).getByText("Review approval rate")).toBeInTheDocument();
     expect(within(stats).getByText("72%")).toBeInTheDocument();
-    expect(within(stats).getByRole("button", { name: "About Approval rate" })).toBeInTheDocument();
+    expect(within(stats).getByRole("button", { name: "About Review approval rate" })).toBeInTheDocument();
     expect(within(stats).getByText("Median turnaround")).toBeInTheDocument();
     expect(within(stats).getByText("8m")).toBeInTheDocument();
     const timeWindow = screen.getByRole("button", { name: "Time window" });
@@ -943,6 +945,12 @@ describe("CodeReviewsPage", () => {
     expect(within(approvalOutcomes).getByText("2.0")).toBeInTheDocument();
     expect(within(approvalOutcomes).queryByText("128")).not.toBeInTheDocument();
     expect(screen.getByText("Approval by round")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("Automatically approved")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("PR approval rate")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("Average rounds to approval")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("2.5")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("P95 rounds to approval")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("4")).toBeInTheDocument();
     expect(screen.queryByText("Decision feedback")).not.toBeInTheDocument();
     expect(screen.getByText("Why PRs were not approved right away")).toBeInTheDocument();
     expect(screen.getByText("PR findings and operational outcomes")).toBeInTheDocument();
@@ -1005,7 +1013,7 @@ describe("CodeReviewsPage", () => {
       "href",
       "/code-reviews?tab=reviews&author=anya&range=30d",
     );
-    expect(within(anyaRow).getByRole("link", { name: "9 PRs approved by 143 by anya" })).toHaveAttribute(
+    expect(within(anyaRow).getByRole("link", { name: "9 Automatically approved PRs by anya" })).toHaveAttribute(
       "href",
       "/code-reviews?tab=reviews&author=anya&range=30d&status=completed&outcome=automatically_approved",
     );
@@ -1110,6 +1118,8 @@ describe("CodeReviewsPage", () => {
         not_approved: 0,
         approved_first_round: 0,
         median_rounds_to_approval: null,
+        average_rounds_to_approval: null,
+        p95_rounds_to_approval: null,
         needs_human_review: 0,
         comment_only: 0,
         blocked: 0,

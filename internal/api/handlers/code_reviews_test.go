@@ -789,14 +789,14 @@ func TestCodeReviewHandler_AnalyticsReturnsReport(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"prs_reviewed", "prs_with_completed_round", "approved_by_143", "not_approved",
-			"approved_first_round", "median_rounds_to_approval",
+			"approved_first_round", "median_rounds_to_approval", "average_rounds_to_approval", "p95_rounds_to_approval",
 			"prs_with_failed_attempt", "prs_with_stale_attempt",
 			"prs_with_change_breakdown", "median_additions", "median_deletions", "prs_with_findings",
 			"prs_with_blocking_findings", "total_findings", "needs_human_review",
 			"comment_only", "blocked", "approval_not_posted", "approval_rounds", "authors",
 			"non_approval_reasons", "comment_requests_total", "comment_requests_by_user",
 		}).AddRow(
-			6, 5, 3, 2, 2, 1.0, 1, 0,
+			6, 5, 3, 2, 2, 1.0, 1.3333333333333333, 2.0, 1, 0,
 			0, -1, -1, 1,
 			1, 2, 2, 0, 0, 0,
 			[]byte(`[{"bucket":"round_1","prs":2},{"bucket":"round_2","prs":1},{"bucket":"round_3","prs":0},{"bucket":"round_4_plus","prs":0},{"bucket":"not_yet_approved","prs":3}]`),
@@ -820,6 +820,8 @@ func TestCodeReviewHandler_AnalyticsReturnsReport(t *testing.T) {
 				"not_approved": 2,
 				"approved_first_round": 2,
 				"median_rounds_to_approval": 1,
+				"average_rounds_to_approval": 1.3333333333333333,
+				"p95_rounds_to_approval": 2,
 				"needs_human_review": 2,
 				"comment_only": 0,
 				"blocked": 0,

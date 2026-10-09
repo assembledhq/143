@@ -1212,6 +1212,8 @@ type CodeReviewAnalyticsSummary struct {
 	NotApproved             int64    `json:"not_approved"`
 	ApprovedFirstRound      int64    `json:"approved_first_round"`
 	MedianRoundsToApproval  *float64 `json:"median_rounds_to_approval"`
+	AverageRoundsToApproval *float64 `json:"average_rounds_to_approval"`
+	P95RoundsToApproval     *float64 `json:"p95_rounds_to_approval"`
 	NeedsHumanReview        int64    `json:"needs_human_review"`
 	CommentOnly             int64    `json:"comment_only"`
 	Blocked                 int64    `json:"blocked"`

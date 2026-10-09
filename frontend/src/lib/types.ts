@@ -498,6 +498,8 @@ export interface CodeReviewAnalyticsSummary {
   not_approved: number;
   approved_first_round: number;
   median_rounds_to_approval: number | null;
+  average_rounds_to_approval: number | null;
+  p95_rounds_to_approval: number | null;
   needs_human_review: number;
   comment_only: number;
   blocked: number;

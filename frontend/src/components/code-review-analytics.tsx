@@ -152,26 +152,42 @@ function MetricCard({
 // review activity only and answer a different question.
 function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summary"] }) {
   return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Approval outcomes">
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-label="Approval outcomes">
       <MetricCard
         label="PRs reviewed"
         value={summary.prs_reviewed.toLocaleString()}
+        context="Unique PRs first sent in this period"
         definition="Unique pull requests first sent to 143 during the selected time period."
       />
       <MetricCard
-        label="Approved by 143"
+        label="Automatically approved"
         value={summary.approved_by_143.toLocaleString()}
-        definition="Reviewed pull requests where 143 posted an approval on GitHub."
+        context="Unique PRs with a posted approval"
+        definition="Unique pull requests where a completed review session posted an approval on GitHub, including sessions completed after the selected period. Each PR counts once. Evidence-only rechecks are excluded."
       />
       <MetricCard
-        label="Approval rate"
+        label="PR approval rate"
         value={percentage(summary.approved_by_143, summary.prs_reviewed)}
-        definition="The percentage of reviewed pull requests where 143 posted an approval on GitHub."
+        context={`${summary.approved_by_143.toLocaleString()} of ${summary.prs_reviewed.toLocaleString()} unique PRs`}
+        definition="Automatically approved PRs divided by unique PRs first sent to 143 during the selected period. Uses all later rounds and includes PRs still awaiting approval. The Reviews tab counts completed review sessions instead."
       />
       <MetricCard
         label="Median rounds to approval"
         value={decimalMetric(summary.median_rounds_to_approval)}
-        definition="The median number of distinct completed revisions before 143 first posted an approval, among approved pull requests."
+        context="Approved PRs only"
+        definition="The median number of completed review sessions up to and including the first posted approval, among approved PRs. Repeat reviews of the same revision count separately; failed, stale, cancelled, and unfinished reviews do not count."
+      />
+      <MetricCard
+        label="Average rounds to approval"
+        value={decimalMetric(summary.average_rounds_to_approval)}
+        context="Approved PRs only"
+        definition="The average number of completed review sessions up to and including the first posted approval, among approved PRs. Repeat reviews of the same revision count separately."
+      />
+      <MetricCard
+        label="P95 rounds to approval"
+        value={roundedMetric(summary.p95_rounds_to_approval)}
+        context="Approved PRs only"
+        definition="At least 95% of approved PRs received their first posted approval within this many completed review sessions. Repeat reviews of the same revision count separately."
       />
     </div>
   );
@@ -325,7 +341,7 @@ export function CodeReviewAnalyticsReport({
                       <AuthorReviewCountLink
                         author={author.author}
                         count={author.approved_by_143}
-                        label="PRs approved by 143"
+                        label="Automatically approved PRs"
                         outcome="automatically_approved"
                         repository={reviewLinkFilters.repository}
                         range={reviewLinkFilters.range}
@@ -362,7 +378,7 @@ export function CodeReviewAnalyticsReport({
                   {
                     content: summary.approved_by_143.toLocaleString(),
                     className: "text-right",
-                    ariaLabel: `${summary.approved_by_143.toLocaleString()} PRs approved by 143 overall`,
+                    ariaLabel: `${summary.approved_by_143.toLocaleString()} automatically approved PRs overall`,
                   },
                   {
                     content: summary.not_approved.toLocaleString(),
@@ -452,7 +468,7 @@ export function CodeReviewAnalyticsReport({
 
       <SectionGroup
         title="Approval by round"
-        description="Each PR appears once, based on the first distinct completed head that received a posted 143 approval."
+        description="Each PR appears once, by the number of completed reviews up to and including its first posted 143 approval. Repeat reviews of the same revision count separately."
       >
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="Approval by round">
           {analytics.approval_rounds.map((bucket) => (

@@ -1705,18 +1705,18 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery(`(?s)WITH first_attempt AS MATERIALIZED.*m\.repository_id = @repository_id.*cohort AS MATERIALIZED.*first_attempt\.first_requested_at >= @created_after.*attempt_flags AS.*distinct_heads AS.*representatives AS.*FROM summary s`).
+	mock.ExpectQuery(`(?s)WITH first_attempt AS MATERIALIZED.*m\.repository_id = @repository_id.*cohort AS MATERIALIZED.*first_attempt\.first_requested_at >= @created_after.*attempt_flags AS.*completed_rounds AS.*representatives AS.*FROM summary s`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"prs_reviewed", "prs_with_completed_round", "approved_by_143", "not_approved",
-			"approved_first_round", "median_rounds_to_approval",
+			"approved_first_round", "median_rounds_to_approval", "average_rounds_to_approval", "p95_rounds_to_approval",
 			"prs_with_failed_attempt", "prs_with_stale_attempt",
 			"prs_with_change_breakdown", "median_additions", "median_deletions", "prs_with_findings",
 			"prs_with_blocking_findings", "total_findings", "needs_human_review",
 			"comment_only", "blocked", "approval_not_posted", "approval_rounds", "authors",
 			"non_approval_reasons", "comment_requests_total", "comment_requests_by_user",
 		}).AddRow(
-			32, 28, 17, 11, 10, 2.0, 2, 2,
+			32, 28, 17, 11, 10, 2.0, 2.5, 5.0, 2, 2,
 			20, medianAdditions, medianDeletions,
 			9, 3, 14, 8, 2, 0, 1,
 			[]byte(`[{"bucket":"round_1","prs":10},{"bucket":"round_2","prs":7},{"bucket":"round_3","prs":0},{"bucket":"round_4_plus","prs":0},{"bucket":"not_yet_approved","prs":15}]`),
@@ -1753,6 +1753,8 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 			NotApproved:             11,
 			ApprovedFirstRound:      10,
 			MedianRoundsToApproval:  func() *float64 { value := 2.0; return &value }(),
+			AverageRoundsToApproval: func() *float64 { value := 2.5; return &value }(),
+			P95RoundsToApproval:     func() *float64 { value := 5.0; return &value }(),
 			NeedsHumanReview:        8,
 			CommentOnly:             2,
 			ApprovalNotPosted:       1,
@@ -1836,14 +1838,14 @@ func TestCodeReviewStore_GetReviewAnalyticsRejectsIncompleteApprovalRounds(t *te
 				WithArgs(pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows([]string{
 					"prs_reviewed", "prs_with_completed_round", "approved_by_143", "not_approved",
-					"approved_first_round", "median_rounds_to_approval",
+					"approved_first_round", "median_rounds_to_approval", "average_rounds_to_approval", "p95_rounds_to_approval",
 					"prs_with_failed_attempt", "prs_with_stale_attempt",
 					"prs_with_change_breakdown", "median_additions", "median_deletions", "prs_with_findings",
 					"prs_with_blocking_findings", "total_findings", "needs_human_review",
 					"comment_only", "blocked", "approval_not_posted", "approval_rounds", "authors",
 					"non_approval_reasons", "comment_requests_total", "comment_requests_by_user",
 				}).AddRow(
-					1, 1, 1, 0, 1, 1.0, 0, 0, 0, -1.0, -1.0, 0, 0, 0, 0, 0, 0, 0,
+					1, 1, 1, 0, 1, 1.0, 1.0, 1.0, 0, 0, 0, -1.0, -1.0, 0, 0, 0, 0, 0, 0, 0,
 					[]byte(tt.rounds), []byte(`[]`), []byte(`[]`), 0, []byte(`[]`),
 				))
 
