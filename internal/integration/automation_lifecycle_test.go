@@ -558,6 +558,8 @@ func TestAutomationLifecycle_PostMergeEditBeforeItsMerge(t *testing.T) {
 // applies over closed evidence that is newer than it. A sync that observes
 // the close stamps it when it looked, which can be after the merge happened,
 // and a merged pull request cannot have been closed without merging later.
+// The close was notified first, so it already retired the generation: the
+// merged run is queued, but it cannot finish that conversation.
 func TestAutomationLifecycle_MergedDeliveryAfterALaterClose(t *testing.T) {
 	h := newLifecycleHarness(t)
 	ctx := context.Background()
@@ -576,6 +578,9 @@ func TestAutomationLifecycle_MergedDeliveryAfterALaterClose(t *testing.T) {
 	require.Equal(t, models.AutomationTargetLifecycleMerged, target.LifecycleState, "the merge applies over the later close")
 	require.WithinDuration(t, closedAt, *target.LifecycleUpdatedAt, time.Millisecond, "and the evidence does not move backwards")
 	require.Equal(t, models.AutomationRunStatusPending, h.reload(t, merged.ID).Status, "the merged run is not skipped as pr_closed")
+	generation, err := h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.Equal(t, models.AutomationTargetSessionStatusRetired, generation.Status, "the earlier close already retired the generation the merged run would have finished")
 }
 
 // TestAutomationLifecycle_StaleReopenOnAMergedTarget proves a reopened
@@ -603,4 +608,81 @@ func TestAutomationLifecycle_StaleReopenOnAMergedTarget(t *testing.T) {
 	run := h.reload(t, reopened.ID)
 	require.Equal(t, models.AutomationRunStatusSkipped, run.Status, "the stale reopen's run is skipped")
 	require.Equal(t, models.AutomationRunOutcomePRClosed, *run.OutcomeReason, "as pr_closed")
+}
+
+// TestAutomationLifecycle_UntimestampedReopenOnAMergedTarget proves a reopen
+// without a timestamp cannot reopen a merged target through arrival. It has
+// no moment to arbitrate on, but GitHub cannot reopen a merged pull request,
+// so it can only describe a moment before the merge.
+func TestAutomationLifecycle_UntimestampedReopenOnAMergedTarget(t *testing.T) {
+	h := newLifecycleHarness(t)
+	ctx := context.Background()
+
+	before := h.target(t).LifecycleUpdatedAt
+	require.NotNil(t, before, "the target already has openness evidence")
+	mergedAt := before.Add(10 * time.Second)
+	require.NoError(t, h.lifecycle.OnPullRequestClosed(ctx, h.orgID, "acme/web", 42, true, mergedAt), "merge")
+
+	reopened := h.deliver(t, automations.GitHubEventTriggerRequest{
+		Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "reopened",
+		HeadSHA: "7777777777777777777777777777777777777777", BaseBranch: "main",
+	})
+	target := h.target(t)
+	require.Equal(t, models.AutomationTargetLifecycleMerged, target.LifecycleState, "the merged pull request stays merged")
+	require.NotNil(t, target.LifecycleUpdatedAt, "the merge's evidence is not cleared")
+	require.WithinDuration(t, mergedAt, *target.LifecycleUpdatedAt, time.Millisecond, "and keeps the merge's moment")
+	run := h.reload(t, reopened.ID)
+	require.Equal(t, models.AutomationRunStatusSkipped, run.Status, "the reopen's run is skipped")
+	require.Equal(t, models.AutomationRunOutcomePRClosed, *run.OutcomeReason, "as pr_closed")
+}
+
+// TestAutomationLifecycle_LaterReopenNotificationOnAMergedTarget proves the
+// reopen notification cannot reopen a merged target either, even when its
+// timestamp is newer than the merge: a notification is stamped when it was
+// processed if the payload had no timestamp.
+func TestAutomationLifecycle_LaterReopenNotificationOnAMergedTarget(t *testing.T) {
+	h := newLifecycleHarness(t)
+	ctx := context.Background()
+
+	before := h.target(t).LifecycleUpdatedAt
+	require.NotNil(t, before, "the target already has openness evidence")
+	mergedAt := before.Add(10 * time.Second)
+	reopenedAt := mergedAt.Add(10 * time.Second)
+
+	require.NoError(t, h.lifecycle.OnPullRequestClosed(ctx, h.orgID, "acme/web", 42, true, mergedAt), "merge")
+	require.NoError(t, h.lifecycle.OnPullRequestReopened(ctx, h.orgID, "acme/web", 42, reopenedAt), "reopen stamped after the merge")
+
+	target := h.target(t)
+	require.Equal(t, models.AutomationTargetLifecycleMerged, target.LifecycleState, "the merged pull request stays merged")
+	require.WithinDuration(t, mergedAt, *target.LifecycleUpdatedAt, time.Millisecond, "and keeps the merge's evidence")
+}
+
+// TestAutomationLifecycle_LaterUnmergedCloseOnAMergedTarget proves an
+// unmerged close stamped after a merge is dropped as stale on the
+// notification path. Applying it would move the target to closed, skip the
+// subscribed merged run that is the generation's final turn, and retire the
+// generation that turn is meant to finish.
+func TestAutomationLifecycle_LaterUnmergedCloseOnAMergedTarget(t *testing.T) {
+	h := newLifecycleHarness(t)
+	ctx := context.Background()
+	h.subscribeToMerges(t)
+
+	before := h.target(t).LifecycleUpdatedAt
+	require.NotNil(t, before, "the target already has openness evidence")
+	mergedAt := before.Add(10 * time.Second)
+	closedAt := mergedAt.Add(10 * time.Second)
+
+	merged := h.deliverMerged(t, mergedAt)
+	require.NoError(t, h.lifecycle.OnPullRequestClosed(ctx, h.orgID, "acme/web", 42, true, mergedAt), "notify merged")
+	require.Equal(t, models.AutomationRunStatusPending, h.reload(t, merged.ID).Status, "the merged run is the final turn")
+
+	require.NoError(t, h.lifecycle.OnPullRequestClosed(ctx, h.orgID, "acme/web", 42, false, closedAt), "unmerged close stamped after the merge")
+
+	target := h.target(t)
+	require.Equal(t, models.AutomationTargetLifecycleMerged, target.LifecycleState, "the merged pull request stays merged")
+	require.WithinDuration(t, mergedAt, *target.LifecycleUpdatedAt, time.Millisecond, "and keeps the merge's evidence")
+	require.Equal(t, models.AutomationRunStatusPending, h.reload(t, merged.ID).Status, "the final turn is not skipped")
+	generation, err := h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.Equal(t, models.AutomationTargetSessionStatusActive, generation.Status, "and its generation is not retired")
 }
