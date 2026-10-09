@@ -73,7 +73,12 @@ jobs:
               - 'sandbox/versions.json'
               - '.dockerignore'
             deploy:
-              - 'deploy/scripts/**'
+              - 'deploy/**'
+              - 'docker-compose*.yml'
+              - 'Dockerfile'
+              - 'Dockerfile.*'
+              - 'go.mod'
+              - 'go.sum'
             ci:
               - '.github/workflows/**'
             # Keep this deliberately broad while activity capsules own the
@@ -452,6 +457,20 @@ jobs:
           go install github.com/securego/gosec/v2/cmd/gosec@v2.22.4
           gosec ./...
 
+  # Config tests read repository-wide inputs; run them for every PR and push.
+  deploy-config-test:
+    name: Deploy Config Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Validate deployment configuration
+        run: |
+          go test ./deploy -count=1 -timeout=120s
+          go vet ./deploy
+
   deploy-scripts-test:
     name: Deploy Scripts Test
     needs: changes
@@ -469,7 +488,7 @@ jobs:
 
   required-checks:
     name: All Checks Pass
-    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, session-transcript-e2e, migration-check, docker-build, security, deploy-scripts-test]
+    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, session-transcript-e2e, migration-check, docker-build, security, deploy-scripts-test, deploy-config-test]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -483,7 +502,13 @@ jobs:
           echo "migration-check: ${{ needs.migration-check.result }}"
           echo "docker-build: ${{ needs.docker-build.result }}"
           echo "security: ${{ needs.security.result }}"
+          echo "deploy-config-test: ${{ needs.deploy-config-test.result }}"
           echo "deploy-scripts-test: ${{ needs.deploy-scripts-test.result }}"
+
+          if [[ "${{ needs.deploy-config-test.result }}" != "success" ]]; then
+            echo "::error::Deployment configuration checks must succeed"
+            exit 1
+          fi
 
           for result in \
             "${{ needs.backend-lint.result }}" \
@@ -494,7 +519,8 @@ jobs:
             "${{ needs.migration-check.result }}" \
             "${{ needs.docker-build.result }}" \
             "${{ needs.security.result }}" \
-            "${{ needs.deploy-scripts-test.result }}"; do
+            "${{ needs.deploy-scripts-test.result }}" \
+            "${{ needs.deploy-config-test.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "::error::One or more required checks failed"
               exit 1
