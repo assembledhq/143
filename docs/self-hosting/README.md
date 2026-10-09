@@ -7,6 +7,7 @@ For general usage docs that apply regardless of who's hosting, see [`../guides/`
 ## Guides
 
 - **[Database backups and recovery](database-backup-controls.md)** — configure schedule holds, validate retained copies, and recover interrupted uploads.
+- **[PostgreSQL resource tuning](postgres-resource-tuning.md)** — size memory and temporary-disk budgets, validate a reload, and keep rollbacks durable.
 - **[Code-review incident recovery](code-review-recovery.md)** — diagnose deployment and database failures, preserve running work, and recover publication safely.
 
 - **[GitHub App setup](github-app-setup.md)** — create your own GitHub OAuth App + GitHub App and wire them into your deployment.

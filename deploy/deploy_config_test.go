@@ -2369,6 +2369,29 @@ func TestProductionPostgresConnectionHeadroom(t *testing.T) {
 	require.NoError(t, err, "test should read production PostgreSQL config")
 
 	require.Contains(t, string(conf), "max_connections = 300", "production Postgres should leave headroom for blue/green worker overlap and deploy-control clients")
+
+	tests := []struct {
+		name     string
+		expected string
+	}{
+		{name: "work_mem", expected: "8MB"},
+		{name: "maintenance_work_mem", expected: "128MB"},
+		{name: "autovacuum_work_mem", expected: "128MB"},
+		{name: "max_parallel_workers_per_gather", expected: "2"},
+		{name: "temp_file_limit", expected: "2GB"},
+		{name: "log_temp_files", expected: "16MB"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pattern := regexp.MustCompile(`(?m)^[ \t]*` + regexp.QuoteMeta(tt.name) + `[ \t]*=[ \t]*([^#\r\n]+?)[ \t]*(?:#.*)?$`)
+			var assignments []string
+			for _, match := range pattern.FindAllStringSubmatch(string(conf), -1) {
+				assignments = append(assignments, strings.TrimSpace(match[1]))
+			}
+			require.Equal(t, []string{tt.expected}, assignments, "Postgres should declare exactly one active approved value for %s", tt.name)
+		})
+	}
 }
 
 func TestDBDeploySyncsMountedPostgresConfig(t *testing.T) {
