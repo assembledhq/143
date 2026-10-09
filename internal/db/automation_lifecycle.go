@@ -72,16 +72,22 @@ func (s *AutomationTargetStore) ApplyPullRequestClosed(ctx context.Context, tx p
 	if err := lockAutomationTarget(ctx, tx, orgID, targetID); err != nil {
 		return out, err
 	}
-	fresh, err := lifecycleObservationIsFresh(ctx, tx, orgID, targetID, observedAt)
-	if err != nil {
-		return out, err
-	}
-	if !fresh {
-		// A redelivered close from before a reopen would otherwise retire the
-		// generation that reopen started and skip its waiters, on a pull
-		// request that is open.
-		out.Stale = true
-		return out, nil
+	// A merge is terminal: GitHub cannot reopen or unmerge the pull request,
+	// so evidence newer than the merge does not mean the pull request moved
+	// on from it, and the merge is never dropped as stale. An unmerged close
+	// can be undone by a reopen, so it is arbitrated.
+	if !merged {
+		fresh, err := lifecycleObservationIsFresh(ctx, tx, orgID, targetID, observedAt)
+		if err != nil {
+			return out, err
+		}
+		if !fresh {
+			// A redelivered close from before a reopen would otherwise retire
+			// the generation that reopen started and skip its waiters, on a
+			// pull request that is open.
+			out.Stale = true
+			return out, nil
+		}
 	}
 	state := models.AutomationTargetLifecycleClosed
 	retiredReason := models.AutomationTargetRetiredPRClosed
@@ -89,8 +95,20 @@ func (s *AutomationTargetStore) ApplyPullRequestClosed(ctx context.Context, tx p
 		state = models.AutomationTargetLifecycleMerged
 		retiredReason = models.AutomationTargetRetiredPRMerged
 	}
-	if err := s.SetLifecycleObserved(ctx, tx, orgID, targetID, state, &observedAt); err != nil {
+	// The store arbitrates the write again. It always applies a merge, and
+	// refuses an unmerged close on a merged target whatever its timestamp,
+	// which the freshness check cannot see: a close stamped when a sync
+	// observed it can look newer than the merge. A refused close is stale
+	// like any other, so it must not skip the merged final turn or retire
+	// the generation that turn is meant to finish. The freshness check stays
+	// because the store applies a same-state close it would drop.
+	applied, err := s.SetLifecycleObserved(ctx, tx, orgID, targetID, state, &observedAt)
+	if err != nil {
 		return out, err
+	}
+	if !applied {
+		out.Stale = true
+		return out, nil
 	}
 
 	// A merged pull request's subscribed merged run is the final turn; on an
@@ -152,12 +170,13 @@ func (s *AutomationTargetStore) ApplyPullRequestClosed(ctx context.Context, tx p
 	return out, nil
 }
 
-// ReopenTarget puts a closed or merged target back to open, under the
-// target lock, and records the observation whatever the current state.
-// The retired generation stays retired: the next trigger creates a new one.
-// Returns whether the state changed; the caller commits either way, because
-// the recorded observation is what keeps a later out-of-order close from
-// being treated as fresh.
+// ReopenTarget puts a closed target back to open, under the target lock,
+// and records the observation on an open one. A merged target stays merged:
+// GitHub cannot reopen a merged pull request, so the reopen is older than
+// the merge. The retired generation stays retired: the next trigger creates
+// a new one. Returns whether the state changed; the caller commits either
+// way, because the recorded observation is what keeps a later out-of-order
+// close from being treated as fresh.
 func (s *AutomationTargetStore) ReopenTarget(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, observedAt time.Time) (bool, error) {
 	if err := lockAutomationTarget(ctx, tx, orgID, targetID); err != nil {
 		return false, err
@@ -180,11 +199,13 @@ func (s *AutomationTargetStore) ReopenTarget(ctx context.Context, tx pgx.Tx, org
 	// The observation is recorded even when the target is already open, so a
 	// close delivered out of order cannot pass the freshness check against
 	// evidence this reopen should have advanced. SetLifecycleObserved keeps
-	// the newer of the two for a state that is not changing.
-	if err := s.SetLifecycleObserved(ctx, tx, orgID, targetID, models.AutomationTargetLifecycleOpen, &observedAt); err != nil {
+	// the newer of the two for a state that is not changing, and refuses to
+	// reopen a merged target whatever the reopen's timestamp.
+	applied, err := s.SetLifecycleObserved(ctx, tx, orgID, targetID, models.AutomationTargetLifecycleOpen, &observedAt)
+	if err != nil {
 		return false, err
 	}
-	return state != models.AutomationTargetLifecycleOpen, nil
+	return applied && state != models.AutomationTargetLifecycleOpen, nil
 }
 
 // RetireTerminalTarget retires the target's active generation when its pull

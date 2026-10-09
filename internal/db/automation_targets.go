@@ -467,34 +467,80 @@ func (s *AutomationTargetStore) SetLifecycle(ctx context.Context, q DBTX, orgID,
 // SetLifecycleObserved records a lifecycle state observed at observedAt,
 // the source's own timestamp (a webhook's pull_request.updated_at) rather
 // than the time the delivery was processed, so a delayed delivery cannot
-// pass for fresh openness evidence. A transition takes the observation
-// time as is, and a nil observedAt leaves the evidence unknown so dispatch
-// must revalidate; a same-state refresh only ever moves the evidence
-// forward.
-func (s *AutomationTargetStore) SetLifecycleObserved(ctx context.Context, q DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState, observedAt *time.Time) error {
+// pass for fresh openness evidence. A same-state refresh only ever moves
+// the evidence forward. A change between open and closed is refused when
+// its observation is older than the evidence the target already holds: a
+// delivery that describes a moment the target has moved past must not
+// replace newer evidence with older, in either direction. A nil observedAt
+// carries no moment to arbitrate on, so it transitions the state and
+// leaves the evidence unknown for dispatch to revalidate.
+//
+// Merged is terminal. GitHub cannot reopen or unmerge a merged pull request,
+// so evidence on the target that is newer than a merge cannot mean the pull
+// request moved on from it. It means a delivery made after the merge was
+// counted as openness evidence, or a sync observed the close later than the
+// merge happened. A transition into merged therefore always applies, and the
+// evidence keeps the later of the two moments so it never moves backwards.
+// A change out of merged is always refused, whatever its timestamp: an
+// observation that says the pull request is open or closed without merging
+// can only describe a moment before the merge, even when it carries no
+// timestamp or one stamped when it was processed.
+//
+// Returns whether the observation was applied. A refused observation is not
+// an error — the caller decides what a stale delivery means for the rest of
+// its work — but it does mean the target still holds the state it had.
+//
+// The arbitration reads the target row with FOR UPDATE, so the comparison
+// and the write see the same evidence even for a caller that did not take
+// the target lock first.
+func (s *AutomationTargetStore) SetLifecycleObserved(ctx context.Context, q DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState, observedAt *time.Time) (bool, error) {
 	if err := state.Validate(); err != nil {
-		return err
+		return false, err
 	}
 	if q == nil {
 		q = s.db
 	}
-	tag, err := q.Exec(ctx, `
-		UPDATE automation_targets
-		SET lifecycle_updated_at = CASE
-		        WHEN lifecycle_state = @state THEN GREATEST(lifecycle_updated_at, @observed_at::timestamptz)
-		        ELSE @observed_at::timestamptz
-		    END,
-		    lifecycle_state = @state,
-		    updated_at = now()
-		WHERE id = @id AND org_id = @org_id`,
-		pgx.NamedArgs{"id": targetID, "org_id": orgID, "state": state, "observed_at": observedAt})
+	// The locked read makes a refusal distinguishable from a target that is
+	// not there, in the same statement as the write.
+	var exists, applied bool
+	err := q.QueryRow(ctx, `
+		WITH current AS (
+		    SELECT id, org_id, lifecycle_state, lifecycle_updated_at
+		    FROM automation_targets
+		    WHERE id = @id AND org_id = @org_id
+		    FOR UPDATE
+		), applied AS (
+		    UPDATE automation_targets t
+		    SET lifecycle_updated_at = CASE
+		            WHEN c.lifecycle_state = @state OR @state::text = @merged::text
+		                THEN GREATEST(c.lifecycle_updated_at, @observed_at::timestamptz)
+		            ELSE @observed_at::timestamptz
+		        END,
+		        lifecycle_state = @state,
+		        updated_at = now()
+		    FROM current c
+		    WHERE t.id = c.id AND t.org_id = c.org_id
+		      AND (c.lifecycle_state = @state
+		           OR @state::text = @merged::text
+		           OR (c.lifecycle_state <> @merged::text
+		               AND (c.lifecycle_updated_at IS NULL
+		                    OR @observed_at::timestamptz IS NULL
+		                    OR @observed_at::timestamptz >= c.lifecycle_updated_at)))
+		    RETURNING t.id
+		)
+		SELECT EXISTS (SELECT 1 FROM current), EXISTS (SELECT 1 FROM applied)`,
+		pgx.NamedArgs{
+			"id": targetID, "org_id": orgID, "state": state, "observed_at": observedAt,
+			"merged": models.AutomationTargetLifecycleMerged,
+		}).
+		Scan(&exists, &applied)
 	if err != nil {
-		return fmt.Errorf("set automation target lifecycle: %w", err)
+		return false, fmt.Errorf("set automation target lifecycle: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrAutomationTargetNotFound
+	if !exists {
+		return false, ErrAutomationTargetNotFound
 	}
-	return nil
+	return applied, nil
 }
 
 // RequestWake writes the wake outbox marker and returns the recorded time.
