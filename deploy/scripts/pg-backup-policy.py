@@ -29,7 +29,8 @@ GIB = 1024 ** 3
 # Resolve the co-installed helpers without requiring callers to edit sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pg_backup_state import (Refused, require, now, emit, identity, read_json,
-                             sync_dir, atomic_json, sha256, invoke, scheduled_backup_profile)
+                             sync_dir, atomic_json, sha256, invoke, scheduled_backup_profile,
+                             scheduled_backup_due)
 from pg_backup_runtime import swap_limits
 
 
@@ -593,7 +594,7 @@ def main():
     sub = parser.add_subparsers(dest='action', required=True)
     backup = sub.add_parser('backup')
     backup.add_argument('--scheduled', action='store_true',
-                        help='use a separately approved private start window; no attendance claim')
+                        help='use an explicitly approved private trial or ongoing schedule; no attendance claim')
     backup.add_argument('--bootstrap', action='store_true')
     backup.add_argument('--canary', action='store_true')
     backup.add_argument('--host-memory-full-percent', type=int, choices=(1, 5),
@@ -621,6 +622,9 @@ def main():
             command.add_argument('--' + field, required=True)
     args = parser.parse_args()
     scheduled = args.action == 'backup' and args.scheduled
+    scheduled_overrides = scheduled and (args.bootstrap or args.canary or args.allow_swap_bursts or
+        args.exercise_stop_after is not None or args.host_memory_full_percent is not None or
+        args.db_memory_full_percent is not None)
     attempt = None
     try:
         flag = 'RESTORE_TEST_ENABLED' if args.action == 'restore' else 'BACKUP_ENABLED'
@@ -631,12 +635,22 @@ def main():
             require(os.environ.get('BACKUP_ATTENDED') == 'true', 'BACKUP_ATTENDED=true is required for manual operations')
             require(os.environ.get('BACKUP_OBSERVER', '').strip(), 'BACKUP_OBSERVER must name the attending operator')
             emit('attended_operation', action=args.action, observer=os.environ['BACKUP_OBSERVER'])
+        if scheduled and not scheduled_overrides:
+            # Off-hour hourly ticks do not create successful attempts, clear a
+            # real failure, take the writer lock, or touch DB/storage clients.
+            state = Path(os.environ.get('BACKUP_DIR', '/backups/postgres')) / '.backup-state'
+            try:
+                preliminary = scheduled_backup_profile(state)
+            except (OSError, ValueError, KeyError, TypeError, Refused) as exc:
+                # Keep invalid profiles on the normal durable-failure path.
+                emit('scheduled_profile_preflight_failed', error=str(exc))
+            else:
+                if not scheduled_backup_due(preliminary):
+                    return 0
         # Outside the common lock so contention/admission failures are durable.
         attempt = start_attempt(args.action)
         if scheduled:
-            require(not (args.bootstrap or args.canary or args.allow_swap_bursts or
-                         args.exercise_stop_after is not None or args.host_memory_full_percent is not None or
-                         args.db_memory_full_percent is not None),
+            require(not scheduled_overrides,
                     'scheduled backups use only the approved profile, without canary or CLI overrides')
         if args.action == 'backup' and args.exercise_stop_after is not None:
             require(args.canary and 5 <= args.exercise_stop_after <= 300,
@@ -656,6 +670,7 @@ def main():
                 # Validate after waiting for the writer lock, before retention
                 # or backup work. A rollout may expire while waiting.
                 profile = scheduled_backup_profile(policy.state)
+                require(scheduled_backup_due(profile), 'scheduled backup hour is no longer due')
                 policy.host_memory_full_percent = profile['host_memory_full_percent']
                 policy.db_memory_full_percent = profile['db_memory_full_percent']
                 data = read_json(attempt)

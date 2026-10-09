@@ -102,13 +102,13 @@ both `BACKUP_ATTENDED=true` and a nonempty
 failures to that operator's terminal. Do not set these variables in cron to
 simulate an observer. The observer must watch disk and memory and have an
 ownership-checked stop procedure. Scheduled backups use a separately approved
-start window as described below; installing helpers does not validate alert delivery.
+trial or ongoing profile as described below; installing helpers does not validate alert delivery.
 Keep schedules held while validating a deployment and assign an operator to
 arrange attended backups at the configured target cadence (six hours by default). If that cannot be met,
 record the recovery-point gap and next reassessment time. Installing helpers
 does not establish backup coverage.
 
-## Time-limited scheduled backups
+## Scheduled backups
 
 The backup installer renders `pg-backup.sh --scheduled` for cron. It preserves
 the existing backup and restore holds. Scheduled execution requires both
@@ -128,9 +128,8 @@ A missed start extends the recovery gap until another backup succeeds.
 
 An operator must separately approve and atomically install a profile owned by
 the account running the backup (root for the installed cron), with mode 0600
-inside the existing private state directory. The profile has this shape;
-replace the placeholders with the approved owner, evidence reference and
-timezone-aware ISO-8601 timestamps:
+inside the existing private state directory. For a time-limited trial, the profile has this shape; replace the placeholders
+with the approved owner, evidence reference and timezone-aware ISO-8601 timestamps:
 
 ```json
 {
@@ -153,6 +152,48 @@ the expired window. Each admitted scheduled attempt records the approved profile
 failed starts record durable failures. Health reports `backup_held=true` for an
 unavailable window even when the cron enable flag remains true, without hiding
 stale recovery points or overdue restores. Expiry does not rewrite cron.
+
+### Ongoing operation
+
+After accepting a trial, an operator can explicitly approve an ongoing schedule.
+This uses a separate schema, so deleting a trial expiry or changing its schema
+number alone cannot remove the trial limit:
+
+```json
+{
+  "schema": 2,
+  "mode": "ongoing",
+  "owner": "<responsible operator>",
+  "evidence": "<private ongoing-operation acceptance record>",
+  "starts_at": "<approved start with timezone>",
+  "timezone": "America/New_York",
+  "hours": [8, 20],
+  "host_memory_full_percent": 1,
+  "db_memory_full_percent": 1
+}
+```
+
+Set `BACKUP_CRON="0 * * * *"` for an hourly tick at minute zero; the validated
+profile selects the eligible local hours using the host's IANA timezone data.
+The start timestamp must have arrived, and `BACKUP_ENABLED=true` is still
+required. The hours must be sorted, unique integers from 0 through 23. Ongoing
+profiles have no expiry. Stop new starts with `BACKUP_ENABLED=false` or by
+removing the approval profile. Both controls stop future starts without
+interrupting admitted work or cleanup. Install the shared helper and policy before the ongoing profile, and
+install the hourly cron last. Installers never promote trials automatically.
+
+Off-hour ticks exit without a new attempt, database access, storage work or
+clearing an earlier failed attempt. The profile and eligible hour are checked
+again under the common writer lock before any backup or retention work. Invalid
+profiles retain durable failed-attempt reporting. Health remains active between
+eligible hours while still reporting stale recovery points and overdue restores.
+
+Choose local hours outside daylight-saving transitions to avoid skipped or
+repeated clock hours. For example, 8 AM/8 PM remains at those Eastern clock times
+in summer and winter, with an 11- or 13-hour overnight interval on transition
+weekends. The configured recovery objective and its 45-minute alert allowance
+remain unchanged; a 13-hour interval can therefore briefly exceed a 12-hour
+objective plus its allowance.
 
 Scheduled mode uses normal two-copy receipt-qualified retention. It cannot
 bootstrap, act as a canary, run a stop exercise, opt into higher swap limits,

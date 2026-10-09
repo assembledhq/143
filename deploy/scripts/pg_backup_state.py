@@ -7,6 +7,7 @@ from pathlib import Path
 import stat
 import subprocess
 import tempfile
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 class Refused(RuntimeError):
     pass
@@ -45,32 +46,60 @@ def read_json(path):
 
 
 def scheduled_backup_profile(state, current=None):
-    """Read a private approval window for new starts, without claiming attendance.
+    """Read explicit private trial or ongoing approval, without claiming attendance.
 
     Code/cron installation never creates or renews this profile. Expiry blocks
     new starts, not completion or cleanup of an already admitted operation.
     """
     profile = read_json(state / 'scheduled-backup.json')
-    require(isinstance(profile, dict) and set(profile) == {
-        'schema', 'owner', 'evidence', 'starts_at', 'expires_at',
-        'host_memory_full_percent', 'db_memory_full_percent'}, 'invalid scheduled backup profile fields')
-    require(type(profile['schema']) is int and profile['schema'] == 1, 'invalid schedule schema')
+    require(isinstance(profile, dict), 'invalid scheduled backup profile')
+    require(type(profile.get('schema')) is int and profile['schema'] in (1, 2), 'invalid schedule schema')
+    fields = {'schema', 'owner', 'evidence', 'starts_at',
+              'host_memory_full_percent', 'db_memory_full_percent'}
+    fields |= {'expires_at'} if profile['schema'] == 1 else {'mode', 'timezone', 'hours'}
+    require(set(profile) == fields, 'invalid scheduled backup profile fields')
     for key in ('owner', 'evidence'):
         require(isinstance(profile[key], str) and 0 < len(profile[key].strip()) <= 1024,
                 'scheduled backup requires ' + key)
     for key in ('host_memory_full_percent', 'db_memory_full_percent'):
         require(type(profile[key]) is int and profile[key] in (1, 5), 'invalid scheduled pressure limit')
     times = []
-    for key in ('starts_at', 'expires_at'):
+    for key in (('starts_at', 'expires_at') if profile['schema'] == 1 else ('starts_at',)):
         require(isinstance(profile[key], str), 'invalid schedule timestamp')
         parsed = dt.datetime.fromisoformat(profile[key])
         require(parsed.tzinfo is not None, 'schedule timestamp requires timezone')
         times.append(parsed.timestamp())
-    start, end = times
-    require(0 < end - start <= 24 * 3600, 'scheduled backup window must be at most 24 hours')
     current = dt.datetime.now(dt.timezone.utc).timestamp() if current is None else current
-    require(start <= current < end, 'scheduled backup window is not active')
+    if profile['schema'] == 1:
+        start, end = times
+        require(0 < end - start <= 24 * 3600, 'scheduled backup window must be at most 24 hours')
+        require(start <= current < end, 'scheduled backup window is not active')
+    else:
+        require(profile['mode'] == 'ongoing', 'ongoing schedule requires explicit mode')
+        zone = profile['timezone']
+        require(isinstance(zone, str) and 0 < len(zone) <= 128, 'invalid schedule timezone')
+        try:
+            ZoneInfo(zone)
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            raise Refused('schedule timezone is unavailable') from exc
+        hours = profile['hours']
+        require(isinstance(hours, list) and 1 <= len(hours) <= 24 and
+                all(type(h) is int and 0 <= h <= 23 for h in hours), 'invalid schedule hours')
+        require(hours == sorted(set(hours)), 'schedule hours must be unique and sorted')
+        require(times[0] <= current, 'scheduled backup window is not active')
     return profile
+
+
+def scheduled_backup_due(profile, current=None):
+    """An hourly cron tick may start ongoing work only in an approved local hour.
+
+    Accept only an already validated profile. Trial timing stays controlled by
+    its existing cron expression; ongoing profiles use timezone-aware hours.
+    """
+    if profile['schema'] == 1:
+        return True
+    current = dt.datetime.now(dt.timezone.utc).timestamp() if current is None else current
+    return dt.datetime.fromtimestamp(current, ZoneInfo(profile['timezone'])).hour in profile['hours']
 
 
 def sync_dir(path):

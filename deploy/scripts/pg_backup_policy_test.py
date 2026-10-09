@@ -178,6 +178,87 @@ print('loaded')
                 mock.patch.object(policy, 'Policy', return_value=self.p):
             return policy.main()
 
+    def ongoing_profile(self, **overrides):
+        current = policy.dt.datetime.now(policy.dt.timezone.utc)
+        profile = dict(schema=2, mode='ongoing', owner='test operator', evidence='private acceptance record',
+                       starts_at=(current - policy.dt.timedelta(hours=1)).isoformat(),
+                       timezone='UTC', hours=[current.hour], host_memory_full_percent=5, db_memory_full_percent=5)
+        profile.update(overrides)
+        policy.atomic_json(self.p.state / 'scheduled-backup.json', profile)
+        return profile
+
+    def test_ongoing_schedule_requires_explicit_schema_and_approved_fields(self):
+        profile = self.ongoing_profile(starts_at='2026-01-01T00:00:00+00:00')
+        for timestamp in ('2026-01-01T00:00:00+00:00', '2027-06-01T00:00:00+00:00'):
+            with self.subTest(timestamp=timestamp):
+                current = policy.dt.datetime.fromisoformat(timestamp).timestamp()
+                self.assertEqual(policy.scheduled_backup_profile(self.p.state, current), profile)
+        for changes in (dict(mode='trial'), dict(mode=True), dict(expires_at=None), dict(schema=1),
+                        dict(hours=[]), dict(hours=[8, 8]), dict(hours=[20, 8]), dict(hours=[True]),
+                        dict(hours=[24]), dict(hours='8,20'), dict(timezone='Unknown/Invalid'),
+                        dict(timezone='/etc/passwd'), dict(timezone=True), dict(owner=''),
+                        dict(evidence=''), dict(db_memory_full_percent=6), dict(allow_swap_bursts=True)):
+            with self.subTest(changes=changes):
+                policy.atomic_json(self.p.state / 'scheduled-backup.json', dict(profile, **changes))
+                with self.assertRaises((policy.Refused, ValueError)):
+                    policy.scheduled_backup_profile(self.p.state, current)
+        policy.atomic_json(self.p.state / 'scheduled-backup.json', profile)
+        with self.assertRaisesRegex(policy.Refused, 'not active'):
+            policy.scheduled_backup_profile(self.p.state, policy.dt.datetime(2025, 12, 31, tzinfo=policy.dt.timezone.utc).timestamp())
+
+    def test_ongoing_eastern_hours_follow_daylight_saving_changes(self):
+        profile = self.ongoing_profile(timezone='America/New_York', hours=[8, 20])
+        cases = [('2026-10-09T00:00:00+00:00', True),  # 8 PM EDT
+                 ('2026-10-09T12:00:00+00:00', True),  # 8 AM EDT
+                 ('2026-10-09T13:00:00+00:00', False),
+                 ('2026-11-01T12:00:00+00:00', False),
+                 ('2026-11-01T13:00:00+00:00', True),  # 8 AM EST after fall-back
+                 ('2026-11-02T01:00:00+00:00', True),  # 8 PM EST
+                 ('2027-03-14T12:00:00+00:00', True),  # 8 AM EDT after spring-forward
+                 ('2027-03-14T13:00:00+00:00', False)]
+        for timestamp, due in cases:
+            with self.subTest(timestamp=timestamp):
+                self.assertEqual(policy.scheduled_backup_due(profile, policy.dt.datetime.fromisoformat(timestamp).timestamp()), due)
+
+    def test_off_hour_tick_preserves_failed_attempt_and_does_no_work(self):
+        current = policy.dt.datetime.now(policy.dt.timezone.utc)
+        self.ongoing_profile(hours=[(current.hour + 1) % 24])
+        previous = self.p.state / 'attempt-previous.json'
+        policy.atomic_json(previous, dict(action='backup', status='failed', error='admission failed',
+                                         started_at=current.isoformat()))
+        before = {p.name: p.read_bytes() for p in self.p.state.iterdir() if p.is_file()}
+        with mock.patch.object(policy, 'start_attempt') as start, \
+                mock.patch.object(self.p, 'locked') as lock, mock.patch.object(self.p, 'backup') as backup:
+            self.assertEqual(self.scheduled(), 0)
+            start.assert_not_called()
+            lock.assert_not_called()
+            backup.assert_not_called()
+        self.assertEqual({p.name: p.read_bytes() for p in self.p.state.iterdir() if p.is_file()}, before)
+        # An off-hour tick must not silently accept prohibited overrides.
+        with mock.patch.object(self.p, 'backup') as backup:
+            self.assertEqual(self.scheduled('--canary'), 1)
+            backup.assert_not_called()
+
+    def test_ongoing_schedule_rechecks_hour_under_lock_and_keeps_guards(self):
+        profile = self.ongoing_profile()
+        with mock.patch.object(policy, 'scheduled_backup_due', side_effect=[True, False]), \
+                mock.patch.object(self.p, 'backup') as backup:
+            self.assertEqual(self.scheduled(), 1)
+            backup.assert_not_called()
+        latest = max((policy.read_json(p) for p in self.p.state.glob('attempt-*.json')), key=lambda a: a['started_at'])
+        self.assertEqual(latest['error'], 'scheduled backup hour is no longer due')
+        with mock.patch.object(self.p, 'backup') as backup:
+            self.assertEqual(self.scheduled(), 0)
+            backup.assert_called_once()
+            self.assertFalse(backup.call_args.args[0].canary)
+            self.assertEqual((self.p.host_memory_full_percent, self.p.db_memory_full_percent, self.p.allow_swap_bursts), (5, 5, False))
+        latest = max((policy.read_json(p) for p in self.p.state.glob('attempt-*.json')), key=lambda a: a['started_at'])
+        self.assertEqual((latest['execution_mode'], latest['schedule'], latest['status']), ('scheduled', profile, 'completed'))
+        with mock.patch.object(self.p, 'backup') as backup:
+            self.assertEqual(self.scheduled(enabled='false'), 1)
+            self.assertEqual(self.scheduled('--allow-swap-bursts'), 1)
+            backup.assert_not_called()
+
     def test_schedule_profile_window_boundaries_and_exact_schema(self):
         start = policy.dt.datetime(2026, 1, 1, tzinfo=policy.dt.timezone.utc)
         end = start + policy.dt.timedelta(hours=24)

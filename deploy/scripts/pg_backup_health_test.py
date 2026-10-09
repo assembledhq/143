@@ -113,6 +113,21 @@ class HealthTests(unittest.TestCase):
                 self.assertTrue(report['restore_overdue'], 'a scheduling approval must never imply restore proof')
                 self.assertFalse(report['telemetry_failed'], 'profile refusal must not suppress other health evidence')
 
+    def test_ongoing_health_stays_active_between_hours_without_hiding_staleness(self):
+        self.record('20260927-050000')
+        profile = dict(schema=2, mode='ongoing', owner='test operator', evidence='private acceptance',
+                       starts_at='2026-01-01T00:00:00+00:00', timezone='UTC', hours=[1, 2],
+                       host_memory_full_percent=5, db_memory_full_percent=5)
+        atomic_json(self.state / 'scheduled-backup.json', profile)
+        for enabled, held in [('true', False), ('false', True)]:
+            with self.subTest(enabled=enabled), mock.patch.dict(os.environ, BACKUP_ENABLED=enabled, RESTORE_TEST_ENABLED='false'):
+                report = health.collect(self.root, self.current)
+                self.assertEqual(report['backup_held'], held)
+                self.assertEqual(report['recovery_age_seconds'], 7 * 3600)
+                self.assertTrue(report['recovery_stale'])
+                self.assertTrue(report['restore_held'])
+                self.assertTrue(report['restore_overdue'])
+
     def test_failed_or_stuck_attempt_visible_even_without_pending_marker(self):
         for status in ['failed', 'interrupted', 'running']:
             with self.subTest(status=status):
