@@ -212,7 +212,7 @@ func (s *PRService) mergePullRequest(ctx context.Context, orgID, pullRequestID, 
 	// `pull_request closed` webhook will arrive shortly and re-run
 	// runMergedPullRequestFollowUps; every sub-step there is idempotent
 	// (deploys ON CONFLICT, set-to-merged status, set-to-fixed issue,
-	// dedupe-keyed evaluate_experiment job, snapshot cleanup, audit gated on
+	// snapshot cleanup, audit gated on
 	// archived=true), so the duplicate execution is intentional and safe.
 	if err := s.pullRequests.UpdateStatus(ctx, orgID, pullRequestID, models.PullRequestStatusMerged); err != nil {
 		s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to persist merged status after successful merge")

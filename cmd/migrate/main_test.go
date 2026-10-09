@@ -232,10 +232,22 @@ func TestMigrationsRestrictConcurrentIndexes(t *testing.T) {
 	require.NoError(t, err, "should glob migration files without error")
 	// golang-migrate v4.19.1 executes each file without an explicit transaction.
 	// PostgreSQL accepts CONCURRENTLY only when the file contains one statement.
-	// Keep this exception scoped to the jobs lookup index on the hot table.
+	// Allow only explicitly reviewed single-statement indexes on hot tables.
 	allowedStandalone := map[string]string{
-		"000294_code_review_preparation_job_lookup.up.sql":   "CREATE INDEX CONCURRENTLY idx_jobs_org_queue_dedupe_created",
-		"000294_code_review_preparation_job_lookup.down.sql": "DROP INDEX CONCURRENTLY idx_jobs_org_queue_dedupe_created",
+		"000294_code_review_preparation_job_lookup.up.sql":     "CREATE INDEX CONCURRENTLY idx_jobs_org_queue_dedupe_created",
+		"000294_code_review_preparation_job_lookup.down.sql":   "DROP INDEX CONCURRENTLY idx_jobs_org_queue_dedupe_created",
+		"000301_job_retention_succeeded_index.down.sql":        "DROP INDEX CONCURRENTLY idx_jobs_retention_succeeded",
+		"000301_job_retention_succeeded_index.up.sql":          "CREATE INDEX CONCURRENTLY idx_jobs_retention_succeeded",
+		"000302_session_executor_job_fk_index.down.sql":        "DROP INDEX CONCURRENTLY idx_session_executors_retention_job",
+		"000302_session_executor_job_fk_index.up.sql":          "CREATE INDEX CONCURRENTLY idx_session_executors_retention_job",
+		"000303_slack_webhook_delivery_fk_index.down.sql":      "DROP INDEX CONCURRENTLY idx_slack_inbound_events_retention_delivery",
+		"000303_slack_webhook_delivery_fk_index.up.sql":        "CREATE INDEX CONCURRENTLY idx_slack_inbound_events_retention_delivery",
+		"000304_pagerduty_webhook_delivery_fk_index.down.sql":  "DROP INDEX CONCURRENTLY idx_pagerduty_inbound_events_retention_delivery",
+		"000304_pagerduty_webhook_delivery_fk_index.up.sql":    "CREATE INDEX CONCURRENTLY idx_pagerduty_inbound_events_retention_delivery",
+		"000305_session_preview_prewarm_job_fk_index.down.sql": "DROP INDEX CONCURRENTLY idx_session_preview_prewarm_runs_retention_job",
+		"000305_session_preview_prewarm_job_fk_index.up.sql":   "CREATE INDEX CONCURRENTLY idx_session_preview_prewarm_runs_retention_job",
+		"000306_preview_cache_prewarm_job_fk_index.down.sql":   "DROP INDEX CONCURRENTLY idx_preview_cache_prewarm_runs_retention_job",
+		"000306_preview_cache_prewarm_job_fk_index.up.sql":     "CREATE INDEX CONCURRENTLY idx_preview_cache_prewarm_runs_retention_job",
 	}
 
 	for _, path := range files {

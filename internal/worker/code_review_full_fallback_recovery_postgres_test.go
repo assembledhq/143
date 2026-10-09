@@ -29,6 +29,8 @@ func TestFullAssessmentFallbackSupervisorRecoveryPostgres(t *testing.T) {
 		t.Skip("set TEST_DATABASE_URL for full fallback recovery proof")
 	}
 	ctx := context.Background()
+	// The shared helper installs pgcrypto outside fixture schemas under a
+	// database advisory lock; independent tenant cases can remain parallel.
 	pool := fullRecoveryPostgresPool(t, ctx)
 	tests := []struct {
 		name        string

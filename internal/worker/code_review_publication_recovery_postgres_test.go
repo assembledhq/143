@@ -310,12 +310,15 @@ func fullRecoveryPostgresPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	admin, err := pgx.Connect(ctx, dsn)
 	require.NoError(t, err, "connect disposable PostgreSQL")
+	ensureFullReviewPostgresExtensions(t, ctx, admin)
 	schema := "full_recovery_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	_, err = admin.Exec(ctx, `CREATE SCHEMA `+schema)
 	require.NoError(t, err, "create isolated recovery schema")
 	t.Cleanup(func() {
-		_, cleanupErr := admin.Exec(ctx, `DROP SCHEMA `+schema+` CASCADE`)
-		require.NoError(t, cleanupErr, "drop isolated recovery schema")
+		withFullReviewFixtureDDL(t, ctx, admin, func() {
+			_, cleanupErr := admin.Exec(ctx, `DROP SCHEMA `+schema+` CASCADE`)
+			require.NoError(t, cleanupErr, "drop only this isolated recovery schema")
+		})
 		require.NoError(t, admin.Close(ctx), "close PostgreSQL admin connection")
 	})
 	cfg, err := pgxpool.ParseConfig(dsn)
@@ -327,11 +330,73 @@ func fullRecoveryPostgresPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	migrations, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.up.sql"))
 	require.NoError(t, err, "list migration chain")
 	sort.Strings(migrations)
-	for _, path := range migrations {
-		up, readErr := os.ReadFile(path)
-		require.NoError(t, readErr, "read migration")
-		_, applyErr := pool.Exec(ctx, string(up))
-		require.NoError(t, applyErr, "apply migration "+filepath.Base(path))
-	}
+	withFullReviewFixtureDDL(t, ctx, admin, func() {
+		for _, path := range migrations {
+			up, readErr := os.ReadFile(path)
+			require.NoError(t, readErr, "read migration")
+			// The dedicated admin connection only holds the shared DDL lock.
+			// Actual migrations use pool autocommit connections so concurrent
+			// indexes retain their required transaction boundary.
+			_, applyErr := pool.Exec(ctx, string(up))
+			require.NoError(t, applyErr, "apply migration "+filepath.Base(path))
+		}
+	})
 	return pool
+}
+
+// pgcrypto belongs to the database, not an individual fixture schema. Creating
+// it under an isolated search_path races other migrations, and dropping that
+// schema can delete the extension while another fixture still needs it.
+// Serialize only this shared external resource across processes; keep actual
+// migration chains, schemas and tenant test cases otherwise isolated.
+func ensureFullReviewPostgresExtensions(t *testing.T, ctx context.Context, conn *pgx.Conn) {
+	t.Helper()
+	tx, err := conn.Begin(ctx)
+	require.NoError(t, err, "begin shared extension fixture setup")
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('143-worker-test-pgcrypto-setup',0))`)
+	require.NoError(t, err, "serialize database-global extension fixture setup")
+	_, err = tx.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public`)
+	require.NoError(t, err, "install shared test extension outside tenant schemas")
+	var namespace string
+	err = tx.QueryRow(ctx, `SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='pgcrypto'`).Scan(&namespace)
+	require.NoError(t, err, "read shared extension schema")
+	if namespace != "public" {
+		_, err = tx.Exec(ctx, `ALTER EXTENSION pgcrypto SET SCHEMA public`)
+		require.NoError(t, err, "normalize existing test extension before isolated schema cleanup")
+	}
+	require.NoError(t, tx.Commit(ctx), "commit extension fixture setup and release advisory lock")
+}
+
+// Full-chain schema setup and cascading teardown share the disposable server's
+// lock budget. Hold a session lock on the dedicated admin connection, with short
+// autocommit try-lock polls so waiters retain no old MVCC snapshots. A blocking
+// advisory-lock SELECT can make CREATE INDEX CONCURRENTLY wait on its snapshot
+// while that SELECT waits on the DDL guard. Test data and tenant cases remain
+// parallel, migrations remain autocommit, and this lock also fences processes.
+func withFullReviewFixtureDDL(t *testing.T, ctx context.Context, conn *pgx.Conn, operation func()) {
+	t.Helper()
+	const lockSQL = `SELECT pg_try_advisory_lock(hashtextextended('143-worker-test-full-schema-ddl',0))`
+	for {
+		var acquired bool
+		require.NoError(t, conn.QueryRow(ctx, lockSQL).Scan(&acquired), "try shared full-schema DDL fixture guard without retaining a wait snapshot")
+		if acquired {
+			break
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			require.NoError(t, ctx.Err(), "fixture DDL guard wait must respect cancellation")
+		case <-timer.C:
+		}
+	}
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		var released bool
+		require.NoError(t, conn.QueryRow(unlockCtx, `SELECT pg_advisory_unlock(hashtextextended('143-worker-test-full-schema-ddl',0))`).Scan(&released), "always release dedicated connection's DDL guard after operation")
+		require.True(t, released, "fixture DDL operation must release the exact acquired session lock")
+	}()
+	operation()
 }

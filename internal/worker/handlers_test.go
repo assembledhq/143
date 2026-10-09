@@ -4151,10 +4151,9 @@ func TestLinearJobHandlers(t *testing.T) {
 		require.ErrorAs(t, err, &retryable, "refresh_linear_team_keys should return a retryable error so transient outages don't drop the cron run")
 	})
 
-	t.Run("refresh_linear_team_keys dead-letters fatally on missing integration", func(t *testing.T) {
+	t.Run("refresh_linear_team_keys skips disconnected integration", func(t *testing.T) {
 		t.Parallel()
-		// 24h cron tick after a disconnect: the integration row is gone.
-		// Retrying for 8 minutes can't bring it back; dead-letter immediately.
+		// A disconnect after enqueue makes this refresh unnecessary.
 		svc := linearservice.NewService(linearservice.Config{
 			Integrations: workerLinearMissingIntegrationReader{},
 			Credentials:  workerLinearCredentialReader{},
@@ -4164,10 +4163,7 @@ func TestLinearJobHandlers(t *testing.T) {
 		payload := json.RawMessage(`{"org_id":"` + uuid.NewString() + `"}`)
 
 		err := handler(context.Background(), "refresh_linear_team_keys", payload)
-		require.Error(t, err, "missing integration should surface as a handler error")
-		var fatal *FatalError
-		require.ErrorAs(t, err, &fatal, "missing integration must dead-letter the cron job, not retry to exhaustion")
-		require.ErrorIs(t, err, linearservice.ErrIntegrationNotFound, "fatal wrapper should preserve the integration-not-found sentinel")
+		require.NoError(t, err, "a disconnected integration should skip an obsolete team-key refresh")
 	})
 
 	t.Run("refresh_linear_team_keys dead-letters fatally on linear unauthorized", func(t *testing.T) {
@@ -6007,8 +6003,11 @@ func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
 	var retryable *RetryableError
 	require.ErrorAs(t, err, &retryable, "pending mergeability should defer the job instead of succeeding")
 	require.ErrorIs(t, retryable.Err, ghservice.ErrPullRequestMergeabilityPending, "deferred job should preserve the pending mergeability sentinel")
-	require.Nil(t, retryable.RetryAfter, "pending mergeability should use the worker's exponential backoff schedule")
-	require.True(t, retryable.ConsumeAttempt, "pending mergeability should consume attempts so exponential backoff advances")
+	expectedDelay := 5 * time.Second
+	expectedBudget := githubRateLimitMaxRetryDuration
+	require.Equal(t, &expectedDelay, retryable.RetryAfter, "pending mergeability should wait for GitHub to finish computing")
+	require.False(t, retryable.ConsumeAttempt, "waiting for GitHub mergeability should preserve the attempt budget")
+	require.Equal(t, &expectedBudget, retryable.MaxRetryDuration, "pending mergeability should retain a finite dependency-wait budget")
 }
 
 func TestSyncPullRequestStateHandlerPropagatesSyncReason(t *testing.T) {

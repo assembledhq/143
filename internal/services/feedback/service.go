@@ -94,8 +94,7 @@ func (s *Service) ProcessComment(ctx context.Context, commentID, orgID uuid.UUID
 	// 2. LLM classification.
 	classification, err := s.classifyComment(ctx, &comment)
 	if err != nil {
-		s.logger.Warn().Err(err).Str("comment_id", commentID.String()).Msg("LLM classification failed, keeping as pending")
-		return nil
+		return fmt.Errorf("classify review comment: %w", err)
 	}
 
 	if !classification.Actionable {

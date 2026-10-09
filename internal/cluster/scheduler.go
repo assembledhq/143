@@ -29,6 +29,7 @@ type schedulerOrgStore interface {
 
 type schedulerIntegrationStore interface {
 	ListOrgsWithActiveIntegrations(ctx context.Context) ([]uuid.UUID, error)
+	ListOrgsWithConnectedProvider(ctx context.Context, provider models.IntegrationProvider) ([]uuid.UUID, error)
 }
 
 type schedulerRepoStore interface {
@@ -347,7 +348,7 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 	// integration's settings UI does not surface a manual refresh, so this is
 	// the only path that reconciles the cache against Linear's source of
 	// truth.
-	s.scheduleLinearTeamKeyRefresh(ctx, orgIDs, now)
+	s.scheduleLinearTeamKeyRefresh(ctx, now)
 
 	// Ninth pass: re-verify auto-join domains' DNS TXT records roughly
 	// daily. A domain that expires or transfers must not keep admitting new
@@ -446,38 +447,21 @@ func (s *Scheduler) recheckVerifiedDomains(ctx context.Context, now time.Time) {
 	}
 }
 
-// scheduleLinearTeamKeyRefresh enqueues a per-org refresh_linear_team_keys
-// job once per UTC day. The job's handler is idempotent (it replaces the
-// linear_team_keys rows for the org's integration); the in-process date
-// guard keeps the scheduler's 10-minute tick from queueing 144 redundant
-// jobs/day after the first enqueue pass.
-//
-// Org-scoping piggybacks on the upstream ListOrgsWithActiveIntegrations call
-// — orgs without a Linear integration won't appear here, so the worker never
-// sees a no-op dispatch. The job itself rechecks the integration row before
-// hitting Linear so a torn-down integration after enqueue still results in a
-// graceful skip.
-func (s *Scheduler) scheduleLinearTeamKeyRefresh(ctx context.Context, orgIDs []uuid.UUID, now time.Time) {
-	dateKey := now.UTC().Format("2006-01-02")
+// scheduleLinearTeamKeyRefresh refreshes connected Linear integrations once
+// per UTC day, including errored connections so a recovered token clears the
+// reconnect banner. Disconnected organizations are not maintenance targets.
+func (s *Scheduler) scheduleLinearTeamKeyRefresh(ctx context.Context, now time.Time) {
 	const jobType = "refresh_linear_team_keys"
-	if s.lastDailyJobDates == nil {
-		s.lastDailyJobDates = make(map[string]string)
-	}
+	dateKey := now.UTC().Format("2006-01-02")
 	if s.lastDailyJobDates[jobType] == dateKey {
 		return
 	}
-
-	for _, orgID := range orgIDs {
-		dedupeKey := fmt.Sprintf("refresh_linear_team_keys:%s:%s", orgID.String(), dateKey)
-		payload := map[string]string{"org_id": orgID.String()}
-		if _, err := s.jobs.Enqueue(ctx, orgID, "linear", jobType, payload, 5, &dedupeKey); err != nil {
-			s.logger.Warn().Err(err).
-				Str("org_id", orgID.String()).
-				Msg("failed to enqueue refresh_linear_team_keys cron job")
-		}
+	orgIDs, err := s.integrations.ListOrgsWithConnectedProvider(ctx, models.IntegrationProviderLinear)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("failed to list connected Linear organizations")
+		return
 	}
-
-	s.lastDailyJobDates[jobType] = dateKey
+	s.scheduleDailyJobWithPriority(ctx, "linear", jobType, orgIDs, now, 5)
 }
 
 func (s *Scheduler) scheduleAuditRetentionCleanup(ctx context.Context, orgIDs []uuid.UUID, now time.Time) {
@@ -492,6 +476,10 @@ func (s *Scheduler) scheduleDataRetentionCleanup(ctx context.Context, orgIDs []u
 // It avoids N redundant Enqueue calls on every scheduler tick after the first
 // tick of the day.
 func (s *Scheduler) scheduleDailyJob(ctx context.Context, queue, jobType string, orgIDs []uuid.UUID, now time.Time) {
+	s.scheduleDailyJobWithPriority(ctx, queue, jobType, orgIDs, now, 1)
+}
+
+func (s *Scheduler) scheduleDailyJobWithPriority(ctx context.Context, queue, jobType string, orgIDs []uuid.UUID, now time.Time, priority int) {
 	dateKey := now.UTC().Format("2006-01-02")
 	if s.lastDailyJobDates == nil {
 		s.lastDailyJobDates = make(map[string]string)
@@ -504,7 +492,7 @@ func (s *Scheduler) scheduleDailyJob(ctx context.Context, queue, jobType string,
 	for _, orgID := range orgIDs {
 		dedupeKey := fmt.Sprintf("%s:%s:%s", jobType, orgID.String(), dateKey)
 		payload := map[string]string{"org_id": orgID.String()}
-		if _, err := s.jobs.Enqueue(ctx, orgID, queue, jobType, payload, 1, &dedupeKey); err != nil {
+		if _, err := s.jobs.Enqueue(ctx, orgID, queue, jobType, payload, priority, &dedupeKey); err != nil {
 			allEnqueued = false
 			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msgf("failed to enqueue %s job", jobType)
 		}

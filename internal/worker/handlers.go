@@ -555,12 +555,11 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("process_review_comment", newProcessReviewCommentHandler(services, logger))
 		w.Register("update_memories", newUpdateMemoriesHandler(services, logger))
 	}
-	if services != nil && services.Memory != nil {
-		w.Register("reinforce_memories", newReinforceMemoriesHandler(services, logger))
-	}
+	w.Register("reinforce_memories", newObsoleteMemoryReinforcementHandler(logger))
 	if stores.AuditLogs != nil && stores.Organizations != nil {
 		w.Register("audit_retention_cleanup", newAuditRetentionCleanupHandler(stores, logger))
 	}
+	w.Register("evaluate_experiment", newObsoleteExperimentHandler(logger))
 	w.Register("data_retention_cleanup", newDataRetentionCleanupHandler(stores, retentionCfg, logger))
 	if stores.Previews != nil {
 		w.Register(models.JobTypeBackfillPreviewGroups, newBackfillPreviewGroupsHandler(stores, logger))
@@ -10353,6 +10352,9 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				// clone / authoritative PR-head checkout did not finish within
 				// this attempt's barrier. Retry on the owning node instead of
 				// launching an agent in an empty or default-branch workspace.
+				if hasThread {
+					registerWorkspaceWaitDeadLetter(ctx, stores, logger, session, threadID, threadTurnBefore)
+				}
 				retryAfter := 2 * time.Second
 				logger.Info().
 					Str("session_id", sessionID.String()).
@@ -11287,7 +11289,7 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 		syncCtx := ghservice.WithPullRequestSyncReason(ctx, syncReason)
 		if err := services.PR.SyncPullRequestState(syncCtx, orgID, pullRequestID); err != nil {
 			if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
-				return &RetryableError{Err: err, ConsumeAttempt: true}
+				return newPullRequestMergeabilityWait(err)
 			}
 			if errors.Is(err, ghservice.ErrPullRequestRepositoryDisconnected) {
 				logger.Info().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Msg("skipping pull request state sync for disconnected repository")
@@ -13468,51 +13470,6 @@ func newUpdateMemoriesHandler(services *Services, logger zerolog.Logger) JobHand
 	}
 }
 
-// reinforce_memories handler re-derives the active memory set for a repo and
-// reinforces those memories. Enqueued when a 143-generated PR is approved.
-func newReinforceMemoriesHandler(services *Services, logger zerolog.Logger) JobHandler {
-	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			OrgID string `json:"org_id"`
-			Repo  string `json:"repo"`
-		}
-		if err := json.Unmarshal(payload, &input); err != nil {
-			return fmt.Errorf("unmarshal reinforce_memories payload: %w", err)
-		}
-
-		orgID, err := parseOrgID(input.OrgID, ctx)
-		if err != nil {
-			return fmt.Errorf("parse org ID: %w", err)
-		}
-
-		if input.Repo == "" {
-			return fmt.Errorf("missing repo in reinforce_memories payload")
-		}
-
-		// Re-derive which memories would be selected for this repo's context.
-		memResult, err := services.Memory.GetContextMemories(ctx, agent.MemoryContextRequest{
-			OrgID: orgID,
-			Repo:  input.Repo,
-		})
-		if err != nil {
-			return fmt.Errorf("get context memories for reinforcement: %w", err)
-		}
-
-		if memResult == nil || len(memResult.MemoryIDs) == 0 {
-			logger.Debug().Str("repo", input.Repo).Msg("no active memories to reinforce")
-			return nil
-		}
-
-		logger.Info().
-			Str("org_id", orgID.String()).
-			Str("repo", input.Repo).
-			Int("memory_count", len(memResult.MemoryIDs)).
-			Msg("reinforcing memories after PR approval")
-
-		return services.Memory.ReinforceMemories(ctx, orgID, memResult.MemoryIDs)
-	}
-}
-
 // audit_retention_cleanup handler deletes audit log entries older than the
 // org-configured retention period using the SECURITY DEFINER function.
 func newAuditRetentionCleanupHandler(stores *Stores, logger zerolog.Logger) JobHandler {
@@ -13639,13 +13596,13 @@ func newDataRetentionCleanupHandler(stores *Stores, retentionCfg DataRetentionCo
 		}
 
 		if stores.Jobs != nil && retentionCfg.JobsDays > 0 {
-			deleted, err := stores.Jobs.DeleteExpiredCompleted(ctx, retentionCfg.JobsDays)
+			deleted, err := sweepExpiredCompletedJobs(ctx, retentionCfg.JobsDays, stores.Jobs.DeleteExpiredCompleted, logger)
+			totalDeleted += deleted
 			if err != nil {
-				logger.Error().Err(err).Msg("failed to delete expired completed jobs")
+				logger.Error().Err(err).Int64("deleted", deleted).Msg("failed to delete expired completed jobs")
 				errs = append(errs, fmt.Errorf("delete expired completed jobs: %w", err))
 			} else {
-				totalDeleted += deleted
-				logger.Info().Int64("deleted", deleted).Int("retention_days", retentionCfg.JobsDays).Msg("completed job cleanup complete")
+				logger.Info().Int64("deleted", deleted).Int("retention_days", retentionCfg.JobsDays).Msg("completed job cleanup sweep finished")
 			}
 		}
 
@@ -14110,14 +14067,11 @@ func newRefreshLinearTeamKeysHandler(svc *linear.Service, logger zerolog.Logger)
 			return err
 		}
 		if err := svc.RefreshTeamKeys(ctx, orgID); err != nil {
-			logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("refresh_linear_team_keys failed")
 			if errors.Is(err, linear.ErrIntegrationNotFound) {
-				// Org disconnected Linear after the 24h cron tick was
-				// scheduled. Retrying for 8 minutes won't bring the row
-				// back; dead-letter so the cron can re-arm cleanly the
-				// next time an install enqueues this job.
-				return &FatalError{Err: err}
+				logger.Info().Str("org_id", orgID.String()).Msg("skipping Linear team-key refresh for disconnected integration")
+				return nil
 			}
+			logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("refresh_linear_team_keys failed")
 			if errors.Is(err, linear.ErrUnauthorized) {
 				svc.MarkIntegrationUnauthorized(ctx, orgID)
 				// Token won't recover in 8 minutes. The MarkIntegrationUnauthorized

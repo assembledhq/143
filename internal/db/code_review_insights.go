@@ -119,7 +119,7 @@ func (s *CodeReviewInsightStore) ProjectRecentDecisions(ctx context.Context, org
 		WHERE m.org_id = @org_id AND m.status = 'completed' AND m.decision IS NOT NULL
 		  AND (o.session_id IS NULL OR
 		       (o.terminal = false AND o.projection_updated_at < @stale_before) OR
-		       o.projection_updated_at < m.updated_at OR
+		       o.projection_updated_at < COALESCE(m.completed_at, m.created_at) OR
 		       (lifecycle.observed_at IS NOT NULL AND
 		        (o.lifecycle_observed_at IS NULL OR o.lifecycle_observed_at < lifecycle.observed_at)))
 		ORDER BY (o.session_id IS NOT NULL), o.projection_updated_at NULLS FIRST,

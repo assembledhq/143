@@ -79,6 +79,9 @@ func applyGitHubRetrySchedule(retryable *RetryableError, retryWindowStartedAt, n
 		return
 	}
 	switch retryable.GitHubRetryPolicy {
+	case githubRetryPolicyMergeabilityWait:
+		delay := mergeabilityPollDelay(retryWindowStartedAt, now)
+		retryable.RetryAfter = &delay
 	case GitHubRetryPolicyNoHint:
 		retryAt := githubNoHintRetryAt(retryWindowStartedAt, now, retryable.GitHubRetryKey)
 		delay := retryAt.Sub(now)

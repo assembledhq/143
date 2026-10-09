@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_preview_cache_prewarm_runs_retention_job;
