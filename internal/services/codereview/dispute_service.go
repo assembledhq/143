@@ -620,10 +620,9 @@ func (s *DisputeService) Triage(ctx context.Context, orgID, disputeID uuid.UUID)
 	if err != nil {
 		return err
 	}
-	result.Direction = directionForDecision(dispute.Decision)
 	result.ContestedReasonCodes = validContestedReasonCodes(result.ContestedReasonCodes, reasons)
 	if len(result.ContestedReasonCodes) == 0 {
-		result.ContestedReasonCodes = append([]models.CodeReviewRiskReasonCode(nil), dispute.ContestedReasonCodes...)
+		result.ContestedReasonCodes = append([]models.CodeReviewRiskReasonCode{}, dispute.ContestedReasonCodes...)
 	}
 	trusted, trustReason := dispute.CurrentTrust()
 	if result.Direction == models.CodeReviewDisputeDirectionShouldNotHaveApproved && result.Routing == models.CodeReviewDisputeRoutingReassess {
@@ -804,8 +803,10 @@ func (s *DisputeService) triageResult(ctx context.Context, dispute models.CodeRe
 	if err := json.Unmarshal([]byte(extractJSONObject(raw)), &result); err != nil {
 		return result, fmt.Errorf("decode code review dispute triage: %w", err)
 	}
+	// The stored decision determines direction even when the model emits a routing word.
+	result.Direction = direction
 	// Contested codes are optional LLM suggestions constrained to this review.
-	// Normalize them before strict validation without changing any policy enum.
+	// Normalize them before strict routing and confidence validation.
 	result.ContestedReasonCodes = validContestedReasonCodes(result.ContestedReasonCodes, reasons)
 	if err := result.Validate(); err != nil {
 		return result, fmt.Errorf("validate code review dispute triage: %w", err)
