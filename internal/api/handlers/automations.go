@@ -1556,6 +1556,16 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			raw = string(*req.ReasoningEffort)
 		} else if automation.ReasoningEffort != nil {
 			raw = string(*automation.ReasoningEffort)
+			// The stored override belongs to the agent the automation used to
+			// run on, and a model patch can move it to one that grades effort
+			// differently (Claude Code has "max"; Codex stops at "xhigh").
+			// This request never named the value, so 400ing on it would blame
+			// the caller for a row they didn't touch — and leave them stuck,
+			// since the Reasoning row disappears for an agent that can't take
+			// any effort at all. Drop it and let the new agent default.
+			if !effectiveAgentType.SupportsReasoningEffortLevel(*automation.ReasoningEffort) {
+				raw = ""
+			}
 		}
 		reasoningOverride, err := parseReasoningEffortForAgent(effectiveAgentType, raw)
 		if err != nil {

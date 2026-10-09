@@ -100,6 +100,7 @@ import type {
 import { cn, formatDateTime, formatTimeAgo } from "@/lib/utils";
 import {
   getCodingAgentReasoningOptions,
+  isCodingAgentReasoningEffortSupported,
   supportsReasoningEffort,
   toCodingAgentReasoningEffort,
   type CodingAgentReasoningEffort,
@@ -1470,15 +1471,19 @@ function AutomationDetailRail({
   const defaultAgentType = settings.default_agent_type ?? "codex";
   const model = automation.model_override;
   // Shared by the row that renders the current model and by the handler that
-  // patches a new one — the two have to agree on which agent a model implies,
-  // or the reasoning reset stops matching what the rail is showing.
-  const effectiveAgentTypeFor = (candidate: string | undefined) =>
-    candidate
-      ? (agentTypeForModel(candidate) ??
-        automation.agent_type ??
-        defaultAgentType)
-      : (automation.agent_type ?? defaultAgentType);
-  const effectiveAgentType = effectiveAgentTypeFor(model);
+  // patches a new one — the two have to agree on which agent a model runs on,
+  // or the reasoning reset stops matching what the rail is showing. A named
+  // agent (the stored one, or the group a new model was picked from) wins over
+  // inference: Pi and OpenCode publish several identical provider/model ids,
+  // and only the named agent can tell them apart.
+  const effectiveAgentTypeFor = (
+    candidate: string | undefined,
+    namedAgentType: string | undefined,
+  ) =>
+    namedAgentType ??
+    (candidate ? agentTypeForModel(candidate) : undefined) ??
+    defaultAgentType;
+  const effectiveAgentType = effectiveAgentTypeFor(model, automation.agent_type);
   const supportsNativeReviewLoop = [
     "codex",
     "claude_code",
@@ -1645,26 +1650,45 @@ function AutomationDetailRail({
                 id={`automation-model-${uid}`}
                 ariaLabel="Model"
                 value={model}
+                agentType={automation.agent_type}
                 density="dense"
                 triggerClassName={inlineControlClass}
-                onValueChange={(value) => {
-                  // The API re-validates the STORED reasoning override against
-                  // the model's agent, so a lone `model` patch is rejected
-                  // outright when the new agent can't accept it. The old batch
-                  // save cleared it in the same request; a per-field patch has
-                  // to carry that reset too, or the switch fails and the row
-                  // the user would need to clear is the one that disappears.
-                  const nextAgentType = effectiveAgentTypeFor(value);
+                onValueChange={(selection) => {
+                  // The group a model was picked from is the agent the user
+                  // chose, and it rides in the same patch as the model. The
+                  // API can re-infer an agent from a model alone, but not for
+                  // the provider/model ids Pi and OpenCode both list. Auto
+                  // clears the model and leaves the agent where it is.
+                  const nextModel = selection?.model ?? "";
+                  const nextAgentType = selection?.agentType;
+                  const sendsAgentType =
+                    nextAgentType !== undefined &&
+                    nextAgentType !== automation.agent_type;
+                  // The STORED reasoning override belongs to the old agent, and
+                  // the levels aren't a shared scale — Codex stops at "xhigh"
+                  // where Claude Code has "max" — so the reset has to be per
+                  // level, not just "does this agent do reasoning at all". The
+                  // API drops a stale override on its own; sending it keeps the
+                  // optimistic row from showing a level the automation no
+                  // longer has.
                   const clearsReasoning =
                     Boolean(automation.reasoning_effort) &&
-                    !supportsReasoningEffort(nextAgentType);
+                    !isCodingAgentReasoningEffortSupported(
+                      effectiveAgentTypeFor(
+                        selection?.model,
+                        selection ? nextAgentType : automation.agent_type,
+                      ),
+                      automation.reasoning_effort ?? "",
+                    );
                   save({
                     body: {
-                      model: value ?? "",
+                      model: nextModel,
+                      ...(sendsAgentType ? { agent_type: nextAgentType } : {}),
                       ...(clearsReasoning ? { reasoning_effort: "" } : {}),
                     },
                     optimistic: {
-                      model_override: value ?? "",
+                      model_override: nextModel,
+                      ...(sendsAgentType ? { agent_type: nextAgentType } : {}),
                       ...(clearsReasoning
                         ? { reasoning_effort: undefined }
                         : {}),

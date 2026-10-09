@@ -111,6 +111,11 @@ func cloneOptionalString(v *string) *string {
 	return &trimmed
 }
 
+// resolveAutomationAgentAndModel folds a create/update request's agent_type
+// and model onto the automation's stored pair and returns the values to
+// persist. Absent request fields keep the stored value; an explicit
+// agent_type always wins over inference. The one exception is a model-only
+// patch naming a model the stored agent can't run — see below.
 func resolveAutomationAgentAndModel(currentAgentType, currentModel, reqAgentType, reqModel *string) (*string, *string, error) {
 	effectiveAgentType := cloneOptionalString(currentAgentType)
 	effectiveModel := cloneOptionalString(currentModel)
@@ -142,7 +147,31 @@ func resolveAutomationAgentAndModel(currentAgentType, currentModel, reqAgentType
 	}
 
 	if err := models.ValidateModelForAgentType(models.AgentType(*effectiveAgentType), *effectiveModel); err != nil {
-		return nil, nil, err
+		// An explicit agent_type wins outright — the caller named both halves,
+		// so a mismatch is their error to fix. But a model-only patch (the
+		// MCP automation_update tool, external API callers) carries no opinion
+		// about the agent, and the stored one is just whatever the previous
+		// model implied; re-infer instead of rejecting a model that belongs to
+		// another agent.
+		//
+		// Only the illegal case re-infers. Agents that accept any
+		// "provider/model" (Pi, OpenCode) share curated ids, so a stored agent
+		// that can still run the new model keeps it rather than being
+		// reassigned to whichever agent AgentTypeForModel happens to rank
+		// first. Callers that know which agent they mean — the web picker
+		// does — send agent_type and skip inference entirely.
+		if reqAgentType != nil || reqModel == nil {
+			return nil, nil, err
+		}
+		inferred := models.AgentTypeForModel(*effectiveModel)
+		if inferred == "" {
+			return nil, nil, err
+		}
+		if inferErr := models.ValidateModelForAgentType(inferred, *effectiveModel); inferErr != nil {
+			return nil, nil, err
+		}
+		s := string(inferred)
+		effectiveAgentType = &s
 	}
 
 	return effectiveAgentType, effectiveModel, nil
