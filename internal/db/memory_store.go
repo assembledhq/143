@@ -2,7 +2,11 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -19,6 +23,32 @@ func NewMemoryStore(db TxStarter) *MemoryStore {
 }
 
 func (s *MemoryStore) Create(ctx context.Context, m *models.Memory) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin memory creation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockMemoryRepo(ctx, tx, m.OrgID, m.Repo); err != nil {
+		return err
+	}
+	if err := createMemory(ctx, tx, m); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func lockMemoryRepo(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, repo string) error {
+	// Serialize learned-rule lookup and insert-only replacement with manual
+	// edits. A transaction lock is released on commit, rollback, or disconnect.
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(@key, 0))`,
+		pgx.NamedArgs{"key": "review-memory/" + orgID.String() + "/" + repo})
+	if err != nil {
+		return fmt.Errorf("lock repository memories: %w", err)
+	}
+	return nil
+}
+
+func createMemory(ctx context.Context, db DBTX, m *models.Memory) error {
 	query := `
 		INSERT INTO memories (org_id, repo, rule, category, source_comment_ids, occurrence_count, status, manually_curated, active, scope, source, last_used_at, times_reinforced, file_patterns)
 		VALUES (@org_id, @repo, @rule, @category, @source_comment_ids, @occurrence_count, @status, @manually_curated, true, @scope, @source, @last_used_at, @times_reinforced, @file_patterns)
@@ -33,7 +63,7 @@ func (s *MemoryStore) Create(ctx context.Context, m *models.Memory) error {
 		source = "review"
 	}
 
-	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+	row := db.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":             m.OrgID,
 		"repo":               m.Repo,
 		"rule":               m.Rule,
@@ -164,6 +194,15 @@ func (s *MemoryStore) UpdateMemoryAndGet(ctx context.Context, orgID, id uuid.UUI
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	var repo string
+	if err := tx.QueryRow(ctx, `SELECT repo FROM memories WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID}).Scan(&repo); err != nil {
+		return models.Memory{}, fmt.Errorf("find memory repository: %w", err)
+	}
+	if err := lockMemoryRepo(ctx, tx, orgID, repo); err != nil {
+		return models.Memory{}, err
+	}
+
 	// 1. Inactivate the current row and get its values.
 	inactivateQuery := `
 		UPDATE memories SET active = false
@@ -293,6 +332,108 @@ func (s *MemoryStore) IncrementOccurrence(ctx context.Context, orgID, memoryID, 
 	}
 
 	return tx.Commit(ctx)
+}
+
+// ApplyReviewComment applies a persisted classification at most once per source
+// comment. The memory version and completion marker share one transaction, so
+// a failed write or lost commit response can safely be retried.
+func (s *MemoryStore) ApplyReviewComment(ctx context.Context, orgID, commentID uuid.UUID, repo, rule, category string) error {
+	if strings.TrimSpace(repo) == "" || strings.TrimSpace(rule) == "" {
+		return fmt.Errorf("review memory requires a repository and nonempty rule")
+	}
+	if err := models.ReviewFeedbackCategory(category).Validate(); err != nil {
+		return err
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin review memory application: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var appliedAt *time.Time
+	var filterStatus string
+	var actionable, generalizable bool
+	var storedRule, storedCategory *string
+	err = tx.QueryRow(ctx, `
+		SELECT memory_applied_at, filter_status, actionable, generalizable, generalized_rule, category
+		FROM review_comments WHERE id = @id AND org_id = @org_id FOR UPDATE`,
+		pgx.NamedArgs{"id": commentID, "org_id": orgID}).Scan(
+		&appliedAt, &filterStatus, &actionable, &generalizable, &storedRule, &storedCategory)
+	if err != nil {
+		return fmt.Errorf("lock classified review comment: %w", err)
+	}
+	if appliedAt != nil {
+		return nil
+	}
+	if filterStatus != "accepted" || !actionable || !generalizable || storedRule == nil || storedCategory == nil || *storedRule != rule || *storedCategory != category {
+		return fmt.Errorf("review comment does not have the expected accepted classification")
+	}
+	if err := lockMemoryRepo(ctx, tx, orgID, repo); err != nil {
+		return err
+	}
+
+	// Previous versions retain source IDs. This also recognizes comments
+	// applied before the durable completion marker was introduced, including
+	// memories subsequently edited or dismissed by a person.
+	var alreadyApplied bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM memories WHERE org_id = @org_id AND @comment_id = ANY(source_comment_ids)
+	)`, pgx.NamedArgs{"org_id": orgID, "comment_id": commentID}).Scan(&alreadyApplied)
+	if err != nil {
+		return fmt.Errorf("check previous review memory application: %w", err)
+	}
+	if !alreadyApplied {
+		if err := applyMemoryOccurrence(ctx, tx, orgID, commentID, repo, rule, category); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE review_comments SET memory_applied_at = now()
+		WHERE id = @id AND org_id = @org_id`, pgx.NamedArgs{"id": commentID, "org_id": orgID}); err != nil {
+		return fmt.Errorf("complete review memory application: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit review memory application: %w", err)
+	}
+	return nil
+}
+
+func applyMemoryOccurrence(ctx context.Context, tx pgx.Tx, orgID, commentID uuid.UUID, repo, rule, category string) error {
+	rows, err := tx.Query(ctx, `
+		SELECT id, org_id, repo, rule, category, source_comment_ids, occurrence_count,
+		       status, manually_curated, active, scope, source, last_used_at, times_reinforced, file_patterns, created_at
+		FROM memories WHERE org_id = @org_id AND repo = @repo AND active = true
+		  AND lower(rule) = lower(@rule)
+		ORDER BY (status = 'dismissed') DESC, manually_curated DESC, created_at DESC, id
+		LIMIT 1 FOR UPDATE`, pgx.NamedArgs{"org_id": orgID, "repo": repo, "rule": rule})
+	if err != nil {
+		return fmt.Errorf("find review memory: %w", err)
+	}
+	existing, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Memory])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return createMemory(ctx, tx, &models.Memory{
+			OrgID: orgID, Repo: repo, Rule: rule, Category: category,
+			SourceCommentIDs: []uuid.UUID{commentID}, OccurrenceCount: 1, Status: "candidate",
+		})
+	}
+	if err != nil {
+		return fmt.Errorf("scan review memory: %w", err)
+	}
+	// Never undo a person's dismissal or change their curated rule/status.
+	if existing.ManuallyCurated || existing.Status == "dismissed" || slices.Contains(existing.SourceCommentIDs, commentID) {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `UPDATE memories SET active = false
+		WHERE id = @id AND org_id = @org_id AND active = true`,
+		pgx.NamedArgs{"id": existing.ID, "org_id": orgID}); err != nil {
+		return fmt.Errorf("inactivate review memory: %w", err)
+	}
+	next := existing
+	next.SourceCommentIDs = append(slices.Clone(existing.SourceCommentIDs), commentID)
+	next.OccurrenceCount++
+	if next.Status == "candidate" && next.OccurrenceCount >= 2 {
+		next.Status = "active"
+	}
+	return createMemory(ctx, tx, &next)
 }
 
 // ListForContext returns all active memories relevant to a given repo context.

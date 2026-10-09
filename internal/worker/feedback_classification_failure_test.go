@@ -65,7 +65,7 @@ func TestProcessReviewCommentHandlerReturnsClassificationFailures(t *testing.T) 
 				var syntax *json.SyntaxError
 				require.ErrorAs(t, err, &syntax, "worker must preserve malformed response errors")
 			}
-			require.Equal(t, 2, reads, "failure should stop after the pending check and classification load")
+			require.Equal(t, 1, reads, "failure should stop after the classification load")
 			require.Equal(t, 0, writes, "classification failures must leave the comment pending")
 			require.Equal(t, 0, memories.createCalls, "classification failures must not teach fabricated conventions")
 		})

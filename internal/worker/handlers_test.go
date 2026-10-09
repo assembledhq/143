@@ -9797,22 +9797,14 @@ func (m *testFeedbackCommentStore) ListActionableByPullRequest(ctx context.Conte
 
 type testFeedbackMemoryStore struct {
 	createCalls int
+	applyFn     func(context.Context, uuid.UUID, uuid.UUID, string, string, string) error
 }
 
-func (m *testFeedbackMemoryStore) Create(ctx context.Context, p *models.Memory) error {
+func (m *testFeedbackMemoryStore) ApplyReviewComment(ctx context.Context, orgID, commentID uuid.UUID, repo, rule, category string) error {
 	m.createCalls++
-	return nil
-}
-
-func (m *testFeedbackMemoryStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.Memory, error) {
-	return models.Memory{}, nil
-}
-
-func (m *testFeedbackMemoryStore) FindMatchingRule(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.Memory, error) {
-	return models.Memory{}, errors.New("not found")
-}
-
-func (m *testFeedbackMemoryStore) IncrementOccurrence(ctx context.Context, orgID, memoryID, commentID uuid.UUID) error {
+	if m.applyFn != nil {
+		return m.applyFn(ctx, orgID, commentID, repo, rule, category)
+	}
 	return nil
 }
 
@@ -9830,7 +9822,7 @@ func (m *testFeedbackJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, que
 	return uuid.New(), nil
 }
 
-func TestProcessReviewCommentHandler_SkipsPatternUpdateWhenCommentAlreadyProcessed(t *testing.T) {
+func TestProcessReviewCommentHandler_RetriesMemoryForAcceptedComment(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -9844,6 +9836,7 @@ func TestProcessReviewCommentHandler_SkipsPatternUpdateWhenCommentAlreadyProcess
 				ID:              gotCommentID,
 				OrgID:           gotOrgID,
 				FilterStatus:    "accepted",
+				Actionable:      true,
 				Generalizable:   true,
 				GeneralizedRule: &rule,
 				Category:        &category,
@@ -9859,7 +9852,7 @@ func TestProcessReviewCommentHandler_SkipsPatternUpdateWhenCommentAlreadyProcess
 
 	err := handler(context.Background(), "process_review_comment", payload)
 	require.NoError(t, err, "process_review_comment handler should succeed for already processed comments")
-	require.Equal(t, 0, memoryStore.createCalls, "process_review_comment should not update memories when comment was already processed")
+	require.Equal(t, 1, memoryStore.createCalls, "accepted comments must retry their idempotent memory application")
 }
 
 // ---------------------------------------------------------------------------
@@ -10289,10 +10282,15 @@ func TestProcessReviewCommentHandler_WithPendingComment(t *testing.T) {
 	commentStore := &testFeedbackCommentStore{
 		getByIDFn: func(ctx context.Context, gotOrgID, gotCommentID uuid.UUID) (models.ReviewComment, error) {
 			callCount++
+			status := "pending"
+			if callCount > 1 {
+				status = "accepted"
+			}
 			return models.ReviewComment{
 				ID:              gotCommentID,
 				OrgID:           gotOrgID,
-				FilterStatus:    "pending",
+				FilterStatus:    status,
+				Actionable:      true,
 				Generalizable:   true,
 				GeneralizedRule: &rule,
 				Category:        &category,

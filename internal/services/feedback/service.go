@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -34,10 +33,7 @@ type ReviewCommentStore interface {
 
 // MemoryStore defines the DB operations for memories (learned conventions).
 type MemoryStore interface {
-	Create(ctx context.Context, m *models.Memory) error
-	GetByID(ctx context.Context, orgID, id uuid.UUID) (models.Memory, error)
-	FindMatchingRule(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.Memory, error)
-	IncrementOccurrence(ctx context.Context, orgID, memoryID, commentID uuid.UUID) error
+	ApplyReviewComment(ctx context.Context, orgID, commentID uuid.UUID, repo, rule, category string) error
 	ListActiveByRepo(ctx context.Context, orgID uuid.UUID, repo string) ([]models.Memory, error)
 	UpdateMemory(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error
 }
@@ -99,7 +95,7 @@ func (s *Service) ProcessComment(ctx context.Context, commentID, orgID uuid.UUID
 
 	if !classification.Actionable {
 		return s.comments.UpdateClassification(ctx, orgID, comment.ID,
-			"filtered_not_actionable", &classification.Category, false, false, nil, &classification.Summary)
+			"filtered_not_actionable", classificationCategory(classification.Category), false, false, nil, &classification.Summary)
 	}
 
 	// 3. Store classification.
@@ -170,7 +166,25 @@ func (s *Service) classifyComment(ctx context.Context, comment *models.ReviewCom
 		return nil, fmt.Errorf("parse LLM classification response: %w", err)
 	}
 
+	if err := models.ReviewFeedbackCategory(result.Category).Validate(); err != nil {
+		if result.Actionable {
+			return nil, fmt.Errorf("validate actionable classification: %w", err)
+		}
+		// The nullable category contract permits acknowledgments and other
+		// non-actionable responses with no meaningful category.
+		result.Category = ""
+	}
+	if result.Actionable && result.Generalizable && (result.GeneralizedRule == nil || strings.TrimSpace(*result.GeneralizedRule) == "") {
+		return nil, fmt.Errorf("generalizable classification requires a nonempty rule")
+	}
 	return &result, nil
+}
+
+func classificationCategory(category string) *string {
+	if category == "" {
+		return nil
+	}
+	return &category
 }
 
 // extractJSON extracts the first JSON object from a string, handling markdown fences.
@@ -202,25 +216,13 @@ func extractJSON(s string) string {
 // UpdateMemories performs dedup and creates/updates memories for a classified comment.
 // This is called by the worker handler which has the repo name from the PR.
 func (s *Service) UpdateMemories(ctx context.Context, orgID, commentID uuid.UUID, repo, rule, category string) error {
-	normalized := normalizeRule(rule)
-
-	existing, err := s.memories.FindMatchingRule(ctx, orgID, repo, normalized)
-	if err == nil {
-		// Match found — increment occurrence count.
-		return s.memories.IncrementOccurrence(ctx, orgID, existing.ID, commentID)
+	if strings.TrimSpace(repo) == "" || strings.TrimSpace(rule) == "" {
+		return fmt.Errorf("review memory requires a repository and nonempty rule")
 	}
-
-	// No match — create new candidate memory.
-	memory := &models.Memory{
-		OrgID:            orgID,
-		Repo:             repo,
-		Rule:             rule,
-		Category:         category,
-		SourceCommentIDs: []uuid.UUID{commentID},
-		OccurrenceCount:  1,
-		Status:           "candidate",
+	if err := models.ReviewFeedbackCategory(category).Validate(); err != nil {
+		return fmt.Errorf("validate review memory category: %w", err)
 	}
-	return s.memories.Create(ctx, memory)
+	return s.memories.ApplyReviewComment(ctx, orgID, commentID, repo, rule, category)
 }
 
 // GenerateConventionsDoc generates the .143/learned-conventions.md content
@@ -361,19 +363,4 @@ func passesStructuralFilter(reviewer, body string) bool {
 	}
 
 	return true
-}
-
-// normalizeRule normalizes a rule string for dedup comparison.
-func normalizeRule(rule string) string {
-	rule = strings.ToLower(rule)
-	// Strip punctuation.
-	rule = strings.Map(func(r rune) rune {
-		if unicode.IsPunct(r) {
-			return -1
-		}
-		return r
-	}, rule)
-	// Collapse whitespace.
-	rule = strings.Join(strings.Fields(rule), " ")
-	return rule
 }

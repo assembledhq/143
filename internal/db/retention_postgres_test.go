@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -164,43 +163,51 @@ INSERT INTO session_executors(org_id,session_id,job_id,job_type,host_node_id,own
 			require.NoError(t, err, "read exact protected batch identities")
 			protected, err = pgx.CollectRows(rows, pgx.RowTo[string])
 			require.NoError(t, err, "collect protected batch identities")
-			if tt.name == "job" {
-				require.Equal(t, int64(10000), maintenanceCleanup(t, pool, tt.function, 30), "corrected succeeded retention must stop after one 10000-row batch")
-				require.Equal(t, int64(5), maintenanceCleanup(t, pool, tt.function, 30), "later cleanup call must finish the remaining eligible jobs")
-			} else {
-				require.Equal(t, int64(10005), maintenanceCleanup(t, pool, tt.function, 30), "existing webhook cleanup must advance past 10001 protected parents")
-			}
+			require.Equal(t, int64(10000), maintenanceCleanup(t, pool, tt.function, 30), "each cleanup call must stop after one 10000-row batch")
+			require.Equal(t, int64(5), maintenanceCleanup(t, pool, tt.function, 30), "later cleanup call must finish remaining eligible parents")
 			require.Equal(t, protected, maintenanceIDs(t, pool, table), "exact protected parent set should survive all batches")
 			require.Equal(t, int64(0), maintenanceCleanup(t, pool, tt.function, 30), "exhausted batch cleanup must be idempotent")
 		})
 	}
 }
 
-func TestRetentionPostgresDownMigrations(t *testing.T) {
+func TestRetentionPostgresMigrationPauseAndResume(t *testing.T) {
 	t.Parallel()
 	pool, schema := newMaintenancePostgres(t)
-	org, _, _ := seedMaintenanceInbound(t, pool)
+	org, integration, _ := seedMaintenanceInbound(t, pool)
 	succeeded := insertMaintenanceJob(t, pool, org, "succeeded", true, "test", json.RawMessage(`{}`))
 	failed := insertMaintenanceJob(t, pool, org, "failed", true, "test", json.RawMessage(`{}`))
-	maintenanceApplyFunctions(t, pool, schema, "000307_job_retention_succeeded_status.down.sql")
-	require.Equal(t, int64(1), maintenanceCleanup(t, pool, "delete_expired_completed_jobs", 30), "down307 should restore failed-only eligibility under valid job statuses")
-	require.Equal(t, []string{succeeded.String()}, maintenanceIDs(t, pool, "jobs"), "down307 must retain the exact succeeded job")
-	var source string
-	require.NoError(t, pool.QueryRow(context.Background(), `SELECT prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.proname='delete_expired_completed_jobs'`, schema).Scan(&source), "read down307 function body")
-	require.Contains(t, source, "session_executors", "down307 must retain migration300 executor guards")
+	webhook := insertMaintenanceWebhook(t, pool, org, integration, true)
+	originalJobs := []string{succeeded.String(), failed.String()}
+	sort.Strings(originalJobs)
+	for _, migration := range []string{"000300_retention_foreign_key_guards.up.sql", "000309_resume_bounded_retention.down.sql"} {
+		maintenanceApplyFunctions(t, pool, schema, migration)
+		for _, function := range []string{"delete_expired_completed_jobs", "delete_expired_webhook_deliveries"} {
+			require.Equal(t, int64(0), maintenanceCleanup(t, pool, function, 30), "cleanup must pause during supporting-index migration in both directions")
+		}
+		require.Equal(t, originalJobs, maintenanceIDs(t, pool, "jobs"), "pause must retain every expired job while indexes change")
+		require.Equal(t, []string{webhook.String()}, maintenanceIDs(t, pool, "webhook_deliveries"), "pause must retain webhook parents while indexes change")
+	}
 	maintenanceApplyFunctions(t, pool, schema, "000300_retention_foreign_key_guards.down.sql")
+	var source string
 	require.NoError(t, pool.QueryRow(context.Background(), `SELECT prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.proname='delete_expired_completed_jobs'`, schema).Scan(&source), "read down300 function body")
 	require.NotContains(t, source, "session_executors", "down300 should restore immediate pre300 executor semantics")
 	require.Contains(t, source, "code_review_recheck_dispatches", "down300 must preserve migration296 recheck guard")
 	require.Contains(t, source, "code_review_revision_assessments", "down300 must preserve migration296 staged assessment guard")
-	require.NotEqual(t, failed, succeeded, "down migration fixture identities should be distinct")
+	require.Equal(t, int64(1), maintenanceCleanup(t, pool, "delete_expired_completed_jobs", 30), "full rollback should restore failed-only eligibility under valid job statuses")
+	require.Equal(t, []string{succeeded.String()}, maintenanceIDs(t, pool, "jobs"), "full rollback must retain the exact succeeded job")
+	maintenanceApplyFunctions(t, pool, schema, "000300_retention_foreign_key_guards.up.sql")
+	maintenanceApplyFunctions(t, pool, schema, "000309_resume_bounded_retention.up.sql")
+	require.Equal(t, int64(1), maintenanceCleanup(t, pool, "delete_expired_completed_jobs", 30), "reapplying final migration should resume bounded succeeded cleanup")
+	require.Equal(t, int64(1), maintenanceCleanup(t, pool, "delete_expired_webhook_deliveries", 30), "reapplying final migration should resume bounded webhook cleanup")
 }
 
-func TestRetentionPostgresConcurrentReferenceFailsClosed(t *testing.T) {
+func TestRetentionPostgresConcurrentReferenceSkipped(t *testing.T) {
 	t.Parallel()
 	pool, _ := newMaintenancePostgres(t)
 	org, integration, installation := seedMaintenanceInbound(t, pool)
 	parent := insertMaintenanceWebhook(t, pool, org, integration, true)
+	insertMaintenanceWebhook(t, pool, org, integration, true)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	childTx, err := pool.Begin(ctx)
@@ -208,26 +215,11 @@ func TestRetentionPostgresConcurrentReferenceFailsClosed(t *testing.T) {
 	defer func() { _ = childTx.Rollback(context.Background()) }()
 	_, err = childTx.Exec(ctx, `INSERT INTO slack_inbound_events(org_id,slack_installation_id,slack_team_id,event_type,payload,webhook_delivery_id) VALUES($1,$2,'team','test','{}',$3)`, org, installation, parent)
 	require.NoError(t, err, "uncommitted child should hold the real FK parent lock")
-	cleanupConn, err := pool.Acquire(ctx)
-	require.NoError(t, err, "reserve separate cleanup connection")
-	defer cleanupConn.Release()
-	cleanupPID := cleanupConn.Conn().PgConn().PID()
-	result := make(chan error, 1)
-	go func() {
-		var deleted int64
-		result <- cleanupConn.QueryRow(ctx, `SELECT delete_expired_webhook_deliveries(30)`).Scan(&deleted)
-	}()
-	require.Eventually(t, func() bool {
-		var blocked bool
-		err := pool.QueryRow(ctx, `SELECT COALESCE(wait_event_type='Lock',false) FROM pg_stat_activity WHERE pid=$1`, cleanupPID).Scan(&blocked)
-		return err == nil && blocked
-	}, 3*time.Second, 10*time.Millisecond, "cleanup must reach the deterministic parent-lock race before committing child")
-	require.NoError(t, childTx.Commit(ctx), "commit referenced child after cleanup selection snapshot")
-	err = <-result
-	var pgErr *pgconn.PgError
-	require.ErrorAs(t, err, &pgErr, "concurrent reference must fail explicitly rather than discard history")
-	require.Equal(t, "23503", pgErr.Code, "real FK should reject deletion after concurrent child commit")
-	require.Equal(t, []string{parent.String()}, maintenanceIDs(t, pool, "webhook_deliveries"), "failed cleanup must preserve the exact referenced parent")
+	var deleted int64
+	require.NoError(t, pool.QueryRow(ctx, `SELECT delete_expired_webhook_deliveries(30)`).Scan(&deleted), "cleanup must skip FK-locked parent and progress before concurrent child commits")
+	require.Equal(t, int64(1), deleted, "only the unreferenced unlocked parent should delete")
+	require.NoError(t, childTx.Commit(ctx), "commit referenced child after concurrent cleanup")
+	require.Equal(t, []string{parent.String()}, maintenanceIDs(t, pool, "webhook_deliveries"), "cleanup must preserve the exact concurrently referenced parent")
 	require.Equal(t, int64(0), maintenanceCleanup(t, pool, "delete_expired_webhook_deliveries", 30), "next snapshot should exclude newly committed reference")
 }
 
@@ -337,24 +329,134 @@ func TestRetentionPostgresPrewarmHistoryOptionalJobLinks(t *testing.T) {
 
 func TestRetentionPostgresConcurrentBatchesSkipLockedRows(t *testing.T) {
 	t.Parallel()
+	tests := []struct{ name, table, function, seed, order string }{
+		{"jobs", "jobs", "delete_expired_completed_jobs", `INSERT INTO jobs(org_id,queue,job_type,status,updated_at) SELECT $1,'maintenance','test','succeeded',now()-interval '40 days' FROM generate_series(1,20005)`, "updated_at,id"},
+		{"webhooks", "webhook_deliveries", "delete_expired_webhook_deliveries", `INSERT INTO webhook_deliveries(org_id,integration_id,provider,event_type,created_at) SELECT $1,$2,'slack','test',now()-interval '40 days' FROM generate_series(1,20005)`, "created_at,id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pool, _ := newMaintenancePostgres(t)
+			org, integration, _ := seedMaintenanceInbound(t, pool)
+			args := []any{org}
+			if tt.name == "webhooks" {
+				args = append(args, integration)
+			}
+			maintenanceExec(t, pool, tt.seed, args...)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			rows, err := pool.Query(ctx, `SELECT id::text FROM `+tt.table+` ORDER BY `+tt.order+` OFFSET 10000`)
+			require.NoError(t, err, "read exact ordered identities beyond the first batch")
+			afterFirst, err := pgx.CollectRows(rows, pgx.RowTo[string])
+			require.NoError(t, err, "collect expected bounded deletion remainder")
+			firstTx, err := pool.Begin(ctx)
+			require.NoError(t, err, "begin first concurrent retention batch")
+			defer func() { _ = firstTx.Rollback(context.Background()) }()
+			var first int64
+			require.NoError(t, firstTx.QueryRow(ctx, `SELECT `+tt.function+`(30)`).Scan(&first), "first batch should claim exactly one bounded rowset")
+			require.Equal(t, int64(10000), first, "first transaction should retain locks only on its bounded deleted rowset")
+			rows, err = firstTx.Query(ctx, `SELECT id::text FROM `+tt.table+` ORDER BY `+tt.order)
+			require.NoError(t, err, "read first transaction's remaining eligible identities")
+			actual, err := pgx.CollectRows(rows, pgx.RowTo[string])
+			require.NoError(t, err, "collect actual remaining identities")
+			require.Equal(t, afterFirst, actual, "first batch must delete the deterministic oldest 10000 parents")
+			// A second connection must make progress before the first DELETE commits.
+			var second int64
+			require.NoError(t, pool.QueryRow(ctx, `SELECT `+tt.function+`(30)`).Scan(&second), "concurrent batch must progress without waiting for the first transaction")
+			require.Equal(t, int64(10000), second, "second caller should claim a distinct eligible batch")
+			require.NoError(t, firstTx.Commit(ctx), "commit first independent retention batch")
+			require.Equal(t, int64(5), maintenanceCleanup(t, pool, tt.function, 30), "later call should finish rows beyond both concurrent batch budgets")
+			require.Equal(t, int64(0), maintenanceCleanup(t, pool, tt.function, 30), "completed concurrent cleanup should be idempotent")
+			require.Empty(t, maintenanceIDs(t, pool, tt.table), "all exact unprotected eligible parents should eventually be deleted")
+		})
+	}
+}
+
+func TestRetentionPostgresUnfinishedFullAssessmentJobs(t *testing.T) {
+	t.Parallel()
 	pool, _ := newMaintenancePostgres(t)
-	org, _, _ := seedMaintenanceInbound(t, pool)
-	maintenanceExec(t, pool, `INSERT INTO jobs(org_id,queue,job_type,status,updated_at) SELECT $1,'maintenance','test','succeeded',now()-interval '40 days' FROM generate_series(1,20005)`, org)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	firstTx, err := pool.Begin(ctx)
-	require.NoError(t, err, "begin first concurrent retention batch")
-	defer func() { _ = firstTx.Rollback(context.Background()) }()
-	var first int64
-	require.NoError(t, firstTx.QueryRow(ctx, `SELECT delete_expired_completed_jobs(30)`).Scan(&first), "first batch should claim exactly one bounded rowset")
-	require.Equal(t, int64(10000), first, "first transaction should retain locks only on its bounded deleted rowset")
-	// The first DELETE is deliberately uncommitted. A second connection must
-	// skip its locked candidates and make progress before firstTx commits.
-	var second int64
-	require.NoError(t, pool.QueryRow(ctx, `SELECT delete_expired_completed_jobs(30)`).Scan(&second), "concurrent batch must progress without waiting for the first transaction")
-	require.Equal(t, int64(10000), second, "second caller should claim a distinct eligible batch")
-	require.NoError(t, firstTx.Commit(ctx), "commit first independent retention batch")
-	require.Equal(t, int64(5), maintenanceCleanup(t, pool, "delete_expired_completed_jobs", 30), "later call should finish rows beyond both concurrent batch budgets")
-	require.Equal(t, int64(0), maintenanceCleanup(t, pool, "delete_expired_completed_jobs", 30), "completed concurrent cleanup should be idempotent")
-	require.Empty(t, maintenanceIDs(t, pool, "jobs"), "all exact unprotected eligible jobs should eventually be deleted")
+	f := seedMaintenanceReview(t, pool, nil)
+	foreign := seedMaintenanceReview(t, pool, nil)
+	executed := "executed"
+	tests := []struct {
+		status   string
+		origin   *string
+		terminal bool
+	}{
+		{status: "reserved"},
+		{status: "running"},
+		{status: "publishing"},
+		{status: "running", origin: &executed},
+		{status: "publishing", origin: &executed},
+		{status: "completed", origin: &executed, terminal: true},
+		{status: "failed", terminal: true},
+		{status: "cancelled", terminal: true},
+		{status: "superseded", terminal: true},
+	}
+	keep := []string{}
+	var eligible int64
+	for i, tt := range tests {
+		assessment := uuid.New()
+		key := "assessment:" + assessment.String()
+		maintenanceExec(t, pool, `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,repository_full_name,pull_request_id,metadata_id,session_id,policy_id,generation,base_sha,base_ref,head_sha,input_version,code_digest,contract_digest,intent_digest,visual_digest,request_digest,gate_digest,input_digest,input_manifest,review_scope,route_reason,status,publication_key,result_origin,completed_at,decision,acceptable,structured_outcome)
+VALUES($1,$2,$3,'test/repo',$4,$5,$6,$7,$12,'base','main','head',1,'code','contract','intent','visual','request','gate','input','{}','full','initial_full',$8,$9,$10,CASE WHEN $11 THEN now() END,'approved',true,'{}')`, assessment, f.org, f.repository, f.pr, f.metadata, f.session, f.policy, tt.status, key, tt.origin, tt.terminal, i+1)
+		payload := json.RawMessage(`{"session_id":"` + f.session.String() + `","review_output_key":"` + key + `"}`)
+		original := insertMaintenanceJob(t, pool, f.org, "failed", true, "run_code_review", payload)
+		if tt.terminal {
+			eligible++
+		} else {
+			keep = append(keep, original.String())
+		}
+		// Exact controller ownership remains required even without staged output.
+		insertMaintenanceJob(t, pool, foreign.org, "failed", true, "run_code_review", payload)
+		insertMaintenanceJob(t, pool, f.org, "failed", true, "continue_session", payload)
+		insertMaintenanceJob(t, pool, f.org, "failed", true, "run_code_review", json.RawMessage(`{"session_id":"`+uuid.NewString()+`","review_output_key":"`+key+`"}`))
+		insertMaintenanceJob(t, pool, f.org, "failed", true, "run_code_review", json.RawMessage(`{"session_id":"`+f.session.String()+`","review_output_key":"other"}`))
+		eligible += 4
+	}
+	require.Equal(t, eligible, maintenanceCleanup(t, pool, "delete_expired_completed_jobs", 30), "finished and mismatched controllers should remain eligible for retention")
+	sort.Strings(keep)
+	require.Equal(t, keep, maintenanceIDs(t, pool, "jobs"), "every unfinished full assessment must retain its exact original job before or after output staging")
+}
+
+func TestRetentionPostgresWebhookOrderedIndex(t *testing.T) {
+	t.Parallel()
+	pool, _ := newMaintenancePostgres(t)
+	org, integration, _ := seedMaintenanceInbound(t, pool)
+	maintenanceExec(t, pool, `INSERT INTO webhook_deliveries(org_id,integration_id,provider,event_type,created_at) SELECT $1,$2,'slack','test',now()-interval '40 days' FROM generate_series(1,1000)`, org, integration)
+	maintenanceExec(t, pool, maintenanceMigration(t, "000307_webhook_retention_ordered_index.down.sql"))
+	maintenanceExec(t, pool, maintenanceMigration(t, "000307_webhook_retention_ordered_index.up.sql"))
+	// Keep planner settings on the same connection as EXPLAIN.
+	conn, err := pool.Acquire(context.Background())
+	require.NoError(t, err, "reserve connection for deterministic index-use check")
+	defer conn.Release()
+	_, err = conn.Exec(context.Background(), `ANALYZE webhook_deliveries; SET enable_seqscan=off`)
+	require.NoError(t, err, "prefer the exact ordered retention candidate index")
+	rows, err := conn.Query(context.Background(), `EXPLAIN SELECT id FROM webhook_deliveries WHERE created_at < now()-interval '30 days' ORDER BY created_at,id LIMIT 10000 FOR UPDATE SKIP LOCKED`)
+	require.NoError(t, err, "explain webhook candidate ordering")
+	plan, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err, "collect webhook retention plan")
+	require.Contains(t, strings.Join(plan, "\n"), "idx_webhook_deliveries_retention_ordered", "candidate lookup should use the ordered created_at and id index")
+	require.NotContains(t, strings.Join(plan, "\n"), "Sort", "ordered index should avoid sorting the expired webhook backlog")
+	_, err = conn.Exec(context.Background(), `RESET enable_seqscan`)
+	require.NoError(t, err, "reset planner setting on the reserved connection")
+}
+
+func TestRetentionPostgresSupportingIndexesReady(t *testing.T) {
+	t.Parallel()
+	pool, schema := newMaintenancePostgres(t)
+	expected := []string{
+		"idx_jobs_retention_succeeded",
+		"idx_pagerduty_inbound_events_retention_delivery",
+		"idx_preview_cache_prewarm_runs_retention_job",
+		"idx_session_executors_retention_job",
+		"idx_session_preview_prewarm_runs_retention_job",
+		"idx_slack_inbound_events_retention_delivery",
+		"idx_webhook_deliveries_retention_ordered",
+	}
+	rows, err := pool.Query(context.Background(), `SELECT c.relname FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=ANY($2) AND i.indisvalid AND i.indisready ORDER BY c.relname`, schema, expected)
+	require.NoError(t, err, "read usable supporting indexes in the isolated retention schema")
+	actual, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err, "collect valid and ready retention indexes")
+	require.Equal(t, expected, actual, "all seven concurrent indexes must be valid and ready when bounded cleanup resumes")
 }

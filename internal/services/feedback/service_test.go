@@ -70,38 +70,14 @@ func (m *mockReviewCommentStore) ListActionableByPullRequest(ctx context.Context
 }
 
 type mockMemoryStore struct {
-	createFn              func(ctx context.Context, m *models.Memory) error
-	getByIDFn             func(ctx context.Context, orgID, id uuid.UUID) (models.Memory, error)
-	findMatchingRuleFn    func(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.Memory, error)
-	incrementOccurrenceFn func(ctx context.Context, orgID, memoryID, commentID uuid.UUID) error
-	listActiveByRepoFn    func(ctx context.Context, orgID uuid.UUID, repo string) ([]models.Memory, error)
-	updateMemoryFn        func(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error
+	applyReviewCommentFn func(context.Context, uuid.UUID, uuid.UUID, string, string, string) error
+	listActiveByRepoFn   func(ctx context.Context, orgID uuid.UUID, repo string) ([]models.Memory, error)
+	updateMemoryFn       func(ctx context.Context, orgID, id uuid.UUID, rule *string, status *string) error
 }
 
-func (m *mockMemoryStore) Create(ctx context.Context, mem *models.Memory) error {
-	if m.createFn != nil {
-		return m.createFn(ctx, mem)
-	}
-	return nil
-}
-
-func (m *mockMemoryStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.Memory, error) {
-	if m.getByIDFn != nil {
-		return m.getByIDFn(ctx, orgID, id)
-	}
-	return models.Memory{}, nil
-}
-
-func (m *mockMemoryStore) FindMatchingRule(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.Memory, error) {
-	if m.findMatchingRuleFn != nil {
-		return m.findMatchingRuleFn(ctx, orgID, repo, normalizedRule)
-	}
-	return models.Memory{}, errors.New("no matching rule")
-}
-
-func (m *mockMemoryStore) IncrementOccurrence(ctx context.Context, orgID, memoryID, commentID uuid.UUID) error {
-	if m.incrementOccurrenceFn != nil {
-		return m.incrementOccurrenceFn(ctx, orgID, memoryID, commentID)
+func (m *mockMemoryStore) ApplyReviewComment(ctx context.Context, orgID, commentID uuid.UUID, repo, rule, category string) error {
+	if m.applyReviewCommentFn != nil {
+		return m.applyReviewCommentFn(ctx, orgID, commentID, repo, rule, category)
 	}
 	return nil
 }
@@ -406,93 +382,41 @@ func TestProcessComment(t *testing.T) {
 
 func TestUpdateMemories(t *testing.T) {
 	t.Parallel()
-
-	tests := []struct {
-		name             string
-		orgID            uuid.UUID
-		commentID        uuid.UUID
-		repo             string
-		rule             string
-		category         string
-		setupMemoryStore func(orgID, commentID uuid.UUID) *mockMemoryStore
-		expectErr        bool
+	for _, tt := range []struct {
+		name, rule, category string
+		fail, invalid        bool
 	}{
-		{
-			name:      "creates new pattern when no match exists",
-			orgID:     uuid.New(),
-			commentID: uuid.New(),
-			repo:      "my-org/my-repo",
-			rule:      "Always validate user input before processing.",
-			category:  "security",
-			setupMemoryStore: func(orgID, commentID uuid.UUID) *mockMemoryStore {
-				return &mockMemoryStore{
-					findMatchingRuleFn: func(ctx context.Context, oID uuid.UUID, repo, normalizedRule string) (models.Memory, error) {
-						return models.Memory{}, errors.New("no matching rule found")
-					},
-					createFn: func(ctx context.Context, p *models.Memory) error {
-						require.Equal(t, orgID, p.OrgID, "pattern org_id should match")
-						require.Equal(t, "my-org/my-repo", p.Repo, "pattern repo should match")
-						require.Equal(t, "Always validate user input before processing.", p.Rule, "pattern rule should match the original rule text")
-						require.Equal(t, "security", p.Category, "pattern category should match")
-						require.Equal(t, 1, p.OccurrenceCount, "new pattern should have occurrence count of 1")
-						require.Equal(t, "candidate", p.Status, "new pattern should have candidate status")
-						require.Len(t, p.SourceCommentIDs, 1, "new pattern should have one source comment ID")
-						require.Equal(t, commentID, p.SourceCommentIDs[0], "source comment ID should match")
-						return nil
-					},
-				}
-			},
-			expectErr: false,
-		},
-		{
-			name:      "increments existing pattern on match",
-			orgID:     uuid.New(),
-			commentID: uuid.New(),
-			repo:      "my-org/my-repo",
-			rule:      "Always validate user input before processing.",
-			category:  "security",
-			setupMemoryStore: func(orgID, commentID uuid.UUID) *mockMemoryStore {
-				existingPatternID := uuid.New()
-				return &mockMemoryStore{
-					findMatchingRuleFn: func(ctx context.Context, oID uuid.UUID, repo, normalizedRule string) (models.Memory, error) {
-						return models.Memory{
-							ID:              existingPatternID,
-							OrgID:           orgID,
-							Repo:            "my-org/my-repo",
-							Rule:            "Always validate user input before processing.",
-							Category:        "security",
-							OccurrenceCount: 3,
-							Status:          "candidate",
-						}, nil
-					},
-					incrementOccurrenceFn: func(ctx context.Context, oID, patternID, cID uuid.UUID) error {
-						require.Equal(t, orgID, oID, "org_id should match when incrementing occurrence")
-						require.Equal(t, existingPatternID, patternID, "pattern ID should match the existing pattern")
-						require.Equal(t, commentID, cID, "comment ID should match when incrementing occurrence")
-						return nil
-					},
-					createFn: func(ctx context.Context, p *models.Memory) error {
-						t.Error("Create should not be called when a matching pattern already exists")
-						return nil
-					},
-				}
-			},
-			expectErr: false,
-		},
-	}
-
-	for _, tt := range tests {
+		{name: "punctuation is preserved for atomic matching", rule: "Always check errors.", category: "logic_bug"},
+		{name: "store failure propagates for retry", rule: "Always check errors.", category: "logic_bug", fail: true},
+		{name: "malformed category cannot teach", rule: "Always check errors.", category: "invented", invalid: true},
+		{name: "empty rule cannot teach", rule: "  ", category: "nit", invalid: true},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-
-			memoryStore := tt.setupMemoryStore(tt.orgID, tt.commentID)
-			svc := newTestService(&mockReviewCommentStore{}, memoryStore, &mockJobStore{}, nil)
-
-			err := svc.UpdateMemories(context.Background(), tt.orgID, tt.commentID, tt.repo, tt.rule, tt.category)
-			if tt.expectErr {
-				require.Error(t, err, "UpdateMemories should return an error")
+			orgID, commentID := uuid.New(), uuid.New()
+			failure := errors.New("memory database unavailable")
+			calls := 0
+			store := &mockMemoryStore{applyReviewCommentFn: func(ctx context.Context, gotOrg, gotComment uuid.UUID, repo, rule, category string) error {
+				calls++
+				require.Equal(t, orgID, gotOrg, "memory application must retain tenant")
+				require.Equal(t, commentID, gotComment, "source comment is the idempotency identity")
+				require.Equal(t, []string{"org/repo", tt.rule, tt.category}, []string{repo, rule, category}, "forward exact classification without stripping punctuation")
+				if tt.fail {
+					return failure
+				}
+				return nil
+			}}
+			err := newTestService(&mockReviewCommentStore{}, store, &mockJobStore{}, nil).UpdateMemories(context.Background(), orgID, commentID, "org/repo", tt.rule, tt.category)
+			if tt.invalid {
+				require.Error(t, err, "invalid rules must fail before memory writes")
+				require.Zero(t, calls, "invalid content must not reach memory storage")
 			} else {
-				require.NoError(t, err, "UpdateMemories should not return an error")
+				require.Equal(t, 1, calls, "memory application should be one atomic store operation")
+				if tt.fail {
+					require.ErrorIs(t, err, failure, "database failures must remain retryable")
+				} else {
+					require.NoError(t, err, "valid classification should apply")
+				}
 			}
 		})
 	}
@@ -664,50 +588,6 @@ func TestGenerateConventionsDoc(t *testing.T) {
 			for _, substr := range tt.expectContains {
 				require.Contains(t, result, substr, "GenerateConventionsDoc output should contain: %s", substr)
 			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Tests: normalizeRule
-// ---------------------------------------------------------------------------
-
-func TestNormalizeRule(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "lowercases the rule",
-			input:    "Always Check Pointers",
-			expected: "always check pointers",
-		},
-		{
-			name:     "strips punctuation",
-			input:    "Always check pointers! Don't forget.",
-			expected: "always check pointers dont forget",
-		},
-		{
-			name:     "collapses whitespace",
-			input:    "  always   check   pointers  ",
-			expected: "always check pointers",
-		},
-		{
-			name:     "handles combined normalization",
-			input:    "  Use `require` — not `assert`!  ",
-			expected: "use `require` not `assert`",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			result := normalizeRule(tt.input)
-			require.Equal(t, tt.expected, result, "normalizeRule should produce the expected normalized output")
 		})
 	}
 }

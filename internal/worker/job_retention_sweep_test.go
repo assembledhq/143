@@ -66,7 +66,7 @@ func TestJobRetentionSweepBudgetsAndErrors(t *testing.T) {
 				}
 				return tt.counts[calls-1], nil
 			}
-			actual, err := sweepExpiredCompletedJobsWithBudget(ctx, 30, batch, logger, tt.maxBatches, 30*time.Second, now)
+			actual, err := sweepExpiredRecordsWithBudget(ctx, 30, batch, logger, "job", tt.maxBatches, 30*time.Second, now)
 			require.Equal(t, tt.expectedCount, actual, "sweep should report only confirmed committed batch counts")
 			require.Equal(t, tt.expectedCalls, calls, "sweep should stop at exhaustion, error or budget")
 			if tt.expectedError != nil {
@@ -105,14 +105,14 @@ func TestJobRetentionSweepInFlightDeadline(t *testing.T) {
 				}
 				return 0, ctx.Err()
 			}
-			deleted, err := sweepExpiredCompletedJobsWithBudget(context.Background(), 30, batch, zerolog.New(&logs), 10, 100*time.Millisecond, time.Now)
+			deleted, err := sweepExpiredRecordsWithBudget(context.Background(), 30, batch, zerolog.New(&logs), "webhook delivery", 10, 100*time.Millisecond, time.Now)
 			require.Equal(t, int64(0), deleted, "in-flight failing batch should not invent a committed count")
 			if tt.expectedError {
 				require.ErrorIs(t, err, dbErr, "deadline must not hide an unrelated SQL error")
 				require.Empty(t, logs.String(), "SQL failure must not be reported as successful budget exhaustion")
 			} else {
 				require.NoError(t, err, "own budget cancellation should leave normal partial progress")
-				require.Contains(t, logs.String(), "job retention sweep budget reached", "in-flight budget expiry should be observable")
+				require.Contains(t, logs.String(), "webhook delivery retention sweep budget reached", "in-flight budget expiry should be observable")
 			}
 		})
 	}

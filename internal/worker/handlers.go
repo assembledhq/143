@@ -13403,32 +13403,21 @@ func newProcessReviewCommentHandler(services *Services, logger zerolog.Logger) J
 			Str("org_id", orgID.String()).
 			Msg("processing review comment")
 
-		shouldUpdateMemories := false
-		if input.Repo != "" {
-			// Only update learned memories when this job is processing a pending comment.
-			// This prevents duplicate occurrence increments on retries/redeliveries.
-			currentComment, err := services.Feedback.GetProcessedComment(ctx, commentID, orgID)
-			if err != nil {
-				return fmt.Errorf("get review comment before processing: %w", err)
-			}
-			shouldUpdateMemories = currentComment.FilterStatus == "pending"
-		}
-
 		if err := services.Feedback.ProcessComment(ctx, commentID, orgID); err != nil {
 			return fmt.Errorf("process review comment: %w", err)
 		}
 
-		// After processing, check if the comment is generalizable and update memories.
-		// The repo is passed from the webhook handler.
-		if shouldUpdateMemories {
+		// Classification and memory application have separate durable progress.
+		// Retry accepted comments after a crash or failed memory write; the store
+		// commits the occurrence and its completion marker atomically.
+		if input.Repo != "" {
 			comment, err := services.Feedback.GetProcessedComment(ctx, commentID, orgID)
-			if err == nil && comment.Generalizable && comment.GeneralizedRule != nil {
-				category := "nit"
-				if comment.Category != nil {
-					category = *comment.Category
-				}
-				if err := services.Feedback.UpdateMemories(ctx, orgID, commentID, input.Repo, *comment.GeneralizedRule, category); err != nil {
-					logger.Warn().Err(err).Str("comment_id", commentID.String()).Msg("failed to update memories")
+			if err != nil {
+				return fmt.Errorf("get classified review comment: %w", err)
+			}
+			if comment.FilterStatus == "accepted" && comment.Actionable && comment.Generalizable && comment.GeneralizedRule != nil && comment.Category != nil {
+				if err := services.Feedback.UpdateMemories(ctx, orgID, commentID, input.Repo, *comment.GeneralizedRule, *comment.Category); err != nil {
+					return fmt.Errorf("apply review comment memory: %w", err)
 				}
 			}
 		}
@@ -13574,13 +13563,13 @@ func newDataRetentionCleanupHandler(stores *Stores, retentionCfg DataRetentionCo
 		}
 
 		if stores.Webhooks != nil && retentionCfg.WebhookDays > 0 {
-			deleted, err := stores.Webhooks.DeleteExpired(ctx, retentionCfg.WebhookDays)
+			deleted, err := sweepExpiredWebhookDeliveries(ctx, retentionCfg.WebhookDays, stores.Webhooks.DeleteExpired, logger)
+			totalDeleted += deleted
 			if err != nil {
-				logger.Error().Err(err).Msg("failed to delete expired webhook deliveries")
+				logger.Error().Err(err).Int64("deleted", deleted).Msg("failed to delete expired webhook deliveries")
 				errs = append(errs, fmt.Errorf("delete expired webhook deliveries: %w", err))
 			} else {
-				totalDeleted += deleted
-				logger.Info().Int64("deleted", deleted).Int("retention_days", retentionCfg.WebhookDays).Msg("webhook delivery cleanup complete")
+				logger.Info().Int64("deleted", deleted).Int("retention_days", retentionCfg.WebhookDays).Msg("webhook delivery cleanup sweep finished")
 			}
 		}
 

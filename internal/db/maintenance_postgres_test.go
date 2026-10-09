@@ -85,14 +85,13 @@ CREATE UNIQUE INDEX metadata_identity ON code_review_session_metadata(org_id,id,
 CREATE UNIQUE INDEX jobs_org_id ON jobs(org_id,id);`)
 	maintenanceExec(t, pool, maintenanceTableDDL(t, "000295_code_review_assessments.up.sql", "code_review_revision_assessments"))
 	maintenanceExec(t, pool, maintenanceTableDDL(t, "000296_code_review_recheck_runtime.up.sql", "code_review_recheck_dispatches"))
-	for _, name := range []string{"000301_job_retention_succeeded_index.up.sql", "000302_session_executor_job_fk_index.up.sql", "000303_slack_webhook_delivery_fk_index.up.sql", "000304_pagerduty_webhook_delivery_fk_index.up.sql", "000305_session_preview_prewarm_job_fk_index.up.sql", "000306_preview_cache_prewarm_job_fk_index.up.sql"} {
+	// Function search_path is public in production. Scope this fixture to its
+	// isolated schema while preserving migration order and actual SQL bodies.
+	maintenanceApplyFunctions(t, pool, schema, "000300_retention_foreign_key_guards.up.sql")
+	for _, name := range []string{"000301_job_retention_succeeded_index.up.sql", "000302_session_executor_job_fk_index.up.sql", "000303_slack_webhook_delivery_fk_index.up.sql", "000304_pagerduty_webhook_delivery_fk_index.up.sql", "000305_session_preview_prewarm_job_fk_index.up.sql", "000306_preview_cache_prewarm_job_fk_index.up.sql", "000307_webhook_retention_ordered_index.up.sql"} {
 		maintenanceExec(t, pool, maintenanceMigration(t, name))
 	}
-	// Function search_path is public in production. Limit fixture execution to
-	// this schema without altering the actual function body or protection SQL.
-	for _, name := range []string{"000300_retention_foreign_key_guards.up.sql", "000307_job_retention_succeeded_status.up.sql"} {
-		maintenanceApplyFunctions(t, pool, schema, name)
-	}
+	maintenanceApplyFunctions(t, pool, schema, "000309_resume_bounded_retention.up.sql")
 	return pool, schema
 }
 
