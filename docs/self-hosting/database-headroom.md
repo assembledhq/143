@@ -1,148 +1,43 @@
-# Database headroom and safe rollout
+# Worker database connection pools
 
-PostgreSQL memory budgets multiply across operations, connections and worker processes. On hosts using strict Linux overcommit accounting, allocation can fail as `Committed_AS` approaches `CommitLimit` even while `MemAvailable` remains positive. Measure both commitment and resident memory before changing limits.
+Workers and session executors use small pools of reusable PostgreSQL connections. The worker Compose configuration sets `DATABASE_MAX_CONN_IDLE_TIME` to five minutes through `WORKER_DATABASE_MAX_CONN_IDLE_TIME`. New executors inherit the worker's effective environment. Without an explicit idle setting, the pool library defaults to 30 minutes.
 
-Reducing query memory can increase temporary-file I/O. Check disk capacity before applying the prepared settings, and keep deployment inventories, measurements and rollout records in your private operations documentation.
+The shorter lifetime lets unused connections opened during bursts close sooner. It does not change the connection ceiling (four per worker or executor by default), cancel active queries or transactions, or limit how long an agent can run. Regular heartbeats keep connections in use. Reopening a retired connection adds connection setup work; measure behavior under your workload before expanding a rollout. Existing worker and executor processes keep their startup configuration.
 
-## Prepared defaults
+This setting does not change PostgreSQL query memory, temporary-file limits, maintenance budgets or parallelism. Those require a separate database-capacity review.
 
-| Setting | Previous | Prepared | Effect |
-| --- | --- | --- | --- |
-| Worker/executor pool idle lifetime | pgx default 30 minutes | 5 minutes | Retires unused pool connections after bursts; acquired connections remain owned. |
-| `work_mem` | 16 MB | 8 MB | Reduces the budget for each sort/hash operation; may increase temporary I/O. |
-| `maintenance_work_mem` | 512 MB | 128 MB | Bounds ordinary maintenance operations. Migrations retain their own smaller override. |
-| `autovacuum_work_mem` | inherited 512 MB | explicit 128 MB | Four workers have a combined configured allowance of 512 MB rather than 2 GB. This is an allowance, not measured resident savings. |
-| `max_parallel_workers_per_gather` | 4 | 2 | Limits query parallelism and the multiplication of query memory. |
-| `temp_file_limit` | unlimited | 2 GB per process | Cancels a transaction whose backend exceeds the temporary-file budget; concurrent backends can exceed this in aggregate. |
-| `log_temp_files` | disabled | 16 MB | Logs completed temporary files at or above the threshold when they are removed. |
+## Override the worker setting
 
-These settings do not bound total PostgreSQL memory. Operations, sessions and workers can allocate concurrently. See PostgreSQL's [resource configuration](https://www.postgresql.org/docs/18/runtime-config-resource.html). Pool idle expiry also does not release connections held by open transactions. Publication timeouts and durable worker draining address those separately.
+For workers managed by `deploy/scripts/deploy.sh`, the persistent host override belongs in `/opt/143/.env.local`. Deployment rebuilds `/opt/143/.env` from its supported shared values and appends `.env.local`. Setting `WORKER_DATABASE_MAX_CONN_IDLE_TIME` only in the deploying machine's shell does not forward it to the host. Editing `/opt/143/.env` directly is temporary and will be overwritten on a secrets refresh.
 
-Temporary-file budgets also multiply: a query using a leader and two parallel workers can consume 3 × 2 GB = 6 GB across those processes. Size a disk reserve for concurrent queries, backup retention and ordinary filesystem growth.
+To retain the previous 30-minute lifetime on one worker host, back up `.env.local` privately and edit only this entry, preserving its existing identity values, ownership and restrictive permissions. Keep exactly one assignment:
 
-The connection ceilings remain API 20, worker/executor 4 per process, and PostgreSQL 300. Reducing those requires concurrency and pool-wait measurements because review publication and lease renewal share the pool. Override the worker idle lifetime with `WORKER_DATABASE_MAX_CONN_IDLE_TIME`; new executor containers inherit the worker environment. Existing processes retain their startup configuration.
-
-## Rollout order
-
-1. Deploy the drain-intent and terminal-review recovery fixes first. Verify old generations are draining and no longer claim jobs, while their owned work can finish. Avoid overlapping fleet retries.
-2. Complete the [pre-merge worker canary](#pre-merge-worker-canary) below before merging the idle-lifetime default change. Observe for at least 15 minutes with completed reviews. Normal merge deployment rolls app nodes first, then workers on up to four hosts concurrently; it has no observation pause between workers. `DEPLOY_JOBS=1` serializes deployments but still targets the fleet. The API already uses five minutes.
-3. Resolve disk headroom before reducing query memory. Inventory `df -h`, `df -i`, `docker system df -v`, all containers including stopped containers, volume mounts, and backup retention. Identify owners, confirm snapshots/restores and retention, then approve a named removal list. Do not run blanket volume pruning. Set a free-space reserve for the host's workload and verify inode headroom.
-4. Record a fresh database baseline: connection counts by state/application, blocking graph, idle transaction age, `Committed_AS`/`CommitLimit`, `MemAvailable`, PostgreSQL cgroup usage, `pg_stat_database.temp_bytes`/`temp_files` deltas, current temporary-file sizes, autovacuum progress and query/review latency. Keep timestamps and sample counts.
-5. Stage the reviewed PostgreSQL config on the database host and use the reload procedure below. **Do not use a general database redeploy for this step**: it may recreate the container. Preserve the previous config for rollback, validate the staged file, and inspect `pg_file_settings` for errors before reload. Read back `pg_settings` afterward, including `source`, `sourcefile` and `pending_restart`; verify the effective settings from a new application connection. Role/database or session overrides can take precedence. All changed PostgreSQL settings here support reload; startup-only limits remain unchanged.
-6. Observe a comparable workload window after reload. Sample `df` alongside `pg_stat_database` deltas and, with monitoring privileges, `SELECT COALESCE(sum(size),0) FROM pg_ls_tmpdir()` for current spills in the default tablespace. Inspect other temporary tablespaces if configured. `log_temp_files` reports files when removed, not live disk use. The 2 GB cap applies per backend process, including parallel workers, and excludes explicit temporary tables; it cannot guarantee a database-wide reserve. If aggregate temp-file growth threatens the disk reserve or queries start failing on the temporary-file limit, autovacuum falls behind, or query latency regresses materially, restore the previous config and reload. Do not count idle snapshots as proof of improvement. Compare connection peaks and commitment headroom during one controlled worker rollover as well as ordinary reviews.
-
-## Pre-merge worker canary
-
-This is a separately approved production rollout. Keep the PR unmerged and prevent overlapping deployments during the canary. Select one existing worker host and record its previous configuration revision, server/sandbox image source revision, image digests and effective pool configuration for rollback. A rollback must restore both configuration and images; changing only the image tag leaves the candidate compose default in place. Confirm that the candidate's migrations are already deployed and that its worker remains compatible with the running app; worker-only deployment does not run migrations. Stop if the routine deploy's schema or support-service preflight rejects the candidate.
-
-Use a clean checkout of the reviewed configuration commit, refreshed onto the current deployed application revision. Do not roll production worker code backward merely to test a pool setting. Record `REVIEWED_SHA` (configuration) and `CANARY_IMAGE_SHA` (server/sandbox image source) separately.
-
-For this configuration-only PR, existing production images can be reused when all runtime source, dependencies, build instructions, entrypoints and migrations are identical. Compare the entire tree against the image source revision. The only permitted differences are this PR's worker compose setting, PostgreSQL config, deployment-config test, CI wiring and self-hosting documentation. Inspect the worker compose diff and require only the reviewed idle-lifetime setting. Stop if any runtime/build input or migration differs. Verify both registry digests and that the app uses the same compatible revision:
-
-```bash
-set -euo pipefail
-: "${REVIEWED_SHA:?set the full reviewed configuration commit}"
-: "${DEPLOYED_IMAGE_SHA:?set the verified deployed image source commit}"
-[[ "$REVIEWED_SHA" =~ ^[0-9a-f]{40}$ ]]
-[[ "$DEPLOYED_IMAGE_SHA" =~ ^[0-9a-f]{40}$ ]]
-test "$(git rev-parse HEAD)" = "$REVIEWED_SHA"
-test -z "$(git status --porcelain)"
-git diff --name-status "$DEPLOYED_IMAGE_SHA" "$REVIEWED_SHA"
-git diff "$DEPLOYED_IMAGE_SHA" "$REVIEWED_SHA" -- docker-compose.worker.yml
-# Proceed only after the source-equivalence and compose-diff checks above pass.
-export CANARY_IMAGE_SHA="$DEPLOYED_IMAGE_SHA"
+```dotenv
+WORKER_DATABASE_MAX_CONN_IDLE_TIME=30m
 ```
 
-If source equivalence cannot be established, build the reviewed images instead. CI publishes images only after a successful push to `main`, so a PR's SHA is not automatically available in GHCR. Use an authorized GHCR account and set `CANARY_PLATFORM` to the worker's platform, such as `linux/amd64`. Record the resulting registry digests; keep the SHA tags unchanged through the canary. These commands publish SHA tags only:
+The same mechanism accepts a positive Go duration such as `5m`. Apply it through a coordinated worker deployment; editing the file alone does not change a running process. Provisioning can regenerate `.env.local`, so retain the override in your private host configuration record and recheck it after reprovisioning. Do not copy the complete environment file into logs or public documentation.
 
-```bash
-set -euo pipefail
-: "${REVIEWED_SHA:?set the full reviewed commit SHA}"
-: "${CANARY_PLATFORM:?set the worker platform}"
-[[ "$REVIEWED_SHA" =~ ^[0-9a-f]{40}$ ]]
-test "$(git rev-parse HEAD)" = "$REVIEWED_SHA"
-test -z "$(git status --porcelain)"
-docker buildx build --platform "$CANARY_PLATFORM" --build-arg BUILD_SHA="$REVIEWED_SHA" \
-  -f Dockerfile -t "ghcr.io/assembledhq/143-server:$REVIEWED_SHA" --push .
-docker buildx build --platform "$CANARY_PLATFORM" \
-  -f sandbox/Dockerfile -t "ghcr.io/assembledhq/143-sandbox:$REVIEWED_SHA" --push .
-export CANARY_IMAGE_SHA="$REVIEWED_SHA"
-```
+Compose translates that worker-specific value into `DATABASE_MAX_CONN_IDLE_TIME`. The container entrypoint subsequently loads the encrypted environment bundle, which can override `DATABASE_MAX_CONN_IDLE_TIME` for both workers and API processes. Check for an existing bundle override before relying on the host setting. Changing the shared bundle is a separate configuration change; the worker-specific host override cannot supersede a value loaded by the entrypoint. Verify the actual process environment and a new executor's `database_max_conn_idle_time` startup log field, inspecting only this setting rather than printing secret-bearing environments.
 
-From the same checkout, set `CANARY_HOST` to the single approved worker and `CANARY_SSH_KEY` to the approved SSH key. Supply the usual secrets checkout and SOPS access described in [secrets setup](../secrets/README.md). Explicit `HOST` selects one worker; an empty `WORKER_DEPLOY_DETACH` keeps rollover in the foreground. Setting it to `0` would still detach because the script treats any nonempty value as enabled.
+## Coordinate a controlled rollout
 
-```bash
-set -euo pipefail
-: "${REVIEWED_SHA:?set the full reviewed commit SHA}"
-: "${CANARY_HOST:?set exactly one approved worker host}"
-: "${CANARY_SSH_KEY:?set the approved SSH key path}"
-: "${CANARY_IMAGE_SHA:?set the selected pinned image source commit}"
-make deploy-worker-preflight HOST="$CANARY_HOST" SSH_KEY="$CANARY_SSH_KEY"
-DEPLOY_MODE=routine WORKER_DEPLOY_DETACH= \
-DEPLOY_DOCKER_PRUNE=0 DEPLOY_DOCKER_VOLUME_PRUNE=0 \
-ALLOW_DEPLOY_DOCKER_DAEMON_RESTART=0 \
-FORCE_DEPLOY_WITH_ACTIVE_SESSIONS= FORCE_INTERRUPT_ACTIVE_RUNTIMES= \
-make deploy-worker \
-  HOST="$CANARY_HOST" SSH_KEY="$CANARY_SSH_KEY" TAG="$CANARY_IMAGE_SHA"
-```
+Manual foreground deployments do not share GitHub Actions' deployment concurrency group. Only detached worker rollovers take the script's host rollover lock, and staging configuration happens before that lock. Watching for an idle deploy run is not mutual exclusion.
 
-Require successful foreground completion, then identify the new worker generation on that host. Verify its running server image against the recorded digest and its startup `server build version` log against `CANARY_IMAGE_SHA`. Check the effective pool idle lifetime is five minutes for the worker and a newly started executor; inspect only the relevant setting, since complete process environments contain secrets. Check the actual process environment and startup configuration: encrypted entrypoint variables can override compose values. A local `WORKER_DATABASE_MAX_CONN_IDLE_TIME` shell override is not forwarded by the deploy script. Existing processes retain their startup configuration. The deployment checks container health, a database heartbeat and preview RPC authentication; those checks do not prove review completion.
+Before staging any files, designate one maintenance owner and establish a deployment hold for the entire canary and any rollback. For a deployment driven by the repository's **Build & Deploy** GitHub Actions workflow, disable that workflow through the repository's workflow controls (or `gh workflow disable deploy.yml` with the correct repository selected). Disabling new triggers does not finish existing runs: wait for queued/running deployment jobs and every already-launched detached host rollover to settle. Use `make deploy-worker-status` and the host rollout status/logs to confirm completion. Coordinate a freeze on manual deployments and any other schedulers too. If these sources cannot be held, postpone the manual canary. Keep the hold until the final configuration is verified, then restore the workflow's previous enabled state and resume the agreed deployment sources.
 
-Start a 15-minute observation window only after those checks pass. During the window, require reviews to complete and publish through the new generation, and compare connection counts, pool acquisition waits, lease renewal, queue delay and publication errors with the baseline. Keep the PR unmerged until the full window and workload checks pass. On regression, hold the merge and restore the previous reviewed worker configuration checkout and image source SHA on the same host through the same routine deploy path with pruning disabled; let owned work drain without forced interruption. Revalidate any later code/config changes before continuing the rollout.
+Within that hold:
 
-After a successful canary, merging applies the worker idle-lifetime default through the normal app-and-worker deployment. PostgreSQL changes remain a separate maintenance step: normal deployment excludes the database role and does not reload its settings.
+1. Select one worker and record its configuration revision, host override, server and sandbox image revisions and digests, and effective idle setting in private operations notes. Pin compatible images; a configuration checkout and an image tag are separate rollback inputs. Worker-only deployment does not run migrations, so verify compatibility with the deployed application and schema before proceeding.
+2. Establish a baseline over a representative workload: database connection counts, worker heartbeats, job/executor leases, queue delay, review completion and verified GitHub publication. Record observation timestamps and monitoring visibility limits. Database activity statistics may require monitoring privileges.
+3. Use the ordinary worker preflight and routine blue/green deployment for that single explicit host. Keep pruning, volume pruning, daemon restarts and forced runtime interruption disabled. Let existing owned jobs, executors and previews drain through the supported deployment controls; a healthy replacement alone does not justify stopping an old generation. Leave `WORKER_DEPLOY_DETACH` empty for foreground feedback; any nonempty value, including `0`, enables detachment.
+4. Verify successful rollover, the new worker's image identity, fresh database heartbeat and preview RPC authentication, and the effective idle setting in both the worker process and a newly launched executor. These checks establish configuration and connectivity, not completed work.
+5. Observe at least 15 minutes after those checks, including completed workload through the new generation. Compare lease renewal, queue delay, review completion and confirmed publication with the baseline. Investigate errors or material latency changes before continuing to more workers. Verify old generations retire only after their owned work drains.
 
-## Reload without recreating the database container
+The application does not currently report pool acquisition waits, idle-close counts or new-connection counts. Startup configuration proves which value was loaded; it does not prove connections retired or establish memory savings. A successful workload window establishes functional compatibility for the observed scope. Fleet behavior, reconnect latency and capacity improvements require additional measurements.
 
-Use an approved database maintenance shell; the read-only diagnostic role cannot reload configuration. Copy the reviewed file to `/opt/143/deploy/postgres/postgresql.conf.candidate` on the verified database host. The file contains server settings, not credentials. The commands below run **on that host**. Confirm there is exactly one matching database container and inspect the diff; proceed only for the six reviewed reloadable settings. Do not use `make deploy-db`.
+## Roll back
 
-```bash
-set -euo pipefail
-DB_CONTAINER="$(docker ps --filter label=com.docker.compose.service=postgres --format '{{.ID}}')"
-test -n "$DB_CONTAINER"
-test "$(printf '%s\n' "$DB_CONTAINER" | wc -l)" -eq 1
-DB_CONFIG=/opt/143/deploy/postgres/postgresql.conf
-DB_CANDIDATE=/opt/143/deploy/postgres/postgresql.conf.candidate
-DB_BACKUP="${DB_CONFIG}.before-headroom-$(date -u +%Y%m%dT%H%M%SZ)"
-diff -u "$DB_CONFIG" "$DB_CANDIDATE" || test "$?" -eq 1
-# Stop here if the diff includes unrelated or startup-only changes.
-cp -p "$DB_CONFIG" "$DB_BACKUP"
-chmod 644 "$DB_CANDIDATE"
-docker cp "$DB_CANDIDATE" "$DB_CONTAINER:/tmp/143-postgresql.conf.candidate"
-DB_DATA_DIR="$(docker exec "$DB_CONTAINER" psql -X -U onefortythree -d onefortythree -Atc 'SHOW data_directory' < /dev/null)"
-docker exec --user postgres "$DB_CONTAINER" postgres -D "$DB_DATA_DIR" -c config_file=/tmp/143-postgresql.conf.candidate -C work_mem < /dev/null
-# Preserve the inode: this file is individually bind-mounted read-only.
-# Renaming a replacement over it would leave the container on the old inode.
-cat "$DB_CANDIDATE" > "$DB_CONFIG"
-docker exec "$DB_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U onefortythree -d onefortythree -c "SELECT sourcefile,sourceline,name,error FROM pg_file_settings WHERE error IS NOT NULL" < /dev/null
-```
+Keep the deployment hold active. Restore the recorded host override and reviewed worker configuration, then use the same routine deployment path on the same host with the recorded compatible server and sandbox images. Restoring an image tag alone leaves the Compose setting in place. Conversely, restoring the configuration does not change images already running. Recheck application/schema compatibility before any image rollback.
 
-If copying/writing/validation fails or that query returns any rows, restore the backup **in place** using the rollback command below and investigate before reloading. After confirming zero errors, reload:
-
-```bash
-docker exec "$DB_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U onefortythree -d onefortythree -c 'SELECT pg_reload_conf()' < /dev/null
-docker exec "$DB_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U onefortythree -d onefortythree -c "SELECT name,setting,unit,source,sourcefile,pending_restart FROM pg_settings WHERE name IN ('work_mem','maintenance_work_mem','autovacuum_work_mem','max_parallel_workers_per_gather','temp_file_limit','log_temp_files') ORDER BY name" < /dev/null
-```
-
-Reload is asynchronous: read back until all six settings match and `pending_restart=false`; check PostgreSQL logs and `pg_file_settings` again for errors. Expected settings in these units: `work_mem=8192 kB`, maintenance/autovacuum `131072 kB`, per-gather workers `2`, temp limit `2097152 kB`, temp logging `16384 kB`. Also verify a newly opened application connection because role/database/session overrides may differ. Keep the recorded backup path with the rollout notes. Roll back by writing to the same inode and reloading, then verify the previous settings:
-
-```bash
-cat "$DB_BACKUP" > "$DB_CONFIG"
-docker exec "$DB_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U onefortythree -d onefortythree -c 'SELECT pg_reload_conf()' < /dev/null
-```
-
-Temporary-file caps cancel queries; they are not a substitute for disk capacity. See PostgreSQL's [disk resource settings](https://www.postgresql.org/docs/18/runtime-config-resource.html#RUNTIME-CONFIG-RESOURCE-DISK) and [temporary-file logging](https://www.postgresql.org/docs/18/runtime-config-logging.html#GUC-LOG-TEMP-FILES).
-
-## Resize plan
-
-Size any RAM increase using measured commitment peaks and the host reserve required by the workload. Confirm the provider's exact machine type, cost, resize downtime, disk behavior, and rollback constraints before execution. A larger host improves the strict commitment budget; initially keep PostgreSQL's container memory limit, `shared_buffers`, connection ceilings and worker concurrency at their previous values so the host gains reserve.
-
-Treat a stop/start resize as a database outage. Stop new review admission through supported operational controls, let active executors and database-dependent work finish, and verify zero active leases before stopping PostgreSQL. Include other product workflows, not just code reviews. Take and verify a restorable backup off the affected root disk, save configuration, record the exact target and a maintenance window, and have a recovery plan before the resize. Confirm that storage growth is reversible or explicitly accept that it is not.
-
-After startup, verify clean schema state, PostgreSQL recovery completion, application connectivity, worker heartbeats, leases and drain state. Run a canary review through actual GitHub delivery before restoring normal admission. Do not promise that a database restart preserves running reviews.
-
-## Monitoring follow-up
-
-Add host alerts for commitment above 85% (warning) / 95% (critical), filesystem use above 85% / 90%, and sustained low `MemAvailable`. Pair them with database connection utilization, blocked-session count, idle transaction age and allocation errors. Start with five-minute sustained windows for capacity signals; page immediately on allocation failures. Thresholds need tuning against workload history. These alerts and the resize are operational follow-ups, not installed by this configuration change.
-
-Success means reviews complete and publish, worker rollover remains healthy, and measured memory/disk reserves survive a comparable load window. Claims about speed or required host capacity need workload measurements.
+For a setting-only rollback that retains current compatible images, use the explicit `30m` host override above in a reviewed configuration, after excluding an encrypted-bundle override. Verify the replacement worker and a new executor read back the intended value, complete work and publish successfully. Preserve owned work during draining; do not bypass lease checks or force-stop an old generation to finish rollback. See [code-review recovery](code-review-recovery.md) for diagnosing stalled work and [secrets management](../secrets/README.md) for environment-bundle setup.

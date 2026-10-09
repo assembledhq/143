@@ -457,10 +457,9 @@ jobs:
           go install github.com/securego/gosec/v2/cmd/gosec@v2.22.4
           gosec ./...
 
+  # Config tests read repository-wide inputs; run them for every PR and push.
   deploy-config-test:
     name: Deploy Config Test
-    needs: changes
-    if: needs.changes.outputs.deploy == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -505,6 +504,11 @@ jobs:
           echo "security: ${{ needs.security.result }}"
           echo "deploy-config-test: ${{ needs.deploy-config-test.result }}"
           echo "deploy-scripts-test: ${{ needs.deploy-scripts-test.result }}"
+
+          if [[ "${{ needs.deploy-config-test.result }}" != "success" ]]; then
+            echo "::error::Deployment configuration checks must succeed"
+            exit 1
+          fi
 
           for result in \
             "${{ needs.backend-lint.result }}" \
