@@ -7,6 +7,8 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
@@ -53,11 +55,18 @@ type dockerInfrastructureCleanupClient interface {
 	VolumeRemove(context.Context, string, bool) error
 }
 
+// key, name, owner and rememberedAt are immutable after insertion and safe
+// to read from a pointer snapshot. Operation state, including the volume
+// set, is protected by mu; requested
+// is atomic so metric snapshots never wait on Docker operations. Never wait
+// for mu while holding cleanupMu or the serving-map lock.
 type infrastructureCleanupRecord struct {
+	mu               sync.Mutex
+	rememberedAt     time.Time
 	key, ref, name   string
 	owner            preview.InfrastructureOwner
 	uncertain        bool
-	requested        bool
+	requested        atomic.Bool
 	resolverRequired bool
 	removed          bool
 	volumesCaptured  bool
@@ -115,56 +124,147 @@ func parseInfrastructureOwner(labels map[string]string) (preview.InfrastructureO
 	return owner, orgErr == nil && previewErr == nil && sessionErr == nil && validInfrastructureOwner(owner)
 }
 
-func (d *DockerPreviewProvider) rememberInfrastructure(ref, name string, owner preview.InfrastructureOwner, uncertain bool) {
+func (d *DockerPreviewProvider) rememberInfrastructure(ref, name string, owner preview.InfrastructureOwner, uncertain bool) *infrastructureCleanupRecord {
 	d.cleanupMu.Lock()
 	defer d.cleanupMu.Unlock()
 	if d.cleanupRecords == nil {
 		d.cleanupRecords = make(map[string]*infrastructureCleanupRecord)
 	}
 	if _, exists := d.cleanupRecords[ref]; !exists {
-		d.cleanupRecords[ref] = &infrastructureCleanupRecord{key: ref, ref: ref, name: name, owner: owner, uncertain: uncertain, volumes: make(map[string]struct{})}
+		d.cleanupRecords[ref] = &infrastructureCleanupRecord{rememberedAt: time.Now(), key: ref, ref: ref, name: name, owner: owner, uncertain: uncertain, volumes: make(map[string]struct{})}
 	}
+	return d.cleanupRecords[ref]
+}
+
+// Gates fence registration and destructive cleanup for the same handle only.
+// Reference counting releases idle entries instead of retaining every handle.
+type infrastructureCleanupGate struct {
+	token chan struct{}
+	users int
+}
+
+func (d *DockerPreviewProvider) lockInfrastructureHandle(ctx context.Context, handle string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	d.cleanupMu.Lock()
+	if d.cleanupHandleGates == nil {
+		d.cleanupHandleGates = make(map[string]*infrastructureCleanupGate)
+	}
+	gate := d.cleanupHandleGates[handle]
+	if gate == nil {
+		gate = &infrastructureCleanupGate{token: make(chan struct{}, 1)}
+		gate.token <- struct{}{}
+		d.cleanupHandleGates[handle] = gate
+	}
+	gate.users++
+	d.cleanupMu.Unlock()
+	releaseReference := func() {
+		d.cleanupMu.Lock()
+		gate.users--
+		if gate.users == 0 {
+			delete(d.cleanupHandleGates, handle)
+		}
+		d.cleanupMu.Unlock()
+	}
+	select {
+	case <-ctx.Done():
+		releaseReference()
+		return nil, ctx.Err()
+	case <-gate.token:
+		release := func() { gate.token <- struct{}{}; releaseReference() }
+		if err := ctx.Err(); err != nil {
+			release()
+			return nil, err
+		}
+		return release, nil
+	}
+}
+
+func (d *DockerPreviewProvider) cleanupRecordSnapshot() []*infrastructureCleanupRecord {
+	d.cleanupMu.Lock()
+	defer d.cleanupMu.Unlock()
+	records := make([]*infrastructureCleanupRecord, 0, len(d.cleanupRecords))
+	for _, record := range d.cleanupRecords {
+		records = append(records, record)
+	}
+	return records
 }
 
 func (d *DockerPreviewProvider) cleanupInfrastructureHandle(handle string) error {
-	d.cleanupWorkMu.Lock()
-	defer d.cleanupWorkMu.Unlock()
-	d.cleanupMu.Lock()
+	return d.cleanupInfrastructureHandleContext(context.Background(), handle)
+}
+
+func (d *DockerPreviewProvider) cleanupInfrastructureHandleContext(ctx context.Context, handle string) error {
 	var records []*infrastructureCleanupRecord
-	for _, record := range d.cleanupRecords {
+	for _, record := range d.cleanupRecordSnapshot() {
 		if record.owner.Handle == handle {
-			record.requested = true
+			// Publish all retry intent before a phase deadline can stop this pass.
+			record.requested.Store(true)
 			records = append(records, record)
 		}
 	}
-	d.cleanupMu.Unlock()
-	return d.cleanupInfrastructureRecords(context.Background(), records)
+	sort.Slice(records, func(i, j int) bool { return records[i].key < records[j].key })
+	return d.cleanupInfrastructureRecords(ctx, records, true)
 }
 
-func (d *DockerPreviewProvider) cleanupInfrastructureRecords(ctx context.Context, records []*infrastructureCleanupRecord) error {
+func (d *DockerPreviewProvider) cleanupInfrastructureRecords(ctx context.Context, records []*infrastructureCleanupRecord, requestStop bool) error {
 	var failures []error
 	for _, record := range records {
 		if err := ctx.Err(); err != nil {
 			failures = append(failures, err)
 			break
 		}
-		if err := d.removeInfrastructureRecord(ctx, record); err != nil {
-			d.logger.Warn().Err(err).Str("container_id", record.ref).Str("handle", record.owner.Handle).Msg("preview infrastructure cleanup will retry")
+		if err := d.cleanupInfrastructureRecord(ctx, record, requestStop, false); err != nil {
 			failures = append(failures, err)
-			continue
 		}
-		d.cleanupMu.Lock()
-		delete(d.cleanupRecords, record.key)
-		d.cleanupMu.Unlock()
 	}
 	return errors.Join(failures...)
 }
 
-func (d *DockerPreviewProvider) removeInfrastructureRecord(ctx context.Context, record *infrastructureCleanupRecord) error {
+func (d *DockerPreviewProvider) cleanupInfrastructureRecord(ctx context.Context, record *infrastructureCleanupRecord, requestStop, discovered bool) error {
+	releaseGate, err := d.lockInfrastructureHandle(ctx, record.owner.Handle)
+	if err != nil {
+		return err
+	}
+	defer releaseGate()
+	record.mu.Lock()
+	defer record.mu.Unlock()
+	d.cleanupMu.Lock()
+	current := d.cleanupRecords[record.key] == record
+	d.cleanupMu.Unlock()
+	if !current {
+		return nil
+	}
+	if requestStop || discovered {
+		record.requested.Store(true)
+	}
+	if discovered {
+		record.resolverRequired = true
+	}
+	if !requestStop && record.resolverRequired && d.localInfrastructureActive(record.owner) {
+		return nil
+	}
+	complete, err := d.removeInfrastructureRecord(ctx, record)
+	if err != nil {
+		d.logger.Warn().Err(err).Str("container_id", record.ref).Str("handle", record.owner.Handle).Msg("preview infrastructure cleanup will retry")
+		return err
+	}
+	if complete {
+		d.cleanupMu.Lock()
+		if d.cleanupRecords[record.key] == record {
+			delete(d.cleanupRecords, record.key)
+		}
+		d.cleanupMu.Unlock()
+	}
+	return nil
+}
+
+func (d *DockerPreviewProvider) removeInfrastructureRecord(ctx context.Context, record *infrastructureCleanupRecord) (bool, error) {
 	// Capture actual volume IDs before Docker removes the container. Docker may
 	// return success while logging a volume deletion failure internally.
 	gc, supportsGC := d.client.(dockerInfrastructureCleanupClient)
-	var uncertainCreateErr error
+	waitingForCreate := false
 	if !record.removed {
 		inspectCtx, inspectCancel := context.WithTimeout(ctx, infrastructureRemoveTimeout)
 		inspected, inspectErr := d.client.ContainerInspect(inspectCtx, record.ref)
@@ -180,14 +280,14 @@ func (d *DockerPreviewProvider) removeInfrastructureRecord(ctx context.Context, 
 					record.removed = true
 					record.uncertain = false
 				} else {
-					uncertainCreateErr = fmt.Errorf("uncertain infrastructure creation is not yet observable: %w", inspectErr)
+					waitingForCreate = true
 				}
 				// Volume allocation precedes daemon container registration. Keep
 				// discovering exact-owned volumes while retaining the tombstone
 				// for a possible late container response.
 				record.volumesCaptured = false
 			} else if inspectErr != nil {
-				return fmt.Errorf("inspect uncertain container: %w", inspectErr)
+				return false, fmt.Errorf("inspect uncertain container: %w", inspectErr)
 			} else {
 				var labels map[string]string
 				if inspected.Config != nil {
@@ -196,7 +296,7 @@ func (d *DockerPreviewProvider) removeInfrastructureRecord(ctx context.Context, 
 				actual, valid := parseInfrastructureOwner(labels)
 				if !valid || actual != record.owner || inspected.ContainerJSONBase == nil || strings.TrimPrefix(inspected.Name, "/") != record.name {
 					// The name belongs to someone else. Never adopt it.
-					return nil
+					return true, nil
 				}
 				record.ref = inspected.ID
 				record.uncertain = false
@@ -209,10 +309,10 @@ func (d *DockerPreviewProvider) removeInfrastructureRecord(ctx context.Context, 
 				}
 			}
 			record.volumesCaptured = true
-		} else if cerrdefs.IsNotFound(inspectErr) && uncertainCreateErr == nil {
+		} else if cerrdefs.IsNotFound(inspectErr) && !waitingForCreate {
 			record.removed = true
 		}
-		if !record.removed && uncertainCreateErr == nil {
+		if !record.removed && !waitingForCreate {
 			stopCtx, stopCancel := context.WithTimeout(ctx, infrastructureRemoveTimeout)
 			timeout := 10
 			if _, phaseBounded := ctx.Deadline(); phaseBounded {
@@ -238,20 +338,43 @@ func (d *DockerPreviewProvider) removeInfrastructureRecord(ctx context.Context, 
 			err := d.client.ContainerRemove(removeCtx, record.ref, container.RemoveOptions{Force: true, RemoveVolumes: removeVolumes})
 			removeCancel()
 			if err != nil && !cerrdefs.IsNotFound(err) {
-				return fmt.Errorf("remove infrastructure container: %w", err)
+				return false, fmt.Errorf("remove infrastructure container: %w", err)
 			}
 			record.removed = true
 		}
 	}
+	if waitingForCreate && time.Since(record.rememberedAt) >= infrastructureCleanupGrace && supportsGC {
+		inventoryCtx, inventoryCancel := context.WithTimeout(ctx, infrastructureRemoveTimeout)
+		listed, err := gc.ContainerList(inventoryCtx, container.ListOptions{All: true, Filters: infrastructureOwnerFilter(record.owner)})
+		inventoryCancel()
+		if err != nil {
+			return false, fmt.Errorf("verify expired uncertain container inventory: %w", err)
+		}
+		for _, candidate := range listed {
+			owner, valid := parseInfrastructureOwner(candidate.Labels)
+			if !valid || owner != record.owner {
+				continue
+			}
+			for _, name := range candidate.Names {
+				if strings.TrimPrefix(name, "/") == record.name {
+					// Retry exact-name inspection next pass rather than adopting an
+					// inventory row without its full current mount/ownership check.
+					return false, nil
+				}
+			}
+		}
+		record.volumesCaptured = false
+		waitingForCreate = false
+	}
 	if !supportsGC {
-		return uncertainCreateErr
+		return !waitingForCreate, nil
 	}
 	if !record.volumesCaptured && validInfrastructureOwner(record.owner) {
 		ctx, cancel := context.WithTimeout(ctx, infrastructureRemoveTimeout)
-		listed, err := gc.VolumeList(ctx, volume.ListOptions{Filters: filters.NewArgs(filters.Arg("label", PreviewInfrastructureManagedLabel+"="+infrastructureLabelVersion), filters.Arg("label", infrastructureHandleLabel+"="+record.owner.Handle))})
+		listed, err := gc.VolumeList(ctx, volume.ListOptions{Filters: infrastructureOwnerFilter(record.owner)})
 		cancel()
 		if err != nil {
-			return fmt.Errorf("discover cleanup volumes: %w", err)
+			return false, fmt.Errorf("discover cleanup volumes: %w", err)
 		}
 		for _, v := range listed.Volumes {
 			if v != nil {
@@ -289,7 +412,18 @@ func (d *DockerPreviewProvider) removeInfrastructureRecord(ctx context.Context, 
 			failures = append(failures, fmt.Errorf("remove infrastructure volume %s: %w", name, err))
 		}
 	}
-	return errors.Join(append(failures, uncertainCreateErr)...)
+	return !waitingForCreate && len(failures) == 0, errors.Join(failures...)
+}
+
+func infrastructureOwnerFilter(owner preview.InfrastructureOwner) filters.Args {
+	return filters.NewArgs(
+		filters.Arg("label", PreviewInfrastructureManagedLabel+"="+infrastructureLabelVersion),
+		filters.Arg("label", infrastructureOrgLabel+"="+owner.OrgID.String()),
+		filters.Arg("label", infrastructurePreviewLabel+"="+owner.PreviewID.String()),
+		filters.Arg("label", infrastructureSessionLabel+"="+owner.SessionID.String()),
+		filters.Arg("label", infrastructureHandleLabel+"="+owner.Handle),
+		filters.Arg("label", infrastructureWorkerLabel+"="+owner.WorkerNodeID),
+	)
 }
 
 func anonymousMount(inspected container.InspectResponse, target string) bool {
@@ -324,14 +458,12 @@ func (d *DockerPreviewProvider) RunInfrastructureCleanup(ctx context.Context) {
 	for {
 		err := d.ReconcileInfrastructure(ctx)
 		if d.cleanupMetrics != nil {
-			d.cleanupMu.Lock()
 			var pending int64
-			for _, record := range d.cleanupRecords {
-				if record.requested {
+			for _, record := range d.cleanupRecordSnapshot() {
+				if record.requested.Load() {
 					pending++
 				}
 			}
-			d.cleanupMu.Unlock()
 			d.cleanupMetrics.Record(ctx, pending, err != nil)
 		}
 		if err != nil && ctx.Err() == nil {
@@ -348,13 +480,16 @@ func (d *DockerPreviewProvider) RunInfrastructureCleanup(ctx context.Context) {
 func (d *DockerPreviewProvider) localInfrastructureActive(owner preview.InfrastructureOwner) bool {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	state, exists := d.previews[owner.Handle]
-	return exists && d.infrastructureOwner(owner.Handle, state.opts) == owner
+	_, exists := d.previews[owner.Handle]
+	// Any local registration protects a handle, including unacknowledged
+	// launches and an unlikely ownership collision.
+	return exists
 }
 
 func (d *DockerPreviewProvider) oldInfrastructure(labels map[string]string, now time.Time) bool {
 	created, err := time.Parse(time.RFC3339Nano, labels[infrastructureCreatedLabel])
-	return err == nil && created.Before(d.cleanupStartupCutoff) && now.Sub(created) >= infrastructureCleanupGrace
+	return err == nil && now.Sub(created) >= infrastructureCleanupGrace &&
+		(created.Before(d.cleanupStartupCutoff) || labels[infrastructureWorkerLabel] == d.workerNodeID)
 }
 
 func (d *DockerPreviewProvider) cleanupPhaseTimeout() time.Duration {
@@ -365,16 +500,19 @@ func (d *DockerPreviewProvider) cleanupPhaseTimeout() time.Duration {
 }
 
 // ReconcileInfrastructure retries local teardown and then resolves a bounded
-// batch of fully-owned resources left by older process generations. Missing
-// resolver entries and resolver errors always protect resources.
+// batch of aged, fully-owned resources, including late current-worker
+// creates after uncertain records retire. Missing resolver entries and
+// resolver errors always protect resources.
 func (d *DockerPreviewProvider) ReconcileInfrastructure(ctx context.Context) (resultErr error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	d.cleanupReconcileMu.Lock()
+	if !d.cleanupReconcileMu.TryLock() {
+		// A pass already owns the cursor state; skip duplicate work without
+		// making this caller wait beyond its lifecycle deadline.
+		return ctx.Err()
+	}
 	defer d.cleanupReconcileMu.Unlock()
-	d.cleanupWorkMu.Lock()
 	defer func() {
-		d.cleanupWorkMu.Unlock()
 		// Run the local handoff sweep after resource discovery so slow teardown
 		// cannot monopolize every pass ahead of reclaimable orphan resources.
 		if ctx.Err() == nil {
@@ -386,13 +524,18 @@ func (d *DockerPreviewProvider) ReconcileInfrastructure(ctx context.Context) (re
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	d.cleanupMu.Lock()
 	var pending, persistedPending []*infrastructureCleanupRecord
 	requestedContainers := make(map[string]bool)
 	requestedNames := make(map[string]bool)
 	requestedVolumes := make(map[string]bool)
-	for _, r := range d.cleanupRecords {
-		if !r.requested {
+	busyOwners := make(map[preview.InfrastructureOwner]bool)
+	for _, r := range d.cleanupRecordSnapshot() {
+		if !r.mu.TryLock() {
+			busyOwners[r.owner] = true
+			continue
+		}
+		if !r.requested.Load() {
+			r.mu.Unlock()
 			continue
 		}
 		requestedContainers[r.key] = true
@@ -408,14 +551,14 @@ func (d *DockerPreviewProvider) ReconcileInfrastructure(ctx context.Context) (re
 		} else {
 			pending = append(pending, r)
 		}
+		r.mu.Unlock()
 	}
-	d.cleanupMu.Unlock()
 	sort.Slice(pending, func(i, j int) bool { return pending[i].key < pending[j].key })
 	sort.Slice(persistedPending, func(i, j int) bool { return persistedPending[i].key < persistedPending[j].key })
 	pending = rotateCleanupCandidates(pending, &d.cleanupPendingCursor, infrastructureCleanupPhaseLimit)
 	persistedPending = rotateCleanupCandidates(persistedPending, &d.cleanupPersistedCursor, infrastructureCleanupPhaseLimit)
 	retryCtx, retryCancel := context.WithTimeout(ctx, d.cleanupPhaseTimeout())
-	pendingErr := d.cleanupInfrastructureRecords(retryCtx, pending)
+	pendingErr := d.cleanupInfrastructureRecords(retryCtx, pending, false)
 	retryCancel()
 	gc, ok := d.client.(dockerInfrastructureCleanupClient)
 	if !ok || d.cleanupResolver == nil || ctx.Err() != nil {
@@ -446,7 +589,7 @@ func (d *DockerPreviewProvider) ReconcileInfrastructure(ctx context.Context) (re
 		for _, name := range c.Names {
 			requested = requested || requestedNames[strings.TrimPrefix(name, "/")]
 		}
-		if valid && !requested && d.oldInfrastructure(c.Labels, now) && !d.localInfrastructureActive(owner) {
+		if valid && !busyOwners[owner] && !requested && d.oldInfrastructure(c.Labels, now) && !d.localInfrastructureActive(owner) {
 			containerCandidates = append(containerCandidates, c)
 		}
 	}
@@ -458,7 +601,7 @@ func (d *DockerPreviewProvider) ReconcileInfrastructure(ctx context.Context) (re
 			continue
 		}
 		owner, valid := parseInfrastructureOwner(v.Labels)
-		if valid && !requestedVolumes[v.Name] && managedAnonymousVolume(*v) && d.oldInfrastructure(v.Labels, now) && !d.localInfrastructureActive(owner) {
+		if valid && !busyOwners[owner] && !requestedVolumes[v.Name] && managedAnonymousVolume(*v) && d.oldInfrastructure(v.Labels, now) && !d.localInfrastructureActive(owner) {
 			volumeCandidates = append(volumeCandidates, v)
 		}
 	}
@@ -501,16 +644,9 @@ func (d *DockerPreviewProvider) ReconcileInfrastructure(ctx context.Context) (re
 		if !eligible[record.owner] {
 			continue
 		}
-		d.mu.RLock()
-		_, active := d.previews[record.owner.Handle]
-		if active {
-			d.mu.RUnlock()
-			continue
-		}
-		if err := d.cleanupInfrastructureRecords(persistedCtx, []*infrastructureCleanupRecord{record}); err != nil {
+		if err := d.cleanupInfrastructureRecords(persistedCtx, []*infrastructureCleanupRecord{record}, false); err != nil {
 			failures = append(failures, err)
 		}
-		d.mu.RUnlock()
 	}
 	persistedCancel()
 	containerCtx, containerCancel := context.WithTimeout(ctx, d.cleanupPhaseTimeout())
@@ -526,25 +662,17 @@ func (d *DockerPreviewProvider) ReconcileInfrastructure(ctx context.Context) (re
 		if len(c.Names) > 0 {
 			name = strings.TrimPrefix(c.Names[0], "/")
 		}
-		d.rememberInfrastructure(c.ID, name, owner, true)
-		d.cleanupMu.Lock()
-		record := d.cleanupRecords[c.ID]
-		record.requested = true
-		record.resolverRequired = true
-		d.cleanupMu.Unlock()
-		// Fence local registration through the final check and daemon teardown.
-		d.mu.RLock()
-		_, active := d.previews[owner.Handle]
-		if active {
-			d.mu.RUnlock()
-			continue
-		}
-		if err := d.cleanupInfrastructureRecords(containerCtx, []*infrastructureCleanupRecord{record}); err != nil {
+		record := d.rememberInfrastructure(c.ID, name, owner, true)
+		if err := d.cleanupInfrastructureRecord(containerCtx, record, false, true); err != nil {
 			failures = append(failures, err)
 		}
-		d.mu.RUnlock()
-		for name := range record.volumes {
-			requestedVolumes[name] = true
+		if record.mu.TryLock() {
+			for name := range record.volumes {
+				requestedVolumes[name] = true
+			}
+			record.mu.Unlock()
+		} else {
+			busyOwners[owner] = true
 		}
 	}
 	containerCancel()
@@ -554,22 +682,27 @@ func (d *DockerPreviewProvider) ReconcileInfrastructure(ctx context.Context) (re
 			break
 		}
 		owner, _ := parseInfrastructureOwner(v.Labels)
-		if !eligible[owner] || requestedVolumes[v.Name] {
+		if !eligible[owner] || busyOwners[owner] || requestedVolumes[v.Name] {
 			continue
 		}
-		d.mu.RLock()
-		_, active := d.previews[owner.Handle]
-		if active {
-			d.mu.RUnlock()
-			continue
-		}
-		if err := d.removeUnreferencedVolume(volumeCtx, gc, *v); err != nil {
+		if err := d.reconcileInfrastructureVolume(volumeCtx, gc, *v, owner); err != nil {
 			failures = append(failures, fmt.Errorf("reconcile volume %s: %w", v.Name, err))
 		}
-		d.mu.RUnlock()
 	}
 	volumeCancel()
 	return errors.Join(failures...)
+}
+
+func (d *DockerPreviewProvider) reconcileInfrastructureVolume(ctx context.Context, gc dockerInfrastructureCleanupClient, v volume.Volume, owner preview.InfrastructureOwner) error {
+	releaseGate, err := d.lockInfrastructureHandle(ctx, owner.Handle)
+	if err != nil {
+		return err
+	}
+	defer releaseGate()
+	if d.localInfrastructureActive(owner) {
+		return nil
+	}
+	return d.removeUnreferencedVolume(ctx, gc, v)
 }
 
 // Sorted round-robin selection gives every candidate a turn even when older
@@ -611,7 +744,7 @@ func (d *DockerPreviewProvider) reconcileLocalInfrastructureOwners(ctx context.C
 	batch := make([]preview.InfrastructureOwner, 0, infrastructureCleanupBatchLimit)
 	for handle, state := range d.previews {
 		owner := d.infrastructureOwner(handle, state.opts)
-		if !state.starting && state.acknowledged && validInfrastructureOwner(owner) {
+		if !state.starting && !state.stopRequested && state.acknowledged && validInfrastructureOwner(owner) {
 			batch = append(batch, owner)
 		}
 	}
@@ -638,13 +771,13 @@ func (d *DockerPreviewProvider) reconcileLocalInfrastructureOwners(ctx context.C
 		}
 		d.mu.RLock()
 		state, exists := d.previews[owner.Handle]
-		ready := exists && !state.starting && state.acknowledged && d.infrastructureOwner(owner.Handle, state.opts) == owner
+		ready := exists && !state.starting && !state.stopRequested && state.acknowledged && d.infrastructureOwner(owner.Handle, state.opts) == owner
 		d.mu.RUnlock()
 		if !ready {
 			continue
 		}
 		processed++
-		if err := d.StopPreviewWithBackgroundWait(ctx, owner.Handle, preview.PreviewStopInteractiveWaitCap); err != nil {
+		if err := d.stopPreviewForInfrastructureCleanup(ctx, owner.Handle); err != nil {
 			failures = append(failures, err)
 		}
 	}

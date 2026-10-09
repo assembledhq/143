@@ -104,9 +104,10 @@ type DockerPreviewProvider struct {
 	previews map[string]*previewState // handle → state
 
 	// Cleanup ownership survives removal from the serving map. Cleanup is
-	// serialized separately so a retry, stop, and reconciliation never race.
+	// serialized per handle/record so unrelated preview traffic never waits
+	// for Docker or database cleanup calls.
 	cleanupMu               sync.Mutex
-	cleanupWorkMu           sync.Mutex
+	cleanupHandleGates      map[string]*infrastructureCleanupGate
 	cleanupReconcileMu      sync.Mutex
 	cleanupPendingCursor    int
 	cleanupPersistedCursor  int
@@ -412,13 +413,21 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		cancelFn:     cancelFn,
 	}
 
+	releaseGate, gateErr := d.lockInfrastructureHandle(ctx, handle)
+	if gateErr != nil {
+		cancelFn()
+		return nil, fmt.Errorf("register preview handle: %w", gateErr)
+	}
 	d.mu.Lock()
 	if _, exists := d.previews[handle]; exists {
 		d.mu.Unlock()
+		releaseGate()
+		cancelFn()
 		return nil, fmt.Errorf("preview handle %q already exists (duplicate handle collision)", handle)
 	}
 	d.previews[handle] = state
 	d.mu.Unlock()
+	releaseGate()
 	defer func() {
 		d.mu.Lock()
 		state.starting = false
@@ -1128,12 +1137,27 @@ func (d *DockerPreviewProvider) StopPreview(ctx context.Context, handle string) 
 // cache warmth against how long it is willing to make someone wait.
 func (d *DockerPreviewProvider) StopPreviewWithBackgroundWait(ctx context.Context, handle string, backgroundWait time.Duration) error {
 	_, err, _ := d.stopCalls.Do(handle, func() (any, error) {
-		return nil, d.stopPreviewWithBackgroundWait(ctx, handle, backgroundWait)
+		return nil, d.stopPreviewWithBackgroundWait(ctx, context.Background(), handle, backgroundWait)
 	})
 	return err
 }
 
-func (d *DockerPreviewProvider) stopPreviewWithBackgroundWait(ctx context.Context, handle string, backgroundWait time.Duration) error {
+// Background ownership reconciliation uses a phase-bound cleanup context and
+// cancellable singleflight wait. Interactive stops keep independent teardown
+// budgets even when their HTTP caller disconnects.
+func (d *DockerPreviewProvider) stopPreviewForInfrastructureCleanup(ctx context.Context, handle string) error {
+	done := d.stopCalls.DoChan(handle, func() (any, error) {
+		return nil, d.stopPreviewWithBackgroundWait(ctx, ctx, handle, preview.PreviewStopInteractiveWaitCap)
+	})
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case result := <-done:
+		return result.Err
+	}
+}
+
+func (d *DockerPreviewProvider) stopPreviewWithBackgroundWait(ctx, cleanupCtx context.Context, handle string, backgroundWait time.Duration) error {
 	d.mu.Lock()
 	state, ok := d.previews[handle]
 	var launchCancel context.CancelFunc
@@ -1144,7 +1168,7 @@ func (d *DockerPreviewProvider) stopPreviewWithBackgroundWait(ctx context.Contex
 	d.mu.Unlock()
 
 	if !ok {
-		return d.cleanupInfrastructureHandle(handle)
+		return d.cleanupInfrastructureHandleContext(cleanupCtx, handle)
 	}
 	if launchCancel != nil {
 		launchCancel()
@@ -1178,7 +1202,7 @@ func (d *DockerPreviewProvider) stopPreviewWithBackgroundWait(ctx context.Contex
 		}
 	}
 	d.mu.RUnlock()
-	cleanupErr := d.cleanupInfrastructureHandle(handle)
+	cleanupErr := d.cleanupInfrastructureHandleContext(cleanupCtx, handle)
 
 	d.mu.Lock()
 	delete(d.previews, handle)

@@ -670,11 +670,19 @@ hardcoded database-version path.
 
 Serving status and cleanup completion are independent. Teardown uses bounded
 contexts independent of request cancellation, serializes concurrent stops, and
-retains unsuccessful container or volume removals for retry. Container removal
+retains unsuccessful container or volume removals for retry. Once the durable
+stop and access revocation commit, callers receive success even if infrastructure
+cleanup remains pending. Cleanup locks are scoped to individual resources and
+handles; inventory and ownership queries do not block unrelated preview traffic.
+Container removal
 alone does not prove volume removal: the provider inspects the actual mounted
 volume identities, removes the container without automatic volume deletion, and
 deletes only volumes that pass the reference checks. Lost create responses retain
-cleanup ownership even when the container is not yet visible. Cleanup failures
+cleanup ownership even when the container is not yet visible. An absent creation
+waits without reporting a cleanup failure, and its record can retire after the
+grace period only after fresh container observations and a final exact-owner
+volume sweep. Aged resources from the current worker remain discoverable if the
+daemon registers them after that record retires. Cleanup failures
 are logged; `preview.infrastructure.cleanup.pending` and
 `preview.infrastructure.cleanup.passes` expose pending teardown and pass outcomes.
 
@@ -686,8 +694,9 @@ reconciliation checks exact tenant and preview identities, full handles,
 persisted serving state, and generation
 liveness. A new local handle remains protected until the manager acknowledges
 that it has persisted the handle. In-flight starts and fresh overlapping
-generations, including draining workers, remain protected. Resources from earlier
-processes additionally require a startup cutoff and grace period.
+generations, including draining workers, remain protected. Reconciliation requires
+a grace period; resources belonging to other worker generations additionally
+require a startup cutoff.
 
 Routine deployment container pruning and opt-in volume pruning exclude managed
 preview infrastructure so its ownership metadata survives until reconciliation.

@@ -1790,6 +1790,8 @@ func (m *Manager) acknowledgePreviewHandle(handle string) {
 
 // StopPreviewWithReason stops a preview, records a stop cause when supplied,
 // and revokes all access sessions.
+// Once the durable stop commits, provider cleanup failures are logged for
+// background retry rather than returned to callers completing their own stop.
 func (m *Manager) StopPreviewWithReason(ctx context.Context, orgID, previewID uuid.UUID, reason models.PreviewStoppedReason) error {
 	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
 	if err != nil {
@@ -1864,7 +1866,7 @@ func (m *Manager) StopPreviewWithReason(ctx context.Context, orgID, previewID uu
 				}
 			}
 		}
-		return cleanupErr
+		return nil
 	}
 
 	destroyNow, _, containerID, releaseErr := m.store.ReleasePreviewHold(ctx, orgID, previewID)
@@ -1912,7 +1914,7 @@ func (m *Manager) StopPreviewWithReason(ctx context.Context, orgID, previewID uu
 	}
 
 	m.logger.Info().Str("preview_id", previewID.String()).Msg("preview stopped")
-	return cleanupErr
+	return nil
 }
 
 // =============================================================================

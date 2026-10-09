@@ -26,6 +26,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/preview"
@@ -40,6 +41,7 @@ type cleanupDockerClient struct {
 	createErr, startErr, stopErr error
 	inspectErr                   error
 	containerListErr             error
+	volumeListErr                error
 	createUncertain              bool
 	createForeign                bool
 	createLate                   bool
@@ -158,7 +160,7 @@ func TestInfrastructureUncertainCreateCleansUnregisteredVolumes(t *testing.T) {
 	require.Empty(t, cli.volumes, "scoped cleanup must remove labelled allocation leftovers even if container never registered")
 	require.NotEmpty(t, d.cleanupRecords, "cleanup must retain the exact uncertain container tombstone after removing volume leftovers")
 	require.Equal(t, []bool{false}, cli.volumeRemoveForces, "unregistered volume cleanup must still use non-force reference-aware deletion")
-	require.Error(t, d.ReconcileInfrastructure(context.Background()), "still-uncertain registration should remain pending")
+	require.NoError(t, d.ReconcileInfrastructure(context.Background()), "unobservable uncertain registration should wait quietly during grace")
 	require.NotEmpty(t, d.cleanupRecords, "an absent container must not release future registration ownership")
 }
 
@@ -359,6 +361,9 @@ func (c *cleanupDockerClient) ContainerList(_ context.Context, opts container.Li
 func (c *cleanupDockerClient) VolumeList(_ context.Context, opts volume.ListOptions) (volume.ListResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.volumeListErr != nil {
+		return volume.ListResponse{}, c.volumeListErr
+	}
 	result := volume.ListResponse{}
 	for _, v := range c.volumes {
 		if labelsMatch(v.Labels, opts.Filters) {
@@ -811,7 +816,8 @@ func TestReconcileInfrastructureBlockedRetriesDoNotStarveDiscovery(t *testing.T)
 				mountpoint := "/var/lib/docker/volumes/" + name + "/_data"
 				cli.volumes[name] = volume.Volume{Name: name, Labels: labels, Mountpoint: mountpoint}
 				key := fmt.Sprintf("pending-container-%02d", i)
-				d.cleanupRecords[key] = &infrastructureCleanupRecord{key: key, ref: key, owner: owner, requested: true, resolverRequired: tt.persisted, removed: true, volumesCaptured: true, volumes: map[string]struct{}{name: {}}}
+				d.cleanupRecords[key] = &infrastructureCleanupRecord{key: key, ref: key, owner: owner, resolverRequired: tt.persisted, removed: true, volumesCaptured: true, volumes: map[string]struct{}{name: {}}}
+				d.cleanupRecords[key].requested.Store(true)
 				references = append(references, container.MountPoint{Type: mount.TypeBind, Source: mountpoint})
 			}
 			cli.containers["external-bindings"] = container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "external-bindings"}, Mounts: references}
@@ -885,7 +891,8 @@ func TestReconcileInfrastructurePendingSidecarDoesNotHideSibling(t *testing.T) {
 	pgLabels[infrastructureVolumeKindLabel] = "anonymous"
 	pg := volume.Volume{Name: pgName, Labels: pgLabels, Mountpoint: "/var/lib/docker/volumes/" + pgName + "/_data"}
 	cli.volumes[pgName] = pg
-	d.cleanupRecords["pg-pending"] = &infrastructureCleanupRecord{key: "pg-pending", ref: "pg-pending", owner: owner, requested: true, resolverRequired: true, removed: true, volumesCaptured: true, volumes: map[string]struct{}{pgName: {}}}
+	d.cleanupRecords["pg-pending"] = &infrastructureCleanupRecord{key: "pg-pending", ref: "pg-pending", owner: owner, resolverRequired: true, removed: true, volumesCaptured: true, volumes: map[string]struct{}{pgName: {}}}
+	d.cleanupRecords["pg-pending"].requested.Store(true)
 	cli.containers["external-binding"] = container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "external-binding"}, Mounts: []container.MountPoint{{Type: mount.TypeBind, Source: pg.Mountpoint}}}
 	redisName := fmt.Sprintf("%064x", 2)
 	redisLabels := infrastructureLabels(owner, "cache", created)
@@ -919,7 +926,8 @@ func TestReconcileInfrastructureObservedContainerDisappearanceCompletes(t *testi
 	labels := infrastructureLabels(owner, "db", time.Now().Add(-time.Hour))
 	labels[infrastructureVolumeKindLabel] = "anonymous"
 	cli.volumes[name] = volume.Volume{Name: name, Labels: labels, Mountpoint: "/var/lib/docker/volumes/" + name + "/_data"}
-	d.cleanupRecords["observed-container"] = &infrastructureCleanupRecord{key: "observed-container", ref: "observed-container", name: "preview-db-test", owner: owner, uncertain: true, requested: true, resolverRequired: true, volumes: make(map[string]struct{})}
+	d.cleanupRecords["observed-container"] = &infrastructureCleanupRecord{key: "observed-container", ref: "observed-container", name: "preview-db-test", owner: owner, uncertain: true, resolverRequired: true, volumes: make(map[string]struct{})}
+	d.cleanupRecords["observed-container"].requested.Store(true)
 	require.NoError(t, d.ReconcileInfrastructure(context.Background()), "missing previously observed container must complete its owned volume cleanup")
 	require.Empty(t, cli.volumes, "previously observed missing container should leave no anonymous volume")
 	require.Empty(t, d.cleanupRecords, "confirmed missing historical container must not become a permanent late-create tombstone")
@@ -1055,4 +1063,452 @@ func TestInfrastructureSoftRestartPreservesContainersAndVolumes(t *testing.T) {
 	require.Empty(t, cli.removeOptions, "soft restart must preserve infrastructure containers")
 	require.NotEmpty(t, cli.volumes, "soft restart must preserve anonymous infrastructure data")
 	require.NoError(t, d.StopPreview(context.Background(), owner.Handle), "final stop should clean up soft-restarted preview")
+}
+
+// Block only one resource; a mock-wide lock would hide provider lock isolation.
+type selectiveCleanupDockerClient struct {
+	*cleanupDockerClient
+	blockedID string
+	entered   chan struct{}
+	release   chan struct{}
+}
+
+func (c *selectiveCleanupDockerClient) ContainerRemove(ctx context.Context, id string, opts container.RemoveOptions) error {
+	if id == c.blockedID {
+		c.entered <- struct{}{}
+		select {
+		case <-c.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return c.cleanupDockerClient.ContainerRemove(ctx, id, opts)
+}
+
+func addCleanupTestContainer(cli *cleanupDockerClient, owner preview.InfrastructureOwner, id string, created time.Time) {
+	cli.containers[id] = container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: id, Name: "/" + id, HostConfig: &container.HostConfig{}, State: &container.State{}}, Config: &container.Config{Labels: infrastructureLabels(owner, "db", created)}}
+}
+
+func TestReconcileInfrastructureDoesNotBlockUnrelatedTraffic(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		blockResolver bool
+	}{{name: "Docker removal"}, {name: "database resolver", blockResolver: true}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			owner := cleanupTestOwner()
+			other := cleanupTestOwner()
+			other.Handle = strings.Repeat("2", 32)
+			base := newCleanupDockerClient()
+			addCleanupTestContainer(base, owner, "blocked", time.Now().Add(-time.Hour))
+			addCleanupTestContainer(base, other, "unrelated", time.Now())
+			entered := make(chan struct{}, 1)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			releaseCleanup := func() { releaseOnce.Do(func() { close(release) }) }
+			defer releaseCleanup()
+			cli := &selectiveCleanupDockerClient{cleanupDockerClient: base, entered: entered, release: release}
+			if !tt.blockResolver {
+				cli.blockedID = "blocked"
+			}
+			resolver := func(ctx context.Context, owners []preview.InfrastructureOwner) (map[preview.InfrastructureOwner]bool, error) {
+				if tt.blockResolver {
+					entered <- struct{}{}
+					select {
+					case <-release:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
+				return map[preview.InfrastructureOwner]bool{owner: true}, nil
+			}
+			d := NewDockerPreviewProvider(cli, &noopSandboxExecutor{}, zerolog.Nop(), WithPreviewWorkerNodeID(owner.WorkerNodeID), WithInfrastructureCleanupResolver(resolver))
+			d.rememberInfrastructure("unrelated", "unrelated", other, false)
+			servingCleanupTest(d, other, &preview.InfraHandle{ContainerID: "unrelated"})
+			done := make(chan error, 1)
+			go func() { done <- d.ReconcileInfrastructure(context.Background()) }()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				require.FailNow(t, "reconciliation should reach the blocked external operation")
+			}
+			stopDone := make(chan error, 1)
+			go func() { stopDone <- d.StopPreview(context.Background(), other.Handle) }()
+			select {
+			case err := <-stopDone:
+				require.NoError(t, err, "unrelated stop must complete while reconciliation is blocked")
+			case <-time.After(time.Second):
+				require.FailNow(t, "unrelated stop must not wait for the blocked cleanup operation")
+			}
+			startDone := make(chan error, 1)
+			go func() {
+				handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sandbox"}, &models.PreviewConfig{Services: map[string]models.ServiceConfig{}}, preview.StartPreviewOptions{SkipServiceBuild: true}, nil)
+				if err == nil {
+					err = d.StopPreview(context.Background(), handle.Handle)
+				}
+				startDone <- err
+			}()
+			select {
+			case err := <-startDone:
+				require.NoError(t, err, "unrelated launch and serving-map writes must complete during reconciliation")
+			case <-time.After(time.Second):
+				require.FailNow(t, "unrelated launch must not wait for a global cleanup lock")
+			}
+			readDone := make(chan bool, 1)
+			go func() { readDone <- d.localInfrastructureActive(owner) }()
+			select {
+			case active := <-readDone:
+				require.False(t, active, "serving-map reads must remain available during cleanup")
+			case <-time.After(time.Second):
+				require.FailNow(t, "serving-map reader must not queue behind unrelated cleanup")
+			}
+			// A second pass should skip instead of waiting past its caller's deadline.
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			require.NoError(t, d.ReconcileInfrastructure(ctx), "already-running reconciliation should quietly skip a duplicate pass")
+			releaseCleanup()
+			select {
+			case err := <-done:
+				require.NoError(t, err, "reconciliation should complete after the gated operation is released")
+			case <-time.After(time.Second):
+				require.FailNow(t, "reconciliation should finish after release")
+			}
+		})
+	}
+}
+
+func TestInfrastructureCleanupSameRecordSerializes(t *testing.T) {
+	t.Parallel()
+	owner := cleanupTestOwner()
+	base := newCleanupDockerClient()
+	addCleanupTestContainer(base, owner, "same-record", time.Now())
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	cli := &selectiveCleanupDockerClient{cleanupDockerClient: base, blockedID: "same-record", entered: entered, release: release}
+	d := NewDockerPreviewProvider(cli, nil, zerolog.Nop(), WithPreviewWorkerNodeID(owner.WorkerNodeID))
+	d.rememberInfrastructure("same-record", "same-record", owner, false)
+	first := make(chan error, 1)
+	go func() { first <- d.cleanupInfrastructureHandle(owner.Handle) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		require.FailNow(t, "first cleanup should reach gated removal")
+	}
+	second := make(chan error, 1)
+	go func() { second <- d.cleanupInfrastructureHandle(owner.Handle) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := d.lockInfrastructureHandle(ctx, owner.Handle)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "same-handle fence waits must obey background phase cancellation")
+	require.NoError(t, d.ReconcileInfrastructure(context.Background()), "background pass should skip the busy record without blocking")
+	cleanupMetrics, metricsErr := metrics.NewPreviewInfrastructureCleanupMetrics()
+	require.NoError(t, metricsErr, "pending cleanup metrics should initialize")
+	d.cleanupMetrics = cleanupMetrics
+	loopCtx, loopCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer loopCancel()
+	loopDone := make(chan struct{})
+	go func() { d.RunInfrastructureCleanup(loopCtx); close(loopDone) }()
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		require.FailNow(t, "pending metric snapshots must not wait for an in-flight record operation")
+	}
+	close(release)
+	for i, done := range []chan error{first, second} {
+		select {
+		case err := <-done:
+			require.NoError(t, err, "serialized cleanup %d should succeed", i)
+		case <-time.After(time.Second):
+			require.FailNow(t, "same-record cleanup should finish after release")
+		}
+	}
+	require.Equal(t, []container.RemoveOptions{{Force: true, RemoveVolumes: false}}, base.removeOptions, "overlapping cleanup snapshots should remove a container exactly once")
+	require.Empty(t, d.cleanupRecords, "successful serialization should release the ledger")
+	require.Empty(t, d.cleanupHandleGates, "idle handle gates must not grow a permanent handle ledger")
+}
+
+type uncertainInspectCleanupDockerClient struct {
+	*cleanupDockerClient
+	inspectName     string
+	inspectionError error
+}
+
+func (c *uncertainInspectCleanupDockerClient) ContainerInspect(ctx context.Context, id string) (container.InspectResponse, error) {
+	if id == c.inspectName && c.inspectionError != nil {
+		return container.InspectResponse{}, c.inspectionError
+	}
+	return c.cleanupDockerClient.ContainerInspect(ctx, id)
+}
+
+func TestInfrastructureUncertainCreateRetirement(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                                                     string
+		expired                                                  bool
+		inspectErr, inventoryErr, volumeListErr, volumeRemoveErr error
+		expectedPending                                          bool
+		expectedErr                                              bool
+	}{
+		{name: "quiet grace", expectedPending: true},
+		{name: "expired absent", expired: true},
+		{name: "inspection failed", expired: true, inspectErr: errors.New("daemon unavailable"), expectedPending: true, expectedErr: true},
+		{name: "inventory failed", expired: true, inventoryErr: errors.New("inventory unavailable"), expectedPending: true, expectedErr: true},
+		{name: "final volume discovery failed", expired: true, volumeListErr: errors.New("volume inventory unavailable"), expectedPending: true, expectedErr: true},
+		{name: "final volume removal failed", expired: true, volumeRemoveErr: cerrdefs.ErrConflict, expectedPending: true, expectedErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			owner := cleanupTestOwner()
+			base := newCleanupDockerClient()
+			base.containerListErr = tt.inventoryErr
+			base.volumeListErr = tt.volumeListErr
+			if tt.volumeRemoveErr != nil {
+				base.volumeErrors = []error{tt.volumeRemoveErr}
+			}
+			labels := infrastructureLabels(owner, "db", time.Now())
+			labels[infrastructureVolumeKindLabel] = "anonymous"
+			name := strings.Repeat("a", 64)
+			base.volumes[name] = volume.Volume{Name: name, Labels: labels, Mountpoint: "/var/lib/docker/volumes/" + name + "/_data"}
+			cli := &uncertainInspectCleanupDockerClient{cleanupDockerClient: base, inspectName: "uncertain", inspectionError: tt.inspectErr}
+			d := NewDockerPreviewProvider(cli, nil, zerolog.Nop(), WithPreviewWorkerNodeID(owner.WorkerNodeID))
+			record := d.rememberInfrastructure("uncertain", "uncertain", owner, true)
+			if tt.expired {
+				record.rememberedAt = time.Now().Add(-infrastructureCleanupGrace - time.Minute)
+			}
+			err := d.cleanupInfrastructureHandle(owner.Handle)
+			if tt.expectedErr {
+				require.Error(t, err, "failed final observations or deletion must retain pending ownership")
+			} else {
+				require.NoError(t, err, "quiet grace and verified expiry should not report cleanup failure")
+			}
+			require.Equal(t, tt.expectedPending, len(d.cleanupRecords) > 0, "only an expired fully-observed clean record should retire")
+			if !tt.expectedPending {
+				require.Empty(t, base.volumes, "expiry must sweep exact-owned volumes before releasing the ledger")
+			}
+			require.Empty(t, base.removeOptions, "missing uncertain container must never cause blind container deletion")
+		})
+	}
+}
+
+func TestInfrastructureLateCreateAfterRetirementRemainsDiscoverable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		local          bool
+		unacknowledged bool
+		starting       bool
+		resolverErr    error
+		eligible       bool
+		removed        bool
+	}{
+		{name: "eligible late create", eligible: true, removed: true},
+		{name: "unacknowledged local handle", local: true, unacknowledged: true, eligible: true},
+		{name: "starting local handle", local: true, starting: true, eligible: true},
+		{name: "active durable handle"},
+		{name: "ownership query failed", resolverErr: errors.New("database unavailable")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			owner := cleanupTestOwner()
+			cli := newCleanupDockerClient()
+			resolver := func(_ context.Context, owners []preview.InfrastructureOwner) (map[preview.InfrastructureOwner]bool, error) {
+				if tt.resolverErr != nil {
+					return nil, tt.resolverErr
+				}
+				result := make(map[preview.InfrastructureOwner]bool)
+				for _, o := range owners {
+					result[o] = tt.eligible
+				}
+				return result, nil
+			}
+			d := NewDockerPreviewProvider(cli, nil, zerolog.Nop(), WithPreviewWorkerNodeID(owner.WorkerNodeID), WithInfrastructureCleanupResolver(resolver))
+			// Both resource timestamps are after this process's startup cutoff.
+			d.cleanupStartupCutoff = time.Now().Add(-time.Hour)
+			record := d.rememberInfrastructure("late", "late", owner, true)
+			record.rememberedAt = time.Now().Add(-infrastructureCleanupGrace - time.Minute)
+			require.NoError(t, d.cleanupInfrastructureHandle(owner.Handle), "verified expired absence should retire uncertain creation")
+			require.Empty(t, d.cleanupRecords, "late creation test must start after tombstone retirement")
+			created := time.Now().Add(-infrastructureCleanupGrace - time.Minute)
+			addCleanupTestContainer(cli, owner, "late", created)
+			labels := infrastructureLabels(owner, "db", created)
+			labels[infrastructureVolumeKindLabel] = "anonymous"
+			volumeName := strings.Repeat("a", 64)
+			cli.volumes[volumeName] = volume.Volume{Name: volumeName, Labels: labels, Mountpoint: "/var/lib/docker/volumes/" + volumeName + "/_data"}
+			if tt.local {
+				servingCleanupTest(d, owner, &preview.InfraHandle{ContainerID: "late"})
+				d.previews[owner.Handle].acknowledged = !tt.unacknowledged
+				d.previews[owner.Handle].starting = tt.starting
+			}
+			err := d.ReconcileInfrastructure(context.Background())
+			if tt.resolverErr != nil {
+				require.Error(t, err, "ownership lookup failure must be observable and protect late resources")
+			} else {
+				require.NoError(t, err, "late resource reconciliation should complete with authoritative ownership")
+			}
+			if tt.removed {
+				require.Empty(t, cli.containers, "aged same-worker late container must remain discoverable without restart")
+				require.Empty(t, cli.volumes, "aged late volume must be swept after its container is removed")
+				require.Equal(t, []bool{false}, cli.volumeRemoveForces, "late cleanup must preserve non-force deletion")
+			} else {
+				require.NotEmpty(t, cli.containers, "active or uncommitted late container must stay protected")
+				require.NotEmpty(t, cli.volumes, "active or uncommitted late data must stay protected")
+				require.Empty(t, cli.removeOptions, "protected late owner must not reach container deletion")
+			}
+		})
+	}
+}
+
+func TestReconcileInfrastructureLocalStopHonorsPhaseDeadline(t *testing.T) {
+	t.Parallel()
+	owner := cleanupTestOwner()
+	base := newCleanupDockerClient()
+	addCleanupTestContainer(base, owner, "local-stop", time.Now())
+	addCleanupTestContainer(base, owner, "z-unattempted", time.Now())
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	cli := &selectiveCleanupDockerClient{cleanupDockerClient: base, blockedID: "local-stop", entered: entered, release: release}
+	resolver := func(_ context.Context, owners []preview.InfrastructureOwner) (map[preview.InfrastructureOwner]bool, error) {
+		result := make(map[preview.InfrastructureOwner]bool)
+		for _, candidate := range owners {
+			result[candidate] = true
+		}
+		return result, nil
+	}
+	d := NewDockerPreviewProvider(cli, nil, zerolog.Nop(), WithPreviewWorkerNodeID(owner.WorkerNodeID), WithInfrastructureCleanupResolver(resolver))
+	d.testInfrastructureCleanupPhaseTimeout = 30 * time.Millisecond
+	d.rememberInfrastructure("local-stop", "local-stop", owner, false)
+	d.rememberInfrastructure("z-unattempted", "z-unattempted", owner, false)
+	servingCleanupTest(d, owner, &preview.InfraHandle{ContainerID: "local-stop"})
+	done := make(chan error, 1)
+	go func() { done <- d.ReconcileInfrastructure(context.Background()) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		require.FailNow(t, "terminal local owner should reach its background stop")
+	}
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.DeadlineExceeded, "background stop must return when its cleanup phase expires")
+	case <-time.After(time.Second):
+		require.FailNow(t, "local reconciliation must honor its phase deadline")
+	}
+	require.Eventually(t, func() bool { d.mu.RLock(); defer d.mu.RUnlock(); return len(d.previews) == 0 }, time.Second, time.Millisecond, "timed-out background stop should finish serving eviction while retaining retry ownership")
+	records := d.cleanupRecordSnapshot()
+	requested := make(map[string]bool)
+	for _, record := range records {
+		requested[record.key] = record.requested.Load()
+	}
+	require.Equal(t, map[string]bool{"local-stop": true, "z-unattempted": true}, requested, "phase cancellation must retain and request retry for every owned infrastructure record, including unattempted siblings")
+	close(release)
+	require.NoError(t, d.ReconcileInfrastructure(context.Background()), "next pass must retry phase-cancelled teardown")
+	require.Empty(t, base.containers, "retry should finish container removal after the blocked operation clears")
+	require.Empty(t, d.cleanupRecords, "successful retry should release phase-cancelled ownership")
+}
+
+func TestInfrastructureBackgroundStopDoesNotWaitForForegroundSingleflight(t *testing.T) {
+	t.Parallel()
+	owner := cleanupTestOwner()
+	base := newCleanupDockerClient()
+	addCleanupTestContainer(base, owner, "foreground-stop", time.Now())
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	cli := &selectiveCleanupDockerClient{cleanupDockerClient: base, blockedID: "foreground-stop", entered: entered, release: release}
+	d := NewDockerPreviewProvider(cli, nil, zerolog.Nop(), WithPreviewWorkerNodeID(owner.WorkerNodeID))
+	d.rememberInfrastructure("foreground-stop", "foreground-stop", owner, false)
+	servingCleanupTest(d, owner, &preview.InfraHandle{ContainerID: "foreground-stop"})
+	foreground := make(chan error, 1)
+	go func() { foreground <- d.StopPreview(context.Background(), owner.Handle) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		require.FailNow(t, "foreground stop must reach the blocked operation")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, d.stopPreviewForInfrastructureCleanup(ctx, owner.Handle), context.DeadlineExceeded, "background ownership sweep must stop waiting for an existing foreground teardown at its deadline")
+	close(release)
+	select {
+	case err := <-foreground:
+		require.NoError(t, err, "background cancellation must not cancel foreground teardown")
+	case <-time.After(time.Second):
+		require.FailNow(t, "foreground stop should finish after release")
+	}
+	require.Equal(t, []container.RemoveOptions{{Force: true, RemoveVolumes: false}}, base.removeOptions, "cancelled background wait must not start duplicate foreground cleanup")
+}
+
+func TestInfrastructureExpiredUncertaintyRetainsLateInventory(t *testing.T) {
+	t.Parallel()
+	owner := cleanupTestOwner()
+	base := newCleanupDockerClient()
+	addCleanupTestContainer(base, owner, "late-inventory", time.Now())
+	cli := &uncertainInspectCleanupDockerClient{cleanupDockerClient: base, inspectName: "late-inventory", inspectionError: cerrdefs.ErrNotFound}
+	d := NewDockerPreviewProvider(cli, nil, zerolog.Nop(), WithPreviewWorkerNodeID(owner.WorkerNodeID))
+	record := d.rememberInfrastructure("late-inventory", "late-inventory", owner, true)
+	record.rememberedAt = time.Now().Add(-infrastructureCleanupGrace - time.Minute)
+	require.NoError(t, d.cleanupInfrastructureHandle(owner.Handle), "exact-owner inventory visible after missing name inspection should wait for a fresh inspect")
+	require.NotEmpty(t, d.cleanupRecords, "visible late exact-owned inventory must prevent uncertain ledger retirement")
+	require.Empty(t, base.removeOptions, "inventory alone must not replace exact ownership and mount inspection")
+	cli.inspectionError = nil
+	require.NoError(t, d.ReconcileInfrastructure(context.Background()), "fresh exact inspect should finish the retained late creation")
+	require.Empty(t, base.containers, "freshly verified late container should be removed")
+	require.Empty(t, d.cleanupRecords, "verified late cleanup should release the retained record")
+}
+
+func TestInfrastructureBackgroundStopSharedFailureRetainsRetry(t *testing.T) {
+	t.Parallel()
+	owner := cleanupTestOwner()
+	base := newCleanupDockerClient()
+	addCleanupTestContainer(base, owner, "background-stop", time.Now())
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	cli := &selectiveCleanupDockerClient{cleanupDockerClient: base, blockedID: "background-stop", entered: entered, release: release}
+	d := NewDockerPreviewProvider(cli, nil, zerolog.Nop(), WithPreviewWorkerNodeID(owner.WorkerNodeID))
+	d.rememberInfrastructure("background-stop", "background-stop", owner, false)
+	servingCleanupTest(d, owner, &preview.InfraHandle{ContainerID: "background-stop"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	background := make(chan error, 1)
+	go func() { background <- d.stopPreviewForInfrastructureCleanup(ctx, owner.Handle) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		require.FailNow(t, "background stop must reach the blocked operation")
+	}
+	// Join the same flight synchronously so cancellation cannot race the join.
+	joined := d.stopCalls.DoChan(owner.Handle, func() (any, error) { return nil, errors.New("joined stop must not start another teardown") })
+	cancel()
+	select {
+	case err := <-background:
+		require.ErrorIs(t, err, context.Canceled, "background caller should return phase cancellation")
+	case <-time.After(time.Second):
+		require.FailNow(t, "background caller must not wait for independent cleanup budgets")
+	}
+	select {
+	case result := <-joined:
+		require.ErrorIs(t, result.Err, context.Canceled, "a caller sharing the background flight should receive its phase failure")
+	case <-time.After(time.Second):
+		require.FailNow(t, "shared stop flight should finish when background cleanup is cancelled")
+	}
+	records := d.cleanupRecordSnapshot()
+	require.Len(t, records, 1, "background phase failure must retain exact-owned retry work for shared callers")
+	require.True(t, records[0].requested.Load(), "failed shared flight must preserve immediate retry intent")
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), owner.Handle), "a later foreground stop should finish the retained background retry")
+	require.Empty(t, d.cleanupRecords, "successful foreground retry should release background ownership")
+	require.Equal(t, []container.RemoveOptions{{Force: true, RemoveVolumes: false}}, base.removeOptions, "shared phase failure and retry should perform one successful daemon removal")
+}
+
+func TestInfrastructureCanceledGateDoesNotRegister(t *testing.T) {
+	t.Parallel()
+	d := NewDockerPreviewProvider(newCleanupDockerClient(), nil, zerolog.Nop())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	release, err := d.lockInfrastructureHandle(ctx, "cancelled")
+	require.ErrorIs(t, err, context.Canceled, "a cancelled lifecycle must not acquire an immediately available gate")
+	require.Nil(t, release, "failed gate acquisition must not publish a release callback")
+	require.Empty(t, d.cleanupHandleGates, "cancelled gate acquisition must not retain an idle entry")
 }
