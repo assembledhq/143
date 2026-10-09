@@ -72,16 +72,22 @@ func (s *AutomationTargetStore) ApplyPullRequestClosed(ctx context.Context, tx p
 	if err := lockAutomationTarget(ctx, tx, orgID, targetID); err != nil {
 		return out, err
 	}
-	fresh, err := lifecycleObservationIsFresh(ctx, tx, orgID, targetID, observedAt)
-	if err != nil {
-		return out, err
-	}
-	if !fresh {
-		// A redelivered close from before a reopen would otherwise retire the
-		// generation that reopen started and skip its waiters, on a pull
-		// request that is open.
-		out.Stale = true
-		return out, nil
+	// A merge is terminal: GitHub cannot reopen or unmerge the pull request,
+	// so evidence newer than the merge does not mean the pull request moved
+	// on from it, and the merge is never dropped as stale. An unmerged close
+	// can be undone by a reopen, so it is arbitrated.
+	if !merged {
+		fresh, err := lifecycleObservationIsFresh(ctx, tx, orgID, targetID, observedAt)
+		if err != nil {
+			return out, err
+		}
+		if !fresh {
+			// A redelivered close from before a reopen would otherwise retire
+			// the generation that reopen started and skip its waiters, on a
+			// pull request that is open.
+			out.Stale = true
+			return out, nil
+		}
 	}
 	state := models.AutomationTargetLifecycleClosed
 	retiredReason := models.AutomationTargetRetiredPRClosed
@@ -89,10 +95,10 @@ func (s *AutomationTargetStore) ApplyPullRequestClosed(ctx context.Context, tx p
 		state = models.AutomationTargetLifecycleMerged
 		retiredReason = models.AutomationTargetRetiredPRMerged
 	}
-	// The store arbitrates the write again, and refuses the same observation
-	// the freshness check above already rejected. The check stays because it
-	// gates more than the write: a stale close must skip no waiters and
-	// retire no generation either.
+	// The store arbitrates the write again: it refuses the same unmerged
+	// close the freshness check above already rejected, and always applies a
+	// merge. The check stays because it gates more than the write: a stale
+	// close must skip no waiters and retire no generation either.
 	if _, err := s.SetLifecycleObserved(ctx, tx, orgID, targetID, state, &observedAt); err != nil {
 		return out, err
 	}
