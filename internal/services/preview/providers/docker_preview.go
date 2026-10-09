@@ -108,12 +108,11 @@ type DockerPreviewProvider struct {
 	cleanupMu               sync.Mutex
 	cleanupWorkMu           sync.Mutex
 	cleanupReconcileMu      sync.Mutex
-	cleanupPendingCursor    uint64
-	cleanupPersistedCursor  uint64
-	cleanupContainerCursor  uint64
-	cleanupVolumeCursor     uint64
-	cleanupOwnerCursor      uint64
-	cleanupLocalOwnerCursor uint64
+	cleanupPendingCursor    int
+	cleanupPersistedCursor  int
+	cleanupContainerCursor  int
+	cleanupVolumeCursor     int
+	cleanupLocalOwnerCursor int
 	cleanupRecords          map[string]*infrastructureCleanupRecord
 	stopCalls               singleflight.Group
 	workerNodeID            string

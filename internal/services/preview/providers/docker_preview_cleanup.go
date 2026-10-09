@@ -574,19 +574,24 @@ func (d *DockerPreviewProvider) ReconcileInfrastructure(ctx context.Context) (re
 
 // Sorted round-robin selection gives every candidate a turn even when older
 // referenced resources permanently consume their phase's count or time budget.
-func rotateCleanupCandidates[T any](values []T, cursor *uint64, limit int) []T {
+func rotateCleanupCandidates[T any](values []T, cursor *int, limit int) []T {
 	if len(values) == 0 {
 		return nil
 	}
 	count := min(len(values), limit)
 	selected := make([]T, 0, count)
-	start := int(*cursor % uint64(len(values)))
+	start := *cursor % len(values)
+	position := start
 	for i := 0; i < count; i++ {
-		selected = append(selected, values[(start+i)%len(values)])
+		selected = append(selected, values[position])
+		position++
+		if position == len(values) {
+			position = 0
+		}
 	}
 	// An early timeout may leave most selected rows unattempted. Advancing
 	// one position ensures those rows eventually become first in a pass.
-	*cursor++
+	*cursor = (start + 1) % len(values)
 	return selected
 }
 
