@@ -44,7 +44,7 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			schedulingEnabled: true,
 			initialStatus:     models.CodeReviewSessionStatusRunning,
 			lockedStatus:      models.CodeReviewSessionStatusRunning,
-			expectedBody:      "143 Code Reviewer has started reviewing this pull request.",
+			expectedBody:      `143 Code Reviewer has started reviewing this pull request at <relative-time datetime="2026-09-25T12:23:16Z">Sep 25, 2026 at 8:23 AM EDT</relative-time>.`,
 			expectedCalls:     []string{"upsert"},
 		},
 		{
@@ -60,7 +60,7 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			initialStatus:   models.CodeReviewSessionStatusRunning,
 			lockedStatus:    models.CodeReviewSessionStatusRunning,
 			lockedFinalBody: statusCommentStringPtr("❌ 143 Code Reviewer needs human review."),
-			expectedBody:    "143 Code Reviewer has started reviewing this pull request.",
+			expectedBody:    `143 Code Reviewer has started reviewing this pull request at <relative-time datetime="2026-09-25T12:23:16Z">Sep 25, 2026 at 8:23 AM EDT</relative-time>.`,
 			expectedCalls:   []string{"upsert"},
 		},
 		{
@@ -383,6 +383,42 @@ func TestCodeReviewStatusCommentReviewNowLink(t *testing.T) {
 			}
 			require.NotContains(t, body, "Open 143 to request", "confirmation explanation belongs in the destination dialog")
 			require.NotContains(t, body, "/api/", "comment link never directly invokes a mutation endpoint")
+		})
+	}
+}
+
+func TestCodeReviewStatusCommentStartTime(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		status    models.CodeReviewSessionStatus
+		createdAt time.Time
+		expected  string
+	}{
+		{
+			name:      "running review localizes with a daylight saving fallback",
+			status:    models.CodeReviewSessionStatusRunning,
+			createdAt: time.Date(2026, time.July, 23, 2, 14, 8, 0, time.UTC),
+			expected:  `143 Code Reviewer has started reviewing this pull request at <relative-time datetime="2026-07-23T02:14:08Z">Jul 22, 2026 at 10:14 PM EDT</relative-time>.`,
+		},
+		{
+			name:      "queued review localizes with a standard time fallback",
+			status:    models.CodeReviewSessionStatusQueued,
+			createdAt: time.Date(2026, time.January, 25, 12, 23, 16, 0, time.UTC),
+			expected:  `143 Code Reviewer has started reviewing this pull request at <relative-time datetime="2026-01-25T12:23:16Z">Jan 25, 2026 at 7:23 AM EST</relative-time>.`,
+		},
+		{
+			name:     "missing start time omits the timestamp",
+			status:   models.CodeReviewSessionStatusRunning,
+			expected: "143 Code Reviewer has started reviewing this pull request.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			metadata := models.CodeReviewSessionMetadata{Status: tt.status, CreatedAt: tt.createdAt}
+			body := codeReviewStatusCommentBody(metadata, nil, "", "")
+			require.Equal(t, tt.expected, body, "review announcement should use the recorded start time with a localized element and an Eastern fallback")
 		})
 	}
 }
