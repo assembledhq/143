@@ -481,6 +481,10 @@ func (s *AutomationTargetStore) SetLifecycle(ctx context.Context, q DBTX, orgID,
 // counted as openness evidence, or a sync observed the close later than the
 // merge happened. A transition into merged therefore always applies, and the
 // evidence keeps the later of the two moments so it never moves backwards.
+// A change out of merged is always refused, whatever its timestamp: an
+// observation that says the pull request is open or closed without merging
+// can only describe a moment before the merge, even when it carries no
+// timestamp or one stamped when it was processed.
 //
 // Returns whether the observation was applied. A refused observation is not
 // an error — the caller decides what a stale delivery means for the rest of
@@ -518,9 +522,10 @@ func (s *AutomationTargetStore) SetLifecycleObserved(ctx context.Context, q DBTX
 		    WHERE t.id = c.id AND t.org_id = c.org_id
 		      AND (c.lifecycle_state = @state
 		           OR @state::text = @merged::text
-		           OR c.lifecycle_updated_at IS NULL
-		           OR @observed_at::timestamptz IS NULL
-		           OR @observed_at::timestamptz >= c.lifecycle_updated_at)
+		           OR (c.lifecycle_state <> @merged::text
+		               AND (c.lifecycle_updated_at IS NULL
+		                    OR @observed_at::timestamptz IS NULL
+		                    OR @observed_at::timestamptz >= c.lifecycle_updated_at)))
 		    RETURNING t.id
 		)
 		SELECT EXISTS (SELECT 1 FROM current), EXISTS (SELECT 1 FROM applied)`,

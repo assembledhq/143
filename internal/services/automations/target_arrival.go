@@ -116,9 +116,12 @@ func (s *GitHubEventTriggerService) recordTargetArrival(ctx context.Context, tx 
 	// it would put the target back to open and replace newer closed evidence
 	// with older. A refused transition leaves the state it found, so the
 	// local copy is only advanced when the write was applied, and the run
-	// falls through to the closed gate below. A merge is terminal and always
-	// applies, so the merged run below is always a final turn on a merged
-	// target, never an ordinary turn on one the store left open.
+	// falls through to the closed gate below. A merge is terminal: it always
+	// applies, and no reopen moves a merged target back to open, so the
+	// merged run below never runs as an ordinary turn on a target the store
+	// left open. It finishes the current conversation only while the target's
+	// generation is still active. A close notified before this delivery may
+	// already have retired it, and the run then starts a fresh session.
 	switch {
 	case req.PullRequestAction == githubActionReopened && target.LifecycleState != models.AutomationTargetLifecycleOpen:
 		applied, err := s.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleOpen, req.PullRequestUpdatedAt)
