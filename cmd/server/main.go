@@ -141,6 +141,21 @@ func main() {
 	}
 	defer pool.Close()
 
+	// Recover process-local preview ownership before any preview starts or
+	// lease heartbeats. Use the database clock so creation timestamps and the
+	// restart cutoff share a time source. Blue/green generations have different
+	// node IDs and are never invalidated by this same-node recovery.
+	if cfg.Mode == "worker" || cfg.Mode == "all" {
+		previewRecoveryStore := db.NewPreviewStore(pool)
+		cutoff, cutoffErr := previewRecoveryStore.CapturePreviewRuntimeRecoveryCutoff(ctx)
+		if cutoffErr != nil {
+			logger.Fatal().Err(cutoffErr).Msg("failed to capture preview ownership recovery cutoff")
+		}
+		if _, recoveryErr := previewRecoveryStore.RecoverPreviewRuntimesAfterWorkerRestart(ctx, cfg.NodeID, cutoff); recoveryErr != nil {
+			logger.Fatal().Err(recoveryErr).Msg("failed to recover preview ownership before worker admission")
+		}
+	}
+
 	// Initialize OpenTelemetry meter provider.
 	// Enables Prometheus /metrics (always) + OTLP push (when OTEL_EXPORTER_OTLP_ENDPOINT is set).
 	_, otelShutdown, err := telemetry.InitMeterProvider(ctx, telemetry.Config{
@@ -171,6 +186,10 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to initialize HTTP metrics")
 	}
 	middleware.SetHTTPMetrics(httpMetrics)
+	previewCleanupMetrics, err := metrics.NewPreviewInfrastructureCleanupMetrics()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to initialize preview infrastructure cleanup metrics")
+	}
 
 	redisMetrics, err := cache.NewMetrics()
 	if err != nil {
@@ -245,6 +264,7 @@ func main() {
 	// gracefully degrades when Docker is not available).
 	fileReader := sandbox.FileReader(sandbox.NoOpFileReader{})
 	var pvProvider preview.PreviewCapableProvider
+	var previewManager *preview.Manager
 	var dependencyCache preview.DependencyCache
 	var snapshotExec preview.SnapshotExecutor
 	var apiSandboxProvider agent.SandboxProvider
@@ -316,6 +336,14 @@ func main() {
 				logger,
 				previewproviders.WithDependencyCache(dependencyCache),
 				previewproviders.WithPackageManagerCacheEnabled(cfg.PreviewPackageManagerCacheEnabled),
+				previewproviders.WithPreviewWorkerNodeID(cfg.NodeID),
+				previewproviders.WithPreviewInfrastructureCleanupMetrics(previewCleanupMetrics),
+				previewproviders.WithInfrastructureCleanupResolver(func(cleanupCtx context.Context, owners []preview.InfrastructureOwner) (map[preview.InfrastructureOwner]bool, error) {
+					if previewManager == nil {
+						return nil, fmt.Errorf("preview manager is unavailable for infrastructure cleanup")
+					}
+					return previewManager.ResolveInfrastructureCleanup(cleanupCtx, owners)
+				}),
 			)
 			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
@@ -413,6 +441,11 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to register cluster node")
 	}
 	go nodeManager.StartHeartbeat(ctx)
+	if previewCapable {
+		if cleaner, ok := pvProvider.(interface{ RunInfrastructureCleanup(context.Context) }); ok {
+			go cleaner.RunInfrastructureCleanup(ctx)
+		}
+	}
 	if cfg.Mode != "worker" {
 		go worker.RunControlPlaneHealthAlerts(ctx, db.NewJobStore(pool), db.NewNodeStore(pool), logger, time.Minute)
 	}

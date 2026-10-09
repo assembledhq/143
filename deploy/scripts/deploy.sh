@@ -2247,7 +2247,10 @@ SELECT COUNT(*) FROM endpoint_blockers;"
 
     local prune_until="${DOCKER_PRUNE_UNTIL:-24h}"
     echo "Pruning unused Docker resources older than $prune_until..."
-    docker container prune -f --filter "until=$prune_until" || echo "WARNING: docker container prune failed; continuing."
+    # The preview reconciler owns these containers and their anonymous data.
+    # Preserve ownership metadata until it has checked persisted liveness;
+    # generic container prune would strand the volumes without that metadata.
+    docker container prune -f --filter "until=$prune_until" --filter "label!=com.143.preview.infrastructure" || echo "WARNING: docker container prune failed; continuing."
     docker image prune -af --filter "until=$prune_until" || echo "WARNING: docker image prune failed; continuing."
     docker builder prune -af --filter "until=$prune_until" || echo "WARNING: docker builder prune failed; continuing."
     if [ "$role" = "worker" ] && [ -n "${IMAGE_TAG:-}" ]; then
@@ -2260,7 +2263,9 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       fi
     fi
     if [ "$role" = "worker" ] && [ "${DEPLOY_DOCKER_VOLUME_PRUNE:-0}" = "1" ]; then
-      docker volume prune -f || echo "WARNING: docker volume prune failed; continuing."
+      # Managed volumes require the reconciler's persisted ownership and bind
+      # reference checks, including after their container has been removed.
+      docker volume prune -f --filter "label!=com.143.preview.infrastructure" || echo "WARNING: docker volume prune failed; continuing."
     fi
   }
 

@@ -29,16 +29,17 @@ import (
 // =============================================================================
 
 type mockProvider struct {
-	startHandle   *PreviewHandle
-	startErr      error
-	startConfig   *models.PreviewConfig
-	startOptions  StartPreviewOptions
-	startObserver ServiceObserver
-	stopErr       error
-	dialErr       error
-	dialStream    PreviewStream
-	statusSnap    *PreviewStatusSnapshot
-	statusErr     error
+	startHandle         *PreviewHandle
+	startErr            error
+	startConfig         *models.PreviewConfig
+	startOptions        StartPreviewOptions
+	startObserver       ServiceObserver
+	stopErr             error
+	dialErr             error
+	dialStream          PreviewStream
+	statusSnap          *PreviewStatusSnapshot
+	statusErr           error
+	acknowledgedHandles []string
 }
 
 func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, opts StartPreviewOptions, observer ServiceObserver) (*PreviewHandle, error) {
@@ -56,6 +57,10 @@ func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *mo
 
 func (m *mockProvider) StopPreview(_ context.Context, _ string) error {
 	return m.stopErr
+}
+
+func (m *mockProvider) AcknowledgePreviewHandle(handle string) {
+	m.acknowledgedHandles = append(m.acknowledgedHandles, handle)
 }
 
 func (m *mockProvider) DialPreview(_ context.Context, _ string) (PreviewStream, error) {
@@ -1508,6 +1513,8 @@ func TestRecyclePreview_PreservesPartiallyReadyStatus(t *testing.T) {
 	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
 	require.NoError(t, err, "RecyclePreview should succeed for a partially ready restart")
 	require.True(t, mgr.provider.(*mockProvider).startOptions.RetainedSandbox, "recycle should tell the provider that WorkDir and HomeDir were retained")
+	require.Equal(t, previewID, mgr.provider.(*mockProvider).startOptions.PreviewID, "recycle must give infrastructure the durable preview owner identity")
+	require.Equal(t, []string{"handle-new"}, mgr.provider.(*mockProvider).acknowledgedHandles, "recycle must release the provider persistence fence only after its new handle is committed")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1699,9 +1706,14 @@ func TestRecyclePreview_DeadSandboxFailsInsteadOfReprovisioning(t *testing.T) {
 	sandboxProvider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
 		return false, nil // definitively gone
 	}
+	cleanupFailure := errors.New("infrastructure cleanup unavailable")
+	provider := &recordingStopProvider{mockProvider: &mockProvider{
+		startHandle: &PreviewHandle{Handle: "handle-new", PrimaryPort: 3001},
+		stopErr:     cleanupFailure,
+	}}
 	mgr := NewManager(ManagerConfig{
 		Store:           db.NewPreviewStore(mock),
-		Provider:        &mockProvider{startHandle: &PreviewHandle{Handle: "handle-new", PrimaryPort: 3001}},
+		Provider:        provider,
 		SandboxProvider: sandboxProvider,
 		Logger:          zerolog.Nop(),
 		WorkerNodeID:    "worker-1",
@@ -1710,6 +1722,9 @@ func TestRecyclePreview_DeadSandboxFailsInsteadOfReprovisioning(t *testing.T) {
 	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
 	require.Error(t, err, "recycle should fail when the sandbox container no longer exists")
 	require.Contains(t, err.Error(), "no longer exists", "error should explain the sandbox is gone")
+	require.ErrorIs(t, err, cleanupFailure, "dead sandbox failure must retain infrastructure cleanup failures")
+	require.Equal(t, []string{"handle-old"}, provider.handles, "dead sandbox recovery must stop the exact old provider handle")
+	require.Equal(t, []error{nil}, provider.ctxErrs, "dead sandbox cleanup must receive a fresh live context")
 	require.NoError(t, mock.ExpectationsWereMet(), "dead-sandbox recycle should mark failed and clear the schedule without reprovisioning")
 }
 
@@ -2756,6 +2771,8 @@ func TestLaunchPreview_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, models.PreviewStatusReady, launched.Status)
 	require.Equal(t, "handle-new", launched.PreviewHandle)
+	require.Equal(t, previewID, provider.startOptions.PreviewID, "launch must give infrastructure the durable preview owner identity")
+	require.Equal(t, []string{"handle-new"}, provider.acknowledgedHandles, "successful launch must acknowledge the handle after it is committed")
 	observer, ok := provider.startObserver.(*managerServiceObserver)
 	require.True(t, ok, "LaunchPreview should pass the manager service observer to the provider")
 	require.Equal(t, "session_prewarm", observer.source, "LaunchPreview should use the initiator as the metrics source when no explicit metrics source is set")
@@ -2953,6 +2970,7 @@ func TestLaunchPreview_HandlePersistError(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "persist preview handle")
+	require.Equal(t, []string(nil), provider.acknowledgedHandles, "failed handle persistence must never acknowledge a launch for reconciliation")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
