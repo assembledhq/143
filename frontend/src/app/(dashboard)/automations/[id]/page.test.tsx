@@ -2670,6 +2670,114 @@ describe("AutomationDetailPage", () => {
     });
   });
 
+  // Two agents can both grade reasoning and still not share a scale, so the
+  // reset on an agent switch has to be decided per level. These two cases pin
+  // both sides of that: "max" is Claude Code only, "high" is common to both.
+  const renderCrossAgentModelSwitch = async (
+    storedReasoning: string,
+  ): Promise<{ body: () => Record<string, unknown> | null }> => {
+    let updateBody: Record<string, unknown> | null = null;
+    const stored: Record<string, unknown> = {
+      id: "auto-1",
+      org_id: "org-1",
+      repository_id: "repo-1",
+      name: "Weekly audit",
+      goal: "Check release health",
+      scope: "",
+      agent_type: "claude_code",
+      model_override: "claude-opus-5",
+      reasoning_effort: storedReasoning,
+      interval_value: 1,
+      interval_unit: "weeks",
+      base_branch: "main",
+      enabled: true,
+      timezone: "UTC",
+      last_run_at: null,
+      next_run_at: null,
+      priority: 50,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+
+    server.use(
+      // Codex is the org default, so its models are offered without a
+      // credential while the automation itself still runs on Claude Code.
+      http.get("*/api/v1/settings", () =>
+        HttpResponse.json({
+          data: { settings: { default_agent_type: "codex" } },
+        }),
+      ),
+      http.get("*/api/v1/settings/codex-auth/status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("*/api/v1/coding-credentials*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({ data: { ...stored } }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = (await request.json()) as Record<string, unknown>;
+        const { model, reasoning_effort } = updateBody as {
+          model?: string;
+          reasoning_effort?: string;
+        };
+        if (model !== undefined) stored.model_override = model;
+        if (reasoning_effort !== undefined) {
+          stored.reasoning_effort = reasoning_effort;
+        }
+        return HttpResponse.json({ data: { ...stored } });
+      }),
+    );
+
+    return { body: () => updateBody };
+  };
+
+  it("switches agents with a model-only patch and leaves the agent to the API", async () => {
+    const user = userEvent.setup();
+    // "high" is on both scales, so nothing about the reasoning row changes —
+    // the patch must carry the model alone. No agent_type: the API re-infers
+    // it, which is what keeps a shared "provider/model" id from dragging an
+    // automation onto whichever agent happens to claim it first.
+    const { body } = await renderCrossAgentModelSwitch("high");
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    await user.click(await screen.findByRole("option", { name: "gpt-5.6-sol" }));
+
+    await waitFor(() => {
+      expect(body()).toEqual({ model: "gpt-5.6-sol" });
+    });
+  });
+
+  it("clears a reasoning level the incoming agent does not grade", async () => {
+    const user = userEvent.setup();
+    // Claude Code grades "max"; Codex stops at "xhigh". Both agents support
+    // reasoning, so an agent-level check would have kept the dead value.
+    const { body } = await renderCrossAgentModelSwitch("max");
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    await user.click(await screen.findByRole("option", { name: "gpt-5.6-sol" }));
+
+    await waitFor(() => {
+      expect(body()).toEqual({ model: "gpt-5.6-sol", reasoning_effort: "" });
+    });
+  });
+
   it("clears an unsupported reasoning override in the same patch as the model switch", async () => {
     const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;
@@ -2745,9 +2853,9 @@ describe("AutomationDetailPage", () => {
     await user.click(screen.getByRole("combobox", { name: "Model" }));
     await user.click(await screen.findByRole("option", { name: "smart" }));
 
-    // The API re-validates the STORED reasoning override against the new
-    // model's agent, so a lone `model` patch would come back 400 and the row
-    // the user would have to clear is the one that disappears with the switch.
+    // Amp grades no effort at all, so the override has to go with the switch —
+    // and it has to ride along in this patch, because the row the user would
+    // otherwise clear it from disappears the moment the model lands.
     await waitFor(() => {
       expect(updateBody).toEqual({ model: "smart", reasoning_effort: "" });
     });

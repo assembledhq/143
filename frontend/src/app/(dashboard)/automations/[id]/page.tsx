@@ -100,6 +100,7 @@ import type {
 import { cn, formatDateTime, formatTimeAgo } from "@/lib/utils";
 import {
   getCodingAgentReasoningOptions,
+  isCodingAgentReasoningEffortSupported,
   supportsReasoningEffort,
   toCodingAgentReasoningEffort,
   type CodingAgentReasoningEffort,
@@ -1648,16 +1649,21 @@ function AutomationDetailRail({
                 density="dense"
                 triggerClassName={inlineControlClass}
                 onValueChange={(value) => {
-                  // The API re-validates the STORED reasoning override against
-                  // the model's agent, so a lone `model` patch is rejected
-                  // outright when the new agent can't accept it. The old batch
-                  // save cleared it in the same request; a per-field patch has
-                  // to carry that reset too, or the switch fails and the row
-                  // the user would need to clear is the one that disappears.
+                  // Picking a model from another agent's group moves the whole
+                  // automation to that agent, and the STORED reasoning override
+                  // belongs to the old one. The levels aren't a shared scale —
+                  // Codex stops at "xhigh" where Claude Code has "max" — so the
+                  // carried-over reset has to be per level, not just "does this
+                  // agent do reasoning at all". The API drops a stale override
+                  // on its own; sending it keeps the optimistic row from
+                  // showing a level the automation no longer has.
                   const nextAgentType = effectiveAgentTypeFor(value);
                   const clearsReasoning =
                     Boolean(automation.reasoning_effort) &&
-                    !supportsReasoningEffort(nextAgentType);
+                    !isCodingAgentReasoningEffortSupported(
+                      nextAgentType,
+                      automation.reasoning_effort ?? "",
+                    );
                   save({
                     body: {
                       model: value ?? "",

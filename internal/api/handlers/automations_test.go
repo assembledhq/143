@@ -484,6 +484,89 @@ func TestAutomationHandler_Create_BadJSON(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
+// resolveAutomationAgentAndModel decides which agent runs an automation after
+// a partial update, so its precedence rules are what let the detail page's
+// Model row patch `model` on its own and still land on a runnable pair.
+func TestResolveAutomationAgentAndModel(t *testing.T) {
+	t.Parallel()
+
+	str := func(s string) *string { return &s }
+
+	t.Run("model-only patch re-infers the agent when the stored one cannot run the model", func(t *testing.T) {
+		t.Parallel()
+
+		agentType, model, err := resolveAutomationAgentAndModel(
+			str(string(models.AgentTypeClaudeCode)),
+			str(models.ClaudeCodeModelOpus5),
+			nil,
+			str(models.CodexModelGPT56Sol),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, agentType)
+		require.Equal(t, string(models.AgentTypeCodex), *agentType)
+		require.NotNil(t, model)
+		require.Equal(t, models.CodexModelGPT56Sol, *model)
+	})
+
+	t.Run("model-only patch keeps the stored agent when it can still run the model", func(t *testing.T) {
+		t.Parallel()
+
+		// Pi and OpenCode both publish "provider/model" ids, and several are
+		// shared verbatim. Inference alone would hand every one of them to
+		// OpenCode; a Pi automation editing its model must stay on Pi.
+		agentType, model, err := resolveAutomationAgentAndModel(
+			str(string(models.AgentTypePi)),
+			str(models.PiModelClaudeOpus48),
+			nil,
+			str(models.PiModelClaudeSonnet46),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, agentType)
+		require.Equal(t, string(models.AgentTypePi), *agentType)
+		require.NotNil(t, model)
+		require.Equal(t, models.PiModelClaudeSonnet46, *model)
+	})
+
+	t.Run("model-only patch still rejects a model no agent owns", func(t *testing.T) {
+		t.Parallel()
+
+		_, _, err := resolveAutomationAgentAndModel(
+			str(string(models.AgentTypeClaudeCode)),
+			str(models.ClaudeCodeModelOpus5),
+			nil,
+			str("not-a-real-model"),
+		)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "model")
+	})
+
+	t.Run("an explicit agent_type wins over the model it disagrees with", func(t *testing.T) {
+		t.Parallel()
+
+		// The caller named both halves, so the mismatch is theirs to fix —
+		// silently retargeting the agent here would make `agent_type` advisory.
+		_, _, err := resolveAutomationAgentAndModel(
+			str(string(models.AgentTypeClaudeCode)),
+			str(models.ClaudeCodeModelOpus5),
+			str(string(models.AgentTypeClaudeCode)),
+			str(models.CodexModelGPT56Sol),
+		)
+		require.Error(t, err)
+	})
+
+	t.Run("an agent_type-only patch is still validated against the stored model", func(t *testing.T) {
+		t.Parallel()
+
+		_, _, err := resolveAutomationAgentAndModel(
+			str(string(models.AgentTypeClaudeCode)),
+			str(models.ClaudeCodeModelOpus5),
+			str(string(models.AgentTypeCodex)),
+			nil,
+		)
+		require.Error(t, err)
+	})
+}
+
 // resolveAutomationSchedule is the single validator behind both Create and
 // PreviewSchedule. Pinning its defaults and error codes here is what keeps a
 // preview from accepting or rejecting anything Create would not.
@@ -1261,6 +1344,141 @@ func TestAutomationHandler_Update_BlankModelPreservesExplicitAgentType(t *testin
 	require.Equal(t, string(models.AgentTypeClaudeCode), *resp.Data.AgentType)
 	require.Nil(t, resp.Data.ModelOverride)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// The detail page's Model row patches `model` on its own, so switching an
+// automation from a Claude model to a Codex one arrives with no agent_type at
+// all. Before Update re-inferred, that request 400'd on INVALID_MODEL and the
+// rail had no way to move an automation between agents.
+func TestAutomationHandler_Update_CrossAgentModelPatchRetargetsAgent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+	iv := 1
+	unit := models.ScheduleUnitDays
+	agentType := string(models.AgentTypeClaudeCode)
+	model := models.ClaudeCodeModelOpus5
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		AgentType: &agentType, ModelOverride: &model,
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+	mock.ExpectExec("UPDATE automations SET").
+		WithArgs(testAnyArgs(32)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{"model": models.CodexModelGPT56Sol}
+	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Update(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Data.AgentType)
+	require.Equal(t, string(models.AgentTypeCodex), *resp.Data.AgentType)
+	require.NotNil(t, resp.Data.ModelOverride)
+	require.Equal(t, models.CodexModelGPT56Sol, *resp.Data.ModelOverride)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// Claude Code grades effort one step further than Codex ("max"), so the same
+// Model-row patch that retargets the agent can strand a reasoning override the
+// new agent has never heard of. The request never named reasoning_effort, so
+// the stale value is dropped rather than 400'd back at the caller.
+func TestAutomationHandler_Update_CrossAgentModelPatchDropsUnsupportedReasoning(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+	iv := 1
+	unit := models.ScheduleUnitDays
+	agentType := string(models.AgentTypeClaudeCode)
+	model := models.ClaudeCodeModelOpus5
+	reasoning := models.ReasoningEffortMax
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		AgentType: &agentType, ModelOverride: &model, ReasoningEffort: &reasoning,
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+	mock.ExpectExec("UPDATE automations SET").
+		WithArgs(testAnyArgs(32)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{"model": models.CodexModelGPT56Sol}
+	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Update(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Data.AgentType)
+	require.Equal(t, string(models.AgentTypeCodex), *resp.Data.AgentType)
+	require.Nil(t, resp.Data.ReasoningEffort)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// An explicit reasoning_effort the target agent cannot run is still the
+// caller's mistake, so it keeps its 400 rather than being silently dropped.
+func TestAutomationHandler_Update_RejectsExplicitUnsupportedReasoning(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+	iv := 1
+	unit := models.ScheduleUnitDays
+	agentType := string(models.AgentTypeCodex)
+	model := models.CodexModelGPT56Sol
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		AgentType: &agentType, ModelOverride: &model,
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{"reasoning_effort": string(models.ReasoningEffortMax)}
+	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Update(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "INVALID_REASONING_EFFORT")
 }
 
 // TestAutomationHandler_Update_TimezoneOnlyRecomputesNextRunAt pins the Update
