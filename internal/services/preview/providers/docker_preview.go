@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/google/uuid"
@@ -41,6 +42,7 @@ var _ preview.PreviewCapableProvider = (*DockerPreviewProvider)(nil)
 var _ preview.PreviewBuildSnapshotPrewarmProvider = (*DockerPreviewProvider)(nil)
 var _ preview.PreviewCachePrewarmProvider = (*DockerPreviewProvider)(nil)
 var _ preview.PreviewSoftRestartProvider = (*DockerPreviewProvider)(nil)
+var _ preview.PreviewHandleAcknowledgementProvider = (*DockerPreviewProvider)(nil)
 
 // DockerPreviewClient defines the subset of the Docker API used for preview infrastructure.
 type DockerPreviewClient interface {
@@ -101,6 +103,24 @@ type DockerPreviewProvider struct {
 	mu       sync.RWMutex
 	previews map[string]*previewState // handle → state
 
+	// Cleanup ownership survives removal from the serving map. Cleanup is
+	// serialized separately so a retry, stop, and reconciliation never race.
+	cleanupMu               sync.Mutex
+	cleanupWorkMu           sync.Mutex
+	cleanupReconcileMu      sync.Mutex
+	cleanupPendingCursor    uint64
+	cleanupPersistedCursor  uint64
+	cleanupContainerCursor  uint64
+	cleanupVolumeCursor     uint64
+	cleanupOwnerCursor      uint64
+	cleanupLocalOwnerCursor uint64
+	cleanupRecords          map[string]*infrastructureCleanupRecord
+	stopCalls               singleflight.Group
+	workerNodeID            string
+	cleanupResolver         preview.InfrastructureCleanupResolver
+	cleanupStartupCutoff    time.Time
+	cleanupMetrics          *metrics.PreviewInfrastructureCleanupMetrics
+
 	// imagePulls deduplicates concurrent pulls of the same image ref. Two
 	// preview starts hitting an absent image at the same moment share a
 	// single pull instead of fanning out N redundant streams.
@@ -111,7 +131,8 @@ type DockerPreviewProvider struct {
 
 	// testParallelBuildDrainGrace overrides parallelBuildCancelDrainGrace in
 	// tests; zero means the production default.
-	testParallelBuildDrainGrace time.Duration
+	testParallelBuildDrainGrace           time.Duration
+	testInfrastructureCleanupPhaseTimeout time.Duration
 }
 
 type previewDialer func(ctx context.Context, addr string) (net.Conn, error)
@@ -123,10 +144,14 @@ func defaultPreviewDialer(ctx context.Context, addr string) (net.Conn, error) {
 
 // previewState tracks all running components of a preview.
 type previewState struct {
-	handle  string
-	sandbox *agent.Sandbox
-	config  *models.PreviewConfig
-	opts    preview.StartPreviewOptions
+	handle        string
+	starting      bool
+	acknowledged  bool
+	stopRequested bool
+	launchCancel  context.CancelFunc
+	sandbox       *agent.Sandbox
+	config        *models.PreviewConfig
+	opts          preview.StartPreviewOptions
 
 	// Infrastructure containers (keyed by infra_name).
 	infra map[string]*preview.InfraHandle
@@ -351,6 +376,8 @@ func NewDockerPreviewProvider(
 		logger:                     logger,
 		dialer:                     defaultPreviewDialer,
 		previews:                   make(map[string]*previewState),
+		cleanupRecords:             make(map[string]*infrastructureCleanupRecord),
+		cleanupStartupCutoff:       time.Now(),
 		packageManagerCacheEnabled: true,
 	}
 	for _, opt := range opts {
@@ -363,7 +390,7 @@ func NewDockerPreviewProvider(
 // StartPreview
 // =============================================================================
 
-func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) (*preview.PreviewHandle, error) {
+func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) (result *preview.PreviewHandle, startErr error) {
 	handle, err := generateHandle()
 	if err != nil {
 		return nil, fmt.Errorf("generate preview handle: %w", err)
@@ -371,15 +398,19 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	// Use context.Background() so service processes outlive the StartPreview call.
 	// The cancelFn is stored in previewState and called by StopPreview.
 	svcCtx, cancelFn := context.WithCancel(context.Background())
+	ctx, launchCancel := context.WithCancel(ctx)
+	defer launchCancel()
 
 	state := &previewState{
-		handle:   handle,
-		sandbox:  sb,
-		config:   cfg,
-		opts:     opts,
-		infra:    make(map[string]*preview.InfraHandle),
-		services: make(map[string]*serviceState),
-		cancelFn: cancelFn,
+		handle:       handle,
+		starting:     true,
+		launchCancel: launchCancel,
+		sandbox:      sb,
+		config:       cfg,
+		opts:         opts,
+		infra:        make(map[string]*preview.InfraHandle),
+		services:     make(map[string]*serviceState),
+		cancelFn:     cancelFn,
 	}
 
 	d.mu.Lock()
@@ -389,6 +420,19 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	}
 	d.previews[handle] = state
 	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		state.starting = false
+		stopped := state.stopRequested
+		d.mu.Unlock()
+		if stopped {
+			result = nil
+			if startErr == nil {
+				startErr = fmt.Errorf("preview stopped during launch: %w", context.Canceled)
+			}
+			d.cleanupState(handle)
+		}
+	}()
 
 	infraCreds := make(map[string]preview.InfraCredential)
 	var svcEnvs map[string]map[string]string
@@ -406,7 +450,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 					return phaseErr
 				}
 
-				ih, err := d.provisionInfra(ctx, sb, handle, name, infraCfg, tmpl)
+				ih, err := d.provisionInfra(ctx, sb, handle, name, infraCfg, tmpl, opts)
 				if err != nil {
 					phaseErr = fmt.Errorf("provision infrastructure %q: %w", name, err)
 					notifyPhaseEnd(observer, "provision_infrastructure", phaseErr)
@@ -414,6 +458,10 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 					return phaseErr
 				}
 				d.mu.Lock()
+				if state.stopRequested {
+					d.mu.Unlock()
+					return fmt.Errorf("%w: preview stopped during infrastructure creation", preview.ErrInfraStartFailed)
+				}
 				state.infra[name] = ih
 				d.mu.Unlock()
 				infraCreds[name] = ih.Credential
@@ -659,6 +707,16 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		InfraCredentials: infraCreds,
 		PartiallyReady:   partiallyReady,
 	}, nil
+}
+
+// AcknowledgePreviewHandle releases the provider-to-manager persistence fence.
+// A concurrent stop cannot resurrect a handle that has already been removed.
+func (d *DockerPreviewProvider) AcknowledgePreviewHandle(handle string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if state, exists := d.previews[handle]; exists {
+		state.acknowledged = true
+	}
 }
 
 func (d *DockerPreviewProvider) PrewarmPreviewInstallCaches(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) error {
@@ -1070,12 +1128,27 @@ func (d *DockerPreviewProvider) StopPreview(ctx context.Context, handle string) 
 // long it blocks awaiting post-ready cache uploads, so the caller can trade
 // cache warmth against how long it is willing to make someone wait.
 func (d *DockerPreviewProvider) StopPreviewWithBackgroundWait(ctx context.Context, handle string, backgroundWait time.Duration) error {
-	d.mu.RLock()
+	_, err, _ := d.stopCalls.Do(handle, func() (any, error) {
+		return nil, d.stopPreviewWithBackgroundWait(ctx, handle, backgroundWait)
+	})
+	return err
+}
+
+func (d *DockerPreviewProvider) stopPreviewWithBackgroundWait(ctx context.Context, handle string, backgroundWait time.Duration) error {
+	d.mu.Lock()
 	state, ok := d.previews[handle]
-	d.mu.RUnlock()
+	var launchCancel context.CancelFunc
+	if ok {
+		state.stopRequested = true
+		launchCancel = state.launchCancel
+	}
+	d.mu.Unlock()
 
 	if !ok {
-		return nil // already stopped — idempotent
+		return d.cleanupInfrastructureHandle(handle)
+	}
+	if launchCancel != nil {
+		launchCancel()
 	}
 
 	// A non-positive budget is the caller asking for the default, not for zero
@@ -1097,24 +1170,22 @@ func (d *DockerPreviewProvider) StopPreviewWithBackgroundWait(ctx context.Contex
 			Msg("stop preview: proceeding before background work finished; an in-flight build cache save may be aborted by teardown")
 	}
 
-	// Tear down infrastructure containers.
-	for name, ih := range state.infra {
-		stopCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		stopTimeout := 10
-		if err := d.client.ContainerStop(stopCtx, ih.ContainerID, container.StopOptions{Timeout: &stopTimeout}); err != nil {
-			d.logger.Warn().Err(err).Str("infra", name).Msg("failed to stop infrastructure container")
+	// Also register legacy/exact local handles. Provision registers earlier,
+	// including start failures that never become part of state.infra.
+	d.mu.RLock()
+	for _, ih := range state.infra {
+		if ih != nil {
+			d.rememberInfrastructure(ih.ContainerID, ih.Credential.Host, d.infrastructureOwner(handle, state.opts), false)
 		}
-		if err := d.client.ContainerRemove(stopCtx, ih.ContainerID, container.RemoveOptions{Force: true}); err != nil {
-			d.logger.Warn().Err(err).Str("infra", name).Msg("failed to remove infrastructure container")
-		}
-		cancel()
 	}
+	d.mu.RUnlock()
+	cleanupErr := d.cleanupInfrastructureHandle(handle)
 
 	d.mu.Lock()
 	delete(d.previews, handle)
 	d.mu.Unlock()
 
-	return nil
+	return cleanupErr
 }
 
 const serviceTerminateTimeout = 5 * time.Second
@@ -1329,7 +1400,11 @@ func (d *DockerPreviewProvider) provisionInfra(
 	previewHandle, infraName string,
 	infraCfg models.InfrastructureConfig,
 	tmpl preview.InfraTemplate,
+	launchOpts ...preview.StartPreviewOptions,
 ) (*preview.InfraHandle, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("%w: preview launch canceled: %v", preview.ErrInfraStartFailed, err)
+	}
 	networkName, err := d.resolveSandboxNetwork(ctx, sb.ID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve sandbox network: %w", err)
@@ -1353,6 +1428,29 @@ func (d *DockerPreviewProvider) provisionInfra(
 	if err := d.ensureImage(ctx, tmpl.Image); err != nil {
 		return nil, err
 	}
+	imageConfig, err := d.client.ImageInspect(ctx, tmpl.Image)
+	if err != nil {
+		return nil, fmt.Errorf("%w: inspect image volumes: %v", preview.ErrInfraImageUnavailable, err)
+	}
+	var opts preview.StartPreviewOptions
+	if len(launchOpts) > 0 {
+		opts = launchOpts[0]
+	}
+	owner := d.infrastructureOwner(previewHandle, opts)
+	labels := infrastructureLabels(owner, infraName, time.Now())
+	var mounts []mount.Mount
+	if imageConfig.Config != nil {
+		paths := make([]string, 0, len(imageConfig.Config.Volumes))
+		for target := range imageConfig.Config.Volumes {
+			paths = append(paths, target)
+		}
+		sort.Strings(paths)
+		for _, target := range paths {
+			volumeLabels := infrastructureLabels(owner, infraName, time.Now())
+			volumeLabels[infrastructureVolumeKindLabel] = "anonymous"
+			mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Target: target, VolumeOptions: &mount.VolumeOptions{Labels: volumeLabels}})
+		}
+	}
 
 	env := d.buildInfraEnv(infraCfg.Template, cred)
 	memLimit := int64(tmpl.DefaultMemMB) * 1024 * 1024
@@ -1363,6 +1461,7 @@ func (d *DockerPreviewProvider) provisionInfra(
 			Image:    tmpl.Image,
 			Env:      env,
 			Hostname: containerName,
+			Labels:   labels,
 		},
 		&container.HostConfig{
 			Resources: container.Resources{
@@ -1370,6 +1469,7 @@ func (d *DockerPreviewProvider) provisionInfra(
 				NanoCPUs: cpuNanos,
 			},
 			NetworkMode: container.NetworkMode(networkName),
+			Mounts:      mounts,
 		},
 		&network.NetworkingConfig{
 			EndpointsConfig: map[string]*network.EndpointSettings{
@@ -1380,17 +1480,36 @@ func (d *DockerPreviewProvider) provisionInfra(
 		containerName,
 	)
 	if err != nil {
+		// A transport failure may follow a successful daemon create. A name
+		// conflict is never ours to clean up; all other uncertain results must
+		// be inspected for the complete ownership tuple before removal.
+		if (!definitiveInfrastructureCreateRejection(err) || resp.ID != "") && !cerrdefs.IsConflict(err) && validInfrastructureOwner(owner) {
+			d.rememberInfrastructure(containerName, containerName, owner, true)
+			if cleanupErr := d.cleanupInfrastructureHandle(previewHandle); cleanupErr != nil {
+				d.logger.Warn().Err(cleanupErr).Str("handle", previewHandle).Msg("failed to clean up uncertain infrastructure creation")
+			}
+		}
 		return nil, fmt.Errorf("%w: create container for image %q: %v", preview.ErrInfraStartFailed, tmpl.Image, err)
+	}
+	d.rememberInfrastructure(resp.ID, containerName, owner, false)
+	if err := ctx.Err(); err != nil {
+		if cleanupErr := d.cleanupInfrastructureHandle(previewHandle); cleanupErr != nil {
+			d.logger.Warn().Err(cleanupErr).Str("handle", previewHandle).Msg("failed to remove infrastructure created after launch cancellation")
+		}
+		return nil, fmt.Errorf("%w: launch canceled after container creation: %v", preview.ErrInfraStartFailed, err)
 	}
 
 	if err := d.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		// Cleanup the created container on start failure.
-		cleanCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if rmErr := d.client.ContainerRemove(cleanCtx, resp.ID, container.RemoveOptions{Force: true}); rmErr != nil {
-			d.logger.Warn().Err(rmErr).Str("container_id", resp.ID).Msg("failed to remove container after start failure")
+		if cleanupErr := d.cleanupInfrastructureHandle(previewHandle); cleanupErr != nil {
+			d.logger.Warn().Err(cleanupErr).Str("container_id", resp.ID).Msg("failed to remove container after start failure")
 		}
 		return nil, fmt.Errorf("%w: start container: %v", preview.ErrInfraStartFailed, err)
+	}
+	if err := ctx.Err(); err != nil {
+		if cleanupErr := d.cleanupInfrastructureHandle(previewHandle); cleanupErr != nil {
+			d.logger.Warn().Err(cleanupErr).Str("handle", previewHandle).Msg("failed to remove infrastructure started after launch cancellation")
+		}
+		return nil, fmt.Errorf("%w: launch canceled after container start: %v", preview.ErrInfraStartFailed, err)
 	}
 
 	return &preview.InfraHandle{
@@ -4034,7 +4153,9 @@ func buildInfraCredential(infraName, host string, port int) (preview.InfraCreden
 func (d *DockerPreviewProvider) cleanupState(handle string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_ = d.StopPreview(ctx, handle)
+	if err := d.StopPreview(ctx, handle); err != nil {
+		d.logger.Warn().Err(err).Str("handle", handle).Msg("preview cleanup remains pending")
+	}
 }
 
 // =============================================================================

@@ -190,6 +190,11 @@ jobs:
           INTEGRATION_DATABASE_URL=$DATABASE_URL \
           go test -tags=integration -timeout=120s ./internal/integration/...
 
+      # Exercise real image-declared volumes: mocks cannot prove that Docker
+      # removed preview data or preserved explicitly named storage.
+      - name: Verify preview infrastructure volume lifecycle
+        run: go test -tags=docker_integration ./internal/services/preview/providers -run '^TestDockerIntegration' -count=1 -timeout=180s
+
       - name: Check backend coverage floor (main only)
         if: github.event_name == 'push'
         run: |

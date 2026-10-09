@@ -655,6 +655,52 @@ Many full-stack apps need a database or cache to function. Not every org will ha
 5. If an `init_script` is specified, the preview manager runs it against the infrastructure after the container is healthy but before starting application services
 6. Infrastructure containers are torn down when the preview stops or expires
 
+#### Infrastructure Teardown and Recovery
+
+Full teardown removes infrastructure containers and their anonymous data volumes.
+Application-only soft restarts retain infrastructure and its data. Named storage
+is not part of the preview cleanup contract.
+
+New infrastructure containers carry the versioned
+`com.143.preview.infrastructure=v1` ownership label, together with organization,
+preview, session, full provider handle, worker generation, and infrastructure
+name. Each image-declared data path is mounted as an explicitly anonymous volume
+with the same ownership labels. Paths come from image inspection rather than a
+hardcoded database-version path.
+
+Serving status and cleanup completion are independent. Teardown uses bounded
+contexts independent of request cancellation, serializes concurrent stops, and
+retains unsuccessful container or volume removals for retry. Container removal
+alone does not prove volume removal: the provider inspects the actual mounted
+volume identities, removes the container without automatic volume deletion, and
+deletes only volumes that pass the reference checks. Lost create responses retain
+cleanup ownership even when the container is not yet visible. Cleanup failures
+are logged; `preview.infrastructure.cleanup.pending` and
+`preview.infrastructure.cleanup.passes` expose pending teardown and pass outcomes.
+
+Before preview admission or lease renewal, a restarted worker retires its own
+pre-restart serving instances and runtimes using a database-clock cutoff. This
+also covers local previews without separate runtime rows. It preserves newer
+instances, surviving runtimes, and other worker generations. Background
+reconciliation checks exact tenant and preview identities, full handles,
+persisted serving state, and generation
+liveness. A new local handle remains protected until the manager acknowledges
+that it has persisted the handle. In-flight starts and fresh overlapping
+generations, including draining workers, remain protected. Resources from earlier
+processes additionally require a startup cutoff and grace period.
+
+Routine deployment container pruning and opt-in volume pruning exclude managed
+preview infrastructure so its ownership metadata survives until reconciliation.
+Volume reconciliation uses non-force deletion and checks running and stopped
+container mounts, including bind references to the volume data directory.
+Unknown or malformed ownership,
+lookup failures, named storage, and unlabelled legacy volumes fail closed; legacy
+data remains an explicit operator cleanup task. Sandbox snapshots and dependency
+caches have separate retention policies.
+
+The `docker_integration` tests exercise real image mounts and deletion through the
+provider. Backend CI runs them explicitly and fails if Docker is unavailable.
+
 #### Available Templates
 
 Platform infrastructure templates are maintained by 143 and versioned independently from user repos. MVP templates:

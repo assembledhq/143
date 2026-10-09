@@ -91,21 +91,23 @@ func (w *CleanupWorker) cleanup() {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	var expiredCount, idleCount int
 	var resourceSamplesDeleted int64
 
 	now := time.Now()
 
 	// Stop expired previews (hard TTL exceeded).
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	expired, err := w.manager.store.ListExpiredPreviewsForWorker(ctx, w.manager.WorkerNodeID(), now)
+	cancel()
 	if err != nil {
 		w.logger.Warn().Err(err).Msg("cleanup: failed to list expired previews")
 	} else {
 		for _, p := range expired {
-			if stopErr := w.manager.StopPreviewWithReason(ctx, p.OrgID, p.ID, models.PreviewStoppedReasonExpired); stopErr != nil {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			stopErr := w.manager.StopPreviewWithReason(stopCtx, p.OrgID, p.ID, models.PreviewStoppedReasonExpired)
+			stopCancel()
+			if stopErr != nil {
 				w.logger.Warn().Err(stopErr).
 					Str("preview_id", p.ID.String()).
 					Msg("cleanup: failed to stop expired preview")
@@ -117,12 +119,17 @@ func (w *CleanupWorker) cleanup() {
 
 	// Stop idle previews (no activity for idleTimeout).
 	idleSince := now.Add(-w.idleTimeout)
+	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 	idle, err := w.manager.store.ListIdlePreviewsForWorker(ctx, w.manager.WorkerNodeID(), idleSince)
+	cancel()
 	if err != nil {
 		w.logger.Warn().Err(err).Msg("cleanup: failed to list idle previews")
 	} else {
 		for _, p := range idle {
-			if stopErr := w.manager.StopPreviewWithReason(ctx, p.OrgID, p.ID, models.PreviewStoppedReasonExpired); stopErr != nil {
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			stopErr := w.manager.StopPreviewWithReason(stopCtx, p.OrgID, p.ID, models.PreviewStoppedReasonExpired)
+			stopCancel()
+			if stopErr != nil {
 				w.logger.Warn().Err(stopErr).
 					Str("preview_id", p.ID.String()).
 					Msg("cleanup: failed to stop idle preview")
@@ -134,7 +141,9 @@ func (w *CleanupWorker) cleanup() {
 
 	if w.resourceSampleRetention > 0 {
 		cutoff := now.Add(-w.resourceSampleRetention)
+		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 		deleted, err := w.manager.store.DeleteExpiredPreviewResourceSamples(ctx, cutoff, w.resourceSampleDeleteLimit)
+		cancel()
 		if err != nil {
 			w.logger.Warn().Err(err).Msg("cleanup: failed to delete expired preview resource samples")
 		} else {
