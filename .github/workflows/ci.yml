@@ -114,7 +114,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        # Docker Official Image mirror avoids Docker Hub pull limits in CI.
+        image: public.ecr.aws/docker/library/postgres:17
         env:
           POSTGRES_USER: onefortythree
           POSTGRES_PASSWORD: dev
@@ -193,7 +194,12 @@ jobs:
       # Exercise real image-declared volumes: mocks cannot prove that Docker
       # removed preview data or preserved explicitly named storage.
       - name: Verify preview infrastructure volume lifecycle
-        run: go test -tags=docker_integration ./internal/services/preview/providers -run '^TestDockerIntegration' -count=1 -timeout=180s
+        # Seed the production template's image name from the official mirror so
+        # these tests also avoid Docker Hub while exercising the same image.
+        run: |
+          docker pull public.ecr.aws/docker/library/postgres:17-alpine
+          docker tag public.ecr.aws/docker/library/postgres:17-alpine postgres:17-alpine
+          go test -tags=docker_integration ./internal/services/preview/providers -run '^TestDockerIntegration' -count=1 -timeout=180s
 
       - name: Check backend coverage floor (main only)
         if: github.event_name == 'push'
@@ -376,7 +382,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        image: public.ecr.aws/docker/library/postgres:17
         env:
           POSTGRES_USER: onefortythree
           POSTGRES_PASSWORD: dev
