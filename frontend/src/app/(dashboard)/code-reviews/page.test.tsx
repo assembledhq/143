@@ -631,7 +631,7 @@ describe("CodeReviewsPage", () => {
     expect(within(stats).getByText("72%")).toBeInTheDocument();
     expect(within(stats).getByRole("button", { name: "About Review approval rate" })).toBeInTheDocument();
     expect(within(stats).getByText("Median turnaround")).toBeInTheDocument();
-    expect(within(stats).getByText("8m")).toBeInTheDocument();
+    expect(within(stats).getByText("8m 0s")).toBeInTheDocument();
     const timeWindow = screen.getByRole("button", { name: "Time window" });
     expect(timeWindow).toHaveTextContent("Last 30 days");
     const filters = timeWindow.closest("#code-review-filters");

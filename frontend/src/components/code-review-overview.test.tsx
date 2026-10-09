@@ -53,7 +53,7 @@ describe("CodeReviewSummaryCards", () => {
           reviews_completed: 128,
           automatically_approved: 92,
           needs_human_review: 21,
-          median_turnaround_seconds: 480,
+          median_turnaround_seconds: 564,
         }}
         isLoading={false}
         isError={false}
@@ -67,6 +67,7 @@ describe("CodeReviewSummaryCards", () => {
     expect(within(summary).queryByText("Queued to completed")).not.toBeInTheDocument();
     expect(within(summary).getByText("92 of 128 completed reviews")).toBeInTheDocument();
     expect(within(summary).getByText("72%")).toBeInTheDocument();
+    expect(within(summary).getByText("9m 24s")).toBeInTheDocument();
 
     const trigger = within(summary).getByRole("button", { name: "About Review approval rate" });
     await user.hover(trigger);
@@ -83,10 +84,18 @@ describe("CodeReviewSummaryCards", () => {
 describe("formatReviewTurnaround", () => {
   it.each([
     { seconds: null, expected: "—" },
+    { seconds: Number.NaN, expected: "—" },
+    { seconds: Number.POSITIVE_INFINITY, expected: "—" },
+    { seconds: 0, expected: "0s" },
     { seconds: 45, expected: "45s" },
-    { seconds: 8 * 60, expected: "8m" },
-    { seconds: 90 * 60, expected: "1h 30m" },
-    { seconds: 48 * 60 * 60, expected: "48h" },
+    { seconds: 59.4, expected: "59s" },
+    { seconds: 59.5, expected: "1m 0s" },
+    { seconds: 8 * 60, expected: "8m 0s" },
+    { seconds: 9 * 60 + 24.4, expected: "9m 24s" },
+    { seconds: 9 * 60 + 24.5, expected: "9m 25s" },
+    { seconds: 60 * 60 - 0.5, expected: "1h 0m 0s" },
+    { seconds: 90 * 60 + 24, expected: "1h 30m 24s" },
+    { seconds: 48 * 60 * 60, expected: "48h 0m 0s" },
   ])("formats $seconds seconds as $expected", ({ seconds, expected }) => {
     expect(formatReviewTurnaround(seconds)).toBe(expected);
   });
