@@ -743,7 +743,8 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueO
 	return id, err
 }
 
-// DeleteExpiredCompleted removes completed/failed jobs older than the given number of days.
+// DeleteExpiredCompleted removes at most 10000 unreferenced succeeded/failed
+// jobs older than the retention period. Subsequent calls continue cleanup progress.
 // lint:allow-no-orgid reason="system-wide retention cleanup across all orgs"
 func (s *JobStore) DeleteExpiredCompleted(ctx context.Context, retentionDays int) (int64, error) {
 	var deleted int64

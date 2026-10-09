@@ -798,6 +798,11 @@ func reconcileCodeReviewSessionCompletion(ctx context.Context, stores *Stores, l
 		return
 	}
 	if session.Status.IsTerminal() && !(recoverFailed && session.Status == models.SessionStatusFailed && session.Origin == models.SessionOriginCodeReview) {
+		if recoverFailed && session.Status == models.SessionStatusCompleted && session.Origin == models.SessionOriginCodeReview {
+			// Confirmed assessment recovery can complete the parent in its
+			// transaction. Notify subscribers from the committed snapshot.
+			stores.Sessions.PublishCommittedSessionStatus(ctx, job.OrgID, session)
+		}
 		return
 	}
 	if err := stores.Sessions.UpdateStatus(ctx, job.OrgID, job.SessionID, models.SessionStatusCompleted); err != nil {

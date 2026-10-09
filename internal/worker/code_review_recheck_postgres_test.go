@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -18,8 +16,6 @@ import (
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -119,31 +115,8 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 		t.Skip("set TEST_DATABASE_URL for PostgreSQL supervisor proof")
 	}
 	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, dsn)
-	require.NoError(t, err, "connect disposable PostgreSQL")
-	schema := "review_supervisor_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	_, err = admin.Exec(ctx, `CREATE SCHEMA `+schema)
-	require.NoError(t, err, "create isolated supervisor schema")
-	t.Cleanup(func() {
-		_, cleanupErr := admin.Exec(ctx, `DROP SCHEMA `+schema+` CASCADE`)
-		require.NoError(t, cleanupErr, "drop isolated supervisor schema")
-		require.NoError(t, admin.Close(ctx), "close database connection")
-	})
-	cfg, err := pgxpool.ParseConfig(dsn)
-	require.NoError(t, err, "parse PostgreSQL URL")
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	require.NoError(t, err, "create isolated supervisor pool")
-	t.Cleanup(pool.Close)
-	migrations, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.up.sql"))
-	require.NoError(t, err, "list actual migrations")
-	sort.Strings(migrations)
-	for _, path := range migrations {
-		up, readErr := os.ReadFile(path)
-		require.NoError(t, readErr, "read actual migration")
-		_, applyErr := pool.Exec(ctx, string(up))
-		require.NoError(t, applyErr, "apply actual migration "+filepath.Base(path))
-	}
+	pool := fullRecoveryPostgresPool(t, ctx)
+	var err error
 	org, integration, repo, pr, policy, session, thread, metadata, baseline, recheck := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	repoName := "test/recheck"
 	for _, stmt := range []struct {

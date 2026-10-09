@@ -1194,14 +1194,6 @@ func TestHandlePullRequestEvent_MergedFlow(t *testing.T) {
 				AddRow(uuid.New(), now, now),
 		)
 
-	// Mock: Enqueue job.
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()),
-		)
-
 	event := PullRequestEvent{
 		Action: "closed",
 		Number: 42,
@@ -1269,14 +1261,6 @@ func TestHandlePullRequestEvent_MergedWithNilSessionID(t *testing.T) {
 				AddRow(uuid.New(), now, now),
 		)
 
-	// Mock: Enqueue job.
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()),
-		)
-
 	event := PullRequestEvent{
 		Action: "closed",
 		Number: 42,
@@ -1293,8 +1277,8 @@ func TestHandlePullRequestEvent_MergedWithNilSessionID(t *testing.T) {
 }
 
 // TestHandlePullRequestEvent_MergedPrefersMergeCommitSHA confirms the webhook
-// path threads the merge commit SHA through to the deploy row and the
-// evaluate_experiment job, matching what the API merge path emits. Without
+// path threads the merge commit SHA through to the deploy row, matching
+// what the API merge path emits. Without
 // this preference, squash/rebase merges would record the pre-merge head SHA
 // in deploys.commit_sha — a different commit than what's actually on main.
 func TestHandlePullRequestEvent_MergedPrefersMergeCommitSHA(t *testing.T) {
@@ -1340,11 +1324,6 @@ func TestHandlePullRequestEvent_MergedPrefersMergeCommitSHA(t *testing.T) {
 			"commit_sha":      &mergeCommitSHA,
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "deployed_at", "created_at"}).AddRow(uuid.New(), now, now))
-
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	event := PullRequestEvent{Action: "closed", Number: 42}
 	event.PR.Merged = true
@@ -1401,11 +1380,6 @@ func TestHandlePullRequestEvent_MergedFallsBackToHeadSHAWhenMergeCommitMissing(t
 			"commit_sha":      &headSHA,
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "deployed_at", "created_at"}).AddRow(uuid.New(), now, now))
-
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	event := PullRequestEvent{Action: "closed", Number: 42}
 	event.PR.Merged = true
@@ -2101,7 +2075,8 @@ func TestHandlePullRequestReviewEvent_ApprovedFlow(t *testing.T) {
 	prMock := newMockPool(t)
 	jobMock := newMockPool(t)
 	prStore := db.NewPullRequestStore(prMock)
-	jobStore := db.NewJobStore(jobMock)
+	jobCalls := &mergeFollowupJobCalls{DBTX: jobMock}
+	jobStore := db.NewJobStore(jobCalls)
 
 	svc := &PRService{
 		pullRequests: prStore,
@@ -2122,14 +2097,6 @@ func TestHandlePullRequestReviewEvent_ApprovedFlow(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	// Mock: Enqueue reinforce_memories job (triggered on approval).
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()),
-		)
-
 	event := PullRequestReviewEvent{
 		Action: "submitted",
 	}
@@ -2141,6 +2108,7 @@ func TestHandlePullRequestReviewEvent_ApprovedFlow(t *testing.T) {
 	err := svc.HandlePullRequestReviewEvent(context.Background(), event)
 	require.NoError(t, err, "HandlePullRequestReviewEvent should not return an error for approved review")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all PR store expectations should be met")
+	require.Equal(t, 0, jobCalls.calls, "approvals must not reinforce memories without exact consumed identities")
 	require.NoError(t, jobMock.ExpectationsWereMet(), "all job store expectations should be met")
 }
 
@@ -3448,14 +3416,6 @@ func TestHandlePullRequestEvent_MergedStopsPreview(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "deployed_at", "created_at"}).
 				AddRow(uuid.New(), now, now),
-		)
-
-	// 4. Enqueue evaluate_experiment job.
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()),
 		)
 
 	// 5. Repo lookup (org-scoped).

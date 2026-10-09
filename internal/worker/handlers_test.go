@@ -4151,10 +4151,9 @@ func TestLinearJobHandlers(t *testing.T) {
 		require.ErrorAs(t, err, &retryable, "refresh_linear_team_keys should return a retryable error so transient outages don't drop the cron run")
 	})
 
-	t.Run("refresh_linear_team_keys dead-letters fatally on missing integration", func(t *testing.T) {
+	t.Run("refresh_linear_team_keys skips disconnected integration", func(t *testing.T) {
 		t.Parallel()
-		// 24h cron tick after a disconnect: the integration row is gone.
-		// Retrying for 8 minutes can't bring it back; dead-letter immediately.
+		// A disconnect after enqueue makes this refresh unnecessary.
 		svc := linearservice.NewService(linearservice.Config{
 			Integrations: workerLinearMissingIntegrationReader{},
 			Credentials:  workerLinearCredentialReader{},
@@ -4164,10 +4163,7 @@ func TestLinearJobHandlers(t *testing.T) {
 		payload := json.RawMessage(`{"org_id":"` + uuid.NewString() + `"}`)
 
 		err := handler(context.Background(), "refresh_linear_team_keys", payload)
-		require.Error(t, err, "missing integration should surface as a handler error")
-		var fatal *FatalError
-		require.ErrorAs(t, err, &fatal, "missing integration must dead-letter the cron job, not retry to exhaustion")
-		require.ErrorIs(t, err, linearservice.ErrIntegrationNotFound, "fatal wrapper should preserve the integration-not-found sentinel")
+		require.NoError(t, err, "a disconnected integration should skip an obsolete team-key refresh")
 	})
 
 	t.Run("refresh_linear_team_keys dead-letters fatally on linear unauthorized", func(t *testing.T) {
@@ -6007,8 +6003,11 @@ func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
 	var retryable *RetryableError
 	require.ErrorAs(t, err, &retryable, "pending mergeability should defer the job instead of succeeding")
 	require.ErrorIs(t, retryable.Err, ghservice.ErrPullRequestMergeabilityPending, "deferred job should preserve the pending mergeability sentinel")
-	require.Nil(t, retryable.RetryAfter, "pending mergeability should use the worker's exponential backoff schedule")
-	require.True(t, retryable.ConsumeAttempt, "pending mergeability should consume attempts so exponential backoff advances")
+	expectedDelay := 5 * time.Second
+	expectedBudget := githubRateLimitMaxRetryDuration
+	require.Equal(t, &expectedDelay, retryable.RetryAfter, "pending mergeability should wait for GitHub to finish computing")
+	require.False(t, retryable.ConsumeAttempt, "waiting for GitHub mergeability should preserve the attempt budget")
+	require.Equal(t, &expectedBudget, retryable.MaxRetryDuration, "pending mergeability should retain a finite dependency-wait budget")
 }
 
 func TestSyncPullRequestStateHandlerPropagatesSyncReason(t *testing.T) {
@@ -9798,22 +9797,14 @@ func (m *testFeedbackCommentStore) ListActionableByPullRequest(ctx context.Conte
 
 type testFeedbackMemoryStore struct {
 	createCalls int
+	applyFn     func(context.Context, uuid.UUID, uuid.UUID, string, string, string) error
 }
 
-func (m *testFeedbackMemoryStore) Create(ctx context.Context, p *models.Memory) error {
+func (m *testFeedbackMemoryStore) ApplyReviewComment(ctx context.Context, orgID, commentID uuid.UUID, repo, rule, category string) error {
 	m.createCalls++
-	return nil
-}
-
-func (m *testFeedbackMemoryStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.Memory, error) {
-	return models.Memory{}, nil
-}
-
-func (m *testFeedbackMemoryStore) FindMatchingRule(ctx context.Context, orgID uuid.UUID, repo, normalizedRule string) (models.Memory, error) {
-	return models.Memory{}, errors.New("not found")
-}
-
-func (m *testFeedbackMemoryStore) IncrementOccurrence(ctx context.Context, orgID, memoryID, commentID uuid.UUID) error {
+	if m.applyFn != nil {
+		return m.applyFn(ctx, orgID, commentID, repo, rule, category)
+	}
 	return nil
 }
 
@@ -9831,7 +9822,7 @@ func (m *testFeedbackJobStore) Enqueue(ctx context.Context, orgID uuid.UUID, que
 	return uuid.New(), nil
 }
 
-func TestProcessReviewCommentHandler_SkipsPatternUpdateWhenCommentAlreadyProcessed(t *testing.T) {
+func TestProcessReviewCommentHandler_RetriesMemoryForAcceptedComment(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -9845,6 +9836,7 @@ func TestProcessReviewCommentHandler_SkipsPatternUpdateWhenCommentAlreadyProcess
 				ID:              gotCommentID,
 				OrgID:           gotOrgID,
 				FilterStatus:    "accepted",
+				Actionable:      true,
 				Generalizable:   true,
 				GeneralizedRule: &rule,
 				Category:        &category,
@@ -9860,7 +9852,7 @@ func TestProcessReviewCommentHandler_SkipsPatternUpdateWhenCommentAlreadyProcess
 
 	err := handler(context.Background(), "process_review_comment", payload)
 	require.NoError(t, err, "process_review_comment handler should succeed for already processed comments")
-	require.Equal(t, 0, memoryStore.createCalls, "process_review_comment should not update memories when comment was already processed")
+	require.Equal(t, 1, memoryStore.createCalls, "accepted comments must retry their idempotent memory application")
 }
 
 // ---------------------------------------------------------------------------
@@ -10290,10 +10282,15 @@ func TestProcessReviewCommentHandler_WithPendingComment(t *testing.T) {
 	commentStore := &testFeedbackCommentStore{
 		getByIDFn: func(ctx context.Context, gotOrgID, gotCommentID uuid.UUID) (models.ReviewComment, error) {
 			callCount++
+			status := "pending"
+			if callCount > 1 {
+				status = "accepted"
+			}
 			return models.ReviewComment{
 				ID:              gotCommentID,
 				OrgID:           gotOrgID,
-				FilterStatus:    "pending",
+				FilterStatus:    status,
+				Actionable:      true,
 				Generalizable:   true,
 				GeneralizedRule: &rule,
 				Category:        &category,

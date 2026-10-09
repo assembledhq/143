@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -537,21 +536,8 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 				AddRow(uuid.New(), now, now),
 		)
 
-	// Pinned to evaluate_experiment on purpose: the merge path must not also
-	// enqueue a sync_pull_request_state readback. A merged PR has no live
-	// health left to fetch, and the SSE nudge that enqueue used to provide now
-	// comes from publishPullRequestTerminalState reading the stored snapshot.
-	evaluateExperimentKey := fmt.Sprintf("evaluate_experiment:%s", prID)
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgx.NamedArgs{
-			"org_id":     orgID,
-			"queue":      "default",
-			"job_type":   "evaluate_experiment",
-			"payload":    pgxmock.AnyArg(),
-			"priority":   5,
-			"dedupe_key": &evaluateExperimentKey,
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	// A terminal merge must not enqueue an unsupported experiment evaluation
+	// or a state-sync readback; all terminal follow-ups below remain observable.
 
 	service := &PRService{
 		tokenProvider: &Service{cache: map[int64]*cachedToken{
@@ -754,4 +740,28 @@ func TestMaybeAutoArchiveSessionOnPRCloseEmitsArchiveAuditOnce(t *testing.T) {
 	require.NoError(t, sessionMock.ExpectationsWereMet(), "session archive expectations should be met")
 	require.NoError(t, orgMock.ExpectationsWereMet(), "organization expectations should be met")
 	require.NoError(t, auditMock.ExpectationsWereMet(), "auto-archive should emit one audit row even if invoked twice")
+}
+
+// A swallowed enqueue error must not make unsupported-job production look safe.
+// Count calls directly, because pgxmock errors are deliberately logged by these
+// best-effort terminal follow-ups.
+type mergeFollowupJobCalls struct {
+	db.DBTX
+	calls int
+}
+
+func (s *mergeFollowupJobCalls) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
+	s.calls++
+	return s.DBTX.QueryRow(ctx, query, args...)
+}
+
+func TestMergedFollowUpsDoNotProduceUnimplementedJobs(t *testing.T) {
+	t.Parallel()
+	pool, err := pgxmock.NewPool()
+	require.NoError(t, err, "create isolated merge follow-up job store")
+	defer pool.Close()
+	calls := &mergeFollowupJobCalls{DBTX: pool}
+	service := &PRService{jobs: db.NewJobStore(calls), logger: zerolog.Nop()}
+	service.runMergedPullRequestFollowUps(context.Background(), models.PullRequest{ID: uuid.New(), OrgID: uuid.New()}, "merged-head")
+	require.Equal(t, 0, calls.calls, "merge follow-ups must not enqueue unimplemented experiment evaluation")
 }

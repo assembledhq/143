@@ -1911,7 +1911,9 @@ func buildServices(
 	if prService != nil {
 		prService.SetAutomationTargetLifecycle(automations.NewTargetLifecycle(pool, db.NewAutomationTargetStore(pool), automationTurnCompleter, logger))
 	}
+	feedbackService := newWorkerFeedbackService(pool, jobStore, llmClient, logger)
 	svc := &worker.Services{
+		Feedback:                     feedbackService,
 		CodeReviewInputCapture:       codeReviewInputCapture,
 		CodeReviewAssessmentsEnabled: cfg.CodeReviewAssessmentsEnabled,
 		CodeReviewRechecksEnabled:    cfg.CodeReviewAssessmentsEnabled && cfg.CodeReviewRechecksEnabled,

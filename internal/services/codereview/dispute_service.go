@@ -804,6 +804,9 @@ func (s *DisputeService) triageResult(ctx context.Context, dispute models.CodeRe
 	if err := json.Unmarshal([]byte(extractJSONObject(raw)), &result); err != nil {
 		return result, fmt.Errorf("decode code review dispute triage: %w", err)
 	}
+	// Contested codes are optional LLM suggestions constrained to this review.
+	// Normalize them before strict validation without changing any policy enum.
+	result.ContestedReasonCodes = validContestedReasonCodes(result.ContestedReasonCodes, reasons)
 	if err := result.Validate(); err != nil {
 		return result, fmt.Errorf("validate code review dispute triage: %w", err)
 	}

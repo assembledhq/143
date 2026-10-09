@@ -2411,8 +2411,7 @@ func TestPRServiceSyncPullRequestStateBypassesCoalescingForMergeSafety(t *testin
 
 // Same drift, but the PR was closed without merging. Sync should flip status
 // to "closed" and skip the snapshot path. Distinct from the merged case
-// because the close branch runs different follow-ups (no deploy row, no
-// evaluate_experiment job).
+// because the close branch runs different follow-ups (no deploy row).
 func TestPRServiceSyncPullRequestStateSelfHealsClosedWithoutMergeDrift(t *testing.T) {
 	t.Parallel()
 

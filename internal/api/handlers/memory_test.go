@@ -262,6 +262,8 @@ func TestMemoryHandler_UpdateEndpointsReturnNewActiveMemory(t *testing.T) {
 			sourceCommentID := uuid.New()
 
 			mock.ExpectBegin()
+			mock.ExpectQuery("SELECT repo FROM memories").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"repo"}).AddRow("org/repo"))
+			mock.ExpectExec("SELECT pg_advisory_xact_lock").WithArgs(pgxmock.AnyArg()).WillReturnResult(pgxmock.NewResult("SELECT", 1))
 			mock.ExpectQuery("UPDATE memories SET active = false WHERE id .+ AND org_id .+ AND active = true RETURNING").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(

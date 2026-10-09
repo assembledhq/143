@@ -47,6 +47,8 @@ func TestMemoryStore_Create_Success(t *testing.T) {
 		ManuallyCurated:  false,
 	}
 
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").WithArgs(pgxmock.AnyArg()).WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery("INSERT INTO memories").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -57,6 +59,7 @@ func TestMemoryStore_Create_Success(t *testing.T) {
 				AddRow(generatedID, now),
 		)
 
+	mock.ExpectCommit()
 	err = store.Create(context.Background(), m)
 	require.NoError(t, err, "should create memory without error")
 	require.Equal(t, generatedID, m.ID, "should set the generated ID on the memory")
@@ -240,6 +243,8 @@ func TestMemoryStore_UpdateMemory_InsertOnlyVersioning(t *testing.T) {
 
 	// Transaction: Begin
 	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT repo FROM memories").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"repo"}).AddRow("org/repo"))
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").WithArgs(pgxmock.AnyArg()).WillReturnResult(pgxmock.NewResult("SELECT", 1))
 
 	// Step 1: Expect the inactivation query that returns the existing row values
 	mock.ExpectQuery("UPDATE memories SET active = false WHERE id .+ AND org_id .+ AND active = true RETURNING").

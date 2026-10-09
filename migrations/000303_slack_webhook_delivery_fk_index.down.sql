@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_slack_inbound_events_retention_delivery;

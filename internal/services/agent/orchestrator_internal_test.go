@@ -534,7 +534,7 @@ func TestWaitForSandboxWorkspaceReady(t *testing.T) {
 			name: "ready on first probe",
 			results: []probeResult{{
 				exitCode: 0,
-				stdout:   expectedHead + "\n" + expectedBranch + "\n",
+				stdout:   expectedHead + "\n" + expectedBranch + "\n" + expectedHead + "\n",
 			}},
 			timeout:       100 * time.Millisecond,
 			expectedCalls: 1,
@@ -543,8 +543,8 @@ func TestWaitForSandboxWorkspaceReady(t *testing.T) {
 			name: "waits through empty and default branch states",
 			results: []probeResult{
 				{exitCode: 128, stderr: "fatal: current branch master has no commits"},
-				{exitCode: 0, stdout: "1111111111111111111111111111111111111111\nmain\n"},
-				{exitCode: 0, stdout: expectedHead + "\n" + expectedBranch + "\n"},
+				{exitCode: 0, stdout: "1111111111111111111111111111111111111111\nmain\n" + expectedHead + "\n"},
+				{exitCode: 0, stdout: expectedHead + "\n" + expectedBranch + "\n" + expectedHead + "\n"},
 			},
 			timeout:       100 * time.Millisecond,
 			expectedCalls: 3,
@@ -565,7 +565,7 @@ func TestWaitForSandboxWorkspaceReady(t *testing.T) {
 			name: "times out on a different pull request head",
 			results: []probeResult{{
 				exitCode: 0,
-				stdout:   "2222222222222222222222222222222222222222\n" + expectedBranch + "\n",
+				stdout:   "2222222222222222222222222222222222222222\n" + expectedBranch + "\n" + expectedHead + "\n",
 			}},
 			timeout:       5 * time.Millisecond,
 			expectedErr:   ErrSandboxWorkspaceNotReady,
@@ -573,7 +573,7 @@ func TestWaitForSandboxWorkspaceReady(t *testing.T) {
 		},
 		{
 			name:          "honors cancellation before probing",
-			results:       []probeResult{{exitCode: 0, stdout: expectedHead + "\n" + expectedBranch + "\n"}},
+			results:       []probeResult{{exitCode: 0, stdout: expectedHead + "\n" + expectedBranch + "\n" + expectedHead + "\n"}},
 			timeout:       100 * time.Millisecond,
 			cancelContext: true,
 			expectedErr:   context.Canceled,

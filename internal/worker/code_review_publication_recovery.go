@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -55,6 +56,21 @@ func recoverStagedFullAssessment(ctx context.Context, stores *Stores, services *
 	if metadata.ID != job.MetadataID || metadata.ID != a.MetadataID || metadata.RepositoryID != a.RepositoryID || metadata.PullRequestID != a.PullRequestID || metadata.PolicyID != a.PolicyID || metadata.HeadSHA != a.HeadSHA || metadata.ReviewOutputKey != a.PublicationKey {
 		return true, fmt.Errorf("staged metadata differs from original controller identity: %w", db.ErrCodeReviewAssessmentState)
 	}
+	// Terminal metadata's orphan repair normally runs after this early recovery
+	// exit. A confirmed, reusable outcome must run that existing guarded path
+	// first, then still prove complete runtime drain inside owner claiming.
+	if a.CoverageComplete && a.PublicationState == models.CodeReviewPublicationConfirmed &&
+		(metadata.Status == models.CodeReviewSessionStatusFailed || metadata.Status == models.CodeReviewSessionStatusStale || metadata.Status == models.CodeReviewSessionStatusCancelled) {
+		if !confirmedFullAssessmentReceiptMatches(a, metadata) {
+			return true, fmt.Errorf("confirmed assessment receipt differs from staged identity: %w", db.ErrCodeReviewAssessmentState)
+		}
+		if stores.ThreadSendTx == nil {
+			return true, fmt.Errorf("confirmed assessment drain recovery requires a transaction")
+		}
+		if err := db.NewCodeReviewScheduleStore(stores.ThreadSendTx).ReconcileTerminalReviews(ctx, job.OrgID, job.RepositoryID, job.PullRequestID); err != nil {
+			return true, err
+		}
+	}
 	// A legacy receipt is a reason to look up the exact publication, not proof
 	// of success. The publication callback performs only that read-only lookup.
 	if metadata.GitHubReviewID == nil {
@@ -66,6 +82,28 @@ func recoverStagedFullAssessment(ctx context.Context, stores *Stores, services *
 		}
 	}
 	return true, resumeStagedFullAssessment(ctx, stores, services, job, metadata, a, nil)
+}
+
+// The new terminal-thread recovery authority requires the exact saved receipt.
+// Legacy and uncertain publication keep their existing reconciliation path.
+func confirmedFullAssessmentReceiptMatches(a models.CodeReviewAssessment, metadata models.CodeReviewSessionMetadata) bool {
+	if a.ReviewScope != models.CodeReviewScopeFull || a.Status != models.CodeReviewAssessmentPublishing ||
+		a.ResultOrigin == nil || a.Decision == nil || a.Acceptable == nil || a.RenderedBody == nil || len(a.StructuredOutcome) == 0 ||
+		a.GitHubReviewID == nil || a.SubmittedCommitSHA == nil || *a.SubmittedCommitSHA != a.HeadSHA {
+		return false
+	}
+	var receipt struct {
+		AssessmentID       string `json:"assessment_id"`
+		InputDigest        string `json:"input_digest"`
+		SubmittedCommitSHA string `json:"submitted_commit_sha"`
+		GitHubReviewID     *int64 `json:"github_review_id"`
+	}
+	if err := json.Unmarshal(a.PublicationReceipt, &receipt); err != nil {
+		return false
+	}
+	return receipt.AssessmentID == a.ID.String() && receipt.InputDigest == a.InputDigest &&
+		receipt.SubmittedCommitSHA == a.HeadSHA && receipt.GitHubReviewID != nil && *receipt.GitHubReviewID == *a.GitHubReviewID &&
+		(metadata.GitHubReviewID == nil || *metadata.GitHubReviewID == *a.GitHubReviewID)
 }
 
 // Called while holding the publication lock and job lease. Persist the known

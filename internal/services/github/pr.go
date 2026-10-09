@@ -3376,16 +3376,6 @@ func (s *PRService) runMergedPullRequestFollowUps(ctx context.Context, pr models
 		}
 	}
 
-	if s.jobs != nil {
-		dedupeKey := fmt.Sprintf("evaluate_experiment:%s", pr.ID)
-		if _, err := s.jobs.Enqueue(ctx, pr.OrgID, "default", "evaluate_experiment", map[string]string{
-			"pull_request_id": pr.ID.String(),
-			"commit_sha":      commitSHA,
-		}, 5, &dedupeKey); err != nil {
-			s.logger.Warn().Err(err).Str("pr_id", pr.ID.String()).Msg("failed to enqueue evaluate_experiment job")
-		}
-	}
-
 	s.teardownPRPreview(ctx, pr, true)
 	if stackComplete {
 		s.maybeAutoArchiveSessionOnPRClose(ctx, pr, snapshotKey, true)
@@ -3742,13 +3732,6 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		if err := s.enqueueCodeReviewDisputeRanking(ctx, pr.OrgID, fmt.Sprintf("human_review:%d", event.Review.ID)); err != nil {
 			return err
 		}
-	}
-
-	// If the PR was approved, reinforce memories that were active for this repo.
-	// This closes the feedback loop: memories that helped produce approved code
-	// get stronger, while unused memories naturally decay.
-	if reviewStatus == models.PullRequestReviewStatusApproved {
-		s.enqueueReinforceMemories(ctx, pr.OrgID, pr.GitHubRepo)
 	}
 
 	// If changes were requested and we have review comments from the review body,
@@ -4141,21 +4124,6 @@ func (s *PRService) enqueueProcessReviewComment(ctx context.Context, orgID uuid.
 		"repo":       repo,
 	}, 3, &dedupeKey); err != nil {
 		s.logger.Warn().Err(err).Str("comment_id", commentID.String()).Msg("failed to enqueue process_review_comment job")
-	}
-}
-
-// enqueueReinforceMemories enqueues a job to reinforce memories for a repo.
-// The dedupe key is per-repo (not per-PR) so that rapid successive approvals
-// for the same repo collapse into a single reinforcement pass. This is correct
-// because the handler re-derives which memories are active for the repo rather
-// than tracking the specific memories injected into each PR.
-func (s *PRService) enqueueReinforceMemories(ctx context.Context, orgID uuid.UUID, repo string) {
-	dedupeKey := fmt.Sprintf("reinforce_memories:%s:%s", orgID, repo)
-	if _, err := s.jobs.Enqueue(ctx, orgID, "feedback", "reinforce_memories", map[string]string{
-		"org_id": orgID.String(),
-		"repo":   repo,
-	}, 5, &dedupeKey); err != nil {
-		s.logger.Warn().Err(err).Str("repo", repo).Msg("failed to enqueue reinforce_memories job")
 	}
 }
 
