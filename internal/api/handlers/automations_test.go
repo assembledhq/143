@@ -485,8 +485,8 @@ func TestAutomationHandler_Create_BadJSON(t *testing.T) {
 }
 
 // resolveAutomationAgentAndModel decides which agent runs an automation after
-// a partial update, so its precedence rules are what let the detail page's
-// Model row patch `model` on its own and still land on a runnable pair.
+// a partial update, so its precedence rules are what let an API or MCP caller
+// patch `model` on its own and still land on a runnable pair.
 func TestResolveAutomationAgentAndModel(t *testing.T) {
 	t.Parallel()
 
@@ -1346,10 +1346,9 @@ func TestAutomationHandler_Update_BlankModelPreservesExplicitAgentType(t *testin
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-// The detail page's Model row patches `model` on its own, so switching an
-// automation from a Claude model to a Codex one arrives with no agent_type at
-// all. Before Update re-inferred, that request 400'd on INVALID_MODEL and the
-// rail had no way to move an automation between agents.
+// API and MCP callers can patch `model` on its own, so switching an automation
+// from a Claude model to a Codex one arrives with no agent_type at all. Before
+// Update re-inferred, that request 400'd on INVALID_MODEL.
 func TestAutomationHandler_Update_CrossAgentModelPatchRetargetsAgent(t *testing.T) {
 	t.Parallel()
 
@@ -1395,8 +1394,8 @@ func TestAutomationHandler_Update_CrossAgentModelPatchRetargetsAgent(t *testing.
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-// Claude Code grades effort one step further than Codex ("max"), so the same
-// Model-row patch that retargets the agent can strand a reasoning override the
+// Claude Code grades effort one step further than Codex ("max"), so a
+// model-only patch that retargets the agent can strand a reasoning override the
 // new agent has never heard of. The request never named reasoning_effort, so
 // the stale value is dropped rather than 400'd back at the caller.
 func TestAutomationHandler_Update_CrossAgentModelPatchDropsUnsupportedReasoning(t *testing.T) {

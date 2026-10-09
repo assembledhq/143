@@ -148,16 +148,18 @@ func resolveAutomationAgentAndModel(currentAgentType, currentModel, reqAgentType
 
 	if err := models.ValidateModelForAgentType(models.AgentType(*effectiveAgentType), *effectiveModel); err != nil {
 		// An explicit agent_type wins outright — the caller named both halves,
-		// so a mismatch is their error to fix. But a model-only patch carries
-		// no opinion about the agent, and the stored one is just whatever the
-		// previous model implied; re-infer instead of rejecting a model the
-		// user picked out of another agent's group in the dropdown.
+		// so a mismatch is their error to fix. But a model-only patch (the
+		// MCP automation_update tool, external API callers) carries no opinion
+		// about the agent, and the stored one is just whatever the previous
+		// model implied; re-infer instead of rejecting a model that belongs to
+		// another agent.
 		//
 		// Only the illegal case re-infers. Agents that accept any
 		// "provider/model" (Pi, OpenCode) share curated ids, so a stored agent
 		// that can still run the new model keeps it rather than being
 		// reassigned to whichever agent AgentTypeForModel happens to rank
-		// first.
+		// first. Callers that know which agent they mean — the web picker
+		// does — send agent_type and skip inference entirely.
 		if reqAgentType != nil || reqModel == nil {
 			return nil, nil, err
 		}
