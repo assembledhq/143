@@ -440,6 +440,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v4
+        with:
+          # Cache Docker Hub images through Google's public mirror for CI builds.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
       - name: Build ${{ matrix.name }} Docker image
         uses: docker/build-push-action@v7
         with:
