@@ -109,13 +109,16 @@ func (s *GitHubEventTriggerService) recordTargetArrival(ctx context.Context, tx 
 	// a delayed delivery is as old as it really is, and a delivery without
 	// one transitions the state but leaves the evidence unknown.
 	//
-	// The store refuses a transition whose observation is older than the
-	// evidence the target already holds, which is the same arbitration the
-	// lifecycle notification path applies. A subscribed reopened delivery
-	// can arrive after the close it precedes, and taking it would put the
-	// target back to open and replace newer closed evidence with older. A
-	// refused transition leaves the state it found, so the local copy is
-	// only advanced when the write was applied.
+	// The store refuses a change between open and closed whose observation
+	// is older than the evidence the target already holds, which is the same
+	// arbitration the lifecycle notification path applies. A subscribed
+	// reopened delivery can arrive after the close it precedes, and taking
+	// it would put the target back to open and replace newer closed evidence
+	// with older. A refused transition leaves the state it found, so the
+	// local copy is only advanced when the write was applied, and the run
+	// falls through to the closed gate below. A merge is terminal and always
+	// applies, so the merged run below is always a final turn on a merged
+	// target, never an ordinary turn on one the store left open.
 	switch {
 	case req.PullRequestAction == githubActionReopened && target.LifecycleState != models.AutomationTargetLifecycleOpen:
 		applied, err := s.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleOpen, req.PullRequestUpdatedAt)

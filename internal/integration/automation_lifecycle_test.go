@@ -489,3 +489,118 @@ func TestAutomationLifecycle_SubscribedReopenArrivingAfterItsClose(t *testing.T)
 	require.NoError(t, err, "reload generation")
 	require.Equal(t, models.AutomationTargetSessionStatusRetired, generation.Status, "the close's retirement stands")
 }
+
+// subscribeToMerges adds the merged event to the harness automation's
+// triggers, so a merge delivers a final turn through arrival.
+func (h *lifecycleHarness) subscribeToMerges(t *testing.T) {
+	t.Helper()
+	_, err := h.pool.Exec(context.Background(), `UPDATE automations SET github_event_triggers = $2 WHERE id = $1`,
+		h.automation.ID, []string{string(models.AutomationGitHubEventPullRequestUpdated), string(models.AutomationGitHubEventPullRequestMerged)})
+	require.NoError(t, err, "subscribe the automation to merges")
+	h.automation.GitHubEventTriggers = append(h.automation.GitHubEventTriggers, models.AutomationGitHubEventPullRequestMerged)
+}
+
+// deliverMerged delivers the subscribed merged event at mergedAt.
+func (h *lifecycleHarness) deliverMerged(t *testing.T, mergedAt time.Time) models.AutomationRun {
+	t.Helper()
+	return h.deliver(t, automations.GitHubEventTriggerRequest{
+		Event: models.AutomationGitHubEventPullRequestMerged, PullRequestAction: "closed",
+		HeadSHA: "1111111111111111111111111111111111111111", PullRequestUpdatedAt: timePtr(mergedAt), BaseBranch: "main",
+	})
+}
+
+// TestAutomationLifecycle_PostMergeEditBeforeItsMerge proves a merge is
+// terminal. An edit made after the merge, processed before the merge's own
+// delivery, is counted as openness evidence newer than the merge. GitHub
+// cannot reopen a merged pull request, so that evidence must not make the
+// merge look stale on either path: the target is merged, the merged run
+// keeps its final turn, and the evidence never moves backwards.
+func TestAutomationLifecycle_PostMergeEditBeforeItsMerge(t *testing.T) {
+	h := newLifecycleHarness(t)
+	ctx := context.Background()
+	h.subscribeToMerges(t)
+
+	// Both moments are after the openness evidence arrival already recorded.
+	before := h.target(t).LifecycleUpdatedAt
+	require.NotNil(t, before, "the target already has openness evidence")
+	mergedAt := before.Add(10 * time.Second)
+	editedAt := mergedAt.Add(10 * time.Second)
+
+	// The post-merge edit is processed first and records openness evidence
+	// newer than the merge.
+	edit := h.deliver(t, automations.GitHubEventTriggerRequest{
+		Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "edited",
+		HeadSHA: "1111111111111111111111111111111111111111", PullRequestUpdatedAt: timePtr(editedAt), BaseBranch: "main",
+	})
+	target := h.target(t)
+	require.Equal(t, models.AutomationTargetLifecycleOpen, target.LifecycleState, "the edit leaves the target open")
+	require.WithinDuration(t, editedAt, *target.LifecycleUpdatedAt, time.Millisecond, "with evidence newer than the merge")
+
+	// The merge's own delivery arrives afterwards.
+	merged := h.deliverMerged(t, mergedAt)
+	target = h.target(t)
+	require.Equal(t, models.AutomationTargetLifecycleMerged, target.LifecycleState, "the merge applies despite the newer evidence")
+	require.WithinDuration(t, editedAt, *target.LifecycleUpdatedAt, time.Millisecond, "and the evidence does not move backwards")
+	require.Equal(t, models.AutomationRunStatusPending, h.reload(t, merged.ID).Status, "the merged run is queued as the final turn")
+
+	// The same webhook's lifecycle notification is not dropped as stale.
+	require.NoError(t, h.lifecycle.OnPullRequestClosed(ctx, h.orgID, "acme/web", 42, true, mergedAt), "notify merged")
+	editRun := h.reload(t, edit.ID)
+	require.Equal(t, models.AutomationRunStatusSkipped, editRun.Status, "the edit's waiter is skipped")
+	require.Equal(t, models.AutomationRunOutcomePRClosed, *editRun.OutcomeReason, "as pr_closed")
+	require.Equal(t, models.AutomationRunStatusPending, h.reload(t, merged.ID).Status, "the merged run keeps its final turn")
+	generation, err := h.targets.GetGenerationByNumber(ctx, h.orgID, *h.run.TargetID, *h.run.TargetGeneration)
+	require.NoError(t, err, "reload generation")
+	require.Equal(t, models.AutomationTargetSessionStatusActive, generation.Status, "the generation lives until the final turn runs")
+}
+
+// TestAutomationLifecycle_MergedDeliveryAfterALaterClose proves a merge
+// applies over closed evidence that is newer than it. A sync that observes
+// the close stamps it when it looked, which can be after the merge happened,
+// and a merged pull request cannot have been closed without merging later.
+func TestAutomationLifecycle_MergedDeliveryAfterALaterClose(t *testing.T) {
+	h := newLifecycleHarness(t)
+	ctx := context.Background()
+	h.subscribeToMerges(t)
+
+	before := h.target(t).LifecycleUpdatedAt
+	require.NotNil(t, before, "the target already has openness evidence")
+	mergedAt := before.Add(10 * time.Second)
+	closedAt := mergedAt.Add(10 * time.Second)
+
+	require.NoError(t, h.lifecycle.OnPullRequestClosed(ctx, h.orgID, "acme/web", 42, false, closedAt), "close observed late")
+	require.Equal(t, models.AutomationTargetLifecycleClosed, h.target(t).LifecycleState, "the target is closed")
+
+	merged := h.deliverMerged(t, mergedAt)
+	target := h.target(t)
+	require.Equal(t, models.AutomationTargetLifecycleMerged, target.LifecycleState, "the merge applies over the later close")
+	require.WithinDuration(t, closedAt, *target.LifecycleUpdatedAt, time.Millisecond, "and the evidence does not move backwards")
+	require.Equal(t, models.AutomationRunStatusPending, h.reload(t, merged.ID).Status, "the merged run is not skipped as pr_closed")
+}
+
+// TestAutomationLifecycle_StaleReopenOnAMergedTarget proves a reopened
+// delivery older than a merge cannot reopen the merged target: the
+// transition is refused and the run that carried it is skipped.
+func TestAutomationLifecycle_StaleReopenOnAMergedTarget(t *testing.T) {
+	h := newLifecycleHarness(t)
+	ctx := context.Background()
+
+	before := h.target(t).LifecycleUpdatedAt
+	require.NotNil(t, before, "the target already has openness evidence")
+	reopenedAt := before.Add(10 * time.Second)
+	mergedAt := reopenedAt.Add(10 * time.Second)
+
+	require.NoError(t, h.lifecycle.OnPullRequestClosed(ctx, h.orgID, "acme/web", 42, true, mergedAt), "merge")
+	require.Equal(t, models.AutomationTargetLifecycleMerged, h.target(t).LifecycleState, "the target is merged")
+
+	reopened := h.deliver(t, automations.GitHubEventTriggerRequest{
+		Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "reopened",
+		HeadSHA: "7777777777777777777777777777777777777777", PullRequestUpdatedAt: timePtr(reopenedAt), BaseBranch: "main",
+	})
+	target := h.target(t)
+	require.Equal(t, models.AutomationTargetLifecycleMerged, target.LifecycleState, "the merged pull request stays merged")
+	require.WithinDuration(t, mergedAt, *target.LifecycleUpdatedAt, time.Millisecond, "and keeps the merge's evidence")
+	run := h.reload(t, reopened.ID)
+	require.Equal(t, models.AutomationRunStatusSkipped, run.Status, "the stale reopen's run is skipped")
+	require.Equal(t, models.AutomationRunOutcomePRClosed, *run.OutcomeReason, "as pr_closed")
+}
