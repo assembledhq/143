@@ -8,7 +8,7 @@ SANDBOX_CLI_GO_SOURCES := $(foreach dir,$(SANDBOX_CLI_PACKAGE_DIRS),$(filter-out
 SANDBOX_CLI_EMBED_SOURCES := $(shell GOOS=linux CGO_ENABLED=0 go list -deps -f '{{if .Module}}{{if eq .Module.Path "github.com/assembledhq/143"}}{{range .EmbedFiles}}{{$$.Dir}}/{{.}} {{end}}{{end}}{{end}}' ./cmd/tools 2>/dev/null)
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json go.mod go.sum $(SANDBOX_CLI_PACKAGE_DIRS) $(SANDBOX_CLI_GO_SOURCES) $(SANDBOX_CLI_EMBED_SOURCES)
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration test-github-rate-limit test-github-rate-limit-redis migrate-up migrate-down demo-seed-check build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr-profile test-pr test-coverage-diff test-main test-integration test-github-rate-limit test-github-rate-limit-redis migrate-up migrate-down demo-seed-check build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -125,14 +125,17 @@ test-coverage:
 	go test -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out -o coverage.html
 
-# Mirror the PR backend job: no race detector, with the coverage floor.
-test-pr:
+# Generate PR-mode coverage for tools that must work below the overall floor.
+test-pr-profile:
 	go test ./internal/... -coverprofile=coverage.out -covermode=count -timeout=120s
+
+# Mirror the PR backend job: no race detector, with the coverage floor.
+test-pr: test-pr-profile
 	python3 .github/scripts/check_go_coverage.py coverage.out "$${BACKEND_COVERAGE_MIN:-70.0}" "$${BACKEND_COVERAGE_TARGET:-75.0}"
 
-# Patch coverage gate vs origin/main (mirrors the PR diff-cover step).
+# Patch coverage gate vs origin/main, independent of the overall floor.
 # Requires: pip install 'diff_cover==10.2.0' && go install github.com/boumenot/gocover-cobertura@v1.4.0
-test-coverage-diff: test-pr
+test-coverage-diff: test-pr-profile
 	gocover-cobertura < coverage.out > coverage.xml
 	diff-cover coverage.xml --compare-branch=origin/main --fail-under=80
 
