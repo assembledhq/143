@@ -125,9 +125,10 @@ test-coverage:
 	go test -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out -o coverage.html
 
-# Mirror the PR backend job: no -race, coverage on, no absolute floor.
+# Mirror the PR backend job: no race detector, with the coverage floor.
 test-pr:
 	go test ./internal/... -coverprofile=coverage.out -covermode=count -timeout=120s
+	python3 .github/scripts/check_go_coverage.py coverage.out "$${BACKEND_COVERAGE_MIN:-70.0}" "$${BACKEND_COVERAGE_TARGET:-75.0}"
 
 # Patch coverage gate vs origin/main (mirrors the PR diff-cover step).
 # Requires: pip install 'diff_cover==10.2.0' && go install github.com/boumenot/gocover-cobertura@v1.4.0
@@ -139,6 +140,7 @@ test-coverage-diff: test-pr
 test-main:
 	go test ./internal/... -coverprofile=coverage.out -covermode=atomic -race -timeout=180s
 	go tool cover -func=coverage.out
+	python3 .github/scripts/check_go_coverage.py coverage.out "$${BACKEND_COVERAGE_MIN:-70.0}" "$${BACKEND_COVERAGE_TARGET:-75.0}"
 
 # Integration tests against a real Postgres. Gated behind the `integration`
 # build tag so `make test` and `go test ./...` stay fast. Reuses DATABASE_URL
