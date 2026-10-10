@@ -339,6 +339,7 @@ type CodeReviewOrchestratorPromptData struct {
 	DescriptionRequirements    []CodeReviewDescriptionRequirementPromptData
 	ReviewerOutputs            []string
 	Findings                   []string
+	PriorFindings              []CodeReviewPriorFindingPromptData
 	ChangedFiles               []string
 	RequestContextAuthor       string
 	RequestContextBody         string
@@ -350,12 +351,41 @@ type CodeReviewOrchestratorPromptData struct {
 	VisualEvidenceOmitted      int
 }
 
+type CodeReviewPriorFindingPromptData struct {
+	ReviewedHeadSHA string
+	Severity        string
+	Location        string
+	Summary         string
+	Body            string
+	ReplyAuthor     string
+	ReplyIsPRAuthor bool
+	ReplyBody       string
+}
+
 func CodeReviewOrchestratorPrompt(data CodeReviewOrchestratorPromptData) string {
 	data.RequestContextAuthor = sanitizeUntrustedXML(data.RequestContextAuthor)
 	data.RequestContextBody = sanitizeUntrustedXML(data.RequestContextBody)
 	data.RequestContextURL = sanitizeUntrustedXML(data.RequestContextURL)
+	data.PriorFindings = sanitizeCodeReviewPriorFindings(data.PriorFindings)
 	data.VisualEvidence = sanitizeCodeReviewVisualEvidence(data.VisualEvidence)
 	return render("code_review_orchestrator.template", data)
+}
+
+func sanitizeCodeReviewPriorFindings(findings []CodeReviewPriorFindingPromptData) []CodeReviewPriorFindingPromptData {
+	sanitized := make([]CodeReviewPriorFindingPromptData, len(findings))
+	for i, finding := range findings {
+		sanitized[i] = CodeReviewPriorFindingPromptData{
+			ReviewedHeadSHA: sanitizeUntrustedXML(finding.ReviewedHeadSHA),
+			Severity:        sanitizeUntrustedXML(finding.Severity),
+			Location:        sanitizeUntrustedXML(finding.Location),
+			Summary:         sanitizeUntrustedXML(finding.Summary),
+			Body:            sanitizeUntrustedXML(finding.Body),
+			ReplyAuthor:     sanitizeUntrustedXML(finding.ReplyAuthor),
+			ReplyIsPRAuthor: finding.ReplyIsPRAuthor,
+			ReplyBody:       sanitizeUntrustedXML(finding.ReplyBody),
+		}
+	}
+	return sanitized
 }
 
 type CodeReviewOrchestratorRepairPromptData struct {
