@@ -148,6 +148,38 @@ func resolveAutomationAgentAndModel(currentAgentType, currentModel, reqAgentType
 	return effectiveAgentType, effectiveModel, nil
 }
 
+// resolveAutomationFallbackModels applies a partial update to an automation's
+// fallback chain and validates the result. A nil req leaves the stored chain
+// untouched — presence of the pointer, not emptiness, signals intent, so
+// clearing the chain is an explicit {"fallback_models": {}}.
+//
+// agentType and effort must be the primary rank's ALREADY-resolved values: a
+// fallback that names no agent or effort of its own inherits them, so
+// validating against the pre-patch primary would accept a chain the automation
+// cannot actually run.
+func resolveAutomationFallbackModels(current models.AutomationFallbackModels, req *models.AutomationFallbackModels, agentType *string, effort *models.ReasoningEffort) (models.AutomationFallbackModels, error) {
+	resolved := current
+	if req != nil {
+		resolved = *req
+	}
+	// Validate BEFORE normalizing. Normalize re-lengths the parallel arrays to
+	// match Models, so normalizing first would silently truncate a client whose
+	// agent_types or reasoning_efforts ran longer than its models — losing
+	// per-rank data with a 201 instead of telling the caller their arrays are
+	// out of sync.
+	if err := resolved.Validate(agentType, effort); err != nil {
+		return models.AutomationFallbackModels{}, err
+	}
+	return resolved.Normalize(), nil
+}
+
+// validateAutomationModelAvailability covers the primary rank only. Fallback
+// ranks are deliberately left to dispatch, which already skips a rank with no
+// usable credential: isAutomationAgentAvailable re-reads org settings and the
+// whole org credential list on every call, so walking the chain here would turn
+// one save into N+1 of those reads — to enforce a fact that can change before
+// the next run anyway. Code review draws the same line: shape at save,
+// availability at dispatch.
 func (h *AutomationHandler) validateAutomationModelAvailability(ctx context.Context, orgID uuid.UUID, agentType *string, modelOverride *string) error {
 	if agentType == nil || modelOverride == nil {
 		return nil

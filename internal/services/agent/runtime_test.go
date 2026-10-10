@@ -24,6 +24,8 @@ type runtimeTestSessionStore struct {
 	countRunningErr            error
 	beginErr                   error
 	beginCalls                 int
+	beginSoftDeadline          time.Time
+	beginHardDeadline          time.Time
 	recordRuntimeProgressCalls int
 	recordRuntimeProgressErr   error
 	stopRequests               []models.RuntimeStopReason
@@ -65,7 +67,8 @@ func (s *runtimeTestSessionStore) UpdateSnapshotInfo(context.Context, uuid.UUID,
 	return nil
 }
 
-func (s *runtimeTestSessionStore) BeginRuntime(context.Context, uuid.UUID, uuid.UUID, models.CheckpointCapability, time.Time, time.Time, time.Time) error {
+func (s *runtimeTestSessionStore) BeginRuntime(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.CheckpointCapability, softDeadline, hardDeadline, _ time.Time) error {
+	s.beginSoftDeadline, s.beginHardDeadline = softDeadline, hardDeadline
 	s.beginCalls++
 	return s.beginErr
 }
@@ -1054,4 +1057,37 @@ func TestRuntimeController_TickPersistsProgressAndRequestsStops(t *testing.T) {
 		controller.tick(context.Background(), now)
 		require.Equal(t, StopReasonSoftBudget, controller.stopRequested, "tick should request a soft-budget stop when no bounded extension is available")
 	})
+}
+
+func TestRuntimeController_ParentDeadlineCapsBudgetsAndExtensions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                                 string
+		softBudget, ceiling, parentRemaining time.Duration
+		expectedSoft, expectedHard           time.Duration
+	}{
+		{name: "long configured session", softBudget: 45 * time.Minute, ceiling: 90 * time.Minute, parentRemaining: 30 * time.Minute, expectedSoft: 28 * time.Minute, expectedHard: 28 * time.Minute},
+		{name: "extension has remaining parent room", softBudget: 10 * time.Minute, ceiling: 90 * time.Minute, parentRemaining: 30 * time.Minute, expectedSoft: 10 * time.Minute, expectedHard: 28 * time.Minute},
+		{name: "shorter org ceiling remains authoritative", softBudget: 5 * time.Minute, ceiling: 15 * time.Minute, parentRemaining: 40 * time.Minute, expectedSoft: 5 * time.Minute, expectedHard: 15 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			startedAt := time.Now()
+			store := &runtimeTestSessionStore{}
+			controller := newRuntimeController(runtimeConfig{SoftBudget: tt.softBudget, AbsoluteRuntimeCeiling: tt.ceiling, ExtensionIncrement: time.Hour, MaxAutomaticExtension: 2 * time.Hour, GracefulShutdownWindow: 5 * time.Minute, CheckpointFinalizeWindow: 5 * time.Minute}, store, nil, nil, zerolog.Nop(), uuid.New(), uuid.New(), 0, nil, newRuntimeProgressTracker(startedAt))
+			ctx := WithRuntimeDeadline(context.Background(), startedAt.Add(tt.parentRemaining))
+			require.NoError(t, controller.Begin(ctx, startedAt, models.CheckpointCapabilityFullResume), "parent budget should seed runtime control")
+			require.Equal(t, startedAt.Add(tt.expectedSoft), store.beginSoftDeadline, "persisted soft deadline must respect remaining parent budget")
+			require.Equal(t, startedAt.Add(tt.expectedHard), store.beginHardDeadline, "persisted hard deadline must leave cleanup time before the parent expires")
+			if tt.expectedSoft < tt.expectedHard {
+				require.True(t, controller.tryExtend(ctx, store.beginSoftDeadline), "healthy execution may extend within remaining parent budget")
+				require.Equal(t, store.beginHardDeadline, store.lastGrantNewSoft, "an automatic extension cannot exceed the capped parent deadline")
+			} else {
+				require.False(t, controller.tryExtend(ctx, store.beginSoftDeadline), "an attempt at its parent ceiling cannot extend")
+			}
+			require.Equal(t, 45*time.Second, controller.cfg.GracefulShutdownWindow, "graceful stop must fit cleanup reserve with persistence margin")
+			require.Equal(t, 45*time.Second, controller.cfg.CheckpointFinalizeWindow, "checkpoint finalization must fit cleanup reserve with persistence margin")
+		})
+	}
 }

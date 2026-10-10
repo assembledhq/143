@@ -33,6 +33,15 @@ interface AutomationModelSelectProps {
   /** Restyles the trigger — used by inline property rows to render it ghosted. */
   triggerClassName?: string;
   density?: ControlDensity;
+  /**
+   * Models another rank already claims. The ranked fallback list passes the
+   * primary model and its sibling rows so the same model cannot be picked
+   * twice — a duplicate rank is accepted by the API but retries a model that
+   * just failed, which is the one thing a fallback chain exists to avoid. The
+   * row's own value is never excluded, so the trigger stays truthful.
+   */
+  excludeModels?: readonly string[];
+  disabled?: boolean;
 }
 
 export function AutomationModelSelect({
@@ -42,6 +51,8 @@ export function AutomationModelSelect({
   ariaLabel = "Automation model",
   triggerClassName,
   density = "default",
+  excludeModels,
+  disabled,
 }: AutomationModelSelectProps) {
   const { data: settingsResponse } = useQuery({
     queryKey: ["settings"],
@@ -92,6 +103,16 @@ export function AutomationModelSelect({
       settings.agent_config,
     ],
   );
+  const selectableGroups = useMemo(() => {
+    if (!excludeModels || excludeModels.length === 0) return modelGroups;
+    const excluded = new Set(excludeModels.filter((model) => model && model !== value));
+    return modelGroups
+      .map((group) => ({
+        ...group,
+        models: group.models.filter((model) => !excluded.has(model)),
+      }))
+      .filter((group) => group.models.length > 0);
+  }, [excludeModels, modelGroups, value]);
   const currentValueAvailable = useMemo(
     () => !value || modelGroups.some((group) => group.models.includes(value)),
     [modelGroups, value],
@@ -104,6 +125,7 @@ export function AutomationModelSelect({
   return (
     <Select
       value={value ?? AUTO_MODEL_VALUE}
+      disabled={disabled}
       onValueChange={(nextValue) =>
         onValueChange(nextValue === AUTO_MODEL_VALUE ? undefined : nextValue)
       }
@@ -119,7 +141,7 @@ export function AutomationModelSelect({
             <SelectItem value={value}>{value}</SelectItem>
           </SelectGroup>
         ) : null}
-        <ModelOptionGroups modelGroups={modelGroups} openCodeAvailability={openCodeAvailability} selectedModel={value} />
+        <ModelOptionGroups modelGroups={selectableGroups} openCodeAvailability={openCodeAvailability} selectedModel={value} />
       </SelectContent>
     </Select>
   );

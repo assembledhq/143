@@ -226,7 +226,30 @@ func (s *AutomationRunStore) MarkWaiting(ctx context.Context, q DBTX, orgID, run
 // never pending, so genuine reservations keep their fencing. Returns
 // whether this caller won the claim.
 func (s *AutomationRunStore) ClaimPendingForPerRun(ctx context.Context, orgID, runID uuid.UUID) (bool, error) {
-	tag, err := s.db.Exec(ctx, `
+	return s.claimPendingForPerRun(ctx, s.db, orgID, runID)
+}
+
+// ClaimPendingForPerRunInTx keeps the claim and its session/link insertion
+// atomic, so completion callbacks can never observe a running successor
+// whose session has not yet been linked. expectedSessionID fences the selection
+// snapshot too: use uuid.Nil when no previous session was linked.
+func (s *AutomationRunStore) ClaimPendingForPerRunInTx(ctx context.Context, tx pgx.Tx, orgID, runID, expectedSessionID uuid.UUID) (bool, error) {
+	var status models.AutomationRunStatus
+	if err := tx.QueryRow(ctx, `SELECT status FROM automation_runs WHERE id = @id AND org_id = @org_id FOR UPDATE`, pgx.NamedArgs{"id": runID, "org_id": orgID}).Scan(&status); err != nil {
+		return false, fmt.Errorf("lock automation run for per-run dispatch: %w", err)
+	}
+	if status != models.AutomationRunStatusPending {
+		return false, nil
+	}
+	current, err := automationSessionIsCurrent(ctx, tx, orgID, runID, expectedSessionID)
+	if err != nil || !current {
+		return false, err
+	}
+	return s.claimPendingForPerRun(ctx, tx, orgID, runID)
+}
+
+func (s *AutomationRunStore) claimPendingForPerRun(ctx context.Context, q DBTX, orgID, runID uuid.UUID) (bool, error) {
+	tag, err := q.Exec(ctx, `
 		UPDATE automation_runs
 		SET status = 'running',
 		    dispatch_state = NULL,

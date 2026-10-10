@@ -24,7 +24,7 @@ func NewAutomationStore(db TxStarter) *AutomationStore {
 
 const automationColumns = `id, org_id, repository_id, name, goal, scope,
 	icon_type, icon_value,
-	agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
+	agent_type, model_override, reasoning_effort, fallback_models, execution_mode, max_concurrent, base_branch,
 	identity_scope, publish_policy, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 	github_event_triggers, github_event_filters,
 	next_run_at, last_run_at, enabled, created_by, paused_by, paused_at,
@@ -45,7 +45,7 @@ func scanAutomation(row pgx.Row) (models.Automation, error) {
 	err := row.Scan(
 		&a.ID, &a.OrgID, &a.RepositoryID, &a.Name, &a.Goal, &a.Scope,
 		&a.IconType, &a.IconValue,
-		&a.AgentType, &a.ModelOverride, &a.ReasoningEffort, &a.ExecutionMode, &a.MaxConcurrent, &a.BaseBranch,
+		&a.AgentType, &a.ModelOverride, &a.ReasoningEffort, &a.FallbackModels, &a.ExecutionMode, &a.MaxConcurrent, &a.BaseBranch,
 		&a.IdentityScope, &a.PublishPolicy, &a.PrePRReviewLoops, &a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.IntervalRunAt, &a.CronExpression, &a.Timezone,
 		&githubEventTriggers, &a.GitHubEventFilters,
 		&a.NextRunAt, &a.LastRunAt, &a.Enabled, &a.CreatedBy, &a.PausedBy, &a.PausedAt,
@@ -97,14 +97,14 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 		INSERT INTO automations (
 			org_id, repository_id, name, goal, scope,
 			icon_type, icon_value,
-			agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
+			agent_type, model_override, reasoning_effort, fallback_models, execution_mode, max_concurrent, base_branch,
 			identity_scope, publish_policy, session_continuity, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 			github_event_triggers, github_event_filters,
 			next_run_at, enabled, created_by, priority, external_metadata
 		) VALUES (
 			@org_id, @repository_id, @name, @goal, @scope,
 			@icon_type, @icon_value,
-			@agent_type, @model_override, @reasoning_effort, @execution_mode, @max_concurrent, @base_branch,
+			@agent_type, @model_override, @reasoning_effort, @fallback_models, @execution_mode, @max_concurrent, @base_branch,
 			@identity_scope, @publish_policy, @session_continuity, @pre_pr_review_loops, @schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
 			@github_event_triggers, @github_event_filters,
 			@next_run_at, @enabled, @created_by, @priority, @external_metadata
@@ -129,6 +129,7 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 		"agent_type":            a.AgentType,
 		"model_override":        a.ModelOverride,
 		"reasoning_effort":      a.ReasoningEffort,
+		"fallback_models":       a.FallbackModels.Normalize(),
 		"execution_mode":        a.ExecutionMode,
 		"max_concurrent":        a.MaxConcurrent,
 		"base_branch":           a.BaseBranch,
@@ -279,6 +280,7 @@ func updateAutomation(ctx context.Context, q DBTX, a *models.Automation) error {
 			name = @name, goal = @goal, scope = @scope, repository_id = @repository_id,
 			icon_type = @icon_type, icon_value = @icon_value,
 			agent_type = @agent_type, model_override = @model_override, reasoning_effort = @reasoning_effort,
+			fallback_models = @fallback_models,
 			execution_mode = @execution_mode, max_concurrent = @max_concurrent,
 			base_branch = @base_branch, identity_scope = @identity_scope,
 			publish_policy = @publish_policy,
@@ -312,6 +314,7 @@ func updateAutomation(ctx context.Context, q DBTX, a *models.Automation) error {
 		"agent_type":            a.AgentType,
 		"model_override":        a.ModelOverride,
 		"reasoning_effort":      a.ReasoningEffort,
+		"fallback_models":       a.FallbackModels.Normalize(),
 		"execution_mode":        a.ExecutionMode,
 		"max_concurrent":        a.MaxConcurrent,
 		"base_branch":           a.BaseBranch,
@@ -899,6 +902,50 @@ func (s *AutomationRunStore) GetByRunID(ctx context.Context, orgID, runID uuid.U
 	return scanAutomationRun(row)
 }
 
+// ListSessionAttempts returns the model attempts this run has already spent,
+// newest first — one row per session it spawned, carrying the agent and model
+// that session actually ran on plus whether it left work behind.
+//
+// The fallback chain resumes from this rather than from a counter, for two
+// reasons. A bare count would be wrong: pre-flight availability can skip a rank
+// without spawning a session, so the Nth session is not necessarily rank N, and
+// resuming at the count would re-dispatch the model that just failed. And
+// deriving everything from durable rows is what makes the chain idempotent — a
+// duplicate automation_run job delivery recomputes the same answer instead of
+// skipping ahead.
+//
+// The deleted_at filter matches listByAutomationFromClause so the attempts and
+// the session the run page displays cannot disagree.
+func (s *AutomationRunStore) ListSessionAttempts(ctx context.Context, orgID, runID uuid.UUID) ([]models.AutomationRunAttempt, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT sessions.id, sessions.agent_type, sessions.model_override, sessions.reasoning_effort,
+			COALESCE(btrim(COALESCE(sessions.diff, '')) <> '', false) AS produced_diff,
+			EXISTS (
+				SELECT 1 FROM pull_requests
+				WHERE pull_requests.org_id = sessions.org_id
+				  AND pull_requests.session_id = sessions.id
+			) AS produced_pull_request
+		FROM session_automation_links sal
+		JOIN sessions
+		  ON sessions.org_id = sal.org_id
+		 AND sessions.id = sal.session_id
+		 AND sessions.deleted_at IS NULL
+		WHERE sal.automation_run_id = @run_id AND sal.org_id = @org_id
+		ORDER BY sessions.created_at DESC, sessions.id DESC`,
+		pgx.NamedArgs{"run_id": runID, "org_id": orgID},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list automation run session attempts: %w", err)
+	}
+	defer rows.Close()
+
+	attempts, err := pgx.CollectRows(rows, pgx.RowToStructByPos[models.AutomationRunAttempt])
+	if err != nil {
+		return nil, fmt.Errorf("scan automation run session attempts: %w", err)
+	}
+	return attempts, nil
+}
+
 func (s *AutomationRunStore) CountConsecutiveFailures(ctx context.Context, orgID, automationID uuid.UUID) (int, error) {
 	var count int
 	err := s.db.QueryRow(ctx, `
@@ -955,6 +1002,8 @@ var AutomationRunListColumns = []string{
 	"session_failure_next_steps",
 	"session_failure_retry_advised",
 	"session_pr_creation_state",
+	"session_agent_type", "session_model_override",
+	"run_primary_agent_type", "run_primary_model",
 	"pr_number", "pr_url", "pr_status", "pr_ci_status",
 }
 
@@ -1005,6 +1054,14 @@ const listByAutomationSelectColumns = `ar.id, ar.automation_id, ar.org_id, ar.tr
 	s.failure_next_steps AS session_failure_next_steps,
 	s.failure_retry_advised AS session_failure_retry_advised,
 	s.pr_creation_state AS session_pr_creation_state,
+	s.agent_type AS session_agent_type, s.model_override AS session_model_override,
+	-- The model chain this run was dispatched under, extracted scalar-wise so
+	-- the heavy config_snapshot blob stays out of the 10s polling payload. The
+	-- run's OWN primary is what tells a reader whether its session fell back;
+	-- comparing against the live automation would relabel every historical run
+	-- the moment someone edits the automation's model.
+	ar.config_snapshot #>> '{agent_type}' AS run_primary_agent_type,
+	ar.config_snapshot #>> '{model_override}' AS run_primary_model,
 	pr.github_pr_number AS pr_number, pr.github_pr_url AS pr_url,
 	pr.status AS pr_status, pr.ci_status AS pr_ci_status,
 	` + automationRunContinuityListColumns
@@ -1025,6 +1082,7 @@ const listByAutomationSelectColumns = `ar.id, ar.automation_id, ar.org_id, ar.tr
 const listByAutomationFromClause = `FROM automation_runs ar
 	LEFT JOIN LATERAL (
 		SELECT sessions.id, sessions.title, sessions.status, sessions.diff_stats,
+			sessions.agent_type, sessions.model_override,
 			sessions.failure_explanation, sessions.failure_category, sessions.failure_next_steps,
 			sessions.failure_retry_advised,
 			COALESCE(sps.pr_creation_state, 'idle') AS pr_creation_state
@@ -1136,6 +1194,10 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 		sessionFailureNextSteps    []string
 		sessionFailureRetryAdvised *bool
 		sessionPRCreationState     *string
+		sessionAgentType           *string
+		sessionModelOverride       *string
+		runPrimaryAgentType        *string
+		runPrimaryModel            *string
 
 		// PR columns. NULL when the session has no PullRequest row yet —
 		// the inner LATERAL is also a LEFT JOIN.
@@ -1158,6 +1220,8 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 		&sessionFailureNextSteps,
 		&sessionFailureRetryAdvised,
 		&sessionPRCreationState,
+		&sessionAgentType, &sessionModelOverride,
+		&runPrimaryAgentType, &runPrimaryModel,
 		&prNumber, &prURL, &prStatus, &prCIStatus,
 	}
 	dests = append(dests, automationRunContinuityDests(&r)...)
@@ -1186,6 +1250,9 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 		r.TriggerDetails = details
 	}
 
+	r.PrimaryAgentType = runPrimaryAgentType
+	r.PrimaryModel = runPrimaryModel
+
 	if sessionID != nil {
 		// status, failure_retry_advised, and pr_creation_state are NOT
 		// NULL on sessions today, so a non-nil sessionID normally implies
@@ -1199,6 +1266,8 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 			FailureExplanation: sessionFailureExplanation,
 			FailureCategory:    sessionFailureCategory,
 			FailureNextSteps:   sessionFailureNextSteps,
+			AgentType:          sessionAgentType,
+			ModelOverride:      sessionModelOverride,
 		}
 		if sessionStatus != nil {
 			s.Status = *sessionStatus
@@ -1273,6 +1342,63 @@ func (s *AutomationRunStore) TransitionStatusIf(ctx context.Context, orgID, runI
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// TransitionStatusForSession fences completion and fallback promotion to the
+// newest linked session. Lock before reading links in a separate statement:
+// a callback waiting behind a successor's claim must see that committed
+// successor, rather than the snapshot from before it acquired the lock.
+// A nil sessionID is reserved for pending dispatch failures with no attempts.
+func (s *AutomationRunStore) TransitionStatusForSession(ctx context.Context, orgID, runID, sessionID uuid.UUID, fromStatus, toStatus models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) (bool, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin session-owned automation transition: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var status models.AutomationRunStatus
+	if err := tx.QueryRow(ctx, `SELECT status FROM automation_runs WHERE id = @id AND org_id = @org_id FOR UPDATE`, pgx.NamedArgs{"id": runID, "org_id": orgID}).Scan(&status); err != nil {
+		return false, fmt.Errorf("lock automation run for session completion: %w", err)
+	}
+	if status != fromStatus {
+		return false, nil
+	}
+	current, err := automationSessionIsCurrent(ctx, tx, orgID, runID, sessionID)
+	if err != nil || !current {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE automation_runs
+		SET status = @to_status,
+			completed_at = COALESCE(@completed_at, completed_at),
+			result_summary = COALESCE(@result_summary, result_summary), updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND status = @from_status`, pgx.NamedArgs{
+		"id": runID, "org_id": orgID, "from_status": fromStatus, "to_status": toStatus,
+		"completed_at": completedAt, "result_summary": resultSummary,
+	})
+	if err != nil {
+		return false, fmt.Errorf("transition session-owned automation run: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit session-owned automation transition: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// automationSessionIsCurrent must run after locking the automation run row.
+// A nil UUID represents a dispatch snapshot with no previous attempts.
+func automationSessionIsCurrent(ctx context.Context, q DBTX, orgID, runID, sessionID uuid.UUID) (bool, error) {
+	var newestSessionID uuid.UUID
+	err := q.QueryRow(ctx, `SELECT sessions.id
+		FROM session_automation_links sal
+		JOIN sessions ON sessions.id = sal.session_id AND sessions.org_id = sal.org_id
+		WHERE sal.automation_run_id = @run_id AND sal.org_id = @org_id AND sessions.deleted_at IS NULL
+		ORDER BY sessions.created_at DESC, sessions.id DESC LIMIT 1`, pgx.NamedArgs{"run_id": runID, "org_id": orgID}).Scan(&newestSessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sessionID == uuid.Nil, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read current automation session: %w", err)
+	}
+	return newestSessionID == sessionID, nil
 }
 
 // MarkCompletedNoop records the authoritative no-changes outcome reported by

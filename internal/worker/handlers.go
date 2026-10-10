@@ -2268,19 +2268,12 @@ func newPagerDutySyncHandler(syncer pagerDutySyncer, logger zerolog.Logger) JobH
 // job pipeline. Completion bubbles back via AutomationRunUpdater on the
 // Orchestrator (see services/automations/hooks.go).
 //
-// Concurrency contract: the handler relies on TransitionStatusIf to make every
-// status transition out of `pending` atomic. Two workers handed a duplicate
-// job (at-least-once delivery, retry-after-crash) both reach the conditional
-// transition; whichever lands its UPDATE first wins, the loser sees
-// transitioned=false and bails. This is what prevents two sessions from being
-// created against the same automation_run row.
-//
-// Terminal status guarantee: by the time this handler returns, the
-// automation_run row is in exactly one of {pending (lost race / unchanged),
-// running (we own the session), skipped (automation deleted/paused), failed
-// (session create failed)}. Leaving the row in pending after we've made
-// changes would force the reaper to clean up, and the reaper's hour-long
-// threshold is too slow to give the UI useful feedback.
+// Concurrency contract: model selection runs before the dispatch transaction.
+// The transaction locks the run and checks its predecessor session again,
+// then atomically claims pending and creates/links the selected session.
+// Duplicate jobs with an outdated attempt snapshot cannot claim or fail a
+// newer fallback generation. A failed insert rolls the claim back to pending
+// so job retry can finish dispatch without exposing a sessionless running run.
 func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -2366,7 +2359,29 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		// require coupling automations and automation_runs tables into one
 		// UPDATE, which isn't worth the complexity for a race that only
 		// starts *one* extra session.
-		if !automation.Enabled {
+		// Separate-session attempts tell us whether a fallback chain is already
+		// in flight. Reused target sessions keep the ordinary pause behavior and
+		// never enter the session-based fallback ledger.
+		perTarget := services != nil && services.AutomationTargets != nil && services.AutomationTargets.Applies(automationservice.DispatchInput{
+			Run: run, Automation: automation, KillSwitch: automationContinuityDisabled(),
+		})
+		var attempts []models.AutomationRunAttempt
+		if !perTarget {
+			attempts, err = stores.AutomationRuns.ListSessionAttempts(ctx, orgID, runID)
+			if err != nil {
+				return fmt.Errorf("resolve automation run attempts: %w", err)
+			}
+		}
+
+		// A promoted run sits in pending between its capacity failure and the
+		// worker claiming its next model, so "pending" no longer implies "never
+		// started". Skipping one mid-chain would cancel a run that is genuinely
+		// in flight, which is the opposite of the pause contract above.
+		if !automation.Enabled && len(attempts) > 0 {
+			log.Info().Int("attempts", len(attempts)).
+				Msg("automation paused mid-fallback-chain; continuing the in-flight run")
+		}
+		if !automation.Enabled && len(attempts) == 0 {
 			now := time.Now()
 			summary := "automation paused before run could start"
 			if _, err := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusSkipped, &now, &summary); err != nil {
@@ -2415,7 +2430,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			} else {
 				log.Warn().Err(err).Msg("invalid agent_type on automation, falling back to default")
 			}
-		} else if stores.Organizations != nil {
+		} else if perTarget && stores.Organizations != nil {
 			org, err := stores.Organizations.GetByID(ctx, orgID)
 			if err != nil {
 				log.Warn().Err(err).Msg("failed to load org settings for automation agent fallback")
@@ -2484,15 +2499,86 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			}
 		}
 
-		// Atomic claim: pending → running. Performed BEFORE session creation
-		// so a duplicate worker that loses the race never reaches the Sessions
-		// or Jobs stores at all. The claim also clears any per-target waiting
-		// bookkeeping a run picked up before it fell back to this path, so
-		// the turn's attempt fence treats it as an ordinary per-run run. Once
-		// we own the row (transitioned=true), any later failure path uses
-		// TransitionStatusIf(running → ...) so we don't accidentally
-		// overwrite a status another path already wrote.
-		transitioned, err := stores.AutomationRuns.ClaimPendingForPerRun(ctx, orgID, runID)
+		if perTarget {
+			attempts, err = stores.AutomationRuns.ListSessionAttempts(ctx, orgID, runID)
+			if err != nil {
+				return fmt.Errorf("resolve automation run attempts after per-target dispatch: %w", err)
+			}
+		}
+
+		// Ranked fallback is only for separate sessions. Per-target dispatch
+		// above owns reusable sessions and completes runs through turn markers.
+		expectedSessionID := uuid.Nil
+		if len(attempts) > 0 {
+			expectedSessionID = attempts[0].SessionID
+		}
+		failPendingRun := func(summary string) error {
+			now := time.Now()
+			if _, updateErr := stores.AutomationRuns.TransitionStatusForSession(ctx, orgID, runID, expectedSessionID, models.AutomationRunStatusPending, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
+				return fmt.Errorf("mark automation run failed: %w", updateErr)
+			}
+			return nil
+		}
+		// Dropping the already-spent ranks from the chain — rather than indexing
+		// into it by session count — is what makes a re-dispatch resume on a
+		// model that has not run yet: pre-flight availability can skip a rank
+		// without spawning a session, so the Nth session is not necessarily
+		// rank N.
+		//
+		// The org default feeds the agent ladder for every rank at once, so the
+		// agent a rank is checked against, dispatched on, and later matched by
+		// are all the same concrete value.
+		orgDefaultAgentType := models.DefaultDefaultAgentType
+		if stores.Organizations != nil {
+			org, orgErr := stores.Organizations.GetByID(ctx, orgID)
+			if orgErr != nil {
+				log.Warn().Err(orgErr).Msg("failed to load org settings for automation agent fallback")
+			} else if settings, parseErr := models.ParseOrgSettings(org.Settings); parseErr != nil {
+				log.Warn().Err(parseErr).Msg("failed to parse org settings for automation agent fallback")
+			} else if settings.DefaultAgentType != "" {
+				orgDefaultAgentType = settings.DefaultAgentType
+			}
+		}
+		candidates, err := automationModelCandidates(run, automation, orgDefaultAgentType)
+		if err != nil {
+			return failPendingRun(err.Error())
+		}
+		remaining := models.AutomationModelRanksRemaining(candidates, attempts)
+		rank, _, rankAvailable, err := resolveAutomationModelSelection(ctx, services, orgID, sessionTriggeredByUserID, remaining)
+		if err != nil {
+			return errors.Join(err, failPendingRun(fmt.Sprintf("failed to resolve automation model availability: %s", err)))
+		}
+		if !rankAvailable {
+			// Dispatching into a model we already know has no usable credential
+			// buys nothing but a failed session, so fail the run here and name
+			// what was tried. Re-running the job would reach the same verdict.
+			//
+			// An exhausted chain lands here too, with nothing left to name; say
+			// so rather than printing a dangling colon.
+			summary := "no configured model was available"
+			if labels := automationModelCandidateLabels(remaining); labels != "" {
+				summary += ": " + labels
+			} else {
+				summary = "every configured model was already attempted for this run"
+			}
+			log.Warn().Int("attempts", len(attempts)).Int("model_ranks", len(candidates)).Int("remaining", len(remaining)).
+				Msg("automation fallback models exhausted")
+			return failPendingRun(summary)
+		}
+
+		session.AgentType = automationRankAgentType(rank, orgDefaultAgentType)
+		session.ModelOverride = rank.Model
+		session.ReasoningEffort = rank.ReasoningEffort
+
+		// Claim and create/link the session in one transaction. A stale callback
+		// locks this same run row before checking ownership, so it sees either
+		// the pending predecessor or the fully linked successor.
+		tx, err := stores.Sessions.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin automation session dispatch: %w", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		transitioned, err := stores.AutomationRuns.ClaimPendingForPerRunInTx(ctx, tx, orgID, runID, expectedSessionID)
 		if err != nil {
 			return fmt.Errorf("transition run to running: %w", err)
 		}
@@ -2500,19 +2586,11 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			log.Info().Msg("skipping automation_run: lost race claiming pending row")
 			return nil
 		}
-
-		if err := stores.Sessions.Create(ctx, session); err != nil {
-			// Session creation failed after we claimed the row — flip
-			// running → failed so the UI reflects the dispatch failure
-			// immediately. Conditional transition guards against the (rare)
-			// case that the orchestrator's completion hook somehow already
-			// fired and moved the row.
-			now := time.Now()
-			summary := fmt.Sprintf("failed to create agent session: %s", err)
-			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusRunning, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
-				log.Error().Err(updateErr).Msg("failed to mark run failed after session create failure")
-			}
+		if err := stores.Sessions.CreateInTx(ctx, tx, session); err != nil {
 			return fmt.Errorf("create session: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit automation session dispatch: %w", err)
 		}
 
 		// Dedupe key on the run_agent enqueue: if this handler is invoked
@@ -2528,7 +2606,10 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 
 		log.Info().
 			Str("session_id", session.ID.String()).
-			Str("agent_type", string(agentType)).
+			Str("agent_type", string(session.AgentType)).
+			Str("model", automationModelCandidateLabel(rank)).
+			Int("attempt", len(attempts)).
+			Bool("fallback", rank.Fallback).
 			Msg("automation session dispatched")
 		return nil
 	}
@@ -8293,6 +8374,40 @@ func parseSlackTimestamp(ts string) time.Time {
 }
 
 // run_agent handler executes an agent run end-to-end via the orchestrator.
+// prepareAutomationSessionExecution refreshes ownership and budget after any
+// queue wait. Terminal or superseded parents must never start new agent work;
+// fail an unstarted child as well so it cannot remain orphaned in pending.
+func prepareAutomationSessionExecution(ctx context.Context, stores *Stores, session *models.Session) (context.Context, bool, error) {
+	if stores.AutomationRuns == nil {
+		return ctx, false, errors.New("automation run store unavailable")
+	}
+	run, err := stores.AutomationRuns.GetByRunID(ctx, session.OrgID, *session.AutomationRunID)
+	if err != nil {
+		return ctx, false, fmt.Errorf("load automation execution budget: %w", err)
+	}
+	attempts, err := stores.AutomationRuns.ListSessionAttempts(ctx, session.OrgID, run.ID)
+	if err != nil {
+		return ctx, false, fmt.Errorf("load current automation session: %w", err)
+	}
+	deadline := run.TriggeredAt.Add(models.AutomationRunExecutionBudget)
+	current := len(attempts) > 0 && attempts[0].SessionID == session.ID
+	if run.Status != models.AutomationRunStatusRunning || !current || !time.Now().Add(agent.HandlerCleanupBuffer).Before(deadline) {
+		summary := "automation run is no longer active or has exhausted its execution budget"
+		if session.Status == models.SessionStatusPending || session.Status == models.SessionStatusRunning {
+			if err := stores.Sessions.UpdateResult(ctx, session.OrgID, session.ID, models.SessionStatusFailed, &models.SessionResult{Error: &summary}); err != nil {
+				return ctx, false, fmt.Errorf("fail expired automation session: %w", err)
+			}
+		}
+		now := time.Now().UTC()
+		if _, err := stores.AutomationRuns.TransitionStatusForSession(ctx, session.OrgID, run.ID, session.ID, models.AutomationRunStatusRunning, models.AutomationRunStatusFailed, &now, &summary); err != nil {
+			return ctx, false, fmt.Errorf("fail expired automation run: %w", err)
+		}
+		return ctx, false, nil
+	}
+	ctx = agent.WithRuntimeDeadline(ctx, deadline)
+	return ctx, true, nil
+}
+
 func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -8392,6 +8507,17 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			return &FatalError{Err: fmt.Errorf("linear pre-start preparation failed")}
 		}
 
+		// A separate-session automation keeps its original wall-clock budget
+		// across fallback and queue delays. Executor handoff re-enters this
+		// handler and rechecks the parent again when it actually starts.
+		if automationTurn == nil && run.AutomationRunID != nil && !run.IsInteractive() {
+			var proceed bool
+			ctx, proceed, err = prepareAutomationSessionExecution(ctx, stores, &run)
+			if err != nil || !proceed {
+				return err
+			}
+		}
+
 		if err := maybeDispatchSessionExecutor(ctx, stores, services, jobType, run, run.PrimaryThreadID); err != nil {
 			return err
 		}
@@ -8429,6 +8555,11 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		runtimeCeiling := services.Orchestrator.ResolveAbsoluteRuntimeCeiling(ctx, orgID)
 		jobCtx, cancel := context.WithTimeout(ctx, runtimeCeiling+agent.HandlerCleanupBuffer)
 		defer cancel()
+		if deadline, ok := agent.RuntimeDeadlineFromContext(ctx); ok {
+			var deadlineCancel context.CancelFunc
+			jobCtx, deadlineCancel = context.WithDeadline(jobCtx, deadline)
+			defer deadlineCancel()
+		}
 		if automationTurn != nil {
 			jobCtx = agent.WithAutomationTurn(jobCtx, automationTurn)
 		}

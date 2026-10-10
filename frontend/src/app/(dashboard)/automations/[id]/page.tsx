@@ -57,6 +57,12 @@ import {
   normalizeCapabilityGrants,
 } from "@/components/automation-capabilities-editor";
 import { BranchPicker } from "@/components/branch-picker";
+import {
+  AutomationFallbackModelsEditor,
+  AutomationFallbackModelsSummary,
+  automationFallbackRanks,
+  buildAutomationFallbackModels,
+} from "@/components/automation-fallback-models-editor";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { AutomationScheduleEditor } from "@/components/automation-schedule-editor";
 import { ApiError, api } from "@/lib/api";
@@ -74,7 +80,7 @@ import {
   upsertAutomationInListCaches,
 } from "@/lib/automation-list-cache";
 import { queryKeys } from "@/lib/query-keys";
-import { agentTypeForModel } from "@/lib/agents";
+import { agentTypeForModel, modelOptionLabel } from "@/lib/agents";
 import {
   automationProductTriggerOptions,
   automationProductTriggersToGitHubEvents,
@@ -91,6 +97,7 @@ import type {
   AgentCapabilityDefinition,
   AgentCapabilityGrant,
   Automation,
+  AutomationFallbackModels,
   AutomationGitHubEventFilters,
   AutomationRun,
   AutomationSessionContinuity,
@@ -178,6 +185,41 @@ const applyAutomationPatch = (
 };
 
 type AutomationAutosave = UseAutosaveResult<AutomationPatch>;
+
+/**
+ * Patch fragment that keeps the ranked fallback chain legal under a primary the
+ * same patch is changing.
+ *
+ * `droppedModel` removes the rank the primary has just become, which the API
+ * refuses as a duplicate of the primary and which would otherwise retry the
+ * model that just failed. It has to travel in the SAME request as the model
+ * change: `useAutosave` coalesces queued patches by shallow key merge, so a
+ * follow-up save would race the model change instead of building on it.
+ *
+ * Returns `{}` when the rebuild is byte-identical to what is stored, so editing
+ * a field that cannot invalidate the chain never re-sends it — the API
+ * re-validates the whole chain whenever the key is present, which would let a
+ * rank nobody touched refuse an unrelated save.
+ */
+function reconcileFallbackModelsPatch(
+  automation: Automation,
+  primaryAgentType: string,
+  droppedModel?: string,
+): { fallback_models?: AutomationFallbackModels } {
+  const storedRanks = automationFallbackRanks(
+    automation.fallback_models,
+    primaryAgentType,
+  );
+  if (storedRanks.length === 0) return {};
+  const next = buildAutomationFallbackModels(
+    droppedModel
+      ? storedRanks.filter((rank) => rank.model !== droppedModel)
+      : storedRanks,
+  );
+  const current = buildAutomationFallbackModels(storedRanks);
+  if (JSON.stringify(next) === JSON.stringify(current)) return {};
+  return { fallback_models: next };
+}
 
 const GENERIC_SAVE_ERROR = "Couldn’t save automation. Your change was reverted.";
 
@@ -1658,16 +1700,27 @@ function AutomationDetailRail({
                   const clearsReasoning =
                     Boolean(automation.reasoning_effort) &&
                     !supportsReasoningEffort(nextAgentType);
+                  // The chain is reconciled into THIS patch, not a follow-up:
+                  // `useAutosave` coalesces queued patches by shallow key merge,
+                  // so a second save would race the model change rather than
+                  // build on it.
+                  const fallbackPatch = reconcileFallbackModelsPatch(
+                    automation,
+                    effectiveAgentType,
+                    value,
+                  );
                   save({
                     body: {
                       model: value ?? "",
                       ...(clearsReasoning ? { reasoning_effort: "" } : {}),
+                      ...fallbackPatch,
                     },
                     optimistic: {
                       model_override: value ?? "",
                       ...(clearsReasoning
                         ? { reasoning_effort: undefined }
                         : {}),
+                      ...fallbackPatch,
                     },
                   });
                 }}
@@ -1692,6 +1745,12 @@ function AutomationDetailRail({
                     value === "__default__"
                       ? ""
                       : toCodingAgentReasoningEffort(value);
+                  // The chain deliberately does not ride along. A rank that
+                  // inherits this level stays valid whatever it changes to:
+                  // the API drops an inherited level the rank's agent cannot
+                  // run rather than rejecting it. Sending the chain anyway
+                  // would re-validate ranks this edit never touched, and would
+                  // pin them to a level nobody chose.
                   save({
                     // The API clears the override with "", but the model types
                     // "no override" as absent — so the cache gets `undefined`.
@@ -1851,6 +1910,36 @@ function AutomationDetailRail({
               supported={supportsNativeReviewLoop}
               canManage={canManage}
             />
+            {canManage && automation.session_continuity !== "per_target" ? (
+              <AutomationFallbackModelsEditor
+                value={automation.fallback_models}
+                primaryModel={model}
+                primaryAgentType={effectiveAgentType}
+                primaryReasoningEffort={automation.reasoning_effort ?? ""}
+                onChange={(fallback_models) =>
+                  // The whole chain every time, never a delta: `useAutosave`
+                  // coalesces queued patches by shallow key merge, so a later
+                  // partial array would replace — not merge into — an earlier
+                  // one, and the intermediate reorder would be lost.
+                  save({
+                    body: { fallback_models },
+                    optimistic: { fallback_models },
+                  })
+                }
+              />
+            ) : (
+              <AutomationFallbackModelsSummary
+                value={automation.fallback_models}
+                primaryModel={model}
+                primaryAgentType={effectiveAgentType}
+              />
+            )}
+            {automation.session_continuity === "per_target" ? (
+              <p className="text-xs text-muted-foreground">
+                Fallback models are inactive while sessions are reused per pull request.
+                Switch session continuity to a new session per run to use them.
+              </p>
+            ) : null}
             <CapabilitiesProperty
               automation={automation}
               canManage={canManage}
@@ -1902,15 +1991,30 @@ function LatestRunSummary({ automationId }: { automationId: string }) {
   );
 }
 
+// Compare separate-session runs against their frozen primary. Reused target
+// sessions follow the live continuity configuration and are not fallback attempts.
 function LatestRunBody({ run }: { run: AutomationRun }) {
   const summary =
     run.result_summary || run.session?.title || statusLabel(run.status);
+  // A run that failed over to a fallback model looks identical to one that ran
+  // on the preferred model — same status, same summary — so this badge is the
+  // only place the substitution is visible. Both sides come from the run
+  // itself: its frozen primary and the model its session actually ran, so
+  // editing the automation later cannot relabel a historical run.
+  const sessionModel = run.session?.model_override;
+  const ranOnFallback =
+    run.session_id == null && Boolean(sessionModel) && sessionModel !== run.primary_model;
   return (
     <div className="mt-3 space-y-2">
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={run.status === "failed" ? "destructive" : "secondary"}>
           Execution: {statusLabel(run.status)}
         </Badge>
+        {ranOnFallback && sessionModel ? (
+          <Badge variant="outline">
+            Fallback model: {modelOptionLabel(sessionModel)}
+          </Badge>
+        ) : null}
         <span className="text-xs text-muted-foreground">
           {formatTimeAgo(run.triggered_at)}
           {run.completed_at ? ` · ${formatDateTime(run.completed_at)}` : ""}
