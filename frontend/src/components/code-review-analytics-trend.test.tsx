@@ -53,6 +53,8 @@ describe("CodeReviewAnalyticsTrend", () => {
     expect(legend).not.toHaveTextContent(/2026|exclusive|Full range|00:00|EDT/);
     const about = screen.getByRole("button", { name: "About this chart" });
     expect(about).toHaveAttribute("aria-expanded", "false");
+    expect(about).toHaveClass("group");
+    expect(about.querySelector("svg")).toHaveClass("transition-transform", "group-data-[state=open]:rotate-180");
     expect(screen.queryByText(/Current requested range/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Outcomes include later completed reviews/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Hover or tap/)).not.toBeInTheDocument();

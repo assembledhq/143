@@ -127,9 +127,12 @@ function AboutChart({ trend, metric }: { trend: AvailableTrend; metric: CodeRevi
   return (
     <Collapsible className="contents">
       <CollapsibleTrigger asChild>
-        <Button variant="ghost" size="sm" className="gap-2">
+        <Button variant="ghost" size="sm" className="group gap-2">
           About this chart
-          <ChevronDown className="size-4" aria-hidden="true" />
+          <ChevronDown
+            className="size-4 transition-transform group-data-[state=open]:rotate-180"
+            aria-hidden="true"
+          />
         </Button>
       </CollapsibleTrigger>
       <CollapsibleContent className="w-full space-y-3 text-xs text-muted-foreground">
