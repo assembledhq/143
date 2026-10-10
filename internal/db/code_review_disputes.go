@@ -568,6 +568,10 @@ func (s *CodeReviewDisputeStore) SetTriage(ctx context.Context, orgID, disputeID
 	if result.Routing == models.CodeReviewDisputeRoutingNotADispute || result.Routing == models.CodeReviewDisputeRoutingReviewRequest {
 		intakeStatus = models.CodeReviewDisputeIntakeDiscarded
 	}
+	reasonCodes := result.ContestedReasonCodes
+	if reasonCodes == nil {
+		reasonCodes = []models.CodeReviewRiskReasonCode{}
+	}
 	rows, err := s.db.Query(ctx, `UPDATE code_review_decision_disputes
 		SET direction = @direction, contested_reason_codes = @reason_codes, dispute_kind = @dispute_kind,
 		    asserts_new_information = @asserts_new_information, routing = @routing,
@@ -578,7 +582,7 @@ func (s *CodeReviewDisputeStore) SetTriage(ctx context.Context, orgID, disputeID
 		WHERE org_id = @org_id AND id = @id AND intake_status = 'pending'
 		RETURNING `+codeReviewDisputeColumns, pgx.NamedArgs{
 		"org_id": orgID, "id": disputeID, "direction": result.Direction,
-		"reason_codes": result.ContestedReasonCodes, "dispute_kind": normalizeCodeReviewDisputeKind(result.DisputeKind),
+		"reason_codes": reasonCodes, "dispute_kind": normalizeCodeReviewDisputeKind(result.DisputeKind),
 		"asserts_new_information": result.AssertsNewInformation, "routing": result.Routing,
 		"intake_status": intakeStatus, "confidence": result.Confidence,
 		"adjudication_status": status, "status_detail": strings.TrimSpace(detail),
