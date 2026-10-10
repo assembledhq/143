@@ -1,18 +1,22 @@
 "use client";
 
 import Link from "next/link";
-import type { ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { ChartNoAxesColumnIncreasing } from "lucide-react";
 import { DataTableSummaryRow } from "@/components/data-table-summary-row";
 import { EmptyState } from "@/components/empty-state";
 import { MetricInfoTooltip } from "@/components/metric-info-tooltip";
+import { CodeReviewAnalyticsTrend } from "@/components/code-review-analytics-trend";
 import { SectionGroup } from "@/components/section-group";
 import { Badge } from "@/components/ui/badge";
 import { SortableTableHeader, sortDirectionAriaValue } from "@/components/sortable-table-header";
 import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { codeReviewReasonLabel } from "@/lib/code-review-reasons";
+import { DEFAULT_CODE_REVIEW_ANALYTICS_METRIC, type CodeReviewAnalyticsMetric } from "@/lib/code-review-analytics-metrics";
+import { cn } from "@/lib/utils";
 import type { CodeReviewAnalytics } from "@/lib/types";
 type AuthorSort = "author" | "reviews" | "approved" | "not_approved" | "approval_rate" | "first_round" | "median_rounds" | "median_additions" | "median_deletions";
 
@@ -127,12 +131,42 @@ function MetricCard({
   value,
   context,
   definition,
+  selected,
+  onSelect,
+  chartId,
 }: {
   label: string;
   value: string;
   context?: string;
   definition?: string;
+  selected?: boolean;
+  onSelect?: () => void;
+  chartId?: string;
 }) {
+  if (onSelect) {
+    return (
+      <Card className={cn("relative shadow-sm transition-all duration-150", selected && "border-primary ring-1 ring-primary/25")}>
+        <Button
+          type="button"
+          variant="ghost"
+          className="h-auto w-full flex-col items-start gap-1.5 rounded-xl p-4 pr-12 text-left whitespace-normal focus-visible:ring-inset sm:h-auto"
+          aria-label={`Show ${label} trend (${value})`}
+          aria-pressed={selected}
+          aria-controls={chartId}
+          onClick={onSelect}
+        >
+          <span className="text-xs font-medium text-muted-foreground">{label}</span>
+          <span className="text-2xl font-semibold tabular-nums text-foreground">{value}</span>
+          {context ? <span className="text-xs font-normal text-muted-foreground">{context}</span> : null}
+        </Button>
+        {definition ? (
+          <div className="absolute top-3.5 right-3.5">
+            <MetricInfoTooltip label={label} definition={definition} />
+          </div>
+        ) : null}
+      </Card>
+    );
+  }
   return (
     <Card>
       <CardContent className="space-y-1.5">
@@ -150,7 +184,17 @@ function MetricCard({
 // Derived from the same report as the tables below, so the headline numbers
 // always agree with them. The reviews tab's cards deliberately describe current
 // review activity only and answer a different question.
-function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summary"] }) {
+function ApprovalOutcomeCards({ summary, selectedMetric, onMetricChange, chartId }: {
+  summary: CodeReviewAnalytics["summary"];
+  selectedMetric: CodeReviewAnalyticsMetric;
+  onMetricChange: (metric: CodeReviewAnalyticsMetric) => void;
+  chartId: string;
+}) {
+  const selection = (metric: CodeReviewAnalyticsMetric) => ({
+    selected: metric === selectedMetric,
+    onSelect: () => onMetricChange(metric),
+    chartId,
+  });
   return (
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-label="Approval outcomes">
       <MetricCard
@@ -158,36 +202,42 @@ function ApprovalOutcomeCards({ summary }: { summary: CodeReviewAnalytics["summa
         value={summary.prs_reviewed.toLocaleString()}
         context="Unique PRs first sent in this period"
         definition="Unique pull requests first sent to 143 during the selected time period."
+        {...selection("prs_reviewed")}
       />
       <MetricCard
         label="Automatically approved"
         value={summary.approved_by_143.toLocaleString()}
         context="Unique PRs with a posted approval"
         definition="Unique pull requests where a completed review session posted an approval on GitHub, including sessions completed after the selected period. Each PR counts once. Evidence-only rechecks are excluded."
+        {...selection("approved_by_143")}
       />
       <MetricCard
         label="PR approval rate"
         value={percentage(summary.approved_by_143, summary.prs_reviewed)}
         context={`${summary.approved_by_143.toLocaleString()} of ${summary.prs_reviewed.toLocaleString()} unique PRs`}
         definition="Automatically approved PRs divided by unique PRs first sent to 143 during the selected period. Uses all later rounds and includes PRs still awaiting approval. The Reviews tab counts completed review sessions instead."
+        {...selection("approval_rate")}
       />
       <MetricCard
         label="Median rounds to approval"
         value={decimalMetric(summary.median_rounds_to_approval)}
         context="Approved PRs only"
         definition="The median number of completed review sessions up to and including the first posted approval, among approved PRs. Repeat reviews of the same revision count separately; failed, stale, cancelled, and unfinished reviews do not count."
+        {...selection("median_rounds_to_approval")}
       />
       <MetricCard
         label="Average rounds to approval"
         value={decimalMetric(summary.average_rounds_to_approval)}
         context="Approved PRs only"
         definition="The average number of completed review sessions up to and including the first posted approval, among approved PRs. Repeat reviews of the same revision count separately."
+        {...selection("average_rounds_to_approval")}
       />
       <MetricCard
         label="P95 rounds to approval"
         value={roundedMetric(summary.p95_rounds_to_approval)}
         context="Approved PRs only"
         definition="At least 95% of approved PRs received their first posted approval within this many completed review sessions. Repeat reviews of the same revision count separately."
+        {...selection("p95_rounds_to_approval")}
       />
     </div>
   );
@@ -203,6 +253,8 @@ export function CodeReviewAnalyticsReport({
   onAuthorSort,
   reviewLinkFilters,
   filters,
+  selectedMetric: controlledMetric,
+  onMetricChange,
 }: {
   analytics?: CodeReviewAnalytics;
   isLoading: boolean;
@@ -216,7 +268,26 @@ export function CodeReviewAnalyticsReport({
     range: string;
   };
   filters: ReactNode;
+  selectedMetric?: CodeReviewAnalyticsMetric;
+  onMetricChange?: (metric: CodeReviewAnalyticsMetric) => void;
 }) {
+  const [localMetric, setLocalMetric] = useState<CodeReviewAnalyticsMetric>(DEFAULT_CODE_REVIEW_ANALYTICS_METRIC);
+  const selectedMetric = controlledMetric ?? localMetric;
+  const chartId = useId();
+  const chartRef = useRef<HTMLDivElement>(null);
+  const selectMetric = (metric: CodeReviewAnalyticsMetric) => {
+    setLocalMetric(metric);
+    onMetricChange?.(metric);
+    const chart = chartRef.current;
+    if (!chart) return;
+    const bounds = chart.getBoundingClientRect();
+    if (bounds.top < 0 || bounds.bottom > window.innerHeight) {
+      chart.scrollIntoView?.({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
+        block: "start",
+      });
+    }
+  };
   if (!analytics && isLoading) {
     return (
       <div className="space-y-4">
@@ -252,26 +323,6 @@ export function CodeReviewAnalyticsReport({
       />
     );
   };
-  if (summary.prs_reviewed === 0) {
-    return (
-      <div className="space-y-3">
-        {isError ? (
-          <ErrorNotice
-            title="Analytics may be out of date"
-            description="Showing the last successful report because the latest refresh failed."
-            action={{ label: "Retry", onClick: onRetry }}
-          />
-        ) : null}
-        {filters}
-        <EmptyState
-          icon={ChartNoAxesColumnIncreasing}
-          title="No PRs first sent to 143 in this time window"
-          description="Choose a longer time window or another repository to analyze PR outcomes."
-        />
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-6" aria-busy={isLoading}>
       {isError ? (
@@ -282,10 +333,23 @@ export function CodeReviewAnalyticsReport({
         />
       ) : null}
 
-      <ApprovalOutcomeCards summary={summary} />
+      <ApprovalOutcomeCards summary={summary} selectedMetric={selectedMetric} onMetricChange={selectMetric} chartId={chartId} />
 
       {filters}
 
+      <div id={chartId} ref={chartRef} className="scroll-mt-4">
+        <CodeReviewAnalyticsTrend trend={analytics.trend} metric={selectedMetric} />
+      </div>
+
+      {summary.prs_reviewed === 0 ? (
+        <EmptyState
+          icon={ChartNoAxesColumnIncreasing}
+          title="No PRs first sent to 143 in this time window"
+          description="Choose a longer time window or another repository to analyze PR outcomes."
+        />
+      ) : null}
+
+      {summary.prs_reviewed > 0 ? <>
       <SectionGroup
         title="Usage by PR author"
         description="Unique PR outcomes grouped by the author captured from the first available assessment."
@@ -546,6 +610,7 @@ export function CodeReviewAnalyticsReport({
           </p>
         </SectionGroup>
       </div>
+      </> : null}
     </div>
   );
 }

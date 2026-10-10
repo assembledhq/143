@@ -1281,6 +1281,7 @@ type CodeReviewApprovalRoundAnalytics struct {
 }
 
 type CodeReviewAnalytics struct {
+	Trend                 *CodeReviewTrend                        `json:"trend,omitempty"`
 	Summary               CodeReviewAnalyticsSummary              `json:"summary"`
 	ApprovalRounds        []CodeReviewApprovalRoundAnalytics      `json:"approval_rounds"`
 	Authors               []CodeReviewAuthorAnalytics             `json:"authors"`

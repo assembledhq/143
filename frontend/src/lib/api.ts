@@ -341,6 +341,12 @@ export const api = {
       author_sort_order?: "asc" | "desc";
       created_after?: string;
       created_before?: string;
+      include_trend?: boolean;
+      trend_span_seconds?: number;
+      trend_current_start?: string;
+      trend_current_end?: string;
+      trend_previous_start?: string;
+      trend_previous_end?: string;
     }) => {
       const searchParams = new URLSearchParams();
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
@@ -348,6 +354,11 @@ export const api = {
       if (params?.author_sort_order) searchParams.set('author_sort_order', params.author_sort_order);
       if (params?.created_after) searchParams.set('created_after', params.created_after);
       if (params?.created_before) searchParams.set('created_before', params.created_before);
+      if (params?.include_trend !== undefined) searchParams.set('include_trend', String(params.include_trend));
+      if (params?.trend_span_seconds !== undefined) searchParams.set('trend_span_seconds', String(params.trend_span_seconds));
+      for (const name of ['trend_current_start', 'trend_current_end', 'trend_previous_start', 'trend_previous_end'] as const) {
+        if (params?.[name]) searchParams.set(name, params[name]);
+      }
       const qs = searchParams.toString();
       return get<import('./types').SingleResponse<import('./types').CodeReviewAnalytics>>(`/api/v1/code-reviews/analytics${qs ? `?${qs}` : ''}`);
     },

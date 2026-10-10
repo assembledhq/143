@@ -29,10 +29,11 @@ const (
 var ErrCodeReviewPublicationLockBusy = errors.New("code review GitHub publication lock is busy")
 
 type CodeReviewStore struct {
-	db      DBTX
-	jobs    *JobStore
-	streams *cache.CodeReviewStreams
-	logger  zerolog.Logger
+	db             DBTX
+	jobs           *JobStore
+	streams        *cache.CodeReviewStreams
+	logger         zerolog.Logger
+	analyticsClock func() time.Time
 
 	// Shared by the worker's publication paths. Waiters must stay outside the
 	// pool: a publisher holds a transaction and can also block its lease renewal,
@@ -1905,11 +1906,17 @@ type CodeReviewStatsFilters struct {
 }
 
 type CodeReviewAnalyticsFilters struct {
-	RepositoryID    *uuid.UUID
-	CreatedAfter    *time.Time
-	CreatedBefore   *time.Time
-	AuthorSortBy    string
-	AuthorSortOrder string
+	IncludeTrend       bool
+	TrendSpanSeconds   *int64
+	TrendCurrentStart  *time.Time
+	TrendCurrentEnd    *time.Time
+	TrendPreviousStart *time.Time
+	TrendPreviousEnd   *time.Time
+	RepositoryID       *uuid.UUID
+	CreatedAfter       *time.Time
+	CreatedBefore      *time.Time
+	AuthorSortBy       string
+	AuthorSortOrder    string
 }
 
 func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filters CodeReviewListFilters) ([]models.CodeReviewListItem, error) {
@@ -2303,10 +2310,27 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		), '[]') AS comment_requests_by_user
 	FROM summary s`
 
+	if filters.IncludeTrend {
+		now := time.Now
+		if s.analyticsClock != nil {
+			now = s.analyticsClock
+		}
+		trendArgs, trendErr := codeReviewTrendQueryArgs(filters, now().UTC().Truncate(time.Microsecond))
+		if trendErr != nil {
+			return models.CodeReviewAnalytics{}, trendErr
+		}
+		for key, value := range trendArgs {
+			args[key] = value
+		}
+		trendCTEs := strings.ReplaceAll(codeReviewTrendCTEs, "__TREND_REPOSITORY_PREDICATE__", scanWhere)
+		query = strings.Replace(query, "\n\tSELECT s.*,", trendCTEs+"\n\tSELECT s.*,", 1)
+		query = strings.Replace(query, "\n\tFROM summary s", ", (SELECT payload FROM trend_result) AS trend\n\tFROM summary s", 1)
+	}
+
 	var analytics models.CodeReviewAnalytics
 	var medianRounds, averageRounds, p95Rounds, medianAdditions, medianDeletions float64
-	var roundsJSON, authorsJSON, reasonsJSON, commentRequestUsersJSON []byte
-	err = s.db.QueryRow(ctx, query, args).Scan(
+	var roundsJSON, authorsJSON, reasonsJSON, commentRequestUsersJSON, trendJSON []byte
+	destinations := []any{
 		&analytics.Summary.PRsReviewed, &analytics.Summary.PRsWithCompletedRound,
 		&analytics.Summary.ApprovedBy143, &analytics.Summary.NotApproved,
 		&analytics.Summary.ApprovedFirstRound, &medianRounds, &averageRounds, &p95Rounds,
@@ -2318,9 +2342,23 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		&analytics.Summary.CommentOnly, &analytics.Summary.Blocked,
 		&analytics.Summary.ApprovalNotPosted, &roundsJSON, &authorsJSON,
 		&reasonsJSON, &analytics.CommentRequestsTotal, &commentRequestUsersJSON,
-	)
+	}
+	if filters.IncludeTrend {
+		destinations = append(destinations, &trendJSON)
+	}
+	err = s.db.QueryRow(ctx, query, args).Scan(destinations...)
 	if err != nil {
 		return models.CodeReviewAnalytics{}, fmt.Errorf("query PR-centric code review analytics: %w", err)
+	}
+	if filters.IncludeTrend {
+		var trend models.CodeReviewTrend
+		if err := json.Unmarshal(trendJSON, &trend); err != nil {
+			return models.CodeReviewAnalytics{}, fmt.Errorf("decode code review analytics trend: %w", err)
+		}
+		if err := trend.Validate(); err != nil {
+			return models.CodeReviewAnalytics{}, err
+		}
+		analytics.Trend = &trend
 	}
 	analytics.Summary.MedianRoundsToApproval = codeReviewOptionalMetric(medianRounds)
 	analytics.Summary.AverageRoundsToApproval = codeReviewOptionalMetric(averageRounds)
