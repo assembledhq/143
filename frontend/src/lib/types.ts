@@ -530,8 +530,45 @@ export interface CodeReviewNonApprovalReasonAnalytics {
   prs: number;
 }
 
+export interface CodeReviewAnalyticsTrendBucket {
+  start: string;
+  end: string;
+  prs_reviewed: number;
+  approved_by_143: number;
+  median_rounds_to_approval: number | null;
+  average_rounds_to_approval: number | null;
+  p95_rounds_to_approval: number | null;
+  partial: boolean;
+  overflow_prs: number;
+}
+
+export interface CodeReviewAnalyticsTrendPoint {
+  index: number;
+  current: CodeReviewAnalyticsTrendBucket;
+  previous: CodeReviewAnalyticsTrendBucket | null;
+  unequal_exposure: boolean;
+}
+
+export type CodeReviewAnalyticsTrend = {
+  status: "available";
+  mode: "finite" | "all_time";
+  generated_at: string;
+  bucket_width_seconds: number;
+  current_window: { start: string; end: string; observed_end: string } | null;
+  previous_window: { start: string; end: string; compared_end: string } | null;
+  observed_end_advanced_by_data: boolean;
+  overflow_prs: number;
+  latest_included_first_requested_at: string | null;
+  points: CodeReviewAnalyticsTrendPoint[];
+} | {
+  status: "unavailable";
+  generated_at: string;
+  unavailable_reason: "range_too_large" | "unrepresentable_range" | "inconsistent_geometry";
+};
+
 export interface CodeReviewAnalytics {
   summary: CodeReviewAnalyticsSummary;
+  trend?: CodeReviewAnalyticsTrend;
   approval_rounds: Array<{
     bucket: "round_1" | "round_2" | "round_3" | "round_4_plus" | "not_yet_approved";
     prs: number;

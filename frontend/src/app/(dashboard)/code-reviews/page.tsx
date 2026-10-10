@@ -66,7 +66,8 @@ import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import { useOpenCodeAvailability, type OpenCodeModelAvailability } from "@/hooks/use-opencode-models";
 import { useAuth } from "@/hooks/use-auth";
-import { DEFAULT_TIME_RANGE, parseTimeRange, timeRangeBounds, timeRangeRefreshDelayMs, type TimeRangeFilter } from "@/lib/time-range";
+import { DEFAULT_TIME_RANGE, parseTimeRange, timeRangeBounds, timeRangeTrendGeometry, timeRangeRefreshDelayMs, type TimeRangeFilter } from "@/lib/time-range";
+import { CODE_REVIEW_ANALYTICS_METRICS, DEFAULT_CODE_REVIEW_ANALYTICS_METRIC } from "@/lib/code-review-analytics-metrics";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
 import { GitHubReviewerConnectionSheet } from "@/components/code-review/github-reviewer-connection-sheet";
@@ -543,6 +544,12 @@ export default function CodeReviewsPage() {
   const [reviewSortOrder, setReviewSortOrder] = useQueryState("order", parseAsStringLiteral(["asc", "desc"] as const).withDefault("asc"));
   const [authorSort, setAuthorSort] = useQueryState("author_sort", parseAsStringLiteral(AUTHOR_SORT_VALUES).withDefault("reviews"));
   const [authorSortOrder, setAuthorSortOrder] = useQueryState("author_order", parseAsStringLiteral(["asc", "desc"] as const).withDefault("desc"));
+  const [analyticsMetric, setAnalyticsMetric] = useQueryState(
+    "analytics_metric",
+    parseAsStringLiteral(CODE_REVIEW_ANALYTICS_METRICS)
+      .withDefault(DEFAULT_CODE_REVIEW_ANALYTICS_METRIC)
+      .withOptions({ history: "replace" }),
+  );
   const [search, setSearch] = useState(searchParam);
   useEffect(() => {
     setSearch(searchParam);
@@ -658,6 +665,7 @@ export default function CodeReviewsPage() {
   // fresh cache entry for an identical request every time the table is re-sorted.
   const analyticsScopeQueryKey = useMemo(
     () => ({
+      include_trend: true,
       repository_id: reviewRepositoryId,
       time_range: timeRangeFilter,
       author_sort_by: authorSort,
@@ -687,12 +695,17 @@ export default function CodeReviewsPage() {
     [statsReviewFilters, timeRangeFilter],
   );
   const currentAnalyticsFilters = useCallback(
-    () => ({
-      repository_id: reviewRepositoryId,
-      author_sort_by: authorSort,
-      author_sort_order: authorSortOrder,
-      ...timeRangeBounds(timeRangeFilter, new Date(timeRangeAnchorMsRef.current)),
-    }),
+    () => {
+      const anchor = new Date(timeRangeAnchorMsRef.current);
+      return {
+        include_trend: true,
+        repository_id: reviewRepositoryId,
+        author_sort_by: authorSort,
+        author_sort_order: authorSortOrder,
+        ...timeRangeBounds(timeRangeFilter, anchor),
+        ...timeRangeTrendGeometry(timeRangeFilter, anchor),
+      };
+    },
     [authorSort, authorSortOrder, reviewRepositoryId, timeRangeFilter],
   );
   const reviewFiltersQueryKey = useMemo(
@@ -1527,6 +1540,8 @@ export default function CodeReviewsPage() {
           <PageTabContent value="analytics">
             <CodeReviewAnalyticsReport
               analytics={analyticsQuery.data?.data}
+              selectedMetric={analyticsMetric}
+              onMetricChange={(metric) => void setAnalyticsMetric(metric)}
               isLoading={analyticsQuery.isLoading}
               isError={analyticsQuery.isError}
               onRetry={() => void analyticsQuery.refetch()}

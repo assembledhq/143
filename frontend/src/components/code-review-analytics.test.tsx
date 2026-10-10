@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
 import type { CodeReviewAnalytics } from "@/lib/types";
+import { CODE_REVIEW_ANALYTICS_METRIC_LABELS, CODE_REVIEW_ANALYTICS_METRICS, type CodeReviewAnalyticsMetric } from "@/lib/code-review-analytics-metrics";
 
 function emptyAnalytics(prsReviewed = 0): CodeReviewAnalytics {
   return {
@@ -51,8 +52,11 @@ function emptyAnalytics(prsReviewed = 0): CodeReviewAnalytics {
   };
 }
 
-function renderReport(analytics: CodeReviewAnalytics) {
-  render(
+function renderReport(analytics: CodeReviewAnalytics, options: {
+  selectedMetric?: CodeReviewAnalyticsMetric;
+  onMetricChange?: (metric: CodeReviewAnalyticsMetric) => void;
+} = {}) {
+  return render(
     <CodeReviewAnalyticsReport
       analytics={analytics}
       isLoading={false}
@@ -63,6 +67,7 @@ function renderReport(analytics: CodeReviewAnalytics) {
       onAuthorSort={vi.fn()}
       reviewLinkFilters={{ range: "30d" }}
       filters={null}
+      {...options}
     />,
   );
 }
@@ -112,6 +117,57 @@ describe("CodeReviewAnalyticsReport PR cohort states", () => {
 
     expect(screen.getByText("No PRs first sent to 143 in this time window")).toBeInTheDocument();
     expect(screen.getByText(/another repository to analyze PR outcomes/)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^Show .* trend \(/ })).toHaveLength(6);
+    expect(screen.queryByRole("table", { name: "Code review analytics by PR author" })).not.toBeInTheDocument();
+  });
+
+  it("selects all six loaded metrics, defaults to Average, and keeps info controls separate", async () => {
+    const user = userEvent.setup();
+    const onMetricChange = vi.fn();
+    renderReport(emptyAnalytics(), { onMetricChange });
+    expect(screen.getByRole("button", { name: /^Show Average rounds to approval trend/ })).toHaveAttribute("aria-pressed", "true");
+    for (const metric of CODE_REVIEW_ANALYTICS_METRICS) {
+      const label = CODE_REVIEW_ANALYTICS_METRIC_LABELS[metric];
+      const button = screen.getByRole("button", { name: new RegExp(`^Show ${label} trend`) });
+      await user.click(button);
+      expect(onMetricChange).toHaveBeenLastCalledWith(metric);
+      expect(button).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByRole("heading", { name: `${label} trend` })).toBeInTheDocument();
+      expect(button.querySelector("button")).toBeNull();
+    }
+    onMetricChange.mockClear();
+    await user.hover(screen.getByRole("button", { name: "About Average rounds to approval" }));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("The average number of completed review sessions");
+    expect(onMetricChange).not.toHaveBeenCalled();
+  });
+
+  it("scrolls an offscreen chart into view with reduced motion while keeping keyboard focus on the card", async () => {
+    const user = userEvent.setup();
+    renderReport(emptyAnalytics(3));
+    const chart = screen.getByLabelText("Code review analytics trend").parentElement!;
+    vi.spyOn(chart, "getBoundingClientRect").mockReturnValue(new DOMRect(0, -200, 800, 100));
+    const scroll = vi.fn();
+    chart.scrollIntoView = scroll;
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true } as MediaQueryList)));
+    try {
+      const button = screen.getByRole("button", { name: /^Show PR approval rate trend/ });
+      button.focus();
+      await user.keyboard("{Enter}");
+      expect(scroll).toHaveBeenCalledWith({ behavior: "instant", block: "start" });
+      expect(button).toHaveFocus();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retains a supplied metric on controlled renders and preserves cached data after a failed refresh", () => {
+    const analytics = emptyAnalytics(3);
+    const { rerender } = renderReport(analytics, { selectedMetric: "p95_rounds_to_approval" });
+    expect(screen.getByRole("button", { name: /^Show P95 rounds to approval trend/ })).toHaveAttribute("aria-pressed", "true");
+    rerender(<CodeReviewAnalyticsReport analytics={analytics} isLoading={false} isError onRetry={vi.fn()} authorSort="reviews" authorSortOrder="desc" onAuthorSort={vi.fn()} reviewLinkFilters={{ range: "30d" }} filters={null} selectedMetric="p95_rounds_to_approval" />);
+    expect(screen.getByText("Analytics may be out of date")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "P95 rounds to approval trend" })).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Code review analytics by PR author" })).toBeInTheDocument();
   });
 
   it("shows every round bucket and an empty median when no PR has approval", () => {

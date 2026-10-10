@@ -1024,6 +1024,8 @@ describe("CodeReviewsPage", () => {
     await waitFor(() => expect(analyticsRequests).toHaveLength(1));
     expectCreatedAfterDaysAgo(analyticsRequests[0]?.get("created_after") ?? undefined, 30);
     expect(analyticsRequests[0]?.has("repository_id")).toBe(false);
+    expect(analyticsRequests[0]?.get("include_trend")).toBe("true");
+    expect(analyticsRequests[0]?.get("trend_span_seconds")).toBe("2592000");
     await user.click(within(authorTable).getByRole("button", { name: "Sort by PR author ascending" }));
     await waitFor(() => expect(analyticsRequests.at(-1)?.get("author_sort_by")).toBe("author"));
     expect(analyticsRequests.at(-1)?.get("author_sort_order")).toBe("asc");
@@ -1043,6 +1045,71 @@ describe("CodeReviewsPage", () => {
 
     expect(await screen.findByRole("tab", { name: "Analytics" })).toHaveAttribute("data-state", "active");
     expect(await screen.findByText("Usage by PR author")).toBeInTheDocument();
+  });
+
+  it.each([
+    { value: "p95_rounds_to_approval", label: "P95 rounds to approval" },
+    { value: "unknown_metric", label: "Average rounds to approval" },
+  ])("restores or validates analytics metric $value", async ({ value, label }) => {
+    mockCodeReviewBaseHandlers();
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: { tab: "analytics", analytics_metric: value },
+    });
+    const cards = await screen.findByLabelText("Approval outcomes");
+    expect(within(cards).getByRole("button", { name: new RegExp(`^Show ${label} trend`) }))
+      .toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("replaces metric URL state without refetching and retains it across tab changes", async () => {
+    const user = userEvent.setup();
+    const onUrlUpdate = vi.fn();
+    const requests: URLSearchParams[] = [];
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews/analytics", ({ request }) => {
+      requests.push(new URL(request.url).searchParams);
+      return HttpResponse.json({ data: reviewAnalytics } satisfies SingleResponse<CodeReviewAnalytics>);
+    }));
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: { tab: "analytics", range: "7d", repository: repo.id },
+      nuqsHasMemory: true,
+      nuqsOnUrlUpdate: onUrlUpdate,
+    });
+    const cards = await screen.findByLabelText("Approval outcomes");
+    await waitFor(() => expect(requests).toHaveLength(1));
+    await user.click(within(cards).getByRole("button", { name: /^Show P95 rounds to approval trend/ }));
+    await waitFor(() => {
+      const update = onUrlUpdate.mock.calls.at(-1)?.[0];
+      expect(update?.searchParams.get("analytics_metric")).toBe("p95_rounds_to_approval");
+      expect(update?.searchParams.get("range")).toBe("7d");
+      expect(update?.searchParams.get("repository")).toBe(repo.id);
+      expect(update?.options.history).toBe("replace");
+    });
+    expect(requests).toHaveLength(1);
+    await user.click(screen.getByRole("tab", { name: "Reviews" }));
+    await user.click(screen.getByRole("tab", { name: "Analytics" }));
+    expect(within(await screen.findByLabelText("Approval outcomes"))
+      .getByRole("button", { name: /^Show P95 rounds to approval trend/ }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(requests.every((params) => !params.has("analytics_metric"))).toBe(true);
+  });
+
+  it("sends full previous calendar month geometry while preserving today's cohort end", async () => {
+    const requests: URLSearchParams[] = [];
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews/analytics", ({ request }) => {
+      requests.push(new URL(request.url).searchParams);
+      return HttpResponse.json({ data: reviewAnalytics } satisfies SingleResponse<CodeReviewAnalytics>);
+    }));
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "analytics", range: "this_month" } });
+    await screen.findByLabelText("Approval outcomes");
+    const anchor = new Date();
+    const start = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+    expect(requests[0]?.get("created_after")).toBe(start.toISOString());
+    expect(requests[0]?.get("trend_current_start")).toBe(start.toISOString());
+    expect(requests[0]?.get("trend_current_end")).toBe(new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1).toISOString());
+    expect(requests[0]?.get("trend_previous_start")).toBe(new Date(anchor.getFullYear(), anchor.getMonth() - 1, 1).toISOString());
+    expect(requests[0]?.get("trend_previous_end")).toBe(start.toISOString());
+    expect(requests[0]?.get("created_before")).toBe(new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate(), 23, 59, 59, 999).toISOString());
   });
 
 	it("reveals a policy limit targeted by an Insights deep link", async () => {
@@ -1074,14 +1141,19 @@ describe("CodeReviewsPage", () => {
       nuqsOnUrlUpdate: onUrlUpdate,
     });
 
+    const updatesBeforeAnalyticsNavigation = onUrlUpdate.mock.calls.length;
     await user.click(await screen.findByRole("tab", { name: "Analytics" }));
     await waitFor(() => {
+      // The search debounce can replace the URL after the tab's push write.
+      const navigationUpdate = onUrlUpdate.mock.calls
+        .slice(updatesBeforeAnalyticsNavigation)
+        .find(([candidate]) => candidate.searchParams.get("tab") === "analytics" && candidate.options.history === "push")?.[0];
+      expect(navigationUpdate?.options.history).toBe("push");
       const update = onUrlUpdate.mock.calls.at(-1)?.[0];
       expect(update?.searchParams.get("tab")).toBe("analytics");
       expect(update?.searchParams.get("repository")).toBe(repo.id);
       expect(update?.searchParams.get("range")).toBe("7d");
       expect(update?.searchParams.get("outcome")).toBe("blocked");
-      expect(update?.options.history).toBe("push");
     });
 
     const updatesBeforeDrilldown = onUrlUpdate.mock.calls.length;
@@ -1097,14 +1169,18 @@ describe("CodeReviewsPage", () => {
         .every(([update]) => update.searchParams.get("tab") === "analytics"),
     ).toBe(true);
 
+    const updatesBeforePolicyNavigation = onUrlUpdate.mock.calls.length;
     await user.click(screen.getByRole("tab", { name: "Policy" }));
     await waitFor(() => {
+      const navigationUpdate = onUrlUpdate.mock.calls
+        .slice(updatesBeforePolicyNavigation)
+        .find(([candidate]) => candidate.searchParams.get("tab") === "policy" && candidate.options.history === "push")?.[0];
+      expect(navigationUpdate?.options.history).toBe("push");
       const update = onUrlUpdate.mock.calls.at(-1)?.[0];
       expect(update?.searchParams.get("tab")).toBe("policy");
       expect(update?.searchParams.get("repository")).toBe(repo.id);
       expect(update?.searchParams.get("range")).toBe("7d");
       expect(update?.searchParams.get("outcome")).toBe("blocked");
-      expect(update?.options.history).toBe("push");
     });
   });
 

@@ -154,6 +154,52 @@ export function timeRangeBounds(
   };
 }
 
+/** Chart geometry is separate from legacy cohort membership bounds. */
+export function timeRangeTrendGeometry(range: TimeRangeFilter, anchor: Date): {
+  trend_span_seconds?: number;
+  trend_current_start?: string;
+  trend_current_end?: string;
+  trend_previous_start?: string;
+  trend_previous_end?: string;
+} {
+  if (range === "all") return {};
+  if (isRollingTimeRange(range)) {
+    return { trend_span_seconds: Number.parseInt(range, 10) * 86_400 };
+  }
+
+  const custom = customTimeRangeDates(range);
+  let start: Date;
+  let end: Date;
+  let previousStart: Date;
+  if (custom) {
+    start = custom.from;
+    end = addDays(custom.to, 1);
+    const spanMs = end.getTime() - start.getTime();
+    // Let the server return a typed unavailable trend for excessive ranges,
+    // without sending an unrepresentable shifted timestamp or losing cards.
+    if (spanMs > 10 * 366 * 86_400_000) return {};
+    previousStart = new Date(start.getTime() - spanMs);
+  } else if (range === "this_month" || range === "last_month") {
+    start = startOfMonth(range === "this_month" ? anchor : subMonths(anchor, 1));
+    end = addMonths(start, 1);
+    previousStart = subMonths(start, 1);
+  } else {
+    const weeks = range === "last_2_weeks" ? 2 : 1;
+    start = startOfWeek(range === "this_week" ? anchor : subWeeks(anchor, weeks));
+    end = addWeeks(start, weeks);
+    previousStart = subWeeks(start, weeks);
+  }
+  // RFC3339 timestamps have four-digit UTC years. Preserve the report if a
+  // custom day's exclusive end or shifted start cannot be sent in that format.
+  if ([start, end, previousStart].some((date) => !Number.isFinite(date.getTime()) || date.getUTCFullYear() < 1 || date.getUTCFullYear() > 9999)) return {};
+  return {
+    trend_current_start: start.toISOString(),
+    trend_current_end: end.toISOString(),
+    trend_previous_start: previousStart.toISOString(),
+    trend_previous_end: start.toISOString(),
+  };
+}
+
 function calendarTimeRangeDates(
   range: TimeRangeFilter,
   anchor: Date,
