@@ -127,7 +127,12 @@ test-coverage:
 
 # Generate PR-mode coverage for tools that must work below the overall floor.
 test-pr-profile:
-	go test ./internal/... -coverprofile=coverage.out -covermode=count -timeout=120s
+	@test -n "$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL}" || { echo 'Set INTEGRATION_DATABASE_URL or DATABASE_URL to a disposable test database'; exit 1; }
+	TEST_DATABASE_URL=$${TEST_DATABASE_URL:-$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL}} TEST_BROWSER_REQUIRED=1 \
+	go test ./internal/... -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=count -timeout=120s
+	INTEGRATION_DATABASE_URL=$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL} \
+	go test -tags=integration -coverpkg=./internal/... -coverprofile=coverage-integration.out -covermode=count -timeout=120s ./internal/integration/...
+	python3 .github/scripts/merge_go_coverage.py coverage.out coverage-unit.out coverage-integration.out
 
 # Mirror the PR backend job: no race detector, with the coverage floor.
 test-pr: test-pr-profile
@@ -141,7 +146,12 @@ test-coverage-diff: test-pr-profile
 
 # Mirror the merge-to-main backend job: race detector on + absolute floor check.
 test-main:
-	go test ./internal/... -coverprofile=coverage.out -covermode=atomic -race -timeout=180s
+	@test -n "$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL}" || { echo 'Set INTEGRATION_DATABASE_URL or DATABASE_URL to a disposable test database'; exit 1; }
+	TEST_DATABASE_URL=$${TEST_DATABASE_URL:-$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL}} TEST_BROWSER_REQUIRED=1 \
+	go test ./internal/... -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=atomic -race -timeout=180s
+	INTEGRATION_DATABASE_URL=$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL} \
+	go test -tags=integration -coverpkg=./internal/... -coverprofile=coverage-integration.out -covermode=atomic -race -timeout=180s ./internal/integration/...
+	python3 .github/scripts/merge_go_coverage.py coverage.out coverage-unit.out coverage-integration.out
 	go tool cover -func=coverage.out
 	python3 .github/scripts/check_go_coverage.py coverage.out "$${BACKEND_COVERAGE_MIN:-70.0}" "$${BACKEND_COVERAGE_TARGET:-75.0}"
 

@@ -134,6 +134,7 @@ jobs:
       # versioning test in internal/db). They self-skip when unset, so this
       # must point at the job's Postgres service or they never run anywhere.
       TEST_DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
+      TEST_BROWSER_REQUIRED: "1"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -186,13 +187,12 @@ jobs:
 
       - name: Run tests (PR — no race)
         if: github.event_name == 'pull_request'
-        run: go test ./internal/... -coverprofile=coverage.out -covermode=count -timeout=120s
+        run: go test ./internal/... -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=count -timeout=120s
 
-      - name: Run tests with race + coverage (main only)
-        if: github.event_name == 'push'
+      - name: Run tests with race + coverage (non-PR)
+        if: github.event_name != 'pull_request'
         run: |
-          go test ./internal/... -coverprofile=coverage.out -covermode=atomic -race -timeout=180s
-          go tool cover -func=coverage.out
+          go test ./internal/... -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=atomic -race -timeout=180s
 
       # Integration tests run on every backend-test invocation (PR + push).
       # They reuse the Postgres service this job already brings up — no new
@@ -200,13 +200,29 @@ jobs:
       # step above, so we don't double-charge CI for the same code paths.
       - name: Run integration tests
         run: |
+          mode=count
+          race=()
+          timeout=120s
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=atomic
+            race=(-race)
+            timeout=180s
+          fi
           INTEGRATION_DATABASE_URL=$DATABASE_URL \
-          go test -tags=integration -timeout=120s ./internal/integration/...
+          go test -tags=integration -coverpkg=./internal/... -coverprofile=coverage-integration.out \
+            -covermode="$mode" "${race[@]}" -timeout="$timeout" ./internal/integration/...
 
       # Exercise real image-declared volumes: mocks cannot prove that Docker
       # removed preview data or preserved explicitly named storage.
       - name: Verify preview infrastructure volume lifecycle
         run: go test -tags=docker_integration ./internal/services/preview/providers -run '^TestDockerIntegration' -count=1 -timeout=180s
+
+      # Measure all backend code exercised by either successful suite, without
+      # double-counting statements shared by multiple test binaries.
+      - name: Combine backend coverage
+        run: |
+          python3 .github/scripts/merge_go_coverage.py coverage.out coverage-unit.out coverage-integration.out
+          go tool cover -func=coverage.out
 
       - name: Check backend coverage floor
         if: github.event_name == 'push' || github.event_name == 'pull_request'
@@ -216,11 +232,14 @@ jobs:
 
       - name: Upload coverage report
         # Keep the evidence available when tests or the coverage floor fail.
-        if: ${{ !cancelled() && hashFiles('coverage.out') != '' }}
+        if: ${{ !cancelled() && hashFiles('coverage*.out') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: backend-coverage
-          path: coverage.out
+          path: |
+            coverage.out
+            coverage-unit.out
+            coverage-integration.out
 
   frontend-lint:
     name: Frontend Lint & Typecheck
