@@ -58,7 +58,7 @@ func newLifecycleInspector(t *testing.T) (*ChromeDPInspector, string) {
 	acquireLifecycleBrowser(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		_, err := io.WriteString(w, `<!doctype html><html><head><title>Preview fixture</title><style>body{margin:0;color:rgb(0,0,0);background:white}#label{color:rgb(255,0,0)}#hidden{display:none}</style></head><body><h1 id="label">Preview fixture</h1><label>Name<input id="name" value="initial"></label><label><input id="check" type="checkbox">Accept</label><select id="choice"><option value="a">A</option><option value="b">B</option></select><button id="save" onclick="document.querySelector('#result').textContent=document.querySelector('#name').value">Save</button><p id="result">empty</p><span id="hidden">Hidden</span><ul><li>first</li><li>second</li></ul><script>console.log('fixture loaded');localStorage.setItem('fixture','value');document.cookie='fixture-cookie=kept;path=/';</script></body></html>`)
+		_, err := io.WriteString(w, `<!doctype html><html><head><title>Preview fixture</title><style>body{margin:0;color:rgb(0,0,0);background:white}#label{color:rgb(255,0,0)}#hidden{display:none}</style></head><body><h1 id="label">Preview fixture</h1><label>Name<input id="name" value="initial"></label><label><input id="check" type="checkbox">Accept</label><select id="choice"><option value="a">A</option><option value="b">B</option></select><button id="save" onclick="document.querySelector('#result').textContent=document.querySelector('#name').value">Save</button><p id="result">empty</p><span id="hidden">Hidden</span><ul><li>first</li><li>second</li></ul><script>window.fixtureInitialVisibility=document.visibilityState;console.log('fixture loaded');localStorage.setItem('fixture','value');document.cookie='fixture-cookie=kept;path=/';</script></body></html>`)
 		if err != nil {
 			http.Error(w, "fixture unavailable", http.StatusInternalServerError)
 		}
@@ -332,6 +332,8 @@ func TestChromeDPScreenshotReactivatesBackgroundTarget(t *testing.T) {
 				require.Equal(t, []int{size.Width, size.Height}, []int{decoded.Bounds().Dx(), decoded.Bounds().Dy()}, "resized capture must retain exact requested dimensions")
 				require.NoError(t, chromedp.Run(preview.ctx, chromedp.Evaluate(`document.visibilityState`, &visibility)), "read target visibility after capture")
 				require.Equal(t, "visible", visibility, "screenshot target must be foregrounded so compositor frames remain available")
+				require.NoError(t, chromedp.Run(preview.ctx, chromedp.Evaluate(`window.fixtureInitialVisibility`, &visibility)), "read visibility recorded by the newly loaded page")
+				require.Equal(t, "visible", visibility, "target must be activated before navigation and page scripts run")
 			}
 		})
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/chromedp"
 	"github.com/stretchr/testify/require"
 )
 
@@ -16,6 +17,39 @@ type screenshotExecutor struct {
 	failAt   string
 	err      error
 	params   *page.CaptureScreenshotParams
+}
+
+func TestBrowserActionStage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		fail bool
+	}{
+		{name: "successful action"},
+		{name: "failed action retains stage and cause", fail: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cause := errors.New("fixture action failure")
+			calls := 0
+			action := chromedp.ActionFunc(func(context.Context) error {
+				calls++
+				if tt.fail {
+					return cause
+				}
+				return nil
+			})
+			err := browserActionStage("navigate snapshot target", action).Do(context.Background())
+			if tt.fail {
+				require.ErrorIs(t, err, cause, "stage annotations must preserve cancellation and protocol error identity")
+				require.EqualError(t, err, "navigate snapshot target: fixture action failure", "stage annotations must name the failed browser operation")
+			} else {
+				require.NoError(t, err, "stage annotations must preserve successful actions")
+			}
+			require.Equal(t, 1, calls, "stage annotations must execute an action exactly once without blind retries")
+		})
+	}
 }
 
 func (e *screenshotExecutor) Execute(_ context.Context, method string, params, result any) error {
