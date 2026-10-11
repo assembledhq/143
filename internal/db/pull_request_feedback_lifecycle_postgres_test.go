@@ -131,6 +131,14 @@ func TestPRFeedbackCollectionLifecyclePostgres(t *testing.T) {
 			if tt.wantStatus == models.PRFeedbackBatchStatusQueued {
 				var snapshot []models.PullRequestFeedbackItem
 				require.NoError(t, json.Unmarshal(actual.FeedbackSnapshot, &snapshot), "batch snapshot must contain immutable collected provider items")
+				// JSON timestamps retain the instant and offset, not pgx's Local
+				// location identity. Compare both representations in UTC.
+				item.ReceivedAt = item.ReceivedAt.UTC()
+				item.UpdatedAt = item.UpdatedAt.UTC()
+				for i := range snapshot {
+					snapshot[i].ReceivedAt = snapshot[i].ReceivedAt.UTC()
+					snapshot[i].UpdatedAt = snapshot[i].UpdatedAt.UTC()
+				}
 				require.Equal(t, []models.PullRequestFeedbackItem{item}, snapshot, "snapshot must retain exact provider payload before claim")
 				items, err := store.ListBatchItems(ctx, org, batch.ID)
 				require.NoError(t, err, "load claimed items")
