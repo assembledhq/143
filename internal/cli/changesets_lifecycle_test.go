@@ -144,5 +144,5 @@ func TestChangesetCommandMalformedConfig(t *testing.T) {
 	require.Empty(t, stdout.String(), "failed command must not print a successful changeset result")
 	require.Contains(t, stderr.String(), "credentials are unavailable", "command should explain config failure")
 	var response json.RawMessage
-	require.Error(t, json.Unmarshal([]byte(stdout.String()), &response), "failed command must not manufacture a valid JSON result")
+	require.Error(t, json.Unmarshal(stdout.Bytes(), &response), "failed command must not manufacture a valid JSON result")
 }

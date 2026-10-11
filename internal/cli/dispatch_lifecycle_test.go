@@ -67,7 +67,7 @@ func TestToolBackendCredentialPrecedence(t *testing.T) {
 				requests = append(requests, r.Method+" "+r.URL.Path+" "+r.Header.Get("Authorization"))
 				mu.Unlock()
 				if tt.fail {
-					http.Error(w, "unavailable", 503)
+					http.Error(w, "unavailable", http.StatusServiceUnavailable)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -122,6 +122,8 @@ func TestToolBackendCredentialPrecedence(t *testing.T) {
 }
 
 // Preview commands read a process-wide config; these local-server cases serialize.
+//
+//nolint:paralleltest // clearDispatchEnvironment uses t.Setenv, requiring serial parent and subtests.
 func TestLaptopPreviewCommandDispatch(t *testing.T) {
 	tests := []struct {
 		name                          string

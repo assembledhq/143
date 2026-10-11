@@ -59,7 +59,7 @@ func TestCLILoginLifecycle(t *testing.T) {
 						return
 					}
 					if tt.exchangeError != "" {
-						http.Error(w, "unavailable", 503)
+						http.Error(w, "unavailable", http.StatusServiceUnavailable)
 						return
 					}
 					response := exchangeResponse{Token: "new-credential", TokenID: "new-token", User: exchangeUser{Name: "Tester"}}
@@ -77,7 +77,7 @@ func TestCLILoginLifecycle(t *testing.T) {
 				}
 				if r.URL.Path == "/api/v1/auth/cli-tokens" {
 					if r.Header.Get("Authorization") != "Bearer new-credential" {
-						http.Error(w, "wrong credential", 401)
+						http.Error(w, "wrong credential", http.StatusUnauthorized)
 						return
 					}
 					fmt.Fprint(w, `{"data":[]}`)

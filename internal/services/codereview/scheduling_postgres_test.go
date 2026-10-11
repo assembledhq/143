@@ -70,6 +70,8 @@ func (f *schedulingSnapshotFixture) update(fn func(*ghservice.CodeReviewPullRequ
 
 // Opt in with a disposable PostgreSQL 15+ server whose user may create databases.
 // Each test run creates, fully migrates, and drops its own database.
+//
+//nolint:paralleltest // Subtests share one database; cross-tenant repair sweeps would consume other cases' fixtures.
 func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 	t.Parallel()
 	raw := os.Getenv("CODE_REVIEW_TEST_DATABASE_URL")

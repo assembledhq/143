@@ -145,6 +145,7 @@ func TestChromeDPStorageRestoration(t *testing.T) {
 	require.Equal(t, exported, actual, "restoration must retain complete origin, local storage and cookies")
 }
 
+//nolint:paralleltest // Subtests operate on the same browser tab and must preserve sequential page state.
 func TestChromeDPInteractionAndAssertionFailures(t *testing.T) {
 	t.Parallel()
 	inspector, base := newLifecycleInspector(t)
