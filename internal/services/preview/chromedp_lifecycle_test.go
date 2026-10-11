@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -296,4 +297,42 @@ func TestChromeDPVisualDiffSnapshots(t *testing.T) {
 	require.Equal(t, "No significant visual changes detected.", actual.Summary, "unchanged snapshots must not be described as a regression")
 	_, err = png.Decode(bytes.NewReader(actual.OverlayPNG))
 	require.NoError(t, err, "diff overlay must contain valid PNG evidence")
+}
+
+func TestChromeDPScreenshotReactivatesBackgroundTarget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		fullPage bool
+	}{
+		{name: "viewport"},
+		{name: "full page", fullPage: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			inspector, base := newLifecycleInspector(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			preview, err := inspector.getOrCreatePreviewCtx("preview")
+			require.NoError(t, err, "create persistent preview target")
+			background, err := inspector.getOrCreatePreviewCtx("other")
+			require.NoError(t, err, "create competing browser tab")
+			for _, size := range []models.ViewportSpec{{Width: 320, Height: 240}, {Width: 800, Height: 600}} {
+				require.NoError(t, chromedp.Run(background.ctx, page.BringToFront()), "background the preview before each repeated capture")
+				var visibility string
+				require.NoError(t, chromedp.Run(preview.ctx, chromedp.Evaluate(`document.visibilityState`, &visibility)), "read preview visibility before activation")
+				require.Equal(t, "hidden", visibility, "regression fixture must actually background the preview target")
+				actual, err := inspector.CaptureScreenshot(ctx, "preview", models.ScreenshotOpts{ViewportW: size.Width, ViewportH: size.Height, FullPage: tt.fullPage})
+				require.NoError(t, err, "repeated capture must reactivate the target after navigation and resize")
+				require.Equal(t, base+"/", actual.URL, "capture must retain the authorized preview URL")
+				require.Equal(t, "Preview fixture", actual.PageTitle, "capture must inspect the preview rather than the competing tab")
+				decoded, err := png.Decode(bytes.NewReader(actual.PNG))
+				require.NoError(t, err, "reactivated capture must return real PNG pixels")
+				require.Equal(t, []int{size.Width, size.Height}, []int{decoded.Bounds().Dx(), decoded.Bounds().Dy()}, "resized capture must retain exact requested dimensions")
+				require.NoError(t, chromedp.Run(preview.ctx, chromedp.Evaluate(`document.visibilityState`, &visibility)), "read target visibility after capture")
+				require.Equal(t, "visible", visibility, "screenshot target must be foregrounded so compositor frames remain available")
+			}
+		})
+	}
 }

@@ -471,9 +471,9 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 	actions = append(actions, chromedp.Location(&pageURL))
 
 	if opts.FullPage {
-		actions = append(actions, chromedp.FullScreenshot(&pngData, 100))
+		actions = append(actions, capturePreviewScreenshot(&pngData, true))
 	} else {
-		actions = append(actions, chromedp.CaptureScreenshot(&pngData))
+		actions = append(actions, capturePreviewScreenshot(&pngData, false))
 	}
 
 	if err := chromedp.Run(timeoutCtx, actions...); err != nil {
@@ -504,6 +504,24 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 		Viewport:      models.ViewportSpec{Width: opts.ViewportW, Height: opts.ViewportH},
 		CapturedAt:    time.Now(),
 	}, nil
+}
+
+// Activate the target before asking Chrome's compositor for pixels. Background
+// headless tabs can stop producing frames after navigation or viewport changes.
+func capturePreviewScreenshot(pngData *[]byte, fullPage bool) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		if err := page.BringToFront().Do(ctx); err != nil {
+			return fmt.Errorf("activate screenshot target: %w", err)
+		}
+		capture := chromedp.CaptureScreenshot(pngData)
+		if fullPage {
+			capture = chromedp.FullScreenshot(pngData, 100)
+		}
+		if err := capture.Do(ctx); err != nil {
+			return fmt.Errorf("capture target pixels: %w", err)
+		}
+		return nil
+	})
 }
 
 // =============================================================================
@@ -1715,7 +1733,7 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 		// Optional screenshot at this step.
 		if step.Screenshot || stepErr != nil {
 			var pngData []byte
-			if err := chromedp.Run(timeoutCtx, chromedp.CaptureScreenshot(&pngData)); err == nil {
+			if err := chromedp.Run(timeoutCtx, capturePreviewScreenshot(&pngData, false)); err == nil {
 				var title string
 				_ = chromedp.Run(timeoutCtx, chromedp.Title(&title))
 				sr.Screenshot = &models.ScreenshotResult{
@@ -1881,7 +1899,7 @@ func (c *ChromeDPInspector) ComputeVisualDiff(ctx context.Context, previewID str
 		chromedp.Navigate(beforeURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Sleep(time.Second),
-		chromedp.CaptureScreenshot(&beforePNG),
+		capturePreviewScreenshot(&beforePNG, false),
 	); err != nil {
 		return nil, fmt.Errorf("capture before snapshot: %w", err)
 	}
@@ -1901,7 +1919,7 @@ func (c *ChromeDPInspector) ComputeVisualDiff(ctx context.Context, previewID str
 		chromedp.Navigate(afterURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Sleep(time.Second),
-		chromedp.CaptureScreenshot(&afterPNG),
+		capturePreviewScreenshot(&afterPNG, false),
 	); err != nil {
 		return nil, fmt.Errorf("capture after snapshot: %w", err)
 	}
