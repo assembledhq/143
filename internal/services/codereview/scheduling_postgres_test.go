@@ -74,7 +74,10 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 	t.Parallel()
 	raw := os.Getenv("CODE_REVIEW_TEST_DATABASE_URL")
 	if raw == "" {
-		t.Skip("set CODE_REVIEW_TEST_DATABASE_URL for full migration and lifecycle proof")
+		raw = os.Getenv("TEST_DATABASE_URL")
+	}
+	if raw == "" {
+		t.Skip("set TEST_DATABASE_URL or CODE_REVIEW_TEST_DATABASE_URL to a disposable server for lifecycle proof")
 	}
 	ctx := context.Background()
 	admin, err := pgx.Connect(ctx, raw)
@@ -329,7 +332,9 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+			// RepairMissingWakes intentionally scans every tenant in this
+			// isolated database. Run lifecycle cases serially so one case's
+			// repair sweep cannot drain another case's cancellation fixture.
 			org, integration, repo, pr := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 			_, err := pool.Exec(ctx, `INSERT INTO organizations(id,name) VALUES($1,'Scheduling test')`, org)
 			require.NoError(t, err, "seed org")

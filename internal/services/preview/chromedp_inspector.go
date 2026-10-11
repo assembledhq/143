@@ -407,6 +407,14 @@ func (c *ChromeDPInspector) getOrCreatePreviewCtx(previewID string) (*previewCon
 			pc.mu.Unlock()
 		}
 	})
+	// Initialize the tab on its persistent context. The first Run starts the
+	// target's event loop using the context passed to it; initializing from an
+	// operation's timeout context would stop that loop when the operation ends,
+	// leaving the cached tab unable to service subsequent requests.
+	if err := chromedp.Run(ctx); err != nil {
+		cancel()
+		return nil, fmt.Errorf("initialize preview browser context: %w", err)
+	}
 
 	c.previews[contextKey] = pc
 	return pc, nil
@@ -2067,7 +2075,7 @@ func generateDiffOverlay(before, after image.Image) ([]byte, error) {
 		height = aBounds.Dy()
 	}
 
-	overlay := image.NewRGBA(image.Rect(0, 0, width, height))
+	overlay := image.NewNRGBA(image.Rect(0, 0, width, height))
 
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
@@ -2080,7 +2088,7 @@ func generateDiffOverlay(before, after image.Image) ([]byte, error) {
 
 			if dr > 10 || dg > 10 || db > 10 {
 				// Red highlight for changed pixels.
-				overlay.Set(x, y, color.RGBA{R: 255, G: 0, B: 0, A: 180})
+				overlay.Set(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 180})
 			} else {
 				// Semi-transparent grayscale for unchanged pixels.
 				r, g, b, _ := after.At(aBounds.Min.X+x, aBounds.Min.Y+y).RGBA()
@@ -2089,7 +2097,7 @@ func generateDiffOverlay(before, after image.Image) ([]byte, error) {
 					grayVal = 255
 				}
 				gray := uint8(grayVal) // #nosec G115 -- clamped above
-				overlay.Set(x, y, color.RGBA{R: gray, G: gray, B: gray, A: 100})
+				overlay.Set(x, y, color.NRGBA{R: gray, G: gray, B: gray, A: 100})
 			}
 		}
 	}

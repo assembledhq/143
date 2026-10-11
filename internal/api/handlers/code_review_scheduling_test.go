@@ -21,20 +21,23 @@ import (
 type scheduleHandlerStub struct {
 	enabled bool
 	request func(codereviewsvc.ScheduleRequestInput) (codereviewsvc.ScheduleRequestResult, error)
+	get     func(uuid.UUID, uuid.UUID) (models.CodeReviewPRState, error)
+	pause   func(uuid.UUID, uuid.UUID, bool) error
+	list    func(uuid.UUID, *uuid.UUID, *uuid.UUID, int) ([]models.CodeReviewScheduledTarget, error)
 }
 
 func (s *scheduleHandlerStub) SchedulingEnabled() bool { return s.enabled }
 func (s *scheduleHandlerStub) RetryReview(context.Context, codereviewsvc.RetryReviewInput) (codereviewsvc.RetryReviewResult, error) {
 	panic("unexpected retry")
 }
-func (s *scheduleHandlerStub) GetSchedule(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewPRState, error) {
-	panic("unexpected read")
+func (s *scheduleHandlerStub) GetSchedule(_ context.Context, orgID, prID uuid.UUID) (models.CodeReviewPRState, error) {
+	return s.get(orgID, prID)
 }
-func (s *scheduleHandlerStub) PauseSchedule(context.Context, uuid.UUID, uuid.UUID, bool) error {
-	panic("unexpected pause")
+func (s *scheduleHandlerStub) PauseSchedule(_ context.Context, orgID, prID uuid.UUID, paused bool) error {
+	return s.pause(orgID, prID, paused)
 }
-func (s *scheduleHandlerStub) ListPendingSchedules(context.Context, uuid.UUID, *uuid.UUID, *uuid.UUID, int) ([]models.CodeReviewScheduledTarget, error) {
-	panic("unexpected list")
+func (s *scheduleHandlerStub) ListPendingSchedules(_ context.Context, orgID uuid.UUID, repoID, after *uuid.UUID, limit int) ([]models.CodeReviewScheduledTarget, error) {
+	return s.list(orgID, repoID, after, limit)
 }
 func (s *scheduleHandlerStub) RequestScheduledReview(_ context.Context, input codereviewsvc.ScheduleRequestInput) (codereviewsvc.ScheduleRequestResult, error) {
 	return s.request(input)
