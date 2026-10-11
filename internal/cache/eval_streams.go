@@ -29,20 +29,8 @@ type EvalBatchStreams struct {
 }
 
 type EvalBatchSubscription struct {
-	C <-chan models.EvalBatchUpdatedEvent
-
-	ch     chan models.EvalBatchUpdatedEvent
-	cancel context.CancelFunc
-	pubsub *redis.PubSub
-
-	mu          sync.Mutex
-	closeReason string
-}
-
-func (s *EvalBatchSubscription) setCloseReason(reason string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.closeReason = reason
+	C     <-chan models.EvalBatchUpdatedEvent
+	state *evalSubscriptionState[models.EvalBatchUpdatedEvent]
 }
 
 func NewEvalBatchStreams(client *Client, logger zerolog.Logger) *EvalBatchStreams {
@@ -80,79 +68,28 @@ func (s *EvalBatchStreams) PublishUpdated(ctx context.Context, event models.Eval
 // for the requested batch ID — there is no server-side filter to maintain
 // in callers, and unrelated batches in the same org cause no fanout.
 func (s *EvalBatchStreams) Subscribe(batchID uuid.UUID) (*EvalBatchSubscription, error) {
-	if s == nil || s.client == nil {
+	if s == nil {
 		return nil, errors.New("redis unavailable")
 	}
-	if !s.client.Available() {
-		return nil, errors.New("redis unavailable")
+	state, err := subscribeToEvalStream[models.EvalBatchUpdatedEvent](s.client, s.logger, evalBatchStreamChannel(batchID), "eval batch")
+	if err != nil {
+		return nil, err
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	pubsub := s.client.raw().Subscribe(ctx, evalBatchStreamChannel(batchID))
-	if _, err := pubsub.Receive(ctx); err != nil {
-		cancel()
-		_ = pubsub.Close()
-		return nil, fmt.Errorf("subscribe eval batch stream: %w", err)
-	}
-
-	sub := &EvalBatchSubscription{
-		ch:     make(chan models.EvalBatchUpdatedEvent, 32),
-		cancel: cancel,
-		pubsub: pubsub,
-	}
-	sub.C = sub.ch
-
-	go func() {
-		defer close(sub.ch)
-		defer cancel()
-
-		for msg := range pubsub.Channel() {
-			var event models.EvalBatchUpdatedEvent
-			if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
-				s.logger.Warn().Err(err).Str("channel", msg.Channel).Msg("failed to decode eval batch update event")
-				continue
-			}
-
-			select {
-			case sub.ch <- event:
-			case <-ctx.Done():
-				sub.setCloseReason(ctx.Err().Error())
-				return
-			}
-		}
-
-		if err := ctx.Err(); err != nil {
-			sub.setCloseReason(err.Error())
-			return
-		}
-		sub.setCloseReason("subscription closed")
-	}()
-
-	return sub, nil
+	return &EvalBatchSubscription{C: state.ch, state: state}, nil
 }
 
 func (s *EvalBatchSubscription) Close() {
-	if s == nil {
+	if s == nil || s.state == nil {
 		return
 	}
-	if s.cancel != nil {
-		s.cancel()
-	}
-	if s.pubsub != nil {
-		_ = s.pubsub.Close()
-	}
+	s.state.close()
 }
 
 func (s *EvalBatchSubscription) CloseReason() string {
-	if s == nil {
+	if s == nil || s.state == nil {
 		return "subscription closed"
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closeReason == "" {
-		return "subscription closed"
-	}
-	return s.closeReason
+	return s.state.reason()
 }
 
 // evalBatchStreamChannel scopes the pub/sub channel by batch ID so subscribers
@@ -174,20 +111,8 @@ type EvalBootstrapStreams struct {
 }
 
 type EvalBootstrapSubscription struct {
-	C <-chan models.EvalBootstrapUpdatedEvent
-
-	ch     chan models.EvalBootstrapUpdatedEvent
-	cancel context.CancelFunc
-	pubsub *redis.PubSub
-
-	mu          sync.Mutex
-	closeReason string
-}
-
-func (s *EvalBootstrapSubscription) setCloseReason(reason string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.closeReason = reason
+	C     <-chan models.EvalBootstrapUpdatedEvent
+	state *evalSubscriptionState[models.EvalBootstrapUpdatedEvent]
 }
 
 func NewEvalBootstrapStreams(client *Client, logger zerolog.Logger) *EvalBootstrapStreams {
@@ -221,61 +146,94 @@ func (s *EvalBootstrapStreams) PublishUpdated(ctx context.Context, event models.
 }
 
 func (s *EvalBootstrapStreams) Subscribe(runID uuid.UUID) (*EvalBootstrapSubscription, error) {
-	if s == nil || s.client == nil {
+	if s == nil {
 		return nil, errors.New("redis unavailable")
 	}
-	if !s.client.Available() {
+	state, err := subscribeToEvalStream[models.EvalBootstrapUpdatedEvent](s.client, s.logger, evalBootstrapStreamChannel(runID), "eval bootstrap")
+	if err != nil {
+		return nil, err
+	}
+	return &EvalBootstrapSubscription{C: state.ch, state: state}, nil
+}
+
+func (s *EvalBootstrapSubscription) Close() {
+	if s == nil || s.state == nil {
+		return
+	}
+	s.state.close()
+}
+
+func (s *EvalBootstrapSubscription) CloseReason() string {
+	if s == nil || s.state == nil {
+		return "subscription closed"
+	}
+	return s.state.reason()
+}
+
+type evalSubscriptionState[T any] struct {
+	ch     chan T
+	cancel context.CancelFunc
+	pubsub *redis.PubSub
+
+	mu          sync.Mutex
+	closeReason string
+}
+
+func subscribeToEvalStream[T any](client *Client, logger zerolog.Logger, channel, eventName string) (*evalSubscriptionState[T], error) {
+	if client == nil || !client.Available() {
 		return nil, errors.New("redis unavailable")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	pubsub := s.client.raw().Subscribe(ctx, evalBootstrapStreamChannel(runID))
+	pubsub := client.raw().Subscribe(ctx, channel)
 	if _, err := pubsub.Receive(ctx); err != nil {
 		cancel()
 		_ = pubsub.Close()
-		return nil, fmt.Errorf("subscribe eval bootstrap stream: %w", err)
+		return nil, fmt.Errorf("subscribe %s stream: %w", eventName, err)
 	}
 
-	sub := &EvalBootstrapSubscription{
-		ch:     make(chan models.EvalBootstrapUpdatedEvent, 32),
+	state := &evalSubscriptionState[T]{
+		ch:     make(chan T, 32),
 		cancel: cancel,
 		pubsub: pubsub,
 	}
-	sub.C = sub.ch
-
-	go func() {
-		defer close(sub.ch)
-		defer cancel()
-
-		for msg := range pubsub.Channel() {
-			var event models.EvalBootstrapUpdatedEvent
-			if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
-				s.logger.Warn().Err(err).Str("channel", msg.Channel).Msg("failed to decode eval bootstrap update event")
-				continue
-			}
-
-			select {
-			case sub.ch <- event:
-			case <-ctx.Done():
-				sub.setCloseReason(ctx.Err().Error())
-				return
-			}
-		}
-
-		if err := ctx.Err(); err != nil {
-			sub.setCloseReason(err.Error())
-			return
-		}
-		sub.setCloseReason("subscription closed")
-	}()
-
-	return sub, nil
+	go state.forward(ctx, logger, eventName)
+	return state, nil
 }
 
-func (s *EvalBootstrapSubscription) Close() {
-	if s == nil {
+func (s *evalSubscriptionState[T]) forward(ctx context.Context, logger zerolog.Logger, eventName string) {
+	defer close(s.ch)
+	defer s.cancel()
+
+	for msg := range s.pubsub.Channel() {
+		var event T
+		if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
+			logger.Warn().Err(err).Str("channel", msg.Channel).Msg("failed to decode " + eventName + " update event")
+			continue
+		}
+
+		select {
+		case s.ch <- event:
+		case <-ctx.Done():
+			s.setCloseReason(ctx.Err().Error())
+			return
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		s.setCloseReason(err.Error())
 		return
 	}
+	s.setCloseReason("subscription closed")
+}
+
+func (s *evalSubscriptionState[T]) setCloseReason(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeReason = reason
+}
+
+func (s *evalSubscriptionState[T]) close() {
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -284,10 +242,7 @@ func (s *EvalBootstrapSubscription) Close() {
 	}
 }
 
-func (s *EvalBootstrapSubscription) CloseReason() string {
-	if s == nil {
-		return "subscription closed"
-	}
+func (s *evalSubscriptionState[T]) reason() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closeReason == "" {

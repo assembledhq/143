@@ -28,6 +28,9 @@ func TestEvalBatchStreams_AvailabilityAndHelpers(t *testing.T) {
 	require.NotEmpty(t, sub.CloseReason(), "closing a subscription should leave a non-empty close reason")
 
 	require.Equal(t, "subscription closed", (*EvalBatchSubscription)(nil).CloseReason(), "nil subscription receivers should report the default close reason")
+	emptySub := &EvalBatchSubscription{}
+	emptySub.Close()
+	require.Equal(t, "subscription closed", emptySub.CloseReason(), "zero-value subscriptions should remain safe to close and inspect")
 
 	require.Equal(t, "143:stream:{batch:00000000-0000-0000-0000-000000000000}:eval_batches", evalBatchStreamChannel(uuid.Nil), "channel helper should scope eval batch streams by batch ID so unrelated batches in the same org don't fan out")
 }
@@ -173,5 +176,8 @@ func TestEvalBootstrapStreams_PublishAndSubscribe(t *testing.T) {
 	}, 2*time.Second, 20*time.Millisecond, "published eval bootstrap events should be delivered to subscribers")
 
 	require.Equal(t, "subscription closed", (*EvalBootstrapSubscription)(nil).CloseReason(), "nil subscription receivers should report the default close reason")
+	emptySub := &EvalBootstrapSubscription{}
+	emptySub.Close()
+	require.Equal(t, "subscription closed", emptySub.CloseReason(), "zero-value subscriptions should remain safe to close and inspect")
 	require.Equal(t, "subscription closed", sub.CloseReason(), "fresh subscriptions should report the default close reason before close")
 }
