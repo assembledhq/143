@@ -72,6 +72,10 @@ func (s *checkpointRetryStore) DeadLetterWithLease(_ context.Context, _, _ uuid.
 	return true, nil
 }
 
+func (s *checkpointRetryStore) DeadLetterCodeReviewWithLease(ctx context.Context, _, jobID, lockToken uuid.UUID, message, _ string) (bool, error) {
+	return s.DeadLetterWithLease(ctx, jobID, lockToken, message)
+}
+
 func TestCodeReviewAgentCheckpointResetsDependencyWindow(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

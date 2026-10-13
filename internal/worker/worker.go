@@ -298,8 +298,7 @@ func (w *Worker) poll(ctx context.Context) {
 	var fatal *FatalError
 	if errors.As(err, &fatal) {
 		w.logger.Error().Err(err).Str("job_id", job.ID.String()).Msg("job failed (fatal, skipping retries)")
-		w.deadLetterJob(ctx, job.ID, *job.LockToken, err.Error())
-		w.runDeadLetterHooks(handlerCtx, err)
+		w.deadLetterJob(ctx, handlerCtx, job, err)
 		return
 	}
 
@@ -307,8 +306,7 @@ func (w *Worker) poll(ctx context.Context) {
 	if errors.As(err, &retryable) {
 		if retryable.ConsumeAttempt && job.Attempts >= job.MaxAttempts {
 			w.logger.Error().Err(err).Str("job_id", job.ID.String()).Msg("retryable job exhausted attempts, dead-lettering")
-			w.deadLetterJob(ctx, job.ID, *job.LockToken, err.Error())
-			w.runDeadLetterHooks(handlerCtx, err)
+			w.deadLetterJob(ctx, handlerCtx, job, err)
 			return
 		}
 		now := time.Now()
@@ -335,8 +333,7 @@ func (w *Worker) poll(ctx context.Context) {
 				Dur("retry_window_age", now.Sub(retryWindowStartedAt)).
 				Msg("retryable job exceeded max duration, dead-lettering")
 			timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", retryWindow, err)
-			w.deadLetterJob(ctx, job.ID, *job.LockToken, timeoutErr.Error())
-			w.runDeadLetterHooks(handlerCtx, timeoutErr)
+			w.deadLetterJob(ctx, handlerCtx, job, timeoutErr)
 			return
 		}
 		w.logger.Info().Err(err).Str("job_id", job.ID.String()).Msg("job deferred (retryable)")
@@ -349,8 +346,7 @@ func (w *Worker) poll(ctx context.Context) {
 
 	w.logger.Error().Err(err).Str("job_id", job.ID.String()).Msg("job failed")
 	if job.Attempts >= job.MaxAttempts {
-		w.deadLetterJob(ctx, job.ID, *job.LockToken, err.Error())
-		w.runDeadLetterHooks(handlerCtx, err)
+		w.deadLetterJob(ctx, handlerCtx, job, err)
 		return
 	}
 	w.retryJob(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, false)
@@ -542,15 +538,34 @@ func (w *Worker) retryJobWithDelayAt(ctx context.Context, now time.Time, jobID, 
 	return runAt, true
 }
 
-func (w *Worker) deadLetterJob(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) {
-	ok, err := w.jobs.DeadLetterWithLease(ctx, jobID, lockToken, errMsg)
+type codeReviewTerminalLeaseStore interface {
+	DeadLetterCodeReviewWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string) (bool, error)
+}
+
+func (w *Worker) deadLetterJob(ctx, handlerCtx context.Context, job *models.Job, terminalErr error) {
+	var ok bool
+	var err error
+	if job.JobType == models.JobTypeRunCodeReview && !errors.Is(terminalErr, errCodeReviewEndedParentRecovery) {
+		store, supported := w.jobs.(codeReviewTerminalLeaseStore)
+		if !supported {
+			w.logger.Error().Str("job_id", job.ID.String()).Msg("job store cannot atomically fail a full review; leaving controller for lease recovery")
+			return
+		}
+		ok, err = store.DeadLetterCodeReviewWithLease(ctx, job.OrgID, job.ID, *job.LockToken, terminalErr.Error(), codeReviewDeadLetterReason(terminalErr))
+	} else {
+		// An ended-parent ownership rejection must preserve the assessment for
+		// the existing guarded recovery path, as its cleanup hook also does.
+		ok, err = w.jobs.DeadLetterWithLease(ctx, job.ID, *job.LockToken, terminalErr.Error())
+	}
 	if err != nil {
-		w.logger.Warn().Err(err).Str("job_id", jobID.String()).Msg("failed to dead-letter job")
+		w.logger.Warn().Err(err).Str("job_id", job.ID.String()).Msg("failed to dead-letter job")
 		return
 	}
 	if !ok {
-		w.logger.Warn().Str("job_id", jobID.String()).Msg("lost ownership before dead-lettering job")
+		w.logger.Warn().Str("job_id", job.ID.String()).Msg("lost ownership before dead-lettering job")
+		return
 	}
+	w.runDeadLetterHooks(handlerCtx, terminalErr)
 }
 
 func (w *Worker) runDeadLetterHooks(handlerCtx context.Context, err error) {
