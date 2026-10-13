@@ -2674,6 +2674,27 @@ func (s *CodeReviewStore) ReplaceFinding(ctx context.Context, finding *models.Co
 	return s.upsertFinding(ctx, finding, true)
 }
 
+// DeleteUnpostedFindings removes only superseded findings owned by this
+// orchestrator attempt. Published findings retain their durable receipts.
+func (s *CodeReviewStore) DeleteUnpostedFindings(ctx context.Context, orgID, sessionID, agentResultID uuid.UUID, dedupeKeys []string) error {
+	if len(dedupeKeys) == 0 {
+		return nil
+	}
+	_, err := s.db.Exec(ctx, `
+		DELETE FROM code_review_findings
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND agent_result_id = @agent_result_id
+		  AND dedupe_key = ANY(@dedupe_keys)
+		  AND github_comment_id IS NULL`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "agent_result_id": agentResultID, "dedupe_keys": dedupeKeys,
+	})
+	if err != nil {
+		return fmt.Errorf("delete unposted code review findings: %w", err)
+	}
+	return nil
+}
+
 func (s *CodeReviewStore) upsertFinding(ctx context.Context, finding *models.CodeReviewFinding, replaceOnConflict bool) error {
 	if err := finding.Severity.Validate(); err != nil {
 		return err

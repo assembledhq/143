@@ -2427,6 +2427,17 @@ func codeReviewOrchestratorCombinedOutput(previous *string, current string, repa
 	return strings.TrimSpace(*previous) + "\n\n--- synthesis repair response ---\n\n" + current
 }
 
+func codeReviewOrchestratorCombinedOutputFromRecord(ctx context.Context, store *db.CodeReviewStore, orgID uuid.UUID, previous *string, state codeReviewOrchestratorStructuredResult, current string) (string, error) {
+	if state.SynthesisRepairCount > 0 && state.RawRecordKey != "" {
+		record, err := store.GetPromptRecordByKey(ctx, orgID, state.RawRecordKey)
+		if err != nil {
+			return "", fmt.Errorf("load original orchestrator output for synthesis repair: %w", err)
+		}
+		previous = &record.Content
+	}
+	return codeReviewOrchestratorCombinedOutput(previous, current, state.SynthesisRepairCount), nil
+}
+
 func codeReviewOrchestratorObserveRepairCompletion(state codeReviewOrchestratorStructuredResult, currentTurn int) codeReviewOrchestratorStructuredResult {
 	if !state.SynthesisRepairPending || currentTurn <= state.SynthesisRepairBaseTurn {
 		return state
@@ -2475,17 +2486,30 @@ func persistCodeReviewOrchestratorFindings(
 	if synthesis != nil {
 		findings = codeReviewFindingsFromSynthesis(*synthesis, changedPaths)
 	}
-	seen := make(map[string]struct{}, len(findings))
-	for _, finding := range findings {
-		seen[finding.DedupeKey] = struct{}{}
-	}
-	for _, legacyFinding := range parseCodeReviewFindings(raw, changedPaths) {
-		if _, ok := seen[legacyFinding.DedupeKey]; ok {
-			continue
+	directives := parseCodeReviewFindings(raw, changedPaths)
+	if synthesis != nil {
+		stored, err := stores.CodeReviews.ListFindings(ctx, job.OrgID, job.SessionID, false)
+		if err != nil {
+			return 0, fmt.Errorf("load previously harvested orchestrator findings: %w", err)
 		}
-		seen[legacyFinding.DedupeKey] = struct{}{}
-		findings = append(findings, legacyFinding)
+		canonicalKeys := make(map[string]int, len(findings))
+		for i, finding := range findings {
+			canonicalKeys[finding.DedupeKey] = i
+		}
+		for _, finding := range stored {
+			if finding.AgentResultID == nil || *finding.AgentResultID != resultID {
+				continue
+			}
+			if i, canonical := canonicalKeys[finding.DedupeKey]; canonical {
+				// A previous attempt may already have written canonical content.
+				// It must not consume a second inline-to-structured match on retry.
+				promoteCodeReviewFinding(&findings[i], finding)
+				continue
+			}
+			directives = append(directives, finding)
+		}
 	}
+	findings, supersededKeys := reconcileCodeReviewOrchestratorFindings(findings, directives)
 	for i := range findings {
 		findings[i].OrgID = job.OrgID
 		findings[i].SessionID = job.SessionID
@@ -2494,7 +2518,91 @@ func persistCodeReviewOrchestratorFindings(
 			return 0, fmt.Errorf("create harvested orchestrator code review finding: %w", err)
 		}
 	}
+	// Write every retained issue before removing superseded repair rows. If a
+	// write or cleanup fails, the caller cannot publish and retry is safe.
+	if err := stores.CodeReviews.DeleteUnpostedFindings(ctx, job.OrgID, job.SessionID, resultID, supersededKeys); err != nil {
+		return 0, fmt.Errorf("remove superseded orchestrator findings: %w", err)
+	}
 	return len(findings), nil
+}
+
+func promoteCodeReviewFinding(kept *models.CodeReviewFinding, candidate models.CodeReviewFinding) {
+	if models.CodeReviewFindingSeverityRank(candidate.Severity) > models.CodeReviewFindingSeverityRank(kept.Severity) {
+		kept.Severity = candidate.Severity
+		kept.Confidence = candidate.Confidence
+		kept.Body = candidate.Body
+	}
+	kept.SelectedForInline = kept.SelectedForInline || candidate.SelectedForInline
+	if kept.GitHubCommentID == nil {
+		kept.GitHubCommentID = candidate.GitHubCommentID
+	}
+}
+
+func reconcileCodeReviewOrchestratorFindings(structured, directives []models.CodeReviewFinding) ([]models.CodeReviewFinding, []string) {
+	findings := make([]models.CodeReviewFinding, 0, len(structured)+len(directives))
+	canonicalKeys := make(map[string]int, len(structured))
+	for _, finding := range structured {
+		if i, duplicate := canonicalKeys[finding.DedupeKey]; duplicate {
+			promoteCodeReviewFinding(&findings[i], finding)
+			continue
+		}
+		canonicalKeys[finding.DedupeKey] = len(findings)
+		findings = append(findings, finding)
+	}
+	uniqueDirectives := make([]models.CodeReviewFinding, 0, len(directives))
+	directiveKeys := make(map[string]int, len(directives))
+	for _, finding := range directives {
+		if i, duplicate := directiveKeys[finding.DedupeKey]; duplicate {
+			promoteCodeReviewFinding(&uniqueDirectives[i], finding)
+			continue
+		}
+		directiveKeys[finding.DedupeKey] = len(uniqueDirectives)
+		uniqueDirectives = append(uniqueDirectives, finding)
+	}
+	matched := make(map[int]bool, len(findings))
+	unmatched := make([]models.CodeReviewFinding, 0, len(uniqueDirectives))
+	for _, finding := range uniqueDirectives {
+		if i, exact := canonicalKeys[finding.DedupeKey]; exact {
+			promoteCodeReviewFinding(&findings[i], finding)
+			matched[i] = true
+			continue
+		}
+		unmatched = append(unmatched, finding)
+	}
+	structuredCounts := make(map[string]int)
+	for i, finding := range findings {
+		if !matched[i] {
+			structuredCounts[codeReviewFindingLocationKey(finding)]++
+		}
+	}
+	directiveCounts := make(map[string]int)
+	for _, finding := range unmatched {
+		directiveCounts[codeReviewFindingLocationKey(finding)]++
+	}
+	supersededKeys := make([]string, 0)
+	for _, finding := range unmatched {
+		location := codeReviewFindingLocationKey(finding)
+		// Only reconcile reworded inline versions when every directive has a
+		// distinct unmatched structured counterpart. Ambiguity retains all
+		// issues; duplicate prose is safer than silently losing a blocker.
+		if location != "" && finding.GitHubCommentID == nil && directiveCounts[location] <= structuredCounts[location] {
+			supersededKeys = append(supersededKeys, finding.DedupeKey)
+			continue
+		}
+		findings = append(findings, finding)
+	}
+	return findings, supersededKeys
+}
+
+func codeReviewFindingLocationKey(finding models.CodeReviewFinding) string {
+	if finding.Path == nil || finding.StartLine == nil || *finding.StartLine <= 0 {
+		return ""
+	}
+	endLine := *finding.StartLine
+	if finding.EndLine != nil {
+		endLine = *finding.EndLine
+	}
+	return fmt.Sprintf("%s:%d:%d:%s", *finding.Path, *finding.StartLine, endLine, finding.Severity)
 }
 
 func codeReviewFindingsFromSynthesis(synthesis codeReviewOrchestratorSynthesis, changedPaths []string) []models.CodeReviewFinding {
@@ -3298,7 +3406,10 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			}
 			continue
 		}
-		combinedRaw := codeReviewOrchestratorCombinedOutput(result.RawOutput, raw, state.SynthesisRepairCount)
+		combinedRaw, err := codeReviewOrchestratorCombinedOutputFromRecord(ctx, stores.CodeReviews, job.OrgID, result.RawOutput, state, raw)
+		if err != nil {
+			return err
+		}
 		synthesis, synthesisErr := parseCodeReviewOrchestratorSynthesis(raw)
 		if synthesisErr == nil {
 			_, synthesisErr = codeReviewDescriptionEvaluationFromSynthesis(policy.Config(), changedFiles, synthesis, visualEvidence)
@@ -4699,10 +4810,17 @@ func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings [
 				summaries = append(summaries, name+" produced no usable review output")
 				continue
 			}
-			if findingCounts[result.ID] == 0 {
-				summaries = append(summaries, name+" found no blocking issues")
+			count := findingCounts[result.ID]
+			if state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult); ok {
+				// Synthesis can replace a finding's attribution; the harvested
+				// count still records what this reviewer originally reported.
+				count = max(count, state.FindingCount)
+			}
+			if count == 0 {
+				// Native reviewer output need not use our directive format. An
+				// empty parse establishes completion, never a clean verdict.
+				summaries = append(summaries, name+" completed its review")
 			} else {
-				count := findingCounts[result.ID]
 				label := "findings"
 				if count == 1 {
 					label = "finding"
