@@ -1371,6 +1371,68 @@ func (s *CodeReviewStore) FailReviewWithStatus(ctx context.Context, orgID uuid.U
 	return metadata, nil
 }
 
+type FailCodeReviewWorkspacePreparationParams struct {
+	ReviewID           uuid.UUID
+	SessionID          uuid.UUID
+	PullRequestID      uuid.UUID
+	HeadSHA            string
+	ExpectedGeneration int64
+	Reason             string
+}
+
+// FailCodeReviewWorkspacePreparation leaves a newer workspace or terminal
+// assessment untouched if initialization wins the race with the controller.
+func (s *CodeReviewStore) FailCodeReviewWorkspacePreparation(ctx context.Context, orgID uuid.UUID, params FailCodeReviewWorkspacePreparationParams) (models.CodeReviewSessionMetadata, error) {
+	var metadata models.CodeReviewSessionMetadata
+	err := s.RunWithGitHubPublicationLock(ctx, orgID, params.PullRequestID, func(lockCtx context.Context, tx DBTX) error {
+		var failErr error
+		metadata, failErr = NewCodeReviewStore(tx).failCodeReviewWorkspacePreparationLocked(lockCtx, orgID, params)
+		return failErr
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	s.publishUpdated(ctx, metadata)
+	return metadata, nil
+}
+
+func (s *CodeReviewStore) failCodeReviewWorkspacePreparationLocked(ctx context.Context, orgID uuid.UUID, params FailCodeReviewWorkspacePreparationParams) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		WITH candidate AS (
+		    SELECT m.id FROM sessions s
+		    JOIN code_review_session_metadata m ON m.org_id = s.org_id AND m.session_id = s.id
+		    WHERE m.org_id = @org_id AND m.id = @review_id AND m.session_id = @session_id
+	      AND m.pull_request_id = @pull_request_id
+		      AND m.head_sha = @head_sha AND m.status IN ('queued', 'running') AND m.stale = false
+	      AND m.github_review_id IS NULL
+		      AND s.org_id = @org_id AND s.workspace_generation = @generation
+		      AND s.status NOT IN ('cancelled', 'completed', 'failed')
+	      AND NOT EXISTS (SELECT 1 FROM code_review_revision_assessments a
+	          WHERE a.org_id = @org_id AND a.metadata_id = @review_id AND a.session_id = @session_id
+	            AND (a.publication_state NOT IN ('not_started', 'not_required')
+	              OR a.publication_receipt IS NOT NULL OR a.github_review_id IS NOT NULL OR a.result_origin IS NOT NULL))
+		    FOR UPDATE OF s, m
+		)
+		UPDATE code_review_session_metadata m
+		SET status = 'failed', phase = NULL, decision = 'blocked', acceptable = false,
+		    failure_reason = @reason, status_code = 'worker_failed', status_message = @reason,
+		    retry_at = NULL, last_error_at = now(), retryable_failure = true, completed_at = now()
+		WHERE m.org_id = @org_id AND m.id IN (SELECT id FROM candidate)
+		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
+		"org_id": orgID, "review_id": params.ReviewID, "session_id": params.SessionID,
+		"pull_request_id": params.PullRequestID,
+		"head_sha":        params.HeadSHA, "generation": params.ExpectedGeneration, "reason": strings.TrimSpace(params.Reason),
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("fail code review workspace preparation: %w", err)
+	}
+	metadata, err := collectOneCodeReviewMetadata(rows)
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	return metadata, nil
+}
+
 // MarkSupersededBy links a retryable terminal attempt to its replacement.
 // The compare-and-set guard makes repeated or concurrent retry requests safe.
 func (s *CodeReviewStore) MarkSupersededBy(ctx context.Context, orgID, sessionID, replacementSessionID uuid.UUID) (models.CodeReviewSessionMetadata, error) {

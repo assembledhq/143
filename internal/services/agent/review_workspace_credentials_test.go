@@ -335,3 +335,25 @@ func TestReviewPreparationKeepsLargeRecipeOffArguments(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &message), "stdin must carry the exact general payload")
 	require.Equal(t, large, message.Payload.Prepare, "stdin transport must preserve large quoted recipe bytes exactly")
 }
+
+func TestCodeReviewLegacyAuthDoesNotPersistInstallationToken(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		origin models.SessionOrigin
+		want   string
+	}{
+		{name: "review", origin: models.SessionOriginCodeReview, want: ""},
+		{name: "ordinary coding", origin: models.SessionOriginManual, want: "fake-fallback"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := SandboxConfig{Env: map[string]string{}}
+			o := &Orchestrator{logger: zerolog.Nop()}
+			_, err := o.prepareSandboxGitHubAuth(context.Background(), &models.Session{Origin: tt.origin}, &models.Repository{FullName: "org/repo"}, "fake-fallback", &cfg, zerolog.Nop())
+			require.NoError(t, err, "legacy Git identity setup should preserve ordinary coding compatibility")
+			require.Equal(t, tt.want, cfg.Env["GITHUB_TOKEN"], "only ordinary coding may retain the existing legacy token fallback")
+		})
+	}
+}

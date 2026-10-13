@@ -8,6 +8,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -65,14 +66,14 @@ func TestCodeReviewWorkspacePreparationStarted(t *testing.T) {
 				if tt.priorJob {
 					rows.AddRow(time.Date(2026, time.September, 23, 18, 0, 0, 0, time.UTC))
 				}
-				mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(job.OrgID, "agent", codeReviewWorkspacePreparationKey(job.MetadataID, job.SessionID, 0)).
+				mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(job.OrgID, job.MetadataID.String(), job.SessionID.String()).
 					WillReturnRows(rows)
 			}
 			started, err := codeReviewWorkspacePreparationStarted(context.Background(), stores,
 				&Services{CodeReviewWorkspacePreparationEnabled: tt.prepare}, job)
 			require.NoError(t, err, "preparation checkpoint lookup should finish without an error")
 			require.Equal(t, tt.want, started, "a prior durable enqueue should suppress repeated GitHub preflight")
-			require.NoError(t, mock.ExpectationsWereMet(), "checkpoint lookup should read only its tenant and generation")
+			require.NoError(t, mock.ExpectationsWereMet(), "checkpoint lookup should preserve the tenant's first preparation across generations")
 		})
 	}
 }
@@ -94,16 +95,21 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 		workspaceGen        int64
 		wrongRepository     bool
 		terminalPreparation bool
+		failureStage        string
 		timedOutPreparation bool
 		cancelError         bool
 		afterPreflight      bool
+		laterTurn           bool
 	}{
 		{name: "snapshot with generation zero", snapshot: &snapshot},
 		{name: "repository mismatch", wrongRepository: true},
-		{name: "dead-lettered preparation falls back without re-enqueue", terminalPreparation: true},
-		{name: "slow live preparation is cancelled and falls back", timedOutPreparation: true},
-		{name: "uncertain cancellation still falls back safely", timedOutPreparation: true, cancelError: true},
-		{name: "holder lost during preflight falls back without re-enqueue", afterPreflight: true},
+		{name: "dead-lettered preparation stops without re-enqueue", terminalPreparation: true},
+		{name: "expired safe clone failure retains budget wording", terminalPreparation: true, timedOutPreparation: true, failureStage: agent.CodeReviewPreparationStageClone},
+		{name: "slow live preparation is cancelled and fails visibly", timedOutPreparation: true},
+		{name: "uncertain cancellation cannot restart preparation", timedOutPreparation: true, cancelError: true},
+		{name: "holder lost during preflight recovers within the first budget", afterPreflight: true},
+		{name: "publication generation cannot reset the initial budget", workspaceGen: 1, timedOutPreparation: true},
+		{name: "later synthesis recovery uses its current turn budget", workspaceGen: 2, laterTurn: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -117,12 +123,17 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "review_id": reviewID, "session_id": sessionID, "head_sha": job.HeadSHA}).
 				WillReturnRows(pgxmock.NewRows([]string{"container_id", "worker_node_id", "workspace_generation"}))
 			now := time.Now().UTC()
+			var phase *models.CodeReviewPhase
+			if tt.laterTurn {
+				value := models.CodeReviewPhaseSynthesizing
+				phase = &value
+			}
 			mock.ExpectQuery("FROM code_review_session_metadata").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 				WillReturnRows(newCodeReviewMetadataRows().AddRow(
 					reviewID, orgID, sessionID, repositoryID, uuid.New(), uuid.New(),
 					"base-1", "head-1", false, models.CodeReviewTriggerSourceAppReviewer,
-					models.CodeReviewSessionStatusRunning, nil, nil, nil, nil, nil, false,
+					models.CodeReviewSessionStatusRunning, phase, nil, nil, nil, nil, false,
 					nil, nil, false, nil, "output-key", nil, nil, nil, nil, nil, nil, now))
 			sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 0, nil, tt.snapshot)
 			setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
@@ -135,24 +146,36 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 			setWorkerSessionColumn(sessionRow, "workspace_generation", tt.workspaceGen)
 			mock.ExpectQuery("FROM sessions").WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
-			if tt.terminalPreparation || tt.timedOutPreparation {
+			createdRows := pgxmock.NewRows([]string{"created_at"})
+			if tt.terminalPreparation || tt.timedOutPreparation || tt.afterPreflight || tt.laterTurn {
 				createdAt := time.Now().UTC()
 				if tt.timedOutPreparation {
 					createdAt = createdAt.Add(-codeReviewWorkspaceWaitLimit - time.Minute)
 				}
-				key := codeReviewWorkspacePreparationKey(reviewID, sessionID, tt.workspaceGen)
-				mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(orgID, "agent", key).
-					WillReturnRows(pgxmock.NewRows([]string{"created_at"}).AddRow(createdAt))
-				if tt.terminalPreparation {
-					mock.ExpectQuery("SELECT status FROM jobs").WithArgs(orgID, "agent", key).
-						WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow(models.JobStatusDeadLetter))
+				if tt.laterTurn {
+					createdAt = createdAt.Add(-24 * time.Hour)
+				}
+				createdRows.AddRow(createdAt)
+			}
+			key := codeReviewWorkspacePreparationKey(reviewID, sessionID, tt.workspaceGen)
+			mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(orgID, reviewID.String(), sessionID.String()).WillReturnRows(createdRows)
+			statusRows := pgxmock.NewRows([]string{"status", "last_error"})
+			if tt.terminalPreparation {
+				stage := tt.failureStage
+				if stage == "" {
+					stage = agent.CodeReviewPreparationStageDependencySetup
+				}
+				statusRows.AddRow(models.JobStatusDeadLetter, agent.NewCodeReviewWorkspacePreparationError(stage, errors.New("safe internal failure")).Error())
+			} else if tt.afterPreflight {
+				statusRows.AddRow(models.JobStatusSucceeded, "")
+			}
+			mock.ExpectQuery("SELECT status,[\\s\\S]*FROM jobs").WithArgs(orgID, "agent", key).WillReturnRows(statusRows)
+			if tt.timedOutPreparation && !tt.terminalPreparation {
+				cancel := mock.ExpectExec("UPDATE jobs").WithArgs(orgID, "agent", key)
+				if tt.cancelError {
+					cancel.WillReturnError(errors.New("connection lost after cancellation attempt"))
 				} else {
-					cancel := mock.ExpectExec("UPDATE jobs").WithArgs(orgID, "agent", key)
-					if tt.cancelError {
-						cancel.WillReturnError(errors.New("connection lost after cancellation attempt"))
-					} else {
-						cancel.WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-					}
+					cancel.WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				}
 			}
 			stores := &Stores{
@@ -166,7 +189,19 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 			err = gate(context.Background(), stores,
 				&Services{CodeReviewWorkspacePreparationEnabled: true},
 				zerolog.Nop(), job)
-			require.NoError(t, err, "ineligible review should use ordinary reviewer workspace recovery without waiting for preparation")
+			if tt.terminalPreparation || tt.timedOutPreparation {
+				var setupFailure *codeReviewWorkspaceGateFailure
+				require.ErrorAs(t, err, &setupFailure, "failed setup must stop fan-out and expose a fenced operational failure")
+				require.Equal(t, tt.workspaceGen, setupFailure.Generation, "terminal projection must use the observed workspace generation")
+				if tt.timedOutPreparation {
+					require.ErrorIs(t, err, context.DeadlineExceeded, "timeout must remain distinct from a code finding")
+					if tt.failureStage != "" {
+						require.Equal(t, "Review workspace preparation exceeded its total eight-minute budget during repository clone. Review did not run.", setupFailure.Err.Error(), "expired persisted safe diagnostics must retain both the total budget and concrete clone stage")
+					}
+				}
+			} else {
+				require.NoError(t, err, "legitimate workspace recovery should remain available within the original budget")
+			}
 			require.NoError(t, mock.ExpectationsWereMet(), "workspace gate should stop before enqueuing an impossible preparation")
 		})
 	}
@@ -196,17 +231,17 @@ func TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation(t *testing.T) {
 	setWorkerSessionColumn(sessionRow, "repository_id", &repositoryID)
 	mock.ExpectQuery("FROM sessions").WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
-	mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(orgID, "agent", key).
+	mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(orgID, reviewID.String(), sessionID.String()).
 		WillReturnRows(pgxmock.NewRows([]string{"created_at"}))
-	mock.ExpectQuery("SELECT status FROM jobs").WithArgs(orgID, "agent", key).
-		WillReturnRows(pgxmock.NewRows([]string{"status"}))
+	mock.ExpectQuery("SELECT status,[\\s\\S]*FROM jobs").WithArgs(orgID, "agent", key).
+		WillReturnRows(pgxmock.NewRows([]string{"status", "last_error"}))
 	mock.ExpectQuery("WITH candidates AS").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-1"))
 	mock.ExpectQuery("INSERT INTO jobs").WithArgs(
 		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 	).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-	mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(orgID, "agent", key).
+	mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(orgID, reviewID.String(), sessionID.String()).
 		WillReturnRows(pgxmock.NewRows([]string{"created_at"}).AddRow(now))
 	stores := &Stores{
 		CodeReviewWorkspaces: db.NewCodeReviewWorkspaceStore(mock),
@@ -228,5 +263,5 @@ func TestCodeReviewControllerWaitLetsReadinessGateOwnDeadline(t *testing.T) {
 	require.True(t, ok, "controller wait should use a retryable job deferral")
 	require.Equal(t, startedAt, *retry.RetryWindowStartedAt, "controller wait should remain anchored to the first durable preparation enqueue")
 	timedOut, _ := retryableDurationExceeded(startedAt, retry, time.Now())
-	require.False(t, timedOut, "worker should not dead-letter the review before the next readiness check can fall back")
+	require.False(t, timedOut, "worker should let the next readiness check persist the fenced operational timeout")
 }

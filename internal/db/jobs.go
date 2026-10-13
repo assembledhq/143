@@ -281,6 +281,38 @@ func (s *JobStore) FirstJobCreatedAtByDedupeKey(ctx context.Context, orgID uuid.
 	return createdAt, nil
 }
 
+// FirstCodeReviewWorkspacePreparationCreatedAt keeps one initial preparation
+// budget when publication or missing-container recovery advances generation.
+func (s *JobStore) FirstCodeReviewWorkspacePreparationCreatedAt(ctx context.Context, orgID, reviewID, sessionID uuid.UUID) (time.Time, error) {
+	var createdAt time.Time
+	err := s.db.QueryRow(ctx, `
+		SELECT created_at FROM jobs
+		WHERE org_id = $1 AND queue = 'agent' AND job_type = 'prepare_code_review_workspace'
+		  AND payload->>'metadata_id' = $2 AND payload->>'session_id' = $3
+		ORDER BY created_at ASC, id ASC LIMIT 1`, orgID, reviewID.String(), sessionID.String()).Scan(&createdAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("first code review workspace preparation: %w", err)
+	}
+	return createdAt, nil
+}
+
+// LatestCodeReviewWorkspacePreparationOutcome reads only the exact generation
+// checkpoint. FailureDetail is untrusted diagnostic data; callers must map it
+// to a known safe preparation error before exposing it to the PR author.
+func (s *JobStore) LatestCodeReviewWorkspacePreparationOutcome(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (models.JobStatus, string, error) {
+	var status models.JobStatus
+	var failureDetail string
+	err := s.db.QueryRow(ctx, `
+		SELECT status, LEFT(COALESCE(last_error, ''), 512) FROM jobs
+		WHERE org_id = $1 AND queue = $2 AND dedupe_key = $3
+		  AND job_type = 'prepare_code_review_workspace'
+		ORDER BY created_at DESC, id DESC LIMIT 1`, orgID, queue, dedupeKey).Scan(&status, &failureDetail)
+	if err != nil {
+		return "", "", fmt.Errorf("latest code review workspace preparation outcome: %w", err)
+	}
+	return status, failureDetail, nil
+}
+
 // LatestJobStatusByDedupeKey distinguishes an active preparation from a
 // terminal failure, so the controller does not spawn another failed job on
 // every workspace poll. A succeeded job may be re-enqueued for recovery if
@@ -298,7 +330,7 @@ func (s *JobStore) LatestJobStatusByDedupeKey(ctx context.Context, orgID uuid.UU
 }
 
 // CancelActiveCodeReviewPreparation fences a timed-out initializer before the
-// controller falls back to the ordinary reviewer workspace path. A running
+// controller records an operational review failure. A running
 // worker may still finish an in-flight Docker operation, but it cannot renew
 // its lease or publish the container after this update.
 func (s *JobStore) CancelActiveCodeReviewPreparation(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (int64, error) {
