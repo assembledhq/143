@@ -2,7 +2,7 @@
 
 > **Status:** Partially Implemented | **Last reviewed:** 2026-10-13
 
-Stage 1 is implemented in PR #2143 and available automatically when the GitHub review service is configured. There is no scheduling rollout flag. No production configuration or deployment has been changed by this work. The product direction was agreed in discussion; numeric limits below are proposed starting values, not measured capacity recommendations.
+Stage 1 is implemented in PR #2143 and available automatically when the GitHub review service is configured. There is no scheduling rollout flag. Deployment configuration, rollout evidence, and measured savings belong in private operational records. Numeric limits below are proposed starting values, not measured capacity recommendations.
 
 ## Purpose
 
@@ -28,7 +28,7 @@ Current delivery unit: Stage 1. Later reuse, resource accounting, and post-appro
 - [x] Confirm the desired workflow: review each open PR, including drafts; suppress repeated work during pushes and restacks.
 - [x] Include UI configuration and per-PR explanations in implementation scope.
 - [x] Draft delivery stages, proposed contracts, rollout gates, and acceptance criteria.
-- [x] Reconcile Claude's review with the implementation and tighten scheduling, reader migration, settings compatibility, and capacity contracts.
+- [x] Reconcile design-review findings with the implementation and tighten scheduling, reader migration, settings compatibility, and capacity contracts.
 - [ ] Establish a production baseline and verify execution-to-credential usage attribution.
 - [x] Deliver durable scheduling, timing controls, and request consolidation locally; rollout remains pending.
 - [ ] Deliver conservative content reuse and revision-bound publication.
@@ -122,7 +122,7 @@ For rollback, pause review ingress and processing and keep the additive schema/d
 
 ## Investigation Baseline (Before Stage 1)
 
-These observations describe the pre-change implementation verified during planning. The Stage 1 implementation record below supersedes the scheduling and policy API entries. Deployed configuration and production savings have not been verified; the default production SSH key was unavailable during the investigation.
+These observations describe the pre-change implementation verified during planning. The Stage 1 implementation record above supersedes the scheduling and policy API entries. Deployment configuration and measured savings require deployment-specific validation; retain investigation access history in private operational records.
 
 | Area | Current behavior and source |
 | --- | --- |
@@ -466,7 +466,7 @@ Migration rollout must define how existing queued jobs acquire or defer to the n
 - **2026-09-10 — Prioritize timing, exact reuse, then enforced budgets.** Timing is a bounded first slice; exact reuse needs explicit coverage/publication contracts; budgets require trustworthy execution attribution. Baseline instrumentation accompanies the early slices.
 - **2026-09-10 — Prefer conservative equality.** Full content/context equality precedes dependency-aware restack reuse and incremental code review. No line-count-only shortcut or smaller reviewer quorum is part of this work.
 - **2026-09-10 — Keep limits provisional.** Five-minute quiet time and 15-minute cadence are proposed starting settings. Account-pool identity, token completeness, and numeric usage ceilings require measurement before enforcement claims.
-- **2026-09-10 — Incorporate validated Claude findings.** Specify wake/lease races, retry generations, joined intent, reader migration, presence-aware defaults, compatible restore/autosave, and current-list parity. Preserve Stage 1 as an independently deliverable scheduling/UI change. Existing runtime checks count sessions; a shared atomic execution authority is a Stage 3 prerequisite, not an existing guarantee. Reject a reviewer-count-plus-one concurrency floor because synthesis follows reviewers.
+- **2026-09-10 — Incorporate validated review findings.** Specify wake/lease races, retry generations, joined intent, reader migration, presence-aware defaults, compatible restore/autosave, and current-list parity. Preserve Stage 1 as an independently deliverable scheduling/UI change. Existing runtime checks count sessions; a shared atomic execution authority is a Stage 3 prerequisite, not an existing guarantee. Reject a reviewer-count-plus-one concurrency floor because synthesis follows reviewers.
 - **2026-09-10 — Separate post-approval spending from reuse.** Coverage reporting must be accurate, but expanding automatic execution after approval remains disabled pending its own rollout and admin enablement decision.
 
 ## Open Measurements and Stage Gates
