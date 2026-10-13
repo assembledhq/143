@@ -112,6 +112,7 @@ type codeReviewOrchestratorSynthesis struct {
 	RiskNotes               []string                                  `json:"risk_notes,omitempty"`
 	ScopeMismatch           bool                                      `json:"scope_mismatch,omitempty"`
 	UnresolvedUncertainty   bool                                      `json:"unresolved_uncertainty,omitempty"`
+	UncertaintyReasons      []models.CodeReviewUncertaintyReason      `json:"uncertainty_reasons"`
 	ReviewerDisagreement    bool                                      `json:"reviewer_disagreement,omitempty"`
 	PromptInjectionDetected bool                                      `json:"prompt_injection_detected,omitempty"`
 	DescriptionInputHash    string                                    `json:"-"`
@@ -2133,6 +2134,7 @@ func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSyn
 		RiskNotes               *[]string                                  `json:"risk_notes"`
 		ScopeMismatch           *bool                                      `json:"scope_mismatch"`
 		UnresolvedUncertainty   *bool                                      `json:"unresolved_uncertainty"`
+		UncertaintyReasons      *[]models.CodeReviewUncertaintyReason      `json:"uncertainty_reasons"`
 		ReviewerDisagreement    *bool                                      `json:"reviewer_disagreement"`
 		PromptInjectionDetected *bool                                      `json:"prompt_injection_detected"`
 	}
@@ -2211,6 +2213,19 @@ func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSyn
 	if err != nil {
 		return codeReviewOrchestratorSynthesis{}, err
 	}
+	var uncertaintyReasons []models.CodeReviewUncertaintyReason
+	if payload.UncertaintyReasons != nil {
+		uncertaintyReasons = make([]models.CodeReviewUncertaintyReason, 0, len(*payload.UncertaintyReasons))
+		for _, reason := range *payload.UncertaintyReasons {
+			if err := reason.Validate(); err != nil {
+				return codeReviewOrchestratorSynthesis{}, fmt.Errorf("orchestrator synthesis: %w", err)
+			}
+			uncertaintyReasons = append(uncertaintyReasons, reason.Normalized())
+		}
+	}
+	if err := models.ValidateCodeReviewUncertaintyReasons(*payload.UnresolvedUncertainty, uncertaintyReasons); err != nil {
+		return codeReviewOrchestratorSynthesis{}, fmt.Errorf("orchestrator synthesis: %w", err)
+	}
 	return codeReviewOrchestratorSynthesis{
 		ApprovalRecommended:     *payload.ApprovalRecommended,
 		DescriptionAssessments:  append([]codeReviewDescriptionAssessment{}, (*payload.DescriptionAssessments)...),
@@ -2221,6 +2236,7 @@ func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSyn
 		RiskNotes:               *payload.RiskNotes,
 		ScopeMismatch:           *payload.ScopeMismatch,
 		UnresolvedUncertainty:   *payload.UnresolvedUncertainty,
+		UncertaintyReasons:      uncertaintyReasons,
 		ReviewerDisagreement:    *payload.ReviewerDisagreement,
 		PromptInjectionDetected: *payload.PromptInjectionDetected,
 	}, nil
@@ -2231,7 +2247,8 @@ func codeReviewOrchestratorSynthesisUsable(synthesis codeReviewOrchestratorSynth
 		strings.TrimSpace(synthesis.ReviewSummary) != "" &&
 		synthesis.DescriptionAssessments != nil &&
 		synthesis.Findings != nil &&
-		synthesis.HumanReviewReasons != nil
+		synthesis.HumanReviewReasons != nil &&
+		models.ValidateCodeReviewUncertaintyReasons(synthesis.UnresolvedUncertainty, synthesis.UncertaintyReasons) == nil
 }
 
 func normalizeCodeReviewOrchestratorFindings(findings []codeReviewOrchestratorFinding) ([]codeReviewOrchestratorFinding, error) {
@@ -2454,6 +2471,9 @@ func extractCodeReviewJSON(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "{}"
+	}
+	if json.Valid([]byte(raw)) {
+		return raw
 	}
 	if start := strings.LastIndex(raw, "```json"); start >= 0 {
 		rest := raw[start+len("```json"):]
@@ -3774,6 +3794,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ReviewerDisagreement:  input.OrchestratorSynthesis.ReviewerDisagreement,
 		ScopeMismatch:         input.OrchestratorSynthesis.ScopeMismatch,
 		UnresolvedUncertainty: input.OrchestratorSynthesis.UnresolvedUncertainty,
+		UncertaintyReasons:    input.OrchestratorSynthesis.UncertaintyReasons,
 		PromptInjectionFound:  codeReviewPromptInjectionLikely(stringPtrValue(input.PullRequest.Body), input.Job.RequestContext) || codeReviewVisualEvidencePromptInjectionLikely(input.VisualEvidence) || input.OrchestratorSynthesis.PromptInjectionDetected,
 	})
 	if reviewerQuorum < requiredReviewerQuorum {

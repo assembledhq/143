@@ -1386,9 +1386,77 @@ type CodeReviewRiskInput struct {
 	ReviewerDisagreement  bool
 	ScopeMismatch         bool
 	UnresolvedUncertainty bool
+	UncertaintyReasons    []CodeReviewUncertaintyReason
 	PromptInjectionFound  bool
 	ContextFetchFailed    bool
 	HeadSHAChanged        bool
+}
+
+// CodeReviewUncertaintyReason identifies evidence whose absence could materially
+// change whether the reviewed behavior is safe to approve.
+type CodeReviewUncertaintyReason struct {
+	MissingEvidence    string `json:"missing_evidence"`
+	MaterialImpact     string `json:"material_impact"`
+	ResolutionEvidence string `json:"resolution_evidence"`
+}
+
+func (r CodeReviewUncertaintyReason) Validate() error {
+	fields := []struct {
+		name  string
+		value string
+	}{
+		{"missing_evidence", r.MissingEvidence},
+		{"material_impact", r.MaterialImpact},
+		{"resolution_evidence", r.ResolutionEvidence},
+	}
+	for _, field := range fields {
+		value := strings.TrimSpace(field.value)
+		if value == "" {
+			return fmt.Errorf("uncertainty reason is missing %s", field.name)
+		}
+		if utf8.RuneCountInString(value) > 1_000 {
+			return fmt.Errorf("uncertainty reason %s exceeds 1000 characters", field.name)
+		}
+		switch strings.ToLower(strings.TrimSpace(strings.TrimRight(strings.Join(strings.Fields(value), " "), ".!?"))) {
+		case "", "uncertain", "unknown", "uncertainty", "unresolved uncertainty", "important uncertainty remained", "material uncertainty", "missing evidence", "insufficient evidence", "needs more evidence", "more evidence needed", "n/a", "none":
+			return fmt.Errorf("uncertainty reason %s must explain the concrete evidence and impact", field.name)
+		}
+	}
+	return nil
+}
+
+// ValidateCodeReviewUncertaintyReasons also applies when reusing persisted
+// synthesis: a historical bare true cannot substitute for material evidence.
+func ValidateCodeReviewUncertaintyReasons(unresolved bool, reasons []CodeReviewUncertaintyReason) error {
+	if !unresolved && len(reasons) > 0 {
+		return fmt.Errorf("uncertainty reasons require unresolved_uncertainty=true")
+	}
+	if unresolved && len(reasons) == 0 {
+		return fmt.Errorf("unresolved_uncertainty=true requires at least one complete uncertainty reason")
+	}
+	if len(reasons) > 10 {
+		return fmt.Errorf("uncertainty reasons exceed limit of 10")
+	}
+	for i, reason := range reasons {
+		if err := reason.Validate(); err != nil {
+			return fmt.Errorf("uncertainty reason %d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+// Normalized keeps each published reason on one line, including historical output.
+func (r CodeReviewUncertaintyReason) Normalized() CodeReviewUncertaintyReason {
+	r.MissingEvidence = strings.Join(strings.Fields(r.MissingEvidence), " ")
+	r.MaterialImpact = strings.Join(strings.Fields(r.MaterialImpact), " ")
+	r.ResolutionEvidence = strings.Join(strings.Fields(r.ResolutionEvidence), " ")
+	return r
+}
+
+func (r CodeReviewUncertaintyReason) Message() string {
+	r = r.Normalized()
+	detail := func(value string) string { return strings.TrimSuffix(value, ".") }
+	return fmt.Sprintf("Missing evidence: %s. Why it matters: %s. To resolve: %s.", detail(r.MissingEvidence), detail(r.MaterialImpact), detail(r.ResolutionEvidence))
 }
 
 type CodeReviewRiskReasonCode string
@@ -1565,6 +1633,9 @@ func (r CodeReviewRiskReason) Message() string {
 	case CodeReviewRiskReasonScopeMismatch:
 		return "orchestrator reported the change may not match the stated intent"
 	case CodeReviewRiskReasonUnresolvedUncertainty:
+		if subject := strings.Join(strings.Fields(r.Subject), " "); subject != "" {
+			return subject
+		}
 		return "orchestrator reported unresolved uncertainty"
 	case CodeReviewRiskReasonPromptInjection:
 		return "possible prompt-injection attempt found in PR content"
@@ -1706,7 +1777,18 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonScopeMismatch})
 	}
 	if input.UnresolvedUncertainty {
-		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonUnresolvedUncertainty})
+		if ValidateCodeReviewUncertaintyReasons(true, input.UncertaintyReasons) == nil {
+			for _, reason := range input.UncertaintyReasons {
+				risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonUnresolvedUncertainty, Subject: reason.Message()})
+			}
+		} else {
+			// Retain the historical reason for callers with older risk evidence.
+			// The synthesis validator separately prevents this from being reused
+			// as a complete orchestrator assessment.
+			risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonUnresolvedUncertainty})
+		}
+	} else if len(input.UncertaintyReasons) > 0 {
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonOrchestratorSynthesisInvalid})
 	}
 	if input.PromptInjectionFound {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonPromptInjection})

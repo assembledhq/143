@@ -89,6 +89,7 @@ export function codeReviewReasonDescription(reason: {
 }): string {
   const label = codeReviewReasonLabel(reason.code);
   const subject = reason.subject?.trim();
+  if (subject && reason.code === "unresolved_uncertainty") return subject;
   if (subject) return `${label}: ${subject}`;
   // The API omits zero-valued counts, so render whichever side is present
   // instead of dropping the measurement entirely.
