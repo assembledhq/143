@@ -425,6 +425,7 @@ type testInternalSandboxProvider struct {
 	execErr    error
 	execStderr string
 	execCalls  []string
+	execInputs []string
 	execFn     func(cmd string, stdout, stderr io.Writer) (int, error)
 	readFiles  map[string][]byte
 	readErr    error
@@ -484,6 +485,23 @@ func (p *testInternalSandboxProvider) Exec(_ context.Context, _ *Sandbox, cmd st
 		_, _ = io.WriteString(stderr, p.execStderr)
 	}
 	return p.execExit, p.execErr
+}
+
+func (p *testInternalSandboxProvider) ExecWithStdin(ctx context.Context, sandbox *Sandbox, cmd string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	input, err := io.ReadAll(stdin)
+	if err != nil {
+		return -1, err
+	}
+	p.execInputs = append(p.execInputs, string(input))
+	var envelope struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(input, &envelope); err != nil {
+		return -1, err
+	}
+	// Keep existing preparation command assertions on public recipe content;
+	// private authentication is never appended to the recorded command.
+	return p.Exec(ctx, sandbox, cmd+" "+string(envelope.Payload), stdout, stderr)
 }
 
 func (p *testInternalSandboxProvider) ReadFile(_ context.Context, _ *Sandbox, path string) ([]byte, error) {
