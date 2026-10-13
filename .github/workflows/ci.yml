@@ -113,26 +113,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.demo_seed == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        # Docker Official Image mirror avoids Docker Hub pull limits in CI.
-        image: public.ecr.aws/docker/library/postgres:17
-        env:
-          POSTGRES_USER: onefortythree
-          POSTGRES_PASSWORD: dev
-          POSTGRES_DB: onefortythree
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
       # Drives DB-backed migration behavior tests (e.g. the coding-credential
       # versioning test in internal/db). They self-skip when unset, so this
-      # must point at the job's Postgres service or they never run anywhere.
+      # must point at the job's Postgres container or they never run anywhere.
       TEST_DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
       TEST_BROWSER_REQUIRED: "1"
     steps:
@@ -141,6 +126,10 @@ jobs:
           persist-credentials: false
       - name: Test CI helper scripts
         run: python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'
+      - name: Start Postgres with registry fallback
+        id: postgres
+        timeout-minutes: 10
+        run: bash .github/scripts/start-ci-postgres.sh
       - name: Preload preview infrastructure test image
         timeout-minutes: 10
         # Fail early if every source is unavailable, before compiling the suite.
@@ -160,17 +149,13 @@ jobs:
       - name: Wait for Postgres
         run: go run ./cmd/wait-postgres
 
-      - name: Size Postgres lock table for parallel schema tests
+      - name: Verify Postgres lock table size for parallel schema tests
         env:
-          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
         # Parallel fixtures apply the full migration chain in isolated schemas.
         # Dropping those schemas together can exhaust the default lock table.
-        # This setting requires a restart; verify it before running migrations.
+        # The container starts with the larger lock table; verify it before migrations.
         run: |
-          docker exec "$POSTGRES_CONTAINER" psql -U onefortythree -d onefortythree -v ON_ERROR_STOP=1 \
-            -c 'ALTER SYSTEM SET max_locks_per_transaction = 256'
-          docker restart "$POSTGRES_CONTAINER"
-          go run ./cmd/wait-postgres
           actual=$(docker exec "$POSTGRES_CONTAINER" psql -U onefortythree -d onefortythree -At \
             -c 'SHOW max_locks_per_transaction')
           echo "max_locks_per_transaction=$actual"
@@ -195,7 +180,7 @@ jobs:
           go test ./internal/... -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=atomic -race -timeout=180s
 
       # Integration tests run on every backend-test invocation (PR + push).
-      # They reuse the Postgres service this job already brings up — no new
+      # They reuse the Postgres container this job already brings up — no new
       # infra. Build-tag gating means they don't run during the unit-test
       # step above, so we don't double-charge CI for the same code paths.
       - name: Run integration tests
@@ -240,6 +225,12 @@ jobs:
             coverage.out
             coverage-unit.out
             coverage-integration.out
+
+      - name: Stop CI Postgres
+        if: always() && steps.postgres.outputs.container_id != ''
+        env:
+          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
+        run: docker rm --force --volumes "$POSTGRES_CONTAINER"
 
   frontend-lint:
     name: Frontend Lint & Typecheck
@@ -400,24 +391,14 @@ jobs:
     needs: changes
     if: needs.changes.outputs.migrations == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: public.ecr.aws/docker/library/postgres:17
-        env:
-          POSTGRES_USER: onefortythree
-          POSTGRES_PASSWORD: dev
-          POSTGRES_DB: onefortythree
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
     steps:
       - uses: actions/checkout@v6
+      - name: Start Postgres with registry fallback
+        id: postgres
+        timeout-minutes: 10
+        run: bash .github/scripts/start-ci-postgres.sh
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -436,6 +417,12 @@ jobs:
 
       - name: Migrate up again (idempotency check)
         run: go run cmd/migrate/main.go up
+
+      - name: Stop CI Postgres
+        if: always() && steps.postgres.outputs.container_id != ''
+        env:
+          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
+        run: docker rm --force --volumes "$POSTGRES_CONTAINER"
 
   docker-build:
     name: Docker Build

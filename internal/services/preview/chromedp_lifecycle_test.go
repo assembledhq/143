@@ -287,7 +287,12 @@ func TestChromeDPPreviewAccessBootstrap(t *testing.T) {
 func TestChromeDPVisualDiffSnapshots(t *testing.T) {
 	t.Parallel()
 	inspector, _ := newLifecycleInspector(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// Warm the persistent target so this fixture times snapshot work against
+	// the production 30s budget instead of 20s. Production also counts cold
+	// browser startup against that budget.
+	_, err := inspector.getOrCreatePreviewCtx("preview")
+	require.NoError(t, err, "initialize the persistent target before timing snapshot comparison")
+	ctx, cancel := context.WithTimeout(context.Background(), BrowserOperationBudgetFor(BrowserOperationVisualDiff).Operation)
 	defer cancel()
 	actual, err := inspector.ComputeVisualDiff(ctx, "preview", "abcd", "dcba")
 	require.NoError(t, err, "actual rendered snapshots must compare successfully")

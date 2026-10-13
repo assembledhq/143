@@ -31,6 +31,11 @@ if name == 'timeout':
     sys.exit(subprocess.run(sys.argv[3:], check=False).returncode)
 if name == 'sleep':
     sys.exit(0)
+if sys.argv[1] == 'run':
+    status = int(os.environ.get('RUN_STATUS', '0'))
+    if status == 0:
+        print('fixture-container')
+    sys.exit(status)
 if sys.argv[1] == 'tag':
     sys.exit(int(os.environ.get('TAG_STATUS', '0')))
 if sys.argv[1] != 'pull':

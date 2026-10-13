@@ -262,7 +262,6 @@ func TestFullAssessmentFreshnessRetryLifecyclePostgres(t *testing.T) {
 		t.Skip("set TEST_DATABASE_URL for freshness retry lifecycle proof")
 	}
 	ctx := context.Background()
-	pool := fullRecoveryPostgresPool(t, ctx)
 	tests := []struct {
 		name    string
 		expire  bool
@@ -271,6 +270,10 @@ func TestFullAssessmentFreshnessRetryLifecyclePostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			// A parallel case's schema-wide sweep can re-enqueue this controller
+			// between dead-lettering and the hook failing its assessment.
+			// Isolate schemas so each case observes only its own repair sweeps.
+			pool := fullRecoveryPostgresPool(t, ctx)
 			f := seedStrandedReview(t, pool, "idle")
 			seedSavedReviewResults(t, pool, f)
 			visual := models.CodeReviewVisualEvidenceSnapshot{AssessmentID: &f.assessment, Complete: true, HeadSHA: "head", Evidence: []models.CodeReviewVisualEvidence{{Source: models.CodeReviewVisualEvidenceSource{SourceID: "image-1", SourceURL: "https://example.invalid/image"}, ContentSHA256: "original", Status: models.CodeReviewVisualEvidenceFetchStatusAvailable}}}
