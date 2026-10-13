@@ -19,6 +19,7 @@ type SessionHistoryFilters struct {
 	Cursor        string
 }
 
+// SessionHistorySummary exposes last_activity_at as updated_at for API compatibility.
 type SessionHistorySummary struct {
 	ID              uuid.UUID            `db:"id" json:"id"`
 	Title           *string              `db:"title" json:"title,omitempty"`
@@ -58,7 +59,7 @@ func (s *SessionHistoryStore) Search(ctx context.Context, orgID, repoID, current
 	// subquery to resolve its (created_at, id) position so the comparison is
 	// correct for the ORDER BY created_at DESC, id DESC sort.
 	rows, err := s.db.Query(ctx, `
-		SELECT id, title, status, origin, result_summary, failure_category, created_at, updated_at
+		SELECT id, title, status, origin, result_summary, failure_category, created_at, last_activity_at AS updated_at
 		FROM sessions
 		WHERE org_id = @org_id
 		  AND repository_id = @repo_id
@@ -100,7 +101,7 @@ func (s *SessionHistoryStore) Search(ctx context.Context, orgID, repoID, current
 
 func (s *SessionHistoryStore) Get(ctx context.Context, orgID, repoID, sessionID uuid.UUID) (SessionHistorySummary, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT id, title, status, origin, result_summary, failure_category, created_at, updated_at
+		SELECT id, title, status, origin, result_summary, failure_category, created_at, last_activity_at AS updated_at
 		FROM sessions
 		WHERE org_id = @org_id
 		  AND repository_id = @repo_id
