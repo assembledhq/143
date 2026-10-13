@@ -987,11 +987,64 @@ func (d *DockerProvider) CloneRepo(ctx context.Context, sb *agent.Sandbox, repoU
 // provided writers. Returns the command's exit code. Leaves ExecOptions.User
 // empty so the exec runs as the container's default user (sandbox).
 func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	return d.exec(ctx, sb, cmd, stdout, stderr, false)
+}
+
+type reviewPreparationEnvironmentError struct {
+	cause error
+}
+
+func (e *reviewPreparationEnvironmentError) Error() string {
+	return "review workspace environment could not be verified; create a fresh workspace before review preparation"
+}
+
+func (e *reviewPreparationEnvironmentError) Unwrap() error {
+	return e.cause
+}
+
+func (d *DockerProvider) ValidateReviewPreparationEnvironment(ctx context.Context, sb *agent.Sandbox) error {
+	if err := ctx.Err(); err != nil {
+		return &reviewPreparationEnvironmentError{cause: err}
+	}
+	if sb == nil || strings.TrimSpace(sb.ID) == "" {
+		return &reviewPreparationEnvironmentError{}
+	}
+	inspect, err := d.client.ContainerInspect(ctx, sb.ID)
+	if err != nil {
+		return &reviewPreparationEnvironmentError{cause: err}
+	}
+	if err := ctx.Err(); err != nil {
+		return &reviewPreparationEnvironmentError{cause: err}
+	}
+	if inspect.Config == nil {
+		return &reviewPreparationEnvironmentError{}
+	}
+	for _, entry := range inspect.Config.Env {
+		key, value, _ := strings.Cut(entry, "=")
+		if (key == "GITHUB_TOKEN" || key == "GH_TOKEN") && value != "" {
+			return errors.New("review workspace stores a GitHub credential in its container environment; create a fresh workspace before review preparation")
+		}
+	}
+	return nil
+}
+
+// ExecForReviewPreparation closes the output attachment when the shared
+// preparation deadline expires. The review subprocess wrapper separately kills
+// its process group before releasing the preparation lock.
+func (d *DockerProvider) ExecForReviewPreparation(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	return d.exec(ctx, sb, cmd, stdout, stderr, true)
+}
+
+func (d *DockerProvider) exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer, closeOnCancel bool) (int, error) {
 	log := d.scopedLogger(sb)
 	log.Debug().Str("cmd", redactSandboxCommandForLog(cmd)).Msg("executing command in sandbox")
 
+	shell := "sh"
+	if closeOnCancel {
+		shell = "/bin/sh"
+	}
 	execCfg := container.ExecOptions{
-		Cmd:          []string{"sh", "-c", cmd},
+		Cmd:          []string{shell, "-c", cmd},
 		AttachStdout: true,
 		AttachStderr: true,
 		WorkingDir:   sb.WorkDir,
@@ -1008,10 +1061,27 @@ func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string
 		return -1, fmt.Errorf("attach exec: %w", err)
 	}
 	defer attachResp.Close()
+	if closeOnCancel {
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-ctx.Done():
+				attachResp.Close()
+			case <-done:
+			}
+		}()
+	}
 
 	// Docker multiplexes stdout and stderr into a single stream
 	if _, err := stdcopy.StdCopy(stdout, stderr, attachResp.Reader); err != nil {
+		if closeOnCancel && ctx.Err() != nil {
+			return -1, ctx.Err()
+		}
 		return -1, fmt.Errorf("read exec output: %w", err)
+	}
+	if closeOnCancel && ctx.Err() != nil {
+		return -1, ctx.Err()
 	}
 
 	inspectResp, err := d.client.ContainerExecInspect(ctx, execResp.ID)
@@ -1026,11 +1096,23 @@ func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string
 // the exec session. It is used for large payloads where staging a sandbox temp
 // file would create avoidable disk pressure.
 func (d *DockerProvider) ExecWithStdin(ctx context.Context, sb *agent.Sandbox, cmd string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	return d.execWithStdin(ctx, sb, cmd, stdin, stdout, stderr, false)
+}
+
+func (d *DockerProvider) ExecWithStdinForReviewPreparation(ctx context.Context, sb *agent.Sandbox, cmd string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	return d.execWithStdin(ctx, sb, cmd, stdin, stdout, stderr, true)
+}
+
+func (d *DockerProvider) execWithStdin(ctx context.Context, sb *agent.Sandbox, cmd string, stdin io.Reader, stdout, stderr io.Writer, reviewPreparation bool) (int, error) {
 	log := d.scopedLogger(sb)
 	log.Debug().Str("cmd", redactSandboxCommandForLog(cmd)).Msg("executing stdin command in sandbox")
 
+	shell := "sh"
+	if reviewPreparation {
+		shell = "/bin/sh"
+	}
 	execCfg := container.ExecOptions{
-		Cmd:          []string{"sh", "-c", cmd},
+		Cmd:          []string{shell, "-c", cmd},
 		AttachStdin:  true,
 		AttachStdout: true,
 		AttachStderr: true,
@@ -1069,9 +1151,15 @@ func (d *DockerProvider) ExecWithStdin(ctx context.Context, sb *agent.Sandbox, c
 	if _, err := stdcopy.StdCopy(stdout, stderr, attachResp.Reader); err != nil {
 		attachResp.Close()
 		<-writeErrCh
+		if reviewPreparation && ctx.Err() != nil {
+			return -1, ctx.Err()
+		}
 		return -1, fmt.Errorf("read exec output: %w", err)
 	}
 	writeErr := <-writeErrCh
+	if reviewPreparation && ctx.Err() != nil {
+		return -1, ctx.Err()
+	}
 
 	inspectResp, err := d.client.ContainerExecInspect(ctx, execResp.ID)
 	if err != nil {
@@ -1099,12 +1187,14 @@ func (d *DockerProvider) ExecWithStdin(ctx context.Context, sb *agent.Sandbox, c
 // shipping.
 var cliTokenPattern = regexp.MustCompile(`143[uj]_[A-Za-z0-9_-]{8,}`)
 var claudeCodeOAuthTokenAssignmentPattern = regexp.MustCompile(`CLAUDE_CODE_OAUTH_TOKEN=("[^"]*"|'[^']*'|[^\s]+)`)
+var authenticatedGitURLPattern = regexp.MustCompile(`(https?://)([^\s/@]+)@`)
 
 func redactSandboxCommandForLog(cmd string) string {
 	if strings.Contains(cmd, "__143_SECRET_FILE__") {
 		return "[redacted preview secret file write]"
 	}
 	cmd = cliTokenPattern.ReplaceAllString(cmd, "143?_***")
+	cmd = authenticatedGitURLPattern.ReplaceAllString(cmd, "${1}[redacted]@")
 	return claudeCodeOAuthTokenAssignmentPattern.ReplaceAllString(cmd, "CLAUDE_CODE_OAUTH_TOKEN=***")
 }
 
@@ -1400,11 +1490,24 @@ func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.Re
 		"--exclude='%s/auth.json' --exclude='%s/account.json' --exclude='%s/mcp-auth.json' --exclude='%s/log' --exclude='%s/log/*' --exclude='%s/repos' --exclude='%s/repos/*'",
 		openCodeDataRel, openCodeDataRel, openCodeDataRel, openCodeDataRel, openCodeDataRel, openCodeDataRel, openCodeDataRel,
 	)
+	// Review evidence binds declared tools installed under ~/.local/bin. Keep
+	// only that executable directory for review checkpoints, including later
+	// checkpoints whose reconstructed sandbox no longer carries its first Purpose.
+	// A literal receipt and canonical parents prevent aliases from widening the
+	// archive; ordinary coding snapshots keep their existing home scope.
+	gitDir := path.Join(sb.WorkDir, ".git")
+	receipt := path.Join(gitDir, "143-review-evidence.json")
+	toolBin := path.Join(sb.HomeDir, ".local/bin")
+	reviewToolScope := fmt.Sprintf(
+		`set --; if [ -d '%[1]s' ] && [ ! -L '%[1]s' ] && [ -f '%[2]s' ] && [ ! -L '%[2]s' ] && [ -d '%[3]s' ] && [ ! -L '%[3]s' ] && [ "$(/bin/realpath -- '%[2]s')" = '%[2]s' ] && [ "$(/bin/realpath -- '%[3]s')" = '%[3]s' ]; then set -- '%[4]s'; fi; `,
+		shellEscape(gitDir), shellEscape(receipt), shellEscape(toolBin), shellEscape(strings.TrimPrefix(toolBin, "/")),
+	)
 	cmd := fmt.Sprintf(
 		"tar -c %s -f - --ignore-failed-read %s %s -C / '%s' '%s/.claude' '%s/.claude.json' '%s/.codex' '%s/.gemini' '%s'",
 		agent.SnapshotTarCompressFlag, agent.SnapshotTarExcludeFlags(false), openCodeExcludeFlags,
 		workDirRel, homeDirRel, homeDirRel, homeDirRel, homeDirRel, openCodeDataRel,
 	)
+	cmd = reviewToolScope + cmd + ` "$@"`
 
 	execCfg := container.ExecOptions{
 		Cmd:          []string{"sh", "-c", cmd},
@@ -1451,8 +1554,37 @@ func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.Re
 // code N" and have to guess whether the archive is corrupt, the path is
 // missing, or the container ran out of disk.
 func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader io.Reader) (returnErr error) {
+	return d.restore(ctx, sb, reader, false)
+}
+
+// RestoreForReviewPreparation also interrupts snapshot input and Docker output
+// on cancellation. The failed hydration owner then destroys the partial sandbox.
+func (d *DockerProvider) RestoreForReviewPreparation(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+	return d.restore(ctx, sb, reader, true)
+}
+
+func (d *DockerProvider) restore(ctx context.Context, sb *agent.Sandbox, reader io.Reader, closeOnCancel bool) (returnErr error) {
 	restoreStage := observability.BeginStage(true, d.scopedLogger(sb), "sandbox_provider_restore")
 	defer func() { restoreStage.End(observability.StageOutcome(ctx, returnErr)) }()
+	if closeOnCancel {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-ctx.Done():
+				if closer, ok := reader.(io.Closer); ok {
+					if err := closer.Close(); err != nil {
+						log := d.scopedLogger(sb)
+						log.Warn().Err(err).Msg("close cancelled review snapshot input")
+					}
+				}
+			case <-done:
+			}
+		}()
+	}
 	d.logger.Info().
 		Str("container_id", sb.ID).
 		Str("sandbox_container_id", sb.ID).
@@ -1468,6 +1600,9 @@ func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader 
 	// must be handled. See agent.SnapshotTarCompressFlag.
 	bufReader := bufio.NewReader(reader)
 	magic, _ := bufReader.Peek(snapshotMagicLen) // best-effort; a short/empty stream falls through to plain tar and fails loudly in the exec
+	if closeOnCancel && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	tarCmd := []string{"tar"}
 	if flag := tarStdinDecompressFlag(magic); flag != "" {
 		tarCmd = append(tarCmd, flag)
@@ -1491,6 +1626,17 @@ func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader 
 		return fmt.Errorf("attach restore exec: %w", err)
 	}
 	defer attachResp.Close()
+	if closeOnCancel {
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-ctx.Done():
+				attachResp.Close()
+			case <-done:
+			}
+		}()
+	}
 
 	// Pipe the snapshot data into stdin. A write failure here ("broken pipe",
 	// "connection reset") most often means the tar process inside the container
@@ -1521,6 +1667,9 @@ func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader 
 	// complaint instead of just an exit code.
 	stderrBuf := newCappedBuffer(tarStderrCap)
 	_, _ = stdcopy.StdCopy(io.Discard, stderrBuf, attachResp.Reader)
+	if closeOnCancel && ctx.Err() != nil {
+		return ctx.Err()
+	}
 
 	inspect, inspectErr := waitForExecExit(ctx, d.client, execResp.ID)
 
