@@ -119,7 +119,6 @@ jobs:
       # versioning test in internal/db). They self-skip when unset, so this
       # must point at the job's Postgres container or they never run anywhere.
       TEST_DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
-      TEST_BROWSER_REQUIRED: "1"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -172,12 +171,30 @@ jobs:
 
       - name: Run tests (PR — no race)
         if: github.event_name == 'pull_request'
-        run: go test ./internal/... -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=count -timeout=120s
+        run: go test ./internal/... -skip '^TestBrowserChromeDP' -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=count -timeout=120s
 
       - name: Run tests with race + coverage (non-PR)
         if: github.event_name != 'pull_request'
         run: |
-          go test ./internal/... -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=atomic -race -timeout=180s
+          go test ./internal/... -skip '^TestBrowserChromeDP' -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=atomic -race -timeout=180s
+
+      # Chrome startup and rendering need CPU that the parallel backend suite
+      # can otherwise consume. Keep real browser fixtures in a serial step,
+      # with the same race mode and their own coverage contribution.
+      - name: Run preview browser lifecycle tests
+        timeout-minutes: 5
+        env:
+          TEST_BROWSER_REQUIRED: "1"
+        run: |
+          mode=count
+          race=()
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=atomic
+            race=(-race)
+          fi
+          go test ./internal/services/preview -run '^TestBrowserChromeDP' -parallel=1 -count=1 -v \
+            -coverpkg=./internal/... -coverprofile=coverage-browser.out -covermode="$mode" \
+            "${race[@]}" -timeout=180s
 
       # Integration tests run on every backend-test invocation (PR + push).
       # They reuse the Postgres container this job already brings up — no new
@@ -202,11 +219,11 @@ jobs:
       - name: Verify preview infrastructure volume lifecycle
         run: go test -tags=docker_integration ./internal/services/preview/providers -run '^TestDockerIntegration' -count=1 -timeout=180s
 
-      # Measure all backend code exercised by either successful suite, without
+      # Measure all backend code exercised by the successful suites, without
       # double-counting statements shared by multiple test binaries.
       - name: Combine backend coverage
         run: |
-          python3 .github/scripts/merge_go_coverage.py coverage.out coverage-unit.out coverage-integration.out
+          python3 .github/scripts/merge_go_coverage.py coverage.out coverage-unit.out coverage-browser.out coverage-integration.out
           go tool cover -func=coverage.out
 
       - name: Check backend coverage floor
@@ -224,6 +241,7 @@ jobs:
           path: |
             coverage.out
             coverage-unit.out
+            coverage-browser.out
             coverage-integration.out
 
       - name: Stop CI Postgres

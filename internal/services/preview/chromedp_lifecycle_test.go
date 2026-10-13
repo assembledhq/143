@@ -23,8 +23,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Ordinary package tests remain usable without Chromium. CI explicitly requires
-// this suite, so a missing browser cannot silently drop these integration checks.
+// Real browser tests use the TestBrowserChromeDP prefix so CI can run them
+// separately from the CPU-heavy backend suite. Ordinary package tests remain
+// usable without Chromium; the dedicated CI step requires a browser.
 func requirePreviewTestBrowser(t *testing.T) {
 	t.Helper()
 	for _, candidate := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"} {
@@ -69,7 +70,7 @@ func newLifecycleInspector(t *testing.T) (*ChromeDPInspector, string) {
 	return inspector, server.URL
 }
 
-func TestChromeDPFailedContextInitializationIsNotCached(t *testing.T) {
+func TestBrowserChromeDPFailedContextInitializationIsNotCached(t *testing.T) {
 	t.Parallel()
 	inspector, _ := newLifecycleInspector(t)
 	first, err := inspector.getOrCreatePreviewCtx("first")
@@ -85,7 +86,7 @@ func TestChromeDPFailedContextInitializationIsNotCached(t *testing.T) {
 	require.False(t, cached, "a failed context must not poison later operations with a cached unusable target")
 }
 
-func TestChromeDPPreviewLifecycle(t *testing.T) {
+func TestBrowserChromeDPPreviewLifecycle(t *testing.T) {
 	t.Parallel()
 	inspector, base := newLifecycleInspector(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -137,7 +138,7 @@ func TestChromeDPPreviewLifecycle(t *testing.T) {
 	}
 }
 
-func TestChromeDPStorageRestoration(t *testing.T) {
+func TestBrowserChromeDPStorageRestoration(t *testing.T) {
 	t.Parallel()
 	inspector, base := newLifecycleInspector(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -162,7 +163,7 @@ func TestChromeDPStorageRestoration(t *testing.T) {
 }
 
 //nolint:paralleltest // Subtests operate on the same browser tab and must preserve sequential page state.
-func TestChromeDPInteractionAndAssertionFailures(t *testing.T) {
+func TestBrowserChromeDPInteractionAndAssertionFailures(t *testing.T) {
 	t.Parallel()
 	inspector, base := newLifecycleInspector(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -220,7 +221,7 @@ func TestChromeDPInteractionAndAssertionFailures(t *testing.T) {
 	require.Equal(t, "fixture error", actual.Results[0].Actual, "console failure must retain exact error text")
 }
 
-func TestChromeDPPreviewAccessBootstrap(t *testing.T) {
+func TestBrowserChromeDPPreviewAccessBootstrap(t *testing.T) {
 	t.Parallel()
 	requirePreviewTestBrowser(t)
 	tests := []struct {
@@ -284,7 +285,7 @@ func TestChromeDPPreviewAccessBootstrap(t *testing.T) {
 	}
 }
 
-func TestChromeDPVisualDiffSnapshots(t *testing.T) {
+func TestBrowserChromeDPVisualDiffSnapshots(t *testing.T) {
 	t.Parallel()
 	inspector, _ := newLifecycleInspector(t)
 	// Warm the persistent target so this fixture times snapshot work against
@@ -304,7 +305,7 @@ func TestChromeDPVisualDiffSnapshots(t *testing.T) {
 	require.NoError(t, err, "diff overlay must contain valid PNG evidence")
 }
 
-func TestChromeDPScreenshotReactivatesBackgroundTarget(t *testing.T) {
+func TestBrowserChromeDPScreenshotReactivatesBackgroundTarget(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
