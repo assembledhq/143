@@ -27,6 +27,7 @@ func TestWorkerDeadLetterHooksRequireCommittedOwnership(t *testing.T) {
 		{name: "lost fence suppresses cleanup", wantCalls: 1},
 		{name: "write failure suppresses cleanup", writeErr: errors.New("database unavailable"), wantCalls: 1},
 		{name: "missing atomic review capability stays active", jobType: models.JobTypeRunCodeReview},
+		{name: "missing atomic recheck capability stays active", jobType: models.JobTypeRunCodeReviewRecheck},
 		{name: "ended parent rejection uses guarded recovery", jobType: models.JobTypeRunCodeReview, terminal: errCodeReviewEndedParentRecovery, owned: true, wantCalls: 1, wantHooks: 1},
 	}
 	for _, tt := range tests {

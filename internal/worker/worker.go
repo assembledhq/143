@@ -539,16 +539,18 @@ func (w *Worker) retryJobWithDelayAt(ctx context.Context, now time.Time, jobID, 
 }
 
 type codeReviewTerminalLeaseStore interface {
-	DeadLetterCodeReviewWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string) (bool, error)
+	DeadLetterCodeReviewWithLease(ctx context.Context, orgID, jobID, lockToken uuid.UUID, errMsg, failureDetail string) (bool, error)
 }
+
+var _ codeReviewTerminalLeaseStore = (*db.JobStore)(nil)
 
 func (w *Worker) deadLetterJob(ctx, handlerCtx context.Context, job *models.Job, terminalErr error) {
 	var ok bool
 	var err error
-	if job.JobType == models.JobTypeRunCodeReview && !errors.Is(terminalErr, errCodeReviewEndedParentRecovery) {
+	if job.JobType == models.JobTypeRunCodeReviewRecheck || (job.JobType == models.JobTypeRunCodeReview && !errors.Is(terminalErr, errCodeReviewEndedParentRecovery)) {
 		store, supported := w.jobs.(codeReviewTerminalLeaseStore)
 		if !supported {
-			w.logger.Error().Str("job_id", job.ID.String()).Msg("job store cannot atomically fail a full review; leaving controller for lease recovery")
+			w.logger.Error().Str("job_id", job.ID.String()).Msg("job store cannot atomically fail a code review; leaving job for lease recovery")
 			return
 		}
 		ok, err = store.DeadLetterCodeReviewWithLease(ctx, job.OrgID, job.ID, *job.LockToken, terminalErr.Error(), codeReviewDeadLetterReason(terminalErr))
