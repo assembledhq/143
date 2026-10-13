@@ -217,6 +217,11 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 	result := ReviewRequestedResult{Processed: true, Deferred: true}
 	err := s.scheduling.store.WithLockedPR(ctx, input.OrgID, input.RepositoryID, input.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
 		scoped := s.transactionalService(tx)
+		// Legacy full-review joins have no assessment link. Settle them before
+		// replay or generation advancement can retarget their recorded session.
+		if err := db.SettleCompletedFullReviewJoins(ctx, tx, input.OrgID, input.PullRequestID); err != nil {
+			return err
+		}
 		latest, latestErr := scoped.metadata.GetLatestByPullRequest(ctx, input.OrgID, input.PullRequestID)
 		if latestErr != nil && !errors.Is(latestErr, pgx.ErrNoRows) {
 			return latestErr
@@ -362,6 +367,9 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 			input.GitHubDeliveryID = pending.Input.GitHubDeliveryID
 			input.RequestContext = pending.Input.RequestContext
 			input.TriggerSource = pending.Input.TriggerSource
+			input.RequestedTeamSlug = pending.Input.RequestedTeamSlug
+			input.RequestedReviewerLogin = pending.Input.RequestedReviewerLogin
+			input.ChangeReason = pending.Input.ChangeReason
 			input.TriggeringDisputeID = pending.Input.TriggeringDisputeID
 			input.ReviewRequestDisputeID = pending.Input.ReviewRequestDisputeID
 			mode = pending.Mode
@@ -386,6 +394,12 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 			supersededGeneration = bound && generation != state.Generation
 		}
 		force = force || pending.Force || supersededGeneration || analysisChanged || (latestErr == nil && latest.HeadSHA == snapshot.HeadSHA && (latest.BaseSHA != snapshot.BaseSHA || baseRefChanged))
+		// A new reviewer-picker team request asks for another full review after
+		// completion. Redeliveries already returned above; active full reviews
+		// remain joinable because they have not completed yet.
+		force = force || (requestID != uuid.Nil && input.ChangeReason == explicitReviewRequestChangeReason &&
+			input.TriggerSource == models.CodeReviewTriggerSourceTeamReviewer && latestErr == nil &&
+			latest.Status == models.CodeReviewSessionStatusCompleted)
 		if input.ExplicitRequest && latestErr == nil && latest.HeadSHA == snapshot.HeadSHA {
 			var hasResults bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM code_review_agent_results WHERE org_id=$1 AND session_id=$2)`, input.OrgID, latest.SessionID).Scan(&hasResults); err != nil {

@@ -297,6 +297,26 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		{"policy patch and historical compatibility", testSchedulingPolicyCompatibility},
 		{"same head context supersession", testSchedulingGenerationFence},
 		{"approved automatic intent terminates", testSchedulingApprovalTerminal},
+		{"team rerequest after human review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingTeamRerequest(t, p, org, repo, pr, snapshot, models.CodeReviewSessionStatusCompleted, models.CodeReviewDecisionNeedsHumanReview)
+		}},
+		{"team rerequest after approval", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingTeamRerequest(t, p, org, repo, pr, snapshot, models.CodeReviewSessionStatusCompleted, models.CodeReviewDecisionApproved)
+		}},
+		{"team rerequest joins queued review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingTeamRerequest(t, p, org, repo, pr, snapshot, models.CodeReviewSessionStatusQueued, "")
+		}},
+		{"team rerequest joins running review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingTeamRerequest(t, p, org, repo, pr, snapshot, models.CodeReviewSessionStatusRunning, "")
+		}},
+		{"ordinary review now preserves completed reuse", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingOrdinaryCompletedReuse(t, p, org, repo, pr, snapshot, false)
+		}},
+		{"mention preserves completed reuse", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingOrdinaryCompletedReuse(t, p, org, repo, pr, snapshot, true)
+		}},
+		{"full assessment completion settles uncaptured joins", testSchedulingFullAssessmentJoinSettlement},
+		{"superseded full review preserves joins for replacement", testSchedulingSupersededFullReviewJoin},
 		{"legacy generation compatibility", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testSchedulingGenerationPath(t, p, org, repo, pr, snapshot, "legacy")
 		}},
