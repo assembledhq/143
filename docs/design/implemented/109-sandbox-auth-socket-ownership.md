@@ -45,7 +45,7 @@ Sandboxed coding agents push to GitHub through a per-session Unix-domain socket.
 The host listens on `<socket-dir>/<session-id>/sock`; the sandbox dials it at
 `/run/143-auth/sock` via a directory bind-mount, and the host replies with a
 fresh GitHub token resolved per request (see
-[65-unified-coding-credentials.md](65-unified-coding-credentials.md)
+[65-unified-coding-credentials.md](../future/65-unified-coding-credentials.md)
 and `internal/services/sandboxauth/`). The per-request resolve is deliberate:
 it issues a fresh repository-bound token for each action without exposing
 user-to-server GitHub credentials inside the sandbox. Push tokens have
@@ -86,16 +86,9 @@ ownership lives "in the long-lived worker process." Reality drifted when turn
 execution was split into one-off executors. This doc is the plan to realign
 code with that intent.
 
-### Observed incident (2026-06-22)
+### Failure across runtime lifetimes
 
-Session `7290ddb5-…` (turn-held, **no** preview hold) failed a push at 21:09
-UTC. Its executor node `g20260622201202` was `node_marked_draining` at 21:04
-(mid-turn) during a rolling deploy; the socket died with the drained executor.
-The push only succeeded on the user's *next* turn (21:30), which re-ran
-`prepareSandboxGitHubAuth`. There were **zero** `rehydrate:` log lines all day
-across many restarts because the rehydrate safety net (a) covered only
-preview-held containers and (b) was scoped to a deploy-stamped `worker_node_id`
-that no longer matched the surviving row.
+A session can retain a live container while its turn executor or worker generation ends. If the authentication socket follows the shorter turn-holder lifetime, a later push can fail even though the sandbox remains usable. A node-generation-scoped restart scan can also miss retained containers. Socket ownership and reconciliation therefore need to follow the container lifetime and local liveness rather than one executor or deploy generation.
 
 ## Stopgaps already shipped (Option 1)
 

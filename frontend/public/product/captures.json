@@ -1,0 +1,150 @@
+{
+  "source": "isolated DEMO_MODE API and canonical .143/seed data, with synthetic GitHub account and PR-health presentation fixtures",
+  "synthetic": true,
+  "identity": "Ada Lovelace",
+  "captures": [
+    {
+      "stem": "product-integrations",
+      "route": "/settings/integrations",
+      "viewport": {
+        "width": 1440,
+        "height": 960
+      },
+      "imageSize": {
+        "width": 1440,
+        "height": 960
+      },
+      "sourcePNG": true
+    },
+    {
+      "stem": "docs-github-app",
+      "route": "/settings/integrations",
+      "viewport": {
+        "width": 1440,
+        "height": 960
+      },
+      "imageSize": {
+        "width": 1022,
+        "height": 204
+      },
+      "sourcePNG": false
+    },
+    {
+      "stem": "product-sessions-list",
+      "route": "/sessions/00000000-0000-4000-a000-000000000300",
+      "viewport": {
+        "width": 1440,
+        "height": 960
+      },
+      "imageSize": {
+        "width": 1440,
+        "height": 960
+      },
+      "sourcePNG": true
+    },
+    {
+      "stem": "docs-sessions-list",
+      "route": "/sessions/00000000-0000-4000-a000-000000000300",
+      "viewport": {
+        "width": 1440,
+        "height": 960
+      },
+      "imageSize": {
+        "width": 1440,
+        "height": 960
+      },
+      "sourcePNG": false
+    },
+    {
+      "stem": "product-session-overview",
+      "route": "/sessions/00000000-0000-4000-a000-000000000300",
+      "viewport": {
+        "width": 1440,
+        "height": 960
+      },
+      "imageSize": {
+        "width": 1440,
+        "height": 960
+      },
+      "sourcePNG": true
+    },
+    {
+      "stem": "docs-session-overview",
+      "route": "/sessions/00000000-0000-4000-a000-000000000300",
+      "viewport": {
+        "width": 1440,
+        "height": 960
+      },
+      "imageSize": {
+        "width": 1440,
+        "height": 960
+      },
+      "sourcePNG": false
+    },
+    {
+      "stem": "product-review-diff",
+      "route": "/sessions/00000000-0000-4000-a000-000000000300",
+      "viewport": {
+        "width": 1440,
+        "height": 960
+      },
+      "imageSize": {
+        "width": 1440,
+        "height": 960
+      },
+      "sourcePNG": true
+    },
+    {
+      "stem": "product-review-changes",
+      "route": "/sessions/00000000-0000-4000-a000-000000000300",
+      "viewport": {
+        "width": 1440,
+        "height": 960
+      },
+      "imageSize": {
+        "width": 1440,
+        "height": 960
+      },
+      "sourcePNG": true
+    },
+    {
+      "stem": "docs-session-changes",
+      "route": "/sessions/00000000-0000-4000-a000-000000000300",
+      "viewport": {
+        "width": 1440,
+        "height": 960
+      },
+      "imageSize": {
+        "width": 1440,
+        "height": 960
+      },
+      "sourcePNG": false
+    },
+    {
+      "stem": "product-session-preview",
+      "route": "/previews",
+      "viewport": {
+        "width": 1440,
+        "height": 960
+      },
+      "imageSize": {
+        "width": 1440,
+        "height": 960
+      },
+      "sourcePNG": true
+    },
+    {
+      "stem": "docs-session-preview",
+      "route": "/previews",
+      "viewport": {
+        "width": 1440,
+        "height": 960
+      },
+      "imageSize": {
+        "width": 1440,
+        "height": 960
+      },
+      "sourcePNG": false
+    }
+  ]
+}

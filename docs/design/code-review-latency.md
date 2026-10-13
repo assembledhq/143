@@ -2,7 +2,7 @@
 
 > **Status:** Partially Implemented | **Last reviewed:** 2026-09-23
 
-Implementation plan based on the read-only production investigation on 2026-09-23. Implementation is in progress; the progress checklist below records completed milestones. No ticket is assigned.
+Implementation plan for reducing built-in code-review latency while preserving evidence, revision, and publication safety. Deployment-specific measurements and execution receipts belong in private operational records.
 
 ## Purpose and scope
 
@@ -12,29 +12,11 @@ Start with infrastructure changes that preserve agent inputs and review quality.
 
 This plan covers the built-in code-review flow. It does not change general coding-session bootstrap, previews, per-target automation behavior, production credentials, host capacity limits, reviewer count, or automatic-review timing defaults. Implementation is authorized; deployment and production policy changes remain separate decisions.
 
-## Measured baseline
+## Measurement baseline
 
-The investigation examined local source at `0d747b81cf818bc5dce2be02c2597e7c74ba65b8` and verified relevant orchestrator, continuation-handler, and reviewer-prompt behavior in deployed build `7862ce3e683ff25b0075d23b4bde9e24a0e575c5`. Refresh source and deployment identity before implementing.
+Collect a deployment-specific baseline before changing behavior. Measure repository preparation, checkpoint save/restore, reviewer completion, synthesis, dispatch retries, and publication separately. Report request-to-publication and creation-to-completion latency alongside terminal outcomes and unfinished attempts.
 
-For Assembled, approximately seven days ending September 23 produced 1,866 attempts: 1,412 completed, 437 stale, 14 failed, and 3 running. Completed reviews took a median 595.6 seconds, mean 629.7 seconds, and p95 1,054.2 seconds from review metadata creation to completion. This excludes quiet-period waiting before creation. The active policy observed during the audit used a 300-second quiet period and a 300-second minimum interval, two primary reviewers, and high-effort synthesis.
-
-| Observation | Median | p95 | Cohort / interpretation |
-| --- | ---: | ---: | --- |
-| Docker sandbox create/start | Same second | 1 s | 366 paired events; timestamps have one-second resolution |
-| Repository clone | 23 s | 33 s | 199 paired events |
-| Clone completion through bootstrap completion | 58 s | 85 s | 196 pairs; includes PR checkout and auth, not only npm |
-| Snapshot save | 17 s | 31 s | 352 pairs |
-| Compressed snapshot size | 467.8 MiB | 490.4 MiB | 352 saves |
-| Container start through restored-workspace setup | 13 s | 18 s | 127 pairs; includes setup/auth beyond transfer |
-| Last reviewer response through synthesis phase start | 62.3 s | 105.1 s | 1,380 completed reviews with two usable reviewers and one turn/phase per lane |
-| Synthesis execution phase | 104.2 s | 304.5 s | Same 1,380-review cohort; includes CLI, model, and tools |
-| Synthesis phase end through review completion | 47.7 s | 73.2 s | Same cohort; includes cleanup, harvesting, and publication |
-
-Lifecycle logs covered 258 matched review sessions in the last approximately 24 hours, not the whole fleet. Among 126 matched synthesis executions, 125 restored a snapshot and one started fresh. The reviewer performing bootstrap finished last in 98 of 128 matched completed reviews. On the latest observed build, 772 executor attempts across 174 reviews included 140 capacity rejections, 93 wrong-node rejections, and 62 sibling-container races. These counts can overlap within a review.
-
-Of the 437 stale attempts, 365 had an activity phase begin and none published a review. This is evidence of started work later superseded, not an exact compute or dollar savings estimate. Separately, 250 recent synthesis threads made a median five tool calls, and only five of 1,537 synthesis results in a later seven-day query required output repair.
-
-These are observed overheads, not measured savings from the proposed changes. Do not add stage medians: cohorts differ, reviewer lanes overlap, and removing work from one lane may not shorten the critical path. Raw local evidence was saved under `/tmp/143-review-perf-20260923/`; that directory is temporary and is not a prerequisite for executing this plan. The tables and measurement instructions here are the durable record. Keep raw transcripts, credentials, and tenant exports out of this public repository.
+Match cohorts by repository, PR size, provider/model, effort, policy, trigger, host load, and workspace source. Parallel reviewer lanes and overlapping cohorts make stage medians non-additive. Retain the measured values, deployment identities, raw evidence, and rollout decisions privately; they are not product defaults or universal performance guarantees.
 
 ## Current flow and code map
 
@@ -42,7 +24,7 @@ These are observed overheads, not measured savings from the proposed changes. Do
 
 `internal/worker/handlers.go:newContinueSessionHandler` hands continuation jobs to session executors. `internal/worker/session_executor_dispatch.go` creates the durable executor and launches its container. `internal/services/agent/orchestrator.go:ContinueSession` then checks local sandbox capacity, worker ownership, workspace reuse, clone/restore, auth, and repository preparation. This ordering allows executors to start only to discover that they must be redirected or retried.
 
-Fresh setup uses `setupFreshSandboxForThread` and `PrepareSandboxRepository`. The latter applies configured dependencies and runs `.143/config.json` bootstrap commands. Assembled currently declares `bash .143/bootstrap-npm.sh`, which can invoke `npm ci` through `.143/preview-install.sh`. The built-in reviewer template explicitly prohibits tests, builds, and linters, so this installation is unnecessary for its read-only task. Synthesis's primary thread is Main and is not currently marked read-only in the same way as fallback reviewer threads; a mode check limited to reviewer thread flags would miss it.
+Fresh setup uses `setupFreshSandboxForThread` and `PrepareSandboxRepository`. The latter applies configured dependencies and repository bootstrap commands, such as dependency installation. Built-in review work should retain the authoritative checkout and evidence while avoiding preparation that its execution policy does not permit it to use. Synthesis uses the primary thread, so review-role detection must cover it as well as reviewer threads.
 
 Reviewers share a sandbox, with an exact branch/head readiness barrier in `waitForSandboxWorkspaceReady`. A successful continuation saves a snapshot before its handler persists thread completion. The last runtime can release and destroy the sandbox before synthesis is dispatched; synthesis then restores it. `codeReviewWaitingForReviewers` and `codeReviewWaitingForOrchestrator` normally retry after ten seconds. `internal/worker/worker.go` has a five-second polling fallback and an existing wake channel.
 
@@ -58,12 +40,12 @@ Other implementation anchors:
 
 ## Progress
 
-- [x] Trace the flow and collect production timing evidence.
-- [x] Verify relevant deployed source and document measurement limits.
+- [x] Trace the execution flow and establish timing methodology.
+- [x] Identify the relevant execution paths and document measurement limits.
 - [x] Write the prioritized implementation and validation plan.
 - [x] M0: Add missing stage instrumentation and establish repeatable comparison cohorts. Production post-change comparison remains pending deployment and sufficient matched reviews.
-- [x] M1: Skip unnecessary dependency/bootstrap work for built-in reviews. Implementation, Claude milestone review, and a bounded missing-artifact replay are complete; production measurement remains a rollout gate.
-- [x] M2: Preserve the workspace across reviewer-to-synthesis handoff. Local implementation and Claude milestone review are complete; production handoff-latency and occupancy measurement remain rollout gates.
+- [x] M1: Skip unnecessary dependency/bootstrap work for built-in reviews. Implementation and focused missing-artifact checks are complete; deployment-level measurement remains an operational validation gate.
+- [x] M2: Preserve the workspace across reviewer-to-synthesis handoff. Implementation and focused lifecycle checks are complete; deployment-level handoff-latency and occupancy measurement remain operational validation gates.
 - [ ] M3: Prepare one workspace and resolve dispatch placement before executor launch.
 - [ ] M4: Wake the review controller when durable results become ready.
 - [ ] M5: Optimize cold checkout if it remains material after M1–M4.
@@ -85,11 +67,11 @@ Acceptance: a single review can be reconstructed from request eligibility throug
 
 Introduce an explicit internal repository-preparation mode for platform-owned review work. Resolve it from trusted review-session metadata and the authorized reviewer/synthesis role; never from prompt text, labels, or a caller-supplied flag. Cover the Main synthesis thread, fallback reviewers, fallback synthesis, and repair turns. Fail back to existing preparation when the role cannot be established.
 
-In this mode, retain repository access, exact PR-head/base validation, Git credential bootstrap, agent auth, prompt/evidence delivery, and required platform tools. Skip repository dependency installation and arbitrary repo bootstrap commands. Route both fresh and restored code-review paths through the same policy. Preserve full preparation for ordinary sessions, previews, and unrelated automation turns. Do not change Assembled's shared bootstrap script to solve a 143-specific review problem.
+In this mode, retain repository access, exact PR-head/base validation, Git credential bootstrap, agent auth, prompt/evidence delivery, and required platform tools. Skip repository dependency installation and arbitrary repo bootstrap commands. Route both fresh and restored code-review paths through the same policy. Preserve full preparation for ordinary sessions, previews, and unrelated automation turns. Keep repository bootstrap behavior intact for workflows that still require it.
 
 Add focused tests near `internal/services/agent/orchestrator_internal_test.go`: eligible review roles never invoke dependency/bootstrap commands; Main synthesis is included; ordinary sessions still prepare; stale heads and unavailable required inputs still fail; cold, restored, and reused paths agree. Missing generated artifacts or dependencies needed to establish a finding must result in explicit incomplete evidence, not an unsupported clean result.
 
-Acceptance: replayed built-in review setup runs zero npm-install/bootstrap commands, preserves the same authoritative checkout and evidence, and leaves ordinary-session behavior unchanged. Measure the reduction in preparation time and snapshot bytes. The observed 58-second span is the optimization target, not a promised per-review saving.
+Acceptance: replayed built-in review setup runs zero npm-install/bootstrap commands, preserves the same authoritative checkout and evidence, and leaves ordinary-session behavior unchanged. Measure the reduction in preparation time and snapshot bytes. Measure actual end-to-end effects rather than promising a fixed per-review saving.
 
 ### M2 — Retain the review workspace between stages
 
@@ -203,40 +185,27 @@ Every retried action must reconcile durable state before creating another sandbo
 
 ## Surprises & Discoveries
 
-- Docker create/start is already fast in the sampled logs. Dependency/bootstrap work and repeated workspace transfer are stronger initial targets than a generic warm-container pool.
-- Existing reviewer parallelism and in-flight GitHub preflight suppression are already implemented; preserve them.
-- The 58-second setup span includes checkout/auth. It must not be reported as a pure npm benchmark.
+- Reviewer parallelism and in-flight GitHub preflight suppression are already implemented; preserve them.
+- Repository preparation combines checkout, authentication, and dependency setup. Attribute each component separately before choosing an optimization.
 - Primary synthesis uses Main, so review-role detection cannot rely only on read-only thread flags.
 - Snapshot archives retain Git and dependency/build state for recovery. A review-specific optimization must not globally change snapshot exclusions.
-- Executor logs use `service=unknown` in the sample. Some readiness-related error text describes cancellation; count it as cancellation, not a workspace timeout.
-- Output-schema repair was uncommon in the audit. It is not a first-priority latency project.
-- This checkout has no `.agent/PLANS.md`, `docs/AGENTS.md`, or `docs/exec-plans/` convention. The plan follows `docs/design/AGENTS.md` and retains living progress/decision/outcome sections.
+- Correlate executor service and review role explicitly. Distinguish cancelled workspace checks from timeouts and capacity failures.
 
 ## Decision Log
 
-- 2026-09-23: Prioritize preparation, workspace reuse, and dispatch correctness before changing reviewer models. Production measurements identify substantial overhead outside execution, and these changes can preserve review policy.
-- 2026-09-23: Keep quantitative observations separate from proposed targets. Stage cohorts overlap, and no optimization has been benchmarked yet.
-- 2026-09-23: Retain checkpoints when introducing warm handoff; reassess snapshot policy after removing unnecessary dependencies and measuring the new archive size.
-- 2026-09-23: Reuse existing holder/job machinery with explicit fencing. Do not present process-local capacity counters as cross-process reservations.
-- 2026-09-23: Preserve the existing scheduling/reuse design as the authority for content equivalence and resource budgets. The new baseline supersedes historical measurements, not that design's safety contract.
-- 2026-09-23: Keep synthesis experiments isolated from live publication and hold reviewer efforts constant.
+- Prioritize preparation, workspace reuse, and dispatch correctness before changing reviewer models; these changes can preserve review policy.
+- Keep quantitative observations separate from proposed targets, with cohort definitions and unfinished work visible.
+- Retain checkpoints when introducing warm handoff; reassess checkpoint policy only after measuring the resulting archive size and recovery behavior.
+- Reuse existing holder/job machinery with explicit fencing. Process-local counters do not constitute cross-process capacity reservations.
+- Keep the scheduling/reuse design authoritative for content equivalence and resource budgets.
+- Evaluate synthesis on frozen inputs while holding reviewer efforts constant.
 
 ## Outcomes & Retrospective
 
-Planning outcome: seven optimization areas are captured with source anchors, measured baselines, delivery order, schema/API boundaries, and validation gates.
+M0 adds attributable controller, executor, workspace, agent-turn, result-durability, and publication stages. Stage outcomes distinguish attempts, waits, failures, and cancellations; dispatch/harvest polling checks are separate from actual execution spans.
 
-M0 implementation: paired stage boundaries now cover the review controller, executor launch and boot, workspace preparation, agent turn, result durability, and GitHub publication. Stage end events carry bounded outcomes; best-effort setup is marked `attempted`, genuine capacity pressure `waiting`, and cancelled workspace readiness `cancelled`. Configuration and live-counter failures remain `failed`; a dedicated capacity-pressure error preserves the existing broad capacity match. Controller dispatch/harvest stages are named `*_check` because a polling pass can do no work. Workspace stages carry the initially selected cold/reused/restored source; a failed restore followed by cold creation emits an explicit final-source correction. Correlation fields include org/session, review/head, thread, job/lock token, running and dispatched build SHAs, and distinct executor/sandbox container IDs where available. The service label for session-executor logs is explicit. Reviewer role is recorded on durable-result events and is added to agent-stage logs when M1's trusted lookup succeeds. Legacy `container_id` logging is preserved alongside `sandbox_container_id`.
+M1 resolves trusted review roles from tenant-scoped metadata and persisted agent-result identity before selecting minimal repository preparation. Unknown, ambiguous, stale, or unrelated work retains full preparation. Authoritative checkout, authentication, prompt delivery, and evidence requirements remain enforced. Structured synthesis can report unresolved uncertainty, which withholds automated approval.
 
-The existing seven-day Assembled baseline above is the pre-change cohort. A repeatable post-change comparison will group completed reviews by repository, PR size, model/effort, policy, trigger, host load, and workspace source, while reporting all failures and supersessions separately. Stage spans and end-to-end latency will be reported independently; controller `*_check` events will not count as actual dispatches. M0's instrumentation itself did not target a latency reduction. Record each later deployed build and matched post-change cohort before claiming an end-to-end delta.
+M2 uses a durable review-workspace holder across reviewer-to-synthesis handoff. Acquisition, renewal, release, expiry, garbage collection, and container reuse are fenced by durable identity. Recovery preserves checkpoints and revalidates the workspace rather than trusting an old readiness flag.
 
-M1 implementation: a tenant-scoped lookup joins active review metadata to the persisted agent result's thread identity and validated reviewer/synthesis role. Only that verified role, paired with a valid review revision context and platform-tagged code-review input for the turn, selects minimal preparation; mixed or human follow-up input keeps full preparation. Missing, ambiguous, stale, or unavailable ownership also retains full preparation. Synthesis currently persists its agent result shortly after dispatch, so the orchestrator rechecks a missing role immediately before repository preparation; if still missing, it safely uses full setup. M2/M3 must retain this fallback or make result-before-dispatch durable. A role found at the later check is carried into repository-preparation timing logs. The minimal path skips repository-declared dependencies and bootstrap commands on fresh/restored review setup. Git credential bootstrap, agent auth, exact-head checkout, and ordinary-session preparation remain on their existing paths. Initial `RunAgent` turns always use full setup because built-in reviews start idle and enter through `ContinueSession`, where platform message provenance is available.
-
-Reviewer, synthesis, and synthesis-repair prompts now explicitly preserve limitations from missing generated artifacts or dependencies. The synthesis contract's `unresolved_uncertainty` field produces a backend risk reason that withholds approval when set. Focused tests cover trusted role resolution, per-turn message provenance, repository setup selection, declared dependency/bootstrap suppression, prompt composition, production wiring, and legacy executor log fields. The touched Go package suites, `go vet` on those packages, and `make lint-tenancy` passed; focused tests for the final review fixes passed. A full `go test ./...` run reported a repeatable deploy dashboard telemetry-query assertion outside this change and a preview cache assertion that passed when rerun alone. Claude's read-only M1 review used the `opus` alias, which reported `claude-opus-5`, and found no P0/P1; its final two P2 observations were addressed with full initial-run setup and retained executor `container_id` logging.
-
-M1's missing-artifact gate used a disposable synthetic repository pinned at base `d6cebbb7890f1c0de6b91e11325b7fa1d4200687` and head `9f3e977327739bcf279022b81f0bf27ca1f20199`. Its one-line authorization change depended on `generated/role-capabilities.mjs`, which was absent because minimal setup did not install the private `@private/roles` dependency or run generation. Read-only Claude `opus` reviewer run `claude-code-read-only-frozen-f150e8b4` identified that exact evidence gap and returned an incomplete review, not a clean finding. A separate frozen synthesis run `claude-code-read-only-frozen-8ce2fb31` preserved it as `approval_recommended=false` and `unresolved_uncertainty=true`. Both runs reported `claude-opus-5`; neither used the live review handler or published anything. A focused backend regression test verifies that a complete structured synthesis with this flag produces the `unresolved_uncertainty` risk reason and withholds automated approval. This is a bounded synthetic prompt-behavior replay, not proof of every model, repository, fallback, or production execution path. No matched end-to-end latency or snapshot-size delta has been measured yet.
-
-On 2026-09-23, the first production M1 check observed build `7522e7c4` skip repository preparation in five cold reviewer turns (median 0.004 ms) and three restored synthesis turns (median 0.005 ms). In the same two-hour log window, the prior build `08cd5578` had 11 successful cold review setups at median 53.637 seconds (44.592–71.415 seconds) and seven restored setups at median 0.166 seconds. The observed cold setup saving is about 54 seconds per reviewer turn; parallel reviewer lanes, capacity retries, and small post-deploy samples prevent an end-to-end speedup claim. Five observed M1 sandbox-create stages succeeded in 0.274–0.384 seconds.
-
-M2 implementation: the new `code_review` holder is acquired under the active review and session row locks before a successful built-in reviewer turn releases its sandbox. Concurrent reviewer lanes extend the same holder without replacing its lease token; each completed turn starts a new idle-retention epoch, including when an expired holder has not yet been swept. Controller attempts renew a live, same-owner holder at most once per 20 seconds, capped at 120 seconds from that latest turn. A successful synthesis turn releases the exact matching holder before its turn hold ends, allowing immediate container destruction; the synthesis role is verified against the persisted agent result and cannot rearm reviewer retention. Terminal reviews and graceful owner-node drain also release holders; GC expires holders when their lease, owner node, revision, container, or review state becomes invalid. An idle review container is reclaimed only after all turn, preview, runtime, holder, and queued/running executor-job checks pass. GC now obtains all referenced containers and the review-only subset in one database scan. Reuse rechecks the durable container identity during readiness waiting and takes a strict container-ID compare-and-swap so a delayed turn cannot republish a container that GC cleared. A reclaimed-workspace retry conditionally resets an unheld session only when its container remains null, preserving any successor lane's running status. Normal snapshot creation and cold recovery remain in place. Focused tests cover holder maintenance before turn release and the controller's terminal release/active renewal; a disposable PostgreSQL 17 test exercises concurrent and staggered acquisition, synthesis release, renewal, stale-head expiry, queued-job gating, terminal release, delayed-reuse fencing, and one-time finalization. The PostgreSQL 17 test passed ten consecutive runs after the final cleanup fixes. Claude's first M2 read-only review used the `opus` alias, which reported `claude-opus-5`, and found no P0/P1; its three P2 findings prompted the direct coverage, synchronous synthesis cleanup, and named GC grace bound. This is local safety evidence, not a production handoff-latency or occupancy result.
-
-A subsequent read-only Claude review found a generic reuse-path race: a strict container-ID CAS loss had treated a live replacement as a cleared ID, potentially retrying a duplicate turn. The recovery path now re-reads the durable ID, diagnoses a live replacement before deciding whether to retry, and uses the stale-container retry sentinel only for a cleared ID. Focused tests cover a cleared ID, a live replacement, and a successor appearing during reset. The redundant old-ID predicate was removed from `ResetAfterLostReuse`. These changes passed touched Go package tests, `go vet ./...`, `go build ./...`, and ten disposable PostgreSQL integration runs; M2 is not yet deployed or measured in production.
+Regression coverage exercises role resolution, missing-artifact uncertainty, holder maintenance, concurrent and staggered acquisition, stale-head handling, owner loss, delayed reuse, and finalization. The validation and rollout sections above define the checks needed for a deployment; operational benchmark results and individual execution receipts are maintained privately.

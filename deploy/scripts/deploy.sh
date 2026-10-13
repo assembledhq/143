@@ -141,7 +141,7 @@ apply_static_egress_worker_host_map() {
   # STATIC_EGRESS_WORKER_HOSTS is a comma-separated list of worker tunnel
   # identities. Entries are "<host>@<wg-address>@<private-key>".
   # Example:
-  # STATIC_EGRESS_WORKER_HOSTS="87.99.158.39@10.143.0.2/32@abc=,54.1.2.3@10.143.0.3/32@def="
+  # STATIC_EGRESS_WORKER_HOSTS="<worker-host-1>@<tunnel-address-1>/32@<private-key-1>,<worker-host-2>@<tunnel-address-2>/32@<private-key-2>"
   IFS=',' read -ra mappings <<< "$STATIC_EGRESS_WORKER_HOSTS"
   for mapping in "${mappings[@]}"; do
     map_host="${mapping%%@*}"

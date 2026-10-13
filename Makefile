@@ -409,9 +409,9 @@ secrets-rotate:
 #
 # SSH_KEY is auto-detected from ~/.ssh/143-deploy but can be overridden.
 # Usage:
-#   make provision-app    HOST=87.99.150.138
-#   make provision-worker HOST=87.99.158.39
-#   make provision-db     HOST=87.99.157.55
+#   make provision-app    HOST='<app-host>'
+#   make provision-worker HOST='<worker-host>'
+#   make provision-db     HOST='<db-host>'
 #   make provision-redis  HOST=10.0.0.50
 #
 # DB-only env vars:
@@ -443,7 +443,7 @@ secrets-rotate:
 #                                  workers always accept advertised routes.
 #
 # Example with overrides:
-#   make provision-worker HOST=87.99.158.39 WORKER_PRIVATE_IP=10.0.0.4 NODE_ID=worker-1
+#   make provision-worker HOST='<worker-host>' WORKER_PRIVATE_IP=10.0.0.4 NODE_ID=worker-1
 #   make provision-app HOST=<public-ip>
 #   make provision-db HOST=<public-ip>
 #   make provision-worker HOST=<public-ip>
@@ -464,7 +464,7 @@ secrets-rotate:
 #   for the gateway afterwards.
 #
 # To tear down and reprovision an existing node:
-#   make provision-app    HOST=87.99.150.138  REPROVISION=true
+#   make provision-app    HOST='<app-host>'  REPROVISION=true
 #
 # Migration note for fleets provisioned before /opt/143/.env.local existed:
 # `make deploy-worker` against such a host fails loudly at the secrets step
@@ -615,7 +615,7 @@ provision-db:
 # HOST is unset.
 # Usage:
 #   make provision-db-backups
-#   make provision-db-backups HOST=87.99.157.99
+#   make provision-db-backups HOST='<db-host>'
 provision-db-backups:
 	$(check-ssh-key)
 	@HOST="$(HOST)"; \
@@ -660,7 +660,7 @@ tailscale-enroll:
 # down containers. Use when deploy fails on a legacy host with
 # "sudo: a password is required" from a deploy-time helper.
 # Usage:
-#   make repair-deploy-sudoers ROLE=app HOST=87.99.150.138
+#   make repair-deploy-sudoers ROLE=app HOST='<app-host>'
 repair-deploy-sudoers:
 	@test -n "$(ROLE)" || { echo "ROLE is required. Usage: make repair-deploy-sudoers ROLE=<app|worker|db|logging|redis> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make repair-deploy-sudoers ROLE=<app|worker|db|logging|redis> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
@@ -671,7 +671,7 @@ repair-deploy-sudoers:
 # Repairs sandbox network/firewall/resolv.conf, sandbox-auth socket dir, and
 # worker sysctl drift. Requires the host to already have /opt/143/deploy staged.
 # Usage:
-#   make repair-worker-host HOST=87.99.158.39
+#   make repair-worker-host HOST='<worker-host>'
 repair-worker-host:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make repair-worker-host HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
@@ -681,9 +681,9 @@ repair-worker-host:
 # worker-owned Docker state. Set CLEAR=true only when intentionally emptying
 # the machine for decommission/reprovision.
 # Usage:
-#   make spin-down-worker HOST=87.99.158.39
-#   make spin-down-worker HOST=87.99.158.39 CLEAR=true
-#   make spin-down-worker HOST=87.99.158.39 TIMEOUT=7200 EXECUTOR_TIMEOUT=600
+#   make spin-down-worker HOST='<worker-host>'
+#   make spin-down-worker HOST='<worker-host>' CLEAR=true
+#   make spin-down-worker HOST='<worker-host>' TIMEOUT=7200 EXECUTOR_TIMEOUT=600
 spin-down-worker:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make spin-down-worker HOST=<ip> [SSH_KEY=<path>] [CLEAR=true] [TIMEOUT=seconds] [EXECUTOR_TIMEOUT=seconds]"; exit 1; }
 	$(check-ssh-key)
@@ -714,7 +714,7 @@ worker-blue-green-env = WORKER_BLUE_GREEN_PORT_START=$(WORKER_BLUE_GREEN_PORT_ST
 # SSH_KEY is auto-detected from ~/.ssh/143-deploy but can be overridden.
 # Usage:
 #   make deploy-app
-#   make deploy-app    HOST=87.99.150.138
+#   make deploy-app    HOST='<app-host>'
 #   make deploy-app    TAG=<sha>
 #   make deploy-worker force=true
 #   make deploy-fleet ROLES=app,worker
