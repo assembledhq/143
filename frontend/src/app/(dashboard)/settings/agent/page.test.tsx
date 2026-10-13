@@ -3,7 +3,8 @@ import { http, HttpResponse } from "msw";
 import { fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import type { CodingCredentialSummary } from "@/lib/types";
-import AgentPage, { reorderRows } from "./page";
+import AgentPage from "./page";
+import { reorderRows } from "./credential-row-order";
 
 const mockUseAuth = vi.fn(() => ({
   user: { id: "user-1", org_id: "org-1", role: "admin", email: "admin@example.com", name: "Admin", created_at: "", role_display: "admin" },

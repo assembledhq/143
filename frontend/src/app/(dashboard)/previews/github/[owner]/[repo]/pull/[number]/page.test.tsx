@@ -27,7 +27,7 @@ vi.mock("@/hooks/use-auth", () => ({
   }),
 }));
 
-import { PullRequestPreviewContent } from "./page";
+import { PullRequestPreviewContent } from "./pull-request-preview-content";
 
 afterEach(() => {
   searchParamsMock.value = new URLSearchParams();

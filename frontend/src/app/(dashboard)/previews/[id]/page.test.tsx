@@ -10,7 +10,7 @@ import {
   PREVIEW_BOOTSTRAP_READY_EVENT,
   PREVIEW_LAUNCH_COMPLETE_EVENT,
 } from "@/lib/preview-bootstrap";
-import { PreviewLandingContent } from "./page";
+import { PreviewLandingContent } from "./preview-landing-content";
 
 let searchParams = new URLSearchParams("launch=1");
 const currentUserRole = vi.hoisted(() => ({ value: "member" }));

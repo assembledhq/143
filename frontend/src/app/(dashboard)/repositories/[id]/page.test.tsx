@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
-import { RepositoryDetailContent } from "./page";
+import { RepositoryDetailContent } from "./repository-detail-content";
 
 describe("RepositoryDetailPage", () => {
   it("updates the browser tab title with the repository name", async () => {
