@@ -1,6 +1,36 @@
+## Public Repository Boundary
+
+`assembledhq/143` is public. Treat repository files, Git history, PR descriptions, issues, review comments, attachments, and CI output as publicly accessible. This includes `docs/design` and `docs/exec-plans`; “internal” describes their audience, not their confidentiality.
+
+### What belongs here
+
+Keep reusable architecture, product contracts, configuration names, defaults, generic deployment procedures, and synthetic examples in this repository. Use placeholders for deployment-specific values.
+
+### What belongs in private 143-infra
+
+Write deployment inventories, live capacity measurements, production configuration values, host/IP/cloud identifiers, incident timelines, recovery receipts, customer-specific observations, and raw operational evidence under `143-infra/docs/operations`.
+
+Do not create infrastructure-specific working notes in this repository, including ignored or untracked folders. If the private destination is unavailable, use a private temporary location outside this checkout.
+
+### Secrets and sensitive data
+
+Never include plaintext credentials, tokens, private keys, signed URLs, session cookies, or decrypted production bundles in tracked files or public output. Encrypted bundles and production access-control material belong only in private `143-infra`.
+
+Use synthetic test fixtures and demo data. Inspect screenshots, logs, traces, and generated artifacts for customer data, private identifiers, credentials, and machine-local paths before attaching or publishing them.
+
+Read-only production access does not authorize publishing its results.
+
+### Before publication
+
+Inspect the full staged diff, newly added files, generated artifacts, commit message, PR text, and attachments. Stage explicit paths.
+
+Secret scanners and `.gitignore` are additional controls; they do not establish that operational notes or attachments are safe to publish.
+
+If sensitive material is found, stop its publication and report the issue without repeating the sensitive values. Removing a file does not remove its history. Credential rotation and Git-history rewriting require explicit authorization.
+
 ## Documentation
 
-Use `docs/design/overall.md` as the high-level architecture map when you need system context. Do not update internal design docs for routine code changes. Update `docs/design` only when a change materially affects architecture, durable product contracts, data models, APIs, operational procedures, or when the user explicitly asks for a design update.
+All tracked documentation is public, including developer-facing design docs and execution plans. Use `docs/design/overall.md` as the high-level architecture map when you need system context. Do not update design docs for routine code changes. Update `docs/design` only when a change materially affects architecture, durable product contracts, data models, APIs, operational procedures, or when the user explicitly asks for a design update.
 
 Update public Fumadocs (`docs/public`) only for significant user-facing behavior, setup, API, or integration changes. Most PRs should not need documentation updates.
 
@@ -354,4 +384,6 @@ The `trg_project_task_counts_update` trigger (migration 000047) fires on ALL col
 
 ## Production Secrets Guardrail
 
-Encrypted env bundles (`.env*.enc`) and `.sops.yaml` live in the private secrets repo (`SECRETS_DIR` — defaults to a `143-infra` checkout next to the main repo, resolved worktree-safely via the shared git dir), never in this public repo — the pre-commit hook and `.gitignore` both block them here. Treat `.env.production.enc` in that checkout as protected production configuration: do not edit, regenerate, or commit changes to it unless the user explicitly asks for a production secret/config change. Read-only decrypts through the Make targets above are fine. Before finishing any work that involved prod debugging, check `git -C "$(./deploy/scripts/resolve-secrets-dir.sh .)" status --short` and leave it clean unless the requested task was specifically to update production env.
+Encrypted env bundles (`.env*.enc`) and `.sops.yaml` live in the private secrets repo (`SECRETS_DIR` — defaults to a `143-infra` checkout next to the main repo, resolved worktree-safely via the shared git dir), never in this public repo — the pre-commit hook and `.gitignore` both block them here. Treat `.env.production.enc` in that checkout as protected production configuration: do not edit, regenerate, or commit changes to it unless the user explicitly asks for a production secret/config change. Read-only decrypts through the Make targets above are fine.
+
+Before finishing any work that involved prod debugging, check `git -C "$(./deploy/scripts/resolve-secrets-dir.sh .)" status --short` and verify that encrypted env bundles and production access-control files are unchanged unless the user explicitly requested their modification. Preserve authorized infra documentation changes and unrelated existing edits; do not reset or revert the private checkout to force a clean status.
