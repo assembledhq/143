@@ -1171,9 +1171,12 @@ type CodeReviewFinding struct {
 }
 
 type CodeReviewListItem struct {
-	CurrentAssessment      *CodeReviewAssessmentSummary `db:"-" json:"current_assessment,omitempty"`
-	ActiveAssessment       *CodeReviewAssessmentSummary `db:"-" json:"active_assessment,omitempty"`
-	LatestFailedAssessment *CodeReviewAssessmentSummary `db:"-" json:"latest_failed_assessment,omitempty"`
+	// CompletedAssessmentOutcome identifies the completed outcome projected for
+	// this exact session; a PR's current summary may belong to a newer session.
+	CompletedAssessmentOutcome bool                         `db:"completed_assessment_outcome" json:"completed_assessment_outcome,omitempty"`
+	CurrentAssessment          *CodeReviewAssessmentSummary `db:"-" json:"current_assessment,omitempty"`
+	ActiveAssessment           *CodeReviewAssessmentSummary `db:"-" json:"active_assessment,omitempty"`
+	LatestFailedAssessment     *CodeReviewAssessmentSummary `db:"-" json:"latest_failed_assessment,omitempty"`
 	CodeReviewSessionMetadata
 	RiskReasonDetails json.RawMessage `db:"risk_reason_details" json:"risk_reason_details,omitempty"`
 	RetryEligible     bool            `db:"retry_eligible" json:"retry_eligible"`

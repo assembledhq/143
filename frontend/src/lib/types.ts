@@ -347,6 +347,7 @@ export interface CodeReviewPromptExamplesResponse {
 }
 
 export interface CodeReviewListItem {
+  completed_assessment_outcome?: boolean;
   id: string;
   org_id: string;
   session_id: string;

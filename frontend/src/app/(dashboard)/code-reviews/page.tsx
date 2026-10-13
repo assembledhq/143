@@ -244,8 +244,15 @@ function isSupersededReview(review: CodeReviewListItem): boolean {
   return review.stale || review.status === "stale" || Boolean(review.superseded_by_session_id);
 }
 
+function hasNoReviewOutcome(review: CodeReviewListItem): boolean {
+  return isSupersededReview(review) || (
+    (review.status === "cancelled" || review.status === "failed") &&
+    !review.github_review_id && !review.completed_assessment_outcome
+  );
+}
+
 function decisionLabel(review: CodeReviewListItem): string {
-  if (isSupersededReview(review)) return "No outcome";
+  if (hasNoReviewOutcome(review)) return "No outcome";
   if (wasAutomaticallyApproved(review)) return "Approved";
   if (review.decision === "approved") return "Approval not posted";
   if (review.decision === "needs_human_review") return "Review needed";
@@ -255,7 +262,7 @@ function decisionLabel(review: CodeReviewListItem): string {
 }
 
 function reviewDecisionTone(review: CodeReviewListItem): StatusTone {
-  if (isSupersededReview(review)) return "neutral";
+  if (hasNoReviewOutcome(review)) return "neutral";
   if (wasAutomaticallyApproved(review)) return "success";
   if (review.decision === "blocked") return "destructive";
   if (review.decision === "needs_human_review") return "warning";

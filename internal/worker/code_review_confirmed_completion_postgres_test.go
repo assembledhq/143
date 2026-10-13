@@ -2,14 +2,26 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+type confirmedNoNetworkPublisher struct {
+	fakeRecheckPublisher
+	fileRequests []codereviewsvc.PullRequestFilesRequest
+}
+
+func (p *confirmedNoNetworkPublisher) ListPullRequestFiles(_ context.Context, request codereviewsvc.PullRequestFilesRequest) ([]codereviewsvc.PullRequestFile, error) {
+	p.fileRequests = append(p.fileRequests, request)
+	return nil, errors.New("confirmed receipt must not fetch GitHub files")
+}
 
 //nolint:paralleltest // One schema-local fault trigger is installed before tenant-parallel cases.
 func TestConfirmedFullPublicationCompletionAtomicPostgres(t *testing.T) {
@@ -68,13 +80,14 @@ func TestConfirmedFullPublicationCompletionAtomicPostgres(t *testing.T) {
 			require.NoError(t, err, "read pinned immutable staged outcome")
 			metadata, err := f.stores.CodeReviews.GetBySessionID(ctx, f.job.OrgID, f.job.SessionID)
 			require.NoError(t, err, "read original terminal metadata")
-			publisher := &fakeRecheckPublisher{}
+			publisher := &confirmedNoNetworkPublisher{}
 			// Call completion without the handler's after-commit, best-effort parent
 			// reconciliation to prove durability does not depend on that later write.
 			complete := func() error {
 				return resumeStagedFullAssessment(ctx, f.stores, &Services{CodeReviews: publisher}, f.job, metadata, staged, nil)
 			}
 			err = complete()
+			require.Empty(t, publisher.fileRequests, "confirmed receipt recovery must remain independent of GitHub file availability")
 			if tt.reject {
 				require.ErrorContains(t, err, "injected assessment completion failure after parent claimed", "failure must occur after atomic parent completion and ownership claim")
 				require.Equal(t, before, snapshot(), "failed assessment completion must roll back parent, ownership, metadata and scheduler together")

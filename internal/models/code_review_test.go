@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +9,31 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCodeReviewCompletedAssessmentOutcomeSerialization(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		completed bool
+		expected  any
+		present   bool
+	}{
+		{name: "legacy responses omit provenance"},
+		{name: "exact session completed projection exposes provenance", completed: true, expected: true, present: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			raw, err := json.Marshal(CodeReviewListItem{CompletedAssessmentOutcome: tt.completed})
+			require.NoError(t, err, "review list responses must serialize outcome provenance")
+			var fields map[string]any
+			require.NoError(t, json.Unmarshal(raw, &fields), "serialized list response must be valid JSON")
+			value, present := fields["completed_assessment_outcome"]
+			require.Equal(t, tt.present, present, "outcome provenance must be omitted unless a completed assessment is projected")
+			require.Equal(t, tt.expected, value, "the outcome provenance marker must identify only a completed session projection")
+		})
+	}
+}
 
 func TestCodeReviewEnumsValidate(t *testing.T) {
 	t.Parallel()

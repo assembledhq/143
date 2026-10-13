@@ -12,9 +12,28 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 )
 
 var errCodeReviewPublicationPaused = errors.New("publication requires operator reconciliation")
+var errCodeReviewParentCancelled = errors.New("parent code review session was cancelled before publication")
+
+func stopUnsentStagedReviewIfParentCancelled(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, assessment models.CodeReviewAssessment) error {
+	cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr)
+	if err != nil || !cancelled {
+		return err
+	}
+	if stores.ThreadSendTx == nil {
+		return fmt.Errorf("cancelled staged review settlement requires transaction support")
+	}
+	if err := db.NewCodeReviewScheduleStore(stores.ThreadSendTx).ReconcileTerminalReviews(ctx, job.OrgID, job.RepositoryID, job.PullRequestID); err != nil {
+		return err
+	}
+	if err := settleFullAssessmentScheduler(ctx, stores.ThreadSendTx, assessment); err != nil {
+		return err
+	}
+	return errCodeReviewParentCancelled
+}
 
 func pauseExpiredCodeReviewPublication(ctx context.Context, stores *Stores, assessment models.CodeReviewAssessment) (bool, error) {
 	if assessment.Status != models.CodeReviewAssessmentPublishing || assessment.PublicationState != models.CodeReviewPublicationUncertain {

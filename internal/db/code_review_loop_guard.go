@@ -69,10 +69,10 @@ func stopFullReviewFallbackLoop(ctx context.Context, tx pgx.Tx, a models.CodeRev
 	if len(sessions) < limit {
 		return false, nil
 	}
-	if _, err = tx.Exec(ctx, `UPDATE code_review_revision_assessments SET status='cancelled',failure_detail=$3,completed_at=COALESCE(completed_at,now()) WHERE org_id=$1 AND id=$2`, a.OrgID, a.ID, models.CodeReviewStatusCodeLoopDetected); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE code_review_revision_assessments SET status='cancelled',failure_detail=$3,decision=NULL,acceptable=NULL,risk_reason_details=NULL,completed_at=COALESCE(completed_at,now()) WHERE org_id=$1 AND id=$2`, a.OrgID, a.ID, models.CodeReviewStatusCodeLoopDetected); err != nil {
 		return false, err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE code_review_session_metadata SET status='cancelled',stale=false,phase=NULL,status_code=$3,status_message=$4,failure_reason=$4,retry_at=NULL,retryable_failure=false,completed_at=COALESCE(completed_at,now()) WHERE org_id=$1 AND session_id=$2 AND pull_request_id=$5 AND status IN ('queued','running','stale','failed')`, a.OrgID, a.SessionID, models.CodeReviewStatusCodeLoopDetected, reason, a.PullRequestID); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE code_review_session_metadata SET status='cancelled',stale=false,phase=NULL,decision=NULL,acceptable=NULL,risk_reason_details='[]'::jsonb,status_code=$3,status_message=$4,failure_reason=$4,retry_at=NULL,retryable_failure=false,completed_at=COALESCE(completed_at,now()) WHERE org_id=$1 AND session_id=$2 AND pull_request_id=$5 AND status IN ('queued','running','stale','failed')`, a.OrgID, a.SessionID, models.CodeReviewStatusCodeLoopDetected, reason, a.PullRequestID); err != nil {
 		return false, err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE session_threads SET cancel_requested_at=COALESCE(cancel_requested_at,now()) WHERE org_id=$1 AND session_id=ANY($2) AND status IN ('pending','running','awaiting_input')`, a.OrgID, sessions); err != nil {

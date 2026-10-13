@@ -130,6 +130,31 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("org_id and session_id are required")
 		}
 		reviewLog := codeReviewTimingLogger(ctx, logger, job)
+		defer func() {
+			if !errors.Is(handlerErr, errFullAssessmentFreshnessInconclusive) {
+				return
+			}
+			var retry *RetryableError
+			if !errors.As(handlerErr, &retry) {
+				return
+			}
+			jobID, hasJob := jobctx.JobIDFromContext(ctx)
+			lockToken, hasLease := jobctx.LockTokenFromContext(ctx)
+			if !hasJob || !hasLease {
+				handlerErr = fmt.Errorf("freshness retry requires an active controller lease")
+				return
+			}
+			startedAt, owned, err := stores.CodeReviews.EnsureFreshnessRetryStartedAt(ctx, job.OrgID, job.SessionID, jobID, lockToken)
+			if err != nil {
+				handlerErr = err
+				return
+			}
+			if !owned {
+				handlerErr = fmt.Errorf("freshness retry lost its controller lease: %w", db.ErrCodeReviewAssessmentState)
+				return
+			}
+			retry.RetryWindowStartedAt = &startedAt
+		}()
 		attemptStage := observability.BeginStage(true, reviewLog, "review_controller_attempt")
 		defer func() { attemptStage.End(codeReviewStageOutcome(ctx, handlerErr)) }()
 		maintainCodeReviewWorkspaceHolder(ctx, stores, reviewLog, job)
@@ -140,8 +165,8 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}()
 		registerCodeReviewDeadLetterReconciliation(ctx, stores, services, logger, job)
 		registerCodeReviewRetryScheduledWait(ctx, stores.CodeReviews, logger, job)
-		if recovered, err := recoverStagedFullAssessment(ctx, stores, services, job); recovered || err != nil {
-			if errors.Is(err, errCodeReviewPublicationSuperseded) || errors.Is(err, errCodeReviewPublicationPaused) {
+		if recovered, err := recoverStagedFullAssessment(reviewLog.WithContext(ctx), stores, services, job); recovered || err != nil {
+			if errors.Is(err, errCodeReviewPublicationSuperseded) || errors.Is(err, errCodeReviewPublicationPaused) || errors.Is(err, errCodeReviewParentCancelled) {
 				return nil
 			}
 			if err == nil {
@@ -315,8 +340,8 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 		}
 		if assessment != nil && assessment.ResultOrigin != nil {
-			if err := resumeStagedFullAssessment(ctx, stores, services, job, metadata, *assessment, changedFiles); err != nil {
-				if errors.Is(err, errCodeReviewPublicationSuperseded) {
+			if err := resumeStagedFullAssessment(reviewLog.WithContext(ctx), stores, services, job, metadata, *assessment, changedFiles); err != nil {
+				if errors.Is(err, errCodeReviewPublicationSuperseded) || errors.Is(err, errCodeReviewParentCancelled) {
 					return nil
 				}
 				return fmt.Errorf("resume staged full assessment: %w", err)
@@ -519,16 +544,12 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			AssessedAt:            time.Now().UTC(),
 		})
 		var assessmentOutcome json.RawMessage
+		// Save publication preparation before staging hands later retries to the
+		// immutable-outcome recovery path.
+		if err := ensureCodeReviewInlineSelection(ctx, stores.CodeReviews, job, findings, changedFiles, policy.Config().InlineCommentLimit); err != nil {
+			return fmt.Errorf("select code review inline findings: %w", err)
+		}
 		if assessment != nil {
-			if err := verifyFullAssessmentFreshness(ctx, services, job, *assessment); err != nil {
-				if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
-					if recoveryErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); recoveryErr != nil {
-						return recoveryErr
-					}
-					return nil
-				}
-				return fmt.Errorf("refresh full assessment before publication: %w", err)
-			}
 			assessmentOutcome, err = fullAssessmentOutcome(agentResults, decision.RiskReasonDetails, assessmentCoverage)
 			if err != nil {
 				return fmt.Errorf("encode full assessment outcome: %w", err)
@@ -540,9 +561,16 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if err := stores.CodeReviewAssessments.StageOutcome(ctx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest, models.CodeReviewAssessmentCompletion{ResultOrigin: models.CodeReviewResultExecuted, CoverageComplete: assessmentCoverage, Decision: decision.Decision, Acceptable: decision.Acceptable, RiskReasonDetails: riskJSON, StructuredOutcome: assessmentOutcome, RenderedBody: body}); err != nil {
 				return fmt.Errorf("stage full assessment outcome: %w", err)
 			}
-		}
-		if err := ensureCodeReviewInlineSelection(ctx, stores.CodeReviews, job, findings, changedFiles, policy.Config().InlineCommentLimit); err != nil {
-			return fmt.Errorf("select code review inline findings: %w", err)
+
+			if err := verifyFullAssessmentFreshness(ctx, services, job, *assessment); err != nil {
+				if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
+					if recoveryErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); recoveryErr != nil {
+						return recoveryErr
+					}
+					return nil
+				}
+				return fmt.Errorf("refresh full assessment before publication: %w", err)
+			}
 		}
 		if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
 			return err
@@ -898,12 +926,15 @@ func recordCodeReviewAutomaticWait(ctx context.Context, store *db.CodeReviewStor
 		return
 	}
 	classification := ghservice.ClassifyRetry(handlerErr, time.Now())
-	if !classification.RateLimited {
+	code, message := models.CodeReviewStatusCodeGitHubRateLimited, "GitHub is rate-limited. The review will resume automatically when the limit resets."
+	if errors.Is(handlerErr, errFullAssessmentFreshnessInconclusive) {
+		code, message = models.CodeReviewStatusCodeGitHubUnavailable, "Visual evidence is temporarily unavailable. Verification will retry automatically using the existing review."
+	} else if !classification.RateLimited {
 		return
 	}
 	retryAt = retryAt.UTC()
 	if _, err := store.SetWaitingForGitHub(ctx, job.OrgID, job.SessionID, jobID, retryAt, handlerErr.Error(),
-		"GitHub is rate-limited. The review will resume automatically when the limit resets."); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		message, code); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		logger.Warn().Err(err).
 			Str("session_id", job.SessionID.String()).
 			Msg("failed to persist code review GitHub rate-limit wait")
@@ -911,6 +942,10 @@ func recordCodeReviewAutomaticWait(ctx context.Context, store *db.CodeReviewStor
 }
 
 func codeReviewTerminalFailureStatus(err error) (models.CodeReviewStatusCode, string, bool) {
+	if errors.Is(err, errFullAssessmentFreshnessInconclusive) {
+		return models.CodeReviewStatusCodeGitHubUnavailable,
+			"Visual evidence could not be verified before automatic retries expired. Request a fresh review after the evidence is available.", false
+	}
 	classification := ghservice.ClassifyRetry(err, time.Now())
 	if classification.RateLimited {
 		return models.CodeReviewStatusCodeGitHubRateLimited,
@@ -3524,15 +3559,6 @@ func completeCodeReviewAfterStableDeterministicFailure(
 	}
 	var assessmentOutcome json.RawMessage
 	if assessment != nil {
-		if err := verifyFullAssessmentFreshness(ctx, services, job, *assessment); err != nil {
-			if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
-				if recoveryErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); recoveryErr != nil {
-					return recoveryErr
-				}
-				return nil
-			}
-			return fmt.Errorf("refresh early-stop assessment before publication: %w", err)
-		}
 		var outcomeErr error
 		assessmentOutcome, outcomeErr = fullAssessmentOutcome(nil, decision.RiskReasonDetails, false)
 		if outcomeErr != nil {
@@ -3544,6 +3570,15 @@ func completeCodeReviewAfterStableDeterministicFailure(
 		}
 		if err := stores.CodeReviewAssessments.StageOutcome(ctx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest, models.CodeReviewAssessmentCompletion{ResultOrigin: models.CodeReviewResultExecuted, CoverageComplete: false, Decision: decision.Decision, Acceptable: decision.Acceptable, RiskReasonDetails: riskJSON, StructuredOutcome: assessmentOutcome, RenderedBody: body}); err != nil {
 			return fmt.Errorf("stage early-stop assessment outcome: %w", err)
+		}
+		if err := verifyFullAssessmentFreshness(ctx, services, job, *assessment); err != nil {
+			if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
+				if recoveryErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); recoveryErr != nil {
+					return recoveryErr
+				}
+				return nil
+			}
+			return fmt.Errorf("refresh early-stop assessment before publication: %w", err)
 		}
 	}
 	publicationStage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "github_publication")

@@ -2431,6 +2431,31 @@ describe("CodeReviewsPage", () => {
     }
   });
 
+  it.each(["cancelled", "failed"] as const)("shows no outcome for an unpublished legacy %s attempt on desktop and mobile", async (status) => {
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({
+      data: [{ ...review, status, decision: "blocked", acceptable: false, github_review_id: undefined, github_review_url: undefined }], meta: {},
+    })));
+    renderWithProviders(<CodeReviewsPage />);
+    expect(await screen.findAllByText("No outcome")).toHaveLength(2);
+    const table = screen.getByRole("table", { name: "Code reviews" });
+    const activity = screen.getByLabelText("Code review activity");
+    expect(within(table).getByText("No outcome")).toHaveClass("text-muted-foreground");
+    expect(within(activity).getByText("No outcome")).toHaveClass("text-muted-foreground");
+    expect(screen.queryByText("Blocked")).not.toBeInTheDocument();
+  });
+
+  it("preserves a completed historical outcome when the current PR assessment belongs to another session", async () => {
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({
+      data: [{ ...review, status: "failed", decision: "blocked", completed_assessment_outcome: true, github_review_id: undefined, github_review_url: undefined,
+        current_assessment: { id: "new-assessment", session_id: "new-session", status: "completed", review_scope: "full", route_reason: "initial_full", head_sha: "new-head", publication_state: "confirmed", created_at: review.created_at } }], meta: {},
+    })));
+    renderWithProviders(<CodeReviewsPage />);
+    expect(await screen.findAllByText("Blocked")).toHaveLength(2);
+    expect(screen.queryByText("No outcome")).not.toBeInTheDocument();
+  });
+
   it("shows operational phases and the automatic GitHub retry countdown without a manual retry action", async () => {
     const waitingReview: CodeReviewListItem = {
       ...review,

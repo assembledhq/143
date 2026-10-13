@@ -201,19 +201,7 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	for _, file := range files {
 		codeFiles = append(codeFiles, ReviewChangedFile{Path: file.Filename, Status: file.Status, PatchDigest: digestJSON(file)})
 	}
-	images := make([]ReviewVisualImage, 0, len(visual.Evidence))
-	for _, e := range visual.Evidence {
-		// Fetch failures remain part of the content identity and can never be
-		// cited as available evidence by the response validator.
-		content := e.ContentSHA256
-		if e.Status != models.CodeReviewVisualEvidenceFetchStatusAvailable {
-			content = digestJSON(struct {
-				Status models.CodeReviewVisualEvidenceFetchStatus
-				Reason string
-			}{e.Status, e.FailureReason})
-		}
-		images = append(images, ReviewVisualImage{SourceID: e.Source.SourceID, SourceURL: e.Source.SourceURL, SourceText: e.Source.ContextText, AltText: e.Source.AltText, ContentDigest: content})
-	}
+	visualInput := AssessmentVisualInput(visual)
 	textItems := make([]ReviewTextEvidence, 0, 1+len(textDiscovery.Sources))
 	prURL := "https://github.com/" + repo.FullName + "/pull/" + fmt.Sprint(pr.GitHubPRNumber)
 	textItems = append(textItems, newReviewTextEvidence("pull_request_description", fmt.Sprint(pr.GitHubPRNumber), prURL, snapshot.AuthorLogin, snapshot.Body, "full"))
@@ -304,7 +292,7 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 			Repository                   json.RawMessage
 			ExternalContextDigest        string
 		}{snapshot.HeadSHA, snapshot.BaseSHA, config.ReviewInstructions, config.AutomatedApprovalPolicy, repo.Settings, externalDigest}), ExternalInputsComplete: true},
-		Title: snapshot.Title, Description: snapshot.Body, Visual: ReviewVisualInput{Images: images, CaptureComplete: visual.Complete && !visual.Overflow && visual.OmittedSourceCount == 0, SourceProvenanceComplete: visual.Complete}, TextEvidence: ReviewTextInput{Items: textItems, UnclassifiedDigest: digestJSON(unclassified), Complete: true, SourceProvenanceComplete: true, FullDiscussionCaptured: true, ParseAmbiguous: parseAmbiguous}, Request: ReviewRequestInput{SubstantiveText: text},
+		Title: snapshot.Title, Description: snapshot.Body, Visual: visualInput, TextEvidence: ReviewTextInput{Items: textItems, UnclassifiedDigest: digestJSON(unclassified), Complete: true, SourceProvenanceComplete: true, FullDiscussionCaptured: true, ParseAmbiguous: parseAmbiguous}, Request: ReviewRequestInput{SubstantiveText: text},
 		Gates: ReviewGateInput{EligibilityDigest: digestJSON(struct {
 			MergeGuard        string
 			HasConflicts      bool
@@ -341,6 +329,25 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 		ChecksConfirmed: summary.ChecksConfirmed,
 	}
 	return AssessmentInputCaptureResult{Manifest: manifest, VisualEvidence: visual, Health: capturedHealth, PullRequest: pr, Policy: *resolved.Policy, Files: files, Snapshot: snapshot}, nil
+}
+
+// AssessmentVisualInput preserves the manifest's content identity for both
+// successful bytes and unavailable captures. It also allows publication to
+// verify an immutable visual checkpoint without refreshing unrelated inputs.
+func AssessmentVisualInput(snapshot models.CodeReviewVisualEvidenceSnapshot) ReviewVisualInput {
+	images := make([]ReviewVisualImage, 0, len(snapshot.Evidence))
+	for _, e := range snapshot.Evidence {
+		content := e.ContentSHA256
+		if e.Status != models.CodeReviewVisualEvidenceFetchStatusAvailable {
+			content = digestJSON(struct {
+				Status models.CodeReviewVisualEvidenceFetchStatus
+				Reason string
+			}{e.Status, e.FailureReason})
+		}
+		images = append(images, ReviewVisualImage{SourceID: e.Source.SourceID, SourceURL: e.Source.SourceURL, SourceText: e.Source.ContextText, AltText: e.Source.AltText, ContentDigest: content})
+	}
+	sort.Slice(images, func(i, j int) bool { return images[i].SourceID < images[j].SourceID })
+	return ReviewVisualInput{Images: images, CaptureComplete: snapshot.Complete && !snapshot.Overflow && snapshot.OmittedSourceCount == 0, SourceProvenanceComplete: snapshot.Complete}
 }
 
 func reviewMergeGuard(state models.PullRequestMergeState) string {

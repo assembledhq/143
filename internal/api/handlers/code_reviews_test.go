@@ -672,7 +672,7 @@ func TestCodeReviewHandler_ListReturnsPaginationMetadata(t *testing.T) {
 			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
 			"retry_eligible", "session_title", "repository_name", "github_repo", "github_pr_number",
-			"github_pr_url", "pull_request_title", "pull_request_author",
+			"github_pr_url", "pull_request_title", "pull_request_author", "completed_assessment_outcome",
 		}))
 	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews?activity_status=current", nil)
@@ -705,7 +705,7 @@ func TestCodeReviewHandler_ListAppliesTimeWindow(t *testing.T) {
 			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "retry_eligible",
 			"session_title", "repository_name", "github_repo", "github_pr_number", "github_pr_url",
-			"pull_request_title", "pull_request_author",
+			"pull_request_title", "pull_request_author", "completed_assessment_outcome",
 		}))
 	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews?created_after=2026-06-01T00:00:00Z", nil)

@@ -65,8 +65,8 @@ func TestStopFullReviewFallbackLoopPostgres(t *testing.T) {
 			require.NoError(t, err, "isolate test tables")
 			_, err = tx.Exec(ctx, `
 CREATE TABLE sessions(n int,id uuid,org_id uuid,revision_context jsonb);
-CREATE TABLE code_review_revision_assessments(n int,id uuid,org_id uuid,pull_request_id uuid,session_id uuid,previous_assessment_id uuid,head_sha text,base_sha text,base_ref text,code_digest text,contract_digest text,intent_digest text,review_scope text,status text,failure_detail text,publication_state text,publication_receipt jsonb,github_review_id bigint,completed_at timestamptz);
-CREATE TABLE code_review_session_metadata(org_id uuid,pull_request_id uuid,session_id uuid,status text,stale boolean DEFAULT true,phase text,status_code text,status_message text,failure_reason text,retry_at timestamptz,retryable_failure bool,completed_at timestamptz);
+CREATE TABLE code_review_revision_assessments(n int,id uuid,org_id uuid,pull_request_id uuid,session_id uuid,previous_assessment_id uuid,head_sha text,base_sha text,base_ref text,code_digest text,contract_digest text,intent_digest text,review_scope text,status text,failure_detail text,publication_state text,publication_receipt jsonb,github_review_id bigint,decision text,acceptable bool,risk_reason_details jsonb,completed_at timestamptz);
+CREATE TABLE code_review_session_metadata(org_id uuid,pull_request_id uuid,session_id uuid,status text,stale boolean DEFAULT true,phase text,status_code text,status_message text,failure_reason text,retry_at timestamptz,retryable_failure bool,decision text,acceptable bool,risk_reason_details jsonb,completed_at timestamptz);
 CREATE TABLE session_threads(org_id uuid,session_id uuid,status text,cancel_requested_at timestamptz);
 CREATE TABLE code_review_requests(org_id uuid,pull_request_id uuid,assessment_id uuid,session_id uuid,status text);
 CREATE TABLE jobs(id uuid DEFAULT gen_random_uuid(),org_id uuid,queue text,job_type text,payload jsonb,priority int,dedupe_key text UNIQUE,run_at timestamptz,max_attempts int);`)

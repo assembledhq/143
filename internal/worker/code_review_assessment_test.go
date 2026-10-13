@@ -12,13 +12,121 @@ import (
 )
 
 type assessmentFreshnessCapture struct {
-	result  codereviewsvc.AssessmentInputCaptureResult
-	request codereviewsvc.AssessmentInputCaptureRequest
+	result   codereviewsvc.AssessmentInputCaptureResult
+	request  codereviewsvc.AssessmentInputCaptureRequest
+	requests []codereviewsvc.AssessmentInputCaptureRequest
 }
 
 func (f *assessmentFreshnessCapture) CaptureAssessmentInputs(_ context.Context, request codereviewsvc.AssessmentInputCaptureRequest) (codereviewsvc.AssessmentInputCaptureResult, error) {
 	f.request = request
+	f.requests = append(f.requests, request)
 	return f.result, nil
+}
+
+type assessmentVisualCheckpoint struct {
+	snapshot models.CodeReviewVisualEvidenceSnapshot
+	requests []codereviewsvc.CaptureVisualEvidenceInput
+}
+
+func (f *assessmentVisualCheckpoint) Capture(_ context.Context, request codereviewsvc.CaptureVisualEvidenceInput) (models.CodeReviewVisualEvidenceSnapshot, error) {
+	f.requests = append(f.requests, request)
+	return f.snapshot, nil
+}
+
+func TestFullAssessmentAvailabilityFreshness(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                                                                string
+		before, after                                                       models.CodeReviewVisualEvidenceFetchStatus
+		change                                                              func(*codereviewsvc.AssessmentInputCaptureResult)
+		retry                                                               bool
+		unchanged, corruptCheckpoint, missingCheckpoint, simultaneousChange bool
+	}{
+		{name: "available bytes temporarily unavailable", before: "available", after: "unavailable", retry: true},
+		{name: "unavailable failure reason changes", before: "unavailable", after: "unavailable", retry: true},
+		{name: "same unavailable reason preserves captured input", before: "unavailable", after: "unavailable", unchanged: true},
+		{name: "restored original bytes preserve captured input", before: "available", after: "available", unchanged: true},
+		{name: "corrupt immutable checkpoint remains bounded", before: "available", after: "unavailable", corruptCheckpoint: true, retry: true},
+		{name: "missing immutable checkpoint remains bounded", before: "available", after: "unavailable", missingCheckpoint: true, retry: true},
+		{name: "known available content change wins over another unavailable image", before: "available", after: "unavailable", simultaneousChange: true},
+		{name: "newly available bytes require new analysis", before: "unavailable", after: "available"},
+		{name: "different available bytes require new analysis", before: "available", after: "available"},
+		{name: "changed caption alongside failure requires new analysis", before: "available", after: "unavailable", change: func(r *codereviewsvc.AssessmentInputCaptureResult) {
+			r.Manifest.Visual.Images[0].SourceText = "New caption"
+		}},
+		{name: "changed alt text requires new analysis", before: "available", after: "unavailable", change: func(r *codereviewsvc.AssessmentInputCaptureResult) { r.Manifest.Visual.Images[0].AltText = "New alt" }},
+		{name: "changed source requires new analysis", before: "available", after: "unavailable", change: func(r *codereviewsvc.AssessmentInputCaptureResult) {
+			r.Manifest.Visual.Images[0].SourceURL = "https://example.test/new"
+		}},
+		{name: "changed code alongside failure requires new analysis", before: "available", after: "unavailable", change: func(r *codereviewsvc.AssessmentInputCaptureResult) { r.Manifest.CodeDigest = "changed" }},
+		{name: "changed request alongside failure requires new analysis", before: "available", after: "unavailable", change: func(r *codereviewsvc.AssessmentInputCaptureResult) { r.Manifest.RequestDigest = "changed" }},
+		{name: "changed policy alongside failure requires new analysis", before: "available", after: "unavailable", change: func(r *codereviewsvc.AssessmentInputCaptureResult) { r.Policy.ID = uuid.New() }},
+		{name: "changed discussion alongside failure requires new analysis", before: "available", after: "unavailable", change: func(r *codereviewsvc.AssessmentInputCaptureResult) {
+			r.Manifest.TextEvidence.Items[0].Content = "New request"
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			id, policyID := uuid.New(), uuid.New()
+			manifest := codereviewsvc.ReviewInputManifest{InputVersion: codereviewsvc.ReviewInputManifestVersion, ReuseEligible: true, InputDigest: "input", CodeDigest: "code", ContractDigest: "contract", IntentDigest: "intent", VisualDigest: "visual", RequestDigest: "request", Code: codereviewsvc.ReviewCodeInput{HeadSHA: "head", BaseSHA: "base", BaseRef: "main"}, Visual: codereviewsvc.ReviewVisualInput{CaptureComplete: true, SourceProvenanceComplete: true, Images: []codereviewsvc.ReviewVisualImage{{SourceID: "image-1", SourceURL: "https://example.test/image?token=secret", SourceText: "Original caption", AltText: "Original alt", ContentDigest: "original"}}}, TextEvidence: codereviewsvc.ReviewTextInput{Items: []codereviewsvc.ReviewTextEvidence{{Surface: "issue_comment", Content: "Original request"}}}}
+			visual := models.CodeReviewVisualEvidenceSnapshot{AssessmentID: &id, Complete: true, HeadSHA: "head", Evidence: []models.CodeReviewVisualEvidence{{Source: models.CodeReviewVisualEvidenceSource{SourceID: "image-1", SourceURL: "https://example.test/image?token=secret", ContextText: "Original caption", AltText: "Original alt"}, ContentSHA256: "original", Status: tt.before}}}
+			if tt.simultaneousChange {
+				visual.Evidence = append(visual.Evidence, models.CodeReviewVisualEvidence{Source: models.CodeReviewVisualEvidenceSource{SourceID: "image-2", SourceURL: "https://example.test/second"}, ContentSHA256: "original-second", Status: "available"})
+			}
+			manifest.Visual = codereviewsvc.AssessmentVisualInput(visual)
+			raw, err := json.Marshal(manifest)
+			require.NoError(t, err, "encode immutable analysis input")
+			assessment := models.CodeReviewAssessment{ID: id, PolicyID: policyID, InputManifest: raw, InputDigest: "input", HeadSHA: "head", BaseSHA: "base", BaseRef: "main"}
+			checkpoint := codereviewsvc.AssessmentInputCaptureResult{Manifest: manifest, Policy: models.CodeReviewPolicyRecord{ID: policyID}, VisualEvidence: visual}
+			fresh := checkpoint
+			fresh.Manifest.Visual.Images = append([]codereviewsvc.ReviewVisualImage(nil), manifest.Visual.Images...)
+			fresh.Manifest.TextEvidence.Items = append([]codereviewsvc.ReviewTextEvidence(nil), manifest.TextEvidence.Items...)
+			fresh.Manifest.VisualDigest = "fresh-visual"
+			fresh.Manifest.Visual.Images[0].ContentDigest = "fresh-content"
+			fresh.VisualEvidence.Evidence = append([]models.CodeReviewVisualEvidence(nil), checkpoint.VisualEvidence.Evidence...)
+			fresh.VisualEvidence.Evidence[0].Status = tt.after
+			if tt.unchanged {
+				fresh.Manifest.VisualDigest = manifest.VisualDigest
+				fresh.Manifest.Visual.Images[0].ContentDigest = manifest.Visual.Images[0].ContentDigest
+			}
+			if tt.simultaneousChange {
+				fresh.Manifest.Visual.Images[1].ContentDigest = "different-available-bytes"
+			}
+			if tt.change != nil {
+				tt.change(&fresh)
+			}
+			capture := &assessmentFreshnessCapture{result: fresh}
+			visualCapture := &assessmentVisualCheckpoint{snapshot: visual}
+			if tt.corruptCheckpoint {
+				visualCapture.snapshot.AssessmentID = new(uuid.New())
+			}
+			services := &Services{CodeReviewInputCapture: capture, CodeReviewVisualEvidence: visualCapture}
+			if tt.missingCheckpoint {
+				services.CodeReviewVisualEvidence = nil
+			}
+			err = verifyFullAssessmentFreshness(context.Background(), services, runCodeReviewPayload{}, assessment)
+			if tt.retry {
+				var retry *RetryableError
+				require.ErrorAs(t, err, &retry, "temporary loss of existing bytes must retry the same controller")
+				require.True(t, retry.ConsumeAttempt, "evidence failures must spend the controller attempt budget")
+				require.NotNil(t, retry.MaxRetryDuration, "evidence recovery must have an explicit durable time bound")
+				require.False(t, retry.BypassMaxRetryDuration, "evidence recovery must never bypass its deadline")
+				require.Len(t, capture.requests, 1, "classification must not refresh unrelated PR inputs twice")
+				if !tt.missingCheckpoint {
+					require.Len(t, visualCapture.requests, 1, "classification must read one immutable visual checkpoint")
+					require.False(t, visualCapture.requests[0].Fresh, "checkpoint read must preserve original captured evidence")
+					require.Equal(t, &id, visualCapture.requests[0].AssessmentID, "checkpoint read must bind the exact assessment identity")
+				}
+				require.NotContains(t, err.Error(), "secret", "freshness diagnostics must not disclose attachment tokens")
+			} else if tt.unchanged {
+				require.NoError(t, err, "exactly restored or unchanged captures must not restart analysis")
+				require.Empty(t, visualCapture.requests, "matching visual identity does not need checkpoint classification")
+			} else {
+				require.ErrorIs(t, err, errFullAssessmentInputsChanged, "genuine analysis changes must require a new assessment")
+			}
+		})
+	}
 }
 
 func TestFullAssessmentCoverage(t *testing.T) {

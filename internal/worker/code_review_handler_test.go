@@ -615,7 +615,7 @@ func TestRecordCodeReviewAutomaticWaitPersistsRateLimitOnly(t *testing.T) {
 	mock.ExpectQuery("WITH scheduled_retry AS MATERIALIZED").
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID, "session_id": sessionID, "job_id": jobID, "retry_at": pgxmock.AnyArg(),
-			"job_error": rateLimitErr.Error(), "status_message": message,
+			"job_error": rateLimitErr.Error(), "status_message": message, "status_code": models.CodeReviewStatusCodeGitHubRateLimited,
 		}).
 		WillReturnRows(newCodeReviewMetadataRows().AddRow(
 			metadataID, orgID, sessionID, uuid.New(), uuid.New(), uuid.New(),
@@ -656,6 +656,7 @@ func TestDelayedCodeReviewRetryHookCannotOverwriteNewerAttempt(t *testing.T) {
 			"org_id": orgID, "session_id": sessionID, "job_id": jobID, "retry_at": runAt,
 			"job_error":      handlerErr.Error(),
 			"status_message": "GitHub is rate-limited. The review will resume automatically when the limit resets.",
+			"status_code":    models.CodeReviewStatusCodeGitHubRateLimited,
 		}).
 		WillReturnRows(newCodeReviewMetadataRows())
 	store := db.NewCodeReviewStore(mock)
