@@ -122,6 +122,10 @@ percentages.
 
 When automatic recovery is exhausted, the failed attempt keeps a concise error and recommended action in its row and evidence panel. Organization admins and members can select **Retry review** for failures marked retryable. A retry creates a new session against the pull request's current head and current policy; it never rewrites the failed session or its evidence. The original attempt links to the replacement for audit history.
 
+Repository review recipes, evidence declarations, and a compatible sandbox image may ship before the review lifecycle integration is activated. Complete recipe ownership and acceptance for the entire enabled-repository scope, verify the rebuilt image and representative cold/warm/restored preparation, and apply and verify the required migrations before merging or deploying the lifecycle activation change. On installations that deploy successful `main` changes automatically, that merge is the rollout gate.
+
+Deploying the lifecycle integration activates evidence preparation for fresh, warm, and restored reviewer paths. `CODE_REVIEW_WORKSPACE_PREPARATION_ENABLED` controls only the dedicated cold-preparation job; setting it to `false` does not disable preparation in reviewer startup or reuse. Complete the release prerequisites before lifecycle activation even when that flag is false.
+
 Before agents start inspecting code, 143 prepares the captured base and head files and runs supported dependency tools and repository setup declared in `.143/config.json`. Workspace preparation has one eight-minute budget covering checkout, setup, and verification. A failed or timed-out setup stops the attempt and appears as an operational error in the review details and rolling GitHub comment. Fix the reported repository setup or access problem before retrying; an unsuccessful setup does not automatically restart through another workspace path.
 
 Use the `review` section to prepare dependency source for code inspection:
