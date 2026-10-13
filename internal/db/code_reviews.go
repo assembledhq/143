@@ -1062,7 +1062,7 @@ func (s *CodeReviewStore) SetWaitingForGitHub(ctx context.Context, orgID, sessio
 			WHERE id = @job_id
 			  AND org_id = @org_id
 			  AND job_type = 'run_code_review'
-			  AND payload->>'session_id' = @session_id::text
+			  AND payload->>'session_id' = @session_id::uuid::text
 			  AND status = 'pending'
 			  AND run_at = @retry_at
 			  AND last_error = @job_error
