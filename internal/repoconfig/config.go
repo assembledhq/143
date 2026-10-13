@@ -17,9 +17,17 @@ type Config struct {
 	Dependencies map[string]string `json:"dependencies,omitempty"`
 	Bootstrap    CommandSection    `json:"bootstrap,omitempty"`
 	Validation   CommandSection    `json:"validation,omitempty"`
+	Review       *ReviewSection    `json:"review,omitempty"`
 }
 
 func Parse(data []byte) (Config, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return Config{}, fmt.Errorf("parse repo config: %w", err)
+	}
+	if raw, present := fields["review"]; present && strings.TrimSpace(string(raw)) == "null" {
+		return Config{}, fmt.Errorf("review must be an object, not null")
+	}
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse repo config: %w", err)
@@ -35,6 +43,11 @@ func Parse(data []byte) (Config, error) {
 	}
 	if err := normalizeCommandSection("validation.commands", &cfg.Validation); err != nil {
 		return Config{}, err
+	}
+	if cfg.Review != nil {
+		if err := cfg.Review.normalize(); err != nil {
+			return Config{}, err
+		}
 	}
 	return cfg, nil
 }
