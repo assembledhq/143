@@ -1,6 +1,12 @@
 package ratelimit
 
-import "context"
+import (
+	"context"
+	"time"
+)
+
+// Leave time for the auth socket response before the helper's two-second limit.
+const externalStateLookupTimeout = time.Second
 
 // BeforeExternal applies a known cooldown to a request whose response the host
 // cannot authenticate. It never issues a recovery permit: sandbox observations
@@ -11,6 +17,8 @@ func (c *Controller) BeforeExternal(ctx context.Context, scope Scope) error {
 	if !c.Participates(scope.InstallationID) {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, externalStateLookupTimeout)
+	defer cancel()
 	now := c.now().UTC()
 	state, degraded := c.get(ctx, c.key(scope.InstallationID))
 	retryAt := strongestStateDeadline(state.BlockedUntil, state)
