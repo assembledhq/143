@@ -314,6 +314,7 @@ print('loaded')
     def test_scheduled_scope_and_hold_cannot_authorize_other_operations(self):
         self.schedule_profile()
         for args in [('--bootstrap',), ('--canary',), ('--allow-swap-bursts',),
+                     ('--dump-cpus', '0.75'), ('--dump-cpus', '1'),
                      ('--exercise-stop-after', '5'), ('--host-memory-full-percent', '1'),
                      ('--host-memory-full-percent', '5'), ('--db-memory-full-percent', '5')]:
             with self.subTest(args=args), mock.patch.object(self.p, 'backup') as backup:
@@ -1065,6 +1066,30 @@ sys.exit(p.main())
                     backup.assert_called_once()
                     self.assertEqual(backup.call_args.args[0].db_memory_full_percent, limit,
                                      'the database pressure choice must apply only to this invocation')
+
+    def test_lower_dump_cpu_is_attended_canary_only_without_changing_guards(self):
+        cases = [(['backup', '--canary', '--dump-cpus', '0.75'], 'true', 0, 0.75),
+                 (['backup', '--canary'], 'true', 0, 1.0),
+                 (['backup', '--dump-cpus', '0.75'], 'true', 1, None),
+                 (['backup', '--canary', '--dump-cpus', '0.75'], 'false', 1, None),
+                 (['backup', '--canary', '--dump-cpus', '2'], 'true', 2, None)]
+        for args, attended, status, expected in cases:
+            with self.subTest(args=args, attended=attended), mock.patch.object(sys, 'argv', ['policy', *args]), \
+                    mock.patch.dict(os.environ, BACKUP_ENABLED='true', BACKUP_ATTENDED=attended, BACKUP_OBSERVER='operator'), \
+                    mock.patch.object(policy.Policy, 'backup', autospec=True) as backup, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                if status == 2:
+                    with self.assertRaises(SystemExit) as error: policy.main()
+                    self.assertEqual(error.exception.code, 2)
+                else:
+                    self.assertEqual(policy.main(), status)
+                if expected is None:
+                    backup.assert_not_called()
+                else:
+                    owner = backup.call_args.args[0]
+                    self.assertEqual(owner.dump_cpus, expected)
+                    self.assertEqual((owner.host_memory_full_percent, owner.db_memory_full_percent, owner.allow_swap_bursts),
+                                     (1, 1, False), 'CPU selection must not relax resource guards')
 
     def test_cli_swap_override_is_attended_canary_only_and_resets_each_invocation(self):
         cases = [

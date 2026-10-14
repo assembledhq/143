@@ -651,6 +651,8 @@ def main():
                         help='use an explicitly approved private trial or ongoing schedule; no attendance claim')
     backup.add_argument('--bootstrap', action='store_true')
     backup.add_argument('--canary', action='store_true')
+    backup.add_argument('--dump-cpus', type=float, choices=(0.75, 1.0),
+                        help='attended canary only: lower dump client CPU to reduce demand; guards and deadline stay unchanged')
     backup.add_argument('--host-memory-full-percent', type=int, choices=(1, 5),
                         help='attended canary only: runtime host memory full PSI avg10 limit; admission stays at 1%%')
     backup.add_argument('--db-memory-full-percent', type=int, choices=(1, 5),
@@ -681,7 +683,7 @@ def main():
     scheduled = args.action == 'backup' and args.scheduled
     scheduled_overrides = scheduled and (args.bootstrap or args.canary or args.allow_swap_bursts or
         args.exercise_stop_after is not None or args.host_memory_full_percent is not None or
-        args.db_memory_full_percent is not None)
+        args.db_memory_full_percent is not None or args.dump_cpus is not None)
     attempt = None
     try:
         flag = 'RESTORE_TEST_ENABLED' if args.action == 'restore' else 'BACKUP_ENABLED'
@@ -714,6 +716,8 @@ def main():
                     'stop exercise requires --canary and a duration of 5..300 seconds')
         policy = Policy()
         if args.action == 'backup':
+            policy.dump_cpus = args.dump_cpus if args.dump_cpus is not None else 1.0
+            require(args.canary or policy.dump_cpus == 1.0, 'lower dump CPU requires --canary')
             args.host_memory_full_percent = args.host_memory_full_percent or 1
             args.db_memory_full_percent = args.db_memory_full_percent or 1
             require(args.canary or not args.allow_swap_bursts, 'swap tolerance requires --canary')
@@ -735,6 +739,7 @@ def main():
                 emit('scheduled_operation', action='backup', profile=profile)
             if args.action == 'backup':
                 emit('backup_pressure_policy', host_memory_full_limit_percent=policy.host_memory_full_percent,
+                     dump_client_cpus=policy.dump_cpus,
                      db_memory_full_limit_percent=policy.db_memory_full_percent,
                      admission_host_memory_full_limit_percent=1, admission_db_memory_full_limit_percent=1,
                      allow_swap_bursts=policy.allow_swap_bursts,

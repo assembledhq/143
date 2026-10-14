@@ -583,6 +583,27 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn('127.0.0.1', command)
         self.assertTrue(result['creation_complete'])
 
+    def test_lower_cpu_changes_only_dump_quota(self):
+        self.p.dump_cpus = 0.75
+        guard = runtime.Guard(self.p, self.partial, self.app, 18 * runtime.GIB)
+        db = dict(Image='sha256:immutable', Config={'Volumes': {}},
+                  NetworkSettings={'Networks': {'db': {'IPAddress': '172.18.0.2'}}})
+        with mock.patch.object(guard, 'database', return_value=(db, self.db)), \
+                mock.patch.object(runtime, 'resources', return_value=safe_resources()), \
+                mock.patch.dict(os.environ, {'DOCKER_HOST': '', 'DOCKER_CONTEXT': ''}), \
+                mock.patch.object(runtime, 'invoke', side_effect=['unix:///var/run/docker.sock', 'c' * 64]) as run:
+            result = guard.prepare()
+        command = run.call_args.args[0]
+        self.assertIn('--cpus=0.75', command)
+        self.assertEqual(result['dump_client_cpus'], 0.75)
+        for limit in ('--memory=2g', '--memory-swap=2g', '--pids-limit=32'):
+            self.assertIn(limit, command, 'other container limits must remain unchanged')
+        self.assertEqual((guard.host_memory_full_percent, guard.db_memory_full_percent, guard.allow_swap_bursts), (1, 1, False))
+        for invalid in (True, 0, 0.5, 2, '0.75', float('nan')):
+            self.p.dump_cpus = invalid
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(Refused, 'CPU limit'):
+                runtime.Guard(self.p, self.partial, self.app, 18 * runtime.GIB)
+
     def test_dead_watchdog_is_not_success(self):
         # Exercise the real fork/wait path. The injected child exits abruptly.
         for p in self.guard.run.iterdir(): p.unlink()

@@ -206,6 +206,13 @@ resource guards, owned cleanup, checksum qualification and preservation of
 uncertain archives are unchanged. Expiry limits the start window, not the number
 of invocations; select the cron cadence and window together for the intended trial.
 
+An attended `backup --canary --dump-cpus 0.75` can reduce the dump client's CPU
+quota from one CPU to three quarters to investigate load-related stops. It may
+take longer and is not guaranteed to finish. The 45-minute dump deadline and all
+resource guards stay unchanged; uploads keep their existing quota. The selected
+quota is recorded in the dump ownership evidence. Scheduled backups retain the
+one-CPU default and reject this CLI override.
+
 Each profile's host and database memory-full PSI limit must be exactly 1% or 5%.
 Higher values accept more stalls and possible application latency; use evidence
 from an attended run when approving them. Admission remains at 1% for both,

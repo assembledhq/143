@@ -130,6 +130,9 @@ class Guard:
     def __init__(self, policy, partial, app, estimate, exercise=None):
         self.policy, self.partial, self.app = policy, partial, app
         self.estimate, self.exercise = estimate, exercise
+        self.dump_cpus = getattr(policy, 'dump_cpus', 1.0)
+        require(type(self.dump_cpus) in (int, float) and self.dump_cpus in (0.75, 1.0),
+                'unsupported dump CPU limit')
         self.host_memory_full_percent = getattr(policy, 'host_memory_full_percent', 1)
         self.db_memory_full_percent = getattr(policy, 'db_memory_full_percent', 1)
         self.allow_swap_bursts = getattr(policy, 'allow_swap_bursts', False)
@@ -332,12 +335,13 @@ class Guard:
         require(parsed.version == 4 and parsed.is_private and not parsed.is_loopback, 'invalid database Docker address')
         sample = resources(self.policy.root, generation['pid'])
         self.observe_dump_resources(sample, None, generation, admission=True)
-        owned.update(database=generation, file_limit=sample['free_bytes'] - self.policy.reserve - 4 * GIB)
+        owned.update(database=generation, file_limit=sample['free_bytes'] - self.policy.reserve - 4 * GIB,
+                     dump_client_cpus=self.dump_cpus)
         limit = str(owned['file_limit'])
         command = ['docker', 'create', '--name', self.app, '--label', LABEL + '=' + self.app,
                    '--pull=never', '--network', 'container:' + generation['id'], '--restart=no',
                    '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
-                   '--memory=2g', '--memory-swap=2g', '--cpus=1', '--pids-limit=32',
+                   '--memory=2g', '--memory-swap=2g', '--cpus=' + format(self.dump_cpus, 'g'), '--pids-limit=32',
                    '--ulimit', 'fsize=' + limit + ':' + limit,
                    '--mount', 'type=bind,src=' + str(self.partial) + ',dst=/backup.dump',
                    '-e', 'PGPASSWORD', '-e', 'PGAPPNAME', '-e', 'PGOPTIONS', '-e', 'PGCONNECT_TIMEOUT',
