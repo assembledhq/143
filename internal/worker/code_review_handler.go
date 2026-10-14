@@ -3953,7 +3953,7 @@ func captureCodeReviewVisualEvidence(ctx context.Context, services *Services, jo
 		HeadSHA:           job.HeadSHA,
 	})
 	if err != nil {
-		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("capture code review visual evidence: %w", err)
+		return models.CodeReviewVisualEvidenceSnapshot{}, classifyGitHubJobError(fmt.Errorf("capture code review visual evidence: %w", err), job.SessionID.String())
 	}
 	if snapshot.Version != 1 || !snapshot.Complete || snapshot.RepositoryID != job.RepositoryID ||
 		snapshot.PullRequestNumber != pr.GitHubPRNumber || !strings.EqualFold(strings.TrimSpace(snapshot.HeadSHA), strings.TrimSpace(job.HeadSHA)) {

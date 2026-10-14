@@ -22,7 +22,8 @@ import (
 )
 
 type wakeTestStore struct {
-	claims atomic.Int32
+	claims  atomic.Int32
+	onClaim func()
 }
 
 type retryWindowLeaseStoreStub struct {
@@ -39,6 +40,9 @@ func (s *retryWindowLeaseStoreStub) EnsureRetryWindowStartedAtWithLease(context.
 
 func (s *wakeTestStore) ClaimNextRunnable(context.Context, string, string, uuid.UUID, time.Duration) (*models.Job, error) {
 	s.claims.Add(1)
+	if s.onClaim != nil {
+		s.onClaim()
+	}
 	return nil, nil
 }
 
@@ -1058,29 +1062,26 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 	w, mock := newTestWorker(t)
 	defer mock.Close()
 
-	w.pollInterval = 10 * time.Millisecond
-	mock.MatchExpectationsInOrder(false)
-	for range 5 {
-		mock.ExpectQuery("WITH unavailable_target_nodes AS").
-			WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
-			WillReturnError(pgx.ErrNoRows)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	store := &wakeTestStore{onClaim: cancel}
+	w.jobs = store
+	w.pollInterval = time.Hour
 
 	done := make(chan struct{})
 	go func() {
 		w.Start(ctx)
 		close(done)
 	}()
+	w.Wake()
 
 	select {
 	case <-done:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("worker should stop when context is cancelled")
 	}
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	require.Equal(t, int32(1), store.claims.Load(), "worker must poll before its context is cancelled")
+	require.Equal(t, context.Canceled, ctx.Err(), "the observed claim must trigger context cancellation before shutdown")
 }
 
 type terminalLeaseStoreStub struct {

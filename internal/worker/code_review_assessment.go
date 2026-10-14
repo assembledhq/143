@@ -31,7 +31,7 @@ func captureFreshFullAssessment(ctx context.Context, services *Services, job run
 	}
 	fresh, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: job.OrgID, RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, SessionID: job.SessionID, AssessmentID: assessment.ID, RequestContext: job.RequestContext, Fresh: true})
 	if err != nil {
-		return fresh, err
+		return fresh, classifyGitHubJobError(err, job.SessionID.String())
 	}
 	var baseline codereviewsvc.ReviewInputManifest
 	if json.Unmarshal(assessment.InputManifest, &baseline) != nil || baseline.InputDigest != assessment.InputDigest ||
@@ -671,7 +671,7 @@ func prepareFullAssessment(ctx context.Context, stores *Stores, services *Servic
 			// full-review controller can still assess and publish this PR.
 			return nil, nil, nil
 		}
-		return nil, nil, err
+		return nil, nil, classifyGitHubJobError(err, job.SessionID.String())
 	}
 	if captured.Policy.ID != job.PolicyID || captured.Policy.Version != job.PolicyVersion || captured.Snapshot.HeadSHA != job.HeadSHA || captured.Snapshot.BaseSHA != metadata.BaseSHA {
 		return nil, nil, fmt.Errorf("full review captured source differs from queued review identity")

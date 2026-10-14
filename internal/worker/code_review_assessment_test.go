@@ -24,13 +24,14 @@ func (f *assessmentFreshnessCapture) CaptureAssessmentInputs(_ context.Context, 
 }
 
 type assessmentVisualCheckpoint struct {
-	snapshot models.CodeReviewVisualEvidenceSnapshot
-	requests []codereviewsvc.CaptureVisualEvidenceInput
+	snapshot   models.CodeReviewVisualEvidenceSnapshot
+	requests   []codereviewsvc.CaptureVisualEvidenceInput
+	captureErr error
 }
 
 func (f *assessmentVisualCheckpoint) Capture(_ context.Context, request codereviewsvc.CaptureVisualEvidenceInput) (models.CodeReviewVisualEvidenceSnapshot, error) {
 	f.requests = append(f.requests, request)
-	return f.snapshot, nil
+	return f.snapshot, f.captureErr
 }
 
 func TestFullAssessmentAvailabilityFreshness(t *testing.T) {
