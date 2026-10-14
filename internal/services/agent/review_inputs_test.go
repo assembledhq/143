@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/cgi"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,7 +21,9 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,6 +31,7 @@ type reviewInputsProvider struct {
 	SandboxProvider
 	calls    atomic.Int64
 	destroys atomic.Int64
+	shell    string
 }
 
 func (p *reviewInputsProvider) IsAlive(context.Context, *Sandbox) (bool, error) { return true, nil }
@@ -39,10 +45,14 @@ type reviewInputsRecoverySessions struct {
 	SessionStore
 	recovered bool
 	params    []db.RecoverIncompleteCodeReviewWorkspaceParams
+	errors    []error
 }
 
 func (s *reviewInputsRecoverySessions) RecoverIncompleteCodeReviewWorkspace(_ context.Context, _ uuid.UUID, params db.RecoverIncompleteCodeReviewWorkspaceParams) (bool, error) {
 	s.params = append(s.params, params)
+	if len(s.errors) >= len(s.params) && s.errors[len(s.params)-1] != nil {
+		return false, s.errors[len(s.params)-1]
+	}
 	return s.recovered, nil
 }
 
@@ -50,9 +60,22 @@ func reviewPreparationContext(jobID, token uuid.UUID) context.Context {
 	return jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), token)
 }
 
-func (p *reviewInputsProvider) Exec(ctx context.Context, _ *Sandbox, command string, stdout, stderr io.Writer) (int, error) {
+func (p *reviewInputsProvider) ReadFile(_ context.Context, _ *Sandbox, name string) ([]byte, error) {
+	return os.ReadFile(name)
+}
+
+func (p *reviewInputsProvider) Exec(ctx context.Context, sandbox *Sandbox, command string, stdout, stderr io.Writer) (int, error) {
 	p.calls.Add(1)
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	shell := p.shell
+	if shell == "" {
+		shell = "sh"
+	}
+	cmd := exec.CommandContext(ctx, shell, "-c", command)
+	cmd.Dir = sandbox.WorkDir
+	cmd.Env = os.Environ()
+	for key, value := range sandbox.Env {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
@@ -62,6 +85,81 @@ func (p *reviewInputsProvider) Exec(ctx context.Context, _ *Sandbox, command str
 		return -1, err
 	}
 	return 0, nil
+}
+
+func TestSharedReviewInputsSurviveBootstrapReviewerEditsAndSynthesis(t *testing.T) {
+	t.Parallel()
+	directory, base, head, _ := newReviewInputsGitFixture(t)
+	configPath := filepath.Join(directory, repoconfig.ConfigPath)
+	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o700), "repository config directory should exist")
+	require.NoError(t, os.WriteFile(configPath, []byte(`{"bootstrap":{"commands":["printf 'generated\\n' > bootstrap-output.txt"]}}`), 0o600), "full repository bootstrap should create its real output")
+	session := reviewInputsSession(t, base, head)
+	provider, tokens := &reviewInputsProvider{}, &reviewInputsTokenSpy{}
+	sandbox := &Sandbox{ID: "shared-container", WorkDir: directory}
+	orchestrator := &Orchestrator{provider: provider, github: tokens, repositories: testInternalRepoStore{repo: models.Repository{FullName: "renamed/repository"}}}
+	require.NoError(t, prepareSandboxRepositoryForSession(context.Background(), provider, session, sandbox, directory, repositoryPreparationFull, zerolog.Nop()), "initial RunAgent preparation should allow generated bootstrap output")
+	require.NoError(t, orchestrator.ensureCodeReviewInputs(context.Background(), session, sandbox), "initial review inputs should depend on captured commits")
+	manifest, patch := CodeReviewInputPaths(session.OrgID, session.ID, *session.RepositoryID, "example/repo", base, head)
+	manifestBefore, err := os.ReadFile(filepath.Join(directory, manifest))
+	require.NoError(t, err, "captured manifest should be present")
+	patchBefore, err := os.ReadFile(filepath.Join(directory, patch))
+	require.NoError(t, err, "captured patch should be present")
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "change.txt"), []byte("reviewer workspace edit\n"), 0o600), "a reviewer can leave a tracked policy violation")
+	reviewInputsGit(t, directory, "add", "change.txt")
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "reviewer-note.txt"), []byte("reviewer workspace file\n"), 0o600), "a reviewer can leave an untracked policy violation")
+	for _, mode := range []repositoryPreparationMode{repositoryPreparationMinimalReview, repositoryPreparationFull} {
+		require.NoError(t, prepareSandboxRepositoryForSession(context.Background(), provider, session, sandbox, directory, mode, zerolog.Nop()), "later reviewer and synthesis preparation should complete")
+		require.NoError(t, orchestrator.ensureCodeReviewInputs(context.Background(), session, sandbox), "warm ContinueSession evidence must survive workspace edits")
+	}
+	manifestAfter, err := os.ReadFile(filepath.Join(directory, manifest))
+	require.NoError(t, err, "warm review manifest should remain readable")
+	patchAfter, err := os.ReadFile(filepath.Join(directory, patch))
+	require.NoError(t, err, "warm review patch should remain readable")
+	require.Equal(t, manifestBefore, manifestAfter, "workspace policy violations must not change captured identity")
+	require.Equal(t, patchBefore, patchAfter, "reviewers and synthesis should consume the same commit-to-commit patch")
+	require.NotContains(t, string(patchAfter), "reviewer workspace", "prepared inputs must exclude reviewer edits")
+	require.Equal(t, int64(0), tokens.calls.Load(), "all warm reviewers must reuse local evidence without authentication")
+}
+
+func TestReviewFetchCredentialsSurviveDashAndReachGit(t *testing.T) {
+	t.Parallel()
+	dash, err := exec.LookPath("dash")
+	if err != nil {
+		t.Skip("dash is required for the Ubuntu shell credential regression")
+	}
+	origin, base, head, _ := newReviewInputsGitFixture(t)
+	root := t.TempDir()
+	output, err := exec.Command("git", "clone", "-q", "--bare", origin, filepath.Join(root, "repo.git")).CombinedOutput()
+	require.NoError(t, err, "local authenticated Git remote should exist: %s", output)
+	gitPath, err := exec.LookPath("git")
+	require.NoError(t, err, "Git HTTP backend should be available")
+	execPath := reviewInputsGit(t, origin, "--exec-path")
+	backend := &cgi.Handler{Path: filepath.Join(execPath, "git-http-backend"), Env: []string{"GIT_PROJECT_ROOT=" + root, "GIT_HTTP_EXPORT_ALL=1", "PATH=" + filepath.Dir(gitPath) + ":" + os.Getenv("PATH")}}
+	var authenticated atomic.Int64
+	const token = "synthetic-dash-fetch-token"
+	remote := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		user, password, ok := request.BasicAuth()
+		if !ok || user != "x-access-token" || password != token {
+			w.Header().Set("WWW-Authenticate", `Basic realm="review-fixture"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		authenticated.Add(1)
+		backend.ServeHTTP(w, request)
+	}))
+	t.Cleanup(remote.Close)
+	directory := filepath.Join(t.TempDir(), "source")
+	require.NoError(t, os.Mkdir(directory, 0o700), "empty RunAgent source checkout should exist")
+	reviewInputsWritableCleanup(t, directory)
+	reviewInputsGit(t, directory, "init", "-qb", "main")
+	provider := &reviewInputsProvider{shell: dash}
+	sandbox := &Sandbox{ID: "source", WorkDir: directory, Env: map[string]string{"GIT_SSL_NO_VERIFY": "true"}}
+	orchestrator := &Orchestrator{provider: provider, github: testInternalGitHubTokens{token: token}, repositories: testInternalRepoStore{repo: models.Repository{FullName: "example/repo", CloneURL: remote.URL + "/repo.git"}}}
+	require.NoError(t, orchestrator.checkoutCodeReviewHead(context.Background(), sandbox, remote.URL+"/repo.git", token, 42, "review", head), "RunAgent must fetch its exact head before credential bootstrap under dash")
+	require.NoError(t, orchestrator.ensureCodeReviewInputs(context.Background(), reviewInputsSession(t, base, head), sandbox), "missing exact base must use authenticated child Git fetch under dash")
+	require.Greater(t, authenticated.Load(), int64(0), "the real Git HTTP backend must receive the short-lived token")
+	require.NotContains(t, reviewInputsGit(t, directory, "config", "--list"), token, "Git config must never retain the temporary token")
+	require.NotContains(t, sandbox.Env, "GH143_REVIEW_FETCH_TOKEN", "shared sandbox state must not retain the temporary token")
 }
 
 type reviewInputsTokenSpy struct{ calls atomic.Int64 }
@@ -79,7 +177,7 @@ type reviewInputsAuthProvider struct {
 
 func (p *reviewInputsAuthProvider) Exec(_ context.Context, sandbox *Sandbox, command string, _, _ io.Writer) (int, error) {
 	p.commands = append(p.commands, command)
-	p.tokens = append(p.tokens, sandbox.Env["143_REVIEW_FETCH_TOKEN"])
+	p.tokens = append(p.tokens, sandbox.Env["GH143_REVIEW_FETCH_TOKEN"])
 	if len(p.commands) == 1 {
 		return 42, nil
 	}
@@ -227,7 +325,6 @@ func TestSharedReviewInputsRejectIncompleteOrModifiedEvidence(t *testing.T) {
 		{name: "missing exact base", edit: "missing-base"},
 		{name: "unrelated captured histories", edit: "unrelated"},
 		{name: "wrong workspace head", edit: "wrong-head"},
-		{name: "changed source", edit: "source"},
 		{name: "modified prepared patch", edit: "patch"},
 		{name: "mismatched manifest identity", edit: "manifest"},
 	}
@@ -253,8 +350,6 @@ func TestSharedReviewInputsRejectIncompleteOrModifiedEvidence(t *testing.T) {
 				session = reviewInputsSession(t, otherBase, head)
 			case "wrong-head":
 				reviewInputsGit(t, directory, "checkout", "-q", "main")
-			case "source":
-				require.NoError(t, os.WriteFile(filepath.Join(directory, "change.txt"), []byte("tampered\n"), 0o600), "source fixture should change")
 			case "patch", "manifest":
 				manifest, patch := CodeReviewInputPaths(session.OrgID, session.ID, *session.RepositoryID, "example/repo", base, head)
 				target := patch

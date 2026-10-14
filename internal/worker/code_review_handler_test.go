@@ -1544,7 +1544,7 @@ func TestCodeReviewVisualEvidenceSatisfactions(t *testing.T) {
 
 func TestCodeReviewReviewerMessageUsesLocalInputs(t *testing.T) {
 	t.Parallel()
-	prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
+	prompt := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), nil, models.CodeReviewVisualEvidenceSnapshot{})
 	require.Contains(t, prompt, "prepared local diff", "reviewers should read the coordinator's captured evidence")
 	require.Contains(t, prompt, "Do NOT run test suites", "reviewer prompt should forbid running test suites")
 	require.Contains(t, prompt, "Do NOT modify the workspace", "reviewer prompt should forbid workspace changes")
@@ -1567,7 +1567,12 @@ func TestCodeReviewReviewerPromptIncludesPullRequestTarget(t *testing.T) {
 	job := runCodeReviewPayload{OrgID: uuid.New(), SessionID: uuid.New(), RepositoryID: uuid.New(), HeadSHA: "db848bf3c98e34c3c26d842b4e9b2ff1913dc34f"}
 	files := []codereview.PullRequestFile{{Filename: "gocode/timeutils/interval.go"}, {Filename: "gocode/timeutils/interval_test.go"}}
 
-	prompt := codeReviewReviewerPrompt(job, pr, models.DefaultCodeReviewPolicyConfig(), 3, "", files, models.CodeReviewVisualEvidenceSnapshot{})
+	revision, err := json.Marshal(map[string]any{"kind": "code_review", "github_repo": pr.GitHubRepo, "github_pr_number": pr.GitHubPRNumber, "base_sha": baseSHA, "head_sha": job.HeadSHA})
+	require.NoError(t, err, "captured session revision should encode")
+	session := models.Session{ID: job.SessionID, OrgID: job.OrgID, RepositoryID: &job.RepositoryID, Origin: models.SessionOriginCodeReview, RevisionContext: revision, BaseCommitSHA: &job.HeadSHA}
+	target, err := agentsvc.CodeReviewInputTargetFromSession(&session)
+	require.NoError(t, err, "captured session input target should validate")
+	prompt := codeReviewReviewerPrompt(target, pr, models.DefaultCodeReviewPolicyConfig(), files, models.CodeReviewVisualEvidenceSnapshot{})
 
 	require.False(t, strings.HasPrefix(prompt, "/review"), "local review should not invoke a URL-driven native command")
 	require.Contains(t, prompt, "<review_target>", "reviewer prompt should include the review target block")
@@ -1584,13 +1589,17 @@ func TestCodeReviewReviewerPromptIncludesPullRequestTarget(t *testing.T) {
 	require.Contains(t, prompt, "- gocode/timeutils/interval.go", "reviewer prompt should list changed files")
 
 	explicitBase := "2222222222222222222222222222222222222222"
-	withExplicitBase := codeReviewReviewerPrompt(job, pr, models.DefaultCodeReviewPolicyConfig(), 3, explicitBase, files, models.CodeReviewVisualEvidenceSnapshot{})
-	require.Contains(t, withExplicitBase, "Base SHA: "+explicitBase, "captured metadata base SHA should win over the PR record")
+	pr.BaseSHA = &explicitBase
+	pr.GitHubRepo = "Renamed/Repository"
+	withRenamedRepository := codeReviewReviewerPrompt(target, pr, models.DefaultCodeReviewPolicyConfig(), files, models.CodeReviewVisualEvidenceSnapshot{})
+	require.Contains(t, withRenamedRepository, "Base SHA: "+baseSHA, "captured session base SHA should win over mutable PR data")
+	require.Contains(t, withRenamedRepository, "Repository: assembledhq/example", "captured repository identity should survive rename or casing changes")
+	require.Contains(t, withRenamedRepository, "Prepared manifest: "+manifest, "prompt and coordinator must retain the same captured bundle path")
 
 	commands := codeReviewNativeReviewCommands(models.AgentTypeClaudeCode, prompt)
 	require.Nil(t, commands, "Claude reviewers should also use plain local review instructions")
 
-	withoutTarget := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
+	withoutTarget := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), nil, models.CodeReviewVisualEvidenceSnapshot{})
 	require.NotContains(t, withoutTarget, "<review_target>", "prompt without a head SHA should omit the target block")
 	require.Contains(t, withoutTarget, "report the review as incomplete", "missing input targets must produce an explicit incomplete result")
 }
@@ -1603,7 +1612,7 @@ func TestCodeReviewEveryReviewerAgentSharesLocalEvidence(t *testing.T) {
 			t.Parallel()
 			cfg := models.DefaultCodeReviewPolicyConfig()
 			cfg.ReviewInstructions = "Review organization-specific invariants."
-			prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, cfg, 2, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
+			prompt := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, cfg, nil, models.CodeReviewVisualEvidenceSnapshot{})
 			message := codeReviewReviewerMessage(agentType, prompt)
 			require.Equal(t, prompt, message, "all reviewers should receive the same local evidence and independent analysis constraints")
 			require.Nil(t, codeReviewNativeReviewCommands(agentType, prompt), "no reviewer should independently retrieve the PR through a native command")
@@ -1617,7 +1626,7 @@ func TestCodeReviewPromptPolicyRouting(t *testing.T) {
 	cfg := models.DefaultCodeReviewPolicyConfig()
 	cfg.ReviewInstructions = "Focus on tenant isolation; {{ .Title }} must remain literal."
 	cfg.AutomatedApprovalPolicy = "Escalate every architectural change."
-	reviewer := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, cfg, 7, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
+	reviewer := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, cfg, nil, models.CodeReviewVisualEvidenceSnapshot{})
 	require.False(t, strings.HasPrefix(reviewer, "/review"), "reviewer invocation should use plain local instructions")
 	require.Contains(t, reviewer, cfg.ReviewInstructions, "reviewer should receive organization review instructions")
 	require.NotContains(t, reviewer, cfg.AutomatedApprovalPolicy, "reviewer should not receive automated approval policy")
@@ -1625,7 +1634,7 @@ func TestCodeReviewPromptPolicyRouting(t *testing.T) {
 
 	empty := cfg
 	empty.ReviewInstructions = ""
-	require.NotContains(t, codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, empty, 7, "", nil, models.CodeReviewVisualEvidenceSnapshot{}), "<organization_review_instructions>", "empty instructions should omit the organization section")
+	require.NotContains(t, codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, empty, nil, models.CodeReviewVisualEvidenceSnapshot{}), "<organization_review_instructions>", "empty instructions should omit the organization section")
 }
 
 func TestCodeReviewOrchestratorPromptIncludesMentionContext(t *testing.T) {
@@ -1756,8 +1765,8 @@ func TestCodeReviewCapturedPolicyVersionsRenderDistinctPromptRecords(t *testing.
 	secondRecord := codeReviewPolicyRecordForTest(second)
 	secondRecord.Version = 2
 
-	firstReviewerRecord := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, firstRecord.Config(), firstRecord.Version, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
-	secondReviewerRecord := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, secondRecord.Config(), secondRecord.Version, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
+	firstReviewerRecord := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, firstRecord.Config(), nil, models.CodeReviewVisualEvidenceSnapshot{})
+	secondReviewerRecord := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, secondRecord.Config(), nil, models.CodeReviewVisualEvidenceSnapshot{})
 	require.Contains(t, firstReviewerRecord, first.ReviewInstructions, "captured reviewer record should use its historic policy record")
 	require.NotContains(t, firstReviewerRecord, second.ReviewInstructions, "captured reviewer record should not use the latest active policy")
 	require.NotEqual(t, firstReviewerRecord, secondReviewerRecord, "different captured policy versions should render different reviewer records")

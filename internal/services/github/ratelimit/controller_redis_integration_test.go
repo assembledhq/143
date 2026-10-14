@@ -80,6 +80,13 @@ func runRedisBackgroundQuotaContract(t *testing.T, newClient func() *cache.Clien
 	lateHeader.Set("X-RateLimit-Remaining", "90")
 	b.Observe(ctx, permit, Observation{StatusCode: 200, Header: lateHeader})
 	require.False(t, b.AdmitBackground(ctx, 42, "tenant-b:pr-b"), "single-key Lua must reject a late higher quota response")
+	laterWindow := header.Clone()
+	laterWindow.Set("X-RateLimit-Reset", fmt.Sprintf("%d", now.Add(2*time.Hour).Unix()))
+	laterWindow.Set("X-RateLimit-Remaining", "90")
+	b.Observe(ctx, permit, Observation{StatusCode: http.StatusUnauthorized, Header: laterWindow})
+	require.False(t, b.AdmitBackground(ctx, 42, "tenant-b:pr-b"), "authentication-failure quota must not replace the installation window on real Redis")
+	b.Observe(ctx, permit, Observation{StatusCode: http.StatusOK, Header: laterWindow})
+	require.False(t, b.AdmitBackground(ctx, 42, "tenant-b:pr-b"), "a premature later reset must not replace an active low window on real Redis")
 	require.True(t, b.AdmitBackground(ctx, 43, "tenant-c:pr-c"), "another installation must remain independent")
 	now = now.Add(time.Minute)
 	require.False(t, a.AdmitBackground(ctx, 42, "tenant-a:pr-a"), "returning candidate must not jump the shared queue")
@@ -89,6 +96,9 @@ func runRedisBackgroundQuotaContract(t *testing.T, newClient func() *cache.Clien
 	require.InDelta(t, time.Hour.Milliseconds(), ttl.Milliseconds(), 10000, "snapshot retention should expire with the provider window")
 	now = now.Add(time.Hour)
 	require.True(t, b.AdmitBackground(ctx, 42, "tenant-a:pr-a"), "expired evidence must stop restricting admission even before Redis key deletion")
+	b.Observe(ctx, permit, Observation{StatusCode: http.StatusOK, Header: quotaTestHeaders(now, 90)})
+	require.True(t, a.AdmitBackground(ctx, 42, "tenant-d:pr-d"), "a legitimate high-quota rollover should replace expired evidence on real Redis")
+	require.True(t, b.AdmitBackground(ctx, 42, "tenant-e:pr-e"), "a legitimate rollover must restore normal admission across independent controllers")
 }
 
 func runRedisControllerContract(t *testing.T, newClient func() *cache.Client, ttlClient redis.UniversalClient, appID int64) {

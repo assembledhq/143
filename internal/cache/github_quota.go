@@ -31,7 +31,7 @@ local limit = tonumber(ARGV[3])
 local remaining = tonumber(ARGV[4])
 local prior_reset = tonumber(redis.call('HGET', KEYS[1], 'reset') or '0')
 local prior_remaining = tonumber(redis.call('HGET', KEYS[1], 'remaining') or '0')
-if reset <= now or reset < prior_reset or (reset == prior_reset and remaining > prior_remaining) then return 0 end
+if reset <= now or reset < prior_reset or (reset > prior_reset and prior_reset > now) or (reset == prior_reset and remaining > prior_remaining) then return 0 end
 redis.call('HSET', KEYS[1], 'reset', reset, 'limit', limit, 'remaining', remaining)
 redis.call('PEXPIRE', KEYS[1], reset - now)
 return 1

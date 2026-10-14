@@ -10190,7 +10190,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						return &FatalError{Err: err}
 					}
 				}
-				if errors.Is(err, agent.ErrCodeReviewRecheckLeaseLost) || errors.Is(err, agent.ErrSandboxCapacity) || errors.Is(err, agent.ErrSnapshotPending) || errors.Is(err, agent.ErrSessionInterrupted) {
+				if errors.Is(err, agent.ErrCodeReviewRecheckLeaseLost) || errors.Is(err, agent.ErrSandboxCapacity) || errors.Is(err, agent.ErrSnapshotPending) || errors.Is(err, agent.ErrSessionInterrupted) || errors.Is(err, agent.ErrSandboxWorkspaceNotReady) || errors.Is(err, agent.ErrStaleSandboxIDCleared) {
 					retryAfter := 2 * time.Second
 					return &RetryableError{Err: err, RetryAfter: &retryAfter}
 				}

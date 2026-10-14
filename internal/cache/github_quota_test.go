@@ -22,7 +22,8 @@ func TestGitHubQuotaObservationOrdering(t *testing.T) {
 		{name: "lower same-window quota", observation: GitHubQuotaObservation{Now: now.Add(time.Second), ResetAt: now.Add(time.Hour), Limit: 100, Remaining: 10}, applied: true, low: true},
 		{name: "out of order higher quota", observation: GitHubQuotaObservation{Now: now.Add(time.Second), ResetAt: now.Add(time.Hour), Limit: 100, Remaining: 50}, low: true},
 		{name: "older window", observation: GitHubQuotaObservation{Now: now.Add(time.Second), ResetAt: now.Add(30 * time.Minute), Limit: 100, Remaining: 90}, low: true},
-		{name: "new window", observation: GitHubQuotaObservation{Now: now.Add(time.Second), ResetAt: now.Add(2 * time.Hour), Limit: 100, Remaining: 90}, applied: true},
+		{name: "premature later window", observation: GitHubQuotaObservation{Now: now.Add(time.Second), ResetAt: now.Add(2 * time.Hour), Limit: 100, Remaining: 90}, low: true},
+		{name: "legitimate new window", observation: GitHubQuotaObservation{Now: now.Add(time.Hour), ResetAt: now.Add(2 * time.Hour), Limit: 100, Remaining: 90}, applied: true},
 		{name: "expired reset", observation: GitHubQuotaObservation{Now: now, ResetAt: now, Limit: 100, Remaining: 90}, low: true},
 		{name: "invalid remaining", observation: GitHubQuotaObservation{Now: now, ResetAt: now.Add(time.Hour), Limit: 100, Remaining: -1}, low: true},
 		{name: "invalid limit", observation: GitHubQuotaObservation{Now: now, ResetAt: now.Add(time.Hour), Limit: 0}, low: true},
@@ -39,7 +40,11 @@ func TestGitHubQuotaObservationOrdering(t *testing.T) {
 			applied, err = client.ObserveGitHubQuota(ctx, key, tt.observation)
 			require.NoError(t, err, "ordered quota observation should complete")
 			require.Equal(t, tt.applied, applied, "only valid newer or lower quota evidence should apply")
-			admission, err := client.AdmitGitHubBackground(ctx, key, "candidate", now.Add(2*time.Second), 20, time.Minute)
+			admissionAt := now.Add(2 * time.Second)
+			if tt.observation.Now.After(admissionAt) {
+				admissionAt = tt.observation.Now
+			}
+			admission, err := client.AdmitGitHubBackground(ctx, key, "candidate", admissionAt, 20, time.Minute)
 			require.NoError(t, err, "shared quota observation should inform admission")
 			require.Equal(t, tt.low, admission.Low, "budget must use the strongest current-window quota evidence")
 		})

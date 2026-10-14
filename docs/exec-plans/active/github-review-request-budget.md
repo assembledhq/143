@@ -64,7 +64,12 @@ stalling active reviews, while preserving fresh checks before publication and me
    preparation must finish before reviewer execution. Recover an interrupted owner
    only after proving its durable job and executor leases are gone; reclaim the
    incomplete workspace with existing generation and live-holder guards before
-   retrying preparation. A timeout alone does not establish owner death.
+   retrying preparation. Healthy-owner polls stay read-only; recovery uses indexed
+   ownership checks, bounded locks, and the existing runtime inbox-loss transition.
+   A timeout alone does not establish owner death. Reused bundles tolerate reviewer
+   workspace edits while validating captured commits and immutable evidence. Use a
+   valid shell environment name for ephemeral fetch credentials and retry temporary
+   readiness failures without consuming reviewer attempts.
    Reviewers analyze the same read-only evidence independently; the coordinator retains final
    freshness checks and invalidates stale assessments. Measure reviewer REST calls
    before and after this change; further broker work depends on demonstrated need.
@@ -75,11 +80,14 @@ stalling active reviews, while preserving fresh checks before publication and me
    `internal/prompts/templates/code_review_reviewer.template`.
 
    Default the background reserve to zero until attributed traffic supports an
-   operator-selected threshold. Positive reserves gate only scoped stale
-   reconciliation sweeps, with shared periodic admission and expiring fair
+   operator-selected threshold. Observation records decisions without suppressing
+   work; enforcement requires an explicit matching installation allowlist. Positive
+   reserves gate only scoped stale reconciliation sweeps, with shared admission and expiring fair
    candidates. Ordinary queued refreshes, active/final reviews, database recovery,
    and publication reconciliation bypass budgeting. Unknown quota or unavailable
-   Redis permits work and exposes the optimization's limits.
+   Redis permits work and exposes the optimization's limits. Admission intervals do
+   not change the ten-minute sweep cadence; absent queue heads can delay successors
+   until their retention expires.
 
 ## Validation and delivery
 

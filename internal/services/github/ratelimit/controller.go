@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
+	otelmetric "go.opentelemetry.io/otel/metric"
 
 	"github.com/assembledhq/143/internal/cache"
 )
@@ -98,9 +100,11 @@ type Controller struct {
 	probeSeq    atomic.Uint64
 	beforeClaim func()
 
-	backgroundQuotaReserve     int64
-	backgroundQuotaInterval    time.Duration
-	backgroundQuotaDegradedLog sync.Once
+	backgroundQuotaReserve    int64
+	backgroundQuotaInterval   time.Duration
+	backgroundQuotaDecisions  otelmetric.Int64Counter
+	backgroundQuotaLogMu      sync.Mutex
+	backgroundQuotaDegradedAt map[int64]time.Time
 }
 
 const (
@@ -155,11 +159,20 @@ func NewController(cfg Config) (*Controller, error) {
 			allowlist[installationID] = struct{}{}
 		}
 	}
+	var quotaDecisions otelmetric.Int64Counter
+	if cfg.BackgroundQuotaReserve > 0 {
+		var err error
+		quotaDecisions, err = otel.Meter("github.com/assembledhq/143/github").Int64Counter("github.background_quota.decisions", otelmetric.WithDescription("Optional GitHub background quota decisions"), otelmetric.WithUnit("{decision}"))
+		if err != nil {
+			otel.Handle(err)
+		}
+	}
 	return &Controller{
 		mode: cfg.Mode, environment: sanitizeKeyPart(cfg.Environment), appID: cfg.AppID,
 		allowlist: allowlist, cache: cfg.Cache, logger: cfg.Logger, now: cfg.Now,
 		owner: owner, probeLease: cfg.ProbeLease, fallback: newLocalStore(cfg.FallbackLimit),
 		backgroundQuotaReserve: cfg.BackgroundQuotaReserve, backgroundQuotaInterval: cfg.BackgroundQuotaInterval,
+		backgroundQuotaDecisions: quotaDecisions, backgroundQuotaDegradedAt: make(map[int64]time.Time),
 	}, nil
 }
 
@@ -263,11 +276,11 @@ func (c *Controller) Observe(ctx context.Context, permit Permit, observation Obs
 		return ObservationResult{}
 	}
 	now := c.now().UTC()
-	c.observeBackgroundQuota(ctx, permit.Scope.InstallationID, observation, now)
 	classification := ClassifyResponse(ResponseInput{
 		StatusCode: observation.StatusCode, Header: observation.Header, Message: observation.Message,
 		GraphQLErrors: observation.GraphQLErrors, Now: now,
 	})
+	c.observeBackgroundQuota(ctx, permit.Scope.InstallationID, observation, classification, now)
 	result := ObservationResult{Classification: classification}
 	key := c.key(permit.Scope.InstallationID)
 	if classification.RateLimited {

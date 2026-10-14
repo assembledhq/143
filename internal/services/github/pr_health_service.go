@@ -632,7 +632,15 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	if reason == PullRequestSyncReasonInitial {
 		key += ":initial"
 	}
-	key = s.backgroundQuotaFlightKey(ctx, key)
+	var resolved *resolvedPullRequestHealthSync
+	if s.backgroundQuotaFlightNeedsResolution(ctx) {
+		var err error
+		resolved, err = s.resolvePullRequestHealthSync(ctx, orgID, pullRequestID)
+		if err != nil {
+			return err
+		}
+		key = s.backgroundQuotaFlightKey(ctx, key, resolved.resolution)
+	}
 	result := s.prHealthSyncGroup.DoChan(key, func() (any, error) {
 		s.logger.Info().
 			Str("org_id", orgID.String()).
@@ -641,7 +649,7 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 			Msg("starting github pull request health sync")
 		syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), prHealthSyncTimeout)
 		defer cancel()
-		return nil, s.syncPullRequestState(syncCtx, orgID, pullRequestID)
+		return nil, s.syncResolvedPullRequestState(syncCtx, orgID, pullRequestID, resolved)
 	})
 	select {
 	case <-ctx.Done():
@@ -659,35 +667,26 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	}
 }
 
-func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) (resultErr error) {
+func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
+	return s.syncResolvedPullRequestState(ctx, orgID, pullRequestID, nil)
+}
+
+func (s *PRService) syncResolvedPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID, resolved *resolvedPullRequestHealthSync) (resultErr error) {
 	var resolution *identity.Resolution
 	scope := reconciliationScopeFromContext(ctx)
 	defer func() {
 		resultErr = reconciliationInstallationFailure(resolution, resultErr)
 		scope.observe(resolution, resultErr)
 	}()
-	pr, err := s.pullRequests.GetByID(ctx, orgID, pullRequestID)
-	if err != nil {
-		return err
-	}
-
-	repo, err := s.repos.GetByFullName(ctx, orgID, pr.GitHubRepo)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			anyStatusRepo, anyStatusErr := s.repos.GetByFullNameAnyStatus(ctx, orgID, pr.GitHubRepo)
-			if anyStatusErr == nil && repoBlocksPullRequestHealthSync(anyStatusRepo) {
-				return fmt.Errorf("%w: %s", ErrPullRequestRepositoryDisconnected, pr.GitHubRepo)
-			}
-			if anyStatusErr != nil && !errors.Is(anyStatusErr, pgx.ErrNoRows) {
-				return fmt.Errorf("load repository for pull request health sync: %w", anyStatusErr)
-			}
+	if resolved == nil {
+		var err error
+		resolved, err = s.resolvePullRequestHealthSync(ctx, orgID, pullRequestID)
+		if err != nil {
+			return err
 		}
-		return fmt.Errorf("load repository for pull request health sync: %w", err)
 	}
-	resolution, err = s.getInstallationResolutionForRepo(ctx, orgID, &repo)
-	if err != nil {
-		return fmt.Errorf("load installation token for pull request health sync: %w", err)
-	}
+	pr, repo := resolved.pullRequest, resolved.repository
+	resolution = resolved.resolution
 	if err := scope.deferral(resolution); err != nil {
 		return err
 	}

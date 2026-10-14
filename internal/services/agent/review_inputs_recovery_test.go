@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +13,63 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+type transientReviewMarkerProvider struct {
+	reviewInputsProvider
+	failures int
+}
+
+func (p *transientReviewMarkerProvider) Exec(ctx context.Context, sandbox *Sandbox, command string, stdout, stderr io.Writer) (int, error) {
+	if p.failures > 0 {
+		p.failures--
+		return -1, errors.New("temporary executor connection failure")
+	}
+	return p.reviewInputsProvider.Exec(ctx, sandbox, command, stdout, stderr)
+}
+
+func TestReviewPreparationTransientAvailabilityUsesReadinessRetry(t *testing.T) {
+	t.Parallel()
+	for _, database := range []bool{false, true} {
+		t.Run(map[bool]string{false: "executor probe", true: "lease database"}[database], func(t *testing.T) {
+			t.Parallel()
+			directory, base, head, _ := newReviewInputsGitFixture(t)
+			session := reviewInputsSession(t, base, head)
+			sandbox := &Sandbox{ID: "source", WorkDir: directory}
+			provider := &transientReviewMarkerProvider{}
+			store := &reviewInputsRecoverySessions{recovered: true}
+			orchestrator := &Orchestrator{provider: provider, sessions: store}
+			if database {
+				require.NoError(t, orchestrator.markCodeReviewInputsPreparing(reviewPreparationContext(uuid.New(), uuid.New()), session, sandbox), "crashed owner marker should exist")
+				store.errors = []error{errors.New("temporary database connection failure")}
+			} else {
+				provider.failures = 1
+			}
+			err := waitForSandboxWorkspaceReady(reviewPreparationContext(uuid.New(), uuid.New()), provider, sandbox, "review", head, time.Second, time.Millisecond, 4*time.Millisecond, nil, func(ctx context.Context) (bool, error) {
+				return orchestrator.codeReviewInputsPreparationFinished(ctx, session, sandbox)
+			})
+			if database {
+				require.ErrorIs(t, err, ErrStaleSandboxIDCleared, "transient lease failure should retry until the source can be safely fenced")
+				require.Len(t, store.params, 2, "lease proof should be retried inside the same readiness attempt")
+			} else {
+				require.NoError(t, err, "transient executor probe should retry until a completed checkout is ready")
+			}
+		})
+	}
+}
+
+func TestReviewPreparationTransientFailureTimeoutKeepsWaitingClassification(t *testing.T) {
+	t.Parallel()
+	directory, base, head, _ := newReviewInputsGitFixture(t)
+	session := reviewInputsSession(t, base, head)
+	provider := &transientReviewMarkerProvider{failures: 100}
+	sandbox := &Sandbox{ID: "source", WorkDir: directory}
+	orchestrator := &Orchestrator{provider: provider}
+	err := waitForSandboxWorkspaceReady(context.Background(), provider, sandbox, "review", head, 30*time.Millisecond, time.Millisecond, 4*time.Millisecond, nil, func(ctx context.Context) (bool, error) {
+		return orchestrator.codeReviewInputsPreparationFinished(ctx, session, sandbox)
+	})
+	require.ErrorIs(t, err, ErrSandboxWorkspaceNotReady, "temporary availability loss should preserve the worker's no-attempt waiting retry")
+	require.Zero(t, provider.destroys.Load(), "availability errors must never authorize source destruction")
+}
 
 func TestReviewPreparationOwnerRecoveryBeforeCheckoutReady(t *testing.T) {
 	t.Parallel()

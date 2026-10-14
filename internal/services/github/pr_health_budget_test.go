@@ -26,20 +26,25 @@ import (
 
 func newPRHealthQuotaController(t *testing.T) *ratelimit.Controller {
 	t.Helper()
+	return newPRHealthQuotaControllerForInstallation(t, 42, 10)
+}
+
+func newPRHealthQuotaControllerForInstallation(t *testing.T, installationID, remaining int64) *ratelimit.Controller {
+	t.Helper()
 	server := miniredis.RunT(t)
 	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + server.Addr()}, zerolog.Nop(), nil)
 	t.Cleanup(func() { require.NoError(t, client.Close(), "isolated quota cache should close") })
 	now := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
 	controller, err := ratelimit.NewController(ratelimit.Config{
-		Mode: ratelimit.ModeEnforce, AppID: 1, InstallationAllowlist: []int64{42}, Cache: client,
+		Mode: ratelimit.ModeEnforce, AppID: 1, InstallationAllowlist: []int64{installationID}, Cache: client,
 		Now: func() time.Time { return now }, BackgroundQuotaReserve: 20, BackgroundQuotaInterval: time.Minute, Logger: zerolog.Nop(),
 	})
 	require.NoError(t, err, "enabled isolated quota controller should initialize")
-	controller.Observe(context.Background(), ratelimit.Permit{Scope: ratelimit.Scope{InstallationID: 42}}, ratelimit.Observation{StatusCode: http.StatusOK, Header: http.Header{
-		"X-Ratelimit-Limit": {"100"}, "X-Ratelimit-Remaining": {"10"}, "X-Ratelimit-Resource": {"core"},
+	controller.Observe(context.Background(), ratelimit.Permit{Scope: ratelimit.Scope{InstallationID: installationID}}, ratelimit.Observation{StatusCode: http.StatusOK, Header: http.Header{
+		"X-Ratelimit-Limit": {"100"}, "X-Ratelimit-Remaining": {strconv.FormatInt(remaining, 10)}, "X-Ratelimit-Resource": {"core"},
 		"X-Ratelimit-Reset": {strconv.FormatInt(now.Add(time.Hour).Unix(), 10)},
 	}})
-	require.True(t, controller.AdmitBackground(context.Background(), 42, "another-tenant:another-pr"), "another background candidate should occupy the current interval")
+	require.True(t, controller.AdmitBackground(context.Background(), installationID, "another-tenant:another-pr"), "another background candidate should occupy the current interval")
 	return controller
 }
 
@@ -137,7 +142,7 @@ func TestPRHealthBackgroundBudgetSweepDoesNotAbsorbOrdinaryFlights(t *testing.T)
 	t.Parallel()
 	orgID, prID := uuid.New(), uuid.New()
 	service, gate := newDriftSyncService(t, orgID, prID)
-	service.backgroundQuotaController = newPRHealthQuotaController(t)
+	service.backgroundQuotaController = newPRHealthQuotaControllerForInstallation(t, 123, 90)
 	ctx := WithPullRequestSyncReason(withReconciliationScope(context.Background()), PullRequestSyncReasonStaleReconcile)
 	leaderErr := make(chan error, 1)
 	go func() { leaderErr <- service.SyncPullRequestState(ctx, orgID, prID) }()
@@ -156,4 +161,77 @@ func TestPRHealthBackgroundBudgetSweepDoesNotAbsorbOrdinaryFlights(t *testing.T)
 	}
 	gate.releaseNow()
 	require.NoError(t, <-leaderErr, "healthy scoped sweep should complete independently")
+}
+
+func TestPRHealthBackgroundBudgetFlightKeysRespectRolloutScope(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		mode         ratelimit.Mode
+		allowlist    []int64
+		reserve      int64
+		source       identity.Source
+		installation int64
+		expected     string
+	}{
+		{name: "disabled", mode: ratelimit.ModeEnforce, allowlist: []int64{42}, source: identity.SourceApp, installation: 42, expected: "ordinary"},
+		{name: "observe empty allowlist", mode: ratelimit.ModeObserve, reserve: 20, source: identity.SourceApp, installation: 42, expected: "ordinary"},
+		{name: "observe selected", mode: ratelimit.ModeObserve, allowlist: []int64{42}, reserve: 20, source: identity.SourceApp, installation: 42, expected: "ordinary"},
+		{name: "enforce empty allowlist", mode: ratelimit.ModeEnforce, reserve: 20, source: identity.SourceApp, installation: 42, expected: "ordinary"},
+		{name: "enforce selected", mode: ratelimit.ModeEnforce, allowlist: []int64{42}, reserve: 20, source: identity.SourceApp, installation: 42, expected: "ordinary:quota-sweep"},
+		{name: "enforce unselected", mode: ratelimit.ModeEnforce, allowlist: []int64{43}, reserve: 20, source: identity.SourceApp, installation: 42, expected: "ordinary"},
+		{name: "user token", mode: ratelimit.ModeEnforce, allowlist: []int64{42}, reserve: 20, source: identity.SourceUser, installation: 42, expected: "ordinary"},
+		{name: "unresolved installation", mode: ratelimit.ModeEnforce, allowlist: []int64{42}, reserve: 20, source: identity.SourceApp, expected: "ordinary"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			controller, err := ratelimit.NewController(ratelimit.Config{Mode: tt.mode, AppID: 1, InstallationAllowlist: tt.allowlist, BackgroundQuotaReserve: tt.reserve})
+			require.NoError(t, err, "rollout settings should construct an isolated controller")
+			service := &PRService{backgroundQuotaController: controller}
+			ctx := WithPullRequestSyncReason(withReconciliationScope(context.Background()), PullRequestSyncReasonStaleReconcile)
+			actual := service.backgroundQuotaFlightKey(ctx, "ordinary", &identity.Resolution{Source: tt.source, InstallationID: tt.installation})
+			require.Equal(t, tt.expected, actual, "non-enforcing sweeps must retain ordinary queued-flight deduplication")
+		})
+	}
+}
+
+func TestPRHealthBackgroundBudgetBypassRetainsOrdinaryFlight(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		mode      ratelimit.Mode
+		allowlist []int64
+		reserve   int64
+	}{
+		{name: "disabled reserve", mode: ratelimit.ModeEnforce, allowlist: []int64{123}},
+		{name: "observe selected", mode: ratelimit.ModeObserve, allowlist: []int64{123}, reserve: 20},
+		{name: "enforce unselected", mode: ratelimit.ModeEnforce, allowlist: []int64{42}, reserve: 20},
+		{name: "enforce empty allowlist", mode: ratelimit.ModeEnforce, reserve: 20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, prID := uuid.New(), uuid.New()
+			service, gate := newDriftSyncService(t, orgID, prID)
+			controller, err := ratelimit.NewController(ratelimit.Config{Mode: tt.mode, AppID: 1, InstallationAllowlist: tt.allowlist, BackgroundQuotaReserve: tt.reserve})
+			require.NoError(t, err, "bypassed quota controller should initialize")
+			service.backgroundQuotaController = controller
+			ctx := WithPullRequestSyncReason(withReconciliationScope(context.Background()), PullRequestSyncReasonStaleReconcile)
+			leaderErr := make(chan error, 1)
+			go func() { leaderErr <- service.SyncPullRequestState(ctx, orgID, prID) }()
+			gate.awaitInFlight()
+			var followerRan atomic.Bool
+			follower := service.prHealthSyncGroup.DoChan(orgID.String()+":"+prID.String(), func() (any, error) {
+				followerRan.Store(true)
+				return nil, nil
+			})
+			gate.releaseNow()
+			result := <-follower
+			require.NoError(t, result.Err, "ordinary follower should share the healthy sweep result")
+			require.True(t, result.Shared, "a bypassed sweep must stay on the ordinary flight")
+			require.False(t, followerRan.Load(), "bypassed quota must not spend a duplicate remote flight")
+			require.NoError(t, <-leaderErr, "bypassed sweep should complete normally")
+		})
+	}
 }

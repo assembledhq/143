@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -36,6 +37,28 @@ func CodeReviewInputPaths(orgID, sessionID, repositoryID uuid.UUID, repository, 
 	encoded := strings.Join([]string{"1", identity.OrgID.String(), identity.SessionID.String(), identity.RepositoryID.String(), identity.Repository, identity.BaseSHA, identity.HeadSHA}, "\x00")
 	directory := fmt.Sprintf(".git/143-review/%x", sha256.Sum256([]byte(encoded)))
 	return path.Join(directory, "manifest.json"), path.Join(directory, "changes.patch")
+}
+
+type CodeReviewInputTarget struct {
+	Repository        string
+	BaseSHA           string
+	HeadSHA           string
+	PullRequestNumber int
+	ManifestPath      string
+	DiffPath          string
+}
+
+func CodeReviewInputTargetFromSession(session *models.Session) (CodeReviewInputTarget, error) {
+	identity, err := codeReviewInputIdentityFromSession(session)
+	if err != nil {
+		return CodeReviewInputTarget{}, err
+	}
+	number, _, _, err := codeReviewCheckoutContextFromSession(session)
+	if err != nil {
+		return CodeReviewInputTarget{}, err
+	}
+	manifest, diff := CodeReviewInputPaths(identity.OrgID, identity.SessionID, identity.RepositoryID, identity.Repository, identity.BaseSHA, identity.HeadSHA)
+	return CodeReviewInputTarget{Repository: identity.Repository, BaseSHA: identity.BaseSHA, HeadSHA: identity.HeadSHA, PullRequestNumber: number, ManifestPath: manifest, DiffPath: diff}, nil
 }
 
 func codeReviewInputIdentityFromSession(session *models.Session) (codeReviewInputIdentity, error) {
@@ -101,17 +124,17 @@ func (o *Orchestrator) codeReviewInputsPreparationFinished(ctx context.Context, 
 	if err != nil {
 		return false, err
 	}
-	command := fmt.Sprintf("if test -e '%s'; then cat '%s'; else exit 42; fi", shellEscapeSingleQuote(codeReviewInputPreparationMarker(sandbox, identity)), shellEscapeSingleQuote(codeReviewInputPreparationMarker(sandbox, identity)))
+	command := fmt.Sprintf("python3 -c '%s' '%s'", shellEscapeSingleQuote(readCodeReviewPreparationMarkerScript), shellEscapeSingleQuote(codeReviewInputPreparationMarker(sandbox, identity)))
 	var stdout, stderr bytes.Buffer
 	exit, err := o.provider.Exec(ctx, sandbox, command, &stdout, &stderr)
 	if err != nil {
-		return false, fmt.Errorf("inspect code review input preparation: %w", err)
+		return false, codeReviewInputAvailabilityError(ctx, "inspect code review input preparation", err)
 	}
 	if exit == 42 {
 		return true, nil
 	}
 	if exit != 0 {
-		return false, fmt.Errorf("inspect code review input preparation: exit=%d", exit)
+		return false, codeReviewInputAvailabilityError(ctx, "inspect code review input preparation", fmt.Errorf("exit=%d", exit))
 	}
 	var owner codeReviewPreparationOwner
 	if err := json.Unmarshal(stdout.Bytes(), &owner); err != nil || owner.Version != 1 || owner.JobID == uuid.Nil || owner.LockToken == uuid.Nil ||
@@ -131,7 +154,10 @@ func (o *Orchestrator) codeReviewInputsPreparationFinished(ctx context.Context, 
 		WaitingJobID: waitingJobID, WaitingLockToken: waitingToken,
 	})
 	if err != nil {
-		return false, fmt.Errorf("prove incomplete review workspace ownership: %w", err)
+		if errors.Is(err, db.ErrReviewPreparationOwnershipUnavailable) {
+			return false, err
+		}
+		return false, codeReviewInputAvailabilityError(ctx, "prove incomplete review workspace ownership", err)
 	}
 	if !cleared {
 		return false, nil
@@ -143,6 +169,21 @@ func (o *Orchestrator) codeReviewInputsPreparationFinished(ctx context.Context, 
 	}
 	return false, ErrStaleSandboxIDCleared
 }
+
+func codeReviewInputAvailabilityError(ctx context.Context, operation string, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return fmt.Errorf("%w: %s: %w", ErrSandboxWorkspaceNotReady, operation, err)
+}
+
+const readCodeReviewPreparationMarkerScript = `import pathlib, sys
+try:
+    with pathlib.Path(sys.argv[1]).open() as marker:
+        sys.stdout.write(marker.read())
+except FileNotFoundError:
+    sys.exit(42)
+`
 
 func (o *Orchestrator) updateCodeReviewPreparationMarker(ctx context.Context, session *models.Session, sandbox *Sandbox, identity codeReviewInputIdentity, mode string) (int, error) {
 	encoded, err := json.Marshal(codeReviewPreparationOwnerFromContext(ctx, session, sandbox))
@@ -216,10 +257,7 @@ func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *mode
 		defer cancel()
 		repo, err := o.repositories.GetByID(prepareCtx, identity.OrgID, identity.RepositoryID)
 		if err != nil {
-			return nil, fmt.Errorf("load shared review input repository: %w", err)
-		}
-		if repo.FullName != identity.Repository {
-			return nil, fmt.Errorf("code review input repository does not match session repository")
+			return nil, codeReviewInputAvailabilityError(prepareCtx, "load shared review input repository", err)
 		}
 		exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, session.WorkspaceGeneration, "", "")
 		if err != nil || exit != 42 {
@@ -264,7 +302,7 @@ func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbo
 	var stderr bytes.Buffer
 	exit, execErr := o.provider.Exec(ctx, reviewInputFetchSandbox(sandbox, token), command, io.Discard, &stderr)
 	if execErr != nil {
-		return exit, fmt.Errorf("prepare shared review inputs: %s", redactGitToken(execErr.Error(), token))
+		return exit, codeReviewInputAvailabilityError(ctx, "prepare shared review inputs", errors.New(redactGitToken(execErr.Error(), token)))
 	}
 	if exit != 0 && (exit != 42 || remote != "") {
 		return exit, fmt.Errorf("code review inputs incomplete: exit=%d %s", exit, redactGitToken(stderr.String(), token))
@@ -326,7 +364,7 @@ func reviewInputFetchSandbox(sandbox *Sandbox, token string) *Sandbox {
 	if copy.Env == nil {
 		copy.Env = make(map[string]string)
 	}
-	copy.Env["143_REVIEW_FETCH_TOKEN"] = token
+	copy.Env["GH143_REVIEW_FETCH_TOKEN"] = token
 	return &copy
 }
 
@@ -336,7 +374,7 @@ func codeReviewFetchCommand(repositoryURL, ref string) string {
 
 const codeReviewFetchScript = `import os, subprocess, sys, urllib.parse
 remote, ref = sys.argv[1:]
-token = os.environ.get("143_REVIEW_FETCH_TOKEN", "")
+token = os.environ.get("GH143_REVIEW_FETCH_TOKEN", "")
 if token and remote.startswith("https://"):
     remote = "https://x-access-token:" + urllib.parse.quote(token, safe="") + "@" + remote[8:]
 try:
@@ -351,7 +389,7 @@ const prepareCodeReviewInputsScript = `import fcntl, hashlib, json, os, pathlib,
 identity = json.loads(sys.argv[1])
 directory = pathlib.Path(sys.argv[2])
 remote = sys.argv[3]
-token = os.environ.get("143_REVIEW_FETCH_TOKEN", "")
+token = os.environ.get("GH143_REVIEW_FETCH_TOKEN", "")
 if token and remote.startswith("https://"):
     remote = "https://x-access-token:" + urllib.parse.quote(token, safe="") + "@" + remote[8:]
 deadline = time.monotonic() + float(sys.argv[4])
@@ -376,10 +414,6 @@ def digest(file):
 def prepare():
     if git("rev-parse", "HEAD").stdout.decode().strip() != identity["head_sha"]:
         raise ValueError("workspace HEAD differs from captured review head")
-    if git("diff", "--quiet", "--no-ext-diff", "--no-textconv", "HEAD", "--", check=False).returncode != 0:
-        raise ValueError("review source tree contains tracked edits")
-    if git("ls-files", "--others", "--exclude-standard", "-z").stdout:
-        raise ValueError("review source tree contains untracked files")
     if directory.exists():
         manifest = json.loads((directory / "manifest.json").read_text())
         if any(manifest.get(key) != value for key, value in identity.items()):

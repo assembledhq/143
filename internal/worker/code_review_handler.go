@@ -1281,6 +1281,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 	if err != nil {
 		return err
 	}
+	var target *agentsvc.CodeReviewInputTarget
 	for _, selection := range selections {
 		idx := selection.Index
 		agentType := selection.AgentType
@@ -1300,7 +1301,24 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 				Msg("skipped unavailable code review reviewer")
 			continue
 		}
-		promptText := codeReviewReviewerPrompt(job, pr, cfg, policy.Version, metadata.BaseSHA, changedFiles, visualEvidence)
+		if target == nil {
+			if stores.Sessions == nil {
+				return fmt.Errorf("captured reviewer input session store unavailable")
+			}
+			session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
+			if err != nil {
+				return fmt.Errorf("load captured reviewer input session: %w", err)
+			}
+			captured, err := agentsvc.CodeReviewInputTargetFromSession(&session)
+			if err != nil {
+				return fmt.Errorf("resolve captured reviewer inputs: %w", err)
+			}
+			if session.RepositoryID == nil || *session.RepositoryID != job.RepositoryID || captured.HeadSHA != job.HeadSHA || captured.BaseSHA != metadata.BaseSHA {
+				return fmt.Errorf("reviewer job does not match captured review input session")
+			}
+			target = &captured
+		}
+		promptText := codeReviewReviewerPrompt(*target, pr, cfg, changedFiles, visualEvidence)
 		recordKey := fmt.Sprintf("%s/reviewer-%02d-%s", rootKey, idx+1, agentType)
 		recordMetadata, err := json.Marshal(map[string]any{
 			"reviewer_key":         key,
@@ -1835,19 +1853,17 @@ func revertCodeReviewReadOnlyThread(ctx context.Context, stores *Stores, service
 	return true
 }
 
-func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
+func codeReviewReviewerPrompt(target agentsvc.CodeReviewInputTarget, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
 	cfg = models.ResolveCodeReviewPolicyConfig(&cfg)
-	baseSHA = firstNonEmpty(baseSHA, stringPtrValue(pr.BaseSHA))
-	manifestPath, diffPath := agentsvc.CodeReviewInputPaths(job.OrgID, job.SessionID, job.RepositoryID, pr.GitHubRepo, baseSHA, job.HeadSHA)
 	return strings.TrimSpace(prompts.CodeReviewReviewerPrompt(prompts.CodeReviewReviewerPromptData{
-		ManifestPath:          manifestPath,
-		DiffPath:              diffPath,
+		ManifestPath:          target.ManifestPath,
+		DiffPath:              target.DiffPath,
 		ReviewInstructions:    cfg.ReviewInstructions,
-		Repository:            pr.GitHubRepo,
-		PullNumber:            pr.GitHubPRNumber,
+		Repository:            target.Repository,
+		PullNumber:            target.PullRequestNumber,
 		PullRequestURL:        pr.GitHubPRURL,
-		BaseSHA:               firstNonEmpty(baseSHA, stringPtrValue(pr.BaseSHA)),
-		HeadSHA:               job.HeadSHA,
+		BaseSHA:               target.BaseSHA,
+		HeadSHA:               target.HeadSHA,
 		ChangedFiles:          codeReviewChangedPaths(changedFiles),
 		VisualEvidence:        codeReviewVisualEvidenceForPrompt(visualEvidence),
 		VisualEvidenceOmitted: visualEvidence.OmittedSourceCount,

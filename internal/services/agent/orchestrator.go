@@ -386,6 +386,7 @@ func waitForSandboxWorkspaceReady(
 		if err := sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved); err != nil {
 			return err
 		}
+		inputsReady := true
 		if checkCancellation != nil {
 			if err := checkCancellation(waitCtx); err != nil {
 				if errors.Is(err, ErrThreadCancelledBeforeWorkspaceReady) {
@@ -394,15 +395,25 @@ func waitForSandboxWorkspaceReady(
 				if waitErr := sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved); waitErr != nil {
 					return waitErr
 				}
-				return err
+				if !errors.Is(err, ErrSandboxWorkspaceNotReady) {
+					return err
+				}
+				inputsReady = false
+				lastObserved = err.Error()
 			}
 		}
 
-		inputsReady := true
 		for _, check := range additionalReadiness {
 			ready, err := check(waitCtx)
 			if err != nil {
-				return err
+				if waitErr := sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved); waitErr != nil {
+					return waitErr
+				}
+				if !errors.Is(err, ErrSandboxWorkspaceNotReady) {
+					return err
+				}
+				lastObserved = err.Error()
+				ready = false
 			}
 			inputsReady = inputsReady && ready
 		}
@@ -430,10 +441,16 @@ func waitForSandboxWorkspaceReady(
 							if waitErr := sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved); waitErr != nil {
 								return waitErr
 							}
-							return err
+							if !errors.Is(err, ErrSandboxWorkspaceNotReady) {
+								return err
+							}
+							inputsReady = false
+							lastObserved = err.Error()
 						}
 					}
-					return nil
+					if inputsReady {
+						return nil
+					}
 				}
 				lastObserved = fmt.Sprintf("branch=%q head=%q", actualBranch, actualHead)
 			} else {
@@ -499,7 +516,7 @@ func (o *Orchestrator) stopWorkspaceWaitIfThreadCancelled(ctx context.Context, o
 	}
 	thread, err := o.sessionThreads.GetByID(ctx, orgID, threadID)
 	if err != nil {
-		return fmt.Errorf("check thread cancellation while waiting for workspace: %w", err)
+		return codeReviewInputAvailabilityError(ctx, "check thread cancellation while waiting for workspace", err)
 	}
 	if thread.CancelRequestedAt == nil && thread.Status != models.ThreadStatusCancelled {
 		return nil
@@ -521,7 +538,7 @@ func (o *Orchestrator) stopWorkspaceWaitIfThreadCancelled(ctx context.Context, o
 func (o *Orchestrator) stopWorkspaceWaitIfContainerChanged(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) error {
 	currentContainerID, err := o.sessions.PeekContainerID(ctx, orgID, sessionID)
 	if err != nil {
-		return fmt.Errorf("check reused workspace ownership while waiting: %w", err)
+		return codeReviewInputAvailabilityError(ctx, "check reused workspace ownership while waiting", err)
 	}
 	if currentContainerID != expectedContainerID {
 		return fmt.Errorf("%w: reused workspace %s is no longer current", ErrStaleSandboxIDCleared, expectedContainerID)
@@ -3664,6 +3681,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		} else if run.Origin == models.SessionOriginCodeReview {
 			_, head, _, checkoutErr := codeReviewCheckoutContextFromSession(run)
 			if checkoutErr != nil {
+				o.failRun(ctx, run, fmt.Sprintf("resolve review checkout: %s", checkoutErr))
 				return checkoutErr
 			}
 			run.BaseCommitSHA = &head
@@ -3722,9 +3740,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		} else if run.Origin == models.SessionOriginCodeReview {
 			prNumber, head, _, checkoutErr := codeReviewCheckoutContextFromSession(run)
 			if checkoutErr != nil {
+				o.failRun(ctx, run, fmt.Sprintf("resolve review checkout: %s", checkoutErr))
 				return checkoutErr
 			}
 			if err := o.checkoutCodeReviewHead(ctx, sandbox, repoURL, token, prNumber, workingBranch, head); err != nil {
+				o.failRun(ctx, run, fmt.Sprintf("checkout review head: %s", err))
 				return err
 			}
 		} else {
@@ -5850,6 +5870,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 
 	if err := o.ensureCodeReviewInputs(ctx, session, sandbox); err != nil {
+		if errors.Is(err, ErrSandboxWorkspaceNotReady) {
+			return err
+		}
 		return o.failContinueSessionError(ctx, session, opts, err, log)
 	}
 
