@@ -6633,6 +6633,7 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 		return nil
 	}
 
+	var automationErrors error
 	for _, prRef := range event.CheckRun.PullRequests {
 		if event.Action == "completed" {
 			conclusion := "unknown"
@@ -6659,7 +6660,7 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 				ProviderEventID:   event.DeliveryID,
 				EventID:           githubIDEventKey("check_run", event.CheckRun.ID),
 			}, event.OwnerOrgID, event.Repository.ID); err != nil {
-				return err
+				automationErrors = errors.Join(automationErrors, err)
 			}
 		}
 
@@ -6673,7 +6674,7 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 		state := checkRunEventState(pr, event)
 		applied, err := s.pullRequests.UpsertCheckState(ctx, pr.OrgID, state)
 		if err != nil {
-			return err
+			return errors.Join(automationErrors, err)
 		}
 		if !applied {
 			// The upsert rejected this event as out of order, so the projection
@@ -6686,14 +6687,14 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 		}
 		requiresSync, err := s.checkStateRequiresAuthoritativeSync(ctx, pr, state)
 		if err != nil {
-			return err
+			return errors.Join(automationErrors, err)
 		}
 		if err := s.enqueuePullRequestCheckProjection(ctx, pr, requiresSync); err != nil {
-			return err
+			return errors.Join(automationErrors, err)
 		}
 	}
 
-	return nil
+	return automationErrors
 }
 
 // StatusEvent represents a GitHub commit status webhook payload.
