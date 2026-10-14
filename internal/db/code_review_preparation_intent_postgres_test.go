@@ -193,6 +193,9 @@ func TestCodeReviewPreparationIntentPostgres(t *testing.T) {
 					token = uuid.New()
 				case "org":
 					orgID = uuid.New()
+					// Keep the envelope consistent to reach the SQL tenant fence;
+					// mismatched call/envelope identity is covered by the unit test.
+					i.OrgID = orgID
 				case "session":
 					_, err := pool.Exec(context.Background(), `UPDATE jobs SET payload=jsonb_set(payload,'{session_id}',to_jsonb($3::text)) WHERE org_id=$1 AND id=$2`, f.orgID, f.jobID, uuid.NewString())
 					require.NoError(t, err, "simulate a different containing session without changing captured provenance")
