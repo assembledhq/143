@@ -21,6 +21,31 @@ import (
 var errFullAssessmentInputsChanged = errors.New("full assessment inputs changed before publication")
 var errFullAssessmentFreshnessInconclusive = errors.New("visual evidence temporarily unavailable during publication verification")
 
+type fullAssessmentQueuedIdentityChanged struct {
+	Fields []string
+}
+
+func (e *fullAssessmentQueuedIdentityChanged) Error() string {
+	return "full review captured source differs from queued review identity: " + strings.Join(e.Fields, ", ")
+}
+
+func fullAssessmentQueuedIdentityChanges(job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, captured codereviewsvc.AssessmentInputCaptureResult) []string {
+	var fields []string
+	if captured.Policy.ID != job.PolicyID {
+		fields = append(fields, "policy_id")
+	}
+	if captured.Policy.Version != job.PolicyVersion {
+		fields = append(fields, "policy_version")
+	}
+	if captured.Snapshot.HeadSHA != job.HeadSHA {
+		fields = append(fields, "head_sha")
+	}
+	if captured.Snapshot.BaseSHA != metadata.BaseSHA {
+		fields = append(fields, "base_sha")
+	}
+	return fields
+}
+
 const fullAssessmentFreshnessRetryDuration = 5 * time.Minute
 
 // Full reviews may finish after CI changes. Their panel still covers the same
@@ -673,8 +698,8 @@ func prepareFullAssessment(ctx context.Context, stores *Stores, services *Servic
 		}
 		return nil, nil, classifyGitHubJobError(err, job.SessionID.String())
 	}
-	if captured.Policy.ID != job.PolicyID || captured.Policy.Version != job.PolicyVersion || captured.Snapshot.HeadSHA != job.HeadSHA || captured.Snapshot.BaseSHA != metadata.BaseSHA {
-		return nil, nil, fmt.Errorf("full review captured source differs from queued review identity")
+	if fields := fullAssessmentQueuedIdentityChanges(job, metadata, captured); len(fields) > 0 {
+		return nil, &captured, &fullAssessmentQueuedIdentityChanged{Fields: fields}
 	}
 	generation := int64(1)
 	var previousID, previousPublishedID *uuid.UUID

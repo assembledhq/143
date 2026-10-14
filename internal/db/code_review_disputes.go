@@ -795,12 +795,65 @@ func (s *CodeReviewDisputeStore) AdmitAndEnqueueReassessment(ctx context.Context
 }
 
 func (s *CodeReviewDisputeStore) MarkReassessmentStarted(ctx context.Context, orgID, disputeID, sessionID uuid.UUID) error {
-	_, err := s.db.Exec(ctx, `UPDATE code_review_decision_disputes
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin code review reassessment binding: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var prID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT pull_request_id FROM code_review_decision_disputes WHERE org_id=$1 AND id=$2`, orgID, disputeID).Scan(&prID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("read code review reassessment pull request: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "code_review_pr:"+orgID.String()+":"+prID.String()); err != nil {
+		return fmt.Errorf("lock code review reassessment pull request: %w", err)
+	}
+	var lockedID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM code_review_decision_disputes WHERE org_id=$1 AND pull_request_id=$2 AND id=$3 FOR UPDATE`, orgID, prID, disputeID).Scan(&lockedID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("lock code review reassessment dispute: %w", err)
+	}
+	// The original starter can bind after its captured-input replacement has
+	// already started. Refresh provenance after both locks, including when a
+	// concurrent dispute update delayed acquisition of the row lock.
+	var obsoleteSource bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM code_review_session_metadata source
+		JOIN sessions source_session ON source_session.org_id=source.org_id AND source_session.id=source.session_id
+		JOIN code_review_decision_disputes dispute ON dispute.org_id=source.org_id AND dispute.pull_request_id=source.pull_request_id
+		WHERE source.org_id=@org_id AND source.session_id=@session_id AND source.pull_request_id=@pr_id
+		  AND source_session.org_id=@org_id AND dispute.org_id=@org_id AND dispute.id=@id
+		  AND (source.status IN ('stale','failed') OR
+		       (dispute.reassessment_session_id IS NOT NULL AND dispute.reassessment_session_id<>source.session_id))
+		  AND (source.triggering_dispute_id=dispute.id OR source_session.revision_context->>'triggering_dispute_id'=dispute.id::text)
+		  AND (EXISTS (
+		    SELECT 1 FROM code_review_requests request
+		    WHERE request.org_id=@org_id AND request.pull_request_id=@pr_id AND request.source_kind='github'
+		      AND request.source_identity='capture_identity:' || source.session_id::text
+		  ) OR EXISTS (
+		    SELECT 1 FROM jobs replacement
+		    WHERE replacement.org_id=@org_id AND replacement.job_type='start_code_review_reassessment'
+		      AND replacement.dedupe_key='code_review_reassessment:' || source.pull_request_id::text || ':capture_identity:' || source.session_id::text
+		      AND replacement.payload->>'triggering_dispute_id'=dispute.id::text
+		  ))
+	)`, pgx.NamedArgs{"org_id": orgID, "pr_id": prID, "id": disputeID, "session_id": sessionID}).Scan(&obsoleteSource); err != nil {
+		return fmt.Errorf("check retired captured-identity reassessment source: %w", err)
+	}
+	if !obsoleteSource {
+		_, err = tx.Exec(ctx, `UPDATE code_review_decision_disputes
 		SET reassessment_session_id = @session_id, reassessment_status = 'running',
 		    status_detail = 'Reassessment started.', updated_at = now(), version = version + 1
 		WHERE org_id = @org_id AND id = @id AND reassessment_status IN ('queued', 'running')`, pgx.NamedArgs{"org_id": orgID, "id": disputeID, "session_id": sessionID})
-	if err != nil {
-		return fmt.Errorf("mark code review reassessment started: %w", err)
+		if err != nil {
+			return fmt.Errorf("mark code review reassessment started: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit code review reassessment binding: %w", err)
 	}
 	return nil
 }
@@ -808,6 +861,98 @@ func (s *CodeReviewDisputeStore) MarkReassessmentStarted(ctx context.Context, or
 func (s *CodeReviewDisputeStore) CompleteReassessment(ctx context.Context, orgID, disputeID, sessionID uuid.UUID, status models.CodeReviewSessionStatus, decision *models.CodeReviewDecision, detail string) error {
 	_, err := s.CompleteReassessmentOnce(ctx, orgID, disputeID, sessionID, status, decision, detail)
 	return err
+}
+
+// Durable replacement admission precedes retirement of the source review.
+// Keep its dispute pending during that handoff, including the interval before
+// the replacement session is allocated and becomes the reassessment owner.
+// A source controller can fail if retirement retries expire after admission;
+// the accepted replacement, rather than that failed source, still owns work.
+const codeReviewDisputeCaptureHandoffSQL = `EXISTS (
+	SELECT 1 FROM code_review_requests request
+	JOIN code_review_session_metadata source ON source.org_id = request.org_id AND source.pull_request_id = request.pull_request_id
+	JOIN code_review_decision_disputes handoff_dispute ON handoff_dispute.org_id = source.org_id AND handoff_dispute.pull_request_id = source.pull_request_id
+	WHERE request.org_id = @org_id AND request.source_kind = 'github' AND request.status = 'pending'
+	  AND source.org_id = @org_id AND source.session_id = @session_id
+	  AND handoff_dispute.org_id = @org_id AND handoff_dispute.id = @id
+	  AND request.source_identity = 'capture_identity:' || @session_id::text
+) OR EXISTS (
+	SELECT 1 FROM jobs replacement
+	JOIN code_review_session_metadata source
+	  ON source.org_id = replacement.org_id AND source.session_id = @session_id
+	JOIN code_review_decision_disputes handoff_dispute ON handoff_dispute.org_id = source.org_id AND handoff_dispute.pull_request_id = source.pull_request_id
+	WHERE replacement.org_id = @org_id AND source.org_id = @org_id
+	  AND handoff_dispute.org_id = @org_id AND handoff_dispute.id = @id
+	  AND replacement.job_type = 'start_code_review_reassessment'
+	  AND replacement.status IN ('pending', 'running')
+	  AND replacement.dedupe_key = 'code_review_reassessment:' || source.pull_request_id::text || ':capture_identity:' || @session_id::text
+	  AND replacement.payload->>'triggering_dispute_id' = @id::text
+)`
+
+// SettleRetiredCapturedIdentityReassessments resolves a capture replacement
+// request that stopped before its dispute acquired a replacement owner. The
+// caller holds the PR transaction; request retirement, dispute settlement and
+// its reply job must commit together.
+func SettleRetiredCapturedIdentityReassessments(ctx context.Context, tx pgx.Tx, orgID, prID uuid.UUID) error {
+	const detail = "The reassessment was stopped before a replacement review could start. The objection remains recorded for a policy owner."
+	_, err := tx.Exec(ctx, `WITH retired AS (
+	 SELECT DISTINCT dispute.id, source.session_id
+	 FROM code_review_requests request
+	 JOIN code_review_session_metadata source
+	   ON source.org_id=request.org_id AND source.pull_request_id=request.pull_request_id
+	 JOIN sessions source_session ON source_session.org_id=source.org_id AND source_session.id=source.session_id
+	 JOIN code_review_decision_disputes dispute
+	   ON dispute.org_id=source.org_id AND dispute.pull_request_id=source.pull_request_id
+	 WHERE request.org_id=$1 AND request.pull_request_id=$2 AND request.source_kind='github'
+	   AND source.org_id=$1 AND source.pull_request_id=$2
+	   AND source_session.org_id=$1 AND dispute.org_id=$1 AND dispute.pull_request_id=$2
+	   AND request.source_identity='capture_identity:' || source.session_id::text
+	   AND (request.status IN ('cancelled','superseded') OR
+	        (request.status='satisfied' AND request.session_id IS DISTINCT FROM source.session_id))
+	   AND (source.triggering_dispute_id=dispute.id OR source_session.revision_context->>'triggering_dispute_id'=dispute.id::text)
+	   AND dispute.reassessment_status IN ('queued','running')
+	   AND (dispute.reassessment_session_id IS NULL OR dispute.reassessment_session_id=source.session_id)
+	   AND NOT EXISTS (
+	     SELECT 1 FROM jobs live_replacement
+	     WHERE live_replacement.org_id=$1 AND live_replacement.job_type='start_code_review_reassessment'
+	       AND live_replacement.status IN ('pending','running')
+	       AND live_replacement.dedupe_key='code_review_reassessment:' || source.pull_request_id::text || ':capture_identity:' || source.session_id::text
+	       AND live_replacement.payload->>'triggering_dispute_id'=dispute.id::text
+	   )
+), settled AS (
+	 UPDATE code_review_decision_disputes dispute
+	 SET reassessment_session_id=COALESCE(dispute.reassessment_session_id,retired.session_id),
+	     reassessment_status='failed', reassessment_decision=NULL, reassessment_flipped=NULL,
+	     status_detail=$3,
+	     reply_status=CASE WHEN (dispute.source='github_comment' OR dispute.direction='should_not_have_approved')
+	       AND dispute.reply_status<>'published' THEN 'pending' ELSE dispute.reply_status END,
+	     updated_at=now(), version=dispute.version+1
+	 FROM retired
+	 WHERE dispute.org_id=$1 AND dispute.pull_request_id=$2 AND dispute.id=retired.id
+	   AND dispute.reassessment_status IN ('queued','running')
+	   AND (dispute.reassessment_session_id IS NULL OR dispute.reassessment_session_id=retired.session_id)
+	 RETURNING dispute.org_id,dispute.id,retired.session_id
+)
+INSERT INTO jobs(org_id,queue,job_type,payload,priority,dedupe_key,max_attempts)
+SELECT org_id,'feedback',$4,jsonb_build_object('org_id',org_id::text,'dispute_id',id::text),4,
+       'reply_code_review_dispute:' || id::text || ':capture_identity_retired:' || session_id::text,6
+FROM settled ON CONFLICT DO NOTHING`, orgID, prID, detail, models.JobTypeReplyCodeReviewDispute)
+	if err != nil {
+		return fmt.Errorf("settle retired captured-identity reassessments: %w", err)
+	}
+	return nil
+}
+
+func (s *CodeReviewDisputeStore) IsCapturedIdentityReassessmentSource(ctx context.Context, orgID, disputeID, sessionID uuid.UUID) (bool, error) {
+	var handoff bool
+	err := s.db.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM code_review_session_metadata source
+		WHERE source.org_id = @org_id AND source.session_id = @session_id AND source.status IN ('stale', 'failed')
+	) AND (`+codeReviewDisputeCaptureHandoffSQL+`)`, pgx.NamedArgs{"org_id": orgID, "id": disputeID, "session_id": sessionID}).Scan(&handoff)
+	if err != nil {
+		return false, fmt.Errorf("check captured-identity dispute handoff: %w", err)
+	}
+	return handoff, nil
 }
 
 func (s *CodeReviewDisputeStore) CompleteReassessmentOnce(ctx context.Context, orgID, disputeID, sessionID uuid.UUID, status models.CodeReviewSessionStatus, decision *models.CodeReviewDecision, detail string) (bool, error) {
@@ -822,9 +967,11 @@ func (s *CodeReviewDisputeStore) CompleteReassessmentOnce(ctx context.Context, o
 		    reply_status = CASE WHEN (source = 'github_comment' OR direction = 'should_not_have_approved') AND reply_status <> 'published' THEN 'pending' ELSE reply_status END,
 		    updated_at = now(), version = version + 1
 		WHERE org_id = @org_id AND id = @id
-		  AND reassessment_status IN ('queued', 'running')`, pgx.NamedArgs{
+		  AND reassessment_status IN ('queued', 'running')
+		  AND (reassessment_session_id IS NULL OR reassessment_session_id = @session_id)
+		  AND (@session_status::text NOT IN ('stale', 'failed') OR NOT (`+codeReviewDisputeCaptureHandoffSQL+`))`, pgx.NamedArgs{
 		"org_id": orgID, "id": disputeID, "session_id": sessionID, "decision": decision,
-		"reassessment_status": reassessmentStatus, "detail": strings.TrimSpace(detail),
+		"reassessment_status": reassessmentStatus, "detail": strings.TrimSpace(detail), "session_status": status,
 	})
 	if err != nil {
 		return false, fmt.Errorf("complete code review reassessment: %w", err)

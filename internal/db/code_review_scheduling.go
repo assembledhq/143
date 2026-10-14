@@ -189,7 +189,10 @@ func RecordCodeReviewRequest(ctx context.Context, tx pgx.Tx, orgID, repoID, prID
 
 func ResolveCodeReviewRequests(ctx context.Context, tx pgx.Tx, orgID, prID uuid.UUID, generation int64, sessionID *uuid.UUID, status string) error {
 	_, err := tx.Exec(ctx, `UPDATE code_review_requests SET session_id=$4,status=$5 WHERE org_id=$1 AND pull_request_id=$2 AND target_generation<=$3 AND status IN ('pending','joined')`, orgID, prID, generation, sessionID, status)
-	return err
+	if err != nil {
+		return err
+	}
+	return SettleRetiredCapturedIdentityReassessments(ctx, tx, orgID, prID)
 }
 
 func EncodeCodeReviewScheduleInput(input any) (json.RawMessage, error) {

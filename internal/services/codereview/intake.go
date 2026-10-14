@@ -93,6 +93,9 @@ func (s *Service) persistReviewIntake(ctx context.Context, input ReviewChangedIn
 			input.BaseSHA = pending.Input.BaseSHA
 			input.FromFork = pending.Input.FromFork
 		}
+		if err := supersedeOverwrittenCaptureRecovery(ctx, tx, state, pending, input, id); err != nil {
+			return err
+		}
 		state.PendingInput, err = db.EncodeCodeReviewScheduleInput(scheduledReviewIntent{Input: input, Mode: mode, Force: force, Inputs: pending.Inputs, NeedsSnapshot: true})
 		if err != nil {
 			return err

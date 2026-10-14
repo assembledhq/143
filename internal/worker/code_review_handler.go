@@ -61,6 +61,8 @@ const codeReviewOrchestratorFindingSummaryLimit = 500
 const codeReviewOrchestratorFindingBodyLimit = 2_000
 const codeReviewOrchestratorHumanReviewSummaryLimit = 500
 
+var errCapturedIdentityReplacementAdmission = errors.New("queue captured-identity replacement")
+
 type codeReviewDescriptionEvaluation struct {
 	Passed               bool
 	RequirementSummaries []string
@@ -133,7 +135,12 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		reviewLog := codeReviewTimingLogger(ctx, logger, job)
 		defer func() {
-			if !errors.Is(handlerErr, errFullAssessmentFreshnessInconclusive) {
+			phase := "freshness"
+			ensureStartedAt := stores.CodeReviews.EnsureFreshnessRetryStartedAt
+			if errors.Is(handlerErr, errCapturedIdentityReplacementAdmission) {
+				phase = "captured-identity replacement"
+				ensureStartedAt = stores.CodeReviews.EnsureCaptureIdentityRetryStartedAt
+			} else if !errors.Is(handlerErr, errFullAssessmentFreshnessInconclusive) {
 				return
 			}
 			var retry *RetryableError
@@ -143,16 +150,16 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			jobID, hasJob := jobctx.JobIDFromContext(ctx)
 			lockToken, hasLease := jobctx.LockTokenFromContext(ctx)
 			if !hasJob || !hasLease {
-				handlerErr = fmt.Errorf("freshness retry requires an active controller lease")
+				handlerErr = fmt.Errorf("%s retry requires an active controller lease", phase)
 				return
 			}
-			startedAt, owned, err := stores.CodeReviews.EnsureFreshnessRetryStartedAt(ctx, job.OrgID, job.SessionID, jobID, lockToken)
+			startedAt, owned, err := ensureStartedAt(ctx, job.OrgID, job.SessionID, jobID, lockToken)
 			if err != nil {
 				handlerErr = err
 				return
 			}
 			if !owned {
-				handlerErr = fmt.Errorf("freshness retry lost its controller lease: %w", db.ErrCodeReviewAssessmentState)
+				handlerErr = fmt.Errorf("%s retry lost its controller lease: %w", phase, db.ErrCodeReviewAssessmentState)
 				return
 			}
 			retry.RetryWindowStartedAt = &startedAt
@@ -324,6 +331,15 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		assessment, capturedAssessment, err := prepareFullAssessment(ctx, stores, services, job, metadata)
 		if err != nil {
+			var changed *fullAssessmentQueuedIdentityChanged
+			if errors.As(err, &changed) && capturedAssessment != nil {
+				// Cancellation can arrive during the network capture. Retain the
+				// parent cancellation gate before admitting any replacement work.
+				if cancelled, cancelErr := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || cancelErr != nil {
+					return cancelErr
+				}
+				return supersedeCodeReviewForCapturedIdentity(ctx, stores, services, logger, job, metadata, *capturedAssessment, changed)
+			}
 			return fmt.Errorf("capture full code review assessment: %w", err)
 		}
 		var visualEvidence models.CodeReviewVisualEvidenceSnapshot
@@ -1083,6 +1099,64 @@ func supersedeCodeReviewForChangedHead(
 	reconcileCodeReviewSessionStale(ctx, stores, logger, job)
 	enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 	return nil
+}
+
+type codeReviewCapturedIdentityReplacement interface {
+	QueueCapturedIdentityReplacement(context.Context, codereviewsvc.ReviewChangedInput) (codereviewsvc.ReviewRequestedResult, error)
+}
+
+func supersedeCodeReviewForCapturedIdentity(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, captured codereviewsvc.AssessmentInputCaptureResult, changed *fullAssessmentQueuedIdentityChanged) error {
+	if services == nil || services.CodeReviewLifecycle == nil {
+		return fmt.Errorf("queue captured-identity replacement: lifecycle service unavailable")
+	}
+	replacement, ok := services.CodeReviewLifecycle.(codeReviewCapturedIdentityReplacement)
+	if !ok {
+		return fmt.Errorf("queue captured-identity replacement: recovery scheduler unavailable")
+	}
+	pr, snapshot := captured.PullRequest, captured.Snapshot
+	queued, err := replacement.QueueCapturedIdentityReplacement(ctx, codereviewsvc.ReviewChangedInput{
+		OrgID: job.OrgID, RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, PriorSessionID: job.SessionID,
+		GitHubRepo: pr.GitHubRepo, GitHubPRNumber: snapshot.Number, GitHubPRURL: snapshot.HTMLURL,
+		PullRequestTitle: snapshot.Title, PullRequestAuthor: snapshot.AuthorLogin, BaseSHA: snapshot.BaseSHA, HeadSHA: snapshot.HeadSHA,
+		FromFork: snapshot.FromFork, RequestedReviewerLogin: job.RequestedReviewerLogin, RequestedTeamSlug: job.RequestedTeamSlug,
+		RequestContext: job.RequestContext, TriggerSource: metadata.TriggerSource, TriggeringDisputeID: job.TriggeringDisputeID,
+	})
+	if err != nil {
+		// The obsolete controller still owns recovery until intent is durable.
+		// Queue/provider outages must not exhaust its ordinary attempt budget
+		// while it is waiting to hand off to current-input work.
+		return capturedIdentityHandoffRetry(err)
+	}
+	if !queued.Processed {
+		return fmt.Errorf("captured-identity replacement was not durably accepted: %s", queued.IgnoredReason)
+	}
+	if queued.IgnoredReason == "source_review_retired" {
+		source, err := stores.CodeReviews.GetBySessionID(ctx, job.OrgID, job.SessionID)
+		if err != nil {
+			return fmt.Errorf("load retired capture source for reconciliation: %w", err)
+		}
+		if source.Status == models.CodeReviewSessionStatusStale {
+			reconcileCodeReviewSessionStale(ctx, stores, logger, job)
+			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
+		}
+		return nil
+	}
+	if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
+		return err
+	}
+	if _, err := stores.CodeReviews.MarkActiveReviewStale(ctx, job.OrgID, job.SessionID, changed.Error()); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return capturedIdentityHandoffRetry(fmt.Errorf("retire superseded captured-identity review: %w", err))
+	}
+	reconcileCodeReviewSessionStale(ctx, stores, logger, job)
+	enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
+	logger.Info().Str("session_id", job.SessionID.String()).Strs("changed_fields", changed.Fields).
+		Bool("replacement_reused", queued.Reused).Msg("superseded queued code review after source identity changed")
+	return nil
+}
+
+func capturedIdentityHandoffRetry(err error) error {
+	delay, window := 15*time.Second, githubRateLimitMaxRetryDuration
+	return &RetryableError{Err: fmt.Errorf("%w: %w", errCapturedIdentityReplacementAdmission, err), RetryAfter: &delay, MaxRetryDuration: &window}
 }
 
 func queueCodeReviewReplacementForChangedHead(

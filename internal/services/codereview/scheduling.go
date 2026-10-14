@@ -280,6 +280,41 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 		if latestErr != nil && !errors.Is(latestErr, pgx.ErrNoRows) {
 			return latestErr
 		}
+		if input.ChangeReason == captureIdentityChangeReason {
+			// Capture runs outside this lock. Another request may have retired
+			// the source in the meantime; that obsolete controller cannot force
+			// a new generation or revoke the new owner of the pull request.
+			var status models.CodeReviewSessionStatus
+			if err := tx.QueryRow(ctx, `SELECT status FROM code_review_session_metadata WHERE org_id=$1 AND pull_request_id=$2 AND session_id=$3 FOR UPDATE`, input.OrgID, input.PullRequestID, input.PriorSessionID).Scan(&status); err != nil {
+				return err
+			}
+			if status != models.CodeReviewSessionStatusQueued && status != models.CodeReviewSessionStatusRunning {
+				result = ReviewRequestedResult{Processed: true, Reused: true, IgnoredReason: "source_review_retired"}
+				if latestErr == nil {
+					result.SessionID, result.MetadataID = latest.SessionID, latest.ID
+				}
+				return nil
+			}
+			pr, err := db.NewPullRequestStore(tx).GetByID(ctx, input.OrgID, input.PullRequestID)
+			if err != nil {
+				return err
+			}
+			snapshot, err := readSnapshot(ctx, pr.GitHubPRNumber)
+			if err != nil {
+				return fmt.Errorf("%w: %w", errScheduleSnapshotUnavailable, err)
+			}
+			// Observe cancellation after the provider read, then hold the parent
+			// row through admission so cancellation and recovery have an order.
+			var parentStatus models.SessionStatus
+			if err := tx.QueryRow(ctx, `SELECT status FROM sessions WHERE org_id=$1 AND id=$2 FOR UPDATE`, input.OrgID, input.PriorSessionID).Scan(&parentStatus); err != nil {
+				return err
+			}
+			if parentStatus == models.SessionStatusCancelled {
+				result = ReviewRequestedResult{Processed: true, IgnoredReason: "cancelled"}
+				return nil
+			}
+			readSnapshot = func(context.Context, int) (ghservice.CodeReviewPullRequestSnapshot, error) { return snapshot, nil }
+		}
 		if !input.ExplicitRequest && errors.Is(latestErr, pgx.ErrNoRows) && state.PendingInput == nil {
 			result = ReviewRequestedResult{IgnoredReason: "review_not_previously_requested"}
 			return nil
@@ -418,6 +453,7 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 		// Automated updates move the target but preserve a pending explicit request.
 		if pending.Input.ExplicitRequest && !input.ExplicitRequest {
 			input.ExplicitRequest = true
+			input.AutomaticRecovery = pending.Input.AutomaticRecovery
 			input.GitHubDeliveryID = pending.Input.GitHubDeliveryID
 			input.RequestContext = pending.Input.RequestContext
 			input.TriggerSource = pending.Input.TriggerSource
@@ -521,6 +557,9 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 			state.Generation++
 		}
 		if requestID != uuid.Nil {
+			if err := supersedeOverwrittenCaptureRecovery(ctx, tx, state, pending, input, requestID); err != nil {
+				return err
+			}
 			state.PendingRequestID = &requestID
 		}
 		if state.FirstPendingAt == nil {
@@ -569,7 +608,10 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 		if err != nil {
 			return err
 		}
-		applyScheduleWait(state, policy.Config, input.ExplicitRequest, approved, mode, now)
+		if err := settleApprovedCaptureRecoveryRequest(ctx, tx, state, input, approved); err != nil {
+			return err
+		}
+		applyScheduleWait(state, policy.Config, reviewAdmissionIsExplicit(input), approved, mode, now)
 		// Revoke obsolete target revisions in the same transaction as replacement
 		// intent. Actual thread cancellation follows commit.
 		if latestErr == nil && (latest.HeadSHA != snapshot.HeadSHA || latest.BaseSHA != snapshot.BaseSHA || baseRefChanged || analysisChanged || force) {
@@ -619,6 +661,34 @@ func (s *Service) cancelStaleScheduledThreads(ctx context.Context, orgID, prID u
 	}
 	_, err = s.threadCanceller.CancelActiveThreads(ctx, orgID, ids)
 	return err
+}
+
+// Approval clears automatic recovery intent permanently. Settle its exact
+// delivery before removing the request pointer, so later human requests cannot
+// attach the stopped recovery to an unrelated review.
+func settleApprovedCaptureRecoveryRequest(ctx context.Context, tx pgx.Tx, state *models.CodeReviewPRState, input ReviewChangedInput, approved bool) error {
+	if !approved || !input.AutomaticRecovery || state.PendingRequestID == nil {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `UPDATE code_review_requests SET status='cancelled' WHERE org_id=$1 AND pull_request_id=$2 AND id=$3 AND source_identity=$4 AND status='pending'`, state.OrgID, state.PullRequestID, *state.PendingRequestID, input.GitHubDeliveryID)
+	if err != nil {
+		return err
+	}
+	return db.SettleRetiredCapturedIdentityReassessments(ctx, tx, state.OrgID, state.PullRequestID)
+}
+
+// A new human request owns its own intent. Retire only the capture replacement
+// it actually overwrites rather than attaching the old dispute to that request.
+func supersedeOverwrittenCaptureRecovery(ctx context.Context, tx pgx.Tx, state *models.CodeReviewPRState, pending scheduledReviewIntent, input ReviewChangedInput, requestID uuid.UUID) error {
+	if !reviewAdmissionIsExplicit(input) || input.ChangeReason == captureIdentityChangeReason ||
+		pending.Input.ChangeReason != captureIdentityChangeReason || state.PendingRequestID == nil || *state.PendingRequestID == requestID {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `UPDATE code_review_requests SET status='superseded' WHERE org_id=$1 AND pull_request_id=$2 AND id=$3 AND source_identity=$4 AND status='pending'`, state.OrgID, state.PullRequestID, *state.PendingRequestID, pending.Input.GitHubDeliveryID)
+	if err != nil {
+		return err
+	}
+	return db.SettleRetiredCapturedIdentityReassessments(ctx, tx, state.OrgID, state.PullRequestID)
 }
 
 func applyScheduleWait(state *models.CodeReviewPRState, policy models.CodeReviewPolicyConfig, explicit, approved bool, mode models.CodeReviewRequestMode, now time.Time) {
@@ -807,7 +877,10 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 		if lastStart != nil {
 			current.LastAgentStartAt = lastStart
 		}
-		applyScheduleWait(current, policy.Config, intent.Input.ExplicitRequest, approved, intent.Mode, now)
+		if err := settleApprovedCaptureRecoveryRequest(ctx, tx, current, intent.Input, approved); err != nil {
+			return err
+		}
+		applyScheduleWait(current, policy.Config, reviewAdmissionIsExplicit(intent.Input), approved, intent.Mode, now)
 		if current.PendingInput == nil {
 			return finish()
 		}
@@ -834,7 +907,7 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 		if source == "" {
 			source = models.CodeReviewTriggerSourceAutoPolicy
 		}
-		opts := reviewStartOptions{triggerSource: source, forceReassessment: intent.Force, changeKey: fmt.Sprintf("schedule:%d", current.Generation), changeReason: in.ChangeReason, triggeringDisputeID: in.TriggeringDisputeID}
+		opts := reviewStartOptions{triggerSource: source, forceReassessment: intent.Force, changeKey: fmt.Sprintf("schedule:%d", current.Generation), changeReason: in.ChangeReason, triggeringDisputeID: in.TriggeringDisputeID, automaticRecovery: in.AutomaticRecovery}
 		submitted, err := scoped.metadata.GetLatestSubmittedByPullRequest(ctx, in.OrgID, in.PullRequestID)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
