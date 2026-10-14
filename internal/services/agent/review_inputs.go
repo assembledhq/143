@@ -696,7 +696,7 @@ def prepare():
     if missing:
         if not remote:
             sys.exit(42)
-        git(*fetch, "--stdin", remote, input=("\n".join(missing) + "\n").encode())
+        git("-c", "fetch.negotiationAlgorithm=noop", *fetch, "--stdin", remote, input=("\n".join(missing) + "\n").encode())
         if missing_objects(merge_base):
             raise ValueError("captured review trees remain incomplete after authenticated hydration")
     temporary = pathlib.Path(tempfile.mkdtemp(prefix=directory.name + ".tmp-", dir=directory.parent))
