@@ -34,6 +34,16 @@ func TestCodeReviewWorkspacePreparationFailureClassification(t *testing.T) {
 		{name: "Git HTTP 404 is deterministic", stage: agent.CodeReviewPreparationStageHydration, cause: errors.New("the requested URL returned error: 404")},
 		{name: "Git HTTP 502", stage: agent.CodeReviewPreparationStageHydration, cause: errors.New("the requested URL returned error: 502"), retry: true},
 		{name: "invalid pinned revision is deterministic", stage: agent.CodeReviewPreparationStageHydration, cause: errors.New("review workspace is missing or has an invalid pinned revision")},
+		{name: "unconfirmed cleanup is terminal", stage: agent.CodeReviewPreparationStageHydration, cause: agent.ErrCodeReviewPreparationCleanup},
+		{name: "unconfirmed cleanup with transient DNS is terminal", stage: agent.CodeReviewPreparationStageClone, cause: errors.Join(agent.ErrCodeReviewPreparationCleanup, &net.DNSError{Err: "temporary failure", IsTemporary: true})},
+		{name: "unconfirmed cleanup with transport EOF is terminal", stage: agent.CodeReviewPreparationStageHydration, cause: errors.Join(agent.ErrCodeReviewPreparationCleanup, io.ErrUnexpectedEOF)},
+		{name: "unconfirmed cleanup with transport diagnostics is terminal", stage: agent.CodeReviewPreparationStageCheckout, cause: errors.Join(agent.ErrCodeReviewPreparationCleanup, errors.New("connection reset by peer"))},
+		{name: "cleanup outside typed hydration retains deadline", stage: agent.CodeReviewPreparationStageReadiness, cause: errors.Join(agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageHydration, io.ErrUnexpectedEOF), agent.ErrCodeReviewPreparationCleanup, context.DeadlineExceeded), deadline: true},
+		{name: "cleanup outside typed hydration survives expired window", stage: agent.CodeReviewPreparationStageReadiness, cause: errors.Join(agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageHydration, io.ErrUnexpectedEOF), agent.ErrCodeReviewPreparationCleanup), expired: true, deadline: true},
+		{name: "unconfirmed cleanup retains original deadline", stage: agent.CodeReviewPreparationStageHydration, cause: errors.Join(agent.ErrCodeReviewPreparationCleanup, context.DeadlineExceeded), deadline: true},
+		{name: "unconfirmed cleanup survives expired durable budget", stage: agent.CodeReviewPreparationStageHydration, cause: agent.ErrCodeReviewPreparationCleanup, expired: true, deadline: true},
+		{name: "unconfirmed cleanup survives deadline context", stage: agent.CodeReviewPreparationStageHydration, cause: agent.ErrCodeReviewPreparationCleanup, ctxDeadline: true, deadline: true},
+		{name: "unconfirmed cleanup survives cancelled context", stage: agent.CodeReviewPreparationStageHydration, cause: agent.ErrCodeReviewPreparationCleanup, cancelled: true},
 		{name: "source integrity failure is deterministic", stage: agent.CodeReviewPreparationStageHydration, cause: agent.ErrCodeReviewSourceIntegrity},
 		{name: "source integrity failure never retries joined transport", stage: agent.CodeReviewPreparationStageHydration, cause: errors.Join(agent.ErrCodeReviewSourceIntegrity, io.ErrUnexpectedEOF)},
 		{name: "source integrity failure never retries transport diagnostics", stage: agent.CodeReviewPreparationStageHydration, cause: errors.Join(agent.ErrCodeReviewSourceIntegrity, errors.New("connection reset by peer"))},
@@ -80,6 +90,11 @@ func TestCodeReviewWorkspacePreparationFailureClassification(t *testing.T) {
 				require.ErrorAs(t, actual, &fatal, "deterministic, moved-head, cancelled and exhausted preparation must not repeat")
 			}
 			require.Equal(t, tt.deadline, errors.Is(actual, context.DeadlineExceeded), "deadline authority must survive generic preparer errors")
+			if errors.Is(tt.cause, agent.ErrCodeReviewPreparationCleanup) {
+				require.ErrorIs(t, actual, agent.ErrCodeReviewPreparationCleanup, "unconfirmed process cleanup must survive budget and cancellation ownership")
+				require.ErrorIs(t, actual, tt.cause, "cleanup classification must preserve all returned joined causes for internal diagnosis")
+				require.Equal(t, "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run.", actual.Error(), "terminal cleanup classification must persist only its finite safe explanation")
+			}
 			if errors.Is(tt.cause, agent.ErrCodeReviewSourceIntegrity) {
 				require.Equal(t, !tt.expired && !tt.ctxDeadline && !tt.cancelled, errors.Is(actual, agent.ErrCodeReviewSourceIntegrity), "source validation classification must preserve its terminal cause unless cancellation or the durable budget owns the outcome")
 			}
@@ -94,13 +109,16 @@ func TestCodeReviewWorkspaceWrappedTimeoutSafeMessage(t *testing.T) {
 	t.Parallel()
 	clone := agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageClone, errors.New("private raw stderr"))
 	integrity := agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageHydration, agent.ErrCodeReviewSourceIntegrity)
+	cleanup := agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageReadiness, agent.ErrCodeReviewPreparationCleanup)
 	tests := []struct {
 		name, raw string
 		known     bool
+		cleanup   bool
 		expected  string
 	}{
 		{name: "exact worker wrapper", raw: fmt.Sprintf("retryable job timed out after %s: %s", codeReviewWorkspaceWaitLimit, clone), known: true, expected: "Review workspace preparation exceeded its total eight-minute budget during repository clone. Review did not run. This is an operational review failure. Check repository access and sandbox network connectivity, then request a new review."},
 		{name: "source integrity under exact worker timeout wrapper", raw: fmt.Sprintf("retryable job timed out after %s: %s", codeReviewWorkspaceWaitLimit, integrity), known: true, expected: "Review workspace preparation exceeded its total eight-minute budget during pinned source hydration. Review did not run. This is an operational review failure. Restore access to the pinned base and head Git objects, then request a new review."},
+		{name: "cleanup under exact worker timeout wrapper", raw: fmt.Sprintf("retryable job timed out after %s: %s", codeReviewWorkspaceWaitLimit, cleanup), known: true, cleanup: true, expected: "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run. This is an operational review failure."},
 		{name: "raw suffix rejected", raw: fmt.Sprintf("retryable job timed out after %s: token=secret", codeReviewWorkspaceWaitLimit)},
 		{name: "nested prefix rejected", raw: fmt.Sprintf("retryable job timed out after %s: raw: %s", codeReviewWorkspaceWaitLimit, clone)},
 		{name: "different duration rejected", raw: "retryable job timed out after 30m0s: " + clone.Error()},
@@ -114,6 +132,7 @@ func TestCodeReviewWorkspaceWrappedTimeoutSafeMessage(t *testing.T) {
 			if known {
 				require.ErrorIs(t, actual, context.DeadlineExceeded, "worker timeout must render as exhausted total budget")
 				require.NotErrorIs(t, actual, agent.ErrCodeReviewSourceIntegrity, "the worker's expired preparation window must own the terminal outcome")
+				require.Equal(t, tt.cleanup, errors.Is(actual, agent.ErrCodeReviewPreparationCleanup), "the finite cleanup cause must survive the persisted timeout wrapper")
 				require.Equal(t, tt.expected, codeReviewWorkspacePreparationFailureMessage(actual), "timeout wrapper must preserve the source stage and author recovery guidance")
 			}
 		})

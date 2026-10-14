@@ -1057,7 +1057,7 @@ func recordCodeReviewAutomaticWait(ctx context.Context, store *db.CodeReviewStor
 func codeReviewTerminalFailureStatus(err error) (models.CodeReviewStatusCode, string, bool) {
 	var preparation *agent.CodeReviewWorkspacePreparationError
 	if errors.As(err, &preparation) {
-		return models.CodeReviewStatusCodeWorkerFailed, codeReviewWorkspacePreparationFailureMessage(preparation), true
+		return models.CodeReviewStatusCodeWorkerFailed, codeReviewWorkspacePreparationFailureMessage(err), true
 	}
 	if errors.Is(err, errFullAssessmentFreshnessInconclusive) {
 		return models.CodeReviewStatusCodeGitHubUnavailable,

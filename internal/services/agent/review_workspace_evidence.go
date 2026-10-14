@@ -507,6 +507,9 @@ func (o *Orchestrator) execReviewEvidenceInput(ctx context.Context, sandbox *San
 		}
 	}
 	if err != nil {
+		if errors.Is(err, ErrCodeReviewPreparationCleanup) {
+			return NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageDependencySetup, errors.Join(err, ctx.Err()))
+		}
 		// Preserve cancellation and sanitize private HTTP-header diagnostics,
 		// even if a provider or Git fails while handling the private input.
 		if ctx.Err() != nil {
@@ -642,7 +645,7 @@ func (o *Orchestrator) ensureCodeReviewWorkspaceEvidence(ctx context.Context, se
 	// only when pinned trees are missing. Healthy warm reuse and dependency
 	// repair with complete Git evidence need no installation-token lookup.
 	err = execute(reviewGitAuthentication{})
-	if errors.Is(err, errReviewHydrationRequired) && !verifyOnly {
+	if errors.Is(err, errReviewHydrationRequired) && !verifyOnly && !errors.Is(err, ErrCodeReviewPreparationCleanup) {
 		if o.github == nil {
 			err = errors.New("review evidence hydration dependencies unavailable")
 		} else {
@@ -657,7 +660,7 @@ func (o *Orchestrator) ensureCodeReviewWorkspaceEvidence(ctx context.Context, se
 		}
 	}
 	stage.End(observability.StageOutcome(prepareCtx, err))
-	if verifyOnly && err != nil && !errors.Is(err, ErrCodeReviewSourceIntegrity) {
+	if verifyOnly && err != nil && !errors.Is(err, ErrCodeReviewSourceIntegrity) && !errors.Is(err, ErrCodeReviewPreparationCleanup) {
 		return context.DeadlineExceeded
 	}
 	return err
@@ -732,25 +735,62 @@ func (o *Orchestrator) execReviewPreparationInput(ctx context.Context, sandbox *
 	defer cancel()
 	quotedCancel := "'" + shellEscapeSingleQuote(cancelPath) + "'"
 	quotedDone := "'" + shellEscapeSingleQuote(cancelPath+".done") + "'"
-	cleanupCommand := "/bin/rm -f " + quotedCancel + " " + quotedDone
+	// Only a finite regular-file status written by the wrapper can confirm
+	// cleanup. Failed, missing or malformed acknowledgement remains terminal.
+	confirmation := `import os, stat, sys
+valid = False
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as saved:
+        info = os.fstat(saved.fileno())
+        valid = stat.S_ISREG(info.st_mode) and info.st_size == 8 and saved.read(9) == b"cleaned\n"
+except OSError:
+    pass
+if valid:
+    try:
+        os.lstat("` + reviewWorkspaceCleanupQuarantinePath + `")
+        valid = False
+    except FileNotFoundError:
+        pass
+    except OSError:
+        valid = False
+if not valid:
+    try:
+        fd = os.open("` + reviewWorkspaceCleanupQuarantinePath + `", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        os.close(fd)
+sys.exit(0 if valid else 1)
+`
+	cleanupCommand := "/usr/bin/python3 -I -S -c '" + shellEscapeSingleQuote(confirmation) + "' " + quotedDone + "; status=$?; /bin/rm -f " + quotedCancel + " " + quotedDone + "; exit \"$status\""
 	if ctx.Err() != nil || err != nil {
-		cleanupCommand = "printf cancelled > " + quotedCancel + "; i=0; until test -f " + quotedDone + "; do i=$((i+1)); test \"$i\" -lt 40 || exit 1; /bin/sleep 0.1; done; " + cleanupCommand
+		cleanupCommand = "printf cancelled > " + quotedCancel + "; i=0; until test -f " + quotedDone + "; do i=$((i+1)); test \"$i\" -lt 40 || break; /bin/sleep 0.1; done; " + cleanupCommand
 	}
 	if cleanupErr := o.execReviewEvidence(cleanupCtx, sandbox, cleanupCommand, ""); cleanupErr != nil {
 		log.Warn().Err(cleanupErr).Msg("failed to confirm review preparation process cleanup")
+		err = errors.Join(err, ErrCodeReviewPreparationCleanup)
 	}
 	if ctx.Err() != nil && !finished {
 		select {
-		case <-result:
+		case executionErr := <-result:
+			if errors.Is(executionErr, ErrCodeReviewPreparationCleanup) {
+				err = errors.Join(err, executionErr)
+			}
 		case <-cleanupCtx.Done():
 			log.Warn().Msg("review preparation output stream did not close after cancellation cleanup")
 		}
 	}
 	if ctx.Err() != nil {
+		if errors.Is(err, ErrCodeReviewPreparationCleanup) {
+			return errors.Join(ctx.Err(), err)
+		}
 		return ctx.Err()
 	}
 	return err
 }
+
+const reviewWorkspaceCleanupQuarantinePath = "/tmp/143-review-preparation-quarantined"
 
 // All executors sharing a container serialize through a kernel advisory lock,
 // including executors in different server processes. Child process groups are
@@ -765,7 +805,10 @@ gitdir = os.path.join(workdir, ".git")
 receipt_path = os.path.join(gitdir, "143-review-evidence.json")
 deadline = time.monotonic() + (max(0, p["deadline_unix"] - time.time()) if p.get("deadline_unix") else p["timeout_seconds"])
 active = None
+stopping_child = False
+cleanup_failed = False
 cancel_path = p.get("cancel_path", "")
+quarantine_path = "` + reviewWorkspaceCleanupQuarantinePath + `"
 
 def check_cancelled():
     if cancel_path and os.path.exists(cancel_path):
@@ -773,27 +816,84 @@ def check_cancelled():
         raise RuntimeError("review workspace preparation cancelled")
 
 def stop_child():
-    global active
-    if active is not None:
-        group = active.pid
+    global active, stopping_child, cleanup_failed
+    if active is None:
+        return
+    child = active
+    group = child.pid
+    active = None  # Repeated cleanup cannot renew the owned child's allowance.
+    stopping_child = True
+    cleanup_deadline = time.monotonic() + 3
+    problems = []
+    try:
+        term_sent = False
         try:
             os.killpg(group, signal.SIGTERM)
+            term_sent = True
         except ProcessLookupError:
             pass
-        try:
-            active.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass
-        # The shell leader can exit while descendants ignore TERM. Always
-        # kill the captured group, even after waiting observes leader exit.
+        except OSError as error:
+            problems.append(("term", error.errno))
+        if term_sent:
+            try:
+                child.wait(timeout=min(2, max(0, cleanup_deadline - time.monotonic())))
+            except subprocess.TimeoutExpired:
+                pass
+            except OSError as error:
+                problems.append(("term_wait", error.errno))
+        # TERM or its wait may fail, and the leader may exit before descendants.
+        # Always attempt KILL against the originally captured group.
         try:
             os.killpg(group, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        active.wait()
-    active = None
+        except OSError as error:
+            problems.append(("kill", error.errno))
+        try:
+            child.wait(timeout=max(0, cleanup_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            problems.append(("kill_wait_timeout", None))
+        except OSError as error:
+            problems.append(("kill_wait", error.errno))
+    finally:
+        stopping_child = False
+        if problems:
+            cleanup_failed = True
+            quarantine_workspace()  # Persist before the shared preparation lock is released.
+    # Diagnostics cannot interrupt the signal/reap sequence. Record only finite
+    # operations, errno and the owned identities; never command/input/env data.
+    for operation, error_number in problems:
+        print("review workspace preparation process cleanup failed (operation=%s errno=%s pid=%d pgid=%d)" % (operation, error_number, child.pid, group), file=sys.stderr)
+
+def quarantine_workspace():
+    # Existing objects, including aliases and special files, already deny reuse.
+    # Never follow, truncate, read or clear an existing quarantine marker.
+    try:
+        descriptor = os.open(quarantine_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        return
+    os.close(descriptor)
+
+def check_workspace_quarantine():
+    global cleanup_failed
+    try:
+        os.lstat(quarantine_path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        cleanup_failed = True
+        raise RuntimeError("review workspace cleanup quarantine could not be checked; workspace must be recreated")
+    cleanup_failed = True
+    raise RuntimeError("review workspace process cleanup was not confirmed; workspace must be recreated")
+
+def require_process_cleanup():
+    check_workspace_quarantine()
+    if cleanup_failed:
+        raise RuntimeError("review workspace preparation process cleanup failed")
 
 def terminated(signum, frame):
+    if stopping_child:
+        return  # Let the original bounded cleanup finish its KILL/reap pass.
     stop_child()
     raise SystemExit(128 + signum)
 
@@ -821,6 +921,7 @@ def child_environment(authenticate=False, platform=False):
 
 def run(script, required=True, authenticate=False, platform=False):
     global active
+    check_workspace_quarantine()
     if not p.get("standalone", False) and script in (p.get("prepare"), p.get("verify_recipe"), p.get("verify_tools")) and auth is not None:
         raise RuntimeError("private review authentication was not released before repository preparation")
     check_cancelled()
@@ -841,6 +942,7 @@ def run(script, required=True, authenticate=False, platform=False):
         except subprocess.TimeoutExpired:
             pass
     stop_child()
+    require_process_cleanup()
     if required and code:
         if platform and script in (p.get("verify_git"), p.get("verify_captured_integrity")) and code == 125:
             raise SourceIntegrityFailure("pinned review source object integrity validation failed; workspace must be recreated")
@@ -849,6 +951,7 @@ def run(script, required=True, authenticate=False, platform=False):
 
 def capture(args):
     global active
+    check_workspace_quarantine()
     check_cancelled()
     if time.monotonic() >= deadline:
         raise TimeoutError("review workspace preparation timed out")
@@ -866,6 +969,7 @@ def capture(args):
         except subprocess.TimeoutExpired:
             pass
     stop_child()
+    require_process_cleanup()
     if code:
         raise RuntimeError("review workspace output verification failed (exit=%d)" % code)
     return data
@@ -1105,6 +1209,7 @@ def prepare_workspace():
                 if time.monotonic() >= deadline:
                     raise TimeoutError("review workspace preparation lock timed out")
                 time.sleep(0.1)
+        check_workspace_quarantine()
         validate_git_configuration()
         verify_object_integrity(p.get("verify_integrity"))
         if not run(p["verify_trees"], required=False,platform=True):
@@ -1153,6 +1258,7 @@ def prepare_workspace():
             verify_pinned_source()
             run(p["verify_trees"],platform=True)
             record = {"revision": p["receipt"], "evidence": evidence_manifest(required=True)}
+            check_workspace_quarantine()
             check_budget()
             fd, temporary = tempfile.mkstemp(prefix="143-review-receipt-", dir=gitdir)
             try:
@@ -1166,6 +1272,7 @@ def prepare_workspace():
         verify_pinned_source()
 
 try:
+    check_workspace_quarantine()
     message = read_preparation_input()
     p = message.pop("payload")
     auth = message.pop("authentication", None)
@@ -1190,10 +1297,17 @@ except Exception as error:
     print(str(error), file=sys.stderr)
     sys.exit(124 if isinstance(error, TimeoutError) else 125 if isinstance(error, SourceIntegrityFailure) else 126 if isinstance(error, HydrationRequired) else 1)
 finally:
-    stop_child()
-    if cancel_path:
-        with open(cancel_path + ".done", "w"):
-            pass
+    try:
+        stop_child()
+    finally:
+        if cancel_path:
+            # Completion is acknowledged even when cleanup failed; only the
+            # explicit cleaned status may confirm termination to the caller.
+            descriptor = os.open(cancel_path + ".done", os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "w") as saved:
+                if not stat.S_ISREG(os.fstat(saved.fileno()).st_mode):
+                    raise RuntimeError("review preparation completion marker must be regular")
+                saved.write("cleanup_failed\n" if cleanup_failed else "cleaned\n")
 `
 
 type reviewWorkspacePreparationPayload struct {

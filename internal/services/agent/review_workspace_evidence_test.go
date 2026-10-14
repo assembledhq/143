@@ -58,6 +58,8 @@ func (p localReviewEvidenceProvider) ExecWithStdin(ctx context.Context, sandbox 
 		diagnostic = strings.Replace(diagnostic, `raise RuntimeError("review Git configuration is unsafe for authenticated preparation; workspace must be recreated")`, `raise RuntimeError("review fixture configuration rejected key=%r" % globals().get("key", "topology"))`, 1)
 		command = strings.Replace(command, shellEscapeSingleQuote(reviewWorkspacePreparationPython), shellEscapeSingleQuote(diagnostic), 1)
 	}
+	// Each host fixture models a separate container namespace, including quoted paths.
+	command = strings.ReplaceAll(command, reviewWorkspaceCleanupQuarantinePath, shellEscapeSingleQuote(filepath.Join(sandbox.WorkDir, ".143-test-cleanup-quarantine")))
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = sandbox.WorkDir
 	cmd.Stdin = stdin

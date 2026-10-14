@@ -10165,11 +10165,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 		}
 		if err := continueErr; err != nil {
+			if errors.Is(err, agent.ErrCodeReviewPreparationCleanup) {
+				err = agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageReadiness, err)
+			}
 			if codeReviewAssessmentID != nil {
 				if errors.Is(err, db.ErrCodeReviewRecheckUserCancelled) {
 					return &FatalError{Err: err}
 				}
-				if errors.Is(err, agent.ErrSessionCancelled) || errors.Is(err, agent.ErrThreadCancelledBeforeWorkspaceReady) || errors.Is(context.Cause(jobCtx), agent.ErrUserCancelCause) {
+				if !errors.Is(err, agent.ErrCodeReviewPreparationCleanup) && (errors.Is(err, agent.ErrSessionCancelled) || errors.Is(err, agent.ErrThreadCancelledBeforeWorkspaceReady) || errors.Is(context.Cause(jobCtx), agent.ErrUserCancelCause)) {
 					jobID, hasJob := jobctx.JobIDFromContext(ctx)
 					lockToken, hasToken := jobctx.LockTokenFromContext(ctx)
 					if !hasJob || !hasToken {
@@ -10199,7 +10202,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						return &FatalError{Err: err}
 					}
 				}
-				if errors.Is(err, agent.ErrCodeReviewRecheckLeaseLost) || errors.Is(err, agent.ErrSandboxCapacity) || errors.Is(err, agent.ErrSnapshotPending) || errors.Is(err, agent.ErrSessionInterrupted) {
+				if !errors.Is(err, agent.ErrCodeReviewPreparationCleanup) && (errors.Is(err, agent.ErrCodeReviewRecheckLeaseLost) || errors.Is(err, agent.ErrSandboxCapacity) || errors.Is(err, agent.ErrSnapshotPending) || errors.Is(err, agent.ErrSessionInterrupted)) {
 					retryAfter := 2 * time.Second
 					return &RetryableError{Err: err, RetryAfter: &retryAfter}
 				}
@@ -10215,6 +10218,11 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					}
 					cancelFailure()
 				}
+				return &FatalError{Err: err}
+			}
+			if errors.Is(err, agent.ErrCodeReviewPreparationCleanup) {
+				logger.Warn().Err(err).Str("session_id", sessionID.String()).Str("thread_id", input.ThreadID).
+					Msg("review preparation process cleanup is unconfirmed; stopping continuation")
 				return &FatalError{Err: err}
 			}
 			cancellationError := errors.Is(err, agent.ErrSessionCancelled) ||
