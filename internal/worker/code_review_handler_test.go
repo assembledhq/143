@@ -1653,6 +1653,7 @@ func TestCodeReviewOrchestratorPromptIncludesMentionContext(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 		models.CodeReviewVisualEvidenceSnapshot{},
 	)
 
