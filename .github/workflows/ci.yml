@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'codex/review-evidence-*']
   push:
     branches: [main]
   schedule:
@@ -186,13 +186,28 @@ jobs:
         env:
           TEST_BROWSER_REQUIRED: "1"
         run: |
+          preview_chrome_path="$(command -v google-chrome)"
+          preview_chrome_binary="$(readlink -f "$preview_chrome_path")"
+          test -x "$preview_chrome_binary"
+          preview_chrome_version="$(timeout 5s "$preview_chrome_binary" --version)"
+          case "$preview_chrome_version" in
+            "Google Chrome "*) ;;
+            *) echo "CI browser must identify as Google Chrome" >&2; exit 1 ;;
+          esac
+          preview_chrome_dir="$(mktemp -d "${RUNNER_TEMP:?}/preview-chrome.XXXXXX")"
+          trap 'rm -rf "$preview_chrome_dir"' EXIT
+          # chromedp discovers headless_shell and Chromium before Google Chrome.
+          # This runner-owned alias selects validated Google Chrome for this fixture step.
+          ln -s "$preview_chrome_binary" "$preview_chrome_dir/headless_shell"
+          test "$(readlink -f "$preview_chrome_dir/headless_shell")" = "$preview_chrome_binary"
+          printf 'Preview test browser: %s (%s)\n' "$preview_chrome_binary" "$preview_chrome_version"
           mode=count
           race=()
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             mode=atomic
             race=(-race)
           fi
-          go test ./internal/services/preview -run '^TestBrowserChromeDP' -parallel=1 -count=1 -v \
+          PATH="$preview_chrome_dir:$PATH" go test ./internal/services/preview -run '^TestBrowserChromeDP' -parallel=1 -count=1 -v \
             -coverpkg=./internal/... -coverprofile=coverage-browser.out -covermode="$mode" \
             "${race[@]}" -timeout=180s
 
