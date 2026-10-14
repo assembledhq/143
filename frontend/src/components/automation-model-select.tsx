@@ -10,6 +10,10 @@ import {
 import { ModelOptionGroups } from "@/components/model-option-groups";
 import { useOpenCodeAvailability } from "@/hooks/use-opencode-models";
 import { api } from "@/lib/api";
+import {
+  agentModelSelectionValue,
+  parseAgentModelSelectionValue,
+} from "@/lib/agent-model-selection";
 import { queryKeys } from "@/lib/query-keys";
 import type {
   CodingCredentialSummary,
@@ -32,15 +36,6 @@ const AUTO_MODEL_VALUE = "__auto__";
 // Pi and OpenCode publish several identical provider/model ids, so a model id
 // alone can't say which agent the user picked it under. Each option carries its
 // group's agent so the choice survives the round trip.
-function selectionValue(agentType: string, model: string): string {
-  return `${agentType}::${model}`;
-}
-
-function parseSelectionValue(value: string): AutomationModelSelection {
-  const [agentType, ...modelParts] = value.split("::");
-  return { agentType: agentType || undefined, model: modelParts.join("::") };
-}
-
 export interface AutomationModelSelection {
   model: string;
   /** The agent group the model was picked from; undefined only when unknown. */
@@ -142,14 +137,18 @@ export function AutomationModelSelect({
 
   return (
     <Select
-      value={value ? selectionValue(currentAgentType, value) : AUTO_MODEL_VALUE}
-      onValueChange={(nextValue) =>
-        onValueChange(
-          nextValue === AUTO_MODEL_VALUE
-            ? undefined
-            : parseSelectionValue(nextValue),
-        )
-      }
+      value={value ? agentModelSelectionValue(currentAgentType, value) : AUTO_MODEL_VALUE}
+      onValueChange={(nextValue) => {
+        if (nextValue === AUTO_MODEL_VALUE) {
+          onValueChange(undefined);
+          return;
+        }
+        const selection = parseAgentModelSelectionValue(nextValue);
+        onValueChange({
+          agentType: selection.agent || undefined,
+          model: selection.model,
+        });
+      }}
     >
       <SelectTrigger id={id} aria-label={ariaLabel} density={density} className={triggerClassName}>
         <SelectValue placeholder="Auto" />
@@ -159,14 +158,14 @@ export function AutomationModelSelect({
         {value && !currentValueAvailable ? (
           <SelectGroup>
             <SelectLabel>Current selection</SelectLabel>
-            <SelectItem value={selectionValue(currentAgentType, value)}>
+            <SelectItem value={agentModelSelectionValue(currentAgentType, value)}>
               {value}
             </SelectItem>
           </SelectGroup>
         ) : null}
         <ModelOptionGroups
           modelGroups={modelGroups}
-          getOptionValue={(group, model) => selectionValue(group.key, model)}
+          getOptionValue={(group, model) => agentModelSelectionValue(group.key, model)}
           openCodeAvailability={openCodeAvailability}
           // Only keeps an OpenCode option with no runnable route visible, so
           // it only applies when the current value is that OpenCode option.

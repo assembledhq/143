@@ -52,6 +52,10 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { DurationInput } from "@/components/duration-input";
 import { ModelOptionGroups } from "@/components/model-option-groups";
+import {
+  agentModelSelectionValue,
+  parseAgentModelSelectionValue,
+} from "@/lib/agent-model-selection";
 import { ApiError, api } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
@@ -448,15 +452,6 @@ function apiErrorMessage(error: unknown): string | null {
   if (error instanceof ApiError) return error.message;
   if (error instanceof Error) return error.message;
   return "Request failed";
-}
-
-function selectionValue(agent: string, model: string): string {
-  return `${agent}::${model}`;
-}
-
-function parseSelectionValue(value: string): { agent: string; model: string } {
-  const [agent, ...modelParts] = value.split("::");
-  return { agent, model: modelParts.join("::") };
 }
 
 function defaultModelForAgent(agent: string, modelGroups: AgentModelGroup[]): string {
@@ -3437,7 +3432,7 @@ function AgentRosterControls({
                   <AgentModelSelect
                     ariaLabel={`Reviewer ${index + 1} model`}
                     infoDescription="Chooses the agent and model at this rank. Later choices run only when earlier choices cannot provide enough usable reviews. Findings that block approval still count as a completed review."
-                    value={selectionValue(agent, reviewerModels[index] ?? defaultModelForAgent(agent, modelGroups))}
+                    value={agentModelSelectionValue(agent, reviewerModels[index] ?? defaultModelForAgent(agent, modelGroups))}
                     modelGroups={modelGroups}
                     openCodeAvailability={openCodeAvailability}
                     currentAgent={agent}
@@ -3445,7 +3440,7 @@ function AgentRosterControls({
                     disabled={disabled}
                     onValueChange={(value) =>
                       commitPolicy((next) => {
-                        const selection = parseSelectionValue(value);
+                        const selection = parseAgentModelSelectionValue(value);
                         const reviewerModels = ensureReviewerModels(next, modelGroups);
                         const reasoningEfforts = ensureReviewerReasoningEfforts(next);
                         next.agent_roster.reviewers = next.agent_roster.reviewers.map((agent, i) => i === index ? selection.agent : agent);
@@ -3525,7 +3520,7 @@ function AgentRosterControls({
           <AgentModelSelect
             ariaLabel="Orchestrator model"
             infoDescription="Chooses the agent and model that combines reviewer evidence into findings and explicit human-review reasons. A selection is required; the backend applies severity rules and every deterministic safeguard."
-            value={selectionValue(config?.agent_roster.orchestrator ?? "", orchestratorModel)}
+            value={agentModelSelectionValue(config?.agent_roster.orchestrator ?? "", orchestratorModel)}
             modelGroups={modelGroups}
             openCodeAvailability={openCodeAvailability}
             currentAgent={config?.agent_roster.orchestrator}
@@ -3533,7 +3528,7 @@ function AgentRosterControls({
             disabled={disabled}
             onValueChange={(value) =>
               commitPolicy((next) => {
-                const selection = parseSelectionValue(value);
+                const selection = parseAgentModelSelectionValue(value);
                 next.agent_roster.orchestrator = selection.agent;
                 next.agent_roster.orchestrator_model = selection.model;
                 normalizeOrchestratorReasoningEffort(next);
@@ -3636,7 +3631,7 @@ function AgentModelSelect({
   infoDescription: string;
   onValueChange: (value: string) => void;
 }) {
-  const currentValueAvailable = modelGroups.some((group) => group.models.some((model) => selectionValue(group.key, model) === value));
+  const currentValueAvailable = modelGroups.some((group) => group.models.some((model) => agentModelSelectionValue(group.key, model) === value));
 
   return (
     <div className="flex min-w-0 items-center gap-1.5">
@@ -3648,12 +3643,12 @@ function AgentModelSelect({
         {!currentValueAvailable && currentAgent && currentModel ? (
           <SelectGroup>
             <SelectLabel>Current selection</SelectLabel>
-            <SelectItem value={selectionValue(currentAgent, currentModel)}>
+            <SelectItem value={agentModelSelectionValue(currentAgent, currentModel)}>
               {AGENTS_BY_KEY[currentAgent]?.label ?? currentAgent} · {modelOptionLabel(currentModel)}
             </SelectItem>
           </SelectGroup>
         ) : null}
-          <ModelOptionGroups modelGroups={modelGroups} getOptionValue={(group, model) => selectionValue(group.key, model)} openCodeAvailability={openCodeAvailability} />
+          <ModelOptionGroups modelGroups={modelGroups} getOptionValue={(group, model) => agentModelSelectionValue(group.key, model)} openCodeAvailability={openCodeAvailability} />
       </SelectContent>
     </Select>
       <SettingInfoTooltip label={ariaLabel} description={infoDescription} />
