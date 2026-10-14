@@ -10,7 +10,7 @@ import threading
 import time
 import types
 
-EXPECTED_SHA256 = "75b7c880581cfd5f5d8592b948e317e9d1589f721ebaaa547ae4b3ebef8f51ca"
+EXPECTED_SHA256 = "f7e372aef2449752093346c499ee5f2b38aa7c1ba92fa8d0221e5c50627dd7fd"
 PREFIX = "143_SOURCE_PROFILE_V1 "
 MAX_RECORDS = 20000
 _dumps = json.dumps
@@ -121,10 +121,14 @@ def install(namespace):
                 result = original(*args, **kwargs)
                 failed = False
                 try:
-                    if name in ("selected_artifacts", "input_hashes", "tree_inventory"):
+                    if name in ("selected_artifacts", "input_hashes"):
                         if type(result) not in (dict, list):
                             raise ValueError
                         metrics["items"] = len(result)
+                    elif name == "write_receipt":
+                        if type(result) is not int:
+                            raise ValueError
+                        metrics["items"] = result
                     elif name == "check_source_capacity":
                         metrics = {"items": result["entries"], "bytes": result["path_bytes"]}
                     elif name == "read_once":
@@ -143,9 +147,61 @@ def install(namespace):
 
     for name, phase, mode in (("selected_artifacts", 1, None), ("read_once", 2, "download"),
                               ("extract", 3, "extract"), ("input_hashes", 6, None),
-                              ("check_source_capacity", 7, None), ("tree_inventory", 8, "path"),
+                              ("check_source_capacity", 7, None), ("write_receipt", 9, None),
                               ("remove_tree", 10, "path")):
         wrap(name, phase, mode)
+
+    original_inventory = namespace["iter_tree_inventory"]
+
+    @functools.wraps(original_inventory)
+    def inventory(*args, **kwargs):
+        # Bind arguments now, while the original generator body stays lazy.
+        iterator = original_inventory(*args, **kwargs)
+
+        def measured():
+            try:
+                cat = category(args, kwargs, "path")
+            except BaseException:
+                invalidate()
+                cat = 1
+            started = begin(8, cat)
+            failed = True
+            items = 0
+
+            class Counted:
+                def __iter__(self):
+                    return self
+
+                def observed(self, operation, *values):
+                    nonlocal items
+                    value = operation(*values)
+                    items += 1
+                    return value
+
+                def __next__(self):
+                    return self.observed(iterator.__next__)
+
+                def send(self, value):
+                    return self.observed(iterator.send, value)
+
+                def throw(self, *values):
+                    return self.observed(iterator.throw, *values)
+
+                def close(self):
+                    return iterator.close()
+
+            try:
+                result = yield from Counted()
+                failed = False
+                return result
+            finally:
+                # A close before exhaustion is partial, even when close itself
+                # succeeds (for example, a receipt deadline after one hash).
+                end(8, cat, started, failed, items=items)
+
+        return measured()
+
+    namespace["iter_tree_inventory"] = inventory
 
     original_additional = namespace["prepare_additional"]
     original_run = namespace["subprocess"].run
@@ -192,40 +248,6 @@ def install(namespace):
 
     namespace["prepare_additional"] = additional
     namespace["subprocess"].run = run
-    original_write = namespace["Path"].write_text
-    original_dumps = namespace["json"].dumps
-
-    def receipt_call(original, *args, **kwargs):
-        started = begin(9, 1)
-        failed = True
-        try:
-            result = original(*args, **kwargs)
-            failed = False
-            return result
-        finally:
-            end(9, 1, started, failed)
-
-    @functools.wraps(original_write)
-    def write_text(path, *args, **kwargs):
-        try:
-            receipt = path.name == "receipt.json"
-        except BaseException:
-            invalidate()
-            receipt = False
-        return receipt_call(original_write, path, *args, **kwargs) if receipt else original_write(path, *args, **kwargs)
-
-    @functools.wraps(original_dumps)
-    def dumps(*args, **kwargs):
-        try:
-            value = argument(args, kwargs, 0, "obj")
-            receipt = type(value) is dict and value.keys() == {"version", "inputs", "files"} and value["version"] == 1
-        except BaseException:
-            invalidate()
-            receipt = False
-        return receipt_call(original_dumps, *args, **kwargs) if receipt else original_dumps(*args, **kwargs)
-
-    namespace["Path"].write_text = write_text
-    namespace["json"].dumps = dumps
 
 
 def main():

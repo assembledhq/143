@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -628,7 +629,7 @@ func (p *realReviewProvider) Create(ctx context.Context, cfg agent.SandboxConfig
 		p.mu.Unlock()
 	}
 	monitor := newRealReviewMemoryMonitor(sandbox.ID, func() realReviewMemorySample {
-		return readRealReviewMemorySample("/sys/fs/cgroup", sandbox.ID, p.profileSourceHelper)
+		return readRealReviewMemorySample("/sys/fs/cgroup", sandbox.ID)
 	}, 500*time.Millisecond, 45*time.Minute, profile)
 	p.mu.Lock()
 	if p.memoryMonitors == nil {
@@ -782,19 +783,33 @@ type realReviewMemorySample struct {
 	MemoryStat         map[string]int64 `json:"memory_stat,omitempty"`
 }
 
+// Values come from one sequential sampling pass, not an atomic kernel snapshot.
+// shmem is included in file, and slab overlaps kernel; these fields are not summed.
+type realReviewMemoryStatAtCurrentPeak struct {
+	SampleNumber          int              `json:"sample_number"`
+	MemoryCurrentBytes    int64            `json:"memory_current_bytes"`
+	MemoryStat            map[string]int64 `json:"memory_stat"`
+	MemoryStatUnavailable bool             `json:"memory_stat_unavailable"`
+	ObservationScope      string           `json:"observation_scope"`
+}
+
+const realReviewMemoryStatScope = "same sequential sampling pass as memory.current; not an atomic kernel snapshot; first sample wins ties; overlapping fields must not be summed"
+
 type realReviewMemoryTelemetry struct {
-	CgroupPath              string                 `json:"source_cgroup_path"`
-	IntervalMS              int64                  `json:"interval_ms"`
-	MaxDurationMS           int64                  `json:"max_duration_ms"`
-	ReadLimitsBytes         map[string]int64       `json:"read_limits_bytes"`
-	Samples                 int                    `json:"sample_count"`
-	CompleteSamples         int                    `json:"complete_sample_count"`
-	Latest                  realReviewMemorySample `json:"latest"`
-	MaxObservedPeakBytes    *int64                 `json:"max_observed_memory_peak_bytes"`
-	MaxObservedCurrentBytes *int64                 `json:"max_observed_memory_current_bytes"`
-	MaxObservedEvents       map[string]int64       `json:"max_observed_memory_events"`
-	LifetimeExpired         bool                   `json:"lifetime_expired"`
-	MaxObservedStat         map[string]int64       `json:"max_observed_memory_stat,omitempty"`
+	CgroupPath              string                             `json:"source_cgroup_path"`
+	IntervalMS              int64                              `json:"interval_ms"`
+	MaxDurationMS           int64                              `json:"max_duration_ms"`
+	ReadLimitsBytes         map[string]int64                   `json:"read_limits_bytes"`
+	Samples                 int                                `json:"sample_count"`
+	CompleteSamples         int                                `json:"complete_sample_count"`
+	Latest                  realReviewMemorySample             `json:"latest"`
+	MaxObservedPeakBytes    *int64                             `json:"max_observed_memory_peak_bytes"`
+	MaxObservedCurrentBytes *int64                             `json:"max_observed_memory_current_bytes"`
+	MaxObservedEvents       map[string]int64                   `json:"max_observed_memory_events"`
+	LifetimeExpired         bool                               `json:"lifetime_expired"`
+	MaxObservedStat         map[string]int64                   `json:"max_observed_memory_stat,omitempty"`
+	StatSamples             int                                `json:"memory_stat_sample_count"`
+	StatAtMaxCurrent        *realReviewMemoryStatAtCurrentPeak `json:"memory_stat_at_max_observed_memory_current"`
 }
 
 type realReviewMemoryMonitor struct {
@@ -813,10 +828,9 @@ func newRealReviewMemoryMonitor(containerID string, read func() realReviewMemory
 	ctx, cancel := context.WithTimeout(context.Background(), lifetime)
 	monitor := &realReviewMemoryMonitor{cancel: cancel, done: make(chan struct{}), read: read,
 		retained: realReviewMemoryTelemetry{CgroupPath: "/docker/" + containerID, IntervalMS: interval.Milliseconds(), MaxDurationMS: lifetime.Milliseconds(),
-			ReadLimitsBytes: map[string]int64{"memory.peak": 128, "memory.current": 128, "memory.events": 4096}}}
+			ReadLimitsBytes: map[string]int64{"memory.peak": 128, "memory.current": 128, "memory.events": 4096, "memory.stat": 8192}}}
 	if len(profiles) > 0 && profiles[0] != nil {
 		monitor.profile = profiles[0]
-		monitor.retained.ReadLimitsBytes["memory.stat"] = 8192
 	}
 	monitor.record(read())
 	go func() {
@@ -844,13 +858,26 @@ func (m *realReviewMemoryMonitor) record(sample realReviewMemorySample) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.retained.Samples++
-	if len(sample.UnavailableFields) == 0 && sample.MemoryPeakBytes != nil && sample.MemoryCurrentBytes != nil && sample.MemoryEvents != nil {
+	coreComplete := sample.MemoryPeakBytes != nil && sample.MemoryCurrentBytes != nil && sample.MemoryEvents != nil
+	for _, field := range sample.UnavailableFields {
+		if field != "memory.stat" {
+			coreComplete = false
+		}
+	}
+	if coreComplete {
 		m.retained.CompleteSamples++
 	}
-	m.retained.Latest = sample
+	m.retained.Latest = cloneRealReviewMemorySample(sample)
+	if sample.MemoryCurrentBytes != nil && (m.retained.MaxObservedCurrentBytes == nil || *sample.MemoryCurrentBytes > *m.retained.MaxObservedCurrentBytes) {
+		// Replace even when this pass lacks stat data: an earlier vector is not
+		// evidence about the sample with the highest observed memory.current.
+		m.retained.StatAtMaxCurrent = &realReviewMemoryStatAtCurrentPeak{SampleNumber: m.retained.Samples, MemoryCurrentBytes: *sample.MemoryCurrentBytes,
+			MemoryStat: maps.Clone(sample.MemoryStat), MemoryStatUnavailable: sample.MemoryStat == nil, ObservationScope: realReviewMemoryStatScope}
+	}
 	m.retained.MaxObservedPeakBytes = retainRealReviewMemoryMaximum(m.retained.MaxObservedPeakBytes, sample.MemoryPeakBytes)
 	m.retained.MaxObservedCurrentBytes = retainRealReviewMemoryMaximum(m.retained.MaxObservedCurrentBytes, sample.MemoryCurrentBytes)
 	if sample.MemoryStat != nil {
+		m.retained.StatSamples++
 		if m.retained.MaxObservedStat == nil {
 			m.retained.MaxObservedStat = map[string]int64{}
 		}
@@ -888,16 +915,32 @@ func (m *realReviewMemoryMonitor) stop() realReviewMemoryTelemetry {
 	})
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.retained
+	result := m.retained
+	result.ReadLimitsBytes = maps.Clone(result.ReadLimitsBytes)
+	result.Latest = cloneRealReviewMemorySample(result.Latest)
+	result.MaxObservedPeakBytes = retainRealReviewMemoryMaximum(nil, result.MaxObservedPeakBytes)
+	result.MaxObservedCurrentBytes = retainRealReviewMemoryMaximum(nil, result.MaxObservedCurrentBytes)
+	result.MaxObservedEvents, result.MaxObservedStat = maps.Clone(result.MaxObservedEvents), maps.Clone(result.MaxObservedStat)
+	if result.StatAtMaxCurrent != nil {
+		peak := *result.StatAtMaxCurrent
+		peak.MemoryStat = maps.Clone(peak.MemoryStat)
+		result.StatAtMaxCurrent = &peak
+	}
+	return result
 }
 
-func readRealReviewMemorySample(cgroupRoot, containerID string, profileStat ...bool) realReviewMemorySample {
+func cloneRealReviewMemorySample(sample realReviewMemorySample) realReviewMemorySample {
+	sample.MemoryPeakBytes = retainRealReviewMemoryMaximum(nil, sample.MemoryPeakBytes)
+	sample.MemoryCurrentBytes = retainRealReviewMemoryMaximum(nil, sample.MemoryCurrentBytes)
+	sample.MemoryEvents, sample.MemoryStat = maps.Clone(sample.MemoryEvents), maps.Clone(sample.MemoryStat)
+	sample.UnavailableFields = slices.Clone(sample.UnavailableFields)
+	return sample
+}
+
+func readRealReviewMemorySample(cgroupRoot, containerID string) realReviewMemorySample {
 	sample := realReviewMemorySample{UnavailableFields: []string{}}
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(containerID) {
-		sample.UnavailableFields = []string{"memory.events", "memory.peak", "memory.current"}
-		if len(profileStat) > 0 && profileStat[0] {
-			sample.UnavailableFields = append(sample.UnavailableFields, "memory.stat")
-		}
+		sample.UnavailableFields = []string{"memory.events", "memory.peak", "memory.current", "memory.stat"}
 		return sample
 	}
 	base := "docker/" + containerID + "/"
@@ -927,14 +970,12 @@ func readRealReviewMemorySample(cgroupRoot, containerID string, profileStat ...b
 			sample.MemoryCurrentBytes = &value
 		}
 	}
-	if len(profileStat) > 0 && profileStat[0] {
-		raw, err := readRealReviewKernelFile(cgroupRoot, base+"memory.stat", 8192)
-		if err == nil {
-			sample.MemoryStat, err = realReviewMemoryStat(raw)
-		}
-		if err != nil {
-			sample.UnavailableFields = append(sample.UnavailableFields, "memory.stat")
-		}
+	raw, err := readRealReviewKernelFile(cgroupRoot, base+"memory.stat", 8192)
+	if err == nil {
+		sample.MemoryStat, err = realReviewMemoryStat(raw)
+	}
+	if err != nil {
+		sample.UnavailableFields = append(sample.UnavailableFields, "memory.stat")
 	}
 	return sample
 }
@@ -943,7 +984,7 @@ func realReviewMemoryStat(raw []byte) (map[string]int64, error) {
 	if len(raw) > 8192 {
 		return nil, errors.New("memory stat observation exceeded its fixed read bound")
 	}
-	result := map[string]int64{}
+	result, seen := map[string]int64{}, map[string]bool{}
 	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 {
@@ -953,15 +994,16 @@ func realReviewMemoryStat(raw []byte) (map[string]int64, error) {
 		if err != nil {
 			return nil, errors.New("memory stat observation requires finite keyed values")
 		}
+		if seen[fields[0]] {
+			return nil, errors.New("memory stat observation contains duplicate values")
+		}
+		seen[fields[0]] = true
 		switch fields[0] {
-		case "anon", "file", "file_dirty", "file_writeback":
-			if _, duplicate := result[fields[0]]; duplicate {
-				return nil, errors.New("memory stat observation contains conflicting values")
-			}
+		case "anon", "file", "shmem", "file_mapped", "file_dirty", "file_writeback", "slab", "kernel":
 			result[fields[0]] = value
 		}
 	}
-	if len(result) != 4 {
+	if len(result) != 8 {
 		return nil, errors.New("memory stat observation lacks required values")
 	}
 	return result, nil
@@ -1422,7 +1464,7 @@ func realReviewLogBuffer(token string) *acceptanceLogBuffer {
 	return buffer
 }
 
-const realReviewProfileHelperSHA256 = "75b7c880581cfd5f5d8592b948e317e9d1589f721ebaaa547ae4b3ebef8f51ca"
+const realReviewProfileHelperSHA256 = "f7e372aef2449752093346c499ee5f2b38aa7c1ba92fa8d0221e5c50627dd7fd"
 const realReviewProfilePrefix = "143_SOURCE_PROFILE_V1 "
 
 //go:embed testdata/review_source_profile.py

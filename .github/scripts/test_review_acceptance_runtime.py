@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Safety contracts for privileged ephemeral acceptance runtime preparation."""
 
+import contextlib
+import io
 import json
+import resource
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 PREPARE = Path(__file__).with_name("prepare-review-acceptance-runtime.sh")
@@ -193,6 +197,78 @@ class ReviewAcceptanceRuntimeTests(unittest.TestCase):
                              "runsc must preserve the credential socket transport while enforcing kernel cgroups")
             self.assertFalse((root / "privileged-command").exists(),
                              "daemon configuration construction should require no privileged operation")
+
+    def test_runsc_defaults_capture_is_bounded_optional_and_not_effective_configuration(self):
+        code = PREPARE.read_text().split("<<'PY_FLAGS'\n", 1)[1].split("\nPY_FLAGS", 1)[0]
+        cases = [
+            ("success", b"-overlay2 value (default root:self)\n", 0, False, False),
+            ("nonzero", b"fixed command failure\n", 2, False, False),
+            ("timeout", b"partial defaults\n", None, True, False),
+            ("execution error", b"", None, False, True),
+            ("preexec limit error", b"", None, False, True),
+            ("output limit", b"x" * 65536, -25, False, False),
+        ]
+        for name, data, status, timed_out, execution_error in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                artifacts = root / "artifacts"
+                artifacts.mkdir()
+                config = root / "daemon.json"
+                runtime = {"path": "/usr/bin/runsc", "runtimeArgs": ["--host-uds=open"]}
+                config.write_text(json.dumps({"runtimes": {"runsc": runtime}}))
+                before = config.read_bytes()
+
+                def command(args, *, stdout, stderr, timeout, check, preexec_fn):
+                    self.assertEqual(args, ["/usr/bin/runsc", "flags"],
+                                     "observation must only execute the fixed read-only command")
+                    self.assertEqual((stderr, timeout, check), (subprocess.STDOUT, 5, False))
+                    preexec_fn()
+                    stdout.write(data)
+                    if timed_out:
+                        raise subprocess.TimeoutExpired(args, timeout)
+                    if execution_error:
+                        error_type = subprocess.SubprocessError if name == "preexec limit error" else OSError
+                        raise error_type("synthetic-private-error")
+                    return subprocess.CompletedProcess(args, status)
+
+                with mock.patch("sys.argv", ["flags", str(config), str(artifacts)]), \
+                        mock.patch.object(subprocess, "run", side_effect=command) as run, \
+                        mock.patch.object(resource, "setrlimit") as bound, \
+                        contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+                    exec(compile(code, str(PREPARE), "exec"), {})
+                run.assert_called_once()
+                bound.assert_called_once_with(resource.RLIMIT_FSIZE, (65536, 65536))
+                self.assertEqual(config.read_bytes(), before,
+                                 "observation must not change runtime registration")
+                self.assertEqual((artifacts / "runsc-flags.txt").read_bytes(), data)
+                self.assertEqual(json.loads((artifacts / "runsc-flags-observation.json").read_text()), {
+                    "command": ["/usr/bin/runsc", "flags"], "exit_status": status,
+                    "timeout_seconds": 5, "timed_out": timed_out, "execution_error": execution_error,
+                    "retained_bytes": len(data), "output_limit_bytes": 65536,
+                    "possibly_truncated": len(data) == 65536, "compiled_defaults_only": True,
+                    "registered_runtime": runtime, "effective_container_overlay_verified": False,
+                })
+                self.assertNotIn("synthetic-private-error", diagnostics.getvalue(),
+                                 "optional execution errors must retain a fixed classification")
+
+    def test_runsc_defaults_capture_rejects_unexpected_registration_before_execution(self):
+        code = PREPARE.read_text().split("<<'PY_FLAGS'\n", 1)[1].split("\nPY_FLAGS", 1)[0]
+        cases = [
+            {"path": "/tmp/untrusted-runsc", "runtimeArgs": ["--host-uds=open"]},
+            {"path": "/usr/bin/runsc", "runtimeArgs": ["--host-uds=open", "--ignore-cgroups"]},
+        ]
+        for runtime in cases:
+            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = root / "daemon.json"
+                config.write_text(json.dumps({"runtimes": {"runsc": runtime}}))
+                with mock.patch("sys.argv", ["flags", str(config), str(root)]), \
+                        mock.patch.object(subprocess, "run") as run, \
+                        self.assertRaises(SystemExit):
+                    exec(compile(code, str(PREPARE), "exec"), {})
+                run.assert_not_called()
+                self.assertFalse((root / "runsc-flags.txt").exists(),
+                                 "untrusted registration must never be executed or claimed")
 
     def test_daemon_preflight_requires_matching_cgroup_v2_driver(self):
         cases = [
