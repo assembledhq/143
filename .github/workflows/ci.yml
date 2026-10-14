@@ -194,12 +194,27 @@ jobs:
           packages="$(go list ./internal/...)"
           unit_packages=()
           while IFS= read -r package; do
-            if [[ "$package" != "github.com/assembledhq/143/internal/services/agent" ]]; then
+            if [[ "$package" != "github.com/assembledhq/143/internal/services/agent" && "$package" != "github.com/assembledhq/143/internal/worker" ]]; then
               unit_packages+=("$package")
             fi
           done <<< "$packages"
           go test "${unit_packages[@]}" -skip '^TestBrowserChromeDP' -coverpkg=./internal/... \
             -coverprofile=coverage-unit-other.out -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
+
+      # Worker capture/recovery fixtures apply the complete schema per case.
+      # Run them after the other packages so they do not compete with DB fixtures.
+      # Current main exceeds the old 120s PR cap; retain its bounded 180s allowance.
+      - name: Run worker unit tests
+        timeout-minutes: 10
+        run: |
+          mode=count
+          race=()
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=atomic
+            race=(-race)
+          fi
+          go test ./internal/worker -coverpkg=./internal/... -coverprofile=coverage-unit-worker.out \
+            -covermode="$mode" "${race[@]}" -timeout=180s
 
       - name: Run agent unit tests
         timeout-minutes: 10
@@ -216,7 +231,7 @@ jobs:
             -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
 
       - name: Combine backend unit coverage
-        run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-agent.out
+        run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-worker.out coverage-unit-agent.out
 
       - name: Run server sandbox presence composition tests
         run: |
@@ -305,6 +320,7 @@ jobs:
             coverage.out
             coverage-unit.out
             coverage-unit-other.out
+            coverage-unit-worker.out
             coverage-unit-agent.out
             coverage-browser.out
             coverage-integration.out
