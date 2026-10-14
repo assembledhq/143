@@ -1,6 +1,7 @@
 package agent_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/assembledhq/143/internal/reviewpreparation"
 	"github.com/stretchr/testify/require"
 )
 
@@ -63,6 +65,17 @@ func TestRealReviewManifestBinding(t *testing.T) {
 		})
 	}
 }
+func TestRealReviewAcceptanceActivationIdentity(t *testing.T) {
+	t.Parallel()
+	repo := realReviewContractManifest().Repositories[0]
+	session := realReviewSession(t, repo)
+	policy, err := reviewpreparation.NewPolicy(true, []string{repo.FullName})
+	require.NoError(t, err, "real-repository acceptance must explicitly enable only its exact candidate repository")
+	active, err := policy.ForSession(context.Background(), realReviewRepoStore{repo}, session)
+	require.NoError(t, err, "acceptance repository ID, tenant, revision and clone identities must satisfy the production gate")
+	require.True(t, active, "acceptance fixtures must execute mandatory preparation through an explicit activation policy")
+}
+
 func TestRealReviewHostCredentialFile(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -295,6 +308,223 @@ func TestRealReviewDeclaredToolObservation(t *testing.T) {
 			actual := map[string]realReviewDeclaredTool{}
 			require.NoError(t, json.Unmarshal(output, &actual), "tool observation should encode bounded metadata only")
 			require.Equal(t, expected, actual, "observation must include exact declared pins, tool hashes and executable modes")
+		})
+	}
+}
+
+func TestRealReviewDeliberateMissingDeclaredTool(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		declared   bool
+		missing    bool
+		linkedTool bool
+		mode       os.FileMode
+		wantError  bool
+	}{
+		{name: "remove one literal declared executable", declared: true, mode: 0o755},
+		{name: "no declared executable", wantError: true},
+		{name: "already missing executable", declared: true, missing: true, wantError: true},
+		{name: "non-executable declaration", declared: true, mode: 0o644, wantError: true},
+		{name: "redirected executable", declared: true, linkedTool: true, mode: 0o755, wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			require.NoError(t, err, "fault injection fixture must use an unaliased filesystem root")
+			home, workspace := filepath.Join(root, "home"), filepath.Join(root, "repository")
+			require.NoError(t, os.MkdirAll(filepath.Join(home, ".local/bin"), 0o700), "isolated platform executable directory should exist")
+			require.NoError(t, os.MkdirAll(filepath.Join(workspace, ".143"), 0o700), "isolated candidate recipe directory should exist")
+			require.NoError(t, os.Mkdir(filepath.Join(workspace, ".git"), 0o700), "isolated readiness directory should exist")
+			dependencies := map[string]string{}
+			if tt.declared {
+				dependencies = map[string]string{"golangci-lint": "2.10.1", "yq": "4.49.1"}
+			}
+			configuration, err := json.Marshal(map[string]any{"dependencies": dependencies})
+			require.NoError(t, err, "fixture must encode its exact declared pins")
+			require.NoError(t, os.WriteFile(filepath.Join(workspace, ".143/config.json"), configuration, 0o600), "fault injection must read literal candidate recipe bytes")
+			contents, unrelated := []byte("literal tool fixture; never executed\n"), []byte("unrelated executable fixture; never executed\n")
+			executable := filepath.Join(home, ".local/bin/golangci-lint")
+			protected := filepath.Join(root, "protected-source")
+			require.NoError(t, os.WriteFile(protected, contents, 0o755), "source outside platform executable directory must survive every fault case")
+			if tt.declared {
+				require.NoError(t, os.WriteFile(filepath.Join(home, ".local/bin/yq"), unrelated, 0o755), "unrelated declared executable must survive removal")
+				if tt.linkedTool {
+					require.NoError(t, os.Symlink(protected, executable), "redirected tool must be rejected before deletion")
+				} else if !tt.missing {
+					require.NoError(t, os.WriteFile(executable, contents, tt.mode), "controlled declared executable must begin with exact bytes and mode")
+				}
+			}
+			receipt := filepath.Join(workspace, ".git/143-review-evidence.json")
+			receiptBytes := []byte(`{"revision":{"head_sha":"pinned"},"evidence":[{"path":".143/source","files":[["api.go","file",123]]}]}`)
+			require.NoError(t, os.WriteFile(receipt, receiptBytes, 0o600), "fault injection must leave captured repository evidence unchanged")
+			runProbe := func(script string) ([]byte, error) {
+				command := exec.Command("python3", "-I", "-S", "-c", script)
+				command.Dir = workspace
+				for _, value := range os.Environ() {
+					if !strings.HasPrefix(value, "HOME=") {
+						command.Env = append(command.Env, value)
+					}
+				}
+				command.Env = append(command.Env, "HOME="+home)
+				return command.CombinedOutput()
+			}
+			identityBefore, err := runProbe(realReviewReceiptIdentityPython)
+			require.NoError(t, err, "readiness identity should be observable before the deliberate fault")
+			output, runErr := runProbe(realReviewRemoveDeclaredToolPython)
+			if tt.wantError {
+				require.Error(t, runErr, "fault injection must reject absent, non-executable or redirected declared binaries")
+			} else {
+				require.NoError(t, runErr, "fault injection must remove only a validated literal platform executable: %s", output)
+				var actual realReviewRemovedTool
+				require.NoError(t, json.Unmarshal(output, &actual), "fault injection should return only bounded metadata")
+				expected := realReviewRemovedTool{
+					Name: "golangci-lint", Absent: true,
+					Tool:           realReviewDeclaredTool{DeclaredVersion: "2.10.1", Path: executable, SHA256: realReviewHash(contents), Mode: 0o755},
+					RemainingTools: map[string]realReviewDeclaredTool{"yq": {DeclaredVersion: "4.49.1", Path: filepath.Join(home, ".local/bin/yq"), SHA256: realReviewHash(unrelated), Mode: 0o755}},
+				}
+				require.Equal(t, expected, actual, "fault evidence must identify exact removed bytes and preserve unrelated declared executable identity")
+				_, statErr := os.Lstat(executable)
+				require.ErrorIs(t, statErr, os.ErrNotExist, "required executable must actually be absent before production repair")
+			}
+			identityAfter, err := runProbe(realReviewReceiptIdentityPython)
+			require.NoError(t, err, "readiness identity should remain observable after every fault attempt")
+			require.Equal(t, string(identityBefore), string(identityAfter), "deliberate executable removal must preserve the exact receipt inode, bytes, permissions and timestamps")
+			protectedAfter, err := os.ReadFile(protected)
+			require.NoError(t, err, "source outside the executable directory must remain readable")
+			require.Equal(t, contents, protectedAfter, "fault injection must never delete or alter unrelated source")
+		})
+	}
+}
+
+func TestRealReviewHostKernelResourceProof(t *testing.T) {
+	t.Parallel()
+	containerID := strings.Repeat("a", 64)
+	owned := "docker/" + containerID
+	tests := []struct {
+		name             string
+		overrides        map[string]string
+		missing          string
+		linked           string
+		linkedGroup      bool
+		nanoCPUs         int64
+		expectedQuotaUS  int64
+		expectedPeriodUS int64
+		wantError        bool
+	}{
+		{name: "exact dedicated two CPU three GiB kernel limits", expectedQuotaUS: 200000, expectedPeriodUS: 100000},
+		{name: "exact fractional CPU limit", overrides: map[string]string{owned + "/cpu.max": "50000 100000\n"}, nanoCPUs: 500000000, expectedQuotaUS: 50000, expectedPeriodUS: 100000},
+		{name: "equivalent finite CPU period", overrides: map[string]string{owned + "/cpu.max": "400000 200000\n"}, expectedQuotaUS: 400000, expectedPeriodUS: 200000},
+		{name: "unlimited memory", overrides: map[string]string{owned + "/memory.max": "max\n"}, wantError: true},
+		{name: "physical memory instead of declared bound", overrides: map[string]string{owned + "/memory.max": "8333333333\n"}, wantError: true},
+		{name: "smaller conflicting memory", overrides: map[string]string{owned + "/memory.max": "1073741824\n"}, wantError: true},
+		{name: "negative memory", overrides: map[string]string{owned + "/memory.max": "-1\n"}, wantError: true},
+		{name: "overflowing memory", overrides: map[string]string{owned + "/memory.max": "99999999999999999999\n"}, wantError: true},
+		{name: "unlimited CPU", overrides: map[string]string{owned + "/cpu.max": "max 100000\n"}, wantError: true},
+		{name: "host CPU availability does not prove quota", overrides: map[string]string{owned + "/cpu.max": "100000 100000\n"}, wantError: true},
+		{name: "zero CPU period", overrides: map[string]string{owned + "/cpu.max": "200000 0\n"}, wantError: true},
+		{name: "malformed CPU controller", overrides: map[string]string{owned + "/cpu.max": "200000\n"}, wantError: true},
+		{name: "shared unlimited service membership", overrides: map[string]string{"proc": "0::/system.slice/containerd.service\n"}, wantError: true},
+		{name: "other container membership", overrides: map[string]string{"proc": "0::/docker/" + strings.Repeat("b", 64) + "\n"}, wantError: true},
+		{name: "escaping membership", overrides: map[string]string{"proc": "0::/docker/../" + containerID + "\n"}, wantError: true},
+		{name: "noncanonical membership", overrides: map[string]string{"proc": "0::/docker//" + containerID + "\n"}, wantError: true},
+		{name: "conflicting unified memberships", overrides: map[string]string{"proc": "0::/docker/" + containerID + "\n0::/system.slice/containerd.service\n"}, wantError: true},
+		{name: "missing CPU controller", overrides: map[string]string{"cgroup.controllers": "memory pids\n"}, wantError: true},
+		{name: "missing memory controller file", missing: owned + "/memory.max", wantError: true},
+		{name: "missing host process", missing: "proc", wantError: true},
+		{name: "PID outside bounded group", overrides: map[string]string{owned + "/cgroup.procs": "70202\n"}, wantError: true},
+		{name: "redirected controller file", linked: owned + "/memory.max", wantError: true},
+		{name: "redirected container group", linkedGroup: true, wantError: true},
+		{name: "oversized controller value", overrides: map[string]string{owned + "/memory.max": strings.Repeat("3", 129)}, wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			require.NoError(t, err, "kernel fixtures must use isolated canonical roots")
+			procRoot, cgroupRoot := filepath.Join(root, "proc"), filepath.Join(root, "cgroup")
+			require.NoError(t, os.MkdirAll(filepath.Join(procRoot, "70201"), 0o700), "inspected host PID fixture must exist")
+			require.NoError(t, os.MkdirAll(filepath.Join(cgroupRoot, owned), 0o700), "dedicated host container cgroup fixture must exist")
+			files := map[string]string{
+				"proc":                  "0::/docker/" + containerID + "\n",
+				"cgroup.controllers":    "cpuset cpu io memory pids\n",
+				owned + "/memory.max":   "3221225472\n",
+				owned + "/cpu.max":      "200000 100000\n",
+				owned + "/cgroup.procs": "70200\n70201\n",
+			}
+			for name, value := range tt.overrides {
+				files[name] = value
+			}
+			for name, value := range files {
+				if name == tt.missing {
+					continue
+				}
+				filename := filepath.Join(cgroupRoot, name)
+				if name == "proc" {
+					filename = filepath.Join(procRoot, "70201/cgroup")
+				}
+				if name == tt.linked {
+					target := filepath.Join(root, "redirected-controller")
+					require.NoError(t, os.WriteFile(target, []byte(value), 0o600), "redirected controller target must preserve valid-looking intent")
+					require.NoError(t, os.Symlink(target, filename), "kernel proof must reject redirected controller reads")
+				} else {
+					require.NoError(t, os.WriteFile(filename, []byte(value), 0o600), "finite host controller observation fixture should exist")
+				}
+			}
+			if tt.linkedGroup {
+				group := filepath.Join(cgroupRoot, owned)
+				target := filepath.Join(root, "redirected-group")
+				require.NoError(t, os.Rename(group, target), "container group fixture may expose valid-looking redirected bounds")
+				require.NoError(t, os.Symlink(target, group), "host kernel proof must reject redirected cgroup parents")
+			}
+			nanoCPUs := tt.nanoCPUs
+			if nanoCPUs == 0 {
+				nanoCPUs = 2000000000
+			}
+			proof, err := readRealReviewKernelResources(procRoot, cgroupRoot, containerID, 70201, 3221225472, nanoCPUs)
+			if tt.wantError {
+				require.Error(t, err, "missing, unlimited, conflicting, shared or redirected kernel state must fail acceptance")
+				require.False(t, proof.Verified, "invalid host controller evidence must never claim enforced resource acceptance")
+				return
+			}
+			require.NoError(t, err, "matching finite per-container kernel bounds must pass without Docker or guest statistics")
+			expected := realReviewKernelResourceProof{ContainerID: containerID, SandboxPID: 70201, CgroupVersion: 2, CgroupPath: "/docker/" + containerID, MemoryMaxBytes: 3221225472, CPUQuotaUS: tt.expectedQuotaUS, CPUPeriodUS: tt.expectedPeriodUS, NanoCPUs: nanoCPUs, PIDMember: true, Verified: true}
+			require.Equal(t, expected, proof, "proof must bind exact inspected PID, owned cgroup membership and declared finite kernel limits")
+		})
+	}
+}
+
+func TestRealReviewFailureTraceRetainsOnlyFixedMetadata(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		raw       string
+		expected  []realReviewTrace
+		wantError bool
+	}{
+		{name: "uninitialized failed container", expected: []realReviewTrace{}},
+		{name: "fixed failed preparation timings", raw: "{\"stage\":\"repository_setup\",\"elapsed_ms\":120,\"authenticated\":false}\n{\"stage\":\"process_group\",\"pid\":70201,\"group\":70201,\"start\":\"99999\"}\n",
+			expected: []realReviewTrace{{Stage: "repository_setup", ElapsedMS: 120}, {Stage: "process_group", PID: 70201, Group: 70201, Start: "99999"}}},
+		{name: "untrusted stage text", raw: `{"stage":"private-token","elapsed_ms":1}`, wantError: true},
+		{name: "untrusted command field", raw: `{"stage":"repository_setup","command":"private-token"}`, wantError: true},
+		{name: "untrusted process identity text", raw: `{"stage":"process_group","pid":70201,"group":70201,"start":"private-token"}`, wantError: true},
+		{name: "multiple objects on one line", raw: `{"stage":"repository_setup"} {"stage":"tool_repair"}`, wantError: true},
+		{name: "negative stage duration", raw: `{"stage":"repository_setup","elapsed_ms":-1}`, wantError: true},
+		{name: "process identity on stage timing", raw: `{"stage":"repository_setup","start":"99999"}`, wantError: true},
+		{name: "oversized observation", raw: strings.Repeat("x", 1024*1024+1), wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual, err := decodeRealReviewTrace([]byte(tt.raw))
+			if tt.wantError {
+				require.Error(t, err, "failed-container diagnostic metadata must reject arbitrary text or oversized input")
+				require.Nil(t, actual, "rejected trace bytes must never be retained in private evidence")
+				return
+			}
+			require.NoError(t, err, "bounded fixed observer entries should survive preparation failure")
+			require.Equal(t, tt.expected, actual, "failed-container diagnostics must preserve only exact stage timing and numeric process identity")
 		})
 	}
 }
