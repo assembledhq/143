@@ -44,6 +44,15 @@ describe("Request Full Re-Review Now", () => {
 });
 
 describe("pending reviews", () => {
+  it("explains capacity waits without claiming an attempt started", async () => {
+    enableScheduling();
+    const target = queuedTarget(1);
+    server.use(http.get("*/api/v1/code-review-targets", () => HttpResponse.json({ data: [{ ...target, schedule: { ...target.schedule, wait_reason: "sandbox_capacity" } }], meta: {} })));
+    renderWithProviders(<ScheduledReviews enabled canManage={false} />);
+    const queue = within(await screen.findByRole("table", { name: "Review queue" }));
+    expect(queue.getByText("Waiting for review capacity")).toBeInTheDocument();
+    expect(screen.queryByText(/session/i)).not.toBeInTheDocument();
+  });
   it.each([true, false])("shows pending work without inventing a session; canManage=%s", async (canManage) => {
     enableScheduling();
     server.use(http.get("*/api/v1/code-review-targets", () => HttpResponse.json({ data: [{

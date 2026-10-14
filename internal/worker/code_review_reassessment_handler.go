@@ -15,6 +15,19 @@ import (
 
 const codeReviewReassessmentWait = 5 * time.Second
 
+const codeReviewCapacityWait = 15 * time.Second
+
+type codeReviewSandboxPreflighter interface {
+	ReviewSandboxAvailable(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error)
+}
+
+func newCodeReviewCapacityWait() error {
+	delay := codeReviewCapacityWait
+	// Waiting for fleet headroom is durable intake, not a failed provider attempt.
+	// Keep it pending without starting or extending a GitHub error retry window.
+	return &RetryableError{Err: fmt.Errorf("waiting for review sandbox capacity"), RetryAfter: &delay, BypassMaxRetryDuration: true}
+}
+
 func newStartCodeReviewReassessmentHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, _ string, payload json.RawMessage) error {
 		if stores == nil || stores.PullRequests == nil {
@@ -40,6 +53,15 @@ func newStartCodeReviewReassessmentHandler(stores *Stores, services *Services, l
 		if scheduler, ok := services.CodeReviewLifecycle.(codeReviewScheduler); ok && scheduler.SchedulingEnabled() && input.TriggeringDisputeID == nil && input.ReviewRequestDisputeID == nil {
 			_, err := services.CodeReviewLifecycle.QueueReviewChanged(ctx, input)
 			return err
+		}
+		if preflight, ok := services.CodeReviewLifecycle.(codeReviewSandboxPreflighter); ok {
+			available, err := preflight.ReviewSandboxAvailable(ctx, input.OrgID, input.RepositoryID, input.PullRequestID)
+			if err != nil {
+				return err
+			}
+			if !available {
+				return newCodeReviewCapacityWait()
+			}
 		}
 		pr, err := stores.PullRequests.GetByID(ctx, input.OrgID, input.PullRequestID)
 		if err != nil {
@@ -90,6 +112,9 @@ func newStartCodeReviewReassessmentHandler(stores *Stores, services *Services, l
 			return fmt.Errorf("start queued code review reassessment: %w", err)
 		}
 		if result.Deferred {
+			if result.IgnoredReason == "sandbox_capacity" {
+				return newCodeReviewCapacityWait()
+			}
 			logger.Info().
 				Str("org_id", input.OrgID.String()).
 				Str("pull_request_id", input.PullRequestID.String()).

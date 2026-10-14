@@ -1983,9 +1983,9 @@ func TestHandlePullRequestEvent_BaseEditEnqueuesHealthSync(t *testing.T) {
 			"merge_state": models.PullRequestMergeStateUnknown,
 		}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	expectCheckSyncLaneEmpty(t, jobMock, orgID, prID, pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonManual))
+	jobMock.ExpectQuery("INSERT INTO jobs").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	jobMock.ExpectCommit()
 
 	event := PullRequestEvent{Action: "edited", Number: 42, OwnerOrgID: &orgID}
 	event.Repository.FullName = "testorg/testrepo"
@@ -2025,9 +2025,9 @@ func TestHandlePullRequestEvent_OpenedEnqueuesHealthSync(t *testing.T) {
 			pgxmock.NewRows(handlerPRColumns).
 				AddRow(handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)...),
 		)
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	expectCheckSyncLaneEmpty(t, jobMock, orgID, prID, pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonManual))
+	jobMock.ExpectQuery("INSERT INTO jobs").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	jobMock.ExpectCommit()
 
 	event := PullRequestEvent{Action: "opened", Number: 42}
 	event.Repository.FullName = "testorg/testrepo"
@@ -2896,6 +2896,7 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 			models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 		))
 	dedupeKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, prID.String())
+	expectCheckSyncLaneEmpty(t, jobMock, orgID, prID, dedupeKey, prHealthRebuildJobType)
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":     orgID,
@@ -2907,6 +2908,7 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 			"run_at":     pgxmock.AnyArg(),
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	jobMock.ExpectCommit()
 	conclusion := "success"
 	event := CheckRunEvent{Action: "completed", DeliveryID: "delivery-check-101"}
 	event.Repository.FullName = "testorg/testrepo"
@@ -3099,6 +3101,9 @@ func TestEnqueuePullRequestCheckProjectionAlwaysRebuilds(t *testing.T) {
 					"dedupe_key": &rebuildKey,
 					"run_at":     pgxmock.AnyArg(),
 				}
+				if jobType == prHealthRebuildJobType {
+					expectCheckSyncLaneEmpty(t, mock, orgID, prID, rebuildKey, prHealthRebuildJobType)
+				}
 				if jobType == prHealthSyncJobType {
 					expectCheckSyncLaneEmpty(t, mock, orgID, prID, syncKey)
 					args = pgx.NamedArgs{
@@ -3114,9 +3119,7 @@ func TestEnqueuePullRequestCheckProjectionAlwaysRebuilds(t *testing.T) {
 				mock.ExpectQuery("INSERT INTO jobs").
 					WithArgs(args).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-				if jobType == prHealthSyncJobType {
-					mock.ExpectCommit()
-				}
+				mock.ExpectCommit()
 			}
 
 			service := &PRService{jobs: db.NewJobStore(mock), logger: zerolog.Nop()}
@@ -3196,6 +3199,7 @@ func TestHandleStatusEvent_EnqueuesHealthSyncForHeadSHA(t *testing.T) {
 			models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(0), now, now,
 		))
 	dedupeKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, prID.String())
+	expectCheckSyncLaneEmpty(t, jobMock, orgID, prID, dedupeKey, prHealthRebuildJobType)
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":     orgID,
@@ -3207,6 +3211,7 @@ func TestHandleStatusEvent_EnqueuesHealthSyncForHeadSHA(t *testing.T) {
 			"run_at":     pgxmock.AnyArg(),
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	jobMock.ExpectCommit()
 
 	event := StatusEvent{
 		ID:          202,
@@ -3975,9 +3980,9 @@ func TestHandlePullRequestEvent_OpenedWith143GeneratedPRTriggersAutoPreview(t *t
 		)
 
 	// 2. enqueuePullRequestStateSync inserts a job.
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	expectCheckSyncLaneEmpty(t, jobMock, orgID, prID, pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonManual))
+	jobMock.ExpectQuery("INSERT INTO jobs").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	jobMock.ExpectCommit()
 
 	// 3. handleAutoPreviewEvent: repo lookup.
 	repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
@@ -4049,9 +4054,9 @@ func TestHandlePullRequestEvent_ReadyForReviewWith143GeneratedPRTriggersAutoPrev
 	// 2. enqueuePullRequestStateSync inserts a job. Leaving the draft state
 	// changes GitHub's mergeable_state without moving the head, so the readback
 	// runs even though the baseline is current for this SHA.
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	expectCheckSyncLaneEmpty(t, jobMock, orgID, prID, pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonManual))
+	jobMock.ExpectQuery("INSERT INTO jobs").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	jobMock.ExpectCommit()
 
 	// 3. handleAutoPreviewEvent: repo lookup.
 	repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
@@ -4124,17 +4129,9 @@ func TestHandlePullRequestEvent_ReadyForReviewSyncsCurrentBaseline(t *testing.T)
 		WillReturnRows(pgxmock.NewRows(handlerPRColumns).AddRow(prRow...))
 
 	payload := &capturedPayload{}
-	dedupeKey := pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonManual)
-	jobMock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgx.NamedArgs{
-			"org_id":     orgID,
-			"queue":      prHealthSyncQueue,
-			"job_type":   prHealthSyncJobType,
-			"payload":    payload,
-			"priority":   6,
-			"dedupe_key": &dedupeKey,
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	expectCheckSyncLaneEmpty(t, jobMock, orgID, prID, pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonManual))
+	jobMock.ExpectQuery("INSERT INTO jobs").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), payload, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	jobMock.ExpectCommit()
 
 	require.NoError(t, svc.HandlePullRequestEvent(context.Background(), event),
 		"ready_for_review should be handled without error")

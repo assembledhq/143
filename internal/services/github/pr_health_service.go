@@ -57,7 +57,6 @@ const (
 	prHealthWebhookDebounce   = 5 * time.Second
 	prHealthCheckSyncDebounce = 15 * time.Second
 	maxHealthRebuildAttempts  = 3
-	maxRebuildEnqueueHops     = 8
 	requiredChecksCacheTTL    = 24 * time.Hour
 	noRequiredChecksCacheTTL  = 6 * time.Hour
 	prHealthSyncTimeout       = 2 * time.Minute
@@ -2352,12 +2351,15 @@ func (s *PRService) queuePullRequestStateSync(ctx context.Context, pr models.Pul
 	}
 	var jobID uuid.UUID
 	var err error
-	if reason == PullRequestSyncReasonIncomplete {
-		runAt := time.Now().UTC().Add(prHealthCheckSyncDebounce)
-		opts.RunAt = &runAt
-		jobID, err = s.jobs.EnqueuePullRequestCheckSync(ctx, pr.OrgID, pr.ID, opts)
-	} else {
+	if reason == PullRequestSyncReasonStaleReconcile || reason == PullRequestSyncReasonMergeabilityWait {
 		jobID, err = s.jobs.EnqueueWithOpts(ctx, pr.OrgID, opts)
+	} else {
+		runAt := time.Now().UTC()
+		if reason == PullRequestSyncReasonIncomplete {
+			runAt = runAt.Add(prHealthCheckSyncDebounce)
+		}
+		opts.RunAt = &runAt
+		jobID, err = s.jobs.EnqueuePullRequestHealthWork(ctx, pr.OrgID, pr.ID, opts)
 	}
 	if err != nil {
 		return fmt.Errorf("enqueue pull request health sync: %w", err)
@@ -2389,51 +2391,14 @@ func (s *PRService) enqueuePullRequestHealthRebuild(ctx context.Context, pr mode
 	if s.jobs == nil {
 		return nil
 	}
-	baseDedupeKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, pr.ID.String())
-	dedupeKey := baseDedupeKey
+	key := fmt.Sprintf("%s:%s", prHealthRebuildJobType, pr.ID.String())
 	runAt := time.Now().UTC().Add(prHealthWebhookDebounce)
-	for hop := 0; hop < maxRebuildEnqueueHops; hop++ {
-		jobID, err := s.jobs.EnqueueWithOpts(ctx, pr.OrgID, db.EnqueueOpts{
-			Queue:   prHealthSyncQueue,
-			JobType: prHealthRebuildJobType,
-			Payload: map[string]string{
-				"org_id":          pr.OrgID.String(),
-				"pull_request_id": pr.ID.String(),
-			},
-			Priority:  4,
-			DedupeKey: &dedupeKey,
-			RunAt:     &runAt,
-		})
-		if err != nil {
-			return fmt.Errorf("enqueue projected pull request health rebuild: %w", err)
-		}
-		if jobID != uuid.Nil {
-			return nil
-		}
-
-		active, err := s.jobs.GetActiveByDedupeKey(ctx, pr.OrgID, prHealthSyncQueue, dedupeKey)
-		if errors.Is(err, pgx.ErrNoRows) {
-			// The conflicting job completed between INSERT and lookup. Retry the
-			// same slot so this webhook still leaves durable work behind.
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("load active projected health rebuild: %w", err)
-		}
-		if active.Status == models.JobStatusPending {
-			// The event row committed before this lookup, so the pending job is
-			// guaranteed to observe it when it starts.
-			return nil
-		}
-		if active.Status != models.JobStatusRunning {
-			return fmt.Errorf("unexpected active projected health rebuild status %q", active.Status)
-		}
-		// A running job may already have read the projection. Chain one pending
-		// successor behind that exact attempt; all webhooks racing the same
-		// attempt collapse onto the same successor key.
-		dedupeKey = fmt.Sprintf("%s:after:%s", baseDedupeKey, active.ID.String())
-	}
-	return fmt.Errorf("projected health rebuild enqueue exceeded %d active-job hops", maxRebuildEnqueueHops)
+	_, err := s.jobs.EnqueuePullRequestHealthWork(ctx, pr.OrgID, pr.ID, db.EnqueueOpts{
+		Queue: prHealthSyncQueue, JobType: prHealthRebuildJobType,
+		Payload:  map[string]string{"org_id": pr.OrgID.String(), "pull_request_id": pr.ID.String()},
+		Priority: 4, DedupeKey: &key, RunAt: &runAt,
+	})
+	return err
 }
 
 func pullRequestStateSyncDedupeKey(pullRequestID uuid.UUID, reason PullRequestSyncReason) string {

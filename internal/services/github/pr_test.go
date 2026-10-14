@@ -4665,16 +4665,9 @@ func TestPushChangesToPR_EnqueuesHealthSyncAfterSuccessfulPush(t *testing.T) {
 	mock.ExpectExec("UPDATE session_diff_snapshots").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgx.NamedArgs{
-			"org_id":     orgID,
-			"queue":      "default",
-			"job_type":   "sync_pull_request_state",
-			"payload":    pgxmock.AnyArg(),
-			"priority":   6,
-			"dedupe_key": pgxmock.AnyArg(),
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	expectCheckSyncLaneEmpty(t, mock, orgID, prID, pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonHeadChanged))
+	mock.ExpectQuery("INSERT INTO jobs").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
 
 	provider := &prTestSandboxProvider{
 		execStdout:  pushHeadSHASentinel + headSHA + "\n",
@@ -4763,16 +4756,9 @@ func TestPushChangesToPR_UsesSessionSnapshotForUnmaterializedPrimaryChangeset(t 
 	mock.ExpectExec("UPDATE session_diff_snapshots").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgx.NamedArgs{
-			"org_id":     orgID,
-			"queue":      "default",
-			"job_type":   "sync_pull_request_state",
-			"payload":    pgxmock.AnyArg(),
-			"priority":   6,
-			"dedupe_key": pgxmock.AnyArg(),
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	expectCheckSyncLaneEmpty(t, mock, orgID, prID, pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonHeadChanged))
+	mock.ExpectQuery("INSERT INTO jobs").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
 
 	provider := &prTestSandboxProvider{
 		execStdout:  pushHeadSHASentinel + pushedHeadSHA + "\n",

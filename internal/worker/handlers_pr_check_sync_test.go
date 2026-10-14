@@ -25,8 +25,11 @@ func TestCheckSyncHandlerWaitsForPredecessor(t *testing.T) {
 		active   bool
 		queryErr error
 		wantSync int
+		reason   ghservice.PullRequestSyncReason
 	}{
 		{name: "running predecessor defers without attempt", active: true},
+		{name: "urgent head change waits for running predecessor", active: true, reason: ghservice.PullRequestSyncReasonHeadChanged},
+		{name: "urgent head change reads freshly after predecessor", wantSync: 1, reason: ghservice.PullRequestSyncReasonHeadChanged},
 		{name: "terminal predecessor permits fresh sync", wantSync: 1},
 		{name: "lookup failure cannot permit sync", queryErr: fmt.Errorf("database unavailable")},
 	} {
@@ -37,7 +40,7 @@ func TestCheckSyncHandlerWaitsForPredecessor(t *testing.T) {
 			defer mock.Close()
 			orgID, prID, predecessorID := uuid.New(), uuid.New(), uuid.New()
 			query := mock.ExpectQuery("SELECT status, run_at, created_at FROM jobs.*WHERE org_id = @org_id AND id = @predecessor_id.*payload->>'pull_request_id' = @pull_request_id").
-				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID.String(), "predecessor_id": predecessorID})
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID.String(), "predecessor_id": predecessorID, "job_type": "sync_pull_request_state"})
 			if tt.queryErr != nil {
 				query.WillReturnError(tt.queryErr)
 			} else {
@@ -48,15 +51,19 @@ func TestCheckSyncHandlerWaitsForPredecessor(t *testing.T) {
 				}
 				query.WillReturnRows(rows)
 			}
+			reason := tt.reason
+			if reason == "" {
+				reason = ghservice.PullRequestSyncReasonIncomplete
+			}
 			syncCalls := 0
 			services := &Services{PR: &stubPRService{syncPullRequestStateFn: func(ctx context.Context, gotOrgID, gotPRID uuid.UUID) error {
 				require.Equal(t, orgID, gotOrgID, "successor must retain tenant identity")
 				require.Equal(t, prID, gotPRID, "successor must retain pull request identity")
-				require.Equal(t, ghservice.PullRequestSyncReasonIncomplete, ghservice.PullRequestSyncReasonFromContext(ctx), "successor must retain check attribution")
+				require.Equal(t, reason, ghservice.PullRequestSyncReasonFromContext(ctx), "successor must retain check attribution")
 				syncCalls++
 				return nil
 			}}}
-			payload, err := json.Marshal(map[string]string{"org_id": orgID.String(), "pull_request_id": prID.String(), "sync_reason": "incomplete_check_set", "after_job_id": predecessorID.String()})
+			payload, err := json.Marshal(map[string]string{"org_id": orgID.String(), "pull_request_id": prID.String(), "sync_reason": string(reason), "after_job_id": predecessorID.String()})
 			require.NoError(t, err, "encode successor payload")
 			err = newSyncPullRequestStateHandler(&Stores{Jobs: db.NewJobStore(mock)}, services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
 			if tt.active {
@@ -82,7 +89,7 @@ func TestCheckSyncHandlerRejectsInvalidPredecessor(t *testing.T) {
 		name, reason, predecessor string
 		stores                    bool
 	}{
-		{name: "urgent lane never waits", reason: "head_changed", predecessor: uuid.NewString(), stores: true},
+		{name: "urgent successor missing store fails closed", reason: "head_changed", predecessor: uuid.NewString()},
 		{name: "missing store fails closed", reason: "incomplete_check_set", predecessor: uuid.NewString()},
 		{name: "invalid predecessor fails closed", reason: "incomplete_check_set", predecessor: "invalid", stores: true},
 	} {
@@ -133,7 +140,7 @@ func TestCheckSyncDependencyWaitPreservesGitHubRetryWindow(t *testing.T) {
 	defer mock.Close()
 	orgID, prID, predecessorID, lockToken := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	now := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
-	queryArgs := pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID.String(), "predecessor_id": predecessorID}
+	queryArgs := pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID.String(), "predecessor_id": predecessorID, "job_type": "sync_pull_request_state"}
 	mock.ExpectQuery("SELECT status, run_at, created_at FROM jobs").WithArgs(queryArgs).
 		WillReturnRows(pgxmock.NewRows([]string{"status", "run_at", "created_at"}).AddRow(models.JobStatusPending, now.Add(time.Hour), now.Add(-time.Hour)))
 	mock.ExpectQuery("SELECT status, run_at, created_at FROM jobs").WithArgs(queryArgs).

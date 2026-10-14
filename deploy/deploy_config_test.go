@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/config"
+	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
@@ -3125,4 +3127,33 @@ func TestWorkerCanReachSandboxBridge(t *testing.T) {
 	require.Contains(t, worker.Networks, "default", "worker must stay on the default compose network so it can reach chrome and other local services")
 	require.Contains(t, worker.Networks, "sandbox", "worker must join 143-sandbox so preview proxy dials can reach sandbox container IPs")
 	require.Greater(t, worker.Networks["default"].GatewayPriority, worker.Networks["sandbox"].GatewayPriority, "worker default gateway must stay on the compose default network so DB/private-fleet traffic does not route through the sandbox bridge")
+}
+
+func TestStandaloneWorkerIdentitySetupContracts(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, compose, service, example string }{
+		{"local development", "../docker-compose.yml", "server", "../.env.example"},
+		{"single-node production", "../docker-compose.single-node.yml", "api", "../.env.single-node.example"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			raw, err := os.ReadFile(tt.compose)
+			require.NoError(t, err, "read the supported standalone Compose entry point")
+			var parsed struct {
+				Services map[string]struct{ Environment map[string]string }
+			}
+			require.NoError(t, yaml.Unmarshal(raw, &parsed), "supported Compose must remain valid YAML")
+			expression := parsed.Services[tt.service].Environment["WORKER_PRIVATE_IP"]
+			require.True(t, strings.HasPrefix(expression, "${WORKER_PRIVATE_IP:?"), "Compose must reject missing identity before creating a worker that cannot admit reviews")
+			values, err := godotenv.Read(tt.example)
+			require.NoError(t, err, "parse the copied default setup template")
+			value, declared := values["WORKER_PRIVATE_IP"]
+			require.True(t, declared, "default setup must declare the required host identity for the operator to fill")
+			cfg := config.Config{Env: "development", Mode: "all", WorkerPrivateIP: value}
+			require.ErrorContains(t, cfg.ValidateSecrets(), "WORKER_PRIVATE_IP", "blank template identity must produce an actionable startup error rather than a hidden admission stall")
+			cfg.WorkerPrivateIP = "192.0.2.10"
+			require.NoError(t, cfg.ValidateSecrets(), "documented setup must work once the operator supplies a stable synthetic host IP")
+			require.Equal(t, "192.0.2.10", cfg.SandboxHostID(), "setup must advertise the exact configured identity instead of a generic constant fallback")
+		})
+	}
 }

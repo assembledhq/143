@@ -535,7 +535,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register(models.JobTypeRestackChangesets, newRestackChangesetsHandler(stores, services, logger))
 		w.Register(models.JobTypePublishChangesetStack, newPublishChangesetStackHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(stores, services, logger))
-		w.Register("rebuild_pull_request_health", newRebuildPullRequestHealthHandler(services, logger))
+		w.Register("rebuild_pull_request_health", newRebuildPullRequestHealthHandler(stores, services, logger))
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
 		w.Register("merge_pull_request_when_ready", newMergePullRequestWhenReadyHandler(services, logger))
@@ -11269,6 +11269,28 @@ func checkSyncPredecessorPollDelay(predecessor db.PullRequestCheckSyncPredecesso
 	return 5 * time.Second
 }
 
+func waitPullRequestHealthPredecessor(ctx context.Context, stores *Stores, orgID, prID uuid.UUID, rawID, jobType string) error {
+	if rawID == "" {
+		return nil
+	}
+	if stores == nil || stores.Jobs == nil {
+		return fmt.Errorf("health successor requires a job store")
+	}
+	id, err := uuid.Parse(rawID)
+	if err != nil {
+		return fmt.Errorf("parse health predecessor: %w", err)
+	}
+	predecessor, err := stores.Jobs.GetPullRequestCheckSyncPredecessor(ctx, orgID, prID, id, jobType)
+	if err != nil {
+		return err
+	}
+	if predecessor != nil {
+		delay := checkSyncPredecessorPollDelay(*predecessor, time.Now())
+		return &RetryableError{Err: fmt.Errorf("waiting for health predecessor %s", id), RetryAfter: &delay, BypassMaxRetryDuration: true}
+	}
+	return nil
+}
+
 func newSyncPullRequestStateHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -11292,22 +11314,8 @@ func newSyncPullRequestStateHandler(stores *Stores, services *Services, logger z
 		if syncReason.Validate() != nil {
 			syncReason = ghservice.PullRequestSyncReasonManual
 		}
-		if input.AfterJobID != "" {
-			if syncReason != ghservice.PullRequestSyncReasonIncomplete || stores == nil || stores.Jobs == nil {
-				return fmt.Errorf("check sync predecessor requires check lane and job store")
-			}
-			predecessorID, err := uuid.Parse(input.AfterJobID)
-			if err != nil {
-				return fmt.Errorf("parse check sync predecessor: %w", err)
-			}
-			predecessor, err := stores.Jobs.GetPullRequestCheckSyncPredecessor(ctx, orgID, pullRequestID, predecessorID)
-			if err != nil {
-				return err
-			}
-			if predecessor != nil {
-				delay := checkSyncPredecessorPollDelay(*predecessor, time.Now())
-				return &RetryableError{Err: fmt.Errorf("waiting for check sync predecessor %s", predecessorID), RetryAfter: &delay, BypassMaxRetryDuration: true}
-			}
+		if err := waitPullRequestHealthPredecessor(ctx, stores, orgID, pullRequestID, input.AfterJobID, "sync_pull_request_state"); err != nil {
+			return err
 		}
 		logger.Info().
 			Str("org_id", orgID.String()).
@@ -11346,11 +11354,12 @@ func newSyncPullRequestStateHandler(stores *Stores, services *Services, logger z
 	}
 }
 
-func newRebuildPullRequestHealthHandler(services *Services, logger zerolog.Logger) JobHandler {
+func newRebuildPullRequestHealthHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
 			OrgID         string `json:"org_id"`
 			PullRequestID string `json:"pull_request_id"`
+			AfterJobID    string `json:"after_job_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal rebuild_pull_request_health payload: %w", err)
@@ -11362,6 +11371,9 @@ func newRebuildPullRequestHealthHandler(services *Services, logger zerolog.Logge
 		pullRequestID, err := uuid.Parse(input.PullRequestID)
 		if err != nil {
 			return fmt.Errorf("parse pull request ID: %w", err)
+		}
+		if err := waitPullRequestHealthPredecessor(ctx, stores, orgID, pullRequestID, input.AfterJobID, "rebuild_pull_request_health"); err != nil {
+			return err
 		}
 		healthChanged, err := services.PR.RebuildPullRequestHealthFromCheckStates(ctx, orgID, pullRequestID)
 		if err != nil {

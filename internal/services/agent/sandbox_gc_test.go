@@ -56,11 +56,17 @@ type fakeSandboxGCStore struct {
 	finalize           map[string]bool
 	finalErr           error
 	reviewFinalize     map[string]bool
+	staleFinalize      map[string]bool
+	staleErr           error
 
 	mu              sync.Mutex
 	finalized       []string
 	finalOrgID      []uuid.UUID
 	reviewFinalized []string
+}
+
+func (f *fakeSandboxGCStore) FinalizeStaleTerminalCodeReviewContainer(_ context.Context, _ uuid.UUID, _ uuid.UUID, expectedContainerID string) (bool, error) {
+	return f.staleFinalize[expectedContainerID], f.staleErr
 }
 
 func (f *fakeSandboxGCStore) FinalizeIdleCodeReviewContainer(_ context.Context, _ uuid.UUID, _ uuid.UUID, expectedContainerID string) (bool, error) {
@@ -338,6 +344,33 @@ func TestSandboxGC_ReapOnceCleansTerminalCodeReviewContainer(t *testing.T) {
 			} else {
 				require.Empty(t, provider.destroyedIDs(), "GC should preserve a container still held by an active review")
 			}
+		})
+	}
+}
+
+func TestSandboxGC_StaleTerminalReviewOwnership(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		age     time.Duration
+		cleared bool
+		err     error
+		want    []string
+	}{
+		{name: "stale turn and recovery flags", age: time.Hour, cleared: true, want: []string{"stale-review"}},
+		{name: "hard age still requires durable fences", age: 25 * time.Hour, want: []string{}},
+		{name: "uncertain reconciliation cannot fall through", age: 25 * time.Hour, err: errors.New("database unavailable"), want: []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			now := time.Now()
+			provider := &fakeSandboxGCProvider{containers: []agent.ManagedSandboxContainer{{ID: "stale-review", OrgID: uuid.NewString(), SessionID: uuid.NewString(), CreatedAt: now.Add(-tt.age)}}}
+			store := &fakeSandboxGCStore{references: []string{"stale-review"}, reviewReferences: []string{"stale-review"}, staleFinalize: map[string]bool{"stale-review": tt.cleared}, staleErr: tt.err, finalize: map[string]bool{"stale-review": true}}
+			gc := agent.NewSandboxGC(provider, store, nil, agent.SandboxGCConfig{}, zerolog.Nop())
+			require.NoError(t, gc.ReapOnce(context.Background(), now), "a bounded GC pass should preserve containers whose ownership is uncertain")
+			require.Equal(t, tt.want, provider.destroyedIDs(), "only a successful durable ownership CAS may authorize review destruction")
+			require.Empty(t, store.finalizedIDs(), "review hard-age cleanup must not bypass review-specific ownership fences")
 		})
 	}
 }

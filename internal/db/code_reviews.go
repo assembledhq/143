@@ -643,13 +643,13 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 			from_fork, trigger_source, status, phase, status_code, status_message, retry_at,
 			last_error_at, retryable_failure, decision, acceptable, stale, superseded_by_session_id,
 			review_output_key, prompt_record_key, github_review_id, github_review_url, final_review_body,
-			failure_reason, completed_at`+triggeringDisputeColumn+`
+			failure_reason, completed_at, created_at`+triggeringDisputeColumn+`
 		) VALUES (
 			@org_id, @session_id, @repository_id, @pull_request_id, @policy_id, @base_sha, @head_sha,
 			@from_fork, @trigger_source, @status, @phase, @status_code, @status_message, @retry_at,
 			@last_error_at, @retryable_failure, @decision, @acceptable, @stale, @superseded_by_session_id,
 			@review_output_key, @prompt_record_key, @github_review_id, @github_review_url, @final_review_body,
-			@failure_reason, @completed_at`+triggeringDisputeValue+`
+			@failure_reason, @completed_at, clock_timestamp()`+triggeringDisputeValue+`
 		)
 		ON CONFLICT (org_id, review_output_key) DO UPDATE
 		SET review_output_key = EXCLUDED.review_output_key`+triggeringDisputeUpdate+`

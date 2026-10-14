@@ -1358,22 +1358,14 @@ func TestEnqueuePullRequestStateSyncRecordsEveryDeduplicatedReason(t *testing.T)
 	orgID := uuid.New()
 	prID := uuid.New()
 	dedupeKey := pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonManual)
-	for index := range 2 {
-		rows := pgxmock.NewRows([]string{"id"})
-		if index == 0 {
-			rows.AddRow(uuid.New())
-		}
-		mock.ExpectQuery("INSERT INTO jobs").
-			WithArgs(pgx.NamedArgs{
-				"org_id":     orgID,
-				"queue":      prHealthSyncQueue,
-				"job_type":   prHealthSyncJobType,
-				"payload":    pgxmock.AnyArg(),
-				"priority":   6,
-				"dedupe_key": &dedupeKey,
-			}).
-			WillReturnRows(rows)
-	}
+	activeID := uuid.New()
+	expectCheckSyncLaneEmpty(t, mock, orgID, prID, dedupeKey)
+	mock.ExpectQuery("INSERT INTO jobs").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(activeID))
+	mock.ExpectCommit()
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id FROM pull_requests").WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
+	mock.ExpectQuery("SELECT j.id, j.status").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id", "status", "awaiting_predecessor"}).AddRow(activeID, models.JobStatusPending, false))
+	mock.ExpectCommit()
 
 	var logs bytes.Buffer
 	service := &PRService{
@@ -1472,21 +1464,13 @@ func TestEnqueuePullRequestHealthRebuildChainsAfterRunningJob(t *testing.T) {
 	followUpDedupeKey := fmt.Sprintf("%s:after:%s", baseDedupeKey, runningJobID.String())
 	payload := pgxmock.AnyArg()
 
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgx.NamedArgs{
-			"org_id": orgID, "queue": prHealthSyncQueue, "job_type": prHealthRebuildJobType,
-			"payload": payload, "priority": 4, "dedupe_key": &baseDedupeKey, "run_at": pgxmock.AnyArg(),
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}))
-	mock.ExpectQuery("SELECT id, status[\\s\\S]+FROM jobs").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "queue": prHealthSyncQueue, "dedupe_key": baseDedupeKey}).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "status"}).AddRow(runningJobID, models.JobStatusRunning))
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgx.NamedArgs{
-			"org_id": orgID, "queue": prHealthSyncQueue, "job_type": prHealthRebuildJobType,
-			"payload": payload, "priority": 4, "dedupe_key": &followUpDedupeKey, "run_at": pgxmock.AnyArg(),
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id FROM pull_requests").WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
+	mock.ExpectQuery("SELECT j.id, j.status").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id", "status", "awaiting_predecessor"}).AddRow(runningJobID, models.JobStatusRunning, false))
+	mock.ExpectQuery("INSERT INTO jobs").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "queue": prHealthSyncQueue, "job_type": prHealthRebuildJobType, "payload": payload, "priority": 4, "dedupe_key": &followUpDedupeKey, "run_at": pgxmock.AnyArg(),
+	}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
 
 	service := &PRService{
 		jobs:   db.NewJobStore(mock),
@@ -4537,14 +4521,18 @@ func strPtr(value string) *string {
 	return &value
 }
 
-func expectCheckSyncLaneEmpty(t *testing.T, mock pgxmock.PgxPoolIface, orgID, prID uuid.UUID, key string) {
+func expectCheckSyncLaneEmpty(t *testing.T, mock pgxmock.PgxPoolIface, orgID, prID uuid.UUID, key string, jobTypes ...string) {
 	t.Helper()
+	jobType := prHealthSyncJobType
+	if len(jobTypes) > 0 {
+		jobType = jobTypes[0]
+	}
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT id FROM pull_requests.*WHERE org_id = @org_id AND id = @pull_request_id FOR UPDATE").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
 	mock.ExpectQuery("SELECT j.id, j.status,.*j.org_id = @org_id.*FOR UPDATE OF j").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "queue": prHealthSyncQueue, "job_type": prHealthSyncJobType, "dedupe_key": key, "successor_prefix": key + ":after:"}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "queue": prHealthSyncQueue, "job_type": jobType, "dedupe_key": key, "successor_prefix": key + ":after:"}).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "status", "awaiting_predecessor"}))
 }
 
@@ -4614,10 +4602,16 @@ func TestEnqueuePullRequestStateSyncIsolatesImmediateLanes(t *testing.T) {
 			key := fmt.Sprintf("sync_pull_request_state:%s:%s", pr.ID, tt.lane)
 			payload, err := json.Marshal(map[string]string{"org_id": pr.OrgID.String(), "pull_request_id": pr.ID.String(), "sync_reason": string(tt.reason)})
 			require.NoError(t, err, "encode full expected immediate payload")
-			mock.ExpectQuery("INSERT INTO jobs").WithArgs(pgx.NamedArgs{
-				"org_id": pr.OrgID, "queue": prHealthSyncQueue, "job_type": prHealthSyncJobType, "payload": payload,
-				"priority": 6, "dedupe_key": &key,
-			}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+			args := pgx.NamedArgs{"org_id": pr.OrgID, "queue": prHealthSyncQueue, "job_type": prHealthSyncJobType, "payload": payload, "priority": 6, "dedupe_key": &key}
+			if tt.lane == "urgent" {
+				expectCheckSyncLaneEmpty(t, mock, pr.OrgID, pr.ID, key)
+				args["run_at"] = pgxmock.AnyArg()
+			}
+			mock.ExpectQuery("INSERT INTO jobs").WithArgs(args).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+			if tt.lane == "urgent" {
+				mock.ExpectCommit()
+			}
+
 			service := &PRService{jobs: db.NewJobStore(mock), logger: zerolog.Nop()}
 			require.NoError(t, service.queuePullRequestStateSync(context.Background(), pr, tt.reason), "immediate work cannot be absorbed by check or legacy lane jobs")
 			require.NoError(t, mock.ExpectationsWereMet(), "immediate lanes must enqueue without a delayed deadline or predecessor")

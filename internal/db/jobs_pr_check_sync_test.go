@@ -101,7 +101,7 @@ func TestGetPullRequestCheckSyncPredecessor(t *testing.T) {
 			defer mock.Close()
 			orgID, prID, predecessorID := uuid.New(), uuid.New(), uuid.New()
 			query := mock.ExpectQuery("SELECT status, run_at, created_at FROM jobs.*WHERE org_id = @org_id AND id = @predecessor_id.*payload->>'pull_request_id' = @pull_request_id").
-				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID.String(), "predecessor_id": predecessorID})
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID.String(), "predecessor_id": predecessorID, "job_type": "sync_pull_request_state"})
 			if tt.queryErr != nil {
 				query.WillReturnError(tt.queryErr)
 			} else {

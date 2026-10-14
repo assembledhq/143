@@ -554,6 +554,7 @@ func TestValidateSecrets_ProductionAllValid(t *testing.T) {
 	cfg := &Config{
 		Env:                  "production",
 		Mode:                 "all",
+		WorkerPrivateIP:      "192.0.2.1",
 		SessionSecret:        strings.Repeat("s", 32),
 		EncryptionMasterKey:  strings.Repeat("k", 32),
 		CSRFSigningKey:       strings.Repeat("c", 32),
@@ -579,6 +580,7 @@ func TestValidateSecrets_ProductionWorkerRequiresSandboxAuthSocket(t *testing.T)
 			cfg := &Config{
 				Env:                 "production",
 				Mode:                tt.mode,
+				WorkerPrivateIP:     "192.0.2.1",
 				SessionSecret:       strings.Repeat("s", 32),
 				EncryptionMasterKey: strings.Repeat("k", 32),
 				CSRFSigningKey:      strings.Repeat("c", 32),
@@ -923,6 +925,37 @@ func TestPreviewOriginHostIsLocal(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tc.want, previewOriginHostIsLocal(tc.template))
+		})
+	}
+}
+
+func TestValidateSecretsWorkerSandboxIdentity(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, mode, ip string
+		wantError      bool
+	}{
+		{"worker missing identity", "worker", "", true},
+		{"combined missing identity", "all", "", true},
+		{"worker hostname is invalid", "worker", "container-name", true},
+		{"combined invalid IP", "all", "999.0.0.1", true},
+		{"unspecified is not physical identity", "all", "0.0.0.0", true},
+		{"loopback is not unique across machines", "worker", "127.0.0.1", true},
+		{"multicast is not physical identity", "all", "ff02::1", true},
+		{"API missing identity is unaffected", "api", "", false},
+		{"API invalid identity is unaffected", "api", "hostname", false},
+		{"worker provisioned identity", "worker", "192.0.2.1", false},
+		{"combined provisioned IPv6", "all", "2001:db8::1", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := (&Config{Env: "development", Mode: tt.mode, WorkerPrivateIP: tt.ip}).ValidateSecrets()
+			if tt.wantError {
+				require.ErrorContains(t, err, "WORKER_PRIVATE_IP must be a stable, unique Docker host IP", "startup must stop with an actionable identity requirement")
+				require.ErrorContains(t, err, ".env or .env.local", "startup message must identify how to configure the worker")
+			} else {
+				require.NoError(t, err, "valid worker identity or API-only mode must start normally")
+			}
 		})
 	}
 }

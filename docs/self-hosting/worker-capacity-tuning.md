@@ -22,6 +22,8 @@ Treat these as **startup-time settings**. In normal deployments, you change env 
 - **`SANDBOX_DISK_LIMIT_GB`**
   Root filesystem size limit per sandbox container.
 
+Review startup uses the shared advertised sandbox budget. Set `WORKER_PRIVATE_IP` to a stable IP unique to each physical Docker host; overlapping worker generations on that host must advertise the same value. Missing or invalid identity stops worker/all startup with an actionable configuration error. Stale or unknown advertised inventory defers reviews while intake stays active. Configure `WORKER_MAX_ACTIVE_SANDBOXES` for the machine’s safe workspace limit. `WORKER_PROCESS_COUNT` controls job loops and does not replace that limit.
+
 ## Practical sizing heuristic
 
 Pick target parallel sandboxes (`P`) for the node, then make sure:
@@ -122,3 +124,15 @@ The default `SANDBOX_MEMORY_LIMIT_MB` was lowered from `4096` to `3072` (paired 
 
 - If you run workloads that genuinely need >3 GB cgroup headroom (large PM bootstraps on monorepos, agents that load big indices into memory), set `SANDBOX_MEMORY_LIMIT_MB=4096` explicitly to preserve old behavior.
 - If you also run with the old `WORKER_PROCESS_COUNT` and bump it per the new bucket presets, do it in one step per node — don't increase density and lower the per-sandbox limit at the same time on a node serving live traffic.
+
+## Review admission rollout
+
+1. Apply the wait-reason migration, drain existing executions, and stop every pre-upgrade worker process, including its background GC loop.
+2. Upgrade and verify the API before starting any upgraded worker. The old API rejects the new `sandbox_capacity` enum value, and its explicit retry endpoint bypasses fleet admission.
+3. Start updated review scheduling, recheck, and pull-request health-sync consumers, then resume recovery according to verified headroom.
+
+A drain flag alone leaves old cleanup and startup paths active. Split API/worker deployments can keep intake active while workers are stopped; preserve all durable pending requests. In `MODE=all`, migrate first and replace the combined process without overlapping old worker/GC processes.
+
+Retained baseline containers owned by legacy worker rows receive no warm-capacity exception until normal runtime recovery establishes ownership on a worker with verified physical identity. Do not derive a physical identity from a container hostname or process node ID.
+
+Before releasing cold recovery work, verify every API and worker process participating in review starts. Direct `/healthz` responses and fresh node heartbeat metadata must agree on `instance_id`, `build_sha`, and `code_review_admission_contract_version: "code-review-sandbox-admission/v1"`. The marker proves configured writer wiring; physical sandbox identity alone does not. Inventory must cover every active/draining process, including deployment overlap, and older processes must have stopped. Missing evidence or incomplete inventory keeps cold releases deferred. Probe each API backend directly rather than relying on a load-balanced health response.

@@ -212,6 +212,14 @@ jobs:
       - name: Combine backend unit coverage
         run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-agent.out
 
+      - name: Run server sandbox presence composition tests
+        run: |
+          race=()
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            race=(-race)
+          fi
+          go test ./cmd/server -run '^TestWorker(SandboxPresence|HeartbeatClearsFailedSandboxPresenceEvidence)' -count=1 "${race[@]}" -timeout=120s
+
       # Chrome startup and rendering need CPU that the parallel backend suite
       # can otherwise consume. Keep real browser fixtures in a serial step,
       # with the same race mode and their own coverage contribution.

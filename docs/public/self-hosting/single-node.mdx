@@ -77,6 +77,12 @@ Fill these groups in `.env.single-node`:
 
 Keep `SANDBOX_RUNTIME=runsc` and `SANDBOX_REQUIRE_GVISOR=true` for production. Use `runc` only for trusted local smoke tests.
 
+Set `WORKER_PRIVATE_IP` to a stable LAN/private IP unique to this physical Docker host and preserve it across worker restarts and deployment generations. Worker/all startup rejects missing or invalid values, including container hostnames, loopback, unspecified, and multicast addresses. API-only mode does not require the value. Fill the required field in `.env.single-node` before starting Compose; there is no generic identity shared across machines.
+
+When upgrading, migrate first, drain existing executions, and fully stop every pre-upgrade worker process and its background GC loop. Upgrade and verify the API before starting upgraded worker consumers: the old API rejects the new `sandbox_capacity` state and its explicit retry endpoint bypasses admission. A drain flag alone leaves old cleanup/startup paths active. In `MODE=all`, replace the combined process without overlapping old worker/GC processes. Preserve pending requests through this transition; split API/worker deployments can keep intake active while workers are stopped. Existing baseline containers on legacy worker owners receive no warm exception until normal recovery establishes verified ownership.
+
+Before cold recovery, verify the process directly through `/healthz`: its `instance_id`, `build_sha`, and `code_review_admission_contract_version: "code-review-sandbox-admission/v1"` must match fresh node heartbeat metadata. The marker appears only after the API and worker admission paths are configured in `MODE=all`. Missing or older evidence keeps cold releases deferred. For multiple processes, inventory every active/draining API and worker instance; one load-balanced health response cannot prove complete rollout.
+
 ## Verify
 
 Check Compose state:

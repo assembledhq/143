@@ -110,6 +110,10 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		name string
 		run  func(*testing.T, *pgxpool.Pool, uuid.UUID, uuid.UUID, uuid.UUID, *schedulingSnapshotFixture)
 	}{
+		{"real concurrent startup respects one physical budget", testSchedulingSandboxBurst},
+		{"sandbox capacity wait preserves intake and clocks", testSchedulingSandboxCapacity},
+		{"evidence capacity loss preserves baseline and request age", testEvidenceCapacityLoss},
+		{"capture clock migration preserves legacy timing", testRecheckCaptureClockMigration},
 		{"pending recheck waits behind active review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testRecheckPendingWait(t, p, org, repo, pr, snapshot, "active")
 		}},
@@ -165,6 +169,12 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		{"capture deadline settles a pending wake", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "deadline")
 		}},
+		{"legacy capture deadline survives process restart", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "legacy deadline")
+		}},
+		{"legacy capacity reason cannot renew capture deadline", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "legacy capacity deadline")
+		}},
 		{"capture failure preserves active review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "active")
 		}},
@@ -181,6 +191,18 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "refresh")
 		}},
 		{"capture failure preserves newer pending request", testRecheckFailurePreservesNewerRequest},
+		{"failure clock preserves newer head", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureClockFences(t, p, org, repo, pr, snapshot, "failure newer head")
+		}},
+		{"successful capture preserves newer head clock", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureClockFences(t, p, org, repo, pr, snapshot, "success newer head")
+		}},
+		{"failure clock preserves newer request", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureClockFences(t, p, org, repo, pr, snapshot, "failure newer request")
+		}},
+		{"successful capture preserves newer request clock", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureClockFences(t, p, org, repo, pr, snapshot, "success newer request")
+		}},
 		{"unsent evidence refresh admits another evidence turn", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testRefreshUnsentEvidenceAssessment(t, p, org, repo, pr, snapshot, false, false)
 		}},

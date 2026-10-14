@@ -13,6 +13,12 @@ import (
 )
 
 func (s *JobStore) EnqueuePullRequestCheckSync(ctx context.Context, orgID, pullRequestID uuid.UUID, opts EnqueueOpts) (uuid.UUID, error) {
+	return s.EnqueuePullRequestHealthWork(ctx, orgID, pullRequestID, opts)
+}
+
+// EnqueuePullRequestHealthWork preserves one pending successor for every
+// health lane, including urgent head changes and database-only rebuilds.
+func (s *JobStore) EnqueuePullRequestHealthWork(ctx context.Context, orgID, pullRequestID uuid.UUID, opts EnqueueOpts) (uuid.UUID, error) {
 	payload, ok := opts.Payload.(map[string]string)
 	if !ok || opts.DedupeKey == nil || opts.RunAt == nil || payload["pull_request_id"] != pullRequestID.String() {
 		return uuid.Nil, fmt.Errorf("check sync requires matching pull request payload, dedupe key, and deadline")
@@ -93,14 +99,21 @@ type PullRequestCheckSyncPredecessor struct {
 	CreatedAt time.Time
 }
 
-func (s *JobStore) GetPullRequestCheckSyncPredecessor(ctx context.Context, orgID, pullRequestID, predecessorID uuid.UUID) (*PullRequestCheckSyncPredecessor, error) {
+func (s *JobStore) GetPullRequestCheckSyncPredecessor(ctx context.Context, orgID, pullRequestID, predecessorID uuid.UUID, jobTypes ...string) (*PullRequestCheckSyncPredecessor, error) {
+	jobType := "sync_pull_request_state"
+	if len(jobTypes) > 0 {
+		jobType = jobTypes[0]
+	}
+	if jobType != "sync_pull_request_state" && jobType != "rebuild_pull_request_health" {
+		return nil, fmt.Errorf("invalid pull request health predecessor type")
+	}
 	var predecessor PullRequestCheckSyncPredecessor
 	err := s.db.QueryRow(ctx, `SELECT status, run_at, created_at FROM jobs
 		WHERE org_id = @org_id AND id = @predecessor_id
-		  AND job_type = 'sync_pull_request_state'
+		  AND job_type = @job_type AND queue = 'default'
 		  AND payload->>'pull_request_id' = @pull_request_id
 		  AND status IN ('pending', 'running')`, pgx.NamedArgs{
-		"org_id": orgID, "pull_request_id": pullRequestID.String(), "predecessor_id": predecessorID,
+		"org_id": orgID, "pull_request_id": pullRequestID.String(), "predecessor_id": predecessorID, "job_type": jobType,
 	}).Scan(&predecessor.Status, &predecessor.RunAt, &predecessor.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil

@@ -80,8 +80,9 @@ func contextFromShutdown(shutdownCh <-chan struct{}) context.Context {
 // RouterSharedDependencies reuses process-scoped state across the API and worker
 // graphs. Omitting it preserves isolated construction for API-only callers.
 type RouterSharedDependencies struct {
-	CodingCredentialStore     *db.CodingCredentialStore
-	GitHubRateLimitController *githubratelimit.Controller
+	CodingCredentialStore       *db.CodingCredentialStore
+	GitHubRateLimitController   *githubratelimit.Controller
+	CodeReviewAdmissionEvidence *codereviewsvc.AdmissionProcessEvidence
 }
 
 // ResolveGitHubRateLimitController returns the process controller when one is
@@ -244,6 +245,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// Create handlers
 	healthHandler := handlers.NewHealthHandler(pool)
 	healthHandler.SetDrainingSignal(shutdownCh)
+	if shared.CodeReviewAdmissionEvidence != nil {
+		healthHandler.SetAdmissionEvidence(shared.CodeReviewAdmissionEvidence.Evidence)
+	}
 	if redisClient != nil {
 		healthHandler.SetRedisHealthCheck(redisClient.Healthy)
 	}
@@ -415,7 +419,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if prService != nil {
 		codeReviewSvc.SetRetryDependencies(pullRequestStore, prService)
 		codeReviewSvc.SetScheduling(db.NewCodeReviewScheduleStore(pool), prService)
+		codeReviewSvc.SetSandboxAdmission()
 		codeReviewSvc.SetSchedulingStreams(codeReviewStreams)
+	}
+	if shared.CodeReviewAdmissionEvidence != nil {
+		shared.CodeReviewAdmissionEvidence.ConfigureAPI(codeReviewSvc)
 	}
 	codeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
 	codeReviewDisputeStore.SetJobStore(jobStore)

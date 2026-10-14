@@ -38,11 +38,14 @@ type Config struct {
 	SessionSecret           string        `env:"SESSION_SECRET"` // #nosec G117 -- env config field
 	PreviewRPCSecrets       []string      `env:"PREVIEW_RPC_SECRETS"   envSeparator:","`
 	NodeID                  string        `env:"NODE_ID"`
-	NodeRegion              string        `env:"NODE_REGION"`
-	BaseURL                 string        `env:"BASE_URL"              envDefault:"http://localhost:8080"`
-	FrontendURL             string        `env:"FRONTEND_URL"`
-	CORSAllowedOrigins      []string      `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
-	Mode                    string        `env:"MODE"                  envDefault:"all"`
+	// WorkerPrivateIP identifies the provisioned physical Docker host across
+	// worker generations. It must be stable and unique per machine.
+	WorkerPrivateIP    string   `env:"WORKER_PRIVATE_IP"`
+	NodeRegion         string   `env:"NODE_REGION"`
+	BaseURL            string   `env:"BASE_URL"              envDefault:"http://localhost:8080"`
+	FrontendURL        string   `env:"FRONTEND_URL"`
+	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
+	Mode               string   `env:"MODE"                  envDefault:"all"`
 	// DemoMode tells the server it is running a dogfood preview with seeded
 	// data and no real GitHub App. Enables a credential banner on the login
 	// page and short-circuits GitHub client construction.
@@ -714,6 +717,9 @@ func (c *Config) ValidateSecrets() error {
 	// Retention day validation applies in all environments.
 	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 || c.DataRetentionSlackInboundPayloadDays < 0 || c.DataRetentionSlackInboundPayloadBatch < 0 || c.PreviewDependencyCacheRetentionDays < 0 || c.PreviewDependencyCacheKeepNewestPerRepo < 0 {
 		return errors.New("DATA_RETENTION_* values, PREVIEW_DEPENDENCY_CACHE_RETENTION_DAYS, and PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO values must not be negative")
+	}
+	if (c.Mode == "worker" || c.Mode == "all") && c.SandboxHostID() == "" {
+		return errors.New("WORKER_PRIVATE_IP must be a stable, unique Docker host IP in worker/all mode; set it in .env or .env.local (not a container hostname, loopback, unspecified, or multicast address), or use MODE=api without worker loops")
 	}
 
 	if c.Env != "production" {

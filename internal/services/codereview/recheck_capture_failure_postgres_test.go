@@ -83,7 +83,7 @@ func testRecheckCaptureFailure(t *testing.T, pool *pgxpool.Pool, org, repo, pr u
 		require.Equal(t, models.CodeReviewAssessmentSuperseded, retired.Status, "obsolete publication must stay superseded")
 		require.Equal(t, "evidence_recheck_failed:Evidence could not be captured. Try again or request a full review.", *retired.FailureDetail, "failure must remain visible without a repair-loop prefix")
 		request.RequestID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("code-review-evidence-refresh:"+previous.ID.String()))
-	} else if mode == "permanent wake" || mode == "deadline" || mode == "paused" {
+	} else if mode == "permanent wake" || mode == "deadline" || mode == "legacy deadline" || mode == "legacy capacity deadline" || mode == "paused" {
 		if mode == "paused" {
 			_, err := pool.Exec(ctx, `UPDATE code_review_pr_state SET automatic_paused=true WHERE org_id=$1 AND pull_request_id=$2`, org, pr)
 			require.NoError(t, err, "pause automatic reviews while retaining explicit recheck support")
@@ -92,10 +92,27 @@ func testRecheckCaptureFailure(t *testing.T, pool *pgxpool.Pool, org, repo, pr u
 		queued, err := service.RequestScheduledReview(ctx, request)
 		require.NoError(t, err, "transient failure should retain bounded pending work")
 		require.Equal(t, models.CodeReviewRequestQueued, queued.Disposition, "initial capture failure should wait")
+		if mode == "legacy deadline" || mode == "legacy capacity deadline" {
+			_, err = pool.Exec(ctx, `UPDATE code_review_requests SET capture_failure_clock_tracked=false,capture_failure_started_at=NULL WHERE org_id=$1 AND id=$2`, org, queued.Schedule.PendingRequestID)
+			require.NoError(t, err, "represent an untracked legacy episode without renewing its old effective deadline")
+			if mode == "legacy capacity deadline" {
+				_, err = pool.Exec(ctx, `UPDATE code_review_pr_state SET wait_reason='sandbox_capacity' WHERE org_id=$1 AND pull_request_id=$2`, org, pr)
+				require.NoError(t, err, "a legacy capacity reason must not be taken as proof that prior capture succeeded")
+			}
+		}
 		if mode == "permanent wake" || mode == "paused" {
 			captureErr = ErrAssessmentReuseUnavailable
 		} else {
 			now = now.Add(16 * time.Minute)
+			// Reconstruct the lifecycle to prove the clock is durable across a
+			// process restart rather than held in service memory.
+			service = NewService(store, store, db.NewSessionStore(pool), db.NewJobStore(pool), zerolog.Nop(), Config{})
+			service.SetScheduling(schedules, snapshot)
+			service.scheduling.now = func() time.Time { return now }
+			service.SetAssessmentContinuation(recheckCaptureFunc(func(context.Context, AssessmentInputCaptureRequest) (AssessmentInputCaptureResult, error) {
+				captures++
+				return AssessmentInputCaptureResult{}, captureErr
+			}), true)
 		}
 		var wakeID uuid.UUID
 		lease := uuid.New()
@@ -184,8 +201,9 @@ func testRecheckFailurePreservesNewerRequest(t *testing.T, pool *pgxpool.Pool, o
 		require.NoError(t, err, "admit newer pending intent during capture")
 		return AssessmentInputCaptureResult{}, ErrAssessmentReuseUnavailable
 	}), true)
-	_, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewRecheck})
-	require.ErrorIs(t, err, ErrRecheckUnavailable, "the failed capture should settle only its own request")
+	result, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewRecheck})
+	require.NoError(t, err, "a replaced capture must preserve newer intake rather than apply its obsolete rejection")
+	require.Equal(t, models.CodeReviewRequestCancelled, result.Disposition, "a newer owner must supersede the older caller")
 	state, err := service.GetSchedule(ctx, org, pr)
 	require.NoError(t, err, "read surviving pending work")
 	require.Equal(t, queued.Schedule.PendingRequestID, state.PendingRequestID, "failure must preserve a concurrently admitted request")

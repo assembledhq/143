@@ -62,7 +62,15 @@ func (s *PullRequestStore) UpsertCheckState(ctx context.Context, orgID uuid.UUID
 			  )
 			RETURNING 1
 		)
-		SELECT EXISTS (SELECT 1 FROM applied)`, pullRequestCheckStateArgs(orgID, state)).Scan(&applied)
+		SELECT EXISTS (SELECT 1 FROM applied) OR EXISTS (
+			SELECT 1 FROM pull_request_check_states
+			WHERE org_id=@org_id AND pull_request_id=@pull_request_id AND head_sha=@head_sha
+			  AND source=@source AND external_key=@external_key
+			  AND provider_sequence=@provider_sequence AND provider_updated_at=@provider_updated_at
+			  AND name=@name AND category=@category AND status=@status AND provider=@provider
+			  AND details_url IS NOT DISTINCT FROM @details_url AND summary=@summary
+			  AND provider_event_id=@provider_event_id
+		)`, pullRequestCheckStateArgs(orgID, state)).Scan(&applied)
 	if err != nil {
 		return false, fmt.Errorf("upsert pull request check state: %w", err)
 	}

@@ -8,13 +8,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/version"
 )
 
 type HealthHandler struct {
-	pool        *pgxpool.Pool
-	redisHealth func(context.Context) bool
-	draining    <-chan struct{}
+	pool              *pgxpool.Pool
+	redisHealth       func(context.Context) bool
+	draining          <-chan struct{}
+	admissionEvidence func() models.CodeReviewAdmissionProcessEvidence
 }
 
 func NewHealthHandler(pool *pgxpool.Pool) *HealthHandler {
@@ -29,11 +31,23 @@ func (h *HealthHandler) SetDrainingSignal(draining <-chan struct{}) {
 	h.draining = draining
 }
 
+func (h *HealthHandler) SetAdmissionEvidence(provider func() models.CodeReviewAdmissionProcessEvidence) {
+	h.admissionEvidence = provider
+}
+
 func (h *HealthHandler) Healthz(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	response := map[string]any{}
+	if h.admissionEvidence != nil {
+		evidence := h.admissionEvidence()
+		response["instance_id"] = evidence.InstanceID
+		response["build_sha"] = evidence.BuildSHA
+		if evidence.ContractVersion != "" {
+			response["code_review_admission_contract_version"] = evidence.ContractVersion
+		}
+	}
 	if h.isDraining() {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"status":"draining"}`))
+		response["status"] = "draining"
+		writeJSON(w, http.StatusServiceUnavailable, response)
 		return
 	}
 	redisStatus := "unavailable"
@@ -44,7 +58,9 @@ func (h *HealthHandler) Healthz(w http.ResponseWriter, r *http.Request) {
 			redisStatus = "ok"
 		}
 	}
-	_, _ = w.Write([]byte(`{"status":"ok","redis":"` + redisStatus + `"}`))
+	response["status"] = "ok"
+	response["redis"] = redisStatus
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *HealthHandler) isDraining() bool {

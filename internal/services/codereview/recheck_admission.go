@@ -108,19 +108,33 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 		SessionID: baseline.SessionID, AssessmentID: uuid.New(), RequestContext: requestContext,
 	})
 	if errors.Is(captureErr, ErrReviewIneligible) {
-		if recovering && captured.Snapshot.State != "" && captured.Snapshot.State != "open" {
-			return s.cancelClosedPendingAssessment(ctx, req, state.RepositoryID, ordinaryHash, kind)
-		}
-		return ScheduleRequestResult{}, captureErr
+		cancelClosed := recovering && captured.Snapshot.State != "" && captured.Snapshot.State != "open"
+		return s.rejectIneligibleAssessmentCapture(ctx, req, state.RepositoryID, ordinaryHash, kind, state, cancelClosed, captureErr)
 	}
 	if errors.Is(captureErr, ErrAssessmentReuseUnavailable) {
-		return s.failRecheckCapture(ctx, req, state.RepositoryID, ordinaryHash, kind, captureErr)
+		return s.failRecheckCapture(ctx, req, state.RepositoryID, ordinaryHash, kind, captureErr, state)
 	}
 	if captureErr != nil {
-		if recovering && state.FirstPendingAt != nil && s.scheduling.now().Sub(*state.FirstPendingAt) >= 15*time.Minute {
-			return s.failRecheckCapture(ctx, req, state.RepositoryID, ordinaryHash, kind, captureErr)
+		return s.queuePendingAssessmentCapture(ctx, req, state.RepositoryID, requestContext, ordinaryHash, kind, recheckCaptureFailureAttempt{cause: captureErr, expected: state})
+	}
+	// Capacity and active-work waits preserve request age. Only an actual
+	// successful capture ends this request's provider-failure episode.
+	captureTargetChanged := false
+	if err := s.scheduling.store.WithLockedPR(ctx, req.OrgID, state.RepositoryID, req.PullRequestID, func(tx pgx.Tx, current *models.CodeReviewPRState) error {
+		if !captureFailureTargetMatches(current, state) {
+			captureTargetChanged = true
+			return nil
 		}
-		return s.queuePendingAssessmentCapture(ctx, req, state.RepositoryID, requestContext, ordinaryHash, kind)
+		if current.PendingRequestID == nil || (current.HeadSHA != "" && current.HeadSHA != captured.Snapshot.HeadSHA) || (current.BaseSHA != "" && current.BaseSHA != captured.Snapshot.BaseSHA) || (current.BaseRef != "" && current.BaseRef != captured.Snapshot.BaseRef) {
+			return nil
+		}
+		_, err := tx.Exec(ctx, `UPDATE code_review_requests SET capture_failure_started_at=NULL,capture_failure_clock_tracked=true WHERE org_id=$1 AND id=$2 AND source_kind=$3 AND source_identity=$4 AND mode=$5 AND input_hash IN ($6,$7) AND status='pending'`, req.OrgID, current.PendingRequestID, kind, req.RequestID.String(), req.Mode, ordinaryHash, forcedHash)
+		return err
+	}); err != nil {
+		return ScheduleRequestResult{}, err
+	}
+	if captureTargetChanged {
+		return s.queuePendingAssessmentCapture(ctx, req, state.RepositoryID, requestContext, ordinaryHash, kind, recheckCaptureFailureAttempt{expected: state})
 	}
 	latest, err := s.scheduling.store.GetLatestAssessment(ctx, req.OrgID, req.PullRequestID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -144,17 +158,17 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 	baselineFacts := baselineForPlanning(baseline, policy, captured.Files)
 	plan := PlanReviewRecheck(RecheckPlanInput{Current: &captured.Manifest, Baseline: baselineFacts, Previous: previous})
 	if plan.Route == RecheckRouteWait {
-		return s.queuePendingAssessmentCapture(ctx, req, state.RepositoryID, requestContext, ordinaryHash, kind)
+		return s.queuePendingAssessmentCapture(ctx, req, state.RepositoryID, requestContext, ordinaryHash, kind, recheckCaptureFailureAttempt{expected: state})
 	}
 	if plan.Route == RecheckRouteFull && !(latest.Status == models.CodeReviewAssessmentReserved || latest.Status == models.CodeReviewAssessmentRunning || latest.Status == models.CodeReviewAssessmentPublishing) {
 		return s.requestFullAssessmentReview(ctx, req, state.RepositoryID, requestContext, true, recovering)
 	}
-	result, err := s.admitCapturedAssessment(ctx, req, captured, baseline, latest, plan, ordinaryHash, kind, requestContext)
+	result, err := s.admitCapturedAssessment(ctx, req, captured, baseline, latest, plan, ordinaryHash, kind, requestContext, state)
 	if errors.Is(err, errRecheckNeedsFull) {
 		return s.requestFullAssessmentReview(ctx, req, state.RepositoryID, requestContext, true, recovering)
 	}
 	if errors.Is(err, errRecheckAdmissionChanged) {
-		return s.queuePendingAssessmentCapture(ctx, req, state.RepositoryID, requestContext, ordinaryHash, kind)
+		return s.queuePendingAssessmentCapture(ctx, req, state.RepositoryID, requestContext, ordinaryHash, kind, recheckCaptureFailureAttempt{expected: state})
 	}
 	return result, err
 }
@@ -309,73 +323,38 @@ func (s *Service) requestLegacyAssessmentReview(ctx context.Context, req Schedul
 	return s.requestFullAssessmentReview(ctx, req, repoID, requestContext, false, recovering)
 }
 
-func (s *Service) queuePendingAssessmentCapture(ctx context.Context, req ScheduleRequestInput, repoID uuid.UUID, context *ReviewRequestContext, hash, kind string) (ScheduleRequestResult, error) {
+type recheckCaptureFailureAttempt struct {
+	cause    error
+	expected models.CodeReviewPRState
+}
+
+func captureFailureTargetMatches(current *models.CodeReviewPRState, expected models.CodeReviewPRState) bool {
+	closedDuringCapture := current.State == models.CodeReviewScheduleClosed && expected.State != models.CodeReviewScheduleClosed
+	return !closedDuringCapture && captureRequestOwnersMatch(current.PendingRequestID, expected.PendingRequestID) && current.Generation == expected.Generation && current.HeadSHA == expected.HeadSHA && current.BaseSHA == expected.BaseSHA && current.BaseRef == expected.BaseRef
+}
+
+func captureRequestOwnersMatch(current, expected *uuid.UUID) bool {
+	return current == nil && expected == nil || current != nil && expected != nil && *current == *expected
+}
+
+func (s *Service) queuePendingAssessmentCapture(ctx context.Context, req ScheduleRequestInput, repoID uuid.UUID, context *ReviewRequestContext, hash, kind string, captureFailure ...recheckCaptureFailureAttempt) (ScheduleRequestResult, error) {
 	var result ScheduleRequestResult
+	failed := false
 	err := s.scheduling.store.WithLockedPR(ctx, req.OrgID, repoID, req.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
-		id, duplicate, err := db.RecordCodeReviewRequest(ctx, tx, req.OrgID, repoID, req.PullRequestID, kind, req.RequestID.String(), req.Mode, hash, state.Generation+1, req.RequesterID)
-		if err != nil {
-			return err
-		}
-		if duplicate {
-			var status string
-			var sessionID, assessmentID *uuid.UUID
-			if err := tx.QueryRow(ctx, `SELECT status,session_id,assessment_id FROM code_review_requests WHERE org_id=$1 AND id=$2`, req.OrgID, id).Scan(&status, &sessionID, &assessmentID); err != nil {
-				return err
-			}
-			if status != "pending" {
-				result.Disposition = models.CodeReviewRequestJoined
-				if status == "satisfied" {
-					result.Disposition = models.CodeReviewRequestReused
-				}
-				result.SessionID = sessionID
-				result.AssessmentID = assessmentID
-				return nil
-			}
-			if state.PendingRequestID != nil && *state.PendingRequestID == id {
-				result.Disposition = models.CodeReviewRequestQueued
-				return nil
-			}
-		}
-		forcePending, err := pendingForcedFull(state.PendingInput)
-		if err != nil {
-			return err
-		}
-		if forcePending {
-			_, err = tx.Exec(ctx, `UPDATE code_review_requests SET status='superseded' WHERE org_id=$1 AND id=$2 AND status='pending'`, req.OrgID, id)
-			result.Disposition = models.CodeReviewRequestCancelled
-			return err
-		}
-		if state.PendingRequestID != nil && *state.PendingRequestID != id {
-			if _, err := tx.Exec(ctx, `UPDATE code_review_requests SET status='superseded' WHERE org_id=$1 AND id=$2 AND status='pending'`, req.OrgID, *state.PendingRequestID); err != nil {
-				return err
-			}
-		}
-		if state.Generation == 0 {
-			state.Generation = 1
-		}
-		source := req.TriggerSource
-		if source == "" {
-			source = models.CodeReviewTriggerSourceSlashCommand
-		}
-		input := ReviewChangedInput{OrgID: req.OrgID, RepositoryID: repoID, PullRequestID: req.PullRequestID, ExplicitRequest: true, GitHubDeliveryID: req.RequestID.String(), RequestContext: context, TriggerSource: source}
-		state.PendingInput, err = db.EncodeCodeReviewScheduleInput(scheduledReviewIntent{Input: input, Mode: models.CodeReviewRecheck, RequesterID: req.RequesterID})
-		if err != nil {
-			return err
-		}
-		state.PendingRequestID = &id
-		now := s.scheduling.now()
-		if state.FirstPendingAt == nil {
-			state.FirstPendingAt = &now
-		}
-		state.State = models.CodeReviewScheduleWaiting
-		state.WaitReason = models.CodeReviewWaitContext
-		retry := now.Add(15 * time.Second)
-		state.RetryAt = &retry
-		result.Disposition = models.CodeReviewRequestQueued
-		return db.UpsertCodeReviewWake(ctx, tx, req.OrgID, req.PullRequestID, retry)
+		var err error
+		failed, err = s.queuePendingAssessmentCaptureInTx(ctx, tx, state, req, context, hash, kind, &result, captureFailure...)
+		return err
 	})
 	if err != nil {
 		return result, err
+	}
+	if failed {
+		record, err := s.scheduling.store.GetRequestByIdentity(ctx, req.OrgID, kind, req.RequestID.String())
+		if err != nil {
+			return result, err
+		}
+		s.logger.Warn().Err(captureFailure[0].cause).Str("org_id", req.OrgID.String()).Str("pull_request_id", req.PullRequestID.String()).Str("request_id", req.RequestID.String()).Msg("evidence recheck capture episode expired")
+		return s.existingAssessmentRequestResult(ctx, req, record)
 	}
 	state, err := s.GetSchedule(ctx, req.OrgID, req.PullRequestID)
 	if err != nil {
@@ -386,7 +365,116 @@ func (s *Service) queuePendingAssessmentCapture(ctx context.Context, req Schedul
 	return result, nil
 }
 
-func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleRequestInput, captured AssessmentInputCaptureResult, baseline, previous models.CodeReviewAssessment, plan RecheckPlan, hash, kind string, requestContext *ReviewRequestContext) (ScheduleRequestResult, error) {
+// The caller holds the PR lock; a stale outcome may requeue intake but
+// cannot mutate a newer capture episode or replace a newer explicit owner.
+func (s *Service) queuePendingAssessmentCaptureInTx(ctx context.Context, tx pgx.Tx, state *models.CodeReviewPRState, req ScheduleRequestInput, context *ReviewRequestContext, hash, kind string, result *ScheduleRequestResult, captureFailure ...recheckCaptureFailureAttempt) (bool, error) {
+	actualFailure := len(captureFailure) > 0 && captureFailure[0].cause != nil
+	id, duplicate, err := db.RecordCodeReviewRequest(ctx, tx, req.OrgID, state.RepositoryID, req.PullRequestID, kind, req.RequestID.String(), req.Mode, hash, state.Generation+1, req.RequesterID)
+	if err != nil {
+		return false, err
+	}
+	if duplicate {
+		var status string
+		var sessionID, assessmentID *uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT status,session_id,assessment_id FROM code_review_requests WHERE org_id=$1 AND id=$2`, req.OrgID, id).Scan(&status, &sessionID, &assessmentID); err != nil {
+			return false, err
+		}
+		if status != "pending" {
+			result.Disposition = models.CodeReviewRequestJoined
+			if status == "satisfied" {
+				result.Disposition = models.CodeReviewRequestReused
+			} else if status == "cancelled" || status == "superseded" || status == "failed" {
+				result.Disposition = models.CodeReviewRequestCancelled
+			}
+			result.SessionID = sessionID
+			result.AssessmentID = assessmentID
+			return false, nil
+		}
+		if !actualFailure && (len(captureFailure) == 0 || captureFailureTargetMatches(state, captureFailure[0].expected)) && state.PendingRequestID != nil && *state.PendingRequestID == id {
+			result.Disposition = models.CodeReviewRequestQueued
+			return false, nil
+		}
+	}
+	if len(captureFailure) > 0 && !captureFailureTargetMatches(state, captureFailure[0].expected) {
+		// A revision change fences the old capture's outcome and episode
+		// clock. Only an owner installed during that capture supersedes
+		// the caller; automatic synchronization may have no explicit owner.
+		result.Disposition = models.CodeReviewRequestQueued
+		newerOwner := state.PendingRequestID != nil && *state.PendingRequestID != id && !captureRequestOwnersMatch(state.PendingRequestID, captureFailure[0].expected.PendingRequestID)
+		if newerOwner || state.State == models.CodeReviewScheduleClosed {
+			status := "superseded"
+			if state.State == models.CodeReviewScheduleClosed {
+				status = "cancelled"
+			}
+			_, err := tx.Exec(ctx, `UPDATE code_review_requests SET status=$3 WHERE org_id=$1 AND id=$2 AND status='pending'`, req.OrgID, id, status)
+			result.Disposition = models.CodeReviewRequestCancelled
+			return false, err
+		}
+		if state.PendingRequestID != nil && *state.PendingRequestID == id {
+			// The same request already owns the newer target. Preserve its
+			// exact intent, age, retry deadline and unknown/known episode.
+			return false, nil
+		}
+		actualFailure = false
+	}
+	if actualFailure {
+		now := s.scheduling.now()
+		var started time.Time
+		// A legacy request's absent clock is unknown, rather than proof of
+		// success. Preserve its old deadline until a real capture ends it.
+		if err := tx.QueryRow(ctx, `UPDATE code_review_requests SET capture_failure_started_at=COALESCE(capture_failure_started_at,CASE WHEN capture_failure_clock_tracked THEN $3::timestamptz ELSE COALESCE($4::timestamptz,$3::timestamptz) END),capture_failure_clock_tracked=true WHERE org_id=$1 AND id=$2 AND status='pending' RETURNING capture_failure_started_at`, req.OrgID, id, now, state.FirstPendingAt).Scan(&started); err != nil {
+			return false, err
+		}
+		if now.Sub(started) >= 15*time.Minute {
+			return true, failRecheckCaptureInTx(ctx, tx, state, req.OrgID, id)
+		}
+	}
+	forcePending, err := pendingForcedFull(state.PendingInput)
+	if err != nil {
+		return false, err
+	}
+	if forcePending {
+		_, err = tx.Exec(ctx, `UPDATE code_review_requests SET status='superseded' WHERE org_id=$1 AND id=$2 AND status='pending'`, req.OrgID, id)
+		result.Disposition = models.CodeReviewRequestCancelled
+		return false, err
+	}
+	if state.PendingRequestID != nil && *state.PendingRequestID != id {
+		if _, err := tx.Exec(ctx, `UPDATE code_review_requests SET status='superseded' WHERE org_id=$1 AND id=$2 AND status='pending'`, req.OrgID, *state.PendingRequestID); err != nil {
+			return false, err
+		}
+	}
+	if state.Generation == 0 {
+		state.Generation = 1
+	}
+	if _, err := tx.Exec(ctx, `UPDATE code_review_requests SET target_generation=$3 WHERE org_id=$1 AND id=$2 AND status='pending'`, req.OrgID, id, state.Generation); err != nil {
+		return false, err
+	}
+	source := req.TriggerSource
+	if source == "" {
+		source = models.CodeReviewTriggerSourceSlashCommand
+	}
+	input := ReviewChangedInput{OrgID: req.OrgID, RepositoryID: state.RepositoryID, PullRequestID: req.PullRequestID, ExplicitRequest: true, GitHubDeliveryID: req.RequestID.String(), RequestContext: context, TriggerSource: source}
+	state.PendingInput, err = db.EncodeCodeReviewScheduleInput(scheduledReviewIntent{Input: input, Mode: models.CodeReviewRecheck, RequesterID: req.RequesterID})
+	if err != nil {
+		return false, err
+	}
+	state.PendingRequestID = &id
+	now := s.scheduling.now()
+	if state.FirstPendingAt == nil {
+		state.FirstPendingAt = &now
+	}
+	state.State = models.CodeReviewScheduleWaiting
+	state.WaitReason = models.CodeReviewWaitContext
+	retry := now.Add(15 * time.Second)
+	if state.RetryAt != nil && state.RetryAt.After(retry) {
+		retry = *state.RetryAt
+	}
+	state.RetryAt = &retry
+	result.Disposition = models.CodeReviewRequestQueued
+	return false, db.UpsertCodeReviewWake(ctx, tx, req.OrgID, req.PullRequestID, retry)
+}
+
+func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleRequestInput, captured AssessmentInputCaptureResult, baseline, previous models.CodeReviewAssessment, plan RecheckPlan, hash, kind string, requestContext *ReviewRequestContext, expected models.CodeReviewPRState) (ScheduleRequestResult, error) {
 	var result ScheduleRequestResult
 	err := s.scheduling.store.WithLockedPR(ctx, req.OrgID, captured.Manifest.Code.RepositoryID, req.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
 		assessments := db.NewCodeReviewAssessmentStore(tx)
@@ -410,6 +498,9 @@ func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleReque
 		}
 		if state.RepositoryID != captured.Manifest.Code.RepositoryID || captured.Manifest.Code.HeadSHA != captured.Snapshot.HeadSHA || captured.Manifest.Code.BaseSHA != captured.Snapshot.BaseSHA || captured.Manifest.Code.BaseRef != captured.Snapshot.BaseRef {
 			return fmt.Errorf("%w: captured revision changed", errRecheckAdmissionChanged)
+		}
+		if !captureFailureTargetMatches(state, expected) || plan.Route != RecheckRouteFull && (state.HeadSHA != "" && state.HeadSHA != captured.Snapshot.HeadSHA || state.BaseSHA != "" && state.BaseSHA != captured.Snapshot.BaseSHA || state.BaseRef != "" && state.BaseRef != captured.Snapshot.BaseRef) {
+			return fmt.Errorf("%w: pending target changed during capture", errRecheckAdmissionChanged)
 		}
 		// The pull request store was refreshed by capture; the admission lock
 		// verifies it still names the same immutable target.
@@ -488,6 +579,20 @@ func (s *Service) admitCapturedAssessment(ctx context.Context, req ScheduleReque
 		}
 		if lockedPlan.Route != RecheckRouteEvidenceOnly {
 			return errRecheckAdmissionChanged
+		}
+		if s.sandboxAdmission {
+			available, err := db.CodeReviewSandboxAvailable(ctx, tx, req.OrgID, currentBaseline.SessionID)
+			if err != nil {
+				return err
+			}
+			if !available {
+				result = ScheduleRequestResult{RequestID: req.RequestID, Disposition: models.CodeReviewRequestQueued}
+				if err := queuePendingAssessmentInTx(ctx, s, tx, state, req, requestContext, requestID); err != nil {
+					return err
+				}
+				state.WaitReason = models.CodeReviewWaitCapacity
+				return nil
+			}
 		}
 		if captured.VisualEvidence.AssessmentID == nil || *captured.VisualEvidence.AssessmentID == uuid.Nil {
 			return errRecheckAdmissionChanged
@@ -694,9 +799,21 @@ func settleCapturedAssessmentPending(ctx context.Context, tx pgx.Tx, state *mode
 	return nil
 }
 
-func (s *Service) cancelClosedPendingAssessment(ctx context.Context, req ScheduleRequestInput, repoID uuid.UUID, hash, kind string) (ScheduleRequestResult, error) {
+func (s *Service) rejectIneligibleAssessmentCapture(ctx context.Context, req ScheduleRequestInput, repoID uuid.UUID, hash, kind string, expected models.CodeReviewPRState, cancelClosed bool, cause error) (ScheduleRequestResult, error) {
 	var record db.CodeReviewRequestRecord
 	err := s.scheduling.store.WithLockedPR(ctx, req.OrgID, repoID, req.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
+		if !captureFailureTargetMatches(state, expected) {
+			var queued ScheduleRequestResult
+			if _, err := s.queuePendingAssessmentCaptureInTx(ctx, tx, state, req, assessmentRequestContext(req), hash, kind, &queued, recheckCaptureFailureAttempt{expected: expected}); err != nil {
+				return err
+			}
+			var err error
+			record, err = db.NewCodeReviewScheduleStore(tx).GetRequestByIdentity(ctx, req.OrgID, kind, req.RequestID.String())
+			return err
+		}
+		if !cancelClosed {
+			return cause
+		}
 		requestID, _, err := db.RecordCodeReviewRequest(ctx, tx, req.OrgID, repoID, req.PullRequestID, kind, req.RequestID.String(), req.Mode, hash, state.Generation+1, req.RequesterID)
 		if err != nil {
 			return err
@@ -732,9 +849,12 @@ func queuePendingAssessmentInTx(ctx context.Context, s *Service, tx pgx.Tx, stat
 	if err != nil {
 		return err
 	}
+	preservingRequest := state.PendingRequestID != nil && *state.PendingRequestID == requestID
 	state.PendingRequestID = &requestID
 	now := s.scheduling.now()
-	state.FirstPendingAt = &now
+	if !preservingRequest || state.FirstPendingAt == nil {
+		state.FirstPendingAt = &now
+	}
 	state.State = models.CodeReviewScheduleWaiting
 	state.WaitReason = models.CodeReviewWaitActive
 	retry := now.Add(15 * time.Second)
