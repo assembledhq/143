@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/db"
@@ -351,6 +352,7 @@ func waitForSandboxWorkspaceReady(
 	expectedBranch, expectedHead string,
 	timeout, initialBackoff, maxBackoff time.Duration,
 	checkCancellation func(context.Context) error,
+	additionalReadiness ...func(context.Context) (bool, error),
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -409,7 +411,17 @@ func waitForSandboxWorkspaceReady(
 				headMatches := actualHead != "" && (expectedHead == "" || strings.EqualFold(actualHead, expectedHead))
 				branchMatches := expectedBranch == "" || actualBranch == expectedBranch || actualBranch == ""
 				preparedBranchMatches := expectedBranch == "" || strings.EqualFold(strings.TrimSpace(fields[2]), actualHead)
+				inputsReady := true
 				if headMatches && branchMatches && preparedBranchMatches {
+					for _, check := range additionalReadiness {
+						ready, err := check(waitCtx)
+						if err != nil {
+							return err
+						}
+						inputsReady = inputsReady && ready
+					}
+				}
+				if headMatches && branchMatches && preparedBranchMatches && inputsReady {
 					// Close the race between the last unsuccessful probe and a
 					// cancellation that arrived while this successful probe ran.
 					if checkCancellation != nil {
@@ -901,6 +913,7 @@ type Orchestrator struct {
 	threadInbox                ThreadInboxStore   // can be nil — disables live inbox delivery
 	activityPhases             *ActivityPhaseService
 	sandboxHolders             SessionSandboxHolderStore
+	reviewInputsGroup          singleflight.Group
 	threadDeliveryLocks        sync.Map
 	activeActivityPhases       sync.Map
 	env                        *AgentEnv          // owns env resolution, auth pre-flight, Codex auth injection
@@ -3419,7 +3432,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	// On DB error we destroy the local container and fail the run — if we
 	// left it alive the reconciler couldn't find it (no container_id row
 	// reference) and it would leak until server restart.
-	actualContainerID, holdErr := o.sessions.AcquireTurnHold(ctx, run.OrgID, run.ID, sandbox.ID)
+	var actualContainerID string
+	holdErr := o.markCodeReviewInputsPreparing(ctx, run, sandbox)
+	if holdErr == nil && run.Origin == models.SessionOriginCodeReview {
+		defer func() {
+			if returnErr != nil {
+				o.clearCodeReviewInputPreparation(ctx, run, sandbox)
+			}
+		}()
+	}
+	if holdErr == nil {
+		actualContainerID, holdErr = o.sessions.AcquireTurnHold(ctx, run.OrgID, run.ID, sandbox.ID)
+	}
 	if holdErr != nil {
 		destroyCtx := context.Background()
 		if destroyErr := o.provider.Destroy(destroyCtx, sandbox); destroyErr != nil {
@@ -3639,6 +3663,16 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 				}
 			}
 			sandbox.Metadata[SandboxMetadataBaseCommitSHA] = baseCommitSHA
+		} else if run.Origin == models.SessionOriginCodeReview {
+			_, head, _, checkoutErr := codeReviewCheckoutContextFromSession(run)
+			if checkoutErr != nil {
+				return checkoutErr
+			}
+			run.BaseCommitSHA = &head
+			if sandbox.Metadata == nil {
+				sandbox.Metadata = make(map[string]string)
+			}
+			sandbox.Metadata[SandboxMetadataBaseCommitSHA] = head
 		} else {
 			baseCommitSHA, err := o.captureBaseCommitSHA(ctx, sandbox)
 			if err != nil {
@@ -3687,6 +3721,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 				return o.failAutomationTurnRunSetup(ctx, run, sandbox, automationTurn, err, log)
 			}
 			workingBranch = automationTurnWorkingBranch(automationTurn.pullRequestNumber)
+		} else if run.Origin == models.SessionOriginCodeReview {
+			prNumber, head, _, checkoutErr := codeReviewCheckoutContextFromSession(run)
+			if checkoutErr != nil {
+				return checkoutErr
+			}
+			if err := o.checkoutCodeReviewHead(ctx, sandbox, repoURL, token, prNumber, workingBranch, head); err != nil {
+				return err
+			}
 		} else {
 			checkoutCmd := fmt.Sprintf("git checkout -b '%s'", shellEscapeSingleQuote(workingBranch))
 			var checkoutOut, checkoutErr bytes.Buffer
@@ -3732,6 +3774,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 				log.Warn().Err(dbErr).Str("source", authState.source).Msg("failed to persist git identity audit")
 			}
 		}
+	}
+
+	if err := o.ensureCodeReviewInputs(ctx, run, sandbox); err != nil {
+		o.failRun(ctx, run, fmt.Sprintf("prepare shared review inputs: %s", err))
+		return err
 	}
 
 	// 8e. Advertise the live sandbox now that the workspace is populated.
@@ -4956,6 +5003,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				}
 				return o.stopWorkspaceWaitIfContainerChanged(checkCtx, session.OrgID, session.ID, workspaceSandbox.ID)
 			},
+			func(checkCtx context.Context) (bool, error) {
+				return o.codeReviewInputsPreparationFinished(checkCtx, session, workspaceSandbox)
+			},
 		)
 		if errors.Is(readyErr, ErrThreadCancelledBeforeWorkspaceReady) {
 			workspaceStage.End("cancelled")
@@ -4983,6 +5033,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					Msg("reused code review workspace did not become ready before retry")
 			}
 			return readyErr
+		}
+		if err := o.ensureCodeReviewInputs(ctx, session, workspaceSandbox); err != nil {
+			return err
 		}
 		log.Info().
 			Str("container_id", workspaceSandbox.ID).
@@ -5237,6 +5290,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// row reference) and it would leak.
 	var actualContainerID string
 	var holdErr error
+	if !reusedExisting {
+		holdErr = o.markCodeReviewInputsPreparing(ctx, session, sandbox)
+		if holdErr == nil && session.Origin == models.SessionOriginCodeReview {
+			defer func() {
+				if returnErr != nil {
+					o.clearCodeReviewInputPreparation(ctx, session, sandbox)
+				}
+			}()
+		}
+	}
 	if reusedExisting {
 		var acquired bool
 		acquired, holdErr = o.sessions.AcquireExistingTurnHold(ctx, session.OrgID, session.ID, sandbox.ID)
@@ -5283,7 +5346,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		} else {
 			actualContainerID = sandbox.ID
 		}
-	} else {
+	} else if holdErr == nil {
 		actualContainerID, holdErr = o.sessions.AcquireTurnHold(ctx, session.OrgID, session.ID, sandbox.ID)
 	}
 	if holdErr != nil {
@@ -5786,6 +5849,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if dbErr := o.sessions.SetGitIdentity(ctx, session.OrgID, session.ID, authState.source, authState.userID); dbErr != nil {
 			log.Warn().Err(dbErr).Str("source", authState.source).Msg("failed to persist git identity audit during continue_session")
 		}
+	}
+
+	if err := o.ensureCodeReviewInputs(ctx, session, sandbox); err != nil {
+		return o.failContinueSessionError(ctx, session, opts, err, log)
 	}
 
 	// 6. Execute agent with log streaming.
@@ -6506,6 +6573,11 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 	if err != nil {
 		return models.Issue{}, "", TokenBillingModeUnknown, err
 	}
+	if codeReviewCheckout {
+		if _, err := codeReviewInputIdentityFromSession(session); err != nil {
+			return models.Issue{}, "", TokenBillingModeUnknown, err
+		}
+	}
 	if codeReviewCheckout && session.RepositoryID == nil {
 		return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("code review session is missing repository")
 	}
@@ -6570,7 +6642,7 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 				return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("code review session is missing working branch")
 			}
 			checkoutStage := observability.BeginStage(true, log, "review_head_checkout")
-			checkoutErr := o.checkoutExpectedPullRequestHead(ctx, sandbox, repo.CloneURL, token, codeReviewPRNumber, workingBranch, codeReviewHeadSHA)
+			checkoutErr := o.checkoutCodeReviewHead(ctx, sandbox, repo.CloneURL, token, codeReviewPRNumber, workingBranch, codeReviewHeadSHA)
 			checkoutStage.End(observability.StageOutcome(ctx, checkoutErr))
 			if checkoutErr != nil {
 				return models.Issue{}, "", TokenBillingModeUnknown, checkoutErr
@@ -6616,6 +6688,8 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 type codeReviewCheckoutContext struct {
 	Kind           string `json:"kind"`
 	GitHubPRNumber int    `json:"github_pr_number"`
+	GitHubRepo     string `json:"github_repo"`
+	BaseSHA        string `json:"base_sha"`
 	HeadSHA        string `json:"head_sha"`
 	BaseSHA        string `json:"base_sha"`
 }

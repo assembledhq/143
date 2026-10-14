@@ -1,0 +1,351 @@
+package agent
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"github.com/assembledhq/143/internal/models"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+)
+
+type reviewInputsProvider struct {
+	SandboxProvider
+	calls atomic.Int64
+}
+
+func (p *reviewInputsProvider) IsAlive(context.Context, *Sandbox) (bool, error) { return true, nil }
+
+func (p *reviewInputsProvider) Exec(ctx context.Context, _ *Sandbox, command string, stdout, stderr io.Writer) (int, error) {
+	p.calls.Add(1)
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return exit.ExitCode(), nil
+		}
+		return -1, err
+	}
+	return 0, nil
+}
+
+type reviewInputsTokenSpy struct{ calls atomic.Int64 }
+
+func (s *reviewInputsTokenSpy) GetInstallationToken(context.Context, int64) (string, error) {
+	s.calls.Add(1)
+	return "", nil
+}
+
+type reviewInputsAuthProvider struct {
+	SandboxProvider
+	commands []string
+	tokens   []string
+}
+
+func (p *reviewInputsAuthProvider) Exec(_ context.Context, sandbox *Sandbox, command string, _, _ io.Writer) (int, error) {
+	p.commands = append(p.commands, command)
+	p.tokens = append(p.tokens, sandbox.Env["143_REVIEW_FETCH_TOKEN"])
+	if len(p.commands) == 1 {
+		return 42, nil
+	}
+	return 0, nil
+}
+
+func TestSharedReviewInputsKeepFetchCredentialsEphemeral(t *testing.T) {
+	t.Parallel()
+	provider := &reviewInputsAuthProvider{}
+	session := reviewInputsSession(t, strings.Repeat("b", 40), strings.Repeat("a", 40))
+	orchestrator := &Orchestrator{
+		provider:     provider,
+		github:       testInternalGitHubTokens{token: "synthetic-fetch-token"},
+		repositories: testInternalRepoStore{repo: models.Repository{FullName: "example/repo", CloneURL: "https://github.com/example/repo.git"}},
+	}
+	sandbox := &Sandbox{ID: "container", WorkDir: "/workspace", Env: map[string]string{"KEEP": "original"}}
+	require.NoError(t, orchestrator.ensureCodeReviewInputs(context.Background(), session, sandbox), "coordinator should authenticate only the missing-input fetch")
+	require.Equal(t, []string{"", "synthetic-fetch-token"}, provider.tokens, "only the remote preparation process should receive the short-lived token")
+	require.Equal(t, map[string]string{"KEEP": "original"}, sandbox.Env, "shared sandbox state must not retain temporary fetch credentials")
+	require.NotContains(t, strings.Join(provider.commands, "\n"), "synthetic-fetch-token", "command logging must never contain fetch credentials")
+}
+
+func newReviewInputsGitFixture(t *testing.T) (string, string, string, string) {
+	t.Helper()
+	directory := filepath.Join(t.TempDir(), "review's source")
+	require.NoError(t, os.Mkdir(directory, 0o700), "isolated source directory should exist")
+	reviewInputsWritableCleanup(t, directory)
+	git := func(args ...string) string { return reviewInputsGit(t, directory, args...) }
+	git("init", "-q", "-b", "main")
+	git("config", "user.name", "Review fixture")
+	git("config", "user.email", "review@example.test")
+	git("config", "commit.gpgsign", "false")
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "change.txt"), []byte("before\n"), 0o600), "common source should be written")
+	git("add", ".")
+	git("commit", "-qm", "common base")
+	mergeBase := git("rev-parse", "HEAD")
+	git("checkout", "-qb", "review")
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "change.txt"), []byte("after\n"), 0o600), "review change should be written")
+	git("commit", "-qam", "review change")
+	head := git("rev-parse", "HEAD")
+	git("checkout", "-q", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "unrelated.txt"), []byte("base branch advance\n"), 0o600), "base-only source should be written")
+	git("add", ".")
+	git("commit", "-qm", "advance base")
+	base := git("rev-parse", "HEAD")
+	git("checkout", "-q", "review")
+	return directory, base, head, mergeBase
+}
+
+func reviewInputsWritableCleanup(t *testing.T, directory string) {
+	t.Helper()
+	t.Cleanup(func() {
+		err := filepath.Walk(directory, func(name string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return os.Chmod(name, 0o700)
+			}
+			return nil
+		})
+		require.NoError(t, err, "read-only fixture directories should permit temporary cleanup")
+	})
+}
+
+func reviewInputsGit(t *testing.T, directory string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", directory}, args...)...)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git fixture command should succeed: %s", output)
+	return strings.TrimSpace(string(output))
+}
+
+func reviewInputsSession(t *testing.T, base, head string) *models.Session {
+	t.Helper()
+	repositoryID := uuid.New()
+	context, err := json.Marshal(codeReviewCheckoutContext{Kind: "code_review", GitHubRepo: "example/repo", GitHubPRNumber: 42, BaseSHA: base, HeadSHA: head})
+	require.NoError(t, err, "captured review context should encode")
+	return &models.Session{ID: uuid.New(), OrgID: uuid.New(), RepositoryID: &repositoryID, Origin: models.SessionOriginCodeReview, BaseCommitSHA: &head, RevisionContext: context}
+}
+
+func TestSharedReviewInputsCompleteAndImmutable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		shallow bool
+	}{
+		{name: "local captured commits"},
+		{name: "missing base and history fetched once", shallow: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			origin, base, head, mergeBase := newReviewInputsGitFixture(t)
+			directory := origin
+			if tt.shallow {
+				directory = filepath.Join(t.TempDir(), "shallow")
+				reviewInputsWritableCleanup(t, directory)
+				output, err := exec.Command("git", "clone", "-q", "--depth=1", "--branch=review", "file://"+origin, directory).CombinedOutput()
+				require.NoError(t, err, "shallow review fixture should clone: %s", output)
+			}
+			session := reviewInputsSession(t, base, head)
+			provider, tokens := &reviewInputsProvider{}, &reviewInputsTokenSpy{}
+			orchestrator := &Orchestrator{provider: provider, github: tokens, repositories: testInternalRepoStore{repo: models.Repository{FullName: "example/repo", CloneURL: origin}}}
+			sandbox := &Sandbox{ID: "source-container", WorkDir: directory}
+			require.NoError(t, orchestrator.ensureCodeReviewInputs(context.Background(), session, sandbox), "coordinator should prepare the complete captured diff")
+			identity, err := codeReviewInputIdentityFromSession(session)
+			require.NoError(t, err, "captured revision identity should validate")
+			manifestPath, patchPath := CodeReviewInputPaths(identity.OrgID, identity.SessionID, identity.RepositoryID, identity.Repository, base, head)
+			manifestBytes, err := os.ReadFile(filepath.Join(directory, manifestPath))
+			require.NoError(t, err, "atomic bundle should publish a manifest")
+			patch, err := os.ReadFile(filepath.Join(directory, patchPath))
+			require.NoError(t, err, "atomic bundle should publish the complete patch")
+			var manifest map[string]any
+			require.NoError(t, json.Unmarshal(manifestBytes, &manifest), "manifest should be JSON")
+			require.Equal(t, map[string]any{
+				"version": float64(1), "org_id": session.OrgID.String(), "session_id": session.ID.String(), "repository_id": session.RepositoryID.String(),
+				"repository": "example/repo", "base_sha": base, "head_sha": head, "merge_base_sha": mergeBase, "patch_sha256": fmt.Sprintf("%x", sha256.Sum256(patch)),
+			}, manifest, "manifest should pin complete tenant/repository/revision evidence")
+			require.Contains(t, string(patch), "-before\n+after", "prepared patch should contain the review change")
+			require.NotContains(t, string(patch), "unrelated.txt", "prepared diff should exclude changes unique to the advanced base branch")
+			before, err := os.Stat(filepath.Join(directory, manifestPath))
+			require.NoError(t, err, "prepared manifest should be present")
+			tokenCalls := tokens.calls.Load()
+			require.NoError(t, orchestrator.ensureCodeReviewInputs(context.Background(), session, sandbox), "warm bundle should validate without fetching")
+			after, err := os.Stat(filepath.Join(directory, manifestPath))
+			require.NoError(t, err, "warm bundle should preserve the manifest")
+			require.Equal(t, before.ModTime(), after.ModTime(), "warm validation should never rewrite shared evidence")
+			require.Equal(t, tokenCalls, tokens.calls.Load(), "warm reviewers should not acquire a token or fetch GitHub inputs")
+			if tt.shallow {
+				require.Equal(t, int64(1), tokenCalls, "one coordinator authentication should recover missing history")
+			} else {
+				require.Equal(t, int64(0), tokenCalls, "complete local commits should require no remote authentication")
+			}
+		})
+	}
+}
+
+func TestSharedReviewInputsRejectIncompleteOrModifiedEvidence(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		edit string
+	}{
+		{name: "missing exact base", edit: "missing-base"},
+		{name: "unrelated captured histories", edit: "unrelated"},
+		{name: "wrong workspace head", edit: "wrong-head"},
+		{name: "changed source", edit: "source"},
+		{name: "modified prepared patch", edit: "patch"},
+		{name: "mismatched manifest identity", edit: "manifest"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			directory, base, head, _ := newReviewInputsGitFixture(t)
+			session := reviewInputsSession(t, base, head)
+			orchestrator := &Orchestrator{provider: &reviewInputsProvider{}, repositories: testInternalRepoStore{repo: models.Repository{FullName: "example/repo"}}}
+			sandbox := &Sandbox{ID: "container", WorkDir: directory}
+			if tt.edit == "patch" || tt.edit == "manifest" {
+				require.NoError(t, orchestrator.ensureCodeReviewInputs(context.Background(), session, sandbox), "valid fixture should prepare before corruption")
+			}
+			switch tt.edit {
+			case "missing-base":
+				session = reviewInputsSession(t, strings.Repeat("1", 40), head)
+			case "unrelated":
+				reviewInputsGit(t, directory, "checkout", "-q", "--orphan", "unrelated")
+				reviewInputsGit(t, directory, "rm", "-qrf", ".")
+				reviewInputsGit(t, directory, "commit", "--allow-empty", "-qm", "unrelated root")
+				otherBase := reviewInputsGit(t, directory, "rev-parse", "HEAD")
+				reviewInputsGit(t, directory, "checkout", "-q", "review")
+				session = reviewInputsSession(t, otherBase, head)
+			case "wrong-head":
+				reviewInputsGit(t, directory, "checkout", "-q", "main")
+			case "source":
+				require.NoError(t, os.WriteFile(filepath.Join(directory, "change.txt"), []byte("tampered\n"), 0o600), "source fixture should change")
+			case "patch", "manifest":
+				manifest, patch := CodeReviewInputPaths(session.OrgID, session.ID, *session.RepositoryID, "example/repo", base, head)
+				target := patch
+				if tt.edit == "manifest" {
+					target = manifest
+				}
+				file := filepath.Join(directory, target)
+				require.NoError(t, os.Chmod(file, 0o600), "corruption fixture should allow writing")
+				require.NoError(t, os.WriteFile(file, []byte("{}"), 0o600), "prepared evidence corruption should be written")
+			}
+			require.Error(t, orchestrator.ensureCodeReviewInputs(context.Background(), session, sandbox), "incomplete or inconsistent evidence must never start a review")
+		})
+	}
+}
+
+func TestSharedReviewInputIdentityRequiresCapturedRevision(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(*models.Session)
+	}{
+		{name: "missing repository", mutate: func(session *models.Session) { session.RepositoryID = nil }},
+		{name: "missing revision", mutate: func(session *models.Session) { session.RevisionContext = nil }},
+		{name: "missing base", mutate: func(session *models.Session) {
+			session.RevisionContext = []byte(`{"kind":"code_review","github_repo":"example/repo","github_pr_number":42,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
+		}},
+		{name: "abbreviated revision", mutate: func(session *models.Session) {
+			session.RevisionContext = []byte(`{"kind":"code_review","github_repo":"example/repo","github_pr_number":42,"base_sha":"abc","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
+		}},
+		{name: "session baseline differs from head", mutate: func(session *models.Session) {
+			wrongBaseline := strings.Repeat("b", 40)
+			session.BaseCommitSHA = &wrongBaseline
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			session := reviewInputsSession(t, strings.Repeat("b", 40), strings.Repeat("a", 40))
+			tt.mutate(session)
+			provider := &reviewInputsProvider{}
+			orchestrator := &Orchestrator{provider: provider}
+			require.Error(t, orchestrator.ensureCodeReviewInputs(context.Background(), session, &Sandbox{ID: "container", WorkDir: t.TempDir()}), "incomplete identities should never begin workspace preparation")
+			require.Equal(t, int64(0), provider.calls.Load(), "invalid identities should be rejected before any sandbox command")
+		})
+	}
+}
+
+func TestSharedReviewInputsRejectMissingFetchRemote(t *testing.T) {
+	t.Parallel()
+	session := reviewInputsSession(t, strings.Repeat("b", 40), strings.Repeat("a", 40))
+	provider := &reviewInputsAuthProvider{}
+	tokens := &reviewInputsTokenSpy{}
+	orchestrator := &Orchestrator{provider: provider, github: tokens, repositories: testInternalRepoStore{repo: models.Repository{FullName: "example/repo"}}}
+	require.ErrorContains(t, orchestrator.ensureCodeReviewInputs(context.Background(), session, &Sandbox{ID: "container", WorkDir: "/workspace"}), "clone URL unavailable", "missing remote inputs must never count as complete preparation")
+	require.Equal(t, int64(0), tokens.calls.Load(), "an unavailable repository URL should be rejected before requesting authentication")
+}
+
+func TestSharedReviewInputPreparationMarkerLifecycle(t *testing.T) {
+	t.Parallel()
+	directory, base, head, _ := newReviewInputsGitFixture(t)
+	session := reviewInputsSession(t, base, head)
+	sandbox := &Sandbox{ID: "container", WorkDir: directory}
+	orchestrator := &Orchestrator{provider: &reviewInputsProvider{}, repositories: testInternalRepoStore{repo: models.Repository{FullName: "example/repo"}}}
+	require.NoError(t, orchestrator.markCodeReviewInputsPreparing(context.Background(), session, sandbox), "owner should mark preparation before publishing a container")
+	ready, err := orchestrator.codeReviewInputsPreparationFinished(context.Background(), session, sandbox)
+	require.NoError(t, err, "sibling should inspect preparation state")
+	require.False(t, ready, "checked-out HEAD alone must not bypass unfinished owner preparation")
+	require.Empty(t, reviewInputsGit(t, directory, "ls-files", "--others", "--exclude-standard"), "pre-clone marker must remain outside the repository")
+	orchestrator.clearCodeReviewInputPreparation(context.Background(), session, sandbox)
+	ready, err = orchestrator.codeReviewInputsPreparationFinished(context.Background(), session, sandbox)
+	require.NoError(t, err, "cancelled owner marker should be removable")
+	require.True(t, ready, "owner cancellation should not leave a permanent readiness wait")
+	require.NoError(t, orchestrator.markCodeReviewInputsPreparing(context.Background(), session, sandbox), "recovery owner should be able to mark a new preparation attempt")
+	require.NoError(t, orchestrator.ensureCodeReviewInputs(context.Background(), session, sandbox), "recovery should publish a complete immutable bundle")
+	ready, err = orchestrator.codeReviewInputsPreparationFinished(context.Background(), session, sandbox)
+	require.NoError(t, err, "complete bundle should release the readiness barrier")
+	require.True(t, ready, "atomic publication should clear the preparation marker")
+}
+
+func TestSharedReviewInputsConcurrentPreparationAndTenantIsolation(t *testing.T) {
+	t.Parallel()
+	directory, base, head, _ := newReviewInputsGitFixture(t)
+	session := reviewInputsSession(t, base, head)
+	provider := &reviewInputsProvider{}
+	orchestrator := &Orchestrator{provider: provider, repositories: testInternalRepoStore{repo: models.Repository{FullName: "example/repo"}}}
+	sandbox := &Sandbox{ID: "shared-container", WorkDir: directory}
+	var wait sync.WaitGroup
+	errors := make(chan error, 8)
+	for range 8 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			errors <- orchestrator.ensureCodeReviewInputs(context.Background(), session, sandbox)
+		}()
+	}
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		require.NoError(t, err, "concurrent siblings should consume one complete immutable bundle")
+	}
+	require.Equal(t, int64(1), provider.calls.Load(), "overlapping sibling preparation should execute once per container/revision")
+	other := *session
+	other.OrgID = uuid.New()
+	require.NoError(t, orchestrator.ensureCodeReviewInputs(context.Background(), &other, sandbox), "another tenant should prepare isolated evidence")
+	manifest, _ := CodeReviewInputPaths(session.OrgID, session.ID, *session.RepositoryID, "example/repo", base, head)
+	otherManifest, _ := CodeReviewInputPaths(other.OrgID, other.ID, *other.RepositoryID, "example/repo", base, head)
+	require.NotEqual(t, manifest, otherManifest, "tenant identity must separate immutable input bundles")
+	entries, err := os.ReadDir(filepath.Join(directory, ".git", "143-review"))
+	require.NoError(t, err, "prepared input cache should exist")
+	var directories []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			directories = append(directories, entry.Name())
+		}
+	}
+	require.Len(t, directories, 2, "each tenant should have exactly one complete directory and no partial staging artifacts")
+}

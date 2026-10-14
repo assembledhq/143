@@ -46,6 +46,9 @@ type Config struct {
 	Owner                 string
 	ProbeLease            time.Duration
 	FallbackLimit         int
+
+	BackgroundQuotaReserve  int64
+	BackgroundQuotaInterval time.Duration
 }
 
 type Scope struct {
@@ -94,6 +97,10 @@ type Controller struct {
 	degradedLog sync.Once
 	probeSeq    atomic.Uint64
 	beforeClaim func()
+
+	backgroundQuotaReserve     int64
+	backgroundQuotaInterval    time.Duration
+	backgroundQuotaDegradedLog sync.Once
 }
 
 const (
@@ -114,6 +121,15 @@ func NewController(cfg Config) (*Controller, error) {
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	if cfg.BackgroundQuotaReserve < 0 {
+		return nil, fmt.Errorf("GitHub background quota reserve must not be negative")
+	}
+	if cfg.BackgroundQuotaInterval == 0 {
+		cfg.BackgroundQuotaInterval = time.Minute
+	}
+	if cfg.BackgroundQuotaInterval < time.Second || cfg.BackgroundQuotaInterval > 15*time.Minute {
+		return nil, fmt.Errorf("GitHub background quota interval must be between 1s and 15m")
 	}
 	if cfg.ProbeLease <= 0 {
 		cfg.ProbeLease = defaultProbeLease
@@ -143,6 +159,7 @@ func NewController(cfg Config) (*Controller, error) {
 		mode: cfg.Mode, environment: sanitizeKeyPart(cfg.Environment), appID: cfg.AppID,
 		allowlist: allowlist, cache: cfg.Cache, logger: cfg.Logger, now: cfg.Now,
 		owner: owner, probeLease: cfg.ProbeLease, fallback: newLocalStore(cfg.FallbackLimit),
+		backgroundQuotaReserve: cfg.BackgroundQuotaReserve, backgroundQuotaInterval: cfg.BackgroundQuotaInterval,
 	}, nil
 }
 
@@ -246,6 +263,7 @@ func (c *Controller) Observe(ctx context.Context, permit Permit, observation Obs
 		return ObservationResult{}
 	}
 	now := c.now().UTC()
+	c.observeBackgroundQuota(ctx, permit.Scope.InstallationID, observation, now)
 	classification := ClassifyResponse(ResponseInput{
 		StatusCode: observation.StatusCode, Header: observation.Header, Message: observation.Message,
 		GraphQLErrors: observation.GraphQLErrors, Now: now,

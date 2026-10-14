@@ -15,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
+	agentsvc "github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/github/ratelimit"
@@ -1541,23 +1542,16 @@ func TestCodeReviewVisualEvidenceSatisfactions(t *testing.T) {
 	}, codeReviewVisualEvidenceSatisfactions(synthesis, snapshot), "satisfaction metrics should preserve the validated visual basis and human GitHub surface")
 }
 
-func TestCodeReviewReviewerMessageUsesNativeReviewCommand(t *testing.T) {
+func TestCodeReviewReviewerMessageUsesLocalInputs(t *testing.T) {
 	t.Parallel()
-
-	prURL := "https://github.com/assembledhq/assembled/pull/53786"
-	prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{GitHubPRURL: prURL}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
-
-	require.True(t, strings.HasPrefix(prompt, "/review "+prURL), "code review reviewer prompt should pass the authoritative pull request URL directly to the native review command")
-	require.Contains(t, prompt, "do not infer the target from recent pull requests", "reviewer prompt should forbid selecting a different pull request from repository activity")
+	prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
+	require.Contains(t, prompt, "prepared local diff", "reviewers should read the coordinator's captured evidence")
 	require.Contains(t, prompt, "Do NOT run test suites", "reviewer prompt should forbid running test suites")
 	require.Contains(t, prompt, "Do NOT modify the workspace", "reviewer prompt should forbid workspace changes")
-	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeCodex, prompt), "Codex reviewer messages should invoke native /review with the review constraints")
-	commands := codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt)
-	require.Len(t, commands, 1, "native reviewer command metadata should be persisted")
-	require.Equal(t, strings.TrimSpace(strings.TrimPrefix(prompt, "/review")), commands[0].Arguments, "native reviewer command should carry the review constraints as arguments")
-	require.True(t, strings.HasPrefix(commands[0].Arguments, prURL), "native reviewer command arguments should begin with the authoritative pull request URL")
-	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "agents without a native /review command should receive the plain prompt")
-	require.Empty(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "agents without a native /review command should not persist command metadata")
+	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeCodex, prompt), "native-capable reviewers should receive the plain local review prompt")
+	require.Nil(t, codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt), "reviewers must not dispatch URL-driven native review commands")
+	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "all reviewers should receive the same evidence contract")
+	require.Nil(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "local reviews should not persist native command metadata")
 }
 
 func TestCodeReviewReviewerPromptIncludesPullRequestTarget(t *testing.T) {
@@ -1570,23 +1564,23 @@ func TestCodeReviewReviewerPromptIncludesPullRequestTarget(t *testing.T) {
 		GitHubPRURL:    "https://github.com/assembledhq/example/pull/53873",
 		BaseSHA:        &baseSHA,
 	}
-	job := runCodeReviewPayload{HeadSHA: "db848bf3c98e34c3c26d842b4e9b2ff1913dc34f"}
+	job := runCodeReviewPayload{OrgID: uuid.New(), SessionID: uuid.New(), RepositoryID: uuid.New(), HeadSHA: "db848bf3c98e34c3c26d842b4e9b2ff1913dc34f"}
 	files := []codereview.PullRequestFile{{Filename: "gocode/timeutils/interval.go"}, {Filename: "gocode/timeutils/interval_test.go"}}
 
 	prompt := codeReviewReviewerPrompt(job, pr, models.DefaultCodeReviewPolicyConfig(), 3, "", files, models.CodeReviewVisualEvidenceSnapshot{})
 
-	require.True(t, strings.HasPrefix(prompt, "/review https://github.com/assembledhq/example/pull/53873"), "native /review invocation should carry the PR URL as its argument")
+	require.False(t, strings.HasPrefix(prompt, "/review"), "local review should not invoke a URL-driven native command")
 	require.Contains(t, prompt, "<review_target>", "reviewer prompt should include the review target block")
 	require.Contains(t, prompt, "Repository: assembledhq/example", "reviewer prompt should identify the repository")
 	require.Contains(t, prompt, "Pull request: #53873", "reviewer prompt should identify the PR number")
 	require.Contains(t, prompt, "Base SHA: "+baseSHA, "reviewer prompt should pin the base SHA")
 	require.Contains(t, prompt, "Head SHA: "+job.HeadSHA, "reviewer prompt should pin the head SHA")
-	require.Contains(t, prompt, "git diff $(git merge-base "+baseSHA+" "+job.HeadSHA+") "+job.HeadSHA, "reviewer prompt should spell out the merge-base diff command")
-	require.Contains(t, prompt, "git fetch origin "+job.HeadSHA, "reviewer prompt should tell the reviewer how to fetch a missing head SHA")
-	require.Contains(t, prompt, "git fetch origin pull/53873/head", "reviewer prompt should offer the PR ref as a fetch fallback")
-	require.Contains(t, prompt, "git checkout --detach "+job.HeadSHA, "reviewer prompt should permit a detached checkout of the head SHA")
-	require.Contains(t, prompt, "substitute `origin/HEAD`", "reviewer prompt should offer a fallback when the base SHA is unreachable")
-	require.Contains(t, prompt, "report the mismatch", "reviewer prompt should require reporting a workspace/head mismatch")
+	manifest, diff := agentsvc.CodeReviewInputPaths(job.OrgID, job.SessionID, job.RepositoryID, pr.GitHubRepo, baseSHA, job.HeadSHA)
+	require.Contains(t, prompt, "Prepared manifest: "+manifest, "reviewers should share the exact identity-keyed manifest")
+	require.Contains(t, prompt, "Prepared diff: "+diff, "reviewers should consume one prepared complete patch")
+	require.Contains(t, prompt, "Do not substitute another base", "missing inputs must never fall back to an unrelated base")
+	require.NotContains(t, prompt, "git fetch", "reviewers must leave network retrieval to the coordinator")
+	require.NotContains(t, prompt, "origin/HEAD", "reviewers must never substitute a mutable diff base")
 	require.Contains(t, prompt, "- gocode/timeutils/interval.go", "reviewer prompt should list changed files")
 
 	explicitBase := "2222222222222222222222222222222222222222"
@@ -1594,15 +1588,14 @@ func TestCodeReviewReviewerPromptIncludesPullRequestTarget(t *testing.T) {
 	require.Contains(t, withExplicitBase, "Base SHA: "+explicitBase, "captured metadata base SHA should win over the PR record")
 
 	commands := codeReviewNativeReviewCommands(models.AgentTypeClaudeCode, prompt)
-	require.Len(t, commands, 1, "native reviewer command metadata should be persisted")
-	require.True(t, strings.HasPrefix(commands[0].Arguments, pr.GitHubPRURL), "native /review arguments should start with the PR URL")
+	require.Nil(t, commands, "Claude reviewers should also use plain local review instructions")
 
 	withoutTarget := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
 	require.NotContains(t, withoutTarget, "<review_target>", "prompt without a head SHA should omit the target block")
-	require.True(t, strings.HasPrefix(withoutTarget, "/review"), "prompt without a target should still begin with /review")
+	require.Contains(t, withoutTarget, "report the review as incomplete", "missing input targets must produce an explicit incomplete result")
 }
 
-func TestCodeReviewEveryReviewerAgentPreservesNativeReviewPrefix(t *testing.T) {
+func TestCodeReviewEveryReviewerAgentSharesLocalEvidence(t *testing.T) {
 	t.Parallel()
 	agents := []models.AgentType{models.AgentTypeCodex, models.AgentTypeClaudeCode, models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode}
 	for _, agentType := range agents {
@@ -1612,7 +1605,8 @@ func TestCodeReviewEveryReviewerAgentPreservesNativeReviewPrefix(t *testing.T) {
 			cfg.ReviewInstructions = "Review organization-specific invariants."
 			prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, cfg, 2, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
 			message := codeReviewReviewerMessage(agentType, prompt)
-			require.Equal(t, "/review", strings.Fields(message)[0], "every configured or fallback reviewer invocation should begin with /review")
+			require.Equal(t, prompt, message, "all reviewers should receive the same local evidence and independent analysis constraints")
+			require.Nil(t, codeReviewNativeReviewCommands(agentType, prompt), "no reviewer should independently retrieve the PR through a native command")
 			require.Contains(t, message, cfg.ReviewInstructions, "every reviewer path should receive captured review instructions")
 		})
 	}
@@ -1624,7 +1618,7 @@ func TestCodeReviewPromptPolicyRouting(t *testing.T) {
 	cfg.ReviewInstructions = "Focus on tenant isolation; {{ .Title }} must remain literal."
 	cfg.AutomatedApprovalPolicy = "Escalate every architectural change."
 	reviewer := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, cfg, 7, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
-	require.True(t, strings.HasPrefix(reviewer, "/review"), "reviewer invocation should preserve /review as its first token")
+	require.False(t, strings.HasPrefix(reviewer, "/review"), "reviewer invocation should use plain local instructions")
 	require.Contains(t, reviewer, cfg.ReviewInstructions, "reviewer should receive organization review instructions")
 	require.NotContains(t, reviewer, cfg.AutomatedApprovalPolicy, "reviewer should not receive automated approval policy")
 	require.Contains(t, reviewer, "{{ .Title }}", "organization prompt data should not be recursively rendered")

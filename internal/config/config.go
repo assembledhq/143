@@ -196,6 +196,10 @@ type Config struct {
 	CodeReviewRechecksEnabled               bool     `env:"CODE_REVIEW_RECHECKS_ENABLED" envDefault:"false"`
 	CodeReviewDisputeReassessmentsEnabled   bool     `env:"CODE_REVIEW_DISPUTE_REASSESSMENTS_ENABLED" envDefault:"true"`
 	CodeReviewDisputeMaxActiveReassessments int      `env:"CODE_REVIEW_DISPUTE_MAX_ACTIVE_REASSESSMENTS" envDefault:"1000"`
+
+	GitHubBackgroundQuotaReserve  int64         `env:"GITHUB_BACKGROUND_QUOTA_RESERVE" envDefault:"0"`
+	GitHubBackgroundQuotaInterval time.Duration `env:"GITHUB_BACKGROUND_QUOTA_INTERVAL" envDefault:"1m"`
+
 	// Rolling 24h ceilings on dispute intake from untrusted GitHub authors.
 	// Tunable because they are the only brake on third-party LLM and GitHub
 	// spend on public repositories.
@@ -700,6 +704,12 @@ func (c *Config) ValidateSecrets() error {
 		if installationID <= 0 {
 			return errors.New("GITHUB_RATE_LIMIT_INSTALLATION_ALLOWLIST entries must be positive")
 		}
+	}
+	if c.GitHubBackgroundQuotaReserve < 0 {
+		return errors.New("GITHUB_BACKGROUND_QUOTA_RESERVE must not be negative")
+	}
+	if (c.GitHubBackgroundQuotaReserve > 0 || c.GitHubBackgroundQuotaInterval != 0) && (c.GitHubBackgroundQuotaInterval < time.Second || c.GitHubBackgroundQuotaInterval > 15*time.Minute) {
+		return errors.New("GITHUB_BACKGROUND_QUOTA_INTERVAL must be between 1s and 15m")
 	}
 	// Retention day validation applies in all environments.
 	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 || c.DataRetentionSlackInboundPayloadDays < 0 || c.DataRetentionSlackInboundPayloadBatch < 0 || c.PreviewDependencyCacheRetentionDays < 0 || c.PreviewDependencyCacheKeepNewestPerRepo < 0 {

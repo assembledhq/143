@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/prompts"
+	agentsvc "github.com/assembledhq/143/internal/services/agent"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	threadsvc "github.com/assembledhq/143/internal/services/thread"
@@ -1352,7 +1353,6 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 			ReviewerIndex:   idx,
 			ThreadID:        thread.ID.String(),
 			PromptRecordKey: recordKey,
-			NativeReview:    codeReviewAgentHasBuiltinReviewCommand(agentType),
 			ReadOnly:        true,
 		})
 		result := &models.CodeReviewAgentResult{
@@ -1383,7 +1383,6 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 				ReviewerIndex:   idx,
 				ThreadID:        thread.ID.String(),
 				PromptRecordKey: recordKey,
-				NativeReview:    codeReviewAgentHasBuiltinReviewCommand(agentType),
 				ReadOnly:        true,
 				Error:           raw,
 				CompletedAt:     time.Now().UTC().Format(time.RFC3339),
@@ -1659,40 +1658,12 @@ func codeReviewReviewerThreadLabel(index int, agentType models.AgentType, fallba
 	return fmt.Sprintf("Code review: %s (%d)", label, index+1)
 }
 
-func codeReviewAgentHasBuiltinReviewCommand(agentType models.AgentType) bool {
-	for _, command := range models.SlashCommandsForAgent(agentType) {
-		if command.Name == "review" {
-			return true
-		}
-	}
-	return false
+func codeReviewNativeReviewCommands(models.AgentType, string) models.SessionInputCommands {
+	return nil
 }
 
-func codeReviewNativeReviewCommands(agentType models.AgentType, promptText string) models.SessionInputCommands {
-	if !codeReviewAgentHasBuiltinReviewCommand(agentType) {
-		return nil
-	}
-	arguments := strings.TrimSpace(strings.TrimPrefix(strings.TrimLeft(promptText, " \t\r\n"), "/review"))
-	return models.SessionInputCommands{{
-		Kind:      "command",
-		AgentType: agentType,
-		Name:      "review",
-		Token:     "/review",
-		Display:   "/review",
-		Arguments: arguments,
-		Source:    models.SessionInputCommandSourceBuiltin,
-	}}
-}
-
-func codeReviewReviewerMessage(agentType models.AgentType, promptText string) string {
-	promptText = strings.TrimSpace(promptText)
-	if !codeReviewAgentHasBuiltinReviewCommand(agentType) || strings.HasPrefix(strings.TrimLeft(promptText, " \t\r\n"), "/review") {
-		return promptText
-	}
-	if promptText == "" {
-		return "/review"
-	}
-	return "/review " + promptText
+func codeReviewReviewerMessage(_ models.AgentType, promptText string) string {
+	return strings.TrimSpace(promptText)
 }
 
 func codeReviewAgentMessageInput(job runCodeReviewPayload, threadID uuid.UUID, message string, commands models.SessionInputCommands, visualEvidence models.CodeReviewVisualEvidenceSnapshot) threadsvc.SendMessageInput {
@@ -1866,7 +1837,11 @@ func revertCodeReviewReadOnlyThread(ctx context.Context, stores *Stores, service
 
 func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
 	cfg = models.ResolveCodeReviewPolicyConfig(&cfg)
+	baseSHA = firstNonEmpty(baseSHA, stringPtrValue(pr.BaseSHA))
+	manifestPath, diffPath := agentsvc.CodeReviewInputPaths(job.OrgID, job.SessionID, job.RepositoryID, pr.GitHubRepo, baseSHA, job.HeadSHA)
 	return strings.TrimSpace(prompts.CodeReviewReviewerPrompt(prompts.CodeReviewReviewerPromptData{
+		ManifestPath:          manifestPath,
+		DiffPath:              diffPath,
 		ReviewInstructions:    cfg.ReviewInstructions,
 		Repository:            pr.GitHubRepo,
 		PullNumber:            pr.GitHubPRNumber,

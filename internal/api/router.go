@@ -95,6 +95,8 @@ func ResolveGitHubRateLimitController(cfg *config.Config, redisClient *cache.Cli
 		Environment: cfg.Env, AppID: cfg.GitHubAppID,
 		InstallationAllowlist: cfg.GitHubRateLimitInstallationAllowlist,
 		Cache:                 redisClient, Logger: logger, Owner: cfg.NodeID + ":github",
+		BackgroundQuotaReserve:  cfg.GitHubBackgroundQuotaReserve,
+		BackgroundQuotaInterval: cfg.GitHubBackgroundQuotaInterval,
 	})
 }
 

@@ -632,6 +632,7 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	if reason == PullRequestSyncReasonInitial {
 		key += ":initial"
 	}
+	key = s.backgroundQuotaFlightKey(ctx, key)
 	result := s.prHealthSyncGroup.DoChan(key, func() (any, error) {
 		s.logger.Info().
 			Str("org_id", orgID.String()).
@@ -689,6 +690,9 @@ func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequest
 	}
 	if err := scope.deferral(resolution); err != nil {
 		return err
+	}
+	if !s.admitBackgroundPullRequestSync(ctx, orgID, pullRequestID, resolution) {
+		return errPullRequestBackgroundQuotaDeferred
 	}
 	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "pr_health")
 	token := resolution.Token
@@ -1127,6 +1131,9 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 	for _, pr := range stale {
 		syncCtx := WithPullRequestSyncReason(ctx, PullRequestSyncReasonStaleReconcile)
 		if err := s.SyncPullRequestState(syncCtx, orgID, pr.ID); err != nil {
+			if errors.Is(err, errPullRequestBackgroundQuotaDeferred) {
+				continue
+			}
 			// The shared sync may have originated outside this sweep. Typed
 			// controller deferrals still identify its affected installation.
 			scope.observe(nil, err)
