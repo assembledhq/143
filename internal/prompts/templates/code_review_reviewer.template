@@ -23,6 +23,7 @@ Head SHA: {{.HeadSHA}}
 Prepared manifest: {{.ManifestPath}}
 Prepared diff: {{.DiffPath}}
 Read the manifest and diff from these workspace-relative paths. Confirm the manifest repository, base SHA, and head SHA match this target, and the workspace HEAD equals the captured head. The manifest includes the exact merge-base SHA and SHA-256 digest of the complete patch. Do not substitute another base or recompute a partial diff. Report missing or mismatched inputs as incomplete; the coordinator must resolve them before review can proceed.
+Git binary payloads preserve the complete patch for integrity checks. Assess binary changes using their filenames, metadata, and available visual evidence; skip encoded payload bodies and report any required missing evidence.
 {{- if .ChangedFiles}}
 Changed files:
 {{- range .ChangedFiles}}

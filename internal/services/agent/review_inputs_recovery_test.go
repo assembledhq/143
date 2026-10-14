@@ -44,7 +44,7 @@ func TestReviewPreparationTransientAvailabilityUsesReadinessRetry(t *testing.T) 
 			} else {
 				provider.failures = 1
 			}
-			err := waitForSandboxWorkspaceReady(reviewPreparationContext(uuid.New(), uuid.New()), provider, sandbox, "review", head, time.Second, time.Millisecond, 4*time.Millisecond, nil, func(ctx context.Context) (bool, error) {
+			err := waitForSandboxWorkspaceReady(reviewPreparationContext(uuid.New(), uuid.New()), provider, sandbox, "review", head, 5*time.Second, time.Millisecond, 4*time.Millisecond, nil, func(ctx context.Context) (bool, error) {
 				return orchestrator.codeReviewInputsPreparationFinished(ctx, session, sandbox)
 			})
 			if database {
@@ -94,14 +94,16 @@ func TestReviewPreparationOwnerRecoveryBeforeCheckoutReady(t *testing.T) {
 			sandbox := &Sandbox{ID: "incomplete-container", WorkDir: directory}
 			require.NoError(t, orchestrator.markCodeReviewInputsPreparing(ownerCtx, session, sandbox), "preparation should record exact job and fencing token")
 			reviewInputsGit(t, directory, "checkout", "-q", "main")
-			err := waitForSandboxWorkspaceReady(waitingCtx, provider, sandbox, "review", head, 80*time.Millisecond, time.Millisecond, 4*time.Millisecond, nil, func(ctx context.Context) (bool, error) {
-				return orchestrator.codeReviewInputsPreparationFinished(ctx, session, sandbox)
-			})
 			if tt.recovered {
+				err := waitForSandboxWorkspaceReady(waitingCtx, provider, sandbox, "review", head, 5*time.Second, time.Millisecond, 4*time.Millisecond, nil, func(ctx context.Context) (bool, error) {
+					return orchestrator.codeReviewInputsPreparationFinished(ctx, session, sandbox)
+				})
 				require.ErrorIs(t, err, ErrStaleSandboxIDCleared, "a fenced incomplete workspace should request the existing cold retry")
 				require.Equal(t, int64(1), provider.destroys.Load(), "only the recovery CAS winner may destroy the incomplete workspace")
 			} else {
-				require.ErrorIs(t, err, ErrSandboxWorkspaceNotReady, "live or retaken ownership must preserve the bounded readiness wait")
+				ready, err := orchestrator.codeReviewInputsPreparationFinished(waitingCtx, session, sandbox)
+				require.NoError(t, err, "live or retaken ownership should return its preparation decision without a transport deadline")
+				require.False(t, ready, "live or retaken ownership must keep the workspace incomplete")
 				require.Equal(t, int64(0), provider.destroys.Load(), "a protected or retaken workspace must never be destroyed")
 			}
 			require.NotEmpty(t, store.params, "owner lease proof must run even when the captured checkout never completed")

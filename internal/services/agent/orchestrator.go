@@ -5052,7 +5052,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return readyErr
 		}
 		if err := o.ensureCodeReviewInputs(ctx, session, workspaceSandbox); err != nil {
-			return err
+			if errors.Is(err, ErrSandboxWorkspaceNotReady) {
+				return err
+			}
+			return o.failContinueSessionError(ctx, session, opts, err, log)
 		}
 		log.Info().
 			Str("container_id", workspaceSandbox.ID).
@@ -5531,7 +5534,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		defer o.threadCancels.Deregister(*opts.ThreadID)
 	}
 	var threadRuntimeCtl *threadRuntimeControl
-	if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
+	stopThreadRuntimeHeartbeat := func() {}
+	stopThreadRuntimeInboxPoller := func() {}
+	initializeThreadRuntime := func() error {
+		if opts == nil || opts.ThreadID == nil || *opts.ThreadID == uuid.Nil {
+			return nil
+		}
 		threadRuntimeCtl, err = o.startThreadRuntimeControl(ctx, session, *opts.ThreadID, sandbox, threadRuntimeSeedMessageIDs(pendingMsgs), log)
 		if err != nil {
 			if errors.Is(err, ErrThreadRuntimeAlreadyActive) {
@@ -5543,34 +5551,43 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return fmt.Errorf("code review recheck requires a durable thread runtime owner")
 		}
 		if threadRuntimeCtl != nil {
-			stopHeartbeat := threadRuntimeCtl.StartHeartbeat(ctx, 0, func() { cancel(ErrWorkerDrainCause) })
-			defer stopHeartbeat()
-			stopInboxPoller := threadRuntimeCtl.StartInboxPoller(ctx, 0, func(deliverCtx context.Context) error {
+			stopThreadRuntimeHeartbeat = threadRuntimeCtl.StartHeartbeat(ctx, 0, func() { cancel(ErrWorkerDrainCause) })
+			stopThreadRuntimeInboxPoller = threadRuntimeCtl.StartInboxPoller(ctx, 0, func(deliverCtx context.Context) error {
 				return o.DeliverThreadInbox(deliverCtx, session.OrgID, session.ID, *opts.ThreadID)
 			})
-			defer stopInboxPoller()
-			defer func() {
-				status := models.ThreadRuntimeStatusClosed
-				stopReason := "completed"
-				lastError := ""
-				if err != nil {
-					status = models.ThreadRuntimeStatusFailed
-					stopReason = "failed"
-					lastError = err.Error()
-				} else if ctx.Err() != nil {
-					status = models.ThreadRuntimeStatusLost
-					stopReason = "context_cancelled"
-					lastError = ctx.Err().Error()
-				}
-				closeCtx, closeCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
-				threadRuntimeCtl.Close(closeCtx, status, stopReason, lastError)
-				closeCancel()
-				o.forgetThreadDeliveryLock(*opts.ThreadID)
-				refreshCtx, refreshCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
-				defer refreshCancel()
-				keepSessionRunningIfSiblingRuntimesActive(refreshCtx, o.sessions, o.sandboxHolders, session.OrgID, session.ID, log)
-				o.admitNextQueuedThread(refreshCtx, session, log)
-			}()
+		}
+		return nil
+	}
+	defer func() { stopThreadRuntimeHeartbeat() }()
+	defer func() { stopThreadRuntimeInboxPoller() }()
+	defer func() {
+		if threadRuntimeCtl == nil {
+			return
+		}
+		status := models.ThreadRuntimeStatusClosed
+		stopReason := "completed"
+		lastError := ""
+		if err != nil {
+			status = models.ThreadRuntimeStatusFailed
+			stopReason = "failed"
+			lastError = err.Error()
+		} else if ctx.Err() != nil {
+			status = models.ThreadRuntimeStatusLost
+			stopReason = "context_cancelled"
+			lastError = ctx.Err().Error()
+		}
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
+		threadRuntimeCtl.Close(closeCtx, status, stopReason, lastError)
+		closeCancel()
+		o.forgetThreadDeliveryLock(*opts.ThreadID)
+		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
+		defer refreshCancel()
+		keepSessionRunningIfSiblingRuntimesActive(refreshCtx, o.sessions, o.sandboxHolders, session.OrgID, session.ID, log)
+		o.admitNextQueuedThread(refreshCtx, session, log)
+	}()
+	if session.Origin != models.SessionOriginCodeReview {
+		if err := initializeThreadRuntime(); err != nil {
+			return err
 		}
 	}
 
@@ -5873,6 +5890,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return err
 		}
 		return o.failContinueSessionError(ctx, session, opts, err, log)
+	}
+
+	if session.Origin == models.SessionOriginCodeReview {
+		if err := initializeThreadRuntime(); err != nil {
+			return err
+		}
 	}
 
 	// 6. Execute agent with log streaming.

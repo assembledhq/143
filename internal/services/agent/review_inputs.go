@@ -280,6 +280,9 @@ func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *mode
 	case <-ctx.Done():
 		return ctx.Err()
 	case result := <-result:
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return result.Err
 	}
 }

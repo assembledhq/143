@@ -70,6 +70,8 @@ stalling active reviews, while preserving fresh checks before publication and me
    workspace edits while validating captured commits and immutable evidence. Use a
    valid shell environment name for ephemeral fetch credentials and retry temporary
    readiness failures without consuming reviewer attempts.
+   Validate reused inputs before claiming a thread runtime or seed inbox messages,
+   and persist a failed reviewer result when immutable evidence is invalid.
    Reviewers analyze the same read-only evidence independently; the coordinator retains final
    freshness checks and invalidates stale assessments. Measure reviewer REST calls
    before and after this change; further broker work depends on demonstrated need.
@@ -88,6 +90,9 @@ stalling active reviews, while preserving fresh checks before publication and me
    Redis permits work and exposes the optimization's limits. Admission intervals do
    not change the ten-minute sweep cadence; absent queue heads can delay successors
    until their retention expires.
+   Deduplicate sweep admission before joining the ordinary PR read flight, so an
+   admitted sweep reuses in-flight reads without allowing a suppressed sweep to
+   delay ordinary refreshes.
 
 ## Validation and delivery
 
@@ -126,6 +131,15 @@ Share evidence while keeping reviewer analysis independent. Instrument before
 tuning or expanding infrastructure. Keep background quota reserve disabled by
 default until attributed traffic supports an operator-selected threshold. Keep live installation identifiers and
 production configuration in the private infrastructure repository.
+
+Preserve captured assessment identity when a base commit is unavailable; fail
+explicitly and require recapture or retry instead of silently substituting a new
+base. Automatic recovery remains limited to proven unstarted platform reviewers;
+other concurrent waiters retain the bounded workspace retry and restart path.
+Fencing an incomplete workspace clears its snapshot reference and requires a cold
+clone because recovery cannot establish that the checkpoint contains valid inputs.
+Keep complete binary patches for integrity and permit reviewers to skip encoded
+payloads while identifying any missing visual evidence.
 
 ## Outcomes & Retrospective
 

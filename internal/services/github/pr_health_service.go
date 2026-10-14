@@ -628,15 +628,17 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 			Msg("starting uncoalesced github pull request health sync")
 		return s.syncPullRequestState(ctx, orgID, pullRequestID)
 	}
-	key := orgID.String() + ":" + pullRequestID.String()
+	readKey := orgID.String() + ":" + pullRequestID.String()
 	if reason == PullRequestSyncReasonInitial {
-		key += ":initial"
+		readKey += ":initial"
 	}
+	key := readKey
 	var resolved *resolvedPullRequestHealthSync
 	if s.backgroundQuotaFlightNeedsResolution(ctx) {
 		var err error
 		resolved, err = s.resolvePullRequestHealthSync(ctx, orgID, pullRequestID)
 		if err != nil {
+			reconciliationScopeFromContext(ctx).observe(nil, err)
 			return err
 		}
 		key = s.backgroundQuotaFlightKey(ctx, key, resolved.resolution)
@@ -649,7 +651,10 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 			Msg("starting github pull request health sync")
 		syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), prHealthSyncTimeout)
 		defer cancel()
-		return nil, s.syncResolvedPullRequestState(syncCtx, orgID, pullRequestID, resolved)
+		if key != readKey {
+			return nil, s.syncBudgetedPullRequestState(syncCtx, readKey, orgID, pullRequestID, resolved)
+		}
+		return nil, s.syncResolvedPullRequestState(syncCtx, orgID, pullRequestID, resolved, false)
 	})
 	select {
 	case <-ctx.Done():
@@ -668,10 +673,10 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 }
 
 func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
-	return s.syncResolvedPullRequestState(ctx, orgID, pullRequestID, nil)
+	return s.syncResolvedPullRequestState(ctx, orgID, pullRequestID, nil, false)
 }
 
-func (s *PRService) syncResolvedPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID, resolved *resolvedPullRequestHealthSync) (resultErr error) {
+func (s *PRService) syncResolvedPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID, resolved *resolvedPullRequestHealthSync, backgroundQuotaAdmitted bool) (resultErr error) {
 	var resolution *identity.Resolution
 	scope := reconciliationScopeFromContext(ctx)
 	defer func() {
@@ -690,7 +695,7 @@ func (s *PRService) syncResolvedPullRequestState(ctx context.Context, orgID, pul
 	if err := scope.deferral(resolution); err != nil {
 		return err
 	}
-	if !s.admitBackgroundPullRequestSync(ctx, orgID, pullRequestID, resolution) {
+	if !backgroundQuotaAdmitted && !s.admitBackgroundPullRequestSync(ctx, orgID, pullRequestID, resolution) {
 		return errPullRequestBackgroundQuotaDeferred
 	}
 	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "pr_health")

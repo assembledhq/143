@@ -62,3 +62,26 @@ func (s *PRService) resolvePullRequestHealthSync(ctx context.Context, orgID, pul
 	}
 	return &resolvedPullRequestHealthSync{pullRequest: pr, repository: repo, resolution: resolution}, nil
 }
+
+func (s *PRService) syncBudgetedPullRequestState(ctx context.Context, readKey string, orgID, pullRequestID uuid.UUID, resolved *resolvedPullRequestHealthSync) error {
+	if err := reconciliationScopeFromContext(ctx).deferral(resolved.resolution); err != nil {
+		return err
+	}
+	if !s.admitBackgroundPullRequestSync(ctx, orgID, pullRequestID, resolved.resolution) {
+		return errPullRequestBackgroundQuotaDeferred
+	}
+	return s.syncAdmittedPullRequestState(ctx, readKey, orgID, pullRequestID, resolved)
+}
+
+func (s *PRService) syncAdmittedPullRequestState(ctx context.Context, readKey string, orgID, pullRequestID uuid.UUID, resolved *resolvedPullRequestHealthSync) error {
+	result := s.prHealthSyncGroup.DoChan(readKey, func() (any, error) {
+		return nil, s.syncResolvedPullRequestState(ctx, orgID, pullRequestID, resolved, true)
+	})
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case completed := <-result:
+		reconciliationScopeFromContext(ctx).observe(nil, completed.Err)
+		return completed.Err
+	}
+}

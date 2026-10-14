@@ -1432,6 +1432,7 @@ type testDeps struct {
 	sandboxAuth               agent.SandboxAuthServer
 	sandboxCapacity           *agent.SandboxCapacityGate
 	threadRuntimes            agent.ThreadRuntimeStore
+	threadInbox               agent.ThreadInboxStore
 	staticEgress              agent.StaticEgressRuntimeConfig
 	users                     agent.UserLookup
 	logger                    *zerolog.Logger
@@ -1734,6 +1735,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		SandboxAuth:               d.sandboxAuth,
 		SandboxCapacity:           d.sandboxCapacity,
 		ThreadRuntimes:            d.threadRuntimes,
+		ThreadInbox:               d.threadInbox,
 		StaticEgress:              d.staticEgress,
 		Users:                     d.users,
 		NodeID:                    d.nodeID,
