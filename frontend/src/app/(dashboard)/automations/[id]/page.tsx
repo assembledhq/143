@@ -80,7 +80,11 @@ import {
   upsertAutomationInListCaches,
 } from "@/lib/automation-list-cache";
 import { queryKeys } from "@/lib/query-keys";
-import { agentTypeForModel, modelOptionLabel } from "@/lib/agents";
+import {
+  agentDisplayLabel,
+  agentTypeForModel,
+  modelOptionLabel,
+} from "@/lib/agents";
 import {
   automationProductTriggerOptions,
   automationProductTriggersToGitHubEvents,
@@ -192,12 +196,17 @@ type AutomationAutosave = UseAutosaveResult<AutomationPatch>;
  * same patch is changing.
  *
  * `dropped` removes the rank the primary has just become, which would otherwise
- * retry the model that just failed — the worker collapses a fallback that
- * repeats the rank before it. Matched on agent and model together, the way the
- * worker compares ranks: the same model id under Pi and under OpenCode is a
- * different route, and a fallback on the other one stays. It has to travel in the SAME request as the model
- * change: `useAutosave` coalesces queued patches by shallow key merge, so a
- * follow-up save would race the model change instead of building on it.
+ * retry the model that just failed. It is matched on agent and model: the same
+ * model id under Pi and under OpenCode is a different route, so a fallback on
+ * the other agent stays. Reasoning effort is deliberately ignored even though
+ * the worker counts it as part of a rank's identity — a capacity failure is
+ * per model, so the same model at another effort would almost certainly fail
+ * the same way, and keeping it would break the one-rank-per-agent-and-model
+ * rule the editor's exclusion and row keys rely on.
+ *
+ * It has to travel in the SAME request as the model change: `useAutosave`
+ * coalesces queued patches by shallow key merge, so a follow-up save would
+ * race the model change instead of building on it.
  *
  * Returns `{}` when the rebuild is byte-identical to what is stored, so editing
  * a field that cannot invalidate the chain never re-sends it — the API
@@ -1488,6 +1497,23 @@ function AutomationDetailRail({
 }) {
   const autosave = useAutomationAutosave(automation.id);
   const { save } = autosave;
+  const queryClient = useQueryClient();
+  // For patches that rewrite the whole fallback chain. Each one is built from
+  // the chain this render sees, but `useAutosave` only applies a patch's
+  // optimistic value when it dispatches — one queued behind an in-flight save
+  // leaves the cache stale, so the next chain edit would rebuild from the old
+  // chain and the shallow coalesce would let it overwrite the queued one.
+  // Advancing the cache as soon as the patch is handed over keeps every later
+  // edit building on the latest chain. A failure still converges: the save
+  // settles with a refetch (`invalidateOnSettled`), which replaces whatever the
+  // rollback restored with what the server actually has.
+  const saveChainPatch = (patch: AutomationPatch) => {
+    save(patch);
+    queryClient.setQueryData(
+      queryKeys.automations.detail(automation.id),
+      (previous: unknown) => applyAutomationPatch(previous, patch),
+    );
+  };
   // The desktop aside is `hidden lg:block` rather than unmounted, so opening the
   // mobile properties sheet puts two copies of this rail in the DOM at once.
   // Scope the control ids per instance to keep every label bound to its own
@@ -1743,7 +1769,7 @@ function AutomationDetailRail({
                         }
                       : undefined,
                   );
-                  save({
+                  saveChainPatch({
                     body: {
                       model: nextModel,
                       ...(sendsAgentType ? { agent_type: nextAgentType } : {}),
@@ -1957,7 +1983,7 @@ function AutomationDetailRail({
                   // coalesces queued patches by shallow key merge, so a later
                   // partial array would replace — not merge into — an earlier
                   // one, and the intermediate reorder would be lost.
-                  save({
+                  saveChainPatch({
                     body: { fallback_models },
                     optimistic: { fallback_models },
                   })
@@ -2038,8 +2064,17 @@ function LatestRunBody({ run }: { run: AutomationRun }) {
   // itself: its frozen primary and the model its session actually ran, so
   // editing the automation later cannot relabel a historical run.
   const sessionModel = run.session?.model_override;
+  // A rank is an agent and a model, and Pi and OpenCode share model ids, so a
+  // fallback can keep the primary's model and change only the agent. Compare
+  // agents only when both are known: a run from before the primary's agent was
+  // recorded must not read as a fallback just because one side is missing.
+  const sessionAgent = run.session?.agent_type;
+  const ranOnFallbackAgent =
+    Boolean(sessionAgent) && Boolean(run.primary_agent_type) && sessionAgent !== run.primary_agent_type;
   const ranOnFallback =
-    run.session_id == null && Boolean(sessionModel) && sessionModel !== run.primary_model;
+    run.session_id == null &&
+    Boolean(sessionModel) &&
+    (sessionModel !== run.primary_model || ranOnFallbackAgent);
   return (
     <div className="mt-3 space-y-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -2049,6 +2084,11 @@ function LatestRunBody({ run }: { run: AutomationRun }) {
         {ranOnFallback && sessionModel ? (
           <Badge variant="outline">
             Fallback model: {modelOptionLabel(sessionModel)}
+            {/* Same model id, different agent: the name alone would read as
+                the primary, so say which agent it fell back to. */}
+            {sessionModel === run.primary_model && sessionAgent
+              ? ` · ${agentDisplayLabel(sessionAgent)}`
+              : null}
           </Badge>
         ) : null}
         <span className="text-xs text-muted-foreground">

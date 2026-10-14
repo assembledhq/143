@@ -42,7 +42,14 @@ interface FallbackRank {
 // The agent a rank runs on: the stored override, else the one the model name
 // implies, else the automation's primary agent. Mirrors
 // models.AutomationFallbackModels.AgentTypeAt so the row labels agree with what
-// the worker will actually dispatch.
+// the worker will actually dispatch — and so a chain saved without agents is
+// rewritten with the agents it already runs on, since every edit writes
+// `agent_types` explicitly.
+//
+// That includes Go's last step, which agentTypeForModel deliberately leaves out:
+// an unrecognised "provider/model" id belongs to Pi. Without it, a custom id
+// on an OpenCode primary reads as OpenCode here while the worker runs it on
+// Pi, and the next reorder silently moves it.
 function rankAgentType(
   value: AutomationFallbackModels | undefined,
   index: number,
@@ -51,7 +58,11 @@ function rankAgentType(
 ): string {
   const explicit = value?.agent_types?.[index]?.trim();
   if (explicit) return explicit;
-  return agentTypeForModel(model) ?? primaryAgentType;
+  return (
+    agentTypeForModel(model)
+    ?? (model.includes("/") ? "pi" : undefined)
+    ?? primaryAgentType
+  );
 }
 
 /**

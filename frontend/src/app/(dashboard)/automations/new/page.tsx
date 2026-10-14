@@ -1191,12 +1191,12 @@ export default function NewAutomationPage() {
                                 ?? agentTypeForModel(selection.model)
                                 ?? defaultAgentType)
                               : defaultAgentType;
-                            // Same reconciliation the detail page does on save:
-                            // a rank equal to the new primary would retry the
-                            // model that just failed on the very next attempt.
-                            // Matched on agent and model, as the worker
-                            // compares ranks — the same id under Pi and under
-                            // OpenCode is a different route.
+                            // Same reconciliation the detail page does on save
+                            // (see reconcileFallbackModelsPatch there): a rank
+                            // equal to the new primary would retry the model
+                            // that just failed on the very next attempt. Matched
+                            // on agent and model, not effort — the same id under
+                            // Pi and under OpenCode is a different route.
                             setFallbackModels((current) =>
                               buildAutomationFallbackModels(
                                 automationFallbackRanks(

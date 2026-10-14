@@ -3526,6 +3526,65 @@ describe("AutomationDetailPage", () => {
     );
   });
 
+  it("keeps every fallback edit queued behind an in-flight save", async () => {
+    const user = userEvent.setup();
+    const automation = {
+      agent_type: "codex",
+      model_override: "gpt-5.4",
+      fallback_models: {
+        models: ["claude-sonnet-4-6", "claude-opus-4-8"],
+        agent_types: ["claude_code", "claude_code"],
+        reasoning_efforts: ["high", "high"],
+      },
+    };
+    mockAutomationWithChain(automation);
+    // The first save stays in flight until released, so both chain edits are
+    // queued behind it. `useAutosave` only applies a queued patch's optimistic
+    // value when it dispatches, so without the cache being advanced the second
+    // edit would rebuild the chain from the stale one and erase the first.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const bodies: Record<string, unknown>[] = [];
+    server.use(
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        bodies.push(body);
+        if (bodies.length === 1) await gate;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+    await user.click(screen.getByRole("button", { name: "Advanced" }));
+
+    await user.click(
+      screen.getByRole("combobox", { name: "After a successful run" }),
+    );
+    await user.click(await screen.findByRole("option", { name: "Do not publish" }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+
+    await user.click(
+      screen.getByRole("combobox", { name: "Rank 2 reasoning level" }),
+    );
+    await user.click(await screen.findByRole("option", { name: "Low" }));
+    await user.click(
+      screen.getByRole("combobox", { name: "Rank 3 reasoning level" }),
+    );
+    await user.click(await screen.findByRole("option", { name: "Low" }));
+
+    release();
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    expect(bodies[1]).toMatchObject({
+      fallback_models: {
+        models: ["claude-sonnet-4-6", "claude-opus-4-8"],
+        reasoning_efforts: ["low", "low"],
+      },
+    });
+  });
+
   // Pi and OpenCode both list "anthropic/claude-opus-4-8", and the worker
   // compares ranks on agent and model together — so the same id under the two
   // agents is two different routes, and the chain has to treat it that way.
@@ -3725,6 +3784,78 @@ describe("AutomationDetailPage", () => {
     expect(
       await screen.findByText(/Fallback model:/),
     ).toBeInTheDocument();
+  });
+
+  const mockLatestRunOn = (run: {
+    primary_agent_type?: string;
+    session_agent_type: string;
+  }) => {
+    mockAutomationWithChain({
+      agent_type: "pi",
+      model_override: "anthropic/claude-opus-4-8",
+      fallback_models: {
+        models: ["anthropic/claude-opus-4-8"],
+        agent_types: ["opencode"],
+      },
+    });
+    server.use(
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "run-1",
+              automation_id: "auto-1",
+              triggered_at: "2026-01-02T00:00:00Z",
+              triggered_by: "schedule",
+              goal_snapshot: "Check release health",
+              status: "completed",
+              result_summary: "Checked release health",
+              completed_at: "2026-01-02T00:00:30Z",
+              created_at: "2026-01-02T00:00:00Z",
+              updated_at: "2026-01-02T00:00:30Z",
+              primary_model: "anthropic/claude-opus-4-8",
+              ...(run.primary_agent_type
+                ? { primary_agent_type: run.primary_agent_type }
+                : {}),
+              session: {
+                id: "sess-1",
+                title: "Checked release health",
+                status: "completed",
+                failure_retry_advised: false,
+                pr_creation_state: "idle",
+                agent_type: run.session_agent_type,
+                model_override: "anthropic/claude-opus-4-8",
+              },
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+  };
+
+  it("labels a fallback that kept the primary's model id but ran on another agent", async () => {
+    // Pi and OpenCode share this id, so comparing models alone would read the
+    // OpenCode failover as the Pi primary and hide it.
+    mockLatestRunOn({ primary_agent_type: "pi", session_agent_type: "opencode" });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    expect(
+      await screen.findByText(/Fallback model:.*· OpenCode/),
+    ).toBeInTheDocument();
+  });
+
+  it("does not label a same-model run whose primary agent was never recorded", async () => {
+    // Runs from before the primary's agent was recorded report none. A
+    // missing side is not evidence of a failover.
+    mockLatestRunOn({ session_agent_type: "opencode" });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Checked release health");
+
+    expect(screen.queryByText(/Fallback model:/)).not.toBeInTheDocument();
   });
 
   it("does not label a run as a fallback after the automation's primary is edited", async () => {

@@ -256,6 +256,23 @@ describe("automationFallbackRanks", () => {
     expect(ranks.map((rank) => rank.reasoningEffort)).toEqual(["", "", ""]);
   });
 
+  it("resolves an agentless custom provider/model rank to Pi, as the worker does", () => {
+    // Go's AgentTypeForModel ends with "any unrecognised provider/model is
+    // Pi". Resolving it to the primary instead would show OpenCode here and,
+    // since every edit writes agent_types explicitly, move the rank off Pi on
+    // the next reorder.
+    const ranks = automationFallbackRanks(
+      { models: ["custom/model", AMP_MODE] },
+      "opencode",
+    );
+
+    expect(ranks.map((rank) => rank.agentType)).toEqual(["pi", "amp"]);
+    expect(buildAutomationFallbackModels([...ranks].reverse())).toMatchObject({
+      models: [AMP_MODE, "custom/model"],
+      agent_types: ["amp", "pi"],
+    });
+  });
+
   it("reads back an empty chain as no rows at all", () => {
     expect(automationFallbackRanks(undefined, "codex")).toEqual([]);
     expect(automationFallbackRanks({}, "codex")).toEqual([]);

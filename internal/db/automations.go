@@ -1059,8 +1059,14 @@ const listByAutomationSelectColumns = `ar.id, ar.automation_id, ar.org_id, ar.tr
 	-- the heavy config_snapshot blob stays out of the 10s polling payload. The
 	-- run's OWN primary is what tells a reader whether its session fell back;
 	-- comparing against the live automation would relabel every historical run
-	-- the moment someone edits the automation's model.
-	ar.config_snapshot #>> '{agent_type}' AS run_primary_agent_type,
+	-- the moment someone edits the automation's model. An agentless primary
+	-- ran on the org default the worker froze at first claim, so report that
+	-- rather than NULL — otherwise a reader cannot tell a same-model fallback on
+	-- another agent from the primary itself.
+	COALESCE(
+		NULLIF(ar.config_snapshot #>> '{agent_type}', ''),
+		ar.config_snapshot #>> '{dispatch_default_agent_type}'
+	) AS run_primary_agent_type,
 	ar.config_snapshot #>> '{model_override}' AS run_primary_model,
 	pr.github_pr_number AS pr_number, pr.github_pr_url AS pr_url,
 	pr.status AS pr_status, pr.ci_status AS pr_ci_status,
