@@ -608,6 +608,16 @@ type CodeReviewPolicyConfig struct {
 	InlineCommentLimit      int                           `json:"inline_comment_limit"`
 }
 
+// CodeReviewAgentDeadline preserves the captured policy's agent timeout from
+// the original phase start, including the legacy thirty-minute fallback.
+func CodeReviewAgentDeadline(policy CodeReviewPolicyConfig, startedAt time.Time) time.Time {
+	timeout := time.Duration(policy.AgentRoster.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Minute
+	}
+	return startedAt.Add(timeout)
+}
+
 const CodeReviewPromptMaxRunes = 8000
 
 type CodeReviewPolicyValidationError struct {

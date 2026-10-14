@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -271,6 +272,10 @@ func TestContinueHandlerCheckpointsFailedPreparationWithoutReplayingJoinedResult
 			}
 			mock.ExpectQuery("(?s)SELECT m.id,m.pull_request_id,m.head_sha.*FOR NO KEY UPDATE OF s,m,j").WithArgs(pgx.NamedArgs{"org_id": org, "job_id": jobID, "session_id": sessionID, "pr_id": pr, "generation": int64(4), "token": token, "thread_id": expectedThread, "before_turn": beforeTurn}).WillReturnRows(pgxmock.NewRows([]string{"id", "pull_request_id", "head_sha"}).AddRow(metadata, pr, "pinnedhead"))
 			mock.ExpectCommit()
+			originalContinueErr := errors.Join(
+				agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageDependencySetup, errors.New("token=synthetic-secret")),
+				errors.New("UpdateResult persistence unavailable"),
+			)
 			orchestrator := &orchestratorServiceStub{continueSessionFn: func(_ context.Context, session *models.Session, options *agent.ContinueSessionOptions) error {
 				require.Equal(t, int64(4), session.WorkspaceGeneration, "orchestrator must receive the originally admitted generation")
 				if tt.explicit {
@@ -279,12 +284,14 @@ func TestContinueHandlerCheckpointsFailedPreparationWithoutReplayingJoinedResult
 					require.Nil(t, options, "unscoped setup must not guess a sibling before ContinueSession")
 				}
 				session.WorkspaceGeneration = 99
-				return errors.Join(agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageDependencySetup, errors.New("token=synthetic-secret")), errors.New("UpdateResult persistence unavailable"))
+				return originalContinueErr
 			}}
 			raw, err := json.Marshal(input)
 			require.NoError(t, err, "continuation payload should encode")
 			ctx := jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), token)
-			result := newContinueSessionHandler(stores, &Services{Orchestrator: orchestrator, ReviewPreparationPolicy: workspacePreparationTestPolicy(true)}, zerolog.Nop())(ctx, "continue_session", raw)
+			var diagnosticLogs bytes.Buffer
+			diagnosticLogger := zerolog.New(&diagnosticLogs).Level(zerolog.WarnLevel)
+			result := newContinueSessionHandler(stores, &Services{Orchestrator: orchestrator, ReviewPreparationPolicy: workspacePreparationTestPolicy(true)}, diagnosticLogger)(ctx, "continue_session", raw)
 			var intentError *codeReviewPreparationIntentError
 			require.ErrorAs(t, result, &intentError, "joined result persistence failure must still carry a durable terminal preparation intent")
 			expected := models.CodeReviewPreparationIntent{Version: 1, OrgID: org, JobID: jobID, MetadataID: metadata, SessionID: sessionID, PullRequestID: pr, HeadSHA: "pinnedhead", WorkspaceGeneration: 4, Turn: 3, TurnScope: "session", FailureClass: models.CodeReviewPreparationFailureSetup, Stage: "dependency_setup"}
@@ -295,6 +302,15 @@ func TestContinueHandlerCheckpointsFailedPreparationWithoutReplayingJoinedResult
 			}
 			require.Equal(t, expected, intentError.Intent, "post-call mutable session state must not replace observed generation or turn scope")
 			require.Equal(t, 1, orchestrator.continueSessionCalls, "failed preparation must never replay to recover a thread result write")
+			var diagnostic map[string]any
+			require.NoError(t, json.Unmarshal(bytes.TrimSpace(diagnosticLogs.Bytes()), &diagnostic), "terminal checkpoint must retain one scoped structured original-error warning")
+			require.Equal(t, map[string]any{
+				"level": "warn", "error": originalContinueErr.Error(), "org_id": org.String(), "session_id": sessionID.String(), "job_id": jobID.String(), "thread_id": input.ThreadID,
+				"message": "review preparation failed; recording terminal failure intent",
+			}, diagnostic, "operator diagnostics must retain the joined persistence failure and exact original job/thread scope")
+			require.NotContains(t, diagnosticLogs.String(), "synthetic-secret", "typed preparation errors must keep command credentials out of structured diagnostics")
+			require.NotContains(t, result.Error(), "UpdateResult persistence unavailable", "persisted terminal explanation must stay finite despite the diagnostic warning")
+			require.NotContains(t, result.Error(), "synthetic-secret", "operator logging must not alter the finite persisted cause")
 			encoded, err := json.Marshal(expected)
 			require.NoError(t, err, "expected checkpoint should encode")
 			thread := ""

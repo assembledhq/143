@@ -10155,6 +10155,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		}
 		continueErr := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts)
 		if terminal := terminalCodeReviewPreparationIntent(preparationIntent, continueErr); terminal != nil {
+			logger.Warn().Err(continueErr).
+				Str("org_id", orgID.String()).
+				Str("session_id", sessionID.String()).
+				Str("job_id", preparationIntent.JobID.String()).
+				Str("thread_id", input.ThreadID).
+				Msg("review preparation failed; recording terminal failure intent")
 			return terminal
 		}
 		if automationRunID != nil && continueErr != nil {

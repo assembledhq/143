@@ -3199,11 +3199,7 @@ func codeReviewOrchestratorResultDeadline(policy models.CodeReviewPolicyConfig, 
 }
 
 func codeReviewAgentDeadline(policy models.CodeReviewPolicyConfig, startedAt time.Time) time.Time {
-	timeout := time.Duration(policy.AgentRoster.TimeoutSeconds) * time.Second
-	if timeout <= 0 {
-		timeout = 30 * time.Minute
-	}
-	return startedAt.Add(timeout)
+	return models.CodeReviewAgentDeadline(policy, startedAt)
 }
 
 func codeReviewThreadCompletedByDeadline(thread models.SessionThread, deadline time.Time) bool {

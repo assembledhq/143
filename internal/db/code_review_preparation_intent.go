@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -248,16 +249,26 @@ func (s *CodeReviewStore) ProjectCodeReviewPreparationIntent(ctx context.Context
 		}
 		if !superseded {
 			// The failing executor can still be finishing its own terminal write.
-			// Retain the intent while any runtime owns the session; do not cancel a
-			// replacement or consume the only checkpoint during that short window.
+			// Retain the intent while an active owner remains before the captured
+			// timeout. Replacement continuation fences above apply at every age.
 			var live bool
 			err = tx.QueryRow(lockCtx, `SELECT EXISTS(SELECT 1 FROM session_executors WHERE org_id=$1 AND session_id=$2 AND status IN ('starting','running','draining')) OR EXISTS(SELECT 1 FROM thread_runtimes WHERE org_id=$1 AND session_id=$2 AND status IN ('starting','live','paused','draining'))`, orgID, intent.SessionID).Scan(&live)
 			if err != nil {
 				return err
 			}
 			if live {
-				result.Pending = true
-				return nil
+				deadline, now, err := codeReviewPreparationProjectionDeadline(lockCtx, tx, orgID, intent)
+				if err != nil {
+					return err
+				}
+				// Active statuses are conservative ownership evidence, even when
+				// their lease is expired or unknown. At the captured recovery deadline
+				// this known fatal preparation failure may project and request durable
+				// cancellation; this does not establish owner drain or result timeout.
+				if now.Before(deadline) {
+					result.Pending = true
+					return nil
+				}
 			}
 		}
 		if !superseded {
@@ -277,4 +288,58 @@ func (s *CodeReviewStore) ProjectCodeReviewPreparationIntent(ctx context.Context
 		s.publishUpdated(ctx, metadata)
 	}
 	return result, nil
+}
+
+// codeReviewPreparationProjectionDeadline reads only captured timeout authority
+// inside the already fenced transaction. It never renews an owner or starts a
+// new timeout from observation time. Explicit synthesis uses its exact baseline
+// result that existed before the journal checkpoint. Review creation bounds
+// recovery for reviewers, inferred scope, and
+// absent results; this can settle failed inferred synthesis before its ordinary
+// synthesis-result timeout without choosing a mutable primary or new budget.
+func codeReviewPreparationProjectionDeadline(ctx context.Context, tx DBTX, orgID uuid.UUID, intent models.CodeReviewPreparationIntent) (time.Time, time.Time, error) {
+	var createdAt, now time.Time
+	var rosterJSON []byte
+	var orchestratorCreatedAt *time.Time
+	var orchestratorCount int64
+	err := tx.QueryRow(ctx, `SELECT m.created_at,p.agent_roster,r.created_at,r.matches,clock_timestamp()
+ FROM code_review_session_metadata m
+ JOIN code_review_policies p ON p.org_id=m.org_id AND p.id=m.policy_id
+ JOIN jobs source ON source.org_id=m.org_id AND source.id=$5 AND source.status='dead_letter'
+ AND source.job_type='continue_session' AND source.payload->>'session_id'=m.session_id::text
+ AND source.completed_at IS NOT NULL
+ LEFT JOIN LATERAL (
+ SELECT MIN(a.created_at) FILTER(WHERE a.role='orchestrator' AND a.status IN ('queued','running')) AS created_at,
+ CASE WHEN COUNT(DISTINCT a.role)>1 THEN -1
+ ELSE COUNT(*) FILTER(WHERE a.role='orchestrator' AND a.status IN ('queued','running')) END AS matches
+ FROM code_review_agent_results a
+ WHERE a.org_id=$1 AND a.session_id=m.session_id AND a.assessment_id IS NULL
+ AND a.created_at<=source.completed_at
+ AND $4::text<>'' AND a.structured_result->>'thread_id'=$4
+ ) r ON true
+ WHERE m.org_id=$1 AND m.id=$2 AND m.session_id=$3`, orgID, intent.MetadataID, intent.SessionID, preparationIntentThread(intent.ThreadID), intent.JobID).Scan(&createdAt, &rosterJSON, &orchestratorCreatedAt, &orchestratorCount, &now)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("load captured review preparation projection deadline: %w", err)
+	}
+	var rosterFields map[string]json.RawMessage
+	if err := json.Unmarshal(rosterJSON, &rosterFields); err != nil || rosterFields == nil {
+		return time.Time{}, time.Time{}, errors.New("invalid captured review preparation timeout authority")
+	}
+	if raw, present := rosterFields["timeout_seconds"]; present && string(raw) == "null" {
+		return time.Time{}, time.Time{}, errors.New("invalid captured review preparation timeout authority")
+	}
+	var roster models.CodeReviewAgentRoster
+	if err := json.Unmarshal(rosterJSON, &roster); err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("decode captured review preparation timeout authority: %w", err)
+	}
+	policy := models.ResolveCodeReviewPolicyConfig(&models.CodeReviewPolicyConfig{AgentRoster: roster})
+	if createdAt.IsZero() || now.IsZero() || orchestratorCount < 0 || orchestratorCount > 1 ||
+		(orchestratorCount == 1 && (orchestratorCreatedAt == nil || orchestratorCreatedAt.IsZero() || orchestratorCreatedAt.Before(createdAt))) ||
+		int64(policy.AgentRoster.TimeoutSeconds) > int64((1<<63-1)/time.Second) {
+		return time.Time{}, time.Time{}, errors.New("invalid captured review preparation timeout authority")
+	}
+	if orchestratorCount == 1 {
+		createdAt = *orchestratorCreatedAt
+	}
+	return models.CodeReviewAgentDeadline(policy, createdAt), now, nil
 }

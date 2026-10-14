@@ -42,7 +42,7 @@ func seedPreparationIntentPostgres(t *testing.T, pool *pgxpool.Pool, scoped bool
 		{`INSERT INTO sessions(id,org_id,origin,status,current_turn,workspace_generation,repository_id) VALUES($1,$2,'code_review','running',2,3,$3)`, []any{f.session.ID, f.orgID, f.repositoryID}},
 		{`INSERT INTO session_threads(id,org_id,session_id,agent_type,label,status,current_turn) VALUES($1,$2,$3,'claude','Reviewer','running',4)`, []any{f.threadID, f.orgID, f.session.ID}},
 		{`INSERT INTO pull_requests(id,org_id,github_pr_number,github_pr_url,github_repo,title,head_sha,base_sha) VALUES($1,$2,1,'https://example.invalid/pr/1','test/intents','Synthetic preparation','head123','base123')`, []any{f.pullRequestID, f.orgID}},
-		{`INSERT INTO code_review_policies(id,org_id,version,approval_mode,description_policy,risk_policy,agent_roster,review_instructions,automated_approval_policy,continuation_policy) VALUES($1,$2,1,'approve_acceptable','{}','{}','{}','','','{}')`, []any{f.policyID, f.orgID}},
+		{`INSERT INTO code_review_policies(id,org_id,version,approval_mode,description_policy,risk_policy,agent_roster,review_instructions,automated_approval_policy,continuation_policy) VALUES($1,$2,1,'approve_acceptable','{}','{}','{"reviewers":["claude_code"],"orchestrator":"claude_code","timeout_seconds":60}','','','{}')`, []any{f.policyID, f.orgID}},
 		{`INSERT INTO code_review_session_metadata(id,org_id,session_id,repository_id,pull_request_id,policy_id,base_sha,head_sha,trigger_source,status,review_output_key) VALUES($1,$2,$3,$4,$5,$6,'base123','head123','app_reviewer','running',$7)`, []any{f.metadataID, f.orgID, f.session.ID, f.repositoryID, f.pullRequestID, f.policyID, "intent-review:" + f.session.ID.String()}},
 		{`INSERT INTO jobs(id,org_id,queue,job_type,payload,status,lock_token,lease_expires_at,locked_at) VALUES($1,$2,'agent','continue_session',$3,'running',$4,now()+interval '5 minutes',now())`, []any{f.jobID, f.orgID, payload, f.token}},
 	}
@@ -154,6 +154,48 @@ func (r *preparationIntentCorrectionRows) Close() {
 		r.onClose = nil
 		callback()
 	}
+}
+
+func seedPreparationIntentOwner(t *testing.T, pool *pgxpool.Pool, f preparationIntentPostgresFixture, kind, lease string) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	var expiry any
+	switch lease {
+	case "future":
+		expiry = time.Now().UTC().Add(5 * time.Minute)
+	case "expired":
+		expiry = time.Now().UTC().Add(-time.Minute)
+	}
+	if kind == "executor" {
+		nodeID := "cutoff-owner-" + uuid.NewString()
+		_, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,host,mode,status) VALUES($1,'example.invalid','worker','active')`, nodeID)
+		require.NoError(t, err, "seed a separate test-only executor host")
+		_, err = pool.Exec(context.Background(), `INSERT INTO session_executors(id,org_id,session_id,thread_id,job_id,job_type,host_node_id,owner_id,lock_token,status,heartbeat_at,lease_expires_at) VALUES($1,$2,$3,$4,$5,'continue_session',$6,'cutoff-owner',$7,'draining',clock_timestamp(),$8)`, id, f.orgID, f.session.ID, f.threadID, f.jobID, nodeID, f.token, expiry)
+		require.NoError(t, err, "retain an executor owner without assuming lease expiry permits reaping")
+	} else {
+		_, err := pool.Exec(context.Background(), `INSERT INTO thread_runtimes(id,org_id,session_id,thread_id,agent_type,owner_node_id,lease_token,status,heartbeat_at,lease_expires_at) VALUES($1,$2,$3,$4,'claude_code','test-owner',$5,'live',clock_timestamp(),$6)`, id, f.orgID, f.session.ID, f.threadID, f.token, expiry)
+		require.NoError(t, err, "retain a runtime owner without changing renewal or reaper policy")
+	}
+	return id
+}
+func readPreparationIntentOwner(t *testing.T, pool *pgxpool.Pool, f preparationIntentPostgresFixture, kind string, id uuid.UUID) json.RawMessage {
+	t.Helper()
+	query := `SELECT to_jsonb(e) FROM session_executors e WHERE org_id=$1 AND id=$2`
+	if kind == "runtime" {
+		query = `SELECT to_jsonb(r) FROM thread_runtimes r WHERE org_id=$1 AND id=$2`
+	}
+	var row json.RawMessage
+	require.NoError(t, pool.QueryRow(context.Background(), query, f.orgID, id).Scan(&row), "read every field of the exact owner row before and after deadline projection")
+	return row
+}
+func setPreparationReviewCutoff(t *testing.T, pool *pgxpool.Pool, f preparationIntentPostgresFixture, expired bool) {
+	t.Helper()
+	created := time.Now().UTC()
+	if expired {
+		created = created.Add(-time.Hour)
+	}
+	_, err := pool.Exec(context.Background(), `UPDATE code_review_session_metadata SET created_at=$3 WHERE org_id=$1 AND id=$2`, f.orgID, f.metadataID, created)
+	require.NoError(t, err, "set the original captured review clock without changing its policy or workspace identity")
 }
 
 // One parent applies the full migration chain once. Parallel cases have distinct
@@ -365,7 +407,7 @@ func TestCodeReviewPreparationIntentPostgres(t *testing.T) {
 		nodeID := "intent-test-" + uuid.NewString()
 		_, err := pool.Exec(context.Background(), `INSERT INTO nodes(id,host,mode,status) VALUES($1,'example.invalid','worker','active')`, nodeID)
 		require.NoError(t, err, "seed a disposable executor host identity")
-		_, err = pool.Exec(context.Background(), `INSERT INTO session_executors(org_id,session_id,thread_id,job_id,job_type,host_node_id,owner_id,lock_token,status) VALUES($1,$2,$3,$4,'continue_session',$5,'test-owner',$6,'draining')`, f.orgID, f.session.ID, f.threadID, f.jobID, nodeID, f.token)
+		_, err = pool.Exec(context.Background(), `INSERT INTO session_executors(org_id,session_id,thread_id,job_id,job_type,host_node_id,owner_id,lock_token,status,heartbeat_at,lease_expires_at) VALUES($1,$2,$3,$4,'continue_session',$5,'test-owner',$6,'draining',clock_timestamp(),clock_timestamp()+interval '5 minutes')`, f.orgID, f.session.ID, f.threadID, f.jobID, nodeID, f.token)
 		require.NoError(t, err, "retain the failing executor while its runtime drains")
 		before := readPreparationIntentState(t, pool, f)
 		actual, err := NewCodeReviewStore(pool).ProjectCodeReviewPreparationIntent(context.Background(), f.orgID, i, "bounded operational reason")
@@ -377,6 +419,202 @@ func TestCodeReviewPreparationIntentPostgres(t *testing.T) {
 		actual, err = NewCodeReviewStore(pool).ProjectCodeReviewPreparationIntent(context.Background(), f.orgID, i, "bounded operational reason")
 		require.NoError(t, err, "controller should project after the original runtime drains")
 		require.Equal(t, CodeReviewPreparationProjection{Projected: true}, actual, "drain completion must permit recovery of the same terminal preparation outcome")
+	})
+
+	t.Run("active owners obey captured cutoff without retirement", func(t *testing.T) {
+		t.Parallel()
+		for _, kind := range []string{"executor", "runtime"} {
+			for _, lease := range []string{"future", "expired", "null"} {
+				for _, expired := range []bool{false, true} {
+					name := kind + "/" + lease + "/before cutoff"
+					if expired {
+						name = kind + "/" + lease + "/after cutoff"
+					}
+					t.Run(name, func(t *testing.T) {
+						t.Parallel()
+						f := seedPreparationIntentPostgres(t, pool, true)
+						i := checkpointPreparationIntentPostgres(t, pool, f, true)
+						owner := seedPreparationIntentOwner(t, pool, f, kind, lease)
+						setPreparationReviewCutoff(t, pool, f, expired)
+						before := readPreparationIntentState(t, pool, f)
+						ownerBefore := readPreparationIntentOwner(t, pool, f, kind, owner)
+						actual, err := NewCodeReviewStore(pool).ProjectCodeReviewPreparationIntent(context.Background(), f.orgID, i, "bounded operational reason")
+						require.NoError(t, err, "active ownership must wait only until the captured review cutoff")
+						require.Equal(t, CodeReviewPreparationProjection{Projected: expired, Pending: !expired}, actual, "lease expiry alone must not grant projection authority before the policy cutoff")
+						require.Equal(t, ownerBefore, readPreparationIntentOwner(t, pool, f, kind, owner), "deadline projection must preserve owner status, token, lease, heartbeat and every other owner field")
+						after := readPreparationIntentState(t, pool, f)
+						if expired {
+							require.Equal(t, "failed", after.MetadataStatus, "expired captured review must durably project the original preparation failure")
+							originalReason := "bounded operational reason"
+							require.Equal(t, &originalReason, after.FailureReason, "elapsed owner wait must preserve the original preparation reason rather than substitute a review timeout")
+							require.True(t, after.Consumed, "deadline projection must atomically consume its exact terminal intent")
+						} else {
+							require.Equal(t, before, after, "before cutoff both metadata and intent must remain unchanged")
+						}
+					})
+				}
+			}
+		}
+	})
+
+	t.Run("owner cutoff retains newer revision and publication fences", func(t *testing.T) {
+		t.Parallel()
+		for _, fence := range []string{"live continuation", "pending continuation", "head", "publication"} {
+			t.Run(fence, func(t *testing.T) {
+				t.Parallel()
+				f := seedPreparationIntentPostgres(t, pool, true)
+				i := checkpointPreparationIntentPostgres(t, pool, f, true)
+				owner := seedPreparationIntentOwner(t, pool, f, "runtime", "null")
+				setPreparationReviewCutoff(t, pool, f, true)
+				switch fence {
+				case "live continuation":
+					seedPreparationReplacement(t, pool, f, &f.threadID, "running", true)
+				case "pending continuation":
+					seedPreparationReplacement(t, pool, f, &f.threadID, "pending", true)
+				case "head":
+					require.NoError(t, NewPullRequestStore(pool).UpdateHeadSHA(context.Background(), f.orgID, f.pullRequestID, "newhead"), "preserve the competing current PR head")
+				case "publication":
+					seedPreparationIntentAssessment(t, pool, f, "uncertain", "", "")
+				}
+				before := readPreparationIntentState(t, pool, f)
+				ownerBefore := readPreparationIntentOwner(t, pool, f, "runtime", owner)
+				actual, err := NewCodeReviewStore(pool).ProjectCodeReviewPreparationIntent(context.Background(), f.orgID, i, "bounded operational reason")
+				if fence == "publication" {
+					require.NoError(t, err, "publication fence must remain authoritative even after the owner wait expires")
+				} else {
+					require.NoError(t, err, "captured cutoff cannot supersede a newer revision or continuation")
+				}
+				require.Equal(t, CodeReviewPreparationProjection{}, actual, "policy cutoff must preserve all original revision and owner supersession guards")
+				after := readPreparationIntentState(t, pool, f)
+				require.Equal(t, before.MetadataStatus, after.MetadataStatus, "deadline must never overwrite a fenced competing review state")
+				require.True(t, after.Consumed, "superseded terminal intent must be consumed without operational projection")
+				require.Equal(t, ownerBefore, readPreparationIntentOwner(t, pool, f, "runtime", owner), "supersession must never retire an owner row")
+			})
+		}
+	})
+
+	t.Run("captured cutoff provenance cannot be fabricated", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name, mode         string
+			pending, projected bool
+		}{
+			{name: "fresh exact orchestrator gets its existing phase clock", mode: "orchestrator fresh", pending: true},
+			{name: "expired exact orchestrator retains its original phase clock", mode: "orchestrator expired", projected: true},
+			{name: "post-checkpoint orchestrator cannot grant a fresh recovery wait", mode: "post checkpoint", projected: true},
+			{name: "missing terminal completion timestamp fails closed", mode: "missing completed"},
+			{name: "fresh reviewer does not renew original review", mode: "reviewer", projected: true},
+			{name: "unrelated orchestrator cannot renew this thread", mode: "unrelated", projected: true},
+			{name: "inferred thread cannot borrow orchestrator phase clock", mode: "inferred", projected: true},
+			{name: "ambiguous exact orchestrators fail closed", mode: "ambiguous"},
+			{name: "conflicting exact running roles fail closed", mode: "role conflict"},
+			{name: "terminal reviewer role still conflicts with exact orchestrator", mode: "terminal role conflict"},
+			{name: "zero original creation time fails closed", mode: "zero"},
+			{name: "nonobject captured roster fails closed", mode: "roster"},
+			{name: "missing tenant-scoped captured policy fails closed", mode: "missing policy"},
+			{name: "inactive captured policy is not renewed by new active policy", mode: "new active policy", projected: true},
+			{name: "legacy roster waits before its default cutoff", mode: "legacy before", pending: true},
+			{name: "legacy roster settles after its default cutoff", mode: "legacy after", projected: true},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				scoped := tt.mode != "inferred"
+				f := seedPreparationIntentPostgres(t, pool, scoped)
+				i := checkpointPreparationIntentPostgres(t, pool, f, scoped)
+				owner := seedPreparationIntentOwner(t, pool, f, "executor", "expired")
+				setPreparationReviewCutoff(t, pool, f, true)
+				if tt.mode == "new active policy" {
+					_, err := pool.Exec(context.Background(), `UPDATE code_review_policies SET active=false WHERE org_id=$1 AND id=$2`, f.orgID, f.policyID)
+					require.NoError(t, err, "retain original captured policy as an inactive historical version")
+					_, err = pool.Exec(context.Background(), `INSERT INTO code_review_policies(id,org_id,version,approval_mode,description_policy,risk_policy,agent_roster,review_instructions,automated_approval_policy,continuation_policy) VALUES($1,$2,2,'approve_acceptable','{}','{}','{"reviewers":["claude_code"],"orchestrator":"claude_code","timeout_seconds":7200}','','','{}')`, uuid.New(), f.orgID)
+					require.NoError(t, err, "activate a newer longer policy without rebinding the original review")
+				}
+				if tt.mode == "legacy before" || tt.mode == "legacy after" {
+					_, err := pool.Exec(context.Background(), `UPDATE code_review_policies SET agent_roster='{}' WHERE org_id=$1 AND id=$2`, f.orgID, f.policyID)
+					require.NoError(t, err, "retain legacy raw roster with no explicit timeout")
+					age := 29 * time.Minute
+					if tt.mode == "legacy after" {
+						age = 31 * time.Minute
+					}
+					_, err = pool.Exec(context.Background(), `UPDATE code_review_session_metadata SET created_at=$3 WHERE org_id=$1 AND id=$2`, f.orgID, f.metadataID, time.Now().UTC().Add(-age))
+					require.NoError(t, err, "use original creation against the legacy thirty-minute default")
+				}
+				if tt.mode == "missing completed" {
+					_, err := pool.Exec(context.Background(), `UPDATE jobs SET completed_at=NULL WHERE org_id=$1 AND id=$2`, f.orgID, f.jobID)
+					require.NoError(t, err, "remove the original terminal cutoff anchor without inventing a replacement")
+				}
+				if tt.mode == "zero" {
+					_, err := pool.Exec(context.Background(), `UPDATE code_review_session_metadata SET created_at='0001-01-01 00:00:00+00' WHERE org_id=$1 AND id=$2`, f.orgID, f.metadataID)
+					require.NoError(t, err, "remove valid original cutoff authority without changing the stored intent")
+				}
+				if tt.mode == "roster" {
+					_, err := pool.Exec(context.Background(), `UPDATE code_review_policies SET agent_roster='[]' WHERE org_id=$1 AND id=$2`, f.orgID, f.policyID)
+					require.NoError(t, err, "retain an invalid captured roster that cannot authorize projection")
+				}
+				if tt.mode == "missing policy" {
+					otherOrg, otherPolicy := uuid.New(), uuid.New()
+					_, err := pool.Exec(context.Background(), `INSERT INTO organizations(id,name) VALUES($1,'other-cutoff-tenant')`, otherOrg)
+					require.NoError(t, err, "seed an independently owned policy tenant")
+					_, err = pool.Exec(context.Background(), `INSERT INTO code_review_policies(id,org_id,version,approval_mode,description_policy,risk_policy,agent_roster,review_instructions,automated_approval_policy,continuation_policy) VALUES($1,$2,1,'approve_acceptable','{}','{}','{}','','','{}')`, otherPolicy, otherOrg)
+					require.NoError(t, err, "seed a policy whose tenant cannot supply this review's cutoff")
+					_, err = pool.Exec(context.Background(), `UPDATE code_review_session_metadata SET policy_id=$3 WHERE org_id=$1 AND id=$2`, f.orgID, f.metadataID, otherPolicy)
+					require.NoError(t, err, "exercise the independent tenant-scoped policy join without disabling schema guards")
+				}
+				if tt.mode == "orchestrator fresh" || tt.mode == "orchestrator expired" || tt.mode == "post checkpoint" || tt.mode == "reviewer" || tt.mode == "unrelated" || tt.mode == "inferred" || tt.mode == "ambiguous" || tt.mode == "role conflict" || tt.mode == "terminal role conflict" {
+					role, threadID := "orchestrator", f.threadID
+					if tt.mode == "reviewer" {
+						role = "reviewer"
+					}
+					if tt.mode == "unrelated" {
+						threadID = uuid.New()
+					}
+					var checkpoint time.Time
+					require.NoError(t, pool.QueryRow(context.Background(), `SELECT completed_at FROM jobs WHERE org_id=$1 AND id=$2`, f.orgID, f.jobID).Scan(&checkpoint), "use the durable original checkpoint to distinguish original and newly observed phases")
+					created := checkpoint.Add(-time.Microsecond)
+					if tt.mode == "orchestrator expired" {
+						created = checkpoint.Add(-2 * time.Minute)
+					}
+					if tt.mode == "post checkpoint" {
+						created = checkpoint.Add(time.Second)
+					}
+					count := 1
+					if tt.mode == "ambiguous" {
+						count = 2
+					}
+					for range count {
+						_, err := pool.Exec(context.Background(), `INSERT INTO code_review_agent_results(org_id,session_id,agent_provider,role,status,structured_result,created_at) VALUES($1,$2,'claude_code',$3,'running',jsonb_build_object('thread_id',$4::text),$5)`, f.orgID, f.session.ID, role, threadID.String(), created)
+						require.NoError(t, err, "retain exact agent-result phase provenance without selecting latest unrelated work")
+					}
+					if tt.mode == "role conflict" || tt.mode == "terminal role conflict" {
+						status := "running"
+						if tt.mode == "terminal role conflict" {
+							status = "completed"
+						}
+						_, err := pool.Exec(context.Background(), `INSERT INTO code_review_agent_results(org_id,session_id,agent_provider,role,status,structured_result,created_at) VALUES($1,$2,'claude_code','reviewer',$3,jsonb_build_object('thread_id',$4::text),$5)`, f.orgID, f.session.ID, status, threadID.String(), created)
+						require.NoError(t, err, "retain the conflicting exact baseline role even when its result is terminal")
+					}
+				}
+				before := readPreparationIntentState(t, pool, f)
+				ownerBefore := readPreparationIntentOwner(t, pool, f, "executor", owner)
+				actual, err := NewCodeReviewStore(pool).ProjectCodeReviewPreparationIntent(context.Background(), f.orgID, i, "bounded operational reason")
+				if tt.pending || tt.projected {
+					require.NoError(t, err, "only an unambiguous captured cutoff may control the owner wait")
+					require.Equal(t, CodeReviewPreparationProjection{Projected: tt.projected, Pending: tt.pending}, actual, "result phase clocks must preserve original review and exact thread provenance")
+				} else {
+					require.Error(t, err, "missing or ambiguous cutoff authority must fail closed")
+					require.Equal(t, CodeReviewPreparationProjection{}, actual, "invalid cutoff cannot claim projection or consume the checkpoint")
+				}
+				after := readPreparationIntentState(t, pool, f)
+				if !tt.projected {
+					require.Equal(t, before, after, "unexpired or invalid cutoff must preserve every original review/intent field")
+				} else {
+					require.Equal(t, "failed", after.MetadataStatus, "only expired valid provenance may project")
+					require.True(t, after.Consumed, "valid expired provenance must consume the exact checkpoint atomically")
+				}
+				require.Equal(t, ownerBefore, readPreparationIntentOwner(t, pool, f, "executor", owner), "phase-clock selection must not change executor ownership or leases")
+			})
+		}
 	})
 
 	t.Run("bounded batches cannot starve a valid older intent", func(t *testing.T) {

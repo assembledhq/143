@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -308,6 +309,77 @@ func TestCodeReviewPreparationIntentLocksCurrentHeadBeforeProjection(t *testing.
 			}
 			require.Equal(t, CodeReviewPreparationProjection{}, actual, "no uncommitted or stale-head transition may claim successful projection")
 			require.NoError(t, mock.ExpectationsWereMet(), "the PR row lock must precede job/session locks and remain held through CAS/consumption")
+		})
+	}
+}
+
+func TestCodeReviewPreparationIntentCapturedDeadlineAuthority(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, roster                                      string
+		matches                                           int64
+		result, missing, zeroCreated, zeroNow, older, bad bool
+	}{
+		{name: "legacy roster retains thirty minute default", roster: `{}`},
+		{name: "captured timeout remains original", roster: `{"reviewers":["claude_code"],"orchestrator":"claude_code","timeout_seconds":60}`},
+		{name: "exact explicit orchestrator retains its phase clock", roster: `{"reviewers":["claude_code"],"orchestrator":"claude_code","timeout_seconds":60}`, matches: 1, result: true},
+		{name: "null roster has no authority", roster: `null`, bad: true},
+		{name: "null timeout has no authority", roster: `{"timeout_seconds":null}`, bad: true},
+		{name: "nonobject roster has no authority", roster: `[]`, bad: true},
+		{name: "ambiguous result match has no authority", roster: `{"reviewers":["claude_code"],"orchestrator":"claude_code","timeout_seconds":60}`, matches: 2, result: true, bad: true},
+		{name: "conflicting exact thread roles have no authority", roster: `{"reviewers":["claude_code"],"orchestrator":"claude_code","timeout_seconds":60}`, matches: -1, result: true, bad: true},
+		{name: "matching result without timestamp has no authority", roster: `{"reviewers":["claude_code"],"orchestrator":"claude_code","timeout_seconds":60}`, matches: 1, bad: true},
+		{name: "result older than review cannot renew timeout", roster: `{"reviewers":["claude_code"],"orchestrator":"claude_code","timeout_seconds":60}`, matches: 1, result: true, older: true, bad: true},
+		{name: "zero original creation time has no authority", roster: `{}`, zeroCreated: true, bad: true},
+		{name: "zero observation time has no authority", roster: `{}`, zeroNow: true, bad: true},
+		{name: "missing tenant-scoped policy has no authority", missing: true, bad: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create an isolated captured-cutoff database mock")
+			defer mock.Close()
+			i := preparationIntentTestValue()
+			created := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+			now := created.Add(45 * time.Minute)
+			var phase *time.Time
+			if tt.result {
+				value := created.Add(30 * time.Second)
+				if tt.older {
+					value = created.Add(-time.Minute)
+				}
+				phase = &value
+			}
+			if tt.zeroCreated {
+				created = time.Time{}
+			}
+			if tt.zeroNow {
+				now = time.Time{}
+			}
+			rows := pgxmock.NewRows([]string{"created_at", "agent_roster", "phase_created_at", "matches", "now"})
+			if !tt.missing {
+				rows.AddRow(created, []byte(tt.roster), phase, tt.matches, now)
+			}
+			mock.ExpectQuery(`(?s)SELECT m.created_at,p.agent_roster,r.created_at,r.matches,clock_timestamp\(\).*JOIN code_review_policies p ON p.org_id=m.org_id AND p.id=m.policy_id.*JOIN jobs source ON source.org_id=m.org_id AND source.id=\$5.*source.completed_at IS NOT NULL.*MIN\(a.created_at\) FILTER\(WHERE a.role='orchestrator' AND a.status IN \('queued','running'\)\).*COUNT\(DISTINCT a.role\)>1 THEN -1.*COUNT\(\*\) FILTER\(WHERE a.role='orchestrator' AND a.status IN \('queued','running'\)\).*a.org_id=\$1.*a.assessment_id IS NULL.*a.created_at<=source.completed_at.*a.structured_result->>'thread_id'=\$4.*m.org_id=\$1 AND m.id=\$2 AND m.session_id=\$3`).WithArgs(i.OrgID, i.MetadataID, i.SessionID, i.ThreadID.String(), i.JobID).WillReturnRows(rows)
+			deadline, observed, err := codeReviewPreparationProjectionDeadline(context.Background(), mock, i.OrgID, i)
+			if tt.bad {
+				require.Error(t, err, "invalid or ambiguous captured authority must not authorize timeout projection")
+				require.True(t, deadline.IsZero() && observed.IsZero(), "invalid authority must not fabricate a cutoff or observation clock")
+			} else {
+				require.NoError(t, err, "captured authority must remain usable after policy version changes")
+				duration := time.Minute
+				if tt.roster == `{}` {
+					duration = 30 * time.Minute
+				}
+				start := created
+				if phase != nil {
+					start = *phase
+				}
+				require.Equal(t, start.Add(duration), deadline, "only original review or exact explicit phase creation may anchor the cutoff")
+				require.Equal(t, now, observed, "cutoff comparison must use database wall clock observed after row fences")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "cutoff lookup must retain tenant, captured policy and exact baseline result identity")
 		})
 	}
 }
