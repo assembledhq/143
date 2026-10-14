@@ -486,10 +486,12 @@ func (p observedReviewIntegrityProvider) ExecWithStdin(ctx context.Context, sand
 	observed := strings.Replace(reviewWorkspacePreparationPython, "def capture(args):", `
 def observe_integrity_phase(stage):
     with open(os.environ["REVIEW_TEST_INTEGRITY_PHASES"], "a") as saved:
-        saved.write(json.dumps({"stage": stage, "remaining_seconds": deadline - time.monotonic(), "active_pid": active.pid if active else None}) + "\n")
+        saved.write(json.dumps({"stage": stage, "remaining_seconds": deadline - time.monotonic(), "controller_pid": os.getpid(), "controller_pgid": os.getpgrp(), "active_pid": active.pid if active else None, "cancel_marker_present": bool(cancel_path and os.path.exists(cancel_path)), "completion_marker_present": bool(cancel_path and os.path.exists(cancel_path + ".done"))}) + "\n")
 def capture(args):
     observe_integrity_phase("capture-enter")`, 1)
 	observed = strings.Replace(observed, "    return data\n", "    observe_integrity_phase(\"capture-complete\")\n    return data\n", 1)
+	observed = strings.Replace(observed, "def stop_child():", "def stop_child():\n    observe_integrity_phase(\"stop-child-enter\")", 1)
+	observed = strings.Replace(observed, "    active = None\n\ndef terminated", "    active = None\n    observe_integrity_phase(\"stop-child-complete\")\n\ndef terminated", 1)
 	observed = strings.Replace(observed, "def verify_object_integrity(script):", "def verify_object_integrity(script):\n    observe_integrity_phase(\"integrity-enter\")", 1)
 	observed = strings.Replace(observed, "    child_directory =", "    if script == p.get(\"verify_integrity\"):\n        observe_integrity_phase(\"integrity-observed-script\" if \"controlled-git\" in script else \"integrity-unobserved-script\")\n    child_directory =", 1)
 	observed = strings.Replace(observed, "    while True:\n        check_cancelled()", "    if script == p.get(\"verify_integrity\"):\n        observe_integrity_phase(\"integrity-popen\")\n    while True:\n        check_cancelled()", 1)
@@ -522,10 +524,12 @@ func TestReviewObjectIntegrityUsesOriginalDeadlineAndCancellation(t *testing.T) 
 			root := t.TempDir()
 			marker, git := filepath.Join(root, "fsck-pid"), filepath.Join(root, "controlled-git")
 			phases := filepath.Join(root, "phases.jsonl")
-			observer := `import os, subprocess, sys
+			observer := `import json, os, subprocess, sys
 if "fsck" not in sys.argv[1:]:
     os.execv("/usr/bin/git", ["/usr/bin/git"] + sys.argv[1:])
 child = subprocess.Popen(["/usr/bin/git"] + sys.argv[1:], stdin=subprocess.DEVNULL, close_fds=True)
+with open(` + strconv.Quote(marker+".json") + `, "w") as saved:
+    json.dump({"observer_pid": os.getpid(), "observer_pgid": os.getpgrp(), "git_pid": child.pid, "git_pgid": os.getpgid(child.pid)}, saved)
 with open(` + strconv.Quote(marker) + `, "w") as saved:
     saved.write(str(child.pid))
 sys.exit(child.wait())
@@ -544,6 +548,8 @@ sys.exit(child.wait())
 			defer cancel()
 			started := time.Now()
 			completed := make(chan error, 1)
+			var completedFailure error
+			completedObserved := false
 			go func() { completed <- o.ensureCodeReviewWorkspaceEvidence(ctx, f.session, sandbox, zerolog.Nop()) }()
 			t.Cleanup(func() {
 				if t.Failed() {
@@ -555,14 +561,25 @@ sys.exit(child.wait())
 					if data, err := os.ReadFile(phases + ".stderr"); err == nil {
 						t.Logf("controlled integrity wrapper stderr: %s", data)
 					}
-					select {
-					case failure := <-completed:
+					if data, err := os.ReadFile(marker + ".json"); err == nil {
+						t.Logf("controlled integrity observer process identities: %s", data)
+					} else {
+						t.Logf("controlled integrity observer identity read: %v", err)
+					}
+					failure, observed := completedFailure, completedObserved
+					if !observed {
+						select {
+						case failure = <-completed:
+							observed = true
+						default:
+							t.Log("controlled fixture output has not returned")
+						}
+					}
+					if observed {
 						for errors.Unwrap(failure) != nil {
 							failure = errors.Unwrap(failure)
 						}
 						t.Logf("deepest controlled fixture failure: %T %#v", failure, failure)
-					default:
-						t.Log("controlled fixture output has not returned")
 					}
 				}
 			})
@@ -584,6 +601,7 @@ sys.exit(child.wait())
 			}
 			select {
 			case err = <-completed:
+				completedFailure, completedObserved = err, true
 			case <-time.After(4 * time.Second):
 				t.Fatal("paused real fsck must terminate within the original two-second budget plus bounded cleanup allowance")
 			}
@@ -593,7 +611,14 @@ sys.exit(child.wait())
 				require.ErrorIs(t, err, context.DeadlineExceeded, "full fsck must consume the existing absolute setup budget")
 			}
 			require.Less(t, time.Since(started), 4*time.Second, "fsck must use the original two-second budget plus bounded process cleanup, without renewing preparation time")
-			require.ErrorIs(t, syscall.Kill(pid, 0), syscall.ESRCH, "the identified paused real Git process must be gone before failed preparation returns")
+			terminationErr := syscall.Kill(pid, 0)
+			if !errors.Is(terminationErr, syscall.ESRCH) {
+				stateCtx, stateCancel := context.WithTimeout(context.Background(), time.Second)
+				state, stateErr := exec.CommandContext(stateCtx, "ps", "-p", strconv.Itoa(pid), "-o", "pid=,ppid=,pgid=,stat=,comm=").CombinedOutput()
+				stateCancel()
+				t.Logf("controlled real Git state after failed preparation returned (read error=%v): %s", stateErr, state)
+			}
+			require.ErrorIs(t, terminationErr, syscall.ESRCH, "the identified paused real Git process must be gone before failed preparation returns")
 		})
 	}
 }

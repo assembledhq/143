@@ -100,7 +100,9 @@ func TestReviewContainerAcceptance(t *testing.T) {
 				"limits": []string{"file transport does not prove live HTTPS authentication", "synthetic dependencies do not accept repository recipes", "synthetic size does not establish largest-repository cost", "disk quota and worker egress policy are not accepted here"},
 			}
 			t.Cleanup(func() {
-				report["passed"] = !t.Failed()
+				credentialDetected := logs.CredentialDetected()
+				report["passed"] = !t.Failed() && !credentialDetected
+				report["provider_log_credential_detected"] = credentialDetected
 				report["installation_token_requests"] = tokens.calls.Load()
 				report["filtered_clone_missing_blobs"] = provider.filteredMissing.Load()
 				report["real_snapshot_bytes"] = provider.snapshotBytes.Load()
@@ -117,6 +119,7 @@ func TestReviewContainerAcceptance(t *testing.T) {
 				report["fault_injection_evidence"] = provider.faultDiagnostic()
 				report["process_cleanup_evidence"] = provider.cleanupEvidence()
 				writeAcceptanceArtifact(t, tt.name, report, logs.String())
+				require.False(t, credentialDetected, "the complete provider log stream through container cleanup must exclude synthetic private input")
 			})
 			t.Cleanup(func() { provider.cleanup(t) })
 			preparationContext := jobctx.WithLockToken(context.Background(), uuid.New())
@@ -169,7 +172,7 @@ func TestReviewContainerAcceptance(t *testing.T) {
 						require.Contains(t, acceptanceErrorCauses(prepareErr), "review workspace preparation command failed (exit=125)", "negative recipe case must reject its explicit failure rather than an earlier observer error")
 					}
 				}
-				provider.assertNoCredentials(t, observed, logs.String())
+				provider.assertNoCredentials(t, observed, &logs)
 				return
 			}
 			require.NoError(t, prepareErr, "cold acceptance must prepare the exact captured workspace")
@@ -238,7 +241,7 @@ func TestReviewContainerAcceptance(t *testing.T) {
 				}
 				assertAcceptanceSource(t, provider, sandbox, fixture)
 			}
-			provider.assertNoCredentials(t, observed, logs.String())
+			provider.assertNoCredentials(t, observed, &logs)
 			for _, name := range []string{".git/config", ".git/143-review-evidence.json", ".143/proc-count"} {
 				assertAcceptanceSecretAbsent(t, acceptanceRead(t, provider, sandbox, name), "repository metadata and recipe ancestry report")
 			}
@@ -463,9 +466,10 @@ func (p *acceptanceProvider) cleanup(t *testing.T) {
 		require.NoError(t, err, "isolated acceptance sandbox should be destroyed")
 	}
 }
-func (p *acceptanceProvider) assertNoCredentials(t *testing.T, observed *acceptanceDockerClient, logs string) {
+func (p *acceptanceProvider) assertNoCredentials(t *testing.T, observed *acceptanceDockerClient, logs *acceptanceLogBuffer) {
 	t.Helper()
-	assertAcceptanceSecretAbsent(t, []byte(logs), "real provider logs")
+	require.False(t, logs.CredentialDetected(), "the entire provider log stream must exclude synthetic private input, including bytes beyond the artifact cap")
+	assertAcceptanceSecretAbsent(t, []byte(logs.String()), "retained provider log artifact")
 	observed.mu.Lock()
 	defer observed.mu.Unlock()
 	for _, execution := range observed.executions {
@@ -634,24 +638,52 @@ func assertAcceptanceSource(t *testing.T, p *acceptanceProvider, sandbox *agent.
 }
 func assertAcceptanceSecretAbsent(t *testing.T, value []byte, surface string) {
 	t.Helper()
-	for _, forbidden := range []string{acceptanceToken, base64.StdEncoding.EncodeToString([]byte("x-access-token:" + acceptanceToken)), url.QueryEscape(acceptanceToken), url.PathEscape(acceptanceToken)} {
+	for _, forbidden := range acceptanceCredentialForms() {
 		require.NotContains(t, string(value), forbidden, "synthetic private input must not reach %s", surface)
 	}
 }
 
+const acceptanceProviderLogArtifactLimit = 64 * 1024
+
+// Retention and credential detection are independent. Scan every incoming byte
+// and retain only the longest credential's boundary overlap between writes;
+// the artifact still contains at most the first 64 KiB of provider logs.
 type acceptanceLogBuffer struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
+	mu                 sync.Mutex
+	buffer             bytes.Buffer
+	needles            [][]byte
+	scanTail           []byte
+	maxScanTail        int
+	credentialDetected bool
 }
 
 func (b *acceptanceLogBuffer) Write(value []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.buffer.Len() < 64*1024 {
-		remaining := 64*1024 - b.buffer.Len()
-		if len(value) < remaining {
-			remaining = len(value)
+	if b.needles == nil {
+		for _, form := range acceptanceCredentialForms() {
+			b.needles = append(b.needles, []byte(form))
+			b.maxScanTail = max(b.maxScanTail, len(form)-1)
 		}
+	}
+	// A cross-write match can involve only the saved suffix and the incoming
+	// prefix. Never concatenate the whole write into scanner-owned storage.
+	prefixSize := min(len(value), b.maxScanTail)
+	boundary := make([]byte, len(b.scanTail)+prefixSize)
+	copy(boundary, b.scanTail)
+	copy(boundary[len(b.scanTail):], value[:prefixSize])
+	for _, needle := range b.needles {
+		if bytes.Contains(value, needle) || bytes.Contains(boundary, needle) {
+			b.credentialDetected = true
+		}
+	}
+	if len(value) >= b.maxScanTail {
+		b.scanTail = append(b.scanTail[:0], value[len(value)-b.maxScanTail:]...)
+	} else {
+		b.scanTail = append(b.scanTail[:0], boundary[max(0, len(boundary)-b.maxScanTail):]...)
+	}
+	if b.buffer.Len() < acceptanceProviderLogArtifactLimit {
+		remaining := min(len(value), acceptanceProviderLogArtifactLimit-b.buffer.Len())
 		if _, err := b.buffer.Write(value[:remaining]); err != nil {
 			return 0, err
 		}
@@ -662,6 +694,14 @@ func (b *acceptanceLogBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buffer.String()
+}
+func (b *acceptanceLogBuffer) CredentialDetected() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.credentialDetected
+}
+func acceptanceCredentialForms() []string {
+	return []string{acceptanceToken, base64.StdEncoding.EncodeToString([]byte("x-access-token:" + acceptanceToken)), url.QueryEscape(acceptanceToken), url.PathEscape(acceptanceToken)}
 }
 func writeAcceptanceArtifact(t *testing.T, name string, report map[string]any, logs string) {
 	t.Helper()
@@ -740,7 +780,7 @@ func acceptanceObservationSandbox(original *agent.Sandbox, destination string) *
 	return &observed
 }
 func acceptanceSafeDiagnostic(value string) string {
-	for _, forbidden := range []string{acceptanceToken, base64.StdEncoding.EncodeToString([]byte("x-access-token:" + acceptanceToken)), url.QueryEscape(acceptanceToken), url.PathEscape(acceptanceToken)} {
+	for _, forbidden := range acceptanceCredentialForms() {
 		value = strings.ReplaceAll(value, forbidden, "[redacted]")
 	}
 	if len(value) > 4096 {
@@ -924,6 +964,59 @@ func TestReviewContainerAcceptanceDeadlineAttribution(t *testing.T) {
 			if tt.preparation {
 				require.Equal(t, float64(originalDeadline.UnixNano())/1e9, deadline, "attributed SDK deadline must exactly match its original context")
 			}
+		})
+	}
+}
+
+func TestReviewContainerAcceptanceProviderLogScan(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, credential string
+		split            bool
+	}{
+		{name: "late raw", credential: acceptanceToken},
+		{name: "late Basic", credential: base64.StdEncoding.EncodeToString([]byte("x-access-token:" + acceptanceToken))},
+		{name: "late query escaped", credential: url.QueryEscape(acceptanceToken)},
+		{name: "late path escaped", credential: url.PathEscape(acceptanceToken)},
+		{name: "split raw", credential: acceptanceToken, split: true},
+		{name: "split Basic", credential: base64.StdEncoding.EncodeToString([]byte("x-access-token:" + acceptanceToken)), split: true},
+		{name: "split query escaped", credential: url.QueryEscape(acceptanceToken), split: true},
+		{name: "split path escaped", credential: url.PathEscape(acceptanceToken), split: true},
+		{name: "large clean stream"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var logs acceptanceLogBuffer
+			prefix := bytes.Repeat([]byte("."), 2*acceptanceProviderLogArtifactLimit)
+			written, err := logs.Write(prefix)
+			require.NoError(t, err, "large provider writes must be consumed without unbounded retention")
+			require.Equal(t, len(prefix), written, "the log writer must report the full accepted write after the artifact fills")
+			require.False(t, logs.CredentialDetected(), "clean bytes beyond the artifact limit must not produce a false credential alarm")
+			if tt.split {
+				// A one-byte chunk exercises every possible credential boundary, after
+				// retention has already stopped.
+				for _, value := range []byte(tt.credential) {
+					written, err = logs.Write([]byte{value})
+					require.NoError(t, err, "split provider log writes must preserve scan progress")
+					require.Equal(t, 1, written, "split writes must be fully consumed")
+				}
+			} else if tt.credential != "" {
+				written, err = logs.Write([]byte(tt.credential))
+				require.NoError(t, err, "late credential bytes must be scanned after artifact retention stops")
+				require.Equal(t, len(tt.credential), written, "late writes must be fully consumed")
+			} else {
+				cleanChunk := bytes.Repeat([]byte("clean-log\n"), 4096)
+				for range 100 {
+					written, err = logs.Write(cleanChunk)
+					require.NoError(t, err, "large clean streams must stay bounded")
+					require.Equal(t, len(cleanChunk), written, "every clean write must be consumed")
+				}
+			}
+			require.Equal(t, tt.credential != "", logs.CredentialDetected(), "detection must cover late and split raw, Basic and URL-encoded forms")
+			require.Equal(t, string(prefix[:acceptanceProviderLogArtifactLimit]), logs.String(), "artifact retention must preserve its exact original 64 KiB cap")
+			require.LessOrEqual(t, len(logs.scanTail), logs.maxScanTail, "scanner state must stay bounded independently of total log length")
+			require.LessOrEqual(t, cap(logs.scanTail), logs.maxScanTail*2, "boundary storage must not grow with streamed output")
 		})
 	}
 }

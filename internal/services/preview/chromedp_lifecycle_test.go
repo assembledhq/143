@@ -57,6 +57,7 @@ func acquireLifecycleBrowser(t *testing.T) {
 func newLifecycleInspector(t *testing.T) (*ChromeDPInspector, string) {
 	t.Helper()
 	acquireLifecycleBrowser(t)
+	verifyLifecycleBrowserReadiness(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, err := io.WriteString(w, `<!doctype html><html><head><title>Preview fixture</title><style>body{margin:0;color:rgb(0,0,0);background:white}#label{color:rgb(255,0,0)}#hidden{display:none}</style></head><body><h1 id="label">Preview fixture</h1><label>Name<input id="name" value="initial"></label><label><input id="check" type="checkbox">Accept</label><select id="choice"><option value="a">A</option><option value="b">B</option></select><button id="save" onclick="document.querySelector('#result').textContent=document.querySelector('#name').value">Save</button><p id="result">empty</p><span id="hidden">Hidden</span><ul><li>first</li><li>second</li></ul><script>window.fixtureInitialVisibility=document.visibilityState;console.log('fixture loaded');localStorage.setItem('fixture','value');document.cookie='fixture-cookie=kept;path=/';</script></body></html>`)

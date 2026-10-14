@@ -12,6 +12,11 @@ on:
     - cron: "17 10,22 * * *"
   workflow_dispatch:
     inputs:
+      review_diagnostics:
+        description: Run targeted Linux process-state and Chrome startup diagnostics
+        required: false
+        default: false
+        type: boolean
       review_workspace_acceptance:
         description: Run the real Docker and gVisor review workspace acceptance suite
         required: false
@@ -539,6 +544,56 @@ jobs:
             echo "--- $t"
             bash "$t"
           done
+
+  review-linux-diagnostics:
+    name: Review Linux CI Diagnostics
+    if: github.event_name == 'workflow_dispatch' && inputs.review_diagnostics
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      TEST_BROWSER_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Record actual platform tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/review-linux-ci-diagnostics"
+          { go version; /usr/bin/git --version; command -v google-chrome; google-chrome --version; } \
+            | tee "$RUNNER_TEMP/review-linux-ci-diagnostics/tools.log"
+      - name: Diagnose real paused Git termination
+        run: |
+          set +e
+          go test ./internal/services/agent -run '^TestReviewObjectIntegrityUsesOriginalDeadlineAndCancellation$' \
+            -parallel=1 -count=3 -v -timeout=180s > "$RUNNER_TEMP/paused-git-diagnostics.log" 2>&1
+          status=$?
+          tail -c 65536 "$RUNNER_TEMP/paused-git-diagnostics.log" \
+            | tee "$RUNNER_TEMP/review-linux-ci-diagnostics/paused-git.log"
+          exit "$status"
+      - name: Diagnose real Chrome startup and context recovery
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/review-linux-ci-diagnostics"
+          set +e
+          go test ./internal/services/preview -run '^TestBrowserChromeDPFailedContextInitializationIsNotCached$' \
+            -parallel=1 -count=3 -v -timeout=180s > "$RUNNER_TEMP/chrome-startup-diagnostics.log" 2>&1
+          status=$?
+          tail -c 65536 "$RUNNER_TEMP/chrome-startup-diagnostics.log" \
+            | tee "$RUNNER_TEMP/review-linux-ci-diagnostics/chrome-startup.log"
+          exit "$status"
+      - name: Upload bounded Linux diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: review-linux-ci-diagnostics-${{ github.sha }}
+          path: ${{ runner.temp }}/review-linux-ci-diagnostics
+          if-no-files-found: error
+          retention-days: 14
 
   review-workspace-acceptance:
     name: Review Workspace Container Acceptance
