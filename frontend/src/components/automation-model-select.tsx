@@ -3,8 +3,10 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
+  agentDisplayLabel,
   agentTypeForModel,
   availableAgentModelGroups,
+  modelOptionLabel,
   pmUsableResolvedCredentials,
 } from "@/lib/agents";
 import { ModelOptionGroups } from "@/components/model-option-groups";
@@ -160,7 +162,7 @@ export function AutomationModelSelect({
           <SelectGroup>
             <SelectLabel>Current selection</SelectLabel>
             <SelectItem value={selectionValue(currentAgentType, value)}>
-              {value}
+              {agentDisplayLabel(currentAgentType)} · {modelOptionLabel(value)}
             </SelectItem>
           </SelectGroup>
         ) : null}

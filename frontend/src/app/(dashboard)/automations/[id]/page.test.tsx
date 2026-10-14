@@ -2931,6 +2931,29 @@ describe("AutomationDetailPage", () => {
     });
   });
 
+  it("labels an unavailable current model with its agent", async () => {
+    const user = userEvent.setup();
+    renderSharedModelIdPicker({
+      agent_type: "pi",
+      model_override: "anthropic/custom-experimental",
+    });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+
+    const currentSelection = await screen.findByRole("group", {
+      name: "Current selection",
+    });
+    expect(
+      within(currentSelection).getByRole("option", {
+        name: "Pi · anthropic/custom-experimental",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("clears an unsupported reasoning override in the same patch as the model switch", async () => {
     const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;
