@@ -346,23 +346,32 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 			// process's clock: every other piece of lifecycle evidence is a
 			// GitHub moment, and a local stamp can be later than a reopen
 			// GitHub already made, which would then be refused as older than
-			// this close. A lookup without a timestamp leaves the evidence
-			// unknown. The store refuses the close when the target already
-			// holds newer open evidence, which means the lookup described the
-			// pull request before a reopen this transaction can see: the run
-			// retries with a fresh lookup instead of being skipped.
-			applied, err := d.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleClosed, current.info.UpdatedAt)
+			// this close. A lookup without a timestamp keeps the evidence the
+			// target already holds rather than clearing it, so an older reopen
+			// delivered afterwards is still refused instead of being accepted
+			// against unknown evidence.
+			observedAt := current.info.UpdatedAt
+			if observedAt == nil {
+				observedAt = target.LifecycleUpdatedAt
+			}
+			applied, err := d.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleClosed, observedAt)
 			if err != nil {
 				return DispatchOutcome{}, err
 			}
 			if !applied {
+				// The target already holds newer open evidence, so the lookup
+				// described the pull request before a reopen this transaction
+				// can see. The run waits for a fresh lookup instead of being
+				// skipped, on the lookup backoff: an API that keeps serving
+				// the old answer must not be polled every second for the whole
+				// wait.
 				if _, err := d.runs.MarkWaiting(ctx, tx, orgID, run.ID); err != nil {
 					return DispatchOutcome{}, err
 				}
 				if err := tx.Commit(ctx); err != nil {
 					return DispatchOutcome{}, fmt.Errorf("commit automation dispatch wait: %w", err)
 				}
-				return DispatchOutcome{Kind: DispatchRetry, RetryAfter: automationStaleLookupRetry, Note: "the lookup's close is older than the target's open evidence"}, nil
+				return DispatchOutcome{Kind: DispatchRetry, RetryAfter: headLookupBackoff(d.now(), run), Note: "the lookup's close is older than the target's open evidence"}, nil
 			}
 		}
 		return d.terminalize(ctx, tx, orgID, run.ID, models.AutomationRunOutcomePRClosed, "pull request is "+current.info.State)
