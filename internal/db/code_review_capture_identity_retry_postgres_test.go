@@ -62,7 +62,7 @@ func TestCodeReviewCaptureIdentityRetryPhaseCheckpointPostgres(t *testing.T) {
 			require.NoError(t, err, "encode the prior independent retry phase checkpoints")
 			status, jobType := "running", "run_code_review"
 			leaseExpiresAt := time.Now().UTC().Add(5 * time.Minute)
-			var leaseDeadline *time.Time = &leaseExpiresAt
+			leaseDeadline := &leaseExpiresAt
 			callOrgID, callSessionID, callJobID, callLockToken := orgID, sessionID, jobID, lockToken
 			switch tt.fence {
 			case "org":
