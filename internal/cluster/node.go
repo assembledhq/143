@@ -12,19 +12,40 @@ import (
 )
 
 type NodeManager struct {
-	pool   db.DBTX
-	logger zerolog.Logger
-	nodeID string
-	mode   string
+	pool         db.DBTX
+	controlPlane db.DBTX
+	logger       zerolog.Logger
+	nodeID       string
+	mode         string
 
 	mu                sync.RWMutex
 	draining          bool
 	heartbeatInterval time.Duration
+	heartbeatTimeout  time.Duration
 	metadataProvider  func() map[string]any
 }
 
-func NewNodeManager(pool db.DBTX, logger zerolog.Logger, nodeID, mode string) *NodeManager {
-	return &NodeManager{pool: pool, logger: logger, nodeID: nodeID, mode: mode, heartbeatInterval: 30 * time.Second}
+type NodeManagerOption func(*NodeManager)
+
+// WithControlPlaneDB isolates this node's heartbeat and shutdown drain writes.
+// Registration and cross-node recovery scans still use the ordinary database.
+func WithControlPlaneDB(pool db.DBTX) NodeManagerOption {
+	return func(n *NodeManager) { n.controlPlane = pool }
+}
+
+func NewNodeManager(pool db.DBTX, logger zerolog.Logger, nodeID, mode string, opts ...NodeManagerOption) *NodeManager {
+	n := &NodeManager{pool: pool, logger: logger, nodeID: nodeID, mode: mode, heartbeatInterval: 30 * time.Second, heartbeatTimeout: 10 * time.Second}
+	for _, opt := range opts {
+		opt(n)
+	}
+	return n
+}
+
+func (n *NodeManager) controlPlaneDB() db.DBTX {
+	if n.controlPlane != nil {
+		return n.controlPlane
+	}
+	return n.pool
 }
 
 func (n *NodeManager) Register(ctx context.Context, host string) error {
@@ -73,6 +94,8 @@ func (n *NodeManager) StartHeartbeat(ctx context.Context) {
 }
 
 func (n *NodeManager) HeartbeatOnce(ctx context.Context) error {
+	attemptCtx, cancel := context.WithTimeout(ctx, n.heartbeatTimeout)
+	defer cancel()
 	status := "active"
 	if n.IsDraining() {
 		status = "draining"
@@ -81,7 +104,7 @@ func (n *NodeManager) HeartbeatOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = n.pool.Exec(ctx, `
+	_, err = n.controlPlaneDB().Exec(attemptCtx, `
 		UPDATE nodes
 		SET last_heartbeat_at = now(),
 			status = CASE WHEN drain_intent <> 'none' OR status = 'draining' THEN 'draining' ELSE $2 END,
@@ -109,7 +132,7 @@ func (n *NodeManager) RequestDrain(ctx context.Context, requestedAt time.Time) e
 		return err
 	}
 
-	_, err = n.pool.Exec(ctx, `
+	_, err = n.controlPlaneDB().Exec(ctx, `
 		UPDATE nodes
 		SET status = 'draining',
 			drain_requested_at = COALESCE(drain_requested_at, $3),
