@@ -14,7 +14,7 @@ import (
 // bypassPermissions does not enable project allow rules or MCP headersHelper.
 func ensureClaudeWorkspaceTrust(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox) error {
 	if sandbox == nil || !path.IsAbs(sandbox.HomeDir) || !path.IsAbs(sandbox.WorkDir) {
-		return fmt.Errorf("Claude workspace trust requires absolute sandbox home and work directories")
+		return fmt.Errorf("claude workspace trust requires absolute sandbox home and work directories")
 	}
 	// Isolated mode excludes the repository and user site packages from Python's
 	// imports, so project files cannot shadow the standard library used here.
