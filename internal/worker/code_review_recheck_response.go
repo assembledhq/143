@@ -49,6 +49,9 @@ type codeReviewRecheckValidation struct {
 // rows plus every disposition in the immutable assessment outcome.
 func validateCodeReviewRecheckResponse(in codeReviewRecheckValidationInput) (codeReviewRecheckValidation, error) {
 	invalid := codeReviewRecheckValidation{Synthesis: in.BaselineSynthesis}
+	if err := models.ValidateCodeReviewUncertaintyReasons(in.BaselineSynthesis.UnresolvedUncertainty, in.BaselineSynthesis.UncertaintyReasons); err != nil {
+		return invalid, fmt.Errorf("invalid baseline uncertainty evidence: %w", err)
+	}
 	if len(in.Raw) > 128*1024 || in.BaselineID == uuid.Nil || in.InputDigest == "" || !in.VisualEvidence.Complete {
 		return invalid, errors.New("incomplete recheck validation context")
 	}

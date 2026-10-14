@@ -40,6 +40,21 @@ describe("codeReviewReasonDescription", () => {
   it("ignores a blank subject", () => {
     expect(codeReviewReasonDescription({ code: "blocked_path", subject: "   " })).toBe("Blocked paths changed");
   });
+
+  it("shows the material uncertainty explanation directly", () => {
+    const explanation = "Missing evidence: the base auth guard; why it matters: viewers may gain write access; to resolve: the base-version guard";
+    expect(codeReviewReasonDescription({ code: "unresolved_uncertainty", subject: `  ${explanation}  ` })).toBe(explanation);
+  });
+
+  it.each([undefined, "", "   "])("keeps the historical uncertainty label for subject %s", (subject) => {
+    expect(codeReviewReasonDescription({ code: "unresolved_uncertainty", subject })).toBe("Important uncertainty remained");
+  });
+
+  it("keeps details for a future reason code", () => {
+    expect(codeReviewReasonDescription({ code: "future_policy_gate", subject: "Policy needs a domain owner" })).toBe(
+      "Future policy gate: Policy needs a domain owner",
+    );
+  });
 });
 
 describe("independent size limits", () => {

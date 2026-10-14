@@ -3413,7 +3413,7 @@ func TestCodeReviewMissingArtifactSynthesisBlocksApproval(t *testing.T) {
 
 	// A frozen reviewer replay reported that a generated role map was required
 	// to assess an authorization change but absent from the review workspace.
-	raw := `{"approval_recommended":false,"description_assessments":[],"findings":[],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":true,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Review authorization capability changed.","review_summary":"The generated role map is unavailable, so the authorization change cannot be assessed.","risk_notes":["Generated role map is missing."]}`
+	raw := `{"approval_recommended":false,"description_assessments":[],"findings":[],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":true,"uncertainty_reasons":[{"missing_evidence":"The generated role map is absent.","material_impact":"The new capability may grant viewers write access.","resolution_evidence":"The generated role-to-capability map."}],"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Review authorization capability changed.","review_summary":"The generated role map is unavailable, so the authorization change cannot be assessed.","risk_notes":["Generated role map is missing."]}`
 	synthesis, err := parseCodeReviewOrchestratorSynthesis(raw)
 	require.NoError(t, err, "missing-artifact synthesis should satisfy the structured output contract")
 	require.False(t, synthesis.ApprovalRecommended, "missing-artifact synthesis should not recommend approval")
@@ -3429,8 +3429,9 @@ func TestCodeReviewMissingArtifactSynthesisBlocksApproval(t *testing.T) {
 		DescriptionPassed:     true,
 		UpToDate:              true,
 		UnresolvedUncertainty: synthesis.UnresolvedUncertainty,
+		UncertaintyReasons:    synthesis.UncertaintyReasons,
 	})
-	require.Equal(t, []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonUnresolvedUncertainty}}, risk.ReasonDetails, "backend risk evaluation should withhold approval for incomplete generated evidence")
+	require.Equal(t, []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonUnresolvedUncertainty, Subject: "Missing evidence: The generated role map is absent. Why it matters: The new capability may grant viewers write access. To resolve: The generated role-to-capability map."}}, risk.ReasonDetails, "backend risk evaluation should withhold approval and expose the concrete missing evidence")
 	require.False(t, risk.Acceptable, "unresolved uncertainty should block automated approval")
 }
 

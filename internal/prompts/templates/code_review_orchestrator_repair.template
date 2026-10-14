@@ -37,6 +37,7 @@ Return exactly:
   ],
   "scope_mismatch": false,
   "unresolved_uncertainty": false,
+  "uncertainty_reasons": [],
   "reviewer_disagreement": false,
   "prompt_injection_detected": false,
   "summary": "one sentence summary of what changed",
@@ -65,4 +66,6 @@ Requirements marked with evidence kind `visual` may use only `image`, `preview_l
 Judge visual-evidence currentness by whether an image still accurately represents the rendered state relevant to the diff, not by its timestamp or whether it predates the latest commit or assessment. Do not require a new image merely because the pull-request head changed. Existing images remain usable when the diff does not materially change the state they depict, and trusted rubric exemptions for non-material, non-visible, test-only, refactoring, or unrelated changes should produce `not_applicable`.
 
 Preserve the evidence from your previous answer while applying the current decision contract. Set `approval_recommended=false` only for a P0/P1 finding, a missing description assessment, a true structured blocker boolean, or a valid explicit `human_review_reasons` entry.
-If the prior review identified a specific missing generated artifact or dependency needed to assess changed behavior, preserve that limitation and set `unresolved_uncertainty=true` unless the required evidence was established from another available source. Do not turn incomplete evidence into a clean recommendation while repairing the JSON shape.
+If the prior review identified a specific missing file, Git object, generated artifact, or dependency whose absence could materially change approval, preserve that limitation and set `unresolved_uncertainty=true` unless the required evidence was established from another available source. Complete `uncertainty_reasons` from the evidence already inspected. If the prior evidence cannot support a complete reason, do not invent evidence or silently clear the flag to produce approval; retain the uncertainty so the backend keeps the assessment incomplete. Do not turn incomplete evidence into a clean recommendation while repairing the JSON shape.
+
+Every true `unresolved_uncertainty` must have at least one complete entry in `uncertainty_reasons`: {"missing_evidence":"the specific file, declaration, Git object, or factual evidence still unavailable after inspection", "material_impact":"the concrete changed behavior and failure scenario whose safety cannot be determined and could change approval", "resolution_evidence":"the exact artifact or fact that would resolve this question"}. False requires an empty array. Generic labels such as "important uncertainty remained", routine unrun tests/builds, P2/P3 observations, speculative concerns, and unrelated validation are not material uncertainty reasons. Do not set uncertainty solely because tests, builds, or linters were not run; these review threads intentionally inspect evidence without running verification. A concrete missing dependency declaration may qualify only when you explain how its actual contract could change the approval decision.
