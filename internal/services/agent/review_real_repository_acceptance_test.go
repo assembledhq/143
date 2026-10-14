@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"net/url"
 	"os"
@@ -144,6 +146,12 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 	require.LessOrEqual(t, len(raw), 65536, "private inventory must be bounded")
 	manifest, err := decodeRealReviewManifest(raw)
 	require.NoError(t, err, "private inventory must bind exact trusted repository identities")
+	profileSetting := os.Getenv("REVIEW_ACCEPTANCE_PROFILE_SOURCE_HELPER")
+	require.True(t, profileSetting == "" || profileSetting == "1", "source-helper profiling must use the explicit host opt-in value 1")
+	if profileSetting == "1" {
+		require.Len(t, manifest.Repositories, 1, "diagnostic profiling requires one isolated Assembled candidate")
+		require.Equal(t, "assembledhq/assembled", manifest.Repositories[0].FullName, "diagnostic profiling supports only the known Assembled source helper")
+	}
 	token, err := readRealReviewToken(tokenPath)
 	require.NoError(t, err, "host-only credential file must be valid")
 	image, networkName := os.Getenv("REVIEW_ACCEPTANCE_IMAGE"), os.Getenv("REVIEW_ACCEPTANCE_NETWORK")
@@ -187,14 +195,25 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 			logs := realReviewLogBuffer(token)
 			surfaces := realReviewLogBuffer(token)
 			observed := &realReviewDockerClient{DockerClient: cli, logs: surfaces}
-			provider := &realReviewProvider{DockerProvider: providers.NewDockerProvider(observed, zerolog.New(logs).Level(zerolog.DebugLevel), providers.WithRuntime("runsc"), providers.WithNetwork(networkName), providers.WithRequireDiskQuota(repo.DiskLimitGB > 0), providers.WithResolvConf(resolvConf)), client: cli, image: image, network: networkName, repo: repo, logs: logs, surfaces: surfaces, containers: map[string]*agent.Sandbox{}}
+			profileHelper := profileSetting == "1" && repo.FullName == "assembledhq/assembled"
+			if profileHelper {
+				require.Equal(t, realReviewProfileHelperSHA256, repo.HelperSHA256[".143/review-sources.py"], "diagnostic profiling supports only its exact hash-bound Assembled helper")
+			}
+			provider := &realReviewProvider{profileSourceHelper: profileHelper, DockerProvider: providers.NewDockerProvider(observed, zerolog.New(logs).Level(zerolog.DebugLevel), providers.WithRuntime("runsc"), providers.WithNetwork(networkName), providers.WithRequireDiskQuota(repo.DiskLimitGB > 0), providers.WithResolvConf(resolvConf)), client: cli, image: image, network: networkName, repo: repo, logs: logs, surfaces: surfaces, containers: map[string]*agent.Sandbox{}}
 			tokens := &realReviewTokens{token: token, installationID: repo.InstallationID}
 			preparationPolicy, policyErr := reviewpreparation.NewPolicy(true, []string{repo.FullName})
 			require.NoError(t, policyErr, "acceptance must explicitly enable preparation for its exact private repository identity")
 			orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{Provider: provider, Repositories: realReviewRepoStore{repo}, GitHub: tokens, Env: agent.NewAgentEnv(agent.AgentEnvDeps{}), Logger: zerolog.New(logs), ReviewPreparationPolicy: preparationPolicy, SandboxCapacity: agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{Counter: acceptanceCapacityCounter{}, MaxActive: 1, Logger: zerolog.Nop()})})
 			report := map[string]any{"repository": repo.FullName, "base_sha": repo.BaseSHA, "head_sha": repo.HeadSHA, "config_sha256": repo.ConfigSHA256, "helper_sha256": repo.HelperSHA256, "source_sha": sourceSHA, "image_id": inspected.ID, "image_os": inspected.Os, "image_architecture": inspected.Architecture, "docker_server_version": info.ServerVersion, "docker_storage_driver": info.Driver, "docker_storage_driver_status": info.DriverStatus, "docker_data_root": info.DockerRootDir, "runsc_version": os.Getenv("REVIEW_ACCEPTANCE_RUNSC_VERSION"), "runtime": "runsc", "cpu_limit": repo.CPULimit, "memory_limit_mb": repo.MemoryLimitMB, "disk_limit_gb": repo.DiskLimitGB, "disk_quota_required": repo.DiskLimitGB > 0, "token_kind": repo.TokenKind, "observation": "trusted run/capture observers record fixed labels and process identity; original functions, payload, deadlines, recipe and security guards are preserved", "limits": []string{"no LLM reviewer execution or durable workspace publication", "GitHub Actions job tokens do not establish deployed GitHub App token issuance", "worker network policy and deployed image identity require separate acceptance"}}
+			if profileHelper {
+				report["result_kind"], report["acceptance_eligible"] = "diagnostic_profile", false
+			}
 			t.Cleanup(func() {
-				report["passed"] = !t.Failed() && !provider.credentialDetected() && provider.created.Load() == provider.destroyed.Load()
+				succeeded := !t.Failed() && !provider.credentialDetected() && provider.created.Load() == provider.destroyed.Load()
+				report["passed"] = succeeded && !profileHelper
+				if profileHelper {
+					report["diagnostic_execution_succeeded"] = succeeded
+				}
 				report["disk_quota_accepted"] = !t.Failed() && !provider.credentialDetected() && repo.DiskLimitGB > 0 && provider.created.Load() > 0 && provider.created.Load() == provider.destroyed.Load()
 				report["credential_detected"] = provider.credentialDetected()
 				report["token_requests"] = tokens.calls.Load()
@@ -524,6 +543,8 @@ type realReviewProvider struct {
 	destructionTraces    []realReviewDestroyedTrace
 	destructionResources []realReviewDestructionResources
 	memoryMonitors       map[string]*realReviewMemoryMonitor
+	profileSourceHelper  bool
+	sourceProfiles       map[string]*realReviewSourceProfile
 	created, destroyed   atomic.Int64
 	creationResources    []map[string]any
 }
@@ -596,9 +617,19 @@ func (p *realReviewProvider) Create(ctx context.Context, cfg agent.SandboxConfig
 		resources["kernel_cgroup_proof"] = proof
 		return nil, errors.New("sandbox process identity changed during host kernel resource verification")
 	}
+	var profile *realReviewSourceProfile
+	if p.profileSourceHelper {
+		profile = &realReviewSourceProfile{cells: map[string]*realReviewProfileAggregate{}}
+		p.mu.Lock()
+		if p.sourceProfiles == nil {
+			p.sourceProfiles = map[string]*realReviewSourceProfile{}
+		}
+		p.sourceProfiles[sandbox.ID] = profile
+		p.mu.Unlock()
+	}
 	monitor := newRealReviewMemoryMonitor(sandbox.ID, func() realReviewMemorySample {
-		return readRealReviewMemorySample("/sys/fs/cgroup", sandbox.ID)
-	}, 500*time.Millisecond, 45*time.Minute)
+		return readRealReviewMemorySample("/sys/fs/cgroup", sandbox.ID, p.profileSourceHelper)
+	}, 500*time.Millisecond, 45*time.Minute, profile)
 	p.mu.Lock()
 	if p.memoryMonitors == nil {
 		p.memoryMonitors = map[string]*realReviewMemoryMonitor{}
@@ -748,6 +779,7 @@ type realReviewMemorySample struct {
 	MemoryCurrentBytes *int64           `json:"memory_current_bytes"`
 	MemoryEvents       map[string]int64 `json:"memory_events"`
 	UnavailableFields  []string         `json:"unavailable_fields"`
+	MemoryStat         map[string]int64 `json:"memory_stat,omitempty"`
 }
 
 type realReviewMemoryTelemetry struct {
@@ -762,6 +794,7 @@ type realReviewMemoryTelemetry struct {
 	MaxObservedCurrentBytes *int64                 `json:"max_observed_memory_current_bytes"`
 	MaxObservedEvents       map[string]int64       `json:"max_observed_memory_events"`
 	LifetimeExpired         bool                   `json:"lifetime_expired"`
+	MaxObservedStat         map[string]int64       `json:"max_observed_memory_stat,omitempty"`
 }
 
 type realReviewMemoryMonitor struct {
@@ -770,16 +803,21 @@ type realReviewMemoryMonitor struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 	read     func() realReviewMemorySample
+	profile  *realReviewSourceProfile
 	retained realReviewMemoryTelemetry
 }
 
 // One monitor retains a fixed-size aggregate, never a timeline. Cancellation
 // joins its goroutine before a final read and before private result serialization.
-func newRealReviewMemoryMonitor(containerID string, read func() realReviewMemorySample, interval, lifetime time.Duration) *realReviewMemoryMonitor {
+func newRealReviewMemoryMonitor(containerID string, read func() realReviewMemorySample, interval, lifetime time.Duration, profiles ...*realReviewSourceProfile) *realReviewMemoryMonitor {
 	ctx, cancel := context.WithTimeout(context.Background(), lifetime)
 	monitor := &realReviewMemoryMonitor{cancel: cancel, done: make(chan struct{}), read: read,
 		retained: realReviewMemoryTelemetry{CgroupPath: "/docker/" + containerID, IntervalMS: interval.Milliseconds(), MaxDurationMS: lifetime.Milliseconds(),
 			ReadLimitsBytes: map[string]int64{"memory.peak": 128, "memory.current": 128, "memory.events": 4096}}}
+	if len(profiles) > 0 && profiles[0] != nil {
+		monitor.profile = profiles[0]
+		monitor.retained.ReadLimitsBytes["memory.stat"] = 8192
+	}
 	monitor.record(read())
 	go func() {
 		defer close(monitor.done)
@@ -812,6 +850,15 @@ func (m *realReviewMemoryMonitor) record(sample realReviewMemorySample) {
 	m.retained.Latest = sample
 	m.retained.MaxObservedPeakBytes = retainRealReviewMemoryMaximum(m.retained.MaxObservedPeakBytes, sample.MemoryPeakBytes)
 	m.retained.MaxObservedCurrentBytes = retainRealReviewMemoryMaximum(m.retained.MaxObservedCurrentBytes, sample.MemoryCurrentBytes)
+	if sample.MemoryStat != nil {
+		if m.retained.MaxObservedStat == nil {
+			m.retained.MaxObservedStat = map[string]int64{}
+		}
+		retainRealReviewCounterMaximum(m.retained.MaxObservedStat, sample.MemoryStat)
+	}
+	if m.profile != nil {
+		m.profile.observeMemory(sample)
+	}
 
 	if sample.MemoryEvents != nil {
 		if m.retained.MaxObservedEvents == nil {
@@ -844,10 +891,13 @@ func (m *realReviewMemoryMonitor) stop() realReviewMemoryTelemetry {
 	return m.retained
 }
 
-func readRealReviewMemorySample(cgroupRoot, containerID string) realReviewMemorySample {
+func readRealReviewMemorySample(cgroupRoot, containerID string, profileStat ...bool) realReviewMemorySample {
 	sample := realReviewMemorySample{UnavailableFields: []string{}}
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(containerID) {
 		sample.UnavailableFields = []string{"memory.events", "memory.peak", "memory.current"}
+		if len(profileStat) > 0 && profileStat[0] {
+			sample.UnavailableFields = append(sample.UnavailableFields, "memory.stat")
+		}
 		return sample
 	}
 	base := "docker/" + containerID + "/"
@@ -877,7 +927,44 @@ func readRealReviewMemorySample(cgroupRoot, containerID string) realReviewMemory
 			sample.MemoryCurrentBytes = &value
 		}
 	}
+	if len(profileStat) > 0 && profileStat[0] {
+		raw, err := readRealReviewKernelFile(cgroupRoot, base+"memory.stat", 8192)
+		if err == nil {
+			sample.MemoryStat, err = realReviewMemoryStat(raw)
+		}
+		if err != nil {
+			sample.UnavailableFields = append(sample.UnavailableFields, "memory.stat")
+		}
+	}
 	return sample
+}
+
+func realReviewMemoryStat(raw []byte) (map[string]int64, error) {
+	if len(raw) > 8192 {
+		return nil, errors.New("memory stat observation exceeded its fixed read bound")
+	}
+	result := map[string]int64{}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return nil, errors.New("memory stat observation requires finite keyed values")
+		}
+		value, err := realReviewNonnegativeKernelInteger(fields[1])
+		if err != nil {
+			return nil, errors.New("memory stat observation requires finite keyed values")
+		}
+		switch fields[0] {
+		case "anon", "file", "file_dirty", "file_writeback":
+			if _, duplicate := result[fields[0]]; duplicate {
+				return nil, errors.New("memory stat observation contains conflicting values")
+			}
+			result[fields[0]] = value
+		}
+	}
+	if len(result) != 4 {
+		return nil, errors.New("memory stat observation lacks required values")
+	}
+	return result, nil
 }
 
 func realReviewMemoryEvents(raw []byte) (map[string]int64, error) {
@@ -949,6 +1036,7 @@ type realReviewDestructionResources struct {
 	DockerState                realReviewDockerState      `json:"docker_state"`
 	MemoryTelemetry            *realReviewMemoryTelemetry `json:"memory_telemetry"`
 	MemoryTelemetryUnavailable string                     `json:"memory_telemetry_unavailable,omitempty"`
+	SourceHelperProfile        *realReviewProfileResult   `json:"source_helper_profile,omitempty"`
 }
 
 func readRealReviewKernelFile(root, relative string, limit int64) ([]byte, error) {
@@ -995,24 +1083,50 @@ func (p *realReviewProvider) ExecWithStdinForReviewPreparation(ctx context.Conte
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return -1, errors.New("production preparation payload could not be attributed")
 	}
-	instrumented, err := instrumentRealReviewCommand(command)
+	instrumented, err := instrumentRealReviewProfileCommand(command, p.profileSourceHelper)
 	if err != nil {
 		return -1, err
 	}
 	started := time.Now()
 	marked := context.WithValue(ctx, acceptancePreparationExecContextKey{}, true)
-	code, execErr := p.DockerProvider.ExecWithStdinForReviewPreparation(marked, sandbox, instrumented, bytes.NewReader(raw), p.observedOutput(stdout), p.observedOutput(stderr))
+	observedStdout := p.observedOutput(stdout)
+	var profileDecoder *realReviewProfileDecoder
+	if p.profileSourceHelper {
+		p.mu.Lock()
+		profile := p.sourceProfiles[sandbox.ID]
+		p.mu.Unlock()
+		if profile != nil {
+			profileDecoder = &realReviewProfileDecoder{profile: profile}
+			observedStdout = io.MultiWriter(profileDecoder, observedStdout)
+		}
+	}
+	code, execErr := p.DockerProvider.ExecWithStdinForReviewPreparation(marked, sandbox, instrumented, bytes.NewReader(raw), observedStdout, p.observedOutput(stderr))
+	if profileDecoder != nil {
+		profileDecoder.finish()
+	}
 	p.mu.Lock()
 	p.executions = append(p.executions, realReviewExecution{Deadline: envelope.Payload.Deadline, ElapsedMS: time.Since(started).Milliseconds(), VerifyOnly: envelope.Payload.VerifyOnly, Standalone: envelope.Payload.Standalone, Authenticated: envelope.Authentication != nil, Clone: envelope.Payload.CloneDestination != "", Exit: code})
 	p.mu.Unlock()
 	return code, execErr
 }
 func instrumentRealReviewCommand(command string) (string, error) {
+	return instrumentRealReviewProfileCommand(command, false)
+}
+
+func instrumentRealReviewProfileCommand(command string, profile bool) (string, error) {
 	anchor := "\ntry:\n    check_workspace_quarantine()\n    message = read_preparation_input()"
 	if strings.Count(command, anchor) != 1 {
 		return "", errors.New("trusted preparation observation anchor changed")
 	}
-	return strings.Replace(command, anchor, "\n"+realReviewTraceObserver+anchor, 1), nil
+	profileLauncher := ""
+	if profile {
+		encoded, err := json.Marshal(realReviewSourceProfileLauncher)
+		if err != nil {
+			return "", errors.New("fixed acceptance profile launcher could not encode")
+		}
+		profileLauncher = "\n_real_profile_launcher = " + string(encoded) + "\n"
+	}
+	return strings.Replace(command, anchor, profileLauncher+"\n"+realReviewTraceObserver+anchor, 1), nil
 }
 func (p *realReviewProvider) observations() []realReviewExecution {
 	p.mu.Lock()
@@ -1036,6 +1150,14 @@ func (p *realReviewProvider) Destroy(ctx context.Context, sandbox *agent.Sandbox
 	} else {
 		telemetry := monitor.stop()
 		resources.MemoryTelemetry = &telemetry
+	}
+	p.mu.Lock()
+	profile := p.sourceProfiles[sandbox.ID]
+	delete(p.sourceProfiles, sandbox.ID)
+	p.mu.Unlock()
+	if profile != nil {
+		result := profile.result()
+		resources.SourceHelperProfile = &result
 	}
 	p.destructionResources = append(p.destructionResources, resources)
 	// Preparation may destroy a failed workspace before its caller receives a
@@ -1300,6 +1422,293 @@ func realReviewLogBuffer(token string) *acceptanceLogBuffer {
 	return buffer
 }
 
+const realReviewProfileHelperSHA256 = "f60e397c24cc8f0d7061037c81d5630f4774700602e429f1d428577afbdf9c80"
+const realReviewProfilePrefix = "143_SOURCE_PROFILE_V1 "
+
+//go:embed testdata/review_source_profile.py
+var realReviewSourceProfileLauncher string
+
+type realReviewProfileRecord struct {
+	Version    int    `json:"version"`
+	Op         int    `json:"op"`
+	Phase      int    `json:"phase"`
+	Category   int    `json:"category"`
+	DurationUS *int64 `json:"duration_us,omitempty"`
+	Failed     *int64 `json:"failed,omitempty"`
+	Items      *int64 `json:"items,omitempty"`
+	Bytes      *int64 `json:"bytes,omitempty"`
+}
+
+type realReviewProfileAggregate struct {
+	Entered           int64            `json:"entered"`
+	Completed         int64            `json:"completed"`
+	Failed            int64            `json:"failed"`
+	Active            int              `json:"active"`
+	MaxActive         int              `json:"max_active"`
+	DurationUS        int64            `json:"sum_completed_operation_duration_us"`
+	Items             *int64           `json:"observed_items,omitempty"`
+	Bytes             *int64           `json:"observed_bytes,omitempty"`
+	MemorySamples     int64            `json:"active_memory_samples"`
+	MaxCurrentBytes   *int64           `json:"max_sampled_memory_current_bytes,omitempty"`
+	MaxMemoryStat     map[string]int64 `json:"max_sampled_memory_stat,omitempty"`
+	SampledEventDelta map[string]int64 `json:"sampled_memory_event_delta,omitempty"`
+	lastEvents        map[string]int64
+}
+
+type realReviewProfileResult struct {
+	DiagnosticOnly bool                                  `json:"diagnostic_only"`
+	HelperSHA256   string                                `json:"helper_sha256"`
+	Invalid        bool                                  `json:"invalid"`
+	InvalidReason  string                                `json:"invalid_reason,omitempty"`
+	Records        int                                   `json:"record_count"`
+	Phases         map[string]realReviewProfileAggregate `json:"phases"`
+	MemoryScope    string                                `json:"memory_scope"`
+	TimingScope    string                                `json:"timing_scope"`
+}
+
+type realReviewSourceProfile struct {
+	mu      sync.Mutex
+	invalid string
+	records int
+	active  int
+	cells   map[string]*realReviewProfileAggregate
+}
+
+type realReviewProfileDecoder struct {
+	mu      sync.Mutex
+	profile *realReviewSourceProfile
+	line    []byte
+	drop    bool
+}
+
+// Parsing never interrupts the original writer or credential scanner. Ordinary
+// output is discarded here; even invalid diagnostic lines retain no raw bytes.
+func (w *realReviewProfileDecoder) Write(raw []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, character := range raw {
+		if character == '\n' {
+			if !w.drop && bytes.HasPrefix(w.line, []byte(realReviewProfilePrefix)) {
+				w.profile.consume(w.line[len(realReviewProfilePrefix):])
+			}
+			w.line, w.drop = nil, false
+			continue
+		}
+		if w.drop {
+			continue
+		}
+		w.line = append(w.line, character)
+		if len(w.line) <= len(realReviewProfilePrefix) && !bytes.HasPrefix([]byte(realReviewProfilePrefix), w.line) {
+			w.line, w.drop = nil, true
+		} else if len(w.line) > 1024 {
+			w.profile.invalidate("record_size_limit")
+			w.line, w.drop = nil, true
+		}
+	}
+	return len(raw), nil
+}
+
+func (w *realReviewProfileDecoder) finish() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if bytes.HasPrefix(w.line, []byte(realReviewProfilePrefix)) {
+		w.profile.invalidate("truncated_record")
+	}
+	w.line = nil
+}
+
+func (p *realReviewSourceProfile) invalidate(reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.invalid == "" {
+		p.invalid = reason
+	}
+}
+
+func (p *realReviewSourceProfile) consume(raw []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.invalid != "" {
+		return
+	}
+	if !realReviewProfileNumericObject(raw) {
+		p.invalid = "invalid_record"
+		return
+	}
+	var value realReviewProfileRecord
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		p.invalid = "invalid_record"
+		return
+	}
+	if value.Version == 1 && value.Op == 3 && value.Phase == 0 && value.Category == 0 && value.DurationUS == nil && value.Failed == nil && value.Items == nil && value.Bytes == nil {
+		p.invalid = "launcher_invalid"
+		return
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) || value.Version != 1 || value.Op < 1 || value.Op > 2 || value.Phase < 1 || value.Phase > 10 || value.Category < 1 || value.Category > 4 {
+		p.invalid = "invalid_record"
+		return
+	}
+	if p.records >= 20000 {
+		p.invalid = "record_count_limit"
+		return
+	}
+	p.records++
+	for _, metric := range []struct {
+		value *int64
+		limit int64
+	}{{value.Items, 1000000}, {value.Bytes, 1073741824}, {value.DurationUS, 480000000}, {value.Failed, 1}} {
+		if metric.value != nil && (*metric.value < 0 || *metric.value > metric.limit) {
+			p.invalid = "invalid_record"
+			return
+		}
+	}
+	if (value.Op == 1 && (value.DurationUS != nil || value.Failed != nil || value.Items != nil || value.Bytes != nil)) || (value.Op == 2 && (value.DurationUS == nil || value.Failed == nil)) {
+		p.invalid = "invalid_record"
+		return
+	}
+	phases := [...]string{"", "selection", "download", "extract", "go_download", "go_processing", "input_binding", "capacity", "inventory", "receipt", "cleanup"}
+	categories := [...]string{"", "all", "npm", "python", "go"}
+	key := phases[value.Phase] + "/" + categories[value.Category]
+	if p.cells == nil {
+		p.cells = map[string]*realReviewProfileAggregate{}
+	}
+	cell := p.cells[key]
+	if cell == nil {
+		cell = &realReviewProfileAggregate{}
+		p.cells[key] = cell
+	}
+	if value.Op == 1 {
+		if p.active >= 64 {
+			p.invalid = "active_count_limit"
+			return
+		}
+		cell.Entered++
+		cell.Active++
+		p.active++
+		cell.MaxActive = max(cell.MaxActive, cell.Active)
+		return
+	}
+	if cell.Active == 0 {
+		p.invalid = "unmatched_exit"
+		return
+	}
+	cell.Active--
+	p.active--
+	cell.Completed++
+	cell.Failed += *value.Failed
+	cell.DurationUS += *value.DurationUS
+	for _, metric := range []struct {
+		value  *int64
+		target **int64
+	}{{value.Items, &cell.Items}, {value.Bytes, &cell.Bytes}} {
+		if metric.value != nil {
+			previous := int64(0)
+			if *metric.target != nil {
+				previous = **metric.target
+			}
+			value := previous + *metric.value
+			*metric.target = &value
+		}
+	}
+	if cell.Active == 0 {
+		cell.lastEvents = nil
+	}
+}
+
+// Reject duplicate keys and non-integer JSON values before typed decoding;
+// otherwise JSON nulls or overwritten keys could silently change attribution.
+func realReviewProfileNumericObject(raw []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('{') {
+		return false
+	}
+	seen := map[string]bool{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, valid := token.(string)
+		if err != nil || !valid || seen[key] {
+			return false
+		}
+		seen[key] = true
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return false
+		}
+		if _, err := strconv.ParseInt(strings.TrimSpace(string(value)), 10, 64); err != nil {
+			return false
+		}
+	}
+	end, err := decoder.Token()
+	if err != nil || end != json.Delim('}') {
+		return false
+	}
+	return errors.Is(decoder.Decode(new(any)), io.EOF) && seen["version"] && seen["op"] && seen["phase"] && seen["category"]
+}
+
+func retainRealReviewCounterMaximum(target, sample map[string]int64) {
+	for key, value := range sample {
+		if previous, present := target[key]; !present || value > previous {
+			target[key] = value
+		}
+	}
+}
+
+// Every active phase observes container-wide samples; overlapping phases do not
+// receive exclusive attribution. memory.peak remains a lifetime aggregate only.
+func (p *realReviewSourceProfile) observeMemory(sample realReviewMemorySample) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.invalid != "" {
+		return
+	}
+	for _, cell := range p.cells {
+		if cell.Active == 0 {
+			continue
+		}
+		cell.MemorySamples++
+		cell.MaxCurrentBytes = retainRealReviewMemoryMaximum(cell.MaxCurrentBytes, sample.MemoryCurrentBytes)
+		if sample.MemoryStat != nil {
+			if cell.MaxMemoryStat == nil {
+				cell.MaxMemoryStat = map[string]int64{}
+			}
+			retainRealReviewCounterMaximum(cell.MaxMemoryStat, sample.MemoryStat)
+		}
+		if sample.MemoryEvents != nil && cell.lastEvents != nil {
+			if cell.SampledEventDelta == nil {
+				cell.SampledEventDelta = map[string]int64{}
+			}
+			for key, current := range sample.MemoryEvents {
+				if previous, present := cell.lastEvents[key]; present && current >= previous {
+					cell.SampledEventDelta[key] += current - previous
+				}
+			}
+		}
+		cell.lastEvents = maps.Clone(sample.MemoryEvents)
+	}
+}
+
+func (p *realReviewSourceProfile) result() realReviewProfileResult {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	reason := p.invalid
+	if reason == "" && p.records == 0 {
+		reason = "missing_profile_records"
+	} else if reason == "" && p.active > 0 {
+		reason = "incomplete_phase_exits"
+	}
+	result := realReviewProfileResult{DiagnosticOnly: true, HelperSHA256: realReviewProfileHelperSHA256, Invalid: reason != "", InvalidReason: reason, Records: p.records, Phases: map[string]realReviewProfileAggregate{}, MemoryScope: "container samples while phase/category is active; overlapping phases share observations; memory.peak is cumulative lifetime only", TimingScope: "sum of completed operation durations; concurrent operations overlap; not elapsed phase wall time; incomplete phases retain active counts only"}
+	for key, original := range p.cells {
+		value := *original
+		value.MaxMemoryStat, value.SampledEventDelta = maps.Clone(original.MaxMemoryStat), maps.Clone(original.SampledEventDelta)
+		value.lastEvents = nil
+		result.Phases[key] = value
+	}
+	return result
+}
+
 // This observer never reads authentication or serializes script contents. It
 // decorates the actual functions without changing their return/exception path.
 const realReviewTraceObserver = `
@@ -1320,6 +1729,23 @@ def _real_identity(child):
         pass
 _real_popen = subprocess.Popen
 def _real_observed_popen(*args, **kwargs):
+    launcher = globals().get("_real_profile_launcher", "")
+    command = args[0] if args else kwargs.get("args")
+    if launcher and isinstance(command,list) and len(command)==3 and command[:2]==["/bin/sh","-c"] and command[2] in (p.get("prepare"),p.get("verify_recipe")):
+        import shlex
+        lines=command[2].splitlines(keepends=True)
+        replacements=0
+        for index,line in enumerate(lines):
+            literal=line.rstrip("\n")
+            if literal in ("python3 .143/review-sources.py","python3 .143/review-sources.py --verify"):
+                suffix=" --verify" if literal.endswith(" --verify") else ""
+                lines[index]="python3 -c "+shlex.quote(launcher)+" .143/review-sources.py"+suffix+("\n" if line.endswith("\n") else "")
+                replacements+=1
+        if replacements==1:
+            replaced=command[:]
+            replaced[2]="".join(lines)
+            if args: args=(replaced,)+args[1:]
+            else: kwargs={**kwargs,"args":replaced}
     child = _real_popen(*args, **kwargs)
     _real_identity(child)
     return child
