@@ -94,3 +94,4 @@ dist/
 # Platform-owned preview cache markers written into the workspace at runtime
 # (see preview.install). These are per-sandbox state, never source.
 .143/cache/
+.143/__pycache__/
