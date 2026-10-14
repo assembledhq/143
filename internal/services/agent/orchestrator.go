@@ -6614,6 +6614,7 @@ type codeReviewCheckoutContext struct {
 	Kind           string `json:"kind"`
 	GitHubPRNumber int    `json:"github_pr_number"`
 	HeadSHA        string `json:"head_sha"`
+	BaseSHA        string `json:"base_sha"`
 }
 
 func codeReviewCheckoutContextFromSession(session *models.Session) (int, string, bool, error) {
