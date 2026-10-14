@@ -25,7 +25,7 @@ import (
 )
 
 func runGH(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if os.Getenv(SocketEnvVar) == "" || os.Getenv("GH_TOKEN") != "" || os.Getenv("GITHUB_TOKEN") != "" || os.Getenv("GH_HOST") != "" && os.Getenv("GH_HOST") != "github.com" {
+	if !usesHostGitHubCredential(os.Environ()) {
 		return executeGH(context.Background(), ghBinaryPath, args, os.Environ(), stdin, stdout, stderr)
 	}
 	client := NewClient(os.Getenv(SocketEnvVar))
@@ -318,17 +318,60 @@ func ghConfigSource(env []string) string {
 }
 
 func shouldObserveGH(args, env []string) bool {
-	for i, arg := range args {
-		if arg == "--hostname" && i+1 < len(args) && args[i+1] != "github.com" || strings.HasPrefix(arg, "--hostname=") && arg != "--hostname=github.com" {
-			return false
-		}
-		if len(args) > 1 && args[0] == "api" && i == 1 && (strings.HasPrefix(arg, "https://") || strings.HasPrefix(arg, "http://")) {
+	api := false
+	endpoint := ""
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--hostname" || arg == "--repo" || arg == "-R":
+			if i+1 >= len(args) {
+				return false
+			}
+			i++
+			if arg == "--hostname" {
+				if args[i] != "github.com" {
+					return false
+				}
+			} else if !defaultGitHubRepository(args[i]) {
+				return false
+			}
+		case strings.HasPrefix(arg, "--hostname="):
+			if arg != "--hostname=github.com" {
+				return false
+			}
+		case strings.HasPrefix(arg, "--repo="):
+			if !defaultGitHubRepository(strings.TrimPrefix(arg, "--repo=")) {
+				return false
+			}
+		case strings.HasPrefix(arg, "-R") && len(arg) > 2:
+			if !defaultGitHubRepository(arg[2:]) {
+				return false
+			}
+		case arg == "-X" || arg == "--method" || arg == "-H" || arg == "--header" || arg == "-f" || arg == "-F" || arg == "--field" || arg == "--raw-field" || arg == "--input" || arg == "--jq" || arg == "-q" || arg == "--template" || arg == "-t" || arg == "--cache" || arg == "--title" || arg == "--body" || arg == "-b" || arg == "--body-file":
+			i++
+		case arg == "api" && !api:
+			api = true
+		case api && endpoint == "" && !strings.HasPrefix(arg, "-"):
+			endpoint = arg
+		case !api && (strings.HasPrefix(arg, "https://") || strings.HasPrefix(arg, "http://")):
 			parsed, err := url.Parse(arg)
-			if err != nil || parsed.Hostname() != "api.github.com" && parsed.Hostname() != "uploads.github.com" {
+			if err != nil || parsed.Host != "github.com" {
 				return false
 			}
 		}
 	}
+	if strings.HasPrefix(endpoint, "https://") || strings.HasPrefix(endpoint, "http://") {
+		parsed, err := url.Parse(endpoint)
+		if err != nil || parsed.Scheme != "https" || parsed.Host != "api.github.com" && parsed.Host != "uploads.github.com" {
+			return false
+		}
+		endpoint = parsed.Path
+	}
+	path := strings.SplitN(endpoint, "?", 2)[0]
+	if strings.Contains(path, "/zipball") || strings.Contains(path, "/tarball") || strings.Contains(path, "/releases/assets/") || strings.Contains(path, "/actions/") && (strings.HasSuffix(path, "/logs") || strings.HasSuffix(path, "/zip")) {
+		return false
+	}
+
 	if len(args) > 0 {
 		switch args[0] {
 		case "config", "auth", "alias", "extension", "release", "run":
@@ -346,4 +389,23 @@ func shouldObserveGH(args, env []string) bool {
 		return true
 	}
 	return config.Socket == ""
+}
+
+func usesHostGitHubCredential(env []string) bool {
+	values := make(map[string]string)
+	for _, entry := range env {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			values[key] = value
+		}
+	}
+	return values[SocketEnvVar] != "" && values["GH_TOKEN"] == "" && values["GITHUB_TOKEN"] == "" && (values["GH_HOST"] == "" || values["GH_HOST"] == "github.com")
+}
+
+func defaultGitHubRepository(value string) bool {
+	if strings.Contains(value, "://") {
+		parsed, err := url.Parse(value)
+		return err == nil && parsed.Host == "github.com"
+	}
+	parts := strings.Split(strings.Trim(value, "/"), "/")
+	return len(parts) == 2 || len(parts) == 3 && parts[0] == "github.com"
 }

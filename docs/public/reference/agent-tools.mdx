@@ -824,3 +824,19 @@ The standard `143-tools github` integration source also reports actual API
 requests through the credential socket. Its token is resolved once per source,
 and observation reports reuse that identity without another credential lookup.
 Static tokens and custom API hosts remain outside installation attribution.
+
+Token minting is attributed to `sandbox_token`; subsequent API observations use
+`sandbox_gh` or `sandbox_tools`. Tool processes reuse a binding for the same
+resolved credential and session. Binding capacity failures produce a warning
+without blocking credential issuance. Cache-hit and local-deferral details are
+debug logs; their bounded activity counters are recorded regardless of log level.
+
+Observed wrappers disable `GH_DEBUG` to keep HTTP bodies and headers out of the
+diagnostic stream. A child terminated by a signal returns status `128 + signal`.
+Archive, artifact, asset-download, and workflow-log API endpoints use the native
+CLI transport so their redirects retain the CLI's host and credential handling.
+The observed transport rejects other cross-host redirect targets.
+
+Sandbox reports carry `github_observation_trusted=false`. The host binds their
+identity to the credential session, but the reported quota values are sandbox
+observations and do not control cooldowns or quota admission.

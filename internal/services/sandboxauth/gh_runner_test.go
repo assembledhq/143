@@ -99,6 +99,8 @@ func TestObservationScopeIdentity(t *testing.T) {
 			require.NoError(t, err, "a host-issued binding should accept its own events")
 			var actual map[string]any
 			require.NoError(t, json.Unmarshal(logs.Bytes(), &actual), "one forwarded request should produce one JSON event")
+			require.Equal(t, false, actual["github_observation_trusted"], "sandbox quota reports must not be treated as authoritative")
+			require.Equal(t, "sandbox", actual["github_observation_source"], "external report provenance must be explicit")
 			require.Equal(t, session.String(), actual["session_id"], "session attribution should come from the listener")
 			require.Equal(t, org.String(), actual["org_id"], "org attribution should come from the listener")
 			require.Equal(t, "example/fixture", actual["github_repository"], "repository attribution should come from the listener")

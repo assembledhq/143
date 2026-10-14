@@ -303,7 +303,6 @@ func (s *Server) handleConn(
 
 	var req Request
 	decoder := json.NewDecoder(io.LimitReader(conn, 64<<10))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
 		// A connection that closes before sending any request is a liveness
 		// probe — the container reconciler dials the socket to learn whether
@@ -341,9 +340,7 @@ func (s *Server) handleConn(
 	}
 	if scope != nil {
 		metadata := scope.metadata
-		if req.Observer == "sandbox_tools" {
-			metadata.Caller = req.Observer
-		}
+		metadata.Caller = "sandbox_token"
 		ctx = telemetry.WithRequestMetadata(ctx, metadata)
 	}
 	resolveCtx, cancel := context.WithTimeout(ctx, s.resolveTimeout)
@@ -362,6 +359,9 @@ func (s *Server) handleConn(
 	}
 	if req.WantObservation && req.Action == ActionAPI && scope != nil {
 		resp.ObservationID = scope.bind(res, req.Observer)
+		if resp.ObservationID == "" {
+			logger.Warn().Str("github_observer", req.Observer).Int("github_observation_capacity", 256).Msg("sandboxauth: GitHub observation capacity reached")
+		}
 	}
 	if res.User != nil && res.User.GitHubLogin != nil {
 		resp.Login = *res.User.GitHubLogin

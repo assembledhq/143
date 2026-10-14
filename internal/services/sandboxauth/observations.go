@@ -2,6 +2,7 @@ package sandboxauth
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net/http"
 	"strconv"
@@ -17,8 +18,10 @@ import (
 )
 
 type observationBinding struct {
-	metadata telemetry.RequestMetadata
-	expires  time.Time
+	metadata  telemetry.RequestMetadata
+	expires   time.Time
+	reusable  bool
+	tokenHash [32]byte
 }
 
 type observationScope struct {
@@ -28,7 +31,7 @@ type observationScope struct {
 }
 
 func newObservationScope(sessionID uuid.UUID, run *models.Session, repo *models.Repository) *observationScope {
-	scope := &observationScope{metadata: telemetry.RequestMetadata{Kind: telemetry.RequestKindAPI, Caller: "sandbox_gh", SessionID: sessionID.String()}, bindings: make(map[string]observationBinding)}
+	scope := &observationScope{metadata: telemetry.RequestMetadata{Kind: telemetry.RequestKindAPI, Caller: "sandbox_token", SessionID: sessionID.String()}, bindings: make(map[string]observationBinding)}
 	if run != nil {
 		scope.metadata.OrgID = run.OrgID.String()
 	}
@@ -47,20 +50,36 @@ func (s *observationScope) bind(res *identity.Resolution, callers ...string) str
 			delete(s.bindings, id)
 		}
 	}
-	if len(s.bindings) >= 256 {
-		return ""
-	}
 	metadata := s.metadata
-	if len(callers) > 0 && callers[0] == "sandbox_tools" {
-		metadata.Caller = callers[0]
+	metadata.Caller = "sandbox_gh"
+	reusable := len(callers) > 0 && callers[0] == "sandbox_tools"
+	if reusable {
+		metadata.Caller = "sandbox_tools"
 	}
 	metadata.AuthType = telemetry.AuthTypeUser
 	if res.Source == identity.SourceApp {
 		metadata.AuthType = telemetry.AuthTypeAppInstallation
 		metadata.InstallationID = res.InstallationID
 	}
+	expires := now.Add(time.Hour)
+	if !res.ExpiresAt.IsZero() && res.ExpiresAt.Before(expires) {
+		expires = res.ExpiresAt
+	}
+	tokenHash := sha256.Sum256([]byte(res.Token))
+	if reusable {
+		for id, binding := range s.bindings {
+			if binding.reusable && binding.tokenHash == tokenHash && binding.metadata == metadata {
+				binding.expires = expires
+				s.bindings[id] = binding
+				return id
+			}
+		}
+	}
+	if len(s.bindings) >= 256 {
+		return ""
+	}
 	id := uuid.NewString()
-	s.bindings[id] = observationBinding{metadata: metadata, expires: now.Add(time.Hour)}
+	s.bindings[id] = observationBinding{metadata: metadata, expires: expires, reusable: reusable, tokenHash: tokenHash}
 	return id
 }
 

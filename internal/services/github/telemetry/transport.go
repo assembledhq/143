@@ -55,6 +55,7 @@ type RequestMetadata struct {
 	SessionID           string
 	OrgID               string
 	Repository          string
+	SandboxObservation  bool
 }
 
 // WithRequestMetadata attaches safe GitHub telemetry dimensions to a request.
@@ -449,6 +450,9 @@ func (t *transport) logRequest(req *http.Request, resp *http.Response, requestEr
 		repository = metadata.Repository
 	}
 	event = addScope(event, metadata)
+	if metadata.SandboxObservation {
+		event = event.Bool("github_observation_trusted", false).Str("github_observation_source", "sandbox")
+	}
 	if repository != "" {
 		event = event.Str("github_repository", repository)
 	}
@@ -785,6 +789,7 @@ func NormalizeExternalRoute(path string) string {
 }
 
 func RecordExternalRequest(ctx context.Context, logger zerolog.Logger, metadata RequestMetadata, method, route string, status int, header http.Header, duration time.Duration) {
+	metadata.SandboxObservation = true
 	request := &http.Request{Method: method, URL: &url.URL{Path: NormalizeExternalRoute(route)}}
 	request = request.WithContext(WithRequestMetadata(ctx, metadata))
 	var response *http.Response

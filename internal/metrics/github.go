@@ -55,10 +55,14 @@ func RecordGitHubActivity(ctx context.Context, caller, resource, outcome, kind s
 		}
 		githubActivity = counter
 	})
-	if githubActivity == nil {
+	recordGitHubActivity(ctx, githubActivity, caller, resource, outcome, kind)
+}
+
+func recordGitHubActivity(ctx context.Context, counter otelmetric.Int64Counter, caller, resource, outcome, kind string) {
+	if counter == nil {
 		return
 	}
-	githubActivity.Add(ctx, 1, otelmetric.WithAttributes(
+	counter.Add(ctx, 1, otelmetric.WithAttributes(
 		attrString("caller", githubActivityDimension(caller, "github_service", "pr_service", "pr_health", "code_review", "code_review_snapshot", "code_review_text_evidence", "code_review_visual_evidence", "code_review_review", "automation_head", "sandbox_gh", "sandbox_tools", "sandbox_token", "installation_token", "org_members", "org_membership", "team_membership")),
 		attrString("resource", githubActivityDimension(resource, "core", "graphql", "search", "code_search", "integration_manifest")),
 		attrString("outcome", githubActivityDimension(outcome, "success", "client_error", "server_error", "rate_limited", "transport_error", "hit", "deferred")),
