@@ -765,7 +765,10 @@ sys.exit(0 if valid else 1)
 `
 	cleanupCommand := "/usr/bin/python3 -I -S -c '" + shellEscapeSingleQuote(confirmation) + "' " + quotedDone + "; status=$?; /bin/rm -f " + quotedCancel + " " + quotedDone + "; exit \"$status\""
 	if ctx.Err() != nil || err != nil {
-		cleanupCommand = "printf cancelled > " + quotedCancel + "; i=0; until test -f " + quotedDone + "; do i=$((i+1)); test \"$i\" -lt 40 || break; /bin/sleep 0.1; done; " + cleanupCommand
+		// Forty-six checks permit at most 45 sleeps (4.5 seconds) within the
+		// existing five-second cleanup allowance, leaving a nominal half-second
+		// for confirmation without renewing the deadline.
+		cleanupCommand = "printf cancelled > " + quotedCancel + "; i=0; until test -f " + quotedDone + "; do i=$((i+1)); test \"$i\" -lt 46 || break; /bin/sleep 0.1; done; " + cleanupCommand
 	}
 	if cleanupErr := o.execReviewEvidence(cleanupCtx, sandbox, cleanupCommand, ""); cleanupErr != nil {
 		log.Warn().Err(cleanupErr).Msg("failed to confirm review preparation process cleanup")

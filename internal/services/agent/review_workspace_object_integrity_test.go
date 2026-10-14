@@ -538,7 +538,8 @@ sys.exit(child.wait())
 			o.provider = observedReviewIntegrityProvider{disconnectedReviewEvidenceProvider{localReviewEvidenceProvider{rewriteTrustedGit: git}}}
 			sandbox := f.sandbox()
 			sandbox.Env = map[string]string{"REVIEW_TEST_INTEGRITY_PHASES": phases}
-			ctx := WithCodeReviewWorkspacePreparationDeadline(context.Background(), time.Now().Add(2*time.Second))
+			deadline := time.Now().Add(2 * time.Second)
+			ctx := WithCodeReviewWorkspacePreparationDeadline(context.Background(), deadline)
 			cancel := func() {}
 			if tt.cancel {
 				ctx, cancel = context.WithCancel(ctx)
@@ -589,7 +590,7 @@ sys.exit(child.wait())
 				}
 				pid, err = strconv.Atoi(string(data))
 				return err == nil
-			}, time.Second, time.Millisecond, "observer must expose a real child PID within the original fixed preparation allowance")
+			}, time.Until(deadline), time.Millisecond, "observer must expose a real child PID within the original fixed preparation allowance")
 			process, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").CombinedOutput()
 			require.NoError(t, err, "test-owned fsck process identity must be inspected without command arguments or environment: %s", process)
 			require.Equal(t, "git", filepath.Base(strings.TrimSpace(string(process))), "observed child must be the real Git executable rather than its controller")

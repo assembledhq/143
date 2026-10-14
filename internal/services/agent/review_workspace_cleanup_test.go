@@ -399,6 +399,80 @@ func (p cleanupAcknowledgementProvider) ExecWithStdin(_ context.Context, _ *Sand
 	}
 }
 
+type delayedCleanupAcknowledgementProvider struct {
+	localReviewEvidenceProvider
+	marker, ticks, contents string
+	cancel                  context.CancelFunc
+}
+
+func (p delayedCleanupAcknowledgementProvider) ExecWithStdin(ctx context.Context, _ *Sandbox, _ string, stdin io.Reader, _, _ io.Writer) (int, error) {
+	if _, err := io.Copy(io.Discard, stdin); err != nil {
+		return -1, err
+	}
+	p.cancel()
+	return -1, ctx.Err()
+}
+
+func (p delayedCleanupAcknowledgementProvider) Exec(ctx context.Context, sandbox *Sandbox, command string, stdout, stderr io.Writer) (int, error) {
+	if strings.Count(command, "/bin/sleep 0.1") != 1 {
+		return -1, errors.New("cleanup regression must replace exactly one bounded sleep operation")
+	}
+	// Virtualize only sleep: the real shell loop and isolated trusted Python
+	// confirmation still execute. Forty-two ticks model an acknowledgement at
+	// 4.2 seconds without making the test depend on wall-clock scheduling.
+	tick := "cleanup_test_ticks=0\ncleanup_test_tick() {\n" +
+		"test \"$1\" = 0.1 || exit 91\n" +
+		"cleanup_test_ticks=$((cleanup_test_ticks+1))\n" +
+		"printf '%s' \"$cleanup_test_ticks\" > '" + shellEscapeSingleQuote(p.ticks) + "'\n"
+	if p.contents != "" {
+		tick += "if test \"$cleanup_test_ticks\" -eq 42; then printf '%s' '" + shellEscapeSingleQuote(p.contents) + "' > '" + shellEscapeSingleQuote(p.marker) + "'; fi\n"
+	}
+	tick += "}\n"
+	command = tick + strings.Replace(command, "/bin/sleep 0.1", "cleanup_test_tick 0.1", 1)
+	return p.localReviewEvidenceProvider.Exec(ctx, sandbox, command, stdout, stderr)
+}
+
+func TestReviewPreparationWaitsForLateCleanupAcknowledgement(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, contents string
+		expectedTicks  string
+		cleanupFailed  bool
+	}{
+		{name: "clean acknowledgement after four seconds", contents: "cleaned\n", expectedTicks: "42"},
+		{name: "failed acknowledgement after four seconds", contents: "cleanup_failed\n", expectedTicks: "42", cleanupFailed: true},
+		{name: "missing acknowledgement exhausts finite wait", expectedTicks: "45", cleanupFailed: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			cancelPath := filepath.Join(root, "cancel")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			provider := delayedCleanupAcknowledgementProvider{
+				marker: cancelPath + ".done", ticks: filepath.Join(root, "ticks"), contents: tt.contents, cancel: cancel,
+			}
+			o := &Orchestrator{provider: provider, logger: zerolog.Nop()}
+			err := o.execReviewPreparationInput(ctx, &Sandbox{WorkDir: root}, "synthetic cancelled attachment", cancelPath, "", strings.NewReader("{}"), zerolog.Nop())
+			require.ErrorIs(t, err, context.Canceled, "cleanup acknowledgement must preserve the original attachment cancellation")
+			quarantine := filepath.Join(root, ".143-test-cleanup-quarantine")
+			if tt.cleanupFailed {
+				require.ErrorIs(t, err, ErrCodeReviewPreparationCleanup, "failed or missing late acknowledgement must remain a terminal cleanup failure")
+				require.FileExists(t, quarantine, "unconfirmed late cleanup must quarantine the holder")
+			} else {
+				require.NotErrorIs(t, err, ErrCodeReviewPreparationCleanup, "an exact late success within the existing five-second allowance must confirm cleanup")
+				require.NoFileExists(t, quarantine, "confirmed late cleanup must leave the holder reusable")
+			}
+			ticks, readErr := os.ReadFile(provider.ticks)
+			require.NoError(t, readErr, "the actual cleanup shell must record every virtual sleep")
+			require.Equal(t, tt.expectedTicks, string(ticks), "acknowledgement wait must use the finite shell allowance and stop as soon as the marker appears")
+			require.NoFileExists(t, cancelPath, "bounded cleanup must remove its cancellation marker")
+			require.NoFileExists(t, provider.marker, "trusted confirmation must consume its acknowledgement marker")
+		})
+	}
+}
+
 func TestReviewPreparationCleanupAcknowledgement(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
