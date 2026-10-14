@@ -135,7 +135,7 @@ func reviewWorkspaceRevision(session *models.Session) (codeReviewCheckoutContext
 // is local even when the per-turn credential socket has been closed.
 func reviewTreeEvidenceScript(workDir, base, head, remote string) string {
 	quote := func(value string) string { return "'" + shellEscapeSingleQuote(value) + "'" }
-	git := "/usr/bin/git -c core.commitGraph=false -c core.hooksPath=/dev/null -c credential.helper= -c maintenance.auto=false -c gc.auto=0"
+	git := "/usr/bin/git -c advice.graftFileDeprecated=false -c core.commitGraph=false -c core.hooksPath=/dev/null -c credential.helper= -c maintenance.auto=false -c gc.auto=0"
 	script := "set -eu\ncd " + quote(workDir) + "\nexport GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null\n"
 	if remote != "" {
 		script += reviewGitAuthenticationConfigScript(workDir, remote)
@@ -165,7 +165,7 @@ func reviewTreeEvidenceScript(workDir, base, head, remote string) string {
 // fsck validates all available objects before any captured graph/tree readers.
 func reviewGitObjectIntegrityScript(workDir string) string {
 	quote := func(value string) string { return "'" + shellEscapeSingleQuote(value) + "'" }
-	git := "/usr/bin/git -c core.commitGraph=false -c core.multiPackIndex=true -c core.hooksPath=/dev/null -c core.fsmonitor=false -c credential.helper= -c maintenance.auto=false -c gc.auto=0"
+	git := "/usr/bin/git -c advice.graftFileDeprecated=false -c core.commitGraph=false -c core.multiPackIndex=true -c core.hooksPath=/dev/null -c core.fsmonitor=false -c credential.helper= -c maintenance.auto=false -c gc.auto=0"
 	script := "set -eu\ncd " + quote(workDir) + "\nexport GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null\n"
 	return script + "if ! " + git + " fsck --full --no-reflogs --no-dangling --no-progress >/dev/null 2>/dev/null; then exit 125; fi\n"
 }
@@ -181,14 +181,14 @@ func reviewPinnedCheckoutVerificationScript(workDir, base, head string) string {
 	// .gitattributes conversions retain Git's normal semantics.
 	script := reviewGitObjectIntegrityScript(workDir)
 	script += reviewTreeEvidenceScript(workDir, base, head, "")
-	script += "test \"$(/usr/bin/git -c core.commitGraph=false -c core.hooksPath=/dev/null rev-parse HEAD)\" = '" + shellEscapeSingleQuote(head) + "'\n"
+	script += "test \"$(/usr/bin/git -c advice.graftFileDeprecated=false -c core.commitGraph=false -c core.hooksPath=/dev/null rev-parse HEAD)\" = '" + shellEscapeSingleQuote(head) + "'\n"
 	script += "/usr/bin/python3 -I -S -c '" + shellEscapeSingleQuote(reviewGitWorktreeVerificationPython) + "' '" + shellEscapeSingleQuote(head) + "'\n"
 	return script
 }
 
 const reviewGitWorktreeVerificationPython = `
 import os, subprocess, sys, tempfile
-args = ["/usr/bin/git", "-c", "core.commitGraph=false", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.filemode=true", "-c", "core.symlinks=true"]
+args = ["/usr/bin/git", "-c", "advice.graftFileDeprecated=false", "-c", "core.commitGraph=false", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.filemode=true", "-c", "core.symlinks=true"]
 configured = subprocess.run(args + ["config", "--null", "--name-only", "--get-regexp", r"^filter\..*\.(clean|process)$"], stdout=subprocess.PIPE)
 if configured.returncode not in (0, 1):
     sys.exit(configured.returncode)
@@ -353,12 +353,12 @@ func (o *Orchestrator) checkoutReviewPullRequestHead(ctx context.Context, sandbo
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	fetch := reviewGitAuthenticationConfigScript(sandbox.WorkDir, repoURL) + fmt.Sprintf("/usr/bin/git -c core.hooksPath=/dev/null -c credential.helper= -c maintenance.auto=false -c gc.auto=0 fetch --quiet --no-tags --filter=blob:none origin 'pull/%d/head'", number)
+	fetch := reviewGitAuthenticationConfigScript(sandbox.WorkDir, repoURL) + fmt.Sprintf("/usr/bin/git -c advice.graftFileDeprecated=false -c core.hooksPath=/dev/null -c credential.helper= -c maintenance.auto=false -c gc.auto=0 fetch --quiet --no-tags --filter=blob:none origin 'pull/%d/head'", number)
 	if err := o.runBoundedReviewCommandAuthenticated(ctx, sandbox, fetch, reviewGitAuthentication{repoURL, token}, path.Join(sandbox.WorkDir, ".git")); err != nil {
 		return fmt.Errorf("fetch review pull request head: %w", err)
 	}
 	var stdout, stderr bytes.Buffer
-	code, err := o.execForReviewPreparation(ctx, sandbox, "/usr/bin/git -c core.hooksPath=/dev/null rev-parse FETCH_HEAD", &stdout, &stderr)
+	code, err := o.execForReviewPreparation(ctx, sandbox, "/usr/bin/git -c advice.graftFileDeprecated=false -c core.hooksPath=/dev/null rev-parse FETCH_HEAD", &stdout, &stderr)
 	if err != nil {
 		return fmt.Errorf("verify fetched review head: %s", redactReviewGitAuthentication(err.Error(), token))
 	}
@@ -369,11 +369,11 @@ func (o *Orchestrator) checkoutReviewPullRequestHead(ctx context.Context, sandbo
 	if actual != expected {
 		return fmt.Errorf("%w: expected %s, got %s", ErrStalePullRequestHead, expected, actual)
 	}
-	checkout := fmt.Sprintf("GIT_NO_LAZY_FETCH=1 /usr/bin/git -c core.hooksPath=/dev/null -c remote.origin.promisor=false checkout -B '%s' '%s'", shellEscapeSingleQuote(branch), shellEscapeSingleQuote(expected))
+	checkout := fmt.Sprintf("GIT_NO_LAZY_FETCH=1 /usr/bin/git -c advice.graftFileDeprecated=false -c core.hooksPath=/dev/null -c remote.origin.promisor=false checkout -B '%s' '%s'", shellEscapeSingleQuote(branch), shellEscapeSingleQuote(expected))
 	if err := o.runBoundedReviewCommand(ctx, sandbox, checkout, ""); err != nil {
 		return fmt.Errorf("checkout review pull request head: %w", err)
 	}
-	return o.execReviewEvidence(ctx, sandbox, fmt.Sprintf("test \"$(/usr/bin/git -c core.hooksPath=/dev/null rev-parse HEAD)\" = '%s'", shellEscapeSingleQuote(expected)), "")
+	return o.execReviewEvidence(ctx, sandbox, fmt.Sprintf("test \"$(/usr/bin/git -c advice.graftFileDeprecated=false -c core.hooksPath=/dev/null rev-parse HEAD)\" = '%s'", shellEscapeSingleQuote(expected)), "")
 }
 
 func (o *Orchestrator) runBoundedReviewCommand(ctx context.Context, sandbox *Sandbox, script, token string) error {
@@ -433,7 +433,7 @@ func (o *Orchestrator) cloneRepositoryForReview(ctx context.Context, sandbox *Sa
 
 func reviewCloneScript(repoURL, branch, destination string) string {
 	quote := func(value string) string { return "'" + shellEscapeSingleQuote(value) + "'" }
-	return "/usr/bin/git -c core.hooksPath=/dev/null -c credential.helper= -c maintenance.auto=false -c gc.auto=0 clone --template=/dev/null --no-checkout --filter=blob:none --branch " + quote(branch) + " " + quote(repoURL) + " " + quote(destination)
+	return "/usr/bin/git -c advice.graftFileDeprecated=false -c core.hooksPath=/dev/null -c credential.helper= -c maintenance.auto=false -c gc.auto=0 clone --template=/dev/null --no-checkout --filter=blob:none --branch " + quote(branch) + " " + quote(repoURL) + " " + quote(destination)
 }
 
 func (o *Orchestrator) execForReviewPreparation(ctx context.Context, sandbox *Sandbox, command string, stdout, stderr io.Writer) (int, error) {
