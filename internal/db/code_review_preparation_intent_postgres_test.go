@@ -38,7 +38,7 @@ func seedPreparationIntentPostgres(t *testing.T, pool *pgxpool.Pool, scoped bool
 	}{
 		{`INSERT INTO organizations(id,name) VALUES($1,$2)`, []any{f.orgID, "preparation-intent-" + f.orgID.String()}},
 		{`INSERT INTO integrations(id,org_id,provider) VALUES($1,$2,'github')`, []any{integrationID, f.orgID}},
-		{`INSERT INTO repositories(id,org_id,integration_id,github_id,full_name,clone_url,installation_id) VALUES($1,$2,$3,1,'test/intents','https://example.invalid/intents.git',1)`, []any{f.repositoryID, f.orgID, integrationID}},
+		{`INSERT INTO repositories(id,org_id,integration_id,github_id,full_name,clone_url,installation_id) VALUES($1,$2,$3,(hashtextextended($1::uuid::text,0) & 9223372036854775807),'test/intents','https://example.invalid/intents.git',1)`, []any{f.repositoryID, f.orgID, integrationID}},
 		{`INSERT INTO sessions(id,org_id,origin,status,current_turn,workspace_generation,repository_id) VALUES($1,$2,'code_review','running',2,3,$3)`, []any{f.session.ID, f.orgID, f.repositoryID}},
 		{`INSERT INTO session_threads(id,org_id,session_id,agent_type,label,status,current_turn) VALUES($1,$2,$3,'claude','Reviewer','running',4)`, []any{f.threadID, f.orgID, f.session.ID}},
 		{`INSERT INTO pull_requests(id,org_id,github_pr_number,github_pr_url,github_repo,title,head_sha,base_sha) VALUES($1,$2,1,'https://example.invalid/pr/1','test/intents','Synthetic preparation','head123','base123')`, []any{f.pullRequestID, f.orgID}},
@@ -503,6 +503,7 @@ func TestCodeReviewPreparationIntentPostgres(t *testing.T) {
 		require.Equal(t, CodeReviewPreparationIntentBatch{Intents: []models.CodeReviewPreparationIntent{i}}, next, "the corrected checkpoint must retain exact original provenance")
 	})
 
+	//nolint:paralleltest // these lock-order cases retain several connections from one bounded PostgreSQL pool and must run serially
 	t.Run("current PR head writer race orders", func(t *testing.T) {
 		// Each case retains a first transaction, a competing backend, and a lock
 		// observer. Serialize these cases in the one bounded migrated pool.
@@ -516,6 +517,7 @@ func TestCodeReviewPreparationIntentPostgres(t *testing.T) {
 				{name: "head update commits before projection", operation: "projection", writerFirst: true},
 				{name: "projection locks head before update", operation: "projection"},
 			} {
+				//nolint:paralleltest // each head race retains its first transaction and waiter in the shared bounded PostgreSQL pool
 				t.Run(writer+"/"+tt.name, func(t *testing.T) {
 					f := seedPreparationIntentPostgres(t, pool, true)
 					var intent models.CodeReviewPreparationIntent
@@ -633,10 +635,12 @@ func TestCodeReviewPreparationIntentPostgres(t *testing.T) {
 		}
 	})
 
+	//nolint:paralleltest // lease-wait cases retain an owner, waiter and observer in one bounded PostgreSQL pool
 	t.Run("lease expiration during PR lock wait", func(t *testing.T) {
 		// Serial lock choreography keeps the shared migrated pool available to
 		// one retained PR owner, one waiter, and the clock/lease observer.
 		for _, operation := range []string{"capture", "projection"} {
+			//nolint:paralleltest // each lease-expiry race reserves the shared PostgreSQL pool for deterministic lock choreography
 			t.Run(operation, func(t *testing.T) {
 				f := seedPreparationIntentPostgres(t, pool, true)
 				var intent models.CodeReviewPreparationIntent
@@ -715,6 +719,7 @@ func TestCodeReviewPreparationIntentPostgres(t *testing.T) {
 		}
 	})
 
+	//nolint:paralleltest // admission/projection cases retain several connections from one bounded PostgreSQL pool
 	t.Run("admission and projection race orders", func(t *testing.T) {
 		// These cases reserve several connections and observe the exact blocked
 		// backend; serialize them to avoid starving this fixture's bounded pool.
@@ -723,6 +728,7 @@ func TestCodeReviewPreparationIntentPostgres(t *testing.T) {
 			if admissionFirst {
 				name = "admitted live replacement fences old projection"
 			}
+			//nolint:paralleltest // each admission/projection race reserves the shared PostgreSQL pool for deterministic lock choreography
 			t.Run(name, func(t *testing.T) {
 				f := seedPreparationIntentPostgres(t, pool, true)
 				i := checkpointPreparationIntentPostgres(t, pool, f, true)

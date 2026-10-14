@@ -91,13 +91,15 @@ func preparationIntentThread(id *uuid.UUID) string {
 	return id.String()
 }
 
-// PendingCodeReviewPreparationIntents returns a bounded, tenant-scoped set;
-// malformed records have no authority and never fall back to last_error.
+// CodeReviewPreparationIntentBatch contains a bounded set of pending intents
+// and indicates whether additional records may require another polling pass.
 type CodeReviewPreparationIntentBatch struct {
 	Intents []models.CodeReviewPreparationIntent
 	More    bool
 }
 
+// PendingCodeReviewPreparationIntents returns a bounded, tenant-scoped set;
+// malformed records have no authority and never fall back to last_error.
 func (s *JobStore) PendingCodeReviewPreparationIntents(ctx context.Context, orgID, metadataID, sessionID uuid.UUID) (CodeReviewPreparationIntentBatch, error) {
 	var batch CodeReviewPreparationIntentBatch
 	rows, err := s.db.Query(ctx, `SELECT id, CASE WHEN octet_length((payload->'terminal_preparation_intent')::text)<=2048 THEN (payload->'terminal_preparation_intent')::text ELSE NULL END, octet_length((payload->'terminal_preparation_intent')::text)>2048 AS oversized FROM jobs
