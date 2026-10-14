@@ -325,10 +325,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if codeReviewHeadChanged(job.HeadSHA, pr, health) {
 			return supersedeCodeReviewForChangedHead(ctx, stores, services, logger, job, pr, health, "PR head changed after review started")
 		}
-		changedFiles, changedFilesAvailable, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
-		if err != nil {
-			return fmt.Errorf("load code review changed files: %w", err)
-		}
 		assessment, capturedAssessment, err := prepareFullAssessment(ctx, stores, services, job, metadata)
 		if err != nil {
 			var changed *fullAssessmentQueuedIdentityChanged
@@ -342,11 +338,13 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 			return fmt.Errorf("capture full code review assessment: %w", err)
 		}
+		changedFiles, changedFilesAvailable, err := loadCodeReviewAssessmentChangedFiles(ctx, stores, services, job, pr, capturedAssessment)
+		if err != nil {
+			return fmt.Errorf("load code review changed files: %w", err)
+		}
 		var visualEvidence models.CodeReviewVisualEvidenceSnapshot
 		if capturedAssessment != nil {
 			visualEvidence = capturedAssessment.VisualEvidence
-			changedFiles = capturedAssessment.Files
-			changedFilesAvailable = true
 		} else {
 			if assessment != nil {
 				visualEvidence, err = captureCodeReviewVisualEvidence(ctx, services, job, pr, assessment.ID)
@@ -520,15 +518,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if codeReviewHeadChanged(job.HeadSHA, pr, health) {
 			return supersedeCodeReviewForChangedHead(ctx, stores, services, logger, job, pr, health, "PR head changed before final recommendation")
 		}
-		changedFiles, changedFilesAvailable, err = loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
+		changedFiles, changedFilesAvailable, err = loadCodeReviewAssessmentChangedFiles(ctx, stores, services, job, pr, capturedAssessment)
 		if err != nil {
 			return fmt.Errorf("reload code review changed files before decision: %w", err)
-		}
-		if capturedAssessment != nil {
-			// Anchor findings to the captured review input. The freshness checks
-			// below prevent publishing if that exact diff is no longer current.
-			changedFiles = capturedAssessment.Files
-			changedFilesAvailable = true
 		}
 		// Team membership can change while reviewer agents run. Recheck it
 		// immediately before the final decision instead of treating the
@@ -3987,6 +3979,16 @@ func codeReviewPolicySettingsURL(frontendURL string) string {
 		return ""
 	}
 	return base + "/code-reviews?tab=policy"
+}
+
+// A fresh capture already contains the exact reviewed diff. Resumed and legacy
+// attempts have no capture in memory and still refresh their changed files.
+// Publication freshness checks below fence the captured revision before submit.
+func loadCodeReviewAssessmentChangedFiles(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, pr models.PullRequest, captured *codereviewsvc.AssessmentInputCaptureResult) ([]codereviewsvc.PullRequestFile, bool, error) {
+	if captured != nil {
+		return captured.Files, true, nil
+	}
+	return loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
 }
 
 func loadCodeReviewChangedFiles(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, pr models.PullRequest) ([]codereviewsvc.PullRequestFile, bool, error) {

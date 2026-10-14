@@ -842,6 +842,9 @@ func TestNormalizeRoute(t *testing.T) {
 		expectedRepository string
 	}{
 		{name: "pull request", rawURL: "https://api.github.com/repos/acme/widget/pulls/42", expectedRoute: "/repos/:owner/:repo/pulls/:id", expectedRepository: "acme/widget"},
+		{name: "check runs", rawURL: "https://api.github.com/repos/acme/widget/commits/feature%2Fprivate-branch/check-runs?per_page=100", expectedRoute: "/repos/:owner/:repo/commits/:ref/check-runs", expectedRepository: "acme/widget"},
+		{name: "combined status", rawURL: "https://api.github.com/repos/acme/widget/commits/feature/private-branch/status", expectedRoute: "/repos/:owner/:repo/commits/:ref/status", expectedRepository: "acme/widget"},
+		{name: "commit metadata", rawURL: "https://api.github.com/repos/acme/widget/commits/private-branch", expectedRoute: "/repos/:owner/:repo/commits/:ref", expectedRepository: "acme/widget"},
 		{name: "issue comment collection", rawURL: "https://api.github.com/repos/acme/widget/issues/42/comments?page=3", expectedRoute: "/repos/:owner/:repo/issues/:id/comments", expectedRepository: "acme/widget"},
 		{name: "issue comment resource", rawURL: "https://api.github.com/repos/acme/widget/issues/comments/123", expectedRoute: "/repos/:owner/:repo/issues/comments/:id", expectedRepository: "acme/widget"},
 		{name: "git ref", rawURL: "https://api.github.com/repos/acme/widget/git/ref/heads/feature/branch", expectedRoute: "/repos/:owner/:repo/git/ref/:ref", expectedRepository: "acme/widget"},

@@ -54,6 +54,7 @@ type assessmentSnapshotter interface {
 	scheduleSnapshotter
 	PullRequestSyncer
 	DiscoverCodeReviewTextEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewTextDiscovery, error)
+	DiscoverCodeReviewEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewEvidenceDiscovery, error)
 }
 
 type assessmentExternalContextResolver interface {
@@ -167,13 +168,28 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	if err != nil {
 		return result, err
 	}
-	visual, err := s.visual.Capture(ctx, CaptureVisualEvidenceInput{Fresh: in.Fresh, OrgID: in.OrgID, RepositoryID: in.RepositoryID, SessionID: in.SessionID, AssessmentID: &in.AssessmentID, PullRequestNumber: pr.GitHubPRNumber, HeadSHA: snapshot.HeadSHA})
+	var textDiscovery *ghservice.CodeReviewTextDiscovery
+	visual, err := s.visual.Capture(ctx, CaptureVisualEvidenceInput{Fresh: in.Fresh, OrgID: in.OrgID, RepositoryID: in.RepositoryID, SessionID: in.SessionID, AssessmentID: &in.AssessmentID, PullRequestNumber: pr.GitHubPRNumber, HeadSHA: snapshot.HeadSHA,
+		Discover: func(ctx context.Context) (models.CodeReviewVisualEvidenceDiscovery, error) {
+			discovery, err := s.snapshots.DiscoverCodeReviewEvidence(ctx, in.OrgID, in.RepositoryID, pr.GitHubPRNumber)
+			if err != nil {
+				return models.CodeReviewVisualEvidenceDiscovery{}, err
+			}
+			textDiscovery = &discovery.Text
+			return discovery.Visual, nil
+		},
+	})
 	if err != nil {
 		return result, err
 	}
-	textDiscovery, err := s.snapshots.DiscoverCodeReviewTextEvidence(ctx, in.OrgID, in.RepositoryID, pr.GitHubPRNumber)
-	if err != nil {
-		return result, err
+	if textDiscovery == nil {
+		// A restored immutable visual checkpoint needs only the bounded text
+		// inventory; do not rediscover images or extend its pagination budget.
+		discovery, err := s.snapshots.DiscoverCodeReviewTextEvidence(ctx, in.OrgID, in.RepositoryID, pr.GitHubPRNumber)
+		if err != nil {
+			return result, err
+		}
+		textDiscovery = &discovery
 	}
 	if !textDiscovery.Complete {
 		return result, fmt.Errorf("%w: text evidence exceeds the complete capture budget", ErrAssessmentReuseUnavailable)

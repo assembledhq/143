@@ -1190,7 +1190,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		// Every internal route names its tool so the per-target allowlist
 		// (design doc 125) is enforced server-side on every call.
 		toolGate := handlers.NewInternalToolGate(cfg.SessionSecret)
-		automationActions := automationactions.New(db.NewAutomationActionStore(pool), automationactions.NewProviders(automationActionTokens, credentialStore, ingestion.NewSlackAPIClient(logger)), logger)
+		automationActions := automationactions.New(db.NewAutomationActionStore(pool), automationactions.NewProviders(automationActionTokens, credentialStore, ingestion.NewSlackAPIClient(logger),
+			automationactions.WithGitHubHTTPClient(githubtelemetry.NewControlledHTTPClient(4*time.Second, logger, githubRateLimitController, "automation_action"))), logger)
 		automationActionHandler := handlers.NewInternalAutomationActionHandler(sessionStore, automationActions, cfg.SessionSecret)
 		r.Route("/api/v1/internal", func(r chi.Router) {
 			r.Get("/sessions/{id}/preview", toolGate.Require("preview:status", internalAgentPreviewHandler.Status))

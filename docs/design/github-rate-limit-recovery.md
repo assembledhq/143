@@ -1,6 +1,6 @@
 # Design: GitHub rate-limit recovery
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-09-15
+> **Status:** Partially Implemented | **Last reviewed:** 2026-10-14
 
 Implementation plan for durable GitHub retry handling and shared installation-level coordination. Local implementation and deployment validation are separate stages.
 
@@ -36,7 +36,7 @@ GitHub documents reset-based waits for exhausted primary quotas and increasing b
 
 Start with server-owned requests authenticated as a GitHub App installation. The same installation's refreshed and repository-scoped tokens share the controller state. Do not partition that state by token or repository, rotate credentials to evade a limit, or broaden token permissions.
 
-Keep the current ten-minute background and two-minute interactive freshness policies initially. Preserve the authoritative checks before review publication and merging, including the existing merge-safety bypass of PR-sync singleflight. This plan does not change SSH provisioning, deployment credentials, GitHub App permissions, or production secrets. It does not automatically govern sandbox `gh` traffic, app-JWT requests, or user-OAuth requests whose limiting principal is different.
+Keep the current ten-minute background and two-minute interactive freshness policies initially. Preserve the authoritative checks before review publication and merging, including the existing merge-safety bypass of PR-sync singleflight. This plan does not change SSH provisioning, deployment credentials, GitHub App permissions, or production secrets. Sandbox traffic participates only through the supported helpers described below; app-JWT requests and user-OAuth requests whose limiting principal is different remain outside installation control.
 
 ## Operator controls
 
@@ -62,12 +62,18 @@ Identity attribution and controller participation are separate claims. The curre
 | Code-review submitter | App installation | Covered by the production-injected controlled client. Its constructor fallback is not a production coverage claim. |
 | Integration repository sync/list/claim client | App installation | Covered by the API process controlled client with `integration_repositories` / explicit handler caller metadata. |
 | Team GitHub user search client | App installation | Covered by the API process controlled client with `team_user_search` metadata. |
+| Automation action inspection and GitHub mutations | App installation | Covered with `automation_action` metadata. Local deferrals remain definitive unsent failures; uncertain mutation outcomes retain receipt-based replay protection. |
 | Authentication handler, GitHub App user authorization, identity user lookup, and GitHub trigger setup | User OAuth or OAuth exchange | Intentionally uncovered because the limiting principal is not the installation. |
 | GitHub App JWT installation-token exchange | App JWT | Intentionally uncovered; it does not consume an installation quota. |
-| Direct sandbox `git`/`gh` traffic and other git protocol operations | Sandbox/user credential scope | Uncovered and outside this server-owned controller. |
+| Supported sandbox `gh` wrapper and `143-tools` GitHub HTTP client | Host-bound App installation or user identity | Attributed through the session auth socket. Known App-installation cooldowns and live trusted probe leases suppress supported requests before dispatch. Sandbox reports remain untrusted telemetry. |
+| Other sandbox HTTP clients, excluded wrapper commands/hosts, explicit credential overrides, and git protocol operations | Sandbox/user credential scope | Outside supported-wrapper attribution and cooldown control; coverage-gap events distinguish known exclusions and reporting failures. |
 
-Only the first four rows count toward the zero-unresolved-principal rollout gate. Every covered row must both carry `app_installation` identity and use `NewControlledHTTPClient`; identity-only telemetry is not evidence of suppression coverage.
+Server-owned installation clients must carry resolved `app_installation` identity and use `NewControlledHTTPClient`; identity-only telemetry is not evidence of suppression coverage. Supported sandbox helpers use the separate host-side check described below and require their own helper/version coverage verification.
 Covered GraphQL callers must also install `WithGraphQLResponseObservation` and hand the owned complete-envelope decoder result to `ObserveGraphQLResponse`; otherwise the bounded transport prefix fails closed and cannot establish recovery for an oversized response.
+
+Sandbox helpers perform a host-side `BeforeExternal` check against the credential's host-bound installation before each supported request. This check applies the later of the retained cooldown and live trusted probe lease without claiming a probe or accepting sandbox responses as controller evidence. At expiry, sandbox traffic can resume concurrently; only trusted host responses can open, extend, or clear controller episodes. The auth socket does not forward HTTP requests or accept credentials, URLs, or response bodies for this check. Capability negotiation preserves rolling compatibility: older helpers or hosts retain their existing behavior with an explicit control-coverage gap. Arbitrary sandbox network clients can bypass the helpers, so this is a supported-client control boundary rather than an egress firewall.
+
+Actual health request events retain `github_health_origin` (`sweep`, `queued`, or `direct`) separately from `github_sync_reason`. Singleflight work uses its actual leader's origin. Commit routes retain the bounded `/check-runs` and `/status` suffixes while hiding the ref, so these sources can be measured independently. `github sandbox coverage` events use bounded reason codes to identify supported control, legacy helpers, exclusions, unavailable bindings, and reporting failures. These are capability/gap events, not outbound requests; a credential issuance or excluded command does not establish how many remote calls followed it. Missing sockets, raw clients, and unshipped helpers remain visibility gaps. Compare request totals against response headers within the same installation, resource, and reset window before attributing unexplained quota consumption.
 
 ## Implementation sequence
 

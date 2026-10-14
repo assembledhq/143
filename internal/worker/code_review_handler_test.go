@@ -6122,3 +6122,51 @@ func TestCapacityWaitRemainsPendingBeyondWorkerRetryWindow(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadCodeReviewAssessmentChangedFilesAvoidsDuplicateReads(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		captured      bool
+		files         []codereview.PullRequestFile
+		providerCalls int
+	}{
+		{name: "fresh assessment uses captured revision", captured: true, files: []codereview.PullRequestFile{{Filename: "captured.go", Status: "modified", Patch: "@@ captured @@"}}},
+		{name: "fresh empty diff remains available", captured: true},
+		{name: "resumed or legacy assessment refreshes files", files: []codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}}, providerCalls: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "changed-file test database should initialize")
+			defer mock.Close()
+			orgID, repoID := uuid.New(), uuid.New()
+			job := runCodeReviewPayload{OrgID: orgID, RepositoryID: repoID, SessionID: uuid.New()}
+			pr := models.PullRequest{GitHubRepo: "acme/widget", GitHubPRNumber: 42}
+			provider := &capturingCodeReviewSubmitter{}
+			var captured *codereview.AssessmentInputCaptureResult
+			if tt.captured {
+				captured = &codereview.AssessmentInputCaptureResult{Files: tt.files}
+			}
+			for range tt.providerCalls {
+				now := time.Now().UTC()
+				mock.ExpectQuery("(?s)FROM repositories.*WHERE id = @id AND org_id = @org_id").WithArgs(pgx.NamedArgs{"id": repoID, "org_id": orgID}).WillReturnRows(pgxmock.NewRows(workerRepositoryColumns()).AddRow(repoID, orgID, uuid.New(), int64(143), "acme/widget", "main", false, nil, nil, "https://github.com/acme/widget.git", int64(42), models.RepositoryStatusActive, nil, nil, []byte(`{}`), now, now))
+			}
+			// Initial fanout and final decision both consume this helper. Fresh
+			// captures reuse their fenced diff; resumed attempts read current files.
+			for range 2 {
+				actual, available, err := loadCodeReviewAssessmentChangedFiles(context.Background(), &Stores{Repositories: db.NewRepositoryStore(mock)}, &Services{CodeReviews: provider}, job, pr, captured)
+				require.NoError(t, err, "file selection should succeed for captured and resumed attempts")
+				require.True(t, available, "an empty authoritative capture is still a complete file inventory")
+				require.Equal(t, tt.files, actual, "file selection should preserve the exact captured or live diff")
+			}
+			expected := make([]codereview.PullRequestFilesRequest, 0, tt.providerCalls)
+			for range tt.providerCalls {
+				expected = append(expected, codereview.PullRequestFilesRequest{InstallationID: 42, Repository: "acme/widget", PullNumber: 42})
+			}
+			require.Equal(t, expected, append([]codereview.PullRequestFilesRequest{}, provider.fileListRequests...), "only resumed and legacy attempts should issue the current file inventory requests")
+			require.NoError(t, mock.ExpectationsWereMet(), "file refresh lookups should retain org scoping")
+		})
+	}
+}

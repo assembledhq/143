@@ -60,19 +60,23 @@ func TestGitHubHTTPObserver(t *testing.T) {
 				response, err := observer.HTTPClient().Do(request)
 				if tt.transportErr {
 					require.ErrorIs(t, err, expectedErr, "telemetry should preserve the original transport error")
+				} else if tt.closeSocket {
+					var local *githubControlError
+					require.ErrorAs(t, err, &local, "advertised request control must fail closed when the broker disappears")
 				} else {
 					require.NoError(t, err, "reporting failure must not fail the source request")
 					require.NoError(t, response.Body.Close(), "source should retain an owned response body")
 				}
 			}
-			require.Equal(t, 2, calls, "all real source requests should reach the original transport")
+			expectedCalls := 2
+			if tt.closeSocket {
+				expectedCalls = 0
+			}
+			require.Equal(t, expectedCalls, calls, "only admitted requests should reach the original transport")
 			require.Equal(t, tt.expectedEvents, strings.Count(logs.String(), "github api request"), "only standard-host calls with available socket reporting should emit attributed requests")
 			require.NotContains(t, logs.String(), "private-upstream-error", "raw transport errors must not enter socket reports")
 			if tt.expectedEvents > 0 {
 				require.Contains(t, logs.String(), `"github_caller":"sandbox_tools"`, "integration requests must have a distinct bounded caller")
-			}
-			if tt.closeSocket {
-				require.Contains(t, stderr.String(), "attribution incomplete", "socket failures should leave an explicit coverage gap")
 			}
 		})
 	}

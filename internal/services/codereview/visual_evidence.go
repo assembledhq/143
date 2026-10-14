@@ -65,6 +65,9 @@ type VisualEvidenceService struct {
 }
 
 type CaptureVisualEvidenceInput struct {
+	// Discover optionally supplies a capture-scoped provider inventory. It runs
+	// synchronously after checkpoint restoration is ruled out, and is never API input.
+	Discover func(context.Context) (models.CodeReviewVisualEvidenceDiscovery, error) `json:"-"`
 	// Fresh bypasses persisted evidence and does not overwrite its checkpoint.
 	Fresh             bool
 	OrgID             uuid.UUID
@@ -147,7 +150,13 @@ func (s *VisualEvidenceService) Capture(ctx context.Context, input CaptureVisual
 
 	}
 
-	discovery, err := s.discoverer.DiscoverCodeReviewVisualEvidence(ctx, input.OrgID, input.RepositoryID, input.PullRequestNumber)
+	var discovery models.CodeReviewVisualEvidenceDiscovery
+	var err error
+	if input.Discover != nil {
+		discovery, err = input.Discover(ctx)
+	} else {
+		discovery, err = s.discoverer.DiscoverCodeReviewVisualEvidence(ctx, input.OrgID, input.RepositoryID, input.PullRequestNumber)
+	}
 	if err != nil {
 		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("discover code review visual evidence: %w", err)
 	}

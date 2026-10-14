@@ -77,8 +77,10 @@ type Op string
 
 const (
 	// OpGet asks the host to resolve and return a fresh credential.
-	OpGet     Op = "get"
-	OpObserve Op = "observe"
+	OpGet      Op = "get"
+	OpObserve  Op = "observe"
+	OpCheck    Op = "check_github_request"
+	OpCoverage Op = "github_coverage"
 )
 
 // Identity classifies whose credential the host returned. Mirrors
@@ -94,26 +96,35 @@ const (
 
 // Request is the in-sandbox client's call.
 type Request struct {
-	Op              Op                `json:"op"`
-	Action          Action            `json:"action,omitempty"`
-	Observer        string            `json:"observer,omitempty"`
-	WantObservation bool              `json:"want_observation,omitempty"`
-	ObservationID   string            `json:"observation_id,omitempty"`
-	Events          []HTTPObservation `json:"events,omitempty"`
-	Finish          bool              `json:"finish,omitempty"`
+	Op                 Op                `json:"op"`
+	Action             Action            `json:"action,omitempty"`
+	Observer           string            `json:"observer,omitempty"`
+	WantObservation    bool              `json:"want_observation,omitempty"`
+	WantRequestControl bool              `json:"want_request_control,omitempty"`
+	ObservationID      string            `json:"observation_id,omitempty"`
+	Events             []HTTPObservation `json:"events,omitempty"`
+	Finish             bool              `json:"finish,omitempty"`
+	Method             string            `json:"method,omitempty"`
+	Route              string            `json:"route,omitempty"`
+	UnknownPrincipal   bool              `json:"unknown_principal,omitempty"`
+	CoverageReason     string            `json:"coverage_reason,omitempty"`
 }
 
 // Response is the host handler's reply. On success Token is non-empty and
 // Error is "". On failure Error carries a human-readable message and the
 // caller should treat the response as if no credential were available.
 type Response struct {
-	Token         string    `json:"token,omitempty"`
-	Username      string    `json:"username,omitempty"`
-	Identity      Identity  `json:"identity,omitempty"`
-	Login         string    `json:"login,omitempty"`
-	ExpiresAt     time.Time `json:"expires_at,omitempty"`
-	Error         string    `json:"error,omitempty"`
-	ObservationID string    `json:"observation_id,omitempty"`
+	Token          string     `json:"token,omitempty"`
+	Username       string     `json:"username,omitempty"`
+	Identity       Identity   `json:"identity,omitempty"`
+	Login          string     `json:"login,omitempty"`
+	ExpiresAt      time.Time  `json:"expires_at,omitempty"`
+	Error          string     `json:"error,omitempty"`
+	ObservationID  string     `json:"observation_id,omitempty"`
+	RequestControl bool       `json:"github_request_control,omitempty"`
+	RetryAt        *time.Time `json:"retry_at,omitempty"`
+	LimitKind      string     `json:"rate_limit_kind,omitempty"`
+	InstallationID int64      `json:"installation_id,omitempty"`
 }
 
 // DefaultUsername is the username git uses when authenticating to GitHub
@@ -292,7 +303,7 @@ func (c *Client) GetObservedAPIToken(ctx context.Context, callers ...string) (*R
 	if len(callers) > 0 {
 		caller = callers[0]
 	}
-	return c.exchange(ctx, Request{Op: OpGet, Action: ActionAPI, WantObservation: true, Observer: caller})
+	return c.exchange(ctx, Request{Op: OpGet, Action: ActionAPI, WantObservation: true, WantRequestControl: true, Observer: caller})
 }
 
 func (c *Client) Observe(ctx context.Context, observationID string, events []HTTPObservation, finish bool) error {
