@@ -73,6 +73,9 @@ type scheduledReviewIntent struct {
 	Force       bool                         `json:"force"`
 	RequesterID *uuid.UUID                   `json:"requester_id,omitempty"`
 	Inputs      *scheduledReviewInputs       `json:"inputs,omitempty"`
+	// Intake may arrive between a wake's hydration and dispatch transactions.
+	// Only a locked snapshot refresh clears this marker.
+	NeedsSnapshot bool `json:"needs_snapshot,omitempty"`
 }
 
 func reviewRequestHash(prID uuid.UUID, mode models.CodeReviewRequestMode, context *ReviewRequestContext, force bool) (string, error) {
@@ -195,6 +198,32 @@ func (s *Service) transactionalService(tx pgx.Tx) *Service {
 }
 
 func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, mode models.CodeReviewRequestMode, force bool, requesterID *uuid.UUID) (ReviewRequestedResult, error) {
+	if !s.SchedulingEnabled() {
+		return ReviewRequestedResult{}, fmt.Errorf("review scheduling unavailable")
+	}
+	if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil || input.PullRequestID == uuid.Nil {
+		return ReviewRequestedResult{}, fmt.Errorf("review target is required")
+	}
+	if isGitHubReviewIntake(input, mode, requesterID) {
+		result, duplicate, err := s.persistReviewIntake(ctx, input, mode, force)
+		if err != nil || duplicate {
+			return result, err
+		}
+		// The committed intent, rather than a possibly superseded webhook, owns
+		// hydration. The existing wake also covers a crash before this refresh.
+		result, err = s.refreshSchedule(ctx, ReviewChangedInput{OrgID: input.OrgID, RepositoryID: input.RepositoryID, PullRequestID: input.PullRequestID}, models.CodeReviewEnsureCurrent, false, nil)
+		if errors.Is(err, errScheduleSnapshotUnavailable) {
+			if waitErr := s.waitForReviewIntakeSnapshot(ctx, input, err); waitErr != nil {
+				return ReviewRequestedResult{}, waitErr
+			}
+			return ReviewRequestedResult{Processed: true, Deferred: true}, nil
+		}
+		return result, err
+	}
+	return s.refreshSchedule(ctx, input, mode, force, requesterID)
+}
+
+func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput, mode models.CodeReviewRequestMode, force bool, requesterID *uuid.UUID) (ReviewRequestedResult, error) {
 	if !s.SchedulingEnabled() {
 		return ReviewRequestedResult{}, fmt.Errorf("review scheduling unavailable")
 	}
@@ -428,7 +457,8 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 			}
 			force = force || string(before) != string(after)
 		}
-		if !force && snapshot.State == "open" && state.PendingInput == nil &&
+		joinIntake := isGitHubReviewIntake(pending.Input, pending.Mode, pending.RequesterID)
+		if !force && snapshot.State == "open" && (state.PendingInput == nil || joinIntake) &&
 			latestErr == nil && (state.ActiveSessionID == nil || latest.SessionID == *state.ActiveSessionID) &&
 			(latest.Status == models.CodeReviewSessionStatusQueued || latest.Status == models.CodeReviewSessionStatusRunning) &&
 			latest.HeadSHA == snapshot.HeadSHA && latest.BaseSHA == snapshot.BaseSHA && !baseRefChanged {
@@ -437,6 +467,19 @@ func (s *Service) scheduleReview(ctx context.Context, input ReviewChangedInput, 
 				return err
 			}
 			if active {
+				if joinIntake {
+					if _, err := tx.Exec(ctx, `UPDATE code_review_requests SET status='joined',session_id=$3,assessment_id=$4,target_generation=$5 WHERE org_id=$1 AND pull_request_id=$2 AND status='pending'`, input.OrgID, input.PullRequestID, latest.SessionID, state.ActiveAssessmentID, state.Generation); err != nil {
+						return err
+					}
+					state.PendingInput = nil
+					state.PendingRequestID = nil
+					state.FirstPendingAt = nil
+					state.EligibleAt = nil
+					state.RetryAt = nil
+					state.ActiveSessionID = &latest.SessionID
+					state.State = models.CodeReviewScheduleRunning
+					state.WaitReason = models.CodeReviewWaitNone
+				}
 				if requestID != uuid.Nil {
 					_, err = tx.Exec(ctx, `UPDATE code_review_requests SET status='joined',session_id=$3,assessment_id=$4,target_generation=$5 WHERE org_id=$1 AND id=$2 AND status='pending'`, input.OrgID, requestID, latest.SessionID, state.ActiveAssessmentID, state.Generation)
 					if err != nil {
@@ -687,11 +730,28 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 		if err := json.Unmarshal(current.PendingInput, &intent); err != nil {
 			return err
 		}
+		// Evidence admission owns these deliberately unhydrated intents. Its
+		// active/context wait must survive this full-review dispatch phase.
 		if intent.Mode == models.CodeReviewRecheck && !intent.Force {
 			at := now.Add(15 * time.Second)
+			if current.RetryAt != nil && current.RetryAt.After(at) {
+				at = *current.RetryAt
+			}
 			current.RetryAt = &at
-			current.WaitReason = models.CodeReviewWaitContext
+			if current.WaitReason == models.CodeReviewWaitNone {
+				current.WaitReason = models.CodeReviewWaitContext
+			}
 			return wait(at)
+		}
+		// An intake committed after this wake's snapshot phase must be refreshed
+		// by the next wake before policy timing can clear its context wait.
+		if intent.NeedsSnapshot || !reviewIntakeHasTarget(intent.Input) ||
+			intent.Input.HeadSHA != current.HeadSHA || intent.Input.BaseSHA != current.BaseSHA {
+			current.State = models.CodeReviewScheduleWaiting
+			current.WaitReason = models.CodeReviewWaitContext
+			current.EligibleAt = nil
+			current.RetryAt = &now
+			return wait(now)
 		}
 		scoped := s.transactionalService(tx)
 		policy, err := scoped.policies.ResolvePolicy(ctx, wake.OrgID)

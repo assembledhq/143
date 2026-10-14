@@ -110,6 +110,45 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		name string
 		run  func(*testing.T, *pgxpool.Pool, uuid.UUID, uuid.UUID, uuid.UUID, *schedulingSnapshotFixture)
 	}{
+		{"pending recheck waits behind active review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckPendingWait(t, p, org, repo, pr, snapshot, "active")
+		}},
+		{"pending recheck waits during rate limit", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckPendingWait(t, p, org, repo, pr, snapshot, "rate_limit")
+		}},
+		{"pending recheck waits for later deadline", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckPendingWait(t, p, org, repo, pr, snapshot, "later_retry")
+		}},
+		{"durable intake races hydrated wake", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingIntakeDispatchRace(t, p, org, repo, pr, snapshot, false)
+		}},
+		{"durable intake races idle wake", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingIntakeDispatchRace(t, p, org, repo, pr, snapshot, true)
+		}},
+		{"durable intake initial rate limit", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "initial")
+		}},
+		{"durable intake credential rate limit", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "credentials")
+		}},
+		{"durable intake single connection", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "single_connection")
+		}},
+		{"durable intake late failure preserves newer intent", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "late_failure")
+		}},
+		{"durable intake late failure preserves hydrated same delivery", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "same_delivery_late_failure")
+		}},
+		{"durable intake completed team review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "completed")
+		}},
+		{"durable intake joins queued review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "queued")
+		}},
+		{"durable intake joins running review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "running")
+		}},
 		{"first recheck request with continuation disabled", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testAssessmentFirstRequestAdmission(t, p, org, pr, snapshot, false)
 		}},
