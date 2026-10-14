@@ -1439,11 +1439,11 @@ func TestPullRequestSyncReasonCoalesces(t *testing.T) {
 		reason PullRequestSyncReason
 		want   bool
 	}{
-		{PullRequestSyncReasonInitial, false},
+		{PullRequestSyncReasonInitial, true},
 		{PullRequestSyncReasonHeadChanged, false},
 		{PullRequestSyncReasonBaseChanged, false},
 		{PullRequestSyncReasonReadyForReview, false},
-		{PullRequestSyncReasonIncomplete, true},
+		{PullRequestSyncReasonIncomplete, false},
 		{PullRequestSyncReasonStaleReconcile, true},
 		{PullRequestSyncReasonMergeSafety, false},
 		{PullRequestSyncReasonCodeReview, false},
@@ -1453,7 +1453,7 @@ func TestPullRequestSyncReasonCoalesces(t *testing.T) {
 	} {
 		t.Run(string(tt.reason), func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.want, tt.reason.coalesces(), "only background reads can share existing requests")
+			require.Equal(t, tt.want, tt.reason.coalesces(), "initial reads share separately while safety and check reads always fetch")
 		})
 	}
 }
@@ -1753,6 +1753,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPend
 	mock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "ci_status": models.PullRequestCIStatusSuccess}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":     orgID,
@@ -1893,6 +1894,7 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 	mock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "ci_status": models.PullRequestCIStatusFailure}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
 
 	service := &PRService{
 		tokenProvider: &Service{cache: map[int64]*cachedToken{}},
@@ -2018,6 +2020,7 @@ func TestPRServiceSyncPullRequestStateIncludesCommitStatuses(t *testing.T) {
 	mock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "ci_status": models.PullRequestCIStatusFailure}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
 
 	service := &PRService{
 		tokenProvider: &Service{cache: map[int64]*cachedToken{}},
@@ -2642,6 +2645,7 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 	mock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "ci_status": models.PullRequestCIStatusSuccess}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
 
 	service := &PRService{
 		tokenProvider:           &Service{cache: map[int64]*cachedToken{}},
@@ -3914,6 +3918,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 		mock.ExpectExec("UPDATE pull_requests SET ci_status").
 			WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "ci_status": models.PullRequestCIStatusFailure}).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectCommit()
 		mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
@@ -4377,6 +4382,13 @@ func expectReserveCheckStateVersion(mock pgxmock.PgxPoolIface, orgID, pullReques
 
 func expectCheckStateReconciliation(mock pgxmock.PgxPoolIface, orgID, pullRequestID uuid.UUID, headSHA string, stateCount int) {
 	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT COALESCE.*FROM pull_requests.*WHERE org_id = @org_id AND id = @pull_request_id FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows([]string{"head_sha", "base_sha", "status"}).AddRow(headSHA, "", models.PullRequestStatusOpen))
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+	mock.ExpectBegin()
 	mock.ExpectExec("DELETE FROM pull_request_check_states").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": headSHA}).
 		WillReturnResult(pgxmock.NewResult("DELETE", 0))
@@ -4522,7 +4534,6 @@ func TestPRServiceSyncPullRequestStateRequiresFreshRead(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		reason PullRequestSyncReason
-		force  bool
 	}{
 		{name: "initial", reason: PullRequestSyncReasonInitial},
 		{name: "head change", reason: PullRequestSyncReasonHeadChanged},
@@ -4532,23 +4543,18 @@ func TestPRServiceSyncPullRequestStateRequiresFreshRead(t *testing.T) {
 		{name: "repair", reason: PullRequestSyncReasonRepair},
 		{name: "manual", reason: PullRequestSyncReasonManual},
 		{name: "merge safety", reason: PullRequestSyncReasonMergeSafety},
-		{name: "check successor", reason: PullRequestSyncReasonIncomplete, force: true},
+		{name: "check successor", reason: PullRequestSyncReasonIncomplete},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			orgID, prID := uuid.New(), uuid.New()
 			service, gate := newDriftSyncService(t, orgID, prID)
 			blocked := make(chan struct{})
-			for _, suffix := range []string{"", ":checks"} {
-				service.prHealthSyncGroup.DoChan(orgID.String()+":"+prID.String()+suffix, func() (any, error) { <-blocked; return nil, fmt.Errorf("obsolete snapshot") })
-			}
+			service.prHealthSyncGroup.DoChan(orgID.String()+":"+prID.String(), func() (any, error) { <-blocked; return nil, fmt.Errorf("obsolete snapshot") })
 			defer close(blocked)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			ctx = WithPullRequestSyncReason(ctx, tt.reason)
-			if tt.force {
-				ctx = WithPullRequestSyncFreshRead(ctx)
-			}
 			done := make(chan error, 1)
 			go func() { done <- service.SyncPullRequestState(ctx, orgID, prID) }()
 			select {
@@ -4598,4 +4604,50 @@ func TestEnqueuePullRequestStateSyncIsolatesImmediateLanes(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "immediate lanes must enqueue without a delayed deadline or predecessor")
 		})
 	}
+}
+
+func TestPRServiceInitialSyncSharesAndSurvivesViewerCancellation(t *testing.T) {
+	t.Parallel()
+	orgID, prID := uuid.New(), uuid.New()
+	service, gate := newDriftSyncService(t, orgID, prID)
+	transport := service.httpClient.Transport
+	deadline := make(chan time.Time, 1)
+	service.httpClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		limit, ok := r.Context().Deadline()
+		if !ok {
+			return nil, fmt.Errorf("initial read lacks detached deadline")
+		}
+		deadline <- limit
+		return transport.RoundTrip(r)
+	})
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	defer cancelLeader()
+	leader := make(chan error, 1)
+	go func() {
+		leader <- service.SyncPullRequestState(WithPullRequestSyncReason(leaderCtx, PullRequestSyncReasonInitial), orgID, prID)
+	}()
+	gate.awaitInFlight()
+	limit := <-deadline
+	require.WithinDuration(t, time.Now().Add(prHealthSyncTimeout), limit, time.Second, "initial read keeps its own bounded two-minute lifetime")
+	const viewers = 8
+	results := make(chan error, viewers)
+	for range viewers {
+		waiter := &reconciliationWaiterContext{Context: context.Background(), joined: make(chan struct{})}
+		go func() {
+			results <- service.SyncPullRequestState(WithPullRequestSyncReason(waiter, PullRequestSyncReasonInitial), orgID, prID)
+		}()
+		select {
+		case <-waiter.joined:
+		case <-time.After(5 * time.Second):
+			t.Fatal("viewer did not register on initial read")
+		}
+	}
+	cancelLeader()
+	require.ErrorIs(t, <-leader, context.Canceled, "cancelled viewer can leave while shared initialization continues")
+	require.Equal(t, int32(1), gate.fetches.Load(), "simultaneous viewers must make one fresh read")
+	gate.releaseNow()
+	for range viewers {
+		require.NoError(t, <-results, "remaining viewers observe the persisted shared result")
+	}
+	require.Equal(t, int32(1), gate.fetches.Load(), "cancellation must not restart or multiply initialization reads")
 }

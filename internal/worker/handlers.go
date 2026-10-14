@@ -11259,6 +11259,13 @@ func primaryIssueIDFromSnapshot(snapshot *models.SessionTurnIssueSnapshot) *uuid
 	return nil
 }
 
+func checkSyncPredecessorPollDelay(predecessor db.PullRequestCheckSyncPredecessor, now time.Time) time.Duration {
+	if predecessor.Status == models.JobStatusPending && predecessor.RunAt.After(now) {
+		return max(5*time.Second, min(predecessor.RunAt.Sub(now), mergeabilityMaximumPollDelay))
+	}
+	return mergeabilityPollDelay(predecessor.CreatedAt, now)
+}
+
 func newSyncPullRequestStateHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -11290,12 +11297,12 @@ func newSyncPullRequestStateHandler(stores *Stores, services *Services, logger z
 			if err != nil {
 				return fmt.Errorf("parse check sync predecessor: %w", err)
 			}
-			active, err := stores.Jobs.PullRequestCheckSyncPredecessorActive(ctx, orgID, pullRequestID, predecessorID)
+			predecessor, err := stores.Jobs.GetPullRequestCheckSyncPredecessor(ctx, orgID, pullRequestID, predecessorID)
 			if err != nil {
 				return err
 			}
-			if active {
-				delay := 5 * time.Second
+			if predecessor != nil {
+				delay := checkSyncPredecessorPollDelay(*predecessor, time.Now())
 				return &RetryableError{Err: fmt.Errorf("waiting for check sync predecessor %s", predecessorID), RetryAfter: &delay, BypassMaxRetryDuration: true}
 			}
 		}
@@ -11305,9 +11312,6 @@ func newSyncPullRequestStateHandler(stores *Stores, services *Services, logger z
 			Str("sync_reason", string(syncReason)).
 			Msg("starting sync_pull_request_state job")
 		syncCtx := ghservice.WithPullRequestSyncReason(ctx, syncReason)
-		if syncReason == ghservice.PullRequestSyncReasonIncomplete {
-			syncCtx = ghservice.WithPullRequestSyncFreshRead(syncCtx)
-		}
 		if err := services.PR.SyncPullRequestState(syncCtx, orgID, pullRequestID); err != nil {
 			if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
 				return newPullRequestMergeabilityWait(err)

@@ -2,8 +2,10 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -85,17 +87,26 @@ func (s *JobStore) EnqueuePullRequestCheckSync(ctx context.Context, orgID, pullR
 	return jobID, nil
 }
 
-func (s *JobStore) PullRequestCheckSyncPredecessorActive(ctx context.Context, orgID, pullRequestID, predecessorID uuid.UUID) (bool, error) {
-	var active bool
-	err := s.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM jobs
+type PullRequestCheckSyncPredecessor struct {
+	Status    models.JobStatus
+	RunAt     time.Time
+	CreatedAt time.Time
+}
+
+func (s *JobStore) GetPullRequestCheckSyncPredecessor(ctx context.Context, orgID, pullRequestID, predecessorID uuid.UUID) (*PullRequestCheckSyncPredecessor, error) {
+	var predecessor PullRequestCheckSyncPredecessor
+	err := s.db.QueryRow(ctx, `SELECT status, run_at, created_at FROM jobs
 		WHERE org_id = @org_id AND id = @predecessor_id
 		  AND job_type = 'sync_pull_request_state'
 		  AND payload->>'pull_request_id' = @pull_request_id
-		  AND status IN ('pending', 'running'))`, pgx.NamedArgs{
+		  AND status IN ('pending', 'running')`, pgx.NamedArgs{
 		"org_id": orgID, "pull_request_id": pullRequestID.String(), "predecessor_id": predecessorID,
-	}).Scan(&active)
-	if err != nil {
-		return false, fmt.Errorf("load check sync predecessor: %w", err)
+	}).Scan(&predecessor.Status, &predecessor.RunAt, &predecessor.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
 	}
-	return active, nil
+	if err != nil {
+		return nil, fmt.Errorf("load check sync predecessor: %w", err)
+	}
+	return &predecessor, nil
 }

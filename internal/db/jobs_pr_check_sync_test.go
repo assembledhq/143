@@ -81,14 +81,16 @@ func TestEnqueuePullRequestCheckSync(t *testing.T) {
 	}
 }
 
-func TestPullRequestCheckSyncPredecessorActive(t *testing.T) {
+func TestGetPullRequestCheckSyncPredecessor(t *testing.T) {
 	t.Parallel()
+	now := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
 	for _, tt := range []struct {
-		name     string
-		active   bool
-		queryErr error
+		name        string
+		predecessor *PullRequestCheckSyncPredecessor
+		queryErr    error
 	}{
-		{name: "pending or running predecessor", active: true},
+		{name: "running predecessor", predecessor: &PullRequestCheckSyncPredecessor{Status: models.JobStatusRunning, RunAt: now, CreatedAt: now.Add(-time.Minute)}},
+		{name: "pending cooldown", predecessor: &PullRequestCheckSyncPredecessor{Status: models.JobStatusPending, RunAt: now.Add(time.Hour), CreatedAt: now.Add(-time.Hour)}},
 		{name: "terminal predecessor"},
 		{name: "database failure", queryErr: fmt.Errorf("unavailable")},
 	} {
@@ -98,19 +100,23 @@ func TestPullRequestCheckSyncPredecessorActive(t *testing.T) {
 			require.NoError(t, err, "create isolated predecessor fixture")
 			defer mock.Close()
 			orgID, prID, predecessorID := uuid.New(), uuid.New(), uuid.New()
-			query := mock.ExpectQuery("SELECT EXISTS.*WHERE org_id = @org_id AND id = @predecessor_id.*payload->>'pull_request_id' = @pull_request_id").
+			query := mock.ExpectQuery("SELECT status, run_at, created_at FROM jobs.*WHERE org_id = @org_id AND id = @predecessor_id.*payload->>'pull_request_id' = @pull_request_id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID.String(), "predecessor_id": predecessorID})
 			if tt.queryErr != nil {
 				query.WillReturnError(tt.queryErr)
 			} else {
-				query.WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.active))
+				rows := pgxmock.NewRows([]string{"status", "run_at", "created_at"})
+				if tt.predecessor != nil {
+					rows.AddRow(tt.predecessor.Status, tt.predecessor.RunAt, tt.predecessor.CreatedAt)
+				}
+				query.WillReturnRows(rows)
 			}
-			active, err := NewJobStore(mock).PullRequestCheckSyncPredecessorActive(context.Background(), orgID, prID, predecessorID)
+			predecessor, err := NewJobStore(mock).GetPullRequestCheckSyncPredecessor(context.Background(), orgID, prID, predecessorID)
 			if tt.queryErr != nil {
 				require.ErrorIs(t, err, tt.queryErr, "database failures cannot permit an overlapping read")
 			} else {
 				require.NoError(t, err, "read predecessor scoped to tenant and pull request")
-				require.Equal(t, tt.active, active, "only active predecessor attempts should delay the successor")
+				require.Equal(t, tt.predecessor, predecessor, "return durable predecessor status and scheduling timestamps")
 			}
 			require.NoError(t, mock.ExpectationsWereMet(), "predecessor lookup must include tenant and pull request identity")
 		})

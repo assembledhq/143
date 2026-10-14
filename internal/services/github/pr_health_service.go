@@ -100,17 +100,11 @@ func (r PullRequestSyncReason) Validate() error {
 
 func (r PullRequestSyncReason) coalesces() bool {
 	switch r {
-	case PullRequestSyncReasonIncomplete, PullRequestSyncReasonStaleReconcile, PullRequestSyncReasonMergeabilityWait:
+	case PullRequestSyncReasonInitial, PullRequestSyncReasonStaleReconcile, PullRequestSyncReasonMergeabilityWait:
 		return true
 	default:
 		return false
 	}
-}
-
-type pullRequestSyncFreshReadContextKey struct{}
-
-func WithPullRequestSyncFreshRead(ctx context.Context) context.Context {
-	return context.WithValue(ctx, pullRequestSyncFreshReadContextKey{}, true)
 }
 
 type pullRequestSyncReasonContextKey struct{}
@@ -626,7 +620,7 @@ func checkSummariesHaveFailedCheck(checks []models.PullRequestCheckSummary) bool
 
 func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
 	reason := PullRequestSyncReasonFromContext(ctx)
-	if fresh, _ := ctx.Value(pullRequestSyncFreshReadContextKey{}).(bool); fresh || !reason.coalesces() {
+	if !reason.coalesces() {
 		s.logger.Info().
 			Str("org_id", orgID.String()).
 			Str("pull_request_id", pullRequestID.String()).
@@ -635,8 +629,8 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 		return s.syncPullRequestState(ctx, orgID, pullRequestID)
 	}
 	key := orgID.String() + ":" + pullRequestID.String()
-	if reason == PullRequestSyncReasonIncomplete {
-		key += ":checks"
+	if reason == PullRequestSyncReasonInitial {
+		key += ":initial"
 	}
 	result := s.prHealthSyncGroup.DoChan(key, func() (any, error) {
 		s.logger.Info().
@@ -853,25 +847,22 @@ func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequest
 			return nil
 		}
 	}
-	// Reconcile the fetched check set before exposing its corresponding health
-	// snapshot. This prevents a projected rebuild from advancing the aggregate
-	// with an older webhook immediately before reconciliation replaces that
-	// webhook row with the newer authoritative state.
-	if err := s.pullRequests.ReconcileCheckStates(ctx, orgID, pullRequestID, details.Head.SHA, checkStateVersion, checkStates); err != nil {
-		s.logger.Warn().Err(err).
-			Str("pull_request_id", pullRequestID.String()).
-			Str("head_sha", details.Head.SHA).
-			Msg("failed to seed pull request check projection during GitHub reconciliation")
-	}
-
-	current, err := s.pullRequests.UpsertHealthSummary(ctx, orgID, pullRequestID, details.Head.SHA, details.Base.SHA, summary, nil, checkStateVersion)
+	current, applied, err := s.pullRequests.ApplyHealthSync(ctx, orgID, pullRequestID, db.PullRequestHealthSyncSnapshot{
+		ExpectedHeadSHA:   stringValue(pr.HeadSHA),
+		ExpectedBaseSHA:   stringValue(pr.BaseSHA),
+		HeadSHA:           details.Head.SHA,
+		BaseSHA:           details.Base.SHA,
+		CheckStateVersion: checkStateVersion,
+		Checks:            checkStates,
+		Summary:           summary,
+		CIStatus:          models.PullRequestCIStatus(deriveAggregateCIStatus(summary.Checks)),
+	})
 	if err != nil {
 		return err
 	}
-
-	ciStatus := deriveAggregateCIStatus(summary.Checks)
-	if err := s.pullRequests.UpdateCIStatus(ctx, orgID, pullRequestID, models.PullRequestCIStatus(ciStatus)); err != nil {
-		s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to update CI status during pull request health sync")
+	if !applied {
+		s.logger.Info().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Int64("check_state_version", checkStateVersion).Msg("skipping superseded pull request health sync")
+		return nil
 	}
 
 	projectedHealthChanged := false
@@ -2438,7 +2429,7 @@ func pullRequestStateSyncDedupeKey(pullRequestID uuid.UUID, reason PullRequestSy
 	lane := "urgent"
 	if reason == PullRequestSyncReasonIncomplete {
 		lane = "checks"
-	} else if reason.coalesces() {
+	} else if reason == PullRequestSyncReasonStaleReconcile || reason == PullRequestSyncReasonMergeabilityWait {
 		lane = "background"
 	}
 	return fmt.Sprintf("%s:%s:%s", prHealthSyncJobType, pullRequestID.String(), lane)
