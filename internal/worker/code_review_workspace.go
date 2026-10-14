@@ -63,6 +63,13 @@ func knownCodeReviewWorkspacePreparationError(detail string) (error, bool) {
 	if timedOut {
 		detail = strings.TrimPrefix(detail, timeoutPrefix)
 	}
+	cleanup := agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageReadiness, agent.ErrCodeReviewPreparationCleanup)
+	if detail == cleanup.Error() {
+		if timedOut {
+			return agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageReadiness, errors.Join(agent.ErrCodeReviewPreparationCleanup, context.DeadlineExceeded)), true
+		}
+		return cleanup, true
+	}
 	integrity := agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageHydration, agent.ErrCodeReviewSourceIntegrity)
 	if detail == integrity.Error() {
 		if timedOut {
@@ -104,7 +111,7 @@ func codeReviewWorkspaceSourceFailureRetryable(err error) bool {
 	default:
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, agent.ErrStalePullRequestHead) || errors.Is(err, agent.ErrCodeReviewSourceIntegrity) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, agent.ErrStalePullRequestHead) || errors.Is(err, agent.ErrCodeReviewSourceIntegrity) || errors.Is(err, agent.ErrCodeReviewPreparationCleanup) {
 		return false
 	}
 	if ghservice.ClassifyRetry(err, time.Now()).Retryable || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -125,6 +132,18 @@ func classifyCodeReviewWorkspacePreparationFailure(ctx context.Context, err erro
 	preparationErr := agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageReadiness, err)
 	var typed *agent.CodeReviewWorkspacePreparationError
 	errors.As(preparationErr, &typed)
+	if errors.Is(err, agent.ErrCodeReviewPreparationCleanup) {
+		// Never reuse a workspace or retry preparation when its previous command
+		// may still be running. Preserve this cause when the caller or durable
+		// preparation window also owns a cancellation/deadline.
+		cause := typed.Unwrap()
+		if !time.Now().Before(startedAt.Add(codeReviewWorkspaceWaitLimit)) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			cause = errors.Join(cause, context.DeadlineExceeded)
+		} else if ctx.Err() != nil {
+			cause = errors.Join(cause, ctx.Err())
+		}
+		return &FatalError{Err: agent.NewCodeReviewWorkspacePreparationError(typed.Stage, cause)}
+	}
 	// A moved ref is revision evidence, rather than an operational failure,
 	// even when the final fetch used the last of the preparation budget.
 	if errors.Is(typed, agent.ErrStalePullRequestHead) {
@@ -144,10 +163,11 @@ func classifyCodeReviewWorkspacePreparationFailure(ctx context.Context, err erro
 }
 
 func codeReviewWorkspacePreparationFailureMessage(err error) string {
+	err = agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageReadiness, err)
 	var preparation *agent.CodeReviewWorkspacePreparationError
-	if !errors.As(err, &preparation) {
-		err = agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageReadiness, err)
-		errors.As(err, &preparation)
+	errors.As(err, &preparation)
+	if errors.Is(err, agent.ErrCodeReviewPreparationCleanup) {
+		return preparation.Error() + " This is an operational review failure."
 	}
 	if errors.Is(preparation, agent.ErrCodeReviewSourceIntegrity) && !errors.Is(preparation, context.Canceled) && !errors.Is(preparation, context.DeadlineExceeded) {
 		return preparation.Error() + " This is an operational review failure."
@@ -316,7 +336,11 @@ func ensureCodeReviewWorkspaceReadyWithRecovery(ctx context.Context, stores *Sto
 		if initialBudgetExpired {
 			var typed *agent.CodeReviewWorkspacePreparationError
 			errors.As(preparationFailure, &typed)
-			preparationFailure = agent.NewCodeReviewWorkspacePreparationError(typed.Stage, context.DeadlineExceeded)
+			cause := error(context.DeadlineExceeded)
+			if errors.Is(preparationFailure, agent.ErrCodeReviewPreparationCleanup) {
+				cause = errors.Join(typed.Unwrap(), cause)
+			}
+			preparationFailure = agent.NewCodeReviewWorkspacePreparationError(typed.Stage, cause)
 		}
 		return newCodeReviewWorkspaceGateFailure(session.WorkspaceGeneration, preparationFailure)
 	}

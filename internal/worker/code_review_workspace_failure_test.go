@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"testing"
 	"time"
@@ -28,6 +29,10 @@ func TestCodeReviewWorkspaceFailurePresentation(t *testing.T) {
 	}{
 		{name: "clone", stage: agent.CodeReviewPreparationStageClone, cause: errors.New("token=synthetic-secret"), expected: "Review workspace preparation failed during repository clone. Review did not run. This is an operational review failure. Check repository access and sandbox network connectivity, then request a new review."},
 		{name: "hydration timeout", stage: agent.CodeReviewPreparationStageHydration, cause: context.DeadlineExceeded, expected: "Review workspace preparation exceeded its total eight-minute budget during pinned source hydration. Review did not run. This is an operational review failure. Restore access to the pinned base and head Git objects, then request a new review."},
+		{name: "cleanup joined outside typed hydration error", stage: agent.CodeReviewPreparationStageReadiness, cause: errors.Join(agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageHydration, context.DeadlineExceeded), agent.ErrCodeReviewPreparationCleanup), expected: "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run. This is an operational review failure."},
+		{name: "unconfirmed cleanup", stage: agent.CodeReviewPreparationStageHydration, cause: agent.ErrCodeReviewPreparationCleanup, expected: "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run. This is an operational review failure."},
+		{name: "unconfirmed cleanup with deadline", stage: agent.CodeReviewPreparationStageHydration, cause: errors.Join(agent.ErrCodeReviewPreparationCleanup, context.DeadlineExceeded), expected: "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run. This is an operational review failure."},
+		{name: "unconfirmed cleanup with cancellation", stage: agent.CodeReviewPreparationStageClone, cause: errors.Join(agent.ErrCodeReviewPreparationCleanup, context.Canceled), expected: "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run. This is an operational review failure."},
 		{name: "source integrity validation", stage: agent.CodeReviewPreparationStageHydration, cause: agent.ErrCodeReviewSourceIntegrity, expected: "Review workspace preparation could not verify pinned Git source object integrity. Recreate the review workspace and retry. Review did not run. This is an operational review failure."},
 		{name: "checkout", stage: agent.CodeReviewPreparationStageCheckout, cause: errors.New("raw command stderr"), expected: "Review workspace preparation failed during pinned pull request checkout. Review did not run. This is an operational review failure. Check that the pinned pull request commit remains fetchable, then request a new review."},
 		{name: "dependency setup", stage: agent.CodeReviewPreparationStageDependencySetup, cause: errors.New("raw command stderr"), expected: "Review workspace preparation failed during declared dependency and bootstrap setup. Review did not run. This is an operational review failure. Check the declared dependency setup and bootstrap commands, then request a new review."},
@@ -39,6 +44,9 @@ func TestCodeReviewWorkspaceFailurePresentation(t *testing.T) {
 			preparation := agent.NewCodeReviewWorkspacePreparationError(tt.stage, tt.cause)
 			decoded, known := knownCodeReviewWorkspacePreparationError(preparation.Error())
 			require.True(t, known, "persisted finite setup stages should remain recognizable")
+			if errors.Is(tt.cause, agent.ErrCodeReviewPreparationCleanup) {
+				require.ErrorIs(t, decoded, agent.ErrCodeReviewPreparationCleanup, "persisted finite cleanup text must prevent reuse and retries")
+			}
 			if errors.Is(tt.cause, agent.ErrCodeReviewSourceIntegrity) {
 				require.ErrorIs(t, decoded, agent.ErrCodeReviewSourceIntegrity, "persisted source validation failure must preserve its deterministic classification")
 				var typed *agent.CodeReviewWorkspacePreparationError
@@ -65,6 +73,7 @@ func TestCodeReviewWorkspaceFailureRejectsRawDiagnostics(t *testing.T) {
 	tests := []struct{ name, detail string }{
 		{name: "unknown command output", detail: "bootstrap failed with token=synthetic-secret"},
 		{name: "safe text with appended diagnostics", detail: agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageClone, errors.New("failed")).Error() + " token=synthetic-secret"},
+		{name: "cleanup text with appended diagnostics", detail: agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageReadiness, agent.ErrCodeReviewPreparationCleanup).Error() + " token=synthetic-secret"},
 		{name: "source integrity text with appended diagnostics", detail: agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageHydration, agent.ErrCodeReviewSourceIntegrity).Error() + " token=synthetic-secret"},
 	}
 	for _, tt := range tests {
@@ -195,4 +204,35 @@ func TestCodeReviewWorkspaceFailureProjectionPostgres(t *testing.T) {
 	body := codeReviewStatusCommentBody(metadata, nil, "https://143.test/code-reviews", "https://143.test/code-reviews?review_now=test")
 	require.Contains(t, body, "**143 review issues:**\n- "+expected, "safe operational failure should be author visible through the existing rolling-comment path")
 	require.NotContains(t, body, "synthetic-secret", "raw setup stderr must not cross the publication boundary")
+}
+
+func TestCodeReviewWorkspaceCleanupFailureMessageNormalizesOuterTypedError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		innerCause error
+		outerCause error
+	}{
+		{name: "typed hydration deadline with external cleanup and EOF", innerCause: context.DeadlineExceeded, outerCause: io.ErrUnexpectedEOF},
+		{name: "typed hydration EOF with external cleanup and deadline", innerCause: io.ErrUnexpectedEOF, outerCause: context.DeadlineExceeded},
+		{name: "typed hydration cancellation with external cleanup", innerCause: context.Canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			existing := agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageHydration, tt.innerCause)
+			input := errors.Join(existing, agent.ErrCodeReviewPreparationCleanup, tt.outerCause)
+			actual := codeReviewWorkspacePreparationFailureMessage(input)
+			statusCode, statusMessage, retryable := codeReviewTerminalFailureStatus(&FatalError{Err: input})
+			require.Equal(t, models.CodeReviewStatusCodeWorkerFailed, statusCode, "outer cleanup remains an operational failure rather than a code-review judgment")
+			require.Equal(t, actual, statusMessage, "terminal worker status must preserve cleanup outside the first typed preparation cause")
+			require.True(t, retryable, "authors may request a fresh review after recreating the failed workspace")
+			require.Equal(t, "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run. This is an operational review failure.", actual, "worker presentation must inspect cleanup outside the first typed error before selecting safe copy")
+			persisted := agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageReadiness, input).Error()
+			decoded, known := knownCodeReviewWorkspacePreparationError(persisted)
+			require.True(t, known, "normalized outer cleanup must serialize to a finite recognized failure")
+			require.ErrorIs(t, decoded, agent.ErrCodeReviewPreparationCleanup, "the persisted cleanup cause must remain terminal after parsing")
+			require.Equal(t, actual, codeReviewWorkspacePreparationFailureMessage(decoded), "persisted cleanup failure must retain exact author-facing recovery guidance")
+		})
+	}
 }

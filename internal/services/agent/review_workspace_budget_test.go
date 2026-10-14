@@ -350,3 +350,92 @@ func TestReviewPreparationMovedHeadSignal(t *testing.T) {
 	require.Equal(t, "Review workspace preparation observed a moved pull request head. Review did not run.", err.Error(), "durable moved-head signal must contain no raw ref or provider diagnostics")
 	require.ErrorIs(t, err, ErrStalePullRequestHead, "controller must distinguish supersession from setup failure")
 }
+
+func TestReviewPreparationCleanupErrorPreservesSafeCausePriority(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		cause error
+	}{
+		{name: "deadline", cause: context.DeadlineExceeded},
+		{name: "cancellation", cause: context.Canceled},
+		{name: "transport diagnostics", cause: errors.New("git https://x-access-token:secret@example.com/repo.git failed")},
+		{name: "moved ref", cause: ErrStalePullRequestHead},
+		{name: "source integrity", cause: ErrCodeReviewSourceIntegrity},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageHydration, errors.Join(ErrCodeReviewPreparationCleanup, tt.cause))
+			require.Equal(t, "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run.", err.Error(), "cleanup uncertainty must require workspace recreation without exposing other diagnostics")
+			require.ErrorIs(t, err, ErrCodeReviewPreparationCleanup, "cleanup uncertainty must retain its terminal identity")
+			require.ErrorIs(t, err, tt.cause, "internal callers must retain the joined original cause")
+		})
+	}
+}
+
+func TestReviewPreparationCleanupNormalizesOuterTypedCauses(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		innerCause error
+		outerCause error
+		wrapped    bool
+	}{
+		{name: "typed hydration joined with cleanup and deadline", innerCause: io.ErrUnexpectedEOF, outerCause: errors.Join(ErrCodeReviewPreparationCleanup, context.DeadlineExceeded)},
+		{name: "typed hydration deadline joined with cleanup and EOF", innerCause: context.DeadlineExceeded, outerCause: errors.Join(ErrCodeReviewPreparationCleanup, io.ErrUnexpectedEOF)},
+		{name: "typed cleanup joined with transport EOF", innerCause: ErrCodeReviewPreparationCleanup, outerCause: io.ErrUnexpectedEOF},
+		{name: "typed cleanup wrapped in private diagnostics", innerCause: ErrCodeReviewPreparationCleanup, wrapped: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			inner := NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageHydration, tt.innerCause)
+			cause := inner
+			if tt.wrapped {
+				cause = fmt.Errorf("provider token=synthetic-secret: %w", inner)
+			} else {
+				cause = errors.Join(inner, tt.outerCause)
+			}
+			actual := NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, cause)
+			var typed *CodeReviewWorkspacePreparationError
+			require.ErrorAs(t, actual, &typed, "outer cleanup uncertainty must normalize to a typed preparation failure")
+			require.Equal(t, CodeReviewPreparationStageHydration, typed.Stage, "normalization must preserve the original concrete preparation stage")
+			require.Equal(t, "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run.", actual.Error(), "outer cleanup must render only the finite safe recreation message")
+			require.ErrorIs(t, actual, ErrCodeReviewPreparationCleanup, "the normalized error must expose cleanup uncertainty")
+			require.ErrorIs(t, actual, cause, "normalization must preserve the complete original error tree")
+			require.ErrorIs(t, actual, inner, "original typed stage error must remain available for internal diagnosis")
+			require.ErrorIs(t, actual, tt.innerCause, "original typed cause must survive normalization")
+			if tt.outerCause != nil {
+				require.ErrorIs(t, actual, tt.outerCause, "all causes joined outside the typed error must survive normalization")
+			}
+		})
+	}
+}
+
+func TestReviewPreparationErrorPreservesExistingIdentity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		cleanup bool
+		wrapped bool
+	}{
+		{name: "ordinary typed error"},
+		{name: "ordinary wrapped typed error", wrapped: true},
+		{name: "direct typed cleanup error", cleanup: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cause := error(io.ErrUnexpectedEOF)
+			if tt.cleanup {
+				cause = ErrCodeReviewPreparationCleanup
+			}
+			existing := NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageHydration, cause)
+			if tt.wrapped {
+				existing = fmt.Errorf("preserved wrapper: %w", existing)
+			}
+			require.Same(t, existing, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, existing), "ordinary existing errors and direct safe cleanup errors must remain idempotent")
+		})
+	}
+}

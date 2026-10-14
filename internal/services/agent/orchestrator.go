@@ -389,6 +389,9 @@ func waitForSandboxWorkspaceReady(
 
 		var stdout, stderr bytes.Buffer
 		exitCode, execErr := execForReviewPreparation(waitCtx, provider, sandbox, probeCommand, &stdout, &stderr)
+		if errors.Is(execErr, ErrCodeReviewPreparationCleanup) {
+			return NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, execErr)
+		}
 		if execErr == nil && exitCode == 0 {
 			// Preserve the empty branch line produced by a detached HEAD.
 			fields := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
@@ -4345,7 +4348,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if codeReviewTurn != nil || isCodeReviewTurnContext(ctx) {
 			return
 		}
-		if session.Origin != models.SessionOriginCodeReview || returnErr == nil || errors.Is(returnErr, ErrCodeReviewThreadFailed) || errors.Is(returnErr, ErrStalePullRequestHead) || errors.Is(returnErr, ErrStaleSandboxIDCleared) || errors.Is(returnErr, ErrSandboxOnDifferentNode) || errors.Is(returnErr, ErrSandboxPreviewRace) || errors.Is(returnErr, ErrSandboxRaceLoser) || errors.Is(returnErr, ErrThreadCancelledBeforeWorkspaceReady) || errors.Is(returnErr, context.Canceled) {
+		if session.Origin != models.SessionOriginCodeReview || returnErr == nil || errors.Is(returnErr, ErrCodeReviewThreadFailed) || errors.Is(returnErr, ErrStalePullRequestHead) || errors.Is(returnErr, ErrStaleSandboxIDCleared) || errors.Is(returnErr, ErrSandboxOnDifferentNode) || errors.Is(returnErr, ErrSandboxPreviewRace) || errors.Is(returnErr, ErrSandboxRaceLoser) || errors.Is(returnErr, ErrThreadCancelledBeforeWorkspaceReady) || (errors.Is(returnErr, context.Canceled) && !errors.Is(returnErr, ErrCodeReviewPreparationCleanup)) {
 			return
 		}
 		var preparationErr *CodeReviewWorkspacePreparationError
@@ -5168,7 +5171,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return o.stopWorkspaceWaitIfContainerChanged(checkCtx, session.OrgID, session.ID, workspaceSandbox.ID)
 			},
 		)
-		if errors.Is(readyErr, context.DeadlineExceeded) && ctx.Err() == nil {
+		if errors.Is(readyErr, context.DeadlineExceeded) && !errors.Is(readyErr, ErrCodeReviewPreparationCleanup) && ctx.Err() == nil {
 			readyErr = o.ensureCodeReviewWorkspaceEvidence(setupCtx, session, workspaceSandbox, log)
 		} else if readyErr == nil {
 			// Preparation can fetch private Git-based dependencies. Reopen
@@ -5176,7 +5179,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			// Git bootstrap itself reads local config. Reject unsafe includes
 			// and topology through a neutral bounded guard before those writes.
 			readyErr = o.runSandboxGitBootstrapForSession(preparationCtx, session, workspaceSandbox, sandboxCfg.WorkDir, continueReviewRepositoryURL, log)
-			if errors.Is(readyErr, context.DeadlineExceeded) && ctx.Err() == nil {
+			if errors.Is(readyErr, context.DeadlineExceeded) && !errors.Is(readyErr, ErrCodeReviewPreparationCleanup) && ctx.Err() == nil {
 				// The budget can expire after the metadata probe. Complete
 				// evidence may still take the one local-only verification path;
 				// it cannot restart bootstrap or source repair.

@@ -96,6 +96,7 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 		wrongRepository     bool
 		terminalPreparation bool
 		failureStage        string
+		cleanupFailure      bool
 		timedOutPreparation bool
 		cancelError         bool
 		afterPreflight      bool
@@ -104,6 +105,8 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 		{name: "snapshot with generation zero", snapshot: &snapshot},
 		{name: "repository mismatch", wrongRepository: true},
 		{name: "dead-lettered preparation stops without re-enqueue", terminalPreparation: true},
+		{name: "persisted unconfirmed cleanup stays terminal", terminalPreparation: true, cleanupFailure: true},
+		{name: "persisted unconfirmed cleanup survives expired budget", terminalPreparation: true, timedOutPreparation: true, cleanupFailure: true},
 		{name: "expired safe clone failure retains budget wording", terminalPreparation: true, timedOutPreparation: true, failureStage: agent.CodeReviewPreparationStageClone},
 		{name: "slow live preparation is cancelled and fails visibly", timedOutPreparation: true},
 		{name: "uncertain cancellation cannot restart preparation", timedOutPreparation: true, cancelError: true},
@@ -165,7 +168,11 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 				if stage == "" {
 					stage = agent.CodeReviewPreparationStageDependencySetup
 				}
-				statusRows.AddRow(models.JobStatusDeadLetter, agent.NewCodeReviewWorkspacePreparationError(stage, errors.New("safe internal failure")).Error())
+				cause := errors.New("safe internal failure")
+				if tt.cleanupFailure {
+					cause = agent.ErrCodeReviewPreparationCleanup
+				}
+				statusRows.AddRow(models.JobStatusDeadLetter, agent.NewCodeReviewWorkspacePreparationError(stage, cause).Error())
 			} else if tt.afterPreflight {
 				statusRows.AddRow(models.JobStatusSucceeded, "")
 			}
@@ -193,6 +200,10 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 				var setupFailure *codeReviewWorkspaceGateFailure
 				require.ErrorAs(t, err, &setupFailure, "failed setup must stop fan-out and expose a fenced operational failure")
 				require.Equal(t, tt.workspaceGen, setupFailure.Generation, "terminal projection must use the observed workspace generation")
+				if tt.cleanupFailure {
+					require.ErrorIs(t, err, agent.ErrCodeReviewPreparationCleanup, "the expired gate must never replace persisted cleanup uncertainty with ordinary timeout")
+					require.Equal(t, "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run.", setupFailure.Err.Error(), "cleanup failure must require workspace recreation even after its durable window expires")
+				}
 				if tt.timedOutPreparation {
 					require.ErrorIs(t, err, context.DeadlineExceeded, "timeout must remain distinct from a code finding")
 					if tt.failureStage != "" {

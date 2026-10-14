@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -54,13 +55,21 @@ func TestReviewPreparationRejectsUnsafeManagedMetadata(t *testing.T) {
 			}
 			tokens := &reviewConfigGitHubTokens{token: "fake-managed-metadata-token"}
 			o.github = tokens
-			deadline := time.Now().Add(250 * time.Millisecond)
+			// Rejection must beat the one-second assertion on its own; a shorter
+			// context could kill the local wrapper before it reports unsafe metadata.
+			deadline := time.Now().Add(2 * time.Second)
 			if tt.phase == "expired" {
 				deadline = time.Now().Add(-time.Second)
 			}
 			ctx := WithCodeReviewWorkspacePreparationDeadline(context.Background(), deadline)
 			started := time.Now()
-			require.Error(t, o.ensureCodeReviewWorkspaceEvidence(ctx, f.session, f.sandbox(), zerolog.Nop()), "special or linked managed metadata must reject readiness instead of blocking beyond preparation")
+			preparationErr := o.ensureCodeReviewWorkspaceEvidence(ctx, f.session, f.sandbox(), zerolog.Nop())
+			require.Error(t, preparationErr, "special or linked managed metadata must reject readiness instead of blocking beyond preparation")
+			require.NotErrorIs(t, preparationErr, ErrCodeReviewPreparationCleanup, "unsafe metadata must be rejected before cleanup becomes uncertain")
+			if tt.phase != "expired" {
+				require.NotErrorIs(t, preparationErr, context.DeadlineExceeded, "metadata rejection must not be established by timing out the fixture")
+				require.Regexp(t, `review preparation requires regular managed metadata|review fixture configuration rejected key='topology'`, errors.Unwrap(preparationErr).Error(), "fresh and warm cases must reach the bounded no-follow configuration or managed-metadata rejection")
+			}
 			require.Less(t, time.Since(started), time.Second, "managed metadata rejection must finish independently of FIFO writers and cancellation cleanup")
 			require.Equal(t, 0, tokens.calls, "managed metadata must fail before any installation-token lookup")
 			outsideBytes, err := os.ReadFile(outside)

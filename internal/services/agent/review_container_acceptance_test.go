@@ -73,7 +73,7 @@ func TestReviewContainerAcceptance(t *testing.T) {
 	tests := []struct{ name string }{
 		{name: "cold"}, {name: "warm"}, {name: "snapshot_restore"},
 		{name: "original_budget"}, {name: "expired_verification"},
-		{name: "unsafe_git_config"}, {name: "corrupt_pack"}, {name: "recipe_failure"},
+		{name: "unsafe_git_config"}, {name: "corrupt_pack"}, {name: "recipe_failure"}, {name: "cleanup_signal_failure"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -99,6 +99,9 @@ func TestReviewContainerAcceptance(t *testing.T) {
 				"fixture_base": fixture.base, "fixture_head": fixture.head, "fixture_merge_base": fixture.mergeBase,
 				"limits": []string{"file transport does not prove live HTTPS authentication", "synthetic dependencies do not accept repository recipes", "synthetic size does not establish largest-repository cost", "disk quota and worker egress policy are not accepted here"},
 			}
+			if tt.name == "cleanup_signal_failure" {
+				report["fault_model"] = "Synthetic TERM PermissionError injected only for the test-owned recipe process group; this does not establish natural Linux EPERM reachability. Real SIGKILL and production cleanup still execute."
+			}
 			t.Cleanup(func() {
 				credentialDetected := logs.CredentialDetected()
 				report["passed"] = !t.Failed() && !credentialDetected
@@ -118,13 +121,15 @@ func TestReviewContainerAcceptance(t *testing.T) {
 				report["observation_failure"] = provider.observationDiagnostic()
 				report["fault_injection_evidence"] = provider.faultDiagnostic()
 				report["process_cleanup_evidence"] = provider.cleanupEvidence()
+				report["cleanup_signal_observations"] = provider.signalObservations()
+				report["cleanup_signal_instrumentations"] = provider.signalInstrumentations.Load()
 				writeAcceptanceArtifact(t, tt.name, report, logs.String())
 				require.False(t, credentialDetected, "the complete provider log stream through container cleanup must exclude synthetic private input")
 			})
 			t.Cleanup(func() { provider.cleanup(t) })
 			preparationContext := jobctx.WithLockToken(context.Background(), uuid.New())
 			var expectedDeadline time.Time
-			if tt.name == "original_budget" {
+			if tt.name == "original_budget" || tt.name == "cleanup_signal_failure" {
 				createdAt := time.Now().Add(-agent.CodeReviewWorkspacePreparationTimeout + 25*time.Second)
 				expectedDeadline = createdAt.Add(agent.CodeReviewWorkspacePreparationTimeout)
 				preparationContext = jobctx.WithJobCreatedAt(preparationContext, createdAt)
@@ -139,15 +144,30 @@ func TestReviewContainerAcceptance(t *testing.T) {
 					report["prepare_error_stage"] = preparationError.Stage
 				}
 			}
-			if tt.name == "original_budget" || tt.name == "unsafe_git_config" || tt.name == "corrupt_pack" || tt.name == "recipe_failure" {
+			if tt.name == "original_budget" || tt.name == "unsafe_git_config" || tt.name == "corrupt_pack" || tt.name == "recipe_failure" || tt.name == "cleanup_signal_failure" {
 				require.Positive(t, provider.filteredMissing.Load(), "rejection must follow successful filtered clone observation")
 				var preparationError *agent.CodeReviewWorkspacePreparationError
 				require.ErrorAs(t, prepareErr, &preparationError, "rejection must identify the production preparation stage")
 				require.Error(t, prepareErr, "rejected cold preparation must report a visible setup failure")
 				require.Nil(t, sandbox, "failed cold preparation must not transfer a sandbox")
 				require.Equal(t, int64(1), provider.destroyed.Load(), "failed preparation must destroy the unpublished container")
-				if tt.name == "original_budget" {
+				if tt.name == "original_budget" || tt.name == "cleanup_signal_failure" {
 					require.ErrorIs(t, prepareErr, context.DeadlineExceeded, "queued preparation must use the original eight-minute deadline")
+					if tt.name == "cleanup_signal_failure" {
+						require.ErrorIs(t, prepareErr, agent.ErrCodeReviewPreparationCleanup, "synthetic TERM failure must retain the terminal cleanup error alongside the original deadline")
+						require.EqualError(t, preparationError, "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run.", "cleanup uncertainty must expose only fixed operational guidance")
+						require.Positive(t, provider.signalInstrumentations.Load(), "the actual trusted wrapper must receive scoped test instrumentation")
+						observations := provider.signalObservations()
+						require.NotEmpty(t, observations, "synthetic signal failure must occur for the actual long-running recipe group")
+						deniedTERM, deliveredKILL := false, false
+						for _, observation := range observations {
+							require.Equal(t, provider.signalProcessGroup(), observation.Group, "only the recorded test-owned recipe group may be instrumented")
+							deniedTERM = deniedTERM || observation.Signal == "TERM" && observation.Denied
+							deliveredKILL = deliveredKILL || observation.Signal == "KILL" && observation.Delivered && !observation.Denied
+						}
+						require.True(t, deniedTERM, "test must actually inject the intended TERM PermissionError")
+						require.True(t, deliveredKILL, "real SIGKILL must still reach the recorded recipe group after TERM denial")
+					}
 					require.Equal(t, agent.CodeReviewPreparationStageDependencySetup, preparationError.Stage, "budget fixture must reach its long-running dependency recipe")
 					require.True(t, provider.cleanupChecked.Load(), "timeout must reach the real long-running recipe")
 					require.True(t, provider.cleanupPassed.Load(), "recipe process group must stop before container destruction")
@@ -291,6 +311,8 @@ type acceptanceProvider struct {
 	toolVersions                                       map[string]string
 	faultEvidence                                      string
 	processCleanupEvidence                             json.RawMessage
+	cleanupSignals                                     []acceptanceCleanupSignalObservation
+	signalInstrumentations                             atomic.Int64
 	observationFailure                                 string
 	faultInjections                                    atomic.Int64
 	recipeFailureReached                               atomic.Bool
@@ -346,7 +368,7 @@ func (p *acceptanceProvider) Destroy(ctx context.Context, sandbox *agent.Sandbox
 		code, inspectionErr := p.DockerProvider.Exec(ctx, sandbox, "/bin/cat .143/recipe-count", &output, io.Discard)
 		p.recipeFailureReached.Store(inspectionErr == nil && code == 0 && output.String() == "failed\n")
 	}
-	if p.mode == "original_budget" {
+	if p.mode == "original_budget" || p.mode == "cleanup_signal_failure" {
 		var output, inspectionError bytes.Buffer
 		command := "/usr/bin/python3 -I -S -c '" + strings.ReplaceAll(acceptanceProcessCleanupPython, "'", "'\"'\"'") + "'"
 		code, inspectErr := p.DockerProvider.Exec(ctx, sandbox, command, &output, &inspectionError)
@@ -372,6 +394,27 @@ func (p *acceptanceProvider) Destroy(ctx context.Context, sandbox *agent.Sandbox
 			}
 		}
 	}
+	if p.mode == "cleanup_signal_failure" {
+		data, readErr := p.DockerProvider.ReadFile(ctx, sandbox, filepath.Join(sandbox.WorkDir, ".143/cleanup-signal-count"))
+		if readErr == nil && len(data) <= 64*1024 {
+			observations := make([]acceptanceCleanupSignalObservation, 0)
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				var observation acceptanceCleanupSignalObservation
+				if decodeErr := json.Unmarshal([]byte(line), &observation); decodeErr != nil {
+					observations = nil
+					break
+				}
+				observations = append(observations, observation)
+			}
+			p.mu.Lock()
+			p.cleanupSignals = observations
+			p.mu.Unlock()
+		} else {
+			p.mu.Lock()
+			p.faultEvidence = acceptanceSafeDiagnostic(fmt.Sprintf("cleanup signal trace unavailable: bytes=%d error=%v", len(data), readErr))
+			p.mu.Unlock()
+		}
+	}
 	if err := p.DockerProvider.Destroy(ctx, sandbox); err != nil {
 		return err
 	}
@@ -383,6 +426,14 @@ func (p *acceptanceProvider) Destroy(ctx context.Context, sandbox *agent.Sandbox
 }
 func (p *acceptanceProvider) ExecWithStdinForReviewPreparation(ctx context.Context, sandbox *agent.Sandbox, command string, input io.Reader, stdout, stderr io.Writer) (int, error) {
 	var captured bytes.Buffer
+	if p.mode == "cleanup_signal_failure" {
+		instrumented, instrumentErr := acceptanceInstrumentCleanupSignal(command)
+		if instrumentErr != nil {
+			return -1, instrumentErr
+		}
+		command = instrumented
+		p.signalInstrumentations.Add(1)
+	}
 	// This observer-only marker preserves the caller's deadline and cancellation.
 	// Cleanup and version probes retain their original unmarked contexts.
 	preparationCtx := context.WithValue(ctx, acceptancePreparationExecContextKey{}, true)
@@ -517,7 +568,7 @@ func newAcceptanceFixture(t *testing.T, mode string) acceptanceFixture {
 		".143/check-private.py":       acceptanceProcInspection,
 	}
 	commands := []string{"/usr/bin/python3 -I -S .143/check-private.py", "/usr/local/go/bin/go mod vendor", "/usr/bin/npm ci --ignore-scripts --no-audit --no-fund", "printf 'setup\\n' >> .143/setup-count"}
-	if mode == "original_budget" {
+	if mode == "original_budget" || mode == "cleanup_signal_failure" {
 		commands = []string{"/usr/bin/python3 -I -S .143/check-private.py", "/usr/bin/python3 -I -S -c 'import json,os,pathlib,time; pathlib.Path(\".143/hang.pid\").write_text(json.dumps({\"pid\":os.getpid(),\"process_group\":os.getpgrp()})); time.sleep(90)'"}
 	}
 	if mode == "recipe_failure" {
@@ -744,7 +795,7 @@ with open(".143/proc-count", "a") as report:
 // this verifies fixture contracts, never substitutes for container acceptance.
 func TestReviewContainerAcceptanceFixture(t *testing.T) {
 	t.Parallel()
-	tests := []struct{ name string }{{"cold"}, {"original_budget"}, {"recipe_failure"}}
+	tests := []struct{ name string }{{"cold"}, {"original_budget"}, {"recipe_failure"}, {"cleanup_signal_failure"}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -1019,4 +1070,127 @@ func TestReviewContainerAcceptanceProviderLogScan(t *testing.T) {
 			require.LessOrEqual(t, cap(logs.scanTail), logs.maxScanTail*2, "boundary storage must not grow with streamed output")
 		})
 	}
+}
+
+type acceptanceCleanupSignalObservation struct {
+	Group     int    `json:"group"`
+	Signal    string `json:"signal"`
+	Denied    bool   `json:"denied"`
+	Delivered bool   `json:"delivered"`
+	Missing   bool   `json:"missing"`
+}
+
+func (p *acceptanceProvider) signalObservations() []acceptanceCleanupSignalObservation {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]acceptanceCleanupSignalObservation(nil), p.cleanupSignals...)
+}
+func (p *acceptanceProvider) signalProcessGroup() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var observed acceptanceCleanupObservation
+	if err := json.Unmarshal(p.processCleanupEvidence, &observed); err != nil {
+		return 0
+	}
+	return observed.ProcessGroup
+}
+func acceptanceInstrumentCleanupSignal(command string) (string, error) {
+	const anchor = "def stop_child():"
+	if strings.Count(command, anchor) != 1 {
+		return "", errors.New("acceptance signal fixture requires exactly one trusted cleanup function")
+	}
+	// The inserted Python deliberately uses no single quotes: the existing
+	// shell-quoted trusted wrapper and its private input remain intact.
+	return strings.Replace(command, anchor, acceptanceCleanupSignalInjectionPython+"\n"+anchor, 1), nil
+}
+
+const acceptanceCleanupSignalInjectionPython = `
+import errno
+acceptance_original_killpg = os.killpg
+
+def acceptance_scoped_killpg(group, sig):
+    if sig not in (signal.SIGTERM, signal.SIGKILL):
+        return acceptance_original_killpg(group, sig)
+    marker_path = os.path.join(workdir, ".143", "hang.pid")
+    try:
+        with open(marker_path) as marker:
+            identity = json.load(marker)
+    except FileNotFoundError:
+        return acceptance_original_killpg(group, sig)
+    if identity.get("process_group") != group:
+        return acceptance_original_killpg(group, sig)
+    record = {"group":group,"signal":"TERM" if sig == signal.SIGTERM else "KILL","denied":sig == signal.SIGTERM,"delivered":False,"missing":False}
+    trace_path = os.path.join(workdir, ".143", "cleanup-signal-count")
+    if sig == signal.SIGTERM:
+        with open(trace_path,"a") as saved:
+            saved.write(json.dumps(record) + "\n")
+        raise PermissionError(errno.EPERM,"synthetic acceptance TERM denial")
+    try:
+        result = acceptance_original_killpg(group,sig)
+        record["delivered"] = True
+    except ProcessLookupError:
+        record["missing"] = True
+        raise
+    finally:
+        with open(trace_path,"a") as saved:
+            saved.write(json.dumps(record) + "\n")
+    return result
+
+os.killpg = acceptance_scoped_killpg
+`
+
+func TestReviewContainerAcceptanceCleanupSignalFixture(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	script := `import json,os,pathlib,signal,subprocess,sys
+workdir=sys.argv[1]
+pathlib.Path(workdir,".143").mkdir()
+target=subprocess.Popen(["/bin/sleep","30"],start_new_session=True)
+other=subprocess.Popen(["/bin/sleep","30"],start_new_session=True)
+pathlib.Path(workdir,".143","hang.pid").write_text(json.dumps({"pid":target.pid,"process_group":target.pid}))
+` + acceptanceCleanupSignalInjectionPython + `
+try:
+    os.killpg(other.pid,signal.SIGTERM)
+    other.wait(timeout=3)
+    denied=False
+    try:
+        os.killpg(target.pid,signal.SIGTERM)
+    except PermissionError as error:
+        denied=error.errno == errno.EPERM
+    os.killpg(target.pid,signal.SIGKILL)
+    target.wait(timeout=3)
+    print(json.dumps({"denied":denied,"target_status":target.returncode,"other_status":other.returncode,"target_group":target.pid}))
+finally:
+    for child in (target,other):
+        try:
+            acceptance_original_killpg(child.pid,signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait(timeout=3)
+`
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "/usr/bin/python3", "-I", "-S", "-c", script, root)
+	output, err := command.CombinedOutput()
+	require.NoError(t, err, "scoped synthetic TERM denial must preserve actual KILL and other-group delivery: %s", output)
+	var result struct {
+		Denied       bool `json:"denied"`
+		TargetStatus int  `json:"target_status"`
+		OtherStatus  int  `json:"other_status"`
+		TargetGroup  int  `json:"target_group"`
+	}
+	require.NoError(t, json.Unmarshal(output, &result), "fixture proof must contain finite signal outcomes")
+	require.True(t, result.Denied, "actual scoped hook must raise the intended synthetic PermissionError")
+	require.Equal(t, -9, result.TargetStatus, "actual SIGKILL must terminate the case-owned process")
+	require.Equal(t, -15, result.OtherStatus, "unrelated groups must retain ordinary TERM delivery")
+	data, readErr := os.ReadFile(filepath.Join(root, ".143", "cleanup-signal-count"))
+	require.NoError(t, readErr, "scoped fixture must retain actual target-group signal attempts")
+	observations := make([]acceptanceCleanupSignalObservation, 0)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var observation acceptanceCleanupSignalObservation
+		require.NoError(t, json.Unmarshal([]byte(line), &observation), "signal proof must decode without credentials")
+		observations = append(observations, observation)
+	}
+	require.Equal(t, []acceptanceCleanupSignalObservation{{Group: result.TargetGroup, Signal: "TERM", Denied: true}, {Group: result.TargetGroup, Signal: "KILL", Delivered: true}}, observations, "only the target group must record the synthetic TERM denial and real KILL delivery")
+	require.NotContains(t, acceptanceCleanupSignalInjectionPython, "'", "test injection must preserve the trusted command's existing shell quoting")
 }

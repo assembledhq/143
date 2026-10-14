@@ -23,6 +23,10 @@ const CodeReviewWorkspaceVerificationTimeout = time.Minute
 // failure. It is terminal for this workspace and cannot request source hydration.
 var ErrCodeReviewSourceIntegrity = errors.New("pinned review source object integrity validation failed; workspace must be recreated")
 
+// ErrCodeReviewPreparationCleanup identifies a preparation command whose process
+// termination could not be confirmed. The workspace cannot be reused or retried.
+var ErrCodeReviewPreparationCleanup = errors.New("review preparation process cleanup could not be confirmed; workspace must be recreated")
+
 const (
 	CodeReviewPreparationStageClone           = "clone"
 	CodeReviewPreparationStageHydration       = "hydration"
@@ -44,6 +48,14 @@ func NewCodeReviewWorkspacePreparationError(stage string, cause error) error {
 	}
 	var existing *CodeReviewWorkspacePreparationError
 	if errors.As(cause, &existing) {
+		if errors.Is(cause, ErrCodeReviewPreparationCleanup) {
+			if _, direct := cause.(*CodeReviewWorkspacePreparationError); !direct {
+				// Cleanup can be joined outside an existing stage error. Keep the
+				// entire error tree under one safe message rather than returning
+				// raw joined diagnostics or hiding its cleanup cause.
+				return &CodeReviewWorkspacePreparationError{Stage: existing.Stage, cause: cause}
+			}
+		}
 		return cause
 	}
 	return &CodeReviewWorkspacePreparationError{Stage: stage, cause: cause}
@@ -52,6 +64,9 @@ func NewCodeReviewWorkspacePreparationError(stage string, cause error) error {
 func (e *CodeReviewWorkspacePreparationError) Unwrap() error { return e.cause }
 
 func (e *CodeReviewWorkspacePreparationError) Error() string {
+	if errors.Is(e.cause, ErrCodeReviewPreparationCleanup) {
+		return "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run."
+	}
 	if errors.Is(e.cause, ErrStalePullRequestHead) {
 		return "Review workspace preparation observed a moved pull request head. Review did not run."
 	}

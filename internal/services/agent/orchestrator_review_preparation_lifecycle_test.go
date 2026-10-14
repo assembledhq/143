@@ -88,44 +88,79 @@ func TestContinueReviewRestoredGitGuardPrecedesBootstrapAndToken(t *testing.T) {
 
 func TestContinueReviewBudgetExpiryAfterReadinessKeepsLocalVerification(t *testing.T) {
 	t.Parallel()
-	orgID := testOrg()
-	issue := testIssue(orgID)
-	issue.Source = models.IssueSourceManual
-	session := testRun(orgID, issue.ID)
-	session.Origin = models.SessionOriginCodeReview
-	session.InteractionMode = models.SessionInteractionModeSingleRun
-	session.ValidationPolicy = models.SessionValidationPolicySkip
-	session.Status = models.SessionStatusIdle
-	session.CurrentTurn = 1
-	session.ContainerID = strPtr("ready-review")
-	session.SandboxState = models.SandboxStateRunning
-	d := defaultDeps()
-	configurePinnedReviewFixture(session, &d)
-	d.issues.issue = issue
-	d.sessions.getByIDFn = func(uuid.UUID, uuid.UUID) (models.Session, error) { return *session, nil }
-	d.github.err = errors.New("complete local-only verification must not look up installation auth")
-	d.messages.messages = []models.SessionMessage{{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Source: models.SessionMessageSourceCodeReview, Content: "Review ready local source."}}
-	previous := d.provider.ExecFn
-	guardCalls, verifyOnlyCalls := 0, 0
-	d.provider.ExecFn = func(ctx context.Context, sandbox *agent.Sandbox, command string, stdout, stderr io.Writer) (int, error) {
-		if strings.Contains(command, `"guard_configuration":true`) {
-			guardCalls++
-			<-ctx.Done()
-			return -1, ctx.Err()
-		}
-		if strings.Contains(command, `"verify_only":true`) {
-			verifyOnlyCalls++
-		}
-		return previous(ctx, sandbox, command, stdout, stderr)
+	tests := []struct {
+		name         string
+		cleanupStage string
+	}{
+		{name: "ordinary expiry retains platform verification"},
+		{name: "readiness cleanup uncertainty forbids verification", cleanupStage: "readiness"},
+		{name: "bootstrap cleanup uncertainty forbids verification", cleanupStage: "bootstrap"},
 	}
-	d.adapter.executeFn = func(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		return &agent.AgentResult{Summary: "reviewed"}, nil
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			issue.Source = models.IssueSourceManual
+			session := testRun(orgID, issue.ID)
+			session.Origin = models.SessionOriginCodeReview
+			session.InteractionMode = models.SessionInteractionModeSingleRun
+			session.ValidationPolicy = models.SessionValidationPolicySkip
+			session.Status = models.SessionStatusIdle
+			session.CurrentTurn = 1
+			session.ContainerID = strPtr("ready-review")
+			session.SandboxState = models.SandboxStateRunning
+			d := defaultDeps()
+			configurePinnedReviewFixture(session, &d)
+			d.issues.issue = issue
+			d.sessions.getByIDFn = func(uuid.UUID, uuid.UUID) (models.Session, error) { return *session, nil }
+			d.github.err = errors.New("complete local-only verification must not look up installation auth")
+			d.messages.messages = []models.SessionMessage{{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Source: models.SessionMessageSourceCodeReview, Content: "Review ready local source."}}
+			previous := d.provider.ExecFn
+			guardCalls, verifyOnlyCalls, reviewerCalls := 0, 0, 0
+			d.provider.ExecFn = func(ctx context.Context, sandbox *agent.Sandbox, command string, stdout, stderr io.Writer) (int, error) {
+				if tt.cleanupStage == "readiness" && strings.Contains(command, `"expected_branch":`) {
+					<-ctx.Done()
+					return -1, errors.Join(agent.ErrCodeReviewPreparationCleanup, ctx.Err())
+				}
+				if strings.Contains(command, `"guard_configuration":true`) {
+					guardCalls++
+					<-ctx.Done()
+					if tt.cleanupStage == "bootstrap" {
+						return -1, errors.Join(agent.ErrCodeReviewPreparationCleanup, ctx.Err())
+					}
+					return -1, ctx.Err()
+				}
+				if strings.Contains(command, `"verify_only":true`) {
+					verifyOnlyCalls++
+				}
+				return previous(ctx, sandbox, command, stdout, stderr)
+			}
+			d.adapter.executeFn = func(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				reviewerCalls++
+				return &agent.AgentResult{Summary: "reviewed"}, nil
+			}
+			ctx := agent.WithCodeReviewWorkspacePreparationDeadline(context.Background(), time.Now().Add(200*time.Millisecond))
+			err := buildOrchestrator(d).ContinueSession(ctx, session, nil)
+			if tt.cleanupStage != "" {
+				require.ErrorIs(t, err, agent.ErrCodeReviewPreparationCleanup, "deadline fallback must retain unconfirmed process cleanup")
+				require.ErrorIs(t, err, context.DeadlineExceeded, "cleanup uncertainty must preserve the original budget expiry")
+				require.ErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "unconfirmed cleanup must stop the initial review lifecycle")
+				require.Equal(t, 0, verifyOnlyCalls, "unconfirmed termination forbids the post-budget verification allowance")
+				require.Equal(t, 0, reviewerCalls, "reviewer cannot execute beside a potentially surviving preparation process")
+				expectedGuards := 1
+				if tt.cleanupStage == "readiness" {
+					expectedGuards = 0
+				}
+				require.Equal(t, expectedGuards, guardCalls, "failed readiness must never begin bootstrap or retry its guard")
+			} else {
+				require.NoError(t, err, "ordinary expiry after ready metadata may validate existing evidence without renewing preparation")
+				require.Equal(t, 1, guardCalls, "bootstrap must never retry after its original budget expires")
+				require.Equal(t, 1, verifyOnlyCalls, "ordinary boundary expiry retains exactly one platform-only verification allowance")
+				require.Equal(t, 1, reviewerCalls, "confirmed preparation cleanup permits the reviewer after local verification")
+			}
+		})
 	}
-	ctx := agent.WithCodeReviewWorkspacePreparationDeadline(context.Background(), time.Now().Add(200*time.Millisecond))
-	err := buildOrchestrator(d).ContinueSession(ctx, session, nil)
-	require.NoError(t, err, "expiry after ready metadata may validate complete existing evidence without renewing preparation")
-	require.Equal(t, 1, guardCalls, "bootstrap must never retry after its original budget expires")
-	require.Equal(t, 1, verifyOnlyCalls, "boundary expiry must use exactly one platform-only verification allowance")
 }
 
 type preparationRecheckTurnStore struct{ agent.CodeReviewTurnStore }
@@ -235,9 +270,12 @@ func TestContinueReviewPreparationFailureIsTerminalForExactThread(t *testing.T) 
 		inferred     bool
 		unscoped     bool
 		recheck      bool
+		cleanup      bool
 	}{
 		{name: "legacy fresh review", source: "fresh"},
 		{name: "warm retained review", source: "warm"},
+		{name: "warm cleanup uncertainty overrides cancellation", source: "warm", cleanup: true},
+		{name: "recheck cleanup uncertainty retains fenced failure", source: "warm", recheck: true, cleanup: true},
 		{name: "restored review checkpoint", source: "snapshot"},
 		{name: "recovered warm inferred thread", source: "warm", inferred: true},
 		{name: "legacy recovery without a resolvable thread", source: "fresh", inferred: true, unscoped: true},
@@ -295,6 +333,9 @@ func TestContinueReviewPreparationFailureIsTerminalForExactThread(t *testing.T) 
 			d.provider.ExecFn = func(ctx context.Context, sandbox *agent.Sandbox, command string, stdout, stderr io.Writer) (int, error) {
 				if strings.Contains(command, "prepare-dependency-evidence") {
 					bootstrapCalls++
+					if tt.cleanup {
+						return -1, errors.Join(agent.ErrCodeReviewPreparationCleanup, context.Canceled)
+					}
 					_, err := io.WriteString(stderr, "failed command containing secret-token")
 					return 1, err
 				}
@@ -322,6 +363,10 @@ func TestContinueReviewPreparationFailureIsTerminalForExactThread(t *testing.T) 
 				require.NotErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "recheck preparation failure must retain its assessment/job lease failure path")
 			} else {
 				require.ErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "preparation failures must use the worker's terminal thread boundary instead of scheduling a second bootstrap")
+			}
+			if tt.cleanup {
+				require.ErrorIs(t, err, agent.ErrCodeReviewPreparationCleanup, "initial and fenced recheck failure paths must retain cleanup uncertainty")
+				require.ErrorIs(t, err, context.Canceled, "terminal cleanup must preserve the joined cancellation identity")
 			}
 			var preparationErr *agent.CodeReviewWorkspacePreparationError
 			require.ErrorAs(t, err, &preparationErr, "terminal result must retain the safe preparation stage for controller projection")
