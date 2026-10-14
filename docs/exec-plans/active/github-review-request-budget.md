@@ -50,7 +50,9 @@ stalling active reviews, while preserving fresh checks before publication and me
    remote requests, bounded delay, and no lost final check state. Keep initial
    viewer reads shared and detached from browser cancellation. Persist check
    projection, health summary, and CI status atomically so parallel lanes cannot
-   replace a newer revision with an older completed read.
+   replace a newer revision with an older completed read. Track authoritative
+   GitHub reads separately from webhook projection versions, so a racing webhook
+   cannot discard fresh mergeability data; overlay its check state afterward.
 
 4. **Prepare review inputs once and protect the remaining quota.** Reuse the
    existing shared checkout and captured assessment inputs. First, resolve exact
