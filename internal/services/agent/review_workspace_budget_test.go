@@ -417,7 +417,7 @@ func TestReviewCloneDoesNotPersistPrivateAuthentication(t *testing.T) {
 	require.NoError(t, err, "successful clone should write a readable Git configuration")
 	require.Contains(t, string(config), origin, "clone should persist only its original bare URL")
 	require.NotContains(t, string(config), "temporary", "clone must not persist private credentials")
-	require.Equal(t, "/usr/bin/git -c core.hooksPath=/dev/null -c credential.helper= -c maintenance.auto=false -c gc.auto=0 clone --template=/dev/null --no-checkout --filter=blob:none --branch 'main' 'https://example.com/repo.git' '/checkout'", reviewCloneScript("https://example.com/repo.git", "main", "/checkout"), "clone arguments must remain credential-free and skip unauthenticated repository code")
+	require.Equal(t, "/usr/bin/git -c advice.graftFileDeprecated=false -c core.hooksPath=/dev/null -c credential.helper= -c maintenance.auto=false -c gc.auto=0 clone --template=/dev/null --no-checkout --filter=blob:none --branch 'main' 'https://example.com/repo.git' '/checkout'", reviewCloneScript("https://example.com/repo.git", "main", "/checkout"), "clone arguments must remain credential-free and skip unauthenticated repository code")
 }
 
 func TestReviewPreparationErrorHidesProviderDiagnostics(t *testing.T) {

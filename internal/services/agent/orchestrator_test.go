@@ -1410,7 +1410,7 @@ func configurePinnedReviewFixture(session *models.Session, d *testDeps) {
 		if strings.Contains(command, "with pathlib.Path(sys.argv[1]).open() as marker:") {
 			return 42, nil // This fixture begins with complete shared inputs and no preparation owner.
 		}
-		if command == "git rev-parse HEAD" || command == "git rev-parse FETCH_HEAD" || command == "/usr/bin/git -c core.hooksPath=/dev/null rev-parse FETCH_HEAD" {
+		if command == "git rev-parse HEAD" || command == "git rev-parse FETCH_HEAD" || command == "/usr/bin/git -c advice.graftFileDeprecated=false -c core.hooksPath=/dev/null rev-parse FETCH_HEAD" {
 			_, err := io.WriteString(stdout, reviewFixtureHead+"\n")
 			return 0, err
 		}

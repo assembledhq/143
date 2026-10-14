@@ -46,7 +46,7 @@ func (p *reviewWorkspaceProvider) Exec(_ context.Context, _ *Sandbox, command st
 	if p.failEvidence && strings.Contains(command, `"receipt":{`) {
 		return 1, nil
 	}
-	if command == "/usr/bin/git -c core.hooksPath=/dev/null rev-parse FETCH_HEAD" || strings.Contains(command, "rev-parse HEAD") {
+	if command == "/usr/bin/git -c advice.graftFileDeprecated=false -c core.hooksPath=/dev/null rev-parse FETCH_HEAD" || strings.Contains(command, "rev-parse HEAD") {
 		_, err := io.WriteString(stdout, p.actualHead+"\n")
 		return 0, err
 	}
