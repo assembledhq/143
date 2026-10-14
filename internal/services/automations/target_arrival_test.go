@@ -56,11 +56,6 @@ func (f *fakeArrivalTargetStore) MarkHeadResolutionPending(_ context.Context, _ 
 	return nil
 }
 
-func (f *fakeArrivalTargetStore) SetLifecycle(_ context.Context, _ db.DBTX, _, _ uuid.UUID, state models.AutomationTargetLifecycleState) error {
-	f.lifecycle = append(f.lifecycle, state)
-	return nil
-}
-
 func (f *fakeArrivalTargetStore) SetLifecycleObserved(_ context.Context, _ db.DBTX, _, _ uuid.UUID, state models.AutomationTargetLifecycleState, observedAt *time.Time) (bool, error) {
 	f.lifecycle = append(f.lifecycle, state)
 	f.observedAt = append(f.observedAt, observedAt)

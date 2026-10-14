@@ -442,7 +442,11 @@ func (s *AutomationTargetStore) RetireActiveGenerationsForAutomation(ctx context
 	return retired, nil
 }
 
-// SetLifecycle records the pull request's lifecycle state on the target.
+// SetLifecycle records the pull request's lifecycle state on the target,
+// stamping the evidence with this process's clock and without arbitration.
+// Lifecycle evidence is compared against GitHub's own timestamps, so a
+// local stamp can make a genuine later event look stale: production paths
+// record lifecycle through SetLifecycleObserved with the source's time.
 func (s *AutomationTargetStore) SetLifecycle(ctx context.Context, q DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState) error {
 	if err := state.Validate(); err != nil {
 		return err

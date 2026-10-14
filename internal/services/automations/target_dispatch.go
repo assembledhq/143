@@ -342,8 +342,27 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 	}
 	if current.ok && current.info.State != "" && current.info.State != "open" && event != models.AutomationGitHubEventPullRequestMerged {
 		if target.LifecycleState != models.AutomationTargetLifecycleMerged {
-			if err := d.targets.SetLifecycle(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleClosed); err != nil {
+			// The close is stamped with GitHub's own updated_at, never this
+			// process's clock: every other piece of lifecycle evidence is a
+			// GitHub moment, and a local stamp can be later than a reopen
+			// GitHub already made, which would then be refused as older than
+			// this close. A lookup without a timestamp leaves the evidence
+			// unknown. The store refuses the close when the target already
+			// holds newer open evidence, which means the lookup described the
+			// pull request before a reopen this transaction can see: the run
+			// retries with a fresh lookup instead of being skipped.
+			applied, err := d.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, models.AutomationTargetLifecycleClosed, current.info.UpdatedAt)
+			if err != nil {
 				return DispatchOutcome{}, err
+			}
+			if !applied {
+				if _, err := d.runs.MarkWaiting(ctx, tx, orgID, run.ID); err != nil {
+					return DispatchOutcome{}, err
+				}
+				if err := tx.Commit(ctx); err != nil {
+					return DispatchOutcome{}, fmt.Errorf("commit automation dispatch wait: %w", err)
+				}
+				return DispatchOutcome{Kind: DispatchRetry, RetryAfter: automationStaleLookupRetry, Note: "the lookup's close is older than the target's open evidence"}, nil
 			}
 		}
 		return d.terminalize(ctx, tx, orgID, run.ID, models.AutomationRunOutcomePRClosed, "pull request is "+current.info.State)
@@ -440,8 +459,12 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 			return DispatchOutcome{Kind: DispatchRetry, RetryAfter: headLookupBackoff(d.now(), run), Note: "pull request openness is stale and the lookup is unavailable"}, nil
 		}
 		// The live lookup refreshes the evidence for the state the target
-		// is in; a merged target running its final turn stays merged.
-		if err := d.targets.SetLifecycle(ctx, tx, orgID, target.ID, target.LifecycleState); err != nil {
+		// is in; a merged target running its final turn stays merged. The
+		// refresh carries GitHub's updated_at, so it only moves the evidence
+		// forward to a GitHub moment and never stamps this process's clock,
+		// which a genuine close made just before it would otherwise look
+		// older than. This run proceeds on the lookup either way.
+		if _, err := d.targets.SetLifecycleObserved(ctx, tx, orgID, target.ID, target.LifecycleState, current.info.UpdatedAt); err != nil {
 			return DispatchOutcome{}, err
 		}
 	}
