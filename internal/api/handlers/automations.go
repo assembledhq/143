@@ -450,12 +450,17 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
 		return
 	}
+	githubEventFilters, err := validateAutomationGitHubEventFilters(req.GitHubEventFilters)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_EVENT_FILTERS", err.Error())
+		return
+	}
 	effectiveAgentType, err := h.defaultAutomationAgentType(r.Context(), orgID, agentType)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings", err)
 		return
 	}
-	reasoningOverride, err := parseReasoningEffortForAgent(effectiveAgentType, string(req.ReasoningEffort))
+	reasoningOverride, err := parseAutomationReasoningEffort(effectiveAgentType, string(req.ReasoningEffort), githubEventFilters)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", err.Error())
 		return
@@ -553,7 +558,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		priority = *req.Priority
 	}
 	prePRReviewLoops := 0
-	if models.AgentSupportsNativeReview(effectiveAgentType) {
+	if validateAutomationReviewLoops(models.DefaultReviewLoopMaxPasses, effectiveAgentType, githubEventFilters) == nil {
 		prePRReviewLoops = models.DefaultReviewLoopMaxPasses
 	}
 	if req.PrePRReviewLoops != nil {
@@ -563,18 +568,13 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 		prePRReviewLoops = *req.PrePRReviewLoops
 	}
-	if err := validatePrePRReviewLoopsForAgent(prePRReviewLoops, effectiveAgentType); err != nil {
+	if err := validateAutomationReviewLoops(prePRReviewLoops, effectiveAgentType, githubEventFilters); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_PRE_PR_REVIEW_LOOPS", err.Error())
 		return
 	}
 	githubEventTriggers, err := resolveAutomationGitHubEventTriggers(req.ProductTriggers, req.GitHubEventTriggers)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_EVENT_TRIGGERS", err.Error())
-		return
-	}
-	githubEventFilters, err := validateAutomationGitHubEventFilters(req.GitHubEventFilters)
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_EVENT_FILTERS", err.Error())
 		return
 	}
 	eventTriggers, err := validateAutomationEventTriggerInputs(req.EventTriggers)
@@ -1468,6 +1468,15 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.GitHubEventFilters != nil {
+		githubEventFilters, err := validateAutomationGitHubEventFilters(*req.GitHubEventFilters)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_EVENT_FILTERS", err.Error())
+			return
+		}
+		automation.GitHubEventFilters = githubEventFilters
+	}
+	routeSettingsEdited := (req.GitHubEventFilters != nil && (hasExplicitAutomationLabelRoutes(before.GitHubEventFilters) || hasExplicitAutomationLabelRoutes(automation.GitHubEventFilters)))
 	if req.Capabilities != nil && !authorizeAutomationActionGrants(w, r, *req.Capabilities) {
 		return
 	}
@@ -1552,7 +1561,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.AgentType != nil || req.Model != nil || req.ReasoningEffort != nil {
+	if req.AgentType != nil || req.Model != nil || req.ReasoningEffort != nil || routeSettingsEdited {
 		effectiveAgentType, err := h.defaultAutomationAgentType(r.Context(), orgID, automation.AgentType)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings", err)
@@ -1564,7 +1573,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		} else if automation.ReasoningEffort != nil {
 			raw = string(*automation.ReasoningEffort)
 		}
-		reasoningOverride, err := parseReasoningEffortForAgent(effectiveAgentType, raw)
+		reasoningOverride, err := parseAutomationReasoningEffort(effectiveAgentType, raw, automation.GitHubEventFilters)
 		if err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_REASONING_EFFORT", err.Error())
 			return
@@ -1604,13 +1613,13 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		automation.PrePRReviewLoops = *req.PrePRReviewLoops
 	}
-	if req.AgentType != nil || req.Model != nil || req.PrePRReviewLoops != nil {
+	if req.AgentType != nil || req.Model != nil || req.PrePRReviewLoops != nil || routeSettingsEdited {
 		effectiveAgentType, err := h.defaultAutomationAgentType(r.Context(), orgID, automation.AgentType)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "DEFAULT_AGENT_LOOKUP_FAILED", "failed to load organization settings", err)
 			return
 		}
-		if err := validatePrePRReviewLoopsForAgent(automation.PrePRReviewLoops, effectiveAgentType); err != nil {
+		if err := validateAutomationReviewLoops(automation.PrePRReviewLoops, effectiveAgentType, automation.GitHubEventFilters); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_PRE_PR_REVIEW_LOOPS", err.Error())
 			return
 		}
@@ -1652,14 +1661,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		automation.GitHubEventTriggers = githubEventTriggers
 	}
-	if req.GitHubEventFilters != nil {
-		githubEventFilters, err := validateAutomationGitHubEventFilters(*req.GitHubEventFilters)
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_EVENT_FILTERS", err.Error())
-			return
-		}
-		automation.GitHubEventFilters = githubEventFilters
-	}
+
 	if req.SessionContinuity != nil {
 		automation.SessionContinuity = *req.SessionContinuity
 	}
