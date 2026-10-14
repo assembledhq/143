@@ -8,7 +8,7 @@ SANDBOX_CLI_GO_SOURCES := $(foreach dir,$(SANDBOX_CLI_PACKAGE_DIRS),$(filter-out
 SANDBOX_CLI_EMBED_SOURCES := $(shell GOOS=linux CGO_ENABLED=0 go list -deps -f '{{if .Module}}{{if eq .Module.Path "github.com/assembledhq/143"}}{{range .EmbedFiles}}{{$$.Dir}}/{{.}} {{end}}{{end}}{{end}}' ./cmd/tools 2>/dev/null)
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json go.mod go.sum $(SANDBOX_CLI_PACKAGE_DIRS) $(SANDBOX_CLI_GO_SOURCES) $(SANDBOX_CLI_EMBED_SOURCES)
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr-profile test-pr test-coverage-diff test-main test-review-container-acceptance test-integration test-github-rate-limit test-github-rate-limit-redis migrate-up migrate-down demo-seed-check build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr-profile test-pr test-coverage-diff test-main test-review-container-acceptance test-review-real-repository-acceptance test-integration test-github-rate-limit test-github-rate-limit-redis migrate-up migrate-down demo-seed-check build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 .PHONY: audit-review-recipes
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
@@ -123,6 +123,11 @@ test:
 # Missing runtime/image/network/evidence settings fail instead of skipping.
 test-review-container-acceptance:
 	REVIEW_CONTAINER_ACCEPTANCE=1 go test ./internal/services/agent -run '^TestReviewContainerAcceptance$$' -count=1 -parallel=2 -v -timeout=10m
+
+# Private, revision-pinned repository acceptance. See docs/testing; never run
+# repository inventories or access tokens in public CI artifacts.
+test-review-real-repository-acceptance:
+	REVIEW_REAL_REPOSITORY_ACCEPTANCE=1 go test ./internal/services/agent -run '^TestReviewRealRepositoryAcceptance$$' -count=1 -parallel=1 -v -timeout=45m
 
 test-race:
 	go test -race ./...
