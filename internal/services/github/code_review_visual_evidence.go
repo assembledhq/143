@@ -49,6 +49,7 @@ type githubVisualEvidenceContent struct {
 type githubVisualEvidencePullRequest struct {
 	Number    int                        `json:"number"`
 	HTMLURL   string                     `json:"html_url"`
+	Body      string                     `json:"body"`
 	BodyHTML  string                     `json:"body_html"`
 	User      *githubVisualEvidenceActor `json:"user"`
 	CreatedAt *time.Time                 `json:"created_at"`
@@ -62,28 +63,50 @@ type githubVisualEvidencePullRequest struct {
 // may contain review evidence. Description images are always captured;
 // discussion images are admitted only from human User or Mannequin actors.
 func (s *PRService) DiscoverCodeReviewVisualEvidence(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (models.CodeReviewVisualEvidenceDiscovery, error) {
+	discovery, err := s.discoverCodeReviewEvidence(ctx, orgID, repositoryID, number, false)
+	return discovery.Visual, err
+}
+
+// DiscoverCodeReviewEvidence captures text and images from the same PR and
+// discussion responses without repeating the four GitHub inventory requests.
+func (s *PRService) DiscoverCodeReviewEvidence(ctx context.Context, orgID, repositoryID uuid.UUID, number int) (CodeReviewEvidenceDiscovery, error) {
+	return s.discoverCodeReviewEvidence(ctx, orgID, repositoryID, number, true)
+}
+
+func (s *PRService) discoverCodeReviewEvidence(ctx context.Context, orgID, repositoryID uuid.UUID, number int, includeText bool) (CodeReviewEvidenceDiscovery, error) {
 	if s == nil || s.repos == nil {
-		return models.CodeReviewVisualEvidenceDiscovery{}, fmt.Errorf("repository store is unavailable")
+		return CodeReviewEvidenceDiscovery{}, fmt.Errorf("repository store is unavailable")
 	}
 	if orgID == uuid.Nil || repositoryID == uuid.Nil || number <= 0 {
-		return models.CodeReviewVisualEvidenceDiscovery{}, fmt.Errorf("org_id, repository_id, and positive pull request number are required")
+		return CodeReviewEvidenceDiscovery{}, fmt.Errorf("org_id, repository_id, and positive pull request number are required")
 	}
 
 	repository, err := s.repos.GetByID(ctx, orgID, repositoryID)
 	if err != nil {
-		return models.CodeReviewVisualEvidenceDiscovery{}, fmt.Errorf("load repository for code review visual evidence: %w", err)
+		return CodeReviewEvidenceDiscovery{}, fmt.Errorf("load repository for code review visual evidence: %w", err)
 	}
 	resolution, err := s.getInstallationResolutionForRepo(ctx, orgID, &repository)
 	if err != nil {
-		return models.CodeReviewVisualEvidenceDiscovery{}, fmt.Errorf("load installation token for code review visual evidence: %w", err)
+		return CodeReviewEvidenceDiscovery{}, fmt.Errorf("load installation token for code review visual evidence: %w", err)
 	}
-	ctx = withGitHubResolutionContext(ctx, resolution, repository.InstallationID, "code_review_visual_evidence")
+	caller := "code_review_visual_evidence"
+	if includeText {
+		caller = "code_review_evidence"
+	}
+	ctx = withGitHubResolutionContext(ctx, resolution, repository.InstallationID, caller)
 	token := resolution.Token
 	owner, repo := splitRepo(repository.FullName)
 
 	var details githubVisualEvidencePullRequest
 	var issueComments, reviews, reviewComments []models.CodeReviewVisualEvidenceSource
 	var issueCommentCount, reviewCount, reviewCommentCount int
+	var issueText, reviewText, reviewCommentText codeReviewTextInventory
+	textInventory := func(inventory *codeReviewTextInventory) *codeReviewTextInventory {
+		if includeText {
+			return inventory
+		}
+		return nil
+	}
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number)
@@ -98,7 +121,7 @@ func (s *PRService) DiscoverCodeReviewVisualEvidence(ctx context.Context, orgID,
 	})
 	group.Go(func() error {
 		path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number)
-		items, count, requestErr := s.listCodeReviewVisualEvidenceSources(groupCtx, token, path, models.CodeReviewEvidenceSurfaceIssueComment)
+		items, count, requestErr := s.listCodeReviewVisualEvidenceSources(groupCtx, token, path, models.CodeReviewEvidenceSurfaceIssueComment, textInventory(&issueText))
 		if requestErr != nil {
 			return fmt.Errorf("list pull request issue comments for visual evidence: %w", requestErr)
 		}
@@ -108,7 +131,7 @@ func (s *PRService) DiscoverCodeReviewVisualEvidence(ctx context.Context, orgID,
 	})
 	group.Go(func() error {
 		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, repo, number)
-		items, count, requestErr := s.listCodeReviewVisualEvidenceSources(groupCtx, token, path, models.CodeReviewEvidenceSurfaceReviewBody)
+		items, count, requestErr := s.listCodeReviewVisualEvidenceSources(groupCtx, token, path, models.CodeReviewEvidenceSurfaceReviewBody, textInventory(&reviewText))
 		if requestErr != nil {
 			return fmt.Errorf("list pull request reviews for visual evidence: %w", requestErr)
 		}
@@ -118,7 +141,7 @@ func (s *PRService) DiscoverCodeReviewVisualEvidence(ctx context.Context, orgID,
 	})
 	group.Go(func() error {
 		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/comments", owner, repo, number)
-		items, count, requestErr := s.listCodeReviewVisualEvidenceSources(groupCtx, token, path, models.CodeReviewEvidenceSurfaceReviewComment)
+		items, count, requestErr := s.listCodeReviewVisualEvidenceSources(groupCtx, token, path, models.CodeReviewEvidenceSurfaceReviewComment, textInventory(&reviewCommentText))
 		if requestErr != nil {
 			return fmt.Errorf("list pull request review comments for visual evidence: %w", requestErr)
 		}
@@ -127,10 +150,10 @@ func (s *PRService) DiscoverCodeReviewVisualEvidence(ctx context.Context, orgID,
 		return nil
 	})
 	if err := group.Wait(); err != nil {
-		return models.CodeReviewVisualEvidenceDiscovery{}, err
+		return CodeReviewEvidenceDiscovery{}, err
 	}
 	if strings.TrimSpace(details.Head.SHA) == "" {
-		return models.CodeReviewVisualEvidenceDiscovery{}, fmt.Errorf("pull request head SHA is missing from visual evidence snapshot")
+		return CodeReviewEvidenceDiscovery{}, fmt.Errorf("pull request head SHA is missing from visual evidence snapshot")
 	}
 
 	sources := make([]models.CodeReviewVisualEvidenceSource, 0)
@@ -154,7 +177,7 @@ func (s *PRService) DiscoverCodeReviewVisualEvidence(ctx context.Context, orgID,
 	sources = appendBoundedVisualEvidenceSources(sources, reviews, models.CodeReviewVisualEvidenceMaxImages)
 	sources = appendBoundedVisualEvidenceSources(sources, reviewComments, models.CodeReviewVisualEvidenceMaxImages)
 
-	return models.CodeReviewVisualEvidenceDiscovery{
+	result := CodeReviewEvidenceDiscovery{Visual: models.CodeReviewVisualEvidenceDiscovery{
 		Version:           codeReviewVisualEvidenceDiscoveryVersion,
 		RepositoryID:      repositoryID,
 		Repository:        repository.FullName,
@@ -163,10 +186,14 @@ func (s *PRService) DiscoverCodeReviewVisualEvidence(ctx context.Context, orgID,
 		CapturedAt:        time.Now().UTC(),
 		SourceCount:       descriptionSourceCount + issueCommentCount + reviewCount + reviewCommentCount,
 		Sources:           sources,
-	}, nil
+	}}
+	if includeText {
+		result.Text = codeReviewTextFromInventories(details.Head.SHA, details.Body, issueText, reviewText, reviewCommentText)
+	}
+	return result, nil
 }
 
-func (s *PRService) listCodeReviewVisualEvidenceSources(ctx context.Context, token, basePath string, surface models.CodeReviewEvidenceSurface) ([]models.CodeReviewVisualEvidenceSource, int, error) {
+func (s *PRService) listCodeReviewVisualEvidenceSources(ctx context.Context, token, basePath string, surface models.CodeReviewEvidenceSurface, text *codeReviewTextInventory) ([]models.CodeReviewVisualEvidenceSource, int, error) {
 	retained := make([]models.CodeReviewVisualEvidenceSource, 0, models.CodeReviewVisualEvidenceMaxImages)
 	total := 0
 	for page := 1; ; page++ {
@@ -182,6 +209,9 @@ func (s *PRService) listCodeReviewVisualEvidenceSources(ctx context.Context, tok
 		var pageItems []githubVisualEvidenceContent
 		if err := json.Unmarshal(body, &pageItems); err != nil {
 			return nil, 0, fmt.Errorf("decode GitHub visual evidence page %d: %w", page, err)
+		}
+		if text != nil {
+			text.add(surface, pageItems)
 		}
 		pageSources, pageSourceCount := visualEvidenceSourcesFromDiscussionBounded(surface, pageItems, models.CodeReviewVisualEvidenceMaxImages)
 		total += pageSourceCount

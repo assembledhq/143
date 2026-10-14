@@ -50,6 +50,7 @@ type RequestMetadata struct {
 	AuthType            string
 	InstallationID      int64
 	SyncReason          string
+	HealthOrigin        string
 	Caller              string
 	PrincipalUnresolved bool
 	SessionID           string
@@ -462,6 +463,9 @@ func (t *transport) logRequest(req *http.Request, resp *http.Response, requestEr
 	if metadata.SyncReason != "" {
 		event = event.Str("github_sync_reason", metadata.SyncReason)
 	}
+	if origin := healthOrigin(metadata.HealthOrigin); origin != "" {
+		event = event.Str("github_health_origin", origin)
+	}
 	if metadata.Caller != "" {
 		event = event.Str("github_caller", metadata.Caller)
 	}
@@ -708,7 +712,18 @@ func normalizeRepositorySegments(segments *[]string) {
 		} else if len(parts) >= 5 {
 			parts[4] = ":id"
 		}
-	case "commits", "branches", "statuses":
+	case "commits":
+		if len(parts) >= 5 {
+			// Collapse refs (including branch names containing slashes), but
+			// retain the bounded endpoint suffix needed to distinguish CI reads.
+			suffix := parts[len(parts)-1]
+			if len(parts) >= 6 && (suffix == "check-runs" || suffix == "status") {
+				parts = append(parts[:4], ":ref", suffix)
+			} else {
+				parts = append(parts[:4], ":ref")
+			}
+		}
+	case "branches", "statuses":
 		if len(parts) >= 5 {
 			parts = append(parts[:4], ":ref")
 		}
@@ -780,7 +795,7 @@ func NormalizeExternalRoute(path string) string {
 			continue
 		}
 		switch segment {
-		case "", "repos", "pulls", "issues", "comments", "reviews", "commits", "branches", "statuses", "contents", "git", "trees", "ref", "refs", "check-runs", "check-suites", "actions", "runs", "jobs", "artifacts", "logs", "releases", "latest", "tags", "assets", "compare", "files", "user", "users", "orgs", "members", "memberships", "teams", "app", "installations", "access_tokens", "graphql", "rate_limit":
+		case "", "repos", "pulls", "issues", "comments", "reviews", "commits", "branches", "statuses", "status", "contents", "git", "trees", "ref", "refs", "check-runs", "check-suites", "actions", "runs", "jobs", "artifacts", "logs", "releases", "latest", "tags", "assets", "compare", "files", "user", "users", "orgs", "members", "memberships", "teams", "app", "installations", "access_tokens", "graphql", "rate_limit":
 		default:
 			return "/other"
 		}

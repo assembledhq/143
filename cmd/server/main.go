@@ -1622,6 +1622,7 @@ func buildServices(
 				}
 			}
 			sandboxAuthServer := sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
+			sandboxAuthServer.SetGitHubRateLimitController(githubRateLimitController)
 			sandboxAuthBroker = sandboxauth.NewBroker(sandboxAuthServer, sessionStore, repoStore, orgStore, logger)
 			orchestratorSandboxAuth = sandboxauth.NewLeaseClient(sandboxAuthBroker, "worker-orchestrator", logger)
 			prSandboxAuth = sandboxauth.NewLeaseClient(sandboxAuthBroker, "worker-pr", logger)

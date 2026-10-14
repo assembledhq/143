@@ -40,6 +40,11 @@ func (o *GitHubHTTPObserver) GetAPIToken(ctx context.Context) (string, error) {
 		return "", errors.New("sandbox GitHub credential unavailable")
 	}
 	o.response = response
+	if response.ObservationID == "" {
+		o.client.reportCoverage(ctx, "sandbox_tools", "missing_binding", o.stderr)
+	} else if !response.RequestControl {
+		o.client.reportCoverage(ctx, "sandbox_tools", "control_unavailable", o.stderr)
+	}
 	return response.Token, nil
 }
 
@@ -57,11 +62,13 @@ func (o *GitHubHTTPObserver) RoundTrip(request *http.Request) (*http.Response, e
 	auth := request.Header.Get("Authorization")
 	unknown := subtle.ConstantTimeCompare([]byte(auth), []byte("token "+binding.Token)) != 1 && subtle.ConstantTimeCompare([]byte(auth), []byte("Bearer "+binding.Token)) != 1
 	request = request.WithContext(context.WithValue(request.Context(), unknownGHPrincipal{}, unknown))
-	return (ghObservationTransport{base: o.base, observe: func(event HTTPObservation) {
+	controlled := githubAdmissionTransport{base: o.base, client: o.client, binding: binding, caller: "sandbox_tools", stderr: o.stderr}
+	return (ghObservationTransport{base: controlled, observe: func(event HTTPObservation) {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), time.Second)
 		defer cancel()
 		if err := o.client.Observe(ctx, binding.ObservationID, []HTTPObservation{event}, false); err != nil {
 			fmt.Fprintln(o.stderr, "143-tools github: GitHub request attribution incomplete")
+			o.client.reportCoverage(context.WithoutCancel(request.Context()), "sandbox_tools", "observation_report_failed", o.stderr)
 		}
 	}}).RoundTrip(request)
 }

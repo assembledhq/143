@@ -11322,7 +11322,7 @@ func newSyncPullRequestStateHandler(stores *Stores, services *Services, logger z
 			Str("pull_request_id", pullRequestID.String()).
 			Str("sync_reason", string(syncReason)).
 			Msg("starting sync_pull_request_state job")
-		syncCtx := ghservice.WithPullRequestSyncReason(ctx, syncReason)
+		syncCtx := ghservice.WithPullRequestSyncReason(ghservice.WithPullRequestSyncOrigin(ctx, ghservice.PullRequestSyncOriginQueued), syncReason)
 		if err := services.PR.SyncPullRequestState(syncCtx, orgID, pullRequestID); err != nil {
 			if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
 				return newPullRequestMergeabilityWait(err)

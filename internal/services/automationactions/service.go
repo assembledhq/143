@@ -14,6 +14,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
@@ -49,9 +50,11 @@ type Receipt struct{ ID, URL string }
 type SendFailure struct {
 	Code       string
 	Definitive bool
+	Err        error
 }
 
 func (e *SendFailure) Error() string { return e.Code }
+func (e *SendFailure) Unwrap() error { return e.Err }
 
 type Provider interface {
 	Inspect(context.Context, models.AutomationActionScope) (PullRequest, error)
@@ -181,7 +184,7 @@ func (s *Service) Execute(ctx context.Context, actor models.AutomationActionActo
 		return result, err
 	}
 	if err = s.provider.Preflight(ctx, scope, payload.Request); err != nil {
-		return result, fmt.Errorf("%w: %v", ErrIntegrationNotReady, err)
+		return result, fmt.Errorf("%w: %w", ErrIntegrationNotReady, err)
 	}
 	if payload.Request.PRNumber > 0 {
 		if err = actionBudget(ctx); err != nil {
@@ -228,6 +231,9 @@ func (s *Service) Execute(ctx context.Context, actor models.AutomationActionActo
 	s.logger.Info().Str("org_id", actor.OrgID.String()).Str("action_id", claimed.ID.String()).Str("kind", string(claimed.Kind)).Str("provider_status", string(status)).Bool("receipt_recorded", finishErr == nil).Str("error_code", code).Msg("automation action attempt finished")
 	if finishErr != nil {
 		return result, fmt.Errorf("record action receipt: %w", finishErr)
+	}
+	if _, ok := ratelimit.AsDeferral(sendErr); ok {
+		return result, sendErr
 	}
 	return result, nil
 }

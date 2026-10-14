@@ -24,6 +24,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/github/identity"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 	"github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
@@ -38,9 +39,10 @@ type Resolver interface {
 // per-session listeners. Construct with NewServer; call Listen at session
 // start and Close(sessionID) at session end.
 type Server struct {
-	resolver  Resolver
-	socketDir string
-	logger    zerolog.Logger
+	resolver         Resolver
+	socketDir        string
+	logger           zerolog.Logger
+	githubController *ratelimit.Controller
 
 	// resolveTimeout bounds a single host-side Resolve call (which may make
 	// outbound HTTP). Less than CallTimeout so the in-sandbox client sees a
@@ -319,8 +321,15 @@ func (s *Server) handleConn(
 	if len(scopes) > 0 {
 		scope = scopes[0]
 	}
+	if req.Op == OpCheck || req.Op == OpCoverage {
+		s.handleGitHubControl(ctx, conn, scope, req, logger)
+		return
+	}
 	if req.Op == OpObserve {
 		if scope == nil || scope.record(ctx, s.logger, req) != nil {
+			if scope != nil {
+				s.logCoverage(scope.metadata, "observation_rejected")
+			}
 			s.writeError(conn, "invalid GitHub observation")
 			return
 		}
@@ -352,16 +361,29 @@ func (s *Server) handleConn(
 		return
 	}
 	resp := Response{
-		Token:     res.Token,
-		Username:  DefaultUsername,
-		Identity:  Identity(res.AuthoredBy()),
-		ExpiresAt: res.ExpiresAt,
+		Token:          res.Token,
+		Username:       DefaultUsername,
+		Identity:       Identity(res.AuthoredBy()),
+		ExpiresAt:      res.ExpiresAt,
+		RequestControl: true,
 	}
 	if req.WantObservation && req.Action == ActionAPI && scope != nil {
 		resp.ObservationID = scope.bind(res, req.Observer)
 		if resp.ObservationID == "" {
 			logger.Warn().Str("github_observer", req.Observer).Int("github_observation_capacity", 256).Msg("sandboxauth: GitHub observation capacity reached")
+		} else {
+			scope.mu.Lock()
+			metadata := scope.bindings[resp.ObservationID].metadata
+			scope.mu.Unlock()
+			reason := "legacy_observation_only"
+			if req.WantRequestControl {
+				reason = "supported_control"
+			}
+			s.logCoverage(metadata, reason)
 		}
+	}
+	if req.Action == ActionAPI && !req.WantObservation && scope != nil {
+		s.logCoverage(scope.metadata, "legacy_unobserved_api")
 	}
 	if res.User != nil && res.User.GitHubLogin != nil {
 		resp.Login = *res.User.GitHubLogin

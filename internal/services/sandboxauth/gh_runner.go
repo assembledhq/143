@@ -16,16 +16,25 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 	"github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 func runGH(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if !usesHostGitHubCredential(os.Environ()) {
+		if os.Getenv(SocketEnvVar) != "" {
+			reason := "explicit_credentials"
+			if host := os.Getenv("GH_HOST"); host != "" && host != "github.com" {
+				reason = "custom_host"
+			}
+			NewClient(os.Getenv(SocketEnvVar)).reportCoverage(context.Background(), "sandbox_gh", reason, stderr)
+		}
 		return executeGH(context.Background(), ghBinaryPath, args, os.Environ(), stdin, stdout, stderr)
 	}
 	client := NewClient(os.Getenv(SocketEnvVar))
@@ -35,6 +44,7 @@ func runGH(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if observedCommand {
 		response, err = client.GetObservedAPIToken(context.Background())
 	} else {
+		client.reportCoverage(context.Background(), "sandbox_gh", "unsupported_command", stderr)
 		response, err = client.Get(context.Background(), ActionAPI)
 	}
 	if err != nil || response.Error != "" || response.Token == "" {
@@ -44,12 +54,17 @@ func runGH(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if response.ObservationID == "" {
 		if observedCommand {
 			fmt.Fprintln(stderr, "143-tools gh: GitHub request attribution unavailable")
+			client.reportCoverage(context.Background(), "sandbox_gh", "missing_binding", stderr)
 		}
 		return executeGH(context.Background(), ghBinaryPath, args, replaceGHEnv(os.Environ(), map[string]string{"GH_TOKEN": response.Token}), stdin, stdout, stderr)
+	}
+	if !response.RequestControl {
+		client.reportCoverage(context.Background(), "sandbox_gh", "control_unavailable", stderr)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	report := make(chan HTTPObservation, 128)
+	var dropped atomic.Bool
 	complete := make(chan bool, 1)
 	go func() {
 		failed := false
@@ -70,18 +85,26 @@ func runGH(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		select {
 		case report <- event:
 		default:
-			fmt.Fprintln(stderr, "143-tools gh: GitHub observation queue full")
+			if dropped.CompareAndSwap(false, true) {
+				fmt.Fprintln(stderr, "143-tools gh: GitHub observation queue full")
+			}
 		}
 	}
-	code := runObservedGH(ctx, ghBinaryPath, args, os.Environ(), response.Token, stdin, stdout, stderr, observed)
+	controlled := githubAdmissionTransport{base: http.DefaultTransport, client: client, binding: response, caller: "sandbox_gh", stderr: stderr}
+	code := runObservedGH(ctx, ghBinaryPath, args, os.Environ(), response.Token, stdin, stdout, stderr, observed, controlled)
 	close(report)
+	if dropped.Load() {
+		client.reportCoverage(ctx, "sandbox_gh", "observation_queue_full", stderr)
+	}
 	select {
 	case failed := <-complete:
 		if failed {
 			fmt.Fprintln(stderr, "143-tools gh: GitHub request attribution incomplete")
+			client.reportCoverage(ctx, "sandbox_gh", "observation_report_failed", stderr)
 		}
 	case <-time.After(2 * time.Second):
 		fmt.Fprintln(stderr, "143-tools gh: GitHub request attribution timed out")
+		client.reportCoverage(ctx, "sandbox_gh", "observation_timeout", stderr)
 	}
 	return code
 }
@@ -164,7 +187,16 @@ func ghProxy(token string, transport http.RoundTripper, observe func(HTTPObserva
 			request.Out.Host = request.In.Host
 		},
 		Transport: ghObservationTransport{base: transport, observe: observe},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			if deferral, ok := ratelimit.AsDeferral(err); ok {
+				seconds := int64(time.Until(deferral.RetryAt).Seconds()) + 1
+				if seconds < 1 {
+					seconds = 1
+				}
+				w.Header().Set("Retry-After", fmt.Sprint(seconds))
+				http.Error(w, "GitHub request deferred during cooldown", http.StatusTooManyRequests)
+				return
+			}
 			http.Error(w, "GitHub transport failed", http.StatusBadGateway)
 		},
 	}
@@ -190,6 +222,10 @@ type ghObservationTransport struct {
 func (t ghObservationTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	started := time.Now()
 	response, err := t.base.RoundTrip(request)
+	var local *githubControlError
+	if errors.As(err, &local) {
+		return response, err
+	}
 	unknown, _ := request.Context().Value(unknownGHPrincipal{}).(bool)
 	event := HTTPObservation{UnknownPrincipal: unknown, Method: request.Method, Route: telemetry.NormalizeExternalRoute(request.URL.Path), DurationMS: time.Since(started).Milliseconds()}
 	if response != nil {

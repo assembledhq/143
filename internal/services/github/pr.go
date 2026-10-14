@@ -4264,6 +4264,9 @@ func (s *PRService) githubRequestMetadataForToken(ctx context.Context, token str
 	if reason, ok := pullRequestSyncReasonAttribute(ctx); ok {
 		metadata.SyncReason = string(reason)
 	}
+	if metadata.Caller == "pr_health" {
+		metadata.HealthOrigin = string(PullRequestSyncOriginFromContext(ctx))
+	}
 	if metadata.AuthType == githubtelemetry.AuthTypeUnknown && s != nil && s.tokenProvider != nil {
 		if installationID, ok := s.tokenProvider.installationIDForToken(token); ok {
 			metadata.AuthType = githubtelemetry.AuthTypeAppInstallation
