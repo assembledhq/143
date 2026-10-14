@@ -403,13 +403,17 @@ func TestPullRequestStore_UpsertHealthSummary_ReusesExistingVersion(t *testing.T
 	prID := uuid.New()
 	now := time.Now().UTC()
 	summary := models.PullRequestHealthSummary{
-		MergeState:       models.PullRequestMergeStateClean,
-		HasConflicts:     false,
-		FailingTestCount: 0,
-		NeedsAgentAction: false,
+		GitHubSyncVersion: 30,
+		MergeState:        models.PullRequestMergeStateClean,
+		HasConflicts:      false,
+		FailingTestCount:  0,
+		NeedsAgentAction:  false,
 	}
 	summaryJSON, err := json.Marshal(summary)
 	require.NoError(t, err, "should marshal the existing summary")
+	summary.GitHubSyncVersion = 31
+	nextJSON, err := json.Marshal(summary)
+	require.NoError(t, err, "encode an unchanged summary with a newer authoritative reservation")
 
 	mock.ExpectBegin()
 	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
@@ -452,9 +456,10 @@ func TestPullRequestStore_UpsertHealthSummary_ReusesExistingVersion(t *testing.T
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
-	current, err := store.UpsertHealthSummary(context.Background(), orgID, prID, "head", "base", summary, summaryJSON, 31)
+	current, err := store.UpsertHealthSummary(context.Background(), orgID, prID, "head", "base", summary, nextJSON, 31)
 	require.NoError(t, err, "UpsertHealthSummary should succeed when the summary is unchanged")
-	require.Equal(t, int64(7), current.Version, "UpsertHealthSummary should keep the same version for unchanged summaries")
+	require.Equal(t, int64(7), current.Version, "authoritative reservation metadata cannot manufacture a health version")
+	require.JSONEq(t, string(nextJSON), string(current.SummaryJSON), "current row must still advance the authoritative reservation")
 	require.Equal(t, models.PullRequestHealthEnrichmentStatusReady, current.EnrichmentStatus, "UpsertHealthSummary should preserve enrichment state when the summary is unchanged")
 	require.NoError(t, mock.ExpectationsWereMet(), "all unchanged-summary expectations should be met")
 }

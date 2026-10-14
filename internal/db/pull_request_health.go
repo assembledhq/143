@@ -110,6 +110,28 @@ func (s *PullRequestStore) UpsertProjectedHealthSummary(ctx context.Context, org
 	return s.upsertHealthSummary(ctx, orgID, pullRequestID, headSHA, baseSHA, summary, preview, false, opts.AppliedCheckStateVersion, &opts)
 }
 
+func healthSummaryJSONEqual(first, second []byte) bool {
+	if bytes.Equal(first, second) {
+		return true
+	}
+	normalize := func(raw []byte) ([]byte, error) {
+		var content map[string]any
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		if err := decoder.Decode(&content); err != nil {
+			return nil, err
+		}
+		delete(content, "github_sync_version")
+		return json.Marshal(content)
+	}
+	firstContent, err := normalize(first)
+	if err != nil {
+		return false
+	}
+	secondContent, err := normalize(second)
+	return err == nil && bytes.Equal(firstContent, secondContent)
+}
+
 func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA, baseSHA string, summary models.PullRequestHealthSummary, preview json.RawMessage, markGitHubSynced bool, checkStateVersion int64, expected *ProjectedHealthSummaryOptions) (models.PullRequestHealthCurrent, bool, bool, error) {
 	summaryJSON, err := json.Marshal(summary)
 	if err != nil {
@@ -182,7 +204,7 @@ func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullR
 	var enrichedAt *time.Time
 	if hasExisting {
 		version = existing.Version
-		if existing.HeadSHA != headSHA || existing.BaseSHA != baseSHA || !bytes.Equal(existing.SummaryJSON, summaryJSON) || !bytes.Equal(existing.SummaryPreviewJSON, preview) {
+		if existing.HeadSHA != headSHA || existing.BaseSHA != baseSHA || !healthSummaryJSONEqual(existing.SummaryJSON, summaryJSON) || !healthSummaryJSONEqual(existing.SummaryPreviewJSON, preview) {
 			version = existing.Version + 1
 		} else {
 			enrichmentStatus = existing.EnrichmentStatus
