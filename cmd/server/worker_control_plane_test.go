@@ -129,6 +129,7 @@ CREATE TABLE jobs(id uuid PRIMARY KEY,org_id uuid,job_type text,payload jsonb,st
 		{name: "caller deadline cancels server lock wait", timeout: 150 * time.Millisecond, wantCode: "57014", wantCtxErr: context.DeadlineExceeded},
 		{name: "server bounds lock wait before caller deadline", timeout: 6 * time.Second, wantCode: "55P03"},
 	}
+	//nolint:paralleltest // The cases share a locked row and the fully occupied ordinary pool.
 	for _, tt := range tests {
 		// These cases intentionally share and sequentially lock one synthetic
 		// row while the only ordinary connection remains occupied.
