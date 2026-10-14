@@ -3088,7 +3088,7 @@ func TestEnqueuePullRequestCheckProjectionAlwaysRebuilds(t *testing.T) {
 			pr := models.PullRequest{ID: prID, OrgID: orgID}
 
 			rebuildKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, prID.String())
-			syncKey := pullRequestStateSyncDedupeKey(prID)
+			syncKey := pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonIncomplete)
 			for _, jobType := range tt.wantJobTypes {
 				args := pgx.NamedArgs{
 					"org_id":     orgID,
@@ -3100,6 +3100,7 @@ func TestEnqueuePullRequestCheckProjectionAlwaysRebuilds(t *testing.T) {
 					"run_at":     pgxmock.AnyArg(),
 				}
 				if jobType == prHealthSyncJobType {
+					expectCheckSyncLaneEmpty(t, mock, orgID, prID, syncKey)
 					args = pgx.NamedArgs{
 						"org_id":     orgID,
 						"queue":      prHealthSyncQueue,
@@ -3107,11 +3108,15 @@ func TestEnqueuePullRequestCheckProjectionAlwaysRebuilds(t *testing.T) {
 						"payload":    pgxmock.AnyArg(),
 						"priority":   6,
 						"dedupe_key": &syncKey,
+						"run_at":     pgxmock.AnyArg(),
 					}
 				}
 				mock.ExpectQuery("INSERT INTO jobs").
 					WithArgs(args).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+				if jobType == prHealthSyncJobType {
+					mock.ExpectCommit()
+				}
 			}
 
 			service := &PRService{jobs: db.NewJobStore(mock), logger: zerolog.Nop()}
@@ -4119,7 +4124,7 @@ func TestHandlePullRequestEvent_ReadyForReviewSyncsCurrentBaseline(t *testing.T)
 		WillReturnRows(pgxmock.NewRows(handlerPRColumns).AddRow(prRow...))
 
 	payload := &capturedPayload{}
-	dedupeKey := pullRequestStateSyncDedupeKey(prID)
+	dedupeKey := pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonManual)
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":     orgID,

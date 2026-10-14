@@ -1342,9 +1342,9 @@ func TestPullRequestStateSyncDedupeKey(t *testing.T) {
 	prID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 
 	require.Equal(t,
-		"sync_pull_request_state:11111111-1111-1111-1111-111111111111",
-		pullRequestStateSyncDedupeKey(prID),
-		"all sync triggers for one pull request should share a dedupe key",
+		"sync_pull_request_state:11111111-1111-1111-1111-111111111111:urgent",
+		pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonManual),
+		"urgent sync triggers should use their own lane for the pull request",
 	)
 }
 
@@ -1357,7 +1357,7 @@ func TestEnqueuePullRequestStateSyncRecordsEveryDeduplicatedReason(t *testing.T)
 
 	orgID := uuid.New()
 	prID := uuid.New()
-	dedupeKey := pullRequestStateSyncDedupeKey(prID)
+	dedupeKey := pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonManual)
 	for index := range 2 {
 		rows := pgxmock.NewRows([]string{"id"})
 		if index == 0 {
@@ -1382,7 +1382,7 @@ func TestEnqueuePullRequestStateSyncRecordsEveryDeduplicatedReason(t *testing.T)
 	}
 	pr := models.PullRequest{ID: prID, OrgID: orgID}
 
-	service.enqueuePullRequestStateSync(context.Background(), pr, PullRequestSyncReasonStaleReconcile)
+	service.enqueuePullRequestStateSync(context.Background(), pr, PullRequestSyncReasonManual)
 	service.enqueuePullRequestStateSync(context.Background(), pr, PullRequestSyncReasonHeadChanged)
 
 	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
@@ -1390,7 +1390,7 @@ func TestEnqueuePullRequestStateSyncRecordsEveryDeduplicatedReason(t *testing.T)
 	var first, second map[string]any
 	require.NoError(t, json.Unmarshal([]byte(lines[0]), &first), "first synchronization request log should be valid JSON")
 	require.NoError(t, json.Unmarshal([]byte(lines[1]), &second), "deduplicated synchronization request log should be valid JSON")
-	require.Equal(t, string(PullRequestSyncReasonStaleReconcile), first["sync_reason"], "first event should preserve the initiating reason")
+	require.Equal(t, string(PullRequestSyncReasonManual), first["sync_reason"], "first event should preserve the initiating reason")
 	require.Equal(t, false, first["deduplicated"], "first event should identify the newly queued job")
 	require.Equal(t, string(PullRequestSyncReasonHeadChanged), second["sync_reason"], "deduplicated event should preserve the later trigger reason")
 	require.Equal(t, true, second["deduplicated"], "second event should identify that the active job absorbed it")
@@ -1433,25 +1433,28 @@ func TestPullRequestSyncReasonValidate(t *testing.T) {
 	}
 }
 
-// Every trigger except merge safety may ride along on a sync that is already
-// running. Merge safety has its own dedicated test below.
 func TestPullRequestSyncReasonCoalesces(t *testing.T) {
 	t.Parallel()
-
-	require.False(t, PullRequestSyncReasonMergeSafety.coalesces(), "merge safety must observe GitHub state fetched after its own request began")
-	for _, reason := range []PullRequestSyncReason{
-		PullRequestSyncReasonInitial,
-		PullRequestSyncReasonHeadChanged,
-		PullRequestSyncReasonBaseChanged,
-		PullRequestSyncReasonReadyForReview,
-		PullRequestSyncReasonIncomplete,
-		PullRequestSyncReasonStaleReconcile,
-		PullRequestSyncReasonCodeReview,
-		PullRequestSyncReasonRepair,
-		PullRequestSyncReasonManual,
-		PullRequestSyncReasonMergeabilityWait,
+	for _, tt := range []struct {
+		reason PullRequestSyncReason
+		want   bool
+	}{
+		{PullRequestSyncReasonInitial, false},
+		{PullRequestSyncReasonHeadChanged, false},
+		{PullRequestSyncReasonBaseChanged, false},
+		{PullRequestSyncReasonReadyForReview, false},
+		{PullRequestSyncReasonIncomplete, true},
+		{PullRequestSyncReasonStaleReconcile, true},
+		{PullRequestSyncReasonMergeSafety, false},
+		{PullRequestSyncReasonCodeReview, false},
+		{PullRequestSyncReasonRepair, false},
+		{PullRequestSyncReasonManual, false},
+		{PullRequestSyncReasonMergeabilityWait, true},
 	} {
-		require.True(t, reason.coalesces(), "%s should share an in-flight sync rather than spend a second GitHub round trip", reason)
+		t.Run(string(tt.reason), func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, tt.reason.coalesces(), "only background reads can share existing requests")
+		})
 	}
 }
 
@@ -4501,4 +4504,98 @@ func setPRHealthSessionThreadRowValue(row []any, column string, value any) {
 
 func strPtr(value string) *string {
 	return &value
+}
+
+func expectCheckSyncLaneEmpty(t *testing.T, mock pgxmock.PgxPoolIface, orgID, prID uuid.UUID, key string) {
+	t.Helper()
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id FROM pull_requests.*WHERE org_id = @org_id AND id = @pull_request_id FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
+	mock.ExpectQuery("SELECT j.id, j.status,.*j.org_id = @org_id.*FOR UPDATE OF j").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "queue": prHealthSyncQueue, "job_type": prHealthSyncJobType, "dedupe_key": key, "successor_prefix": key + ":after:"}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "status", "awaiting_predecessor"}))
+}
+
+func TestPRServiceSyncPullRequestStateRequiresFreshRead(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		reason PullRequestSyncReason
+		force  bool
+	}{
+		{name: "initial", reason: PullRequestSyncReasonInitial},
+		{name: "head change", reason: PullRequestSyncReasonHeadChanged},
+		{name: "base change", reason: PullRequestSyncReasonBaseChanged},
+		{name: "ready for review", reason: PullRequestSyncReasonReadyForReview},
+		{name: "code review", reason: PullRequestSyncReasonCodeReview},
+		{name: "repair", reason: PullRequestSyncReasonRepair},
+		{name: "manual", reason: PullRequestSyncReasonManual},
+		{name: "merge safety", reason: PullRequestSyncReasonMergeSafety},
+		{name: "check successor", reason: PullRequestSyncReasonIncomplete, force: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, prID := uuid.New(), uuid.New()
+			service, gate := newDriftSyncService(t, orgID, prID)
+			blocked := make(chan struct{})
+			for _, suffix := range []string{"", ":checks"} {
+				service.prHealthSyncGroup.DoChan(orgID.String()+":"+prID.String()+suffix, func() (any, error) { <-blocked; return nil, fmt.Errorf("obsolete snapshot") })
+			}
+			defer close(blocked)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			ctx = WithPullRequestSyncReason(ctx, tt.reason)
+			if tt.force {
+				ctx = WithPullRequestSyncFreshRead(ctx)
+			}
+			done := make(chan error, 1)
+			go func() { done <- service.SyncPullRequestState(ctx, orgID, prID) }()
+			select {
+			case <-gate.started:
+			case <-ctx.Done():
+				t.Fatal("fresh request inherited an older background read")
+			}
+			gate.releaseNow()
+			require.NoError(t, <-done, "fresh request must read GitHub after its own start")
+			require.Equal(t, int32(1), gate.fetches.Load(), "fresh request must perform its own authoritative read")
+		})
+	}
+}
+
+func TestEnqueuePullRequestStateSyncIsolatesImmediateLanes(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		reason PullRequestSyncReason
+		lane   string
+	}{
+		{PullRequestSyncReasonInitial, "urgent"},
+		{PullRequestSyncReasonHeadChanged, "urgent"},
+		{PullRequestSyncReasonBaseChanged, "urgent"},
+		{PullRequestSyncReasonReadyForReview, "urgent"},
+		{PullRequestSyncReasonCodeReview, "urgent"},
+		{PullRequestSyncReasonMergeSafety, "urgent"},
+		{PullRequestSyncReasonRepair, "urgent"},
+		{PullRequestSyncReasonManual, "urgent"},
+		{PullRequestSyncReasonStaleReconcile, "background"},
+		{PullRequestSyncReasonMergeabilityWait, "background"},
+	} {
+		t.Run(string(tt.reason), func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create isolated immediate enqueue fixture")
+			defer mock.Close()
+			pr := models.PullRequest{ID: uuid.New(), OrgID: uuid.New()}
+			key := fmt.Sprintf("sync_pull_request_state:%s:%s", pr.ID, tt.lane)
+			payload, err := json.Marshal(map[string]string{"org_id": pr.OrgID.String(), "pull_request_id": pr.ID.String(), "sync_reason": string(tt.reason)})
+			require.NoError(t, err, "encode full expected immediate payload")
+			mock.ExpectQuery("INSERT INTO jobs").WithArgs(pgx.NamedArgs{
+				"org_id": pr.OrgID, "queue": prHealthSyncQueue, "job_type": prHealthSyncJobType, "payload": payload,
+				"priority": 6, "dedupe_key": &key,
+			}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+			service := &PRService{jobs: db.NewJobStore(mock), logger: zerolog.Nop()}
+			require.NoError(t, service.queuePullRequestStateSync(context.Background(), pr, tt.reason), "immediate work cannot be absorbed by check or legacy lane jobs")
+			require.NoError(t, mock.ExpectationsWereMet(), "immediate lanes must enqueue without a delayed deadline or predecessor")
+		})
+	}
 }

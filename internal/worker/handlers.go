@@ -534,7 +534,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register(models.JobTypeVerifyChangesetSplit, newVerifyChangesetSplitHandler(stores, services, logger))
 		w.Register(models.JobTypeRestackChangesets, newRestackChangesetsHandler(stores, services, logger))
 		w.Register(models.JobTypePublishChangesetStack, newPublishChangesetStackHandler(stores, services, logger))
-		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
+		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(stores, services, logger))
 		w.Register("rebuild_pull_request_health", newRebuildPullRequestHealthHandler(services, logger))
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
@@ -11259,12 +11259,13 @@ func primaryIssueIDFromSnapshot(snapshot *models.SessionTurnIssueSnapshot) *uuid
 	return nil
 }
 
-func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) JobHandler {
+func newSyncPullRequestStateHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
 			OrgID         string `json:"org_id"`
 			PullRequestID string `json:"pull_request_id"`
 			SyncReason    string `json:"sync_reason"`
+			AfterJobID    string `json:"after_job_id"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal sync_pull_request_state payload: %w", err)
@@ -11281,12 +11282,32 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 		if syncReason.Validate() != nil {
 			syncReason = ghservice.PullRequestSyncReasonManual
 		}
+		if input.AfterJobID != "" {
+			if syncReason != ghservice.PullRequestSyncReasonIncomplete || stores == nil || stores.Jobs == nil {
+				return fmt.Errorf("check sync predecessor requires check lane and job store")
+			}
+			predecessorID, err := uuid.Parse(input.AfterJobID)
+			if err != nil {
+				return fmt.Errorf("parse check sync predecessor: %w", err)
+			}
+			active, err := stores.Jobs.PullRequestCheckSyncPredecessorActive(ctx, orgID, pullRequestID, predecessorID)
+			if err != nil {
+				return err
+			}
+			if active {
+				delay := 5 * time.Second
+				return &RetryableError{Err: fmt.Errorf("waiting for check sync predecessor %s", predecessorID), RetryAfter: &delay, BypassMaxRetryDuration: true}
+			}
+		}
 		logger.Info().
 			Str("org_id", orgID.String()).
 			Str("pull_request_id", pullRequestID.String()).
 			Str("sync_reason", string(syncReason)).
 			Msg("starting sync_pull_request_state job")
 		syncCtx := ghservice.WithPullRequestSyncReason(ctx, syncReason)
+		if syncReason == ghservice.PullRequestSyncReasonIncomplete {
+			syncCtx = ghservice.WithPullRequestSyncFreshRead(syncCtx)
+		}
 		if err := services.PR.SyncPullRequestState(syncCtx, orgID, pullRequestID); err != nil {
 			if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
 				return newPullRequestMergeabilityWait(err)

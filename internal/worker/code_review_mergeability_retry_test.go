@@ -46,7 +46,7 @@ func TestPullRequestMergeabilityWaitUsesBoundedRetryWindow(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			return newSyncPullRequestStateHandler(services, zerolog.Nop())(ctx, "sync_pull_request_state", payload)
+			return newSyncPullRequestStateHandler(nil, services, zerolog.Nop())(ctx, "sync_pull_request_state", payload)
 		}},
 	}
 	for _, handler := range handlers {

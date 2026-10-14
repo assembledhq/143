@@ -250,14 +250,16 @@ func TestReconciliationWaiterRetainsOutsideFlightInstallation(t *testing.T) {
 	}))
 	service := &PRService{cachedResolver: identity.NewResolver(reconciliationTokenSource{}, zerolog.Nop()), pullRequests: db.NewPullRequestStore(mock), repos: db.NewRepositoryStore(mock), logger: zerolog.Nop(), baseURL: "https://api.github.com", httpClient: client}
 	leaderErr := make(chan error, 1)
-	go func() { leaderErr <- service.SyncPullRequestState(context.Background(), orgID, firstID) }()
+	go func() {
+		leaderErr <- service.SyncPullRequestState(WithPullRequestSyncReason(context.Background(), PullRequestSyncReasonStaleReconcile), orgID, firstID)
+	}()
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
 		t.Fatal("outside flight should reach its GitHub request")
 	}
 	waiterCtx := &reconciliationWaiterContext{Context: context.Background(), joined: make(chan struct{})}
-	sweepCtx := withReconciliationScope(waiterCtx)
+	sweepCtx := withReconciliationScope(WithPullRequestSyncReason(waiterCtx, PullRequestSyncReasonStaleReconcile))
 	waiterErr := make(chan error, 1)
 	go func() { waiterErr <- service.SyncPullRequestState(sweepCtx, orgID, firstID) }()
 	select {
