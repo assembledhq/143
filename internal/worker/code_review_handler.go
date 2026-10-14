@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/prompts"
+	"github.com/assembledhq/143/internal/services/agent"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	threadsvc "github.com/assembledhq/143/internal/services/thread"
@@ -210,7 +211,16 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 						if reason == "" {
 							reason = "code review failed without usable reviewer output"
 						}
-						if reconcileErr := reconcileCodeReviewSessionFailure(ctx, stores, job, reason); reconcileErr != nil {
+						var reconcileErr error
+						if strings.HasPrefix(reason, "Review workspace preparation") {
+							if cancelErr := cancelActiveCodeReviewThreads(ctx, stores, services, logger, job); cancelErr != nil {
+								return cancelErr
+							}
+							reconcileErr = reconcileCodeReviewSessionFailureWithDetails(ctx, stores, job, reason, "code_review_workspace_preparation", []string{"Correct the workspace setup problem, then request a new review."})
+						} else {
+							reconcileErr = reconcileCodeReviewSessionFailure(ctx, stores, job, reason)
+						}
+						if reconcileErr != nil {
 							return reconcileErr
 						}
 					}
@@ -277,6 +287,13 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 			if started {
 				if err := ensureCodeReviewWorkspaceReady(ctx, stores, services, reviewLog, job); err != nil {
+					var setupFailure *codeReviewWorkspaceGateFailure
+					if errors.As(err, &setupFailure) {
+						if errors.Is(setupFailure, agent.ErrStalePullRequestHead) {
+							return reconcileCodeReviewMovedWorkspaceHead(ctx, stores, services, reviewLog, job, setupFailure)
+						}
+						return failCodeReviewWorkspacePreparation(ctx, stores, services, reviewLog, job, setupFailure)
+					}
 					if errors.Is(err, errCodeReviewWorkspaceStopped) {
 						return fmt.Errorf("%w: reconcile stopped review on next controller attempt: %w", errCodeReviewEndedParentRecovery, err)
 					}
@@ -309,6 +326,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		agentResults, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
 		if err != nil {
 			return fmt.Errorf("list code review agent results: %w", err)
+		}
+		if stopped, err := stopCodeReviewForWorkspacePreparationFailure(ctx, stores, services, reviewLog, job, agentResults); stopped || err != nil {
+			return err
 		}
 		findings, err := stores.CodeReviews.ListFindings(ctx, job.OrgID, job.SessionID, false)
 		if err != nil {
@@ -408,6 +428,13 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				workspaceGate = ensureCodeReviewWorkspaceReadyAfterPreflight
 			}
 			if err := workspaceGate(ctx, stores, services, reviewLog, job); err != nil {
+				var setupFailure *codeReviewWorkspaceGateFailure
+				if errors.As(err, &setupFailure) {
+					if errors.Is(setupFailure, agent.ErrStalePullRequestHead) {
+						return reconcileCodeReviewMovedWorkspaceHead(ctx, stores, services, reviewLog, job, setupFailure)
+					}
+					return failCodeReviewWorkspacePreparation(ctx, stores, services, reviewLog, job, setupFailure)
+				}
 				if errors.Is(err, errCodeReviewWorkspaceStopped) {
 					return fmt.Errorf("%w: reconcile stopped review on next controller attempt: %w", errCodeReviewEndedParentRecovery, err)
 				}
@@ -425,6 +452,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			agentResults, err = stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
 			if err != nil {
 				return fmt.Errorf("list harvested code review agent results: %w", err)
+			}
+			if stopped, err := stopCodeReviewForWorkspacePreparationFailure(ctx, stores, services, reviewLog, job, agentResults); stopped || err != nil {
+				return err
 			}
 			findings, err = stores.CodeReviews.ListFindings(ctx, job.OrgID, job.SessionID, false)
 			if err != nil {
@@ -452,6 +482,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			agentResults, err = stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
 			if err != nil {
 				return fmt.Errorf("list synthesized code review agent results: %w", err)
+			}
+			if stopped, err := stopCodeReviewForWorkspacePreparationFailure(ctx, stores, services, reviewLog, job, agentResults); stopped || err != nil {
+				return err
 			}
 			if codeReviewOrchestratorNeedsFallback(agentResults) {
 				if err := ensureCodeReviewOrchestratorThread(ctx, stores, services, logger, job, pr, health, policy, metadata, changedFiles, agentResults, findings, visualEvidence); err != nil {
@@ -785,6 +818,70 @@ func failCodeReviewWithoutReviewerOutput(ctx context.Context, stores *Stores, se
 	return nil
 }
 
+func codeReviewWorkspacePreparationFailureFromResults(results []models.CodeReviewAgentResult) error {
+	for _, result := range results {
+		if result.Status != models.CodeReviewAgentResultStatusFailed && result.Status != models.CodeReviewAgentResultStatusTimedOut {
+			continue
+		}
+		var detail string
+		switch result.Role {
+		case models.CodeReviewAgentRoleReviewer:
+			state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
+			if ok {
+				detail = state.Error
+			}
+		case models.CodeReviewAgentRoleOrchestrator:
+			state, ok := parseCodeReviewOrchestratorStructuredResult(result.StructuredResult)
+			if ok {
+				detail = state.Error
+			}
+		}
+		if preparation, known := knownCodeReviewWorkspacePreparationError(detail); known {
+			return preparation
+		}
+	}
+	return nil
+}
+
+func stopCodeReviewForWorkspacePreparationFailure(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, results []models.CodeReviewAgentResult) (bool, error) {
+	failure := codeReviewWorkspacePreparationFailureFromResults(results)
+	if failure == nil {
+		return false, nil
+	}
+	generation, err := stores.Sessions.WorkspaceGenerationForReview(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return true, fmt.Errorf("load workspace generation before setup failure: %w", err)
+	}
+	return true, failCodeReviewWorkspacePreparation(ctx, stores, services, logger, job, &codeReviewWorkspaceGateFailure{Generation: generation, Err: failure})
+}
+
+func failCodeReviewWorkspacePreparation(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, failure *codeReviewWorkspaceGateFailure) error {
+	reason := codeReviewWorkspacePreparationFailureMessage(failure.Err)
+	if _, err := stores.CodeReviews.FailCodeReviewWorkspacePreparation(ctx, job.OrgID, db.FailCodeReviewWorkspacePreparationParams{
+		ReviewID: job.MetadataID, SessionID: job.SessionID, PullRequestID: job.PullRequestID, HeadSHA: job.HeadSHA,
+		ExpectedGeneration: failure.Generation, Reason: reason,
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return &RetryableError{Err: fmt.Errorf("%w: setup failure fence changed", errCodeReviewEndedParentRecovery), RetryAfter: durationPtr(codeReviewWorkspaceWait)}
+		}
+		return err
+	}
+	var cleanupErrors []error
+	if err := cancelActiveCodeReviewThreads(ctx, stores, services, logger, job); err != nil {
+		cleanupErrors = append(cleanupErrors, err)
+	}
+	if err := failFullAssessmentForSession(ctx, stores, job, reason); err != nil {
+		cleanupErrors = append(cleanupErrors, err)
+	}
+	if err := reconcileCodeReviewSessionFailureWithDetails(ctx, stores, job, reason, "code_review_workspace_preparation", []string{"Correct the workspace setup problem, then request a new review."}); err != nil {
+		cleanupErrors = append(cleanupErrors, err)
+	}
+	removeCodeReviewRequestedReviewerAfterDeadLetter(ctx, stores, services, logger, job)
+	enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
+	logger.Warn().Str("session_id", job.SessionID.String()).Msg("code review stopped after workspace preparation failure")
+	return errors.Join(cleanupErrors...)
+}
+
 func codeReviewMetadataTerminal(status models.CodeReviewSessionStatus) bool {
 	switch status {
 	case models.CodeReviewSessionStatusCompleted, models.CodeReviewSessionStatusFailed, models.CodeReviewSessionStatusStale, models.CodeReviewSessionStatusCancelled:
@@ -883,6 +980,21 @@ func reconcileCodeReviewSessionFailureWithDetails(ctx context.Context, stores *S
 
 func registerCodeReviewDeadLetterReconciliation(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload) {
 	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		if errors.Is(deadLetterErr, agent.ErrStalePullRequestHead) {
+			var signal *codeReviewWorkspaceGateFailure
+			if !errors.As(deadLetterErr, &signal) {
+				logger.Warn().Str("session_id", job.SessionID.String()).Msg("moved-head exhaustion has no generation provenance; leaving settlement fenced")
+				return
+			}
+			status, detail, err := stores.Jobs.LatestCodeReviewWorkspacePreparationOutcome(hookCtx, job.OrgID, "agent", codeReviewWorkspacePreparationKey(job.MetadataID, job.SessionID, signal.Generation))
+			if err == nil && (status == models.JobStatusFailed || status == models.JobStatusDeadLetter || status == models.JobStatusCancelled) && errors.Is(safeCodeReviewWorkspacePreparationError(detail), agent.ErrStalePullRequestHead) {
+				err = settleCodeReviewMovedWorkspaceHead(hookCtx, stores, services, logger, job, signal.Generation)
+			}
+			if err != nil {
+				logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("moved-head reconciliation remains fenced after controller exhaustion")
+			}
+			return
+		}
 		if errors.Is(deadLetterErr, errCodeReviewEndedParentRecovery) {
 			logger.Warn().Err(deadLetterErr).Str("session_id", job.SessionID.String()).Msg("ended review recovery remains fenced after controller exhaustion")
 			return
@@ -943,6 +1055,10 @@ func recordCodeReviewAutomaticWait(ctx context.Context, store *db.CodeReviewStor
 }
 
 func codeReviewTerminalFailureStatus(err error) (models.CodeReviewStatusCode, string, bool) {
+	var preparation *agent.CodeReviewWorkspacePreparationError
+	if errors.As(err, &preparation) {
+		return models.CodeReviewStatusCodeWorkerFailed, codeReviewWorkspacePreparationFailureMessage(err), true
+	}
 	if errors.Is(err, errFullAssessmentFreshnessInconclusive) {
 		return models.CodeReviewStatusCodeGitHubUnavailable,
 			"Visual evidence could not be verified before automatic retries expired. Request a fresh review after the evidence is available.", false
@@ -1052,6 +1168,118 @@ func syncCodeReviewPullRequestState(ctx context.Context, services *Services, log
 		return classifyGitHubJobError(wrapped, job.SessionID.String())
 	}
 	return nil
+}
+
+// A moved-ref initializer is terminal, but its review outcome is supersession,
+// not an operational failure. Always sync live state before replacing the
+// review, and never treat this signal as workspace readiness.
+func reconcileCodeReviewMovedWorkspaceHead(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, signal *codeReviewWorkspaceGateFailure) error {
+	generation, err := stores.Sessions.WorkspaceGenerationForReview(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return fmt.Errorf("reload moved-head workspace generation: %w", err)
+	}
+	if generation != signal.Generation {
+		return &RetryableError{Err: errCodeReviewEndedParentRecovery, RetryAfter: durationPtr(codeReviewWorkspaceWait)}
+	}
+	startedAt := signal.PreparationStartedAt
+	if startedAt.IsZero() {
+		return &RetryableError{Err: errCodeReviewEndedParentRecovery, RetryAfter: durationPtr(codeReviewWorkspaceWait)}
+	}
+	deadline := startedAt.Add(codeReviewWorkspaceWaitLimit)
+	expired := func() bool { return !time.Now().Before(deadline) }
+	if expired() {
+		return settleCodeReviewMovedWorkspaceHead(ctx, stores, services, logger, job, signal.Generation)
+	}
+	syncCtx, syncCancel := context.WithDeadline(ctx, deadline)
+	defer syncCancel()
+	if err := syncCodeReviewPullRequestState(syncCtx, services, logger, job); err != nil {
+		if errors.Is(err, errCodeReviewSchedulingSuperseded) {
+			return nil
+		}
+		if expired() {
+			return settleCodeReviewMovedWorkspaceHead(ctx, stores, services, logger, job, signal.Generation)
+		}
+		return codeReviewMovedHeadRetry(err, startedAt, signal.Generation)
+	}
+	pr, err := stores.PullRequests.GetByID(syncCtx, job.OrgID, job.PullRequestID)
+	if err != nil {
+		if expired() {
+			return settleCodeReviewMovedWorkspaceHead(ctx, stores, services, logger, job, signal.Generation)
+		}
+		return codeReviewMovedHeadRetry(err, startedAt, signal.Generation)
+	}
+	health, err := loadStoredCodeReviewHealth(syncCtx, stores, job, pr)
+	if err != nil {
+		if expired() {
+			return settleCodeReviewMovedWorkspaceHead(ctx, stores, services, logger, job, signal.Generation)
+		}
+		return codeReviewMovedHeadRetry(err, startedAt, signal.Generation)
+	}
+	generation, err = stores.Sessions.WorkspaceGenerationForReview(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return codeReviewMovedHeadRetry(err, startedAt, signal.Generation)
+	}
+	if generation != signal.Generation {
+		return &RetryableError{Err: errCodeReviewEndedParentRecovery, RetryAfter: durationPtr(codeReviewWorkspaceWait)}
+	}
+	if codeReviewHeadChanged(job.HeadSHA, pr, health) {
+		if err := supersedeCodeReviewForChangedHead(ctx, stores, services, logger, job, pr, health, "PR head moved during workspace preparation"); err != nil {
+			return codeReviewMovedHeadRetry(err, startedAt, signal.Generation)
+		}
+		return nil
+	}
+	if expired() {
+		return settleCodeReviewMovedWorkspaceHead(ctx, stores, services, logger, job, signal.Generation)
+	}
+	// GitHub may lag the fetched ref or a push may have been reverted. Do not
+	// invent a new revision, grant a new setup budget, or launch on stale proof.
+	return codeReviewMovedHeadRetry(errors.New("waiting for the live pull request revision after a moved ref"), startedAt, signal.Generation)
+}
+
+func settleCodeReviewMovedWorkspaceHead(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, generation int64) error {
+	const reason = "PR head moved during workspace preparation; live revision could not be reconciled within the original preparation budget. Request a new review of the current revision."
+	if _, err := stores.CodeReviews.SupersedeCodeReviewWorkspacePreparation(ctx, job.OrgID, db.SupersedeCodeReviewWorkspacePreparationParams{
+		ReviewID: job.MetadataID, SessionID: job.SessionID, PullRequestID: job.PullRequestID,
+		HeadSHA: job.HeadSHA, ExpectedGeneration: generation, Reason: reason,
+	}); err != nil {
+		return &RetryableError{Err: fmt.Errorf("%w: moved-head settlement fence changed: %w", errCodeReviewEndedParentRecovery, err), RetryAfter: durationPtr(codeReviewWorkspaceWait)}
+	}
+	if err := supersedeFullAssessmentForSession(ctx, stores, job, reason); err != nil {
+		return fmt.Errorf("%w: %w", errCodeReviewEndedParentRecovery, err)
+	}
+	if err := cancelActiveCodeReviewThreads(ctx, stores, services, logger, job); err != nil {
+		return fmt.Errorf("%w: %w", errCodeReviewEndedParentRecovery, err)
+	}
+	reconcileCodeReviewSessionStale(ctx, stores, logger, job)
+	enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
+	return nil
+}
+
+func codeReviewMovedHeadRetry(err error, startedAt time.Time, generation int64) error {
+	var retry *RetryableError
+	if !errors.As(err, &retry) {
+		retry = &RetryableError{Err: err, RetryAfter: durationPtr(codeReviewWorkspaceWait)}
+	}
+	retry.Err = &codeReviewWorkspaceGateFailure{Generation: generation, PreparationStartedAt: startedAt, Err: fmt.Errorf("%w: %w", agent.ErrStalePullRequestHead, retry.Err)}
+	remaining := time.Until(startedAt.Add(codeReviewWorkspaceWaitLimit))
+	if remaining < 0 {
+		remaining = 0
+	}
+	if retry.RetryAfter == nil {
+		retry.RetryAfter = durationPtr(codeReviewWorkspaceWait)
+	}
+	if *retry.RetryAfter > remaining {
+		retry.RetryAfter = &remaining
+	}
+	retry.RetryWindowStartedAt = &startedAt
+	retry.MaxRetryDuration = durationPtr(codeReviewWorkspaceWaitLimit)
+	retry.BypassMaxRetryDuration = true // the next gate settles stale under the review fence
+	retry.ResetRetryWindow = false
+	retry.ConsumeAttempt = false
+	retry.GitHubRetryPolicy = GitHubRetryPolicyNone
+	retry.GitHubRetryAt = nil
+	retry.GitHubRetryKey = ""
+	return retry
 }
 
 // supersedeCodeReviewForChangedHead preserves commit-level approval integrity

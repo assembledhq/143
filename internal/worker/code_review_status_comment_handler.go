@@ -204,7 +204,11 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 	case models.CodeReviewSessionStatusFailed:
 		paragraphs = append(paragraphs, "143 Code Reviewer could not complete this review.")
 		if message := strings.TrimSpace(stringPtrValue(metadata.StatusMessage)); message != "" {
-			paragraphs = append(paragraphs, message)
+			if strings.HasPrefix(message, "Review workspace preparation") {
+				paragraphs = append(paragraphs, "**143 review issues:**\n- "+message)
+			} else {
+				paragraphs = append(paragraphs, message)
+			}
 		}
 		footer.ReviewNowURL = reviewNowURL
 	case models.CodeReviewSessionStatusStale:

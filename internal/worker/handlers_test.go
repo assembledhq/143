@@ -12798,6 +12798,46 @@ func TestContinueSessionHandler_DeadLettersRecordedCodeReviewThreadFailure(t *te
 	require.NoError(t, mock.ExpectationsWereMet(), "the worker must not reset the already-failed reviewer thread to idle")
 }
 
+func TestContinueSessionHandler_UnconfirmedPreparationCleanupIsTerminal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		joined error
+	}{
+		{name: "transport EOF", joined: io.ErrUnexpectedEOF},
+		{name: "workspace readiness retry signal", joined: agent.ErrSandboxWorkspaceNotReady},
+		{name: "capacity retry signal", joined: agent.ErrSandboxCapacity},
+		{name: "cancellation signal", joined: agent.ErrSessionCancelled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stores, mock := newTestStores(t)
+			defer mock.Close()
+			stores.SessionThreads = db.NewSessionThreadStore(mock)
+			orgID, sessionID, threadID, issueID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			sessionRow := workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)
+			setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
+			mock.ExpectQuery("SELECT .* FROM sessions").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+			mock.ExpectQuery("SELECT .* FROM session_threads").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeClaudeCode, nil, models.ThreadStatusFailed)...))
+			preparation := errors.Join(agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageHydration, tt.joined), agent.ErrCodeReviewPreparationCleanup)
+			orch := &orchestratorServiceStub{continueSessionFn: func(context.Context, *models.Session, *agent.ContinueSessionOptions) error { return preparation }}
+			handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+			payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+			err := handler(context.Background(), "continue_session", payload)
+			var fatal *FatalError
+			require.ErrorAs(t, err, &fatal, "cleanup uncertainty must terminate before generic retry or thread reset")
+			require.ErrorIs(t, err, agent.ErrCodeReviewPreparationCleanup, "worker failure must preserve unconfirmed termination")
+			require.ErrorIs(t, err, tt.joined, "worker failure must retain the original joined cause")
+			require.Equal(t, "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run.", err.Error(), "terminal job persistence must receive only the finite cleanup explanation")
+			require.Equal(t, 1, orch.continueSessionCalls, "the continuation must run exactly once")
+			require.NoError(t, mock.ExpectationsWereMet(), "terminal cleanup must leave the existing failed thread and parent lifecycle intact")
+		})
+	}
+}
+
 func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T) {
 	t.Parallel()
 
@@ -13634,6 +13674,66 @@ func TestPullRequestReconciliationKeepsCanceledHTTPOperationTerminal(t *testing.
 			joined := errors.Join(fmt.Errorf("sync pull request: %w", requestErr), errors.New("unrelated database failure"))
 			require.Nil(t, githubReconciliationRetryableError(joined, "canceled-request"), "aggregate classification must not unwrap a canceled HTTP request into independently retryable causes")
 			require.False(t, ghservice.ClassifyRetry(requestErr, time.Now()).Retryable, "ordinary HTTP cancellation semantics must remain terminal")
+		})
+	}
+}
+
+func TestContinueSessionHandler_RecheckCleanupFailureRetainsLeaseFence(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		joined       error
+		cancelCaller bool
+	}{
+		{name: "transient capacity does not schedule retry", joined: agent.ErrSandboxCapacity},
+		{name: "caller cancellation does not bypass failure fence", joined: context.Canceled, cancelCaller: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stores, mock := newTestStores(t)
+			defer mock.Close()
+			stores.SessionThreads = db.NewSessionThreadStore(mock)
+			stores.CodeReviewRechecks = db.NewCodeReviewRecheckStore(mock)
+			orgID, sessionID, threadID, issueID, assessmentID, jobID, lockToken := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			sessionRow := workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)
+			setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
+			mock.ExpectQuery("SELECT .* FROM sessions").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+			now := time.Now().UTC()
+			dispatchColumns := []string{"assessment_id", "org_id", "repository_id", "pull_request_id", "session_id", "thread_id", "expected_turn", "payload_digest", "message_id", "job_id", "status", "attempt_lock_token", "result_message_id", "provider_session_id", "snapshot_key", "native_context", "failure_detail", "attempt_usage", "completed_at", "created_at", "updated_at"}
+			mock.ExpectQuery("SELECT .* FROM code_review_recheck_dispatches WHERE org_id").WithArgs(orgID, assessmentID).
+				WillReturnRows(pgxmock.NewRows(dispatchColumns).AddRow(assessmentID, orgID, uuid.New(), uuid.New(), sessionID, threadID, 3, "digest", int64(42), jobID, models.CodeReviewRecheckDispatchRunning, &lockToken, nil, nil, nil, nil, nil, nil, nil, now, now))
+			mock.ExpectQuery("SELECT .* FROM session_threads").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeClaudeCode, nil, models.ThreadStatusRunning)...))
+			preparation := errors.Join(agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageHydration, tt.joined), agent.ErrCodeReviewPreparationCleanup)
+			mock.ExpectBegin()
+			mock.ExpectQuery("SELECT d.assessment_id FROM code_review_recheck_dispatches d JOIN jobs").WithArgs(orgID, assessmentID, jobID, lockToken).
+				WillReturnRows(pgxmock.NewRows([]string{"assessment_id"}).AddRow(assessmentID))
+			mock.ExpectQuery("UPDATE code_review_recheck_dispatches SET status='failed'").WithArgs(orgID, assessmentID, jobID, lockToken, "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run.").
+				WillReturnRows(pgxmock.NewRows([]string{"session_id", "thread_id", "expected_turn"}).AddRow(sessionID, threadID, 3))
+			mock.ExpectQuery(`SELECT \(.*FROM sessions s WHERE s.org_id`).WithArgs(orgID, sessionID).
+				WillReturnRows(pgxmock.NewRows([]string{"drained"}).AddRow(false))
+			mock.ExpectCommit()
+			ctx, cancelCaller := context.WithCancelCause(jobctx.WithJobID(jobctx.WithLockToken(context.Background(), lockToken), jobID))
+			defer cancelCaller(nil)
+			orch := &orchestratorServiceStub{continueSessionFn: func(_ context.Context, _ *models.Session, opts *agent.ContinueSessionOptions) error {
+				require.Equal(t, &agent.CodeReviewTurnContinueOptions{AssessmentID: assessmentID, ThreadID: threadID, ExpectedTurn: 3, MessageID: 42}, opts.CodeReviewTurn, "failure must remain scoped to the existing dispatched recheck turn")
+				if tt.cancelCaller {
+					cancelCaller(agent.ErrUserCancelCause)
+				}
+				return preparation
+			}}
+			handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+			payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `","queued_message_id":"42","code_review_assessment_id":"` + assessmentID.String() + `"}`)
+			err := handler(ctx, "continue_session", payload)
+			var fatal *FatalError
+			require.ErrorAs(t, err, &fatal, "uncertain recheck cleanup must be terminal rather than transient retry or cancellation projection")
+			require.ErrorIs(t, err, agent.ErrCodeReviewPreparationCleanup, "fenced recheck failure must retain the cleanup cause")
+			require.ErrorIs(t, err, tt.joined, "fenced recheck failure must retain the original joined cause")
+			require.Equal(t, "Review workspace preparation could not confirm process cleanup. Recreate the review workspace and retry. Review did not run.", err.Error(), "fenced dispatch and job persistence must share the finite cleanup explanation")
+			require.Equal(t, 1, orch.continueSessionCalls, "the failed recheck may not execute again")
+			require.NoError(t, mock.ExpectationsWereMet(), "failure must lock the exact org/assessment/job/lease and leave an undrained session/thread owned")
 		})
 	}
 }
