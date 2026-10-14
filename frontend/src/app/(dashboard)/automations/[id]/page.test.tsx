@@ -3585,6 +3585,73 @@ describe("AutomationDetailPage", () => {
     });
   });
 
+  it("rolls a failed fallback edit back to the saved chain even when the refetch fails too", async () => {
+    const user = userEvent.setup();
+    const chain = {
+      agent_type: "codex",
+      model_override: "gpt-5.4",
+      fallback_models: {
+        models: ["claude-sonnet-4-6"],
+        agent_types: ["claude_code"],
+        reasoning_efforts: ["high"],
+      },
+    };
+    mockAutomationWithChain(chain);
+    // A chain edit that dispatches right away must not have its unsaved value
+    // written to the cache before the save captures its rollback baseline —
+    // otherwise the rollback "restores" the unsaved edit, and with the settle
+    // refetch failing too nothing ever corrects it.
+    let detailReads = 0;
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () => {
+        detailReads += 1;
+        if (detailReads > 1) {
+          return HttpResponse.json({ error: "unavailable" }, { status: 503 });
+        }
+        return HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            interval_value: 1,
+            interval_unit: "weeks",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+            ...chain,
+          },
+        });
+      }),
+      http.patch("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({ error: "rejected" }, { status: 500 }),
+      ),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+    await user.click(screen.getByRole("button", { name: "Advanced" }));
+
+    const reasoning = screen.getByRole("combobox", { name: "Rank 2 reasoning level" });
+    expect(reasoning).toHaveTextContent("High");
+    await user.click(reasoning);
+    await user.click(await screen.findByRole("option", { name: "Low" }));
+
+    await waitFor(() => expect(detailReads).toBeGreaterThan(1));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", { name: "Rank 2 reasoning level" }),
+      ).toHaveTextContent("High"),
+    );
+  });
+
   // Pi and OpenCode both list "anthropic/claude-opus-4-8", and the worker
   // compares ranks on agent and model together — so the same id under the two
   // agents is two different routes, and the chain has to treat it that way.

@@ -1503,12 +1503,15 @@ function AutomationDetailRail({
   // optimistic value when it dispatches — one queued behind an in-flight save
   // leaves the cache stale, so the next chain edit would rebuild from the old
   // chain and the shallow coalesce would let it overwrite the queued one.
-  // Advancing the cache as soon as the patch is handed over keeps every later
-  // edit building on the latest chain. A failure still converges: the save
-  // settles with a refetch (`invalidateOnSettled`), which replaces whatever the
-  // rollback restored with what the server actually has.
+  //
+  // So a queued patch advances the cache as soon as it is handed over. Only a
+  // queued one: a patch that dispatched applies its own optimistic value and
+  // captures its rollback baseline first, and writing it early would make a
+  // failure roll back to the unsaved chain. A queued patch's baseline is set
+  // later anyway — the in-flight save settles with a refetch that replaces
+  // this write with server state before the queued patch dispatches.
   const saveChainPatch = (patch: AutomationPatch) => {
-    save(patch);
+    if (save(patch) !== "queued") return;
     queryClient.setQueryData(
       queryKeys.automations.detail(automation.id),
       (previous: unknown) => applyAutomationPatch(previous, patch),
