@@ -4,12 +4,30 @@ package testutil
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
 
 	"github.com/assembledhq/143/internal/services/agent"
 )
+
+// ExecWithStdinForReviewPreparation models only the review transport. Existing mock command
+// assertions inspect only public recipe content; authentication never enters
+// the recorded command or ExecFn input.
+func (m *MockSandboxProvider) ExecWithStdinForReviewPreparation(ctx context.Context, sb *agent.Sandbox, cmd string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	data, err := io.ReadAll(stdin)
+	if err != nil {
+		return -1, err
+	}
+	var envelope struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return -1, err
+	}
+	return m.Exec(ctx, sb, cmd+" "+string(envelope.Payload), stdout, stderr)
+}
 
 // Compile-time guards: the mock implements both the SandboxProvider contract
 // and the optional InteractiveSandboxProvider capability so adapter tests

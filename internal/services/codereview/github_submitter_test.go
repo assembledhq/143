@@ -234,7 +234,9 @@ func TestGitHubSubmitterGraphQLDecoderRecoversOversizedSuccessfulProbe(t *testin
 	})
 	now = seedResult.Deferral.RetryAt
 	body := `{"data":{"padding":"` + strings.Repeat("x", 1<<20+4096) + `"}}`
-	client := githubtelemetry.NewControlledHTTPClient(time.Second, zerolog.Nop(), controller, "code_review", roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+	// The cooldown clock is virtual. The bounded in-memory transport and suite
+	// timeout govern execution without a real client deadline racing decoding.
+	client := githubtelemetry.NewControlledHTTPClient(0, zerolog.Nop(), controller, "code_review", roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 	}))
 	submitter := NewGitHubSubmitter(&tokenStub{token: "token"}, WithGitHubSubmitterHTTPClient(client))

@@ -398,6 +398,9 @@ func waitForSandboxWorkspaceReady(
 
 		var stdout, stderr bytes.Buffer
 		exitCode, execErr := provider.Exec(waitCtx, sandbox, probeCommand, &stdout, &stderr)
+		if errors.Is(execErr, ErrCodeReviewPreparationCleanup) {
+			return NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, execErr)
+		}
 		if execErr == nil && exitCode == 0 {
 			// Preserve the empty branch line produced by a detached HEAD.
 			fields := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
@@ -6614,6 +6617,7 @@ type codeReviewCheckoutContext struct {
 	Kind           string `json:"kind"`
 	GitHubPRNumber int    `json:"github_pr_number"`
 	HeadSHA        string `json:"head_sha"`
+	BaseSHA        string `json:"base_sha"`
 }
 
 func codeReviewCheckoutContextFromSession(session *models.Session) (int, string, bool, error) {
