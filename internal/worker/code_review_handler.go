@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/prompts"
+	agentsvc "github.com/assembledhq/143/internal/services/agent"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	threadsvc "github.com/assembledhq/143/internal/services/thread"
@@ -1280,6 +1281,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 	if err != nil {
 		return err
 	}
+	var target *agentsvc.CodeReviewInputTarget
 	for _, selection := range selections {
 		idx := selection.Index
 		agentType := selection.AgentType
@@ -1299,7 +1301,24 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 				Msg("skipped unavailable code review reviewer")
 			continue
 		}
-		promptText := codeReviewReviewerPrompt(job, pr, cfg, policy.Version, metadata.BaseSHA, changedFiles, visualEvidence)
+		if target == nil {
+			if stores.Sessions == nil {
+				return fmt.Errorf("captured reviewer input session store unavailable")
+			}
+			session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
+			if err != nil {
+				return fmt.Errorf("load captured reviewer input session: %w", err)
+			}
+			captured, err := agentsvc.CodeReviewInputTargetFromSession(&session)
+			if err != nil {
+				return fmt.Errorf("resolve captured reviewer inputs: %w", err)
+			}
+			if session.RepositoryID == nil || *session.RepositoryID != job.RepositoryID || captured.HeadSHA != job.HeadSHA || captured.BaseSHA != metadata.BaseSHA {
+				return fmt.Errorf("reviewer job does not match captured review input session")
+			}
+			target = &captured
+		}
+		promptText := codeReviewReviewerPrompt(*target, pr, cfg, changedFiles, visualEvidence)
 		recordKey := fmt.Sprintf("%s/reviewer-%02d-%s", rootKey, idx+1, agentType)
 		recordMetadata, err := json.Marshal(map[string]any{
 			"reviewer_key":         key,
@@ -1352,7 +1371,6 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 			ReviewerIndex:   idx,
 			ThreadID:        thread.ID.String(),
 			PromptRecordKey: recordKey,
-			NativeReview:    codeReviewAgentHasBuiltinReviewCommand(agentType),
 			ReadOnly:        true,
 		})
 		result := &models.CodeReviewAgentResult{
@@ -1383,7 +1401,6 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 				ReviewerIndex:   idx,
 				ThreadID:        thread.ID.String(),
 				PromptRecordKey: recordKey,
-				NativeReview:    codeReviewAgentHasBuiltinReviewCommand(agentType),
 				ReadOnly:        true,
 				Error:           raw,
 				CompletedAt:     time.Now().UTC().Format(time.RFC3339),
@@ -1659,40 +1676,12 @@ func codeReviewReviewerThreadLabel(index int, agentType models.AgentType, fallba
 	return fmt.Sprintf("Code review: %s (%d)", label, index+1)
 }
 
-func codeReviewAgentHasBuiltinReviewCommand(agentType models.AgentType) bool {
-	for _, command := range models.SlashCommandsForAgent(agentType) {
-		if command.Name == "review" {
-			return true
-		}
-	}
-	return false
+func codeReviewNativeReviewCommands(models.AgentType, string) models.SessionInputCommands {
+	return nil
 }
 
-func codeReviewNativeReviewCommands(agentType models.AgentType, promptText string) models.SessionInputCommands {
-	if !codeReviewAgentHasBuiltinReviewCommand(agentType) {
-		return nil
-	}
-	arguments := strings.TrimSpace(strings.TrimPrefix(strings.TrimLeft(promptText, " \t\r\n"), "/review"))
-	return models.SessionInputCommands{{
-		Kind:      "command",
-		AgentType: agentType,
-		Name:      "review",
-		Token:     "/review",
-		Display:   "/review",
-		Arguments: arguments,
-		Source:    models.SessionInputCommandSourceBuiltin,
-	}}
-}
-
-func codeReviewReviewerMessage(agentType models.AgentType, promptText string) string {
-	promptText = strings.TrimSpace(promptText)
-	if !codeReviewAgentHasBuiltinReviewCommand(agentType) || strings.HasPrefix(strings.TrimLeft(promptText, " \t\r\n"), "/review") {
-		return promptText
-	}
-	if promptText == "" {
-		return "/review"
-	}
-	return "/review " + promptText
+func codeReviewReviewerMessage(_ models.AgentType, promptText string) string {
+	return strings.TrimSpace(promptText)
 }
 
 func codeReviewAgentMessageInput(job runCodeReviewPayload, threadID uuid.UUID, message string, commands models.SessionInputCommands, visualEvidence models.CodeReviewVisualEvidenceSnapshot) threadsvc.SendMessageInput {
@@ -1864,15 +1853,17 @@ func revertCodeReviewReadOnlyThread(ctx context.Context, stores *Stores, service
 	return true
 }
 
-func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
+func codeReviewReviewerPrompt(target agentsvc.CodeReviewInputTarget, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
 	cfg = models.ResolveCodeReviewPolicyConfig(&cfg)
 	return strings.TrimSpace(prompts.CodeReviewReviewerPrompt(prompts.CodeReviewReviewerPromptData{
+		ManifestPath:          target.ManifestPath,
+		DiffPath:              target.DiffPath,
 		ReviewInstructions:    cfg.ReviewInstructions,
-		Repository:            pr.GitHubRepo,
-		PullNumber:            pr.GitHubPRNumber,
+		Repository:            target.Repository,
+		PullNumber:            target.PullRequestNumber,
 		PullRequestURL:        pr.GitHubPRURL,
-		BaseSHA:               firstNonEmpty(baseSHA, stringPtrValue(pr.BaseSHA)),
-		HeadSHA:               job.HeadSHA,
+		BaseSHA:               target.BaseSHA,
+		HeadSHA:               target.HeadSHA,
 		ChangedFiles:          codeReviewChangedPaths(changedFiles),
 		VisualEvidence:        codeReviewVisualEvidenceForPrompt(visualEvidence),
 		VisualEvidenceOmitted: visualEvidence.OmittedSourceCount,

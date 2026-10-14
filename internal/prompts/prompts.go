@@ -266,6 +266,8 @@ func ReviewLoopFixPrompt(data ReviewLoopFixPromptData) string {
 // ─── Code Reviews ───────────────────────────────────────────────────────────
 
 type CodeReviewReviewerPromptData struct {
+	ManifestPath            string
+	DiffPath                string
 	ReviewInstructions      string
 	Repository              string
 	PullNumber              int

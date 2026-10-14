@@ -28,6 +28,9 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 	if !ok || head != expectedHead {
 		return nil, fmt.Errorf("code review workspace revision does not match active review")
 	}
+	if _, err := codeReviewInputIdentityFromSession(session); err != nil {
+		return nil, err
+	}
 	branch := sessionWorkingBranch(session, &models.Issue{})
 	if branch == "" {
 		return nil, fmt.Errorf("code review session is missing a working branch")
@@ -87,6 +90,7 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 		return nil, err
 	}
 	defer reservation.Release()
+	ctx = withCodeReviewPreparationBudget(ctx)
 	createStage := observability.BeginStage(true, log, "sandbox_create")
 	sandbox, err := o.provider.Create(ctx, cfg)
 	createStage.End(observability.StageOutcome(ctx, err))
@@ -122,13 +126,16 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 	o.runSandboxGitBootstrap(ctx, sandbox, cfg.WorkDir, log)
 	gitAuthStage.End("attempted")
 	checkoutStage := observability.BeginStage(true, log, "review_head_checkout")
-	checkoutErr := o.checkoutExpectedPullRequestHead(ctx, sandbox, repo.CloneURL, token, prNumber, branch, head)
+	checkoutErr := o.checkoutCodeReviewHead(ctx, sandbox, repo.CloneURL, token, prNumber, branch, head)
 	checkoutStage.End(observability.StageOutcome(ctx, checkoutErr))
 	if checkoutErr != nil {
 		return nil, checkoutErr
 	}
 	if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, cfg.WorkDir, repositoryPreparationMinimalReview, log); err != nil {
 		return nil, fmt.Errorf("prepare review repository: %w", err)
+	}
+	if err := o.ensureCodeReviewInputs(ctx, session, sandbox); err != nil {
+		return nil, err
 	}
 	// Ownership of a successful sandbox transfers to the caller. Its durable
 	// publication transaction supplies the review holder and worker identity.

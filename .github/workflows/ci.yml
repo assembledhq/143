@@ -174,14 +174,43 @@ jobs:
         if: needs.changes.outputs.demo_seed == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
         run: make demo-seed-check
 
-      - name: Run tests (PR — no race)
-        if: github.event_name == 'pull_request'
-        run: go test ./internal/... -skip '^TestBrowserChromeDP' -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=count -timeout=120s
-
-      - name: Run tests with race + coverage (non-PR)
-        if: github.event_name != 'pull_request'
+      - name: Run backend unit tests outside the agent package
+        timeout-minutes: 10
         run: |
-          go test ./internal/... -skip '^TestBrowserChromeDP' -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=atomic -race -timeout=180s
+          mode=count
+          race=()
+          package_timeout=120s
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=atomic
+            race=(-race)
+            package_timeout=180s
+          fi
+          packages="$(go list ./internal/...)"
+          unit_packages=()
+          while IFS= read -r package; do
+            if [[ "$package" != "github.com/assembledhq/143/internal/services/agent" ]]; then
+              unit_packages+=("$package")
+            fi
+          done <<< "$packages"
+          go test "${unit_packages[@]}" -skip '^TestBrowserChromeDP' -coverpkg=./internal/... \
+            -coverprofile=coverage-unit-other.out -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
+
+      - name: Run agent unit tests
+        timeout-minutes: 10
+        run: |
+          mode=count
+          race=()
+          package_timeout=300s
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=atomic
+            race=(-race)
+            package_timeout=360s
+          fi
+          go test ./internal/services/agent -coverpkg=./internal/... -coverprofile=coverage-unit-agent.out \
+            -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
+
+      - name: Combine backend unit coverage
+        run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-agent.out
 
       # Chrome startup and rendering need CPU that the parallel backend suite
       # can otherwise consume. Keep real browser fixtures in a serial step,
@@ -261,6 +290,8 @@ jobs:
           path: |
             coverage.out
             coverage-unit.out
+            coverage-unit-other.out
+            coverage-unit-agent.out
             coverage-browser.out
             coverage-integration.out
 

@@ -1010,10 +1010,13 @@ func (d *DockerProvider) ValidateReviewPreparationEnvironment(ctx context.Contex
 		return &reviewPreparationEnvironmentError{}
 	}
 	inspect, err := d.client.ContainerInspect(ctx, sb.ID)
-	if err != nil {
-		return &reviewPreparationEnvironmentError{cause: err}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return &reviewPreparationEnvironmentError{cause: contextErr}
 	}
-	if err := ctx.Err(); err != nil {
+	if err != nil {
+		if cerrdefs.IsNotFound(err) || cerrdefs.IsUnavailable(err) {
+			return agent.ErrCodeReviewPreparationTransport
+		}
 		return &reviewPreparationEnvironmentError{cause: err}
 	}
 	if inspect.Config == nil {
@@ -1024,6 +1027,9 @@ func (d *DockerProvider) ValidateReviewPreparationEnvironment(ctx context.Contex
 		if (key == "GITHUB_TOKEN" || key == "GH_TOKEN") && value != "" {
 			return errors.New("review workspace stores a GitHub credential in its container environment; create a fresh workspace before review preparation")
 		}
+	}
+	if inspect.ContainerJSONBase != nil && inspect.State != nil && (!inspect.State.Running || inspect.State.Paused || inspect.State.Restarting || inspect.State.Dead) {
+		return agent.ErrCodeReviewPreparationTransport
 	}
 	return nil
 }

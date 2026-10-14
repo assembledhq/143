@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
+	otelmetric "go.opentelemetry.io/otel/metric"
 
 	"github.com/assembledhq/143/internal/cache"
 )
@@ -46,6 +48,9 @@ type Config struct {
 	Owner                 string
 	ProbeLease            time.Duration
 	FallbackLimit         int
+
+	BackgroundQuotaReserve  int64
+	BackgroundQuotaInterval time.Duration
 }
 
 type Scope struct {
@@ -94,6 +99,12 @@ type Controller struct {
 	degradedLog sync.Once
 	probeSeq    atomic.Uint64
 	beforeClaim func()
+
+	backgroundQuotaReserve    int64
+	backgroundQuotaInterval   time.Duration
+	backgroundQuotaDecisions  otelmetric.Int64Counter
+	backgroundQuotaLogMu      sync.Mutex
+	backgroundQuotaDegradedAt map[int64]time.Time
 }
 
 const (
@@ -114,6 +125,15 @@ func NewController(cfg Config) (*Controller, error) {
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	if cfg.BackgroundQuotaReserve < 0 {
+		return nil, fmt.Errorf("GitHub background quota reserve must not be negative")
+	}
+	if cfg.BackgroundQuotaInterval == 0 {
+		cfg.BackgroundQuotaInterval = time.Minute
+	}
+	if cfg.BackgroundQuotaInterval < time.Second || cfg.BackgroundQuotaInterval > 15*time.Minute {
+		return nil, fmt.Errorf("GitHub background quota interval must be between 1s and 15m")
 	}
 	if cfg.ProbeLease <= 0 {
 		cfg.ProbeLease = defaultProbeLease
@@ -139,10 +159,20 @@ func NewController(cfg Config) (*Controller, error) {
 			allowlist[installationID] = struct{}{}
 		}
 	}
+	var quotaDecisions otelmetric.Int64Counter
+	if cfg.BackgroundQuotaReserve > 0 {
+		var err error
+		quotaDecisions, err = otel.Meter("github.com/assembledhq/143/github").Int64Counter("github.background_quota.decisions", otelmetric.WithDescription("Optional GitHub background quota decisions"), otelmetric.WithUnit("{decision}"))
+		if err != nil {
+			otel.Handle(err)
+		}
+	}
 	return &Controller{
 		mode: cfg.Mode, environment: sanitizeKeyPart(cfg.Environment), appID: cfg.AppID,
 		allowlist: allowlist, cache: cfg.Cache, logger: cfg.Logger, now: cfg.Now,
 		owner: owner, probeLease: cfg.ProbeLease, fallback: newLocalStore(cfg.FallbackLimit),
+		backgroundQuotaReserve: cfg.BackgroundQuotaReserve, backgroundQuotaInterval: cfg.BackgroundQuotaInterval,
+		backgroundQuotaDecisions: quotaDecisions, backgroundQuotaDegradedAt: make(map[int64]time.Time),
 	}, nil
 }
 
@@ -250,6 +280,7 @@ func (c *Controller) Observe(ctx context.Context, permit Permit, observation Obs
 		StatusCode: observation.StatusCode, Header: observation.Header, Message: observation.Message,
 		GraphQLErrors: observation.GraphQLErrors, Now: now,
 	})
+	c.observeBackgroundQuota(ctx, permit.Scope.InstallationID, observation, classification, now)
 	result := ObservationResult{Classification: classification}
 	key := c.key(permit.Scope.InstallationID)
 	if classification.RateLimited {

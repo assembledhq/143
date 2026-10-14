@@ -161,6 +161,8 @@ type PRService struct {
 	prHealthSyncGroup        singleflight.Group
 	publicationPolicy        PublicationExecutionPolicy
 
+	backgroundQuotaController *ratelimit.Controller
+
 	// cachedResolverMu guards lazy construction of cachedResolver. The
 	// resolver is built from the currently-wired dependencies on first use
 	// and cached for subsequent calls; any Set* mutator that changes a
@@ -619,6 +621,7 @@ func (s *PRService) SetRateLimitController(controller *ratelimit.Controller) {
 	if s == nil {
 		return
 	}
+	s.backgroundQuotaController = controller
 	s.httpClient = githubtelemetry.NewControlledHTTPClient(30*time.Second, s.logger, controller, "pr_service")
 	s.invalidateResolver()
 }

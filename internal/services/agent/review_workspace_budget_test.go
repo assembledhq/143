@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/jobctx"
+	"github.com/assembledhq/143/internal/models"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -80,17 +82,126 @@ func (p disconnectedReviewEvidenceProvider) ExecWithStdin(ctx context.Context, s
 
 func TestReviewPreparationUsesOneAbsoluteBudget(t *testing.T) {
 	t.Parallel()
-	started := time.Now().Add(-3 * time.Minute)
-	ctx := withCodeReviewPreparationBudget(jobctx.WithJobCreatedAt(context.Background(), started))
-	first, cancelFirst := codeReviewPreparationContext(ctx)
-	defer cancelFirst()
-	second, cancelSecond := codeReviewPreparationContext(withCodeReviewPreparationBudget(ctx))
-	defer cancelSecond()
-	firstDeadline, _ := first.Deadline()
-	secondDeadline, _ := second.Deadline()
-	require.Equal(t, started.Add(CodeReviewWorkspacePreparationTimeout), firstDeadline, "preparation must include the durable job's elapsed queue and retry time")
-	require.Equal(t, firstDeadline, secondDeadline, "later preparation stages must retain the first absolute deadline")
-	require.NoError(t, ctx.Err(), "preparation deadline marker must not cancel the later reviewer execution")
+	synctest.Test(t, func(t *testing.T) {
+		started := time.Now()
+		ctx := withCodeReviewPreparationBudget(jobctx.WithJobCreatedAt(context.Background(), started.Add(-time.Hour)))
+		first, cancelFirst := codeReviewPreparationContext(ctx)
+		defer cancelFirst()
+		time.Sleep(3 * time.Minute)
+		second, cancelSecond := codeReviewPreparationContext(withCodeReviewPreparationBudget(ctx))
+		defer cancelSecond()
+		firstDeadline, _ := first.Deadline()
+		secondDeadline, _ := second.Deadline()
+		require.Equal(t, started.Add(CodeReviewWorkspacePreparationTimeout), firstDeadline, "preparation must begin at actual setup rather than durable job creation")
+		require.Equal(t, firstDeadline, secondDeadline, "later preparation stages must retain the first absolute deadline")
+		require.Equal(t, 5*time.Minute, time.Until(secondDeadline), "setup elapsed time must consume the original total budget")
+		time.Sleep(5 * time.Minute)
+		synctest.Wait()
+		require.ErrorIs(t, first.Err(), context.DeadlineExceeded, "the original preparation must end after eight minutes")
+		require.ErrorIs(t, second.Err(), context.DeadlineExceeded, "later stages must stop at the same absolute deadline")
+		require.NoError(t, ctx.Err(), "preparation deadline marker must not cancel later reviewer execution")
+	})
+}
+
+func TestReviewPreparationBudgetPreservesEarlierDeadlines(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name    string
+		elapsed time.Duration
+		caller  bool
+	}{
+		{name: "earlier preparation", elapsed: time.Minute},
+		{name: "expired preparation", elapsed: -time.Minute},
+		{name: "earlier caller", elapsed: time.Minute, caller: true},
+		{name: "expired caller", elapsed: -time.Minute, caller: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				deadline := time.Now().Add(test.elapsed)
+				ctx := jobctx.WithJobCreatedAt(context.Background(), time.Now().Add(-time.Hour))
+				if test.caller {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithDeadline(ctx, deadline)
+					defer cancel()
+				} else {
+					ctx = WithCodeReviewWorkspacePreparationDeadline(ctx, deadline)
+				}
+				prepared, cancel := codeReviewPreparationContext(withCodeReviewPreparationBudget(ctx))
+				defer cancel()
+				actual, _ := prepared.Deadline()
+				require.Equal(t, deadline, actual, "fresh setup must preserve an explicitly supplied earlier deadline")
+				if test.elapsed < 0 {
+					require.ErrorIs(t, prepared.Err(), context.DeadlineExceeded, "expired explicit budgets must never authorize renewed preparation")
+				} else {
+					require.NoError(t, prepared.Err(), "a live earlier deadline must permit preparation only for its remaining time")
+				}
+			})
+		})
+	}
+}
+
+type reviewSetupBudgetProvider struct {
+	reviewWorkspaceProvider
+	deadline time.Time
+	prepared int
+}
+
+func (p *reviewSetupBudgetProvider) Create(ctx context.Context, cfg SandboxConfig) (*Sandbox, error) {
+	bounded, cancel := codeReviewPreparationContext(ctx)
+	defer cancel()
+	p.deadline, _ = bounded.Deadline()
+	time.Sleep(time.Minute)
+	return p.reviewWorkspaceProvider.Create(ctx, cfg)
+}
+
+func (p *reviewSetupBudgetProvider) CloneRepo(ctx context.Context, sandbox *Sandbox, repository, branch, token string) error {
+	time.Sleep(2 * time.Minute)
+	return p.reviewWorkspaceProvider.CloneRepo(ctx, sandbox, repository, branch, token)
+}
+
+func (p *reviewSetupBudgetProvider) Exec(ctx context.Context, sandbox *Sandbox, command string, stdout, stderr io.Writer) (int, error) {
+	if strings.Contains(command, "identity = json.loads(sys.argv[1])") {
+		p.prepared++
+		deadline, _ := ctx.Deadline()
+		if deadline != p.deadline || time.Until(deadline) != 5*time.Minute {
+			return -1, errors.New("input preparation renewed the setup budget")
+		}
+	}
+	return p.reviewWorkspaceProvider.Exec(ctx, sandbox, command, stdout, stderr)
+}
+
+func TestStandaloneReviewWorkspaceBudgetStartsAfterAdmission(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		started := time.Now()
+		head := strings.Repeat("a", 40)
+		provider := &reviewSetupBudgetProvider{reviewWorkspaceProvider: reviewWorkspaceProvider{actualHead: head}}
+		orchestrator := &Orchestrator{
+			provider: provider,
+			sandboxCapacity: NewSandboxCapacityGate(SandboxCapacityGateConfig{
+				Counter: reviewWorkspaceCapacityCounter{}, MaxActive: 2, Logger: zerolog.Nop(),
+			}),
+			env: NewAgentEnv(AgentEnvDeps{}),
+			repositories: testInternalRepoStore{repo: models.Repository{
+				FullName: "test/repo", CloneURL: "https://github.com/test/repo.git", DefaultBranch: "main",
+			}},
+			github: testInternalGitHubTokens{token: "synthetic-token"},
+			logger: zerolog.Nop(),
+		}
+		repository := uuid.New()
+		session := &models.Session{
+			ID: uuid.New(), OrgID: uuid.New(), Origin: models.SessionOriginCodeReview,
+			AgentType: models.AgentTypeCodex, RepositoryID: &repository,
+			RevisionContext: []byte(`{"kind":"code_review","github_repo":"test/repo","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","github_pr_number":42,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
+		}
+		ctx := jobctx.WithJobCreatedAt(context.Background(), started.Add(-time.Hour))
+		sandbox, err := orchestrator.PrepareCodeReviewWorkspace(ctx, session, head)
+		require.NoError(t, err, "standalone cold preparation must permit a fresh setup for an old queued job")
+		require.Equal(t, "prepared-container", sandbox.ID, "successful preparation must transfer its owned container")
+		require.Equal(t, started.Add(CodeReviewWorkspacePreparationTimeout), provider.deadline, "standalone setup must stamp its budget before container creation")
+		require.Equal(t, 1, provider.prepared, "input generation must consume the same budget after create and clone")
+	})
 }
 
 type reviewBudgetStageObservation struct {

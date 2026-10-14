@@ -26,6 +26,8 @@ import (
 var regexpGitObjectID = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
 var errReviewHydrationRequired = errors.New("pinned review source requires authenticated hydration")
+var ErrCodeReviewPreparationTransport = errors.New("review preparation transport unavailable")
+var errReviewPreparationTransport = ErrCodeReviewPreparationTransport
 
 // This optional transport keeps private authentication off process arguments,
 // provider command logs, and the general repository preparation payload.
@@ -261,6 +263,11 @@ allowed = {
     "core.logallrefupdates": {"true"},
     "core.ignorecase": {"true", "false"},
     "core.precomposeunicode": {"true", "false"},
+    "core.hookspath": {".githooks", ".husky", ".husky/_", ".git/hooks"},
+    "filter.lfs.clean": {"git-lfs clean -- %f"},
+    "filter.lfs.smudge": {"git-lfs smudge -- %f"},
+    "filter.lfs.process": {"git-lfs filter-process"},
+    "filter.lfs.required": {"true"},
     "remote.origin.url": {settings["repo_url"]},
     "remote.origin.fetch": {"+refs/heads/*:refs/remotes/origin/*"},
     "remote.origin.promisor": {"true"},
@@ -455,9 +462,24 @@ func execForReviewPreparation(ctx context.Context, provider SandboxProvider, san
 		}
 	}
 	if provider, ok := provider.(reviewPreparationExecutor); ok {
-		return provider.ExecForReviewPreparation(ctx, sandbox, command, stdout, stderr)
+		code, err := provider.ExecForReviewPreparation(ctx, sandbox, command, stdout, stderr)
+		return code, reviewPreparationExecutionError(ctx, err)
 	}
-	return provider.Exec(ctx, sandbox, command, stdout, stderr)
+	code, err := provider.Exec(ctx, sandbox, command, stdout, stderr)
+	return code, reviewPreparationExecutionError(ctx, err)
+}
+
+func reviewPreparationExecutionError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrCodeReviewPreparationCleanup) || errors.Is(err, ErrCodeReviewSourceIntegrity) {
+		return NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, err)
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return errReviewPreparationTransport
 }
 
 func (o *Orchestrator) readReviewPreparationFile(ctx context.Context, sandbox *Sandbox, name string) ([]byte, error) {
@@ -486,6 +508,7 @@ func (o *Orchestrator) execReviewEvidenceInput(ctx context.Context, sandbox *San
 	var stderr bytes.Buffer
 	var exitCode int
 	var err error
+	var transportErr error
 	if input == nil {
 		exitCode, err = o.execForReviewPreparation(ctx, sandbox, command, io.Discard, &stderr)
 	} else {
@@ -498,22 +521,27 @@ func (o *Orchestrator) execReviewEvidenceInput(ctx context.Context, sandbox *San
 		}
 		if err == nil {
 			if trusted, ok := o.provider.(reviewPreparationTrustedStdinExecutor); ok {
-				exitCode, err = trusted.ExecWithStdinForReviewPreparation(ctx, clean, command, input, io.Discard, &stderr)
+				exitCode, transportErr = trusted.ExecWithStdinForReviewPreparation(ctx, clean, command, input, io.Discard, &stderr)
+				err = transportErr
 			} else if provider, ok := o.provider.(reviewPreparationStdinExecutor); ok {
-				exitCode, err = provider.ExecWithStdin(ctx, clean, command, input, io.Discard, &stderr)
+				exitCode, transportErr = provider.ExecWithStdin(ctx, clean, command, input, io.Discard, &stderr)
+				err = transportErr
 			} else {
 				err = errors.New("review provider does not support private Git authentication input")
 			}
 		}
 	}
 	if err != nil {
-		if errors.Is(err, ErrCodeReviewPreparationCleanup) {
+		if errors.Is(err, ErrCodeReviewPreparationCleanup) || errors.Is(err, ErrCodeReviewSourceIntegrity) {
 			return NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageDependencySetup, errors.Join(err, ctx.Err()))
 		}
 		// Preserve cancellation and sanitize private HTTP-header diagnostics,
 		// even if a provider or Git fails while handling the private input.
 		if ctx.Err() != nil {
 			return fmt.Errorf("prepare review evidence: %w", ctx.Err())
+		}
+		if transportErr != nil || errors.Is(err, errReviewPreparationTransport) {
+			return fmt.Errorf("prepare review evidence: %w", errReviewPreparationTransport)
 		}
 		return fmt.Errorf("prepare review evidence: %s", redactReviewGitAuthentication(err.Error(), token))
 	}
@@ -927,7 +955,7 @@ def child_environment(authenticate=False, platform=False):
     return env
 
 def run(script, required=True, authenticate=False, platform=False):
-    global active
+    global active, cleanup_failed
     check_workspace_quarantine()
     if not p.get("standalone", False) and script in (p.get("prepare"), p.get("repair_tools"), p.get("verify_recipe"), p.get("verify_tools")) and auth is not None:
         raise RuntimeError("private review authentication was not released before repository preparation")
@@ -951,6 +979,12 @@ def run(script, required=True, authenticate=False, platform=False):
     stop_child()
     require_process_cleanup()
     if required and code:
+        if platform and script == p.get("verify_captured_integrity") and code == 77:
+            cleanup_failed = True
+            quarantine_workspace()
+            raise RuntimeError("captured review object cleanup could not be confirmed")
+        if platform and p.get("standalone", False) and script == p.get("prepare") and code == 42:
+            raise HydrationRequired("pinned review source requires authenticated hydration")
         if platform and script in (p.get("verify_git"), p.get("verify_captured_integrity")) and code == 125:
             raise SourceIntegrityFailure("pinned review source object integrity validation failed; workspace must be recreated")
         raise RuntimeError("review workspace preparation command failed (exit=%d)" % code)
@@ -1317,11 +1351,19 @@ finally:
         if cancel_path:
             # Completion is acknowledged even when cleanup failed; only the
             # explicit cleaned status may confirm termination to the caller.
-            descriptor = os.open(cancel_path + ".done", os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(descriptor, "w") as saved:
-                if not stat.S_ISREG(os.fstat(saved.fileno()).st_mode):
+            done_path = cancel_path + ".done"
+            descriptor, temporary = tempfile.mkstemp(prefix=os.path.basename(done_path) + ".tmp-", dir=os.path.dirname(done_path))
+            try:
+                with os.fdopen(descriptor, "w") as saved:
+                    if not stat.S_ISREG(os.fstat(saved.fileno()).st_mode):
+                        raise RuntimeError("review preparation completion marker must be regular")
+                    saved.write("cleanup_failed\n" if cleanup_failed else "cleaned\n")
+                if os.path.lexists(done_path) and not stat.S_ISREG(os.lstat(done_path).st_mode):
                     raise RuntimeError("review preparation completion marker must be regular")
-                saved.write("cleanup_failed\n" if cleanup_failed else "cleaned\n")
+                os.replace(temporary, done_path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
 `
 
 type reviewWorkspacePreparationPayload struct {

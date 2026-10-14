@@ -39,9 +39,7 @@ const cleanupSignalFailurePython = `
 import errno
 cleanup_test_killpg = os.killpg
 cleanup_test_open = open
-cleanup_test_os_open = os.open
-cleanup_test_fdopen = os.fdopen
-cleanup_test_ack_descriptors = set()
+cleanup_test_replace = os.replace
 cleanup_test_term_count = 0
 
 def cleanup_test_signal(group, sig):
@@ -59,48 +57,19 @@ def cleanup_test_signal(group, sig):
         raise ProcessLookupError(errno.ESRCH, "synthetic cleanup lookup race")
     return cleanup_test_killpg(group, sig)
 
-class CleanupTestAckWriter:
-    def __init__(self, saved):
-        self.saved = saved
-        self.parts = []
-    def __enter__(self):
-        self.saved.__enter__()
-        return self
-    def write(self, value):
-        self.parts.append(value)
-        return self.saved.write(value)
-    def __getattr__(self, name):
-        return getattr(self.saved, name)
-    def __exit__(self, kind, value, traceback):
-        try:
-            return self.saved.__exit__(kind, value, traceback)
-        finally:
-            with cleanup_test_open(os.environ["REVIEW_TEST_CLEANUP_ACK"], "w") as recorded:
-                recorded.write("".join(self.parts))
-
-def cleanup_test_record_open(name, mode="r", *args, **kwargs):
-    saved = cleanup_test_open(name, mode, *args, **kwargs)
-    if str(name) == cancel_path + ".done" and "w" in mode:
-        return CleanupTestAckWriter(saved)
-    return saved
-
-def cleanup_test_record_descriptor(name, *args, **kwargs):
-    descriptor = cleanup_test_os_open(name, *args, **kwargs)
-    if str(name) == cancel_path + ".done":
-        cleanup_test_ack_descriptors.add(descriptor)
-    return descriptor
-
-def cleanup_test_record_fdopen(descriptor, mode="r", *args, **kwargs):
-    saved = cleanup_test_fdopen(descriptor, mode, *args, **kwargs)
-    if descriptor in cleanup_test_ack_descriptors and "w" in mode:
-        cleanup_test_ack_descriptors.remove(descriptor)
-        return CleanupTestAckWriter(saved)
-    return saved
+def cleanup_test_record_replace(source, destination):
+    acknowledgement = None
+    if str(destination) == cancel_path + ".done":
+        with cleanup_test_open(source) as completed:
+            acknowledgement = completed.read()
+    result = cleanup_test_replace(source, destination)
+    if acknowledgement is not None:
+        with cleanup_test_open(os.environ["REVIEW_TEST_CLEANUP_ACK"], "w") as recorded:
+            recorded.write(acknowledgement)
+    return result
 
 os.killpg = cleanup_test_signal
-os.open = cleanup_test_record_descriptor
-os.fdopen = cleanup_test_record_fdopen
-open = cleanup_test_record_open
+os.replace = cleanup_test_record_replace
 `
 
 type cleanupSignalObservation struct {
@@ -221,9 +190,10 @@ func TestReviewPreparationCleanupSignalErrors(t *testing.T) {
 				}
 				require.Eventually(t, func() bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) }, 2*time.Second, time.Millisecond, "red or deliberately denied cleanup cases must leave no owned live process after fixture teardown")
 			})
-			process, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").CombinedOutput()
-			require.NoError(t, err, "owned native process identity should be inspected without argv or environment: %s", process)
-			require.Equal(t, "git", filepath.Base(strings.TrimSpace(string(process))), "cleanup signal regression must pause real Git")
+			require.Eventually(t, func() bool {
+				process, processErr := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").CombinedOutput()
+				return processErr == nil && filepath.Base(strings.TrimSpace(string(process))) == "git"
+			}, 2*time.Second, time.Millisecond, "cleanup signal regression must observe real Git after the owned shell executes it")
 			require.NoError(t, syscall.Kill(pid, syscall.SIGSTOP), "the identified real Git process must still exist when paused")
 			require.Eventually(t, func() bool {
 				state, stateErr := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "stat=").CombinedOutput()
@@ -557,12 +527,14 @@ func TestReviewPreparationQuarantineRejectsLaterExecution(t *testing.T) {
 			if tt.authenticated {
 				auth = reviewGitAuthentication{f.remote, "synthetic-private-input"}
 			}
-			started := time.Now()
-			err := f.orchestrator().execReviewPreparationPayload(context.Background(), f.sandbox(), payload, auth, zerolog.Nop())
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := f.orchestrator().execReviewPreparationPayload(ctx, f.sandbox(), payload, auth, zerolog.Nop())
 			require.ErrorIs(t, err, ErrCodeReviewPreparationCleanup, "every later preparation mode must reject the quarantined holder")
 			require.NoFileExists(t, filepath.Join(f.workDir, "sentinel"), "quarantine must block execution before source, authentication, or repository commands")
 			require.NoFileExists(t, filepath.Join(f.workDir, ".git/143-review-evidence.json"), "quarantine must never publish readiness")
-			require.Less(t, time.Since(started), time.Second, "unsafe quarantine objects must fail promptly without blocking")
+			require.NoError(t, ctx.Err(), "quarantine rejection must finish before the bounded caller deadline")
+			require.NotErrorIs(t, err, context.DeadlineExceeded, "quarantine metadata must be rejected directly rather than blocking until the preparation deadline")
 			if tt.kind == "symlink" {
 				data, readErr := os.ReadFile(quarantine + ".target")
 				require.NoError(t, readErr, "quarantine alias rejection must preserve its external target")

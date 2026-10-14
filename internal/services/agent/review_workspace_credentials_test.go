@@ -300,14 +300,15 @@ func TestReviewTrustedWrapperIgnoresWritablePathAndPythonStartup(t *testing.T) {
 func TestReviewPrivateAuthenticationFailsClosedAndRedactsDiagnostics(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		provider SandboxProvider
-		env      map[string]string
-		want     string
+		name           string
+		provider       SandboxProvider
+		env            map[string]string
+		want           string
+		classification error
 	}{
 		{name: "unsupported transport", provider: struct{ SandboxProvider }{}, want: "private Git authentication input"},
 		{name: "legacy container token", provider: &testInternalSandboxProvider{}, env: map[string]string{"GITHUB_TOKEN": "legacy-fake-token"}, want: "must be recreated"},
-		{name: "private provider error", provider: &testInternalSandboxProvider{execErr: errors.New("fake-only " + base64.StdEncoding.EncodeToString([]byte("x-access-token:fake-only")))}, want: "***"},
+		{name: "private provider error", provider: &testInternalSandboxProvider{execErr: errors.New("fake-only " + base64.StdEncoding.EncodeToString([]byte("x-access-token:fake-only")))}, want: "review preparation transport unavailable", classification: ErrCodeReviewPreparationTransport},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -315,6 +316,9 @@ func TestReviewPrivateAuthenticationFailsClosedAndRedactsDiagnostics(t *testing.
 			o := &Orchestrator{provider: tt.provider, logger: zerolog.Nop()}
 			err := o.execReviewPreparationPayload(context.Background(), &Sandbox{WorkDir: t.TempDir(), Env: tt.env}, reviewWorkspacePreparationPayload{WorkDir: t.TempDir(), Standalone: true, Prepare: "true", CancelPath: filepath.Join(t.TempDir(), "cancel"), TimeoutSeconds: 1}, reviewGitAuthentication{"https://example.com/repo.git", "fake-only"}, zerolog.Nop())
 			require.ErrorContains(t, err, tt.want, "unsafe transport/container and private diagnostics must fail without exposing authentication")
+			if tt.classification != nil {
+				require.ErrorIs(t, err, tt.classification, "private provider failure must retain the retry classification without raw diagnostic details")
+			}
 			require.NotContains(t, err.Error(), "fake-only", "safe failure must redact raw fake authentication")
 			require.NotContains(t, err.Error(), base64.StdEncoding.EncodeToString([]byte("x-access-token:fake-only")), "safe failure must redact encoded fake authentication")
 		})
