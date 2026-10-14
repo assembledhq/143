@@ -1668,9 +1668,8 @@ function AutomationDetailRail({
                   // the levels aren't a shared scale — Codex stops at "xhigh"
                   // where Claude Code has "max" — so the reset has to be per
                   // level, not just "does this agent do reasoning at all". The
-                  // API drops a stale override on its own; sending it keeps the
-                  // optimistic row from showing a level the automation no
-                  // longer has.
+                  // API rejects a retained level the new agent can't grade, so
+                  // the reset has to ride in this same patch.
                   const clearsReasoning =
                     Boolean(automation.reasoning_effort) &&
                     !isCodingAgentReasoningEffortSupported(

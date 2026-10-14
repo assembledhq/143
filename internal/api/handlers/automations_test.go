@@ -1395,56 +1395,85 @@ func TestAutomationHandler_Update_CrossAgentModelPatchRetargetsAgent(t *testing.
 }
 
 // Claude Code grades effort one step further than Codex ("max"), so a
-// model-only patch that retargets the agent can strand a reasoning override the
-// new agent has never heard of. The request never named reasoning_effort, so
-// the stale value is dropped rather than 400'd back at the caller.
-func TestAutomationHandler_Update_CrossAgentModelPatchDropsUnsupportedReasoning(t *testing.T) {
+// model-only patch that retargets the agent can leave a reasoning override the
+// new agent can't run. It is rejected rather than silently dropped: the caller
+// changing agents clears it in the same patch, as the web picker does.
+func TestAutomationHandler_Update_CrossAgentModelPatchRejectsRetainedUnsupportedReasoning(t *testing.T) {
 	t.Parallel()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+	for _, tc := range []struct {
+		name       string
+		body       map[string]any
+		wantStatus int
+	}{
+		{
+			name:       "retained level is rejected",
+			body:       map[string]any{"model": models.CodexModelGPT56Sol},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "clearing it in the same patch succeeds",
+			body:       map[string]any{"model": models.CodexModelGPT56Sol, "reasoning_effort": ""},
+			wantStatus: http.StatusOK,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	orgID := uuid.New()
-	id := uuid.New()
-	now := time.Now()
-	iv := 1
-	unit := models.ScheduleUnitDays
-	agentType := string(models.AgentTypeClaudeCode)
-	model := models.ClaudeCodeModelOpus5
-	reasoning := models.ReasoningEffortMax
-	a := models.Automation{
-		ID: id, OrgID: orgID, Name: "a", Goal: "g",
-		AgentType: &agentType, ModelOverride: &model, ReasoningEffort: &reasoning,
-		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
-		Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
-		CreatedAt: now, UpdatedAt: now,
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			orgID := uuid.New()
+			id := uuid.New()
+			now := time.Now()
+			iv := 1
+			unit := models.ScheduleUnitDays
+			agentType := string(models.AgentTypeClaudeCode)
+			model := models.ClaudeCodeModelOpus5
+			reasoning := models.ReasoningEffortMax
+			a := models.Automation{
+				ID: id, OrgID: orgID, Name: "a", Goal: "g",
+				AgentType: &agentType, ModelOverride: &model, ReasoningEffort: &reasoning,
+				ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+				Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+				CreatedAt: now, UpdatedAt: now,
+			}
+
+			mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+				WithArgs(testAnyArgs(2)...).
+				WillReturnRows(newAutomationRow(mock, a))
+			if tc.wantStatus == http.StatusOK {
+				mock.ExpectExec("UPDATE automations SET").
+					WithArgs(testAnyArgs(32)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+
+			h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+			req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), tc.body, orgID, uuid.New(), map[string]string{"id": id.String()})
+			rr := httptest.NewRecorder()
+			h.Update(rr, req)
+			require.Equal(t, tc.wantStatus, rr.Code, rr.Body.String())
+
+			if tc.wantStatus != http.StatusOK {
+				// The model half resolved (Codex can run it); the reasoning is
+				// what fails, so the caller is told which field to clear.
+				require.Contains(t, rr.Body.String(), "INVALID_REASONING_EFFORT")
+				require.NoError(t, mock.ExpectationsWereMet())
+				return
+			}
+			var resp models.SingleResponse[models.Automation]
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+			require.NotNil(t, resp.Data.AgentType)
+			require.Equal(t, string(models.AgentTypeCodex), *resp.Data.AgentType)
+			require.Nil(t, resp.Data.ReasoningEffort)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
 	}
-
-	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
-		WithArgs(testAnyArgs(2)...).
-		WillReturnRows(newAutomationRow(mock, a))
-	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(32)...).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
-	body := map[string]any{"model": models.CodexModelGPT56Sol}
-	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
-	rr := httptest.NewRecorder()
-	h.Update(rr, req)
-	require.Equal(t, http.StatusOK, rr.Code)
-
-	var resp models.SingleResponse[models.Automation]
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	require.NotNil(t, resp.Data.AgentType)
-	require.Equal(t, string(models.AgentTypeCodex), *resp.Data.AgentType)
-	require.Nil(t, resp.Data.ReasoningEffort)
-	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-// An explicit reasoning_effort the target agent cannot run is still the
-// caller's mistake, so it keeps its 400 rather than being silently dropped.
+// An explicit reasoning_effort the agent cannot run is the caller's mistake and
+// keeps its 400.
 func TestAutomationHandler_Update_RejectsExplicitUnsupportedReasoning(t *testing.T) {
 	t.Parallel()
 
