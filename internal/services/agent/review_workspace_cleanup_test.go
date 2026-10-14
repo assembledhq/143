@@ -39,9 +39,7 @@ const cleanupSignalFailurePython = `
 import errno
 cleanup_test_killpg = os.killpg
 cleanup_test_open = open
-cleanup_test_os_open = os.open
-cleanup_test_fdopen = os.fdopen
-cleanup_test_ack_descriptors = set()
+cleanup_test_replace = os.replace
 cleanup_test_term_count = 0
 
 def cleanup_test_signal(group, sig):
@@ -59,48 +57,19 @@ def cleanup_test_signal(group, sig):
         raise ProcessLookupError(errno.ESRCH, "synthetic cleanup lookup race")
     return cleanup_test_killpg(group, sig)
 
-class CleanupTestAckWriter:
-    def __init__(self, saved):
-        self.saved = saved
-        self.parts = []
-    def __enter__(self):
-        self.saved.__enter__()
-        return self
-    def write(self, value):
-        self.parts.append(value)
-        return self.saved.write(value)
-    def __getattr__(self, name):
-        return getattr(self.saved, name)
-    def __exit__(self, kind, value, traceback):
-        try:
-            return self.saved.__exit__(kind, value, traceback)
-        finally:
-            with cleanup_test_open(os.environ["REVIEW_TEST_CLEANUP_ACK"], "w") as recorded:
-                recorded.write("".join(self.parts))
-
-def cleanup_test_record_open(name, mode="r", *args, **kwargs):
-    saved = cleanup_test_open(name, mode, *args, **kwargs)
-    if str(name) == cancel_path + ".done" and "w" in mode:
-        return CleanupTestAckWriter(saved)
-    return saved
-
-def cleanup_test_record_descriptor(name, *args, **kwargs):
-    descriptor = cleanup_test_os_open(name, *args, **kwargs)
-    if str(name) == cancel_path + ".done":
-        cleanup_test_ack_descriptors.add(descriptor)
-    return descriptor
-
-def cleanup_test_record_fdopen(descriptor, mode="r", *args, **kwargs):
-    saved = cleanup_test_fdopen(descriptor, mode, *args, **kwargs)
-    if descriptor in cleanup_test_ack_descriptors and "w" in mode:
-        cleanup_test_ack_descriptors.remove(descriptor)
-        return CleanupTestAckWriter(saved)
-    return saved
+def cleanup_test_record_replace(source, destination):
+    acknowledgement = None
+    if str(destination) == cancel_path + ".done":
+        with cleanup_test_open(source) as completed:
+            acknowledgement = completed.read()
+    result = cleanup_test_replace(source, destination)
+    if acknowledgement is not None:
+        with cleanup_test_open(os.environ["REVIEW_TEST_CLEANUP_ACK"], "w") as recorded:
+            recorded.write(acknowledgement)
+    return result
 
 os.killpg = cleanup_test_signal
-os.open = cleanup_test_record_descriptor
-os.fdopen = cleanup_test_record_fdopen
-open = cleanup_test_record_open
+os.replace = cleanup_test_record_replace
 `
 
 type cleanupSignalObservation struct {

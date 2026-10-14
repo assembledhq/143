@@ -73,7 +73,10 @@ stalling active reviews, while preserving fresh checks before publication and me
    Validate reused inputs before claiming a thread runtime or seed inbox messages,
    and persist a failed reviewer result when immutable evidence is invalid.
    Carry the shared eight-minute preparation deadline, including earlier caller
-   deadlines, through input generation and hydration. Give Git commands the
+   deadlines, through input generation and hydration. After that deadline, allow
+   one minute only to verify an existing bundle using local objects; do not fetch,
+   repair, generate inputs, or renew preparation. Earlier caller deadlines still
+   apply. Give input-generation and hydration Git commands the
    remaining budget and use managed Docker process cleanup before removing the
    preparation-owner marker. Canceling a waiting sibling must not cancel the
    owner; canceling the owner must wait for bounded cleanup. Hydrate missing
