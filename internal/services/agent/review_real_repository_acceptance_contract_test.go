@@ -715,6 +715,232 @@ func TestRealReviewDockerFailureStateRedaction(t *testing.T) {
 	}
 }
 
+func TestRealReviewProfileDecoderPreservesDrainAndRedacts(t *testing.T) {
+	t.Parallel()
+	enter := realReviewProfilePrefix + "{\"version\":1,\"op\":1,\"phase\":2,\"category\":2}\n"
+	exit := realReviewProfilePrefix + "{\"version\":1,\"op\":2,\"phase\":2,\"category\":2,\"duration_us\":100,\"failed\":0,\"bytes\":50}\n"
+	tests := []struct {
+		name       string
+		raw        string
+		wantReason string
+	}{
+		{name: "fragmented fixed numeric records", raw: "ordinary stdout\n" + enter + exit},
+		{name: "missing profile", raw: "ordinary stdout only\n", wantReason: "missing_profile_records"},
+		{name: "untrusted text", raw: realReviewProfilePrefix + "{\"version\":1,\"op\":1,\"phase\":\"private-token\",\"category\":2}\n", wantReason: "invalid_record"},
+		{name: "unknown field", raw: realReviewProfilePrefix + "{\"version\":1,\"op\":1,\"phase\":2,\"category\":2,\"path\":123}\n", wantReason: "invalid_record"},
+		{name: "duplicate key", raw: realReviewProfilePrefix + "{\"version\":1,\"op\":1,\"phase\":1,\"phase\":2,\"category\":2}\n", wantReason: "invalid_record"},
+		{name: "non-numeric null", raw: realReviewProfilePrefix + "{\"version\":1,\"op\":1,\"phase\":2,\"category\":2,\"bytes\":null}\n", wantReason: "invalid_record"},
+		{name: "unmatched exit", raw: exit, wantReason: "unmatched_exit"},
+		{name: "unfinished operation", raw: enter, wantReason: "incomplete_phase_exits"},
+		{name: "truncated diagnostic line", raw: strings.TrimSuffix(enter, "\n"), wantReason: "truncated_record"},
+		{name: "oversized line", raw: realReviewProfilePrefix + strings.Repeat("x", 1025) + "\n", wantReason: "record_size_limit"},
+		{name: "bounded record count", raw: strings.Repeat(enter+exit, 10000) + enter, wantReason: "record_count_limit"},
+		{name: "bounded simultaneous operations", raw: strings.Repeat(enter, 65), wantReason: "active_count_limit"},
+		{name: "launcher hash rejection", raw: realReviewProfilePrefix + "{\"version\":1,\"op\":3,\"phase\":0,\"category\":0}\n", wantReason: "launcher_invalid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			profile := &realReviewSourceProfile{}
+			decoder := &realReviewProfileDecoder{profile: profile}
+			provider := &realReviewProvider{logs: realReviewLogBuffer("private-token"), surfaces: realReviewLogBuffer("private-token")}
+			var forwarded strings.Builder
+			writer := io.MultiWriter(decoder, provider.observedOutput(&forwarded))
+			for offset := 0; offset < len(tt.raw); offset += 7 {
+				end := min(offset+7, len(tt.raw))
+				count, err := writer.Write([]byte(tt.raw[offset:end]))
+				require.NoError(t, err, "diagnostic parse failure must never interrupt original output draining")
+				require.Equal(t, end-offset, count, "every original byte must still reach its forwarding and credential-scan surface")
+			}
+			decoder.finish()
+			require.Equal(t, tt.raw, forwarded.String(), "profiling must preserve exact original stdout bytes")
+			result := profile.result()
+			require.Equal(t, tt.wantReason, result.InvalidReason, "profile validity must explicitly distinguish unavailable or unsafe attribution")
+			require.LessOrEqual(t, result.Records, 20000, "retained profile count must obey the fixed record cap")
+			encoded, err := json.Marshal(result)
+			require.NoError(t, err, "fixed numeric profile aggregates should encode without raw output")
+			require.NotContains(t, string(encoded), "private-token", "untrusted profile text must never be retained in diagnostics")
+			if strings.Contains(tt.raw, "private-token") {
+				require.True(t, provider.credentialDetected(), "diagnostic decoding must leave the complete credential scanner active")
+			}
+			if tt.wantReason == "" {
+				bytes := int64(50)
+				expected := map[string]realReviewProfileAggregate{"download/npm": {Entered: 1, Completed: 1, MaxActive: 1, DurationUS: 100, Bytes: &bytes}}
+				require.Equal(t, expected, result.Phases, "valid fragments must retain only exact fixed category counts and numeric measurements")
+			}
+		})
+	}
+}
+
+func TestRealReviewProfileOverlapUsesSharedContainerSamples(t *testing.T) {
+	t.Parallel()
+	profile := &realReviewSourceProfile{}
+	for _, record := range []string{
+		`{"version":1,"op":1,"phase":2,"category":2}`,
+		`{"version":1,"op":1,"phase":2,"category":2}`,
+		`{"version":1,"op":1,"phase":3,"category":3}`,
+	} {
+		profile.consume([]byte(record))
+	}
+	current, cumulativePeak := int64(100), int64(9999)
+	profile.observeMemory(realReviewMemorySample{MemoryCurrentBytes: &current, MemoryPeakBytes: &cumulativePeak, MemoryEvents: map[string]int64{"max": 3, "oom": 0, "oom_kill": 0}, MemoryStat: map[string]int64{"anon": 50, "file": 40, "file_dirty": 4, "file_writeback": 0}})
+	current = 200
+	profile.observeMemory(realReviewMemorySample{MemoryCurrentBytes: &current, MemoryPeakBytes: &cumulativePeak, MemoryEvents: map[string]int64{"max": 7, "oom": 0, "oom_kill": 0}, MemoryStat: map[string]int64{"anon": 80, "file": 60, "file_dirty": 0, "file_writeback": 2}})
+	for _, record := range []string{
+		`{"version":1,"op":2,"phase":2,"category":2,"duration_us":100,"failed":0,"bytes":10}`,
+		`{"version":1,"op":2,"phase":2,"category":2,"duration_us":50,"failed":0,"bytes":20}`,
+		`{"version":1,"op":2,"phase":3,"category":3,"duration_us":80,"failed":1}`,
+	} {
+		profile.consume([]byte(record))
+	}
+	bytes := int64(30)
+	currentMaximum := int64(200)
+	stat := map[string]int64{"anon": 80, "file": 60, "file_dirty": 4, "file_writeback": 2}
+	deltas := map[string]int64{"max": 4, "oom": 0, "oom_kill": 0}
+	expected := map[string]realReviewProfileAggregate{
+		"download/npm":   {Entered: 2, Completed: 2, MaxActive: 2, DurationUS: 150, Bytes: &bytes, MemorySamples: 2, MaxCurrentBytes: &currentMaximum, MaxMemoryStat: stat, SampledEventDelta: deltas},
+		"extract/python": {Entered: 1, Completed: 1, Failed: 1, MaxActive: 1, DurationUS: 80, MemorySamples: 2, MaxCurrentBytes: &currentMaximum, MaxMemoryStat: stat, SampledEventDelta: deltas},
+	}
+	result := profile.result()
+	require.False(t, result.Invalid, "matched overlapping operations should provide valid diagnostic attribution")
+	require.Equal(t, expected, result.Phases, "overlapping phases must share container-wide observations rather than claim exclusive resource ownership")
+	require.Equal(t, "sum of completed operation durations; concurrent operations overlap; not elapsed phase wall time; incomplete phases retain active counts only", result.TimingScope, "concurrent durations must be labeled as completed operation time instead of elapsed phase wall time")
+	encoded, err := json.Marshal(result)
+	require.NoError(t, err, "overlap aggregates should encode using fixed data only")
+	require.NotContains(t, string(encoded), "9999", "cumulative lifetime memory.peak must never become a per-phase peak")
+}
+
+func TestRealReviewProfileSamplingAndDecodingAreConcurrent(t *testing.T) {
+	t.Parallel()
+	profile := &realReviewSourceProfile{}
+	peak, current := int64(300), int64(200)
+	monitor := newRealReviewMemoryMonitor(strings.Repeat("a", 64), func() realReviewMemorySample {
+		return realReviewMemorySample{MemoryPeakBytes: &peak, MemoryCurrentBytes: &current, MemoryEvents: map[string]int64{"max": 0, "oom": 0, "oom_kill": 0}, MemoryStat: map[string]int64{"anon": 100, "file": 80, "file_dirty": 0, "file_writeback": 0}, UnavailableFields: []string{}}
+	}, time.Millisecond, time.Minute, profile)
+	t.Cleanup(func() { monitor.stop() })
+	for range 1000 {
+		profile.consume([]byte(`{"version":1,"op":1,"phase":2,"category":2}`))
+		profile.consume([]byte(`{"version":1,"op":2,"phase":2,"category":2,"duration_us":1,"failed":0}`))
+	}
+	monitor.stop()
+	result := profile.result()
+	require.False(t, result.Invalid, "concurrent numeric decoding and host sampling should remain valid after monitor join")
+	cell := result.Phases["download/npm"]
+	actual := []int64{int64(result.Records), cell.Entered, cell.Completed, int64(cell.Active), int64(cell.MaxActive), cell.DurationUS}
+	require.Equal(t, []int64{2000, 1000, 1000, 0, 1, 1000}, actual, "sampling must preserve exact operation counts and timing without races or lost decoder events")
+}
+
+func TestRealReviewProfileMemoryStatIsOptionalAndBounded(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		raw       string
+		profile   bool
+		wantError bool
+	}{
+		{name: "finite numeric fields", raw: "anon 10\nfile 20\nfile_dirty 3\nfile_writeback 0\nother_counter 4\n", profile: true},
+		{name: "missing stat", profile: true, wantError: true},
+		{name: "missing required field", raw: "anon 10\nfile 20\nfile_dirty 3\n", profile: true, wantError: true},
+		{name: "negative value", raw: "anon -1\nfile 20\nfile_dirty 3\nfile_writeback 0\n", profile: true, wantError: true},
+		{name: "untrusted text", raw: "anon private-token\nfile 20\nfile_dirty 3\nfile_writeback 0\n", profile: true, wantError: true},
+		{name: "duplicate field", raw: "anon 10\nfile 20\nfile_dirty 3\nfile_writeback 0\nanon 20\n", profile: true, wantError: true},
+		{name: "oversized stat", raw: strings.Repeat("x", 8193), profile: true, wantError: true},
+		{name: "ordinary acceptance never reads optional stat", raw: "invalid stat deliberately ignored\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			require.NoError(t, err, "stat fixtures must have canonical host roots")
+			containerID := strings.Repeat("a", 64)
+			group := filepath.Join(root, "docker", containerID)
+			require.NoError(t, os.MkdirAll(group, 0o700), "optional stat must come from the exact owned container cgroup")
+			for name, value := range map[string]string{"memory.events": "max 0\noom 0\noom_kill 0\n", "memory.peak": "100\n", "memory.current": "50\n"} {
+				require.NoError(t, os.WriteFile(filepath.Join(group, name), []byte(value), 0o600), "ordinary resource fields should remain readable")
+			}
+			if tt.raw != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(group, "memory.stat"), []byte(tt.raw), 0o600), "optional fixture may contain available or rejected kernel data")
+			}
+			actual := readRealReviewMemorySample(root, containerID, tt.profile)
+			peak, current := int64(100), int64(50)
+			expected := realReviewMemorySample{MemoryPeakBytes: &peak, MemoryCurrentBytes: &current, MemoryEvents: map[string]int64{"max": 0, "oom": 0, "oom_kill": 0}, UnavailableFields: []string{}}
+			if tt.wantError {
+				expected.UnavailableFields = []string{"memory.stat"}
+			} else if tt.profile {
+				expected.MemoryStat = map[string]int64{"anon": 10, "file": 20, "file_dirty": 3, "file_writeback": 0}
+			}
+			require.Equal(t, expected, actual, "optional stat failures must be explicit without disturbing ordinary kernel evidence or opt-out behavior")
+		})
+	}
+}
+
+func TestRealReviewProfileObserverKeepsOriginalAuthGuard(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		auth bool
+	}{
+		{name: "released authentication permits exact Popen interception"},
+		{name: "unreleased authentication still triggers original identity guard", auth: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			trace := filepath.Join(root, "private-trace")
+			script := "set -eu\npython3 .143/review-sources.py\n"
+			encodedScript, err := json.Marshal(script)
+			require.NoError(t, err, "fixed helper command should encode for the original-identity fixture")
+			fixture := "import json,os,pathlib,stat,subprocess,time\np={\"prepare\":" + string(encodedScript) + "}\nauth="
+			if tt.auth {
+				fixture += "object()\n"
+			} else {
+				fixture += "None\n"
+			}
+			fixture += `
+def original_popen(args,**kwargs):
+    assert kwargs == {"cwd":"/literal-workdir","env":{"literal":"preserved"},"stdin":subprocess.DEVNULL,"close_fds":True,"start_new_session":True}
+    assert args[:2] == ["/bin/sh","-c"]
+    assert args[2] != p["prepare"]
+    assert "python3 -c " in args[2]
+    assert ".143/review-sources.py" in args[2]
+    class Child: pid=999999
+    return Child()
+subprocess.Popen=original_popen
+def run(script,required=True,authenticate=False,platform=False):
+    assert script is p["prepare"]
+    if auth is not None and script in (p.get("prepare"),p.get("verify_recipe")):
+        raise RuntimeError("original authentication release guard")
+    subprocess.Popen(["/bin/sh","-c",script],cwd="/literal-workdir",env={"literal":"preserved"},stdin=subprocess.DEVNULL,close_fds=True,start_new_session=True)
+    assert script is p["prepare"]
+    return "original-result"
+def capture(args): return b"ok"
+def check_workspace_quarantine(): pass
+def read_preparation_input(): return None
+try:
+    check_workspace_quarantine()
+    message = read_preparation_input()
+    assert run(p["prepare"]) == "original-result"
+except RuntimeError:
+    raise SystemExit(17)
+`
+			command, err := instrumentRealReviewProfileCommand(realReviewPython(fixture), true)
+			require.NoError(t, err, "opt-in profile observer should preserve the production wrapper's trusted anchor")
+			encodedTrace, err := json.Marshal(trace)
+			require.NoError(t, err, "isolated trace path should encode")
+			command = strings.ReplaceAll(command, `"/tmp/143-real-review-observation.jsonl"`, string(encodedTrace))
+			output, runErr := exec.Command("/bin/sh", "-c", command).CombinedOutput()
+			if tt.auth {
+				var exitErr *exec.ExitError
+				require.ErrorAs(t, runErr, &exitErr, "unreleased authentication must fail before any Popen interception")
+				require.Equal(t, 17, exitErr.ExitCode(), "observer must preserve the original auth guard's exception path")
+			} else {
+				require.NoError(t, runErr, "exact Popen copy may change while the original function sees its unchanged script: %s", output)
+			}
+		})
+	}
+}
+
 func TestRealReviewFailureTraceRetainsOnlyFixedMetadata(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
