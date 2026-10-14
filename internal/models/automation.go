@@ -457,10 +457,18 @@ func AutomationRankAgentType(rank AutomationModelRank, defaultAgentType AgentTyp
 			}
 		}
 	}
-	if defaultAgentType != "" {
-		if err := defaultAgentType.Validate(); err == nil {
-			return defaultAgentType
-		}
+	return CanonicalAutomationDefaultAgentType(defaultAgentType)
+}
+
+// CanonicalAutomationDefaultAgentType is the agent an agentless rank actually
+// resolves to under an org default: trimmed and validated, else the built-in
+// default. Org settings store default_agent_type as written, so the raw value
+// is not safe to freeze or compare — a frozen " codex " would be read back as
+// "codex" and refuse every later claim for the run.
+func CanonicalAutomationDefaultAgentType(defaultAgentType AgentType) AgentType {
+	trimmed := AgentType(strings.TrimSpace(string(defaultAgentType)))
+	if trimmed != "" && trimmed.Validate() == nil {
+		return trimmed
 	}
 	return DefaultDefaultAgentType
 }

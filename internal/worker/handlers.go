@@ -2558,6 +2558,11 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 				orgDefaultAgentType = settings.DefaultAgentType
 			}
 		}
+		// Resolve, freeze, and compare one canonical value: the claim matches
+		// it against the frozen default as text, so a raw org setting with
+		// stray whitespace would freeze one string and later be compared as
+		// another.
+		orgDefaultAgentType = models.CanonicalAutomationDefaultAgentType(orgDefaultAgentType)
 		candidates, err := automationModelCandidates(run, automation, orgDefaultAgentType)
 		if err != nil {
 			return failPendingRun(err.Error())

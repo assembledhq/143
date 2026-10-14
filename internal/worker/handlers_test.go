@@ -9901,6 +9901,109 @@ func TestAutomationRunHandler_DispatchesOrgDefaultAgentForAgentlessAutomation(t 
 		"the attempt this session records must spend its own rank; if it does not, the chain never advances and the run re-dispatches until the reaper fails it")
 }
 
+// Org settings store default_agent_type as written, padding included. The
+// claim compares the frozen default as text, so what it freezes has to be the
+// canonical agent the ladder resolved — otherwise the next attempt reads the
+// trimmed value back, disagrees, and the fresh fallback dispatch is refused,
+// leaving the run pending until the reaper.
+func TestAutomationRunHandler_FreezesTheCanonicalOrgDefault(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Automations = db.NewAutomationStore(mock)
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+	stores.Organizations = db.NewOrganizationStore(mock)
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	runID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now()
+	repoID := uuid.New()
+	// Deliberately NOT models.DefaultDefaultAgentType: a test whose org default
+	// equalled the built-in one would pass even if the org setting were ignored.
+	orgDefaultAgentType := models.AgentTypeClaudeCode
+
+	payload, err := json.Marshal(map[string]string{
+		"org_id":            orgID.String(),
+		"automation_id":     automationID.String(),
+		"automation_run_id": runID.String(),
+	})
+	require.NoError(t, err, "marshal payload should succeed")
+
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(automationRunRows(
+			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
+			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+		))
+
+	// agent_type is nil and there are no fallbacks: a one-rank chain whose
+	// only rank names a model and nothing else.
+	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(automationRows(
+			automationID, orgID, &repoID, "nightly", "cleanup", nil,
+			models.AutomationIconTypeEmoji, "⚙️",
+			nil, stringPtr(models.DefaultCodexModel), nil, models.AutomationFallbackModels{}, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
+			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{}, []byte("{}"),
+			nil, nil, true, nil, nil, nil,
+			50, []byte("{}"), now, now, nil,
+		))
+
+	expectAutomationRunSessionAttempts(mock)
+
+	// The org default is read once per dispatch and feeds the ladder for every
+	// rank at once, so the agent that is checked, dispatched and later matched
+	// is one value rather than three independent resolutions.
+	mock.ExpectQuery("SELECT id, name, settings").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerOrganizationColumns()).
+			AddRow(orgID, "Assembled", json.RawMessage(`{"default_agent_type":" claude_code "}`), now, now))
+
+	expectedModel := models.DefaultCodexModel
+	createSessionArgs := workerAnyArgs(39)
+	createSessionArgs[1] = orgDefaultAgentType
+	createSessionArgs[9] = &expectedModel
+	createSessionArgs[23] = &runID
+	mock.ExpectBegin()
+	expectCurrentAutomationSession(mock, models.AutomationRunStatusPending, uuid.Nil)
+	// The claim freezes the default it resolved against, so a later attempt in
+	// this chain resolves agentless ranks the same way.
+	mock.ExpectExec(`UPDATE automation_runs\s+SET status = 'running',\s+dispatch_state = NULL.+WHERE id = @id AND org_id = @org_id\s+AND status = 'pending'`).
+		WithArgs(string(orgDefaultAgentType), models.AutomationRunDispatchDefaultAgentTypeKey, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery(`INSERT INTO sessions`).
+		WithArgs(createSessionArgs...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
+	mock.ExpectQuery(`INSERT INTO session_threads`).
+		WithArgs(workerAnyArgs(8)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
+
+	mock.ExpectQuery(`INSERT INTO jobs`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	availability := &automationModelAvailabilityStub{unavailable: map[string]bool{}}
+	handler := newAutomationRunHandler(stores, &Services{CodingAgents: availability}, zerolog.Nop())
+	err = handler(context.Background(), models.JobTypeAutomationRun, payload)
+
+	require.NoError(t, err, "an automation that overrides only its model must dispatch normally")
+	require.Equal(t,
+		[]string{automationModelAvailabilityKey(string(orgDefaultAgentType), models.DefaultCodexModel)},
+		availability.checked,
+		"availability must be looked up against the resolved agent; a blank one has no credential to check and would dispatch unverified")
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"the session must be created on the org default agent, which is what the createSessionArgs agent_type position pins")
+
+}
+
 // An org default changed mid-chain must not re-label rank 0. The first attempt
 // ran the agentless primary on the then-default Claude Code and failed on
 // capacity; the live setting now resolves to Codex. Re-reading it would resolve

@@ -347,6 +347,16 @@ func TestAutomationRankAgentType(t *testing.T) {
 			expected:         models.DefaultDefaultAgentType,
 		},
 		{
+			// Org settings store default_agent_type as written. The ladder
+			// has to resolve the value the user meant, and resolve it to the
+			// same string the run freezes and later compares, or the frozen
+			// default refuses every later claim for the run.
+			name:             "a padded org default resolves to the agent it names",
+			rank:             models.AutomationModelRank{},
+			defaultAgentType: models.AgentType(" claude_code "),
+			expected:         models.AgentTypeClaudeCode,
+		},
+		{
 			// Both rungs above are unusable, so even a rank naming nothing at
 			// all comes out dispatchable.
 			name:             "a rank with neither agent nor a usable default still resolves",
