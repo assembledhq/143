@@ -2375,6 +2375,10 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			return nil
 		}
 
+		automation, err = models.AutomationWithRunLabelModel(automation, run)
+		if err != nil {
+			return fmt.Errorf("resolve automation run label model: %w", err)
+		}
 		identityScope, err := automationRunIdentityScope(run, automation)
 		if err != nil {
 			now := time.Now()

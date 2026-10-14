@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -291,4 +292,60 @@ func codingCredentialAgentType(provider models.ProviderName) models.AgentType {
 	default:
 		return ""
 	}
+}
+
+func (h *AutomationHandler) validateAutomationLabelModels(ctx context.Context, automation models.Automation) error {
+	if len(automation.GitHubEventFilters) == 0 {
+		return nil
+	}
+	if err := automation.ValidateLabelModelOverrides(); err != nil {
+		return err
+	}
+	var filters models.AutomationGitHubEventFilters
+	if err := json.Unmarshal(automation.GitHubEventFilters, &filters); err != nil {
+		return err
+	}
+	routes := filters.ResolvedLabelModelRoutes(automation.AgentType)
+	if len(routes) == 0 {
+		return nil
+	}
+	available := map[models.AgentType]bool{}
+	for _, route := range routes {
+		available[route.AgentType] = false
+	}
+	checked := h.orgStore != nil || h.codingCredentialStore != nil
+	if h.orgStore != nil {
+		org, err := h.orgStore.GetByID(ctx, automation.OrgID)
+		if err != nil {
+			return fmt.Errorf("load organization settings: %w", err)
+		}
+		settings, err := models.ParseOrgSettings(org.Settings)
+		if err != nil {
+			return err
+		}
+		for agent := range available {
+			available[agent] = hasAutomationAgentConfigKey(settings.AgentConfig, agent)
+		}
+	}
+	missing := false
+	for _, usable := range available {
+		missing = missing || !usable
+	}
+	if missing && h.codingCredentialStore != nil {
+		credentials, err := h.codingCredentialStore.ListByScope(ctx, models.Scope{OrgID: automation.OrgID})
+		if err != nil {
+			return fmt.Errorf("list org coding credentials: %w", err)
+		}
+		for _, credential := range credentials {
+			if credential.Status == models.CodingCredentialStatusActive {
+				available[codingCredentialAgentType(credential.Provider)] = true
+			}
+		}
+	}
+	for _, route := range routes {
+		if checked && !available[route.AgentType] {
+			return fmt.Errorf("model %q is not available for agent %q; configure a team-usable credential first", route.Model, route.AgentType)
+		}
+	}
+	return nil
 }

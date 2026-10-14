@@ -633,6 +633,10 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Priority:            priority,
 		ExternalMetadata:    req.Metadata,
 	}
+	if err := h.validateAutomationLabelModels(r.Context(), automation); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_LABEL_MODELS", err.Error())
+		return
+	}
 	if user != nil {
 		automation.CreatedBy = &user.ID
 	}
@@ -1850,6 +1854,10 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if err := h.validateAutomationLabelModels(r.Context(), automation); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_LABEL_MODELS", err.Error())
+		return
+	}
 	if err := h.persistAutomationUpdate(r.Context(), &before, &automation); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update automation", err)
 		return
