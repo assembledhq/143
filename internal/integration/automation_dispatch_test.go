@@ -1096,7 +1096,9 @@ func TestAutomationDispatch_OldMergedDeliveryFreshGeneration(t *testing.T) {
 	target, err := h.targets.GetByID(ctx, h.orgID, *merged.TargetID)
 	require.NoError(t, err, "reload target")
 	require.Equal(t, models.AutomationTargetLifecycleMerged, target.LifecycleState, "the evidence refresh keeps the merged state")
-	require.WithinDuration(t, time.Now(), *target.LifecycleUpdatedAt, time.Minute, "the live lookup refreshed the evidence")
+	// The refresh carries GitHub's updated_at, never the local clock, so the
+	// evidence stays at the lookup's moment rather than jumping to now.
+	require.WithinDuration(t, old, *target.LifecycleUpdatedAt, time.Millisecond, "the live lookup refreshed the evidence to GitHub's moment")
 
 	late := h.push(t, "2222222222222222222222222222222222222222", time.Now().UTC())
 	require.Equal(t, models.AutomationRunStatusSkipped, late.Status, "a push after merge is still skipped at arrival")

@@ -40,7 +40,6 @@ type githubAutomationTargetStore interface {
 	AdoptHead(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, headSHA string, updatedAt *time.Time) (int, error)
 	TouchObservedHead(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, headSHA string, updatedAt time.Time) error
 	MarkHeadResolutionPending(ctx context.Context, tx pgx.Tx, orgID, targetID uuid.UUID, deadline time.Time) error
-	SetLifecycle(ctx context.Context, q db.DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState) error
 	SetLifecycleObserved(ctx context.Context, q db.DBTX, orgID, targetID uuid.UUID, state models.AutomationTargetLifecycleState, observedAt *time.Time) (bool, error)
 }
 
