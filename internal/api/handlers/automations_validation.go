@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -291,4 +292,23 @@ func codingCredentialAgentType(provider models.ProviderName) models.AgentType {
 	default:
 		return ""
 	}
+}
+
+func (h *AutomationHandler) validateAutomationLabelModels(ctx context.Context, automation models.Automation) error {
+	if len(automation.GitHubEventFilters) == 0 {
+		return nil
+	}
+	if err := automation.ValidateLabelModelOverrides(); err != nil {
+		return err
+	}
+	var filters models.AutomationGitHubEventFilters
+	if err := json.Unmarshal(automation.GitHubEventFilters, &filters); err != nil {
+		return err
+	}
+	var mappedModel *string
+	for _, model := range filters.LabelModelOverrides {
+		mappedModel = &model
+		break
+	}
+	return h.validateAutomationModelAvailability(ctx, automation.OrgID, automation.AgentType, mappedModel)
 }

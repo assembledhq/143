@@ -409,9 +409,28 @@ func (s *GitHubEventTriggerService) triggerAutomation(ctx context.Context, autom
 		return nil
 	}
 
+	filters, err := decodeGitHubEventFilters(automation)
+	if err != nil {
+		return err
+	}
+	automation, selection, err := automation.SelectLabelModel(filters, req.Labels)
+	if err != nil {
+		return err
+	}
 	configSnapshot, err := automation.BuildConfigSnapshot()
 	if err != nil {
 		return fmt.Errorf("build config snapshot: %w", err)
+	}
+	if selection != nil {
+		var snapshot map[string]any
+		if err := json.Unmarshal(configSnapshot, &snapshot); err != nil {
+			return err
+		}
+		snapshot["label_model_selection"] = selection
+		configSnapshot, err = json.Marshal(snapshot)
+		if err != nil {
+			return err
+		}
 	}
 	configSnapshot, err = withGitHubEventSnapshot(configSnapshot, req)
 	if err != nil {

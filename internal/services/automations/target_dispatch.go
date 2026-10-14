@@ -310,6 +310,10 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 		}
 		return DispatchOutcome{}, fmt.Errorf("reread automation: %w", err)
 	}
+	automation, err = models.AutomationWithRunLabelModel(automation, in.Run)
+	if err != nil {
+		return DispatchOutcome{}, fmt.Errorf("resolve target run label model: %w", err)
+	}
 	if automation.SessionContinuity.OrDefault() != models.AutomationSessionContinuityPerTarget {
 		return DispatchOutcome{Kind: DispatchNotApplicable, Note: "automation is per_run"}, nil
 	}
