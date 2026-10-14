@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/reviewpreparation"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -382,7 +384,7 @@ func TestReviewPreparationKeepsLargeRecipeOffArguments(t *testing.T) {
 	require.Equal(t, large, message.Payload.Prepare, "stdin transport must preserve large quoted recipe bytes exactly")
 }
 
-func TestCodeReviewLegacyAuthDoesNotPersistInstallationToken(t *testing.T) {
+func TestActivatedCodeReviewAuthDoesNotPersistInstallationToken(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name   string
@@ -396,10 +398,13 @@ func TestCodeReviewLegacyAuthDoesNotPersistInstallationToken(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := SandboxConfig{Env: map[string]string{}}
-			o := &Orchestrator{logger: zerolog.Nop()}
-			_, err := o.prepareSandboxGitHubAuth(context.Background(), &models.Session{Origin: tt.origin}, &models.Repository{FullName: "org/repo"}, "fake-fallback", &cfg, zerolog.Nop())
+			orgID, repoID := uuid.New(), uuid.New()
+			policy, err := reviewpreparation.NewPolicy(true, []string{"org/repo"})
+			require.NoError(t, err, "activated auth test policy must construct")
+			o := &Orchestrator{logger: zerolog.Nop(), reviewPreparationPolicy: policy}
+			_, err = o.prepareSandboxGitHubAuth(context.Background(), &models.Session{OrgID: orgID, RepositoryID: &repoID, Origin: tt.origin, RevisionContext: json.RawMessage(`{"github_repo":"org/repo"}`)}, &models.Repository{ID: repoID, OrgID: orgID, FullName: "org/repo"}, "fake-fallback", &cfg, zerolog.Nop())
 			require.NoError(t, err, "legacy Git identity setup should preserve ordinary coding compatibility")
-			require.Equal(t, tt.want, cfg.Env["GITHUB_TOKEN"], "only ordinary coding may retain the existing legacy token fallback")
+			require.Equal(t, tt.want, cfg.Env["GITHUB_TOKEN"], "activated review must suppress the token fallback while ordinary coding retains it")
 		})
 	}
 }

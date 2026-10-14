@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/llm"
+	"github.com/caarlos0/env/v11"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -915,6 +916,33 @@ func TestPreviewOriginHostIsLocal(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tc.want, previewOriginHostIsLocal(tc.template))
+		})
+	}
+}
+
+func TestReviewPreparationConfiguration(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		environment  map[string]string
+		enabled      bool
+		repositories []string
+	}{
+		{name: "staged default"},
+		{name: "global alone retains empty list", environment: map[string]string{"CODE_REVIEW_WORKSPACE_PREPARATION_ENABLED": "true"}, enabled: true},
+		{name: "explicit scoped activation", environment: map[string]string{"CODE_REVIEW_WORKSPACE_PREPARATION_ENABLED": "true", "CODE_REVIEW_WORKSPACE_PREPARATION_REPOSITORIES": "sample/first,sample/second"}, enabled: true, repositories: []string{"sample/first", "sample/second"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var cfg Config
+			environment := tt.environment
+			if environment == nil {
+				environment = map[string]string{}
+			}
+			require.NoError(t, env.ParseWithOptions(&cfg, env.Options{Environment: environment}), "scoped review preparation environment must parse")
+			require.Equal(t, tt.enabled, cfg.CodeReviewWorkspacePreparationEnabled, "global preparation switch must retain its configured value")
+			require.Equal(t, tt.repositories, cfg.CodeReviewWorkspacePreparationRepositories, "repository list must default to empty and parse explicit configuration")
 		})
 	}
 }

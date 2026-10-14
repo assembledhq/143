@@ -24,6 +24,7 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/repoconfig"
+	"github.com/assembledhq/143/internal/reviewpreparation"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/providers"
 	"github.com/docker/docker/api/types/container"
@@ -86,8 +87,11 @@ func TestReviewContainerAcceptance(t *testing.T) {
 				client:         cli, image: image, network: networkName, fixture: fixture, mode: tt.name,
 			}
 			tokens := &acceptanceTokens{}
+			policy, policyErr := reviewpreparation.NewPolicy(true, []string{"synthetic/repo"})
+			require.NoError(t, policyErr, "the opt-in runtime fixture must explicitly activate its repository")
 			orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
-				Provider: provider, Repositories: acceptanceRepoStore{}, GitHub: tokens,
+				ReviewPreparationPolicy: policy,
+				Provider:                provider, Repositories: acceptanceRepoStore{}, GitHub: tokens,
 				Env: agent.NewAgentEnv(agent.AgentEnvDeps{}), Logger: zerolog.New(&logs),
 				SandboxCapacity: agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{Counter: acceptanceCapacityCounter{}, MaxActive: 2, Logger: zerolog.Nop()}),
 			})
@@ -659,15 +663,15 @@ func newAcceptanceFixture(t *testing.T, mode string) acceptanceFixture {
 func (f acceptanceFixture) session(t *testing.T) *models.Session {
 	t.Helper()
 	repoID := uuid.New()
-	revision, err := json.Marshal(map[string]any{"kind": "code_review", "github_pr_number": 42, "base_sha": f.base, "head_sha": f.head})
+	revision, err := json.Marshal(map[string]any{"kind": "code_review", "github_repo": "synthetic/repo", "github_pr_number": 42, "base_sha": f.base, "head_sha": f.head})
 	require.NoError(t, err, "captured review revision should encode")
 	return &models.Session{ID: uuid.New(), OrgID: uuid.New(), Origin: models.SessionOriginCodeReview, AgentType: models.AgentTypeCodex, RepositoryID: &repoID, RevisionContext: revision}
 }
 
 type acceptanceRepoStore struct{}
 
-func (acceptanceRepoStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.Repository, error) {
-	return models.Repository{FullName: "synthetic/repo", CloneURL: acceptanceRemote, DefaultBranch: "main"}, nil
+func (acceptanceRepoStore) GetByID(_ context.Context, orgID, repositoryID uuid.UUID) (models.Repository, error) {
+	return models.Repository{ID: repositoryID, OrgID: orgID, FullName: "synthetic/repo", CloneURL: acceptanceRemote, DefaultBranch: "main"}, nil
 }
 
 type acceptanceTokens struct{ calls atomic.Int64 }

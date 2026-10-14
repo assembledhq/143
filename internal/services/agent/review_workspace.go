@@ -15,6 +15,17 @@ import (
 // review. The caller must publish it under the preparation job's lease or
 // destroy it. No reviewer can observe this container until publication.
 func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *models.Session, expectedHead string) (_ *Sandbox, returnErr error) {
+	if o == nil {
+		return nil, fmt.Errorf("code review workspace preparation dependencies unavailable")
+	}
+	mandatoryPreparation, activationErr := o.reviewPreparationEnabled(ctx, session)
+	if activationErr != nil {
+		return nil, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, activationErr)
+	}
+	if !mandatoryPreparation {
+		return nil, fmt.Errorf("code review workspace preparation is not activated for this repository")
+	}
+	ctx = withReviewPreparationActivation(ctx, true)
 	ctx, cancelPreparation := codeReviewPreparationContext(ctx)
 	defer cancelPreparation()
 	defer func() {

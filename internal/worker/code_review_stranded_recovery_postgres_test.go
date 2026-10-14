@@ -44,8 +44,8 @@ func seedStrandedReview(t *testing.T, pool *pgxpool.Pool, parent string) strande
 	}{
 		{`INSERT INTO organizations(id,name) VALUES($1,'Saved Review Test')`, []any{org}},
 		{`INSERT INTO integrations(id,org_id,provider) VALUES($1,$2,'github')`, []any{integration, org}},
-		{`INSERT INTO repositories(id,org_id,integration_id,github_id,full_name,clone_url,installation_id) VALUES($1,$2,$3,(hashtextextended($1::uuid::text,0) & 9223372036854775807),'test/saved-review','https://example.invalid/repo.git',1)`, []any{repo, org, integration}},
-		{`INSERT INTO sessions(id,org_id,repository_id,origin,status,failure_explanation) VALUES($1,$2,$3,'code_review',$4,'original execution timeout')`, []any{session, org, repo, parent}},
+		{`INSERT INTO repositories(id,org_id,integration_id,github_id,full_name,clone_url,installation_id) VALUES($1,$2,$3,(hashtextextended($1::uuid::text,0) & 9223372036854775807),'test/saved-review','https://github.com/test/saved-review.git',1)`, []any{repo, org, integration}},
+		{`INSERT INTO sessions(id,org_id,repository_id,origin,status,failure_explanation,revision_context) VALUES($1,$2,$3,'code_review',$4,'original execution timeout','{"github_repo":"test/saved-review"}')`, []any{session, org, repo, parent}},
 		{`INSERT INTO pull_requests(id,org_id,github_pr_number,github_pr_url,github_repo,title,head_sha,base_sha) VALUES($1,$2,9,'https://example.invalid/pr/9','test/saved-review','Saved review','head','base')`, []any{pr, org}},
 		{`INSERT INTO code_review_policies(id,org_id,repository_id,version,approval_mode,description_policy,risk_policy,agent_roster,review_instructions,automated_approval_policy,continuation_policy) VALUES($1,$2,NULL,1,'approve_acceptable','{}','{}','{"reviewers":["claude_code"],"reviewer_count":1}','','','{}')`, []any{policy, org}},
 		{`INSERT INTO code_review_session_metadata(id,org_id,session_id,repository_id,pull_request_id,policy_id,base_sha,head_sha,trigger_source,status,phase,review_output_key) VALUES($1,$2,$3,$4,$5,$6,'base','head','slash_command','running','syncing_github',$7)`, []any{metadata, org, session, repo, pr, policy, key}},
@@ -256,7 +256,7 @@ func TestSavedCompletedReviewHandlerDoesNotDispatchPostgres(t *testing.T) {
 	require.NoError(t, err, "load captured review policy")
 	capture := &fixedRecheckCapture{result: codereviewsvc.AssessmentInputCaptureResult{Manifest: f.manifest, Policy: policy}}
 	publisher := &inlineRecoveryPublisher{}
-	services := &Services{CodeReviewVisualEvidence: &codeReviewVisualEvidenceProviderStub{snapshot: models.CodeReviewVisualEvidenceSnapshot{Version: 1, RepositoryID: f.job.RepositoryID, PullRequestNumber: 9, HeadSHA: "head", Complete: true}}, CodeReviewWorkspacePreparationEnabled: true, CodeReviewAssessmentsEnabled: true, CodeReviewInputCapture: capture, CodeReviews: publisher}
+	services := &Services{CodeReviewVisualEvidence: &codeReviewVisualEvidenceProviderStub{snapshot: models.CodeReviewVisualEvidenceSnapshot{Version: 1, RepositoryID: f.job.RepositoryID, PullRequestNumber: 9, HeadSHA: "head", Complete: true}}, ReviewPreparationPolicy: workspacePreparationTestPolicy(true), CodeReviewAssessmentsEnabled: true, CodeReviewInputCapture: capture, CodeReviews: publisher}
 	before, err := f.stores.CodeReviews.ListAgentResults(ctx, f.job.OrgID, f.job.SessionID)
 	require.NoError(t, err, "snapshot completed work")
 	payload, err := json.Marshal(f.job)
@@ -433,7 +433,7 @@ func TestWorkspaceStoppedRaceKeepsDeadLetterGuardPostgres(t *testing.T) {
 				require.NoError(t, err, "end parent after initial terminal-state check")
 			}
 			f.stores.CodeReviewWorkspaces = db.NewCodeReviewWorkspaceStore(pool)
-			services := &Services{CodeReviewWorkspacePreparationEnabled: true, CodeReviewVisualEvidence: &codeReviewVisualEvidenceProviderStub{snapshot: models.CodeReviewVisualEvidenceSnapshot{Version: 1, RepositoryID: f.job.RepositoryID, PullRequestNumber: 9, HeadSHA: "head", Complete: true}}, CodeReviews: &inlineRecoveryPublisher{}}
+			services := &Services{ReviewPreparationPolicy: workspacePreparationTestPolicy(true), CodeReviewVisualEvidence: &codeReviewVisualEvidenceProviderStub{snapshot: models.CodeReviewVisualEvidenceSnapshot{Version: 1, RepositoryID: f.job.RepositoryID, PullRequestNumber: 9, HeadSHA: "head", Complete: true}}, CodeReviews: &inlineRecoveryPublisher{}}
 			if tt.early {
 				_, err := pool.Exec(ctx, `INSERT INTO jobs(org_id,queue,job_type,payload,dedupe_key,status) VALUES($1,'agent','prepare_code_review_workspace',$3,$2,'succeeded')`, f.job.OrgID, codeReviewWorkspacePreparationKey(f.job.MetadataID, f.job.SessionID, 0), map[string]any{"metadata_id": f.job.MetadataID.String(), "session_id": f.job.SessionID.String()})
 				require.NoError(t, err, "seed first workspace checkpoint")

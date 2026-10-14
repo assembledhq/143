@@ -9,7 +9,11 @@ import (
 )
 
 func (o *Orchestrator) runSandboxGitBootstrapForSession(ctx context.Context, session *models.Session, sandbox *Sandbox, workDir, repoURL string, log zerolog.Logger) error {
-	if session.Origin != models.SessionOriginCodeReview {
+	mandatoryPreparation, err := o.reviewPreparationEnabled(ctx, session)
+	if err != nil {
+		return NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, err)
+	}
+	if !mandatoryPreparation {
 		o.runSandboxGitBootstrap(ctx, sandbox, workDir, log)
 		return nil
 	}
@@ -30,7 +34,11 @@ func (o *Orchestrator) runSandboxGitBootstrapForSession(ctx context.Context, ses
 }
 
 func (o *Orchestrator) prepareRepositoryForContinueSession(ctx context.Context, session *models.Session, sandbox *Sandbox, mode repositoryPreparationMode, log zerolog.Logger) error {
-	if session.Origin == models.SessionOriginCodeReview {
+	mandatoryPreparation, err := o.reviewPreparationEnabled(ctx, session)
+	if err != nil {
+		return NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, err)
+	}
+	if mandatoryPreparation {
 		return o.ensureCodeReviewWorkspaceEvidence(ctx, session, sandbox, log)
 	}
 	return prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandbox.WorkDir, mode, log)
@@ -99,4 +107,19 @@ func reviewWorkspaceReadyProbeCommand(workDir, expectedBranch string) (string, e
 		return "", err
 	}
 	return "/usr/bin/python3 -I -S -c '" + shellEscapeSingleQuote(reviewWorkspaceReadyProbePython) + "' '" + shellEscapeSingleQuote(string(settings)) + "'", nil
+}
+
+// Activation is resolved once at lifecycle entry and carried through helpers so
+// clone, authentication, readiness, and evidence share one decision.
+type reviewPreparationActivationKey struct{}
+
+func withReviewPreparationActivation(ctx context.Context, active bool) context.Context {
+	return context.WithValue(ctx, reviewPreparationActivationKey{}, active)
+}
+
+func (o *Orchestrator) reviewPreparationEnabled(ctx context.Context, session *models.Session) (bool, error) {
+	if active, ok := ctx.Value(reviewPreparationActivationKey{}).(bool); ok {
+		return active, nil
+	}
+	return o.reviewPreparationPolicy.ForSession(ctx, o.repositories, session)
 }

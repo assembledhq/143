@@ -202,7 +202,8 @@ type Config struct {
 	CodeReviewDisputeUntrustedIntakePerLogin       int `env:"CODE_REVIEW_DISPUTE_UNTRUSTED_INTAKE_PER_LOGIN"        envDefault:"5"`
 	CodeReviewDisputeUntrustedIntakePerPullRequest int `env:"CODE_REVIEW_DISPUTE_UNTRUSTED_INTAKE_PER_PULL_REQUEST" envDefault:"20"`
 	// Enable only after all agent workers have the preparation job handler.
-	CodeReviewWorkspacePreparationEnabled bool `env:"CODE_REVIEW_WORKSPACE_PREPARATION_ENABLED" envDefault:"false"`
+	CodeReviewWorkspacePreparationEnabled      bool     `env:"CODE_REVIEW_WORKSPACE_PREPARATION_ENABLED" envDefault:"false"`
+	CodeReviewWorkspacePreparationRepositories []string `env:"CODE_REVIEW_WORKSPACE_PREPARATION_REPOSITORIES" envSeparator:","`
 
 	// CSRF
 	CSRFSigningKey string `env:"CSRF_SIGNING_KEY"`

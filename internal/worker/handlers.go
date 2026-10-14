@@ -26,6 +26,7 @@ import (
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
+	"github.com/assembledhq/143/internal/reviewpreparation"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
 	automationservice "github.com/assembledhq/143/internal/services/automations"
@@ -1003,7 +1004,7 @@ type Services struct {
 	CodeReviewWorkspacePreparer interface {
 		PrepareCodeReviewWorkspace(ctx context.Context, session *models.Session, expectedHead string) (*agent.Sandbox, error)
 	}
-	CodeReviewWorkspacePreparationEnabled bool
+	ReviewPreparationPolicy *reviewpreparation.Policy
 }
 
 type githubOrgRosterService interface {
@@ -10141,7 +10142,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			// re-enter ContinueSession without options keep it.
 			jobCtx = agent.WithAutomationTurn(jobCtx, continueOpts.AutomationTurn)
 		}
-		preparationDeadline, deadlineErr := initialCodeReviewPreparationDeadline(jobCtx, stores, logger, session, preparationThread, continueOpts != nil && continueOpts.CodeReviewTurn != nil)
+		preparationDeadline, deadlineErr := initialCodeReviewPreparationDeadline(jobCtx, stores, services, logger, session, preparationThread, continueOpts != nil && continueOpts.CodeReviewTurn != nil)
 		if deadlineErr != nil {
 			return deadlineErr
 		}

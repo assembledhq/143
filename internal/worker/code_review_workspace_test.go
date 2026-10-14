@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -57,9 +58,11 @@ func TestCodeReviewWorkspacePreparationStarted(t *testing.T) {
 			mock, err := pgxmock.NewPool()
 			require.NoError(t, err, "create isolated preparation checkpoint database mock")
 			defer mock.Close()
+			mock.MatchExpectationsInOrder(false)
 			job := runCodeReviewPayload{OrgID: uuid.New(), SessionID: uuid.New(), MetadataID: uuid.New()}
-			stores := &Stores{Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock)}
+			stores := &Stores{Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock), Repositories: db.NewRepositoryStore(mock)}
 			if tt.prepare {
+				expectPreparationSession(mock, job.OrgID, job.SessionID, uuid.New())
 				mock.ExpectQuery("SELECT workspace_generation FROM sessions").WithArgs(job.OrgID, job.SessionID).
 					WillReturnRows(pgxmock.NewRows([]string{"workspace_generation"}).AddRow(int64(0)))
 				rows := pgxmock.NewRows([]string{"created_at"})
@@ -70,7 +73,7 @@ func TestCodeReviewWorkspacePreparationStarted(t *testing.T) {
 					WillReturnRows(rows)
 			}
 			started, err := codeReviewWorkspacePreparationStarted(context.Background(), stores,
-				&Services{CodeReviewWorkspacePreparationEnabled: tt.prepare}, job)
+				&Services{ReviewPreparationPolicy: workspacePreparationTestPolicy(tt.prepare)}, job)
 			require.NoError(t, err, "preparation checkpoint lookup should finish without an error")
 			require.Equal(t, tt.want, started, "a prior durable enqueue should suppress repeated GitHub preflight")
 			require.NoError(t, mock.ExpectationsWereMet(), "checkpoint lookup should preserve the tenant's first preparation across generations")
@@ -81,7 +84,7 @@ func TestCodeReviewWorkspacePreparationStarted(t *testing.T) {
 func TestPrepareCodeReviewWorkspaceHandlerHonorsPreparationSwitch(t *testing.T) {
 	t.Parallel()
 	err := newPrepareCodeReviewWorkspaceHandler(nil,
-		&Services{CodeReviewWorkspacePreparationEnabled: false},
+		&Services{ReviewPreparationPolicy: workspacePreparationTestPolicy(false)},
 		zerolog.Nop())(context.Background(), models.JobTypePrepareCodeReviewWorkspace, nil)
 	require.NoError(t, err, "a queued preparation should no-op when the rollout switch is disabled")
 }
@@ -120,6 +123,7 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 			mock, err := pgxmock.NewPool()
 			require.NoError(t, err, "create isolated workspace gate database mock")
 			defer mock.Close()
+			mock.MatchExpectationsInOrder(false)
 			orgID, sessionID, reviewID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 			job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, MetadataID: reviewID, HeadSHA: "head-1"}
 			mock.ExpectQuery("SELECT s.container_id, s.worker_node_id, s.workspace_generation").
@@ -140,10 +144,13 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 					nil, nil, false, nil, "output-key", nil, nil, nil, nil, nil, nil, now))
 			sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 0, nil, tt.snapshot)
 			setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
+			setWorkerSessionColumn(sessionRow, "revision_context", json.RawMessage(`{"github_repo":"test/preparation"}`))
 			if tt.wrongRepository {
 				otherRepositoryID := uuid.New()
+				expectPreparationRepository(mock, orgID, otherRepositoryID)
 				setWorkerSessionColumn(sessionRow, "repository_id", &otherRepositoryID)
 			} else {
+				expectPreparationRepository(mock, orgID, repositoryID)
 				setWorkerSessionColumn(sessionRow, "repository_id", &repositoryID)
 			}
 			setWorkerSessionColumn(sessionRow, "workspace_generation", tt.workspaceGen)
@@ -187,14 +194,14 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 			}
 			stores := &Stores{
 				CodeReviewWorkspaces: db.NewCodeReviewWorkspaceStore(mock),
-				CodeReviews:          db.NewCodeReviewStore(mock), Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock),
+				CodeReviews:          db.NewCodeReviewStore(mock), Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock), Repositories: db.NewRepositoryStore(mock),
 			}
 			gate := ensureCodeReviewWorkspaceReady
 			if tt.afterPreflight {
 				gate = ensureCodeReviewWorkspaceReadyAfterPreflight
 			}
 			err = gate(context.Background(), stores,
-				&Services{CodeReviewWorkspacePreparationEnabled: true},
+				&Services{ReviewPreparationPolicy: workspacePreparationTestPolicy(true)},
 				zerolog.Nop(), job)
 			if tt.terminalPreparation || tt.timedOutPreparation {
 				var setupFailure *codeReviewWorkspaceGateFailure
@@ -223,6 +230,7 @@ func TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "create isolated cold preparation database mock")
 	defer mock.Close()
+	mock.MatchExpectationsInOrder(false)
 	orgID, sessionID, reviewID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, MetadataID: reviewID, HeadSHA: "head-1"}
 	key := codeReviewWorkspacePreparationKey(reviewID, sessionID, 0)
@@ -239,7 +247,9 @@ func TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation(t *testing.T) {
 			nil, nil, false, nil, "output-key", nil, nil, nil, nil, nil, nil, now))
 	sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 0, nil, nil)
 	setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
+	setWorkerSessionColumn(sessionRow, "revision_context", json.RawMessage(`{"github_repo":"test/preparation"}`))
 	setWorkerSessionColumn(sessionRow, "repository_id", &repositoryID)
+	expectPreparationRepository(mock, orgID, repositoryID)
 	mock.ExpectQuery("FROM sessions").WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
 	mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(orgID, reviewID.String(), sessionID.String()).
@@ -256,10 +266,10 @@ func TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"created_at"}).AddRow(now))
 	stores := &Stores{
 		CodeReviewWorkspaces: db.NewCodeReviewWorkspaceStore(mock),
-		CodeReviews:          db.NewCodeReviewStore(mock), Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock),
+		CodeReviews:          db.NewCodeReviewStore(mock), Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock), Repositories: db.NewRepositoryStore(mock),
 	}
 	err = ensureCodeReviewWorkspaceReady(context.Background(), stores,
-		&Services{CodeReviewWorkspacePreparationEnabled: true},
+		&Services{ReviewPreparationPolicy: workspacePreparationTestPolicy(true)},
 		zerolog.Nop(), job)
 	var retry *RetryableError
 	require.ErrorAs(t, err, &retry, "a cold workspace should enqueue preparation and defer reviewer fan-out")

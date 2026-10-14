@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -114,7 +115,8 @@ func TestInitialCodeReviewPreparationDeadline(t *testing.T) {
 			mock, err := pgxmock.NewPool()
 			require.NoError(t, err, "deadline routing mock should initialize")
 			defer mock.Close()
-			orgID, sessionID, threadID, reviewID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			orgID, sessionID, threadID, reviewID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			expectPreparationRepository(mock, orgID, repositoryID)
 			created := time.Now().UTC().Add(-time.Minute)
 			first := created.Add(-6 * time.Minute)
 			thread := &models.SessionThread{ID: threadID, SessionID: sessionID, CurrentTurn: tt.turn, Label: tt.label, ExecutionMode: models.ThreadExecutionModeReview, FilesystemMode: models.ThreadFilesystemModeReadOnly}
@@ -138,7 +140,7 @@ func TestInitialCodeReviewPreparationDeadline(t *testing.T) {
 					mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(orgID, reviewID.String(), sessionID.String()).WillReturnRows(rows)
 				}
 			}
-			deadline, err := initialCodeReviewPreparationDeadline(jobctx.WithJobCreatedAt(context.Background(), created), &Stores{CodeReviews: db.NewCodeReviewStore(mock), Jobs: db.NewJobStore(mock)}, zerolog.Nop(), models.Session{ID: sessionID, OrgID: orgID, Origin: models.SessionOriginCodeReview}, thread, tt.recheck)
+			deadline, err := initialCodeReviewPreparationDeadline(jobctx.WithJobCreatedAt(context.Background(), created), &Stores{CodeReviews: db.NewCodeReviewStore(mock), Jobs: db.NewJobStore(mock), Repositories: db.NewRepositoryStore(mock)}, &Services{ReviewPreparationPolicy: workspacePreparationTestPolicy(true)}, zerolog.Nop(), models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repositoryID, RevisionContext: json.RawMessage(`{"github_repo":"test/preparation"}`), Origin: models.SessionOriginCodeReview}, thread, tt.recheck)
 			require.NoError(t, err, "role routing must preserve the correct durable preparation window")
 			if tt.wantDeadline {
 				start := created

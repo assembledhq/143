@@ -33,7 +33,7 @@ func seedWorkspacePreparationJob(t *testing.T, pool *pgxpool.Pool, f strandedRev
 	require.NoError(t, err, "encode exact initializer provenance")
 	_, err = pool.Exec(f.ctx(), `INSERT INTO nodes(id,mode,status,last_heartbeat_at) VALUES($1,'worker','active',now())`, node)
 	require.NoError(t, err, "seed isolated healthy preparation owner")
-	_, err = pool.Exec(f.ctx(), `UPDATE sessions SET revision_context='{"head_sha":"head"}' WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.job.SessionID)
+	_, err = pool.Exec(f.ctx(), `UPDATE sessions SET revision_context='{"head_sha":"head","github_repo":"test/saved-review"}' WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.job.SessionID)
 	require.NoError(t, err, "pin the review's source identity before preparing")
 	_, err = pool.Exec(f.ctx(), `INSERT INTO jobs(id,org_id,queue,job_type,payload,status,dedupe_key,lock_token,locked_by_node_id,lease_expires_at,created_at,last_error) VALUES($1,$2,'agent','prepare_code_review_workspace',$3,$4,$5,$6,$7,now()+interval '10 minutes',$8,$9)`, id, f.job.OrgID, raw, status, codeReviewWorkspacePreparationKey(f.job.MetadataID, f.job.SessionID, 0), token, node, startedAt, detail)
 	require.NoError(t, err, "persist the original preparation checkpoint and current-generation signal")
@@ -84,7 +84,7 @@ func TestCodeReviewWorkspaceInitializerRetryPostgres(t *testing.T) {
 				}
 				return &agent.Sandbox{ID: "prepared-" + id.String()}, nil
 			})
-			services := &Services{CodeReviewWorkspacePreparationEnabled: true, CodeReviewWorkspacePreparer: preparer, SandboxProvider: &stubSandboxProvider{}}
+			services := &Services{ReviewPreparationPolicy: workspacePreparationTestPolicy(true), CodeReviewWorkspacePreparer: preparer, SandboxProvider: &stubSandboxProvider{}}
 			handler := newPrepareCodeReviewWorkspaceHandler(f.stores, services, zerolog.Nop())
 			ctx := jobctx.WithWorkerNodeID(jobctx.WithLockToken(jobctx.WithJobID(context.Background(), id), token), node)
 			actual := handler(ctx, models.JobTypePrepareCodeReviewWorkspace, raw)
@@ -162,7 +162,7 @@ func TestCodeReviewMovedWorkspaceHeadControllerPostgres(t *testing.T) {
 			}
 			syncCalls := 0
 			lifecycle := &codeReviewLifecycleStub{result: codereviewsvc.ReviewRequestedResult{Processed: true}}
-			services := &Services{CodeReviewWorkspacePreparationEnabled: true, CodeReviewLifecycle: lifecycle, PR: &stubPRService{syncPullRequestStateFn: func(ctx context.Context, org, pr uuid.UUID) error {
+			services := &Services{ReviewPreparationPolicy: workspacePreparationTestPolicy(true), CodeReviewLifecycle: lifecycle, PR: &stubPRService{syncPullRequestStateFn: func(ctx context.Context, org, pr uuid.UUID) error {
 				syncCalls++
 				deadline, hasDeadline := ctx.Deadline()
 				require.True(t, hasDeadline, "live synchronization must have the original preparation deadline")

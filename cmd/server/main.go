@@ -34,6 +34,7 @@ import (
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
+	"github.com/assembledhq/143/internal/reviewpreparation"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
@@ -1610,6 +1611,10 @@ func buildServices(
 	uploadStore := buildUploadStore(context.Background(), cfg, logger)
 	codeReviewRoleStore := db.NewCodeReviewStore(pool)
 
+	reviewPreparationPolicy, err := reviewpreparation.NewPolicy(cfg.CodeReviewWorkspacePreparationEnabled, cfg.CodeReviewWorkspacePreparationRepositories)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("invalid code review workspace preparation configuration")
+	}
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:                   sandboxProvider,
 		Adapters:                   agentAdapters,
@@ -1621,6 +1626,7 @@ func buildServices(
 		SessionMessages:            sessionMessageStore,
 		SessionThreads:             sessionThreadStore,
 		CodeReviewRoles:            codeReviewRoleStore,
+		ReviewPreparationPolicy:    reviewPreparationPolicy,
 		SessionIssueLinks:          db.NewSessionIssueLinkStore(pool),
 		IssueSnapshots:             db.NewSessionTurnIssueSnapshotStore(pool),
 		ProjectTasks:               projectTaskUpdater,
@@ -1953,8 +1959,8 @@ func buildServices(
 		SandboxGC:                  sandboxGC,
 		SandboxAuthBroker:          sandboxAuthBroker,
 
-		CodeReviewWorkspacePreparer:           orchestrator,
-		CodeReviewWorkspacePreparationEnabled: cfg.CodeReviewWorkspacePreparationEnabled,
+		CodeReviewWorkspacePreparer: orchestrator,
+		ReviewPreparationPolicy:     reviewPreparationPolicy,
 	}
 	pagerDutyTriggerer := automations.NewPagerDutyEventTriggerService(
 		db.NewAutomationEventTriggerStore(pool),
