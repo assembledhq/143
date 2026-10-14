@@ -359,11 +359,12 @@ func (t AutomationProductTrigger) Validate() error {
 }
 
 type AutomationGitHubEventFilters struct {
-	LabelModelOverrides map[string]string               `json:"label_model_overrides,omitempty"`
-	CheckRun            *AutomationGitHubCheckRunFilter `json:"check_run,omitempty"`
-	BaseBranches        []string                        `json:"base_branches,omitempty"`
-	Authors             []string                        `json:"authors,omitempty"`
-	Paths               []string                        `json:"paths,omitempty"`
+	LabelModelRoutes    map[string]AutomationLabelModelRoute `json:"label_model_routes,omitempty"`
+	LabelModelOverrides map[string]string                    `json:"label_model_overrides,omitempty"`
+	CheckRun            *AutomationGitHubCheckRunFilter      `json:"check_run,omitempty"`
+	BaseBranches        []string                             `json:"base_branches,omitempty"`
+	Authors             []string                             `json:"authors,omitempty"`
+	Paths               []string                             `json:"paths,omitempty"`
 	// Labels matches the pull request's GitHub labels. An event passes when the
 	// PR carries at least one of the configured labels (case-insensitive).
 	// An event whose labels could not be determined is filtered out, so a
