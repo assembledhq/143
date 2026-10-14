@@ -445,7 +445,6 @@ func waitForSandboxWorkspaceReady(
 								return err
 							}
 							inputsReady = false
-							lastObserved = err.Error()
 						}
 					}
 					if inputsReady {
