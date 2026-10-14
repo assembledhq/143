@@ -108,6 +108,7 @@ const (
 	jobOrgIDContextKey   jobContextKey = "job_org_id"
 	defaultLeaseDuration               = 60 * time.Second
 	defaultRenewInterval               = 20 * time.Second
+	defaultRenewTimeout                = 5 * time.Second
 )
 
 func withJobOrgID(ctx context.Context, orgID uuid.UUID) context.Context {
@@ -117,6 +118,18 @@ func withJobOrgID(ctx context.Context, orgID uuid.UUID) context.Context {
 func jobOrgIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 	orgID, ok := ctx.Value(jobOrgIDContextKey).(uuid.UUID)
 	return orgID, ok
+}
+
+// JobLeaseRenewer is the fenced renewal operation needed by worker liveness.
+// Claims, terminal writes and handler transactions must not share its reserve.
+type JobLeaseRenewer interface {
+	RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error)
+}
+
+type Option func(*Worker)
+
+func WithLeaseRenewer(renewer JobLeaseRenewer) Option {
+	return func(w *Worker) { w.leaseRenewer = renewer }
 }
 
 type jobLeaseStore interface {
@@ -152,12 +165,14 @@ var defaultMaxLongRunningJobDuration = time.Duration(models.MaxAbsoluteRuntimeCe
 
 type Worker struct {
 	jobs          jobLeaseStore
+	leaseRenewer  JobLeaseRenewer
 	logger        zerolog.Logger
 	nodeID        string
 	handlers      map[string]JobHandler
 	pollInterval  time.Duration
 	leaseDuration time.Duration
 	renewInterval time.Duration
+	renewTimeout  time.Duration
 	// maxLongRunningJobDuration is a worker-level lease-renewal watchdog for
 	// session jobs. Handler-owned contexts should normally stop first; this
 	// outer guard prevents a wedged handler from renewing a job forever.
@@ -169,8 +184,8 @@ type Worker struct {
 	activeRunAgentJobs atomic.Int32
 }
 
-func New(pool db.DBTX, logger zerolog.Logger, nodeID string) *Worker {
-	return &Worker{
+func New(pool db.DBTX, logger zerolog.Logger, nodeID string, opts ...Option) *Worker {
+	w := &Worker{
 		jobs:                      db.NewJobStore(pool),
 		logger:                    logger,
 		nodeID:                    nodeID,
@@ -178,9 +193,14 @@ func New(pool db.DBTX, logger zerolog.Logger, nodeID string) *Worker {
 		pollInterval:              5 * time.Second,
 		leaseDuration:             defaultLeaseDuration,
 		renewInterval:             defaultRenewInterval,
+		renewTimeout:              defaultRenewTimeout,
 		maxLongRunningJobDuration: defaultMaxLongRunningJobDuration,
 		wakeCh:                    make(chan struct{}, 1),
 	}
+	for _, opt := range opts {
+		opt(w)
+	}
+	return w
 }
 
 func (w *Worker) Wake() {
@@ -431,31 +451,102 @@ func (w *Worker) renewLeaseLoop(
 ) {
 	defer close(done)
 
+	renewer := w.leaseRenewer
+	if renewer == nil {
+		renewer = w.jobs
+	}
+	attemptTimeout := w.renewTimeout
+	if attemptTimeout <= 0 {
+		attemptTimeout = defaultRenewTimeout
+	}
 	ticker := time.NewTicker(w.renewInterval)
 	defer ticker.Stop()
+	// A failed attempt near expiry must not leave the handler running until
+	// the next renewal tick. Only a confirmed database expiry extends this timer.
+	// Database lease timestamps require synchronized worker and database clocks.
+	expiryTimer := time.NewTimer(time.Until(leaseExpiry))
+	defer expiryTimer.Stop()
+	loseOwnership := func() {
+		lostOwnership.Store(true)
+		cancelHandler()
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-expiryTimer.C:
+			if ctx.Err() == nil {
+				loseOwnership()
+			}
+			return
 		case <-ticker.C:
-			job, ok, err := w.jobs.RenewLease(ctx, jobID, lockToken, w.leaseDuration)
-			if err != nil {
-				w.logger.Warn().Err(err).Str("job_id", jobID.String()).Msg("failed to renew job lease")
-				if time.Now().After(leaseExpiry) {
-					lostOwnership.Store(true)
-					cancelHandler()
-					return
+			if ctx.Err() != nil {
+				return
+			}
+			if !time.Now().Before(leaseExpiry) {
+				loseOwnership()
+				return
+			}
+			deadline := time.Now().Add(attemptTimeout)
+			if leaseExpiry.Before(deadline) {
+				deadline = leaseExpiry
+			}
+			attemptCtx, cancelAttempt := context.WithDeadline(ctx, deadline)
+			type renewalResult struct {
+				job   *models.Job
+				owned bool
+				err   error
+			}
+			resultCh := make(chan renewalResult, 1)
+			go func() {
+				job, owned, err := renewer.RenewLease(attemptCtx, jobID, lockToken, w.leaseDuration)
+				resultCh <- renewalResult{job: job, owned: owned, err: err}
+			}()
+			var result renewalResult
+			select {
+			case <-ctx.Done():
+				cancelAttempt()
+				<-resultCh // Join bounded database cancellation before shutdown.
+				return
+			case <-expiryTimer.C:
+				// Server cancellation can take longer than the query's context
+				// deadline. Fence the handler at its last confirmed expiry while
+				// joining that cancellation; never detach the database call.
+				if ctx.Err() == nil {
+					loseOwnership()
 				}
+				cancelAttempt()
+				<-resultCh
+				return
+			case result = <-resultCh:
+			}
+			job, ok, err := result.job, result.owned, result.err
+			attemptErr := attemptCtx.Err()
+			cancelAttempt()
+			// Handler completion and executor handoff cancel this context too;
+			// they are not evidence of a lost lease or authority for a terminal write.
+			if ctx.Err() != nil {
+				return
+			}
+			if !time.Now().Before(leaseExpiry) {
+				loseOwnership()
+				return
+			}
+			if err != nil || attemptErr != nil {
+				if err == nil {
+					err = attemptErr
+				}
+				w.logger.Warn().Err(err).Str("job_id", jobID.String()).Msg("failed to renew job lease")
 				continue
+			}
+			if !ok {
+				loseOwnership()
+				return
 			}
 			if job != nil && job.LeaseExpiresAt != nil {
 				leaseExpiry = *job.LeaseExpiresAt
-			}
-			if !ok {
-				lostOwnership.Store(true)
-				cancelHandler()
-				return
+				expiryTimer.Reset(time.Until(leaseExpiry))
 			}
 		}
 	}
