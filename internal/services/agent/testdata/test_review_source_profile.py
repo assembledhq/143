@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 
 LAUNCHER = Path(__file__).with_name("review_source_profile.py")
-PIN = "f60e397c24cc8f0d7061037c81d5630f4774700602e429f1d428577afbdf9c80"
+PIN = "75b7c880581cfd5f5d8592b948e317e9d1589f721ebaaa547ae4b3ebef8f51ca"
 
 
 def fresh_profile():
