@@ -10149,7 +10149,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		if preparationDeadline != nil {
 			jobCtx = agent.WithCodeReviewWorkspacePreparationDeadline(jobCtx, *preparationDeadline)
 		}
+		preparationIntent, intentErr := captureCodeReviewPreparationIntent(jobCtx, stores, services, session, preparationThread, continueOpts != nil && continueOpts.CodeReviewTurn != nil)
+		if intentErr != nil {
+			return intentErr
+		}
 		continueErr := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts)
+		if terminal := terminalCodeReviewPreparationIntent(preparationIntent, continueErr); terminal != nil {
+			return terminal
+		}
 		if automationRunID != nil && continueErr != nil {
 			// The attempt ended even though the orchestrator returned an
 			// error, so its result is the run's terminal record and the job

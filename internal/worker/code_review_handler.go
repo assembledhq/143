@@ -248,6 +248,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
 			return err
 		}
+		if stopped, err := reconcileTerminalCodeReviewPreparationIntents(ctx, stores, services, logger, job); stopped || err != nil {
+			return err
+		}
 		resumeSaved, settledEnded, err := recoverEndedCodeReviewParent(ctx, stores, job, policy.Config())
 		if err != nil {
 			return fmt.Errorf("%w: %w", errCodeReviewEndedParentRecovery, err)
@@ -886,6 +889,10 @@ func failCodeReviewWorkspacePreparation(ctx context.Context, stores *Stores, ser
 		}
 		return err
 	}
+	return reconcileCodeReviewWorkspacePreparationFailure(ctx, stores, services, logger, job, reason)
+}
+
+func reconcileCodeReviewWorkspacePreparationFailure(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, reason string) error {
 	var cleanupErrors []error
 	if err := cancelActiveCodeReviewThreads(ctx, stores, services, logger, job); err != nil {
 		cleanupErrors = append(cleanupErrors, err)

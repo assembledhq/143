@@ -548,7 +548,15 @@ var _ codeReviewTerminalLeaseStore = (*db.JobStore)(nil)
 func (w *Worker) deadLetterJob(ctx, handlerCtx context.Context, job *models.Job, terminalErr error) {
 	var ok bool
 	var err error
-	if job.JobType == models.JobTypeRunCodeReviewRecheck || (job.JobType == models.JobTypeRunCodeReview && !errors.Is(terminalErr, errCodeReviewEndedParentRecovery)) {
+	var intentError *codeReviewPreparationIntentError
+	if job.JobType == "continue_session" && errors.As(terminalErr, &intentError) {
+		store, supported := w.jobs.(preparationIntentLeaseStore)
+		if !supported {
+			w.logger.Error().Str("job_id", job.ID.String()).Msg("job store cannot checkpoint terminal review preparation; leaving job for lease recovery")
+			return
+		}
+		ok, err = store.DeadLetterContinueSessionWithPreparationIntentWithLease(ctx, job.OrgID, job.ID, *job.LockToken, intentError.Intent)
+	} else if job.JobType == models.JobTypeRunCodeReviewRecheck || (job.JobType == models.JobTypeRunCodeReview && !errors.Is(terminalErr, errCodeReviewEndedParentRecovery)) {
 		store, supported := w.jobs.(codeReviewTerminalLeaseStore)
 		if !supported {
 			w.logger.Error().Str("job_id", job.ID.String()).Msg("job store cannot atomically fail a code review; leaving job for lease recovery")

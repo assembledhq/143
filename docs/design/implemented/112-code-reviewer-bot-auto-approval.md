@@ -561,6 +561,18 @@ Suppressed
 - all P2 and P3 findings
 ```
 
+### Workspace Preparation Failure Recovery
+
+For activated repository preparation, a queued continuation captures its tenant, job, session, review metadata, PR head, workspace generation and turn before provider execution. Explicit thread identity stays explicit; an inferred continuation records a null thread and the session turn. Admission and recovery serialize on the review publication lock and lock the PR row before job/session/metadata rows. This also fences ordinary head updates that do not acquire the publication advisory lock. Inactive recipe preparation gains no new mandatory admission check. Evidence rechecks retain their separate assessment and dispatch leases.
+
+If preparation fails terminally, the current job lease atomically commits both `dead_letter` status and a versioned `terminal_preparation_intent` in `jobs.payload`. Its strict 2 KiB schema requires all provenance members, including zero generation, false recheck and null inferred thread. Failure class and stage are finite values; arbitrary error output is excluded. Recheck records cannot acquire baseline projection authority. Both worker and durable session-executor terminal writers use this checkpoint.
+
+The review controller checks committed intents before dispatch or result-harvest waits. Projection and intent consumption commit together under the existing head, generation, publication and cancellation fences. Overlapping replacement continuations supersede the old record; active runtimes postpone projection. Inferred records affect review metadata rather than selecting a sibling thread. Database errors retry projection only, with no provider or setup call. Malformed records have no projection authority; bounded scanning must make progress before normal dispatch resumes. Recovery continues for previously committed intents if activation is later disabled.
+
+Migration 000313 adds a concurrent partial index over unconsumed terminal records by tenant, session and metadata, matching controller polling. It follows the same single-statement and invalid-index recovery procedure as migration 000312. Normal deployment applies migrations before application and worker rollout. Source and CI do not establish applied production schema state.
+
+This guarantee begins when the lease-owned terminal checkpoint commits. A crash before that checkpoint is outside its coverage; existing workspace cleanup and quarantine guards still apply. Recovery never infers provenance from `last_error` or uses generic continuation replay to repair a failed result write.
+
 ## Prompt Versioning And Untrusted PR Content
 
 Editable prompts are approval policy and are versioned with that policy. A review session captures:

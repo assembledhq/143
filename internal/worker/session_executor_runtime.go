@@ -513,7 +513,19 @@ func (r *SessionExecutorRuntime) markJobFailed(ctx context.Context, executor mod
 }
 
 func (r *SessionExecutorRuntime) markJobDeadLetter(ctx context.Context, handlerCtx context.Context, executor models.SessionExecutor, job *models.Job, err error) {
-	ok, writeErr := r.Jobs.DeadLetterWithLease(ctx, job.ID, executor.LockToken, err.Error())
+	var ok bool
+	var writeErr error
+	var intentError *codeReviewPreparationIntentError
+	if job.JobType == "continue_session" && errors.As(err, &intentError) {
+		store, supported := r.Jobs.(preparationIntentLeaseStore)
+		if !supported {
+			r.loggerPtr().Error().Str("job_id", job.ID.String()).Msg("executor job store cannot checkpoint terminal review preparation; leaving job for lease recovery")
+			return
+		}
+		ok, writeErr = store.DeadLetterContinueSessionWithPreparationIntentWithLease(ctx, job.OrgID, job.ID, executor.LockToken, intentError.Intent)
+	} else {
+		ok, writeErr = r.Jobs.DeadLetterWithLease(ctx, job.ID, executor.LockToken, err.Error())
+	}
 	if writeErr != nil {
 		r.loggerPtr().Warn().Err(writeErr).Str("job_id", job.ID.String()).Msg("failed to dead-letter session executor job")
 		return

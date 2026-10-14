@@ -2215,6 +2215,9 @@ func TestRunCodeReviewHandlerFastWaitSkipsGitHubRefresh(t *testing.T) {
 			mock.ExpectQuery("(?s)SELECT .*FROM sessions").
 				WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+			mock.ExpectQuery("(?s)SELECT id, CASE WHEN octet_length").
+				WithArgs(orgID, sessionID.String(), metadataID.String()).
+				WillReturnRows(pgxmock.NewRows([]string{"id", "intent"}))
 			mock.ExpectQuery("(?s)FROM code_review_agent_results.*WHERE org_id = @org_id.*AND session_id = @session_id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 				WillReturnRows(newCodeReviewAgentResultRows().
