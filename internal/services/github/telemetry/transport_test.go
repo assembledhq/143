@@ -868,3 +868,30 @@ func TestNormalizeRoute(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeExternalRoute(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ path, expected string }{{"/repos/example/fixture/contents/private.txt", "/repos/:owner/:repo/contents/:path"}, {"/graphql", "/graphql"}, {"/secret/private-token", "/other"}, {"/:private-token", "/other"}}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, NormalizeExternalRoute(tt.path), "external routes must discard opaque path contents")
+		})
+	}
+}
+
+func TestLocalActivityScope(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ kind, outcome string }{{"cache_hit", "hit"}, {"deferral", "deferred"}}
+	for _, tt := range tests {
+		t.Run(tt.kind, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			ctx := WithRequestMetadata(context.Background(), RequestMetadata{SessionID: "session-fixture", OrgID: "org-fixture", Caller: "sandbox_token", InstallationID: 42})
+			RecordLocalActivity(ctx, zerolog.New(&logs), tt.kind, "/app/installations/:installation_id/access_tokens")
+			var actual map[string]any
+			require.NoError(t, json.Unmarshal(logs.Bytes(), &actual), "local events should be structured JSON")
+			require.Equal(t, map[string]any{"level": "debug", "session_id": "session-fixture", "org_id": "org-fixture", "github_caller": "sandbox_token", "github_activity": tt.kind, "github_route": "/app/installations/:installation_id/access_tokens", "github_installation_id": float64(42), "message": "github local activity"}, actual, "local cache hits and deferrals must retain trusted scope without becoming remote request logs")
+		})
+	}
+}

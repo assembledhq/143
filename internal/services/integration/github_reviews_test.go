@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -606,4 +607,11 @@ func TestGitHubCodeReviewSource_StaticTokenWinsOverFunc(t *testing.T) {
 
 	_, err := src.ListRecentPRs(context.Background(), PRFilter{})
 	require.NoError(t, err)
+}
+
+func TestGitHubCodeReviewSource_CustomHTTPClient(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{Timeout: time.Second}
+	source := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{Token: "fixture", HTTPClient: client})
+	require.Same(t, client, source.httpClient, "source should retain the supplied attribution transport")
 }

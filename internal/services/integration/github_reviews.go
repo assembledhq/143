@@ -51,8 +51,9 @@ type GitHubCodeReviewSource struct {
 
 // GitHubCodeReviewConfig holds the connection details for a GitHub CodeReviewSource.
 type GitHubCodeReviewConfig struct {
-	BaseURL string // defaults to "https://api.github.com"
-	Token   string // installation token or PAT (mutually exclusive with TokenFunc)
+	HTTPClient *http.Client
+	BaseURL    string // defaults to "https://api.github.com"
+	Token      string // installation token or PAT (mutually exclusive with TokenFunc)
 	// TokenFunc resolves a token on first use. Used when the token comes from
 	// a per-session source (e.g. host auth socket) rather than a static env
 	// var. If both Token and TokenFunc are set, Token wins.
@@ -68,8 +69,12 @@ func NewGitHubCodeReviewSource(cfg GitHubCodeReviewConfig) *GitHubCodeReviewSour
 		baseURL = "https://api.github.com"
 	}
 
+	client := cfg.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
 	return &GitHubCodeReviewSource{
-		httpClient:  &http.Client{Timeout: 30 * time.Second},
+		httpClient:  client,
 		baseURL:     baseURL,
 		owner:       cfg.Owner,
 		repo:        cfg.Repo,

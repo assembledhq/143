@@ -801,3 +801,26 @@ Common use: after `list`/`get` show a pattern of wrong decisions, apply the corr
   --reason "Blocked three doc-only PRs this week; policy now exempts docs-only diffs" \
   --config '{"automated_approval_policy":"Approve documentation-only changes that touch no executable code."}'
 ```
+
+## Sandbox GitHub CLI transport
+
+The sandbox's installed `gh` wrapper invokes `143-tools gh <arguments...>`.
+Arguments, stdin, stdout, ordinary stderr, pagination, and exit status follow
+the GitHub CLI. Its normal transport uses a private Unix socket to forward
+requests to `api.github.com` or `uploads.github.com` over TLS. The host records
+normalized routes, status, duration, and quota headers with the session's
+resolved identity. Credentials and HTTP bodies are excluded from telemetry.
+The CLI cache remains enabled; cached responses never count as remote requests.
+
+Explicit `GH_TOKEN`, `GITHUB_TOKEN`, nondefault `GH_HOST`, and existing Unix
+transport settings preserve their original transport and bypass observation.
+Configuration, auth, alias, extension, release, and workflow-run commands also bypass the
+transport. Direct CLI binaries, arbitrary HTTP clients, and Git fetches are
+outside this API measurement. API authorization-header overrides are counted
+with an unknown principal rather than attributed to the session's installation.
+Observed token-cache hits and controller deferrals are recorded separately.
+
+The standard `143-tools github` integration source also reports actual API
+requests through the credential socket. Its token is resolved once per source,
+and observation reports reuse that identity without another credential lookup.
+Static tokens and custom API hosts remain outside installation attribution.

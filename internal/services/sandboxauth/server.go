@@ -24,6 +24,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/github/identity"
+	"github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 // Resolver is the slice of identity.Resolver the server actually uses.
@@ -163,7 +164,7 @@ func (s *Server) Listen(
 		Logger()
 
 	loopCtx, cancel := context.WithCancel(context.Background())
-	go s.acceptLoop(loopCtx, ln, run, repo, logger)
+	go s.acceptLoop(loopCtx, ln, run, repo, logger, newObservationScope(sessionID, run, repo))
 
 	var closeOnce sync.Once
 	entry := &activeListener{}
@@ -269,6 +270,7 @@ func (s *Server) acceptLoop(
 	run *models.Session,
 	repo *models.Repository,
 	logger zerolog.Logger,
+	scopes ...*observationScope,
 ) {
 	for {
 		conn, err := ln.Accept()
@@ -280,7 +282,7 @@ func (s *Server) acceptLoop(
 			}
 			return
 		}
-		go s.handleConn(ctx, conn, run, repo, logger)
+		go s.handleConn(ctx, conn, run, repo, logger, scopes...)
 	}
 }
 
@@ -294,12 +296,15 @@ func (s *Server) handleConn(
 	run *models.Session,
 	repo *models.Repository,
 	logger zerolog.Logger,
+	scopes ...*observationScope,
 ) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(CallTimeout))
 
 	var req Request
-	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+	decoder := json.NewDecoder(io.LimitReader(conn, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
 		// A connection that closes before sending any request is a liveness
 		// probe — the container reconciler dials the socket to learn whether
 		// another worker generation is already serving it. Treat a clean EOF as
@@ -311,11 +316,36 @@ func (s *Server) handleConn(
 		logger.Warn().Err(err).Msg("sandboxauth: bad request")
 		return
 	}
+	var scope *observationScope
+	if len(scopes) > 0 {
+		scope = scopes[0]
+	}
+	if req.Op == OpObserve {
+		if scope == nil || scope.record(ctx, logger, req) != nil {
+			s.writeError(conn, "invalid GitHub observation")
+			return
+		}
+		if err := json.NewEncoder(conn).Encode(&Response{}); err != nil {
+			logger.Warn().Err(err).Msg("sandboxauth: write observation response")
+		}
+		return
+	}
 	if req.Op != OpGet {
 		s.writeError(conn, fmt.Sprintf("unsupported op %q", req.Op))
 		return
 	}
 
+	if req.Observer != "" && req.Observer != "sandbox_tools" {
+		s.writeError(conn, "unsupported GitHub observer")
+		return
+	}
+	if scope != nil {
+		metadata := scope.metadata
+		if req.Observer == "sandbox_tools" {
+			metadata.Caller = req.Observer
+		}
+		ctx = telemetry.WithRequestMetadata(ctx, metadata)
+	}
 	resolveCtx, cancel := context.WithTimeout(ctx, s.resolveTimeout)
 	defer cancel()
 	res, err := s.resolver.ResolveSandbox(resolveCtx, run, repo, string(req.Action))
@@ -329,6 +359,9 @@ func (s *Server) handleConn(
 		Username:  DefaultUsername,
 		Identity:  Identity(res.AuthoredBy()),
 		ExpiresAt: res.ExpiresAt,
+	}
+	if req.WantObservation && req.Action == ActionAPI && scope != nil {
+		resp.ObservationID = scope.bind(res, req.Observer)
 	}
 	if res.User != nil && res.User.GitHubLogin != nil {
 		resp.Login = *res.User.GitHubLogin

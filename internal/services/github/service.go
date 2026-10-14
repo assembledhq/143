@@ -22,6 +22,7 @@ import (
 )
 
 type Service struct {
+	logger       zerolog.Logger
 	appID        int64
 	privateKey   *rsa.PrivateKey
 	httpClient   *http.Client
@@ -38,6 +39,7 @@ func (s *Service) SetRateLimitController(controller *ratelimit.Controller, logge
 	if s == nil {
 		return
 	}
+	s.logger = logger
 	s.httpClient = githubtelemetry.NewControlledHTTPClient(10*time.Second, logger, controller, "github_service")
 }
 
@@ -112,6 +114,7 @@ func NewService(appID int64, privateKeyPEM string, loggers ...zerolog.Logger) (*
 		logger = loggers[0]
 	}
 	return &Service{
+		logger:       logger,
 		appID:        appID,
 		privateKey:   key,
 		httpClient:   githubtelemetry.NewHTTPClient(10*time.Second, logger),
@@ -136,11 +139,13 @@ func (s *Service) GitHubAppID() int64 {
 
 func (s *Service) GetInstallationToken(ctx context.Context, installationID int64) (string, error) {
 	if token, ok := s.cachedInstallationToken(installationID); ok {
+		s.recordTokenCacheHit(ctx, installationID, "installation_token")
 		return token, nil
 	}
 
 	result := s.tokenGroup.DoChan(fmt.Sprintf("installation:%d", installationID), func() (any, error) {
 		if token, ok := s.cachedInstallationToken(installationID); ok {
+			s.recordTokenCacheHit(ctx, installationID, "installation_token")
 			return token, nil
 		}
 
@@ -213,11 +218,13 @@ func (s *Service) GetSandboxInstallationToken(ctx context.Context, installationI
 
 	key := sandboxTokenCacheKey{InstallationID: installationID, RepositoryID: repositoryID, Action: action}
 	if token, ok := s.cachedSandboxInstallationToken(key); ok {
+		s.recordTokenCacheHit(ctx, installationID, "sandbox_token")
 		return token, nil
 	}
 
 	result := s.tokenGroup.DoChan(fmt.Sprintf("sandbox:%d:%d:%s", installationID, repositoryID, action), func() (any, error) {
 		if token, ok := s.cachedSandboxInstallationToken(key); ok {
+			s.recordTokenCacheHit(ctx, installationID, "sandbox_token")
 			return token, nil
 		}
 
@@ -284,11 +291,11 @@ func (s *Service) exchangeForScopedInstallationToken(ctx context.Context, jwtTok
 }
 
 func (s *Service) exchangeForInstallationTokenRequest(ctx context.Context, jwtToken string, installationID int64, tokenRequest *installationTokenRequest) (string, time.Time, error) {
-	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
-		Kind:           githubtelemetry.RequestKindAPI,
-		AuthType:       githubtelemetry.AuthTypeAppJWT,
-		InstallationID: installationID,
-	})
+	metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+	metadata.Kind = githubtelemetry.RequestKindAPI
+	metadata.AuthType = githubtelemetry.AuthTypeAppJWT
+	metadata.InstallationID = installationID
+	ctx = githubtelemetry.WithRequestMetadata(ctx, metadata)
 	path := fmt.Sprintf("/app/installations/%d/access_tokens", installationID)
 	url := s.apiURL(path)
 	var body io.Reader
@@ -331,11 +338,11 @@ func (s *Service) exchangeForInstallationTokenRequest(ctx context.Context, jwtTo
 }
 
 func (s *Service) GetInstallationDetails(ctx context.Context, installationID int64) (InstallationDetails, error) {
-	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
-		Kind:           githubtelemetry.RequestKindAPI,
-		AuthType:       githubtelemetry.AuthTypeAppJWT,
-		InstallationID: installationID,
-	})
+	metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+	metadata.Kind = githubtelemetry.RequestKindAPI
+	metadata.AuthType = githubtelemetry.AuthTypeAppJWT
+	metadata.InstallationID = installationID
+	ctx = githubtelemetry.WithRequestMetadata(ctx, metadata)
 	jwtToken, err := s.generateJWT()
 	if err != nil {
 		return InstallationDetails{}, err
@@ -551,4 +558,9 @@ func parseNextGitHubPath(link string) string {
 		}
 	}
 	return ""
+}
+
+func (s *Service) recordTokenCacheHit(ctx context.Context, installationID int64, caller string) {
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, installationID, caller)
+	githubtelemetry.RecordLocalActivity(ctx, s.logger, "cache_hit", "/app/installations/:installation_id/access_tokens")
 }
