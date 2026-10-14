@@ -207,9 +207,12 @@ class WatchdogLinuxTest(unittest.TestCase):
         cases = [
             ("success", "BEGIN; INSERT INTO fixture_commits VALUES ('success'); COMMIT; SELECT 'committed';\n", 20, 0, "committed"),
             ("certified_no_commit", "BEGIN; INSERT INTO fixture_commits VALUES ('no_commit'); ROLLBACK; SELECT 'no_commit';\n", 20, 0, "no_commit"),
-            ("timeout", "BEGIN; INSERT INTO fixture_commits VALUES ('timeout'); SELECT pg_sleep(60); COMMIT;\n", 1, None, None),
-            ("sigterm", "BEGIN; INSERT INTO fixture_commits VALUES ('sigterm'); SELECT pg_sleep(60); COMMIT;\n", 20, None, None),
-            ("stopped_timer_sigterm", "BEGIN; INSERT INTO fixture_commits VALUES ('stopped'); SELECT pg_sleep(60); COMMIT;\n", 20, None, None),
+            # A dead client can leave its backend running until the current
+            # query finishes. Bound SQL separately from the client watchdog,
+            # so the interrupted transaction cannot hold the next case's lock.
+            ("timeout", "BEGIN; SET LOCAL statement_timeout='2s'; INSERT INTO fixture_commits VALUES ('timeout'); SELECT pg_sleep(60); COMMIT;\n", 1, None, None),
+            ("sigterm", "BEGIN; SET LOCAL statement_timeout='2s'; INSERT INTO fixture_commits VALUES ('sigterm'); SELECT pg_sleep(60); COMMIT;\n", 20, None, None),
+            ("stopped_timer_sigterm", "BEGIN; SET LOCAL statement_timeout='2s'; INSERT INTO fixture_commits VALUES ('stopped'); SELECT pg_sleep(60); COMMIT;\n", 20, None, None),
         ]
         shell_cases = [(strict, case) for strict in (False, True) for case in cases]
         for strict_shell, (name, sql, seconds, expected_status, receipt) in shell_cases:
