@@ -226,5 +226,21 @@ func TestObservationProtocol(t *testing.T) {
 	require.NotEmpty(t, response.ObservationID, "host must create an opaque observation binding")
 	require.NoError(t, client.Observe(context.Background(), response.ObservationID, []HTTPObservation{{Method: "GET", Route: "/graphql", Status: 200}}, true), "reporting should use the existing credential socket")
 	require.Error(t, client.Observe(context.Background(), response.ObservationID, nil, true), "completed bindings should reject further observations")
-	require.Contains(t, logs.String(), "github api request", "an actual reported request must produce request telemetry")
+	requests := 0
+	credentials := 0
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var actual map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &actual), "socket logs must be valid JSON")
+		switch actual["message"] {
+		case "github api request":
+			requests++
+			require.Equal(t, 1, strings.Count(line, `"session_id":`), "request logs must contain exactly one session field")
+			require.Equal(t, session.String(), actual["session_id"], "request log scope must identify the listener session")
+		case "sandboxauth: served credential":
+			credentials++
+			require.Equal(t, session.String(), actual["session_id"], "credential diagnostics must retain listener context")
+		}
+	}
+	require.Equal(t, 1, requests, "an actual reported request must produce one request event")
+	require.Equal(t, 1, credentials, "the credential exchange must retain its scoped diagnostic event")
 }

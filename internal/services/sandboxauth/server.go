@@ -320,7 +320,7 @@ func (s *Server) handleConn(
 		scope = scopes[0]
 	}
 	if req.Op == OpObserve {
-		if scope == nil || scope.record(ctx, logger, req) != nil {
+		if scope == nil || scope.record(ctx, s.logger, req) != nil {
 			s.writeError(conn, "invalid GitHub observation")
 			return
 		}

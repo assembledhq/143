@@ -123,6 +123,8 @@ func TestWrapperCredentialAndEndpointSelection(t *testing.T) {
 		{name: "host override", env: []string{SocketEnvVar + "=fixture", "GH_HOST=enterprise.example"}, credentials: false},
 		{name: "missing socket", credentials: false},
 		{name: "method before enterprise endpoint", env: []string{SocketEnvVar + "=fixture"}, args: []string{"api", "-X", "GET", "https://enterprise.example/api/v3/user"}, credentials: true},
+		{name: "preview before enterprise endpoint", env: []string{SocketEnvVar + "=fixture"}, args: []string{"api", "--preview", "fixture", "https://enterprise.example/api/v3/user"}, credentials: true},
+		{name: "short preview before enterprise endpoint", env: []string{SocketEnvVar + "=fixture"}, args: []string{"api", "-p", "fixture", "https://enterprise.example/api/v3/user"}, credentials: true},
 		{name: "method before standard endpoint", env: []string{SocketEnvVar + "=fixture"}, args: []string{"api", "-X", "GET", "https://api.github.com/user"}, credentials: true, observe: true},
 		{name: "explicit repository host", env: []string{SocketEnvVar + "=fixture"}, args: []string{"pr", "view", "-R", "enterprise.example/owner/repo"}, credentials: true},
 		{name: "compact repository host", env: []string{SocketEnvVar + "=fixture"}, args: []string{"pr", "view", "-Renterprise.example/owner/repo"}, credentials: true},

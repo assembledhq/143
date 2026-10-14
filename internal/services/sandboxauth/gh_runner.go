@@ -108,7 +108,9 @@ func runObservedGH(ctx context.Context, binary string, args, env []string, token
 		return 1
 	}
 	if err := os.Chmod(socketPath, 0o600); err != nil {
-		listener.Close()
+		if closeErr := listener.Close(); closeErr != nil {
+			fmt.Fprintln(stderr, "143-tools gh: close unsecured transport failed")
+		}
 		fmt.Fprintln(stderr, "143-tools gh: secure transport failed")
 		return 1
 	}
@@ -249,12 +251,13 @@ func prepareGHConfig(dir, socketPath string, env []string) error {
 		return err
 	}
 	config := make(map[string]any)
-	if body, err := os.ReadFile(filepath.Join(source, "config.yml")); err == nil {
-		if err := yaml.Unmarshal(body, &config); err != nil {
+	configBody, readErr := os.ReadFile(filepath.Join(source, "config.yml")) // #nosec G304 -- GH_CONFIG_DIR must support CLI-user-selected configuration paths.
+	if readErr == nil {
+		if err := yaml.Unmarshal(configBody, &config); err != nil {
 			return err
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
 	}
 	if config == nil {
 		config = make(map[string]any)
@@ -347,7 +350,7 @@ func shouldObserveGH(args, env []string) bool {
 			if !defaultGitHubRepository(arg[2:]) {
 				return false
 			}
-		case arg == "-X" || arg == "--method" || arg == "-H" || arg == "--header" || arg == "-f" || arg == "-F" || arg == "--field" || arg == "--raw-field" || arg == "--input" || arg == "--jq" || arg == "-q" || arg == "--template" || arg == "-t" || arg == "--cache" || arg == "--title" || arg == "--body" || arg == "-b" || arg == "--body-file":
+		case arg == "-X" || arg == "--method" || arg == "-H" || arg == "--header" || arg == "-f" || arg == "-F" || arg == "--field" || arg == "--raw-field" || arg == "--input" || arg == "--jq" || arg == "-q" || arg == "--template" || arg == "-t" || arg == "--cache" || arg == "-p" || arg == "--preview" || arg == "--title" || arg == "--body" || arg == "-b" || arg == "--body-file":
 			i++
 		case arg == "api" && !api:
 			api = true
