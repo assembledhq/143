@@ -2158,7 +2158,7 @@ func TestSetupFreshSandbox_CodeReviewChecksOutPullRequestHead(t *testing.T) {
 	}
 	provider := &testInternalSandboxProvider{
 		execFn: func(cmd string, stdout, stderr io.Writer) (int, error) {
-			if cmd == "git rev-parse HEAD" || cmd == "/usr/bin/git -c core.hooksPath=/dev/null rev-parse FETCH_HEAD" {
+			if cmd == "git rev-parse HEAD" || cmd == "/usr/bin/git -c advice.graftFileDeprecated=false -c core.hooksPath=/dev/null rev-parse FETCH_HEAD" {
 				_, _ = io.WriteString(stdout, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
 			}
 			return 0, nil
@@ -2182,8 +2182,8 @@ func TestSetupFreshSandbox_CodeReviewChecksOutPullRequestHead(t *testing.T) {
 	require.Contains(t, commands, "--filter=blob:none", "review fetches should not download all historical blobs")
 	require.NotContains(t, commands, "ghp_test123", "review fetch must keep installation authentication out of command arguments")
 	require.Contains(t, strings.Join(provider.execInputs, "\n"), `"token":"ghp_test123"`, "review fetch should receive explicit private stdin authentication")
-	require.Contains(t, commands, "GIT_NO_LAZY_FETCH=1 /usr/bin/git -c core.hooksPath=/dev/null -c remote.origin.promisor=false checkout -B", "review checkout should use its already-hydrated local evidence while suppressing undeclared hooks")
-	require.Contains(t, provider.execCalls, "/usr/bin/git -c core.hooksPath=/dev/null rev-parse FETCH_HEAD", "review checkout should verify the fetched PR head before changing its branch")
+	require.Contains(t, commands, "GIT_NO_LAZY_FETCH=1 /usr/bin/git -c advice.graftFileDeprecated=false -c core.hooksPath=/dev/null -c remote.origin.promisor=false checkout -B", "review checkout should use its already-hydrated local evidence while suppressing undeclared hooks")
+	require.Contains(t, provider.execCalls, "/usr/bin/git -c advice.graftFileDeprecated=false -c core.hooksPath=/dev/null rev-parse FETCH_HEAD", "review checkout should verify the fetched PR head before changing its branch")
 	require.NotContains(t, provider.execCalls, "git checkout -b '143/88888888/code-review-for-assembledhq-143-42'", "review checkout should not branch from a moving target tip")
 
 	// Defense-in-depth ordering: the git credential helper must be configured

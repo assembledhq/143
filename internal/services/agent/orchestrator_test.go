@@ -1406,7 +1406,7 @@ func configurePinnedReviewFixture(session *models.Session, d *testDeps) {
 	session.WorkingBranch = strPtr("143/test/code-review")
 	previousExec := d.provider.ExecFn
 	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, command string, stdout, stderr io.Writer) (int, error) {
-		if command == "git rev-parse HEAD" || command == "git rev-parse FETCH_HEAD" || command == "/usr/bin/git -c core.hooksPath=/dev/null rev-parse FETCH_HEAD" {
+		if command == "git rev-parse HEAD" || command == "git rev-parse FETCH_HEAD" || command == "/usr/bin/git -c advice.graftFileDeprecated=false -c core.hooksPath=/dev/null rev-parse FETCH_HEAD" {
 			_, err := io.WriteString(stdout, reviewFixtureHead+"\n")
 			return 0, err
 		}
