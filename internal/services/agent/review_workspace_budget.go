@@ -6,12 +6,8 @@ import (
 	"fmt"
 	"io"
 	"time"
-
-	"github.com/assembledhq/143/internal/jobctx"
 )
 
-// CodeReviewWorkspacePreparationTimeout is the total budget for one preparation
-// attempt, including queue time and retries, rather than a per-command timeout.
 const CodeReviewWorkspacePreparationTimeout = 8 * time.Minute
 
 // CodeReviewWorkspaceVerificationTimeout permits bounded platform-only checks
@@ -113,11 +109,7 @@ func withCodeReviewPreparationBudget(ctx context.Context) context.Context {
 	if _, ok := ctx.Value(codeReviewPreparationDeadlineKey{}).(time.Time); ok {
 		return ctx
 	}
-	started := time.Now()
-	if created, ok := jobctx.JobCreatedAtFromContext(ctx); ok {
-		started = created
-	}
-	return WithCodeReviewWorkspacePreparationDeadline(ctx, started.Add(CodeReviewWorkspacePreparationTimeout))
+	return WithCodeReviewWorkspacePreparationDeadline(ctx, time.Now().Add(CodeReviewWorkspacePreparationTimeout))
 }
 
 func codeReviewPreparationContext(ctx context.Context) (context.Context, context.CancelFunc) {

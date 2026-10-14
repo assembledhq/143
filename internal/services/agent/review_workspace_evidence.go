@@ -949,7 +949,7 @@ def child_environment(authenticate=False, platform=False):
     return env
 
 def run(script, required=True, authenticate=False, platform=False):
-    global active
+    global active, cleanup_failed
     check_workspace_quarantine()
     if not p.get("standalone", False) and script in (p.get("prepare"), p.get("repair_tools"), p.get("verify_recipe"), p.get("verify_tools")) and auth is not None:
         raise RuntimeError("private review authentication was not released before repository preparation")
@@ -973,6 +973,10 @@ def run(script, required=True, authenticate=False, platform=False):
     stop_child()
     require_process_cleanup()
     if required and code:
+        if platform and script == p.get("verify_captured_integrity") and code == 77:
+            cleanup_failed = True
+            quarantine_workspace()
+            raise RuntimeError("captured review object cleanup could not be confirmed")
         if platform and p.get("standalone", False) and script == p.get("prepare") and code == 42:
             raise HydrationRequired("pinned review source requires authenticated hydration")
         if platform and script in (p.get("verify_git"), p.get("verify_captured_integrity")) and code == 125:

@@ -90,6 +90,7 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 		return nil, err
 	}
 	defer reservation.Release()
+	ctx = withCodeReviewPreparationBudget(ctx)
 	createStage := observability.BeginStage(true, log, "sandbox_create")
 	sandbox, err := o.provider.Create(ctx, cfg)
 	createStage.End(observability.StageOutcome(ctx, err))

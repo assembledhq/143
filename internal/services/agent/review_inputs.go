@@ -262,13 +262,20 @@ func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *mode
 		if err != nil {
 			return nil, codeReviewInputAvailabilityError(prepareCtx, "load shared review input repository", err)
 		}
-		exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, verifyOnly)
+		exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, true)
 		if verifyOnly {
 			if err != nil || exit != 0 {
 				return nil, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, errors.Join(context.DeadlineExceeded, err))
 			}
 			return nil, nil
 		}
+		if err != nil || exit != 42 {
+			if err != nil {
+				return nil, err
+			}
+			return nil, o.finishCodeReviewInputPreparation(prepareCtx, session, sandbox, identity)
+		}
+		exit, err = o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, false)
 		if err != nil || exit != 42 {
 			if err != nil {
 				return nil, err
@@ -316,8 +323,13 @@ func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *mode
 			}
 			return err
 		}
-		if !started.Load() && errors.Is(result.Err, context.Canceled) && !errors.Is(result.Err, ErrCodeReviewPreparationCleanup) && !errors.Is(result.Err, context.DeadlineExceeded) {
-			return codeReviewInputAvailabilityError(ctx, "shared review input preparation owner cancelled", result.Err)
+		if !started.Load() {
+			if errors.Is(result.Err, ErrCodeReviewPreparationCleanup) || errors.Is(result.Err, ErrCodeReviewSourceIntegrity) || errors.Is(result.Err, ErrStalePullRequestHead) {
+				return result.Err
+			}
+			if errors.Is(result.Err, context.Canceled) || errors.Is(result.Err, context.DeadlineExceeded) {
+				return codeReviewInputAvailabilityError(ctx, "shared review input preparation owner stopped", errors.New("owner preparation allowance ended before shared inputs were ready"))
+			}
 		}
 		return result.Err
 	}
@@ -361,15 +373,23 @@ func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbo
 			remote = "origin"
 		}
 	}
-	command := fmt.Sprintf("cd '%s' && /usr/bin/python3 -I -S -c '%s' '%s' '%s' '%s' '%f' '%t'", shellEscapeSingleQuote(sandbox.WorkDir), shellEscapeSingleQuote(prepareCodeReviewInputsScript), shellEscapeSingleQuote(string(encoded)), shellEscapeSingleQuote(path.Dir(manifestPath)), shellEscapeSingleQuote(remote), deadline, verifyOnly)
+	commandFor := func(hashOnly bool) string {
+		return fmt.Sprintf("cd '%s' && /usr/bin/python3 -I -S -c '%s' '%s' '%s' '%s' '%f' '%t' '%t' '%t'", shellEscapeSingleQuote(sandbox.WorkDir), shellEscapeSingleQuote(prepareCodeReviewInputsScript), shellEscapeSingleQuote(string(encoded)), shellEscapeSingleQuote(path.Dir(manifestPath)), shellEscapeSingleQuote(remote), deadline, verifyOnly, hashOnly, trusted || stdin)
+	}
+	command := commandFor(false)
 	if trusted || stdin {
 		payload := reviewWorkspacePreparationPayload{
 			WorkDir: sandbox.WorkDir, Standalone: true, PlatformCommand: true,
-			GuardConfiguration: repoURL != "", ExpectedRepoURL: repoURL,
 			Prepare: command, DeadlineUnix: deadline, CancelPath: reviewPreparationMarkerPath(sandbox),
-			AuthenticateGit:         hydrate,
-			VerifyIntegrity:         reviewGitObjectIntegrityScript(sandbox.WorkDir),
-			VerifyCapturedIntegrity: reviewGitObjectIntegrityScript(sandbox.WorkDir) + reviewTreeEvidenceScript(sandbox.WorkDir, identity.BaseSHA, identity.HeadSHA, ""),
+			AuthenticateGit: hydrate,
+		}
+		if !verifyOnly {
+			payload.GuardConfiguration = repoURL != ""
+			payload.ExpectedRepoURL = repoURL
+			payload.VerifyIntegrity = reviewGitObjectIntegrityScript(sandbox.WorkDir)
+			payload.VerifyCapturedIntegrity = reviewGitObjectIntegrityScript(sandbox.WorkDir) + reviewTreeEvidenceScript(sandbox.WorkDir, identity.BaseSHA, identity.HeadSHA, "")
+		} else {
+			payload.VerifyCapturedIntegrity = commandFor(true)
 		}
 		auth := reviewGitAuthentication{}
 		if hydrate {
@@ -392,6 +412,9 @@ func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbo
 	}
 	var stderr bytes.Buffer
 	exit, execErr := o.provider.Exec(ctx, reviewInputFetchSandbox(sandbox, token), command, io.Discard, &stderr)
+	if exit == 77 {
+		return exit, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, errors.Join(ErrCodeReviewPreparationCleanup, ctx.Err()))
+	}
 	if execErr != nil {
 		return exit, codeReviewInputAvailabilityError(ctx, "prepare shared review inputs", errors.New(redactGitToken(execErr.Error(), token)))
 	}
@@ -476,7 +499,7 @@ except subprocess.SubprocessError:
     sys.exit(1)
 `
 
-const prepareCodeReviewInputsScript = `import fcntl, hashlib, json, os, pathlib, shutil, subprocess, sys, tempfile, time, urllib.parse
+const prepareCodeReviewInputsScript = `import fcntl, hashlib, json, os, pathlib, select, shutil, stat, subprocess, sys, tempfile, time, urllib.parse
 identity = json.loads(sys.argv[1])
 directory = pathlib.Path(sys.argv[2])
 remote = sys.argv[3]
@@ -485,6 +508,8 @@ if token and remote.startswith("https://"):
     remote = "https://x-access-token:" + urllib.parse.quote(token, safe="") + "@" + remote[8:]
 deadline = time.monotonic() + max(0, float(sys.argv[4]) - time.time())
 verify_only = sys.argv[5] == "true"
+hash_only = sys.argv[6] == "true"
+managed_verification = sys.argv[7] == "true"
 fetch = ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head"]
 if remote == "origin":
     fetch.append("--filter=blob:none")
@@ -495,8 +520,123 @@ def remaining():
         raise TimeoutError("shared review input preparation deadline exceeded")
     return seconds
 
+def git_environment():
+    environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1"}
+    if not remote:
+        environment["GIT_ALLOW_PROTOCOL"] = ""
+    return environment
+
+def git_command(*args):
+    return ["/usr/bin/git", "-c", "core.commitGraph=false", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper=", "-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", "remote.origin.promisor=false", *args]
+
 def git(*args, check=True, stdout=subprocess.PIPE, input=None):
-    return subprocess.run(["/usr/bin/git", "-c", "core.commitGraph=false", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper=", "-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", "remote.origin.promisor=false", *args], input=input, stdout=stdout, stderr=subprocess.PIPE, check=check, timeout=remaining(), env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1"})
+    return subprocess.run(git_command(*args), input=input, stdout=stdout, stderr=subprocess.PIPE, check=check, timeout=remaining(), env=git_environment())
+
+class ObjectReader:
+    def __init__(self, stream):
+        self.fd = stream.fileno()
+        self.buffer = bytearray()
+
+    def receive(self, size):
+        if not select.select([self.fd], [], [], remaining())[0]:
+            raise TimeoutError("captured review object verification timed out")
+        return os.read(self.fd, size)
+
+    def line(self):
+        while b"\n" not in self.buffer:
+            if len(self.buffer) > 128:
+                raise ValueError("captured review object header is invalid")
+            chunk = self.receive(4096)
+            if not chunk:
+                if self.buffer:
+                    raise ValueError("captured review object header is incomplete")
+                return None
+            self.buffer.extend(chunk)
+        end = self.buffer.index(b"\n")
+        if end > 128:
+            raise ValueError("captured review object header is invalid")
+        line = bytes(self.buffer[:end])
+        del self.buffer[:end + 1]
+        return line
+
+    def chunk(self, size):
+        if self.buffer:
+            count = min(size, len(self.buffer))
+            data = bytes(self.buffer[:count])
+            del self.buffer[:count]
+        else:
+            data = self.receive(min(size, 1024 * 1024))
+        if not data:
+            raise ValueError("captured review object body is incomplete")
+        return data
+
+class ObjectCleanupError(RuntimeError):
+    def __init__(self, failures):
+        super().__init__("captured review object process cleanup could not be confirmed")
+        self.failures = failures
+
+def valid_oid(value):
+    return len(value) in (40, 64) and all(byte in b"0123456789abcdef" for byte in value)
+
+def verify_captured_objects(merge_base):
+    if not isinstance(merge_base, str) or not valid_oid(merge_base.encode()):
+        raise ValueError("captured review merge base is invalid")
+    processes = []
+    try:
+        objects = subprocess.Popen(git_command("rev-list", "--objects", "--no-object-names", "--missing=print", "--no-walk", identity["base_sha"], identity["head_sha"], merge_base), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_environment(), bufsize=0)
+        processes.append(objects)
+        batch = subprocess.Popen(git_command("cat-file", "--batch"), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_environment(), bufsize=0)
+        processes.append(batch)
+        os.set_blocking(batch.stdin.fileno(), False)
+        names, contents = ObjectReader(objects.stdout), ObjectReader(batch.stdout)
+        while (oid := names.line()) is not None:
+            if not valid_oid(oid):
+                raise ValueError("captured review object is missing or invalid")
+            request = oid + b"\n"
+            while request:
+                if not select.select([], [batch.stdin.fileno()], [], remaining())[1]:
+                    raise TimeoutError("captured review object verification timed out")
+                request = request[os.write(batch.stdin.fileno(), request):]
+            header = contents.line()
+            fields = header.split() if header is not None else []
+            if len(fields) != 3 or fields[0] != oid or fields[1] not in (b"commit", b"tree", b"blob") or not fields[2].isdigit():
+                raise ValueError("captured review object is missing or invalid")
+            size = int(fields[2])
+            digest = hashlib.sha1() if len(oid) == 40 else hashlib.sha256()
+            digest.update(fields[1] + b" " + fields[2] + b"\0")
+            while size:
+                remaining()
+                data = contents.chunk(size)
+                digest.update(data)
+                size -= len(data)
+            if contents.chunk(1) != b"\n" or digest.hexdigest().encode() != oid:
+                raise ValueError("captured review source object hash mismatch")
+        if objects.wait(timeout=remaining()) != 0:
+            raise ValueError("captured review object closure is incomplete")
+        batch.stdin.close()
+        if batch.wait(timeout=remaining()) != 0:
+            raise ValueError("captured review object verification failed")
+    finally:
+        original = sys.exc_info()[1]
+        failures = []
+        for process in processes:
+            try:
+                if process.poll() is None:
+                    process.kill()
+            except Exception as error:
+                failures.append(error)
+            try:
+                process.wait(timeout=1)
+            except Exception as error:
+                failures.append(error)
+            for stream in (process.stdin, process.stdout):
+                try:
+                    if stream is not None:
+                        stream.close()
+                except Exception as error:
+                    failures.append(error)
+        if failures:
+            raise ObjectCleanupError(failures) from original
 
 def digest(file):
     with file.open("rb") as stream:
@@ -511,8 +651,15 @@ def missing_objects(merge_base):
     return [line[1:] for line in objects if line.startswith("?")]
 
 def prepare():
-    if verify_only and not directory.is_dir():
+    if verify_only and not os.path.lexists(directory):
         sys.exit(42)
+    if os.path.lexists(directory):
+        for ancestor in [pathlib.Path(".git"), directory.parent, directory]:
+            if not stat.S_ISDIR(ancestor.lstat().st_mode):
+                raise ValueError("prepared review input directory must be local and regular")
+        for file in [directory / "manifest.json", directory / "changes.patch"]:
+            if not stat.S_ISREG(file.lstat().st_mode):
+                raise ValueError("prepared review input evidence must be regular")
     if git("rev-parse", "HEAD").stdout.decode().strip() != identity["head_sha"]:
         raise ValueError("workspace HEAD differs from captured review head")
     if directory.exists():
@@ -522,8 +669,8 @@ def prepare():
         merge_base = git("merge-base", identity["base_sha"], identity["head_sha"]).stdout.decode().strip()
         if manifest.get("merge_base_sha") != merge_base or manifest.get("patch_sha256") != digest(directory / "changes.patch"):
             raise ValueError("prepared review input digest or merge base mismatch")
-        if verify_only and missing_objects(merge_base):
-            sys.exit(42)
+        if verify_only and not managed_verification:
+            verify_captured_objects(merge_base)
         return
     for sha in [identity["base_sha"], identity["head_sha"]]:
         if git("cat-file", "-e", sha + "^{commit}", check=False).returncode != 0:
@@ -567,22 +714,34 @@ def prepare():
             shutil.rmtree(temporary)
 
 try:
-    if verify_only and not directory.is_dir():
-        sys.exit(42)
-    directory.parent.mkdir(parents=True, exist_ok=True)
-    with (directory.parent / (directory.name + ".lock")).open("a") as lock:
-        while True:
-            remaining()
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                time.sleep(min(0.02, remaining()))
+    if hash_only:
+        manifest = json.loads((directory / "manifest.json").read_text())
+        if any(manifest.get(key) != value for key, value in identity.items()):
+            raise ValueError("prepared review input identity mismatch")
+        verify_captured_objects(manifest.get("merge_base_sha"))
+    elif verify_only:
         prepare()
+    else:
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        with (directory.parent / (directory.name + ".lock")).open("a") as lock:
+            while True:
+                remaining()
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    time.sleep(min(0.02, remaining()))
+            prepare()
+except ObjectCleanupError:
+    print("captured review object process cleanup could not be confirmed", file=sys.stderr)
+    sys.exit(77)
+except (TimeoutError, subprocess.TimeoutExpired):
+    print("captured review input verification timed out", file=sys.stderr)
+    sys.exit(1)
 except subprocess.SubprocessError as error:
     print("captured review input Git operation failed (" + type(error).__name__ + ")", file=sys.stderr)
-    sys.exit(1)
+    sys.exit(125 if hash_only else 1)
 except (ValueError, OSError) as error:
     print(str(error), file=sys.stderr)
-    sys.exit(1)
+    sys.exit(125 if hash_only else 1)
 `

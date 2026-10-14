@@ -3388,6 +3388,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 
 	// 7. Create sandbox with agent-specific env vars (API keys).
 	// Start with server-level defaults, then overlay org-level overrides.
+	if run.Origin == models.SessionOriginCodeReview {
+		ctx = withCodeReviewPreparationBudget(ctx)
+	}
 	sandboxCfg := DefaultSandboxConfig()
 	sandboxCfg.SessionID = run.ID.String()
 	sandboxCfg.OrgID = run.OrgID.String()
@@ -4700,6 +4703,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	hydrateSessionPolicyForExecution(session, promptIssue)
 
 	// 4. Create sandbox.
+	if session.Origin == models.SessionOriginCodeReview {
+		ctx = withCodeReviewPreparationBudget(ctx)
+	}
 	sandboxCfg := DefaultSandboxConfig()
 	sandboxCfg.SessionID = session.ID.String()
 	sandboxCfg.OrgID = session.OrgID.String()
@@ -5050,12 +5056,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return o.failContinueSessionError(ctx, session, opts, readyErr, log)
 			}
 			return readyErr
-		}
-		if err := o.ensureCodeReviewInputs(ctx, session, workspaceSandbox); err != nil {
-			if errors.Is(err, ErrSandboxWorkspaceNotReady) {
-				return err
-			}
-			return o.failContinueSessionError(ctx, session, opts, err, log)
 		}
 		log.Info().
 			Str("container_id", workspaceSandbox.ID).
@@ -5488,6 +5488,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		o.closeSandboxAuth(session.ID, log)
 	}()
+	var reviewSetupPin *reviewSetupHold
+	if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil && o.threadRuntimes != nil {
+		reviewSetupPin, err = o.acquireReviewSetupHold(ctx, session, sandbox, cancel)
+		if err != nil {
+			return err
+		}
+		defer reviewSetupPin.Release()
+	}
 	if o.nodeID != "" {
 		if err := o.sessions.SetWorkerNodeIDForContainer(ctx, session.OrgID, session.ID, sandbox.ID, o.nodeID); err != nil {
 			log.Error().Err(err).
@@ -5889,6 +5897,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if err := initializeThreadRuntime(); err != nil {
 			return err
 		}
+		reviewSetupPin.Release()
 	}
 
 	// 6. Execute agent with log streaming.

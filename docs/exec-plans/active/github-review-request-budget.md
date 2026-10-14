@@ -72,7 +72,8 @@ stalling active reviews, while preserving fresh checks before publication and me
    readiness failures without consuming reviewer attempts.
    Validate reused inputs before claiming a thread runtime or seed inbox messages,
    and persist a failed reviewer result when immutable evidence is invalid.
-   Carry the shared eight-minute preparation deadline, including earlier caller
+   Start the shared eight-minute deadline at workspace setup after capacity
+   admission, excluding queue age. Carry it, including earlier caller
    deadlines, through input generation and hydration. After that deadline, allow
    one minute only to verify an existing bundle using local objects; do not fetch,
    repair, generate inputs, or renew preparation. Earlier caller deadlines still
@@ -81,6 +82,11 @@ stalling active reviews, while preserving fresh checks before publication and me
    preparation-owner marker. Canceling a waiting sibling must not cancel the
    owner; canceling the owner must wait for bounded cleanup. Hydrate missing
    captured tree objects through the coordinator before computing the patch.
+   Verify existing bundles once per turn using local captured objects and digests,
+   without full-history integrity scans or credential-oriented configuration
+   guards. Keep strict trust and integrity checks for creation and hydration.
+   Pin a ready container with a distinct short setup lease until its thread
+   runtime holder exists, retaining the owner-recovery barrier before acquisition.
    Reviewers analyze the same read-only evidence independently; the coordinator retains final
    freshness checks and invalidates stale assessments. Measure reviewer REST calls
    before and after this change; further broker work depends on demonstrated need.

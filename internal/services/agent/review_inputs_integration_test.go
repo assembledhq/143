@@ -19,7 +19,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -149,9 +148,16 @@ func TestManagedSharedReviewInputsFullShallowAndPartialClones(t *testing.T) {
 			}
 			provider.mu.Lock()
 			for _, payload := range provider.preparations {
-				require.True(t, payload.Standalone && payload.PlatformCommand && payload.GuardConfiguration, "shared inputs must use the trusted standalone platform contract")
-				require.Equal(t, f.remote, payload.ExpectedRepoURL, "local validation must guard the same literal clone URL as hydration")
+				require.True(t, payload.Standalone && payload.PlatformCommand, "shared inputs must use the trusted standalone platform contract")
+				if payload.VerifyIntegrity != "" {
+					require.True(t, payload.GuardConfiguration, "creation and hydration must retain the strict configuration guard")
+					require.Equal(t, f.remote, payload.ExpectedRepoURL, "creation must guard the same literal clone URL as hydration")
+				}
 			}
+			warm := provider.preparations[len(provider.preparations)-1]
+			require.Empty(t, warm.VerifyIntegrity, "warm reuse must never run a full object scan")
+			require.NotContains(t, warm.VerifyCapturedIntegrity, "fsck", "warm reuse must never repeat a full object scan")
+			require.False(t, warm.GuardConfiguration || warm.AuthenticateGit, "local warm verification must not depend on authentication configuration")
 			provider.mu.Unlock()
 		})
 	}
@@ -199,6 +205,9 @@ func (p *sharedInputsBudgetProvider) ExecWithStdin(ctx context.Context, _ *Sandb
 	deadline, _ := ctx.Deadline()
 	p.stages = append(p.stages, reviewBudgetStageObservation{deadline, message.Payload.DeadlineUnix, message.Payload.Prepare})
 	if len(p.stages) == 1 {
+		return 126, nil
+	}
+	if len(p.stages) == 2 {
 		time.Sleep(time.Minute)
 		return 126, nil
 	}
@@ -217,9 +226,8 @@ func TestSharedReviewInputsRetainOneAbsolutePreparationBudget(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
 				started := time.Now()
-				ctx := withCodeReviewPreparationBudget(jobctx.WithJobCreatedAt(context.Background(), started.Add(-3*time.Minute)))
-				ctx = WithCodeReviewWorkspacePreparationDeadline(ctx, started.Add(7*time.Minute))
 				deadline := started.Add(5 * time.Minute)
+				ctx := WithCodeReviewWorkspacePreparationDeadline(context.Background(), deadline)
 				if expire {
 					deadline = started.Add(90 * time.Second)
 					var cancel context.CancelFunc
@@ -235,7 +243,7 @@ func TestSharedReviewInputsRetainOneAbsolutePreparationBudget(t *testing.T) {
 					require.NoError(t, err, "two one-minute stages must not renew or hit an obsolete per-command cap")
 				}
 				synctest.Wait()
-				require.Len(t, provider.stages, 2, "local proof and authenticated hydration should share the original deadline")
+				require.Len(t, provider.stages, 3, "warm probe, creation proof and authenticated hydration should share the original deadline")
 				for _, stage := range provider.stages {
 					require.Equal(t, deadline, stage.contextDeadline, "every stage context must carry the earliest absolute deadline")
 					require.InDelta(t, float64(deadline.UnixNano())/float64(time.Second), stage.payloadDeadline, 0.001, "managed payload must carry the same deadline")
@@ -398,8 +406,8 @@ func TestSharedReviewInputFlightsSeparateLeaderAndFollowerCancellation(t *testin
 						require.NotErrorIs(t, followerErr, ErrSandboxWorkspaceNotReady, "uncertain work must never become an ordinary retry")
 					} else if scenario == "expired owner cancellation" {
 						require.ErrorIs(t, ownerErr, context.DeadlineExceeded, "expired verification must retain its deadline even if its owner later cancels")
-						require.ErrorIs(t, followerErr, context.DeadlineExceeded, "live followers must preserve an expired owner's deadline cause")
-						require.NotErrorIs(t, followerErr, ErrSandboxWorkspaceNotReady, "a joined deadline and cancellation must remain terminal")
+						require.ErrorIs(t, followerErr, ErrSandboxWorkspaceNotReady, "a live follower must retry when its owner's verification allowance ends")
+						require.NotErrorIs(t, followerErr, context.DeadlineExceeded, "the owner's deadline must not become a live follower's deadline")
 					} else {
 						require.NotErrorIs(t, ownerErr, ErrCodeReviewPreparationCleanup, "acknowledged owner cleanup should preserve plain cancellation")
 						require.ErrorIs(t, followerErr, ErrSandboxWorkspaceNotReady, "a live follower must retry when its preparation owner cancels")

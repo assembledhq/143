@@ -181,7 +181,7 @@ func (p *reviewInputsAuthProvider) Exec(_ context.Context, sandbox *Sandbox, com
 	}
 	p.commands = append(p.commands, command)
 	p.tokens = append(p.tokens, sandbox.Env["GH143_REVIEW_FETCH_TOKEN"])
-	if len(p.commands) == 1 {
+	if len(p.commands) <= 2 {
 		return 42, nil
 	}
 	return 0, nil
@@ -198,7 +198,7 @@ func TestSharedReviewInputsKeepFetchCredentialsEphemeral(t *testing.T) {
 	}
 	sandbox := &Sandbox{ID: "container", WorkDir: "/workspace", Env: map[string]string{"KEEP": "original"}}
 	require.NoError(t, orchestrator.ensureCodeReviewInputs(context.Background(), session, sandbox), "coordinator should authenticate only the missing-input fetch")
-	require.Equal(t, []string{"", "synthetic-fetch-token"}, provider.tokens, "only the remote preparation process should receive the short-lived token")
+	require.Equal(t, []string{"", "", "synthetic-fetch-token"}, provider.tokens, "only authenticated hydration should receive the short-lived token")
 	require.Equal(t, map[string]string{"KEEP": "original"}, sandbox.Env, "shared sandbox state must not retain temporary fetch credentials")
 	require.NotContains(t, strings.Join(provider.commands, "\n"), "synthetic-fetch-token", "command logging must never contain fetch credentials")
 }
@@ -459,7 +459,7 @@ func TestSharedReviewInputsConcurrentPreparationAndTenantIsolation(t *testing.T)
 	for err := range errors {
 		require.NoError(t, err, "concurrent siblings should consume one complete immutable bundle")
 	}
-	require.Equal(t, int64(2), provider.calls.Load(), "overlapping siblings should share one preparation and one owner-marker completion")
+	require.Equal(t, int64(3), provider.calls.Load(), "overlapping siblings should share a warm probe, one creation and one owner-marker completion")
 	other := *session
 	other.OrgID = uuid.New()
 	require.NoError(t, orchestrator.ensureCodeReviewInputs(context.Background(), &other, sandbox), "another tenant should prepare isolated evidence")

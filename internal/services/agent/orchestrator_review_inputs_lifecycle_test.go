@@ -58,10 +58,10 @@ func TestContinueSessionReviewInputsFailBeforeRuntimeAndInboxOwnership(t *testin
 		failure     string
 		preparation int64
 	}{
-		{name: "final availability", failure: "availability", preparation: 2},
-		{name: "final digest", failure: "digest", preparation: 2},
-		{name: "final cancellation", failure: "cancellation", preparation: 2},
 		{name: "reused availability", failure: "availability", preparation: 1},
+		{name: "reused digest", failure: "digest", preparation: 1},
+		{name: "reused source integrity", failure: "source", preparation: 1},
+		{name: "reused cancellation", failure: "cancellation", preparation: 1},
 		{name: "reused head", failure: "head", preparation: 1},
 		{name: "reused invalid marker", failure: "marker", preparation: 0},
 		{name: "reused malformed revision", failure: "revision", preparation: 0},
@@ -102,6 +102,9 @@ func TestContinueSessionReviewInputsFailBeforeRuntimeAndInboxOwnership(t *testin
 						case "digest":
 							_, writeErr := io.WriteString(stderr, "prepared review input digest or merge base mismatch")
 							return 1, writeErr
+						case "source":
+							_, writeErr := io.WriteString(stderr, "captured review source object hash mismatch")
+							return 125, writeErr
 						case "head":
 							_, writeErr := io.WriteString(stderr, "workspace HEAD differs from captured review head")
 							return 1, writeErr
@@ -135,7 +138,7 @@ func TestContinueSessionReviewInputsFailBeforeRuntimeAndInboxOwnership(t *testin
 			case "availability":
 				require.ErrorIs(t, err, agent.ErrSandboxWorkspaceNotReady, "temporary availability must preserve the waiting retry")
 				require.Empty(t, d.sessionThreads.updateResultCalls, "waiting retry must not terminalize the review thread")
-			case "digest", "head", "marker", "revision":
+			case "digest", "source", "head", "marker", "revision":
 				require.ErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "invalid captured evidence must remain fatal")
 				require.NotErrorIs(t, err, agent.ErrSandboxWorkspaceNotReady, "evidence mismatch must never become an availability retry")
 				require.Len(t, d.sessionThreads.updateResultCalls, 1, "invalid evidence must persist the reviewer failure")
