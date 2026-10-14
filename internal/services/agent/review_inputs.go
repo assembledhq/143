@@ -529,7 +529,7 @@ def git_environment():
     return environment
 
 def git_command(*args):
-    return ["/usr/bin/git", "-c", "core.commitGraph=false", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper=", "-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", "remote.origin.promisor=false", *args]
+    return ["/usr/bin/git", "-c", "advice.graftFileDeprecated=false", "-c", "core.commitGraph=false", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper=", "-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", "remote.origin.promisor=false", *args]
 
 def git(*args, check=True, stdout=subprocess.PIPE, input=None):
     return subprocess.run(git_command(*args), input=input, stdout=stdout, stderr=subprocess.PIPE, check=check, timeout=remaining(), env=git_environment())

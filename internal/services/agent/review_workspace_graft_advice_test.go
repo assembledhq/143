@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -38,6 +39,7 @@ func TestReviewGitGraftAdviceSuppression(t *testing.T) {
 		script        func(reviewEvidenceGitFixture) string
 		integrityOnly bool
 	}{
+		{name: "shared input Git command factory", script: sharedReviewInputGraftAdviceFixtureScript},
 		{name: "pinned comparison and local tree closure", script: func(f reviewEvidenceGitFixture) string {
 			return reviewTreeEvidenceScript(f.workDir, f.base, f.head, "") + "printf '%s\n' \"$comparison\"\n"
 		}},
@@ -75,4 +77,24 @@ func TestReviewGitGraftAdviceSuppression(t *testing.T) {
 			require.Empty(t, stderr, "trusted Git and Python index checks must override hostile repository advice without deprecation noise")
 		})
 	}
+}
+
+func sharedReviewInputGraftAdviceFixtureScript(f reviewEvidenceGitFixture) string {
+	// Exercise the production factory directly so its subprocess stderr reaches
+	// the real-Git assertion instead of being captured by the preparation helper.
+	const script = `import ast, os, subprocess, sys
+module = ast.parse(sys.argv[1])
+functions = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name in ("git_command", "git_environment")]
+if len(functions) != 2:
+    raise ValueError("shared review input Git factory and environment must exist")
+namespace = {"os": os, "remote": ""}
+exec(compile(ast.Module(body=functions, type_ignores=[]), "shared-input-git-factory", "exec"), namespace)
+environment = namespace["git_environment"]()
+for name, expected in {"GIT_GRAFT_FILE": "/dev/null", "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": ""}.items():
+    if environment.get(name) != expected:
+        raise ValueError("shared input Git environment guard changed: " + name)
+result = subprocess.run(namespace["git_command"]("merge-base", sys.argv[2], sys.argv[3]), env=environment)
+sys.exit(result.returncode)
+`
+	return fmt.Sprintf("/usr/bin/python3 -I -S -c '%s' '%s' '%s' '%s'", shellEscapeSingleQuote(script), shellEscapeSingleQuote(prepareCodeReviewInputsScript), f.base, f.head)
 }
