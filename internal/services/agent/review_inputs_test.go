@@ -176,6 +176,9 @@ type reviewInputsAuthProvider struct {
 }
 
 func (p *reviewInputsAuthProvider) Exec(_ context.Context, sandbox *Sandbox, command string, _, _ io.Writer) (int, error) {
+	if strings.Contains(command, "marker, owner, mode = ") {
+		return 0, nil
+	}
 	p.commands = append(p.commands, command)
 	p.tokens = append(p.tokens, sandbox.Env["GH143_REVIEW_FETCH_TOKEN"])
 	if len(p.commands) == 1 {
@@ -420,10 +423,14 @@ func TestSharedReviewInputPreparationMarkerLifecycle(t *testing.T) {
 	require.NoError(t, err, "sibling should inspect preparation state")
 	require.False(t, ready, "checked-out HEAD alone must not bypass unfinished owner preparation")
 	require.Empty(t, reviewInputsGit(t, directory, "ls-files", "--others", "--exclude-standard"), "pre-clone marker must remain outside the repository")
-	orchestrator.clearCodeReviewInputPreparation(ctx, session, sandbox)
+	identity, err := codeReviewInputIdentityFromSession(session)
+	require.NoError(t, err, "fixture input identity must validate")
+	exit, err := orchestrator.updateCodeReviewPreparationMarker(ctx, session, sandbox, identity, "clear")
+	require.NoError(t, err, "owner completion CAS should succeed")
+	require.Zero(t, exit, "only the exact owner may complete preparation")
 	ready, err = orchestrator.codeReviewInputsPreparationFinished(ctx, session, sandbox)
-	require.NoError(t, err, "cancelled owner marker should be removable")
-	require.True(t, ready, "owner cancellation should not leave a permanent readiness wait")
+	require.NoError(t, err, "completed owner marker should be absent")
+	require.True(t, ready, "owner completion should release its readiness marker")
 	require.NoError(t, orchestrator.markCodeReviewInputsPreparing(ctx, session, sandbox), "recovery owner should be able to mark a new preparation attempt")
 	require.NoError(t, orchestrator.ensureCodeReviewInputs(ctx, session, sandbox), "recovery should publish a complete immutable bundle")
 	ready, err = orchestrator.codeReviewInputsPreparationFinished(ctx, session, sandbox)
@@ -452,7 +459,7 @@ func TestSharedReviewInputsConcurrentPreparationAndTenantIsolation(t *testing.T)
 	for err := range errors {
 		require.NoError(t, err, "concurrent siblings should consume one complete immutable bundle")
 	}
-	require.Equal(t, int64(1), provider.calls.Load(), "overlapping sibling preparation should execute once per container/revision")
+	require.Equal(t, int64(2), provider.calls.Load(), "overlapping siblings should share one preparation and one owner-marker completion")
 	other := *session
 	other.OrgID = uuid.New()
 	require.NoError(t, orchestrator.ensureCodeReviewInputs(context.Background(), &other, sandbox), "another tenant should prepare isolated evidence")

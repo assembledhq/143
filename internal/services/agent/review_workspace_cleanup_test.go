@@ -221,9 +221,10 @@ func TestReviewPreparationCleanupSignalErrors(t *testing.T) {
 				}
 				require.Eventually(t, func() bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) }, 2*time.Second, time.Millisecond, "red or deliberately denied cleanup cases must leave no owned live process after fixture teardown")
 			})
-			process, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").CombinedOutput()
-			require.NoError(t, err, "owned native process identity should be inspected without argv or environment: %s", process)
-			require.Equal(t, "git", filepath.Base(strings.TrimSpace(string(process))), "cleanup signal regression must pause real Git")
+			require.Eventually(t, func() bool {
+				process, processErr := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").CombinedOutput()
+				return processErr == nil && filepath.Base(strings.TrimSpace(string(process))) == "git"
+			}, 2*time.Second, time.Millisecond, "cleanup signal regression must observe real Git after the owned shell executes it")
 			require.NoError(t, syscall.Kill(pid, syscall.SIGSTOP), "the identified real Git process must still exist when paused")
 			require.Eventually(t, func() bool {
 				state, stateErr := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "stat=").CombinedOutput()

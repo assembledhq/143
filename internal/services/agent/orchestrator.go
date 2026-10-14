@@ -1730,6 +1730,10 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 	if repo == nil || sandboxCfg == nil {
 		return nil, nil
 	}
+	if run.Origin == models.SessionOriginCodeReview {
+		delete(sandboxCfg.Env, "GITHUB_TOKEN")
+		delete(sandboxCfg.Env, "GH_TOKEN")
+	}
 	if repo.FullName != "" {
 		parts := strings.SplitN(repo.FullName, "/", 2)
 		if len(parts) == 2 {
@@ -1743,8 +1747,8 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 			Bool("sandbox_auth_nil", o.sandboxAuth == nil).
 			Bool("fallback_token_present", fallbackToken != "").
 			Str("session_id", run.ID.String()).
-			Msg("sandbox auth socket bridge unavailable; falling back to env token (legacy path)")
-		if fallbackToken != "" {
+			Msg("sandbox auth socket bridge unavailable")
+		if fallbackToken != "" && run.Origin != models.SessionOriginCodeReview {
 			sandboxCfg.Env["GITHUB_TOKEN"] = fallbackToken
 		}
 		name, email := identity.CommitIdentity(nil)
@@ -3448,13 +3452,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	// reference) and it would leak until server restart.
 	var actualContainerID string
 	holdErr := o.markCodeReviewInputsPreparing(ctx, run, sandbox)
-	if holdErr == nil && run.Origin == models.SessionOriginCodeReview {
-		defer func() {
-			if returnErr != nil {
-				o.clearCodeReviewInputPreparation(ctx, run, sandbox)
-			}
-		}()
-	}
 	if holdErr == nil {
 		actualContainerID, holdErr = o.sessions.AcquireTurnHold(ctx, run.OrgID, run.ID, sandbox.ID)
 	}
@@ -4986,7 +4983,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if reusedExisting && session.Origin == models.SessionOriginCodeReview && resolvedRepoID != nil && opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
 		_, expectedHead, _, checkoutErr := codeReviewCheckoutContextFromSession(session)
 		if checkoutErr != nil {
-			return checkoutErr
+			return o.failContinueSessionError(ctx, session, opts, checkoutErr, log)
 		}
 		expectedBranch := sessionWorkingBranch(session, promptIssue)
 		workspaceThreadID := *opts.ThreadID
@@ -5048,6 +5045,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					Err(readyErr).
 					Str("container_id", workspaceSandbox.ID).
 					Msg("reused code review workspace did not become ready before retry")
+			}
+			if ctx.Err() == nil && !errors.Is(readyErr, ErrSandboxWorkspaceNotReady) && !errors.Is(readyErr, ErrThreadCancelledBeforeWorkspaceReady) {
+				return o.failContinueSessionError(ctx, session, opts, readyErr, log)
 			}
 			return readyErr
 		}
@@ -5312,13 +5312,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	var holdErr error
 	if !reusedExisting {
 		holdErr = o.markCodeReviewInputsPreparing(ctx, session, sandbox)
-		if holdErr == nil && session.Origin == models.SessionOriginCodeReview {
-			defer func() {
-				if returnErr != nil {
-					o.clearCodeReviewInputPreparation(ctx, session, sandbox)
-				}
-			}()
-		}
 	}
 	if reusedExisting {
 		var acquired bool
@@ -6734,7 +6727,6 @@ type codeReviewCheckoutContext struct {
 	GitHubRepo     string `json:"github_repo"`
 	BaseSHA        string `json:"base_sha"`
 	HeadSHA        string `json:"head_sha"`
-	BaseSHA        string `json:"base_sha"`
 }
 
 func codeReviewCheckoutContextFromSession(session *models.Session) (int, string, bool, error) {

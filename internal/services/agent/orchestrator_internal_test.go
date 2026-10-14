@@ -26,6 +26,27 @@ import (
 	"github.com/assembledhq/143/internal/services/workspace"
 )
 
+func TestReviewSandboxAuthenticationKeepsCredentialsOutOfCreationEnvironment(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		origin models.SessionOrigin
+		tokens map[string]string
+	}{
+		{name: "code review", origin: models.SessionOriginCodeReview, tokens: map[string]string{"GITHUB_TOKEN": "", "GH_TOKEN": ""}},
+		{name: "manual session", origin: models.SessionOriginManual, tokens: map[string]string{"GITHUB_TOKEN": "fallback-token", "GH_TOKEN": "configured-token"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			session := &models.Session{Origin: test.origin}
+			cfg := &SandboxConfig{HomeDir: "/home/sandbox", Env: map[string]string{"GITHUB_TOKEN": "configured-token", "GH_TOKEN": "configured-token"}}
+			_, err := (&Orchestrator{}).prepareSandboxGitHubAuth(context.Background(), session, &models.Repository{FullName: "example/repo"}, "fallback-token", cfg, zerolog.Nop())
+			require.NoError(t, err, "authentication setup should retain the origin's existing behavior")
+			require.Equal(t, test.tokens, map[string]string{"GITHUB_TOKEN": cfg.Env["GITHUB_TOKEN"], "GH_TOKEN": cfg.Env["GH_TOKEN"]}, "review workspaces must not retain creation credentials while manual sessions retain legacy access")
+		})
+	}
+}
+
 func TestOrchestratorInjectInternalAPIEnvUsesCodingSessionID(t *testing.T) {
 	t.Parallel()
 

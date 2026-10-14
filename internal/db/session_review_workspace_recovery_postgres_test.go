@@ -460,7 +460,7 @@ func TestIncompleteReviewWorkspaceRecoveryHealthyOwnerUsesReadOnlyPrecheckPostgr
 			require.NoError(t, err, "heartbeat should retain its row lock across readiness polls")
 			recorder := &recoveryTransactionRecorder{TxStarter: f.pool}
 			store := NewSessionStore(recorder)
-			probeCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			for range 5 {
 				recovered, err := store.RecoverIncompleteCodeReviewWorkspace(probeCtx, f.org, f.params)

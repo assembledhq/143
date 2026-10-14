@@ -72,6 +72,12 @@ stalling active reviews, while preserving fresh checks before publication and me
    readiness failures without consuming reviewer attempts.
    Validate reused inputs before claiming a thread runtime or seed inbox messages,
    and persist a failed reviewer result when immutable evidence is invalid.
+   Carry the shared eight-minute preparation deadline, including earlier caller
+   deadlines, through input generation and hydration. Give Git commands the
+   remaining budget and use managed Docker process cleanup before removing the
+   preparation-owner marker. Canceling a waiting sibling must not cancel the
+   owner; canceling the owner must wait for bounded cleanup. Hydrate missing
+   captured tree objects through the coordinator before computing the patch.
    Reviewers analyze the same read-only evidence independently; the coordinator retains final
    freshness checks and invalidates stale assessments. Measure reviewer REST calls
    before and after this change; further broker work depends on demonstrated need.
@@ -144,7 +150,8 @@ payloads while identifying any missing visual evidence.
 ## Outcomes & Retrospective
 
 Enforcement configuration is prepared with an attended-rollout gate. Attribution
-has local transport/cache/identity tests. Shared inputs have real Git and recovery
-tests; budgeting has fair-admission and standalone/Cluster Redis tests. The
-background reserve remains disabled by default. Deployment and measured savings
-remain pending; prepared code and configuration do not establish production impact.
+and coalescing are merged, with their deployments checked healthy. Shared inputs
+have real Git and recovery tests; budgeting has fair-admission and
+standalone/Cluster Redis tests. Shared-input deployment and measured savings
+remain pending. The background reserve remains disabled by default; prepared
+code and configuration do not establish production impact.

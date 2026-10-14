@@ -8205,7 +8205,8 @@ func TestReviewInputsGateBeforeAgentExecution(t *testing.T) {
 			} else {
 				err = orchestrator.ContinueSession(context.Background(), session, nil)
 			}
-			require.ErrorContains(t, err, "code review inputs incomplete", "all runtime paths should reject an unavailable prepared diff")
+			require.ErrorContains(t, err, "required captured base is unavailable", "all runtime paths should reject the specific shared-input preparation failure")
+			require.NotErrorIs(t, err, agent.ErrSandboxWorkspaceNotReady, "invalid captured evidence must remain fatal after managed dispatch")
 			require.Equal(t, int64(1), preparationCalls.Load(), "runtime setup should reach the shared evidence gate")
 			require.False(t, executed.Load(), "a reviewer must never execute before a complete input bundle exists")
 		})

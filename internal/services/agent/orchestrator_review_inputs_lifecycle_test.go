@@ -63,6 +63,8 @@ func TestContinueSessionReviewInputsFailBeforeRuntimeAndInboxOwnership(t *testin
 		{name: "final cancellation", failure: "cancellation", preparation: 2},
 		{name: "reused availability", failure: "availability", preparation: 1},
 		{name: "reused head", failure: "head", preparation: 1},
+		{name: "reused invalid marker", failure: "marker", preparation: 0},
+		{name: "reused malformed revision", failure: "revision", preparation: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -78,6 +80,9 @@ func TestContinueSessionReviewInputsFailBeforeRuntimeAndInboxOwnership(t *testin
 			revision, err := json.Marshal(map[string]any{"kind": "code_review", "github_repo": d.repos.repo.FullName, "github_pr_number": 42, "base_sha": base, "head_sha": head})
 			require.NoError(t, err, "captured input revision should encode")
 			session.RevisionContext = revision
+			if test.failure == "revision" {
+				session.RevisionContext = []byte(`{`)
+			}
 			thread := uuid.New()
 			d.sessionThreads = &mockSessionThreadStore{getByIDResult: &models.SessionThread{ID: thread, SessionID: session.ID, OrgID: org, Status: models.ThreadStatusRunning}}
 			d.messages.messages = []models.SessionMessage{{ID: 42, OrgID: org, SessionID: session.ID, ThreadID: &thread, TurnNumber: 1, Role: models.MessageRoleUser, Source: models.SessionMessageSourceCodeReview, Content: "Review captured changes."}}
@@ -108,6 +113,10 @@ func TestContinueSessionReviewInputsFailBeforeRuntimeAndInboxOwnership(t *testin
 					return 0, nil
 				}
 				if strings.Contains(command, "with pathlib.Path(sys.argv[1]).open() as marker:") {
+					if test.failure == "marker" {
+						_, writeErr := io.WriteString(stdout, "{}")
+						return 0, writeErr
+					}
 					return 42, nil
 				}
 				if strings.HasPrefix(command, "git -C ") && strings.Contains(command, "rev-parse --verify HEAD") {
@@ -126,7 +135,7 @@ func TestContinueSessionReviewInputsFailBeforeRuntimeAndInboxOwnership(t *testin
 			case "availability":
 				require.ErrorIs(t, err, agent.ErrSandboxWorkspaceNotReady, "temporary availability must preserve the waiting retry")
 				require.Empty(t, d.sessionThreads.updateResultCalls, "waiting retry must not terminalize the review thread")
-			case "digest", "head":
+			case "digest", "head", "marker", "revision":
 				require.ErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "invalid captured evidence must remain fatal")
 				require.NotErrorIs(t, err, agent.ErrSandboxWorkspaceNotReady, "evidence mismatch must never become an availability retry")
 				require.Len(t, d.sessionThreads.updateResultCalls, 1, "invalid evidence must persist the reviewer failure")
