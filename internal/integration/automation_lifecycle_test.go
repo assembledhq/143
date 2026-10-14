@@ -753,6 +753,7 @@ func TestAutomationLifecycle_DispatchStaleCloseLookupRetries(t *testing.T) {
 	h.dispatcher.SetHeadResolver(&fakeHeadResolver{info: automations.PullRequestHeadInfo{SHA: head, UpdatedAt: &closedAt, State: "closed", BaseBranch: "main"}})
 	outcome := h.dispatch(t, run, models.AgentTypeCodex)
 	require.Equal(t, automations.DispatchRetry, outcome.Kind, "the stale close sends the run back to wait for a fresh lookup")
+	require.GreaterOrEqual(t, outcome.RetryAfter, 30*time.Second, "on the lookup backoff, not a one-second poll")
 
 	target := h.target(t)
 	require.Equal(t, models.AutomationTargetLifecycleOpen, target.LifecycleState, "the target stays open")
@@ -760,4 +761,38 @@ func TestAutomationLifecycle_DispatchStaleCloseLookupRetries(t *testing.T) {
 	reloaded := h.reload(t, run.ID)
 	require.Equal(t, models.AutomationRunStatusPending, reloaded.Status, "the run is not skipped")
 	require.Nil(t, reloaded.OutcomeReason, "and has no outcome")
+}
+
+// TestAutomationLifecycle_DispatchUntimestampedCloseKeepsEvidence proves a
+// lookup that reports a close without a timestamp keeps the evidence the
+// target already holds rather than clearing it. Cleared evidence would let a
+// reopen older than that evidence, delivered afterwards, reopen the target.
+func TestAutomationLifecycle_DispatchUntimestampedCloseKeepsEvidence(t *testing.T) {
+	h := newLifecycleHarness(t)
+	h.finishFirstTurn(t)
+
+	before := h.target(t).LifecycleUpdatedAt
+	require.NotNil(t, before, "the target already has openness evidence")
+	reopenedAt := before.Add(5 * time.Second)
+	pushedAt := before.Add(10 * time.Second)
+
+	head := "2222222222222222222222222222222222222222"
+	run := h.push(t, head, pushedAt)
+	h.dispatcher.SetHeadResolver(&fakeHeadResolver{info: automations.PullRequestHeadInfo{SHA: head, State: "closed", BaseBranch: "main"}})
+	outcome := h.dispatch(t, run, models.AgentTypeCodex)
+	require.Equal(t, automations.DispatchTerminalized, outcome.Kind, "the closed pull request ends the run")
+	target := h.target(t)
+	require.Equal(t, models.AutomationTargetLifecycleClosed, target.LifecycleState, "dispatch closes the target")
+	require.NotNil(t, target.LifecycleUpdatedAt, "the evidence is not cleared")
+	require.WithinDuration(t, pushedAt, *target.LifecycleUpdatedAt, time.Millisecond, "it keeps the moment the target already held")
+
+	// A reopen older than that evidence arrives late.
+	reopened := h.deliver(t, automations.GitHubEventTriggerRequest{
+		Event: models.AutomationGitHubEventPullRequestUpdated, PullRequestAction: "reopened",
+		HeadSHA: head, PullRequestUpdatedAt: timePtr(reopenedAt), BaseBranch: "main",
+	})
+	require.Equal(t, models.AutomationTargetLifecycleClosed, h.target(t).LifecycleState, "the older reopen does not reopen the target")
+	late := h.reload(t, reopened.ID)
+	require.Equal(t, models.AutomationRunStatusSkipped, late.Status, "its run is skipped")
+	require.Equal(t, models.AutomationRunOutcomePRClosed, *late.OutcomeReason, "as pr_closed")
 }
