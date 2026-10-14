@@ -64,7 +64,7 @@ func TestCheckSyncHandlerWaitsForPredecessor(t *testing.T) {
 				require.ErrorAs(t, err, &retry, "active predecessor must defer overlapping GitHub reads")
 				require.False(t, retry.ConsumeAttempt, "waiting for predecessor must preserve the attempt budget")
 				require.True(t, retry.BypassMaxRetryDuration, "internal dependency wait must survive a predecessor cooldown longer than the ordinary retry budget")
-				require.Equal(t, new(2*time.Minute), retry.RetryAfter, "waiting successor should poll at a bounded interval")
+				require.Equal(t, new(5*time.Second), retry.RetryAfter, "waiting successor should poll at a bounded interval")
 			} else if tt.queryErr != nil {
 				require.ErrorIs(t, err, tt.queryErr, "failed predecessor lookup cannot authorize a read")
 			} else {
@@ -113,8 +113,8 @@ func TestCheckSyncPredecessorPollDelay(t *testing.T) {
 		{name: "long cooldown bounded", status: models.JobStatusPending, due: 2 * time.Hour, age: time.Hour, want: 2 * time.Minute},
 		{name: "near deadline avoids hot polling", status: models.JobStatusPending, due: time.Second, want: 5 * time.Second},
 		{name: "new running read", status: models.JobStatusRunning, want: 5 * time.Second},
-		{name: "running read backs off", status: models.JobStatusRunning, age: 15 * time.Second, want: 20 * time.Second},
-		{name: "old running read bounded", status: models.JobStatusRunning, age: 2 * time.Hour, want: 2 * time.Minute},
+		{name: "running read stays responsive", status: models.JobStatusRunning, age: 15 * time.Second, want: 5 * time.Second},
+		{name: "old running read stays responsive", status: models.JobStatusRunning, age: 2 * time.Hour, want: 5 * time.Second},
 		{name: "overdue pending job backs off", status: models.JobStatusPending, due: -time.Minute, age: time.Minute, want: 40 * time.Second},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

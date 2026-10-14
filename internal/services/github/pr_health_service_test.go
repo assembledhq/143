@@ -1619,8 +1619,11 @@ func TestRebuildProjectedHealthSummary(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			actual := rebuildProjectedHealthSummary(tt.initial, []models.PullRequestCheckState{tt.state})
-			require.Equal(t, tt.expected, actual, "projected rebuild should derive aggregate health entirely from merged check state")
+			initial, expected := tt.initial, tt.expected
+			initial.GitHubSyncVersion = 17
+			expected.GitHubSyncVersion = 17
+			actual := rebuildProjectedHealthSummary(initial, []models.PullRequestCheckState{tt.state})
+			require.Equal(t, expected, actual, "projected rebuild should derive aggregate health entirely from merged check state")
 		})
 	}
 }
@@ -2560,6 +2563,13 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 	repoID := uuid.New()
 	integrationID := uuid.New()
 	now := time.Now().UTC()
+	priorSummary := models.PullRequestHealthSummary{GitHubSyncVersion: 1, MergeState: models.PullRequestMergeStateBlocked, ChecksConfirmed: true, Checks: []models.PullRequestCheckSummary{{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed, Provider: "github-actions"}}}
+	priorJSON, err := json.Marshal(priorSummary)
+	require.NoError(t, err, "encode a projected baseline whose authoritative reservation is older")
+	prior := models.PullRequestHealthCurrent{PullRequestID: pullRequestID, OrgID: orgID, Version: 7, HeadSHA: "head-pending", BaseSHA: "base-pending", SummaryJSON: priorJSON, SummaryPreviewJSON: priorJSON, EnrichmentStatus: models.PullRequestHealthEnrichmentStatusNotRequested, CheckStateVersion: 3, CreatedAt: now, UpdatedAt: now}
+	currentRows := func() *pgxmock.Rows {
+		return pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(pullRequestID, orgID, prior.Version, prior.HeadSHA, prior.BaseSHA, priorJSON, priorJSON, prior.EnrichmentStatus, nil, prior.CheckStateVersion, now, now)
+	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -2577,31 +2587,31 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
-			"Pending mergeability", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+			"Pending mergeability", (*string)(nil), "open", "pending", "app", "success", new("head-pending"), new("feature"), new("base-pending"),
+			models.PullRequestMergeStateBlocked, false, 0, false, &now, int64(7), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
-	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 2)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
-		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
-	expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-pending", 1)
+		WillReturnRows(currentRows())
+	expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-pending", 1, prior)
 	mock.ExpectBegin()
 	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
-		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+		WillReturnRows(currentRows())
 	mock.ExpectExec("INSERT INTO pull_request_health_snapshots").
 		WithArgs(pgx.NamedArgs{
 			"pull_request_id":   pullRequestID,
 			"org_id":            orgID,
-			"version":           int64(1),
+			"version":           int64(8),
 			"head_sha":          "head-pending",
 			"base_sha":          "base-pending",
 			"summary_json":      pgxmock.AnyArg(),
@@ -2609,20 +2619,20 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 		}).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE pull_request_repair_runs").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(1), "head_sha": "head-pending"}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(8), "head_sha": "head-pending"}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("INSERT INTO pull_request_health_current").
 		WithArgs(pgx.NamedArgs{
 			"pull_request_id":      pullRequestID,
 			"org_id":               orgID,
-			"version":              int64(1),
+			"version":              int64(8),
 			"head_sha":             "head-pending",
 			"base_sha":             "base-pending",
 			"summary_json":         pgxmock.AnyArg(),
 			"summary_preview_json": pgxmock.AnyArg(),
 			"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
 			"enriched_at":          (*time.Time)(nil),
-			"check_state_version":  int64(0),
+			"check_state_version":  int64(2),
 			"created_at":           pgxmock.AnyArg(),
 			"updated_at":           pgxmock.AnyArg(),
 		}).
@@ -2637,7 +2647,7 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 			"has_conflicts":      false,
 			"failing_test_count": 0,
 			"needs_agent_action": false,
-			"version":            int64(1),
+			"version":            int64(8),
 			"mark_github_synced": true,
 		}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -2646,6 +2656,8 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "ci_status": models.PullRequestCIStatusSuccess}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
+
+	mock.ExpectQuery("SELECT EXISTS.*FROM pull_request_check_states").WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": "head-pending", "after_version": int64(2)}).WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
 
 	service := &PRService{
 		tokenProvider:           &Service{cache: map[int64]*cachedToken{}},
@@ -2659,7 +2671,7 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 	service.tokenProvider.cache[123] = &cachedToken{Token: "install-token", ExpiresAt: time.Now().Add(time.Hour)}
 
 	err = service.SyncPullRequestState(context.Background(), orgID, pullRequestID)
-	require.ErrorIs(t, err, ErrPullRequestMergeabilityPending, "SyncPullRequestState should persist pending state and request a retry")
+	require.ErrorIs(t, err, ErrPullRequestMergeabilityPending, "a later webhook projection cannot turn pending mergeability into a successful freshness check")
 	require.NoError(t, mock.ExpectationsWereMet(), "all pending mergeability sync expectations should be met")
 }
 
@@ -4380,14 +4392,21 @@ func expectReserveCheckStateVersion(mock pgxmock.PgxPoolIface, orgID, pullReques
 	mock.ExpectCommit()
 }
 
-func expectCheckStateReconciliation(mock pgxmock.PgxPoolIface, orgID, pullRequestID uuid.UUID, headSHA string, stateCount int) {
+func expectCheckStateReconciliation(mock pgxmock.PgxPoolIface, orgID, pullRequestID uuid.UUID, headSHA string, stateCount int, prior ...models.PullRequestHealthCurrent) {
+	currentRows := pgxmock.NewRows(prHealthCurrentTestColumns)
+	baseSHA := ""
+	if len(prior) > 0 {
+		current := prior[0]
+		baseSHA = current.BaseSHA
+		currentRows.AddRow(current.PullRequestID, current.OrgID, current.Version, current.HeadSHA, current.BaseSHA, current.SummaryJSON, current.SummaryPreviewJSON, current.EnrichmentStatus, current.EnrichedAt, current.CheckStateVersion, current.CreatedAt, current.UpdatedAt)
+	}
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT COALESCE.*FROM pull_requests.*WHERE org_id = @org_id AND id = @pull_request_id FOR UPDATE").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
-		WillReturnRows(pgxmock.NewRows([]string{"head_sha", "base_sha", "status"}).AddRow(headSHA, "", models.PullRequestStatusOpen))
+		WillReturnRows(pgxmock.NewRows([]string{"head_sha", "base_sha", "status"}).AddRow(headSHA, baseSHA, models.PullRequestStatusOpen))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
-		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+		WillReturnRows(currentRows)
 	mock.ExpectBegin()
 	mock.ExpectExec("DELETE FROM pull_request_check_states").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": headSHA}).

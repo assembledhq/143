@@ -11260,6 +11260,9 @@ func primaryIssueIDFromSnapshot(snapshot *models.SessionTurnIssueSnapshot) *uuid
 }
 
 func checkSyncPredecessorPollDelay(predecessor db.PullRequestCheckSyncPredecessor, now time.Time) time.Duration {
+	if predecessor.Status == models.JobStatusRunning {
+		return 5 * time.Second
+	}
 	if predecessor.Status == models.JobStatusPending && predecessor.RunAt.After(now) {
 		return max(5*time.Second, min(predecessor.RunAt.Sub(now), mergeabilityMaximumPollDelay))
 	}

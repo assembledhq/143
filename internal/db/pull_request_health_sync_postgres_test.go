@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,4 +146,93 @@ func TestApplyHealthSyncPartialWebhookAndRollbackPostgres(t *testing.T) {
 			require.Equal(t, "success", ci, "CI must remain consistent with the preserved baseline")
 		})
 	}
+}
+
+func TestApplyHealthSyncSurvivesWebhookRebuildPostgres(t *testing.T) {
+	t.Parallel()
+	pool, orgID, prID := newHealthSyncPostgres(t)
+	ctx := context.Background()
+	store := NewPullRequestStore(pool)
+	baselineVersion, err := store.ReserveCheckStateVersion(ctx, orgID, prID)
+	require.NoError(t, err, "reserve baseline authoritative read")
+	baselineSnapshot := healthSyncSnapshot(orgID, prID, "old-head", "old-base", baselineVersion)
+	baselineSnapshot.Summary.MergeState = models.PullRequestMergeStateBlocked
+	baselineSnapshot.Summary.ChecksConfirmed = false
+	baselineSnapshot.Summary.Checks[0].Status = models.PullRequestCheckStatusPending
+	baselineSnapshot.Checks[0].Status = models.PullRequestCheckStatusPending
+	baselineSnapshot.CIStatus = models.PullRequestCIStatusPending
+	_, applied, err := store.ApplyHealthSync(ctx, orgID, prID, baselineSnapshot)
+	require.NoError(t, err, "persist blocked baseline")
+	require.True(t, applied, "baseline must be authoritative")
+	freshVersion, err := store.ReserveCheckStateVersion(ctx, orgID, prID)
+	require.NoError(t, err, "reserve fresh GitHub read before the webhook")
+	webhook := baselineSnapshot.Checks[0]
+	webhook.Status = models.PullRequestCheckStatusPassed
+	webhook.ProviderSequence++
+	webhook.ProviderUpdatedAt = webhook.ProviderUpdatedAt.Add(time.Minute)
+	applied, err = store.UpsertCheckState(ctx, orgID, webhook)
+	require.NoError(t, err, "commit webhook after fresh read began")
+	require.True(t, applied, "webhook must advance its projection sequence")
+	baseline, err := store.GetHealthCurrent(ctx, orgID, prID)
+	require.NoError(t, err, "read baseline before local rebuild")
+	states, err := store.ListCheckStatesAfter(ctx, orgID, prID, "old-head", baseline.CheckStateVersion)
+	require.NoError(t, err, "read committed webhook for local rebuild")
+	require.Len(t, states, 1, "one webhook must be newer than the baseline")
+	webhookVersion := states[0].ProjectionVersion
+	require.Greater(t, webhookVersion, freshVersion, "webhook counter must advance beyond the in-flight authoritative reservation")
+	var projectedSummary models.PullRequestHealthSummary
+	require.NoError(t, json.Unmarshal(baseline.SummaryJSON, &projectedSummary), "decode authoritative summary before projection")
+	projectedSummary.Checks = []models.PullRequestCheckSummary{states[0].CheckSummary()}
+	projectedSummary.ChecksConfirmed = true
+	projected, applied, _, err := store.UpsertProjectedHealthSummary(ctx, orgID, prID, "old-head", "old-base", projectedSummary, nil, ProjectedHealthSummaryOptions{ExpectedHealthVersion: baseline.Version, ExpectedHeadSHA: "old-head", ExpectedCheckStateVersion: baseline.CheckStateVersion, AppliedCheckStateVersion: webhookVersion})
+	require.NoError(t, err, "persist local rebuild while GitHub read is still in flight")
+	require.True(t, applied, "local rebuild must advance check projection")
+	require.Greater(t, projected.CheckStateVersion, freshVersion, "rebuild reproduces the reviewed race")
+	freshSnapshot := healthSyncSnapshot(orgID, prID, "old-head", "old-base", freshVersion)
+	freshSnapshot.Summary.ChecksConfirmed = false
+	freshSnapshot.Summary.Checks[0].Status = models.PullRequestCheckStatusPending
+	freshSnapshot.Checks[0].Status = models.PullRequestCheckStatusPending
+	freshSnapshot.Checks[0].ProviderSequence = baselineSnapshot.Checks[0].ProviderSequence
+	freshSnapshot.CIStatus = models.PullRequestCIStatusPending
+	fresh, applied, err := store.ApplyHealthSync(ctx, orgID, prID, freshSnapshot)
+	require.NoError(t, err, "fresh GitHub state must survive projection-only advancement")
+	require.True(t, applied, "webhook rebuild is not a newer authoritative read")
+	require.Equal(t, freshVersion, fresh.CheckStateVersion, "fresh snapshot restores its read barrier so later webhook rows can overlay")
+	var freshSummary models.PullRequestHealthSummary
+	require.NoError(t, json.Unmarshal(fresh.SummaryJSON, &freshSummary), "decode persisted fresh mergeability")
+	require.Equal(t, models.PullRequestMergeStateClean, freshSummary.MergeState, "fresh clean mergeability cannot be silently discarded")
+	require.Equal(t, freshVersion, freshSummary.GitHubSyncVersion, "only GitHub read advances the authoritative watermark")
+	pending, err := store.HasCheckStatesAfter(ctx, orgID, prID, "old-head", freshVersion)
+	require.NoError(t, err, "detect the webhook that raced the authoritative read")
+	require.True(t, pending, "newer webhook row must survive reconciliation for the existing overlay path")
+	states, err = store.ListCheckStatesAfter(ctx, orgID, prID, "old-head", fresh.CheckStateVersion)
+	require.NoError(t, err, "load the retained webhook for overlay")
+	require.Len(t, states, 1, "retained webhook must still be newer than the fresh read barrier")
+	freshSummary.Checks = []models.PullRequestCheckSummary{states[0].CheckSummary()}
+	freshSummary.ChecksConfirmed = true
+	final, applied, _, err := store.UpsertProjectedHealthSummary(ctx, orgID, prID, "old-head", "old-base", freshSummary, nil, ProjectedHealthSummaryOptions{ExpectedHealthVersion: fresh.Version, ExpectedHeadSHA: "old-head", ExpectedCheckStateVersion: fresh.CheckStateVersion, AppliedCheckStateVersion: webhookVersion})
+	require.NoError(t, err, "overlay newer webhook onto fresh GitHub mergeability")
+	require.True(t, applied, "overlay must restore the latest check status")
+	require.NoError(t, store.UpdateCIStatus(ctx, orgID, prID, models.PullRequestCIStatusSuccess), "complete the normal overlay CI follow-through")
+	var finalSummary models.PullRequestHealthSummary
+	require.NoError(t, json.Unmarshal(final.SummaryJSON, &finalSummary), "decode final merge and check state")
+	require.Equal(t, models.PullRequestMergeStateClean, finalSummary.MergeState, "overlay must preserve fresh mergeability")
+	require.Equal(t, models.PullRequestCheckStatusPassed, finalSummary.Checks[0].Status, "overlay must preserve newer webhook check status")
+	require.Equal(t, freshVersion, finalSummary.GitHubSyncVersion, "overlay cannot advance the authoritative watermark")
+	require.Equal(t, webhookVersion, final.CheckStateVersion, "projection watermark remains independently advanced")
+	_, applied, err = store.ApplyHealthSync(ctx, orgID, prID, baselineSnapshot)
+	require.NoError(t, err, "older actual GitHub read must skip without retry failure")
+	require.False(t, applied, "older authoritative read is still fenced on the same head")
+	noOpVersion, err := store.ReserveCheckStateVersion(ctx, orgID, prID)
+	require.NoError(t, err, "reserve unchanged follow-up read")
+	noOpSnapshot := healthSyncSnapshot(orgID, prID, "old-head", "old-base", noOpVersion)
+	noOpSnapshot.Summary = finalSummary
+	noOpSnapshot.Checks = []models.PullRequestCheckState{webhook}
+	noOp, applied, err := store.ApplyHealthSync(ctx, orgID, prID, noOpSnapshot)
+	require.NoError(t, err, "unchanged follow-up must still advance authoritative freshness")
+	require.True(t, applied, "latest unchanged read must be applied")
+	require.Equal(t, final.Version, noOp.Version, "metadata-only freshness cannot create a health snapshot version")
+	var noOpSummary models.PullRequestHealthSummary
+	require.NoError(t, json.Unmarshal(noOp.SummaryJSON, &noOpSummary), "decode latest freshness metadata")
+	require.Equal(t, noOpVersion, noOpSummary.GitHubSyncVersion, "no-op health update still advances authoritative ordering")
 }

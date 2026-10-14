@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -41,15 +42,22 @@ func (s *PullRequestStore) ApplyHealthSync(ctx context.Context, orgID, pullReque
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return models.PullRequestHealthCurrent{}, false, err
 	}
+	var authoritativeSummary models.PullRequestHealthSummary
+	if len(current.SummaryJSON) > 0 {
+		if err := json.Unmarshal(current.SummaryJSON, &authoritativeSummary); err != nil {
+			return models.PullRequestHealthCurrent{}, false, fmt.Errorf("decode authoritative pull request health sync version: %w", err)
+		}
+	}
 	if status != models.PullRequestStatusOpen ||
 		(headSHA != snapshot.ExpectedHeadSHA && headSHA != snapshot.HeadSHA) ||
 		(baseSHA != snapshot.ExpectedBaseSHA && baseSHA != snapshot.BaseSHA) ||
-		current.CheckStateVersion > snapshot.CheckStateVersion {
+		authoritativeSummary.GitHubSyncVersion > snapshot.CheckStateVersion {
 		return current, false, nil
 	}
 	if err := store.ReconcileCheckStates(ctx, orgID, pullRequestID, snapshot.HeadSHA, snapshot.CheckStateVersion, snapshot.Checks); err != nil {
 		return models.PullRequestHealthCurrent{}, false, err
 	}
+	snapshot.Summary.GitHubSyncVersion = snapshot.CheckStateVersion
 	current, err = store.UpsertHealthSummary(ctx, orgID, pullRequestID, snapshot.HeadSHA, snapshot.BaseSHA, snapshot.Summary, nil, snapshot.CheckStateVersion)
 	if err != nil {
 		return models.PullRequestHealthCurrent{}, false, err
