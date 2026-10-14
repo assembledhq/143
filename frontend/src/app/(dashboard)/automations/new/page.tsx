@@ -75,6 +75,7 @@ import {
 } from "@/lib/automation-templates";
 import {
   getCodingAgentReasoningOptions,
+  isCodingAgentReasoningEffortSupported,
   supportsReasoningEffort,
   toCodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
@@ -300,6 +301,7 @@ export default function NewAutomationPage() {
     linearCooldownMinutes,
     baseBranchByRepoId,
     model,
+    modelAgentType,
     identityScope,
     publishPolicy,
     prePRReviewLoops,
@@ -360,8 +362,10 @@ export default function NewAutomationPage() {
     ? (baseBranchByRepoId[repoId] ?? selectedRepo?.default_branch ?? "")
     : "";
   const defaultAgentType = settings.default_agent_type ?? "codex";
+  // The group the model was picked from wins over inference: Pi and OpenCode
+  // list several of the same provider/model ids.
   const effectiveAgentType = model
-    ? (agentTypeForModel(model) ?? defaultAgentType)
+    ? (modelAgentType ?? agentTypeForModel(model) ?? defaultAgentType)
     : defaultAgentType;
   const supportsNativeReviewLoop = [
     "codex",
@@ -626,6 +630,9 @@ export default function NewAutomationPage() {
           ? { event_triggers: eventTriggers }
           : {}),
         model,
+        // Without it the API infers the agent from the model, which picks
+        // OpenCode for an id the user chose from the Pi group.
+        ...(model && modelAgentType ? { agent_type: modelAgentType } : {}),
         identity_scope: identityScope,
         publish_policy: publishPolicy,
         pre_pr_review_loops: effectivePrePRReviewLoops,
@@ -1162,7 +1169,32 @@ export default function NewAutomationPage() {
                           id="advanced-model"
                           ariaLabel="Model"
                           value={model}
-                          onValueChange={(value) => setFormField("model", value)}
+                          agentType={modelAgentType}
+                          onValueChange={(selection) =>
+                            setForm((current) => {
+                              const nextAgentType = selection
+                                ? (selection.agentType
+                                  ?? agentTypeForModel(selection.model)
+                                  ?? defaultAgentType)
+                                : defaultAgentType;
+                              // Reasoning levels aren't a shared scale (Claude
+                              // Code has "max", Codex stops at "xhigh"), and a
+                              // level the new agent can't grade would fail the
+                              // create.
+                              const keepsReasoning =
+                                !current.reasoningEffort
+                                || isCodingAgentReasoningEffortSupported(
+                                  nextAgentType,
+                                  current.reasoningEffort,
+                                );
+                              return {
+                                ...current,
+                                model: selection?.model,
+                                modelAgentType: selection?.agentType,
+                                ...(keepsReasoning ? {} : { reasoningEffort: "" }),
+                              };
+                            })
+                          }
                         />
                       </div>
                       {showReasoningSelector ? (

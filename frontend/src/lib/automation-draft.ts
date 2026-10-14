@@ -60,6 +60,9 @@ export type AutomationFormState = {
   linearCooldownMinutes: string;
   baseBranchByRepoId: Record<string, string>;
   model: string | undefined;
+  // The agent group `model` was picked from. Pi and OpenCode list several of
+  // the same provider/model ids, so the model alone can't recover it.
+  modelAgentType: string | undefined;
   identityScope: "org" | "personal";
   publishPolicy: AutomationPublishPolicy;
   prePRReviewLoops: number;
@@ -153,6 +156,7 @@ export function defaultAutomationFormState(
     linearCooldownMinutes: "0",
     baseBranchByRepoId: {},
     model: undefined,
+    modelAgentType: undefined,
     identityScope: "org",
     publishPolicy: "pull_request",
     prePRReviewLoops: DEFAULT_REVIEW_MAX_PASSES,
@@ -223,6 +227,10 @@ export function automationFormStateFromDraft(
       ? parsed.baseBranchByRepoId
       : {},
     model: typeof parsed.model === "string" ? parsed.model : undefined,
+    modelAgentType:
+      typeof parsed.model === "string" && typeof parsed.modelAgentType === "string"
+        ? parsed.modelAgentType
+        : undefined,
     identityScope: parsed.identityScope === "personal" ? "personal" : "org",
     publishPolicy: parsed.publishPolicy === "none" ? "none" : "pull_request",
     prePRReviewLoops: clampInteger(
@@ -350,6 +358,7 @@ function isEmptyDraft(draft: AutomationDraft): boolean {
     && draft.linearCooldownMinutes === "0"
     && Object.keys(draft.baseBranchByRepoId).length === 0
     && draft.model === undefined
+    && draft.modelAgentType === undefined
     && draft.identityScope === "org"
     && draft.prePRReviewLoops === DEFAULT_REVIEW_MAX_PASSES
     && draft.reasoningEffort === ""

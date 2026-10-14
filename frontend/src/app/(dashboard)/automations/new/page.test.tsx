@@ -1757,6 +1757,119 @@ describe("NewAutomationPage", () => {
     });
   });
 
+  const renderCreateWithModelGroups = (
+    settings: Record<string, unknown>,
+  ): { body: () => Record<string, unknown> | null } => {
+    let requestBody: Record<string, unknown> | null = null;
+    server.use(
+      http.get("*/api/v1/settings", () =>
+        HttpResponse.json({
+          data: { id: "org-1", name: "Test Org", settings },
+        }),
+      ),
+      http.get("*/api/v1/settings/codex-auth/status", () =>
+        HttpResponse.json({ data: { status: "completed" } }),
+      ),
+      http.get("*/api/v1/coding-credentials*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+      http.post("*/api/v1/automations", async ({ request }) => {
+        requestBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+    return { body: () => requestBody };
+  };
+
+  const pickModelFromGroup = async (
+    user: ReturnType<typeof userEvent.setup>,
+    group: string,
+    option: string,
+  ) => {
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    const listbox = await screen.findByRole("group", { name: group });
+    await user.click(within(listbox).getByRole("option", { name: option }));
+  };
+
+  it("creates with the agent of the group a shared model id was picked from", async () => {
+    const user = userEvent.setup();
+    // Pi and OpenCode both list this id; without agent_type the API infers
+    // OpenCode, which is checked first.
+    const { body } = renderCreateWithModelGroups({
+      default_agent_type: "codex",
+      agent_config: {
+        pi: { PI_API_KEY: "set" },
+        opencode: { OPENCODE_API_KEY: "set" },
+      },
+    });
+
+    renderWithProviders(<NewAutomationPage />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText("Advanced options"));
+    await pickModelFromGroup(user, "Pi", "Claude Opus 4.8");
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(body()).toMatchObject({
+        model: "anthropic/claude-opus-4-8",
+        agent_type: "pi",
+      });
+    });
+  });
+
+  it("drops a reasoning level the newly picked agent cannot grade", async () => {
+    const user = userEvent.setup();
+    // Claude Code grades "max"; Codex stops at "xhigh". Sending it anyway is
+    // an explicit value the API rejects, so the create would fail.
+    const { body } = renderCreateWithModelGroups({
+      default_agent_type: "claude_code",
+    });
+
+    renderWithProviders(<NewAutomationPage />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText("Advanced options"));
+    await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
+    await user.click(await screen.findByRole("option", { name: "Max" }));
+    await pickModelFromGroup(user, "Codex", "gpt-5.6-sol");
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(body()).toMatchObject({
+        model: "gpt-5.6-sol",
+        agent_type: "codex",
+      });
+    });
+    expect(body()).not.toHaveProperty("reasoning_effort");
+  });
+
   it("shows goal length validation and blocks submit when the goal exceeds the backend limit", async () => {
     const user = userEvent.setup();
 
