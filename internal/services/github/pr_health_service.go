@@ -847,7 +847,7 @@ func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequest
 			return nil
 		}
 	}
-	current, applied, err := s.pullRequests.ApplyHealthSync(ctx, orgID, pullRequestID, db.PullRequestHealthSyncSnapshot{
+	current, applied, err := s.pullRequests.ApplyHealthSync(s.logger.WithContext(ctx), orgID, pullRequestID, db.PullRequestHealthSyncSnapshot{
 		ExpectedHeadSHA:   stringValue(pr.HeadSHA),
 		ExpectedBaseSHA:   stringValue(pr.BaseSHA),
 		HeadSHA:           details.Head.SHA,

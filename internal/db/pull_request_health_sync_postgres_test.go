@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -235,4 +237,107 @@ func TestApplyHealthSyncSurvivesWebhookRebuildPostgres(t *testing.T) {
 	var noOpSummary models.PullRequestHealthSummary
 	require.NoError(t, json.Unmarshal(noOp.SummaryJSON, &noOpSummary), "decode latest freshness metadata")
 	require.Equal(t, noOpVersion, noOpSummary.GitHubSyncVersion, "no-op health update still advances authoritative ordering")
+}
+
+func TestApplyHealthSyncRepairsTypeMismatchedLegacySummaryPostgres(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name                       string
+		invalidMarker, newerMarker bool
+	}{
+		{name: "unrelated legacy field mismatch is repaired"},
+		{name: "undecodable marker is repaired with bounded warning", invalidMarker: true},
+		{name: "valid newer marker retains its fence", newerMarker: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pool, orgID, prID := newHealthSyncPostgres(t)
+			ctx := context.Background()
+			store := NewPullRequestStore(pool)
+			baselineVersion, err := store.ReserveCheckStateVersion(ctx, orgID, prID)
+			require.NoError(t, err, "reserve original authoritative state")
+			_, applied, err := store.ApplyHealthSync(ctx, orgID, prID, healthSyncSnapshot(orgID, prID, "old-head", "old-base", baselineVersion))
+			require.NoError(t, err, "persist original authoritative state")
+			require.True(t, applied, "baseline must be committed")
+			candidateVersion, err := store.ReserveCheckStateVersion(ctx, orgID, prID)
+			require.NoError(t, err, "reserve recovery candidate")
+			marker := any(baselineVersion)
+			if tt.newerMarker {
+				newerVersion, err := store.ReserveCheckStateVersion(ctx, orgID, prID)
+				require.NoError(t, err, "reserve a newer authoritative owner")
+				_, applied, err := store.ApplyHealthSync(ctx, orgID, prID, healthSyncSnapshot(orgID, prID, "old-head", "old-base", newerVersion))
+				require.NoError(t, err, "persist newer authoritative owner")
+				require.True(t, applied, "newer owner must establish its fence")
+				marker = newerVersion
+			}
+			if tt.invalidMarker {
+				marker = "legacy-marker-type"
+			}
+			legacyJSON, err := json.Marshal(map[string]any{"github_sync_version": marker, "merge_state": []string{"legacy-field-type"}, "checks": "legacy-summary-canary"})
+			require.NoError(t, err, "encode syntactically valid but type-mismatched legacy JSONB")
+			_, err = pool.Exec(ctx, `UPDATE pull_request_health_current SET summary_json=$3,summary_preview_json=$3 WHERE org_id=$1 AND pull_request_id=$2`, orgID, prID, legacyJSON)
+			require.NoError(t, err, "seed legacy summary shape inside the owned fixture")
+			var legacy models.PullRequestHealthSummary
+			require.Error(t, json.Unmarshal(legacyJSON, &legacy), "fixture must reproduce the legacy typed-summary decoding failure")
+			var logs bytes.Buffer
+			logger := zerolog.New(&logs)
+			current, applied, err := store.ApplyHealthSync(logger.WithContext(ctx), orgID, prID, healthSyncSnapshot(orgID, prID, "old-head", "old-base", candidateVersion))
+			require.NoError(t, err, "legacy field types cannot permanently block authoritative recovery")
+			require.Equal(t, !tt.newerMarker, applied, "a valid newer marker still fences an older recovery candidate")
+			if tt.newerMarker {
+				require.JSONEq(t, string(legacyJSON), string(current.SummaryJSON), "newer owner must not be overwritten despite unrelated malformed legacy fields")
+			} else {
+				var recovered models.PullRequestHealthSummary
+				require.NoError(t, json.Unmarshal(current.SummaryJSON, &recovered), "full sync must replace the malformed shape with valid fresh state")
+				require.Equal(t, candidateVersion, recovered.GitHubSyncVersion, "successful recovery must establish a valid authoritative watermark")
+				require.Equal(t, models.PullRequestMergeStateClean, recovered.MergeState, "recovery must persist fresh mergeability")
+				require.Equal(t, healthSyncSnapshot(orgID, prID, "old-head", "old-base", candidateVersion).Summary.Checks, recovered.Checks, "recovery must persist the full fresh check set")
+				var head, base, ci string
+				require.NoError(t, pool.QueryRow(ctx, `SELECT head_sha,base_sha,ci_status FROM pull_requests WHERE org_id=$1 AND id=$2`, orgID, prID).Scan(&head, &base, &ci), "read fresh hot-row state after recovery")
+				require.Equal(t, []string{"old-head", "old-base", "success"}, []string{head, base, ci}, "recovery must keep revision identity and CI consistent")
+			}
+			if tt.invalidMarker {
+				var warning map[string]any
+				require.NoError(t, json.Unmarshal(logs.Bytes(), &warning), "invalid marker should emit one bounded warning")
+				require.Equal(t, map[string]any{"level": "warn", "org_id": orgID.String(), "pull_request_id": prID.String(), "message": "stored pull request health summary has an invalid authoritative sync version"}, warning, "warning must contain only fixed fields and omit raw summary and error contents")
+			} else {
+				require.Empty(t, logs.String(), "unrelated legacy fields cannot produce an undecodable-marker warning")
+			}
+		})
+	}
+}
+
+func TestApplyHealthSyncIdenticalContentPreservesSnapshotAndEnrichmentPostgres(t *testing.T) {
+	t.Parallel()
+	pool, orgID, prID := newHealthSyncPostgres(t)
+	ctx := context.Background()
+	store := NewPullRequestStore(pool)
+	firstVersion, err := store.ReserveCheckStateVersion(ctx, orgID, prID)
+	require.NoError(t, err, "reserve first authoritative read")
+	first, applied, err := store.ApplyHealthSync(ctx, orgID, prID, healthSyncSnapshot(orgID, prID, "old-head", "old-base", firstVersion))
+	require.NoError(t, err, "persist first JSONB summary")
+	require.True(t, applied, "first read must establish health")
+	require.NoError(t, store.UpdateHealthEnrichment(ctx, orgID, prID, first.Version, json.RawMessage(`{"files":["example.go"]}`), json.RawMessage(`{"tests":["unit tests"]}`), models.PullRequestHealthEnrichmentStatusReady), "persist enrichment for the first semantic snapshot")
+	firstCurrent, err := store.GetHealthCurrent(ctx, orgID, prID)
+	require.NoError(t, err, "read canonical JSONB and enrichment before identical write")
+	firstSnapshot, err := store.GetHealthSnapshot(ctx, orgID, prID, first.Version)
+	require.NoError(t, err, "capture immutable enriched snapshot before identical write")
+	secondVersion, err := store.ReserveCheckStateVersion(ctx, orgID, prID)
+	require.NoError(t, err, "reserve second read with identical health content")
+	second, applied, err := store.ApplyHealthSync(ctx, orgID, prID, healthSyncSnapshot(orgID, prID, "old-head", "old-base", secondVersion))
+	require.NoError(t, err, "persist semantically identical summary with fresh authoritative ordering")
+	require.True(t, applied, "identical read must still update freshness")
+	require.Equal(t, firstCurrent.Version, second.Version, "JSONB formatting and reservation metadata cannot create a semantic health version")
+	require.Equal(t, firstCurrent.EnrichmentStatus, second.EnrichmentStatus, "identical content must retain ready enrichment")
+	require.Equal(t, firstCurrent.EnrichedAt, second.EnrichedAt, "identical content must retain the existing enrichment timestamp")
+	var summary models.PullRequestHealthSummary
+	require.NoError(t, json.Unmarshal(second.SummaryJSON, &summary), "decode latest authoritative metadata")
+	require.Equal(t, secondVersion, summary.GitHubSyncVersion, "freshness watermark advances independently of health version")
+	require.Equal(t, secondVersion, second.CheckStateVersion, "latest authoritative read updates its projection barrier")
+	secondSnapshot, err := store.GetHealthSnapshot(ctx, orgID, prID, first.Version)
+	require.NoError(t, err, "read immutable enriched snapshot after identical write")
+	require.Equal(t, firstSnapshot, secondSnapshot, "identical content cannot alter snapshot history or cached detail payloads")
+	var snapshots int64
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM pull_request_health_snapshots WHERE org_id=$1 AND pull_request_id=$2`, orgID, prID).Scan(&snapshots), "count semantic snapshot history after identical writes")
+	require.Equal(t, int64(1), snapshots, "two identical summaries must leave one semantic snapshot")
 }

@@ -11266,7 +11266,7 @@ func checkSyncPredecessorPollDelay(predecessor db.PullRequestCheckSyncPredecesso
 	if predecessor.Status == models.JobStatusPending && predecessor.RunAt.After(now) {
 		return max(5*time.Second, min(predecessor.RunAt.Sub(now), mergeabilityMaximumPollDelay))
 	}
-	return mergeabilityPollDelay(predecessor.CreatedAt, now)
+	return 5 * time.Second
 }
 
 func newSyncPullRequestStateHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {

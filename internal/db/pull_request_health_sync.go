@@ -9,6 +9,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 )
 
 type PullRequestHealthSyncSnapshot struct {
@@ -42,10 +43,13 @@ func (s *PullRequestStore) ApplyHealthSync(ctx context.Context, orgID, pullReque
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return models.PullRequestHealthCurrent{}, false, err
 	}
-	var authoritativeSummary models.PullRequestHealthSummary
+	var authoritativeSummary struct {
+		GitHubSyncVersion int64 `json:"github_sync_version"`
+	}
 	if len(current.SummaryJSON) > 0 {
 		if err := json.Unmarshal(current.SummaryJSON, &authoritativeSummary); err != nil {
-			return models.PullRequestHealthCurrent{}, false, fmt.Errorf("decode authoritative pull request health sync version: %w", err)
+			zerolog.Ctx(ctx).Warn().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Msg("stored pull request health summary has an invalid authoritative sync version")
+			authoritativeSummary.GitHubSyncVersion = 0
 		}
 	}
 	if status != models.PullRequestStatusOpen ||

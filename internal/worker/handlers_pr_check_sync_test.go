@@ -112,10 +112,11 @@ func TestCheckSyncPredecessorPollDelay(t *testing.T) {
 		{name: "scheduled cooldown", status: models.JobStatusPending, due: 70 * time.Second, age: time.Hour, want: 70 * time.Second},
 		{name: "long cooldown bounded", status: models.JobStatusPending, due: 2 * time.Hour, age: time.Hour, want: 2 * time.Minute},
 		{name: "near deadline avoids hot polling", status: models.JobStatusPending, due: time.Second, want: 5 * time.Second},
+		{name: "pending due now stays responsive", status: models.JobStatusPending, age: 2 * time.Hour, want: 5 * time.Second},
 		{name: "new running read", status: models.JobStatusRunning, want: 5 * time.Second},
 		{name: "running read stays responsive", status: models.JobStatusRunning, age: 15 * time.Second, want: 5 * time.Second},
 		{name: "old running read stays responsive", status: models.JobStatusRunning, age: 2 * time.Hour, want: 5 * time.Second},
-		{name: "overdue pending job backs off", status: models.JobStatusPending, due: -time.Minute, age: time.Minute, want: 40 * time.Second},
+		{name: "overdue pending job stays responsive", status: models.JobStatusPending, due: -time.Minute, age: time.Minute, want: 5 * time.Second},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
