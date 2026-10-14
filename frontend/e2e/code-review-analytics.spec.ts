@@ -46,6 +46,37 @@ test("selects Analytics metrics without another request and exposes comparison d
   const pageErrors: string[] = [];
   const analyticsRequests: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
+  // Model a healthy idle stream so fallback polling cannot race metric selection.
+  await context.addInitScript(() => {
+    class FixtureEventSource extends EventTarget {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSED = 2;
+      readonly CONNECTING = 0;
+      readonly OPEN = 1;
+      readonly CLOSED = 2;
+      readonly url: string;
+      readonly withCredentials: boolean;
+      readyState = FixtureEventSource.CONNECTING;
+      onopen: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      constructor(url: string | URL, options?: EventSourceInit) {
+        super();
+        this.url = String(url);
+        this.withCredentials = options?.withCredentials ?? false;
+        setTimeout(() => {
+          if (this.readyState !== FixtureEventSource.CONNECTING) return;
+          this.readyState = FixtureEventSource.OPEN;
+          const event = new Event("open");
+          this.onopen?.(event);
+          this.dispatchEvent(event);
+        }, 0);
+      }
+      close() { this.readyState = FixtureEventSource.CLOSED; }
+    }
+    Object.defineProperty(window, "EventSource", { configurable: true, writable: true, value: FixtureEventSource });
+  });
   await context.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
     let body: unknown = { data: [], meta: {} };

@@ -257,7 +257,7 @@ func TestCodeReviewMovedHeadDeadLetterFencePostgres(t *testing.T) {
 			}
 			ctx := jobctx.WithDeadLetterHooks(f.ctx())
 			registerCodeReviewDeadLetterReconciliation(ctx, f.stores, &Services{}, zerolog.Nop(), f.job)
-			var failure error = codeReviewMovedHeadRetry(errors.New("raw token=synthetic-secret"), started, 0)
+			var failure = codeReviewMovedHeadRetry(errors.New("raw token=synthetic-secret"), started, 0)
 			if tt.unscoped {
 				failure = agent.ErrStalePullRequestHead
 			}

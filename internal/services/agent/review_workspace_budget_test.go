@@ -3,14 +3,19 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/assembledhq/143/internal/jobctx"
@@ -86,22 +91,127 @@ func TestReviewPreparationUsesOneAbsoluteBudget(t *testing.T) {
 	require.NoError(t, ctx.Err(), "preparation deadline marker must not cancel the later reviewer execution")
 }
 
+type reviewBudgetStageObservation struct {
+	contextDeadline time.Time
+	payloadDeadline float64
+	script          string
+}
+
+type coordinatedReviewBudgetProvider struct {
+	SandboxProvider
+	mu     sync.Mutex
+	stages []reviewBudgetStageObservation
+}
+
+func (p *coordinatedReviewBudgetProvider) ExecForReviewPreparation(context.Context, *Sandbox, string, io.Writer, io.Writer) (int, error) {
+	// Deadline propagation is verified separately from real process cleanup.
+	// Cleanup transport must not advance the virtual preparation clock.
+	return 0, nil
+}
+
+func (p *coordinatedReviewBudgetProvider) ExecWithStdin(ctx context.Context, _ *Sandbox, _ string, stdin io.Reader, _, _ io.Writer) (int, error) {
+	var message struct {
+		Payload reviewWorkspacePreparationPayload `json:"payload"`
+	}
+	if err := json.NewDecoder(stdin).Decode(&message); err != nil {
+		return -1, err
+	}
+	deadline, _ := ctx.Deadline()
+	p.mu.Lock()
+	p.stages = append(p.stages, reviewBudgetStageObservation{deadline, message.Payload.DeadlineUnix, message.Payload.Prepare})
+	stage := len(p.stages)
+	p.mu.Unlock()
+	if stage == 1 {
+		time.Sleep(time.Minute)
+		return 0, nil
+	}
+	if stage == 2 {
+		<-ctx.Done()
+		return -1, ctx.Err()
+	}
+	return -1, errors.New("exhausted preparation budget unexpectedly started another stage")
+}
+
+func (p *coordinatedReviewBudgetProvider) observations() []reviewBudgetStageObservation {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]reviewBudgetStageObservation(nil), p.stages...)
+}
+
 func TestReviewPreparationCombinedStagesExhaustBudget(t *testing.T) {
+	t.Parallel()
+	// synctest forbids t.Parallel inside its bubble; the outer test is parallel.
+	synctest.Test(t, func(t *testing.T) {
+		started := time.Now()
+		deadline := started.Add(2 * time.Minute)
+		provider := &coordinatedReviewBudgetProvider{}
+		o := &Orchestrator{provider: provider, logger: zerolog.Nop()}
+		sandbox := &Sandbox{WorkDir: "/budget-fixture"}
+		ctx := WithCodeReviewWorkspacePreparationDeadline(context.Background(), deadline)
+
+		require.NoError(t, o.runBoundedReviewCommand(ctx, sandbox, "printf first-stage", ""), "coordinated first stage should consume only part of the original preparation budget")
+		require.Equal(t, time.Minute, time.Since(started), "first stage should finish after consuming half of the shared virtual budget")
+		err := o.runBoundedReviewCommand(ctx, sandbox, "printf second-stage", "")
+		require.ErrorIs(t, err, context.DeadlineExceeded, "second stage must expire at the original deadline rather than renew its preparation budget")
+		require.Equal(t, 2*time.Minute, time.Since(started), "combined stages must stop when the original total budget is exhausted")
+		require.ErrorIs(t, o.runBoundedReviewCommand(ctx, sandbox, "printf forbidden-stage", ""), context.DeadlineExceeded, "exhausted preparation budget must reject a third stage before transport execution")
+		unixDeadline := float64(deadline.UnixNano()) / float64(time.Second)
+		require.Equal(t, []reviewBudgetStageObservation{
+			{contextDeadline: deadline, payloadDeadline: unixDeadline, script: "set -eu\nprintf first-stage"},
+			{contextDeadline: deadline, payloadDeadline: unixDeadline, script: "set -eu\nprintf second-stage"},
+		}, provider.observations(), "both stages must receive the same original context and serialized deadline, and no third stage may execute")
+	})
+}
+
+func TestReviewPreparationCancellationTerminatesDetachedStage(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(dir, ".git"), 0o700), "bounded command markers should have an existing directory")
 	o := &Orchestrator{provider: disconnectedReviewEvidenceProvider{}, logger: zerolog.Nop()}
 	sandbox := &Sandbox{WorkDir: dir}
-	ctx := WithCodeReviewWorkspacePreparationDeadline(context.Background(), time.Now().Add(400*time.Millisecond))
-	require.NoError(t, o.runBoundedReviewCommand(ctx, sandbox, "sleep 0.2", ""), "first stage should consume part of the total budget")
-	err := o.runBoundedReviewCommand(ctx, sandbox, "sleep 2; printf escaped > late-stage", "")
-	require.ErrorIs(t, err, context.DeadlineExceeded, "second stage must use the remaining budget instead of starting a fresh timeout")
-	require.ErrorIs(t, o.runBoundedReviewCommand(ctx, sandbox, "printf started > forbidden-stage", ""), context.DeadlineExceeded, "an exhausted budget must reject new stages before command execution")
-	time.Sleep(250 * time.Millisecond)
-	_, err = os.Stat(filepath.Join(dir, "late-stage"))
-	require.ErrorIs(t, err, os.ErrNotExist, "cancelled attachment must still terminate the underlying second-stage process")
-	_, err = os.Stat(filepath.Join(dir, "forbidden-stage"))
-	require.ErrorIs(t, err, os.ErrNotExist, "deadline exhaustion must not start a new command")
+	ctx, cancel := context.WithCancel(WithCodeReviewWorkspacePreparationDeadline(context.Background(), time.Now().Add(15*time.Second)))
+	defer cancel()
+	// Exec replaces the stage shell with this observable real child. Waiting
+	// for its PID avoids relying on process startup or a late-write timer.
+	child := "import os,pathlib,signal; pathlib.Path('stage.pid').write_text(str(os.getpid())); signal.pause(); pathlib.Path('escaped-stage').write_text('escaped')"
+	command := "/usr/bin/python3 -I -S -c '" + shellEscapeSingleQuote(child) + "'"
+	completed := make(chan error, 1)
+	go func() { completed <- o.runBoundedReviewCommand(ctx, sandbox, "exec "+command, "") }()
+	pidPath := filepath.Join(dir, "stage.pid")
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(pidPath)
+		if err != nil {
+			return false
+		}
+		_, err = strconv.Atoi(string(data))
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond, "cancellation proof must observe a running real stage before disconnecting its attachment")
+	data, err := os.ReadFile(pidPath)
+	require.NoError(t, err, "observed stage should publish a readable PID")
+	pid, err := strconv.Atoi(string(data))
+	require.NoError(t, err, "observed stage should publish its actual process ID")
+	needsCleanup := true
+	t.Cleanup(func() {
+		if !needsCleanup {
+			return
+		}
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			t.Errorf("could not terminate the owned stage fixture during cleanup: %v", err)
+		}
+	})
+	require.NoError(t, syscall.Kill(pid, 0), "the observed real stage must still be alive before attachment cancellation")
+	cancel()
+	select {
+	case err := <-completed:
+		require.ErrorIs(t, err, context.Canceled, "disconnected output attachment must preserve caller cancellation")
+	case <-time.After(10 * time.Second):
+		t.Fatal("preparation must return after cancelling its observed real stage")
+	}
+	terminationErr := syscall.Kill(pid, 0)
+	needsCleanup = !errors.Is(terminationErr, syscall.ESRCH)
+	require.ErrorIs(t, terminationErr, syscall.ESRCH, "the observed real stage must be terminated and reaped before cancelled preparation returns")
+	_, err = os.Stat(filepath.Join(dir, "escaped-stage"))
+	require.ErrorIs(t, err, os.ErrNotExist, "cancelled detached stage must never continue to its next instruction")
 }
 
 func TestReviewPreparationExpiredBudgetVerifiesOnlyHealthyEvidence(t *testing.T) {

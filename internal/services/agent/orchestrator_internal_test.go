@@ -2199,15 +2199,6 @@ func TestSetupFreshSandbox_CodeReviewChecksOutPullRequestHead(t *testing.T) {
 	require.Less(t, bootstrapIdx, fetchIdx, "git-bootstrap should run before the PR head fetch so the credential helper is configured first")
 }
 
-func indexOfExecCall(calls []string, want string) int {
-	for i, c := range calls {
-		if c == want {
-			return i
-		}
-	}
-	return -1
-}
-
 func TestSetupFreshSandbox_WorkingBranchCheckoutFailures(t *testing.T) {
 	t.Parallel()
 
