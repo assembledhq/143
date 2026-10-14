@@ -2,7 +2,8 @@
 # Source this file in a dedicated shell, then call:
 #   recovery_watchdog_run SECONDS SIGNAL_CALLBACK START_CALLBACK COMMAND [ARGS...]
 # SIGNAL_CALLBACK receives SIGNAL and the owned command PID. START_CALLBACK
-# receives that PID; returning nonzero refuses execution and cleans the child.
+# receives that PID; returning nonzero cancels the owned command and waits for
+# cleanup. It does not prove that the command caused no side effects.
 # The caller must wait for this function before exiting. It owns INT/TERM/HUP
 # and EXIT traps until it returns; callbacks must not spawn background children.
 
