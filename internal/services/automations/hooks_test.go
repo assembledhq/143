@@ -758,6 +758,45 @@ func TestAutomationHooks_OnSessionComplete_DoesNotPromoteExhaustedChain(t *testi
 	requireFailedExactlyOnce(t, f, "every rank in the chain has already been attempted")
 }
 
+// The hook must decide "anything left?" from the chain the worker actually
+// dispatched, not the raw snapshot. Raw ranks leave an agentless primary as
+// nil, which never matches the concrete agent its session recorded, and keep
+// adjacent duplicates the worker collapses — either way a spent chain looks
+// unspent, the hook promotes, and the worker fails the run as exhausted on the
+// next dispatch, replacing the capacity summary with a less useful one.
+func TestAutomationHooks_OnSessionComplete_ExhaustionMatchesWorkerResolvedChain(t *testing.T) {
+	t.Parallel()
+
+	str := func(v string) *string { return &v }
+	for _, tt := range []struct {
+		name     string
+		snapshot []byte
+		attempt  models.AutomationRunAttempt
+	}{
+		{
+			name:     "agentless primary resolved by the frozen default",
+			snapshot: []byte(`{"agent_type":null,"model_override":"gpt-5-codex","fallback_models":{},"dispatch_default_agent_type":"codex"}`),
+			attempt:  models.AutomationRunAttempt{AgentType: str("codex"), Model: str("gpt-5-codex")},
+		},
+		{
+			name:     "fallback repeating the primary collapses",
+			snapshot: []byte(`{"agent_type":"claude_code","model_override":"claude-sonnet-4-5","fallback_models":{"models":["claude-sonnet-4-5"],"agent_types":["claude_code"]},"dispatch_default_agent_type":"codex"}`),
+			attempt:  models.AutomationRunAttempt{AgentType: str("claude_code"), Model: str("claude-sonnet-4-5")},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tt.attempt.SessionID = uuid.New()
+			f := newPromotionFixture(t, tt.snapshot, []models.AutomationRunAttempt{tt.attempt})
+
+			err := f.hooks.OnSessionComplete(context.Background(), f.session, models.SessionStatusFailed)
+
+			require.NoError(t, err, "an exhausted chain is a normal failure, not an error")
+			requireFailedExactlyOnce(t, f, "the worker's resolved chain has nothing left to try")
+		})
+	}
+}
+
 // TestAutomationHooks_OnSessionComplete_ExhaustionCountsSpentRanksNotSessions
 // is why the attempt history replaced a bare session count. Sessions and ranks
 // are not one-to-one: pre-flight availability skips a rank without spawning a

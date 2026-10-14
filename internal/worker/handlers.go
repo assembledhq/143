@@ -2384,7 +2384,21 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		if !automation.Enabled && len(attempts) == 0 {
 			now := time.Now()
 			summary := "automation paused before run could start"
-			if _, err := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusSkipped, &now, &summary); err != nil {
+			// The empty attempt list above is a snapshot, and a promoted run
+			// returns to the same "pending" a never-started one is in. Under
+			// duplicate delivery another worker can dispatch an attempt, hit a
+			// capacity failure, and promote the run back to pending between that
+			// read and this write — a status-only CAS would then skip a chain that
+			// is genuinely in flight. The nil-session fence re-reads the links
+			// under the run's row lock and only skips a run that still has none.
+			// Reused target sessions stay on the plain CAS: they never enter the
+			// session-based fallback ledger.
+			if perTarget {
+				_, err = stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusSkipped, &now, &summary)
+			} else {
+				_, err = stores.AutomationRuns.TransitionStatusForSession(ctx, orgID, runID, uuid.Nil, models.AutomationRunStatusPending, models.AutomationRunStatusSkipped, &now, &summary)
+			}
+			if err != nil {
 				return fmt.Errorf("mark run skipped after pause: %w", err)
 			}
 			return nil
@@ -2527,9 +2541,14 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		//
 		// The org default feeds the agent ladder for every rank at once, so the
 		// agent a rank is checked against, dispatched on, and later matched by
-		// are all the same concrete value.
+		// are all the same concrete value. The first claim freezes it into the
+		// run's snapshot; later attempts must use that frozen value, or an org
+		// default changed mid-chain re-labels rank 0 and the chain re-runs the
+		// primary on the new agent before the configured fallback.
 		orgDefaultAgentType := models.DefaultDefaultAgentType
-		if stores.Organizations != nil {
+		if frozen, ok := models.AutomationRunDispatchDefaultAgentType(run.ConfigSnapshot); ok {
+			orgDefaultAgentType = frozen
+		} else if stores.Organizations != nil {
 			org, orgErr := stores.Organizations.GetByID(ctx, orgID)
 			if orgErr != nil {
 				log.Warn().Err(orgErr).Msg("failed to load org settings for automation agent fallback")
@@ -2578,7 +2597,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("begin automation session dispatch: %w", err)
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
-		transitioned, err := stores.AutomationRuns.ClaimPendingForPerRunInTx(ctx, tx, orgID, runID, expectedSessionID)
+		transitioned, err := stores.AutomationRuns.ClaimPendingForPerRunInTx(ctx, tx, orgID, runID, expectedSessionID, orgDefaultAgentType)
 		if err != nil {
 			return fmt.Errorf("transition run to running: %w", err)
 		}

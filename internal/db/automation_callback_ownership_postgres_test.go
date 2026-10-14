@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -44,7 +45,7 @@ func TestAutomationRunStore_CallbackWaitsForSuccessorPostgres(t *testing.T) {
 			tx, err := pool.Begin(ctx)
 			require.NoError(t, err, "begin atomic successor dispatch")
 			defer func() { _ = tx.Rollback(ctx) }()
-			claimed, err := store.ClaimPendingForPerRunInTx(ctx, tx, orgID, runID, predecessorID)
+			claimed, err := store.ClaimPendingForPerRunInTx(ctx, tx, orgID, runID, predecessorID, models.AgentTypeCodex)
 			require.NoError(t, err, "claim the successor while holding the logical run lock")
 			require.True(t, claimed, "the successor should win the pending run claim")
 
@@ -119,7 +120,7 @@ func TestAutomationRunStore_OwnershipFencesTenantPostgres(t *testing.T) {
 				tx, beginErr := pool.Begin(ctx)
 				require.NoError(t, beginErr, "begin the cross-tenant dispatch attempt")
 				defer func() { _ = tx.Rollback(ctx) }()
-				changed, err = store.ClaimPendingForPerRunInTx(ctx, tx, otherOrgID, runID, uuid.Nil)
+				changed, err = store.ClaimPendingForPerRunInTx(ctx, tx, otherOrgID, runID, uuid.Nil, models.AgentTypeCodex)
 			} else {
 				changed, err = store.TransitionStatusForSession(ctx, otherOrgID, runID, uuid.New(), tt.status, models.AutomationRunStatusFailed, nil, nil)
 			}
@@ -129,6 +130,69 @@ func TestAutomationRunStore_OwnershipFencesTenantPostgres(t *testing.T) {
 			err = pool.QueryRow(ctx, `SELECT status FROM automation_runs WHERE id = $1 AND org_id = $2`, runID, orgID).Scan(&actual)
 			require.NoError(t, err, "read the run through its actual tenant")
 			require.Equal(t, tt.status, actual, "another tenant's request must leave the run's exact state unchanged")
+		})
+	}
+}
+
+// The org default resolves every agentless rank, and the attempt ledger
+// matches ranks by agent — so a default re-read live on each attempt lets an
+// org setting changed mid-chain re-label rank 0 and re-run the primary before
+// the configured fallback. The first claim freezes the default; a later claim
+// for the same run must keep it even when the caller now resolves another.
+func TestAutomationRunStore_ClaimFreezesDispatchDefaultAgentPostgres(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name     string
+		snapshot *string
+	}{
+		{name: "existing snapshot", snapshot: stringPtr(`{"agent_type": null, "fallback_models": {}}`)},
+		{name: "no snapshot"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pool, _ := newAutomationCallbackPostgresPool(t)
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			store := NewAutomationRunStore(pool)
+			orgID, runID := uuid.New(), uuid.New()
+			_, err := pool.Exec(ctx, `INSERT INTO automation_runs (id, org_id, status, config_snapshot) VALUES ($1, $2, 'pending', $3::jsonb)`, runID, orgID, tt.snapshot)
+			require.NoError(t, err, "seed a pending run before its first attempt")
+
+			claim := func(defaultAgentType models.AgentType) {
+				tx, err := pool.Begin(ctx)
+				require.NoError(t, err, "begin dispatch transaction")
+				defer func() { _ = tx.Rollback(ctx) }()
+				claimed, err := store.ClaimPendingForPerRunInTx(ctx, tx, orgID, runID, uuid.Nil, defaultAgentType)
+				require.NoError(t, err, "claim the pending run")
+				require.True(t, claimed, "the run is pending with no attempts, so the claim should win")
+				require.NoError(t, tx.Commit(ctx), "commit the claim")
+			}
+			frozen := func() json.RawMessage {
+				var raw json.RawMessage
+				require.NoError(t, pool.QueryRow(ctx, `SELECT config_snapshot FROM automation_runs WHERE id = $1`, runID).Scan(&raw))
+				return raw
+			}
+
+			claim(models.AgentTypeCodex)
+			got, ok := models.AutomationRunDispatchDefaultAgentType(frozen())
+			require.True(t, ok, "the first claim should freeze the org default it resolved ranks against")
+			require.Equal(t, models.AgentTypeCodex, got)
+			if tt.snapshot != nil {
+				ranks, present, err := models.AutomationModelRanksFromConfigSnapshot(frozen())
+				require.NoError(t, err)
+				require.True(t, present, "freezing the default must keep the rest of the snapshot intact")
+				require.Len(t, ranks, 1)
+			}
+
+			// A capacity failure promotes the run back to pending, and by the
+			// next attempt the org default has changed.
+			_, err = pool.Exec(ctx, `UPDATE automation_runs SET status = 'pending' WHERE id = $1`, runID)
+			require.NoError(t, err, "promote the run for its next attempt")
+			claim(models.AgentTypeClaudeCode)
+			got, ok = models.AutomationRunDispatchDefaultAgentType(frozen())
+			require.True(t, ok)
+			require.Equal(t, models.AgentTypeCodex, got, "a later claim must not re-freeze the default mid-chain")
 		})
 	}
 }
@@ -160,7 +224,8 @@ func newAutomationCallbackPostgresPool(t *testing.T) (*pgxpool.Pool, string) {
 	_, err = pool.Exec(ctx, `CREATE TABLE automation_runs (
 		id uuid PRIMARY KEY, org_id uuid NOT NULL, status text NOT NULL,
 		dispatch_state text, wait_reason text, wait_started_at timestamptz,
-		completed_at timestamptz, result_summary text, updated_at timestamptz
+		completed_at timestamptz, result_summary text, updated_at timestamptz,
+		config_snapshot jsonb
 	);
 	CREATE TABLE sessions (
 		id uuid PRIMARY KEY, org_id uuid NOT NULL,

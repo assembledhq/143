@@ -1906,6 +1906,32 @@ func TestAutomationFallbackModelsMigrationPostgresBehavior(t *testing.T) {
 		require.Error(t, execErr, "a non-object fallback chain value (%s) should be rejected", nonObject)
 	}
 
+	// 310 adds the guard NOT VALID so it never scans under ACCESS EXCLUSIVE;
+	// 311 validates it under the weaker lock. Both halves have to hold, or the
+	// split is either pointless or leaves the guard unvalidated forever.
+	constraintValidated := func() bool {
+		var validated bool
+		require.NoError(t, conn.QueryRow(ctx, `
+			SELECT c.convalidated
+			FROM pg_constraint c
+			JOIN pg_class r ON r.oid = c.conrelid
+			JOIN pg_namespace n ON n.oid = r.relnamespace
+			WHERE n.nspname = current_schema()
+			  AND r.relname = 'automations'
+			  AND c.conname = 'chk_automations_fallback_models'`).Scan(&validated))
+		return validated
+	}
+	require.False(t, constraintValidated(), "310 should add the fallback chain guard NOT VALID")
+	validateBody, err := os.ReadFile("../../migrations/000311_validate_automation_fallback_models.up.sql")
+	require.NoError(t, err, "test should read the fallback chain validation migration")
+	_, err = conn.Exec(ctx, string(validateBody))
+	require.NoError(t, err, "311 should validate the guard over rows 310 backfilled and accepted")
+	require.True(t, constraintValidated(), "311 should leave the fallback chain guard validated")
+	unvalidateBody, err := os.ReadFile("../../migrations/000311_validate_automation_fallback_models.down.sql")
+	require.NoError(t, err, "test should read the validation migration's down")
+	_, err = conn.Exec(ctx, string(unvalidateBody))
+	require.NoError(t, err, "311 down should be a no-op the 310 down can follow")
+
 	downBody, err := os.ReadFile("../../migrations/000310_automation_fallback_models.down.sql")
 	require.NoError(t, err, "test should read the automation fallback models down migration")
 	_, err = conn.Exec(ctx, string(downBody))

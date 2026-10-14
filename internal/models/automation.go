@@ -410,6 +410,107 @@ func AutomationModelRanksFromConfigSnapshot(raw json.RawMessage) ([]AutomationMo
 	return automation.ModelRanks(), true, nil
 }
 
+// AutomationRunDispatchDefaultAgentTypeKey is the config_snapshot key the
+// worker freezes the org default agent under when it first claims a run. A
+// rank with no agent of its own resolves to that default, and the default is
+// part of the rank's identity in the attempt ledger: re-reading the live org
+// setting on a later attempt would let a mid-chain change re-label rank 0, so
+// the attempt that already ran stops matching it and the chain re-runs the
+// primary before the fallback the user configured.
+const AutomationRunDispatchDefaultAgentTypeKey = "dispatch_default_agent_type"
+
+// AutomationRunDispatchDefaultAgentType reads the org default a run froze at
+// its first claim. ok is false for a run never claimed by a fallback-aware
+// worker, so callers fall back to the live org setting.
+func AutomationRunDispatchDefaultAgentType(raw json.RawMessage) (AgentType, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	var snapshot map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return "", false
+	}
+	value, present := snapshot[AutomationRunDispatchDefaultAgentTypeKey]
+	if !present {
+		return "", false
+	}
+	var agentType string
+	if err := json.Unmarshal(value, &agentType); err != nil {
+		return "", false
+	}
+	resolved := AgentType(strings.TrimSpace(agentType))
+	if resolved.Validate() != nil {
+		return "", false
+	}
+	return resolved, true
+}
+
+// AutomationRankAgentType applies the automation agent ladder to one rank:
+// the rank's own agent, else the org default the caller resolved, else the
+// built-in default. A rank naming only a model still inherits the org default.
+func AutomationRankAgentType(rank AutomationModelRank, defaultAgentType AgentType) AgentType {
+	if rank.AgentType != nil {
+		if explicit := strings.TrimSpace(*rank.AgentType); explicit != "" {
+			candidate := AgentType(explicit)
+			if err := candidate.Validate(); err == nil {
+				return candidate
+			}
+		}
+	}
+	if defaultAgentType != "" {
+		if err := defaultAgentType.Validate(); err == nil {
+			return defaultAgentType
+		}
+	}
+	return DefaultDefaultAgentType
+}
+
+// ResolveAutomationModelRanks turns a stored chain into the candidates a run
+// actually tries. The worker dispatches from it and the completion hook
+// decides from it whether anything is left to promote to, so the two cannot
+// disagree about exhaustion.
+//
+// Every rank's agent is resolved to a concrete value FIRST, because two things
+// downstream compare agents and both are wrong on a blank one. Availability
+// cannot look up a credential for "", so a blank rank would dispatch
+// unchecked; and a session records the agent it actually ran, so a rank still
+// carrying nil never matches its own attempt and the chain re-dispatches that
+// model until the reaper stops it. Leaving the agent unset is the common
+// automation configuration, so both paths matter.
+//
+// Consecutive duplicates then collapse the way codeReviewOrchestratorCandidates
+// compares roster entries: a fallback that repeats the rank before it would
+// otherwise burn an attempt re-running the model that just failed. Reasoning
+// effort is part of the identity — re-trying the same model at a cheaper level
+// is a legitimate chain. Non-adjacent repeats are kept, because a chain that
+// deliberately returns to an earlier model after trying another one is a valid
+// retry strategy; AutomationModelRanksRemaining spends those positions one at a
+// time so the later copy is genuinely reachable.
+func ResolveAutomationModelRanks(ranks []AutomationModelRank, defaultAgentType AgentType) []AutomationModelRank {
+	candidates := make([]AutomationModelRank, 0, len(ranks))
+	for _, rank := range ranks {
+		agentType := string(AutomationRankAgentType(rank, defaultAgentType))
+		rank.AgentType = &agentType
+		if len(candidates) > 0 && automationModelRanksEqual(candidates[len(candidates)-1], rank) {
+			continue
+		}
+		candidates = append(candidates, rank)
+	}
+	return candidates
+}
+
+func automationModelRanksEqual(a, b AutomationModelRank) bool {
+	effort := func(rank AutomationModelRank) string {
+		if rank.ReasoningEffort == nil {
+			return ""
+		}
+		return strings.TrimSpace(string(*rank.ReasoningEffort))
+	}
+	return strings.TrimSpace(stringOrEmpty(a.AgentType)) == strings.TrimSpace(stringOrEmpty(b.AgentType)) &&
+		strings.TrimSpace(stringOrEmpty(a.Model)) == strings.TrimSpace(stringOrEmpty(b.Model)) &&
+		effort(a) == effort(b)
+}
+
 // AutomationRun records a single execution of an automation (scheduled or manual).
 type AutomationRun struct {
 	ID                 uuid.UUID                     `db:"id"                    json:"id"`

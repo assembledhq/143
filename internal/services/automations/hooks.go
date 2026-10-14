@@ -245,6 +245,17 @@ func (h *AutomationHooks) promoteToNextModelRank(ctx context.Context, session *m
 		// Snapshot predates fallback models: there is no chain to promote.
 		return false, nil
 	}
+	// Resolve the chain exactly as the worker dispatched it — agents filled in
+	// from the default it froze at first claim, consecutive duplicates
+	// collapsed. Raw snapshot ranks leave an agentless primary as nil, which
+	// never matches the concrete agent its session recorded, so a chain with
+	// nothing left would look unspent: the hook would promote, and the worker
+	// would immediately fail the run as exhausted and overwrite the capacity
+	// summary the user needs. A run without a frozen default was never claimed
+	// by a fallback-aware worker; leave its ranks as they were.
+	if defaultAgentType, frozen := models.AutomationRunDispatchDefaultAgentType(automationRun.ConfigSnapshot); frozen {
+		ranks = models.ResolveAutomationModelRanks(ranks, defaultAgentType)
+	}
 
 	attempts, err := h.fallback.runs.ListSessionAttempts(ctx, orgID, runID)
 	if err != nil {

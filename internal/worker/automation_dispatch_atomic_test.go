@@ -32,7 +32,7 @@ func TestAutomationRunHandler_SessionCreateFailureRollsBackClaim(t *testing.T) {
 	expectAutomationRunSessionAttempts(mock)
 	mock.ExpectBegin()
 	expectCurrentAutomationSession(mock, models.AutomationRunStatusPending, uuid.Nil)
-	mock.ExpectExec(`UPDATE automation_runs[\s\S]+WHERE id = @id AND org_id = @org_id[\s\S]+AND status = 'pending'`).WithArgs(runID, orgID).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`UPDATE automation_runs[\s\S]+WHERE id = @id AND org_id = @org_id[\s\S]+AND status = 'pending'`).WithArgs(pgxmock.AnyArg(), models.AutomationRunDispatchDefaultAgentTypeKey, runID, orgID).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	createErr := errors.New("session insert unavailable")
 	mock.ExpectQuery(`INSERT INTO sessions`).WithArgs(workerAnyArgs(39)...).WillReturnError(createErr)
 	mock.ExpectRollback()

@@ -56,9 +56,9 @@ func TestAutomationRunStore_ClaimPendingForPerRunInTxFencesSelection(t *testing.
 				}
 			}
 			if tt.expected {
-				mock.ExpectExec(`UPDATE automation_runs[\s\S]+WHERE id = @id AND org_id = @org_id[\s\S]+AND status = 'pending'`).WithArgs(runID, orgID).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec(`UPDATE automation_runs[\s\S]+WHERE id = @id AND org_id = @org_id[\s\S]+AND status = 'pending'`).WithArgs(string(models.AgentTypeCodex), models.AutomationRunDispatchDefaultAgentTypeKey, runID, orgID).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			}
-			got, err := NewAutomationRunStore(mock).ClaimPendingForPerRunInTx(context.Background(), tx, orgID, runID, previousID)
+			got, err := NewAutomationRunStore(mock).ClaimPendingForPerRunInTx(context.Background(), tx, orgID, runID, previousID, models.AgentTypeCodex)
 			if tt.lookupError {
 				require.Error(t, err, "ownership lookup failures must prevent dispatch")
 			} else {
