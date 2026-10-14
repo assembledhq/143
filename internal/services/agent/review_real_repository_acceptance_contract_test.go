@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -546,9 +547,9 @@ func TestRealReviewOwnedMemorySample(t *testing.T) {
 		{name: "missing events is unavailable evidence", missing: "memory.events", unavailable: []string{"memory.events"}},
 		{name: "malformed events retain available byte observations", events: "max 3\noom_kill 1\n", unavailable: []string{"memory.events"}},
 		{name: "oversized byte observation", peak: strings.Repeat("3", 129), unavailable: []string{"memory.peak"}},
-		{name: "disappeared cgroup", missing: "group", unavailable: []string{"memory.events", "memory.peak", "memory.current"}},
-		{name: "redirected cgroup", linkedGroup: true, unavailable: []string{"memory.events", "memory.peak", "memory.current"}},
-		{name: "escaping container identity", invalidID: true, unavailable: []string{"memory.events", "memory.peak", "memory.current"}},
+		{name: "disappeared cgroup", missing: "group", unavailable: []string{"memory.events", "memory.peak", "memory.current", "memory.stat"}},
+		{name: "redirected cgroup", linkedGroup: true, unavailable: []string{"memory.events", "memory.peak", "memory.current", "memory.stat"}},
+		{name: "escaping container identity", invalidID: true, unavailable: []string{"memory.events", "memory.peak", "memory.current", "memory.stat"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -558,7 +559,7 @@ func TestRealReviewOwnedMemorySample(t *testing.T) {
 			containerID := strings.Repeat("a", 64)
 			group := filepath.Join(root, "docker", containerID)
 			require.NoError(t, os.MkdirAll(group, 0o700), "only the exact owned container cgroup may supply telemetry")
-			files := map[string]string{"memory.peak": "300\n", "memory.current": "0\n", "memory.events": "max 3\noom 1\noom_kill 1\n"}
+			files := map[string]string{"memory.peak": "300\n", "memory.current": "0\n", "memory.events": "max 3\noom 1\noom_kill 1\n", "memory.stat": realReviewContractMemoryStatRaw}
 			if tt.peak != "" {
 				files["memory.peak"] = tt.peak
 			}
@@ -583,7 +584,7 @@ func TestRealReviewOwnedMemorySample(t *testing.T) {
 			}
 			actual := readRealReviewMemorySample(root, containerID)
 			peak, current := int64(300), int64(0)
-			expected := realReviewMemorySample{MemoryPeakBytes: &peak, MemoryCurrentBytes: &current, MemoryEvents: map[string]int64{"max": 3, "oom": 1, "oom_kill": 1}, UnavailableFields: tt.unavailable}
+			expected := realReviewMemorySample{MemoryPeakBytes: &peak, MemoryCurrentBytes: &current, MemoryEvents: map[string]int64{"max": 3, "oom": 1, "oom_kill": 1}, UnavailableFields: tt.unavailable, MemoryStat: realReviewContractMemoryStat()}
 			for _, unavailable := range tt.unavailable {
 				switch unavailable {
 				case "memory.peak":
@@ -592,6 +593,8 @@ func TestRealReviewOwnedMemorySample(t *testing.T) {
 					expected.MemoryCurrentBytes = nil
 				case "memory.events":
 					expected.MemoryEvents = nil
+				case "memory.stat":
+					expected.MemoryStat = nil
 				}
 			}
 			require.Equal(t, expected, actual, "missing fields must be explicit while available exact byte and OOM counters survive independently")
@@ -643,7 +646,7 @@ func TestRealReviewMemoryMonitorRetainsEvidenceAndJoins(t *testing.T) {
 			}
 			actual := monitor.stop()
 			expectedPeak := tt.expectedPeak
-			expected := realReviewMemoryTelemetry{CgroupPath: "/docker/" + strings.Repeat("a", 64), IntervalMS: time.Hour.Milliseconds(), MaxDurationMS: lifetime.Milliseconds(), ReadLimitsBytes: map[string]int64{"memory.peak": 128, "memory.current": 128, "memory.events": 4096}, Samples: 2, CompleteSamples: tt.completeSamples, Latest: final, MaxObservedPeakBytes: &expectedPeak, MaxObservedCurrentBytes: &initialCurrent, MaxObservedEvents: tt.expectedEvents, LifetimeExpired: tt.expired}
+			expected := realReviewMemoryTelemetry{CgroupPath: "/docker/" + strings.Repeat("a", 64), IntervalMS: time.Hour.Milliseconds(), MaxDurationMS: lifetime.Milliseconds(), ReadLimitsBytes: map[string]int64{"memory.peak": 128, "memory.current": 128, "memory.events": 4096, "memory.stat": 8192}, Samples: 2, CompleteSamples: tt.completeSamples, Latest: final, MaxObservedPeakBytes: &expectedPeak, MaxObservedCurrentBytes: &initialCurrent, MaxObservedEvents: tt.expectedEvents, LifetimeExpired: tt.expired, StatAtMaxCurrent: realReviewContractStatPeak(1, initialCurrent, nil)}
 			require.Equal(t, expected, actual, "bounded telemetry must preserve earlier exact kernel observations even after the cgroup disappears")
 			require.Equal(t, actual, monitor.stop(), "stopping twice must not restart reads or mutate the retained result")
 			require.Equal(t, int64(2), calls.Load(), "joined sampler must perform only its initial and final reads when no interval fires")
@@ -686,7 +689,7 @@ func TestRealReviewMemoryMonitorRetainsPeriodicOOMBeforeRemoval(t *testing.T) {
 	monitor.cancel()
 	close(release)
 	actual := monitor.stop()
-	expected := realReviewMemoryTelemetry{CgroupPath: "/docker/" + strings.Repeat("a", 64), IntervalMS: 1, MaxDurationMS: time.Minute.Milliseconds(), ReadLimitsBytes: map[string]int64{"memory.peak": 128, "memory.current": 128, "memory.events": 4096}, Samples: 3, CompleteSamples: 1, Latest: vanished, MaxObservedPeakBytes: &peak, MaxObservedCurrentBytes: &current, MaxObservedEvents: map[string]int64{"max": 8, "oom": 2, "oom_kill": 1}}
+	expected := realReviewMemoryTelemetry{CgroupPath: "/docker/" + strings.Repeat("a", 64), IntervalMS: 1, MaxDurationMS: time.Minute.Milliseconds(), ReadLimitsBytes: map[string]int64{"memory.peak": 128, "memory.current": 128, "memory.events": 4096, "memory.stat": 8192}, Samples: 3, CompleteSamples: 1, Latest: vanished, MaxObservedPeakBytes: &peak, MaxObservedCurrentBytes: &current, MaxObservedEvents: map[string]int64{"max": 8, "oom": 2, "oom_kill": 1}, StatAtMaxCurrent: realReviewContractStatPeak(2, current, nil)}
 	require.Equal(t, expected, actual, "a periodic OOM observation must survive a missing initial and final cgroup without retaining a timeline")
 	require.Equal(t, int64(3), calls.Load(), "cancellation must join the in-flight sample and prevent further ticker reads")
 }
@@ -830,22 +833,136 @@ func TestRealReviewProfileSamplingAndDecodingAreConcurrent(t *testing.T) {
 	require.Equal(t, []int64{2000, 1000, 1000, 0, 1, 1000}, actual, "sampling must preserve exact operation counts and timing without races or lost decoder events")
 }
 
-func TestRealReviewProfileMemoryStatIsOptionalAndBounded(t *testing.T) {
+const realReviewContractMemoryStatRaw = "anon 10\nfile 20\nshmem 15\nfile_mapped 4\nfile_dirty 3\nfile_writeback 0\nslab 2\nkernel 5\n"
+
+func realReviewContractMemoryStat() map[string]int64 {
+	return map[string]int64{"anon": 10, "file": 20, "shmem": 15, "file_mapped": 4, "file_dirty": 3, "file_writeback": 0, "slab": 2, "kernel": 5}
+}
+
+func realReviewContractStatPeak(number int, current int64, stat map[string]int64) *realReviewMemoryStatAtCurrentPeak {
+	return &realReviewMemoryStatAtCurrentPeak{SampleNumber: number, MemoryCurrentBytes: current, MemoryStat: stat, MemoryStatUnavailable: stat == nil, ObservationScope: realReviewMemoryStatScope}
+}
+
+func realReviewContractMemorySample(current int64, stat map[string]int64) realReviewMemorySample {
+	peak := int64(9999)
+	unavailable := []string{}
+	if stat == nil {
+		unavailable = []string{"memory.stat"}
+	}
+	return realReviewMemorySample{MemoryPeakBytes: &peak, MemoryCurrentBytes: &current, MemoryEvents: map[string]int64{"max": 0, "oom": 0, "oom_kill": 0}, MemoryStat: stat, UnavailableFields: unavailable}
+}
+
+func TestRealReviewMemoryPeakStatUsesSameSamplingPass(t *testing.T) {
+	t.Parallel()
+	first, highest, later := realReviewContractMemoryStat(), realReviewContractMemoryStat(), realReviewContractMemoryStat()
+	first["file_dirty"], highest["anon"], later["file"] = 99, 30, 77
+	tests := []struct {
+		name            string
+		samples         []realReviewMemorySample
+		peak            *realReviewMemoryStatAtCurrentPeak
+		maxima          map[string]int64
+		statSamples     int
+		completeSamples int
+	}{
+		{name: "peak vector is not per-field maxima", samples: []realReviewMemorySample{realReviewContractMemorySample(100, first), realReviewContractMemorySample(300, highest), realReviewContractMemorySample(200, later)}, peak: realReviewContractStatPeak(2, 300, highest), maxima: map[string]int64{"anon": 30, "file": 77, "shmem": 15, "file_mapped": 4, "file_dirty": 99, "file_writeback": 0, "slab": 2, "kernel": 5}, statSamples: 3, completeSamples: 3},
+		{name: "missing stat at higher current never borrows earlier vector", samples: []realReviewMemorySample{realReviewContractMemorySample(100, first), realReviewContractMemorySample(300, nil)}, peak: realReviewContractStatPeak(2, 300, nil), maxima: first, statSamples: 1, completeSamples: 2},
+		{name: "tie retains original unavailable vector", samples: []realReviewMemorySample{realReviewContractMemorySample(300, nil), realReviewContractMemorySample(300, highest)}, peak: realReviewContractStatPeak(1, 300, nil), maxima: highest, statSamples: 1, completeSamples: 2},
+		{name: "disappearance preserves earlier peak but latest remains unavailable", samples: []realReviewMemorySample{realReviewContractMemorySample(300, highest), {UnavailableFields: []string{"memory.events", "memory.peak", "memory.current", "memory.stat"}}}, peak: realReviewContractStatPeak(1, 300, highest), maxima: highest, statSamples: 1, completeSamples: 1},
+		{name: "stat without current cannot establish peak association", samples: []realReviewMemorySample{{MemoryStat: first, UnavailableFields: []string{"memory.events", "memory.peak", "memory.current"}}}, maxima: first, statSamples: 1},
+		{name: "lower current missing stat does not erase observed peak", samples: []realReviewMemorySample{realReviewContractMemorySample(300, highest), realReviewContractMemorySample(0, nil)}, peak: realReviewContractStatPeak(1, 300, highest), maxima: highest, statSamples: 1, completeSamples: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			monitor := &realReviewMemoryMonitor{}
+			for _, sample := range tt.samples {
+				monitor.record(sample)
+			}
+			require.Equal(t, tt.peak, monitor.retained.StatAtMaxCurrent, "one peak vector must belong to the exact highest-current pass, including unavailable stats")
+			require.Equal(t, tt.maxima, monitor.retained.MaxObservedStat, "independent historical maxima remain explicitly distinct from the peak vector")
+			require.Equal(t, tt.statSamples, monitor.retained.StatSamples, "optional stat coverage must be counted separately from core evidence")
+			require.Equal(t, tt.completeSamples, monitor.retained.CompleteSamples, "missing optional stat must not invalidate otherwise complete core telemetry")
+			require.Equal(t, tt.samples[len(tt.samples)-1], monitor.retained.Latest, "the latest unavailable observation must not inherit prior values")
+			encoded, err := json.Marshal(monitor.retained)
+			require.NoError(t, err, "fixed-size peak observations should serialize without a sample timeline")
+			if tt.peak != nil && tt.peak.MemoryStatUnavailable {
+				require.Contains(t, string(encoded), `"memory_stat":null,"memory_stat_unavailable":true`, "unavailable highest-current stats must serialize explicitly rather than borrow a past vector")
+			}
+		})
+	}
+}
+
+func TestRealReviewMemoryMonitorOwnsRetainedAndReturnedVectors(t *testing.T) {
+	t.Parallel()
+	sample := realReviewContractMemorySample(300, realReviewContractMemoryStat())
+	monitor := &realReviewMemoryMonitor{}
+	monitor.record(sample)
+	*sample.MemoryCurrentBytes, *sample.MemoryPeakBytes = 999, 888
+	sample.MemoryStat["anon"], sample.MemoryEvents["oom"] = 777, 6
+	sample.UnavailableFields = append(sample.UnavailableFields, "memory.events")
+	require.Equal(t, realReviewContractMemorySample(300, realReviewContractMemoryStat()), monitor.retained.Latest, "retained latest must own its maps, pointers and field labels")
+	require.Equal(t, realReviewContractStatPeak(1, 300, realReviewContractMemoryStat()), monitor.retained.StatAtMaxCurrent, "peak vector must remain frozen after its source sample is mutated")
+	absent := realReviewContractMemorySample(300, nil)
+	missing := &realReviewMemoryMonitor{}
+	missing.record(absent)
+	absent.UnavailableFields[0] = "memory.events"
+	require.Equal(t, []string{"memory.stat"}, missing.retained.Latest.UnavailableFields, "unavailable field labels must also be copied rather than alias the read result")
+
+	joined := newRealReviewMemoryMonitor(strings.Repeat("a", 64), func() realReviewMemorySample {
+		return realReviewContractMemorySample(300, realReviewContractMemoryStat())
+	}, time.Hour, time.Minute)
+	t.Cleanup(func() { joined.stop() })
+	original := joined.stop()
+	changed := joined.stop()
+	changed.Latest.MemoryStat["anon"] = 1000
+	changed.Latest.MemoryEvents["oom"] = 1000
+	changed.Latest.UnavailableFields = append(changed.Latest.UnavailableFields, "memory.events")
+	*changed.Latest.MemoryCurrentBytes, *changed.MaxObservedCurrentBytes, *changed.MaxObservedPeakBytes = 1000, 1000, 1000
+	changed.MaxObservedStat["anon"], changed.MaxObservedEvents["oom"] = 1000, 1000
+	changed.ReadLimitsBytes["memory.stat"] = 1
+	changed.StatAtMaxCurrent.MemoryStat["anon"], changed.StatAtMaxCurrent.MemoryCurrentBytes = 1000, 1000
+	require.Equal(t, original, joined.stop(), "repeated result serialization must not expose monitor-owned mutable state")
+}
+
+func TestRealReviewNormalMemoryMonitorConcurrentResultCopies(t *testing.T) {
+	t.Parallel()
+	monitor := newRealReviewMemoryMonitor(strings.Repeat("a", 64), func() realReviewMemorySample {
+		return realReviewContractMemorySample(300, realReviewContractMemoryStat())
+	}, time.Millisecond, time.Minute)
+	t.Cleanup(func() { monitor.stop() })
+	results := make([]realReviewMemoryTelemetry, 8)
+	var writers sync.WaitGroup
+	for i := range results {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			results[i] = monitor.stop()
+			results[i].StatAtMaxCurrent.MemoryStat["anon"] = int64(i)
+			results[i].Latest.MemoryStat["anon"] = int64(i)
+		}()
+	}
+	writers.Wait()
+	actual := monitor.stop()
+	require.Equal(t, realReviewContractMemoryStat(), actual.StatAtMaxCurrent.MemoryStat, "concurrent private result copies must never alias the joined monitor")
+	require.Equal(t, actual.Samples, actual.StatSamples, "every available normal sample should count toward optional stat coverage")
+	require.Equal(t, actual.Samples, actual.CompleteSamples, "normal optional stats preserve core telemetry completeness")
+	encoded, err := json.Marshal(actual)
+	require.NoError(t, err, "the joined normal aggregate should remain serializable after concurrent readers")
+	require.NotContains(t, string(encoded), "private-token", "retained fields must contain finite allowlisted observations only")
+}
+
+func TestRealReviewMemoryStatIsOptionalInNormalAcceptance(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
 		raw       string
-		profile   bool
 		wantError bool
 	}{
-		{name: "finite numeric fields", raw: "anon 10\nfile 20\nfile_dirty 3\nfile_writeback 0\nother_counter 4\n", profile: true},
-		{name: "missing stat", profile: true, wantError: true},
-		{name: "missing required field", raw: "anon 10\nfile 20\nfile_dirty 3\n", profile: true, wantError: true},
-		{name: "negative value", raw: "anon -1\nfile 20\nfile_dirty 3\nfile_writeback 0\n", profile: true, wantError: true},
-		{name: "untrusted text", raw: "anon private-token\nfile 20\nfile_dirty 3\nfile_writeback 0\n", profile: true, wantError: true},
-		{name: "duplicate field", raw: "anon 10\nfile 20\nfile_dirty 3\nfile_writeback 0\nanon 20\n", profile: true, wantError: true},
-		{name: "oversized stat", raw: strings.Repeat("x", 8193), profile: true, wantError: true},
-		{name: "ordinary acceptance never reads optional stat", raw: "invalid stat deliberately ignored\n"},
+		{name: "normal acceptance reads finite allowlisted values", raw: "anon 10\nfile 20\nshmem 15\nfile_mapped 4\nfile_dirty 3\nfile_writeback 0\nslab 2\nkernel 5\nother_counter 4\n"},
+		{name: "missing stat", wantError: true},
+		{name: "incomplete stat", raw: "anon 10\nfile 20\nfile_dirty 3\nfile_writeback 0\n", wantError: true},
+		{name: "invalid stat", raw: "anon private-token\n", wantError: true},
+		{name: "oversized stat", raw: strings.Repeat("x", 8193), wantError: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -861,15 +978,49 @@ func TestRealReviewProfileMemoryStatIsOptionalAndBounded(t *testing.T) {
 			if tt.raw != "" {
 				require.NoError(t, os.WriteFile(filepath.Join(group, "memory.stat"), []byte(tt.raw), 0o600), "optional fixture may contain available or rejected kernel data")
 			}
-			actual := readRealReviewMemorySample(root, containerID, tt.profile)
+			actual := readRealReviewMemorySample(root, containerID)
 			peak, current := int64(100), int64(50)
-			expected := realReviewMemorySample{MemoryPeakBytes: &peak, MemoryCurrentBytes: &current, MemoryEvents: map[string]int64{"max": 0, "oom": 0, "oom_kill": 0}, UnavailableFields: []string{}}
+			expected := realReviewMemorySample{MemoryPeakBytes: &peak, MemoryCurrentBytes: &current, MemoryEvents: map[string]int64{"max": 0, "oom": 0, "oom_kill": 0}, UnavailableFields: []string{}, MemoryStat: realReviewContractMemoryStat()}
 			if tt.wantError {
 				expected.UnavailableFields = []string{"memory.stat"}
-			} else if tt.profile {
-				expected.MemoryStat = map[string]int64{"anon": 10, "file": 20, "file_dirty": 3, "file_writeback": 0}
+				expected.MemoryStat = nil
 			}
-			require.Equal(t, expected, actual, "optional stat failures must be explicit without disturbing ordinary kernel evidence or opt-out behavior")
+			require.Equal(t, expected, actual, "normal stat failures must be explicit while core kernel evidence remains intact")
+		})
+	}
+}
+
+func TestRealReviewMemoryStatStrictFiniteWhitelist(t *testing.T) {
+	t.Parallel()
+	valid := "anon 10\nfile 20\nshmem 15\nfile_mapped 4\nfile_dirty 3\nfile_writeback 0\nslab 2\nkernel 5\n"
+	tests := []struct {
+		name      string
+		raw       string
+		wantError bool
+	}{
+		{name: "eight independent observations", raw: valid},
+		{name: "unknown numeric field is not retained", raw: valid + "new_kernel_counter 9\n"},
+		{name: "exact byte bound", raw: valid + strings.Repeat(" ", 8192-len(valid))},
+		{name: "over byte bound", raw: valid + strings.Repeat(" ", 8193-len(valid)), wantError: true},
+		{name: "missing required field", raw: strings.ReplaceAll(valid, "shmem 15\n", ""), wantError: true},
+		{name: "duplicate known field", raw: valid + "anon 10\n", wantError: true},
+		{name: "duplicate unknown field", raw: valid + "new_kernel_counter 9\nnew_kernel_counter 9\n", wantError: true},
+		{name: "negative value", raw: strings.ReplaceAll(valid, "anon 10", "anon -1"), wantError: true},
+		{name: "overflow value", raw: strings.ReplaceAll(valid, "anon 10", "anon 9223372036854775808"), wantError: true},
+		{name: "unknown malformed value", raw: valid + "new_kernel_counter private-token\n", wantError: true},
+		{name: "empty stat", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual, err := realReviewMemoryStat([]byte(tt.raw))
+			if tt.wantError {
+				require.Error(t, err, "incomplete or ambiguous stat vectors must not become numerical proof")
+				require.Nil(t, actual, "rejected stats must not retain partial numerical data")
+				return
+			}
+			require.NoError(t, err, "bounded finite stat vectors may ignore future numerical kernel fields")
+			require.Equal(t, realReviewContractMemoryStat(), actual, "only eight independent fields may be retained without overlapping-field sums")
 		})
 	}
 }

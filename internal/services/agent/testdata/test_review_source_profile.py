@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 
 LAUNCHER = Path(__file__).with_name("review_source_profile.py")
-PIN = "75b7c880581cfd5f5d8592b948e317e9d1589f721ebaaa547ae4b3ebef8f51ca"
+PIN = "f7e372aef2449752093346c499ee5f2b38aa7c1ba92fa8d0221e5c50627dd7fd"
 
 
 def fresh_profile():
@@ -42,6 +42,10 @@ def fixture_namespace(overrides=None):
             return result
         return call
 
+    def inventory(*args, **kwargs):
+        calls.append(("iter_tree_inventory", args, kwargs))
+        yield "synthetic-path", "hash"
+
     class FixturePath:
         def __init__(self, name):
             self.name = name
@@ -55,6 +59,8 @@ def fixture_namespace(overrides=None):
         "input_hashes": original("input_hashes", {"synthetic-path": "hash"}),
         "check_source_capacity": original("check_source_capacity", {"entries": 4, "path_bytes": 70}),
         "tree_inventory": original("tree_inventory", {"synthetic-path": "hash"}),
+        "iter_tree_inventory": inventory,
+        "write_receipt": original("write_receipt", 1),
         "remove_tree": original("remove_tree", sentinel),
         "prepare_additional": original("prepare_additional", sentinel),
         "subprocess": types.SimpleNamespace(run=original("run", sentinel)),
@@ -92,7 +98,8 @@ class ReviewSourceProfileTests(unittest.TestCase):
                 namespace["extract"](data=sentinel, destination=Path("sources/npm/archive"), kind="tar", spool_directory=sentinel),
                 namespace["input_hashes"](paths=[sentinel]),
                 namespace["check_source_capacity"](sources=sentinel),
-                namespace["tree_inventory"](path=Path("sources/python")),
+                list(namespace["iter_tree_inventory"](path=Path("sources/python"))),
+                namespace["write_receipt"](path=Path("receipt.json"), inputs={}, sources=sentinel, deadline=12),
                 namespace["remove_tree"](path=Path("sources/go")),
             ]
         self.assertIs(values[2], sentinel)
@@ -101,11 +108,170 @@ class ReviewSourceProfileTests(unittest.TestCase):
         self.assertEqual(calls[2], ("extract", (), {"data": sentinel, "destination": Path("sources/npm/archive"), "kind": "tar", "spool_directory": sentinel}))
         records = decode_records(output.getvalue())
         exits = [r for r in records if r["op"] == 2]
-        self.assertEqual([(r["phase"], r["category"]) for r in exits], [(1, 1), (2, 2), (3, 2), (6, 1), (7, 1), (8, 3), (10, 4)])
-        self.assertEqual([r.get("items") for r in exits], [1, None, None, 1, 4, 1, None])
-        self.assertEqual([r.get("bytes") for r in exits], [None, 6, None, None, 70, None, None])
+        self.assertEqual([(r["phase"], r["category"]) for r in exits], [(1, 1), (2, 2), (3, 2), (6, 1), (7, 1), (8, 3), (9, 1), (10, 4)])
+        self.assertEqual([r.get("items") for r in exits], [1, None, None, 1, 4, 1, 1, None])
+        self.assertEqual([r.get("bytes") for r in exits], [None, 6, None, None, 70, None, None, None])
         self.assertNotIn("synthetic-private", output.getvalue())
         self.assertNotIn("registry.npmjs.org", output.getvalue())
+        self.assert_numeric_records(records)
+
+    def test_inventory_generator_is_lazy_and_preserves_send_throw_values_and_return(self):
+        profile = fresh_profile()
+        first, second, third, sent, returned = (object() for _ in range(5))
+        fault = ValueError("synthetic-private-throw")
+        calls = []
+
+        def inventory(path, *, marker):
+            calls.append((path, marker))
+            received = yield first
+            self.assertIs(received, sent)
+            try:
+                yield second
+            except ValueError as caught:
+                self.assertIs(caught, fault)
+                yield third
+            return returned
+
+        namespace, _, _ = fixture_namespace({"iter_tree_inventory": inventory})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            profile.install(namespace)
+            with self.assertRaises(TypeError):
+                namespace["iter_tree_inventory"](Path("sources/python"))
+            iterator = namespace["iter_tree_inventory"](path=Path("sources/python"), marker=sent)
+            self.assertEqual(calls, [])
+            self.assertEqual(decode_records(output.getvalue()), [])
+            with self.assertRaises(TypeError):
+                iterator.send(sent)
+            self.assertEqual(decode_records(output.getvalue()), [])
+            self.assertIs(next(iterator), first)
+            self.assertEqual(calls, [(Path("sources/python"), sent)])
+            self.assertEqual([(r["op"], r["phase"]) for r in decode_records(output.getvalue())], [(1, 8)])
+            self.assertIs(iterator.send(sent), second)
+            self.assertIs(iterator.throw(fault), third)
+            with self.assertRaises(StopIteration) as stopped:
+                next(iterator)
+            self.assertIs(stopped.exception.value, returned)
+            self.assertIsNone(iterator.close())
+        records = decode_records(output.getvalue())
+        self.assertEqual([(r["op"], r["phase"], r["category"]) for r in records], [(1, 8, 3), (2, 8, 3)])
+        self.assertEqual(records[-1]["items"], 3)
+        self.assertEqual(records[-1]["failed"], 0)
+        self.assert_numeric_records(records)
+        self.assertNotIn("synthetic-private", output.getvalue())
+        self.assertNotIn("sources", output.getvalue())
+
+    def test_inventory_generator_close_and_failures_end_once_without_changing_errors(self):
+        for mode in ("close before iteration", "close after yield", "original failure", "injected failure", "close failure"):
+            with self.subTest(mode=mode):
+                profile = fresh_profile()
+                fault = RuntimeError("synthetic-private-inventory-error")
+                value = object()
+                closed = []
+
+                def inventory(path):
+                    try:
+                        yield value
+                        if mode == "original failure":
+                            raise fault
+                        yield value
+                    finally:
+                        closed.append(True)
+                        if mode == "close failure":
+                            raise fault
+
+                namespace, _, _ = fixture_namespace({"iter_tree_inventory": inventory})
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    profile.install(namespace)
+                    iterator = namespace["iter_tree_inventory"](Path("sources"))
+                    if mode == "close before iteration":
+                        self.assertIsNone(iterator.close())
+                    else:
+                        self.assertIs(next(iterator), value)
+                        if mode == "close after yield":
+                            self.assertIsNone(iterator.close())
+                        else:
+                            with self.assertRaises(RuntimeError) as caught:
+                                if mode == "original failure":
+                                    next(iterator)
+                                elif mode == "injected failure":
+                                    iterator.throw(fault)
+                                else:
+                                    iterator.close()
+                            self.assertIs(caught.exception, fault)
+                        self.assertIsNone(iterator.close())
+                records = decode_records(output.getvalue())
+                if mode == "close before iteration":
+                    self.assertEqual(records, [])
+                    self.assertEqual(closed, [])
+                else:
+                    self.assertEqual([(r["op"], r["phase"]) for r in records], [(1, 8), (2, 8)])
+                    self.assertEqual(records[-1]["items"], 1)
+                    self.assertEqual(records[-1]["failed"], 1)
+                    self.assertEqual(closed, [True])
+                self.assert_numeric_records(records)
+                self.assertNotIn("synthetic-private", output.getvalue())
+
+    def test_receipt_timeout_after_first_yield_marks_inventory_partial_without_changing_error(self):
+        profile = fresh_profile()
+        fault = TimeoutError("synthetic-private-receipt-deadline")
+        yielded, checks = [], []
+
+        def inventory(path):
+            for name in ("first", "second"):
+                yielded.append(name)
+                yield name, "hash"
+
+        def remaining(deadline):
+            checks.append(deadline)
+            raise fault
+
+        def write_receipt(path, inputs, sources, deadline):
+            with path.open("x", encoding="utf-8") as stream:
+                stream.write('{"files":{')
+                for name, digest in namespace["iter_tree_inventory"](sources):
+                    remaining(deadline)
+                    stream.write(json.dumps(name) + ":" + json.dumps(digest))
+            return len(yielded)
+
+        namespace, _, _ = fixture_namespace({"iter_tree_inventory": inventory, "write_receipt": write_receipt})
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(output):
+            profile.install(namespace)
+            path = Path(temporary, "receipt.json")
+            with self.assertRaises(TimeoutError) as caught:
+                namespace["write_receipt"](path=path, inputs={}, sources=Path(temporary), deadline=12)
+            self.assertIs(caught.exception, fault)
+            self.assertEqual(path.read_text(), '{"files":{')
+        self.assertEqual(yielded, ["first"])
+        self.assertEqual(checks, [12])
+        records = decode_records(output.getvalue())
+        self.assertEqual([(r["op"], r["phase"]) for r in records], [(1, 9), (1, 8), (2, 8), (2, 9)])
+        self.assertEqual([(r["phase"], r["failed"], r.get("items")) for r in records if r["op"] == 2], [(8, 1, 1), (9, 1, None)])
+        self.assert_numeric_records(records)
+        self.assertNotIn("synthetic-private", output.getvalue())
+        self.assertNotIn("first", output.getvalue())
+
+    def test_receipt_wrapper_counts_result_and_never_mutates_global_path_or_json(self):
+        profile = fresh_profile()
+        original_write, original_dumps = Path.write_text, json.dumps
+        namespace, calls, _ = fixture_namespace({"Path": Path, "json": json, "write_receipt": lambda *args, **kwargs: 19})
+        original_tree = namespace["tree_inventory"]
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(output):
+            profile.install(namespace)
+            self.assertIs(Path.write_text, original_write)
+            self.assertIs(json.dumps, original_dumps)
+            self.assertIs(namespace["tree_inventory"], original_tree)
+            Path(temporary, "receipt.json").write_text(json.dumps({"version": 1, "inputs": {}, "files": {}}))
+            namespace["tree_inventory"](Path(temporary))
+            self.assertEqual(decode_records(output.getvalue()), [])
+            self.assertEqual(namespace["write_receipt"](path=Path(temporary, "receipt.json"), inputs={}, sources=Path(temporary), deadline=12), 19)
+        records = decode_records(output.getvalue())
+        self.assertEqual([(r["op"], r["phase"]) for r in records], [(1, 9), (2, 9)])
+        self.assertEqual(records[-1]["items"], 19)
+        self.assertEqual(records[-1]["failed"], 0)
         self.assert_numeric_records(records)
 
     def test_download_categories_do_not_attribute_unknown_registries_to_python(self):
@@ -378,43 +544,82 @@ if __name__ == "__main__":
             launcher = launcher.replace(PIN, hashlib.sha256(source).hexdigest(), 1)
         return subprocess.run([sys.executable, "-c", launcher, ".143/review-sources.py", *args], cwd=root, text=True, capture_output=True, timeout=10)
 
-    def test_receipt_serialization_and_write_are_observed_without_recursive_emission(self):
-        source = b'''import json, sys, types
+    def test_streaming_prepare_and_verify_entry_points_cover_inventory_and_receipt(self):
+        source = b"""import hashlib, json, sys, types
 from pathlib import Path
 from neighbor import VALUE
+ORIGINAL_DUMPS = json.dumps
+ORIGINAL_WRITE = Path.write_text
 selected_artifacts = lambda *a, **k: []
 read_once = lambda *a, **k: b"source"
 extract = lambda *a, **k: None
 input_hashes = lambda *a, **k: {}
 check_source_capacity = lambda *a, **k: {"entries": 1, "path_bytes": 1}
-tree_inventory = lambda *a, **k: {}
+def tree_inventory(*args, **kwargs):
+    raise AssertionError("obsolete inventory path must not be called")
 remove_tree = lambda *a, **k: None
 prepare_additional = lambda *a, **k: None
 subprocess = types.SimpleNamespace(run=lambda *a, **k: None)
+def iter_tree_inventory(path):
+    for item in sorted(path.rglob("*")):
+        if item.is_file():
+            yield item.relative_to(path).as_posix(), hashlib.sha256(item.read_bytes()).hexdigest()
+def write_receipt(path, inputs, sources, deadline):
+    count = 0
+    with path.open("x", encoding="utf-8") as stream:
+        stream.write('{"files":{')
+        for name, digest in iter_tree_inventory(sources):
+            if count:
+                stream.write(",")
+            stream.write(json.dumps(name) + ":" + json.dumps(digest))
+            count += 1
+        stream.write('},"inputs":')
+        json.dump(inputs, stream, sort_keys=True, separators=(",", ":"))
+        stream.write(',"version":1}')
+    return count
+def prepare():
+    source = Path("sources/python/library.py")
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"source")
+    return write_receipt(Path("receipt.json"), {"fixture": "hash"}, Path("sources"), 12)
+def verify():
+    receipt = json.loads(Path("receipt.json").read_text())
+    files = receipt["files"]
+    count = len(files)
+    for name, digest in iter_tree_inventory(Path("sources")):
+        assert files.pop(name, None) == digest
+    assert not files
+    return count
 def main():
-    receipt = {"version": 1, "inputs": {"fixture": "hash"}, "files": {"library.py": "hash"}}
-    payload = json.dumps(obj=receipt, sort_keys=True, separators=(",", ":"))
-    written = Path("receipt.json").write_text(data=payload, encoding="utf-8")
-    Path("result.json").write_text(json.dumps({"argv": sys.argv, "neighbor": VALUE, "payload": payload, "written": written}), encoding="utf-8")
+    count = verify() if sys.argv[1:] == ["--verify"] else prepare()
+    Path("result.json").write_text(json.dumps({"argv": sys.argv, "neighbor": VALUE, "count": count, "global_path_unchanged": Path.write_text is ORIGINAL_WRITE, "global_json_unchanged": json.dumps is ORIGINAL_DUMPS}), encoding="utf-8")
 if __name__ == "__main__":
     Path("unwanted-main").touch()
-'''
+"""
+        digest = hashlib.sha256(b"source").hexdigest()
+        expected = json.dumps({"version": 1, "inputs": {"fixture": "hash"}, "files": {"python/library.py": digest}}, sort_keys=True, separators=(",", ":"))
         for args in ((), ("--verify",)):
             with self.subTest(args=args), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary).resolve()
                 (root / ".143").mkdir()
                 (root / ".143/review-sources.py").write_bytes(source)
                 (root / ".143/neighbor.py").write_text("VALUE = 42\n")
+                if args:
+                    (root / "sources/python").mkdir(parents=True)
+                    (root / "sources/python/library.py").write_bytes(b"source")
+                    (root / "receipt.json").write_text(expected)
                 result = self.run_child(root, source, args)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 records = decode_records(result.stdout)
                 self.assert_numeric_records(records)
-                self.assertEqual([r["op"] for r in records if r["phase"] == 9], [1, 2, 1, 2])
-                self.assertLessEqual(len(records), 20)
+                self.assertEqual([r["op"] for r in records if r["phase"] == 8], [1, 2])
+                self.assertEqual([r["op"] for r in records if r["phase"] == 9], [] if args else [1, 2])
+                self.assertEqual([(r["phase"], r["items"], r["failed"]) for r in records if r["op"] == 2 and r["phase"] in (8, 9)], [(8, 1, 0)] if args else [(8, 1, 0), (9, 1, 0)])
+                self.assertLessEqual(len(records), 10)
                 self.assertFalse((root / "unwanted-main").exists())
+                self.assertEqual((root / "receipt.json").read_text(), expected)
                 actual = json.loads((root / "result.json").read_text())
-                expected = '{"files":{"library.py":"hash"},"inputs":{"fixture":"hash"},"version":1}'
-                self.assertEqual(actual, {"argv": [".143/review-sources.py", *args], "neighbor": 42, "payload": expected, "written": len(expected)})
+                self.assertEqual(actual, {"argv": [".143/review-sources.py", *args], "neighbor": 42, "count": 1, "global_path_unchanged": True, "global_json_unchanged": True})
                 self.assertNotIn(str(root), result.stdout)
                 self.assertNotIn("library.py", result.stdout)
 

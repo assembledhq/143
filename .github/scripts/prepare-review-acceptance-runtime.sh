@@ -206,6 +206,50 @@ config = {'data-root': str(state / 'mount/docker'), 'exec-root': str(state / 'ex
 PY_CONFIG
 }
 
+# The flags command describes compiled defaults, not a running container's
+# effective configuration. Keep that distinction and the registered overrides
+# explicit instead of inferring a backing medium from current documentation.
+record_runsc_flags() {
+  python3 - "$REVIEW_ACCEPTANCE_RUNTIME_STATE/daemon.json" "$REVIEW_ACCEPTANCE_ARTIFACT_DIR" <<'PY_FLAGS'
+import json, resource, subprocess, sys, tempfile
+from pathlib import Path
+config = json.loads(Path(sys.argv[1]).read_text())
+runtime = config['runtimes']['runsc']
+if runtime != {'path': '/usr/bin/runsc', 'runtimeArgs': ['--host-uds=open']}:
+    raise SystemExit('review acceptance runtime: unexpected owned runsc registration')
+limit = 65536
+status, timed_out, execution_error = None, False, False
+
+def bound_output():
+    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+with tempfile.TemporaryFile() as output:
+    try:
+        result = subprocess.run(['/usr/bin/runsc', 'flags'], stdout=output,
+                                stderr=subprocess.STDOUT, timeout=5, check=False,
+                                preexec_fn=bound_output)
+        status = result.returncode
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    except (OSError, subprocess.SubprocessError):
+        execution_error = True
+    output.seek(0)
+    retained = output.read(limit)
+artifacts = Path(sys.argv[2])
+(artifacts / 'runsc-flags.txt').write_bytes(retained)
+(artifacts / 'runsc-flags-observation.json').write_text(json.dumps({
+    'command': ['/usr/bin/runsc', 'flags'], 'exit_status': status,
+    'timeout_seconds': 5, 'timed_out': timed_out, 'execution_error': execution_error,
+    'retained_bytes': len(retained), 'output_limit_bytes': limit,
+    'possibly_truncated': len(retained) == limit,
+    'compiled_defaults_only': True, 'registered_runtime': runtime,
+    'effective_container_overlay_verified': False,
+}, indent=2) + '\n')
+if status != 0 or timed_out or execution_error or len(retained) == limit:
+    print('review acceptance runtime: warning: optional runsc defaults observation unavailable or bounded', file=sys.stderr)
+PY_FLAGS
+}
+
 verify_daemon_configuration() {
   python3 - <<'PY_DAEMON'
 import json, os
@@ -295,6 +339,7 @@ PY
   # Cleanup never starts/reconfigures it and never prunes its existing data.
   sudo -n systemctl stop docker.socket docker.service
   write_daemon_config
+  record_runsc_flags
   sudo -n sh -c 'nohup dockerd --config-file "$1" > "$2" 2>&1 < /dev/null & printf "%s\n" "$!" > "$3"' \
     sh "$state/daemon.json" "$artifacts/dockerd.log" "$state/launch.pid"
   clear_docker_client_environment
