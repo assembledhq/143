@@ -3,9 +3,11 @@ package agent
 import (
 	"context"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -75,6 +77,48 @@ func TestWorkspaceReadinessWithRealGitCheckout(t *testing.T) {
 			} else {
 				require.ErrorIs(t, err, ErrSandboxWorkspaceNotReady, "missing or mismatched working-branch ownership must not pass readiness")
 			}
+		})
+	}
+}
+
+func TestWorkspaceReadinessRejectsUnsafeMetadataWithoutBlocking(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, path string
+		fifo, link bool
+		head       string
+	}{
+		{name: "FIFO HEAD", path: "HEAD", fifo: true},
+		{name: "linked HEAD", path: "HEAD", link: true},
+		{name: "path traversal HEAD", path: "HEAD", head: "ref: refs/heads/../../../outside"},
+		{name: "Git pointer layout", path: ".git", head: "gitdir: /outside"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			repo := t.TempDir()
+			gitdir := filepath.Join(repo, ".git")
+			require.NoError(t, os.MkdirAll(gitdir, 0o700), "isolated readiness metadata directory should exist")
+			target := filepath.Join(gitdir, tt.path)
+			if tt.path == ".git" {
+				require.NoError(t, os.Remove(gitdir), "pointer fixture should replace empty metadata directory")
+				target = gitdir
+			}
+			switch {
+			case tt.fifo:
+				require.NoError(t, syscall.Mkfifo(target, 0o600), "readiness FIFO fixture should remain unopened")
+			case tt.link:
+				require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "outside"), target), "readiness must reject linked metadata")
+			default:
+				require.NoError(t, os.WriteFile(target, []byte(tt.head), 0o600), "readiness fixture should store unsafe pointer metadata")
+			}
+			command, err := reviewWorkspaceReadyProbeCommand(repo, "143/review")
+			require.NoError(t, err, "trusted bounded metadata probe should render")
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			out, err := exec.CommandContext(ctx, "/bin/sh", "-c", command).CombinedOutput()
+			require.Error(t, err, "unsafe metadata must fail without invoking Git/config/includes: %s", out)
+			require.NoError(t, ctx.Err(), "regular-file and path checks must reject FIFO/links/traversal before deadline")
 		})
 	}
 }

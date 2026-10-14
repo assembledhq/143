@@ -1391,6 +1391,32 @@ func testRun(orgID, issueID uuid.UUID) *models.Session {
 	}
 }
 
+const reviewFixtureHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func configurePinnedReviewFixture(session *models.Session, d *testDeps) {
+	session.RevisionContext = json.RawMessage(`{"kind":"code_review","github_pr_number":42,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}`)
+	session.WorkingBranch = strPtr("143/test/code-review")
+	previousExec := d.provider.ExecFn
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, command string, stdout, stderr io.Writer) (int, error) {
+		if command == "git rev-parse HEAD" || command == "git rev-parse FETCH_HEAD" || command == "/usr/bin/git -c core.hooksPath=/dev/null rev-parse FETCH_HEAD" {
+			_, err := io.WriteString(stdout, reviewFixtureHead+"\n")
+			return 0, err
+		}
+		if strings.Contains(command, "review readiness requires literal repository metadata") {
+			_, err := io.WriteString(stdout, reviewFixtureHead+"\n143/test/code-review\n"+reviewFixtureHead+"\n")
+			return 0, err
+		}
+		if previousExec != nil {
+			return previousExec(ctx, sb, command, stdout, stderr)
+		}
+		return 0, nil
+	}
+	if session.ContainerID != nil {
+		containerID := *session.ContainerID
+		d.sessions.peekContainerIDFn = func() (string, error) { return containerID, nil }
+	}
+}
+
 func strPtr(s string) *string {
 	return &s
 }
@@ -4240,6 +4266,7 @@ func TestRunAgent_AutomaticPRPublishingGuards(t *testing.T) {
 			d.agentPRPromptEnabled = tt.promptFlag
 			if tt.ineligibleOrigin {
 				run.Origin = models.SessionOriginCodeReview
+				configurePinnedReviewFixture(run, &d)
 			}
 			if tt.alreadyPublished {
 				run.PRCreationState = models.PRCreationStateSucceeded
@@ -4418,16 +4445,21 @@ func TestRunAgent_CapturesAndPersistsBaseCommitSHA(t *testing.T) {
 				}
 				return 0, nil
 			}
+			expectedBase := "abc123"
+			if tt.origin == models.SessionOriginCodeReview {
+				configurePinnedReviewFixture(run, &d)
+				expectedBase = reviewFixtureHead
+			}
 			d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-				require.Equal(t, "abc123", sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA], "adapter should receive the captured starting commit")
+				require.Equal(t, expectedBase, sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA], "adapter should receive the captured starting commit")
 				require.Equal(t, tt.expectedTarget, sandbox.Metadata[agent.SandboxMetadataTargetBranch], "review diffs should exclude the target branch")
 				return &agent.AgentResult{Summary: "done"}, nil
 			}
 
 			err := buildOrchestrator(d).RunAgent(context.Background(), run)
 			require.NoError(t, err, "RunAgent should succeed")
-			require.Equal(t, []string{"abc123"}, d.sessions.getBaseCommitSHAs(), "RunAgent should persist the captured base commit sha")
-			require.Equal(t, strPtr("abc123"), run.BaseCommitSHA, "RunAgent should store the captured base commit sha on the session")
+			require.Equal(t, []string{expectedBase}, d.sessions.getBaseCommitSHAs(), "RunAgent should persist the captured base commit sha")
+			require.Equal(t, strPtr(expectedBase), run.BaseCommitSHA, "RunAgent should store the captured base commit sha on the session")
 		})
 	}
 }
@@ -7026,6 +7058,7 @@ func TestContinueSession_CodeReviewResultErrorFailsOnlyReviewerThread(t *testing
 	session.PrimaryThreadID = &primaryThreadID
 
 	d := defaultDeps()
+	configurePinnedReviewFixture(session, &d)
 	d.issues.issue = issue
 	d.sessionThreads = &mockSessionThreadStore{getByIDResult: &models.SessionThread{
 		ID:             reviewerThreadID,
@@ -8079,6 +8112,9 @@ func TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata(t *testing.T) {
 			session.TargetBranch = tt.targetBranch
 
 			d := defaultDeps()
+			if tt.origin == models.SessionOriginCodeReview {
+				configurePinnedReviewFixture(session, &d)
+			}
 			d.issues.issue = issue
 			if tt.restore {
 				session.ContainerID = nil
