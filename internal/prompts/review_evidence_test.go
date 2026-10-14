@@ -23,26 +23,23 @@ func TestReviewerDiscoversPreparedSourcesAsUntrustedData(t *testing.T) {
 	}
 }
 
-func TestReviewerRequiresCapturedLocalComparisonWithoutPreparationRepairs(t *testing.T) {
+func TestReviewerRequiresCapturedPreparedComparisonWithoutPreparationRepairs(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name, base, expected string
-	}{
-		{name: "captured base", base: "captured-base", expected: "git merge-base captured-base captured-head"},
-		{name: "missing captured base", expected: "captured base SHA was not supplied; stop and report"},
+	prompt := CodeReviewReviewerPrompt(CodeReviewReviewerPromptData{
+		Repository: "example/repository", BaseSHA: "captured-base", HeadSHA: "captured-head",
+		ManifestPath: ".git/review-inputs/manifest.json", DiffPath: ".git/review-inputs/comparison.patch",
+	})
+	for _, expected := range []string{
+		"Prepared manifest: .git/review-inputs/manifest.json",
+		"Prepared diff: .git/review-inputs/comparison.patch",
+		"Confirm the manifest repository, base SHA, and head SHA match this target",
+		"SHA-256 digest of the complete patch",
+		"Do not substitute another base or recompute a partial diff",
+	} {
+		require.Contains(t, prompt, expected, "reviewers must consume and verify the coordinator's exact captured comparison")
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			prompt := CodeReviewReviewerPrompt(CodeReviewReviewerPromptData{BaseSHA: tt.base, HeadSHA: "captured-head"})
-			require.Contains(t, prompt, tt.expected, "reviewer should use only the captured comparison or identify its specific missing base")
-			require.Contains(t, prompt, "do not fetch, deepen the clone, change checkouts, or substitute a branch tip", "platform preparation must remain outside reviewer execution")
-			if tt.base != "" {
-				require.Contains(t, prompt, "git diff --no-ext-diff --no-textconv", "reviewer diff inspection must disable repository-provided external diff and textconv commands")
-			}
-			for _, forbidden := range []string{"origin/HEAD", "git fetch", "git checkout", "--deepen"} {
-				require.NotContains(t, prompt, forbidden, "reviewer instructions must not repair missing evidence or substitute a mutable comparison")
-			}
-		})
+	require.NotRegexp(t, `(?m)^/review(?: |$)`, prompt, "the prepared-input prompt must not invoke a native review command")
+	for _, forbidden := range []string{"origin/HEAD", "git fetch", "git checkout", "--deepen", "git diff"} {
+		require.NotContains(t, prompt, forbidden, "reviewer instructions must not repair, refetch or reconstruct their captured comparison")
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/assembledhq/143/internal/jobctx"
 )
 
 const CodeReviewWorkspacePreparationTimeout = 8 * time.Minute
@@ -44,11 +46,11 @@ func NewCodeReviewWorkspacePreparationError(stage string, cause error) error {
 	}
 	var existing *CodeReviewWorkspacePreparationError
 	if errors.As(cause, &existing) {
-		if errors.Is(cause, ErrCodeReviewPreparationCleanup) {
+		if errors.Is(cause, ErrCodeReviewPreparationCleanup) || errors.Is(cause, ErrCodeReviewSourceIntegrity) {
 			if _, direct := cause.(*CodeReviewWorkspacePreparationError); !direct {
-				// Cleanup can be joined outside an existing stage error. Keep the
-				// entire error tree under one safe message rather than returning
-				// raw joined diagnostics or hiding its cleanup cause.
+				// Terminal cleanup or integrity can be joined outside an existing
+				// stage error. Keep the entire tree under one safe message rather
+				// than returning raw diagnostics or hiding its terminal cause.
 				return &CodeReviewWorkspacePreparationError{Stage: existing.Stage, cause: cause}
 			}
 		}
@@ -109,7 +111,13 @@ func withCodeReviewPreparationBudget(ctx context.Context) context.Context {
 	if _, ok := ctx.Value(codeReviewPreparationDeadlineKey{}).(time.Time); ok {
 		return ctx
 	}
-	return WithCodeReviewWorkspacePreparationDeadline(ctx, time.Now().Add(CodeReviewWorkspacePreparationTimeout))
+	startedAt := time.Now()
+	if active, _ := ctx.Value(reviewPreparationActivationKey{}).(bool); active {
+		if createdAt, ok := jobctx.JobCreatedAtFromContext(ctx); ok && !createdAt.IsZero() {
+			startedAt = createdAt
+		}
+	}
+	return WithCodeReviewWorkspacePreparationDeadline(ctx, startedAt.Add(CodeReviewWorkspacePreparationTimeout))
 }
 
 func codeReviewPreparationContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -172,4 +180,32 @@ func sandboxProviderForPreparation(ctx context.Context, provider SandboxProvider
 		return reviewPreparationSandboxProvider{provider}
 	}
 	return provider
+}
+
+// codeReviewSetupWindow is used sequentially by one continuation. Only an
+// already reusable warm workspace may start one local verification allowance;
+// later stages retain that same deadline, including when it has expired.
+type codeReviewSetupWindow struct {
+	parent       context.Context
+	preparation  context.Context
+	reusable     bool
+	verification context.Context
+	cancel       context.CancelFunc
+}
+
+func (w *codeReviewSetupWindow) Context() context.Context {
+	if w.verification != nil {
+		return w.verification
+	}
+	if w.reusable && errors.Is(w.preparation.Err(), context.DeadlineExceeded) && w.parent.Err() == nil {
+		w.verification, w.cancel = context.WithTimeout(w.parent, CodeReviewWorkspaceVerificationTimeout)
+		return w.verification
+	}
+	return w.preparation
+}
+
+func (w *codeReviewSetupWindow) Close() {
+	if w.cancel != nil {
+		w.cancel()
+	}
 }

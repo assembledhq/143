@@ -3798,7 +3798,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 				if mandatoryPreparation {
 					checkoutErr = o.checkoutReviewPullRequestHead(preparationCtx, sandbox, repoURL, token, prNumber, workingBranch, head)
 				} else {
-					checkoutErr = o.checkoutExpectedPullRequestHead(ctx, sandbox, repoURL, token, prNumber, workingBranch, head)
+					checkoutErr = o.checkoutCodeReviewHead(ctx, sandbox, repoURL, token, prNumber, workingBranch, head)
 				}
 			}
 			if checkoutErr != nil {
@@ -4816,6 +4816,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// 4. Create sandbox.
 	if session.Origin == models.SessionOriginCodeReview {
 		ctx = withCodeReviewPreparationBudget(ctx)
+		if !mandatoryPreparation {
+			// Main's shared-input budget starts after admission, independently
+			// of an older queued job. Keep later input checks on this marker.
+			preparationCtx = ctx
+		}
 	}
 	sandboxCfg := DefaultSandboxConfig()
 	sandboxCfg.SessionID = session.ID.String()
@@ -5113,12 +5118,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// Complete warm evidence may still be validated after the initial
 	// budget. Share this short verification window across auth and the
 	// receipt check; it cannot start fetch/bootstrap repair.
-	setupCtx := preparationCtx
-	if session.Origin == models.SessionOriginCodeReview && reusedExisting && errors.Is(preparationCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-		var cancelVerification context.CancelFunc
-		setupCtx, cancelVerification = context.WithTimeout(ctx, CodeReviewWorkspaceVerificationTimeout)
-		defer cancelVerification()
-	}
+	setupWindow := codeReviewSetupWindow{parent: ctx, preparation: preparationCtx, reusable: session.Origin == models.SessionOriginCodeReview && reusedExisting}
+	defer setupWindow.Close()
 	var authState *sandboxGitHubAuthState
 	var authErr error
 	// continueTargetBranch is the resolved target branch (repo default,
@@ -5150,7 +5151,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		repoID = promptIssue.RepositoryID
 	}
 	if repoID != nil {
-		repo, repoErr := o.repositories.GetByID(setupCtx, session.OrgID, *repoID)
+		repo, repoErr := o.repositories.GetByID(setupWindow.Context(), session.OrgID, *repoID)
 		if repoErr != nil {
 			log.Error().Err(repoErr).Msg("failed to fetch repository for continue-session auth wiring")
 			if session.Origin == models.SessionOriginCodeReview {
@@ -5176,7 +5177,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		var fallbackToken string
 		if !reusedExisting && !mandatoryPreparation {
-			token, tokenErr := o.github.GetInstallationToken(setupCtx, repo.InstallationID)
+			token, tokenErr := o.github.GetInstallationToken(setupWindow.Context(), repo.InstallationID)
 			if tokenErr != nil {
 				log.Error().Err(tokenErr).Msg("failed to get installation token for continue-session auth wiring")
 				if session.Origin == models.SessionOriginCodeReview {
@@ -5199,7 +5200,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		repoCopy := repo
 		if !restrictedPRFeedback {
-			authState, authErr = o.prepareSandboxGitHubAuth(setupCtx, session, &repoCopy, fallbackToken, &sandboxCfg, log)
+			authState, authErr = o.prepareSandboxGitHubAuth(setupWindow.Context(), session, &repoCopy, fallbackToken, &sandboxCfg, log)
 		}
 		if authErr != nil {
 			log.Error().Err(authErr).Msg("failed to wire GitHub auth for continue-session sandbox")
@@ -5275,7 +5276,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			},
 		)
 		if mandatoryPreparation && errors.Is(readyErr, context.DeadlineExceeded) && !errors.Is(readyErr, ErrCodeReviewPreparationCleanup) && ctx.Err() == nil {
-			readyErr = o.ensureCodeReviewWorkspaceEvidence(setupCtx, session, workspaceSandbox, log)
+			readyErr = o.ensureCodeReviewWorkspaceEvidence(setupWindow.Context(), session, workspaceSandbox, log)
 		} else if mandatoryPreparation && readyErr == nil {
 			// Preparation can fetch private Git-based dependencies. Reopen
 			// auth first, then configure the helper before repairing evidence.
@@ -5286,9 +5287,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				// The budget can expire after the metadata probe. Complete
 				// evidence may still take the one local-only verification path;
 				// it cannot restart bootstrap or source repair.
-				readyErr = o.ensureCodeReviewWorkspaceEvidence(ctx, session, workspaceSandbox, log)
+				readyErr = o.ensureCodeReviewWorkspaceEvidence(setupWindow.Context(), session, workspaceSandbox, log)
 			} else if readyErr == nil {
-				readyErr = o.ensureCodeReviewWorkspaceEvidence(setupCtx, session, workspaceSandbox, log)
+				readyErr = o.ensureCodeReviewWorkspaceEvidence(setupWindow.Context(), session, workspaceSandbox, log)
 			}
 		}
 		if errors.Is(readyErr, ErrThreadCancelledBeforeWorkspaceReady) {
@@ -6063,7 +6064,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	}
 
-	if err := o.ensureCodeReviewInputs(ctx, session, sandbox); err != nil {
+	if err := o.ensureCodeReviewInputs(setupWindow.Context(), session, sandbox); err != nil {
 		if errors.Is(err, ErrSandboxWorkspaceNotReady) {
 			return err
 		}
@@ -6894,7 +6895,7 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 			if mandatoryPreparation {
 				checkoutErr = o.checkoutReviewPullRequestHead(ctx, sandbox, repo.CloneURL, token, codeReviewPRNumber, workingBranch, codeReviewHeadSHA)
 			} else {
-				checkoutErr = o.checkoutExpectedPullRequestHead(ctx, sandbox, repo.CloneURL, token, codeReviewPRNumber, workingBranch, codeReviewHeadSHA)
+				checkoutErr = o.checkoutCodeReviewHead(ctx, sandbox, repo.CloneURL, token, codeReviewPRNumber, workingBranch, codeReviewHeadSHA)
 			}
 			checkoutStage.End(observability.StageOutcome(ctx, checkoutErr))
 			if checkoutErr != nil {
@@ -7878,6 +7879,13 @@ func (o *Orchestrator) failContinueSessionError(ctx context.Context, run *models
 	if opts != nil && opts.CodeReviewTurn != nil {
 		return cause
 	}
+	var preparationErr *CodeReviewWorkspacePreparationError
+	if run != nil && run.Origin == models.SessionOriginCodeReview && errors.As(cause, &preparationErr) {
+		// ContinueSession's deferred preparation projection also knows inferred
+		// reviewer IDs. Its exact-thread fence must precede any shared-parent
+		// or primary-thread fallback here.
+		return cause
+	}
 	var threadID *uuid.UUID
 	if opts != nil {
 		threadID = opts.ThreadID
@@ -7900,8 +7908,9 @@ func (o *Orchestrator) failContinueSessionError(ctx context.Context, run *models
 //
 // The handled result is true for code-review thread turns even when the
 // persistence write fails. Callers must propagate persistErr without wrapping
-// it in ErrCodeReviewThreadFailed so the worker retries the write instead of
-// dead-lettering a thread whose terminal result is not durable.
+// it in ErrCodeReviewThreadFailed because no terminal thread result was stored.
+// Preserve the original cause so recovery can distinguish unsafe preparation
+// from a result-write failure without blindly rerunning repository setup.
 func (o *Orchestrator) failCodeReviewThreadTurn(ctx context.Context, run *models.Session, threadID *uuid.UUID, result *models.SessionResult, errMsg string, activityExecution *activityPhaseExecution, log zerolog.Logger) (handled bool, persistErr error) {
 	if !isCodeReviewThreadTurn(run, threadID) {
 		return false, nil

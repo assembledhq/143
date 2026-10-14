@@ -657,7 +657,7 @@ func TestWaitForSandboxWorkspaceReady(t *testing.T) {
 				}
 			}
 
-			err := waitForSandboxWorkspaceReady(ctx, provider, sandbox, expectedBranch, expectedHead, tt.timeout, time.Millisecond, 4*time.Millisecond, checkCancellation, true)
+			err := waitForSandboxWorkspaceReady(withReviewPreparationActivation(ctx, true), provider, sandbox, expectedBranch, expectedHead, tt.timeout, time.Millisecond, 4*time.Millisecond, checkCancellation)
 			if tt.expectedErr != nil {
 				require.ErrorIs(t, err, tt.expectedErr, "workspace readiness should return the expected transient or context error")
 			} else {

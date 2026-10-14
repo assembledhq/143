@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestReviewPreparationActivationPreservesLegacyAuthFallback(t *testing.T) {
+func TestReviewPreparationActivationPreservesReviewAuthIsolation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name           string
@@ -20,10 +20,10 @@ func TestReviewPreparationActivationPreservesLegacyAuthFallback(t *testing.T) {
 		nilPolicy      bool
 		token, ghToken string
 	}{
-		{name: "default", nilPolicy: true, token: "fallback-token", ghToken: "prior-gh-token"},
-		{name: "global disabled", names: []string{"sample/repository"}, token: "fallback-token", ghToken: "prior-gh-token"},
-		{name: "empty repository list", enabled: true, token: "fallback-token", ghToken: "prior-gh-token"},
-		{name: "outside repository list", enabled: true, names: []string{"other/repository"}, token: "fallback-token", ghToken: "prior-gh-token"},
+		{name: "default", nilPolicy: true},
+		{name: "global disabled", names: []string{"sample/repository"}},
+		{name: "empty repository list", enabled: true},
+		{name: "outside repository list", enabled: true, names: []string{"other/repository"}},
 		{name: "selected repository", enabled: true, names: []string{"sample/repository"}},
 	}
 	for _, tt := range tests {
@@ -43,8 +43,8 @@ func TestReviewPreparationActivationPreservesLegacyAuthFallback(t *testing.T) {
 			cfg.Env = map[string]string{"GITHUB_TOKEN": "prior-token", "GH_TOKEN": "prior-gh-token"}
 			_, err := orchestrator.prepareSandboxGitHubAuth(context.Background(), session, repository, "fallback-token", &cfg, zerolog.Nop())
 			require.NoError(t, err, "known repository scope must resolve auth transport")
-			require.Equal(t, tt.token, cfg.Env["GITHUB_TOKEN"], "only activated preparation may replace the legacy environment fallback with private transport")
-			require.Equal(t, tt.ghToken, cfg.Env["GH_TOKEN"], "inactive review auth must preserve existing GH_TOKEN behavior")
+			require.Equal(t, tt.token, cfg.Env["GITHUB_TOKEN"], "review authentication must stay out of the container environment for every recipe policy")
+			require.Equal(t, tt.ghToken, cfg.Env["GH_TOKEN"], "inactive recipe preparation must preserve main review credential isolation")
 		})
 	}
 }

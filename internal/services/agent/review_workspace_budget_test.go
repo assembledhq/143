@@ -20,6 +20,7 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/reviewpreparation"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -155,9 +156,23 @@ func (p *reviewSetupBudgetProvider) Create(ctx context.Context, cfg SandboxConfi
 	return p.reviewWorkspaceProvider.Create(ctx, cfg)
 }
 
-func (p *reviewSetupBudgetProvider) CloneRepo(ctx context.Context, sandbox *Sandbox, repository, branch, token string) error {
-	time.Sleep(2 * time.Minute)
-	return p.reviewWorkspaceProvider.CloneRepo(ctx, sandbox, repository, branch, token)
+func (p *reviewSetupBudgetProvider) ExecWithStdin(ctx context.Context, sandbox *Sandbox, command string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	input, err := io.ReadAll(stdin)
+	if err != nil {
+		return -1, err
+	}
+	var envelope struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(input, &envelope); err != nil {
+		return -1, err
+	}
+	command += " " + string(envelope.Payload)
+	if strings.Contains(command, "clone --template=/dev/null --no-checkout") {
+		p.cloneCount++
+		time.Sleep(2 * time.Minute)
+	}
+	return p.Exec(ctx, sandbox, command, stdout, stderr)
 }
 
 func (p *reviewSetupBudgetProvider) Exec(ctx context.Context, sandbox *Sandbox, command string, stdout, stderr io.Writer) (int, error) {
@@ -171,35 +186,42 @@ func (p *reviewSetupBudgetProvider) Exec(ctx context.Context, sandbox *Sandbox, 
 	return p.reviewWorkspaceProvider.Exec(ctx, sandbox, command, stdout, stderr)
 }
 
-func TestStandaloneReviewWorkspaceBudgetStartsAfterAdmission(t *testing.T) {
+func TestStandaloneActivatedReviewWorkspaceUsesAdmittedPreparationDeadline(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		started := time.Now()
 		head := strings.Repeat("a", 40)
+		repository, organization := uuid.New(), uuid.New()
+		policy, err := reviewpreparation.NewPolicy(true, []string{"test/repo"})
+		require.NoError(t, err, "the admitted preparation fixture must explicitly activate its repository")
 		provider := &reviewSetupBudgetProvider{reviewWorkspaceProvider: reviewWorkspaceProvider{actualHead: head}}
 		orchestrator := &Orchestrator{
-			provider: provider,
+			provider:                provider,
+			reviewPreparationPolicy: policy,
 			sandboxCapacity: NewSandboxCapacityGate(SandboxCapacityGateConfig{
 				Counter: reviewWorkspaceCapacityCounter{}, MaxActive: 2, Logger: zerolog.Nop(),
 			}),
 			env: NewAgentEnv(AgentEnvDeps{}),
 			repositories: testInternalRepoStore{repo: models.Repository{
-				FullName: "test/repo", CloneURL: "https://github.com/test/repo.git", DefaultBranch: "main",
+				ID: repository, OrgID: organization, FullName: "test/repo", CloneURL: "https://github.com/test/repo.git", DefaultBranch: "main",
 			}},
 			github: testInternalGitHubTokens{token: "synthetic-token"},
 			logger: zerolog.Nop(),
 		}
-		repository := uuid.New()
+		branch := "143/review/admitted-budget"
 		session := &models.Session{
-			ID: uuid.New(), OrgID: uuid.New(), Origin: models.SessionOriginCodeReview,
+			ID: uuid.New(), OrgID: organization, WorkingBranch: &branch, Origin: models.SessionOriginCodeReview,
 			AgentType: models.AgentTypeCodex, RepositoryID: &repository,
 			RevisionContext: []byte(`{"kind":"code_review","github_repo":"test/repo","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","github_pr_number":42,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
 		}
 		ctx := jobctx.WithJobCreatedAt(context.Background(), started.Add(-time.Hour))
+		// The initial preparation handler supplies the durable admitted checkpoint,
+		// which takes precedence over the intake job's earlier capacity wait.
+		ctx = WithCodeReviewWorkspacePreparationDeadline(ctx, started.Add(CodeReviewWorkspacePreparationTimeout))
 		sandbox, err := orchestrator.PrepareCodeReviewWorkspace(ctx, session, head)
-		require.NoError(t, err, "standalone cold preparation must permit a fresh setup for an old queued job")
+		require.NoError(t, err, "activated cold preparation must retain the handler checkpoint after an earlier capacity wait")
 		require.Equal(t, "prepared-container", sandbox.ID, "successful preparation must transfer its owned container")
-		require.Equal(t, started.Add(CodeReviewWorkspacePreparationTimeout), provider.deadline, "standalone setup must stamp its budget before container creation")
+		require.Equal(t, started.Add(CodeReviewWorkspacePreparationTimeout), provider.deadline, "the handler checkpoint must bound setup before container creation")
 		require.Equal(t, 1, provider.prepared, "input generation must consume the same budget after create and clone")
 	})
 }
@@ -549,6 +571,220 @@ func TestReviewPreparationErrorPreservesExistingIdentity(t *testing.T) {
 				existing = fmt.Errorf("preserved wrapper: %w", existing)
 			}
 			require.Same(t, existing, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, existing), "ordinary existing errors and direct safe cleanup errors must remain idempotent")
+		})
+	}
+}
+
+func TestReviewPreparationBudgetSeparatesAdmissionFromActivatedExecution(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		active    bool
+		remaining time.Duration
+	}{
+		{name: "inactive shared input setup starts after admission", remaining: CodeReviewWorkspacePreparationTimeout},
+		{name: "activated execution retains durable attempt age", active: true, remaining: 5 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				started := time.Now()
+				ctx := withReviewPreparationActivation(jobctx.WithJobCreatedAt(context.Background(), started.Add(-3*time.Minute)), tt.active)
+				ctx = withCodeReviewPreparationBudget(ctx)
+				first, cancelFirst := codeReviewPreparationContext(ctx)
+				defer cancelFirst()
+				deadline, ok := first.Deadline()
+				require.True(t, ok, "both setup modes must carry an absolute preparation boundary")
+				require.Equal(t, started.Add(tt.remaining), deadline, "only activated recipe execution must consume durable attempt age")
+				time.Sleep(time.Minute)
+				second, cancelSecond := codeReviewPreparationContext(ctx)
+				defer cancelSecond()
+				actual, ok := second.Deadline()
+				require.True(t, ok, "later stages must retain a concrete preparation boundary")
+				require.Equal(t, deadline, actual, "later stage entry must not renew either preparation mode")
+				require.Equal(t, tt.remaining-time.Minute, time.Until(actual), "setup time must consume the same absolute boundary")
+			})
+		})
+	}
+}
+
+func TestWarmReviewSetupWindowStartsLazilyAndNeverRenews(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		parent := context.Background()
+		originalDeadline := time.Now().Add(time.Minute)
+		preparation, cancel := context.WithDeadline(WithCodeReviewWorkspacePreparationDeadline(parent, originalDeadline), originalDeadline)
+		defer cancel()
+		window := codeReviewSetupWindow{parent: parent, preparation: preparation, reusable: true}
+		defer window.Close()
+		require.Same(t, preparation, window.Context(), "a live setup must retain its original preparation context")
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		first := window.Context()
+		deadline, ok := first.Deadline()
+		require.True(t, ok, "a reusable expired setup must receive a bounded verification context")
+		require.Equal(t, originalDeadline.Add(CodeReviewWorkspaceVerificationTimeout), deadline, "the existing one-minute allowance must begin only at its first post-expiry check")
+		time.Sleep(40 * time.Second)
+		require.Same(t, first, window.Context(), "a later verification stage must consume the same allowance")
+		require.Equal(t, 20*time.Second, time.Until(deadline), "the second verification must receive only the unused allowance")
+		time.Sleep(20 * time.Second)
+		synctest.Wait()
+		require.ErrorIs(t, window.Context().Err(), context.DeadlineExceeded, "an exhausted verification window must never renew")
+		window.Close()
+		require.Same(t, first, window.Context(), "closing a consumed window must not permit a replacement")
+	})
+}
+
+func TestWarmReviewSetupWindowPreservesCallerAuthority(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		reusable      bool
+		cancelCaller  bool
+		outerDeadline bool
+	}{
+		{name: "cold setup cannot extend preparation"},
+		{name: "cancelled caller cannot open verification", reusable: true, cancelCaller: true},
+		{name: "earlier outer deadline bounds verification", reusable: true, outerDeadline: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				started := time.Now()
+				parent, cancelParent := context.WithCancel(context.Background())
+				defer cancelParent()
+				var cancelOuter context.CancelFunc
+				if tt.outerDeadline {
+					parent, cancelOuter = context.WithDeadline(parent, started.Add(80*time.Second))
+					defer cancelOuter()
+				}
+				preparation, cancel := context.WithDeadline(parent, started.Add(time.Minute))
+				defer cancel()
+				window := codeReviewSetupWindow{parent: parent, preparation: preparation, reusable: tt.reusable}
+				defer window.Close()
+				time.Sleep(time.Minute)
+				synctest.Wait()
+				if tt.cancelCaller {
+					cancelParent()
+				}
+				actual := window.Context()
+				if !tt.reusable || tt.cancelCaller {
+					require.Same(t, preparation, actual, "a cold or cancelled setup must retain the expired preparation context")
+					require.ErrorIs(t, actual.Err(), context.DeadlineExceeded, "local verification must not bypass a closed setup boundary")
+					return
+				}
+				deadline, ok := actual.Deadline()
+				require.True(t, ok, "warm verification must remain deadline bounded")
+				require.Equal(t, started.Add(80*time.Second), deadline, "an earlier outer deadline must cap the existing verification allowance")
+				cancelParent()
+				require.ErrorIs(t, actual.Err(), context.Canceled, "caller cancellation must immediately cancel an already-open verification window")
+			})
+		})
+	}
+}
+
+type sharedWarmVerificationProvider struct {
+	SandboxProvider
+	stages          []reviewWorkspacePreparationPayload
+	deadlines       []time.Time
+	authentications []*reviewGitAuthentication
+}
+
+func (*sharedWarmVerificationProvider) ReadFile(context.Context, *Sandbox, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (*sharedWarmVerificationProvider) Exec(context.Context, *Sandbox, string, io.Writer, io.Writer) (int, error) {
+	return 0, nil
+}
+
+func (p *sharedWarmVerificationProvider) ExecWithStdin(ctx context.Context, _ *Sandbox, _ string, input io.Reader, _, _ io.Writer) (int, error) {
+	var message struct {
+		Payload        reviewWorkspacePreparationPayload `json:"payload"`
+		Authentication *reviewGitAuthentication          `json:"authentication,omitempty"`
+	}
+	if err := json.NewDecoder(input).Decode(&message); err != nil {
+		return -1, err
+	}
+	deadline, _ := ctx.Deadline()
+	p.stages = append(p.stages, message.Payload)
+	p.deadlines = append(p.deadlines, deadline)
+	p.authentications = append(p.authentications, message.Authentication)
+	if len(p.stages) == 1 {
+		time.Sleep(40 * time.Second)
+		return 0, nil
+	}
+	<-ctx.Done()
+	return -1, ctx.Err()
+}
+
+func TestWarmRecipeAndCapturedInputVerificationShareRemainingAllowance(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		started := time.Now()
+		originalDeadline := started.Add(time.Minute)
+		parent := WithCodeReviewWorkspacePreparationDeadline(context.Background(), originalDeadline)
+		preparation, cancel := context.WithDeadline(parent, originalDeadline)
+		defer cancel()
+		window := codeReviewSetupWindow{parent: parent, preparation: preparation, reusable: true}
+		defer window.Close()
+		require.Same(t, preparation, window.Context(), "setup begins with its original preparation boundary")
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		provider := &sharedWarmVerificationProvider{}
+		tokens := &reviewInputsTokenSpy{}
+		orchestrator := &Orchestrator{provider: provider, repositories: testInternalRepoStore{repo: models.Repository{FullName: "example/repo", CloneURL: "https://github.com/example/repo.git"}}, github: tokens, logger: zerolog.Nop()}
+		session := reviewInputsSession(t, strings.Repeat("b", 40), strings.Repeat("a", 40))
+		sandbox := &Sandbox{ID: "shared-warm-window", WorkDir: "/workspace"}
+		require.NoError(t, orchestrator.ensureCodeReviewWorkspaceEvidence(window.Context(), session, sandbox, zerolog.Nop()), "a complete warm recipe receipt may use local verification after mid-setup expiry")
+		err := orchestrator.ensureCodeReviewInputs(window.Context(), session, sandbox)
+		synctest.Wait()
+		require.ErrorIs(t, err, context.DeadlineExceeded, "captured inputs must exhaust only the remaining verification allowance")
+		require.Equal(t, started.Add(2*time.Minute), time.Now(), "sequential verifiers may consume one existing minute after setup expiry")
+		require.Equal(t, []time.Time{started.Add(2 * time.Minute), started.Add(2 * time.Minute)}, provider.deadlines, "recipe receipt and captured input checks must receive exactly one shared absolute deadline")
+		require.Len(t, provider.stages, 2, "only the two local verification commands may execute")
+		require.True(t, provider.stages[0].VerifyOnly, "expired recipe evidence may verify existing receipts without repair")
+		require.True(t, provider.stages[1].Standalone, "the second command must be the actual shared captured-input verifier")
+		require.Contains(t, provider.stages[1].Prepare, "'true' 'false' 'true'", "captured-input platform command must be verify-only with private-input support")
+		for _, stage := range provider.stages {
+			require.False(t, stage.AuthenticateGit, "expired verification must never request Git authentication")
+			require.InDelta(t, float64(started.Add(2*time.Minute).UnixNano())/float64(time.Second), stage.DeadlineUnix, 0.001, "managed verification payloads must share the same deadline")
+		}
+		require.Equal(t, []*reviewGitAuthentication{nil, nil}, provider.authentications, "expired verification must never carry credentials")
+		require.Zero(t, tokens.calls.Load(), "expired verification must never mint a GitHub installation token")
+	})
+}
+
+func TestReviewPreparationIntegrityNormalizesOuterTypedCauses(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		wrapped bool
+	}{
+		{name: "integrity joined outside typed transport failure"},
+		{name: "typed integrity wrapped in private diagnostics", wrapped: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			innerCause := error(io.ErrUnexpectedEOF)
+			if tt.wrapped {
+				innerCause = ErrCodeReviewSourceIntegrity
+			}
+			inner := NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageHydration, innerCause)
+			cause := errors.Join(inner, ErrCodeReviewSourceIntegrity)
+			if tt.wrapped {
+				cause = fmt.Errorf("provider token=synthetic-secret: %w", inner)
+			}
+			actual := NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, cause)
+			var typed *CodeReviewWorkspacePreparationError
+			require.ErrorAs(t, actual, &typed, "joined integrity must retain a typed finite preparation failure")
+			require.Equal(t, CodeReviewPreparationStageHydration, typed.Stage, "normalization must retain the concrete failed stage")
+			require.Equal(t, "Review workspace preparation could not verify pinned Git source object integrity. Recreate the review workspace and retry. Review did not run.", actual.Error(), "outer integrity must not expose private provider diagnostics")
+			require.ErrorIs(t, actual, ErrCodeReviewSourceIntegrity, "the finite error must retain terminal source integrity")
+			require.ErrorIs(t, actual, cause, "the full original tree must remain available for internal classification")
 		})
 	}
 }
