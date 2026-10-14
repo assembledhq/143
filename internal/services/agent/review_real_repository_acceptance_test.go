@@ -203,6 +203,7 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 				report["executions"] = provider.observations()
 				report["process_cleanup"] = provider.cleanupObservations
 				report["destruction_traces"] = provider.destructionTraces
+				report["destruction_resources"] = provider.destructionResources
 				report["sdk_exec_count"] = observed.calls.Load()
 				report["creation_resources"] = provider.creationResources
 				report["sdk_preparation_deadlines"] = observed.deadlines()
@@ -510,19 +511,21 @@ func (c *realReviewDockerClient) deadlines() []float64 {
 
 type realReviewProvider struct {
 	*providers.DockerProvider
-	client              *client.Client
-	image, network      string
-	repo                realReviewRepository
-	logs                *acceptanceLogBuffer
-	surfaces            *acceptanceLogBuffer
-	outputScanners      []*acceptanceLogBuffer
-	mu                  sync.Mutex
-	containers          map[string]*agent.Sandbox
-	executions          []realReviewExecution
-	cleanupObservations []json.RawMessage
-	destructionTraces   []realReviewDestroyedTrace
-	created, destroyed  atomic.Int64
-	creationResources   []map[string]any
+	client               *client.Client
+	image, network       string
+	repo                 realReviewRepository
+	logs                 *acceptanceLogBuffer
+	surfaces             *acceptanceLogBuffer
+	outputScanners       []*acceptanceLogBuffer
+	mu                   sync.Mutex
+	containers           map[string]*agent.Sandbox
+	executions           []realReviewExecution
+	cleanupObservations  []json.RawMessage
+	destructionTraces    []realReviewDestroyedTrace
+	destructionResources []realReviewDestructionResources
+	memoryMonitors       map[string]*realReviewMemoryMonitor
+	created, destroyed   atomic.Int64
+	creationResources    []map[string]any
 }
 
 // Independent streams need independent boundary tails: interleaving stderr,
@@ -593,6 +596,15 @@ func (p *realReviewProvider) Create(ctx context.Context, cfg agent.SandboxConfig
 		resources["kernel_cgroup_proof"] = proof
 		return nil, errors.New("sandbox process identity changed during host kernel resource verification")
 	}
+	monitor := newRealReviewMemoryMonitor(sandbox.ID, func() realReviewMemorySample {
+		return readRealReviewMemorySample("/sys/fs/cgroup", sandbox.ID)
+	}, 500*time.Millisecond, 45*time.Minute)
+	p.mu.Lock()
+	if p.memoryMonitors == nil {
+		p.memoryMonitors = map[string]*realReviewMemoryMonitor{}
+	}
+	p.memoryMonitors[sandbox.ID] = monitor
+	p.mu.Unlock()
 	var output bytes.Buffer
 	code, traceErr := p.DockerProvider.Exec(ctx, sandbox, "umask 077; : > /tmp/143-real-review-observation.jsonl", &output, io.Discard)
 	if traceErr != nil || code != 0 {
@@ -731,6 +743,214 @@ func realReviewPositiveKernelInteger(raw string) (int64, error) {
 	return parsed, nil
 }
 
+type realReviewMemorySample struct {
+	MemoryPeakBytes    *int64           `json:"memory_peak_bytes"`
+	MemoryCurrentBytes *int64           `json:"memory_current_bytes"`
+	MemoryEvents       map[string]int64 `json:"memory_events"`
+	UnavailableFields  []string         `json:"unavailable_fields"`
+}
+
+type realReviewMemoryTelemetry struct {
+	CgroupPath              string                 `json:"source_cgroup_path"`
+	IntervalMS              int64                  `json:"interval_ms"`
+	MaxDurationMS           int64                  `json:"max_duration_ms"`
+	ReadLimitsBytes         map[string]int64       `json:"read_limits_bytes"`
+	Samples                 int                    `json:"sample_count"`
+	CompleteSamples         int                    `json:"complete_sample_count"`
+	Latest                  realReviewMemorySample `json:"latest"`
+	MaxObservedPeakBytes    *int64                 `json:"max_observed_memory_peak_bytes"`
+	MaxObservedCurrentBytes *int64                 `json:"max_observed_memory_current_bytes"`
+	MaxObservedEvents       map[string]int64       `json:"max_observed_memory_events"`
+	LifetimeExpired         bool                   `json:"lifetime_expired"`
+}
+
+type realReviewMemoryMonitor struct {
+	mu       sync.Mutex
+	once     sync.Once
+	cancel   context.CancelFunc
+	done     chan struct{}
+	read     func() realReviewMemorySample
+	retained realReviewMemoryTelemetry
+}
+
+// One monitor retains a fixed-size aggregate, never a timeline. Cancellation
+// joins its goroutine before a final read and before private result serialization.
+func newRealReviewMemoryMonitor(containerID string, read func() realReviewMemorySample, interval, lifetime time.Duration) *realReviewMemoryMonitor {
+	ctx, cancel := context.WithTimeout(context.Background(), lifetime)
+	monitor := &realReviewMemoryMonitor{cancel: cancel, done: make(chan struct{}), read: read,
+		retained: realReviewMemoryTelemetry{CgroupPath: "/docker/" + containerID, IntervalMS: interval.Milliseconds(), MaxDurationMS: lifetime.Milliseconds(),
+			ReadLimitsBytes: map[string]int64{"memory.peak": 128, "memory.current": 128, "memory.events": 4096}}}
+	monitor.record(read())
+	go func() {
+		defer close(monitor.done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				monitor.mu.Lock()
+				monitor.retained.LifetimeExpired = errors.Is(ctx.Err(), context.DeadlineExceeded)
+				monitor.mu.Unlock()
+				return
+			case <-ticker.C:
+				if ctx.Err() == nil {
+					monitor.record(read())
+				}
+			}
+		}
+	}()
+	return monitor
+}
+
+func (m *realReviewMemoryMonitor) record(sample realReviewMemorySample) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.retained.Samples++
+	if len(sample.UnavailableFields) == 0 && sample.MemoryPeakBytes != nil && sample.MemoryCurrentBytes != nil && sample.MemoryEvents != nil {
+		m.retained.CompleteSamples++
+	}
+	m.retained.Latest = sample
+	m.retained.MaxObservedPeakBytes = retainRealReviewMemoryMaximum(m.retained.MaxObservedPeakBytes, sample.MemoryPeakBytes)
+	m.retained.MaxObservedCurrentBytes = retainRealReviewMemoryMaximum(m.retained.MaxObservedCurrentBytes, sample.MemoryCurrentBytes)
+
+	if sample.MemoryEvents != nil {
+		if m.retained.MaxObservedEvents == nil {
+			m.retained.MaxObservedEvents = map[string]int64{}
+		}
+		for key, value := range sample.MemoryEvents {
+			if previous, present := m.retained.MaxObservedEvents[key]; !present || value > previous {
+				m.retained.MaxObservedEvents[key] = value
+			}
+		}
+	}
+}
+
+func retainRealReviewMemoryMaximum(previous, current *int64) *int64 {
+	if current == nil || (previous != nil && *previous >= *current) {
+		return previous
+	}
+	value := *current
+	return &value
+}
+
+func (m *realReviewMemoryMonitor) stop() realReviewMemoryTelemetry {
+	m.once.Do(func() {
+		m.cancel()
+		<-m.done
+		m.record(m.read())
+	})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.retained
+}
+
+func readRealReviewMemorySample(cgroupRoot, containerID string) realReviewMemorySample {
+	sample := realReviewMemorySample{UnavailableFields: []string{}}
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(containerID) {
+		sample.UnavailableFields = []string{"memory.events", "memory.peak", "memory.current"}
+		return sample
+	}
+	base := "docker/" + containerID + "/"
+	// Read events first so a disappearing cgroup cannot erase already observed
+	// OOM counters merely because another optional metric is no longer readable.
+	if raw, err := readRealReviewKernelFile(cgroupRoot, base+"memory.events", 4096); err == nil {
+		sample.MemoryEvents, err = realReviewMemoryEvents(raw)
+		if err != nil {
+			sample.UnavailableFields = append(sample.UnavailableFields, "memory.events")
+		}
+	} else {
+		sample.UnavailableFields = append(sample.UnavailableFields, "memory.events")
+	}
+	for _, metric := range []string{"memory.peak", "memory.current"} {
+		raw, err := readRealReviewKernelFile(cgroupRoot, base+metric, 128)
+		var value int64
+		if err == nil {
+			value, err = realReviewNonnegativeKernelInteger(string(raw))
+		}
+		if err != nil {
+			sample.UnavailableFields = append(sample.UnavailableFields, metric)
+			continue
+		}
+		if metric == "memory.peak" {
+			sample.MemoryPeakBytes = &value
+		} else {
+			sample.MemoryCurrentBytes = &value
+		}
+	}
+	return sample
+}
+
+func realReviewMemoryEvents(raw []byte) (map[string]int64, error) {
+	if len(raw) > 4096 {
+		return nil, errors.New("memory event observation exceeded its fixed read bound")
+	}
+	result := map[string]int64{}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return nil, errors.New("memory event observation must contain finite keyed counters")
+		}
+		value, err := realReviewNonnegativeKernelInteger(fields[1])
+		if err != nil {
+			return nil, errors.New("memory event observation must contain finite keyed counters")
+		}
+		switch fields[0] {
+		case "low", "high", "max", "oom", "oom_kill", "oom_group_kill", "sock_throttled":
+			if _, duplicate := result[fields[0]]; duplicate {
+				return nil, errors.New("memory event observation contains conflicting counters")
+			}
+			result[fields[0]] = value
+		}
+	}
+	for _, required := range []string{"max", "oom", "oom_kill"} {
+		if _, present := result[required]; !present {
+			return nil, errors.New("memory event observation lacks required kernel counters")
+		}
+	}
+	return result, nil
+}
+
+func realReviewNonnegativeKernelInteger(raw string) (int64, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" || strings.IndexFunc(value, func(character rune) bool { return character < '0' || character > '9' }) >= 0 {
+		return 0, errors.New("kernel observation must be a finite nonnegative integer")
+	}
+	return strconv.ParseInt(value, 10, 64)
+}
+
+type realReviewDockerState struct {
+	Available           bool   `json:"available"`
+	Running             bool   `json:"running"`
+	PID                 int    `json:"pid"`
+	OOMKilled           bool   `json:"oom_killed"`
+	ExitCode            int    `json:"exit_code"`
+	Status              string `json:"status"`
+	ErrorClassification string `json:"error_classification"`
+}
+
+func sanitizeRealReviewDockerState(state *container.State) realReviewDockerState {
+	if state == nil {
+		return realReviewDockerState{Status: "unavailable", ErrorClassification: "inspection_unavailable"}
+	}
+	result := realReviewDockerState{Available: true, Running: state.Running, PID: state.Pid, OOMKilled: state.OOMKilled, ExitCode: state.ExitCode, Status: string(state.Status), ErrorClassification: "none"}
+	switch result.Status {
+	case "created", "running", "paused", "restarting", "removing", "exited", "dead":
+	default:
+		result.Status = "unrecognized"
+	}
+	if state.Error != "" {
+		result.ErrorClassification = "reported_without_details"
+	}
+	return result
+}
+
+type realReviewDestructionResources struct {
+	ContainerID                string                     `json:"container_id"`
+	DockerState                realReviewDockerState      `json:"docker_state"`
+	MemoryTelemetry            *realReviewMemoryTelemetry `json:"memory_telemetry"`
+	MemoryTelemetryUnavailable string                     `json:"memory_telemetry_unavailable,omitempty"`
+}
+
 func readRealReviewKernelFile(root, relative string, limit int64) ([]byte, error) {
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root || filepath.IsAbs(relative) || filepath.Clean(relative) != relative || relative == "." || relative == ".." || strings.HasPrefix(relative, "../") || strings.ContainsAny(relative, "\r\n\x00\\") {
 		return nil, errors.New("kernel resource path must be canonical and bounded inside its host root")
@@ -802,6 +1022,22 @@ func (p *realReviewProvider) observations() []realReviewExecution {
 func (p *realReviewProvider) Destroy(ctx context.Context, sandbox *agent.Sandbox) error {
 	observeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
+	resources := realReviewDestructionResources{ContainerID: sandbox.ID, DockerState: sanitizeRealReviewDockerState(nil)}
+	actual, inspectErr := p.client.ContainerInspect(observeCtx, sandbox.ID)
+	if inspectErr == nil && actual.ID == sandbox.ID {
+		resources.DockerState = sanitizeRealReviewDockerState(actual.State)
+	}
+	p.mu.Lock()
+	monitor := p.memoryMonitors[sandbox.ID]
+	delete(p.memoryMonitors, sandbox.ID)
+	p.mu.Unlock()
+	if monitor == nil {
+		resources.MemoryTelemetryUnavailable = "no_verified_owned_cgroup_monitor"
+	} else {
+		telemetry := monitor.stop()
+		resources.MemoryTelemetry = &telemetry
+	}
+	p.destructionResources = append(p.destructionResources, resources)
 	// Preparation may destroy a failed workspace before its caller receives a
 	// sandbox. Retain only sanitized fixed-stage timing while it still exists.
 	var traceOutput bytes.Buffer
