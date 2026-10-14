@@ -139,7 +139,23 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
 	}
-	defer pool.Close()
+	controlPlanePool, err := newWorkerControlPlanePool(ctx, *cfg)
+	if err != nil {
+		pool.Close()
+		logger.Fatal().Err(err).Msg("failed to connect worker control-plane database")
+	}
+	defer func() {
+		// Cancel liveness operations before Close waits for borrowed connections.
+		cancel()
+		if controlPlanePool != nil {
+			controlPlanePool.Close()
+		}
+		pool.Close()
+	}()
+	controlPlaneDB := db.DBTX(pool)
+	if controlPlanePool != nil {
+		controlPlaneDB = controlPlanePool
+	}
 
 	// Recover process-local preview ownership before any preview starts or
 	// lease heartbeats. Use the database clock so creation timestamps and the
@@ -432,7 +448,7 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
 
-	nodeManager := cluster.NewNodeManager(pool, logger, cfg.NodeID, cfg.Mode)
+	nodeManager := cluster.NewNodeManager(pool, logger, cfg.NodeID, cfg.Mode, cluster.WithControlPlaneDB(controlPlaneDB))
 	previewCapable := (cfg.Mode == "worker" || cfg.Mode == "all") && pvProvider != nil
 	var previewRoutingReady atomic.Bool
 	nodeManager.SetMetadataProvider(func() map[string]any {
@@ -817,6 +833,7 @@ func main() {
 			agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
 			cfg.SandboxHostID(),
 			reviewAdmissionEvidence,
+			worker.WithLeaseRenewer(db.NewJobStore(controlPlaneDB)),
 		)
 		if workerPreviewStore != nil && cfg.NodeID != "" {
 			go runPreviewRuntimeHeartbeat(ctx, workerPreviewStore, cfg.NodeID, logger, 30*time.Second, 90*time.Second)
@@ -1087,10 +1104,11 @@ func startProcessWorkers(
 	staticEgress agent.StaticEgressRuntimeConfig,
 	sandboxHostID string,
 	admissionEvidence *codereviewsvc.AdmissionProcessEvidence,
+	workerOptions ...worker.Option,
 ) []*worker.Worker {
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
-		w := worker.New(pool, logger, nodeID)
+		w := worker.New(pool, logger, nodeID, workerOptions...)
 		worker.RegisterHandlers(w, stores, services, retentionCfg, logger)
 		workers = append(workers, w)
 	}

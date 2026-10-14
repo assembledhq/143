@@ -24,6 +24,10 @@ Treat these as **startup-time settings**. In normal deployments, you change env 
 
 Review startup uses the shared advertised sandbox budget. Set `WORKER_PRIVATE_IP` to a stable IP unique to each physical Docker host; overlapping worker generations on that host must advertise the same value. Missing or invalid identity stops worker/all startup with an actionable configuration error. Stale or unknown advertised inventory defers reviews while intake stays active. Configure `WORKER_MAX_ACTIVE_SANDBOXES` for the machine’s safe workspace limit. `WORKER_PROCESS_COUNT` controls job loops and does not replace that limit.
 
+## Database connection budget
+
+Each `MODE=worker` or `MODE=all` process reserves a separate pool of at most two additional database connections for node heartbeats, shutdown drain writes, and worker-owned job lease renewal. Include this per-process reserve in the PostgreSQL connection budget, including overlapping deployment generations. The reserve can idle at zero connections. Ordinary job work and session executors retain their existing pool limits; increasing worker control-plane headroom does not enlarge executor pools. API-only processes do not create this reserve.
+
 ## Practical sizing heuristic
 
 Pick target parallel sandboxes (`P`) for the node, then make sure:

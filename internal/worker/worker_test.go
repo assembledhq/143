@@ -1258,6 +1258,7 @@ func expectClaimWithTarget(mock pgxmock.PgxPoolIface, jobID, orgID uuid.UUID, jo
 }
 
 func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uuid.UUID, jobType string, payload json.RawMessage, createdAt time.Time, lockToken uuid.UUID, attempts, maxAttempts int, targetNodeID *string) {
+	claimedAt := time.Now()
 	var target any
 	if targetNodeID != nil {
 		target = *targetNodeID
@@ -1271,7 +1272,7 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 			"dedupe_key", "target_node_id", "retry_window_started_at", "created_at", "updated_at", "completed_at",
 		}).AddRow(
 			jobID, orgID, "default", jobType, payload, 5, "running",
-			attempts, maxAttempts, createdAt, "test-node", createdAt, createdAt.Add(defaultLeaseDuration),
+			attempts, maxAttempts, createdAt, "test-node", claimedAt, claimedAt.Add(defaultLeaseDuration),
 			lockToken.String(), "test-node", string(models.JobOwnerKindWorker), nil, nil, target, nil, createdAt, createdAt, nil,
 		))
 }
