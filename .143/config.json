@@ -75,5 +75,25 @@
         "memory": "4Gi"
       }
     }
+  },
+  "review": {
+    "commands": [
+      "sh .143/review-dependencies.sh"
+    ],
+    "verify_commands": [
+      "sh .143/review-dependencies.sh --verify"
+    ],
+    "evidence": [
+      {
+        "path": ".143/cache/review/go/pkg/mod",
+        "description": "Exact locked Go dependency sources; .143/cache/review/go/modules.json maps module versions to relative source paths. Set GOMODCACHE to this root for optional Go inspection.",
+        "category": "go_dependencies"
+      },
+      {
+        "path": "frontend/node_modules",
+        "description": "Locked frontend package sources and declarations installed with lifecycle scripts disabled. Source availability does not prove builds, tests or runtime readiness.",
+        "category": "javascript_dependencies"
+      }
+    ]
   }
 }

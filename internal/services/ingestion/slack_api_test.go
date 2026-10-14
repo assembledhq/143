@@ -693,6 +693,7 @@ func TestSlackWritesDoNotFollowRedirects(t *testing.T) {
 	}))
 	defer server.Close()
 	client := NewSlackAPIClient(zerolog.Nop())
+	client.client.Transport = server.Client().Transport
 	client.baseURL = server.URL
 	_, err := client.PostMessage(context.Background(), "test-token", "C123", "", "hello")
 	require.ErrorContains(t, err, "status 307", "a redirected write has no confirmed delivery")

@@ -961,8 +961,14 @@ func TestWorker_Poll_LostLeaseSkipsTerminalWrite(t *testing.T) {
 	mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
 		WithArgs(int(defaultLeaseDuration.Seconds()), jobID, lockToken).
 		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery("WITH target AS").
+		WithArgs(jobID, lockToken, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(0)))
 
-	w.poll(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	w.poll(ctx)
+	require.NoError(t, ctx.Err(), "lease loss must cancel the handler before the test deadline")
 
 	select {
 	case <-releaseHandler:
