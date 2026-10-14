@@ -10,12 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +27,7 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/reviewpreparation"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/providers"
 	"github.com/docker/docker/api/types/container"
@@ -168,6 +171,8 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 	require.NoError(t, err, "Docker daemon must be reachable")
 	_, registered := info.Runtimes["runsc"]
 	require.True(t, registered, "gVisor must be registered")
+	require.Equal(t, "2", info.CgroupVersion, "real-repository resource acceptance requires host cgroup v2")
+	require.Equal(t, "cgroupfs", info.CgroupDriver, "disposable acceptance daemon must explicitly match runsc's filesystem cgroup driver")
 	inspected, err := cli.ImageInspect(ctx, image)
 	require.NoError(t, err, "built sandbox image must exist")
 	require.Equal(t, "linux", inspected.Os, "sandbox image must target Linux")
@@ -184,7 +189,9 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 			observed := &realReviewDockerClient{DockerClient: cli, logs: surfaces}
 			provider := &realReviewProvider{DockerProvider: providers.NewDockerProvider(observed, zerolog.New(logs).Level(zerolog.DebugLevel), providers.WithRuntime("runsc"), providers.WithNetwork(networkName), providers.WithRequireDiskQuota(repo.DiskLimitGB > 0), providers.WithResolvConf(resolvConf)), client: cli, image: image, network: networkName, repo: repo, logs: logs, surfaces: surfaces, containers: map[string]*agent.Sandbox{}}
 			tokens := &realReviewTokens{token: token, installationID: repo.InstallationID}
-			orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{Provider: provider, Repositories: realReviewRepoStore{repo}, GitHub: tokens, Env: agent.NewAgentEnv(agent.AgentEnvDeps{}), Logger: zerolog.New(logs), SandboxCapacity: agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{Counter: acceptanceCapacityCounter{}, MaxActive: 1, Logger: zerolog.Nop()})})
+			preparationPolicy, policyErr := reviewpreparation.NewPolicy(true, []string{repo.FullName})
+			require.NoError(t, policyErr, "acceptance must explicitly enable preparation for its exact private repository identity")
+			orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{Provider: provider, Repositories: realReviewRepoStore{repo}, GitHub: tokens, Env: agent.NewAgentEnv(agent.AgentEnvDeps{}), Logger: zerolog.New(logs), ReviewPreparationPolicy: preparationPolicy, SandboxCapacity: agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{Counter: acceptanceCapacityCounter{}, MaxActive: 1, Logger: zerolog.Nop()})})
 			report := map[string]any{"repository": repo.FullName, "base_sha": repo.BaseSHA, "head_sha": repo.HeadSHA, "config_sha256": repo.ConfigSHA256, "helper_sha256": repo.HelperSHA256, "source_sha": sourceSHA, "image_id": inspected.ID, "image_os": inspected.Os, "image_architecture": inspected.Architecture, "docker_server_version": info.ServerVersion, "docker_storage_driver": info.Driver, "docker_storage_driver_status": info.DriverStatus, "docker_data_root": info.DockerRootDir, "runsc_version": os.Getenv("REVIEW_ACCEPTANCE_RUNSC_VERSION"), "runtime": "runsc", "cpu_limit": repo.CPULimit, "memory_limit_mb": repo.MemoryLimitMB, "disk_limit_gb": repo.DiskLimitGB, "disk_quota_required": repo.DiskLimitGB > 0, "token_kind": repo.TokenKind, "observation": "trusted run/capture observers record fixed labels and process identity; original functions, payload, deadlines, recipe and security guards are preserved", "limits": []string{"no LLM reviewer execution or durable workspace publication", "GitHub Actions job tokens do not establish deployed GitHub App token issuance", "worker network policy and deployed image identity require separate acceptance"}}
 			t.Cleanup(func() {
 				report["passed"] = !t.Failed() && !provider.credentialDetected() && provider.created.Load() == provider.destroyed.Load()
@@ -195,6 +202,7 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 				report["destroyed_containers"] = provider.destroyed.Load()
 				report["executions"] = provider.observations()
 				report["process_cleanup"] = provider.cleanupObservations
+				report["destruction_traces"] = provider.destructionTraces
 				report["sdk_exec_count"] = observed.calls.Load()
 				report["creation_resources"] = provider.creationResources
 				report["sdk_preparation_deadlines"] = observed.deadlines()
@@ -249,11 +257,19 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 				}
 			}
 			require.Equal(t, 1, setupCount, "fresh real repository must execute its exact declared setup once")
+			report["tool_repair_applicable"] = len(coldTools) > 0
+			if len(coldTools) == 0 {
+				report["tool_repair_not_applicable_reason"] = "repository declares no platform executables"
+			}
 			phases := []struct {
-				name    string
-				expired bool
-			}{{"warm", false}, {"restored", false}, {"expired", true}}
+				name       string
+				expired    bool
+				repairTool bool
+			}{{name: "warm"}, {name: "restored"}, {name: "tool_repair", repairTool: true}, {name: "expired", expired: true}}
 			for _, phase := range phases {
+				if phase.repairTool && len(coldTools) == 0 {
+					continue
+				}
 				turnCreatedAt := time.Now()
 				phaseContext := jobctx.WithJobCreatedAt(context.Background(), turnCreatedAt)
 				turnContext, turnCancel := context.WithDeadline(phaseContext, turnCreatedAt.Add(agent.CodeReviewWorkspacePreparationTimeout))
@@ -305,6 +321,14 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 				phaseTools := provider.declaredTools(t, sandbox)
 				report[phase.name+"_declared_tools_before_verification"] = phaseTools
 				require.Equal(t, coldTools, phaseTools, "healthy reuse must retain exact declared tool bytes and modes before the engine can repair anything")
+				var receiptIdentityBefore json.RawMessage
+				if phase.repairTool {
+					receiptIdentityBefore = provider.receiptIdentity(t, sandbox)
+					removed := provider.removeDeclaredTool(t, sandbox, coldTools)
+					report["tool_repair_removed_tool"] = removed
+					report["tool_repair_receipt_identity_before"] = receiptIdentityBefore
+					require.Equal(t, coldReceipt, provider.read(t, sandbox, ".git/143-review-evidence.json"), "deliberately removing a platform executable must preserve the exact source-evidence receipt")
+				}
 				before := provider.readTrace(t, sandbox)
 				callsBefore := tokens.calls.Load()
 				if phase.expired {
@@ -319,9 +343,9 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 				if reuseErr != nil {
 					report[phase.name+"_error"] = realReviewSafeError(reuseErr, token)
 				}
-				require.NoError(t, reuseErr, "healthy real-repository evidence should reuse through the production path")
+				require.NoError(t, reuseErr, "real-repository evidence reuse or declared-tool repair should succeed through the production path")
 				currentExecutions, currentSDK := provider.observations()[executionsBefore:], observed.deadlines()[sdkBefore:]
-				require.Len(t, currentExecutions, 1, "complete evidence must execute exactly one local production evidence validation")
+				require.Len(t, currentExecutions, 1, "complete repository evidence must execute exactly one local production validation or tool repair")
 				require.Equal(t, len(currentExecutions), len(currentSDK), "every reuse input must have an attributed SDK execution")
 				for index, execution := range currentExecutions {
 					require.False(t, execution.Standalone, "reuse must execute the full evidence engine, not a standalone command")
@@ -337,13 +361,18 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 					report["restored_through_verification_ms"] = time.Since(turnCreatedAt).Milliseconds()
 					require.Less(t, time.Since(turnCreatedAt), agent.CodeReviewWorkspacePreparationTimeout, "new container, snapshot restore and verification must share one eight-minute budget")
 				}
-				require.Equal(t, callsBefore, tokens.calls.Load(), "warm, restored and expired paths must acquire no token")
-				require.Equal(t, coldReceipt, provider.read(t, sandbox, ".git/143-review-evidence.json"), "reuse must preserve exact receipt bytes")
+				require.Equal(t, callsBefore, tokens.calls.Load(), "reuse and tool-only repair must acquire no repository token")
+				require.Equal(t, coldReceipt, provider.read(t, sandbox, ".git/143-review-evidence.json"), "reuse and tool-only repair must preserve exact receipt bytes and captured repository evidence")
+				if phase.repairTool {
+					receiptIdentityAfter := provider.receiptIdentity(t, sandbox)
+					require.Equal(t, receiptIdentityBefore, receiptIdentityAfter, "tool-only repair must retain the same readiness file identity, bytes, permissions and timestamps")
+					report["tool_repair_receipt_identity_after"] = receiptIdentityAfter
+				}
 				after := provider.readTrace(t, sandbox)
 				require.GreaterOrEqual(t, len(after), len(before), "trusted trace must append without erasure")
 				current := after[len(before):]
 				require.NotEmpty(t, current, "actual reuse must emit a trusted execution trace")
-				fullHashes, toolVerifiers := 0, 0
+				fullHashes, toolVerifiers, toolRepairs := 0, 0, 0
 				for _, entry := range current {
 					if entry.Stage == "full_object_hash" {
 						fullHashes++
@@ -351,9 +380,11 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 					if entry.Stage == "tool_verifier" {
 						toolVerifiers++
 					}
+					if entry.Stage == "tool_repair" {
+						toolRepairs++
+					}
 					require.NotEqual(t, "source_hydration", entry.Stage, "complete evidence reuse may not hydrate or repair captured source")
 					require.NotEqual(t, "repository_setup", entry.Stage, "reuse may not run repository installation")
-					require.NotEqual(t, "tool_repair", entry.Stage, "healthy warm, restored and expired evidence may not reinstall tools")
 					require.False(t, entry.Authenticated, "reuse must not execute authenticated Git")
 					if phase.expired {
 						require.NotEqual(t, "repository_verifier", entry.Stage, "expired verification must not execute arbitrary repository verifier")
@@ -363,7 +394,16 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 				if len(coldTools) > 0 {
 					require.Positive(t, toolVerifiers, "each reuse must execute platform verification of actual declared tool pins")
 				}
-				require.Equal(t, coldTools, provider.declaredTools(t, sandbox), "healthy validation must preserve exact declared tool bytes and permissions")
+				if phase.repairTool {
+					require.Equal(t, 1, toolRepairs, "a deliberately missing required executable must run exactly one registered platform tool repair")
+					require.GreaterOrEqual(t, toolVerifiers, 2, "tool repair must be bracketed by a failed pin check and successful verification")
+					require.Less(t, time.Since(turnCreatedAt), agent.CodeReviewWorkspacePreparationTimeout, "missing-tool detection, repair and verification must share the original turn budget")
+				} else {
+					require.Zero(t, toolRepairs, "healthy warm, restored and expired evidence may not reinstall tools")
+				}
+				verifiedTools := provider.declaredTools(t, sandbox)
+				require.Equal(t, coldTools, verifiedTools, "validation and registered tool repair must retain exact declared tool bytes and executable modes")
+				report[phase.name+"_declared_tools_after_verification"] = verifiedTools
 				report[phase.name+"_trace"] = current
 				if phase.expired {
 					require.Less(t, time.Since(phaseStarted), agent.CodeReviewWorkspaceVerificationTimeout, "expired platform-only verification must finish inside its original minute")
@@ -415,6 +455,13 @@ type realReviewDeclaredTool struct {
 	Path            string `json:"path"`
 	SHA256          string `json:"sha256"`
 	Mode            uint32 `json:"mode"`
+}
+
+type realReviewRemovedTool struct {
+	Name           string                            `json:"name"`
+	Tool           realReviewDeclaredTool            `json:"tool"`
+	Absent         bool                              `json:"absent"`
+	RemainingTools map[string]realReviewDeclaredTool `json:"remaining_tools"`
 }
 
 type realReviewExecution struct {
@@ -473,6 +520,7 @@ type realReviewProvider struct {
 	containers          map[string]*agent.Sandbox
 	executions          []realReviewExecution
 	cleanupObservations []json.RawMessage
+	destructionTraces   []realReviewDestroyedTrace
 	created, destroyed  atomic.Int64
 	creationResources   []map[string]any
 }
@@ -518,7 +566,7 @@ func (p *realReviewProvider) Create(ctx context.Context, cfg agent.SandboxConfig
 	if err != nil {
 		return nil, errors.New("actual container resource inspection failed")
 	}
-	if actual.Config == nil || actual.HostConfig == nil {
+	if actual.ID != sandbox.ID || actual.Config == nil || actual.HostConfig == nil || actual.State == nil || !actual.State.Running || actual.State.Pid <= 0 {
 		return nil, errors.New("actual container configuration absent")
 	}
 	if _, err := p.surfaces.Write([]byte(strings.Join(actual.Config.Env, "\x00"))); err != nil {
@@ -530,7 +578,21 @@ func (p *realReviewProvider) Create(ctx context.Context, cfg agent.SandboxConfig
 	if p.repo.DiskLimitGB > 0 && actual.HostConfig.StorageOpt["size"] != fmt.Sprintf("%dG", p.repo.DiskLimitGB) {
 		return nil, errors.New("actual disk quota differs from required private input")
 	}
-	p.creationResources = append(p.creationResources, map[string]any{"runtime": actual.HostConfig.Runtime, "memory_bytes": actual.HostConfig.Memory, "nano_cpus": actual.HostConfig.NanoCPUs, "storage_options": actual.HostConfig.StorageOpt, "storage_driver": actual.Driver, "network_mode": actual.HostConfig.NetworkMode})
+	resources := map[string]any{"runtime": actual.HostConfig.Runtime, "memory_bytes": actual.HostConfig.Memory, "nano_cpus": actual.HostConfig.NanoCPUs, "storage_options": actual.HostConfig.StorageOpt, "storage_driver": actual.Driver, "network_mode": actual.HostConfig.NetworkMode}
+	p.creationResources = append(p.creationResources, resources)
+	// SDK intent and guest statistics cannot prove resource enforcement. Read
+	// the host kernel for this exact running sandbox before any repository work.
+	proof, proofErr := observeRealReviewKernelResources(sandbox.ID, actual.State.Pid, actual.HostConfig.Memory, actual.HostConfig.NanoCPUs)
+	resources["kernel_cgroup_proof"] = proof
+	if proofErr != nil {
+		return nil, fmt.Errorf("actual host kernel resource enforcement failed: %w", proofErr)
+	}
+	confirmed, confirmErr := p.client.ContainerInspect(ctx, sandbox.ID)
+	if confirmErr != nil || confirmed.ID != sandbox.ID || confirmed.State == nil || !confirmed.State.Running || confirmed.State.Pid != actual.State.Pid {
+		proof.Verified = false
+		resources["kernel_cgroup_proof"] = proof
+		return nil, errors.New("sandbox process identity changed during host kernel resource verification")
+	}
 	var output bytes.Buffer
 	code, traceErr := p.DockerProvider.Exec(ctx, sandbox, "umask 077; : > /tmp/143-real-review-observation.jsonl", &output, io.Discard)
 	if traceErr != nil || code != 0 {
@@ -538,6 +600,164 @@ func (p *realReviewProvider) Create(ctx context.Context, cfg agent.SandboxConfig
 	}
 	return sandbox, nil
 }
+
+// These proofs contain only controller values and bounded process/cgroup
+// identity. Host environment, command lines, and credential-bearing Docker
+// configuration are never read or serialized by the kernel probe.
+type realReviewKernelResourceProof struct {
+	ContainerID    string `json:"container_id"`
+	SandboxPID     int    `json:"sandbox_pid"`
+	CgroupVersion  int    `json:"cgroup_version"`
+	CgroupPath     string `json:"cgroup_path"`
+	MemoryMaxBytes int64  `json:"memory_max_bytes"`
+	CPUQuotaUS     int64  `json:"cpu_quota_us"`
+	CPUPeriodUS    int64  `json:"cpu_period_us"`
+	NanoCPUs       int64  `json:"nano_cpus"`
+	PIDMember      bool   `json:"pid_member"`
+	Verified       bool   `json:"verified"`
+}
+
+func observeRealReviewKernelResources(containerID string, pid int, memoryBytes, nanoCPUs int64) (realReviewKernelResourceProof, error) {
+	var filesystem syscall.Statfs_t
+	if err := syscall.Statfs("/sys/fs/cgroup", &filesystem); err != nil || filesystem.Type != 0x63677270 {
+		return realReviewKernelResourceProof{}, errors.New("host resource proof requires a cgroup v2 kernel filesystem")
+	}
+	return readRealReviewKernelResources("/proc", "/sys/fs/cgroup", containerID, pid, memoryBytes, nanoCPUs)
+}
+
+// Fixture roots are arguments so focused tests exercise actual safe reads and
+// failure behavior without a Docker daemon or mutable package-level hooks.
+func readRealReviewKernelResources(procRoot, cgroupRoot, containerID string, pid int, memoryBytes, nanoCPUs int64) (realReviewKernelResourceProof, error) {
+	proof := realReviewKernelResourceProof{ContainerID: containerID, SandboxPID: pid, CgroupVersion: 2}
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(containerID) || pid <= 0 || pid > 2147483647 || memoryBytes <= 0 || nanoCPUs <= 0 {
+		return proof, errors.New("host resource proof requires exact container identity and positive declared bounds")
+	}
+	controllers, err := readRealReviewKernelFile(cgroupRoot, "cgroup.controllers", 4096)
+	if err != nil {
+		return proof, errors.New("host cgroup v2 controller inventory is missing or unsafe")
+	}
+	hasCPU, hasMemory := false, false
+	for _, controller := range strings.Fields(string(controllers)) {
+		hasCPU = hasCPU || controller == "cpu"
+		hasMemory = hasMemory || controller == "memory"
+	}
+	if !hasCPU || !hasMemory {
+		return proof, errors.New("host cgroup v2 must expose CPU and memory controllers")
+	}
+	processCgroup := strconv.Itoa(pid) + "/cgroup"
+	membership, err := readRealReviewKernelFile(procRoot, processCgroup, 4096)
+	if err != nil {
+		return proof, errors.New("sandbox host cgroup membership is missing or unsafe")
+	}
+	group, err := realReviewOwnedCgroupPath(string(membership), containerID)
+	if err != nil {
+		return proof, err
+	}
+	proof.CgroupPath = group
+	base := strings.TrimPrefix(group, "/")
+	memory, err := readRealReviewKernelFile(cgroupRoot, base+"/memory.max", 128)
+	if err != nil {
+		return proof, errors.New("sandbox host memory controller bound is missing or unsafe")
+	}
+	proof.MemoryMaxBytes, err = realReviewPositiveKernelInteger(string(memory))
+	if err != nil || proof.MemoryMaxBytes != memoryBytes {
+		return proof, errors.New("sandbox host memory.max must equal the declared finite memory bound")
+	}
+	cpu, err := readRealReviewKernelFile(cgroupRoot, base+"/cpu.max", 128)
+	if err != nil {
+		return proof, errors.New("sandbox host CPU controller bound is missing or unsafe")
+	}
+	cpuFields := strings.Fields(string(cpu))
+	if len(cpuFields) != 2 {
+		return proof, errors.New("sandbox host cpu.max must have a finite quota and period")
+	}
+	proof.CPUQuotaUS, err = realReviewPositiveKernelInteger(cpuFields[0])
+	if err != nil {
+		return proof, errors.New("sandbox host cpu.max quota must be finite and positive")
+	}
+	proof.CPUPeriodUS, err = realReviewPositiveKernelInteger(cpuFields[1])
+	if err != nil {
+		return proof, errors.New("sandbox host cpu.max period must be finite and positive")
+	}
+	actualCPU := new(big.Rat).SetFrac(big.NewInt(proof.CPUQuotaUS), big.NewInt(proof.CPUPeriodUS))
+	declaredCPU := new(big.Rat).SetFrac(big.NewInt(nanoCPUs), big.NewInt(1000000000))
+	if actualCPU.Cmp(declaredCPU) != 0 {
+		return proof, errors.New("sandbox host cpu.max must equal its declared per-container CPU bound")
+	}
+	proof.NanoCPUs = nanoCPUs
+	processes, err := readRealReviewKernelFile(cgroupRoot, base+"/cgroup.procs", 65536)
+	if err != nil {
+		return proof, errors.New("sandbox host cgroup process membership is missing or unsafe")
+	}
+	for _, process := range strings.Fields(string(processes)) {
+		member, parseErr := realReviewPositiveKernelInteger(process)
+		if parseErr != nil {
+			return proof, errors.New("sandbox host cgroup process membership is invalid")
+		}
+		proof.PIDMember = proof.PIDMember || member == int64(pid)
+	}
+	if !proof.PIDMember {
+		return proof, errors.New("sandbox PID does not belong to its resource-bounded container cgroup")
+	}
+	confirmed, err := readRealReviewKernelFile(procRoot, processCgroup, 4096)
+	if err != nil || !bytes.Equal(membership, confirmed) {
+		return proof, errors.New("sandbox host cgroup membership changed during kernel observation")
+	}
+	proof.Verified = true
+	return proof, nil
+}
+
+func realReviewOwnedCgroupPath(membership, containerID string) (string, error) {
+	membership = strings.TrimSuffix(membership, "\n")
+	if strings.ContainsAny(membership, "\r\n\x00") || !strings.HasPrefix(membership, "0::") {
+		return "", errors.New("sandbox must have one unambiguous host cgroup v2 membership")
+	}
+	group := strings.TrimPrefix(membership, "0::")
+	if !path.IsAbs(group) || path.Clean(group) != group || group != "/docker/"+containerID {
+		return "", errors.New("sandbox must belong to its exact owned cgroupfs container group, never a shared or escaping path")
+	}
+	return group, nil
+}
+
+func realReviewPositiveKernelInteger(raw string) (int64, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" || strings.IndexFunc(value, func(character rune) bool { return character < '0' || character > '9' }) >= 0 {
+		return 0, errors.New("kernel resource value must be one finite positive integer")
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0, errors.New("kernel resource value must be one finite positive integer")
+	}
+	return parsed, nil
+}
+
+func readRealReviewKernelFile(root, relative string, limit int64) ([]byte, error) {
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root || filepath.IsAbs(relative) || filepath.Clean(relative) != relative || relative == "." || relative == ".." || strings.HasPrefix(relative, "../") || strings.ContainsAny(relative, "\r\n\x00\\") {
+		return nil, errors.New("kernel resource path must be canonical and bounded inside its host root")
+	}
+	name := filepath.Join(root, relative)
+	resolved, err := filepath.EvalSymlinks(name)
+	if err != nil || resolved != name {
+		return nil, errors.New("kernel resource file must not be missing or redirected")
+	}
+	descriptor, err := syscall.Open(name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, errors.New("kernel resource file must be safely readable")
+	}
+	file := os.NewFile(uintptr(descriptor), name)
+	metadata, statErr := file.Stat()
+	if statErr != nil || !metadata.Mode().IsRegular() {
+		closeErr := file.Close()
+		return nil, errors.Join(errors.New("kernel resource file must be regular"), closeErr)
+	}
+	value, readErr := io.ReadAll(io.LimitReader(file, limit+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || int64(len(value)) > limit {
+		return nil, errors.New("kernel resource file exceeded its bounded safe read")
+	}
+	return value, nil
+}
+
 func (p *realReviewProvider) ExecWithStdinForReviewPreparation(ctx context.Context, sandbox *agent.Sandbox, command string, input io.Reader, stdout, stderr io.Writer) (int, error) {
 	raw, err := io.ReadAll(io.LimitReader(input, 2*1024*1024+1))
 	if err != nil || len(raw) > 2*1024*1024 {
@@ -582,6 +802,18 @@ func (p *realReviewProvider) observations() []realReviewExecution {
 func (p *realReviewProvider) Destroy(ctx context.Context, sandbox *agent.Sandbox) error {
 	observeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
+	// Preparation may destroy a failed workspace before its caller receives a
+	// sandbox. Retain only sanitized fixed-stage timing while it still exists.
+	var traceOutput bytes.Buffer
+	traceCode, traceErr := p.DockerProvider.Exec(observeCtx, sandbox, realReviewPython(realReviewBoundedTracePython), p.observedOutput(&traceOutput), io.Discard)
+	trace := realReviewDestroyedTrace{ContainerID: sandbox.ID}
+	if traceErr == nil && traceCode == 0 {
+		entries, parseErr := decodeRealReviewTrace(traceOutput.Bytes())
+		if parseErr == nil {
+			trace.Entries, trace.Captured = entries, true
+		}
+	}
+	p.destructionTraces = append(p.destructionTraces, trace)
 	var output bytes.Buffer
 	code, observeErr := p.DockerProvider.Exec(observeCtx, sandbox, realReviewPython(realReviewCleanupPython), &output, io.Discard)
 	if output.Len() <= 1024*1024 && json.Valid(output.Bytes()) {
@@ -633,20 +865,56 @@ func (p *realReviewProvider) exec(t *testing.T, sandbox *agent.Sandbox, command 
 	require.LessOrEqual(t, output.Len(), 1024*1024, "private observation output must remain bounded")
 	return output.Bytes()
 }
+
+type realReviewDestroyedTrace struct {
+	ContainerID string            `json:"container_id"`
+	Entries     []realReviewTrace `json:"entries"`
+	Captured    bool              `json:"captured"`
+}
+
 func (p *realReviewProvider) readTrace(t *testing.T, sandbox *agent.Sandbox) []realReviewTrace {
 	t.Helper()
-	raw := p.exec(t, sandbox, "/bin/cat /tmp/143-real-review-observation.jsonl")
+	raw := p.exec(t, sandbox, realReviewPython(realReviewBoundedTracePython))
+	result, err := decodeRealReviewTrace(raw)
+	require.NoError(t, err, "trusted execution trace must contain only fixed stages and bounded process metadata")
+	return result
+}
+
+func decodeRealReviewTrace(raw []byte) ([]realReviewTrace, error) {
+	if len(raw) > 1024*1024 {
+		return nil, errors.New("trusted execution trace exceeded its fixed observation bound")
+	}
 	result := []realReviewTrace{}
 	for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
 		if len(line) == 0 {
 			continue
 		}
 		var entry realReviewTrace
-		require.NoError(t, json.Unmarshal(line, &entry), "trusted execution trace should decode")
+		decoder := json.NewDecoder(bytes.NewReader(line))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&entry); err != nil {
+			return nil, errors.New("trusted execution trace contains invalid fixed metadata")
+		}
+		if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+			return nil, errors.New("trusted execution trace must contain one entry per line")
+		}
+		switch entry.Stage {
+		case "process_group":
+			if entry.PID <= 0 || entry.Group <= 1 || !regexp.MustCompile(`^[0-9]{1,32}$`).MatchString(entry.Start) {
+				return nil, errors.New("trusted execution trace contains invalid process identity")
+			}
+		case "standalone", "repository_setup", "repository_verifier", "full_object_hash", "captured_tree_closure", "pinned_source", "tool_verifier", "tool_repair", "source_hydration", "platform", "platform_capture":
+			if entry.ElapsedMS < 0 || entry.PID != 0 || entry.Group != 0 || entry.Start != "" {
+				return nil, errors.New("trusted execution trace contains invalid fixed-stage timing")
+			}
+		default:
+			return nil, errors.New("trusted execution trace contains an unknown stage")
+		}
 		result = append(result, entry)
 	}
-	return result
+	return result, nil
 }
+
 func (p *realReviewProvider) assertBindings(t *testing.T, sandbox *agent.Sandbox, receipt []byte) {
 	t.Helper()
 	var actual struct {
@@ -694,6 +962,35 @@ func (p *realReviewProvider) declaredTools(t *testing.T, sandbox *agent.Sandbox)
 	return tools
 }
 
+// This is a deliberate, bounded fault in the acceptance container only. The
+// probe validates every declared binary before removing one literal executable;
+// its output proves the executable is absent before the production engine runs.
+func (p *realReviewProvider) removeDeclaredTool(t *testing.T, sandbox *agent.Sandbox, expected map[string]realReviewDeclaredTool) realReviewRemovedTool {
+	t.Helper()
+	raw := p.exec(t, sandbox, realReviewPython(realReviewRemoveDeclaredToolPython))
+	var removed realReviewRemovedTool
+	require.NoError(t, json.Unmarshal(raw, &removed), "deliberate tool removal should report only bounded executable metadata")
+	tool, exists := expected[removed.Name]
+	require.True(t, exists, "only a declared required platform executable may be removed")
+	require.Equal(t, tool, removed.Tool, "the removed executable must have the exact previously observed pin, hash and mode")
+	require.True(t, removed.Absent, "the deliberate missing executable must be observed absent before production repair")
+	remaining := make(map[string]realReviewDeclaredTool, len(expected)-1)
+	for name, tool := range expected {
+		if name != removed.Name {
+			remaining[name] = tool
+		}
+	}
+	require.Equal(t, remaining, removed.RemainingTools, "deliberate removal must preserve every unrelated declared executable")
+	return removed
+}
+
+func (p *realReviewProvider) receiptIdentity(t *testing.T, sandbox *agent.Sandbox) json.RawMessage {
+	t.Helper()
+	raw := p.exec(t, sandbox, realReviewPython(realReviewReceiptIdentityPython))
+	require.True(t, json.Valid(raw), "readiness identity observation should encode fixed filesystem metadata only")
+	return append(json.RawMessage(nil), bytes.TrimSpace(raw)...)
+}
+
 func (p *realReviewProvider) inspect(t *testing.T, sandbox *agent.Sandbox) json.RawMessage {
 	t.Helper()
 	raw := p.exec(t, sandbox, realReviewPython(realReviewMetricsPython))
@@ -717,8 +1014,8 @@ func (p *realReviewProvider) inspect(t *testing.T, sandbox *agent.Sandbox) json.
 
 type realReviewRepoStore struct{ repo realReviewRepository }
 
-func (s realReviewRepoStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.Repository, error) {
-	return models.Repository{FullName: s.repo.FullName, CloneURL: s.repo.CloneURL, DefaultBranch: s.repo.DefaultBranch, InstallationID: s.repo.InstallationID}, nil
+func (s realReviewRepoStore) GetByID(_ context.Context, orgID, repositoryID uuid.UUID) (models.Repository, error) {
+	return models.Repository{ID: repositoryID, OrgID: orgID, FullName: s.repo.FullName, CloneURL: s.repo.CloneURL, DefaultBranch: s.repo.DefaultBranch, InstallationID: s.repo.InstallationID}, nil
 }
 
 type realReviewTokens struct {
@@ -740,7 +1037,7 @@ func (p *realReviewTokens) GetInstallationToken(ctx context.Context, installatio
 func realReviewSession(t *testing.T, repo realReviewRepository) *models.Session {
 	t.Helper()
 	repositoryID := uuid.New()
-	revision, err := json.Marshal(map[string]any{"kind": "code_review", "github_pr_number": repo.PRNumber, "base_sha": repo.BaseSHA, "head_sha": repo.HeadSHA})
+	revision, err := json.Marshal(map[string]any{"kind": "code_review", "github_repo": repo.FullName, "github_pr_number": repo.PRNumber, "base_sha": repo.BaseSHA, "head_sha": repo.HeadSHA})
 	require.NoError(t, err, "exact private comparison must encode")
 	return &models.Session{ID: uuid.New(), OrgID: uuid.New(), Origin: models.SessionOriginCodeReview, AgentType: models.AgentTypeCodex, RepositoryID: &repositoryID, RevisionContext: revision}
 }
@@ -805,6 +1102,21 @@ def capture(args):
     finally:
         _real_record({"stage":"platform_capture","elapsed_ms":int((time.monotonic()-started)*1000),"authenticated":False})
 `
+const realReviewBoundedTracePython = `
+import os,stat,sys
+try:
+    descriptor=os.open("/tmp/143-real-review-observation.jsonl",os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+except FileNotFoundError:
+    raise SystemExit(0)
+with os.fdopen(descriptor,"rb") as source:
+    metadata=os.fstat(source.fileno())
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size>1048576:
+        raise RuntimeError("trusted trace observation requires a bounded regular file")
+    value=source.read(1048577)
+    if len(value)>1048576:
+        raise RuntimeError("trusted trace observation exceeded its read bound")
+    sys.stdout.buffer.write(value)
+`
 const realReviewCleanupPython = `
 import json,os,pathlib
 trace=pathlib.Path("/tmp/143-real-review-observation.jsonl")
@@ -825,27 +1137,62 @@ live=[member for member in members if member["state"] not in ("Z","X","x")]
 print(json.dumps({"observed_groups":sorted(groups),"remaining_members":members,"live_members":live}))
 raise SystemExit(1 if live else 0)
 `
-const realReviewDeclaredToolsPython = `
+const realReviewDeclaredToolObservationPython = `
 import hashlib,json,os,pathlib,re,stat
 configured=json.loads(pathlib.Path(".143/config.json").read_text()).get("dependencies",{})
 home=pathlib.Path.home()
-tools={}
-for name,version in sorted(configured.items()):
-    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}",name) or not isinstance(version,str):
-        raise RuntimeError("declared tool observation requires a literal platform executable name and pin")
-    for parent in (home,home/".local",home/".local/bin"):
-        if not stat.S_ISDIR(parent.lstat().st_mode) or parent.resolve()!=parent:
-            raise RuntimeError("declared tool directory is missing or redirected")
-    executable=home/".local/bin"/name
-    metadata=executable.lstat()
-    if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode&0o111 or metadata.st_size>256*1024*1024:
-        raise RuntimeError("declared tool is missing, linked, not executable or outside the observation bound")
+def observe_declared_tools(excluded=()):
+    tools={}
+    for name,version in sorted(configured.items()):
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}",name) or not isinstance(version,str):
+            raise RuntimeError("declared tool observation requires a literal platform executable name and pin")
+        for parent in (home,home/".local",home/".local/bin"):
+            if not stat.S_ISDIR(parent.lstat().st_mode) or parent.resolve()!=parent:
+                raise RuntimeError("declared tool directory is missing or redirected")
+        if name in excluded:
+            continue
+        executable=home/".local/bin"/name
+        descriptor=os.open(executable,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        with os.fdopen(descriptor,"rb") as source:
+            metadata=os.fstat(source.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode&0o111 or metadata.st_size>256*1024*1024:
+                raise RuntimeError("declared tool is missing, linked, not executable or outside the observation bound")
+            digest=hashlib.sha256()
+            for block in iter(lambda:source.read(1024*1024),b""):
+                digest.update(block)
+        tools[name]={"declared_version":version,"path":str(executable),"sha256":digest.hexdigest(),"mode":stat.S_IMODE(metadata.st_mode)}
+    return tools
+`
+const realReviewDeclaredToolsPython = realReviewDeclaredToolObservationPython + `
+print(json.dumps(observe_declared_tools(),sort_keys=True))
+`
+const realReviewRemoveDeclaredToolPython = realReviewDeclaredToolObservationPython + `
+tools=observe_declared_tools()
+if not tools:
+    raise RuntimeError("missing-tool acceptance requires a declared platform executable")
+name=sorted(tools)[0]
+executable=home/".local/bin"/name
+executable.unlink()
+try:
+    executable.lstat()
+except FileNotFoundError:
+    absent=True
+else:
+    raise RuntimeError("deliberate missing-tool fault was not established")
+print(json.dumps({"name":name,"tool":tools[name],"absent":absent,"remaining_tools":observe_declared_tools((name,))},sort_keys=True))
+`
+const realReviewReceiptIdentityPython = `
+import hashlib,json,os,pathlib,stat
+receipt=pathlib.Path(".git/143-review-evidence.json")
+descriptor=os.open(receipt,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+with os.fdopen(descriptor,"rb") as source:
+    metadata=os.fstat(source.fileno())
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError("readiness identity requires a literal regular receipt")
     digest=hashlib.sha256()
-    with executable.open("rb") as source:
-        for block in iter(lambda:source.read(1024*1024),b""):
-            digest.update(block)
-    tools[name]={"declared_version":version,"path":str(executable),"sha256":digest.hexdigest(),"mode":stat.S_IMODE(metadata.st_mode)}
-print(json.dumps(tools,sort_keys=True))
+    for block in iter(lambda:source.read(1024*1024),b""):
+        digest.update(block)
+print(json.dumps({"device":metadata.st_dev,"inode":metadata.st_ino,"mode":stat.S_IMODE(metadata.st_mode),"size":metadata.st_size,"mtime_ns":metadata.st_mtime_ns,"ctime_ns":metadata.st_ctime_ns,"sha256":digest.hexdigest()},sort_keys=True))
 `
 
 const realReviewMetricsPython = `
