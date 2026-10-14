@@ -9798,6 +9798,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 
 		var threadID uuid.UUID
 		var threadTurnBefore int
+		var preparationThread *models.SessionThread
 		var hasThread bool
 		var continueOpts *agent.ContinueSessionOptions
 		var resultAgentSessionID string
@@ -9998,6 +9999,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					return &FatalError{Err: fmt.Errorf("%w: thread %s", agent.ErrThreadCancelledBeforeWorkspaceReady, threadID)}
 				}
 				threadTurnBefore = thread.CurrentTurn
+				preparationThread = &thread
 
 				// Phase 2: stamp the thread-start checkpoint before the first
 				// agent turn. The session's current SnapshotKey is the
@@ -10139,6 +10141,13 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			// re-enter ContinueSession without options keep it.
 			jobCtx = agent.WithAutomationTurn(jobCtx, continueOpts.AutomationTurn)
 		}
+		preparationDeadline, deadlineErr := initialCodeReviewPreparationDeadline(jobCtx, stores, logger, session, preparationThread, continueOpts != nil && continueOpts.CodeReviewTurn != nil)
+		if deadlineErr != nil {
+			return deadlineErr
+		}
+		if preparationDeadline != nil {
+			jobCtx = agent.WithCodeReviewWorkspacePreparationDeadline(jobCtx, *preparationDeadline)
+		}
 		continueErr := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts)
 		if automationRunID != nil && continueErr != nil {
 			// The attempt ended even though the orchestrator returned an
@@ -10156,11 +10165,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 		}
 		if err := continueErr; err != nil {
+			if errors.Is(err, agent.ErrCodeReviewPreparationCleanup) {
+				err = agent.NewCodeReviewWorkspacePreparationError(agent.CodeReviewPreparationStageReadiness, err)
+			}
 			if codeReviewAssessmentID != nil {
 				if errors.Is(err, db.ErrCodeReviewRecheckUserCancelled) {
 					return &FatalError{Err: err}
 				}
-				if errors.Is(err, agent.ErrSessionCancelled) || errors.Is(err, agent.ErrThreadCancelledBeforeWorkspaceReady) || errors.Is(context.Cause(jobCtx), agent.ErrUserCancelCause) {
+				if !errors.Is(err, agent.ErrCodeReviewPreparationCleanup) && (errors.Is(err, agent.ErrSessionCancelled) || errors.Is(err, agent.ErrThreadCancelledBeforeWorkspaceReady) || errors.Is(context.Cause(jobCtx), agent.ErrUserCancelCause)) {
 					jobID, hasJob := jobctx.JobIDFromContext(ctx)
 					lockToken, hasToken := jobctx.LockTokenFromContext(ctx)
 					if !hasJob || !hasToken {
@@ -10190,7 +10202,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						return &FatalError{Err: err}
 					}
 				}
-				if errors.Is(err, agent.ErrCodeReviewRecheckLeaseLost) || errors.Is(err, agent.ErrSandboxCapacity) || errors.Is(err, agent.ErrSnapshotPending) || errors.Is(err, agent.ErrSessionInterrupted) || errors.Is(err, agent.ErrSandboxWorkspaceNotReady) || errors.Is(err, agent.ErrStaleSandboxIDCleared) {
+				if !errors.Is(err, agent.ErrCodeReviewPreparationCleanup) && (errors.Is(err, agent.ErrCodeReviewRecheckLeaseLost) || errors.Is(err, agent.ErrSandboxCapacity) || errors.Is(err, agent.ErrSnapshotPending) || errors.Is(err, agent.ErrSessionInterrupted) || errors.Is(err, agent.ErrSandboxWorkspaceNotReady) || errors.Is(err, agent.ErrStaleSandboxIDCleared)) {
 					retryAfter := 2 * time.Second
 					return &RetryableError{Err: err, RetryAfter: &retryAfter}
 				}
@@ -10206,6 +10218,11 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					}
 					cancelFailure()
 				}
+				return &FatalError{Err: err}
+			}
+			if errors.Is(err, agent.ErrCodeReviewPreparationCleanup) {
+				logger.Warn().Err(err).Str("session_id", sessionID.String()).Str("thread_id", input.ThreadID).
+					Msg("review preparation process cleanup is unconfirmed; stopping continuation")
 				return &FatalError{Err: err}
 			}
 			cancellationError := errors.Is(err, agent.ErrSessionCancelled) ||

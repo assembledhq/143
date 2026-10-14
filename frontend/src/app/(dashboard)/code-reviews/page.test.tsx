@@ -2484,6 +2484,34 @@ describe("CodeReviewsPage", () => {
     expect(screen.queryByRole("button", { name: "Retry review" })).not.toBeInTheDocument();
   });
 
+  it("shows a workspace setup failure and recovery guidance in the list and evidence sheet", async () => {
+    const user = userEvent.setup();
+    const message = "Review workspace preparation failed during declared dependency and bootstrap setup. Review did not run. This is an operational review failure. Check the declared dependency setup and bootstrap commands, then request a new review.";
+    const failedReview: CodeReviewListItem = {
+      ...review,
+      status: "failed",
+      status_code: "worker_failed",
+      status_message: message,
+      failure_reason: message,
+      retryable_failure: true,
+      retry_eligible: true,
+      decision: "blocked",
+      acceptable: false,
+      completed_at: "2026-06-26T12:05:00Z",
+      github_review_id: undefined,
+      github_review_url: undefined,
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [failedReview], meta: {} } satisfies ListResponse<CodeReviewListItem>)));
+    renderWithProviders(<CodeReviewsPage />);
+    const table = await screen.findByRole("table");
+    const row = within(table).getByRole("row", { name: /#428 Fix invoice rounding/i });
+    expect(within(row).getByText(message)).toBeInTheDocument();
+    await user.click(within(row).getByRole("button", { name: "View review" }));
+    const sheet = await screen.findByRole("dialog", { name: /Review for #428/i });
+    expect(within(sheet).getByRole("alert")).toHaveTextContent(message);
+  });
+
   it("shows a retryable failure in the evidence sheet and starts a fresh review", async () => {
     const user = userEvent.setup();
     const failedReview: CodeReviewListItem = {

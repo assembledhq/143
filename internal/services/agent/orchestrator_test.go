@@ -1392,6 +1392,32 @@ func testRun(orgID, issueID uuid.UUID) *models.Session {
 	}
 }
 
+const reviewFixtureHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func configurePinnedReviewFixture(session *models.Session, d *testDeps) {
+	session.RevisionContext = json.RawMessage(`{"kind":"code_review","github_repo":"acme/backend","github_pr_number":42,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}`)
+	session.WorkingBranch = strPtr("143/test/code-review")
+	previousExec := d.provider.ExecFn
+	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, command string, stdout, stderr io.Writer) (int, error) {
+		if command == "git rev-parse HEAD" || command == "git rev-parse FETCH_HEAD" || command == "/usr/bin/git -c core.hooksPath=/dev/null rev-parse FETCH_HEAD" {
+			_, err := io.WriteString(stdout, reviewFixtureHead+"\n")
+			return 0, err
+		}
+		if strings.Contains(command, "review readiness requires literal repository metadata") {
+			_, err := io.WriteString(stdout, reviewFixtureHead+"\n143/test/code-review\n"+reviewFixtureHead+"\n")
+			return 0, err
+		}
+		if previousExec != nil {
+			return previousExec(ctx, sb, command, stdout, stderr)
+		}
+		return 0, nil
+	}
+	if session.ContainerID != nil {
+		containerID := *session.ContainerID
+		d.sessions.peekContainerIDFn = func() (string, error) { return containerID, nil }
+	}
+}
+
 func strPtr(s string) *string {
 	return &s
 }
@@ -4243,14 +4269,7 @@ func TestRunAgent_AutomaticPRPublishingGuards(t *testing.T) {
 			d.agentPRPromptEnabled = tt.promptFlag
 			if tt.ineligibleOrigin {
 				run.Origin = models.SessionOriginCodeReview
-				run.RevisionContext = []byte(`{"kind":"code_review","github_repo":"acme/backend","github_pr_number":42,"base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
-				d.provider.ExecFn = func(_ context.Context, _ *agent.Sandbox, command string, stdout, _ io.Writer) (int, error) {
-					if command == "git rev-parse HEAD" {
-						_, err := io.WriteString(stdout, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
-						return 0, err
-					}
-					return 0, nil
-				}
+				configurePinnedReviewFixture(run, &d)
 			}
 			if tt.alreadyPublished {
 				run.PRCreationState = models.PRCreationStateSucceeded
@@ -4433,6 +4452,9 @@ func TestRunAgent_CapturesAndPersistsBaseCommitSHA(t *testing.T) {
 					return 0, err
 				}
 				return 0, nil
+			}
+			if tt.origin == models.SessionOriginCodeReview {
+				configurePinnedReviewFixture(run, &d)
 			}
 			d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 				require.Equal(t, tt.expectedBase, sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA], "adapter should receive the captured starting commit")
@@ -7043,6 +7065,7 @@ func TestContinueSession_CodeReviewResultErrorFailsOnlyReviewerThread(t *testing
 	session.PrimaryThreadID = &primaryThreadID
 
 	d := defaultDeps()
+	configurePinnedReviewFixture(session, &d)
 	d.issues.issue = issue
 	d.sessionThreads = &mockSessionThreadStore{getByIDResult: &models.SessionThread{
 		ID:             reviewerThreadID,
@@ -8098,6 +8121,9 @@ func TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata(t *testing.T) {
 			session.TargetBranch = tt.targetBranch
 
 			d := defaultDeps()
+			if tt.origin == models.SessionOriginCodeReview {
+				configurePinnedReviewFixture(session, &d)
+			}
 			d.issues.issue = issue
 			if tt.restore {
 				session.ContainerID = nil

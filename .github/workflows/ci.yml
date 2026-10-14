@@ -11,6 +11,12 @@ on:
     # cross-cutting break that affected-test runs missed to ~12 hours.
     - cron: "17 10,22 * * *"
   workflow_dispatch:
+    inputs:
+      review_workspace_acceptance:
+        description: Run the real Docker and gVisor review workspace acceptance suite
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
@@ -588,9 +594,87 @@ jobs:
             bash "$t"
           done
 
+  review-workspace-acceptance:
+    name: Review Workspace Container Acceptance
+    if: github.event_name == 'workflow_dispatch' && inputs.review_workspace_acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      REVIEW_ACCEPTANCE_IMAGE: 143-review-acceptance:${{ github.sha }}
+      REVIEW_ACCEPTANCE_NETWORK: review-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+      REVIEW_ACCEPTANCE_RUNTIME: runsc
+      REVIEW_ACCEPTANCE_SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Initialize acceptance evidence directory
+        run: printf 'REVIEW_ACCEPTANCE_ARTIFACT_DIR=%s/review-workspace-acceptance\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Verify Linux credential ancestry fixture before image build
+        run: |
+          mkdir -p "$REVIEW_ACCEPTANCE_ARTIFACT_DIR"
+          set +e
+          go test ./internal/services/agent -run '^TestReviewCredentialInputIsPrivateFromSetupAndWarmVerifier$' -count=1 -parallel=1 -v -timeout=120s \
+            > "$RUNNER_TEMP/review-credential-fixture.log" 2>&1
+          status=$?
+          tail -c 65536 "$RUNNER_TEMP/review-credential-fixture.log" | tee "$REVIEW_ACCEPTANCE_ARTIFACT_DIR/credential-fixture.log"
+          exit "$status"
+      - name: Install the supported gVisor runtime
+        run: |
+          # Match deploy/scripts/bootstrap.sh's package source and runtime flags.
+          curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+          echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main' \
+            | sudo tee /etc/apt/sources.list.d/gvisor.list
+          sudo apt-get update
+          sudo apt-get install -y runsc
+          sudo runsc install -- --ignore-cgroups --host-uds=open
+          sudo systemctl restart docker
+          runsc --version | tee "$REVIEW_ACCEPTANCE_ARTIFACT_DIR/runsc-version.txt"
+          echo "REVIEW_ACCEPTANCE_RUNSC_VERSION=$(runsc --version | head -n 1)" >> "$GITHUB_ENV"
+          docker info --format '{{json .Runtimes}}' | tee "$REVIEW_ACCEPTANCE_ARTIFACT_DIR/docker-runtimes.json"
+      - name: Build the actual sandbox image
+        run: |
+          set +e
+          docker build --label "org.opencontainers.image.revision=$REVIEW_ACCEPTANCE_SOURCE_SHA" \
+            -t "$REVIEW_ACCEPTANCE_IMAGE" -f sandbox/Dockerfile . \
+            > "$RUNNER_TEMP/review-image-build.log" 2>&1
+          status=$?
+          tail -c 65536 "$RUNNER_TEMP/review-image-build.log" | tee "$REVIEW_ACCEPTANCE_ARTIFACT_DIR/image-build.log"
+          exit "$status"
+      - name: Create an isolated acceptance network
+        run: docker network create "$REVIEW_ACCEPTANCE_NETWORK"
+      - name: Run container acceptance with bounded evidence
+        run: |
+          set +e
+          make test-review-container-acceptance > "$RUNNER_TEMP/review-acceptance-test.log" 2>&1
+          status=$?
+          tail -c 65536 "$RUNNER_TEMP/review-acceptance-test.log" | tee "$REVIEW_ACCEPTANCE_ARTIFACT_DIR/acceptance-test.log"
+          exit "$status"
+      - name: Remove remaining acceptance containers and network
+        if: always()
+        run: |
+          if docker network inspect "$REVIEW_ACCEPTANCE_NETWORK" >/dev/null 2>&1; then
+            mapfile -t containers < <(docker ps -aq --filter "network=$REVIEW_ACCEPTANCE_NETWORK")
+            if (( ${#containers[@]} )); then docker rm -f "${containers[@]}"; fi
+            docker network rm "$REVIEW_ACCEPTANCE_NETWORK"
+          fi
+      - name: Upload container acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: review-workspace-acceptance-${{ github.sha }}
+          path: ${{ runner.temp }}/review-workspace-acceptance
+          if-no-files-found: error
+          retention-days: 14
+
   required-checks:
     name: All Checks Pass
-    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, session-transcript-e2e, migration-check, docker-build, security, deploy-scripts-test, deploy-config-test]
+    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, session-transcript-e2e, migration-check, docker-build, security, deploy-scripts-test, deploy-config-test, review-workspace-acceptance]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -606,6 +690,7 @@ jobs:
           echo "security: ${{ needs.security.result }}"
           echo "deploy-config-test: ${{ needs.deploy-config-test.result }}"
           echo "deploy-scripts-test: ${{ needs.deploy-scripts-test.result }}"
+          echo "review-workspace-acceptance: ${{ needs.review-workspace-acceptance.result }}"
 
           if [[ "${{ needs.deploy-config-test.result }}" != "success" ]]; then
             echo "::error::Deployment configuration checks must succeed"
@@ -622,7 +707,8 @@ jobs:
             "${{ needs.docker-build.result }}" \
             "${{ needs.security.result }}" \
             "${{ needs.deploy-scripts-test.result }}" \
-            "${{ needs.deploy-config-test.result }}"; do
+            "${{ needs.deploy-config-test.result }}" \
+            "${{ needs.review-workspace-acceptance.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "::error::One or more required checks failed"
               exit 1

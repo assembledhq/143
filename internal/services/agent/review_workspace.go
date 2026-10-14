@@ -15,6 +15,14 @@ import (
 // review. The caller must publish it under the preparation job's lease or
 // destroy it. No reviewer can observe this container until publication.
 func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *models.Session, expectedHead string) (_ *Sandbox, returnErr error) {
+	ctx, cancelPreparation := codeReviewPreparationContext(ctx)
+	defer cancelPreparation()
+	defer func() {
+		returnErr = NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, returnErr)
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if o == nil || o.provider == nil || o.sandboxCapacity == nil || o.env == nil || o.repositories == nil || o.github == nil {
 		return nil, fmt.Errorf("code review workspace preparation dependencies unavailable")
 	}
@@ -117,21 +125,27 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 		cloneBranch = *session.TargetBranch
 	}
 	cloneStage := observability.BeginStage(true, log, "repository_clone")
-	cloneErr := o.provider.CloneRepo(ctx, sandbox, repo.CloneURL, cloneBranch, token)
+	cloneErr := o.cloneRepositoryForReview(ctx, sandbox, repo.CloneURL, cloneBranch, token)
 	cloneStage.End(observability.StageOutcome(ctx, cloneErr))
 	if cloneErr != nil {
 		return nil, fmt.Errorf("clone review repository: %w", cloneErr)
 	}
 	gitAuthStage := observability.BeginStage(true, log, "git_auth_bootstrap")
-	o.runSandboxGitBootstrap(ctx, sandbox, cfg.WorkDir, log)
-	gitAuthStage.End("attempted")
+	bootstrapErr := o.runSandboxGitBootstrapForSession(ctx, session, sandbox, cfg.WorkDir, repo.CloneURL, log)
+	gitAuthStage.End(observability.StageOutcome(ctx, bootstrapErr))
+	if bootstrapErr != nil {
+		return nil, bootstrapErr
+	}
+	if err := o.hydrateCodeReviewTrees(ctx, session, sandbox, repo.CloneURL, token, log); err != nil {
+		return nil, err
+	}
 	checkoutStage := observability.BeginStage(true, log, "review_head_checkout")
-	checkoutErr := o.checkoutCodeReviewHead(ctx, sandbox, repo.CloneURL, token, prNumber, branch, head)
+	checkoutErr := o.checkoutReviewPullRequestHead(ctx, sandbox, repo.CloneURL, token, prNumber, branch, head)
 	checkoutStage.End(observability.StageOutcome(ctx, checkoutErr))
 	if checkoutErr != nil {
 		return nil, checkoutErr
 	}
-	if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, cfg.WorkDir, repositoryPreparationMinimalReview, log); err != nil {
+	if err := o.ensureCodeReviewWorkspaceEvidence(ctx, session, sandbox, log); err != nil {
 		return nil, fmt.Errorf("prepare review repository: %w", err)
 	}
 	if err := o.ensureCodeReviewInputs(ctx, session, sandbox); err != nil {

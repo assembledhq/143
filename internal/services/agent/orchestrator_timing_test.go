@@ -83,7 +83,7 @@ func (r testCodeReviewRoleResolver) ResolveAgentRoleForThread(context.Context, u
 	return r.role, r.found, r.err
 }
 
-func TestReviewRepositoryPreparationSkipsOnlyVerifiedReviewTurns(t *testing.T) {
+func TestReviewRepositoryPreparationRunsBootstrapForVerifiedReviewTurns(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -95,8 +95,8 @@ func TestReviewRepositoryPreparationSkipsOnlyVerifiedReviewTurns(t *testing.T) {
 		wantMode  repositoryPreparationMode
 		wantExecs []string
 	}{
-		{name: "reviewer cold", origin: models.SessionOriginCodeReview, revision: `{"kind":"code_review","github_pr_number":12,"head_sha":"abc"}`, threadID: testUUIDPtr(), resolver: testCodeReviewRoleResolver{role: models.CodeReviewAgentRoleReviewer, found: true}, wantMode: repositoryPreparationMinimalReview},
-		{name: "Main synthesis", origin: models.SessionOriginCodeReview, revision: `{"kind":"code_review","github_pr_number":12,"head_sha":"abc"}`, threadID: testUUIDPtr(), resolver: testCodeReviewRoleResolver{role: models.CodeReviewAgentRoleOrchestrator, found: true}, wantMode: repositoryPreparationMinimalReview},
+		{name: "reviewer cold", origin: models.SessionOriginCodeReview, revision: `{"kind":"code_review","github_pr_number":12,"head_sha":"abc"}`, threadID: testUUIDPtr(), resolver: testCodeReviewRoleResolver{role: models.CodeReviewAgentRoleReviewer, found: true}, wantMode: repositoryPreparationMinimalReview, wantExecs: []string{"cd '/workspace' && true"}},
+		{name: "Main synthesis", origin: models.SessionOriginCodeReview, revision: `{"kind":"code_review","github_pr_number":12,"head_sha":"abc"}`, threadID: testUUIDPtr(), resolver: testCodeReviewRoleResolver{role: models.CodeReviewAgentRoleOrchestrator, found: true}, wantMode: repositoryPreparationMinimalReview, wantExecs: []string{"cd '/workspace' && true"}},
 		{name: "review role missing", origin: models.SessionOriginCodeReview, revision: `{"kind":"code_review","github_pr_number":12,"head_sha":"abc"}`, threadID: testUUIDPtr(), resolver: testCodeReviewRoleResolver{}, wantMode: repositoryPreparationFull, wantExecs: []string{"cd '/workspace' && true"}},
 		{name: "role resolver absent", origin: models.SessionOriginCodeReview, revision: `{"kind":"code_review","github_pr_number":12,"head_sha":"abc"}`, threadID: testUUIDPtr(), wantMode: repositoryPreparationFull, wantExecs: []string{"cd '/workspace' && true"}},
 		{name: "invalid role", origin: models.SessionOriginCodeReview, revision: `{"kind":"code_review","github_pr_number":12,"head_sha":"abc"}`, threadID: testUUIDPtr(), resolver: testCodeReviewRoleResolver{role: "other", found: true}, wantMode: repositoryPreparationFull, wantExecs: []string{"cd '/workspace' && true"}},
@@ -123,16 +123,16 @@ func TestReviewRepositoryPreparationSkipsOnlyVerifiedReviewTurns(t *testing.T) {
 				require.Empty(t, role, "unverified roles should not be attributed to full preparation")
 			}
 			err := prepareSandboxRepositoryForSession(context.Background(), provider, session, &Sandbox{ID: "sandbox-1", WorkDir: "/workspace"}, "/workspace", mode, logger)
-			require.NoError(t, err, "eligible review setup should skip bootstrap without affecting full setup")
-			require.Equal(t, tt.wantExecs, provider.execCalls, "only full preparation should run repo bootstrap commands")
+			require.NoError(t, err, "review setup should prepare declared dependencies and bootstrap")
+			require.Equal(t, tt.wantExecs, provider.execCalls, "both verified reviews and ordinary turns should run repo bootstrap commands")
 			if mode == repositoryPreparationMinimalReview {
-				require.Contains(t, output.String(), `"outcome":"skipped"`, "minimal review setup should record that dependency and bootstrap work was skipped")
+				require.Contains(t, output.String(), `"outcome":"succeeded"`, "review setup should record successful dependency and bootstrap preparation")
 			}
 		})
 	}
 }
 
-func TestMinimalReviewPreparationSkipsDependenciesAndBootstrap(t *testing.T) {
+func TestReviewPreparationRunsDependenciesAndBootstrap(t *testing.T) {
 	t.Parallel()
 
 	provider := &testInternalSandboxProvider{readFiles: map[string][]byte{
@@ -143,8 +143,10 @@ func TestMinimalReviewPreparationSkipsDependenciesAndBootstrap(t *testing.T) {
 	}}
 	session := &models.Session{Origin: models.SessionOriginCodeReview}
 	err := prepareSandboxRepositoryForSession(context.Background(), provider, session, &Sandbox{ID: "sandbox-1", WorkDir: "/workspace"}, "/workspace", repositoryPreparationMinimalReview, zerolog.Nop())
-	require.NoError(t, err, "minimal review preparation should succeed without repository-declared setup")
-	require.Empty(t, provider.execCalls, "minimal review preparation should run neither dependency installers nor npm bootstrap")
+	require.NoError(t, err, "review preparation should run repository-declared setup")
+	require.Equal(t, 2, len(provider.execCalls), "review preparation should install the declared tool and execute npm bootstrap")
+	require.Contains(t, provider.execCalls[0], "golangci-lint-1.64.8", "review preparation should preserve the declared tooling pin")
+	require.Equal(t, "cd '/workspace' && npm ci", provider.execCalls[1], "review preparation should restore the declared dependency bootstrap")
 }
 
 func testUUIDPtr() *uuid.UUID {

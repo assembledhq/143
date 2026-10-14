@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_jobs_code_review_initial_preparation;

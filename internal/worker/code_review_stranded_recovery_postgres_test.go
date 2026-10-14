@@ -435,7 +435,7 @@ func TestWorkspaceStoppedRaceKeepsDeadLetterGuardPostgres(t *testing.T) {
 			f.stores.CodeReviewWorkspaces = db.NewCodeReviewWorkspaceStore(pool)
 			services := &Services{CodeReviewWorkspacePreparationEnabled: true, CodeReviewVisualEvidence: &codeReviewVisualEvidenceProviderStub{snapshot: models.CodeReviewVisualEvidenceSnapshot{Version: 1, RepositoryID: f.job.RepositoryID, PullRequestNumber: 9, HeadSHA: "head", Complete: true}}, CodeReviews: &inlineRecoveryPublisher{}}
 			if tt.early {
-				_, err := pool.Exec(ctx, `INSERT INTO jobs(org_id,queue,job_type,payload,dedupe_key,status) VALUES($1,'agent','prepare_code_review_workspace','{}',$2,'succeeded')`, f.job.OrgID, codeReviewWorkspacePreparationKey(f.job.MetadataID, f.job.SessionID, 0))
+				_, err := pool.Exec(ctx, `INSERT INTO jobs(org_id,queue,job_type,payload,dedupe_key,status) VALUES($1,'agent','prepare_code_review_workspace',$3,$2,'succeeded')`, f.job.OrgID, codeReviewWorkspacePreparationKey(f.job.MetadataID, f.job.SessionID, 0), map[string]any{"metadata_id": f.job.MetadataID.String(), "session_id": f.job.SessionID.String()})
 				require.NoError(t, err, "seed first workspace checkpoint")
 				f.stores.Sessions = db.NewSessionStore(parentEndAtWorkspaceCheckpointDB{DBTX: pool, beforeGeneration: endParent})
 			} else {
