@@ -107,10 +107,48 @@ func TestReviewCredentialInputIsPrivateFromSetupAndWarmVerifier(t *testing.T) {
 	// The shim only replaces transport and emits no credentials or environment.
 	remote, err := json.Marshal(f.remote)
 	require.NoError(t, err, "isolated transport URL should serialize")
-	shim := filepath.Join(t.TempDir(), "git-fixture")
-	shimSource := "#!/usr/bin/python3 -I -S\nimport os, subprocess, sys\nremote = " + string(remote) + "\nargs = [remote if value.startswith('https://') else value for value in sys.argv[1:]]\nif 'fetch' in args: args = ['-c', 'url.' + remote + '.insteadOf=https://example.com/repo.git'] + args\nenv = dict(os.environ); env['GIT_ALLOW_PROTOCOL'] = 'file'\nsys.exit(subprocess.call(['/usr/bin/git'] + args, env=env))\n"
+	shimRoot := t.TempDir()
+	shim := filepath.Join(shimRoot, "git-fixture")
+	diagnosticPath := filepath.Join(shimRoot, "fsck-failure")
+	diagnosticJSON, err := json.Marshal(diagnosticPath)
+	require.NoError(t, err, "fixture diagnostic path should serialize")
+	shimSource := `#!/usr/bin/python3 -I -S
+import os, pathlib, subprocess, sys
+remote = ` + string(remote) + `
+args = [remote if value.startswith('https://') else value for value in sys.argv[1:]]
+if 'fetch' in args:
+    args = ['-c', 'url.' + remote + '.insteadOf=https://example.com/repo.git'] + args
+env = dict(os.environ)
+env['GIT_ALLOW_PROTOCOL'] = 'file'
+if 'fsck' not in args:
+    sys.exit(subprocess.call(['/usr/bin/git'] + args, env=env))
+# Production intentionally hides fsck output from public setup errors. Retain
+# bounded diagnostics for this isolated fake-credential fixture, without
+# recording environment values, command arguments, or successful fsck output.
+child = subprocess.Popen(['/usr/bin/git'] + args, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+output = bytearray()
+while True:
+    chunk = child.stdout.read(4096)
+    if not chunk:
+        break
+    output.extend(chunk[:max(0, 4096 - len(output))])
+code = child.wait()
+if code:
+    pathlib.Path(` + string(diagnosticJSON) + `).write_bytes(output)
+sys.exit(code)
+`
 	require.NoError(t, os.WriteFile(shim, []byte(shimSource), 0o700), "trusted fixture shim should preserve real Git behavior without network access")
-	provider := &recordingReviewCredentialProvider{localReviewEvidenceProvider: localReviewEvidenceProvider{diagnoseFailures: true, logFailure: t.Logf, rewriteTrustedGit: shim}}
+	logFailure := func(format string, args ...any) {
+		t.Logf(format, args...)
+		if output, readErr := os.ReadFile(diagnosticPath); readErr == nil {
+			safe := strings.ReplaceAll(string(output), secret, "[fake credential redacted]")
+			safe = strings.ReplaceAll(safe, base64.StdEncoding.EncodeToString([]byte("x-access-token:"+secret)), "[fake credential redacted]")
+			t.Logf("isolated credential fixture fsck diagnostic: %s", safe)
+		} else if !errors.Is(readErr, os.ErrNotExist) {
+			t.Logf("could not read isolated fixture fsck diagnostic: %v", readErr)
+		}
+	}
+	provider := &recordingReviewCredentialProvider{localReviewEvidenceProvider: localReviewEvidenceProvider{diagnoseFailures: true, logFailure: logFailure, rewriteTrustedGit: shim}}
 	o := f.orchestrator()
 	o.provider, o.github = provider, testInternalGitHubTokens{token: secret}
 	o.repositories = testInternalRepoStore{repo: models.Repository{CloneURL: "https://example.com/repo.git"}}
