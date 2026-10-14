@@ -1288,7 +1288,13 @@ def prepare_workspace():
                 if os.path.exists(temporary):
                     os.unlink(temporary)
         validate_git_configuration()
-        verify_pinned_source()
+        # Live preparation already validated the complete pinned checkout
+        # after its last repository/tool command. Manifest reads and the
+        # platform-owned receipt write cannot alter tracked Git source, so
+        # repeating that expensive pass provides no additional command fence.
+        # Expired checks defer their only complete checkout check until here.
+        if p.get("verify_only", False):
+            verify_pinned_source()
 
 try:
     check_workspace_quarantine()

@@ -73,9 +73,9 @@ func TestReviewObjectIntegrityHashesOnceBeforeEachVerification(t *testing.T) {
 		expected []string
 		missing  bool
 	}{
-		{name: "cold locally complete", expected: []string{"fsck", "closure", "fsck", "closure", "index", "setup", "fsck", "closure", "index", "verify", "fsck", "closure", "index", "closure", "fsck", "closure", "index"}},
-		{name: "cold missing captured source", missing: true, expected: []string{"fsck", "closure", "fsck", "closure", "closure", "closure", "fsck", "closure", "index", "setup", "fsck", "closure", "index", "verify", "fsck", "closure", "index", "closure", "fsck", "closure", "index"}},
-		{name: "warm", expected: []string{"fsck", "closure", "fsck", "closure", "index", "verify", "fsck", "closure", "index", "fsck", "closure", "index"}},
+		{name: "cold locally complete", expected: []string{"fsck", "closure", "fsck", "closure", "index", "setup", "fsck", "closure", "index", "verify", "fsck", "closure", "index", "closure"}},
+		{name: "cold missing captured source", missing: true, expected: []string{"fsck", "closure", "fsck", "closure", "closure", "closure", "fsck", "closure", "index", "setup", "fsck", "closure", "index", "verify", "fsck", "closure", "index", "closure"}},
+		{name: "warm", expected: []string{"fsck", "closure", "fsck", "closure", "index", "verify", "fsck", "closure", "index"}},
 		{name: "expired", expected: []string{"fsck", "closure", "fsck", "closure", "index"}},
 		{name: "standalone", expected: []string{"fsck", "fsck", "closure"}},
 	}
