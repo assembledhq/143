@@ -789,6 +789,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		githubAutomationTriggerer.SetActions(db.NewAutomationActionStore(pool))
 		githubAutomationTriggerer.SetCapabilityResolver(agentCapabilitySvc)
 		githubAutomationTriggerer.SetLabelResolver(prService)
+		githubAutomationTriggerer.SetCheckRunPullRequestResolver(prService)
 		githubAutomationTriggerer.SetTargetStores(db.NewAutomationTargetStore(pool), automationRunStore)
 		prService.SetAutomationEventTriggerer(githubAutomationTriggerer)
 		// The webhook path runs on this instance, so per-target continuity's

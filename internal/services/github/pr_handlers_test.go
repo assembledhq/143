@@ -619,24 +619,28 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name             string
-		events           []models.AutomationGitHubEvent
-		withPR           bool
-		run              func(*testing.T, *PRService, uuid.UUID, int64, string)
-		wantActor        string
-		wantLabels       []string
-		wantBody         string
-		wantEventID      string
-		wantGroupID      string
-		wantBaseBranch   string
-		wantURL          string
-		wantTitle        string
-		wantHeadSHA      string
-		wantActorType    string
-		wantPRAction     string
-		wantLabelOnly    bool
-		wantChangedLabel string
-		wantLabelRefresh bool
+		name                string
+		events              []models.AutomationGitHubEvent
+		withPR              bool
+		run                 func(*testing.T, *PRService, uuid.UUID, int64, string)
+		wantActor           string
+		wantLabels          []string
+		wantBody            string
+		wantEventID         string
+		wantGroupID         string
+		wantBaseBranch      string
+		wantURL             string
+		wantTitle           string
+		wantHeadSHA         string
+		wantActorType       string
+		wantPRAction        string
+		wantLabelOnly       bool
+		wantChangedLabel    string
+		wantLabelRefresh    bool
+		wantCheckName       string
+		wantCheckAppID      int64
+		wantCheckRunID      int64
+		wantCheckConclusion string
 	}{
 		{
 			name: "pull request opened",
@@ -849,6 +853,8 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 				event.Repository.ID = githubRepoID
 				event.Repository.FullName = fullName
 				event.CheckRun.ID = 777
+				event.CheckRun.Name = "review-policy"
+				event.CheckRun.App.ID = 123
 				event.CheckRun.Conclusion = &conclusion
 				event.CheckRun.HeadSHA = "head-123"
 				event.CheckRun.PullRequests = append(event.CheckRun.PullRequests, struct {
@@ -861,9 +867,10 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 				}{Ref: "release"}})
 				require.NoError(t, svc.HandleCheckRunEvent(context.Background(), event), "check run webhook should not fail")
 			},
-			wantActor:      "github",
-			wantBody:       "Check run completed: failure",
-			wantEventID:    "check_run:777",
+			wantActor:     "github",
+			wantBody:      "Check run completed: failure",
+			wantEventID:   "check_run:777",
+			wantCheckName: "review-policy", wantCheckAppID: 123, wantCheckRunID: 777, wantCheckConclusion: "failure",
 			wantBaseBranch: "release",
 			wantHeadSHA:    "head-123", wantActorType: "System",
 		},
@@ -1002,6 +1009,10 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 				recordedReq = triggerer.calls[0]
 			}
 			require.Equal(t, tt.wantLabels, recordedReq.Labels, "automation request should carry the PR labels from the webhook payload")
+			require.Equal(t, tt.wantCheckName, recordedReq.CheckName, "automation check filters need the exact check name")
+			require.Equal(t, tt.wantCheckAppID, recordedReq.CheckAppID, "automation check filters need the verified webhook publisher ID")
+			require.Equal(t, tt.wantCheckRunID, recordedReq.CheckRunID, "snapshot provenance should retain the completed check ID")
+			require.Equal(t, tt.wantCheckConclusion, recordedReq.CheckConclusion, "snapshot provenance should retain the completed conclusion")
 			require.Equal(t, orgID, recordedReq.OrgID, "automation request should use the resolved repository org")
 			require.Equal(t, repoID, recordedReq.RepositoryID, "automation request should use the resolved repository id")
 			require.Equal(t, fullName, recordedReq.Repository, "automation request should include repository name")
