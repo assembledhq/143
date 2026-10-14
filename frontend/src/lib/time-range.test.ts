@@ -7,9 +7,69 @@ import {
   timeRangeDisplayDates,
   timeRangeRefreshDelayMs,
   timeRangeBounds,
+  timeRangeTrendGeometry,
 } from "./time-range";
 
 describe("time ranges", () => {
+  it.each([
+    { range: "this_month" as const, start: new Date(2026, 9, 1), end: new Date(2026, 10, 1), previousStart: new Date(2026, 8, 1) },
+    { range: "last_month" as const, start: new Date(2026, 8, 1), end: new Date(2026, 9, 1), previousStart: new Date(2026, 7, 1) },
+    { range: "this_week" as const, start: new Date(2026, 9, 4), end: new Date(2026, 9, 11), previousStart: new Date(2026, 8, 27) },
+    { range: "last_week" as const, start: new Date(2026, 8, 27), end: new Date(2026, 9, 4), previousStart: new Date(2026, 8, 20) },
+    { range: "last_2_weeks" as const, start: new Date(2026, 8, 20), end: new Date(2026, 9, 4), previousStart: new Date(2026, 8, 6) },
+  ])("uses preceding calendar geometry for $range without changing membership", ({ range, start, end, previousStart }) => {
+    const anchor = new Date(2026, 9, 9, 14);
+    const originalAnchor = anchor.getTime();
+    const membership = timeRangeBounds(range, anchor);
+    expect(timeRangeTrendGeometry(range, anchor)).toEqual({
+      trend_current_start: start.toISOString(),
+      trend_current_end: end.toISOString(),
+      trend_previous_start: previousStart.toISOString(),
+      trend_previous_end: start.toISOString(),
+    });
+    expect(timeRangeBounds(range, anchor)).toEqual(membership);
+    expect(anchor.getTime()).toBe(originalAnchor);
+    expect(membership.created_after).toBe(start.toISOString());
+  });
+
+  it.each([
+    { range: "7d" as const, expected: { trend_span_seconds: 604_800 } },
+    { range: "30d" as const, expected: { trend_span_seconds: 2_592_000 } },
+    { range: "90d" as const, expected: { trend_span_seconds: 7_776_000 } },
+    { range: "all" as const, expected: {} },
+    { range: "custom:1000-01-01:9999-12-31" as const, expected: {} },
+    { range: "custom:9999-12-30:9999-12-31" as const, expected: {} },
+  ])("keeps $range trend geometry separate from membership", ({ range, expected }) => {
+    const anchor = new Date(2026, 10, 3, 14);
+    expect(timeRangeTrendGeometry(range, anchor)).toEqual(expected);
+    if (isRollingTimeRange(range)) {
+      expect(timeRangeBounds(range, anchor)).toEqual({
+        created_after: new Date(anchor.getTime() - Number.parseInt(range, 10) * 86_400_000).toISOString(),
+      });
+    }
+  });
+
+  it("uses exclusive local days and an equal elapsed previous span for custom geometry", () => {
+    const start = new Date(2026, 9, 5);
+    const end = new Date(2026, 9, 19);
+    expect(timeRangeTrendGeometry("custom:2026-10-05:2026-10-18", new Date(2026, 9, 9, 14))).toEqual({
+      trend_current_start: start.toISOString(),
+      trend_current_end: end.toISOString(),
+      trend_previous_start: new Date(start.getTime() - (end.getTime() - start.getTime())).toISOString(),
+      trend_previous_end: start.toISOString(),
+    });
+  });
+
+  it("keeps local calendar boundaries across the November DST week", () => {
+    const start = new Date(2026, 10, 1);
+    expect(timeRangeTrendGeometry("last_week", new Date(2026, 10, 9, 14))).toEqual({
+      trend_current_start: start.toISOString(),
+      trend_current_end: new Date(2026, 10, 8).toISOString(),
+      trend_previous_start: new Date(2026, 9, 25).toISOString(),
+      trend_previous_end: start.toISOString(),
+    });
+  });
+
   it.each([
     { value: "7d", expected: "7d" },
     { value: "this_week", expected: "this_week" },

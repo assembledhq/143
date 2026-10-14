@@ -47,11 +47,19 @@ func (m *mockOrgs) GetByID(ctx context.Context, id uuid.UUID) (models.Organizati
 }
 
 type mockIntegrations struct {
-	orgs []uuid.UUID
+	orgs          []uuid.UUID
+	connectedOrgs []uuid.UUID
+	connectedErr  error
+	provider      models.IntegrationProvider
 }
 
 func (m *mockIntegrations) ListOrgsWithActiveIntegrations(ctx context.Context) ([]uuid.UUID, error) {
 	return m.orgs, nil
+}
+
+func (m *mockIntegrations) ListOrgsWithConnectedProvider(ctx context.Context, provider models.IntegrationProvider) ([]uuid.UUID, error) {
+	m.provider = provider
+	return m.connectedOrgs, m.connectedErr
 }
 
 type mockRepos struct {
@@ -242,17 +250,18 @@ func TestScheduler_ScheduleLinearTeamKeyRefresh_OncePerUTCDay(t *testing.T) {
 	orgIDs := []uuid.UUID{uuid.New(), uuid.New()}
 	jobs := &trackingJobs{}
 	s := &Scheduler{
-		jobs:   jobs,
-		logger: zerolog.Nop(),
+		jobs:         jobs,
+		integrations: &mockIntegrations{connectedOrgs: orgIDs},
+		logger:       zerolog.Nop(),
 	}
 
 	firstTick := time.Date(2026, 5, 8, 10, 0, 0, 0, time.UTC)
 	secondTick := firstTick.Add(10 * time.Minute)
 	nextDay := firstTick.Add(24 * time.Hour)
 
-	s.scheduleLinearTeamKeyRefresh(context.Background(), orgIDs, firstTick)
-	s.scheduleLinearTeamKeyRefresh(context.Background(), orgIDs, secondTick)
-	s.scheduleLinearTeamKeyRefresh(context.Background(), orgIDs, nextDay)
+	s.scheduleLinearTeamKeyRefresh(context.Background(), firstTick)
+	s.scheduleLinearTeamKeyRefresh(context.Background(), secondTick)
+	s.scheduleLinearTeamKeyRefresh(context.Background(), nextDay)
 
 	require.Equal(t,
 		[]string{"refresh_linear_team_keys", "refresh_linear_team_keys", "refresh_linear_team_keys", "refresh_linear_team_keys"},
@@ -747,4 +756,47 @@ func TestRecheckVerifiedDomains_NoopWhenUnwired(t *testing.T) {
 	s := &Scheduler{logger: zerolog.Nop()}
 	// Must not panic with nil store/verifier (e.g. worker-only deployments).
 	s.recheckVerifiedDomains(context.Background(), time.Now())
+}
+
+func TestSchedulerLinearRefreshRetriesUnfinishedDailyPass(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		listFail    bool
+		enqueueFail bool
+	}{
+		{name: "listing failure retries next tick", listFail: true},
+		{name: "enqueue failure retries next tick", enqueueFail: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			linearOrg, githubOnlyOrg := uuid.New(), uuid.New()
+			integrations := &mockIntegrations{orgs: []uuid.UUID{githubOnlyOrg}, connectedOrgs: []uuid.UUID{linearOrg}}
+			jobs := &trackingJobs{}
+			if tt.listFail {
+				integrations.connectedErr = errors.New("database unavailable")
+			}
+			if tt.enqueueFail {
+				jobs.enqueueFailures = 1
+			}
+			s := &Scheduler{jobs: jobs, integrations: integrations, logger: zerolog.Nop()}
+			// This local time belongs to the following UTC day.
+			now := time.Date(2026, 10, 8, 23, 30, 0, 0, time.FixedZone("offset", -4*60*60))
+			s.scheduleLinearTeamKeyRefresh(context.Background(), now)
+			require.Empty(t, s.lastDailyJobDates["refresh_linear_team_keys"], "failed listing or enqueue must not suppress the rest of the UTC day")
+			integrations.connectedErr = nil
+			s.scheduleLinearTeamKeyRefresh(context.Background(), now.Add(10*time.Minute))
+			require.Equal(t, models.IntegrationProviderLinear, integrations.provider, "Linear refresh must use the provider-specific connected scan")
+			require.Equal(t, "2026-10-09", s.lastDailyJobDates["refresh_linear_team_keys"], "only a fully successful pass should mark the UTC day finished")
+			expectedCalls := 1
+			if tt.enqueueFail {
+				expectedCalls = 2
+			}
+			require.Equal(t, expectedCalls, len(jobs.payloads), "unfinished work should retry once while successful daily work stays deduplicated")
+			for _, payload := range jobs.payloads {
+				require.Equal(t, map[string]string{"org_id": linearOrg.String()}, payload, "GitHub-only organization must not get Linear maintenance")
+			}
+		})
+	}
 }

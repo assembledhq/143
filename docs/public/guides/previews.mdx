@@ -21,10 +21,10 @@ A preview turns a session from "read the diff" into "try the changed app." Use i
 
 <Screenshot
   src="/product/docs-session-preview.webp"
-  alt="143 session preview panel showing a running preview booting with infrastructure, services, and preview steps"
+  alt="143 demo Previews workspace showing a running PR preview and controls to open, stop, or refresh it"
   width={1440}
-  height={810}
-  caption="Reviewers can start and open previews from the session instead of pulling the branch locally."
+  height={960}
+  caption="The Previews workspace lists running previews and shows when a branch has newer changes."
 />
 
 Previews are configured in `.143/config.json` under the top-level `preview` key. Commit that file to the base branch so sessions, branch previews, and API-triggered previews all read the same contract.

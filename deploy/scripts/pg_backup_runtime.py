@@ -91,18 +91,23 @@ def resources(root, db_pid):
                 monotonic=time.monotonic())
 
 
-def swap_limits(allow_swap_bursts=False, *, admission=False):
+def swap_limits(allow_swap_bursts=False, *, admission=False, swap_out_mib_per_second=4):
     require(type(allow_swap_bursts) is bool, 'unsupported swap tolerance')
+    require(type(swap_out_mib_per_second) is int and swap_out_mib_per_second in (4, 8),
+            'unsupported swap-out rate')
     multiplier = 2 if allow_swap_bursts and not admission else 1
+    rate = 4 if admission else 8 if allow_swap_bursts else swap_out_mib_per_second
     return dict(swap_usage_limit_bytes=multiplier * 256 * 1024 ** 2,
-                swap_out_limit_bytes_per_second=multiplier * 4 * 1024 ** 2)
+                swap_out_limit_bytes_per_second=rate * 1024 ** 2)
 
 
 def check_resources(sample, previous, reserve, *, admission=False, estimate=0, capacity_only=False,
-                    host_memory_full_percent=1, db_memory_full_percent=1, allow_swap_bursts=False):
+                    host_memory_full_percent=1, db_memory_full_percent=1, allow_swap_bursts=False,
+                    swap_out_mib_per_second=4):
     for limit in (host_memory_full_percent, db_memory_full_percent):
         require(type(limit) is int and limit in (1, 5), 'unsupported memory pressure limit')
-    swap = swap_limits(allow_swap_bursts, admission=admission)
+    swap = swap_limits(allow_swap_bursts, admission=admission,
+                       swap_out_mib_per_second=swap_out_mib_per_second)
     # The attended canary override permits moderate stalls during work, never
     # admission into an already pressured host or weaker actual-memory limits.
     host_memory_limit = 1 if admission else host_memory_full_percent
@@ -130,9 +135,14 @@ class Guard:
     def __init__(self, policy, partial, app, estimate, exercise=None):
         self.policy, self.partial, self.app = policy, partial, app
         self.estimate, self.exercise = estimate, exercise
+        self.dump_cpus = getattr(policy, 'dump_cpus', 1.0)
+        require(type(self.dump_cpus) in (int, float) and self.dump_cpus in (0.75, 1.0),
+                'unsupported dump CPU limit')
         self.host_memory_full_percent = getattr(policy, 'host_memory_full_percent', 1)
         self.db_memory_full_percent = getattr(policy, 'db_memory_full_percent', 1)
         self.allow_swap_bursts = getattr(policy, 'allow_swap_bursts', False)
+        self.swap_out_mib_per_second = getattr(policy, 'swap_out_mib_per_second', 4)
+        swap_limits(self.allow_swap_bursts, swap_out_mib_per_second=self.swap_out_mib_per_second)
         self.run = policy.state / app
         self.record = self.run / 'ownership.json'
         self.result = self.run / 'result.json'
@@ -282,7 +292,8 @@ class Guard:
                            database=database, boot_id=self.owner_identity[0],
                            host_memory_full_limit_percent=1 if admission else self.host_memory_full_percent,
                            db_memory_full_limit_percent=1 if admission else self.db_memory_full_percent,
-                           **swap_limits(self.allow_swap_bursts, admission=admission))
+                           **swap_limits(self.allow_swap_bursts, admission=admission,
+                                         swap_out_mib_per_second=self.swap_out_mib_per_second))
         # Keep the triggering sample even if enforcement or a later backend
         # query fails. In-memory evidence also survives a failed history write.
         self.last_dump_sample = observation
@@ -295,7 +306,8 @@ class Guard:
                             estimate=self.estimate if admission else 0,
                             host_memory_full_percent=self.host_memory_full_percent,
                             db_memory_full_percent=self.db_memory_full_percent,
-                            allow_swap_bursts=self.allow_swap_bursts)
+                            allow_swap_bursts=self.allow_swap_bursts,
+                            swap_out_mib_per_second=self.swap_out_mib_per_second)
         except Refused:
             self.violating_sample = observation
             raise
@@ -332,12 +344,13 @@ class Guard:
         require(parsed.version == 4 and parsed.is_private and not parsed.is_loopback, 'invalid database Docker address')
         sample = resources(self.policy.root, generation['pid'])
         self.observe_dump_resources(sample, None, generation, admission=True)
-        owned.update(database=generation, file_limit=sample['free_bytes'] - self.policy.reserve - 4 * GIB)
+        owned.update(database=generation, file_limit=sample['free_bytes'] - self.policy.reserve - 4 * GIB,
+                     dump_client_cpus=self.dump_cpus)
         limit = str(owned['file_limit'])
         command = ['docker', 'create', '--name', self.app, '--label', LABEL + '=' + self.app,
                    '--pull=never', '--network', 'container:' + generation['id'], '--restart=no',
                    '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
-                   '--memory=2g', '--memory-swap=2g', '--cpus=1', '--pids-limit=32',
+                   '--memory=2g', '--memory-swap=2g', '--cpus=' + format(self.dump_cpus, 'g'), '--pids-limit=32',
                    '--ulimit', 'fsize=' + limit + ':' + limit,
                    '--mount', 'type=bind,src=' + str(self.partial) + ',dst=/backup.dump',
                    '-e', 'PGPASSWORD', '-e', 'PGAPPNAME', '-e', 'PGOPTIONS', '-e', 'PGCONNECT_TIMEOUT',
@@ -498,7 +511,7 @@ class TransferGuard(Guard):
         # Persist the violating sample too, so a stop is diagnosable.
         limit = self.host_memory_full_percent if enforce and self.phase != 'metadata' else None
         db_limit = self.db_memory_full_percent if enforce and self.phase != 'metadata' else None
-        swap = swap_limits(self.allow_swap_bursts)
+        swap = swap_limits(self.allow_swap_bursts, swap_out_mib_per_second=self.swap_out_mib_per_second)
         if not enforce or self.phase == 'metadata':
             swap = dict.fromkeys(swap)
         observation = dict(at=now(), phase=self.phase, resources=sample, client_memory=self.client_memory,
@@ -517,7 +530,8 @@ class TransferGuard(Guard):
                             capacity_only=self.phase == 'metadata',
                             host_memory_full_percent=self.host_memory_full_percent,
                             db_memory_full_percent=self.db_memory_full_percent,
-                            allow_swap_bursts=self.allow_swap_bursts)
+                            allow_swap_bursts=self.allow_swap_bursts,
+                            swap_out_mib_per_second=self.swap_out_mib_per_second)
         self.previous = sample
 
     def checkpoint(self, name, *, enforce=True):
@@ -662,6 +676,107 @@ class TransferGuard(Guard):
 
 def protect_transfer(policy, partial, app, timeline, measured_db, version):
     return run_guard(TransferGuard(policy, partial, app, timeline, measured_db, version))
+
+
+class VerificationRecoveryGuard(TransferGuard):
+    """Resume pre-upload work without discarding the dump or its recovery point."""
+    def __init__(self, policy, archive, app, pending, measured_db):
+        super().__init__(policy, archive, app, dict(pending['timeline']), measured_db, '')
+        self.pending = pending
+
+    def prepare(self):
+        p, pending = self.policy, self.pending
+        before = read_json(self.run.parent / 'pending-before.json')
+        require(read_json(p.state / 'pending.json') == before, 'pending verification changed before recovery')
+        old_app = pending['app_name']
+        dump_app = pending.get('dump_app', old_app)
+        require(re.fullmatch(r'143-backup-[a-f0-9]{32}', dump_app), 'invalid original dump identity')
+        dump = read_json(p.state / dump_app / 'ownership.json')
+        dump_result = read_json(p.state / dump_app / 'result.json')
+        previous = p.state / old_app / 'postdump'
+        owner, result = read_json(previous / 'ownership.json'), read_json(previous / 'result.json')
+        file_id = identity(self.partial)
+        require(dump['app'] == dump_app and dump_result['status'] == 'completed' and
+                dump_result['cleanup_verified'] is True and
+                all(file_id[k] == dump['partial'][k] for k in ('device', 'inode')),
+                'original dump completion or identity unproven')
+        # Publishing via link/unlink changes ctime. Bytes, mtime and inode must
+        # still match the completed dump; verification and hashing run again.
+        require(owner['app'] == old_app and all(file_id[k] == owner['partial'][k]
+                for k in ('device', 'inode', 'bytes', 'mtime_ns')),
+                'preserved verification archive changed')
+        require(result['status'] == 'failed' and result['cleanup_verified'] is True,
+                'prior verification cleanup unproven')
+        require(not owner.get('creation_started') or owner.get('creation_complete') is True,
+                'prior reader creation outcome ambiguous')
+        require(not (previous / 'upload.json').exists() and
+                owner.get('client_name', '').removeprefix(old_app) in ('', '-structural', '-metadata'),
+                'verification marker conflicts with upload evidence')
+        for record in (dump, owner):
+            try:
+                current = proc_identity(record['owner_pid'])
+            except FileNotFoundError:
+                current = None
+            require(current != record['owner_identity'], 'prior backup owner is still alive')
+        require(os.environ.get('DOCKER_HOST', '') in ('', 'unix:///var/run/docker.sock') and
+                not os.environ.get('DOCKER_CONTEXT'), 'local default Docker endpoint required')
+        endpoint = invoke(['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], timeout=5).strip()
+        require(endpoint == 'unix:///var/run/docker.sock', 'local Linux Docker socket required')
+        listing = invoke(['docker', 'container', 'ls', '-a', '--no-trunc',
+                          '--format', '{{json .ID}}\t{{json (.Label "' + LABEL + '")}}'], timeout=5)
+        for line in listing.splitlines():
+            cid_json, label_json = line.split('\t')
+            cid, label = json.loads(cid_json), json.loads(label_json)
+            require(isinstance(cid, str) and re.fullmatch(r'[a-f0-9]{64}', cid)
+                    and isinstance(label, str), 'invalid reader inventory')
+            require(not label, 'backup reader still exists; reconcile before retry')
+        self.db, generation = self.database(dump['database'])
+        self.owned = dict(app=self.app, database=generation, partial=file_id,
+                          owner_pid=self.owner_pid, owner_identity=self.owner_identity,
+                          creation_started=False, creation_complete=False, resumed_from=old_app)
+        atomic_json(self.record, self.owned)
+        require(not json.loads(self.query(
+            "SELECT coalesce(json_agg(pid), '[]') FROM pg_stat_activity WHERE application_name='" + dump_app + "'",
+            self.owned)), 'original dump backend still exists')
+        first = resources(p.root, generation['pid'])
+        check_resources(first, None, p.reserve, admission=True)
+        self.checkpoint('verification_resumed')
+        require(p.remote(pending['file'], aws=self.aws) is None,
+                'prior object exists; reconcile instead of retrying')
+        self.version = self.aws(['--version']).strip()
+        require(self.version.split()[:1] == [p.aws_cli_version], 'unexpected AWS CLI version')
+        self.structural_check(self.partial)
+        self.timeline['structural_verified_at'] = now()
+        checksum = self.checksum(self.partial)
+        self.timeline['local_sha256_at'] = now()
+        require(identity(self.partial) == file_id and read_json(p.state / 'pending.json') == before,
+                'archive or verification marker changed during recovery')
+        final = p.root / pending['file']
+        if self.partial != final:
+            require(not final.exists(), 'archive publication target changed')
+            os.link(self.partial, final)
+            self.partial.unlink()
+            sync_dir(p.root)
+            self.partial = final
+        self.timeline['verification_resumed_from'] = old_app
+        if pending.get('database_size_evidence'):
+            self.timeline['database_size_evidence'] = pending['database_size_evidence']
+        self.timeline['upload_started_at'] = now()
+        atomic_json(p.state / 'pending.json', dict(file=final.name, app_name=self.app, dump_app=dump_app,
+                    started_at=pending['started_at'], phase='upload', runtime='postdump',
+                    identity=identity(final), sha256=checksum, timeline=self.timeline,
+                    database_bytes=self.measured_db))
+        self.checkpoint('upload_started')
+
+    def supervise(self):
+        try:
+            self.prepare()
+            result = self.policy.upload_archive(self.partial, self.app, self.timeline,
+                                                self.measured_db, self.version, self)
+            self.terminal(dict(status='completed', at=now(), cleanup_verified=True,
+                               phase_resources=self.phase_resources, **result))
+        except (OSError, ValueError, KeyError, TypeError, Refused, subprocess.TimeoutExpired) as exc:
+            self.fail(str(exc))
 
 
 class RecoveryTransferGuard(TransferGuard):

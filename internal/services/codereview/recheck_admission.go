@@ -863,7 +863,13 @@ func (s *Service) FallbackAssessmentToFull(ctx context.Context, orgID, assessmen
 		return errors.New("assessment must be terminal before a full fallback")
 	}
 	requestID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("code-review-full-fallback:"+assessmentID.String()))
-	_, err = s.requestFullAssessmentReview(ctx, ScheduleRequestInput{OrgID: orgID, PullRequestID: a.PullRequestID, RequestID: requestID, Mode: models.CodeReviewForceFresh, Reason: reason}, a.RepositoryID, &ReviewRequestContext{Source: "assessment_fallback", Body: reason}, true, false)
+	var manifest ReviewInputManifest
+	if err := json.Unmarshal(a.InputManifest, &manifest); err != nil {
+		return fmt.Errorf("decode fallback request input: %w", err)
+	}
+	// Recovery explains why work was restarted; it must not replace the human
+	// request that the captured assessment was intended to answer.
+	_, err = s.requestFullAssessmentReview(ctx, ScheduleRequestInput{OrgID: orgID, PullRequestID: a.PullRequestID, RequestID: requestID, Mode: models.CodeReviewForceFresh, Reason: reason}, a.RepositoryID, &ReviewRequestContext{Source: "assessment_fallback", Body: manifest.Request.SubstantiveText}, true, false)
 	if err != nil {
 		return err
 	}

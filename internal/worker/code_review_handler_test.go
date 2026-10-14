@@ -615,7 +615,7 @@ func TestRecordCodeReviewAutomaticWaitPersistsRateLimitOnly(t *testing.T) {
 	mock.ExpectQuery("WITH scheduled_retry AS MATERIALIZED").
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID, "session_id": sessionID, "job_id": jobID, "retry_at": pgxmock.AnyArg(),
-			"job_error": rateLimitErr.Error(), "status_message": message,
+			"job_error": rateLimitErr.Error(), "status_message": message, "status_code": models.CodeReviewStatusCodeGitHubRateLimited,
 		}).
 		WillReturnRows(newCodeReviewMetadataRows().AddRow(
 			metadataID, orgID, sessionID, uuid.New(), uuid.New(), uuid.New(),
@@ -656,6 +656,7 @@ func TestDelayedCodeReviewRetryHookCannotOverwriteNewerAttempt(t *testing.T) {
 			"org_id": orgID, "session_id": sessionID, "job_id": jobID, "retry_at": runAt,
 			"job_error":      handlerErr.Error(),
 			"status_message": "GitHub is rate-limited. The review will resume automatically when the limit resets.",
+			"status_code":    models.CodeReviewStatusCodeGitHubRateLimited,
 		}).
 		WillReturnRows(newCodeReviewMetadataRows())
 	store := db.NewCodeReviewStore(mock)
@@ -2480,6 +2481,9 @@ func TestHarvestCodeReviewOrchestratorResultPreservesCompletedOutputAfterDeadlin
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
 		WillReturnRows(newSessionMessageRows().
 			AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, models.MessageRoleAssistant, rawReview, nil, nil, nil, nil, "", completedAt))
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_findings").
+		WithArgs(orgID, sessionID, false).
+		WillReturnRows(newCodeReviewFindingRows())
 	mock.ExpectQuery("INSERT INTO code_review_findings").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -2546,6 +2550,9 @@ func TestHarvestLegacyCodeReviewSynthesisOnReadOnlyMain(t *testing.T) {
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": mainThreadID}).
 		WillReturnRows(newSessionMessageRows().
 			AddRow(int64(1), sessionID, orgID, &mainThreadID, nil, 1, models.MessageRoleAssistant, raw, nil, nil, nil, nil, "", now))
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_findings").
+		WithArgs(orgID, sessionID, false).
+		WillReturnRows(newCodeReviewFindingRows())
 	mock.ExpectQuery("UPDATE code_review_agent_results").
 		WithArgs(models.CodeReviewAgentResultStatusCompleted, &raw,
 			readOnlyMainSynthesisArg{threadID: mainThreadID, summary: "The change is focused."}, orgID, resultID).
@@ -5300,7 +5307,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected:     models.CodeReviewDecisionNeedsHumanReview,
 			reason:       "reviewer quorum 1 is below policy requirement 2",
-			bodyContains: "**Reviewers:** Codex found no blocking issues; Claude Code failed",
+			bodyContains: "**Reviewers:** Codex completed its review; Claude Code failed",
 		},
 		{
 			name: "explains a description requirement the coding agent marked missing",

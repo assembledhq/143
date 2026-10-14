@@ -759,6 +759,9 @@ func TestCodeReviewOrchestratorFallbackRecoversAndCompletes(t *testing.T) {
 	mock.ExpectQuery("(?s)SELECT .*FROM session_messages").WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
 		WillReturnRows(newSessionMessageRows().AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, models.MessageRoleAssistant, raw, nil, nil, nil, nil, "", now))
 	var completedState json.RawMessage
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_findings").
+		WithArgs(orgID, sessionID, false).
+		WillReturnRows(newCodeReviewFindingRows())
 	mock.ExpectQuery("UPDATE code_review_agent_results").WithArgs(models.CodeReviewAgentResultStatusCompleted, &raw, codeReviewFallbackArg(func(value any) bool {
 		completedState, _ = value.(json.RawMessage)
 		state, ok := parseCodeReviewOrchestratorStructuredResult(completedState)

@@ -1,8 +1,9 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CodeReviewAnalyticsReport } from "@/components/code-review-analytics";
 import type { CodeReviewAnalytics } from "@/lib/types";
+import { CODE_REVIEW_ANALYTICS_METRIC_LABELS, CODE_REVIEW_ANALYTICS_METRICS, type CodeReviewAnalyticsMetric } from "@/lib/code-review-analytics-metrics";
 
 function emptyAnalytics(prsReviewed = 0): CodeReviewAnalytics {
   return {
@@ -13,6 +14,8 @@ function emptyAnalytics(prsReviewed = 0): CodeReviewAnalytics {
       not_approved: 0,
       approved_first_round: 0,
       median_rounds_to_approval: null,
+      average_rounds_to_approval: null,
+      p95_rounds_to_approval: null,
       needs_human_review: 0,
       comment_only: 0,
       blocked: 0,
@@ -49,8 +52,11 @@ function emptyAnalytics(prsReviewed = 0): CodeReviewAnalytics {
   };
 }
 
-function renderReport(analytics: CodeReviewAnalytics) {
-  render(
+function renderReport(analytics: CodeReviewAnalytics, options: {
+  selectedMetric?: CodeReviewAnalyticsMetric;
+  onMetricChange?: (metric: CodeReviewAnalyticsMetric) => void;
+} = {}) {
+  return render(
     <CodeReviewAnalyticsReport
       analytics={analytics}
       isLoading={false}
@@ -61,12 +67,13 @@ function renderReport(analytics: CodeReviewAnalytics) {
       onAuthorSort={vi.fn()}
       reviewLinkFilters={{ range: "30d" }}
       filters={null}
+      {...options}
     />,
   );
 }
 
 describe("CodeReviewAnalyticsReport PR cohort states", () => {
-  it("shows headline metric definitions in tooltips without subdescriptions", async () => {
+  it("distinguishes PR approval from review approval and defines the median population", async () => {
     const user = userEvent.setup();
     const analytics = emptyAnalytics(4);
     analytics.summary.approved_by_143 = 2;
@@ -74,19 +81,35 @@ describe("CodeReviewAnalyticsReport PR cohort states", () => {
     renderReport(analytics);
 
     const outcomes = screen.getByLabelText("Approval outcomes");
-    expect(within(outcomes).queryByText("First sent to 143 in this period")).not.toBeInTheDocument();
-    expect(within(outcomes).queryByText("50% of PRs reviewed")).not.toBeInTheDocument();
-    expect(within(outcomes).queryByText("Approved PRs only")).not.toBeInTheDocument();
+    expect(within(outcomes).getByText("Unique PRs first sent in this period")).toBeInTheDocument();
+    expect(within(outcomes).getByText("2 of 4 unique PRs")).toBeInTheDocument();
+    expect(within(outcomes).getByText("50%")).toBeInTheDocument();
+    expect(within(outcomes).getAllByText("Approved PRs only")).toHaveLength(3);
 
     const trigger = within(outcomes).getByRole("button", { name: "About Median rounds to approval" });
     await user.hover(trigger);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      "The median number of distinct completed revisions before 143 first posted an approval, among approved pull requests.",
+      "The median number of completed review sessions up to and including the first posted approval, among approved PRs. Repeat reviews of the same revision count separately; failed, stale, cancelled, and unfinished reviews do not count.",
     );
 
     expect(within(outcomes).getByRole("button", { name: "About PRs reviewed" })).toBeInTheDocument();
-    expect(within(outcomes).getByRole("button", { name: "About Approved by 143" })).toBeInTheDocument();
-    expect(within(outcomes).getByRole("button", { name: "About Approval rate" })).toBeInTheDocument();
+    const approvalTrigger = within(outcomes).getByRole("button", { name: "About Automatically approved" });
+    await user.unhover(trigger);
+    await user.hover(approvalTrigger);
+    await waitFor(() => expect(screen.getByRole("tooltip")).toHaveTextContent(
+      "Each PR counts once. Evidence-only rechecks are excluded.",
+    ));
+    const rateTrigger = within(outcomes).getByRole("button", { name: "About PR approval rate" });
+    await user.unhover(approvalTrigger);
+    await user.hover(rateTrigger);
+    await waitFor(() => expect(screen.getByRole("tooltip")).toHaveTextContent(
+      "Automatically approved PRs divided by unique PRs first sent to 143 during the selected period. Uses all later rounds and includes PRs still awaiting approval. The Reviews tab counts completed review sessions instead.",
+    ));
+    await user.unhover(rateTrigger);
+    await user.hover(within(outcomes).getByRole("button", { name: "About P95 rounds to approval" }));
+    await waitFor(() => expect(screen.getByRole("tooltip")).toHaveTextContent(
+      "At least 95% of approved PRs received their first posted approval within this many completed review sessions.",
+    ));
   });
 
   it("shows PR-oriented empty copy when the cohort has no PRs", () => {
@@ -94,6 +117,57 @@ describe("CodeReviewAnalyticsReport PR cohort states", () => {
 
     expect(screen.getByText("No PRs first sent to 143 in this time window")).toBeInTheDocument();
     expect(screen.getByText(/another repository to analyze PR outcomes/)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^Show .* trend \(/ })).toHaveLength(6);
+    expect(screen.queryByRole("table", { name: "Code review analytics by PR author" })).not.toBeInTheDocument();
+  });
+
+  it("selects all six loaded metrics, defaults to Average, and keeps info controls separate", async () => {
+    const user = userEvent.setup();
+    const onMetricChange = vi.fn();
+    renderReport(emptyAnalytics(), { onMetricChange });
+    expect(screen.getByRole("button", { name: /^Show Average rounds to approval trend/ })).toHaveAttribute("aria-pressed", "true");
+    for (const metric of CODE_REVIEW_ANALYTICS_METRICS) {
+      const label = CODE_REVIEW_ANALYTICS_METRIC_LABELS[metric];
+      const button = screen.getByRole("button", { name: new RegExp(`^Show ${label} trend`) });
+      await user.click(button);
+      expect(onMetricChange).toHaveBeenLastCalledWith(metric);
+      expect(button).toHaveAttribute("aria-pressed", "true");
+      expect(screen.getByRole("heading", { name: `${label} trend` })).toBeInTheDocument();
+      expect(button.querySelector("button")).toBeNull();
+    }
+    onMetricChange.mockClear();
+    await user.hover(screen.getByRole("button", { name: "About Average rounds to approval" }));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("The average number of completed review sessions");
+    expect(onMetricChange).not.toHaveBeenCalled();
+  });
+
+  it("scrolls an offscreen chart into view with reduced motion while keeping keyboard focus on the card", async () => {
+    const user = userEvent.setup();
+    renderReport(emptyAnalytics(3));
+    const chart = screen.getByLabelText("Code review analytics trend").parentElement!;
+    vi.spyOn(chart, "getBoundingClientRect").mockReturnValue(new DOMRect(0, -200, 800, 100));
+    const scroll = vi.fn();
+    chart.scrollIntoView = scroll;
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true } as MediaQueryList)));
+    try {
+      const button = screen.getByRole("button", { name: /^Show PR approval rate trend/ });
+      button.focus();
+      await user.keyboard("{Enter}");
+      expect(scroll).toHaveBeenCalledWith({ behavior: "instant", block: "start" });
+      expect(button).toHaveFocus();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retains a supplied metric on controlled renders and preserves cached data after a failed refresh", () => {
+    const analytics = emptyAnalytics(3);
+    const { rerender } = renderReport(analytics, { selectedMetric: "p95_rounds_to_approval" });
+    expect(screen.getByRole("button", { name: /^Show P95 rounds to approval trend/ })).toHaveAttribute("aria-pressed", "true");
+    rerender(<CodeReviewAnalyticsReport analytics={analytics} isLoading={false} isError onRetry={vi.fn()} authorSort="reviews" authorSortOrder="desc" onAuthorSort={vi.fn()} reviewLinkFilters={{ range: "30d" }} filters={null} selectedMetric="p95_rounds_to_approval" />);
+    expect(screen.getByText("Analytics may be out of date")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "P95 rounds to approval trend" })).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Code review analytics by PR author" })).toBeInTheDocument();
   });
 
   it("shows every round bucket and an empty median when no PR has approval", () => {
@@ -101,9 +175,12 @@ describe("CodeReviewAnalyticsReport PR cohort states", () => {
 
     const outcomes = screen.getByLabelText("Approval outcomes");
     expect(within(outcomes).getByText("Median rounds to approval")).toBeInTheDocument();
-    expect(within(outcomes).getByText("—")).toBeInTheDocument();
+    expect(within(outcomes).getAllByText("—")).toHaveLength(3);
 
     const rounds = screen.getByLabelText("Approval by round");
+    expect(screen.getByText(
+      "Each PR appears once, by the number of completed reviews up to and including its first posted 143 approval. Repeat reviews of the same revision count separately.",
+    )).toBeInTheDocument();
     for (const label of [
       "Approved in round 1",
       "Approved in round 2",
@@ -128,12 +205,18 @@ describe("CodeReviewAnalyticsReport PR cohort states", () => {
     const analytics = emptyAnalytics(3);
     analytics.summary.approved_by_143 = 2;
     analytics.summary.median_rounds_to_approval = 1.5;
+    analytics.summary.average_rounds_to_approval = 2.3333333333333335;
+    analytics.summary.p95_rounds_to_approval = 4;
     analytics.authors[0]!.approved_by_143 = 2;
     analytics.authors[0]!.median_rounds_to_approval = 1.5;
     renderReport(analytics);
 
     const outcomes = screen.getByLabelText("Approval outcomes");
     expect(within(outcomes).getByText("1.5")).toBeInTheDocument();
+    expect(within(outcomes).getByText("Average rounds to approval")).toBeInTheDocument();
+    expect(within(outcomes).getByText("2.3")).toBeInTheDocument();
+    expect(within(outcomes).getByText("P95 rounds to approval")).toBeInTheDocument();
+    expect(within(outcomes).getByText("4")).toBeInTheDocument();
 
     const authorTable = screen.getByRole("table", { name: "Code review analytics by PR author" });
     expect(within(authorTable).getAllByText("1.5")).toHaveLength(2);

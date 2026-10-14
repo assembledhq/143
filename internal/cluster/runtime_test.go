@@ -72,8 +72,13 @@ func (m *schedulerRuntimeOrgStoreMock) GetByID(ctx context.Context, id uuid.UUID
 }
 
 type schedulerRuntimeIntegrationStoreMock struct {
-	orgIDs []uuid.UUID
-	err    error
+	orgIDs       []uuid.UUID
+	linearOrgIDs []uuid.UUID
+	err          error
+}
+
+func (m *schedulerRuntimeIntegrationStoreMock) ListOrgsWithConnectedProvider(ctx context.Context, provider models.IntegrationProvider) ([]uuid.UUID, error) {
+	return m.linearOrgIDs, nil
 }
 
 func (m *schedulerRuntimeIntegrationStoreMock) ListOrgsWithActiveIntegrations(ctx context.Context) ([]uuid.UUID, error) {
@@ -145,14 +150,14 @@ func TestSchedulerRunOnce(t *testing.T) {
 		{
 			name:         "keeps maintenance jobs and never enqueues PM work",
 			lock:         &schedulerRuntimeLockMock{acquired: true},
-			integrations: &schedulerRuntimeIntegrationStoreMock{orgIDs: []uuid.UUID{oldOrgID, newOrgID}},
+			integrations: &schedulerRuntimeIntegrationStoreMock{orgIDs: []uuid.UUID{oldOrgID, newOrgID}, linearOrgIDs: []uuid.UUID{oldOrgID}},
 			orgs: &schedulerRuntimeOrgStoreMock{orgByID: map[uuid.UUID]models.Organization{
 				oldOrgID: {ID: oldOrgID, Settings: defaultSettingsJSON},
 				newOrgID: {ID: newOrgID, Settings: defaultSettingsJSON},
 			}},
 			repos:           &schedulerRuntimeRepoStoreMock{},
 			jobs:            &schedulerRuntimeJobsMock{},
-			expectedEnqueue: 14,
+			expectedEnqueue: 13,
 			expectedRelease: 1,
 		},
 	}
@@ -180,6 +185,10 @@ func TestSchedulerRunOnce(t *testing.T) {
 			}
 			if len(tt.integrations.orgIDs) > 0 {
 				require.Contains(t, tt.jobs.enqueued[0], "sync_slack", "Slack sync should remain scheduled independently")
+			}
+			if len(tt.integrations.linearOrgIDs) > 0 {
+				require.Contains(t, tt.jobs.enqueued, oldOrgID.String()+":refresh_linear_team_keys", "connected Linear organization should receive its health probe")
+				require.NotContains(t, tt.jobs.enqueued, newOrgID.String()+":refresh_linear_team_keys", "all-provider membership alone must not enqueue Linear work")
 			}
 			require.Equal(t, tt.expectedRelease, tt.lock.releaseCalls, "runOnce should release the lock when acquired")
 		})

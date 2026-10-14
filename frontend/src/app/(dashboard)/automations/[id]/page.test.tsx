@@ -5,6 +5,7 @@ import {
   screen,
   userEvent,
   waitFor,
+  within,
 } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { http, HttpResponse } from "msw";
@@ -2349,7 +2350,10 @@ describe("AutomationDetailPage", () => {
     await user.click(await screen.findByText("claude-sonnet-4-6"));
 
     await waitFor(() => {
-      expect(updateBody).toEqual({ model: "claude-sonnet-4-6" });
+      expect(updateBody).toEqual({
+        model: "claude-sonnet-4-6",
+        agent_type: "claude_code",
+      });
     });
   });
 
@@ -2674,6 +2678,263 @@ describe("AutomationDetailPage", () => {
     });
   });
 
+  // Two agents can both grade reasoning and still not share a scale, so the
+  // reset on an agent switch has to be decided per level. These two cases pin
+  // both sides of that: "max" is Claude Code only, "high" is common to both.
+  const renderCrossAgentModelSwitch = async (
+    storedReasoning: string,
+  ): Promise<{ body: () => Record<string, unknown> | null }> => {
+    let updateBody: Record<string, unknown> | null = null;
+    const stored: Record<string, unknown> = {
+      id: "auto-1",
+      org_id: "org-1",
+      repository_id: "repo-1",
+      name: "Weekly audit",
+      goal: "Check release health",
+      scope: "",
+      agent_type: "claude_code",
+      model_override: "claude-opus-5",
+      reasoning_effort: storedReasoning,
+      interval_value: 1,
+      interval_unit: "weeks",
+      base_branch: "main",
+      enabled: true,
+      timezone: "UTC",
+      last_run_at: null,
+      next_run_at: null,
+      priority: 50,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+
+    server.use(
+      // Codex is the org default, so its models are offered without a
+      // credential while the automation itself still runs on Claude Code.
+      http.get("*/api/v1/settings", () =>
+        HttpResponse.json({
+          data: { settings: { default_agent_type: "codex" } },
+        }),
+      ),
+      http.get("*/api/v1/settings/codex-auth/status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("*/api/v1/coding-credentials*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({ data: { ...stored } }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      // Stateful, so the refetch after the save renders what the API stored
+      // rather than replaying the pre-edit agent.
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = (await request.json()) as Record<string, unknown>;
+        const { model, agent_type, reasoning_effort } = updateBody as {
+          model?: string;
+          agent_type?: string;
+          reasoning_effort?: string;
+        };
+        if (model !== undefined) stored.model_override = model;
+        if (agent_type !== undefined) stored.agent_type = agent_type;
+        if (reasoning_effort !== undefined) {
+          stored.reasoning_effort = reasoning_effort;
+        }
+        return HttpResponse.json({ data: { ...stored } });
+      }),
+    );
+
+    return { body: () => updateBody };
+  };
+
+  it("moves the automation to the agent group the model was picked from", async () => {
+    const user = userEvent.setup();
+    // "high" is on both scales, so the reasoning override stays put and the
+    // patch carries only the model and the agent it was picked under.
+    const { body } = await renderCrossAgentModelSwitch("high");
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+    // Claude Code's scale while the automation still runs on it.
+    await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
+    expect(await screen.findByRole("option", { name: "Max" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    await user.click(await screen.findByRole("option", { name: "gpt-5.6-sol" }));
+
+    await waitFor(() => {
+      expect(body()).toEqual({ model: "gpt-5.6-sol", agent_type: "codex" });
+    });
+    // The rail now offers Codex's scale. The stored agent is what decides it,
+    // so a save that left agent_type behind would still offer "Max".
+    await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
+    expect(
+      await screen.findByRole("option", { name: "Extra High" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Max" })).not.toBeInTheDocument();
+  });
+
+  it("clears a reasoning level the incoming agent does not grade", async () => {
+    const user = userEvent.setup();
+    // Claude Code grades "max"; Codex stops at "xhigh". Both agents support
+    // reasoning, so an agent-level check would have kept the dead value.
+    const { body } = await renderCrossAgentModelSwitch("max");
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    await user.click(await screen.findByRole("option", { name: "gpt-5.6-sol" }));
+
+    await waitFor(() => {
+      expect(body()).toEqual({
+        model: "gpt-5.6-sol",
+        agent_type: "codex",
+        reasoning_effort: "",
+      });
+    });
+  });
+
+  // Pi and OpenCode both list "anthropic/claude-opus-4-8" and
+  // "anthropic/claude-sonnet-4-6", so the model id alone can't say which agent
+  // the user picked. These pin that the group they picked it under is what
+  // lands in the patch, in both directions.
+  const renderSharedModelIdPicker = (stored: {
+    agent_type: string;
+    model_override: string;
+  }): { body: () => Record<string, unknown> | null } => {
+    let updateBody: Record<string, unknown> | null = null;
+    server.use(
+      // Org-configured keys put both groups in the picker without credentials.
+      http.get("*/api/v1/settings", () =>
+        HttpResponse.json({
+          data: {
+            settings: {
+              default_agent_type: "codex",
+              agent_config: {
+                pi: { PI_API_KEY: "set" },
+                opencode: { OPENCODE_API_KEY: "set" },
+              },
+            },
+          },
+        }),
+      ),
+      http.get("*/api/v1/settings/codex-auth/status", () =>
+        HttpResponse.json({ data: null }),
+      ),
+      http.get("*/api/v1/coding-credentials*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
+            ...stored,
+            interval_value: 1,
+            interval_unit: "weeks",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+    return { body: () => updateBody };
+  };
+
+  const pickFromGroup = async (
+    user: ReturnType<typeof userEvent.setup>,
+    group: string,
+    option: string,
+  ) => {
+    await waitFor(() => {
+      expect(screen.getByText("Weekly audit")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    const listbox = await screen.findByRole("group", { name: group });
+    await user.click(within(listbox).getByRole("option", { name: option }));
+  };
+
+  it("sends the Pi agent for a shared model id picked from the Pi group", async () => {
+    const user = userEvent.setup();
+    // Inferring from the id alone would land this on OpenCode, which lists the
+    // same id and is checked first.
+    const { body } = renderSharedModelIdPicker({
+      agent_type: "codex",
+      model_override: "gpt-5.6-sol",
+    });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await pickFromGroup(user, "Pi", "Claude Opus 4.8");
+
+    await waitFor(() => {
+      expect(body()).toEqual({
+        model: "anthropic/claude-opus-4-8",
+        agent_type: "pi",
+      });
+    });
+  });
+
+  it("moves a Pi automation to OpenCode when the id is picked from the OpenCode group", async () => {
+    const user = userEvent.setup();
+    // Pi accepts any provider/model id, so without the agent the API would
+    // keep this on Pi — valid, but not what the user picked.
+    const { body } = renderSharedModelIdPicker({
+      agent_type: "pi",
+      model_override: "anthropic/claude-opus-4-8",
+    });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await pickFromGroup(user, "OpenCode", "Claude Sonnet 4.6");
+
+    await waitFor(() => {
+      expect(body()).toEqual({
+        model: "anthropic/claude-sonnet-4-6",
+        agent_type: "opencode",
+      });
+    });
+  });
+
+  it("leaves the agent out when the pick stays in the automation's own group", async () => {
+    const user = userEvent.setup();
+    const { body } = renderSharedModelIdPicker({
+      agent_type: "pi",
+      model_override: "anthropic/claude-opus-4-8",
+    });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await pickFromGroup(user, "Pi", "Claude Sonnet 4.6");
+
+    await waitFor(() => {
+      expect(body()).toEqual({ model: "anthropic/claude-sonnet-4-6" });
+    });
+  });
+
   it("clears an unsupported reasoning override in the same patch as the model switch", async () => {
     const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;
@@ -2749,11 +3010,15 @@ describe("AutomationDetailPage", () => {
     await user.click(screen.getByRole("combobox", { name: "Model" }));
     await user.click(await screen.findByRole("option", { name: "smart" }));
 
-    // The API re-validates the STORED reasoning override against the new
-    // model's agent, so a lone `model` patch would come back 400 and the row
-    // the user would have to clear is the one that disappears with the switch.
+    // Amp grades no effort at all, so the override has to go with the switch —
+    // and it has to ride along in this patch, because the row the user would
+    // otherwise clear it from disappears the moment the model lands.
     await waitFor(() => {
-      expect(updateBody).toEqual({ model: "smart", reasoning_effort: "" });
+      expect(updateBody).toEqual({
+        model: "smart",
+        agent_type: "amp",
+        reasoning_effort: "",
+      });
     });
     await waitFor(() =>
       expect(
@@ -2823,7 +3088,10 @@ describe("AutomationDetailPage", () => {
     // Claude Code has reasoning levels, so the reset must NOT ride along —
     // clearing an override the user never touched would be its own bug.
     await waitFor(() => {
-      expect(updateBody).toEqual({ model: "claude-sonnet-4-6" });
+      expect(updateBody).toEqual({
+        model: "claude-sonnet-4-6",
+        agent_type: "claude_code",
+      });
     });
   });
 
@@ -3251,9 +3519,132 @@ describe("AutomationDetailPage", () => {
       expect(updateBodies).toEqual([
         {
           model: "claude-sonnet-4-6",
+          agent_type: "claude_code",
           fallback_models: { models: ["smart"], agent_types: ["amp"] },
         },
       ]),
+    );
+  });
+
+  // Pi and OpenCode both list "anthropic/claude-opus-4-8", and the worker
+  // compares ranks on agent and model together — so the same id under the two
+  // agents is two different routes, and the chain has to treat it that way.
+  const mockChainWithSharedIdGroups = (
+    automationOverrides: Record<string, unknown>,
+  ) => {
+    const updateBodies = mockAutomationWithChain(automationOverrides);
+    server.use(
+      http.get("*/api/v1/settings", () =>
+        HttpResponse.json({
+          data: {
+            settings: {
+              default_agent_type: "codex",
+              agent_config: {
+                pi: { PI_API_KEY: "set" },
+                opencode: { OPENCODE_API_KEY: "set" },
+              },
+            },
+          },
+        }),
+      ),
+    );
+    return updateBodies;
+  };
+
+  const pickPrimaryFromGroup = async (
+    user: ReturnType<typeof userEvent.setup>,
+    group: string,
+    option: string,
+  ) => {
+    await user.click(screen.getByRole("combobox", { name: "Model" }));
+    const listbox = await screen.findByRole("group", { name: group });
+    await user.click(within(listbox).getByRole("option", { name: option }));
+  };
+
+  it("keeps a fallback on the other agent when the primary takes the same model id", async () => {
+    const user = userEvent.setup();
+    const updateBodies = mockChainWithSharedIdGroups({
+      agent_type: "codex",
+      model_override: "gpt-5.4",
+      fallback_models: {
+        models: ["anthropic/claude-opus-4-8"],
+        agent_types: ["opencode"],
+      },
+    });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+    await pickPrimaryFromGroup(user, "Pi", "Claude Opus 4.8");
+
+    // The OpenCode rank is a different route from the new Pi primary, so the
+    // chain is untouched and stays out of the patch.
+    await waitFor(() =>
+      expect(updateBodies).toEqual([
+        { model: "anthropic/claude-opus-4-8", agent_type: "pi" },
+      ]),
+    );
+  });
+
+  it("drops the fallback when the primary takes the same model on the same agent", async () => {
+    const user = userEvent.setup();
+    const updateBodies = mockChainWithSharedIdGroups({
+      agent_type: "codex",
+      model_override: "gpt-5.4",
+      fallback_models: {
+        models: ["anthropic/claude-opus-4-8"],
+        agent_types: ["opencode"],
+      },
+    });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+    await pickPrimaryFromGroup(user, "OpenCode", "Claude Opus 4.8");
+
+    await waitFor(() =>
+      expect(updateBodies).toEqual([
+        {
+          model: "anthropic/claude-opus-4-8",
+          agent_type: "opencode",
+          fallback_models: {},
+        },
+      ]),
+    );
+  });
+
+  it("offers the primary's model id as a fallback only under the other agent", async () => {
+    const user = userEvent.setup();
+    const updateBodies = mockChainWithSharedIdGroups({
+      agent_type: "pi",
+      model_override: "anthropic/claude-opus-4-8",
+    });
+
+    renderWithProviders(<AutomationDetailPage />);
+    await screen.findByText("Weekly audit");
+
+    await user.click(screen.getByRole("button", { name: "Advanced" }));
+    await user.click(screen.getByRole("button", { name: /Add fallback model/ }));
+    await user.click(
+      screen.getByRole("combobox", { name: "Rank 2 fallback model" }),
+    );
+    // Excluded under Pi, where it would repeat the primary...
+    const piGroup = await screen.findByRole("group", { name: "Pi" });
+    expect(
+      within(piGroup).queryByRole("option", { name: "Claude Opus 4.8" }),
+    ).not.toBeInTheDocument();
+    // ...but still offered under OpenCode, and the rank keeps that agent
+    // rather than one inferred from the id.
+    const openCodeGroup = screen.getByRole("group", { name: "OpenCode" });
+    await user.click(
+      within(openCodeGroup).getByRole("option", { name: "Claude Opus 4.8" }),
+    );
+
+    await waitFor(() =>
+      expect(updateBodies).toContainEqual({
+        fallback_models: {
+          models: ["anthropic/claude-opus-4-8"],
+          agent_types: ["opencode"],
+        },
+      }),
     );
   });
 

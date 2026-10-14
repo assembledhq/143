@@ -883,6 +883,8 @@ type fakeDependencyCache struct {
 	// saveHook, when set, runs at the start of every SavePathCache. Tests use it
 	// to observe save ordering relative to other launch phases.
 	saveHook func(models.PreviewCacheKind)
+	// findHook observes lookup ordering without racing a post-return counter.
+	findHook func(models.PreviewCacheKind)
 	// buildSaveBlock, when set, makes build-output saves block until the channel
 	// is closed — used to prove StopPreview awaits the save.
 	buildSaveBlock chan struct{}
@@ -907,6 +909,9 @@ func (f *fakeDependencyCache) Save(ctx context.Context, sb *agent.Sandbox, cache
 }
 
 func (f *fakeDependencyCache) FindPathCache(_ context.Context, _ uuid.UUID, _ uuid.UUID, kind models.PreviewCacheKind, _ string) (*preview.DependencyCacheHit, error) {
+	if f.findHook != nil {
+		f.findHook(kind)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.pathFinds == nil {
@@ -2153,11 +2158,16 @@ func TestStartPreview_WorkdirSnapshotStillRestoresHomeCache(t *testing.T) {
 		return 0, nil
 	}
 	packageManagerID := uuid.New()
+	obs := &recordingObserver{}
+	lookupAfterReady := make(chan bool, 1)
 	cache := &fakeDependencyCache{pmFindHit: &preview.DependencyCacheHit{Entry: models.PreviewDependencyCache{
 		ID: packageManagerID, CacheKind: models.PreviewCacheKindPackageManager,
-	}}}
+	}}, findHook: func(kind models.PreviewCacheKind) {
+		if kind == models.PreviewCacheKindInstallOutput {
+			lookupAfterReady <- len(obs.ready()) > 0
+		}
+	}}
 	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
-	obs := &recordingObserver{}
 
 	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "snapshot", WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, previewInstallTestConfig(), preview.StartPreviewOptions{
 		OrgID:        uuid.New(),
@@ -2171,7 +2181,15 @@ func TestStartPreview_WorkdirSnapshotStillRestoresHomeCache(t *testing.T) {
 	require.Equal(t, 1, finds[models.PreviewCacheKindPackageManager], "fresh snapshot sandbox should look up the HomeDir package-manager cache")
 	require.Equal(t, 1, restores[models.PreviewCacheKindPackageManager], "fresh snapshot sandbox should restore the HomeDir package-manager cache")
 	require.Contains(t, roots, models.PreviewCacheRootHomeDir, "package-manager archive should extract into HomeDir")
-	require.Zero(t, finds[models.PreviewCacheKindInstallOutput], "valid WorkDir snapshot should not synchronously look up the dependency-output cache")
+	// The deferred probe may already have run when StartPreview returns. Check
+	// its ordering against readiness rather than assuming a goroutine schedule.
+	select {
+	case afterReady := <-lookupAfterReady:
+		require.True(t, afterReady, "dependency-output lookup must happen only after the service reports ready")
+	case <-time.After(5 * time.Second):
+		t.Fatal("deferred dependency-output probe did not run after readiness")
+	}
+	require.Zero(t, restores[models.PreviewCacheKindInstallOutput], "valid WorkDir outputs must not be replaced by a remote dependency archive")
 	dependencyRestores := obs.dependencyCacheRestores()
 	require.Len(t, dependencyRestores, 1, "dependency restore lifecycle should report one result")
 	require.Equal(t, "skipped_install_valid", dependencyRestores[0].status, "valid snapshot outputs should explain why dependency extraction was skipped")

@@ -755,6 +755,37 @@ func (s *SessionChangesetStore) GetAssignedPatch(ctx context.Context, orgID, ses
 // ReplaceSplitPaths freezes the latest diff snapshot as the split source on
 // first use, then replaces one changeset's draft path assignment atomically.
 func (s *SessionChangesetStore) ReplaceSplitPaths(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, paths []string) error {
+	lockKey := orgID.String() + ":" + sessionID.String() + ":" + changesetID.String()
+	return s.withSplitLock(ctx, lockKey, func(store *SessionChangesetStore) error {
+		return store.replaceSplitPaths(ctx, orgID, sessionID, changesetID, paths)
+	})
+}
+
+// Acquire the lock in a separate statement so replacement reads use a fresh
+// READ COMMITTED snapshot after a preceding save commits.
+func (s *SessionChangesetStore) withSplitLock(ctx context.Context, lockKey string, replace func(*SessionChangesetStore) error) error {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return errors.New("replace changeset split requires transaction support")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin changeset split replacement: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
+		return fmt.Errorf("acquire changeset split replacement lock: %w", err)
+	}
+	if err := replace(NewSessionChangesetStore(tx)); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit changeset split replacement: %w", err)
+	}
+	return nil
+}
+
+func (s *SessionChangesetStore) replaceSplitPaths(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, paths []string) error {
 	if _, err := s.GetByID(ctx, orgID, sessionID, changesetID); err != nil {
 		return err
 	}
@@ -786,8 +817,9 @@ func (s *SessionChangesetStore) ReplaceSplitPaths(ctx context.Context, orgID, se
 		}
 	}
 	paths = normalized
+	// Consume the deletion before reinserting paths that keep the same key.
 	result, err := s.db.Exec(ctx, `WITH locked AS (
-		SELECT pg_advisory_xact_lock(hashtextextended(@org_id::text || ':' || @session_id::text || ':' || @changeset_id::text, 0))
+		SELECT pg_advisory_xact_lock(hashtextextended(@org_id::uuid::text || ':' || @session_id::uuid::text || ':' || @changeset_id::uuid::text, 0))
 	), source AS (
 		INSERT INTO session_changeset_split_plans (org_id, session_id, source_diff_snapshot_id)
 		SELECT @org_id, @session_id, latest_diff_snapshot_id
@@ -801,11 +833,15 @@ func (s *SessionChangesetStore) ReplaceSplitPaths(ctx context.Context, orgID, se
 		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
 	), deleted AS (
 		DELETE FROM session_changeset_split_paths
+		USING locked
 		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
 		  AND EXISTS (SELECT 1 FROM valid_changeset)
+		RETURNING 1
 	), updated_plan AS (
 		UPDATE session_changeset_split_plans SET revision = revision + 1, updated_at = now()
+		FROM locked, (SELECT count(*) AS deleted_count FROM deleted) deletion_barrier
 		WHERE org_id = @org_id AND session_id = @session_id
+		  AND deletion_barrier.deleted_count >= 0
 		RETURNING session_id
 	)
 	INSERT INTO session_changeset_split_paths (org_id, session_id, changeset_id, path)
@@ -959,6 +995,13 @@ func (s *SessionChangesetStore) GetSplitStatus(ctx context.Context, orgID, sessi
 }
 
 func (s *SessionChangesetStore) ReplaceSplitOmissions(ctx context.Context, orgID, sessionID, userID uuid.UUID, omissions []models.ChangesetSplitOmission) error {
+	lockKey := orgID.String() + ":" + sessionID.String()
+	return s.withSplitLock(ctx, lockKey, func(store *SessionChangesetStore) error {
+		return store.replaceSplitOmissions(ctx, orgID, sessionID, userID, omissions)
+	})
+}
+
+func (s *SessionChangesetStore) replaceSplitOmissions(ctx context.Context, orgID, sessionID, userID uuid.UUID, omissions []models.ChangesetSplitOmission) error {
 	var sourceDiff string
 	if err := s.db.QueryRow(ctx, `SELECT d.diff FROM session_changeset_split_plans p
 		JOIN session_diff_snapshots d ON d.id = p.source_diff_snapshot_id AND d.org_id = p.org_id AND d.session_id = p.session_id
@@ -983,16 +1026,24 @@ func (s *SessionChangesetStore) ReplaceSplitOmissions(ctx context.Context, orgID
 		paths = append(paths, path)
 		reasons = append(reasons, reason)
 	}
+	// Reject the whole input before deletion, then finish deletion before insertion.
 	result, err := s.db.Exec(ctx, `WITH locked AS (
-		SELECT pg_advisory_xact_lock(hashtextextended(@org_id::text || ':' || @session_id::text, 0))
+		SELECT pg_advisory_xact_lock(hashtextextended(@org_id::uuid::text || ':' || @session_id::uuid::text, 0))
+	), valid_input AS (
+		SELECT NOT EXISTS (SELECT 1 FROM session_changeset_split_paths sp
+			WHERE sp.org_id = @org_id AND sp.session_id = @session_id AND sp.path = ANY(@paths::text[])) AS valid
+		FROM locked
 	), deleted AS (
-		DELETE FROM session_changeset_split_omissions WHERE org_id = @org_id AND session_id = @session_id
+		DELETE FROM session_changeset_split_omissions
+		USING valid_input
+		WHERE org_id = @org_id AND session_id = @session_id AND valid_input.valid
+		RETURNING 1
 	)
 	INSERT INTO session_changeset_split_omissions (org_id, session_id, path, reason, confirmed_by_user_id)
 	SELECT @org_id, @session_id, p.path, p.reason, @user_id
-	FROM locked, unnest(@paths::text[], @reasons::text[]) AS p(path, reason)
-	WHERE NOT EXISTS (SELECT 1 FROM session_changeset_split_paths sp
-		WHERE sp.org_id = @org_id AND sp.session_id = @session_id AND sp.path = p.path)`, pgx.NamedArgs{
+	FROM valid_input, (SELECT count(*) AS deleted_count FROM deleted) deletion_barrier,
+		unnest(@paths::text[], @reasons::text[]) AS p(path, reason)
+	WHERE valid_input.valid AND deletion_barrier.deleted_count >= 0`, pgx.NamedArgs{
 		"org_id": orgID, "session_id": sessionID, "user_id": userID, "paths": paths, "reasons": reasons,
 	})
 	if err != nil {

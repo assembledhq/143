@@ -156,4 +156,4 @@ else
   echo "WARNING: no JSON offsite configuration; backup admission will fail closed." >&2
 fi
 
-echo "WARNING: scheduled backups require a separately approved private scheduled-backup.json start window; cron alone does not authorize work. Restore testing remains attended. See docs/self-hosting/database-backup-controls.md." >&2
+echo "WARNING: scheduled backups require a separately approved private scheduled-backup.json trial or ongoing profile; cron alone does not authorize work. Restore testing remains attended. See docs/self-hosting/database-backup-controls.md." >&2

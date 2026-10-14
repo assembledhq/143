@@ -206,7 +206,9 @@ func (s *WebhookDeliveryStore) SummarizeRecentFailuresForIntegration(ctx context
 	return summary, nil
 }
 
-// DeleteExpired removes webhook deliveries older than the given number of days.
+// DeleteExpired removes at most 10000 unreferenced webhook deliveries older
+// than the given number of days. Each call is one independently committed batch
+// when this store uses the production pool; callers bound repeated sweeps.
 // lint:allow-no-orgid reason="cross-org retention cleanup across all orgs"
 func (s *WebhookDeliveryStore) DeleteExpired(ctx context.Context, retentionDays int) (int64, error) {
 	var deleted int64

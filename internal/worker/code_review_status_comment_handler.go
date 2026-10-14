@@ -224,7 +224,11 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 			provisionalBody, _ = models.SplitCodeReviewCommentFooter(provisionalBody, sessionURL)
 			paragraphs = append(paragraphs, provisionalBody)
 		} else {
-			paragraphs = append(paragraphs, "143 Code Reviewer has started reviewing this pull request.")
+			announcement := "143 Code Reviewer has started reviewing this pull request"
+			if !metadata.CreatedAt.IsZero() {
+				announcement += " at " + models.CodeReviewCommentTime(metadata.CreatedAt)
+			}
+			paragraphs = append(paragraphs, announcement+".")
 		}
 		if message := strings.TrimSpace(stringPtrValue(metadata.StatusMessage)); message != "" {
 			paragraphs = append(paragraphs, message)

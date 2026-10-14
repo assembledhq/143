@@ -52,6 +52,10 @@ func NewCodeReviewRecheckStore(conn TxStarter) *CodeReviewRecheckStore {
 // for the PR before coverage is marked reusable. The caller must invoke this
 // in the same transaction as the assessment completion. A terminal status by
 // itself does not prove that a sandbox, preview, or executor has drained.
+// A failed parent is eligible only for its exact staged, confirmed full outcome;
+// completing that historical review must not authorize fresh execution or resend.
+// Its terminal parent status commits with the owner and assessment so a crash
+// before the controller status notification cannot strand a failed PR owner.
 func (s *CodeReviewRecheckStore) ClaimFullAssessmentOwner(ctx context.Context, tx pgx.Tx, orgID, sessionID, pullRequestID uuid.UUID) (bool, error) {
 	if orgID == uuid.Nil || sessionID == uuid.Nil || pullRequestID == uuid.Nil || tx == nil {
 		return false, fmt.Errorf("invalid full assessment conversation owner")
@@ -69,9 +73,39 @@ func (s *CodeReviewRecheckStore) ClaimFullAssessmentOwner(ctx context.Context, t
 		return false, err
 	}
 	var claimed uuid.UUID
-	err := tx.QueryRow(ctx, `UPDATE sessions s SET code_review_owner_pr_id=$3
+	err := tx.QueryRow(ctx, `UPDATE sessions s SET code_review_owner_pr_id=$3,
+		status=CASE WHEN s.status='failed' THEN 'completed' ELSE s.status END,
+		completed_at=CASE WHEN s.status='failed' THEN now() ELSE s.completed_at END,
+		error=CASE WHEN s.status='failed' THEN NULL ELSE s.error END,
+		failure_explanation=CASE WHEN s.status='failed' THEN NULL ELSE s.failure_explanation END,
+		failure_category=CASE WHEN s.status='failed' THEN NULL ELSE s.failure_category END,
+		failure_next_steps=CASE WHEN s.status='failed' THEN NULL ELSE s.failure_next_steps END,
+		failure_retry_advised=CASE WHEN s.status='failed' THEN false ELSE s.failure_retry_advised END,
+		last_activity_at=CASE WHEN s.status='failed' THEN now() ELSE s.last_activity_at END
 		WHERE s.org_id=$1 AND s.id=$2 AND s.origin='code_review'
-		AND s.status IN ('idle','completed','running')
+		AND (s.status IN ('idle','completed','running') OR (s.status='failed'
+			AND EXISTS (SELECT 1 FROM code_review_revision_assessments a
+				JOIN code_review_session_metadata m ON m.org_id=a.org_id AND m.id=a.metadata_id AND m.session_id=a.session_id
+				WHERE a.org_id=s.org_id AND a.session_id=s.id AND a.pull_request_id=$3
+				AND a.review_scope='full' AND a.status='publishing' AND a.coverage_complete
+				AND a.result_origin IS NOT NULL AND a.decision IS NOT NULL AND a.acceptable IS NOT NULL
+				AND a.rendered_body IS NOT NULL AND a.structured_outcome IS NOT NULL
+				AND a.publication_state='confirmed' AND a.github_review_id IS NOT NULL
+				AND a.submitted_commit_sha=a.head_sha AND a.publication_receipt IS NOT NULL
+				AND a.publication_receipt->>'assessment_id'=a.id::text
+				AND a.publication_receipt->>'input_digest'=a.input_digest
+				AND a.publication_receipt->>'submitted_commit_sha'=a.head_sha
+				AND jsonb_typeof(a.publication_receipt->'github_review_id')='number'
+				AND a.publication_receipt->>'github_review_id'=a.github_review_id::text
+				AND m.status='completed' AND m.assessment_id=a.id
+				AND m.repository_id=a.repository_id AND m.pull_request_id=a.pull_request_id
+				AND m.policy_id=a.policy_id AND m.head_sha=a.head_sha
+				AND m.review_output_key=a.publication_key AND m.github_review_id=a.github_review_id)
+			AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.org_id=s.org_id
+				AND j.status IN ('pending','running') AND j.payload->>'session_id'=s.id::text
+				AND j.job_type IN ('run_agent','continue_session','fork_session_thread','revert_session_thread','deliver_thread_inbox','prepare_code_review_workspace'))
+			AND NOT EXISTS (SELECT 1 FROM code_review_recheck_dispatches d
+				WHERE d.org_id=s.org_id AND d.session_id=s.id AND d.status IN ('pending','running'))))
 		AND EXISTS (SELECT 1 FROM code_review_session_metadata m WHERE m.org_id=s.org_id AND m.session_id=s.id AND m.pull_request_id=$3 AND m.status='completed')
 		AND (s.code_review_owner_pr_id IS NULL OR s.code_review_owner_pr_id=$3)
 		AND (`+codeReviewRecheckSessionDrainedSQL+`)

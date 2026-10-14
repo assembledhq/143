@@ -69,6 +69,46 @@ func newSchedulingPostgres(t *testing.T) (*pgxpool.Pool, uuid.UUID, uuid.UUID, u
 	return pool, orgID, repoID, prID
 }
 
+func TestRevokeScheduledCodeReviewUnsentOutcomePostgres(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		receipt bool
+	}{{name: "unsent revocation has no fabricated outcome"}, {name: "confirmed legacy outcome is historical", receipt: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pool, org, repo, pr := newSchedulingPostgres(t)
+			ctx := context.Background()
+			_, err := pool.Exec(ctx, `ALTER TABLE code_review_session_metadata ADD COLUMN head_sha text,ADD COLUMN stale boolean DEFAULT false,ADD COLUMN phase text,ADD COLUMN decision text,ADD COLUMN acceptable boolean,ADD COLUMN risk_reason_details jsonb DEFAULT '[]',ADD COLUMN failure_reason text,ADD COLUMN status_code text,ADD COLUMN status_message text,ADD COLUMN retry_at timestamptz,ADD COLUMN last_error_at timestamptz,ADD COLUMN retryable_failure boolean,ADD COLUMN completed_at timestamptz`)
+			require.NoError(t, err, "add the exact revocation outcome fields to the focused scheduling fixture")
+			session, foreignOrg := uuid.New(), uuid.New()
+			_, err = pool.Exec(ctx, `INSERT INTO code_review_session_metadata(org_id,session_id,pull_request_id,status,head_sha,decision,acceptable,risk_reason_details,github_review_id) VALUES($1,$2,$3,'running','old-head','blocked',false,'[{"code":"unverified"}]',CASE WHEN $4 THEN 77 ELSE NULL END),($5,$6,$3,'running','old-head','blocked',false,'[]',NULL)`, org, session, pr, tt.receipt, foreignOrg, uuid.New())
+			require.NoError(t, err, "seed obsolete outcome and a foreign tenant with the same PR identity")
+			err = NewCodeReviewScheduleStore(pool).WithLockedPR(ctx, org, repo, pr, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
+				return RevokeScheduledCodeReviews(ctx, tx, org, pr, "new-head", &session, state)
+			})
+			require.NoError(t, err, "obsolete unsent scheduling may revoke under the PR lock")
+			var status string
+			var decision *string
+			var acceptable *bool
+			var risk string
+			require.NoError(t, pool.QueryRow(ctx, `SELECT status,decision,acceptable,risk_reason_details::text FROM code_review_session_metadata WHERE org_id=$1 AND session_id=$2`, org, session).Scan(&status, &decision, &acceptable, &risk), "read revoked scheduling outcome")
+			require.Equal(t, "stale", status, "revocation must retire the obsolete schedule")
+			if tt.receipt {
+				require.Equal(t, new("blocked"), decision, "a confirmed legacy publication retains its historical decision")
+				require.Equal(t, new(false), acceptable, "a confirmed legacy publication retains its historical acceptance")
+				require.JSONEq(t, `[{"code":"unverified"}]`, risk, "a confirmed legacy publication retains its historical risk reasons")
+			} else {
+				require.Nil(t, decision, "provably unsent revocation must not fabricate Blocked")
+				require.Nil(t, acceptable, "provably unsent revocation must not fabricate a risk outcome")
+				require.Equal(t, "[]", risk, "provably unsent revocation clears fabricated risk reasons")
+			}
+			require.NoError(t, pool.QueryRow(ctx, `SELECT status FROM code_review_session_metadata WHERE org_id=$1`, foreignOrg).Scan(&status), "inspect tenant-isolation sentinel")
+			require.Equal(t, "running", status, "revocation cannot change another tenant's schedule")
+		})
+	}
+}
+
 func testRepairRetainedFullController(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, status, publicationState string) {
 	ctx := context.Background()
 	assessmentID, sessionID, foreignOrg := uuid.New(), uuid.New(), uuid.New()

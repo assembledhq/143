@@ -2,17 +2,17 @@
 
 > **Status:** Partially Implemented | **Last reviewed:** 2026-09-15
 
-Implementation plan for [VIR-161](https://linear.app/assembledhq/issue/VIR-161/investigate-recurring-github-rate-limiting). Prepared against repository revision `eb4da2211b3511f6143039a6ed8dd5f2ac0f3856`. The local PR 1-3 scope is implemented in the isolated worktree; production configuration, deployment, and rollout remain separate, unauthorized follow-ups.
+Implementation plan for durable GitHub retry handling and shared installation-level coordination. Local implementation and deployment validation are separate stages.
 
 ## Purpose
 
 When GitHub throttles an installation, stop avoidable requests, preserve queued reviews, and resume them automatically if GitHub recovers within the bounded recovery window. When that window expires, retain the existing actionable failure and manual review retry; do not silently re-enqueue a fresh job to bypass the bound. Keep review publication and merge safety checks authoritative. Reduce additional API demand only where measurements identify a worthwhile source.
 
-We can implement and test the recovery changes without production access. We cannot yet establish the cause of the September incident or claim that these changes will eliminate it. Production logs, quota consumption, and the deployed revision remain unverified because the available SSH key was rejected.
+Implementation and local verification can proceed independently of production access. Incident causes and operational effects require deployment-specific request attribution and quota evidence.
 
 ## Evidence and uncertainty
 
-The September report describes reviews accumulating in “Waiting for GitHub” and resuming after a reset. Its timestamp is September 10, 2026, 18:43:16 UTC; the [Slack report](https://assembled-hq.slack.com/archives/C0AELD22NBG/p1789065796283219) provides the incident anchor, not a request trace.
+For each affected installation, capture the limiting resource, authoritative response metadata, caller volumes, recovery timing, and participating process coverage in private incident records. The table below describes source-level recovery behavior.
 
 | Finding | Evidence | Implication |
 | --- | --- | --- |
@@ -28,7 +28,7 @@ The September report describes reviews accumulating in “Waiting for GitHub” 
 | Ordinary scheduled polling alone has not been shown to exhaust quota. | `internal/cluster/scheduler.go` schedules batches of 50 per organization per ten minutes. The ordinary complete sync makes three reads; `fetchPullRequestDetails` can add four mergeability reads, for three to seven in that path. | Six full ordinary batches imply about 900 requests/hour per organization before extra reads and other callers. The bounded mergeability ladder is a candidate for measurement. Neither estimate measures queued retries or actual fleet traffic. |
 | API telemetry and a dashboard already exist. | [PR 1918](https://github.com/assembledhq/143/pull/1918), `internal/services/github/telemetry/transport.go`, and `deploy/grafana/provisioning/dashboards/github-api-health.json`. | Extend existing attribution rather than build a parallel monitoring system. Server telemetry does not cover direct sandbox GitHub calls. |
 
-Still unknown: primary versus secondary throttling, the affected installation and resource, its actual quota, the largest callers before exhaustion, requests made outside the server, and whether all relevant fixes were deployed during the September incident. A failing endpoint identifies a victim of exhaustion; it does not establish which caller consumed the allowance.
+Still unknown: primary versus secondary throttling, the affected installation and resource, its actual quota, the largest callers before exhaustion, requests made outside the server, and which fixes were present in the affected deployment. A failing endpoint identifies a victim of exhaustion; it does not establish which caller consumed the allowance.
 
 GitHub documents reset-based waits for exhausted primary quotas and increasing backoff for repeated secondary throttles. REST and GraphQL have separate primary allowances; record the resource accurately even though the initial controller conservatively gates the whole installation. Use actual response evidence rather than assuming a universal quota. See [GitHub rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
 
@@ -194,7 +194,7 @@ Include `./internal/services/github/telemetry` and the proposed `./internal/serv
 Production access is required for attribution and rollout validation, not for writing or locally implementing the plan. Once access works, confirm the deployed revision and start with the existing dashboard and bounded log queries:
 
 ```bash
-make logs-query Q='"github api request" AND _time:[2026-09-10T17:30:00Z,2026-09-10T19:30:00Z]' LIMIT=500
+make logs-query Q='"github api request" AND _time:[now-2h,now-1h]' LIMIT=500
 make logs-query Q='"github api request" AND _time:[now-1h,now]' LIMIT=500
 ```
 
@@ -206,16 +206,16 @@ These are inspection samples, not complete counts. Use time-bounded server-side 
 4. Expand after the canary demonstrates correct recovery and acceptable review latency/background freshness. Starting with PR 1, scheduling beyond the five-minute-29-second local bound without a server hint, or an unacceptable measured freshness regression, is a rollback trigger. If PR 1 causes that regression, revise/revert its retry policy while retaining its independent correctness fixes; disabling the PR 2 controller alone cannot undo PR 1's parked-job schedule. Pursue demand reductions only from the measured caller breakdown.
 5. Roll back enforcement with mode `off` if scope, recovery, or latency is wrong. Preserve durable queued jobs and retry windows; PR 1's corrected worker retry handling remains available. Use short probe leases so stopping a process cannot strand recovery.
 
-Do not mark VIR-161 resolved based only on local tests. Closure requires a documented causal finding or an explicit statement that the original cause remains unknown, plus production evidence that the implemented mitigation addresses the observed failure pattern. Production secret/configuration changes and deployment remain separate actions from this plan.
+Do not declare an incident resolved based only on local tests. Closure requires a documented causal finding or an explicit statement that the original cause remains unknown, plus production evidence that the implemented mitigation addresses the observed failure pattern. Production secret/configuration changes and deployment remain separate actions from this plan.
 
 ## Progress
 
 - [x] Inspect existing rate classification, job retry behavior, PR reconciliation, telemetry, and Redis patterns.
 - [x] Separate historical causes, current code gaps, and unavailable production evidence.
 - [x] Write the proposed implementation sequence and validation/rollout gates.
-- [x] Review with Claude and revise retry amplification, classification, retry windows, publication state, principal propagation, and controller contracts.
-- [x] Obtain Claude's second review: all ten original findings resolved; clarify the three remaining scheduling/classification/status contracts.
-- [x] Obtain Claude's focused check: ready to implement, no blocking findings; record the remaining minor scheduling clarification.
+- [x] Review and revise retry amplification, classification, retry windows, publication state, principal propagation, and controller contracts.
+- [x] Clarify the scheduling, classification, and status contracts.
+- [x] Resolve the remaining scheduling contract before implementation.
 - [x] Implement and verify PR 1's structured classification, durable retry scheduling, incomplete-read protection, and reconciliation/publication safety.
 - [x] Implement and verify the shared installation controller, Redis coordination, exact deferrals, and caller/status integration.
 - [x] Complete local rollout controls, principal/caller attribution, dashboard changes, operational guidance, and reproducible focused/Redis verification targets.
@@ -252,11 +252,10 @@ Do not mark VIR-161 resolved based only on local tests. Closure requires a docum
 - Redis generation fences probe outcomes, but cannot by itself invalidate a later unexpired server deadline retained by another controller. Cross-generation reconciliation now keeps the newer generation, merges only stronger future deadline evidence, and revokes probes admitted against the weaker state; completion tombstones remain authoritative.
 - A response-body read can fail after HTTP status, provider timing, and controller retry metadata are already known. Returning the raw read error discarded those signals, so interrupted GitHub responses now carry both the read cause and the response metadata and cannot produce an authoritative health projection.
 - Go's `http.Client.Timeout` can expire while reading a response body without expiring the operation context supplied by the caller. Since both client timeouts and caller deadlines match `context.DeadlineExceeded`, retry classification must retain the caller context's actual terminal state rather than infer provenance from the timeout error alone.
-- No successful production log or database query was obtained during this investigation.
 
 ## Decision Log
 
-- 2026-09-14: Proceed with a plan despite unavailable production access; keep the root cause unconfirmed.
+- 2026-09-14: Keep implementation planning separate from incident root-cause and deployment-impact claims.
 - 2026-09-14: After review, make PR 1 reduce independent PR retries and establish classification, publication, and retry-window safety; sweep containment alone is insufficient.
 - 2026-09-14: Use Redis for optional shared cooldown state and existing Postgres jobs for durable retry scheduling; keep a bounded local fallback.
 - 2026-09-14: Simplify the initial controller to one installation record and probe lease, with cluster-safe keying and one-way cache dependencies. Defer narrower primary resource gating until its benefit is measured.
@@ -264,7 +263,7 @@ Do not mark VIR-161 resolved based only on local tests. Closure requires a docum
 - 2026-09-14: Use one explicit two-hour GitHub recovery window across throttle/transient errors, preserving transient attempt limits. On expiry require the existing manual retry instead of automatically creating fresh jobs.
 - 2026-09-14: After the second review, cap locally calculated scheduling/cooldown delay at five minutes plus 0–29 seconds jitter and test recovery latency separately from queue/runtime delay. No-hint slots and explicit controller deadlines are alternative scheduling policies, not cumulative delays.
 - 2026-09-14: Place the pure classifier and deferral type in the proposed `ratelimit` package in PR 1, with service/telemetry importing it. Preserve terminal error classification when transient and throttle failures alternate.
-- 2026-09-14: Claude's final review found no blockers. Clarify that enforcement supplies the retry deadline for both actual throttled responses and locally deferred requests, preserving the original error and outbound telemetry; `off`/`observe` retain PR 1's policy.
+- 2026-09-14: Enforcement supplies the retry deadline for both actual throttled responses and locally deferred requests, preserving the original error and outbound telemetry; `off`/`observe` retain PR 1's policy.
 - 2026-09-14: Defer broad polling/cache changes until measurements identify the largest avoidable callers.
 - 2026-09-14: Preserve recovered Redis generations as short-lived tombstones instead of deleting the record, allowing independent controllers to clear stale local fallback state without weakening generation fencing.
 - 2026-09-14: Carry the exact issuing installation on App identity resolutions and treat unresolved API principals as an explicit metric/log coverage fault that blocks canary expansion.
@@ -281,9 +280,4 @@ Do not mark VIR-161 resolved based only on local tests. Closure requires a docum
 
 The local PR 1-3 implementation is complete. Shared classification and exact controller deadlines now feed the durable two-hour worker recovery window; retry-scheduled hooks align review `retry_at` with the lease-owned job timestamp; throttled reconciliation preserves authoritative health and publication state while independent database recovery still runs. API and worker clients share installation-wide Redis cooldown records, with one generation- and claim-token-fenced recovery probe and bounded process-local fallback. Rollout defaults to observation, requires an installation allowlist for enforcement, and separates actual request, predicted/suppressed deferral, transition, and unresolved-principal telemetry.
 
-No database migration, public API, token permission, production configuration, secret, deployment, automatic mutation replay, push, or merge was performed. Remote CI, deployed-revision checks, production attribution, canary enforcement, fleet behavior, incident causality, and measured demand reduction remain unverified follow-ups. Local verification evidence is recorded after the final focused and real-Redis targets below.
-
-Final round-seven local validation completed from this worktree on 2026-09-15:
-
-- `make test-github-rate-limit` exited 0. It ran race-enabled tests for the changed GitHub, code-review, cache, job-hook, database fence, configuration, metrics, core API, server, focused API GitHub caller, and worker retry/status/reconciliation paths; `go vet` for every touched Go package; an isolated temporary-output `go build` of `./cmd/server`; `git diff --check`; and an isolated-index whitespace check that includes untracked additions.
-- `make test-github-rate-limit-redis` exited 0. The mandatory tagged integration contract passed with independent controller/client instances against an isolated loopback standalone Redis and a three-master Redis Cluster, exercising Lua generation, maximum-deadline retention, unique probe-token fencing (including stale success/error/throttle results), missing/rolled-back record restoration before and after premature-probe throttling, cross-generation stronger-deadline preservation, superseded-probe revocation, exact stale-observation deadlines, and recovery without skips.
+Deployment acceptance requires principal/caller attribution, exact revision and process coverage, representative quota/reset observations, and a controlled enforcement canary. The validation targets above exercise retry classification, generation/deadline fencing, independent controller instances, Redis loss/recovery, and standalone/Cluster Lua behavior. Retain run receipts and deployment-specific observations privately rather than treating them as universal acceptance evidence.

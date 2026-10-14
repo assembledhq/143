@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_jobs_retention_succeeded;

@@ -638,6 +638,9 @@ func parseCodeReviewAnalyticsFilters(w http.ResponseWriter, r *http.Request) (db
 		}
 		analyticsFilters.AuthorSortOrder = order
 	}
+	if !parseCodeReviewTrendFilters(w, r, &analyticsFilters) {
+		return db.CodeReviewAnalyticsFilters{}, false
+	}
 	return analyticsFilters, true
 }
 

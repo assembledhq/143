@@ -10,13 +10,13 @@ This is an extension of the existing preview credential model in `.143/config.js
 
 ## Motivation
 
-Many apps do not boot from code alone. They need a database URL, auth signing key, queue mode, third-party API key, or framework-specific config file. In the Assembled preview case, the backend tried to start without `development.conf.json` or equivalent env overrides, so startup failed at:
+Many apps do not boot from code alone. They need a database URL, auth signing key, queue mode, third-party API key, or framework-specific config file. A missing value can prevent a service from starting. For example, a fictional web app might report:
 
 ```text
-Invalid queue type:
+Missing required configuration: QUEUE_MODE
 ```
 
-The immediate fix for that repo is small: provide values like `MSGBROKER_QUEUE_TYPE=local` and whatever database/Snowflake settings the webserver requires. The product problem is broader: every repo keeps secrets in a different shape.
+That app could receive `QUEUE_MODE=local` and its database settings through env vars or `config/preview.json`. The preview system should support both delivery shapes.
 
 Some repos use env vars. Some use `.env`. Some use JSON, YAML, TOML, or framework-specific config files. Some already store a whole dev config object in AWS Secrets Manager. A good preview system should support those differences without making every user learn a complex secrets platform.
 
@@ -41,11 +41,13 @@ Some repos use env vars. Some use `.env`. Some use JSON, YAML, TOML, or framewor
 
 The user-facing concept is a **secret bundle**.
 
+The examples below use a fictional `example/web-app`. Its helper scripts, variable names, file paths, bundle names, and external secret reference are illustrative; adapt them to the application.
+
 A bundle has:
 
 | Field | Meaning |
 |---|---|
-| Name | Stable handle such as `assembled-dev` or `staging-preview`. |
+| Name | Stable handle such as `example-app-preview` or `staging-preview`. |
 | Repository | The existing 143 repository row this bundle belongs to. |
 | Source | Where values come from: 143-managed values in v1, external secret stores later. |
 | Outputs | How resolved values appear inside the preview: env vars or files. |
@@ -58,20 +60,20 @@ The bundle is configured in 143 by an admin. The repo only commits the bundle re
 ```json
 {
   "preview": {
-    "name": "Assembled",
+    "name": "Example web app",
     "primary": "frontend",
     "services": {
       "frontend": {
-        "command": ["bash", ".143/preview-frontend.sh"],
+        "command": ["bash", ".143/start-frontend.sh"],
         "port": 8080,
         "env": {
-          "WEBSERVER": "localhost",
-          "WEBSERVER_PORT": "3000"
+          "API_HOST": "localhost",
+          "API_PORT": "3000"
         },
         "ready": { "http_path": "/" }
       },
       "webserver": {
-        "command": ["bash", ".143/preview-webserver.sh"],
+        "command": ["bash", ".143/start-api.sh"],
         "port": 3000,
         "env": {
           "PORT": "3000",
@@ -82,19 +84,19 @@ The bundle is configured in 143 by an admin. The repo only commits the bundle re
     },
     "secrets": [
       {
-        "bundle": "assembled-dev-env",
+        "bundle": "example-app-env",
         "services": ["webserver"],
-        "env": ["MSGBROKER_QUEUE_TYPE"]
+        "env": ["QUEUE_MODE"]
       },
       {
-        "bundle": "assembled-dev-config",
+        "bundle": "example-app-config",
         "services": ["frontend", "webserver"],
-        "files": ["development.conf.json"]
+        "files": ["config/preview.json"]
       }
     ],
     "network": {
       "mode": "managed",
-      "destinations": ["assembled-dev-db"]
+      "destinations": ["example-app-db"]
     }
   }
 }
@@ -110,9 +112,9 @@ Use the simplest repo-facing shape:
 {
   "preview": {
     "secrets": {
-      "bundle": "assembled-dev",
+      "bundle": "example-app-preview",
       "services": ["frontend", "webserver"],
-      "files": ["development.conf.json"]
+      "files": ["config/preview.json"]
     }
   }
 }
@@ -140,7 +142,7 @@ If multiple bundles are needed later, support an array while preserving the one-
 {
   "preview": {
     "secrets": [
-      { "bundle": "assembled-dev", "services": ["webserver"] },
+      { "bundle": "example-app-preview", "services": ["webserver"] },
       { "bundle": "stripe-sandbox", "services": ["webserver"] }
     ]
   }
@@ -178,9 +180,9 @@ Detection should produce a small requirement record:
 
 ```json
 {
-  "bundle": "assembled-dev",
+  "bundle": "example-app-preview",
   "services": ["frontend", "webserver"],
-  "files": ["development.conf.json"],
+  "files": ["config/preview.json"],
   "status": "setup_required"
 }
 ```
@@ -226,7 +228,7 @@ Admin bundle setup:
       "type": "env",
       "values": {
         "DATABASE_URL": "secret:database_url",
-        "MSGBROKER_QUEUE_TYPE": "literal:local"
+        "QUEUE_MODE": "literal:local"
       }
     }
   ]
@@ -237,14 +239,14 @@ At preview start, the selected service process receives:
 
 ```text
 DATABASE_URL=postgres://...
-MSGBROKER_QUEUE_TYPE=local
+QUEUE_MODE=local
 ```
 
 Repo-authored `preview.services.<service>.env` remains for non-secret values only.
 
 ### Output Type: File
 
-File delivery writes a generated file before services start. This handles repos that expect `.env`, `development.conf.json`, `config/local.yml`, or similar files.
+File delivery writes a generated file before services start. This handles repos that expect `.env`, `config/preview.json`, `config/local.yml`, or similar files.
 
 Admin bundle setup:
 
@@ -253,12 +255,12 @@ Admin bundle setup:
   "outputs": [
     {
       "type": "file",
-      "path": "development.conf.json",
+      "path": "config/preview.json",
       "format": "json",
       "mode": "0600",
       "content": {
-        "msgbroker": {
-          "queue_type": "local"
+        "queue": {
+          "mode": "local"
         },
         "database": {
           "application": "secret:application_database_url",
@@ -279,12 +281,12 @@ Supported v1 formats should be:
 | Format | Use |
 |---|---|
 | `env` | Render `.env` style `KEY=value` files. |
-| `json` | Render structured config such as `development.conf.json`, either from structured `content` with `secret:` references or from one managed secret value containing the whole JSON document. The resolved document must parse as JSON before the bundle is accepted. |
+| `json` | Render structured config such as `config/preview.json`, either from structured `content` with `secret:` references or from one managed secret value containing the whole JSON document. The resolved document must parse as JSON before the bundle is accepted. |
 | `raw` | Write one complete secret value as a file, useful for certificates, PEM blocks, or other non-JSON blobs. |
 
 YAML and template rendering can come later. JSON plus env files cover the common cases without making the first version too flexible.
 
-Admins should not need to base64-encode JSON just to survive env or shell quoting. The product stores managed values as strings and the preview runtime writes generated files from bytes; implementation may base64 those bytes internally while crossing a shell boundary, but that is a runtime transport detail, not part of the admin or repo-authored contract. User-provided base64 is still acceptable when the application itself expects base64, but it should not be required for `development.conf.json`.
+Admins should not need to base64-encode JSON just to survive env or shell quoting. The product stores managed values as strings and the preview runtime writes generated files from bytes; implementation may base64 those bytes internally while crossing a shell boundary, but that is a runtime transport detail, not part of the admin or repo-authored contract. User-provided base64 is still acceptable when the application itself expects base64, but it should not be required for `config/preview.json`.
 
 ## Source Model
 
@@ -303,12 +305,12 @@ Admins can point a bundle at an external source:
   "source": {
     "type": "aws_secrets_manager",
     "region": "us-east-1",
-    "secret_id": "assembled/development-conf"
+    "secret_id": "example/web-app/preview"
   }
 }
 ```
 
-143 fetches the secret on the worker side during preview start. The sandbox should not receive AWS credentials just to fetch its own config. If a company already stores `development.conf.json` in AWS Secrets Manager, 143 should pull that value and render it as a file or map selected fields into env vars.
+143 fetches the secret on the worker side during preview start. The sandbox should not receive AWS credentials just to fetch its own config. If a company already stores `config/preview.json` in AWS Secrets Manager, 143 should pull that value and render it as a file or map selected fields into env vars.
 
 External source credentials are platform credentials, not preview app credentials. They should be scoped by org, hidden from repo config, and audited separately.
 
@@ -370,9 +372,9 @@ The repo author should only need to commit:
 {
   "preview": {
     "secrets": {
-      "bundle": "assembled-dev",
+      "bundle": "example-app-preview",
       "services": ["frontend", "webserver"],
-      "files": ["development.conf.json"]
+      "files": ["config/preview.json"]
     }
   }
 }
@@ -381,7 +383,7 @@ The repo author should only need to commit:
 If the bundle is missing, preview startup should fail before running app code with a clear message:
 
 ```text
-Preview needs the "assembled-dev" secret bundle.
+Preview needs the "example-app-preview" secret bundle.
 Ask an org admin to create it or choose a preview config that does not require secrets.
 ```
 
@@ -398,14 +400,16 @@ Admins see a guided setup:
 
 The UI should show names and destinations, not values:
 
+This is an illustrative V2 external-source view. V1 bundles use 143-managed values.
+
 ```text
-assembled-dev
-Repos: assembledhq/assembled
-Source: AWS Secrets Manager / assembled/development-conf
+example-app-preview
+Repos: example/web-app
+Source: AWS Secrets Manager / example/web-app/preview
 Exposure: Preview runtime
 Outputs:
-  - file development.conf.json -> workspace
-  - env MSGBROKER_QUEUE_TYPE -> webserver
+  - file config/preview.json -> workspace
+  - env QUEUE_MODE -> webserver
 Status: Ready
 ```
 
@@ -415,9 +419,9 @@ If a non-admin starts a preview that requires a missing bundle, show a request f
 
 ```text
 This preview needs admin-managed secrets.
-Requested: assembled-dev
+Requested: example-app-preview
 Used by: webserver
-Outputs: development.conf.json, MSGBROKER_QUEUE_TYPE
+Outputs: config/preview.json, QUEUE_MODE
 ```
 
 The user can request setup from admins with one click. The request should include the repo, preview config name, bundle name, and non-secret output contract.
@@ -463,18 +467,18 @@ Use envelope encryption:
 5. Store only ciphertext, nonce, encrypted DEK, KEK version, algorithm, and AAD metadata in Postgres.
 6. Never store the KEK in Postgres. For self-hosted installs without KMS, the existing `ENCRYPTION_MASTER_KEY` style can act as the KEK, but KMS/HSM should be the recommended production path.
 
-Given 143's current production shape, the practical v1 KEK store should be the existing sops-managed production env path: `.env.production.enc`, decrypted onto app/worker hosts at deploy/boot the same way `ENCRYPTION_MASTER_KEY` is handled today. Prefer a dedicated `PREVIEW_SECRET_BUNDLE_KEK` over reusing `ENCRYPTION_MASTER_KEY` so preview runtime secrets can be rotated independently from integration credentials. Store a non-secret version label next to it, such as `PREVIEW_SECRET_BUNDLE_KEK_VERSION=preview-secrets-2026-05`.
+For self-hosted deployments using SOPS-managed env bundles, the KEK can be supplied through the private `.env.production.enc` configuration and resolved at deploy or boot. Prefer a dedicated `PREVIEW_SECRET_BUNDLE_KEK` over sharing `ENCRYPTION_MASTER_KEY` so preview runtime secrets can be rotated independently from integration credentials. Use a non-secret version label, for example `PREVIEW_SECRET_BUNDLE_KEK_VERSION=example-preview-secrets-v1`. Keep key material in encrypted secrets storage and deployment-specific key-version history in private operational records.
 
-That is not as strong as cloud KMS because any process or host that can read the runtime env can use the KEK. It is still a good fit for v1 because it matches the existing operational model, avoids adding AWS credentials just to decrypt local DB rows, and protects against database-only compromise or leaked backups. The stronger future option is a managed KMS or Vault Transit backend once production already has a cloud identity plane for app/worker hosts. If 143 runs on AWS EC2/ECS with instance/task roles, use AWS KMS CMKs and IAM instead of storing AWS access keys in `.env.production.enc`. If hosts remain VPS-based, adding AWS KMS usually means storing long-lived AWS credentials in the env file, which is not a clear security win over the current sops-protected KEK.
+A runtime-env KEK protects against database-only compromise or leaked database backups, but a process or host that can read that env can use the key. A managed KMS or Vault Transit backend provides a stronger separation when app/worker hosts have suitable cloud identities. On AWS, instance/task roles avoid storing AWS access keys solely for decryption. Choose the key-storage backend for the deployment's identity and access model rather than assuming one hosting environment.
 
-Implementation note: the backend config has `PREVIEW_SECRET_BUNDLE_KEK` and `PREVIEW_SECRET_BUNDLE_KEK_VERSION`. The backend also falls back to the existing `ENCRYPTION_MASTER_KEY` when the preview-specific KEK is unset. Production should add the dedicated preview KEK before relying on preview secret bundles for real customer secrets; until then, preview bundles share the integration-credential KEK.
+Implementation note: backend config supports `PREVIEW_SECRET_BUNDLE_KEK` and `PREVIEW_SECRET_BUNDLE_KEK_VERSION`, with a fallback to `ENCRYPTION_MASTER_KEY` when the preview-specific key is unset. A deployment using that fallback shares the integration-credential KEK. Configure a dedicated preview key before using bundles for customer secrets. Record deployment-specific key configuration privately.
 
 The v1 implementation stores a compact encrypted blob with `alg`, `kid`, and `ciphertext`; the ciphertext is produced by the existing application crypto service, which uses AES-256-GCM envelope encryption internally. The stronger long-term stored shape should make the envelope metadata explicit and bind ciphertext to bundle context with AAD:
 
 ```json
 {
   "alg": "AES-256-GCM",
-  "kek_version": "preview-secrets-2026-05",
+  "kek_version": "example-preview-secrets-v1",
   "nonce": "base64...",
   "ciphertext": "base64...",
   "encrypted_dek": "base64...",
@@ -615,4 +619,4 @@ Ship the smallest useful version:
 6. Base-branch pinning for all connected preview config.
 7. Clear missing-bundle startup errors.
 
-That is enough to solve the Assembled preview shape while creating a clean path to AWS Secrets Manager.
+This supports applications with env-based or file-based configuration while leaving external secret sources as a separate extension.

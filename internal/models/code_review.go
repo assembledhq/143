@@ -1171,9 +1171,12 @@ type CodeReviewFinding struct {
 }
 
 type CodeReviewListItem struct {
-	CurrentAssessment      *CodeReviewAssessmentSummary `db:"-" json:"current_assessment,omitempty"`
-	ActiveAssessment       *CodeReviewAssessmentSummary `db:"-" json:"active_assessment,omitempty"`
-	LatestFailedAssessment *CodeReviewAssessmentSummary `db:"-" json:"latest_failed_assessment,omitempty"`
+	// CompletedAssessmentOutcome identifies the completed outcome projected for
+	// this exact session; a PR's current summary may belong to a newer session.
+	CompletedAssessmentOutcome bool                         `db:"completed_assessment_outcome" json:"completed_assessment_outcome,omitempty"`
+	CurrentAssessment          *CodeReviewAssessmentSummary `db:"-" json:"current_assessment,omitempty"`
+	ActiveAssessment           *CodeReviewAssessmentSummary `db:"-" json:"active_assessment,omitempty"`
+	LatestFailedAssessment     *CodeReviewAssessmentSummary `db:"-" json:"latest_failed_assessment,omitempty"`
 	CodeReviewSessionMetadata
 	RiskReasonDetails json.RawMessage `db:"risk_reason_details" json:"risk_reason_details,omitempty"`
 	RetryEligible     bool            `db:"retry_eligible" json:"retry_eligible"`
@@ -1212,6 +1215,8 @@ type CodeReviewAnalyticsSummary struct {
 	NotApproved             int64    `json:"not_approved"`
 	ApprovedFirstRound      int64    `json:"approved_first_round"`
 	MedianRoundsToApproval  *float64 `json:"median_rounds_to_approval"`
+	AverageRoundsToApproval *float64 `json:"average_rounds_to_approval"`
+	P95RoundsToApproval     *float64 `json:"p95_rounds_to_approval"`
 	NeedsHumanReview        int64    `json:"needs_human_review"`
 	CommentOnly             int64    `json:"comment_only"`
 	Blocked                 int64    `json:"blocked"`
@@ -1279,6 +1284,7 @@ type CodeReviewApprovalRoundAnalytics struct {
 }
 
 type CodeReviewAnalytics struct {
+	Trend                 *CodeReviewTrend                        `json:"trend,omitempty"`
 	Summary               CodeReviewAnalyticsSummary              `json:"summary"`
 	ApprovalRounds        []CodeReviewApprovalRoundAnalytics      `json:"approval_rounds"`
 	Authors               []CodeReviewAuthorAnalytics             `json:"authors"`

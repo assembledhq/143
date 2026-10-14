@@ -40,6 +40,10 @@ type RetryableError struct {
 	// successful retry is expected immediately after the current attempt repaired
 	// durable state, not for capacity/backlog gates.
 	BypassMaxRetryDuration bool
+	// ResetRetryWindow clears the previous external-dependency window when
+	// requeueing an agent-progress checkpoint. Only use with non-consuming,
+	// untargeted waits whose own durable phase deadlines bound execution.
+	ResetRetryWindow bool
 	// MaxRetryDuration overrides the default retry window for a bounded external
 	// wait. Unlike BypassMaxRetryDuration, the job is still guaranteed to
 	// terminate if the dependency does not recover.
@@ -132,6 +136,10 @@ type retryWindowLeaseStore interface {
 type targetRetryLeaseStore interface {
 	RetryWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error)
 	RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error)
+}
+
+type retryWindowResetLeaseStore interface {
+	RetryWithoutConsumingAttemptWithLeaseAndResetWindow(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error)
 }
 
 // maxRetryableDuration is the maximum wall-clock time a retryable job is
@@ -290,8 +298,7 @@ func (w *Worker) poll(ctx context.Context) {
 	var fatal *FatalError
 	if errors.As(err, &fatal) {
 		w.logger.Error().Err(err).Str("job_id", job.ID.String()).Msg("job failed (fatal, skipping retries)")
-		w.deadLetterJob(ctx, job.ID, *job.LockToken, err.Error())
-		w.runDeadLetterHooks(handlerCtx, err)
+		w.deadLetterJob(ctx, handlerCtx, job, err)
 		return
 	}
 
@@ -299,8 +306,7 @@ func (w *Worker) poll(ctx context.Context) {
 	if errors.As(err, &retryable) {
 		if retryable.ConsumeAttempt && job.Attempts >= job.MaxAttempts {
 			w.logger.Error().Err(err).Str("job_id", job.ID.String()).Msg("retryable job exhausted attempts, dead-lettering")
-			w.deadLetterJob(ctx, job.ID, *job.LockToken, err.Error())
-			w.runDeadLetterHooks(handlerCtx, err)
+			w.deadLetterJob(ctx, handlerCtx, job, err)
 			return
 		}
 		now := time.Now()
@@ -327,12 +333,11 @@ func (w *Worker) poll(ctx context.Context) {
 				Dur("retry_window_age", now.Sub(retryWindowStartedAt)).
 				Msg("retryable job exceeded max duration, dead-lettering")
 			timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", retryWindow, err)
-			w.deadLetterJob(ctx, job.ID, *job.LockToken, timeoutErr.Error())
-			w.runDeadLetterHooks(handlerCtx, timeoutErr)
+			w.deadLetterJob(ctx, handlerCtx, job, timeoutErr)
 			return
 		}
 		w.logger.Info().Err(err).Str("job_id", job.ID.String()).Msg("job deferred (retryable)")
-		runAt, scheduled := w.retryJobWithDelayAt(ctx, now, job.ID, *job.LockToken, err.Error(), job.Attempts, !retryable.ConsumeAttempt, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID)
+		runAt, scheduled := w.retryJobWithDelayAt(ctx, now, job.ID, *job.LockToken, err.Error(), job.Attempts, !retryable.ConsumeAttempt, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID, retryable.ResetRetryWindow)
 		if scheduled {
 			w.runRetryScheduledHooks(handlerCtx, err, runAt)
 		}
@@ -341,8 +346,7 @@ func (w *Worker) poll(ctx context.Context) {
 
 	w.logger.Error().Err(err).Str("job_id", job.ID.String()).Msg("job failed")
 	if job.Attempts >= job.MaxAttempts {
-		w.deadLetterJob(ctx, job.ID, *job.LockToken, err.Error())
-		w.runDeadLetterHooks(handlerCtx, err)
+		w.deadLetterJob(ctx, handlerCtx, job, err)
 		return
 	}
 	w.retryJob(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, false)
@@ -483,10 +487,10 @@ func (w *Worker) retryJob(ctx context.Context, jobID, lockToken uuid.UUID, errMs
 }
 
 func (w *Worker) retryJobWithDelay(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override *time.Duration, targetNodeID *string, clearTargetNodeID bool) {
-	w.retryJobWithDelayAt(ctx, time.Now(), jobID, lockToken, errMsg, attempt, preserveAttempts, override, targetNodeID, clearTargetNodeID)
+	w.retryJobWithDelayAt(ctx, time.Now(), jobID, lockToken, errMsg, attempt, preserveAttempts, override, targetNodeID, clearTargetNodeID, false)
 }
 
-func (w *Worker) retryJobWithDelayAt(ctx context.Context, now time.Time, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override *time.Duration, targetNodeID *string, clearTargetNodeID bool) (time.Time, bool) {
+func (w *Worker) retryJobWithDelayAt(ctx context.Context, now time.Time, jobID, lockToken uuid.UUID, errMsg string, attempt int, preserveAttempts bool, override *time.Duration, targetNodeID *string, clearTargetNodeID, resetRetryWindow bool) (time.Time, bool) {
 	var backoff time.Duration
 	if override != nil {
 		backoff = *override
@@ -500,7 +504,13 @@ func (w *Worker) retryJobWithDelayAt(ctx context.Context, now time.Time, jobID, 
 		err error
 	)
 	updateTarget := targetNodeID != nil || clearTargetNodeID
-	if updateTarget {
+	if resetRetryWindow {
+		if resetStore, supported := w.jobs.(retryWindowResetLeaseStore); supported && preserveAttempts && !updateTarget {
+			ok, err = resetStore.RetryWithoutConsumingAttemptWithLeaseAndResetWindow(ctx, jobID, lockToken, errMsg, runAt)
+		} else {
+			err = errors.New("retry window reset requires an untargeted non-consuming retry and reset-capable store")
+		}
+	} else if updateTarget {
 		if targetStore, supportsTargetRetry := w.jobs.(targetRetryLeaseStore); supportsTargetRetry {
 			if preserveAttempts {
 				ok, err = targetStore.RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx, jobID, lockToken, errMsg, runAt, targetNodeID)
@@ -528,15 +538,36 @@ func (w *Worker) retryJobWithDelayAt(ctx context.Context, now time.Time, jobID, 
 	return runAt, true
 }
 
-func (w *Worker) deadLetterJob(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) {
-	ok, err := w.jobs.DeadLetterWithLease(ctx, jobID, lockToken, errMsg)
+type codeReviewTerminalLeaseStore interface {
+	DeadLetterCodeReviewWithLease(ctx context.Context, orgID, jobID, lockToken uuid.UUID, errMsg, failureDetail string) (bool, error)
+}
+
+var _ codeReviewTerminalLeaseStore = (*db.JobStore)(nil)
+
+func (w *Worker) deadLetterJob(ctx, handlerCtx context.Context, job *models.Job, terminalErr error) {
+	var ok bool
+	var err error
+	if job.JobType == models.JobTypeRunCodeReviewRecheck || (job.JobType == models.JobTypeRunCodeReview && !errors.Is(terminalErr, errCodeReviewEndedParentRecovery)) {
+		store, supported := w.jobs.(codeReviewTerminalLeaseStore)
+		if !supported {
+			w.logger.Error().Str("job_id", job.ID.String()).Msg("job store cannot atomically fail a code review; leaving job for lease recovery")
+			return
+		}
+		ok, err = store.DeadLetterCodeReviewWithLease(ctx, job.OrgID, job.ID, *job.LockToken, terminalErr.Error(), codeReviewDeadLetterReason(terminalErr))
+	} else {
+		// An ended-parent ownership rejection must preserve the assessment for
+		// the existing guarded recovery path, as its cleanup hook also does.
+		ok, err = w.jobs.DeadLetterWithLease(ctx, job.ID, *job.LockToken, terminalErr.Error())
+	}
 	if err != nil {
-		w.logger.Warn().Err(err).Str("job_id", jobID.String()).Msg("failed to dead-letter job")
+		w.logger.Warn().Err(err).Str("job_id", job.ID.String()).Msg("failed to dead-letter job")
 		return
 	}
 	if !ok {
-		w.logger.Warn().Str("job_id", jobID.String()).Msg("lost ownership before dead-lettering job")
+		w.logger.Warn().Str("job_id", job.ID.String()).Msg("lost ownership before dead-lettering job")
+		return
 	}
+	w.runDeadLetterHooks(handlerCtx, terminalErr)
 }
 
 func (w *Worker) runDeadLetterHooks(handlerCtx context.Context, err error) {

@@ -652,7 +652,14 @@ func (s *Service) handleExplicitReviewRequest(
 	changeKey string,
 ) (ReviewRequestedResult, error) {
 	if s.SchedulingEnabled() {
-		return s.scheduleReview(ctx, ReviewChangedInput{OrgID: input.OrgID, RepositoryID: input.RepositoryID, PullRequestID: input.PullRequestID, ExplicitRequest: true, GitHubDeliveryID: input.DeliveryID, RequestContext: normalizeReviewRequestContext(input.RequestContext), RequestedReviewerLogin: input.RequestedLogin, RequestedTeamSlug: input.RequestedTeam, TriggerSource: source, ChangeReason: changeReason}, models.CodeReviewReviewNow, false, nil)
+		return s.scheduleReview(ctx, ReviewChangedInput{
+			OrgID: input.OrgID, RepositoryID: input.RepositoryID, PullRequestID: input.PullRequestID,
+			GitHubRepo: input.GitHubRepo, GitHubPRNumber: input.GitHubPRNumber, GitHubPRURL: input.GitHubPRURL,
+			PullRequestTitle: input.PullRequestTitle, PullRequestAuthor: input.PullRequestAuthor,
+			HeadSHA: input.HeadSHA, BaseSHA: input.BaseSHA, FromFork: input.FromFork,
+			ExplicitRequest: true, GitHubDeliveryID: input.DeliveryID, RequestContext: normalizeReviewRequestContext(input.RequestContext),
+			RequestedReviewerLogin: input.RequestedLogin, RequestedTeamSlug: input.RequestedTeam, TriggerSource: source, ChangeReason: changeReason,
+		}, models.CodeReviewReviewNow, false, nil)
 	}
 	input.RequestContext = normalizeReviewRequestContext(input.RequestContext)
 	// A reviewer-picker request or configured-team mention is intentional even

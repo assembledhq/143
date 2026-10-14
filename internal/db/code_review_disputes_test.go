@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -678,4 +679,48 @@ func TestCodeReviewDisputeStore_DeleteExpiredQueueSnapshots(t *testing.T) {
 	require.NoError(t, err, "expired queue snapshot cleanup should succeed")
 	require.Equal(t, int64(4), deleted, "cleanup should report the deleted snapshot rows")
 	require.NoError(t, mock.ExpectationsWereMet(), "all snapshot cleanup expectations should be met")
+}
+
+func TestCodeReviewDisputeStore_SetTriageNormalizesReasonCodes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		input, expected []models.CodeReviewRiskReasonCode
+	}{
+		{name: "nil reasons persist as an empty array", expected: []models.CodeReviewRiskReasonCode{}},
+		{name: "empty reasons stay empty", input: []models.CodeReviewRiskReasonCode{}, expected: []models.CodeReviewRiskReasonCode{}},
+		{name: "populated reasons preserve order and values", input: []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonDescriptionFailed, models.CodeReviewRiskReasonBlockingFindings}, expected: []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonDescriptionFailed, models.CodeReviewRiskReasonBlockingFindings}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create the database mock")
+			defer mock.Close()
+			orgID, disputeID := uuid.New(), uuid.New()
+			result := models.CodeReviewDisputeTriageResult{
+				Direction: models.CodeReviewDisputeDirectionShouldHaveApproved, ContestedReasonCodes: slices.Clone(tt.input),
+				DisputeKind: "new_evidence", AssertsNewInformation: true,
+				Routing: models.CodeReviewDisputeRoutingPolicySignalOnly, Confidence: .99,
+			}
+			expected := models.CodeReviewDispute{ID: disputeID, OrgID: orgID, ContestedReasonCodes: tt.expected}
+			mock.ExpectQuery(`UPDATE code_review_decision_disputes[\s\S]+WHERE org_id = @org_id AND id = @id AND intake_status = 'pending'`).
+				WithArgs(pgx.NamedArgs{
+					"org_id": orgID, "id": disputeID, "direction": result.Direction,
+					"reason_codes": tt.expected, "dispute_kind": "new_evidence",
+					"asserts_new_information": true, "routing": result.Routing,
+					"intake_status": models.CodeReviewDisputeIntakeTriaged, "confidence": .99,
+					"adjudication_status": models.CodeReviewDisputeAdjudicationPending, "status_detail": "Recorded.",
+				}).WillReturnRows(codeReviewDisputeMockRows(expected))
+			actual, err := NewCodeReviewDisputeStore(mock).SetTriage(context.Background(), orgID, disputeID, result, true, "Recorded.")
+			require.NoError(t, err, "triage should persist nil, empty and populated reason lists")
+			require.Equal(t, expected, actual, "triage should return the persisted dispute")
+			require.Equal(t, models.CodeReviewDisputeTriageResult{
+				Direction: models.CodeReviewDisputeDirectionShouldHaveApproved, ContestedReasonCodes: tt.input,
+				DisputeKind: "new_evidence", AssertsNewInformation: true,
+				Routing: models.CodeReviewDisputeRoutingPolicySignalOnly, Confidence: .99,
+			}, result, "persistence normalization must not mutate the caller's triage result")
+			require.NoError(t, mock.ExpectationsWereMet(), "the tenant-scoped pending update should receive the exact nonnil array")
+		})
+	}
 }

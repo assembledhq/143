@@ -93,7 +93,7 @@ var internalCodeReviewListColumns = []string{
 	"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 	"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 	"github_review_url", "final_review_body", "failure_reason", "risk_reason_details", "completed_at", "created_at", "retry_eligible", "session_title",
-	"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
+	"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author", "completed_assessment_outcome",
 }
 
 func internalCodeReviewListRow(fx internalCodeReviewFixture, reviewID, reviewSessionID uuid.UUID, body *string) []any {
@@ -106,7 +106,7 @@ func internalCodeReviewListRow(fx internalCodeReviewFixture, reviewID, reviewSes
 		reviewID, fx.orgID, reviewSessionID, fx.repoID, uuid.New(), uuid.New(),
 		"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, &decision, &acceptable, false,
 		nil, "key-" + reviewID.String(), nil, nil, nil, body, nil, []byte(`[{"code":"blocking_findings"}]`), &now, now, false, &title,
-		&repoName, "acme/repo", 42, "https://github.com/acme/repo/pull/42", "Fix auth bug", "devin",
+		&repoName, "acme/repo", 42, "https://github.com/acme/repo/pull/42", "Fix auth bug", "devin", false,
 	}
 }
 

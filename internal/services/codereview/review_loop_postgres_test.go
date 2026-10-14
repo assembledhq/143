@@ -26,7 +26,7 @@ func testSchedulingRestartLoop(t *testing.T, pool *pgxpool.Pool, org, repo, pr u
 		a, _, err := assessments.Create(ctx, models.CodeReviewAssessmentCapture{
 			OrgID: org, RepositoryID: repo, PullRequestID: pr, PolicyID: metadata.PolicyID, SessionID: metadata.SessionID,
 			Generation: generation, PreviousAssessmentID: previous, BaseSHA: snapshot.snapshot.BaseSHA, BaseRef: snapshot.snapshot.BaseRef, HeadSHA: snapshot.snapshot.HeadSHA,
-			InputVersion: 1, CodeDigest: "code", ContractDigest: "contract", IntentDigest: "intent", VisualDigest: uuid.NewString(), RequestDigest: "request", GateDigest: "gate", InputDigest: uuid.NewString(), InputManifest: json.RawMessage(`{}`),
+			InputVersion: 1, CodeDigest: "code", ContractDigest: "contract", IntentDigest: "intent", VisualDigest: uuid.NewString(), RequestDigest: "request", GateDigest: "gate", InputDigest: uuid.NewString(), InputManifest: json.RawMessage(`{"request":{"substantive_text":"Please verify the Copilot conversation behavior"}}`),
 			ReviewScope: models.CodeReviewScopeFull, RouteReason: models.CodeReviewRouteInitialFull, PublicationKey: metadata.ReviewOutputKey,
 		})
 		require.NoError(t, err, "capture assessment with unstable visual identity")
@@ -40,6 +40,9 @@ func testSchedulingRestartLoop(t *testing.T, pool *pgxpool.Pool, org, repo, pr u
 		require.NoError(t, err, "read scheduler after fallback")
 		if generation < 3 {
 			require.NotEmpty(t, state.PendingInput, "first two failures should admit one replacement")
+			var pending scheduledReviewIntent
+			require.NoError(t, json.Unmarshal(state.PendingInput, &pending), "read the automatic fallback input")
+			require.Equal(t, &ReviewRequestContext{Source: "assessment_fallback", Body: "Please verify the Copilot conversation behavior"}, pending.Input.RequestContext, "automatic fallback must preserve the captured human request without replacing it with failure prose")
 			require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "dispatch replacement through normal scheduling")
 		} else {
 			require.Nil(t, state.PendingInput, "third failed automatic attempt must not queue a fourth")
@@ -55,6 +58,8 @@ func testSchedulingRestartLoop(t *testing.T, pool *pgxpool.Pool, org, repo, pr u
 	require.False(t, stopped.Stale, "loop cancellation must appear as a current terminal outcome")
 	require.Equal(t, &code, stopped.StatusCode, "loop must have an explicit machine-readable reason")
 	require.False(t, stopped.RetryableFailure, "generic retry polling must not restart the loop")
+	require.Nil(t, stopped.Decision, "unsent cancelled attempts must not fabricate a code decision")
+	require.Nil(t, stopped.Acceptable, "unsent cancelled attempts must not fabricate risk acceptance")
 	require.NoError(t, service.FallbackAssessmentToFull(ctx, org, last.ID, "inputs changed before publication"), "crash replay must preserve cancellation")
 	var commentJobs int
 	var commentPayload SyncReviewStatusCommentJobPayload

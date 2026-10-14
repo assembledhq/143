@@ -407,6 +407,14 @@ func (c *ChromeDPInspector) getOrCreatePreviewCtx(previewID string) (*previewCon
 			pc.mu.Unlock()
 		}
 	})
+	// Initialize the tab on its persistent context. The first Run starts the
+	// target's event loop using the context passed to it; initializing from an
+	// operation's timeout context would stop that loop when the operation ends,
+	// leaving the cached tab unable to service subsequent requests.
+	if err := chromedp.Run(ctx); err != nil {
+		cancel()
+		return nil, fmt.Errorf("initialize preview browser context: %w", err)
+	}
 
 	c.previews[contextKey] = pc
 	return pc, nil
@@ -443,16 +451,17 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 	var pageURL string
 
 	actions := []chromedp.Action{
-		chromedp.EmulateViewport(int64(opts.ViewportW), int64(opts.ViewportH)),
+		chromedp.ActionFunc(activatePreviewTarget),
+		browserActionStage("resize screenshot target", chromedp.EmulateViewport(int64(opts.ViewportW), int64(opts.ViewportH))),
 	}
 	if opts.Path != "" {
 		url, urlErr := c.previewURL(previewID, opts.Path)
 		if urlErr != nil {
 			return nil, fmt.Errorf("invalid path: %w", urlErr)
 		}
-		actions = append(actions, chromedp.Navigate(url), chromedp.WaitReady("body", chromedp.ByQuery))
+		actions = append(actions, browserActionStage("navigate screenshot target", chromedp.Navigate(url)), browserActionStage("wait for screenshot body", chromedp.WaitReady("body", chromedp.ByQuery)))
 	} else {
-		actions = append(actions, chromedp.WaitReady("body", chromedp.ByQuery))
+		actions = append(actions, browserActionStage("wait for screenshot body", chromedp.WaitReady("body", chromedp.ByQuery)))
 	}
 
 	if opts.Delay > 0 {
@@ -463,9 +472,9 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 	actions = append(actions, chromedp.Location(&pageURL))
 
 	if opts.FullPage {
-		actions = append(actions, chromedp.FullScreenshot(&pngData, 100))
+		actions = append(actions, capturePreviewScreenshot(&pngData, true))
 	} else {
-		actions = append(actions, chromedp.CaptureScreenshot(&pngData))
+		actions = append(actions, capturePreviewScreenshot(&pngData, false))
 	}
 
 	if err := chromedp.Run(timeoutCtx, actions...); err != nil {
@@ -496,6 +505,40 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 		Viewport:      models.ViewportSpec{Width: opts.ViewportW, Height: opts.ViewportH},
 		CapturedAt:    time.Now(),
 	}, nil
+}
+
+// Activate the target before asking Chrome's compositor for pixels. Background
+// headless tabs can stop producing frames after navigation or viewport changes.
+func capturePreviewScreenshot(pngData *[]byte, fullPage bool) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		if err := activatePreviewTarget(ctx); err != nil {
+			return err
+		}
+		capture := chromedp.CaptureScreenshot(pngData)
+		if fullPage {
+			capture = chromedp.FullScreenshot(pngData, 100)
+		}
+		if err := capture.Do(ctx); err != nil {
+			return fmt.Errorf("capture target pixels: %w", err)
+		}
+		return nil
+	})
+}
+
+func activatePreviewTarget(ctx context.Context) error {
+	if err := page.BringToFront().Do(ctx); err != nil {
+		return fmt.Errorf("activate screenshot target: %w", err)
+	}
+	return nil
+}
+
+func browserActionStage(stage string, action chromedp.Action) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		if err := action.Do(ctx); err != nil {
+			return fmt.Errorf("%s: %w", stage, err)
+		}
+		return nil
+	})
 }
 
 // =============================================================================
@@ -1707,7 +1750,7 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 		// Optional screenshot at this step.
 		if step.Screenshot || stepErr != nil {
 			var pngData []byte
-			if err := chromedp.Run(timeoutCtx, chromedp.CaptureScreenshot(&pngData)); err == nil {
+			if err := chromedp.Run(timeoutCtx, capturePreviewScreenshot(&pngData, false)); err == nil {
 				var title string
 				_ = chromedp.Run(timeoutCtx, chromedp.Title(&title))
 				sr.Screenshot = &models.ScreenshotResult{
@@ -1869,11 +1912,12 @@ func (c *ChromeDPInspector) ComputeVisualDiff(ctx context.Context, previewID str
 
 	var beforePNG []byte
 	if err := chromedp.Run(timeoutCtx,
-		chromedp.EmulateViewport(1280, 720),
-		chromedp.Navigate(beforeURL),
-		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.ActionFunc(activatePreviewTarget),
+		browserActionStage("resize snapshot target", chromedp.EmulateViewport(1280, 720)),
+		browserActionStage("navigate snapshot target", chromedp.Navigate(beforeURL)),
+		browserActionStage("wait for snapshot body", chromedp.WaitReady("body", chromedp.ByQuery)),
 		chromedp.Sleep(time.Second),
-		chromedp.CaptureScreenshot(&beforePNG),
+		capturePreviewScreenshot(&beforePNG, false),
 	); err != nil {
 		return nil, fmt.Errorf("capture before snapshot: %w", err)
 	}
@@ -1890,10 +1934,11 @@ func (c *ChromeDPInspector) ComputeVisualDiff(ctx context.Context, previewID str
 
 	var afterPNG []byte
 	if err := chromedp.Run(timeoutCtx,
-		chromedp.Navigate(afterURL),
-		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.ActionFunc(activatePreviewTarget),
+		browserActionStage("navigate snapshot target", chromedp.Navigate(afterURL)),
+		browserActionStage("wait for snapshot body", chromedp.WaitReady("body", chromedp.ByQuery)),
 		chromedp.Sleep(time.Second),
-		chromedp.CaptureScreenshot(&afterPNG),
+		capturePreviewScreenshot(&afterPNG, false),
 	); err != nil {
 		return nil, fmt.Errorf("capture after snapshot: %w", err)
 	}
@@ -2067,7 +2112,7 @@ func generateDiffOverlay(before, after image.Image) ([]byte, error) {
 		height = aBounds.Dy()
 	}
 
-	overlay := image.NewRGBA(image.Rect(0, 0, width, height))
+	overlay := image.NewNRGBA(image.Rect(0, 0, width, height))
 
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
@@ -2080,7 +2125,7 @@ func generateDiffOverlay(before, after image.Image) ([]byte, error) {
 
 			if dr > 10 || dg > 10 || db > 10 {
 				// Red highlight for changed pixels.
-				overlay.Set(x, y, color.RGBA{R: 255, G: 0, B: 0, A: 180})
+				overlay.Set(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 180})
 			} else {
 				// Semi-transparent grayscale for unchanged pixels.
 				r, g, b, _ := after.At(aBounds.Min.X+x, aBounds.Min.Y+y).RGBA()
@@ -2089,7 +2134,7 @@ func generateDiffOverlay(before, after image.Image) ([]byte, error) {
 					grayVal = 255
 				}
 				gray := uint8(grayVal) // #nosec G115 -- clamped above
-				overlay.Set(x, y, color.RGBA{R: gray, G: gray, B: gray, A: 100})
+				overlay.Set(x, y, color.NRGBA{R: gray, G: gray, B: gray, A: 100})
 			}
 		}
 	}

@@ -79,8 +79,9 @@ matching local inode/size/mtime/ctime identity, and a fresh exact S3 key, size,
 ETag, and last-modified match for every local archive. The policy refuses all
 pruning/admission if any archive is unknown, changed, or has invalid evidence,
 or if listing fails. Unknown files consume capacity; they do not count as
-qualified recovery copies. Existing archives are never automatically re-uploaded
-to create evidence. No remote deletion is implemented.
+qualified recovery copies. Unknown archives are never automatically re-uploaded
+to create evidence. A proven interrupted backup can resume as described below.
+No remote deletion is implemented.
 
 A new backup is individually uploaded using the pinned AWS CLI 2.35.11 image and
 explicit `--checksum-algorithm CRC64NVME`. Only successful uploads followed by a
@@ -96,19 +97,19 @@ from the full database size. This is preflight admission, not a hard dump-size
 limit. `BACKUP_RESERVE_BYTES` can increase the reserve but cannot lower it below
 20 GiB. `BACKUP_LOCK_TIMEOUT_SECONDS` defaults to 60 seconds, maximum 3600.
 
-Manual backup, prune, resume-upload and local restore commands require
+Manual backup, prune, resume-verification, resume-upload and local restore commands require
 both `BACKUP_ATTENDED=true` and a nonempty
 `BACKUP_OBSERVER` identifying the operator. They report JSON events and nonzero
 failures to that operator's terminal. Do not set these variables in cron to
 simulate an observer. The observer must watch disk and memory and have an
 ownership-checked stop procedure. Scheduled backups use a separately approved
-start window as described below; installing helpers does not validate alert delivery.
+trial or ongoing profile as described below; installing helpers does not validate alert delivery.
 Keep schedules held while validating a deployment and assign an operator to
 arrange attended backups at the configured target cadence (six hours by default). If that cannot be met,
 record the recovery-point gap and next reassessment time. Installing helpers
 does not establish backup coverage.
 
-## Time-limited scheduled backups
+## Scheduled backups
 
 The backup installer renders `pg-backup.sh --scheduled` for cron. It preserves
 the existing backup and restore holds. Scheduled execution requires both
@@ -128,9 +129,8 @@ A missed start extends the recovery gap until another backup succeeds.
 
 An operator must separately approve and atomically install a profile owned by
 the account running the backup (root for the installed cron), with mode 0600
-inside the existing private state directory. The profile has this shape;
-replace the placeholders with the approved owner, evidence reference and
-timezone-aware ISO-8601 timestamps:
+inside the existing private state directory. For a time-limited trial, the profile has this shape; replace the placeholders
+with the approved owner, evidence reference and timezone-aware ISO-8601 timestamps:
 
 ```json
 {
@@ -154,20 +154,91 @@ failed starts record durable failures. Health reports `backup_held=true` for an
 unavailable window even when the cron enable flag remains true, without hiding
 stale recovery points or overdue restores. Expiry does not rewrite cron.
 
+### Ongoing operation
+
+After accepting a trial, an operator can explicitly approve an ongoing schedule.
+This uses a separate schema, so deleting a trial expiry or changing its schema
+number alone cannot remove the trial limit:
+
+```json
+{
+  "schema": 2,
+  "mode": "ongoing",
+  "owner": "<responsible operator>",
+  "evidence": "<private ongoing-operation acceptance record>",
+  "starts_at": "<approved start with timezone>",
+  "timezone": "America/New_York",
+  "hours": [8, 20],
+  "host_memory_full_percent": 1,
+  "db_memory_full_percent": 1
+}
+```
+
+Set `BACKUP_CRON="0 * * * *"` for an hourly tick at minute zero; the validated
+profile selects the eligible local hours using the host's IANA timezone data.
+The start timestamp must have arrived, and `BACKUP_ENABLED=true` is still
+required. The hours must be sorted, unique integers from 0 through 23. Ongoing
+profiles have no expiry. Stop new starts with `BACKUP_ENABLED=false` or by
+removing the approval profile. Both controls stop future starts without
+interrupting admitted work or cleanup. Install the shared helper and policy before the ongoing profile, and
+install the hourly cron last. Installers never promote trials automatically.
+
+Off-hour ticks exit without a new attempt, database access, storage work or
+clearing an earlier failed attempt. The profile and eligible hour are checked
+again under the common writer lock before any backup or retention work. Invalid
+profiles retain durable failed-attempt reporting. Health remains active between
+eligible hours while still reporting stale recovery points and overdue restores.
+
+Choose local hours outside daylight-saving transitions to avoid skipped or
+repeated clock hours. For example, 8 AM/8 PM remains at those Eastern clock times
+in summer and winter, with an 11- or 13-hour overnight interval on transition
+weekends. The configured recovery objective and its 45-minute alert allowance
+remain unchanged; a 13-hour interval can therefore briefly exceed a 12-hour
+objective plus its allowance.
+
 Scheduled mode uses normal two-copy receipt-qualified retention. It cannot
-bootstrap, act as a canary, run a stop exercise, opt into higher swap limits,
-restore, or retry an ambiguous upload. Standalone prune, upload recovery and
+bootstrap, act as a canary, run a stop exercise, use CLI pressure overrides,
+restore, or retry an ambiguous upload. It can resume a completed dump's
+verification or a failed upload when ownership, cleanup, file identity and
+remote absence are proven, before admitting a fresh dump. Standalone prune, recovery and
 restore remain attended commands. Common locking, strict admission, runtime
 resource guards, owned cleanup, checksum qualification and preservation of
 uncertain archives are unchanged. Expiry limits the start window, not the number
 of invocations; select the cron cadence and window together for the intended trial.
 
+An attended `backup --canary --dump-cpus 0.75` can reduce the dump client's CPU
+quota from one CPU to three quarters to investigate load-related stops. It may
+take longer and is not guaranteed to finish. The 45-minute dump deadline and all
+resource guards stay unchanged; uploads keep their existing quota. The selected
+quota is recorded in the dump ownership evidence. Scheduled backups reject this
+CLI override and use their approved profile instead.
+
 Each profile's host and database memory-full PSI limit must be exactly 1% or 5%.
 Higher values accept more stalls and possible application latency; use evidence
 from an attended run when approving them. Admission remains at 1% for both,
-and scheduled swap limits remain 256 MiB total and 4 MiB/s. CLI pressure and
+and admission swap limits remain 256 MiB total and 4 MiB/s. CLI pressure and
 swap overrides cannot be combined with `--scheduled`. Effective limits are
 logged after loading the profile and retained with runtime observations.
+
+Schema 1 and 2 profiles retain one CPU and a 4 MiB/s runtime swap-out limit.
+An ongoing profile may explicitly select a lower dump CPU quota and a higher
+runtime swap-out rate using **schema 3**. Keep every schema 2 field, change
+`schema` to `3`, and add both required fields:
+
+```json
+"dump_cpus": 0.75,
+"swap_out_mib_per_second": 8
+```
+
+The only accepted CPU quotas are `0.75` and `1.0`; the rate must be the integer
+`4` or `8`. Install the shared state helper, runtime and policy before installing
+this profile. The rate applies during dumping, verification, upload and scheduled
+recovery. Total swap remains capped at **256 MiB**, including when the runtime
+rate is 8 MiB/s; strict admission retains its 4 MiB/s rate. Disk, RAM, database
+headroom, pressure, deadline and cleanup guards remain unchanged. A lower CPU
+quota may lengthen the dump, and a higher swap-out rate permits transient latency;
+neither guarantees completion. This does not enable the attended canary's
+separate 512 MiB total-swap allowance.
 
 Before enabling a window, verify runtime protection and independent monitoring,
 save rollback copies, and identify the operator who will inspect each outcome.
@@ -186,7 +257,7 @@ existing Docker-network address. The database's HBA rules must permit this
 connection; loopback TCP access is not assumed.
 There is no production data-volume mount or database restart. The client mounts
 only its private partial archive and has a 2 GiB memory limit, no swap allowance,
-one CPU, 32-process limit, read-only root filesystem, dropped capabilities and
+one CPU by default (or an approved 0.75 CPU quota), 32-process limit, read-only root filesystem, dropped capabilities and
 a hard file-size limit. Image-declared data volumes are masked by small tmpfs
 mounts instead of creating anonymous restore volumes.
 The higher client limit leaves room for large COPY rows and libpq buffering;
@@ -260,7 +331,8 @@ Admission requires the estimated dump plus the configured reserve plus **5 GiB**
 at least 3 GiB available memory and commitment headroom, and 1.5 GiB database
 cgroup headroom. Runtime stopping begins at reserve plus **4 GiB**, 1.5 GiB
 available memory, 1 GiB commitment headroom, 0.5 GiB database cgroup headroom,
-256 MiB swap use, or 4 MiB/s swap-out. Pressure thresholds are explicit in
+256 MiB swap use, or 4 MiB/s swap-out by default. A schema 3 profile can select
+8 MiB/s at runtime while preserving the 256 MiB total limit. Pressure thresholds are explicit in
 `pg_backup_runtime.py`. The default reserve remains 20 GiB and can only increase.
 
 An explicitly attended `backup --canary --host-memory-full-percent 5` permits
@@ -290,7 +362,8 @@ relax both stall thresholds for a single invocation.
 `--allow-swap-bursts` permits up to **512 MiB total host swap and 8 MiB/s
 swap-out** during an attended canary's dump, verification and upload. It requires
 `--canary`, `BACKUP_ATTENDED=true` and a named `BACKUP_OBSERVER`. Admission and
-subsequent invocations retain the default 256 MiB and 4 MiB/s limits. Each
+subsequent manual invocations retain the default 256 MiB and 4 MiB/s limits;
+scheduled invocations use their approved profile. Each
 resource observation records the effective byte and byte-per-second ceilings;
 metadata-only checks record null ceilings because they enforce capacity only.
 The option accepts additional paging and possible application latency, while
@@ -491,8 +564,9 @@ successful drill must not mask the current incomplete one.
 Before dump/restore work starts, the policy saves `pending.json` with the archive,
 phase and (for a dump) unique `PGAPPNAME`. Failed or interrupted backup work, or
 restore work without proven cleanup, preserves this marker and any
-partial/completed output. The next operation refuses to
-proceed. There is deliberately no age-only partial sweep: a dead Docker client
+partial/completed output. The next backup first attempts guarded recovery for
+completed dumps in verification or upload; all other uncertain markers block
+new work. There is deliberately no age-only partial sweep: a dead Docker client
 does not prove its database backend or upload container is gone.
 
 Do not simply remove the marker or re-upload an uncertain archive. Inspect the
@@ -507,6 +581,17 @@ container and a fresh object listing. A missing exit record, nonzero exit or
 ambiguous command completion requires independent integrity verification before
 receipt import; matching object size alone is insufficient. Automatic uncertain
 upload recovery remains deliberately unavailable.
+
+Completed dump verification can resume automatically on the next backup or
+through the attended `resume-verification` command. Recovery requires the
+original dump's successful cleanup, the failed verification reader's proven
+cleanup, unchanged inode/size/mtime, no live owner or backup reader, the original
+database generation, and current resource admission. It repeats structural and
+SHA-256 verification before publishing an upload marker and starting an upload.
+Both a preserved partial and a file already renamed to its final name are
+supported; an ambiguous pair is refused. Original dump times and the original
+database-size measurement remain attached to the receipt. Recovery does not
+refresh the snapshot's age or prove a full restore.
 
 An attended recovery can use `resume-upload` when
 the archive is complete, unchanged, and its previous runtime has a failed result

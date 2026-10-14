@@ -36,7 +36,9 @@ func (s *CodeReviewScheduleStore) SettleAssessment(ctx context.Context, orgID, a
 		default:
 			return nil
 		}
-		if _, err := tx.Exec(ctx, `UPDATE code_review_requests SET status=$3 WHERE org_id=$1 AND assessment_id=$2 AND status IN ('pending','joined')`, orgID, assessmentID, requestStatus); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE code_review_requests SET status=$3
+ WHERE org_id=$1 AND status IN ('pending','joined')
+ AND (assessment_id=$2 OR ($3='satisfied' AND $6='full' AND assessment_id IS NULL AND status='joined' AND session_id=$4 AND pull_request_id=$5))`, orgID, assessmentID, requestStatus, sessionID, pullRequestID, scope); err != nil {
 			return err
 		}
 		ownsAssessment := state.ActiveAssessmentID != nil && *state.ActiveAssessmentID == assessmentID
@@ -72,4 +74,15 @@ func (s *CodeReviewScheduleStore) SettleAssessment(ctx context.Context, orgID, a
 		state.EligibleAt = nil
 		return nil
 	})
+}
+
+// SettleCompletedFullReviewJoins preserves the original session of requests
+// joined before a full assessment was captured, including pre-capture sessions.
+// Call under the PR scheduling lock before replaying or advancing requests.
+func SettleCompletedFullReviewJoins(ctx context.Context, tx pgx.Tx, orgID, prID uuid.UUID) error {
+	_, err := tx.Exec(ctx, `UPDATE code_review_requests r SET status='satisfied'
+ FROM code_review_session_metadata m
+ WHERE r.org_id=$1 AND r.pull_request_id=$2 AND r.status='joined' AND r.assessment_id IS NULL
+ AND m.org_id=r.org_id AND m.pull_request_id=r.pull_request_id AND m.session_id=r.session_id AND m.status='completed'`, orgID, prID)
+	return err
 }

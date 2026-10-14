@@ -21,6 +21,26 @@ var ErrCodeReviewActiveHeadConflict = errors.New("another code review is active 
 
 const codeReviewActiveHeadConstraint = "idx_code_review_metadata_active_head"
 
+// EnsureFreshnessRetryStartedAt records this controller's first visual
+// verification retry under its lease. A prior GitHub retry phase has a separate
+// deadline; retries and worker restarts preserve this private payload checkpoint.
+func (s *CodeReviewStore) EnsureFreshnessRetryStartedAt(ctx context.Context, orgID, sessionID, jobID, lockToken uuid.UUID) (time.Time, bool, error) {
+	var startedAt time.Time
+	err := s.db.QueryRow(ctx, `UPDATE jobs
+ SET payload=jsonb_set(payload,'{_code_review_freshness_retry_started_at}',
+       COALESCE(payload->'_code_review_freshness_retry_started_at',to_jsonb(now())),true),updated_at=now()
+ WHERE org_id=$1 AND id=$2 AND lock_token=$3 AND status='running'
+   AND job_type='run_code_review' AND payload->>'session_id'=$4
+ RETURNING (payload->>'_code_review_freshness_retry_started_at')::timestamptz`, orgID, jobID, lockToken, sessionID.String()).Scan(&startedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("record full review freshness retry start: %w", err)
+	}
+	return startedAt, true, nil
+}
+
 const (
 	codeReviewPublicationLockWaitTimeout = 20 * time.Second
 	codeReviewPublicationLockTimeout     = 5 * time.Minute
@@ -29,10 +49,11 @@ const (
 var ErrCodeReviewPublicationLockBusy = errors.New("code review GitHub publication lock is busy")
 
 type CodeReviewStore struct {
-	db      DBTX
-	jobs    *JobStore
-	streams *cache.CodeReviewStreams
-	logger  zerolog.Logger
+	db             DBTX
+	jobs           *JobStore
+	streams        *cache.CodeReviewStreams
+	logger         zerolog.Logger
+	analyticsClock func() time.Time
 
 	// Shared by the worker's publication paths. Waiters must stay outside the
 	// pool: a publisher holds a transaction and can also block its lease renewal,
@@ -1026,7 +1047,14 @@ func (s *CodeReviewStore) SetOperationalPhase(ctx context.Context, orgID, sessio
 // SetWaitingForGitHub persists an automatic rate-limit wait only while the
 // exact job retry transition is still pending. Locking that row inside the
 // statement prevents a delayed hook from racing a newer claim or reschedule.
-func (s *CodeReviewStore) SetWaitingForGitHub(ctx context.Context, orgID, sessionID, jobID uuid.UUID, retryAt time.Time, jobError, message string) (models.CodeReviewSessionMetadata, error) {
+func (s *CodeReviewStore) SetWaitingForGitHub(ctx context.Context, orgID, sessionID, jobID uuid.UUID, retryAt time.Time, jobError, message string, codes ...models.CodeReviewStatusCode) (models.CodeReviewSessionMetadata, error) {
+	code := models.CodeReviewStatusCodeGitHubRateLimited
+	if len(codes) > 0 {
+		code = codes[0]
+	}
+	if err := code.Validate(); err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
 	rows, err := s.db.Query(ctx, `
 		WITH scheduled_retry AS MATERIALIZED (
 			SELECT id
@@ -1034,7 +1062,7 @@ func (s *CodeReviewStore) SetWaitingForGitHub(ctx context.Context, orgID, sessio
 			WHERE id = @job_id
 			  AND org_id = @org_id
 			  AND job_type = 'run_code_review'
-			  AND payload->>'session_id' = @session_id::text
+			  AND payload->>'session_id' = @session_id::uuid::text
 			  AND status = 'pending'
 			  AND run_at = @retry_at
 			  AND last_error = @job_error
@@ -1042,7 +1070,7 @@ func (s *CodeReviewStore) SetWaitingForGitHub(ctx context.Context, orgID, sessio
 		)
 		UPDATE code_review_session_metadata
 		SET phase = 'waiting_for_github',
-		    status_code = 'github_rate_limited',
+		    status_code = @status_code,
 		    status_message = @status_message,
 		    retry_at = @retry_at,
 		    last_error_at = now(),
@@ -1053,7 +1081,7 @@ func (s *CodeReviewStore) SetWaitingForGitHub(ctx context.Context, orgID, sessio
 		  AND EXISTS (SELECT 1 FROM scheduled_retry)
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
 		"org_id": orgID, "session_id": sessionID, "job_id": jobID, "retry_at": retryAt,
-		"job_error": jobError, "status_message": strings.TrimSpace(message),
+		"job_error": jobError, "status_message": strings.TrimSpace(message), "status_code": code,
 	})
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("set code review GitHub wait: %w", err)
@@ -1157,8 +1185,8 @@ func (s *CodeReviewStore) MarkStale(ctx context.Context, orgID, sessionID uuid.U
 		SET status = 'stale',
 		    stale = true,
 		    phase = NULL,
-		    decision = 'blocked',
-		    acceptable = false,
+		    decision = CASE WHEN github_review_id IS NOT NULL THEN decision ELSE NULL END,
+		    acceptable = CASE WHEN github_review_id IS NOT NULL THEN acceptable ELSE NULL END,
 		    failure_reason = @failure_reason,
 		    status_code = NULL,
 		    status_message = NULL,
@@ -1312,8 +1340,8 @@ func (s *CodeReviewStore) FailReviewWithStatus(ctx context.Context, orgID uuid.U
 		UPDATE code_review_session_metadata
 		SET status = 'failed',
 		    phase = NULL,
-		    decision = 'blocked',
-		    acceptable = false,
+		    decision = CASE WHEN github_review_id IS NOT NULL THEN decision ELSE NULL END,
+		    acceptable = CASE WHEN github_review_id IS NOT NULL THEN acceptable ELSE NULL END,
 		    failure_reason = @failure_reason,
 		    status_code = @status_code,
 		    status_message = @status_message,
@@ -1413,11 +1441,14 @@ const codeReviewCurrentAssessmentJoin = `
 
 const codeReviewCurrentGitHubReviewID = `(CASE WHEN ca.decision IS NOT NULL THEN ca.github_review_id ELSE m.github_review_id END)`
 const codeReviewCurrentRiskReasons = `(CASE WHEN ca.decision IS NOT NULL THEN ca.risk_reason_details ELSE m.risk_reason_details END)`
+const codeReviewUnpublishedTerminalSQL = `(m.status IN ('failed','cancelled') AND ca.decision IS NULL AND m.github_review_id IS NULL)`
+const codeReviewCurrentDecision = `(CASE WHEN ` + codeReviewUnpublishedTerminalSQL + ` THEN NULL ELSE COALESCE(ca.decision,m.decision) END)`
+const codeReviewCurrentAcceptable = `(CASE WHEN ` + codeReviewUnpublishedTerminalSQL + ` THEN NULL ELSE COALESCE(ca.acceptable,m.acceptable) END)`
 
 const codeReviewListItemSelect = `
 			SELECT m.id, m.org_id, m.session_id, m.repository_id, m.pull_request_id, m.policy_id,
 			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.phase, m.status_code,
-			       m.status_message, m.retry_at, m.last_error_at, m.retryable_failure, COALESCE(ca.decision,m.decision) AS decision, COALESCE(ca.acceptable,m.acceptable) AS acceptable, m.stale,
+			       m.status_message, m.retry_at, m.last_error_at, m.retryable_failure, ` + codeReviewCurrentDecision + ` AS decision, ` + codeReviewCurrentAcceptable + ` AS acceptable, m.stale,
 			       m.superseded_by_session_id, COALESCE(ca.publication_key,m.review_output_key) AS review_output_key, m.prompt_record_key, ` + codeReviewCurrentGitHubReviewID + ` AS github_review_id,
 			       (CASE WHEN ca.decision IS NOT NULL THEN ca.github_review_url ELSE m.github_review_url END) AS github_review_url,
 			       (CASE WHEN ca.decision IS NOT NULL THEN ca.rendered_body ELSE m.final_review_body END) AS final_review_body,
@@ -1456,7 +1487,8 @@ const codeReviewListItemSelect = `
 			       ) AS retry_eligible,
 			       s.title AS session_title, r.full_name AS repository_name, pr.github_repo, pr.github_pr_number,
 			       pr.github_pr_url, pr.title AS pull_request_title,
-			       COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), pr.authored_by::text) AS pull_request_author
+			       COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), pr.authored_by::text) AS pull_request_author,
+			       (ca.decision IS NOT NULL) AS completed_assessment_outcome
 		FROM code_review_session_metadata m
 			JOIN sessions s ON s.id = m.session_id AND s.org_id = m.org_id
 			JOIN repositories r ON r.id = m.repository_id AND r.org_id = m.org_id
@@ -1583,7 +1615,7 @@ func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, include
 		if err := filters.Decision.Validate(); err != nil {
 			return "", nil, err
 		}
-		query += ` AND COALESCE(ca.decision,m.decision) = @decision`
+		query += ` AND ` + codeReviewCurrentDecision + ` = @decision`
 		args["decision"] = *filters.Decision
 	}
 	if filters.Outcome != nil {
@@ -1592,9 +1624,9 @@ func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, include
 		}
 		switch *filters.Outcome {
 		case models.CodeReviewListOutcomeAutomaticallyApproved:
-			query += ` AND m.status = 'completed' AND COALESCE(ca.decision,m.decision) = 'approved' AND ` + codeReviewCurrentGitHubReviewID + ` IS NOT NULL`
+			query += ` AND m.status = 'completed' AND ` + codeReviewCurrentDecision + ` = 'approved' AND ` + codeReviewCurrentGitHubReviewID + ` IS NOT NULL`
 		case models.CodeReviewListOutcomeCompletedNotApproved:
-			query += ` AND m.status = 'completed' AND (COALESCE(ca.decision,m.decision) IS DISTINCT FROM 'approved' OR ` + codeReviewCurrentGitHubReviewID + ` IS NULL)`
+			query += ` AND m.status = 'completed' AND (` + codeReviewCurrentDecision + ` IS DISTINCT FROM 'approved' OR ` + codeReviewCurrentGitHubReviewID + ` IS NULL)`
 		}
 	}
 	activityPredicate, err := codeReviewActivityStatusPredicate(filters.ActivityStatus)
@@ -1610,7 +1642,7 @@ func codeReviewListWhere(orgID uuid.UUID, filters CodeReviewListFilters, include
 		args["status"] = *filters.Status
 	}
 	if filters.Acceptable != nil {
-		query += ` AND COALESCE(ca.acceptable,m.acceptable) = @acceptable`
+		query += ` AND ` + codeReviewCurrentAcceptable + ` = @acceptable`
 		args["acceptable"] = *filters.Acceptable
 	}
 	if filters.Reason != nil {
@@ -1702,16 +1734,18 @@ const codeReviewSupersededSQL = `(m.stale OR m.status = 'stale' OR m.superseded_
 const (
 	codeReviewOutcomeRankSQL = `(CASE
 			WHEN ` + codeReviewSupersededSQL + ` THEN 6
-			WHEN m.status = 'completed' AND COALESCE(ca.decision,m.decision) = 'approved' AND ` + codeReviewCurrentGitHubReviewID + ` IS NOT NULL THEN 0
-			WHEN COALESCE(ca.decision,m.decision) = 'approved' THEN 1
-			WHEN COALESCE(ca.decision,m.decision) = 'needs_human_review' THEN 2
-			WHEN COALESCE(ca.decision,m.decision) = 'blocked' THEN 3
-			WHEN COALESCE(ca.decision,m.decision) = 'comment_only' THEN 4
+			WHEN ` + codeReviewUnpublishedTerminalSQL + ` THEN 6
+			WHEN m.status = 'completed' AND ` + codeReviewCurrentDecision + ` = 'approved' AND ` + codeReviewCurrentGitHubReviewID + ` IS NOT NULL THEN 0
+			WHEN ` + codeReviewCurrentDecision + ` = 'approved' THEN 1
+			WHEN ` + codeReviewCurrentDecision + ` = 'needs_human_review' THEN 2
+			WHEN ` + codeReviewCurrentDecision + ` = 'blocked' THEN 3
+			WHEN ` + codeReviewCurrentDecision + ` = 'comment_only' THEN 4
 			ELSE 5
 		END)`
 	codeReviewRiskRankSQL = `(CASE
 			WHEN ` + codeReviewSupersededSQL + ` THEN 2
-			WHEN COALESCE(ca.acceptable,m.acceptable) THEN 0
+			WHEN ` + codeReviewUnpublishedTerminalSQL + ` THEN 2
+			WHEN ` + codeReviewCurrentAcceptable + ` THEN 0
 			ELSE 1
 		END)`
 	// Queued and running rows label themselves with their phase; the phase
@@ -1773,6 +1807,7 @@ func codeReviewListSortFor(sortBy string) (codeReviewListSort, error) {
 // a plain column value instead.
 func CodeReviewSortRankForItem(sortBy string, item models.CodeReviewListItem) (int, bool) {
 	superseded := item.Stale || item.Status == models.CodeReviewSessionStatusStale || item.SupersededBySessionID != nil
+	unpublishedTerminal := (item.Status == models.CodeReviewSessionStatusFailed || item.Status == models.CodeReviewSessionStatusCancelled) && item.GitHubReviewID == nil && !item.CompletedAssessmentOutcome
 	decision := ""
 	if item.Decision != nil {
 		decision = string(*item.Decision)
@@ -1780,7 +1815,7 @@ func CodeReviewSortRankForItem(sortBy string, item models.CodeReviewListItem) (i
 	switch sortBy {
 	case "outcome":
 		switch {
-		case superseded:
+		case superseded || unpublishedTerminal:
 			return 6, true
 		case item.Status == models.CodeReviewSessionStatusCompleted && decision == "approved" && item.GitHubReviewID != nil:
 			return 0, true
@@ -1797,7 +1832,7 @@ func CodeReviewSortRankForItem(sortBy string, item models.CodeReviewListItem) (i
 		}
 	case "risk":
 		switch {
-		case superseded:
+		case superseded || unpublishedTerminal:
 			return 2, true
 		case item.Acceptable != nil && *item.Acceptable:
 			return 0, true
@@ -1905,11 +1940,17 @@ type CodeReviewStatsFilters struct {
 }
 
 type CodeReviewAnalyticsFilters struct {
-	RepositoryID    *uuid.UUID
-	CreatedAfter    *time.Time
-	CreatedBefore   *time.Time
-	AuthorSortBy    string
-	AuthorSortOrder string
+	IncludeTrend       bool
+	TrendSpanSeconds   *int64
+	TrendCurrentStart  *time.Time
+	TrendCurrentEnd    *time.Time
+	TrendPreviousStart *time.Time
+	TrendPreviousEnd   *time.Time
+	RepositoryID       *uuid.UUID
+	CreatedAfter       *time.Time
+	CreatedBefore      *time.Time
+	AuthorSortBy       string
+	AuthorSortOrder    string
 }
 
 func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filters CodeReviewListFilters) ([]models.CodeReviewListItem, error) {
@@ -2085,8 +2126,8 @@ func codeReviewOptionalMetric(value float64) *float64 {
 // selected by the first attempt's creation time; every later attempt is then
 // considered when deriving the PR's eventual outcome.
 func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUID, filters CodeReviewAnalyticsFilters) (models.CodeReviewAnalytics, error) {
-	// Analytics intentionally cohorts and counts historical session attempts.
-	// A later assessment on the same session is evidence usage, not a new round.
+	// Every completed review session is a round, including repeat reviews of
+	// the same head. A later assessment on that session is evidence usage.
 	authorOrder, err := codeReviewAuthorAnalyticsOrder(filters.AuthorSortBy, filters.AuthorSortOrder)
 	if err != nil {
 		return models.CodeReviewAnalytics{}, err
@@ -2187,36 +2228,24 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		FROM attempts
 		GROUP BY pull_request_id
 	),
-	completed_ranked AS (
+	completed_rounds AS (
 		SELECT a.*,
 			ROW_NUMBER() OVER (
-				PARTITION BY a.pull_request_id, a.head_sha
-				ORDER BY
-					(a.decision = 'approved' AND a.github_review_id IS NOT NULL) IS TRUE DESC,
-					CASE WHEN a.decision = 'approved' AND a.github_review_id IS NOT NULL THEN a.completed_at END ASC,
-					a.completed_at DESC, a.id DESC
-			) AS duplicate_rank
+				PARTITION BY a.pull_request_id ORDER BY a.completed_at, a.id
+			)::bigint AS round_number
 		FROM attempts a
 		WHERE a.status = 'completed' AND a.completed_at IS NOT NULL
-	),
-	distinct_heads AS (
-		SELECT r.*,
-			ROW_NUMBER() OVER (
-				PARTITION BY r.pull_request_id ORDER BY r.completed_at, r.id
-			)::bigint AS round_number
-		FROM completed_ranked r
-		WHERE r.duplicate_rank = 1
 	),
 	first_approvals AS (
 		SELECT DISTINCT ON (pull_request_id)
 			pull_request_id, round_number, session_id
-		FROM distinct_heads
+		FROM completed_rounds
 		WHERE decision = 'approved' AND github_review_id IS NOT NULL
 		ORDER BY pull_request_id, round_number
 	),
 	representatives AS (
 		SELECT DISTINCT ON (h.pull_request_id) h.*
-		FROM distinct_heads h
+		FROM completed_rounds h
 		LEFT JOIN first_approvals approval ON approval.pull_request_id = h.pull_request_id
 		ORDER BY h.pull_request_id,
 			(h.session_id = approval.session_id) DESC,
@@ -2252,6 +2281,10 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 			COUNT(*) FILTER (WHERE approval_round = 1)::bigint AS approved_first_round,
 			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY approval_round)
 				FILTER (WHERE approval_round IS NOT NULL), -1)::double precision AS median_rounds_to_approval,
+			COALESCE(AVG(approval_round)
+				FILTER (WHERE approval_round IS NOT NULL), -1)::double precision AS average_rounds_to_approval,
+			COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY approval_round)
+				FILTER (WHERE approval_round IS NOT NULL), -1)::double precision AS p95_rounds_to_approval,
 			COUNT(*) FILTER (WHERE had_failed)::bigint AS prs_with_failed_attempt,
 			COUNT(*) FILTER (WHERE had_stale)::bigint AS prs_with_stale_attempt,
 			COUNT(*) FILTER (WHERE session_id IS NOT NULL AND additions IS NOT NULL AND deletions IS NOT NULL)::bigint AS prs_with_change_breakdown,
@@ -2279,7 +2312,7 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 	),
 	reasons AS (
 		SELECT reason->>'code' AS code, COUNT(DISTINCT h.pull_request_id)::bigint AS prs
-		FROM distinct_heads h
+		FROM completed_rounds h
 		LEFT JOIN first_approvals approval ON approval.pull_request_id = h.pull_request_id
 		CROSS JOIN LATERAL jsonb_array_elements(h.risk_reason_details) reason
 		WHERE (approval.round_number IS NULL OR h.round_number <= approval.round_number)
@@ -2311,13 +2344,30 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		), '[]') AS comment_requests_by_user
 	FROM summary s`
 
+	if filters.IncludeTrend {
+		now := time.Now
+		if s.analyticsClock != nil {
+			now = s.analyticsClock
+		}
+		trendArgs, trendErr := codeReviewTrendQueryArgs(filters, now().UTC().Truncate(time.Microsecond))
+		if trendErr != nil {
+			return models.CodeReviewAnalytics{}, trendErr
+		}
+		for key, value := range trendArgs {
+			args[key] = value
+		}
+		trendCTEs := strings.ReplaceAll(codeReviewTrendCTEs, "__TREND_REPOSITORY_PREDICATE__", scanWhere)
+		query = strings.Replace(query, "\n\tSELECT s.*,", trendCTEs+"\n\tSELECT s.*,", 1)
+		query = strings.Replace(query, "\n\tFROM summary s", ", (SELECT payload FROM trend_result) AS trend\n\tFROM summary s", 1)
+	}
+
 	var analytics models.CodeReviewAnalytics
-	var medianRounds, medianAdditions, medianDeletions float64
-	var roundsJSON, authorsJSON, reasonsJSON, commentRequestUsersJSON []byte
-	err = s.db.QueryRow(ctx, query, args).Scan(
+	var medianRounds, averageRounds, p95Rounds, medianAdditions, medianDeletions float64
+	var roundsJSON, authorsJSON, reasonsJSON, commentRequestUsersJSON, trendJSON []byte
+	destinations := []any{
 		&analytics.Summary.PRsReviewed, &analytics.Summary.PRsWithCompletedRound,
 		&analytics.Summary.ApprovedBy143, &analytics.Summary.NotApproved,
-		&analytics.Summary.ApprovedFirstRound, &medianRounds,
+		&analytics.Summary.ApprovedFirstRound, &medianRounds, &averageRounds, &p95Rounds,
 		&analytics.Summary.PRsWithFailedAttempt, &analytics.Summary.PRsWithStaleAttempt,
 		&analytics.Summary.PRsWithChangeBreakdown,
 		&medianAdditions, &medianDeletions,
@@ -2326,11 +2376,27 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		&analytics.Summary.CommentOnly, &analytics.Summary.Blocked,
 		&analytics.Summary.ApprovalNotPosted, &roundsJSON, &authorsJSON,
 		&reasonsJSON, &analytics.CommentRequestsTotal, &commentRequestUsersJSON,
-	)
+	}
+	if filters.IncludeTrend {
+		destinations = append(destinations, &trendJSON)
+	}
+	err = s.db.QueryRow(ctx, query, args).Scan(destinations...)
 	if err != nil {
 		return models.CodeReviewAnalytics{}, fmt.Errorf("query PR-centric code review analytics: %w", err)
 	}
+	if filters.IncludeTrend {
+		var trend models.CodeReviewTrend
+		if err := json.Unmarshal(trendJSON, &trend); err != nil {
+			return models.CodeReviewAnalytics{}, fmt.Errorf("decode code review analytics trend: %w", err)
+		}
+		if err := trend.Validate(); err != nil {
+			return models.CodeReviewAnalytics{}, err
+		}
+		analytics.Trend = &trend
+	}
 	analytics.Summary.MedianRoundsToApproval = codeReviewOptionalMetric(medianRounds)
+	analytics.Summary.AverageRoundsToApproval = codeReviewOptionalMetric(averageRounds)
+	analytics.Summary.P95RoundsToApproval = codeReviewOptionalMetric(p95Rounds)
 	analytics.Summary.MedianAdditions = codeReviewOptionalMetric(medianAdditions)
 	analytics.Summary.MedianDeletions = codeReviewOptionalMetric(medianDeletions)
 	for _, section := range []struct {
@@ -2606,6 +2672,27 @@ func (s *CodeReviewStore) CreateFinding(ctx context.Context, finding *models.Cod
 
 func (s *CodeReviewStore) ReplaceFinding(ctx context.Context, finding *models.CodeReviewFinding) error {
 	return s.upsertFinding(ctx, finding, true)
+}
+
+// DeleteUnpostedFindings removes only superseded findings owned by this
+// orchestrator attempt. Published findings retain their durable receipts.
+func (s *CodeReviewStore) DeleteUnpostedFindings(ctx context.Context, orgID, sessionID, agentResultID uuid.UUID, dedupeKeys []string) error {
+	if len(dedupeKeys) == 0 {
+		return nil
+	}
+	_, err := s.db.Exec(ctx, `
+		DELETE FROM code_review_findings
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND agent_result_id = @agent_result_id
+		  AND dedupe_key = ANY(@dedupe_keys)
+		  AND github_comment_id IS NULL`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "agent_result_id": agentResultID, "dedupe_keys": dedupeKeys,
+	})
+	if err != nil {
+		return fmt.Errorf("delete unposted code review findings: %w", err)
+	}
+	return nil
 }
 
 func (s *CodeReviewStore) upsertFinding(ctx context.Context, finding *models.CodeReviewFinding, replaceOnConflict bool) error {

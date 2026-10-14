@@ -99,7 +99,9 @@ func NewStartRunner(cfg StartRunnerConfig) *StartRunner {
 	if cfg.SnapshotCache != nil {
 		snapshotCache = cfg.SnapshotCache
 	} else if cfg.Manager != nil {
-		snapshotCache = cfg.Manager.SnapshotCache()
+		if cache := cfg.Manager.SnapshotCache(); cache != nil {
+			snapshotCache = cache
+		}
 	}
 	return &StartRunner{
 		manager:         cfg.Manager,

@@ -1,6 +1,7 @@
 package preview
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -83,9 +84,10 @@ func TestCleanupWorker_CleanupExpiredAndIdle(t *testing.T) {
 	defer mock.Close()
 
 	store := db.NewPreviewStore(mock)
+	provider := &recordingStopProvider{mockProvider: &mockProvider{}}
 	mgr := NewManager(ManagerConfig{
 		Store:        store,
-		Provider:     &mockProvider{},
+		Provider:     provider,
 		Logger:       zerolog.Nop(),
 		WorkerNodeID: "worker-1",
 	})
@@ -177,6 +179,11 @@ func TestCleanupWorker_CleanupExpiredAndIdle(t *testing.T) {
 	// Call cleanup directly.
 	w.cleanup()
 
+	require.Equal(t, []string{"handle-exp", "handle-idle"}, provider.handles, "cleanup must independently stop each expired or idle preview")
+	require.Equal(t, []error{nil, nil}, provider.ctxErrs, "a previous preview stop must not consume the next preview's context")
+	require.False(t, provider.contexts[0] == provider.contexts[1], "every preview stop must receive a fresh timeout context")
+	require.ErrorIs(t, provider.contexts[0].Err(), context.Canceled, "first preview stop context should be released before the next sweep operation")
+	require.ErrorIs(t, provider.contexts[1].Err(), context.Canceled, "second preview stop context should be released after its operation")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

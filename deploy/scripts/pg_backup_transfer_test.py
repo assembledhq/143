@@ -88,6 +88,31 @@ class TransferTests(unittest.TestCase):
         state.atomic_json(self.state / 'pending.json', dict(app_name=self.app, partial=self.partial.name,
                                                           phase='verification', runtime='postdump'))
 
+    def test_scheduled_rate_applies_to_verification_and_upload_with_original_total_limit(self):
+        self.p.swap_out_mib_per_second = 8
+        mib = 1024 ** 2
+        for phase in ('verification', 'upload'):
+            with self.subTest(phase=phase):
+                self.guard = runtime.TransferGuard(self.p, self.partial, self.app, {}, 100, 'test-cli')
+                self.guard.owned = dict(self.owned)
+                self.guard.phase = phase
+                samples = [dict(safe_resources(), monotonic=10 + i * 5,
+                                swap_bytes=256 * mib + (1 if i == 2 else 0), swap_out_bytes=i * 40 * mib)
+                           for i in range(3)]
+                for i, sample in enumerate(samples):
+                    with mock.patch.object(self.guard, 'database'), mock.patch.object(runtime, 'resources', return_value=sample):
+                        if i == 2:
+                            with self.assertRaisesRegex(state.Refused, 'swap usage'):
+                                self.guard.tick(force=True)
+                        else:
+                            self.guard.tick(force=True)
+                self.guard.fail('swap usage at risk')
+                history = state.read_json(self.guard.run / 'samples.json')
+                self.assertEqual([x['resources'] for x in history], samples)
+                self.assertEqual([(x['swap_usage_limit_bytes'], x['swap_out_limit_bytes_per_second']) for x in history],
+                                 [(256 * mib, 8 * mib)] * 3)
+                self.assert_preserved()
+
     def test_paced_upload_forces_classic_and_readonly_private_config(self):
         import configparser
         self.p.aws_spec = mock.Mock(return_value=(['image', 's3', 'cp'], {'credential': 'private'}))

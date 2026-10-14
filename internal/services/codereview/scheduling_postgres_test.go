@@ -70,11 +70,16 @@ func (f *schedulingSnapshotFixture) update(fn func(*ghservice.CodeReviewPullRequ
 
 // Opt in with a disposable PostgreSQL 15+ server whose user may create databases.
 // Each test run creates, fully migrates, and drops its own database.
+//
+//nolint:paralleltest // Subtests share one database; cross-tenant repair sweeps would consume other cases' fixtures.
 func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 	t.Parallel()
 	raw := os.Getenv("CODE_REVIEW_TEST_DATABASE_URL")
 	if raw == "" {
-		t.Skip("set CODE_REVIEW_TEST_DATABASE_URL for full migration and lifecycle proof")
+		raw = os.Getenv("TEST_DATABASE_URL")
+	}
+	if raw == "" {
+		t.Skip("set TEST_DATABASE_URL or CODE_REVIEW_TEST_DATABASE_URL to a disposable server for lifecycle proof")
 	}
 	ctx := context.Background()
 	admin, err := pgx.Connect(ctx, raw)
@@ -105,6 +110,45 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		name string
 		run  func(*testing.T, *pgxpool.Pool, uuid.UUID, uuid.UUID, uuid.UUID, *schedulingSnapshotFixture)
 	}{
+		{"pending recheck waits behind active review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckPendingWait(t, p, org, repo, pr, snapshot, "active")
+		}},
+		{"pending recheck waits during rate limit", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckPendingWait(t, p, org, repo, pr, snapshot, "rate_limit")
+		}},
+		{"pending recheck waits for later deadline", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckPendingWait(t, p, org, repo, pr, snapshot, "later_retry")
+		}},
+		{"durable intake races hydrated wake", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingIntakeDispatchRace(t, p, org, repo, pr, snapshot, false)
+		}},
+		{"durable intake races idle wake", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingIntakeDispatchRace(t, p, org, repo, pr, snapshot, true)
+		}},
+		{"durable intake initial rate limit", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "initial")
+		}},
+		{"durable intake credential rate limit", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "credentials")
+		}},
+		{"durable intake single connection", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "single_connection")
+		}},
+		{"durable intake late failure preserves newer intent", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "late_failure")
+		}},
+		{"durable intake late failure preserves hydrated same delivery", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "same_delivery_late_failure")
+		}},
+		{"durable intake completed team review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "completed")
+		}},
+		{"durable intake joins queued review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "queued")
+		}},
+		{"durable intake joins running review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingDurableIntake(t, p, org, repo, pr, snapshot, "running")
+		}},
 		{"first recheck request with continuation disabled", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testAssessmentFirstRequestAdmission(t, p, org, pr, snapshot, false)
 		}},
@@ -292,6 +336,26 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		{"policy patch and historical compatibility", testSchedulingPolicyCompatibility},
 		{"same head context supersession", testSchedulingGenerationFence},
 		{"approved automatic intent terminates", testSchedulingApprovalTerminal},
+		{"team rerequest after human review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingTeamRerequest(t, p, org, repo, pr, snapshot, models.CodeReviewSessionStatusCompleted, models.CodeReviewDecisionNeedsHumanReview)
+		}},
+		{"team rerequest after approval", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingTeamRerequest(t, p, org, repo, pr, snapshot, models.CodeReviewSessionStatusCompleted, models.CodeReviewDecisionApproved)
+		}},
+		{"team rerequest joins queued review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingTeamRerequest(t, p, org, repo, pr, snapshot, models.CodeReviewSessionStatusQueued, "")
+		}},
+		{"team rerequest joins running review", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingTeamRerequest(t, p, org, repo, pr, snapshot, models.CodeReviewSessionStatusRunning, "")
+		}},
+		{"ordinary review now preserves completed reuse", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingOrdinaryCompletedReuse(t, p, org, repo, pr, snapshot, false)
+		}},
+		{"mention preserves completed reuse", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingOrdinaryCompletedReuse(t, p, org, repo, pr, snapshot, true)
+		}},
+		{"full assessment completion settles uncaptured joins", testSchedulingFullAssessmentJoinSettlement},
+		{"superseded full review preserves joins for replacement", testSchedulingSupersededFullReviewJoin},
 		{"legacy generation compatibility", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testSchedulingGenerationPath(t, p, org, repo, pr, snapshot, "legacy")
 		}},
@@ -329,7 +393,9 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+			// RepairMissingWakes intentionally scans every tenant in this
+			// isolated database. Run lifecycle cases serially so one case's
+			// repair sweep cannot drain another case's cancellation fixture.
 			org, integration, repo, pr := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 			_, err := pool.Exec(ctx, `INSERT INTO organizations(id,name) VALUES($1,'Scheduling test')`, org)
 			require.NoError(t, err, "seed org")

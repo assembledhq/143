@@ -679,6 +679,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	}
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, StartPreviewOptions{
 		OrgID:        input.OrgID,
+		PreviewID:    instance.ID,
 		RepositoryID: input.RepositoryID,
 		SessionID:    input.SessionID,
 		ConfigDigest: computeConfigDigest(input.Config),
@@ -706,9 +707,12 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	}
 	if err != nil {
 		m.logger.Error().Err(err).Str("preview_id", instance.ID.String()).Msg("failed to update handle in DB, stopping provider")
-		_ = m.stopViaProviderPrompt(ctx, handle.Handle)
+		if stopErr := m.stopViaProviderPrompt(ctx, handle.Handle); stopErr != nil {
+			m.logger.Warn().Err(stopErr).Str("preview_id", instance.ID.String()).Str("handle", handle.Handle).Msg("provider cleanup failed after preview handle persistence error")
+		}
 		return nil, fmt.Errorf("persist preview handle: %w", err)
 	}
+	m.acknowledgePreviewHandle(handle.Handle)
 	if stopResourceSampler != nil {
 		m.registerPreviewResourceSampler(instance.ID, stopResourceSampler)
 		stopResourceSampler = nil
@@ -726,7 +730,9 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 		// Preview was stopped concurrently — clean up the provider.
 		m.logger.Warn().Str("preview_id", instance.ID.String()).Msg("preview was stopped during startup, cleaning up provider")
 		m.stopPreviewResourceSampler(instance.ID)
-		_ = m.stopViaProviderPrompt(ctx, handle.Handle)
+		if stopErr := m.stopViaProviderPrompt(ctx, handle.Handle); stopErr != nil {
+			m.logger.Warn().Err(stopErr).Str("preview_id", instance.ID.String()).Str("handle", handle.Handle).Msg("provider cleanup failed after concurrent preview stop")
+		}
 		return nil, fmt.Errorf("preview was stopped concurrently during startup")
 	}
 	instance.Status = nextStatus
@@ -1776,8 +1782,16 @@ func (m *Manager) stopViaProviderPrompt(ctx context.Context, handle string) erro
 	return m.stopViaProvider(ctx, handle, models.PreviewStoppedReasonNone)
 }
 
+func (m *Manager) acknowledgePreviewHandle(handle string) {
+	if provider, ok := m.provider.(PreviewHandleAcknowledgementProvider); ok {
+		provider.AcknowledgePreviewHandle(handle)
+	}
+}
+
 // StopPreviewWithReason stops a preview, records a stop cause when supplied,
 // and revokes all access sessions.
+// Once the durable stop commits, provider cleanup failures are logged for
+// background retry rather than returned to callers completing their own stop.
 func (m *Manager) StopPreviewWithReason(ctx context.Context, orgID, previewID uuid.UUID, reason models.PreviewStoppedReason) error {
 	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
 	if err != nil {
@@ -1801,9 +1815,11 @@ func (m *Manager) StopPreviewWithReason(ctx context.Context, orgID, previewID uu
 	// Stop via provider. The provider blocks on in-flight cache uploads before
 	// tearing the sandbox down; how long it may block depends on who is waiting
 	// (see stopBackgroundWaitForReason).
+	var cleanupErr error
 	if instance.PreviewHandle != "" && m.provider != nil {
 		if err := m.stopViaProvider(ctx, instance.PreviewHandle, reason); err != nil {
-			m.logger.Error().Err(err).
+			cleanupErr = fmt.Errorf("provider stop preview: %w", err)
+			m.logger.Warn().Err(err).
 				Str("preview_id", previewID.String()).
 				Str("handle", instance.PreviewHandle).
 				Msg("provider stop failed")
@@ -1811,8 +1827,12 @@ func (m *Manager) StopPreviewWithReason(ctx context.Context, orgID, previewID uu
 	}
 
 	// Atomically stop + revoke access sessions.
+	// Provider teardown can consume or cancel the request context. Revocation
+	// gets its own bounded context so failed teardown cannot leave access live.
+	ctx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer persistCancel()
 	if err := m.store.StopPreviewWithRevocationAndReason(ctx, orgID, previewID, reason); err != nil {
-		return fmt.Errorf("stop preview: %w", err)
+		return errors.Join(cleanupErr, fmt.Errorf("stop preview: %w", err))
 	}
 	if instance.PreviewTargetID != nil {
 		if target, targetErr := m.store.GetPreviewTarget(ctx, orgID, *instance.PreviewTargetID); targetErr == nil {
@@ -2308,6 +2328,7 @@ func (m *Manager) ResumeStoppedWarmPreview(ctx context.Context, orgID, previewID
 
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, StartPreviewOptions{
 		OrgID:           input.OrgID,
+		PreviewID:       previewID,
 		RepositoryID:    input.RepositoryID,
 		SessionID:       input.SessionID,
 		ConfigDigest:    computeConfigDigest(input.Config),
@@ -2346,6 +2367,7 @@ func (m *Manager) ResumeStoppedWarmPreview(ctx context.Context, orgID, previewID
 		}
 		return fmt.Errorf("warm resume: update handle: %w", err)
 	}
+	m.acknowledgePreviewHandle(handle.Handle)
 
 	nextStatus := models.PreviewStatusReady
 	if handle.PartiallyReady {
@@ -2538,6 +2560,9 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	if instance.Status.IsTerminal() {
 		return fmt.Errorf("cannot recycle terminal preview (status=%s)", instance.Status)
 	}
+	if m.workerNodeID != "" && instance.WorkerNodeID != "" && instance.WorkerNodeID != m.workerNodeID {
+		return fmt.Errorf("recycle: preview belongs to another worker generation: %w", errRecycleSkipped)
+	}
 
 	if m.provider == nil {
 		return fmt.Errorf("preview provider is not configured")
@@ -2583,6 +2608,15 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 				Str("preview_id", previewID.String()).
 				Str("container_id", input.Sandbox.ID).
 				Msg("recycle: sandbox container no longer exists; failing preview so it can be relaunched")
+			var cleanupErr error
+			if instance.PreviewHandle != "" {
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				cleanupErr = m.stopViaProviderPrompt(cleanupCtx, instance.PreviewHandle)
+				cleanupCancel()
+				if cleanupErr != nil {
+					m.logger.Warn().Err(cleanupErr).Str("preview_id", previewID.String()).Str("handle", instance.PreviewHandle).Msg("recycle: provider cleanup failed after sandbox loss")
+				}
+			}
 			if _, statusErr := m.store.UpdatePreviewStatusIfActive(ctx, orgID, previewID, models.PreviewStatusFailed, deadSandboxReason); statusErr != nil {
 				m.logger.Warn().Err(statusErr).Str("preview_id", previewID.String()).Msg("recycle: failed to set failed status after dead sandbox")
 			}
@@ -2590,7 +2624,7 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 				m.logger.Warn().Err(schedErr).Str("preview_id", previewID.String()).Msg("recycle: failed to clear recycle schedule after dead sandbox")
 			}
 			m.releasePreviewHoldAfterRecycleFailure(ctx, instance)
-			return fmt.Errorf("recycle: sandbox container %s no longer exists", input.Sandbox.ID)
+			return errors.Join(fmt.Errorf("recycle: sandbox container %s no longer exists", input.Sandbox.ID), cleanupErr)
 		}
 	}
 
@@ -2691,6 +2725,7 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	}
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, StartPreviewOptions{
 		OrgID:           input.OrgID,
+		PreviewID:       previewID,
 		RepositoryID:    input.RepositoryID,
 		SessionID:       input.SessionID,
 		ConfigDigest:    computeConfigDigest(input.Config),
@@ -2720,13 +2755,16 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	}
 	if err != nil {
 		m.logger.Error().Err(err).Msg("recycle: failed to update handle, stopping new preview")
-		_ = m.stopViaProviderPrompt(ctx, handle.Handle)
+		if stopErr := m.stopViaProviderPrompt(ctx, handle.Handle); stopErr != nil {
+			m.logger.Warn().Err(stopErr).Str("preview_id", previewID.String()).Str("handle", handle.Handle).Msg("recycle: provider cleanup failed after handle persistence error")
+		}
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, "recycle failed: could not persist new handle"); statusErr != nil {
 			m.logger.Warn().Err(statusErr).Msg("recycle: failed to set failed status after handle update error")
 		}
 		m.releasePreviewHoldAfterRecycleFailure(ctx, instance)
 		return fmt.Errorf("recycle: update handle: %w", err)
 	}
+	m.acknowledgePreviewHandle(handle.Handle)
 
 	nextStatus := models.PreviewStatusReady
 	if handle.PartiallyReady {

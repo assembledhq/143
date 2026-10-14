@@ -1,6 +1,6 @@
 # Design: PR-Centric Code Review Analytics
 
-> **Status:** Implemented | **Last reviewed:** 2026-08-06
+> **Status:** Implemented | **Last reviewed:** 2026-10-09
 >
 > **Depends on:** [112-code-reviewer-bot-auto-approval.md](112-code-reviewer-bot-auto-approval.md), [../overall.md](../overall.md)
 
@@ -98,21 +98,22 @@ whose attempts only failed or became stale visible in the operational metrics.
 
 ### Review round
 
-A review round is a completed 143 assessment of a distinct PR head SHA.
+A review round is a completed 143 review session.
 
-- The first completed assessment is round 1.
-- A completed assessment of a new head SHA is the next round.
+- The first completed review is round 1, ordered by completion time and ID.
+- Each subsequent completed review is another round, including a repeat review
+  of the same head SHA.
 - Failed, stale, cancelled, or still-running sessions do not count.
-- Retries or duplicate completed sessions for the same head SHA count once.
 - A completed non-approval counts as a round.
 - Rounds after the first posted 143 approval are ignored.
-
-If duplicate completed assessments exist for one head SHA, use the earliest
-completed assessment with a posted approval; otherwise use the latest completed
-assessment as that head's result. This makes an approval visible without allowing
-same-head reruns to inflate the round count.
+- Evidence assessments within an existing session do not create another review
+  session and do not add a round.
 
 ### 143 approval
+
+This report uses completed review-session results. Evidence-only rechecks within
+an existing session do not update that historical result, so approvals posted
+only by those rechecks are excluded from both tabs' approval counts.
 
 A PR is approved by 143 only when a completed review has:
 
@@ -124,8 +125,12 @@ This matches the existing product distinction.
 
 ### Rounds to approval
 
-For an approved PR, rounds to approval is the ordinal number of the first round
-that posted a 143 approval.
+For an approved PR, rounds to approval is the number of completed reviews up to
+and including the first review that posted a 143 approval. Median and average
+use approved PRs only. p95 uses PostgreSQL's discrete 95th percentile, so it
+reports an observed integer review count within which at least 95% of approved
+PRs received their first approval. All three metrics are null when no PR is
+approved.
 
 Example:
 
@@ -133,7 +138,7 @@ Example:
 | --- | --- |
 | Assessment becomes stale after the head changes | Not a round |
 | New head receives a completed non-approval | Round 1 |
-| Infrastructure retry on the same head | No additional round |
+| Failed infrastructure retry on the same head | No additional round |
 | Author pushes fixes; completed non-approval | Round 2 |
 | Author pushes again; 143 posts approval | Round 3 |
 
@@ -156,10 +161,10 @@ while still describing the final observed state of the PR.
 ## Analytics page
 
 Keep the existing page shell, repository selector, and time-window selector.
-Replace the current review-based report with the sections below, numbered in the
-order the page renders them.
+Show headline cards first, then filters, the selected metric's comparison chart,
+and the PR-author table. The other current-cohort report sections follow.
 
-### 1. Usage by PR author
+### Usage by PR author
 
 Keep the current author table and convert every count to unique PRs:
 
@@ -180,23 +185,86 @@ outcome filters where the existing list supports them. The Reviews tab may still
 show individual sessions after navigation; grouping that tab by PR is outside
 this design.
 
-### 2. Headline cards
+### Headline cards
 
-Show four cards. Each card is a label and a value with no subdescription; the
-definition is reachable from an info tooltip on the label, so the cards stay
-scannable and the wording lives in one place.
+Show six cards, ordered as PR counts and approval rate followed by median,
+average, and P95 rounds to approval. Each card has a label, value, and brief
+counting-unit or population context. The full definition is reachable from an
+info tooltip.
 
 | Card | Definition | Tooltip |
 | --- | --- | --- |
 | **PRs reviewed** | Unique PRs in the cohort | Unique pull requests first sent to 143 during the selected time period |
-| **Approved by 143** | Cohort PRs with a posted 143 approval | Reviewed pull requests where 143 posted an approval on GitHub |
-| **Approval rate** | Approved by 143 / PRs reviewed | The percentage of reviewed pull requests where 143 posted an approval on GitHub |
-| **Median rounds to approval** | Median among approved cohort PRs | The median number of distinct completed revisions before 143 first posted an approval, among approved pull requests |
+| **Automatically approved** | Cohort PRs with a posted 143 approval | Unique PRs with approval from a completed review, including reviews after the selected period; evidence-only rechecks are excluded |
+| **PR approval rate** | Automatically approved / PRs reviewed | Unique approved PRs divided by all cohort PRs, including PRs still awaiting approval |
+| **Median rounds to approval** | Median among approved cohort PRs | Completed reviews through the first posted approval; repeat reviews of a revision count separately |
+| **Average rounds to approval** | Arithmetic mean among approved cohort PRs | Completed reviews through the first posted approval; repeat reviews of a revision count separately |
+| **P95 rounds to approval** | Discrete 95th percentile among approved cohort PRs | At least 95% of approved PRs received their first approval within this many completed reviews |
 
-If no PRs are in the cohort, show the existing analytics empty state with PR-based
-copy. If PRs exist but none are approved, show `—` for median rounds.
+Keep all six selectable cards visible when the current cohort is empty, with
+zero counts and `—` for unavailable rate/round values. Previous-period chart
+data can still be useful. Suppress the remaining empty current-only report
+sections. If PRs exist but none are approved, show `—` for all three rounds metrics.
+Show "Approved PRs only" on each rounds card and a numerator/denominator on
+both approval-rate cards. The Reviews tab labels its rate "Review approval
+rate" and counts completed sessions matching all its filters; Analytics labels
+its rate "PR approval rate" and counts each cohort PR once. Both tabs label the
+posted-approval count "Automatically approved" and expose its counting unit.
 
-### 3. Direct review requests by user
+### Metric trends and comparison
+
+Selecting a headline card changes one inline chart, defaulting to Average rounds
+to approval. The validated `analytics_metric` URL parameter persists selection
+using replacement history. Selection uses already-loaded data and does not
+change the request or cache scope. Info-tooltip controls remain separately
+focusable from card selection. Selection brings an offscreen chart into view
+without moving keyboard focus and respects reduced-motion preferences.
+
+The solid current series and dashed previous series align by elapsed position
+within their windows. A compact legend shows each period's date range. Point
+tooltips show concise local dates, values, and sample counts; irregular or
+subday intervals also show their local times. Exact timestamps, durations,
+timezone, and raw counts remain in the expandable accessible data table.
+The collapsed "About this chart" disclosure explains full requested and
+observed ranges, outcome maturity, and elapsed alignment. Only relevant
+exceptions need inline notices, keeping the ordinary chart easy to scan.
+Zero observed activity has zero counts; approval rate and rounds without their
+required population are null gaps. Future intervals are omitted. A current
+cohort with no approvals can still show the previous rounds series.
+
+Calendar presets compare with the preceding local calendar period: this month
+compares with last month, and this week with last week. Rolling and custom
+ranges use a consecutive equal-duration previous window. Only the common elapsed
+prefix of previous is compared, even after the current period finishes. Retain
+the current tail if the preceding calendar period is shorter. All time uses
+actual eligible history and has no previous comparison.
+
+Both series use eventual PR outcomes from one database statement, including
+reviews completed after the PR's first-request interval. Recent PRs can still
+receive approvals; previous PRs have had longer to do so. No age adjustment,
+whole-period delta, or automatic improvement/regression label is added.
+
+Chart geometry never changes legacy cohort membership. Rolling membership keeps
+its open upper end; finite inclusive membership ends normalize by one PostgreSQL
+microsecond. The Go clock is a layout anchor, not an outcome cutoff. Current data
+extents advance the observed end when needed, and PRs beyond nominal geometry
+remain in the final bucket with explicit overflow attribution. Current point
+counts therefore sum to the headline count.
+
+Use fixed elapsed widths of 24 hours, seven days, or 30 days, then a whole-day
+width for longer history, with at most 90 points. Merge a trailing geometry
+remainder shorter than half the nominal width. At the common comparison boundary,
+split only when both pieces are at least half a nominal bucket. If the paired
+piece is shorter, keep the whole bucket current-only. Otherwise retain a short
+unmatched tail in one paired point, flag unequal exposure, and show both actual
+durations. Fixed elapsed buckets can shift to 23:00 or 01:00 local time across
+DST; labels must show actual intervals. Keep low-sample values and their counts.
+
+Finite trend spans are bounded to ten years. Excessive or unrepresentable ranges
+show a chart-unavailable explanation while retaining the report. Missing trend
+data from an older backend also leaves the current report usable.
+
+### Direct review requests by user
 
 Show a compact table of trusted GitHub users whose newly created PR conversation
 comments directly mentioned the configured 143 code reviewer:
@@ -211,7 +279,7 @@ Automatic head reassessments, reviewer assignments, and manual retries do not
 count. Later comment requests for a PR in the selected cohort remain included,
 matching the report's existing full-PR-journey semantics.
 
-### 4. Approval by round
+### Approval by round
 
 Show one compact distribution with these mutually exclusive outcomes:
 
@@ -224,7 +292,7 @@ Show one compact distribution with these mutually exclusive outcomes:
 Each item shows a PR count and percentage of PRs reviewed. A simple row or set of
 cards is sufficient; this does not require a charting library.
 
-### 5. Why PRs were not approved right away
+### Why PRs were not approved right away
 
 Show the existing structured non-approval reason labels, but count each reason at
 most once per PR.
@@ -237,7 +305,7 @@ reasons.
 This preserves evidence about friction encountered during the PR journey without
 allowing long-running PRs to dominate the report.
 
-### 6. PR findings and operational outcomes
+### PR findings and operational outcomes
 
 Keep the current findings and decision-outcome section, using the representative
 assessment:
@@ -264,12 +332,14 @@ outcomes.
 
 ```text
 Analytics
+[PRs reviewed] [Automatically approved] [PR approval rate]
+[Median rounds] [Average rounds] [P95 rounds]
+
 [Repository] [PRs first sent to 143: Last 30 days]
+[Selected metric: current period and previous period chart]
 
 Usage by PR author
 Author       PRs   Approved   Not approved   First-round approval   Median rounds
-
-[PRs reviewed] [Approved by 143] [Approval rate] [Median rounds]
 
 Direct review requests by user
 GitHub user                                  Direct comment requests
@@ -288,9 +358,8 @@ PR findings and outcomes
 Needs human review · Comment only · Blocked · Approval not posted
 ```
 
-Do not add a funnel, trend chart, maturity model, or separate review-activity
-panel in the first version. Use the current section styling and avoid introducing
-a charting library.
+Do not add a funnel, maturity model, or separate review-activity panel. Use the
+current section styling and existing Recharts dependency.
 
 ## API and query shape
 
@@ -306,7 +375,9 @@ filters. Change the response contract to PR-oriented fields:
       "approved_by_143": 31,
       "not_approved": 8,
       "approved_first_round": 20,
-      "median_rounds_to_approval": 2,
+      "median_rounds_to_approval": 1,
+      "average_rounds_to_approval": 1.4838709677419355,
+      "p95_rounds_to_approval": 3,
       "prs_with_failed_attempt": 2,
       "prs_with_stale_attempt": 5,
       "prs_with_change_breakdown": 36,
@@ -356,8 +427,8 @@ The implementation should derive this in one org-scoped PostgreSQL query:
 1. identify PRs by their first review-attempt creation time and apply the cohort
    filters;
 2. load all attempts for those PRs, including attempts after the cohort window;
-3. collapse duplicate completed sessions to one result per PR and head SHA;
-4. order distinct completed heads by completion time to assign round numbers;
+3. select completed review sessions with a completion timestamp;
+4. order every completed session by completion time and ID to assign round numbers;
 5. select one representative assessment per PR;
 6. aggregate PR outcomes, rounds, authors, representative change-distribution
    and finding metrics, distinct per-PR reason codes, and direct comment-request
@@ -372,6 +443,32 @@ schema change is required.
 Continue filtering every source by `org_id`. No migration is expected unless
 focused query testing shows an additional index is required.
 
+Trend computation is opt-in with `include_trend=true`; legacy requests omit
+`data.trend` and the additional query work. Rolling callers supply a positive
+`trend_span_seconds`. Calendar/custom callers supply `trend_current_start`,
+`trend_current_end`, `trend_previous_start`, and `trend_previous_end`, all UTC
+RFC3339 instants with exclusive ends. Current start must equal `created_after`,
+and previous end must equal current start. Without explicit geometry, two finite
+membership bounds infer consecutive equal spans. Start-only requests without a
+span or complete geometry, end-only bounds, reversed bounds, overlapping or
+incomplete geometry, and malformed options return a structured 400. Both
+previous and current finite geometry are subject to the ten-year limit.
+
+An available trend has `status=available`, `mode=finite|all_time`, `generated_at`,
+full and observed/compared windows, `bucket_width_seconds`, data-clock and
+overflow metadata, and ordered `points`. Each point has a current bucket,
+nullable previous bucket, and `unequal_exposure`. Buckets carry actual start/end,
+raw reviewed/approved counts, nullable median/average/P95 rounds, partial and
+overflow flags. Percentiles use the same `percentile_cont(0.5)` and
+`percentile_disc(0.95)` as the cards; never combine bucket percentiles into
+whole-period statistics. An unavailable trend contains only `status=unavailable`,
+`generated_at`, and a typed `unavailable_reason`.
+
+All time derives extents inside the same statement. Previous facts are loaded
+only through their compared prefix and affect trend buckets only. Every author,
+reason, finding, operational, round-distribution, and direct-comment report
+remains current-cohort-only.
+
 The date parameters retain their current names. They apply to the first attempt
 created for each PR rather than to every matching session. This contract change
 must be reflected in handler, store, and frontend tests.
@@ -383,7 +480,7 @@ must be reflected in handler, store, and frontend tests.
 - **Only failed or stale attempts:** the PR is included and contributes to the
   corresponding operational PR metric.
 - **Approval decision was not posted:** the PR remains not yet approved.
-- **Same SHA reviewed more than once:** it is one round.
+- **Same SHA reviewed more than once:** each completed review is a round.
 - **PR receives approval after the selected window:** it is approved in its
   original cohort.
 - **PR remains open or is closed without 143 approval:** it is not yet approved.
@@ -414,7 +511,7 @@ Add focused store tests covering:
 
 Update handler contract tests and frontend component tests for:
 
-- the four headline cards;
+- the six headline cards;
 - all approval-round buckets;
 - no-PR and no-approval empty values;
 - non-approval reasons;
@@ -432,12 +529,13 @@ the report is derived from current durable review and PR records.
 
 ## Success criteria
 
-- A user can explain the four headline metrics without knowing what a review
-  session is.
+- A user can explain the six headline metrics and distinguish PR counts from
+  review-session counts.
 - Each PR contributes once to PR counts and outcome rates.
-- Failed, stale, and same-head retries do not inflate rounds.
+- Failed, stale, cancelled, and unfinished attempts do not count as rounds;
+  repeat completed reviews of the same revision do count.
 - The page directly answers how many rounds approval took.
-- The PR-author usage table is the primary report immediately after the filters.
+- The selected metric trend precedes the PR-author usage table after the filters.
 - Existing author, finding, non-approval, and operational
   insights remain available with PR-based denominators.
 - No PR contributes more than once to an author row, outcome count,

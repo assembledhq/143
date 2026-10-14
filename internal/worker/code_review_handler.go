@@ -130,6 +130,31 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("org_id and session_id are required")
 		}
 		reviewLog := codeReviewTimingLogger(ctx, logger, job)
+		defer func() {
+			if !errors.Is(handlerErr, errFullAssessmentFreshnessInconclusive) {
+				return
+			}
+			var retry *RetryableError
+			if !errors.As(handlerErr, &retry) {
+				return
+			}
+			jobID, hasJob := jobctx.JobIDFromContext(ctx)
+			lockToken, hasLease := jobctx.LockTokenFromContext(ctx)
+			if !hasJob || !hasLease {
+				handlerErr = fmt.Errorf("freshness retry requires an active controller lease")
+				return
+			}
+			startedAt, owned, err := stores.CodeReviews.EnsureFreshnessRetryStartedAt(ctx, job.OrgID, job.SessionID, jobID, lockToken)
+			if err != nil {
+				handlerErr = err
+				return
+			}
+			if !owned {
+				handlerErr = fmt.Errorf("freshness retry lost its controller lease: %w", db.ErrCodeReviewAssessmentState)
+				return
+			}
+			retry.RetryWindowStartedAt = &startedAt
+		}()
 		attemptStage := observability.BeginStage(true, reviewLog, "review_controller_attempt")
 		defer func() { attemptStage.End(codeReviewStageOutcome(ctx, handlerErr)) }()
 		maintainCodeReviewWorkspaceHolder(ctx, stores, reviewLog, job)
@@ -140,8 +165,8 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}()
 		registerCodeReviewDeadLetterReconciliation(ctx, stores, services, logger, job)
 		registerCodeReviewRetryScheduledWait(ctx, stores.CodeReviews, logger, job)
-		if recovered, err := recoverStagedFullAssessment(ctx, stores, services, job); recovered || err != nil {
-			if errors.Is(err, errCodeReviewPublicationSuperseded) || errors.Is(err, errCodeReviewPublicationPaused) {
+		if recovered, err := recoverStagedFullAssessment(reviewLog.WithContext(ctx), stores, services, job); recovered || err != nil {
+			if errors.Is(err, errCodeReviewPublicationSuperseded) || errors.Is(err, errCodeReviewPublicationPaused) || errors.Is(err, errCodeReviewParentCancelled) {
 				return nil
 			}
 			if err == nil {
@@ -315,8 +340,8 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 		}
 		if assessment != nil && assessment.ResultOrigin != nil {
-			if err := resumeStagedFullAssessment(ctx, stores, services, job, metadata, *assessment, changedFiles); err != nil {
-				if errors.Is(err, errCodeReviewPublicationSuperseded) {
+			if err := resumeStagedFullAssessment(reviewLog.WithContext(ctx), stores, services, job, metadata, *assessment, changedFiles); err != nil {
+				if errors.Is(err, errCodeReviewPublicationSuperseded) || errors.Is(err, errCodeReviewParentCancelled) {
 					return nil
 				}
 				return fmt.Errorf("resume staged full assessment: %w", err)
@@ -519,16 +544,12 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			AssessedAt:            time.Now().UTC(),
 		})
 		var assessmentOutcome json.RawMessage
+		// Save publication preparation before staging hands later retries to the
+		// immutable-outcome recovery path.
+		if err := ensureCodeReviewInlineSelection(ctx, stores.CodeReviews, job, findings, changedFiles, policy.Config().InlineCommentLimit); err != nil {
+			return fmt.Errorf("select code review inline findings: %w", err)
+		}
 		if assessment != nil {
-			if err := verifyFullAssessmentFreshness(ctx, services, job, *assessment); err != nil {
-				if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
-					if recoveryErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); recoveryErr != nil {
-						return recoveryErr
-					}
-					return nil
-				}
-				return fmt.Errorf("refresh full assessment before publication: %w", err)
-			}
 			assessmentOutcome, err = fullAssessmentOutcome(agentResults, decision.RiskReasonDetails, assessmentCoverage)
 			if err != nil {
 				return fmt.Errorf("encode full assessment outcome: %w", err)
@@ -540,9 +561,16 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if err := stores.CodeReviewAssessments.StageOutcome(ctx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest, models.CodeReviewAssessmentCompletion{ResultOrigin: models.CodeReviewResultExecuted, CoverageComplete: assessmentCoverage, Decision: decision.Decision, Acceptable: decision.Acceptable, RiskReasonDetails: riskJSON, StructuredOutcome: assessmentOutcome, RenderedBody: body}); err != nil {
 				return fmt.Errorf("stage full assessment outcome: %w", err)
 			}
-		}
-		if err := ensureCodeReviewInlineSelection(ctx, stores.CodeReviews, job, findings, changedFiles, policy.Config().InlineCommentLimit); err != nil {
-			return fmt.Errorf("select code review inline findings: %w", err)
+
+			if err := verifyFullAssessmentFreshness(ctx, services, job, *assessment); err != nil {
+				if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
+					if recoveryErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); recoveryErr != nil {
+						return recoveryErr
+					}
+					return nil
+				}
+				return fmt.Errorf("refresh full assessment before publication: %w", err)
+			}
 		}
 		if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
 			return err
@@ -798,6 +826,11 @@ func reconcileCodeReviewSessionCompletion(ctx context.Context, stores *Stores, l
 		return
 	}
 	if session.Status.IsTerminal() && !(recoverFailed && session.Status == models.SessionStatusFailed && session.Origin == models.SessionOriginCodeReview) {
+		if recoverFailed && session.Status == models.SessionStatusCompleted && session.Origin == models.SessionOriginCodeReview {
+			// Confirmed assessment recovery can complete the parent in its
+			// transaction. Notify subscribers from the committed snapshot.
+			stores.Sessions.PublishCommittedSessionStatus(ctx, job.OrgID, session)
+		}
 		return
 	}
 	if err := stores.Sessions.UpdateStatus(ctx, job.OrgID, job.SessionID, models.SessionStatusCompleted); err != nil {
@@ -893,12 +926,15 @@ func recordCodeReviewAutomaticWait(ctx context.Context, store *db.CodeReviewStor
 		return
 	}
 	classification := ghservice.ClassifyRetry(handlerErr, time.Now())
-	if !classification.RateLimited {
+	code, message := models.CodeReviewStatusCodeGitHubRateLimited, "GitHub is rate-limited. The review will resume automatically when the limit resets."
+	if errors.Is(handlerErr, errFullAssessmentFreshnessInconclusive) {
+		code, message = models.CodeReviewStatusCodeGitHubUnavailable, "Visual evidence is temporarily unavailable. Verification will retry automatically using the existing review."
+	} else if !classification.RateLimited {
 		return
 	}
 	retryAt = retryAt.UTC()
 	if _, err := store.SetWaitingForGitHub(ctx, job.OrgID, job.SessionID, jobID, retryAt, handlerErr.Error(),
-		"GitHub is rate-limited. The review will resume automatically when the limit resets."); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		message, code); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		logger.Warn().Err(err).
 			Str("session_id", job.SessionID.String()).
 			Msg("failed to persist code review GitHub rate-limit wait")
@@ -906,6 +942,10 @@ func recordCodeReviewAutomaticWait(ctx context.Context, store *db.CodeReviewStor
 }
 
 func codeReviewTerminalFailureStatus(err error) (models.CodeReviewStatusCode, string, bool) {
+	if errors.Is(err, errFullAssessmentFreshnessInconclusive) {
+		return models.CodeReviewStatusCodeGitHubUnavailable,
+			"Visual evidence could not be verified before automatic retries expired. Request a fresh review after the evidence is available.", false
+	}
 	classification := ghservice.ClassifyRetry(err, time.Now())
 	if classification.RateLimited {
 		return models.CodeReviewStatusCodeGitHubRateLimited,
@@ -995,7 +1035,10 @@ func syncCodeReviewPullRequestState(ctx context.Context, services *Services, log
 	if err := services.PR.SyncPullRequestState(syncCtx, job.OrgID, job.PullRequestID); err != nil {
 		if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
 			delay := 5 * time.Second
-			return &RetryableError{Err: err, RetryAfter: &delay, BypassMaxRetryDuration: true}
+			// GitHub can remain indeterminate indefinitely. Bound this external
+			// wait with the same durable recovery window as other GitHub failures.
+			retryWindow := githubRateLimitMaxRetryDuration
+			return &RetryableError{Err: err, RetryAfter: &delay, MaxRetryDuration: &retryWindow}
 		}
 		if errors.Is(err, ghservice.ErrPullRequestRepositoryDisconnected) {
 			logger.Info().
@@ -2384,6 +2427,17 @@ func codeReviewOrchestratorCombinedOutput(previous *string, current string, repa
 	return strings.TrimSpace(*previous) + "\n\n--- synthesis repair response ---\n\n" + current
 }
 
+func codeReviewOrchestratorCombinedOutputFromRecord(ctx context.Context, store *db.CodeReviewStore, orgID uuid.UUID, previous *string, state codeReviewOrchestratorStructuredResult, current string) (string, error) {
+	if state.SynthesisRepairCount > 0 && state.RawRecordKey != "" {
+		record, err := store.GetPromptRecordByKey(ctx, orgID, state.RawRecordKey)
+		if err != nil {
+			return "", fmt.Errorf("load original orchestrator output for synthesis repair: %w", err)
+		}
+		previous = &record.Content
+	}
+	return codeReviewOrchestratorCombinedOutput(previous, current, state.SynthesisRepairCount), nil
+}
+
 func codeReviewOrchestratorObserveRepairCompletion(state codeReviewOrchestratorStructuredResult, currentTurn int) codeReviewOrchestratorStructuredResult {
 	if !state.SynthesisRepairPending || currentTurn <= state.SynthesisRepairBaseTurn {
 		return state
@@ -2432,17 +2486,30 @@ func persistCodeReviewOrchestratorFindings(
 	if synthesis != nil {
 		findings = codeReviewFindingsFromSynthesis(*synthesis, changedPaths)
 	}
-	seen := make(map[string]struct{}, len(findings))
-	for _, finding := range findings {
-		seen[finding.DedupeKey] = struct{}{}
-	}
-	for _, legacyFinding := range parseCodeReviewFindings(raw, changedPaths) {
-		if _, ok := seen[legacyFinding.DedupeKey]; ok {
-			continue
+	directives := parseCodeReviewFindings(raw, changedPaths)
+	if synthesis != nil {
+		stored, err := stores.CodeReviews.ListFindings(ctx, job.OrgID, job.SessionID, false)
+		if err != nil {
+			return 0, fmt.Errorf("load previously harvested orchestrator findings: %w", err)
 		}
-		seen[legacyFinding.DedupeKey] = struct{}{}
-		findings = append(findings, legacyFinding)
+		canonicalKeys := make(map[string]int, len(findings))
+		for i, finding := range findings {
+			canonicalKeys[finding.DedupeKey] = i
+		}
+		for _, finding := range stored {
+			if finding.AgentResultID == nil || *finding.AgentResultID != resultID {
+				continue
+			}
+			if i, canonical := canonicalKeys[finding.DedupeKey]; canonical {
+				// A previous attempt may already have written canonical content.
+				// It must not consume a second inline-to-structured match on retry.
+				promoteCodeReviewFinding(&findings[i], finding)
+				continue
+			}
+			directives = append(directives, finding)
+		}
 	}
+	findings, supersededKeys := reconcileCodeReviewOrchestratorFindings(findings, directives)
 	for i := range findings {
 		findings[i].OrgID = job.OrgID
 		findings[i].SessionID = job.SessionID
@@ -2451,7 +2518,91 @@ func persistCodeReviewOrchestratorFindings(
 			return 0, fmt.Errorf("create harvested orchestrator code review finding: %w", err)
 		}
 	}
+	// Write every retained issue before removing superseded repair rows. If a
+	// write or cleanup fails, the caller cannot publish and retry is safe.
+	if err := stores.CodeReviews.DeleteUnpostedFindings(ctx, job.OrgID, job.SessionID, resultID, supersededKeys); err != nil {
+		return 0, fmt.Errorf("remove superseded orchestrator findings: %w", err)
+	}
 	return len(findings), nil
+}
+
+func promoteCodeReviewFinding(kept *models.CodeReviewFinding, candidate models.CodeReviewFinding) {
+	if models.CodeReviewFindingSeverityRank(candidate.Severity) > models.CodeReviewFindingSeverityRank(kept.Severity) {
+		kept.Severity = candidate.Severity
+		kept.Confidence = candidate.Confidence
+		kept.Body = candidate.Body
+	}
+	kept.SelectedForInline = kept.SelectedForInline || candidate.SelectedForInline
+	if kept.GitHubCommentID == nil {
+		kept.GitHubCommentID = candidate.GitHubCommentID
+	}
+}
+
+func reconcileCodeReviewOrchestratorFindings(structured, directives []models.CodeReviewFinding) ([]models.CodeReviewFinding, []string) {
+	findings := make([]models.CodeReviewFinding, 0, len(structured)+len(directives))
+	canonicalKeys := make(map[string]int, len(structured))
+	for _, finding := range structured {
+		if i, duplicate := canonicalKeys[finding.DedupeKey]; duplicate {
+			promoteCodeReviewFinding(&findings[i], finding)
+			continue
+		}
+		canonicalKeys[finding.DedupeKey] = len(findings)
+		findings = append(findings, finding)
+	}
+	uniqueDirectives := make([]models.CodeReviewFinding, 0, len(directives))
+	directiveKeys := make(map[string]int, len(directives))
+	for _, finding := range directives {
+		if i, duplicate := directiveKeys[finding.DedupeKey]; duplicate {
+			promoteCodeReviewFinding(&uniqueDirectives[i], finding)
+			continue
+		}
+		directiveKeys[finding.DedupeKey] = len(uniqueDirectives)
+		uniqueDirectives = append(uniqueDirectives, finding)
+	}
+	matched := make(map[int]bool, len(findings))
+	unmatched := make([]models.CodeReviewFinding, 0, len(uniqueDirectives))
+	for _, finding := range uniqueDirectives {
+		if i, exact := canonicalKeys[finding.DedupeKey]; exact {
+			promoteCodeReviewFinding(&findings[i], finding)
+			matched[i] = true
+			continue
+		}
+		unmatched = append(unmatched, finding)
+	}
+	structuredCounts := make(map[string]int)
+	for i, finding := range findings {
+		if !matched[i] {
+			structuredCounts[codeReviewFindingLocationKey(finding)]++
+		}
+	}
+	directiveCounts := make(map[string]int)
+	for _, finding := range unmatched {
+		directiveCounts[codeReviewFindingLocationKey(finding)]++
+	}
+	supersededKeys := make([]string, 0)
+	for _, finding := range unmatched {
+		location := codeReviewFindingLocationKey(finding)
+		// Only reconcile reworded inline versions when every directive has a
+		// distinct unmatched structured counterpart. Ambiguity retains all
+		// issues; duplicate prose is safer than silently losing a blocker.
+		if location != "" && finding.GitHubCommentID == nil && directiveCounts[location] <= structuredCounts[location] {
+			supersededKeys = append(supersededKeys, finding.DedupeKey)
+			continue
+		}
+		findings = append(findings, finding)
+	}
+	return findings, supersededKeys
+}
+
+func codeReviewFindingLocationKey(finding models.CodeReviewFinding) string {
+	if finding.Path == nil || finding.StartLine == nil || *finding.StartLine <= 0 {
+		return ""
+	}
+	endLine := *finding.StartLine
+	if finding.EndLine != nil {
+		endLine = *finding.EndLine
+	}
+	return fmt.Sprintf("%s:%d:%d:%s", *finding.Path, *finding.StartLine, endLine, finding.Severity)
 }
 
 func codeReviewFindingsFromSynthesis(synthesis codeReviewOrchestratorSynthesis, changedPaths []string) []models.CodeReviewFinding {
@@ -2822,6 +2973,7 @@ func codeReviewWaitingForReviewers(policy models.CodeReviewPolicyConfig) error {
 		Err:                    errors.New("waiting for code review reviewer agents"),
 		RetryAfter:             &delay,
 		BypassMaxRetryDuration: true,
+		ResetRetryWindow:       true,
 	}
 }
 
@@ -3254,7 +3406,10 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			}
 			continue
 		}
-		combinedRaw := codeReviewOrchestratorCombinedOutput(result.RawOutput, raw, state.SynthesisRepairCount)
+		combinedRaw, err := codeReviewOrchestratorCombinedOutputFromRecord(ctx, stores.CodeReviews, job.OrgID, result.RawOutput, state, raw)
+		if err != nil {
+			return err
+		}
 		synthesis, synthesisErr := parseCodeReviewOrchestratorSynthesis(raw)
 		if synthesisErr == nil {
 			_, synthesisErr = codeReviewDescriptionEvaluationFromSynthesis(policy.Config(), changedFiles, synthesis, visualEvidence)
@@ -3393,6 +3548,7 @@ func codeReviewWaitingForOrchestrator(policy models.CodeReviewPolicyConfig) erro
 		Err:                    errors.New("waiting for code review orchestrator agent"),
 		RetryAfter:             &delay,
 		BypassMaxRetryDuration: true,
+		ResetRetryWindow:       true,
 	}
 }
 
@@ -3514,15 +3670,6 @@ func completeCodeReviewAfterStableDeterministicFailure(
 	}
 	var assessmentOutcome json.RawMessage
 	if assessment != nil {
-		if err := verifyFullAssessmentFreshness(ctx, services, job, *assessment); err != nil {
-			if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
-				if recoveryErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); recoveryErr != nil {
-					return recoveryErr
-				}
-				return nil
-			}
-			return fmt.Errorf("refresh early-stop assessment before publication: %w", err)
-		}
 		var outcomeErr error
 		assessmentOutcome, outcomeErr = fullAssessmentOutcome(nil, decision.RiskReasonDetails, false)
 		if outcomeErr != nil {
@@ -3534,6 +3681,15 @@ func completeCodeReviewAfterStableDeterministicFailure(
 		}
 		if err := stores.CodeReviewAssessments.StageOutcome(ctx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest, models.CodeReviewAssessmentCompletion{ResultOrigin: models.CodeReviewResultExecuted, CoverageComplete: false, Decision: decision.Decision, Acceptable: decision.Acceptable, RiskReasonDetails: riskJSON, StructuredOutcome: assessmentOutcome, RenderedBody: body}); err != nil {
 			return fmt.Errorf("stage early-stop assessment outcome: %w", err)
+		}
+		if err := verifyFullAssessmentFreshness(ctx, services, job, *assessment); err != nil {
+			if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
+				if recoveryErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); recoveryErr != nil {
+					return recoveryErr
+				}
+				return nil
+			}
+			return fmt.Errorf("refresh early-stop assessment before publication: %w", err)
 		}
 	}
 	publicationStage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "github_publication")
@@ -4654,10 +4810,17 @@ func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings [
 				summaries = append(summaries, name+" produced no usable review output")
 				continue
 			}
-			if findingCounts[result.ID] == 0 {
-				summaries = append(summaries, name+" found no blocking issues")
+			count := findingCounts[result.ID]
+			if state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult); ok {
+				// Synthesis can replace a finding's attribution; the harvested
+				// count still records what this reviewer originally reported.
+				count = max(count, state.FindingCount)
+			}
+			if count == 0 {
+				// Native reviewer output need not use our directive format. An
+				// empty parse establishes completion, never a clean verdict.
+				summaries = append(summaries, name+" completed its review")
 			} else {
-				count := findingCounts[result.ID]
 				label := "findings"
 				if count == 1 {
 					label = "finding"

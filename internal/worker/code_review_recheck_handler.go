@@ -60,25 +60,7 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		if err != nil {
 			return err
 		}
-		jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
-			current, loadErr := stores.CodeReviewAssessments.GetByID(hookCtx, a.OrgID, a.ID)
-			if loadErr != nil {
-				logger.Warn().Err(loadErr).Str("assessment_id", a.ID.String()).Msg("load dead-lettered assessment failed")
-				return
-			}
-			if current.Status != models.CodeReviewAssessmentRunning && current.Status != models.CodeReviewAssessmentReserved &&
-				!(current.Status == models.CodeReviewAssessmentPublishing && current.PublicationState == models.CodeReviewPublicationReserved) {
-				return
-			}
-			if failErr := stores.CodeReviewAssessments.Fail(hookCtx, current.OrgID, current.ID, current.Generation, current.InputDigest, codeReviewDeadLetterReason(deadLetterErr)); failErr != nil {
-				logger.Warn().Err(failErr).Str("assessment_id", a.ID.String()).Msg("reconcile dead-lettered assessment failed")
-				return
-			}
-			if settleErr := settleCodeReviewAssessment(hookCtx, stores, current); settleErr != nil {
-				logger.Warn().Err(settleErr).Str("assessment_id", a.ID.String()).Msg("settle dead-lettered assessment failed")
-			}
-			stores.CodeReviews.PublishAssessmentUpdated(hookCtx, current)
-		})
+		registerCodeReviewRecheckDeadLetterReconciliation(ctx, stores, logger, a)
 		// The repair sweep also sends terminal full assessments here when their
 		// original controller stopped before persisting the replacement request.
 		if (a.Status == models.CodeReviewAssessmentSuperseded || a.Status == models.CodeReviewAssessmentFailed) && a.FailureDetail != nil &&
@@ -386,6 +368,32 @@ func recheckRequirements(policy models.CodeReviewPolicyConfig, files []coderevie
 	return requirements, nil
 }
 
+func registerCodeReviewRecheckDeadLetterReconciliation(ctx context.Context, stores *Stores, logger zerolog.Logger, a models.CodeReviewAssessment) {
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		current, loadErr := stores.CodeReviewAssessments.GetByID(hookCtx, a.OrgID, a.ID)
+		if loadErr != nil {
+			logger.Warn().Err(loadErr).Str("assessment_id", a.ID.String()).Msg("load dead-lettered assessment failed")
+			return
+		}
+		// Worker retirement already failed the eligible assessment atomically.
+		// Direct handler callers retain the same guarded failure behavior.
+		if current.Status != models.CodeReviewAssessmentFailed {
+			if current.Status != models.CodeReviewAssessmentRunning && current.Status != models.CodeReviewAssessmentReserved &&
+				!(current.Status == models.CodeReviewAssessmentPublishing && current.PublicationState == models.CodeReviewPublicationReserved) {
+				return
+			}
+			if failErr := stores.CodeReviewAssessments.Fail(hookCtx, current.OrgID, current.ID, current.Generation, current.InputDigest, codeReviewDeadLetterReason(deadLetterErr)); failErr != nil {
+				logger.Warn().Err(failErr).Str("assessment_id", a.ID.String()).Msg("reconcile dead-lettered assessment failed")
+				return
+			}
+		}
+		if settleErr := settleCodeReviewAssessment(hookCtx, stores, current); settleErr != nil {
+			logger.Warn().Err(settleErr).Str("assessment_id", a.ID.String()).Msg("settle dead-lettered assessment failed")
+		}
+		stores.CodeReviews.PublishAssessmentUpdated(hookCtx, current)
+	})
+}
+
 func failCodeReviewRecheck(ctx context.Context, stores *Stores, services *Services, a models.CodeReviewAssessment, reason string, full bool) error {
 	detail := reason
 	if full {
@@ -543,7 +551,14 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 						return noteErr
 					}
 				}
-				return codeReviewWaitingForOrchestrator(models.DefaultCodeReviewPolicyConfig())
+				// A publication lookup is not agent progress: keep any existing
+				// dependency retry window instead of granting a new budget.
+				delay := 10 * time.Second
+				return &RetryableError{
+					Err:                    errors.New("waiting for code review publication reconciliation"),
+					RetryAfter:             &delay,
+					BypassMaxRetryDuration: true,
+				}
 			}
 		}
 		if err != nil {

@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_session_preview_prewarm_runs_retention_job;

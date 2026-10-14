@@ -179,7 +179,7 @@ func TestRetryScheduledHookRequiresLeaseOwnedUpdate(t *testing.T) {
 				hookRunAt = runAt
 			})
 
-			runAt, scheduled := worker.retryJobWithDelayAt(ctx, now, jobID, lockToken, "GitHub rate limited", 1, true, &delay, nil, false)
+			runAt, scheduled := worker.retryJobWithDelayAt(ctx, now, jobID, lockToken, "GitHub rate limited", 1, true, &delay, nil, false, false)
 			if scheduled {
 				worker.runRetryScheduledHooks(ctx, errors.New("GitHub rate limited"), runAt)
 			}
@@ -1177,7 +1177,7 @@ func TestWorker_TerminalWriteHelpers(t *testing.T) {
 		{
 			name: "deadLetterJob tolerates lost ownership",
 			run: func(w *Worker) {
-				w.deadLetterJob(context.Background(), jobID, lockToken, "boom")
+				w.deadLetterJob(context.Background(), context.Background(), &models.Job{ID: jobID, LockToken: &lockToken}, errors.New("boom"))
 			},
 		},
 	}

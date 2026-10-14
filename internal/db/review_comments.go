@@ -172,7 +172,7 @@ func (s *ReviewCommentStore) UpdateClassification(ctx context.Context, orgID, id
 		UPDATE review_comments
 		SET filter_status = @filter_status, category = @category, actionable = @actionable,
 		    generalizable = @generalizable, generalized_rule = @generalized_rule, summary = @summary
-		WHERE id = @id AND org_id = @org_id`
+		WHERE id = @id AND org_id = @org_id AND filter_status = 'pending'`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":               id,

@@ -338,8 +338,10 @@ func (o *Orchestrator) diagnoseAcquireHoldRaceLoss(
 }
 
 // waitForSandboxWorkspaceReady blocks a reused code-review thread until the
-// shared checkout has both a valid commit and the exact branch/head prepared
-// by the winning sibling. A live container alone is not sufficient: the
+// shared checkout has the exact commit and working-branch ref prepared
+// by the winning sibling. Reviewers may subsequently detach at that commit;
+// the prepared branch must still point at it to prove checkout ownership.
+// A live container alone is not sufficient: the
 // winner publishes container_id before CloneRepo and pull/<n>/head checkout
 // finish, so an immediate reuse can otherwise start in an empty repository.
 func waitForSandboxWorkspaceReady(
@@ -362,10 +364,17 @@ func waitForSandboxWorkspaceReady(
 
 	quotedWorkDir := "'" + shellEscapeSingleQuote(sandbox.WorkDir) + "'"
 	probeCommand := fmt.Sprintf(
-		"git -C %s rev-parse --verify HEAD && git -C %s branch --show-current",
+		"git -C %s rev-parse --verify HEAD && branch=$(git -C %s branch --show-current) && printf '%%s\\n' \"$branch\"",
 		quotedWorkDir,
 		quotedWorkDir,
 	)
+	if expectedBranch != "" {
+		// The native review prompt permits checkout --detach at the pinned
+		// review head. Checking the prepared branch ref keeps that legal state
+		// distinct from a detached clone whose authoritative checkout never ran.
+		branchRef := "'" + shellEscapeSingleQuote("refs/heads/"+expectedBranch+"^{commit}") + "'"
+		probeCommand += fmt.Sprintf(" && git -C %s rev-parse --verify %s", quotedWorkDir, branchRef)
+	}
 	waitCtx, cancelWait := context.WithTimeout(ctx, timeout)
 	defer cancelWait()
 
@@ -390,12 +399,14 @@ func waitForSandboxWorkspaceReady(
 		var stdout, stderr bytes.Buffer
 		exitCode, execErr := provider.Exec(waitCtx, sandbox, probeCommand, &stdout, &stderr)
 		if execErr == nil && exitCode == 0 {
-			fields := strings.Fields(stdout.String())
-			if len(fields) >= 2 {
-				actualHead, actualBranch := fields[0], fields[1]
-				headMatches := expectedHead == "" || strings.EqualFold(actualHead, expectedHead)
-				branchMatches := expectedBranch == "" || actualBranch == expectedBranch
-				if headMatches && branchMatches {
+			// Preserve the empty branch line produced by a detached HEAD.
+			fields := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+			if len(fields) >= 2 && (expectedBranch == "" || len(fields) >= 3) {
+				actualHead, actualBranch := strings.TrimSpace(fields[0]), strings.TrimSpace(fields[1])
+				headMatches := actualHead != "" && (expectedHead == "" || strings.EqualFold(actualHead, expectedHead))
+				branchMatches := expectedBranch == "" || actualBranch == expectedBranch || actualBranch == ""
+				preparedBranchMatches := expectedBranch == "" || strings.EqualFold(strings.TrimSpace(fields[2]), actualHead)
+				if headMatches && branchMatches && preparedBranchMatches {
 					// Close the race between the last unsuccessful probe and a
 					// cancellation that arrived while this successful probe ran.
 					if checkCancellation != nil {

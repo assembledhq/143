@@ -288,6 +288,8 @@ const reviewAnalytics: CodeReviewAnalytics = {
     not_approved: 11,
     approved_first_round: 10,
     median_rounds_to_approval: 2,
+    average_rounds_to_approval: 2.5,
+    p95_rounds_to_approval: 4,
     needs_human_review: 8,
     comment_only: 2,
     blocked: 0,
@@ -625,11 +627,11 @@ describe("CodeReviewsPage", () => {
     expect(within(stats).getByText("Automatically approved")).toBeInTheDocument();
     expect(within(stats).getByText("92")).toBeInTheDocument();
     expect(within(stats).getByRole("button", { name: "About Automatically approved" })).toBeInTheDocument();
-    expect(within(stats).getByText("Approval rate")).toBeInTheDocument();
+    expect(within(stats).getByText("Review approval rate")).toBeInTheDocument();
     expect(within(stats).getByText("72%")).toBeInTheDocument();
-    expect(within(stats).getByRole("button", { name: "About Approval rate" })).toBeInTheDocument();
+    expect(within(stats).getByRole("button", { name: "About Review approval rate" })).toBeInTheDocument();
     expect(within(stats).getByText("Median turnaround")).toBeInTheDocument();
-    expect(within(stats).getByText("8m")).toBeInTheDocument();
+    expect(within(stats).getByText("8m 0s")).toBeInTheDocument();
     const timeWindow = screen.getByRole("button", { name: "Time window" });
     expect(timeWindow).toHaveTextContent("Last 30 days");
     const filters = timeWindow.closest("#code-review-filters");
@@ -943,6 +945,12 @@ describe("CodeReviewsPage", () => {
     expect(within(approvalOutcomes).getByText("2.0")).toBeInTheDocument();
     expect(within(approvalOutcomes).queryByText("128")).not.toBeInTheDocument();
     expect(screen.getByText("Approval by round")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("Automatically approved")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("PR approval rate")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("Average rounds to approval")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("2.5")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("P95 rounds to approval")).toBeInTheDocument();
+    expect(within(approvalOutcomes).getByText("4")).toBeInTheDocument();
     expect(screen.queryByText("Decision feedback")).not.toBeInTheDocument();
     expect(screen.getByText("Why PRs were not approved right away")).toBeInTheDocument();
     expect(screen.getByText("PR findings and operational outcomes")).toBeInTheDocument();
@@ -1005,7 +1013,7 @@ describe("CodeReviewsPage", () => {
       "href",
       "/code-reviews?tab=reviews&author=anya&range=30d",
     );
-    expect(within(anyaRow).getByRole("link", { name: "9 PRs approved by 143 by anya" })).toHaveAttribute(
+    expect(within(anyaRow).getByRole("link", { name: "9 Automatically approved PRs by anya" })).toHaveAttribute(
       "href",
       "/code-reviews?tab=reviews&author=anya&range=30d&status=completed&outcome=automatically_approved",
     );
@@ -1016,6 +1024,8 @@ describe("CodeReviewsPage", () => {
     await waitFor(() => expect(analyticsRequests).toHaveLength(1));
     expectCreatedAfterDaysAgo(analyticsRequests[0]?.get("created_after") ?? undefined, 30);
     expect(analyticsRequests[0]?.has("repository_id")).toBe(false);
+    expect(analyticsRequests[0]?.get("include_trend")).toBe("true");
+    expect(analyticsRequests[0]?.get("trend_span_seconds")).toBe("2592000");
     await user.click(within(authorTable).getByRole("button", { name: "Sort by PR author ascending" }));
     await waitFor(() => expect(analyticsRequests.at(-1)?.get("author_sort_by")).toBe("author"));
     expect(analyticsRequests.at(-1)?.get("author_sort_order")).toBe("asc");
@@ -1035,6 +1045,71 @@ describe("CodeReviewsPage", () => {
 
     expect(await screen.findByRole("tab", { name: "Analytics" })).toHaveAttribute("data-state", "active");
     expect(await screen.findByText("Usage by PR author")).toBeInTheDocument();
+  });
+
+  it.each([
+    { value: "p95_rounds_to_approval", label: "P95 rounds to approval" },
+    { value: "unknown_metric", label: "Average rounds to approval" },
+  ])("restores or validates analytics metric $value", async ({ value, label }) => {
+    mockCodeReviewBaseHandlers();
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: { tab: "analytics", analytics_metric: value },
+    });
+    const cards = await screen.findByLabelText("Approval outcomes");
+    expect(within(cards).getByRole("button", { name: new RegExp(`^Show ${label} trend`) }))
+      .toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("replaces metric URL state without refetching and retains it across tab changes", async () => {
+    const user = userEvent.setup();
+    const onUrlUpdate = vi.fn();
+    const requests: URLSearchParams[] = [];
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews/analytics", ({ request }) => {
+      requests.push(new URL(request.url).searchParams);
+      return HttpResponse.json({ data: reviewAnalytics } satisfies SingleResponse<CodeReviewAnalytics>);
+    }));
+    renderWithProviders(<CodeReviewsPage />, {
+      searchParams: { tab: "analytics", range: "7d", repository: repo.id },
+      nuqsHasMemory: true,
+      nuqsOnUrlUpdate: onUrlUpdate,
+    });
+    const cards = await screen.findByLabelText("Approval outcomes");
+    await waitFor(() => expect(requests).toHaveLength(1));
+    await user.click(within(cards).getByRole("button", { name: /^Show P95 rounds to approval trend/ }));
+    await waitFor(() => {
+      const update = onUrlUpdate.mock.calls.at(-1)?.[0];
+      expect(update?.searchParams.get("analytics_metric")).toBe("p95_rounds_to_approval");
+      expect(update?.searchParams.get("range")).toBe("7d");
+      expect(update?.searchParams.get("repository")).toBe(repo.id);
+      expect(update?.options.history).toBe("replace");
+    });
+    expect(requests).toHaveLength(1);
+    await user.click(screen.getByRole("tab", { name: "Reviews" }));
+    await user.click(screen.getByRole("tab", { name: "Analytics" }));
+    expect(within(await screen.findByLabelText("Approval outcomes"))
+      .getByRole("button", { name: /^Show P95 rounds to approval trend/ }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(requests.every((params) => !params.has("analytics_metric"))).toBe(true);
+  });
+
+  it("sends full previous calendar month geometry while preserving today's cohort end", async () => {
+    const requests: URLSearchParams[] = [];
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews/analytics", ({ request }) => {
+      requests.push(new URL(request.url).searchParams);
+      return HttpResponse.json({ data: reviewAnalytics } satisfies SingleResponse<CodeReviewAnalytics>);
+    }));
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "analytics", range: "this_month" } });
+    await screen.findByLabelText("Approval outcomes");
+    const anchor = new Date();
+    const start = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+    expect(requests[0]?.get("created_after")).toBe(start.toISOString());
+    expect(requests[0]?.get("trend_current_start")).toBe(start.toISOString());
+    expect(requests[0]?.get("trend_current_end")).toBe(new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1).toISOString());
+    expect(requests[0]?.get("trend_previous_start")).toBe(new Date(anchor.getFullYear(), anchor.getMonth() - 1, 1).toISOString());
+    expect(requests[0]?.get("trend_previous_end")).toBe(start.toISOString());
+    expect(requests[0]?.get("created_before")).toBe(new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate(), 23, 59, 59, 999).toISOString());
   });
 
 	it("reveals a policy limit targeted by an Insights deep link", async () => {
@@ -1066,14 +1141,19 @@ describe("CodeReviewsPage", () => {
       nuqsOnUrlUpdate: onUrlUpdate,
     });
 
+    const updatesBeforeAnalyticsNavigation = onUrlUpdate.mock.calls.length;
     await user.click(await screen.findByRole("tab", { name: "Analytics" }));
     await waitFor(() => {
+      // The search debounce can replace the URL after the tab's push write.
+      const navigationUpdate = onUrlUpdate.mock.calls
+        .slice(updatesBeforeAnalyticsNavigation)
+        .find(([candidate]) => candidate.searchParams.get("tab") === "analytics" && candidate.options.history === "push")?.[0];
+      expect(navigationUpdate?.options.history).toBe("push");
       const update = onUrlUpdate.mock.calls.at(-1)?.[0];
       expect(update?.searchParams.get("tab")).toBe("analytics");
       expect(update?.searchParams.get("repository")).toBe(repo.id);
       expect(update?.searchParams.get("range")).toBe("7d");
       expect(update?.searchParams.get("outcome")).toBe("blocked");
-      expect(update?.options.history).toBe("push");
     });
 
     const updatesBeforeDrilldown = onUrlUpdate.mock.calls.length;
@@ -1089,14 +1169,18 @@ describe("CodeReviewsPage", () => {
         .every(([update]) => update.searchParams.get("tab") === "analytics"),
     ).toBe(true);
 
+    const updatesBeforePolicyNavigation = onUrlUpdate.mock.calls.length;
     await user.click(screen.getByRole("tab", { name: "Policy" }));
     await waitFor(() => {
+      const navigationUpdate = onUrlUpdate.mock.calls
+        .slice(updatesBeforePolicyNavigation)
+        .find(([candidate]) => candidate.searchParams.get("tab") === "policy" && candidate.options.history === "push")?.[0];
+      expect(navigationUpdate?.options.history).toBe("push");
       const update = onUrlUpdate.mock.calls.at(-1)?.[0];
       expect(update?.searchParams.get("tab")).toBe("policy");
       expect(update?.searchParams.get("repository")).toBe(repo.id);
       expect(update?.searchParams.get("range")).toBe("7d");
       expect(update?.searchParams.get("outcome")).toBe("blocked");
-      expect(update?.options.history).toBe("push");
     });
   });
 
@@ -1110,6 +1194,8 @@ describe("CodeReviewsPage", () => {
         not_approved: 0,
         approved_first_round: 0,
         median_rounds_to_approval: null,
+        average_rounds_to_approval: null,
+        p95_rounds_to_approval: null,
         needs_human_review: 0,
         comment_only: 0,
         blocked: 0,
@@ -2343,6 +2429,31 @@ describe("CodeReviewsPage", () => {
       expect(label).toHaveClass("text-muted-foreground");
       expect(label).not.toHaveClass("text-destructive");
     }
+  });
+
+  it.each(["cancelled", "failed"] as const)("shows no outcome for an unpublished legacy %s attempt on desktop and mobile", async (status) => {
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({
+      data: [{ ...review, status, decision: "blocked", acceptable: false, github_review_id: undefined, github_review_url: undefined }], meta: {},
+    })));
+    renderWithProviders(<CodeReviewsPage />);
+    expect(await screen.findAllByText("No outcome")).toHaveLength(2);
+    const table = screen.getByRole("table", { name: "Code reviews" });
+    const activity = screen.getByLabelText("Code review activity");
+    expect(within(table).getByText("No outcome")).toHaveClass("text-muted-foreground");
+    expect(within(activity).getByText("No outcome")).toHaveClass("text-muted-foreground");
+    expect(screen.queryByText("Blocked")).not.toBeInTheDocument();
+  });
+
+  it("preserves a completed historical outcome when the current PR assessment belongs to another session", async () => {
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({
+      data: [{ ...review, status: "failed", decision: "blocked", completed_assessment_outcome: true, github_review_id: undefined, github_review_url: undefined,
+        current_assessment: { id: "new-assessment", session_id: "new-session", status: "completed", review_scope: "full", route_reason: "initial_full", head_sha: "new-head", publication_state: "confirmed", created_at: review.created_at } }], meta: {},
+    })));
+    renderWithProviders(<CodeReviewsPage />);
+    expect(await screen.findAllByText("Blocked")).toHaveLength(2);
+    expect(screen.queryByText("No outcome")).not.toBeInTheDocument();
   });
 
   it("shows operational phases and the automatic GitHub retry countdown without a manual retry action", async () => {

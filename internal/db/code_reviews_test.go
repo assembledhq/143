@@ -639,7 +639,7 @@ func TestCodeReviewStore_SetWaitingForGitHubPersistsOperationalState(t *testing.
 	defer mock.Close()
 	jobError := "GitHub rate limited"
 	mock.ExpectQuery("(?s)WITH scheduled_retry AS MATERIALIZED.*FROM jobs.*job_type = 'run_code_review'.*payload->>'session_id'.*status = 'pending'.*run_at = @retry_at.*last_error = @job_error.*FOR UPDATE.*UPDATE code_review_session_metadata.*phase = 'waiting_for_github'.*WHERE org_id = @org_id.*session_id = @session_id.*EXISTS \\(SELECT 1 FROM scheduled_retry\\)").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "job_id": jobID, "retry_at": retryAt, "job_error": jobError, "status_message": message}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "job_id": jobID, "retry_at": retryAt, "job_error": jobError, "status_message": message, "status_code": models.CodeReviewStatusCodeGitHubRateLimited}).
 		WillReturnRows(codeReviewMetadataRowsForTest().AddRow(
 			uuid.New(), orgID, sessionID, uuid.New(), uuid.New(), uuid.New(),
 			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer,
@@ -669,7 +669,7 @@ func TestCodeReviewStore_SetWaitingForGitHubRejectsStaleRetryTransition(t *testi
 	mock.ExpectQuery("(?s)WITH scheduled_retry AS MATERIALIZED.*status = 'pending'.*run_at = @retry_at.*FOR UPDATE.*UPDATE code_review_session_metadata").
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID, "session_id": sessionID, "job_id": jobID, "retry_at": retryAt,
-			"job_error": "old throttle", "status_message": "waiting",
+			"job_error": "old throttle", "status_message": "waiting", "status_code": models.CodeReviewStatusCodeGitHubRateLimited,
 		}).
 		WillReturnRows(codeReviewMetadataRowsForTest())
 
@@ -1328,7 +1328,7 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery("(?s)m.status = 'failed'.*pr.status = 'open'.*current_health.head_sha = m.head_sha.*FROM code_review_session_metadata newer.*approved.status = 'completed'.*policy.active = true.*AS retry_eligible.*COALESCE\\(ca\\.decision,m\\.decision\\) = @decision.*risk_reason->>'code' = @reason.*LOWER\\(COALESCE\\(NULLIF\\(s.revision_context->>'pull_request_author', ''\\), 'Unknown'\\)\\) = LOWER\\(@author\\)").
+	mock.ExpectQuery("(?s)m.status = 'failed'.*pr.status = 'open'.*current_health.head_sha = m.head_sha.*FROM code_review_session_metadata newer.*approved.status = 'completed'.*policy.active = true.*AS retry_eligible.*END\\) = @decision.*risk_reason->>'code' = @reason.*LOWER\\(COALESCE\\(NULLIF\\(s.revision_context->>'pull_request_author', ''\\), 'Unknown'\\)\\) = LOWER\\(@author\\)").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -1339,12 +1339,12 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 			"github_review_url", "final_review_body", "failure_reason", "risk_reason_details", "completed_at", "created_at", "retry_eligible", "session_title", "repository_name", "github_repo",
-			"github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
+			"github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author", "completed_assessment_outcome",
 		}).AddRow(
 			metadataID, orgID, sessionID, repoID, prID, policyID,
 			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, status, nil, nil, nil, nil, nil, false, &decision, &acceptable, false,
 			nil, "key", nil, nil, nil, nil, nil, []byte(`[{"code":"blocking_findings"}]`), &now, now, false, &title, &repoName, "acme/repo",
-			42, "https://github.com/acme/repo/pull/42", "Fix auth bug", "devin",
+			42, "https://github.com/acme/repo/pull/42", "Fix auth bug", "devin", false,
 		))
 
 	reviews, err := NewCodeReviewStore(mock).ListReviews(context.Background(), orgID, CodeReviewListFilters{
@@ -1378,12 +1378,12 @@ func TestCodeReviewStore_ListReviewsAppliesOutcomeFilters(t *testing.T) {
 		{
 			name:            "automatically approved requires a completed posted approval",
 			outcome:         models.CodeReviewListOutcomeAutomaticallyApproved,
-			expectedPattern: `m\.status = 'completed'\s+AND COALESCE\(ca\.decision,m\.decision\) = 'approved'\s+AND .*github_review_id.* IS NOT NULL`,
+			expectedPattern: `m\.status = 'completed'\s+AND .*END\) = 'approved'\s+AND .*github_review_id.* IS NOT NULL`,
 		},
 		{
 			name:            "completed not approved includes approval decisions that were not posted",
 			outcome:         models.CodeReviewListOutcomeCompletedNotApproved,
-			expectedPattern: `m\.status = 'completed'\s+AND \(COALESCE\(ca\.decision,m\.decision\) IS DISTINCT FROM 'approved'\s+OR .*github_review_id.* IS NULL\)`,
+			expectedPattern: `m\.status = 'completed'\s+AND \(.*END\) IS DISTINCT FROM 'approved'\s+OR .*github_review_id.* IS NULL\)`,
 		},
 	}
 
@@ -1403,7 +1403,7 @@ func TestCodeReviewStore_ListReviewsAppliesOutcomeFilters(t *testing.T) {
 					"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 					"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 					"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "session_title",
-					"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
+					"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author", "completed_assessment_outcome",
 				}))
 
 			reviews, err := NewCodeReviewStore(mock).ListReviews(context.Background(), orgID, CodeReviewListFilters{
@@ -1515,7 +1515,7 @@ func TestCodeReviewStore_ListReviewsAppliesCursorAndTimeFilters(t *testing.T) {
 			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
 			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "session_title",
-			"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
+			"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author", "completed_assessment_outcome",
 		}))
 
 	reviews, err := NewCodeReviewStore(mock).ListReviews(context.Background(), orgID, CodeReviewListFilters{
@@ -1705,18 +1705,18 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery(`(?s)WITH first_attempt AS MATERIALIZED.*m\.repository_id = @repository_id.*cohort AS MATERIALIZED.*first_attempt\.first_requested_at >= @created_after.*attempt_flags AS.*distinct_heads AS.*representatives AS.*FROM summary s`).
+	mock.ExpectQuery(`(?s)WITH first_attempt AS MATERIALIZED.*m\.repository_id = @repository_id.*cohort AS MATERIALIZED.*first_attempt\.first_requested_at >= @created_after.*attempt_flags AS.*completed_rounds AS.*representatives AS.*FROM summary s`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"prs_reviewed", "prs_with_completed_round", "approved_by_143", "not_approved",
-			"approved_first_round", "median_rounds_to_approval",
+			"approved_first_round", "median_rounds_to_approval", "average_rounds_to_approval", "p95_rounds_to_approval",
 			"prs_with_failed_attempt", "prs_with_stale_attempt",
 			"prs_with_change_breakdown", "median_additions", "median_deletions", "prs_with_findings",
 			"prs_with_blocking_findings", "total_findings", "needs_human_review",
 			"comment_only", "blocked", "approval_not_posted", "approval_rounds", "authors",
 			"non_approval_reasons", "comment_requests_total", "comment_requests_by_user",
 		}).AddRow(
-			32, 28, 17, 11, 10, 2.0, 2, 2,
+			32, 28, 17, 11, 10, 2.0, 2.5, 5.0, 2, 2,
 			20, medianAdditions, medianDeletions,
 			9, 3, 14, 8, 2, 0, 1,
 			[]byte(`[{"bucket":"round_1","prs":10},{"bucket":"round_2","prs":7},{"bucket":"round_3","prs":0},{"bucket":"round_4_plus","prs":0},{"bucket":"not_yet_approved","prs":15}]`),
@@ -1753,6 +1753,8 @@ func TestCodeReviewStore_GetReviewAnalyticsReturnsDecisionReport(t *testing.T) {
 			NotApproved:             11,
 			ApprovedFirstRound:      10,
 			MedianRoundsToApproval:  func() *float64 { value := 2.0; return &value }(),
+			AverageRoundsToApproval: func() *float64 { value := 2.5; return &value }(),
+			P95RoundsToApproval:     func() *float64 { value := 5.0; return &value }(),
 			NeedsHumanReview:        8,
 			CommentOnly:             2,
 			ApprovalNotPosted:       1,
@@ -1836,14 +1838,14 @@ func TestCodeReviewStore_GetReviewAnalyticsRejectsIncompleteApprovalRounds(t *te
 				WithArgs(pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows([]string{
 					"prs_reviewed", "prs_with_completed_round", "approved_by_143", "not_approved",
-					"approved_first_round", "median_rounds_to_approval",
+					"approved_first_round", "median_rounds_to_approval", "average_rounds_to_approval", "p95_rounds_to_approval",
 					"prs_with_failed_attempt", "prs_with_stale_attempt",
 					"prs_with_change_breakdown", "median_additions", "median_deletions", "prs_with_findings",
 					"prs_with_blocking_findings", "total_findings", "needs_human_review",
 					"comment_only", "blocked", "approval_not_posted", "approval_rounds", "authors",
 					"non_approval_reasons", "comment_requests_total", "comment_requests_by_user",
 				}).AddRow(
-					1, 1, 1, 0, 1, 1.0, 0, 0, 0, -1.0, -1.0, 0, 0, 0, 0, 0, 0, 0,
+					1, 1, 1, 0, 1, 1.0, 1.0, 1.0, 0, 0, 0, -1.0, -1.0, 0, 0, 0, 0, 0, 0, 0,
 					[]byte(tt.rounds), []byte(`[]`), []byte(`[]`), 0, []byte(`[]`),
 				))
 
@@ -1930,7 +1932,7 @@ func TestCodeReviewSortedCursorPredicate(t *testing.T) {
 			filters: CodeReviewListFilters{
 				SortBy: "risk", SortOrder: "asc", CursorSortValue: 1,
 			},
-			expectedWhere: "WHEN COALESCE(ca.acceptable,m.acceptable) THEN 0",
+			expectedWhere: "WHEN " + codeReviewCurrentAcceptable + " THEN 0",
 			expectedValue: 1,
 		},
 	}
@@ -2245,7 +2247,7 @@ func TestCodeReviewStore_ListReviewsPageReturnsExactCountForEmptyPage(t *testing
 			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
 			"retry_eligible", "session_title", "repository_name", "github_repo", "github_pr_number",
-			"github_pr_url", "pull_request_title", "pull_request_author",
+			"github_pr_url", "pull_request_title", "pull_request_author", "completed_assessment_outcome",
 		}))
 
 	page, err := NewCodeReviewStore(mock).ListReviewsPage(context.Background(), orgID, CodeReviewListFilters{
@@ -2281,7 +2283,7 @@ func TestCodeReviewStore_ListReviewsPageUsesImmutableCursorAnchorWithMutableFilt
 			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
 			"retry_eligible", "session_title", "repository_name", "github_repo", "github_pr_number",
-			"github_pr_url", "pull_request_title", "pull_request_author",
+			"github_pr_url", "pull_request_title", "pull_request_author", "completed_assessment_outcome",
 		}))
 
 	page, err := NewCodeReviewStore(mock).ListReviewsPage(context.Background(), orgID, CodeReviewListFilters{
@@ -2306,12 +2308,12 @@ func TestCodeReviewStore_ListReviewsPageAppliesOutcomeToCountAndRows(t *testing.
 		{
 			name:    "automatically approved",
 			outcome: models.CodeReviewListOutcomeAutomaticallyApproved,
-			pattern: `m\.status = 'completed' AND COALESCE\(ca\.decision,m\.decision\) = 'approved' AND .*github_review_id.* IS NOT NULL`,
+			pattern: `m\.status = 'completed' AND .*END\) = 'approved' AND .*github_review_id.* IS NOT NULL`,
 		},
 		{
 			name:    "completed not approved",
 			outcome: models.CodeReviewListOutcomeCompletedNotApproved,
-			pattern: `m\.status = 'completed' AND \(COALESCE\(ca\.decision,m\.decision\) IS DISTINCT FROM 'approved' OR .*github_review_id.* IS NULL\)`,
+			pattern: `m\.status = 'completed' AND \(.*END\) IS DISTINCT FROM 'approved' OR .*github_review_id.* IS NULL\)`,
 		},
 	}
 
@@ -2335,7 +2337,7 @@ func TestCodeReviewStore_ListReviewsPageAppliesOutcomeToCountAndRows(t *testing.
 					"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 					"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
 					"retry_eligible", "session_title", "repository_name", "github_repo", "github_pr_number",
-					"github_pr_url", "pull_request_title", "pull_request_author",
+					"github_pr_url", "pull_request_title", "pull_request_author", "completed_assessment_outcome",
 				}))
 
 			page, err := NewCodeReviewStore(mock).ListReviewsPage(context.Background(), orgID, CodeReviewListFilters{
@@ -2370,7 +2372,7 @@ func TestCodeReviewStore_ListReviewsPageUsesExtraRowForNextCursor(t *testing.T) 
 		"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 		"github_review_url", "final_review_body", "failure_reason", "risk_reason_details", "completed_at", "created_at",
 		"retry_eligible", "session_title", "repository_name", "github_repo", "github_pr_number",
-		"github_pr_url", "pull_request_title", "pull_request_author",
+		"github_pr_url", "pull_request_title", "pull_request_author", "completed_assessment_outcome",
 	})
 	addRow := func(id, sessionID uuid.UUID, createdAt time.Time, number int) {
 		rows.AddRow(
@@ -2379,7 +2381,7 @@ func TestCodeReviewStore_ListReviewsPageUsesExtraRowForNextCursor(t *testing.T) 
 			models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false,
 			nil, nil, false, nil, "output", nil, nil, nil, nil, nil, []byte(`[]`), &createdAt, createdAt,
 			false, nil, &repositoryName, "acme/repo", number,
-			fmt.Sprintf("https://github.com/acme/repo/pull/%d", number), "Review", "dev",
+			fmt.Sprintf("https://github.com/acme/repo/pull/%d", number), "Review", "dev", false,
 		)
 	}
 	addRow(firstID, firstSessionID, now, 2)
@@ -2420,12 +2422,12 @@ func TestCodeReviewStore_GetListItemBySessionIDScopesByOrgAndSession(t *testing.
 			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
 			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id",
 			"github_review_url", "final_review_body", "failure_reason", "risk_reason_details", "completed_at", "created_at", "retry_eligible", "session_title",
-			"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
+			"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author", "completed_assessment_outcome",
 		}).AddRow(
 			metadataID, orgID, sessionID, repoID, uuid.New(), uuid.New(),
 			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusRunning, nil, nil, nil, nil, nil, false, nil, nil, false,
 			nil, "key", nil, nil, nil, nil, nil, []byte(`[]`), nil, now, false, &title, &repoName, "acme/repo",
-			42, "https://github.com/acme/repo/pull/42", "Fix auth bug", "devin",
+			42, "https://github.com/acme/repo/pull/42", "Fix auth bug", "devin", false,
 		))
 
 	item, err := NewCodeReviewStore(mock).GetListItemBySessionID(context.Background(), orgID, sessionID)

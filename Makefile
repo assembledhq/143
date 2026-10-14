@@ -8,7 +8,7 @@ SANDBOX_CLI_GO_SOURCES := $(foreach dir,$(SANDBOX_CLI_PACKAGE_DIRS),$(filter-out
 SANDBOX_CLI_EMBED_SOURCES := $(shell GOOS=linux CGO_ENABLED=0 go list -deps -f '{{if .Module}}{{if eq .Module.Path "github.com/assembledhq/143"}}{{range .EmbedFiles}}{{$$.Dir}}/{{.}} {{end}}{{end}}{{end}}' ./cmd/tools 2>/dev/null)
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json go.mod go.sum $(SANDBOX_CLI_PACKAGE_DIRS) $(SANDBOX_CLI_GO_SOURCES) $(SANDBOX_CLI_EMBED_SOURCES)
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration test-github-rate-limit test-github-rate-limit-redis migrate-up migrate-down demo-seed-check build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr-profile test-pr test-coverage-diff test-main test-integration test-github-rate-limit test-github-rate-limit-redis migrate-up migrate-down demo-seed-check build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -125,20 +125,39 @@ test-coverage:
 	go test -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out -o coverage.html
 
-# Mirror the PR backend job: no -race, coverage on, no absolute floor.
-test-pr:
-	go test ./internal/... -coverprofile=coverage.out -covermode=count -timeout=120s
+# Generate PR-mode coverage for tools that must work below the overall floor.
+test-pr-profile:
+	@test -n "$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL}" || { echo 'Set INTEGRATION_DATABASE_URL or DATABASE_URL to a disposable test database'; exit 1; }
+	TEST_DATABASE_URL=$${TEST_DATABASE_URL:-$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL}} \
+	go test ./internal/... -skip '^TestBrowserChromeDP' -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=count -timeout=120s
+	TEST_BROWSER_REQUIRED=1 go test ./internal/services/preview -run '^TestBrowserChromeDP' -parallel=1 -count=1 \
+	-coverpkg=./internal/... -coverprofile=coverage-browser.out -covermode=count -timeout=180s
+	INTEGRATION_DATABASE_URL=$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL} \
+	go test -tags=integration -coverpkg=./internal/... -coverprofile=coverage-integration.out -covermode=count -timeout=120s ./internal/integration/...
+	python3 .github/scripts/merge_go_coverage.py coverage.out coverage-unit.out coverage-browser.out coverage-integration.out
 
-# Patch coverage gate vs origin/main (mirrors the PR diff-cover step).
+# Mirror the PR backend job: no race detector, with the coverage floor.
+test-pr: test-pr-profile
+	python3 .github/scripts/check_go_coverage.py coverage.out "$${BACKEND_COVERAGE_MIN:-70.0}" "$${BACKEND_COVERAGE_TARGET:-75.0}"
+
+# Patch coverage gate vs origin/main, independent of the overall floor.
 # Requires: pip install 'diff_cover==10.2.0' && go install github.com/boumenot/gocover-cobertura@v1.4.0
-test-coverage-diff: test-pr
+test-coverage-diff: test-pr-profile
 	gocover-cobertura < coverage.out > coverage.xml
 	diff-cover coverage.xml --compare-branch=origin/main --fail-under=80
 
 # Mirror the merge-to-main backend job: race detector on + absolute floor check.
 test-main:
-	go test ./internal/... -coverprofile=coverage.out -covermode=atomic -race -timeout=180s
+	@test -n "$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL}" || { echo 'Set INTEGRATION_DATABASE_URL or DATABASE_URL to a disposable test database'; exit 1; }
+	TEST_DATABASE_URL=$${TEST_DATABASE_URL:-$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL}} \
+	go test ./internal/... -skip '^TestBrowserChromeDP' -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=atomic -race -timeout=180s
+	TEST_BROWSER_REQUIRED=1 go test ./internal/services/preview -run '^TestBrowserChromeDP' -parallel=1 -count=1 \
+	-coverpkg=./internal/... -coverprofile=coverage-browser.out -covermode=atomic -race -timeout=180s
+	INTEGRATION_DATABASE_URL=$${INTEGRATION_DATABASE_URL:-$$DATABASE_URL} \
+	go test -tags=integration -coverpkg=./internal/... -coverprofile=coverage-integration.out -covermode=atomic -race -timeout=180s ./internal/integration/...
+	python3 .github/scripts/merge_go_coverage.py coverage.out coverage-unit.out coverage-browser.out coverage-integration.out
 	go tool cover -func=coverage.out
+	python3 .github/scripts/check_go_coverage.py coverage.out "$${BACKEND_COVERAGE_MIN:-70.0}" "$${BACKEND_COVERAGE_TARGET:-75.0}"
 
 # Integration tests against a real Postgres. Gated behind the `integration`
 # build tag so `make test` and `go test ./...` stay fast. Reuses DATABASE_URL
@@ -394,9 +413,9 @@ secrets-rotate:
 #
 # SSH_KEY is auto-detected from ~/.ssh/143-deploy but can be overridden.
 # Usage:
-#   make provision-app    HOST=87.99.150.138
-#   make provision-worker HOST=87.99.158.39
-#   make provision-db     HOST=87.99.157.55
+#   make provision-app    HOST='<app-host>'
+#   make provision-worker HOST='<worker-host>'
+#   make provision-db     HOST='<db-host>'
 #   make provision-redis  HOST=10.0.0.50
 #
 # DB-only env vars:
@@ -428,7 +447,7 @@ secrets-rotate:
 #                                  workers always accept advertised routes.
 #
 # Example with overrides:
-#   make provision-worker HOST=87.99.158.39 WORKER_PRIVATE_IP=10.0.0.4 NODE_ID=worker-1
+#   make provision-worker HOST='<worker-host>' WORKER_PRIVATE_IP=10.0.0.4 NODE_ID=worker-1
 #   make provision-app HOST=<public-ip>
 #   make provision-db HOST=<public-ip>
 #   make provision-worker HOST=<public-ip>
@@ -449,7 +468,7 @@ secrets-rotate:
 #   for the gateway afterwards.
 #
 # To tear down and reprovision an existing node:
-#   make provision-app    HOST=87.99.150.138  REPROVISION=true
+#   make provision-app    HOST='<app-host>'  REPROVISION=true
 #
 # Migration note for fleets provisioned before /opt/143/.env.local existed:
 # `make deploy-worker` against such a host fails loudly at the secrets step
@@ -600,7 +619,7 @@ provision-db:
 # HOST is unset.
 # Usage:
 #   make provision-db-backups
-#   make provision-db-backups HOST=87.99.157.99
+#   make provision-db-backups HOST='<db-host>'
 provision-db-backups:
 	$(check-ssh-key)
 	@HOST="$(HOST)"; \
@@ -645,7 +664,7 @@ tailscale-enroll:
 # down containers. Use when deploy fails on a legacy host with
 # "sudo: a password is required" from a deploy-time helper.
 # Usage:
-#   make repair-deploy-sudoers ROLE=app HOST=87.99.150.138
+#   make repair-deploy-sudoers ROLE=app HOST='<app-host>'
 repair-deploy-sudoers:
 	@test -n "$(ROLE)" || { echo "ROLE is required. Usage: make repair-deploy-sudoers ROLE=<app|worker|db|logging|redis> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make repair-deploy-sudoers ROLE=<app|worker|db|logging|redis> HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
@@ -656,7 +675,7 @@ repair-deploy-sudoers:
 # Repairs sandbox network/firewall/resolv.conf, sandbox-auth socket dir, and
 # worker sysctl drift. Requires the host to already have /opt/143/deploy staged.
 # Usage:
-#   make repair-worker-host HOST=87.99.158.39
+#   make repair-worker-host HOST='<worker-host>'
 repair-worker-host:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make repair-worker-host HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
@@ -666,9 +685,9 @@ repair-worker-host:
 # worker-owned Docker state. Set CLEAR=true only when intentionally emptying
 # the machine for decommission/reprovision.
 # Usage:
-#   make spin-down-worker HOST=87.99.158.39
-#   make spin-down-worker HOST=87.99.158.39 CLEAR=true
-#   make spin-down-worker HOST=87.99.158.39 TIMEOUT=7200 EXECUTOR_TIMEOUT=600
+#   make spin-down-worker HOST='<worker-host>'
+#   make spin-down-worker HOST='<worker-host>' CLEAR=true
+#   make spin-down-worker HOST='<worker-host>' TIMEOUT=7200 EXECUTOR_TIMEOUT=600
 spin-down-worker:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make spin-down-worker HOST=<ip> [SSH_KEY=<path>] [CLEAR=true] [TIMEOUT=seconds] [EXECUTOR_TIMEOUT=seconds]"; exit 1; }
 	$(check-ssh-key)
@@ -699,7 +718,7 @@ worker-blue-green-env = WORKER_BLUE_GREEN_PORT_START=$(WORKER_BLUE_GREEN_PORT_ST
 # SSH_KEY is auto-detected from ~/.ssh/143-deploy but can be overridden.
 # Usage:
 #   make deploy-app
-#   make deploy-app    HOST=87.99.150.138
+#   make deploy-app    HOST='<app-host>'
 #   make deploy-app    TAG=<sha>
 #   make deploy-worker force=true
 #   make deploy-fleet ROLES=app,worker

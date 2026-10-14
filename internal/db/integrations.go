@@ -291,3 +291,17 @@ func (s *IntegrationStore) ListOrgsWithActiveIntegrations(ctx context.Context) (
 	}
 	return orgIDs, nil
 }
+
+// ListOrgsWithConnectedProvider returns organizations with a connected provider,
+// including error status so background health probes can recover auth banners.
+// lint:allow-no-orgid reason="deliberately cross-org scan enumerating connected organizations for one provider health probe"
+func (s *IntegrationStore) ListOrgsWithConnectedProvider(ctx context.Context, provider models.IntegrationProvider) ([]uuid.UUID, error) {
+	if err := provider.Validate(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(ctx, `SELECT DISTINCT org_id FROM integrations WHERE provider = @provider AND status IN ('active', 'error') ORDER BY org_id`, pgx.NamedArgs{"provider": provider})
+	if err != nil {
+		return nil, fmt.Errorf("query organizations with connected provider: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+}

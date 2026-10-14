@@ -743,7 +743,8 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueO
 	return id, err
 }
 
-// DeleteExpiredCompleted removes completed/failed jobs older than the given number of days.
+// DeleteExpiredCompleted removes at most 10000 unreferenced succeeded/failed
+// jobs older than the retention period. Subsequent calls continue cleanup progress.
 // lint:allow-no-orgid reason="system-wide retention cleanup across all orgs"
 func (s *JobStore) DeleteExpiredCompleted(ctx context.Context, retentionDays int) (int64, error) {
 	var deleted int64
@@ -1285,6 +1286,34 @@ func (s *JobStore) RetryWithoutConsumingAttemptWithLease(ctx context.Context, jo
 		  AND lock_token = $4`, errMsg, runAt, jobID, lockToken)
 	if err != nil {
 		return false, fmt.Errorf("retry job without consuming attempt with lease: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// RetryWithoutConsumingAttemptWithLeaseAndResetWindow requeues an agent-progress
+// checkpoint and clears the preceding dependency wait in the same fenced write.
+// Ordinary dependency retries must preserve their original deadline instead.
+// lint:allow-no-orgid reason="worker queue consumer requeues cross-org jobs by globally unique fenced job id"
+func (s *JobStore) RetryWithoutConsumingAttemptWithLeaseAndResetWindow(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
+	tag, err := s.execLeaseTerminalUpdate(ctx, `
+		UPDATE jobs
+		SET status = 'pending',
+			last_error = $1,
+			run_at = $2,
+			attempts = GREATEST(attempts - 1, 0),
+			retry_window_started_at = NULL,
+			locked_by_node_id = NULL,
+			run_owner_id = NULL,
+			owner_kind = 'worker',
+			lock_token = NULL,
+			locked_at = NULL,
+			lease_expires_at = NULL,
+			updated_at = now()
+		WHERE id = $3
+		  AND status = 'running'
+		  AND lock_token = $4`, errMsg, runAt, jobID, lockToken)
+	if err != nil {
+		return false, fmt.Errorf("retry job and reset retry window with lease: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
 }

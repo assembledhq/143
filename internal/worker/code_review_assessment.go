@@ -15,9 +15,13 @@ import (
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 )
 
 var errFullAssessmentInputsChanged = errors.New("full assessment inputs changed before publication")
+var errFullAssessmentFreshnessInconclusive = errors.New("visual evidence temporarily unavailable during publication verification")
+
+const fullAssessmentFreshnessRetryDuration = 5 * time.Minute
 
 // Full reviews may finish after CI changes. Their panel still covers the same
 // analysis inputs; live publication safety is checked separately below.
@@ -31,10 +35,44 @@ func captureFreshFullAssessment(ctx context.Context, services *Services, job run
 	}
 	var baseline codereviewsvc.ReviewInputManifest
 	if json.Unmarshal(assessment.InputManifest, &baseline) != nil || baseline.InputDigest != assessment.InputDigest ||
-		!fullAssessmentAnalysisUnchanged(baseline, fresh.Manifest) || fresh.Manifest.Code.HeadSHA != assessment.HeadSHA || fresh.Manifest.Code.BaseSHA != assessment.BaseSHA || fresh.Manifest.Code.BaseRef != assessment.BaseRef || fresh.Policy.ID != assessment.PolicyID {
+		!fullAssessmentNonVisualAnalysisUnchanged(baseline, fresh.Manifest) || fresh.Manifest.Code.HeadSHA != assessment.HeadSHA || fresh.Manifest.Code.BaseSHA != assessment.BaseSHA || fresh.Manifest.Code.BaseRef != assessment.BaseRef || fresh.Policy.ID != assessment.PolicyID {
 		return fresh, errFullAssessmentInputsChanged
 	}
+	if baseline.VisualDigest == "" || baseline.VisualDigest != fresh.Manifest.VisualDigest {
+		if !fullAssessmentVisualSourcesUnchanged(baseline.Visual, fresh.Manifest.Visual) {
+			return fresh, fmt.Errorf("%w: visual sources", errFullAssessmentInputsChanged)
+		}
+		for i, image := range baseline.Visual.Images {
+			if image.ContentDigest == fresh.Manifest.Visual.Images[i].ContentDigest {
+				continue
+			}
+			for _, current := range fresh.VisualEvidence.Evidence {
+				if current.Source.SourceID == image.SourceID && current.Status == models.CodeReviewVisualEvidenceFetchStatusAvailable {
+					return fresh, fmt.Errorf("%w: available visual content", errFullAssessmentInputsChanged)
+				}
+			}
+		}
+		// The manifest deliberately identifies unavailable captures by their
+		// failure as well as successful bytes. Consult the exact immutable
+		// checkpoint only when a same-source mismatch needs classification.
+		if services.CodeReviewVisualEvidence == nil {
+			return fresh, fullAssessmentFreshnessRetry("visual checkpoint unavailable")
+		}
+		checkpoint, err := services.CodeReviewVisualEvidence.Capture(ctx, codereviewsvc.CaptureVisualEvidenceInput{OrgID: job.OrgID, RepositoryID: job.RepositoryID, SessionID: job.SessionID, AssessmentID: &assessment.ID, PullRequestNumber: fresh.PullRequest.GitHubPRNumber, HeadSHA: assessment.HeadSHA})
+		if err != nil || checkpoint.AssessmentID == nil || *checkpoint.AssessmentID != assessment.ID || checkpoint.HeadSHA != assessment.HeadSHA || !reflect.DeepEqual(codereviewsvc.AssessmentVisualInput(checkpoint), baseline.Visual) {
+			return fresh, fullAssessmentFreshnessRetry("visual checkpoint could not verify captured input")
+		}
+		if transitions, inconclusive := fullAssessmentAvailabilityLoss(baseline.Visual, fresh.Manifest.Visual, checkpoint, fresh.VisualEvidence); inconclusive {
+			return fresh, fullAssessmentFreshnessRetry("visual (" + strings.Join(transitions, ", ") + ")")
+		}
+		return fresh, fmt.Errorf("%w: visual content", errFullAssessmentInputsChanged)
+	}
 	return fresh, nil
+}
+
+func fullAssessmentFreshnessRetry(detail string) error {
+	delay, window := 15*time.Second, fullAssessmentFreshnessRetryDuration
+	return &RetryableError{Err: fmt.Errorf("%w: %s", errFullAssessmentFreshnessInconclusive, detail), ConsumeAttempt: true, RetryAfter: &delay, MaxRetryDuration: &window}
 }
 
 func verifyFullAssessmentFreshness(ctx context.Context, services *Services, job runCodeReviewPayload, assessment models.CodeReviewAssessment) error {
@@ -42,10 +80,10 @@ func verifyFullAssessmentFreshness(ctx context.Context, services *Services, job 
 	return err
 }
 
-func fullAssessmentAnalysisUnchanged(before, after codereviewsvc.ReviewInputManifest) bool {
+func fullAssessmentNonVisualAnalysisUnchanged(before, after codereviewsvc.ReviewInputManifest) bool {
 	if before.InputVersion != codereviewsvc.ReviewInputManifestVersion || before.InputVersion != after.InputVersion || before.ReuseEligible != after.ReuseEligible ||
 		before.CodeDigest == "" || before.CodeDigest != after.CodeDigest || before.ContractDigest == "" || before.ContractDigest != after.ContractDigest ||
-		before.IntentDigest == "" || before.IntentDigest != after.IntentDigest || before.VisualDigest == "" || before.VisualDigest != after.VisualDigest ||
+		before.IntentDigest == "" || before.IntentDigest != after.IntentDigest ||
 		before.RequestDigest == "" || before.RequestDigest != after.RequestDigest {
 		return false
 	}
@@ -60,6 +98,53 @@ func fullAssessmentAnalysisUnchanged(before, after codereviewsvc.ReviewInputMani
 		return input
 	}
 	return reflect.DeepEqual(withoutChecks(before.TextEvidence), withoutChecks(after.TextEvidence))
+}
+
+func fullAssessmentVisualSourcesUnchanged(before, after codereviewsvc.ReviewVisualInput) bool {
+	if !before.CaptureComplete || !after.CaptureComplete || !before.SourceProvenanceComplete || !after.SourceProvenanceComplete || len(before.Images) != len(after.Images) {
+		return false
+	}
+	for i, image := range before.Images {
+		fresh := after.Images[i]
+		fresh.ContentDigest = image.ContentDigest
+		if image != fresh {
+			return false
+		}
+	}
+	return true
+}
+
+func fullAssessmentAvailabilityLoss(before, after codereviewsvc.ReviewVisualInput, checkpoint, fresh models.CodeReviewVisualEvidenceSnapshot) ([]string, bool) {
+	if !checkpoint.Complete || !fresh.Complete || checkpoint.Overflow || fresh.Overflow || checkpoint.OmittedSourceCount != 0 || fresh.OmittedSourceCount != 0 || len(checkpoint.Evidence) != len(before.Images) || len(fresh.Evidence) != len(after.Images) {
+		return nil, false
+	}
+	statuses := func(snapshot models.CodeReviewVisualEvidenceSnapshot) map[string]models.CodeReviewVisualEvidenceFetchStatus {
+		result := make(map[string]models.CodeReviewVisualEvidenceFetchStatus, len(snapshot.Evidence))
+		for _, image := range snapshot.Evidence {
+			result[image.Source.SourceID] = image.Status
+		}
+		return result
+	}
+	oldStatuses, newStatuses := statuses(checkpoint), statuses(fresh)
+	transitions := make([]string, 0)
+	for i, image := range before.Images {
+		if image.ContentDigest == after.Images[i].ContentDigest {
+			continue
+		}
+		old, oldOK := oldStatuses[image.SourceID]
+		current, currentOK := newStatuses[image.SourceID]
+		// Every changed content identity must be explained by loss of bytes.
+		// Newly available or different available bytes require new analysis.
+		if !oldOK || !currentOK || old.Validate() != nil || current != models.CodeReviewVisualEvidenceFetchStatusUnavailable {
+			return nil, false
+		}
+		if len(transitions) < 8 {
+			// Source IDs are stable hashes. Never include attachment URLs or
+			// failure text, which can contain credentials from remote services.
+			transitions = append(transitions, fmt.Sprintf("%.80s:%s->%s", image.SourceID, old, current))
+		}
+	}
+	return transitions, len(transitions) > 0
 }
 
 // A staged approval must still pass the backend decision rules at the moment
@@ -173,11 +258,11 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 				freshnessErr = verifyFullAssessmentApproval(lockCtx, lockedReviews, stores, services, job, fresh)
 			}
 			if err := freshnessErr; err != nil {
-				if !errors.Is(err, errFullAssessmentInputsChanged) && !errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
+				if !errors.Is(err, errFullAssessmentInputsChanged) && !errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) && !errors.Is(err, errFullAssessmentFreshnessInconclusive) {
 					return codereviewsvc.SubmitReviewResult{}, false, err
 				}
 				if current.PublicationState == models.CodeReviewPublicationReserved {
-					return codereviewsvc.SubmitReviewResult{}, false, errFullAssessmentInputsChanged
+					return codereviewsvc.SubmitReviewResult{}, false, err
 				}
 				reconciler, ok := services.CodeReviews.(interface {
 					ReconcileAssessmentPublication(context.Context, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error)
@@ -477,6 +562,24 @@ func resumeStagedFullAssessment(ctx context.Context, stores *Stores, services *S
 	if assessment.ResultOrigin == nil || assessment.Decision == nil || assessment.Acceptable == nil || assessment.RenderedBody == nil || len(assessment.StructuredOutcome) == 0 {
 		return db.ErrCodeReviewAssessmentState
 	}
+	logger := *zerolog.Ctx(ctx)
+	var pr models.PullRequest
+	if stores.PullRequests != nil {
+		var err error
+		pr, err = stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("load staged review pull request: %w", err)
+		}
+	}
+	// Cancellation may arrive while freshness is being retried. It can stop an
+	// unsent review, while uncertain or confirmed sends still need receipts.
+	unsent := metadata.GitHubReviewID == nil && assessment.PublicationReceipt == nil && assessment.GitHubReviewID == nil &&
+		(assessment.PublicationState == models.CodeReviewPublicationNotStarted || assessment.PublicationState == models.CodeReviewPublicationReserved)
+	if unsent {
+		if err := stopUnsentStagedReviewIfParentCancelled(ctx, stores, services, logger, job, pr, assessment); err != nil {
+			return err
+		}
+	}
 	if assessment.PublicationState == models.CodeReviewPublicationNotStarted {
 		if err := verifyFullAssessmentFreshness(ctx, services, job, assessment); err != nil {
 			if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
@@ -486,6 +589,37 @@ func resumeStagedFullAssessment(ctx context.Context, stores *Stores, services *S
 				return errCodeReviewPublicationSuperseded
 			}
 			return err
+		}
+	}
+	filesAvailable := changedFiles != nil
+	if changedFiles == nil && unsent && stores.PullRequests != nil {
+		var err error
+		changedFiles, filesAvailable, err = loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
+		if err != nil {
+			return fmt.Errorf("restore staged review change metrics: %w", err)
+		}
+	}
+	if unsent {
+		findings, err := stores.CodeReviews.ListFindings(ctx, job.OrgID, job.SessionID, false)
+		if err != nil {
+			return fmt.Errorf("restore staged inline findings: %w", err)
+		}
+		if len(findings) > 0 {
+			policy, err := stores.CodeReviews.GetPolicyByID(ctx, job.OrgID, job.PolicyID)
+			if err != nil {
+				return fmt.Errorf("load staged inline finding policy: %w", err)
+			}
+			if err := ensureCodeReviewInlineSelection(ctx, stores.CodeReviews, job, findings, changedFiles, policy.Config().InlineCommentLimit); err != nil {
+				return fmt.Errorf("restore staged inline selection: %w", err)
+			}
+		}
+		if err := stopUnsentStagedReviewIfParentCancelled(ctx, stores, services, logger, job, pr, assessment); err != nil {
+			return err
+		}
+	}
+	if metadata.Status == models.CodeReviewSessionStatusRunning || metadata.Status == models.CodeReviewSessionStatusQueued {
+		if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhasePublishing); err != nil {
+			return fmt.Errorf("restore staged review publishing phase: %w", err)
 		}
 	}
 	submission, _, err := submitFullReviewWithAssessment(ctx, stores, services, job, metadata, &assessment, *assessment.Decision, *assessment.RenderedBody, changedFiles)
@@ -503,13 +637,15 @@ func resumeStagedFullAssessment(ctx context.Context, stores *Stores, services *S
 		}
 	}
 	legacy := db.CompleteCodeReviewParams{SessionID: job.SessionID, Decision: *assessment.Decision, Acceptable: *assessment.Acceptable, GitHubReviewID: submission.GitHubReviewID, GitHubReviewURL: submission.GitHubReviewURL, FinalReviewBody: finalBody, RiskReasonDetails: reasons}
-	if changedFiles != nil {
+	if filesAvailable {
 		additions, deletions := codeReviewLineChanges(changedFiles)
 		legacy.Additions, legacy.Deletions = &additions, &deletions
 	}
+	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
 	if err := completeFullAssessment(ctx, stores.ThreadSendTx, assessment, legacy, assessment.StructuredOutcome, assessment.CoverageComplete, *assessment.RenderedBody); err != nil {
 		return err
 	}
+	logCodeReviewFirstReviewerStart(ctx, stores, logger, job, metadata.CreatedAt)
 	return nil
 }
 

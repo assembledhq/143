@@ -491,7 +491,10 @@ func RevokeScheduledCodeReviews(ctx context.Context, tx pgx.Tx, orgID, prID uuid
 		return err
 	}
 	_, err = tx.Exec(ctx, `UPDATE code_review_session_metadata m
- SET status='stale',stale=true,phase=NULL,decision='blocked',acceptable=false,
+ SET status='stale',stale=true,phase=NULL,
+     decision=CASE WHEN m.github_review_id IS NULL THEN NULL ELSE decision END,
+     acceptable=CASE WHEN m.github_review_id IS NULL THEN NULL ELSE acceptable END,
+     risk_reason_details=CASE WHEN m.github_review_id IS NULL THEN '[]'::jsonb ELSE risk_reason_details END,
      failure_reason='review scheduling target superseded',status_code=NULL,status_message=NULL,
      retry_at=NULL,last_error_at=NULL,retryable_failure=false,completed_at=COALESCE(completed_at,now())
  WHERE m.org_id=$1 AND m.pull_request_id=$2 AND m.head_sha<>$3

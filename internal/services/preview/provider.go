@@ -73,7 +73,10 @@ type PreviewSoftRestartProvider interface {
 }
 
 type StartPreviewOptions struct {
-	OrgID        uuid.UUID
+	OrgID uuid.UUID
+	// PreviewID is required for managed infrastructure ownership. Cache-only
+	// prewarms that provision no infrastructure may leave it nil.
+	PreviewID    uuid.UUID
 	RepositoryID uuid.UUID
 	SessionID    uuid.UUID
 	ConfigDigest string
@@ -89,6 +92,25 @@ type StartPreviewOptions struct {
 	// starts and recycles must leave this false. Service start commands remain
 	// responsible for detecting unexpectedly missing artifacts.
 	SkipServiceBuild bool
+}
+
+// InfrastructureOwner is the durable identity attached to preview infrastructure.
+// A nil SessionID represents a standalone branch preview. Starts without a
+// PreviewID cannot participate in managed infrastructure garbage collection.
+type InfrastructureOwner = models.PreviewInfrastructureOwner
+
+// InfrastructureCleanupResolver authorizes infrastructure deletion in batches.
+// Only an explicit true entry permits deletion; errors and absent entries must
+// retain the candidate infrastructure.
+type InfrastructureCleanupResolver func(context.Context, []InfrastructureOwner) (map[InfrastructureOwner]bool, error)
+
+// PreviewHandleAcknowledgementProvider retains a completed launch until the
+// manager has committed its returned handle to durable routing. A service
+// observer can change the preview status before that commit, so returning from
+// StartPreview alone cannot authorize local ownership reconciliation.
+type PreviewHandleAcknowledgementProvider interface {
+	// AcknowledgePreviewHandle is an idempotent local state update with no I/O.
+	AcknowledgePreviewHandle(handle string)
 }
 
 // PreviewHandle is returned by StartPreview and contains the information

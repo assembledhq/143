@@ -73,9 +73,15 @@ jobs:
               - 'sandbox/versions.json'
               - '.dockerignore'
             deploy:
-              - 'deploy/scripts/**'
+              - 'deploy/**'
+              - 'docker-compose*.yml'
+              - 'Dockerfile'
+              - 'Dockerfile.*'
+              - 'go.mod'
+              - 'go.sum'
             ci:
               - '.github/workflows/**'
+              - '.github/scripts/**'
             # Keep this deliberately broad while activity capsules own the
             # transcript renderer. One central classifier prevents required
             # checks from silently disappearing on backend contract changes.
@@ -107,30 +113,31 @@ jobs:
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.demo_seed == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: onefortythree
-          POSTGRES_PASSWORD: dev
-          POSTGRES_DB: onefortythree
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
       # Drives DB-backed migration behavior tests (e.g. the coding-credential
       # versioning test in internal/db). They self-skip when unset, so this
-      # must point at the job's Postgres service or they never run anywhere.
+      # must point at the job's Postgres container or they never run anywhere.
       TEST_DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Test CI helper scripts
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'
+      - name: Start Postgres with registry fallback
+        id: postgres
+        timeout-minutes: 10
+        run: bash .github/scripts/start-ci-postgres.sh
+      - name: Preload preview infrastructure test image
+        timeout-minutes: 10
+        # Fail early if every source is unavailable, before compiling the suite.
+        # Preserve the production template's image name and PostgreSQL variant.
+        run: |
+          bash .github/scripts/pull-ci-image.sh postgres:17-alpine \
+            public.ecr.aws/docker/library/postgres:17-alpine \
+            mirror.gcr.io/library/postgres:17-alpine \
+            postgres:17-alpine
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -141,17 +148,13 @@ jobs:
       - name: Wait for Postgres
         run: go run ./cmd/wait-postgres
 
-      - name: Size Postgres lock table for parallel schema tests
+      - name: Verify Postgres lock table size for parallel schema tests
         env:
-          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
         # Parallel fixtures apply the full migration chain in isolated schemas.
         # Dropping those schemas together can exhaust the default lock table.
-        # This setting requires a restart; verify it before running migrations.
+        # The container starts with the larger lock table; verify it before migrations.
         run: |
-          docker exec "$POSTGRES_CONTAINER" psql -U onefortythree -d onefortythree -v ON_ERROR_STOP=1 \
-            -c 'ALTER SYSTEM SET max_locks_per_transaction = 256'
-          docker restart "$POSTGRES_CONTAINER"
-          go run ./cmd/wait-postgres
           actual=$(docker exec "$POSTGRES_CONTAINER" psql -U onefortythree -d onefortythree -At \
             -c 'SHOW max_locks_per_transaction')
           echo "max_locks_per_transaction=$actual"
@@ -168,42 +171,84 @@ jobs:
 
       - name: Run tests (PR — no race)
         if: github.event_name == 'pull_request'
-        run: go test ./internal/... -coverprofile=coverage.out -covermode=count -timeout=120s
+        run: go test ./internal/... -skip '^TestBrowserChromeDP' -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=count -timeout=120s
 
-      - name: Run tests with race + coverage (main only)
-        if: github.event_name == 'push'
+      - name: Run tests with race + coverage (non-PR)
+        if: github.event_name != 'pull_request'
         run: |
-          go test ./internal/... -coverprofile=coverage.out -covermode=atomic -race -timeout=180s
-          go tool cover -func=coverage.out
+          go test ./internal/... -skip '^TestBrowserChromeDP' -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=atomic -race -timeout=180s
+
+      # Chrome startup and rendering need CPU that the parallel backend suite
+      # can otherwise consume. Keep real browser fixtures in a serial step,
+      # with the same race mode and their own coverage contribution.
+      - name: Run preview browser lifecycle tests
+        timeout-minutes: 5
+        env:
+          TEST_BROWSER_REQUIRED: "1"
+        run: |
+          mode=count
+          race=()
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=atomic
+            race=(-race)
+          fi
+          go test ./internal/services/preview -run '^TestBrowserChromeDP' -parallel=1 -count=1 -v \
+            -coverpkg=./internal/... -coverprofile=coverage-browser.out -covermode="$mode" \
+            "${race[@]}" -timeout=180s
 
       # Integration tests run on every backend-test invocation (PR + push).
-      # They reuse the Postgres service this job already brings up — no new
+      # They reuse the Postgres container this job already brings up — no new
       # infra. Build-tag gating means they don't run during the unit-test
       # step above, so we don't double-charge CI for the same code paths.
       - name: Run integration tests
         run: |
+          mode=count
+          race=()
+          timeout=120s
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=atomic
+            race=(-race)
+            timeout=180s
+          fi
           INTEGRATION_DATABASE_URL=$DATABASE_URL \
-          go test -tags=integration -timeout=120s ./internal/integration/...
+          go test -tags=integration -coverpkg=./internal/... -coverprofile=coverage-integration.out \
+            -covermode="$mode" "${race[@]}" -timeout="$timeout" ./internal/integration/...
 
-      - name: Check backend coverage floor (main only)
-        if: github.event_name == 'push'
+      # Exercise real image-declared volumes: mocks cannot prove that Docker
+      # removed preview data or preserved explicitly named storage.
+      - name: Verify preview infrastructure volume lifecycle
+        run: go test -tags=docker_integration ./internal/services/preview/providers -run '^TestDockerIntegration' -count=1 -timeout=180s
+
+      # Measure all backend code exercised by the successful suites, without
+      # double-counting statements shared by multiple test binaries.
+      - name: Combine backend coverage
         run: |
-          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
-          echo "Total coverage: ${COVERAGE}%"
-          if awk "BEGIN { exit !(${COVERAGE} < ${BACKEND_COVERAGE_MIN}) }"; then
-            echo "::error::Backend coverage ${COVERAGE}% is below the minimum ${BACKEND_COVERAGE_MIN}%"
-            exit 1
-          fi
-          if awk "BEGIN { exit !(${COVERAGE} < ${BACKEND_COVERAGE_TARGET}) }"; then
-            echo "::warning::Backend coverage ${COVERAGE}% is below target ${BACKEND_COVERAGE_TARGET}%"
-          fi
+          python3 .github/scripts/merge_go_coverage.py coverage.out coverage-unit.out coverage-browser.out coverage-integration.out
+          go tool cover -func=coverage.out
+
+      - name: Check backend coverage floor
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        run: |
+          python3 .github/scripts/check_go_coverage.py coverage.out \
+            "$BACKEND_COVERAGE_MIN" "$BACKEND_COVERAGE_TARGET"
 
       - name: Upload coverage report
-        if: github.event_name == 'push'
+        # Keep the evidence available when tests or the coverage floor fail.
+        if: ${{ !cancelled() && hashFiles('coverage*.out') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: backend-coverage
-          path: coverage.out
+          path: |
+            coverage.out
+            coverage-unit.out
+            coverage-browser.out
+            coverage-integration.out
+
+      - name: Stop CI Postgres
+        if: always() && steps.postgres.outputs.container_id != ''
+        env:
+          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
+        run: docker rm --force --volumes "$POSTGRES_CONTAINER"
 
   frontend-lint:
     name: Frontend Lint & Typecheck
@@ -364,24 +409,14 @@ jobs:
     needs: changes
     if: needs.changes.outputs.migrations == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: onefortythree
-          POSTGRES_PASSWORD: dev
-          POSTGRES_DB: onefortythree
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
     steps:
       - uses: actions/checkout@v6
+      - name: Start Postgres with registry fallback
+        id: postgres
+        timeout-minutes: 10
+        run: bash .github/scripts/start-ci-postgres.sh
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -400,6 +435,12 @@ jobs:
 
       - name: Migrate up again (idempotency check)
         run: go run cmd/migrate/main.go up
+
+      - name: Stop CI Postgres
+        if: always() && steps.postgres.outputs.container_id != ''
+        env:
+          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
+        run: docker rm --force --volumes "$POSTGRES_CONTAINER"
 
   docker-build:
     name: Docker Build
@@ -424,6 +465,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v4
+        with:
+          # Bootstrap must use the cache before BuildKit's mirror config is active.
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          # Cache Docker Hub images through Google's public mirror for CI builds.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
       - name: Build ${{ matrix.name }} Docker image
         uses: docker/build-push-action@v7
         with:
@@ -452,6 +500,20 @@ jobs:
           go install github.com/securego/gosec/v2/cmd/gosec@v2.22.4
           gosec ./...
 
+  # Config tests read repository-wide inputs; run them for every PR and push.
+  deploy-config-test:
+    name: Deploy Config Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Validate deployment configuration
+        run: |
+          go test ./deploy -count=1 -timeout=120s
+          go vet ./deploy
+
   deploy-scripts-test:
     name: Deploy Scripts Test
     needs: changes
@@ -469,7 +531,7 @@ jobs:
 
   required-checks:
     name: All Checks Pass
-    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, session-transcript-e2e, migration-check, docker-build, security, deploy-scripts-test]
+    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, session-transcript-e2e, migration-check, docker-build, security, deploy-scripts-test, deploy-config-test]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -483,7 +545,13 @@ jobs:
           echo "migration-check: ${{ needs.migration-check.result }}"
           echo "docker-build: ${{ needs.docker-build.result }}"
           echo "security: ${{ needs.security.result }}"
+          echo "deploy-config-test: ${{ needs.deploy-config-test.result }}"
           echo "deploy-scripts-test: ${{ needs.deploy-scripts-test.result }}"
+
+          if [[ "${{ needs.deploy-config-test.result }}" != "success" ]]; then
+            echo "::error::Deployment configuration checks must succeed"
+            exit 1
+          fi
 
           for result in \
             "${{ needs.backend-lint.result }}" \
@@ -494,7 +562,8 @@ jobs:
             "${{ needs.migration-check.result }}" \
             "${{ needs.docker-build.result }}" \
             "${{ needs.security.result }}" \
-            "${{ needs.deploy-scripts-test.result }}"; do
+            "${{ needs.deploy-scripts-test.result }}" \
+            "${{ needs.deploy-config-test.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "::error::One or more required checks failed"
               exit 1

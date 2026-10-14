@@ -178,6 +178,152 @@ print('loaded')
                 mock.patch.object(policy, 'Policy', return_value=self.p):
             return policy.main()
 
+    def ongoing_profile(self, **overrides):
+        current = policy.dt.datetime.now(policy.dt.timezone.utc)
+        profile = dict(schema=2, mode='ongoing', owner='test operator', evidence='private acceptance record',
+                       starts_at=(current - policy.dt.timedelta(hours=1)).isoformat(),
+                       timezone='UTC', hours=[current.hour], host_memory_full_percent=5, db_memory_full_percent=5)
+        profile.update(overrides)
+        policy.atomic_json(self.p.state / 'scheduled-backup.json', profile)
+        return profile
+
+    def test_ongoing_schedule_requires_explicit_schema_and_approved_fields(self):
+        profile = self.ongoing_profile(starts_at='2026-01-01T00:00:00+00:00')
+        for timestamp in ('2026-01-01T00:00:00+00:00', '2027-06-01T00:00:00+00:00'):
+            with self.subTest(timestamp=timestamp):
+                current = policy.dt.datetime.fromisoformat(timestamp).timestamp()
+                self.assertEqual(policy.scheduled_backup_profile(self.p.state, current), profile)
+        for changes in (dict(mode='trial'), dict(mode=True), dict(expires_at=None), dict(schema=1),
+                        dict(hours=[]), dict(hours=[8, 8]), dict(hours=[20, 8]), dict(hours=[True]),
+                        dict(hours=[24]), dict(hours='8,20'), dict(timezone='Unknown/Invalid'),
+                        dict(timezone='/etc/passwd'), dict(timezone=True), dict(owner=''),
+                        dict(evidence=''), dict(db_memory_full_percent=6), dict(allow_swap_bursts=True)):
+            with self.subTest(changes=changes):
+                policy.atomic_json(self.p.state / 'scheduled-backup.json', dict(profile, **changes))
+                with self.assertRaises((policy.Refused, ValueError)):
+                    policy.scheduled_backup_profile(self.p.state, current)
+        policy.atomic_json(self.p.state / 'scheduled-backup.json', profile)
+        with self.assertRaisesRegex(policy.Refused, 'not active'):
+            policy.scheduled_backup_profile(self.p.state, policy.dt.datetime(2025, 12, 31, tzinfo=policy.dt.timezone.utc).timestamp())
+
+    def test_scheduled_resource_profile_requires_explicit_schema_and_narrow_values(self):
+        for cpus in (0.75, 1.0):
+            for rate in (4, 8):
+                with self.subTest(cpus=cpus, rate=rate):
+                    profile = self.ongoing_profile(schema=3, dump_cpus=cpus, swap_out_mib_per_second=rate)
+                    self.assertEqual(policy.scheduled_backup_profile(self.p.state), profile)
+        profile = self.ongoing_profile(schema=3, dump_cpus=0.75, swap_out_mib_per_second=8)
+        cases = [dict(dump_cpus=x) for x in (True, 0.5, 2, '0.75', None)]
+        cases += [dict(swap_out_mib_per_second=x) for x in (True, 0, 5, 16, 8.0, '8', None)]
+        cases += [dict(schema=2), dict(schema=1), dict(swap_usage_limit_bytes=512 * 1024 ** 2),
+                  dict(allow_swap_bursts=True)]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                policy.atomic_json(self.p.state / 'scheduled-backup.json', dict(profile, **changes))
+                with self.assertRaises(policy.Refused):
+                    policy.scheduled_backup_profile(self.p.state)
+        for missing in ('dump_cpus', 'swap_out_mib_per_second'):
+            with self.subTest(missing=missing):
+                incomplete = {k: v for k, v in profile.items() if k != missing}
+                policy.atomic_json(self.p.state / 'scheduled-backup.json', incomplete)
+                with self.assertRaises(policy.Refused):
+                    policy.scheduled_backup_profile(self.p.state)
+
+    def test_scheduled_resource_profile_applies_under_lock_and_resets_for_legacy_and_manual(self):
+        # A changed profile while acquiring the lock must be the one actually used.
+        self.ongoing_profile()
+        selected = {}
+        original_lock = self.p.locked
+        @contextlib.contextmanager
+        def changed_profile_lock():
+            with original_lock():
+                selected.update(self.ongoing_profile(schema=3, dump_cpus=0.75, swap_out_mib_per_second=8))
+                yield
+        output = io.StringIO()
+        with mock.patch.object(self.p, 'locked', side_effect=changed_profile_lock), \
+                mock.patch.object(self.p, 'backup') as backup, contextlib.redirect_stdout(output):
+            self.assertEqual(self.scheduled(), 0)
+            backup.assert_called_once()
+        self.assertEqual((self.p.dump_cpus, self.p.swap_out_mib_per_second, self.p.allow_swap_bursts),
+                         (0.75, 8, False), 'scheduled rate must not enable the 512 MiB canary allowance')
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        limits = next(e for e in events if e['event'] == 'backup_pressure_policy')
+        self.assertEqual({k: limits[k] for k in ('dump_client_cpus', 'swap_usage_limit_bytes',
+                         'swap_out_limit_bytes_per_second', 'admission_swap_usage_limit_bytes',
+                         'admission_swap_out_limit_bytes_per_second')},
+                         dict(dump_client_cpus=0.75, swap_usage_limit_bytes=256 * 1024 ** 2,
+                              swap_out_limit_bytes_per_second=8 * 1024 ** 2,
+                              admission_swap_usage_limit_bytes=256 * 1024 ** 2,
+                              admission_swap_out_limit_bytes_per_second=4 * 1024 ** 2))
+        attempt = policy.read_json(next(self.p.state.glob('attempt-*.json')))
+        self.assertEqual(attempt['schedule'], selected, 'persist the profile selected under the lock')
+        for configure in (self.schedule_profile, self.ongoing_profile):
+            configure()
+            with mock.patch.object(self.p, 'backup'):
+                self.assertEqual(self.scheduled(), 0)
+            self.assertEqual((self.p.dump_cpus, self.p.swap_out_mib_per_second, self.p.allow_swap_bursts),
+                             (1.0, 4, False), 'legacy profiles must retain their original defaults')
+        self.p.dump_cpus, self.p.swap_out_mib_per_second = 0.75, 8
+        with mock.patch.object(sys, 'argv', ['pg-backup-policy.py', 'backup']), \
+                mock.patch.dict(os.environ, BACKUP_ENABLED='true', BACKUP_ATTENDED='true', BACKUP_OBSERVER='operator'), \
+                mock.patch.object(policy, 'Policy', return_value=self.p), mock.patch.object(self.p, 'backup'):
+            self.assertEqual(policy.main(), 0)
+        self.assertEqual((self.p.dump_cpus, self.p.swap_out_mib_per_second, self.p.allow_swap_bursts),
+                         (1.0, 4, False), 'scheduled resource selections must not carry into manual runs')
+
+    def test_ongoing_eastern_hours_follow_daylight_saving_changes(self):
+        profile = self.ongoing_profile(timezone='America/New_York', hours=[8, 20])
+        cases = [('2026-10-09T00:00:00+00:00', True),  # 8 PM EDT
+                 ('2026-10-09T12:00:00+00:00', True),  # 8 AM EDT
+                 ('2026-10-09T13:00:00+00:00', False),
+                 ('2026-11-01T12:00:00+00:00', False),
+                 ('2026-11-01T13:00:00+00:00', True),  # 8 AM EST after fall-back
+                 ('2026-11-02T01:00:00+00:00', True),  # 8 PM EST
+                 ('2027-03-14T12:00:00+00:00', True),  # 8 AM EDT after spring-forward
+                 ('2027-03-14T13:00:00+00:00', False)]
+        for timestamp, due in cases:
+            with self.subTest(timestamp=timestamp):
+                self.assertEqual(policy.scheduled_backup_due(profile, policy.dt.datetime.fromisoformat(timestamp).timestamp()), due)
+
+    def test_off_hour_tick_preserves_failed_attempt_and_does_no_work(self):
+        current = policy.dt.datetime.now(policy.dt.timezone.utc)
+        self.ongoing_profile(hours=[(current.hour + 1) % 24])
+        previous = self.p.state / 'attempt-previous.json'
+        policy.atomic_json(previous, dict(action='backup', status='failed', error='admission failed',
+                                         started_at=current.isoformat()))
+        before = {p.name: p.read_bytes() for p in self.p.state.iterdir() if p.is_file()}
+        with mock.patch.object(policy, 'start_attempt') as start, \
+                mock.patch.object(self.p, 'locked') as lock, mock.patch.object(self.p, 'backup') as backup:
+            self.assertEqual(self.scheduled(), 0)
+            start.assert_not_called()
+            lock.assert_not_called()
+            backup.assert_not_called()
+        self.assertEqual({p.name: p.read_bytes() for p in self.p.state.iterdir() if p.is_file()}, before)
+        # An off-hour tick must not silently accept prohibited overrides.
+        with mock.patch.object(self.p, 'backup') as backup:
+            self.assertEqual(self.scheduled('--canary'), 1)
+            backup.assert_not_called()
+
+    def test_ongoing_schedule_rechecks_hour_under_lock_and_keeps_guards(self):
+        profile = self.ongoing_profile()
+        with mock.patch.object(policy, 'scheduled_backup_due', side_effect=[True, False]), \
+                mock.patch.object(self.p, 'backup') as backup:
+            self.assertEqual(self.scheduled(), 1)
+            backup.assert_not_called()
+        latest = max((policy.read_json(p) for p in self.p.state.glob('attempt-*.json')), key=lambda a: a['started_at'])
+        self.assertEqual(latest['error'], 'scheduled backup hour is no longer due')
+        with mock.patch.object(self.p, 'backup') as backup:
+            self.assertEqual(self.scheduled(), 0)
+            backup.assert_called_once()
+            self.assertFalse(backup.call_args.args[0].canary)
+            self.assertEqual((self.p.host_memory_full_percent, self.p.db_memory_full_percent, self.p.allow_swap_bursts), (5, 5, False))
+        latest = max((policy.read_json(p) for p in self.p.state.glob('attempt-*.json')), key=lambda a: a['started_at'])
+        self.assertEqual((latest['execution_mode'], latest['schedule'], latest['status']), ('scheduled', profile, 'completed'))
+        with mock.patch.object(self.p, 'backup') as backup:
+            self.assertEqual(self.scheduled(enabled='false'), 1)
+            self.assertEqual(self.scheduled('--allow-swap-bursts'), 1)
+            backup.assert_not_called()
+
     def test_schedule_profile_window_boundaries_and_exact_schema(self):
         start = policy.dt.datetime(2026, 1, 1, tzinfo=policy.dt.timezone.utc)
         end = start + policy.dt.timedelta(hours=24)
@@ -233,6 +379,7 @@ print('loaded')
     def test_scheduled_scope_and_hold_cannot_authorize_other_operations(self):
         self.schedule_profile()
         for args in [('--bootstrap',), ('--canary',), ('--allow-swap-bursts',),
+                     ('--dump-cpus', '0.75'), ('--dump-cpus', '1'),
                      ('--exercise-stop-after', '5'), ('--host-memory-full-percent', '1'),
                      ('--host-memory-full-percent', '5'), ('--db-memory-full-percent', '5')]:
             with self.subTest(args=args), mock.patch.object(self.p, 'backup') as backup:
@@ -249,7 +396,7 @@ print('loaded')
             os.environ.pop('BACKUP_ENABLED', None)
             self.assertEqual(policy.main(), 1, 'scheduled mode requires an explicit enable flag')
             factory.assert_not_called()
-        for action in ('backup', 'prune', 'resume-upload', 'restore'):
+        for action in ('backup', 'prune', 'resume-upload', 'resume-verification', 'restore'):
             with self.subTest(action=action), \
                     mock.patch.object(sys, 'argv', ['pg-backup-policy.py', action]), \
                     mock.patch.dict(os.environ, BACKUP_ENABLED='true', RESTORE_TEST_ENABLED='true',
@@ -348,7 +495,7 @@ print('loaded')
         self.assertEqual([p.read_bytes() for p in paths], [b'verified dump'] * 2)
         self.assertFalse((self.p.state / 'pending.json').exists())
 
-    def test_scheduled_failed_upload_is_preserved_and_never_retried(self):
+    def test_scheduled_upload_without_cleanup_evidence_remains_blocked(self):
         self.schedule_profile()
         paths = [self.archive(n) for n in (1, 2)]
         self.canary()
@@ -360,7 +507,7 @@ print('loaded')
         self.assertEqual(len(archives), 3, 'failed upload must preserve the new local archive and both older copies')
         self.assertEqual([p.read_bytes() for p in paths], [b'verified dump'] * 2)
         with mock.patch.object(self.p, 'dump_archive') as dump, mock.patch.object(self.p, 'aws') as aws:
-            self.assertEqual(self.scheduled(), 1, 'pending work requires attended reconciliation')
+            self.assertEqual(self.scheduled(), 1, 'unproven cleanup requires attended reconciliation')
             dump.assert_not_called()
             aws.assert_not_called()
         self.assertEqual({p.name: policy.identity(p) for p in self.root.glob('*.dump')}, archives)
@@ -519,6 +666,35 @@ print('loaded')
                 for f in self.root.glob('.*.partial.*'): f.unlink()
                 (self.p.state / 'pending.json').unlink()
                 setattr(self.p, defect, False)
+
+    def test_verification_marker_keeps_original_database_measurement(self):
+        self.archive(1); self.archive(2); self.canary()
+        with self.simulated_io(), mock.patch.object(self.p, 'transfer_archive', side_effect=policy.Refused('reader stopped')):
+            with self.assertRaisesRegex(policy.Refused, 'reader stopped'):
+                self.p.backup(argparse.Namespace(bootstrap=False, canary=True))
+        pending = policy.read_json(self.p.state / 'pending.json')
+        self.assertEqual((pending['phase'], pending['database_bytes']), ('verification', 100))
+        self.assertTrue(pending['timeline']['dump_completed_at'])
+
+    def test_upload_checkpoint_failure_leaves_final_file_with_upload_marker(self):
+        self.archive(1); self.archive(2); self.canary()
+        def transfer(partial, app, timeline, measured_db, version):
+            def checkpoint(name, **kwargs):
+                if name == 'upload_started': raise policy.Refused('host_io pressure at risk')
+            guard = types.SimpleNamespace(structural_check=self.p.structural_check, checksum=policy.sha256,
+                                          aws=self.p.aws, checkpoint=checkpoint)
+            return self.p.finish_archive(partial, app, timeline, measured_db, version, guard)
+        with self.simulated_io(), mock.patch.object(self.p, 'transfer_archive', side_effect=transfer):
+            with self.assertRaisesRegex(policy.Refused, 'host_io pressure'):
+                self.p.backup(argparse.Namespace(bootstrap=False, canary=True))
+        pending = policy.read_json(self.p.state / 'pending.json')
+        final = self.root / pending['file']
+        self.assertEqual(pending['phase'], 'upload')
+        self.assertEqual(pending['identity'], policy.identity(final))
+        self.assertEqual(pending['sha256'], policy.sha256(final))
+        self.assertEqual(pending['database_bytes'], 100)
+        self.assertEqual(list(self.root.glob('.*.partial.*')), [])
+        self.assertFalse((self.p.state / (final.name + '.json')).exists())
 
     def test_post_upload_pressure_preserves_success_receipt_and_pressure_evidence(self):
         paths = [self.archive(n) for n in (1, 2)]
@@ -955,6 +1131,30 @@ sys.exit(p.main())
                     backup.assert_called_once()
                     self.assertEqual(backup.call_args.args[0].db_memory_full_percent, limit,
                                      'the database pressure choice must apply only to this invocation')
+
+    def test_lower_dump_cpu_is_attended_canary_only_without_changing_guards(self):
+        cases = [(['backup', '--canary', '--dump-cpus', '0.75'], 'true', 0, 0.75),
+                 (['backup', '--canary'], 'true', 0, 1.0),
+                 (['backup', '--dump-cpus', '0.75'], 'true', 1, None),
+                 (['backup', '--canary', '--dump-cpus', '0.75'], 'false', 1, None),
+                 (['backup', '--canary', '--dump-cpus', '2'], 'true', 2, None)]
+        for args, attended, status, expected in cases:
+            with self.subTest(args=args, attended=attended), mock.patch.object(sys, 'argv', ['policy', *args]), \
+                    mock.patch.dict(os.environ, BACKUP_ENABLED='true', BACKUP_ATTENDED=attended, BACKUP_OBSERVER='operator'), \
+                    mock.patch.object(policy.Policy, 'backup', autospec=True) as backup, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                if status == 2:
+                    with self.assertRaises(SystemExit) as error: policy.main()
+                    self.assertEqual(error.exception.code, 2)
+                else:
+                    self.assertEqual(policy.main(), status)
+                if expected is None:
+                    backup.assert_not_called()
+                else:
+                    owner = backup.call_args.args[0]
+                    self.assertEqual(owner.dump_cpus, expected)
+                    self.assertEqual((owner.host_memory_full_percent, owner.db_memory_full_percent, owner.allow_swap_bursts),
+                                     (1, 1, False), 'CPU selection must not relax resource guards')
 
     def test_cli_swap_override_is_attended_canary_only_and_resets_each_invocation(self):
         cases = [

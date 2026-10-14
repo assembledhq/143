@@ -3,7 +3,10 @@
 import { useState, type ReactNode } from "react";
 import { ChevronDown, ChevronUp, Plus, Trash2 } from "lucide-react";
 
-import { AutomationModelSelect } from "@/components/automation-model-select";
+import {
+  AutomationModelSelect,
+  type AutomationModelSelection,
+} from "@/components/automation-model-select";
 import { Button } from "@/components/ui/button";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { Label } from "@/components/ui/label";
@@ -203,17 +206,26 @@ export function AutomationFallbackModelsEditor({
     onChange(buildAutomationFallbackModels(next));
   }
 
-  function setRankModel(index: number, model: string | undefined) {
+  // The group a model was picked from is the agent the rank runs on. Pi and
+  // OpenCode list several of the same provider/model ids, so inferring from
+  // the id alone would put a Pi pick on OpenCode.
+  function selectionAgentType(selection: AutomationModelSelection): string {
+    return selection.agentType ?? agentTypeForModel(selection.model) ?? primaryAgentType;
+  }
+
+  function setRankModel(index: number, selection: AutomationModelSelection | undefined) {
     // Clearing a committed rank back to "Auto" has no meaning for a fallback —
     // a rank with no model is exactly what removing it expresses.
-    if (!model) {
+    if (!selection?.model) {
       removeRank(index);
       return;
     }
-    const agentType = agentTypeForModel(model) ?? primaryAgentType;
+    const agentType = selectionAgentType(selection);
     commit(
       ranks.map((rank, i) =>
-        i === index ? { model, agentType, reasoningEffort: rank.reasoningEffort } : rank,
+        i === index
+          ? { model: selection.model, agentType, reasoningEffort: rank.reasoningEffort }
+          : rank,
       ),
     );
   }
@@ -234,15 +246,18 @@ export function AutomationFallbackModelsEditor({
     commit(ranks.filter((_, i) => i !== index));
   }
 
-  function addDraftRank(model: string) {
-    const agentType = agentTypeForModel(model) ?? primaryAgentType;
+  function addDraftRank(selection: AutomationModelSelection) {
+    const agentType = selectionAgentType(selection);
     setDraftOpen(false);
-    commit([...ranks, { model, agentType, reasoningEffort: "" }]);
+    commit([...ranks, { model: selection.model, agentType, reasoningEffort: "" }]);
   }
 
-  // Every rank the chain already claims, so no two rows pick the same model and
-  // no fallback duplicates the primary.
-  const claimedModels = [primaryModel ?? "", ...ranks.map((rank) => rank.model)].filter(Boolean);
+  // Every rank the chain already claims, so no two rows pick the same model on
+  // the same agent and no fallback duplicates the primary.
+  const claimedSelections: AutomationModelSelection[] = [
+    ...(primaryModel ? [{ model: primaryModel, agentType: primaryAgentType }] : []),
+    ...ranks.map((rank) => ({ model: rank.model, agentType: rank.agentType })),
+  ];
 
   return (
     <div className="space-y-1.5">
@@ -292,13 +307,14 @@ export function AutomationFallbackModelsEditor({
             primaryReasoningEffort,
           );
           return (
-            // Keyed by model alone, never by position: models are unique within
-            // a chain (excludeModels enforces it), and mixing the index in made
-            // every key from the edit point onward change on a reorder or a
-            // removal. React then unmounted and remounted the rows instead of
-            // moving them, destroying the very button the user had just
-            // activated and dropping keyboard focus to <body>.
-            <div key={rank.model} className="space-y-1.5 px-2.5 py-2">
+            // Keyed by agent and model, never by position: that pair is unique
+            // within a chain (excludeSelections enforces it — the same model id
+            // can appear once under Pi and once under OpenCode), and mixing the
+            // index in made every key from the edit point onward change on a
+            // reorder or a removal. React then unmounted and remounted the rows
+            // instead of moving them, destroying the very button the user had
+            // just activated and dropping keyboard focus to <body>.
+            <div key={`${rank.agentType}::${rank.model}`} className="space-y-1.5 px-2.5 py-2">
               <span className="text-xs font-medium text-muted-foreground">
                 {index + 2}. Fallback model
               </span>
@@ -307,10 +323,11 @@ export function AutomationFallbackModelsEditor({
                   <AutomationModelSelect
                     ariaLabel={`Rank ${index + 2} fallback model`}
                     value={rank.model}
+                    agentType={rank.agentType}
                     density="dense"
                     disabled={disabled}
-                    excludeModels={claimedModels}
-                    onValueChange={(model) => setRankModel(index, model)}
+                    excludeSelections={claimedSelections}
+                    onValueChange={(selection) => setRankModel(index, selection)}
                   />
                 </div>
                 <RankAction
@@ -388,9 +405,9 @@ export function AutomationFallbackModelsEditor({
                   ariaLabel={`Rank ${ranks.length + 2} fallback model`}
                   density="dense"
                   disabled={disabled}
-                  excludeModels={claimedModels}
-                  onValueChange={(model) => {
-                    if (model) addDraftRank(model);
+                  excludeSelections={claimedSelections}
+                  onValueChange={(selection) => {
+                    if (selection?.model) addDraftRank(selection);
                   }}
                 />
               </div>
@@ -436,7 +453,7 @@ export function AutomationFallbackModelsSummary({
         <p className="text-xs text-muted-foreground">No fallback models.</p>
       ) : (
         ranks.map((rank, index) => (
-          <p key={rank.model} className="text-xs text-foreground">
+          <p key={`${rank.agentType}::${rank.model}`} className="text-xs text-foreground">
             {index + 2}. {modelOptionLabel(rank.model)}
             <span className="text-muted-foreground">
               {" · "}

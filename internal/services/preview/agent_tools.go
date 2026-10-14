@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -1412,14 +1414,22 @@ func contrastRatio(fg, bg rgbColor) float64 {
 // isLargeTextSize determines if text qualifies as "large text" under WCAG.
 // Large text is >= 18pt (24px) or >= 14pt bold (18.66px, ~19px, font-weight >= 700).
 func isLargeTextSize(fontSize, fontWeight string) bool {
-	var size float64
-	if n, _ := fmt.Sscanf(fontSize, "%fpx", &size); n != 1 {
-		if n, _ := fmt.Sscanf(fontSize, "%fpt", &size); n == 1 {
-			size = size * 4.0 / 3.0 // pt to px
-		} else {
-			return false
-		}
+	fontSize = strings.TrimSpace(fontSize)
+	unitScale := 1.0
+	switch {
+	case strings.HasSuffix(fontSize, "px"):
+		fontSize = strings.TrimSuffix(fontSize, "px")
+	case strings.HasSuffix(fontSize, "pt"):
+		fontSize = strings.TrimSuffix(fontSize, "pt")
+		unitScale = 4.0 / 3.0
+	default:
+		return false
 	}
+	size, err := strconv.ParseFloat(fontSize, 64)
+	if err != nil || math.IsNaN(size) || math.IsInf(size, 0) {
+		return false
+	}
+	size *= unitScale
 
 	isBold := fontWeight == "bold" || fontWeight == "bolder"
 	if !isBold {

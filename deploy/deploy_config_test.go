@@ -42,6 +42,7 @@ func TestProductionComposeCapsDatabasePools(t *testing.T) {
 	require.NoError(t, err, "test should read the worker compose file")
 	workerText := string(workerCompose)
 	require.Contains(t, workerText, "pool_max_conns=${WORKER_DATABASE_POOL_MAX_CONNS:-4}", "worker compose should cap worker and inherited session-executor database pools")
+	require.Contains(t, workerText, "DATABASE_MAX_CONN_IDLE_TIME: ${WORKER_DATABASE_MAX_CONN_IDLE_TIME:-5m}", "worker and inherited executor pools should configure a five-minute idle lifetime")
 }
 
 func TestFrontendDockerfileRunsRepoScopedStandaloneServer(t *testing.T) {

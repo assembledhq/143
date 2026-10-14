@@ -151,7 +151,7 @@ func TestCodeReviewInsightStore_ProjectRecentDecisionsBatchesProjection(t *testi
 	orgID := uuid.New()
 	sessionIDs := []uuid.UUID{uuid.New(), uuid.New()}
 	staleBefore := time.Date(2026, 8, 4, 7, 0, 0, 0, time.UTC)
-	pool.ExpectQuery("SELECT m.session_id[\\s\\S]+code_review_pull_request_lifecycle_observations[\\s\\S]+o.lifecycle_observed_at[\\s\\S]+LIMIT @limit").
+	pool.ExpectQuery("SELECT m.session_id[\\s\\S]+code_review_pull_request_lifecycle_observations[\\s\\S]+COALESCE\\(m.completed_at, m.created_at\\)[\\s\\S]+o.lifecycle_observed_at[\\s\\S]+LIMIT @limit").
 		WithArgs(orgID, staleBefore, 100).
 		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionIDs[0]).AddRow(sessionIDs[1]))
 	pool.ExpectExec("INSERT INTO code_review_decision_outcomes[\\s\\S]+m.session_id = ANY\\(@session_ids\\)").

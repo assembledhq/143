@@ -57,6 +57,17 @@ $diff$,
 WHERE id = '00000000-0000-4000-a000-000000000300'::uuid
   AND org_id = '00000000-0000-4000-a000-000000000001'::uuid;
 
+-- The Changes view reads the latest snapshot before the session's legacy diff.
+-- Keep that seed-owned snapshot complete so demo captures show the same diff.
+UPDATE session_diff_snapshots AS snapshot
+SET diff = session.diff
+FROM sessions AS session
+WHERE snapshot.id = '00000000-0000-4000-a000-000000000720'::uuid
+  AND snapshot.session_id = session.id
+  AND snapshot.org_id = session.org_id
+  AND session.id = '00000000-0000-4000-a000-000000000300'::uuid
+  AND session.org_id = '00000000-0000-4000-a000-000000000001'::uuid;
+
 -- A few chat messages per session so the detail pages render a conversation.
 -- DELETE first to keep reseeds idempotent (see note at top of the illusory
 -- section — session_messages has no unique constraint on the seeded cols).
