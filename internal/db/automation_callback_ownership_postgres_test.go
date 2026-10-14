@@ -137,17 +137,23 @@ func TestAutomationRunStore_OwnershipFencesTenantPostgres(t *testing.T) {
 // The org default resolves every agentless rank, and the attempt ledger
 // matches ranks by agent — so a default re-read live on each attempt lets an
 // org setting changed mid-chain re-label rank 0 and re-run the primary before
-// the configured fallback. The first claim freezes the default; a later claim
-// for the same run must keep it even when the caller now resolves another.
+// the configured fallback. The first claim freezes the default into an object
+// snapshot. A later claim that resolved against a different default read the
+// run before that freeze, so it must lose rather than dispatch a wrong rank.
+// Snapshots that are not objects are left exactly as they are: JSON null
+// concatenated with an object becomes an array no reader accepts.
 func TestAutomationRunStore_ClaimFreezesDispatchDefaultAgentPostgres(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
-		name     string
-		snapshot *string
+		name       string
+		snapshot   *string
+		freezes    bool
+		wantStored string
 	}{
-		{name: "existing snapshot", snapshot: stringPtr(`{"agent_type": null, "fallback_models": {}}`)},
-		{name: "no snapshot"},
+		{name: "object snapshot", snapshot: stringPtr(`{"agent_type": null, "fallback_models": {}}`), freezes: true},
+		{name: "SQL NULL snapshot"},
+		{name: "JSON null snapshot", snapshot: stringPtr(`null`), wantStored: `null`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -159,38 +165,54 @@ func TestAutomationRunStore_ClaimFreezesDispatchDefaultAgentPostgres(t *testing.
 			_, err := pool.Exec(ctx, `INSERT INTO automation_runs (id, org_id, status, config_snapshot) VALUES ($1, $2, 'pending', $3::jsonb)`, runID, orgID, tt.snapshot)
 			require.NoError(t, err, "seed a pending run before its first attempt")
 
-			claim := func(defaultAgentType models.AgentType) {
+			claim := func(defaultAgentType models.AgentType) bool {
 				tx, err := pool.Begin(ctx)
 				require.NoError(t, err, "begin dispatch transaction")
 				defer func() { _ = tx.Rollback(ctx) }()
 				claimed, err := store.ClaimPendingForPerRunInTx(ctx, tx, orgID, runID, uuid.Nil, defaultAgentType)
 				require.NoError(t, err, "claim the pending run")
-				require.True(t, claimed, "the run is pending with no attempts, so the claim should win")
 				require.NoError(t, tx.Commit(ctx), "commit the claim")
+				return claimed
 			}
-			frozen := func() json.RawMessage {
-				var raw json.RawMessage
-				require.NoError(t, pool.QueryRow(ctx, `SELECT config_snapshot FROM automation_runs WHERE id = $1`, runID).Scan(&raw))
+			stored := func() *string {
+				var raw *string
+				require.NoError(t, pool.QueryRow(ctx, `SELECT config_snapshot::text FROM automation_runs WHERE id = $1`, runID).Scan(&raw))
 				return raw
 			}
-
-			claim(models.AgentTypeCodex)
-			got, ok := models.AutomationRunDispatchDefaultAgentType(frozen())
-			require.True(t, ok, "the first claim should freeze the org default it resolved ranks against")
-			require.Equal(t, models.AgentTypeCodex, got)
-			if tt.snapshot != nil {
-				ranks, present, err := models.AutomationModelRanksFromConfigSnapshot(frozen())
-				require.NoError(t, err)
-				require.True(t, present, "freezing the default must keep the rest of the snapshot intact")
-				require.Len(t, ranks, 1)
+			promote := func() {
+				// A capacity failure promotes the run back to pending, and by
+				// the next attempt the org default has changed.
+				_, err := pool.Exec(ctx, `UPDATE automation_runs SET status = 'pending' WHERE id = $1`, runID)
+				require.NoError(t, err, "promote the run for its next attempt")
 			}
 
-			// A capacity failure promotes the run back to pending, and by the
-			// next attempt the org default has changed.
-			_, err = pool.Exec(ctx, `UPDATE automation_runs SET status = 'pending' WHERE id = $1`, runID)
-			require.NoError(t, err, "promote the run for its next attempt")
-			claim(models.AgentTypeClaudeCode)
-			got, ok = models.AutomationRunDispatchDefaultAgentType(frozen())
+			require.True(t, claim(models.AgentTypeCodex), "the first claim of a pending run with no attempts should win")
+			if !tt.freezes {
+				if tt.snapshot == nil {
+					require.Nil(t, stored(), "a run with no snapshot keeps none")
+				} else {
+					require.JSONEq(t, tt.wantStored, *stored(), "a non-object snapshot must be left untouched")
+				}
+				promote()
+				require.True(t, claim(models.AgentTypeClaudeCode), "with nothing frozen there is nothing for a later claim to disagree with")
+				return
+			}
+
+			raw := stored()
+			require.NotNil(t, raw)
+			got, ok := models.AutomationRunDispatchDefaultAgentType(json.RawMessage(*raw))
+			require.True(t, ok, "the first claim should freeze the org default it resolved ranks against")
+			require.Equal(t, models.AgentTypeCodex, got)
+			ranks, present, err := models.AutomationModelRanksFromConfigSnapshot(json.RawMessage(*raw))
+			require.NoError(t, err)
+			require.True(t, present, "freezing the default must keep the rest of the snapshot intact")
+			require.Len(t, ranks, 1)
+
+			promote()
+			require.False(t, claim(models.AgentTypeClaudeCode),
+				"a claim resolved against a different default read the run before the freeze; it must lose")
+			require.True(t, claim(models.AgentTypeCodex), "a claim resolved against the frozen default wins")
+			got, ok = models.AutomationRunDispatchDefaultAgentType(json.RawMessage(*stored()))
 			require.True(t, ok)
 			require.Equal(t, models.AgentTypeCodex, got, "a later claim must not re-freeze the default mid-chain")
 		})
