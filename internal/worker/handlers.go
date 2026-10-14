@@ -9798,6 +9798,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 
 		var threadID uuid.UUID
 		var threadTurnBefore int
+		var preparationThread *models.SessionThread
 		var hasThread bool
 		var continueOpts *agent.ContinueSessionOptions
 		var resultAgentSessionID string
@@ -9998,6 +9999,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					return &FatalError{Err: fmt.Errorf("%w: thread %s", agent.ErrThreadCancelledBeforeWorkspaceReady, threadID)}
 				}
 				threadTurnBefore = thread.CurrentTurn
+				preparationThread = &thread
 
 				// Phase 2: stamp the thread-start checkpoint before the first
 				// agent turn. The session's current SnapshotKey is the
@@ -10138,6 +10140,13 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			// The turn rides on the context as well so recovery paths that
 			// re-enter ContinueSession without options keep it.
 			jobCtx = agent.WithAutomationTurn(jobCtx, continueOpts.AutomationTurn)
+		}
+		preparationDeadline, deadlineErr := initialCodeReviewPreparationDeadline(jobCtx, stores, logger, session, preparationThread, continueOpts != nil && continueOpts.CodeReviewTurn != nil)
+		if deadlineErr != nil {
+			return deadlineErr
+		}
+		if preparationDeadline != nil {
+			jobCtx = agent.WithCodeReviewWorkspacePreparationDeadline(jobCtx, *preparationDeadline)
 		}
 		continueErr := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts)
 		if automationRunID != nil && continueErr != nil {
