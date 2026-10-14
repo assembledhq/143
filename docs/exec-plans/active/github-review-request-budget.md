@@ -43,7 +43,7 @@ stalling active reviews, while preserving fresh checks before publication and me
    or chained successor for requests arriving during execution. Add a bounded
    delay for incomplete-check refreshes and one follow-up when needed, following
    the existing DB rebuild pattern. Preserve immediate local webhook updates.
-   Tune the proposed 15–30 second window using step 2. Head/base changes, review
+   Start with a fixed 15-second deadline and tune it from attributed production traffic. Head/base changes, review
    and merge safety checks, repairs, and manual refreshes must bypass the delay;
    a pending delayed sync must never absorb urgent work. Extend
    `internal/services/github/pr_health_service.go`. Replay bursts to verify fewer
@@ -86,7 +86,7 @@ behavior before expanding rollout.
 - [x] Incorporate Fable's review and revised delivery order.
 - [x] Prepare scoped enforcement configuration and validate cooldown/Redis behavior.
 - [x] Implement and locally validate standard sandbox request attribution.
-- [ ] Implement and validate coalescing.
+- [x] Implement and validate coalescing, including concurrent PostgreSQL scheduling.
 - [ ] Implement and validate shared inputs and opt-in background budgeting.
 - [ ] Complete deployment admission, rollout, and production impact measurements.
 
