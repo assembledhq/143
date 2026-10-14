@@ -31,6 +31,7 @@ import (
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/repoconfig"
+	"github.com/assembledhq/143/internal/reviewpreparation"
 	"github.com/assembledhq/143/internal/sandboxdeps"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/linear"
@@ -364,9 +365,26 @@ func waitForSandboxWorkspaceReady(
 		maxBackoff = initialBackoff
 	}
 
-	probeCommand, probeErr := reviewWorkspaceReadyProbeCommand(sandbox.WorkDir, expectedBranch)
-	if probeErr != nil {
-		return probeErr
+	strict, _ := ctx.Value(reviewPreparationActivationKey{}).(bool)
+	quotedWorkDir := "'" + shellEscapeSingleQuote(sandbox.WorkDir) + "'"
+	probeCommand := fmt.Sprintf(
+		"git -C %s rev-parse --verify HEAD && branch=$(git -C %s branch --show-current) && printf '%%s\\n' \"$branch\"",
+		quotedWorkDir,
+		quotedWorkDir,
+	)
+	if expectedBranch != "" {
+		// The native review prompt permits checkout --detach at the pinned
+		// review head. Checking the prepared branch ref keeps that legal state
+		// distinct from a detached clone whose authoritative checkout never ran.
+		branchRef := "'" + shellEscapeSingleQuote("refs/heads/"+expectedBranch+"^{commit}") + "'"
+		probeCommand += fmt.Sprintf(" && git -C %s rev-parse --verify %s", quotedWorkDir, branchRef)
+	}
+	if strict {
+		var probeErr error
+		probeCommand, probeErr = reviewWorkspaceReadyProbeCommand(sandbox.WorkDir, expectedBranch)
+		if probeErr != nil {
+			return probeErr
+		}
 	}
 	waitCtx, cancelWait := context.WithTimeout(ctx, timeout)
 	defer cancelWait()
@@ -409,7 +427,13 @@ func waitForSandboxWorkspaceReady(
 			inputsReady = inputsReady && ready
 		}
 		var stdout, stderr bytes.Buffer
-		exitCode, execErr := execForReviewPreparation(waitCtx, provider, sandbox, probeCommand, &stdout, &stderr)
+		var exitCode int
+		var execErr error
+		if strict {
+			exitCode, execErr = execForReviewPreparation(waitCtx, provider, sandbox, probeCommand, &stdout, &stderr)
+		} else {
+			exitCode, execErr = provider.Exec(waitCtx, sandbox, probeCommand, &stdout, &stderr)
+		}
 		if errors.Is(execErr, ErrCodeReviewPreparationCleanup) {
 			return NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, execErr)
 		}
@@ -889,6 +913,7 @@ type Orchestrator struct {
 	humanInputRequests         SessionHumanInputRequestStore
 	sessionMessages            SessionMessageStore
 	sessionThreads             SessionThreadStore
+	reviewPreparationPolicy    *reviewpreparation.Policy
 	codeReviewRoles            CodeReviewRoleResolver
 	sessionIssueLinks          SessionIssueLinkStore
 	issueSnapshots             SessionIssueSnapshotStore
@@ -1424,6 +1449,7 @@ type OrchestratorConfig struct {
 	HumanInputRequests         SessionHumanInputRequestStore
 	SessionMessages            SessionMessageStore
 	SessionThreads             SessionThreadStore
+	ReviewPreparationPolicy    *reviewpreparation.Policy
 	CodeReviewRoles            CodeReviewRoleResolver // optional — nil retains full repository preparation
 	SessionIssueLinks          SessionIssueLinkStore
 	IssueSnapshots             SessionIssueSnapshotStore
@@ -1517,6 +1543,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	}
 
 	return &Orchestrator{
+		reviewPreparationPolicy:    cfg.ReviewPreparationPolicy,
 		provider:                   cfg.Provider,
 		adapters:                   cfg.Adapters,
 		sessions:                   cfg.Sessions,
@@ -2046,6 +2073,11 @@ func (o *Orchestrator) refreshReviewPreparationMode(ctx context.Context, session
 func prepareSandboxRepositoryForSession(ctx context.Context, provider SandboxProvider, session *models.Session, sandbox *Sandbox, workDir string, mode repositoryPreparationMode, log zerolog.Logger) error {
 	stageLog := log.With().Str("preparation_mode", string(mode)).Logger()
 	stage := observability.BeginStage(session != nil && session.Origin == models.SessionOriginCodeReview, stageLog, "repository_preparation")
+	if mode == repositoryPreparationMinimalReview {
+		stageLog.Info().Msg("skipping repository dependencies and bootstrap for built-in code review")
+		stage.End("skipped")
+		return nil
+	}
 	_, err := prepareSandboxRepositoryWithTiming(ctx, provider, sandbox, workDir, stageLog, false, session != nil && session.Origin == models.SessionOriginCodeReview)
 	stage.End(observability.StageOutcome(ctx, err))
 	return err
@@ -3090,8 +3122,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	// once the sandbox is available, so CancelSession can send SIGINT.
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	mandatoryPreparation, activationErr := o.reviewPreparationEnabled(ctx, run)
+	if activationErr != nil {
+		return NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, activationErr)
+	}
+	ctx = withReviewPreparationActivation(ctx, mandatoryPreparation)
 	preparationCtx := ctx
-	if run.Origin == models.SessionOriginCodeReview {
+	if mandatoryPreparation {
 		ctx = withCodeReviewPreparationBudget(ctx)
 		var cancelPreparation context.CancelFunc
 		preparationCtx, cancelPreparation = codeReviewPreparationContext(ctx)
@@ -3661,7 +3698,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	// non-empty directories).
 	if repoURL != "" {
 		cloneErr := error(nil)
-		if run.Origin == models.SessionOriginCodeReview {
+		if mandatoryPreparation {
 			cloneErr = o.cloneRepositoryForReview(preparationCtx, sandbox, repoURL, branch, token)
 		} else {
 			cloneErr = o.provider.CloneRepo(ctx, sandbox, repoURL, branch, token)
@@ -3753,10 +3790,16 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		} else if run.Origin == models.SessionOriginCodeReview {
 			prNumber, head, _, checkoutErr := codeReviewCheckoutContextFromSession(run)
 			if checkoutErr == nil {
-				checkoutErr = o.hydrateCodeReviewTrees(preparationCtx, run, sandbox, repoURL, token, log)
+				if mandatoryPreparation {
+					checkoutErr = o.hydrateCodeReviewTrees(preparationCtx, run, sandbox, repoURL, token, log)
+				}
 			}
 			if checkoutErr == nil {
-				checkoutErr = o.checkoutReviewPullRequestHead(preparationCtx, sandbox, repoURL, token, prNumber, workingBranch, head)
+				if mandatoryPreparation {
+					checkoutErr = o.checkoutReviewPullRequestHead(preparationCtx, sandbox, repoURL, token, prNumber, workingBranch, head)
+				} else {
+					checkoutErr = o.checkoutExpectedPullRequestHead(ctx, sandbox, repoURL, token, prNumber, workingBranch, head)
+				}
 			}
 			if checkoutErr != nil {
 				checkoutErr = NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageCheckout, checkoutErr)
@@ -4345,8 +4388,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// once the sandbox is available, so CancelSession can send SIGINT.
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	mandatoryPreparation, activationErr := o.reviewPreparationEnabled(ctx, session)
+	if activationErr != nil {
+		return NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, activationErr)
+	}
+	ctx = withReviewPreparationActivation(ctx, mandatoryPreparation)
 	preparationCtx := ctx
-	if session.Origin == models.SessionOriginCodeReview {
+	if mandatoryPreparation {
 		ctx = withCodeReviewPreparationBudget(ctx)
 		var cancelPreparation context.CancelFunc
 		preparationCtx, cancelPreparation = codeReviewPreparationContext(ctx)
@@ -5127,7 +5175,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			continueTargetBranch = *session.TargetBranch
 		}
 		var fallbackToken string
-		if !reusedExisting && session.Origin != models.SessionOriginCodeReview {
+		if !reusedExisting && !mandatoryPreparation {
 			token, tokenErr := o.github.GetInstallationToken(setupCtx, repo.InstallationID)
 			if tokenErr != nil {
 				log.Error().Err(tokenErr).Msg("failed to get installation token for continue-session auth wiring")
@@ -5179,7 +5227,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// on the review session's authoritative branch and head SHA. Keeping this
 	// barrier before AcquireTurnHold also prevents a waiting sibling from
 	// releasing the winner's single shared turn-hold bit on timeout.
-	if reusedExisting && session.Origin == models.SessionOriginCodeReview && resolvedRepoID != nil {
+	if reusedExisting && session.Origin == models.SessionOriginCodeReview && resolvedRepoID != nil && (mandatoryPreparation || (opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil)) {
 		_, expectedHead, _, checkoutErr := codeReviewCheckoutContextFromSession(session)
 		if checkoutErr != nil {
 			return o.failContinueSessionError(ctx, session, opts, checkoutErr, log)
@@ -5226,9 +5274,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return o.codeReviewInputsPreparationFinished(checkCtx, session, workspaceSandbox)
 			},
 		)
-		if errors.Is(readyErr, context.DeadlineExceeded) && !errors.Is(readyErr, ErrCodeReviewPreparationCleanup) && ctx.Err() == nil {
+		if mandatoryPreparation && errors.Is(readyErr, context.DeadlineExceeded) && !errors.Is(readyErr, ErrCodeReviewPreparationCleanup) && ctx.Err() == nil {
 			readyErr = o.ensureCodeReviewWorkspaceEvidence(setupCtx, session, workspaceSandbox, log)
-		} else if readyErr == nil {
+		} else if mandatoryPreparation && readyErr == nil {
 			// Preparation can fetch private Git-based dependencies. Reopen
 			// auth first, then configure the helper before repairing evidence.
 			// Git bootstrap itself reads local config. Reject unsafe includes
@@ -6728,7 +6776,12 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 }
 
 func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string, log zerolog.Logger, repairOpts *PRRepairContinueOptions, automationTurn *automationTurnState) (models.Issue, string, TokenBillingMode, error) {
-	if session.Origin == models.SessionOriginCodeReview {
+	mandatoryPreparation, activationErr := o.reviewPreparationEnabled(ctx, session)
+	if activationErr != nil {
+		return models.Issue{}, "", TokenBillingModeUnknown, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, activationErr)
+	}
+	ctx = withReviewPreparationActivation(ctx, mandatoryPreparation)
+	if mandatoryPreparation {
 		ctx = withCodeReviewPreparationBudget(ctx)
 		var cancelPreparation context.CancelFunc
 		ctx, cancelPreparation = codeReviewPreparationContext(ctx)
@@ -6792,7 +6845,7 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 		}
 		cloneStage := observability.BeginStage(codeReviewCheckout, log, "repository_clone")
 		var cloneErr error
-		if codeReviewCheckout {
+		if mandatoryPreparation {
 			cloneErr = o.cloneRepositoryForReview(ctx, sandbox, repo.CloneURL, branch, token)
 		} else {
 			cloneErr = o.provider.CloneRepo(ctx, sandbox, repo.CloneURL, branch, token)
@@ -6831,11 +6884,18 @@ func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *
 			if workingBranch == "" {
 				return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("code review session is missing working branch")
 			}
-			if err := o.hydrateCodeReviewTrees(ctx, session, sandbox, repo.CloneURL, token, log); err != nil {
-				return models.Issue{}, "", TokenBillingModeUnknown, err
+			if mandatoryPreparation {
+				if err := o.hydrateCodeReviewTrees(ctx, session, sandbox, repo.CloneURL, token, log); err != nil {
+					return models.Issue{}, "", TokenBillingModeUnknown, err
+				}
 			}
 			checkoutStage := observability.BeginStage(true, log, "review_head_checkout")
-			checkoutErr := o.checkoutReviewPullRequestHead(ctx, sandbox, repo.CloneURL, token, codeReviewPRNumber, workingBranch, codeReviewHeadSHA)
+			var checkoutErr error
+			if mandatoryPreparation {
+				checkoutErr = o.checkoutReviewPullRequestHead(ctx, sandbox, repo.CloneURL, token, codeReviewPRNumber, workingBranch, codeReviewHeadSHA)
+			} else {
+				checkoutErr = o.checkoutExpectedPullRequestHead(ctx, sandbox, repo.CloneURL, token, codeReviewPRNumber, workingBranch, codeReviewHeadSHA)
+			}
 			checkoutStage.End(observability.StageOutcome(ctx, checkoutErr))
 			if checkoutErr != nil {
 				return models.Issue{}, "", TokenBillingModeUnknown, checkoutErr

@@ -25,6 +25,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/reviewpreparation"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/linear"
@@ -1395,6 +1396,13 @@ func testRun(orgID, issueID uuid.UUID) *models.Session {
 const reviewFixtureHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func configurePinnedReviewFixture(session *models.Session, d *testDeps) {
+	policy, err := reviewpreparation.NewPolicy(true, []string{d.repos.repo.FullName})
+	if err != nil {
+		panic(err)
+	}
+	d.reviewPreparationPolicy = policy
+	d.repos.repo.OrgID = session.OrgID
+	d.repos.repo.ID = *session.RepositoryID
 	session.RevisionContext = json.RawMessage(`{"kind":"code_review","github_repo":"acme/backend","github_pr_number":42,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}`)
 	session.WorkingBranch = strPtr("143/test/code-review")
 	previousExec := d.provider.ExecFn
@@ -1427,6 +1435,8 @@ func boolPtr(v bool) *bool {
 }
 
 type testDeps struct {
+	codeReviewRoles           agent.CodeReviewRoleResolver
+	reviewPreparationPolicy   *reviewpreparation.Policy
 	internalAPIURL            string
 	internalAPISecret         string
 	provider                  *testutil.MockSandboxProvider
@@ -1731,6 +1741,8 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		sessionThreads = d.sessionThreads
 	}
 	return agent.NewOrchestrator(agent.OrchestratorConfig{
+		ReviewPreparationPolicy:   d.reviewPreparationPolicy,
+		CodeReviewRoles:           d.codeReviewRoles,
 		InternalAPIURL:            d.internalAPIURL,
 		InternalAPISecret:         d.internalAPISecret,
 		Provider:                  d.provider,

@@ -1261,7 +1261,12 @@ def prepare_workspace():
             validate_git_configuration()
             run(p["hydrate_trees"], authenticate=True)
         auth = None  # No private authentication state remains for recipes.
-        verify_pinned_source()
+        # Expired verification runs only platform-owned tool probes and the
+        # read-only manifest traversal. Validate the complete pinned checkout
+        # once after those probes, at the final handoff below. Live preparation
+        # still validates source before any repository installer or verifier.
+        if not p.get("verify_only", False):
+            verify_pinned_source()
         previous = read_receipt()
         artifact_recipe = p.get("artifact_recipe_declared", p.get("bootstrap_declared", False))
         can_reuse = previous.get("revision") == p["receipt"]

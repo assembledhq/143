@@ -188,7 +188,14 @@ func codeReviewWorkspacePreparationFailureMessage(err error) string {
 
 // Only the initial reviewer turn inherits the cold preparation checkpoint.
 // Synthesis, evidence rechecks and later turns have their own durable job budget.
-func initialCodeReviewPreparationDeadline(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session, thread *models.SessionThread, evidenceRecheck bool) (*time.Time, error) {
+func initialCodeReviewPreparationDeadline(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, thread *models.SessionThread, evidenceRecheck bool) (*time.Time, error) {
+	active, activationErr := codeReviewPreparationActiveForSession(ctx, stores, services, &session)
+	if activationErr != nil {
+		return nil, activationErr
+	}
+	if !active {
+		return nil, nil
+	}
 	if session.Origin != models.SessionOriginCodeReview || thread == nil || evidenceRecheck || thread.CurrentTurn != 0 ||
 		thread.ExecutionMode != models.ThreadExecutionModeReview || thread.FilesystemMode != models.ThreadFilesystemModeReadOnly {
 		return nil, nil
@@ -251,16 +258,27 @@ func codeReviewWorkspaceColdEligible(session models.Session, repositoryID uuid.U
 // checks readiness before repeating expensive GitHub calls. It refreshes
 // GitHub once more after readiness, immediately before reviewer fan-out.
 func codeReviewWorkspacePreparationStarted(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload) (bool, error) {
-	if services == nil || !services.CodeReviewWorkspacePreparationEnabled {
+	if services == nil || !services.ReviewPreparationPolicy.Enabled() {
 		return false, nil
 	}
-	if stores == nil || stores.Sessions == nil || stores.Jobs == nil {
+	if stores == nil || stores.Sessions == nil {
 		return false, fmt.Errorf("code review workspace preparation is enabled without required stores")
+	}
+	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return false, fmt.Errorf("load review session before preparation checkpoint: %w", err)
+	}
+	active, err := codeReviewPreparationActiveForSession(ctx, stores, services, &session)
+	if err != nil || !active {
+		return false, err
+	}
+	if stores.Jobs == nil {
+		return false, fmt.Errorf("review preparation job store unavailable")
 	}
 	if _, err := stores.Sessions.WorkspaceGenerationForReview(ctx, job.OrgID, job.SessionID); err != nil {
 		return false, fmt.Errorf("validate review session before preparation checkpoint: %w", err)
 	}
-	_, err := stores.Jobs.FirstCodeReviewWorkspacePreparationCreatedAt(ctx, job.OrgID, job.MetadataID, job.SessionID)
+	_, err = stores.Jobs.FirstCodeReviewWorkspacePreparationCreatedAt(ctx, job.OrgID, job.MetadataID, job.SessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -285,8 +303,19 @@ func ensureCodeReviewWorkspaceReadyAfterPreflight(ctx context.Context, stores *S
 // A completed initializer is not proof of readiness. Both gates check the
 // current holder, review revision, and session before dispatching reviewers.
 func ensureCodeReviewWorkspaceReadyWithRecovery(ctx context.Context, stores *Stores, services *Services, log zerolog.Logger, job runCodeReviewPayload, afterPreflight bool) error {
-	if services == nil || !services.CodeReviewWorkspacePreparationEnabled {
+	if services == nil || !services.ReviewPreparationPolicy.Enabled() {
 		return nil
+	}
+	if stores == nil || stores.Sessions == nil {
+		return fmt.Errorf("review preparation session store unavailable")
+	}
+	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return fmt.Errorf("load review session before workspace gate: %w", err)
+	}
+	active, err := codeReviewPreparationActiveForSession(ctx, stores, services, &session)
+	if err != nil || !active {
+		return err
 	}
 	if stores == nil || stores.CodeReviewWorkspaces == nil || stores.CodeReviews == nil || stores.Sessions == nil || stores.Jobs == nil {
 		return fmt.Errorf("code review workspace preparation is enabled without required stores")
@@ -304,10 +333,6 @@ func ensureCodeReviewWorkspaceReadyWithRecovery(ctx context.Context, stores *Sto
 	}
 	if metadata.ID != job.MetadataID || metadata.HeadSHA != job.HeadSHA || metadata.Stale || codeReviewMetadataTerminal(metadata.Status) {
 		return errCodeReviewWorkspaceStopped
-	}
-	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
-	if err != nil {
-		return fmt.Errorf("load review session before workspace enqueue: %w", err)
 	}
 	if session.Status == models.SessionStatusCancelled || session.Status == models.SessionStatusFailed || session.Status == models.SessionStatusCompleted {
 		return errCodeReviewWorkspaceStopped
@@ -418,11 +443,8 @@ func ensureCodeReviewWorkspaceReadyWithRecovery(ctx context.Context, stores *Sto
 
 func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, log zerolog.Logger) JobHandler {
 	return func(ctx context.Context, _ string, raw json.RawMessage) (returnErr error) {
-		if services != nil && !services.CodeReviewWorkspacePreparationEnabled {
+		if services == nil || !services.ReviewPreparationPolicy.Enabled() {
 			return nil // a fleet rollout disabled preparation before this queued job claimed
-		}
-		if stores == nil || stores.CodeReviewWorkspaces == nil || stores.CodeReviews == nil || stores.Sessions == nil || stores.Jobs == nil || services == nil || services.CodeReviewWorkspacePreparer == nil || services.SandboxProvider == nil {
-			return fmt.Errorf("code review workspace preparation dependencies unavailable")
 		}
 		var input prepareCodeReviewWorkspacePayload
 		if err := json.Unmarshal(raw, &input); err != nil {
@@ -430,6 +452,20 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 		}
 		if input.OrgID == uuid.Nil || input.MetadataID == uuid.Nil || input.SessionID == uuid.Nil || input.ExpectedGeneration < 0 {
 			return fmt.Errorf("invalid code review workspace job identity")
+		}
+		if stores == nil || stores.Sessions == nil {
+			return fmt.Errorf("review preparation session store unavailable")
+		}
+		session, err := stores.Sessions.GetByID(ctx, input.OrgID, input.SessionID)
+		if err != nil {
+			return fmt.Errorf("load review session for workspace preparation: %w", err)
+		}
+		active, err := codeReviewPreparationActiveForSession(ctx, stores, services, &session)
+		if err != nil || !active {
+			return err
+		}
+		if stores == nil || stores.CodeReviewWorkspaces == nil || stores.CodeReviews == nil || stores.Sessions == nil || stores.Jobs == nil || services == nil || services.CodeReviewWorkspacePreparer == nil || services.SandboxProvider == nil {
+			return fmt.Errorf("code review workspace preparation dependencies unavailable")
 		}
 		jobID, hasJob := jobctx.JobIDFromContext(ctx)
 		lockToken, hasToken := jobctx.LockTokenFromContext(ctx)
@@ -458,10 +494,6 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 		}
 		if policy.ID != metadata.PolicyID || policy.OrgID != input.OrgID {
 			return fmt.Errorf("captured review policy changed before workspace preparation")
-		}
-		session, err := stores.Sessions.GetByID(ctx, input.OrgID, input.SessionID)
-		if err != nil {
-			return fmt.Errorf("load review session for workspace preparation: %w", err)
 		}
 		if session.Status == models.SessionStatusCancelled || session.Status == models.SessionStatusFailed || session.Status == models.SessionStatusCompleted {
 			return nil
@@ -662,4 +694,31 @@ func codeReviewSavedResultsComplete(policy models.CodeReviewPolicyConfig, result
 	}
 	_, usableSynthesis := codeReviewOrchestratorEvidence(results)
 	return codeReviewReviewerRosterTerminal(policy, results, false) && codeReviewHasUsableReviewerOutput(results) && usableSynthesis
+}
+
+func codeReviewPreparationActiveForSession(ctx context.Context, stores *Stores, services *Services, session *models.Session) (bool, error) {
+	if session == nil || session.Origin != models.SessionOriginCodeReview {
+		return false, nil
+	}
+	if services == nil || !services.ReviewPreparationPolicy.Enabled() {
+		return false, nil
+	}
+	if stores == nil || stores.Repositories == nil {
+		return false, fmt.Errorf("review preparation repository store unavailable")
+	}
+	return services.ReviewPreparationPolicy.ForSession(ctx, stores.Repositories, session)
+}
+
+func codeReviewPreparationActiveForJob(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload) (bool, error) {
+	if services == nil || !services.ReviewPreparationPolicy.Enabled() {
+		return false, nil
+	}
+	if stores == nil || stores.Sessions == nil {
+		return false, fmt.Errorf("review preparation session store unavailable")
+	}
+	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return false, fmt.Errorf("load review preparation session: %w", err)
+	}
+	return codeReviewPreparationActiveForSession(ctx, stores, services, &session)
 }

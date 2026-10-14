@@ -21,6 +21,7 @@ import (
 	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/repoconfig"
+	"github.com/assembledhq/143/internal/reviewpreparation"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/workspace"
@@ -656,7 +657,7 @@ func TestWaitForSandboxWorkspaceReady(t *testing.T) {
 				}
 			}
 
-			err := waitForSandboxWorkspaceReady(ctx, provider, sandbox, expectedBranch, expectedHead, tt.timeout, time.Millisecond, 4*time.Millisecond, checkCancellation)
+			err := waitForSandboxWorkspaceReady(ctx, provider, sandbox, expectedBranch, expectedHead, tt.timeout, time.Millisecond, 4*time.Millisecond, checkCancellation, true)
 			if tt.expectedErr != nil {
 				require.ErrorIs(t, err, tt.expectedErr, "workspace readiness should return the expected transient or context error")
 			} else {
@@ -2170,6 +2171,7 @@ func TestSetupFreshSandbox_CodeReviewChecksOutPullRequestHead(t *testing.T) {
 		Title:        &title,
 		RevisionContext: json.RawMessage(`{
 			"kind": "code_review",
+			"github_repo": "assembledhq/143",
 			"github_pr_number": 42,
 			"github_repo": "assembledhq/143",
 			"base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -2188,14 +2190,17 @@ func TestSetupFreshSandbox_CodeReviewChecksOutPullRequestHead(t *testing.T) {
 			return 0, nil
 		},
 	}
+	policy, err := reviewpreparation.NewPolicy(true, []string{repo.FullName})
+	require.NoError(t, err, "pinned review fixture must explicitly activate mandatory preparation")
 	orch := &Orchestrator{
-		repositories: testInternalRepoStore{repo: repo},
-		github:       testInternalGitHubTokens{token: "ghp_test123"},
-		provider:     provider,
-		logger:       zerolog.Nop(),
+		reviewPreparationPolicy: policy,
+		repositories:            testInternalRepoStore{repo: repo},
+		github:                  testInternalGitHubTokens{token: "ghp_test123"},
+		provider:                provider,
+		logger:                  zerolog.Nop(),
 	}
 
-	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", WorkDir: "/home/sandbox/backend", HomeDir: "/home/sandbox"}, nil, zerolog.Nop(), nil)
+	_, _, _, err = orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", WorkDir: "/home/sandbox/backend", HomeDir: "/home/sandbox"}, nil, zerolog.Nop(), nil)
 
 	require.NoError(t, err, "setupFreshSandbox should check out the recorded PR head for code review sessions")
 	commands := strings.Join(provider.execCalls, "\n")

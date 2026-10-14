@@ -9,6 +9,7 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/reviewpreparation"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -96,19 +97,22 @@ func TestPrepareCodeReviewWorkspaceExactHead(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			provider := &reviewWorkspaceProvider{actualHead: tt.actualHead, failEvidence: tt.failEvidence}
+			repoID, orgID := uuid.New(), uuid.New()
+			policy, err := reviewpreparation.NewPolicy(true, []string{"test/repo"})
+			require.NoError(t, err, "explicit test repository activation must construct")
 			orchestrator := &Orchestrator{
-				provider: provider,
+				reviewPreparationPolicy: policy,
+				provider:                provider,
 				sandboxCapacity: NewSandboxCapacityGate(SandboxCapacityGateConfig{
 					Counter: reviewWorkspaceCapacityCounter{}, MaxActive: 2, Logger: zerolog.Nop(),
 				}),
 				env: NewAgentEnv(AgentEnvDeps{}),
 				repositories: testInternalRepoStore{repo: models.Repository{
-					FullName: "test/repo", CloneURL: "https://github.com/test/repo.git", DefaultBranch: "main",
+					ID: repoID, OrgID: orgID, FullName: "test/repo", CloneURL: "https://github.com/test/repo.git", DefaultBranch: "main",
 				}},
 				github: testInternalGitHubTokens{token: "short-lived-token"},
 				logger: zerolog.Nop(),
 			}
-			repoID, orgID := uuid.New(), uuid.New()
 			title := "Review test change"
 			session := &models.Session{
 				ID: uuid.New(), OrgID: orgID, Origin: models.SessionOriginCodeReview,
