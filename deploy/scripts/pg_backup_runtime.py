@@ -91,18 +91,23 @@ def resources(root, db_pid):
                 monotonic=time.monotonic())
 
 
-def swap_limits(allow_swap_bursts=False, *, admission=False):
+def swap_limits(allow_swap_bursts=False, *, admission=False, swap_out_mib_per_second=4):
     require(type(allow_swap_bursts) is bool, 'unsupported swap tolerance')
+    require(type(swap_out_mib_per_second) is int and swap_out_mib_per_second in (4, 8),
+            'unsupported swap-out rate')
     multiplier = 2 if allow_swap_bursts and not admission else 1
+    rate = 4 if admission else 8 if allow_swap_bursts else swap_out_mib_per_second
     return dict(swap_usage_limit_bytes=multiplier * 256 * 1024 ** 2,
-                swap_out_limit_bytes_per_second=multiplier * 4 * 1024 ** 2)
+                swap_out_limit_bytes_per_second=rate * 1024 ** 2)
 
 
 def check_resources(sample, previous, reserve, *, admission=False, estimate=0, capacity_only=False,
-                    host_memory_full_percent=1, db_memory_full_percent=1, allow_swap_bursts=False):
+                    host_memory_full_percent=1, db_memory_full_percent=1, allow_swap_bursts=False,
+                    swap_out_mib_per_second=4):
     for limit in (host_memory_full_percent, db_memory_full_percent):
         require(type(limit) is int and limit in (1, 5), 'unsupported memory pressure limit')
-    swap = swap_limits(allow_swap_bursts, admission=admission)
+    swap = swap_limits(allow_swap_bursts, admission=admission,
+                       swap_out_mib_per_second=swap_out_mib_per_second)
     # The attended canary override permits moderate stalls during work, never
     # admission into an already pressured host or weaker actual-memory limits.
     host_memory_limit = 1 if admission else host_memory_full_percent
@@ -136,6 +141,8 @@ class Guard:
         self.host_memory_full_percent = getattr(policy, 'host_memory_full_percent', 1)
         self.db_memory_full_percent = getattr(policy, 'db_memory_full_percent', 1)
         self.allow_swap_bursts = getattr(policy, 'allow_swap_bursts', False)
+        self.swap_out_mib_per_second = getattr(policy, 'swap_out_mib_per_second', 4)
+        swap_limits(self.allow_swap_bursts, swap_out_mib_per_second=self.swap_out_mib_per_second)
         self.run = policy.state / app
         self.record = self.run / 'ownership.json'
         self.result = self.run / 'result.json'
@@ -285,7 +292,8 @@ class Guard:
                            database=database, boot_id=self.owner_identity[0],
                            host_memory_full_limit_percent=1 if admission else self.host_memory_full_percent,
                            db_memory_full_limit_percent=1 if admission else self.db_memory_full_percent,
-                           **swap_limits(self.allow_swap_bursts, admission=admission))
+                           **swap_limits(self.allow_swap_bursts, admission=admission,
+                                         swap_out_mib_per_second=self.swap_out_mib_per_second))
         # Keep the triggering sample even if enforcement or a later backend
         # query fails. In-memory evidence also survives a failed history write.
         self.last_dump_sample = observation
@@ -298,7 +306,8 @@ class Guard:
                             estimate=self.estimate if admission else 0,
                             host_memory_full_percent=self.host_memory_full_percent,
                             db_memory_full_percent=self.db_memory_full_percent,
-                            allow_swap_bursts=self.allow_swap_bursts)
+                            allow_swap_bursts=self.allow_swap_bursts,
+                            swap_out_mib_per_second=self.swap_out_mib_per_second)
         except Refused:
             self.violating_sample = observation
             raise
@@ -502,7 +511,7 @@ class TransferGuard(Guard):
         # Persist the violating sample too, so a stop is diagnosable.
         limit = self.host_memory_full_percent if enforce and self.phase != 'metadata' else None
         db_limit = self.db_memory_full_percent if enforce and self.phase != 'metadata' else None
-        swap = swap_limits(self.allow_swap_bursts)
+        swap = swap_limits(self.allow_swap_bursts, swap_out_mib_per_second=self.swap_out_mib_per_second)
         if not enforce or self.phase == 'metadata':
             swap = dict.fromkeys(swap)
         observation = dict(at=now(), phase=self.phase, resources=sample, client_memory=self.client_memory,
@@ -521,7 +530,8 @@ class TransferGuard(Guard):
                             capacity_only=self.phase == 'metadata',
                             host_memory_full_percent=self.host_memory_full_percent,
                             db_memory_full_percent=self.db_memory_full_percent,
-                            allow_swap_bursts=self.allow_swap_bursts)
+                            allow_swap_bursts=self.allow_swap_bursts,
+                            swap_out_mib_per_second=self.swap_out_mib_per_second)
         self.previous = sample
 
     def checkpoint(self, name, *, enforce=True):

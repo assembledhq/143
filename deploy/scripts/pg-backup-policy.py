@@ -722,6 +722,7 @@ def main():
             args.db_memory_full_percent = args.db_memory_full_percent or 1
             require(args.canary or not args.allow_swap_bursts, 'swap tolerance requires --canary')
             policy.allow_swap_bursts = args.allow_swap_bursts
+            policy.swap_out_mib_per_second = 4
             require(args.canary or (args.host_memory_full_percent == 1 and args.db_memory_full_percent == 1),
                     'higher memory pressure limits require --canary')
             policy.host_memory_full_percent = args.host_memory_full_percent
@@ -734,6 +735,8 @@ def main():
                 require(scheduled_backup_due(profile), 'scheduled backup hour is no longer due')
                 policy.host_memory_full_percent = profile['host_memory_full_percent']
                 policy.db_memory_full_percent = profile['db_memory_full_percent']
+                policy.dump_cpus = profile.get('dump_cpus', 1.0)
+                policy.swap_out_mib_per_second = profile.get('swap_out_mib_per_second', 4)
                 data = read_json(attempt)
                 atomic_json(attempt, dict(data, execution_mode='scheduled', schedule=profile))
                 emit('scheduled_operation', action='backup', profile=profile)
@@ -743,7 +746,7 @@ def main():
                      db_memory_full_limit_percent=policy.db_memory_full_percent,
                      admission_host_memory_full_limit_percent=1, admission_db_memory_full_limit_percent=1,
                      allow_swap_bursts=policy.allow_swap_bursts,
-                     **swap_limits(policy.allow_swap_bursts),
+                     **swap_limits(policy.allow_swap_bursts, swap_out_mib_per_second=policy.swap_out_mib_per_second),
                      admission_swap_usage_limit_bytes=256 * 1024 ** 2,
                      admission_swap_out_limit_bytes_per_second=4 * 1024 ** 2)
             if args.action in ('backup', 'restore', 'prune', 'resume-upload', 'resume-verification'):

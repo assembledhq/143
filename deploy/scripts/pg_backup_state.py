@@ -53,11 +53,18 @@ def scheduled_backup_profile(state, current=None):
     """
     profile = read_json(state / 'scheduled-backup.json')
     require(isinstance(profile, dict), 'invalid scheduled backup profile')
-    require(type(profile.get('schema')) is int and profile['schema'] in (1, 2), 'invalid schedule schema')
+    require(type(profile.get('schema')) is int and profile['schema'] in (1, 2, 3), 'invalid schedule schema')
     fields = {'schema', 'owner', 'evidence', 'starts_at',
               'host_memory_full_percent', 'db_memory_full_percent'}
     fields |= {'expires_at'} if profile['schema'] == 1 else {'mode', 'timezone', 'hours'}
+    if profile['schema'] == 3:
+        fields |= {'dump_cpus', 'swap_out_mib_per_second'}
     require(set(profile) == fields, 'invalid scheduled backup profile fields')
+    if profile['schema'] == 3:
+        require(type(profile['dump_cpus']) in (int, float) and profile['dump_cpus'] in (0.75, 1.0),
+                'invalid scheduled dump CPU limit')
+        require(type(profile['swap_out_mib_per_second']) is int and profile['swap_out_mib_per_second'] in (4, 8),
+                'invalid scheduled swap-out rate')
     for key in ('owner', 'evidence'):
         require(isinstance(profile[key], str) and 0 < len(profile[key].strip()) <= 1024,
                 'scheduled backup requires ' + key)

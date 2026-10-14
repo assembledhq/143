@@ -133,6 +133,56 @@ class RuntimeTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(Refused, 'unsupported swap'):
                 runtime.check_resources(safe_resources(), None, self.p.reserve, allow_swap_bursts=invalid)
 
+    def test_scheduled_swap_rate_keeps_total_swap_admission_and_other_guards(self):
+        mib = 1024 ** 2
+        cases = [
+            ('runtime boundary', False, 256 * mib, 40 * mib, 5, {}, None),
+            ('runtime rate exceeded', False, 256 * mib, 40 * mib + 1, 5, {}, 'swap-out'),
+            ('total unchanged', False, 256 * mib + 1, 0, 5, {}, 'swap usage'),
+            ('admission rate unchanged', True, 256 * mib, 20 * mib + 1, 5, {}, 'swap-out'),
+            ('admission total unchanged', True, 256 * mib + 1, 0, 5, {}, 'swap usage'),
+            ('monitor deadline', False, 0, 0, 31, {}, 'monitor delayed'),
+            ('RAM floor', False, 0, 0, 5, {'available_bytes': 1.5 * runtime.GIB - 1}, 'available memory'),
+            ('commit floor', False, 0, 0, 5, {'commit_headroom': runtime.GIB - 1}, 'commit'),
+            ('DB floor', False, 0, 0, 5, {'db_headroom': runtime.GIB / 2 - 1}, 'database memory'),
+            ('disk floor', False, 0, 0, 5, {'free_bytes': 24 * runtime.GIB - 1}, 'disk'),
+            ('memory PSI', False, 0, 0, 5, {'db_memory': {'some': 2, 'full': 2}}, 'db_memory'),
+            ('I/O PSI', False, 0, 0, 5, {'db_io': {'some': 21, 'full': 0}}, 'db_io'),
+        ]
+        for name, admission, used, delta, seconds, fields, error in cases:
+            with self.subTest(name=name):
+                previous = safe_resources()
+                sample = dict(previous, swap_bytes=used, swap_out_bytes=delta,
+                              monotonic=previous['monotonic'] + seconds, **fields)
+                options = dict(swap_out_mib_per_second=8, admission=admission)
+                if error:
+                    with self.assertRaisesRegex(Refused, error):
+                        runtime.check_resources(sample, previous, self.p.reserve, **options)
+                else:
+                    runtime.check_resources(sample, previous, self.p.reserve, **options)
+        for invalid in (True, 8.0, '8', 5, 16, None):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(Refused, 'unsupported swap-out'):
+                runtime.check_resources(safe_resources(), None, self.p.reserve, swap_out_mib_per_second=invalid)
+
+    def test_dump_scheduled_swap_rate_records_trigger_without_raising_total(self):
+        self.p.swap_out_mib_per_second = 8
+        self.guard = runtime.Guard(self.p, self.partial, self.app, 18 * runtime.GIB)
+        mib = 1024 ** 2
+        samples = [dict(safe_resources(), monotonic=10 + i * 5,
+                        swap_bytes=256 * mib + (1 if i == 2 else 0), swap_out_bytes=i * 40 * mib)
+                   for i in range(3)]
+        self.supervise_samples(samples)
+        history = read_json(self.guard.run / 'samples.json')
+        self.assertEqual([x['resources'] for x in history], samples)
+        self.assertEqual([(x['swap_usage_limit_bytes'], x['swap_out_limit_bytes_per_second']) for x in history],
+                         [(256 * mib, 8 * mib)] * 3)
+        result = read_json(self.guard.result)
+        self.assertEqual(result['error'], 'swap usage at risk')
+        self.assertEqual(result['violating_sample'], history[-1])
+        self.assertTrue(result['cleanup_verified'])
+        self.assertFalse(self.partial.exists())
+        self.assertEqual(self.completed.read_bytes(), b'previous verified backup')
+
     def test_dump_swap_override_records_trigger_and_cleans_only_owned_partial(self):
         self.p.allow_swap_bursts = True
         self.guard = runtime.Guard(self.p, self.partial, self.app, 18 * runtime.GIB)

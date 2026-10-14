@@ -118,15 +118,16 @@ class HealthTests(unittest.TestCase):
         profile = dict(schema=2, mode='ongoing', owner='test operator', evidence='private acceptance',
                        starts_at='2026-01-01T00:00:00+00:00', timezone='UTC', hours=[1, 2],
                        host_memory_full_percent=5, db_memory_full_percent=5)
-        atomic_json(self.state / 'scheduled-backup.json', profile)
-        for enabled, held in [('true', False), ('false', True)]:
-            with self.subTest(enabled=enabled), mock.patch.dict(os.environ, BACKUP_ENABLED=enabled, RESTORE_TEST_ENABLED='false'):
-                report = health.collect(self.root, self.current)
-                self.assertEqual(report['backup_held'], held)
-                self.assertEqual(report['recovery_age_seconds'], 7 * 3600)
-                self.assertTrue(report['recovery_stale'])
-                self.assertTrue(report['restore_held'])
-                self.assertTrue(report['restore_overdue'])
+        for selection in (profile, dict(profile, schema=3, dump_cpus=0.75, swap_out_mib_per_second=8)):
+            atomic_json(self.state / 'scheduled-backup.json', selection)
+            for enabled, held in [('true', False), ('false', True)]:
+                with self.subTest(enabled=enabled), mock.patch.dict(os.environ, BACKUP_ENABLED=enabled, RESTORE_TEST_ENABLED='false'):
+                    report = health.collect(self.root, self.current)
+                    self.assertEqual(report['backup_held'], held)
+                    self.assertEqual(report['recovery_age_seconds'], 7 * 3600)
+                    self.assertTrue(report['recovery_stale'])
+                    self.assertTrue(report['restore_held'])
+                    self.assertTrue(report['restore_overdue'])
 
     def test_failed_or_stuck_attempt_visible_even_without_pending_marker(self):
         for status in ['failed', 'interrupted', 'running']:

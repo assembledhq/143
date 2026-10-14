@@ -206,6 +206,71 @@ print('loaded')
         with self.assertRaisesRegex(policy.Refused, 'not active'):
             policy.scheduled_backup_profile(self.p.state, policy.dt.datetime(2025, 12, 31, tzinfo=policy.dt.timezone.utc).timestamp())
 
+    def test_scheduled_resource_profile_requires_explicit_schema_and_narrow_values(self):
+        for cpus in (0.75, 1.0):
+            for rate in (4, 8):
+                with self.subTest(cpus=cpus, rate=rate):
+                    profile = self.ongoing_profile(schema=3, dump_cpus=cpus, swap_out_mib_per_second=rate)
+                    self.assertEqual(policy.scheduled_backup_profile(self.p.state), profile)
+        profile = self.ongoing_profile(schema=3, dump_cpus=0.75, swap_out_mib_per_second=8)
+        cases = [dict(dump_cpus=x) for x in (True, 0.5, 2, '0.75', None)]
+        cases += [dict(swap_out_mib_per_second=x) for x in (True, 0, 5, 16, 8.0, '8', None)]
+        cases += [dict(schema=2), dict(schema=1), dict(swap_usage_limit_bytes=512 * 1024 ** 2),
+                  dict(allow_swap_bursts=True)]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                policy.atomic_json(self.p.state / 'scheduled-backup.json', dict(profile, **changes))
+                with self.assertRaises(policy.Refused):
+                    policy.scheduled_backup_profile(self.p.state)
+        for missing in ('dump_cpus', 'swap_out_mib_per_second'):
+            with self.subTest(missing=missing):
+                incomplete = {k: v for k, v in profile.items() if k != missing}
+                policy.atomic_json(self.p.state / 'scheduled-backup.json', incomplete)
+                with self.assertRaises(policy.Refused):
+                    policy.scheduled_backup_profile(self.p.state)
+
+    def test_scheduled_resource_profile_applies_under_lock_and_resets_for_legacy_and_manual(self):
+        # A changed profile while acquiring the lock must be the one actually used.
+        self.ongoing_profile()
+        selected = {}
+        original_lock = self.p.locked
+        @contextlib.contextmanager
+        def changed_profile_lock():
+            with original_lock():
+                selected.update(self.ongoing_profile(schema=3, dump_cpus=0.75, swap_out_mib_per_second=8))
+                yield
+        output = io.StringIO()
+        with mock.patch.object(self.p, 'locked', side_effect=changed_profile_lock), \
+                mock.patch.object(self.p, 'backup') as backup, contextlib.redirect_stdout(output):
+            self.assertEqual(self.scheduled(), 0)
+            backup.assert_called_once()
+        self.assertEqual((self.p.dump_cpus, self.p.swap_out_mib_per_second, self.p.allow_swap_bursts),
+                         (0.75, 8, False), 'scheduled rate must not enable the 512 MiB canary allowance')
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        limits = next(e for e in events if e['event'] == 'backup_pressure_policy')
+        self.assertEqual({k: limits[k] for k in ('dump_client_cpus', 'swap_usage_limit_bytes',
+                         'swap_out_limit_bytes_per_second', 'admission_swap_usage_limit_bytes',
+                         'admission_swap_out_limit_bytes_per_second')},
+                         dict(dump_client_cpus=0.75, swap_usage_limit_bytes=256 * 1024 ** 2,
+                              swap_out_limit_bytes_per_second=8 * 1024 ** 2,
+                              admission_swap_usage_limit_bytes=256 * 1024 ** 2,
+                              admission_swap_out_limit_bytes_per_second=4 * 1024 ** 2))
+        attempt = policy.read_json(next(self.p.state.glob('attempt-*.json')))
+        self.assertEqual(attempt['schedule'], selected, 'persist the profile selected under the lock')
+        for configure in (self.schedule_profile, self.ongoing_profile):
+            configure()
+            with mock.patch.object(self.p, 'backup'):
+                self.assertEqual(self.scheduled(), 0)
+            self.assertEqual((self.p.dump_cpus, self.p.swap_out_mib_per_second, self.p.allow_swap_bursts),
+                             (1.0, 4, False), 'legacy profiles must retain their original defaults')
+        self.p.dump_cpus, self.p.swap_out_mib_per_second = 0.75, 8
+        with mock.patch.object(sys, 'argv', ['pg-backup-policy.py', 'backup']), \
+                mock.patch.dict(os.environ, BACKUP_ENABLED='true', BACKUP_ATTENDED='true', BACKUP_OBSERVER='operator'), \
+                mock.patch.object(policy, 'Policy', return_value=self.p), mock.patch.object(self.p, 'backup'):
+            self.assertEqual(policy.main(), 0)
+        self.assertEqual((self.p.dump_cpus, self.p.swap_out_mib_per_second, self.p.allow_swap_bursts),
+                         (1.0, 4, False), 'scheduled resource selections must not carry into manual runs')
+
     def test_ongoing_eastern_hours_follow_daylight_saving_changes(self):
         profile = self.ongoing_profile(timezone='America/New_York', hours=[8, 20])
         cases = [('2026-10-09T00:00:00+00:00', True),  # 8 PM EDT

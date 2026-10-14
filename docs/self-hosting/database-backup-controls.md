@@ -197,7 +197,7 @@ remain unchanged; a 13-hour interval can therefore briefly exceed a 12-hour
 objective plus its allowance.
 
 Scheduled mode uses normal two-copy receipt-qualified retention. It cannot
-bootstrap, act as a canary, run a stop exercise, opt into higher swap limits,
+bootstrap, act as a canary, run a stop exercise, use CLI pressure overrides,
 restore, or retry an ambiguous upload. It can resume a completed dump's
 verification or a failed upload when ownership, cleanup, file identity and
 remote absence are proven, before admitting a fresh dump. Standalone prune, recovery and
@@ -210,15 +210,35 @@ An attended `backup --canary --dump-cpus 0.75` can reduce the dump client's CPU
 quota from one CPU to three quarters to investigate load-related stops. It may
 take longer and is not guaranteed to finish. The 45-minute dump deadline and all
 resource guards stay unchanged; uploads keep their existing quota. The selected
-quota is recorded in the dump ownership evidence. Scheduled backups retain the
-one-CPU default and reject this CLI override.
+quota is recorded in the dump ownership evidence. Scheduled backups reject this
+CLI override and use their approved profile instead.
 
 Each profile's host and database memory-full PSI limit must be exactly 1% or 5%.
 Higher values accept more stalls and possible application latency; use evidence
 from an attended run when approving them. Admission remains at 1% for both,
-and scheduled swap limits remain 256 MiB total and 4 MiB/s. CLI pressure and
+and admission swap limits remain 256 MiB total and 4 MiB/s. CLI pressure and
 swap overrides cannot be combined with `--scheduled`. Effective limits are
 logged after loading the profile and retained with runtime observations.
+
+Schema 1 and 2 profiles retain one CPU and a 4 MiB/s runtime swap-out limit.
+An ongoing profile may explicitly select a lower dump CPU quota and a higher
+runtime swap-out rate using **schema 3**. Keep every schema 2 field, change
+`schema` to `3`, and add both required fields:
+
+```json
+"dump_cpus": 0.75,
+"swap_out_mib_per_second": 8
+```
+
+The only accepted CPU quotas are `0.75` and `1.0`; the rate must be the integer
+`4` or `8`. Install the shared state helper, runtime and policy before installing
+this profile. The rate applies during dumping, verification, upload and scheduled
+recovery. Total swap remains capped at **256 MiB**, including when the runtime
+rate is 8 MiB/s; strict admission retains its 4 MiB/s rate. Disk, RAM, database
+headroom, pressure, deadline and cleanup guards remain unchanged. A lower CPU
+quota may lengthen the dump, and a higher swap-out rate permits transient latency;
+neither guarantees completion. This does not enable the attended canary's
+separate 512 MiB total-swap allowance.
 
 Before enabling a window, verify runtime protection and independent monitoring,
 save rollback copies, and identify the operator who will inspect each outcome.
@@ -237,7 +257,7 @@ existing Docker-network address. The database's HBA rules must permit this
 connection; loopback TCP access is not assumed.
 There is no production data-volume mount or database restart. The client mounts
 only its private partial archive and has a 2 GiB memory limit, no swap allowance,
-one CPU, 32-process limit, read-only root filesystem, dropped capabilities and
+one CPU by default (or an approved 0.75 CPU quota), 32-process limit, read-only root filesystem, dropped capabilities and
 a hard file-size limit. Image-declared data volumes are masked by small tmpfs
 mounts instead of creating anonymous restore volumes.
 The higher client limit leaves room for large COPY rows and libpq buffering;
@@ -311,7 +331,8 @@ Admission requires the estimated dump plus the configured reserve plus **5 GiB**
 at least 3 GiB available memory and commitment headroom, and 1.5 GiB database
 cgroup headroom. Runtime stopping begins at reserve plus **4 GiB**, 1.5 GiB
 available memory, 1 GiB commitment headroom, 0.5 GiB database cgroup headroom,
-256 MiB swap use, or 4 MiB/s swap-out. Pressure thresholds are explicit in
+256 MiB swap use, or 4 MiB/s swap-out by default. A schema 3 profile can select
+8 MiB/s at runtime while preserving the 256 MiB total limit. Pressure thresholds are explicit in
 `pg_backup_runtime.py`. The default reserve remains 20 GiB and can only increase.
 
 An explicitly attended `backup --canary --host-memory-full-percent 5` permits
@@ -341,7 +362,8 @@ relax both stall thresholds for a single invocation.
 `--allow-swap-bursts` permits up to **512 MiB total host swap and 8 MiB/s
 swap-out** during an attended canary's dump, verification and upload. It requires
 `--canary`, `BACKUP_ATTENDED=true` and a named `BACKUP_OBSERVER`. Admission and
-subsequent invocations retain the default 256 MiB and 4 MiB/s limits. Each
+subsequent manual invocations retain the default 256 MiB and 4 MiB/s limits;
+scheduled invocations use their approved profile. Each
 resource observation records the effective byte and byte-per-second ceilings;
 metadata-only checks record null ceilings because they enforce capacity only.
 The option accepts additional paging and possible application latency, while
