@@ -343,10 +343,11 @@ func (d *TargetDispatcher) Dispatch(ctx context.Context, in DispatchInput) (Disp
 	if current.ok && current.info.State != "" && current.info.State != "open" && event != models.AutomationGitHubEventPullRequestMerged {
 		if target.LifecycleState != models.AutomationTargetLifecycleMerged {
 			// The close is stamped with GitHub's own updated_at, never this
-			// process's clock: every other piece of lifecycle evidence is a
-			// GitHub moment, and a local stamp can be later than a reopen
-			// GitHub already made, which would then be refused as older than
-			// this close. A lookup without a timestamp keeps the evidence the
+			// process's clock: the store orders lifecycle evidence by GitHub
+			// moments, and a local stamp can be later than a reopen GitHub
+			// already made, which would then be refused as older than this
+			// close. The lifecycle notifications still fall back to the local
+			// clock when a payload has no updated_at (design doc 125). A lookup without a timestamp keeps the evidence the
 			// target already holds rather than clearing it, so an older reopen
 			// delivered afterwards is still refused instead of being accepted
 			// against unknown evidence.
