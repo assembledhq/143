@@ -33,6 +33,8 @@ type codeReviewInputIdentity struct {
 var reviewCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$|^[0-9a-f]{64}$`)
 var reviewRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
+const codeReviewInputCleanupAcknowledgementTimeout = 10 * time.Second
+
 func CodeReviewInputPaths(orgID, sessionID, repositoryID uuid.UUID, repository, baseSHA, headSHA string) (string, string) {
 	identity := codeReviewInputIdentity{1, orgID, sessionID, repositoryID, strings.TrimSpace(repository), strings.TrimSpace(baseSHA), strings.TrimSpace(headSHA)}
 	encoded := strings.Join([]string{"1", identity.OrgID.String(), identity.SessionID.String(), identity.RepositoryID.String(), identity.Repository, identity.BaseSHA, identity.HeadSHA}, "\x00")
@@ -305,7 +307,7 @@ func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *mode
 		if !started.Load() {
 			return cause
 		}
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), codeReviewInputCleanupAcknowledgementTimeout)
 		defer cleanupCancel()
 		select {
 		case result := <-result:
@@ -626,7 +628,7 @@ def verify_captured_objects(merge_base):
             except Exception as error:
                 failures.append(error)
             try:
-                process.wait(timeout=1)
+                process.wait(timeout=3)
             except Exception as error:
                 failures.append(error)
             for stream in (process.stdin, process.stdout):

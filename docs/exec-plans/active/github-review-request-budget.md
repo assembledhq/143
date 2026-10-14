@@ -120,6 +120,13 @@ progress. For shared inputs, add worker/agent tests for revision and tenant
 isolation, missing commits, and stale assessments; run
 `go test ./internal/worker/... ./internal/services/agent/...`.
 
+Before shared-input rollout, measure cold clone, integrity scans, and captured
+object hydration on the rebuilt Linux sandbox image against a large checkout.
+Confirm that the complete setup fits its eight-minute budget. Local captured-tree
+timings and native Linux fixtures do not establish cold image performance or
+production cleanup latency. Retain workspace quarantine when child termination
+cannot be confirmed; a confirmed slow reap may use its bounded cleanup allowance.
+
 Compare requests per completed review, refreshes per PR, quota-exhaustion time,
 and review p50/p95 across comparable workloads. Confirm unchanged freshness
 behavior before expanding rollout.

@@ -175,12 +175,47 @@ func TestReviewSetupHoldAbsoluteDeadlineStopsPreparation(t *testing.T) {
 		defer cancel(nil)
 		hold, err := o.acquireReviewSetupHold(ctx, session, sandbox, cancel)
 		require.NoError(t, err, "a live preparation budget must acquire a setup pin")
-		time.Sleep(2*time.Minute + 5*time.Second)
+		time.Sleep(2*time.Minute + 10*time.Second)
 		synctest.Wait()
 		require.ErrorIs(t, context.Cause(ctx), context.DeadlineExceeded, "setup ownership must terminate after the absolute budget plus verification and cleanup allowance")
 		hold.Release()
 		require.Len(t, holders.released, 1, "an expired pin must still release its exact durable holder")
 	})
+}
+
+func TestReviewSetupHoldCancellationAndHandoffOrdering(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name         string
+		cause        error
+		releaseFirst bool
+	}{
+		{name: "late deadline after handoff", cause: context.DeadlineExceeded, releaseFirst: true},
+		{name: "late lease loss after handoff", cause: ErrWorkerDrainCause, releaseFirst: true},
+		{name: "deadline before handoff", cause: context.DeadlineExceeded},
+		{name: "lease loss before handoff", cause: ErrWorkerDrainCause},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			done := make(chan struct{})
+			close(done)
+			releases := 0
+			hold := &reviewSetupHold{stop: func() {}, done: done, release: func() { releases++ }}
+			if tt.releaseFirst {
+				hold.Release()
+			}
+			hold.cancelWhileActive(cancel, tt.cause)
+			hold.Release()
+			if tt.releaseFirst {
+				require.NoError(t, context.Cause(ctx), "an observed setup failure arriving after handoff must not cancel the live runtime")
+			} else {
+				require.ErrorIs(t, context.Cause(ctx), tt.cause, "a failure while the setup lease is active must retain its cancellation fence")
+			}
+			require.Equal(t, 1, releases, "handoff and deferred cleanup must release the exact setup holder once")
+		})
+	}
 }
 
 func TestReviewSetupHoldFailureAndGenericSession(t *testing.T) {

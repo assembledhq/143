@@ -26,7 +26,8 @@ import (
 var regexpGitObjectID = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
 var errReviewHydrationRequired = errors.New("pinned review source requires authenticated hydration")
-var errReviewPreparationTransport = errors.New("review preparation transport unavailable")
+var ErrCodeReviewPreparationTransport = errors.New("review preparation transport unavailable")
+var errReviewPreparationTransport = ErrCodeReviewPreparationTransport
 
 // This optional transport keeps private authentication off process arguments,
 // provider command logs, and the general repository preparation payload.
@@ -262,6 +263,11 @@ allowed = {
     "core.logallrefupdates": {"true"},
     "core.ignorecase": {"true", "false"},
     "core.precomposeunicode": {"true", "false"},
+    "core.hookspath": {".githooks", ".husky", ".husky/_", ".git/hooks"},
+    "filter.lfs.clean": {"git-lfs clean -- %f"},
+    "filter.lfs.smudge": {"git-lfs smudge -- %f"},
+    "filter.lfs.process": {"git-lfs filter-process"},
+    "filter.lfs.required": {"true"},
     "remote.origin.url": {settings["repo_url"]},
     "remote.origin.fetch": {"+refs/heads/*:refs/remotes/origin/*"},
     "remote.origin.promisor": {"true"},
@@ -534,8 +540,8 @@ func (o *Orchestrator) execReviewEvidenceInput(ctx context.Context, sandbox *San
 		if ctx.Err() != nil {
 			return fmt.Errorf("prepare review evidence: %w", ctx.Err())
 		}
-		if transportErr != nil {
-			return fmt.Errorf("prepare review evidence: %w: %s", errReviewPreparationTransport, redactReviewGitAuthentication(transportErr.Error(), token))
+		if transportErr != nil || errors.Is(err, errReviewPreparationTransport) {
+			return fmt.Errorf("prepare review evidence: %w", errReviewPreparationTransport)
 		}
 		return fmt.Errorf("prepare review evidence: %s", redactReviewGitAuthentication(err.Error(), token))
 	}

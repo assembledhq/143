@@ -13,10 +13,20 @@ import (
 )
 
 type reviewSetupHold struct {
-	stop    context.CancelFunc
-	done    chan struct{}
-	release func()
-	once    sync.Once
+	stop     context.CancelFunc
+	done     chan struct{}
+	release  func()
+	once     sync.Once
+	mu       sync.Mutex
+	released bool
+}
+
+func (h *reviewSetupHold) cancelWhileActive(cancel context.CancelCauseFunc, cause error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.released {
+		cancel(cause)
+	}
 }
 
 func (h *reviewSetupHold) Release() {
@@ -24,6 +34,9 @@ func (h *reviewSetupHold) Release() {
 		return
 	}
 	h.once.Do(func() {
+		h.mu.Lock()
+		h.released = true
+		h.mu.Unlock()
 		h.stop()
 		timer := time.NewTimer(threadRuntimeStateUpdateTimeout)
 		defer timer.Stop()
@@ -62,7 +75,7 @@ func (o *Orchestrator) acquireReviewSetupHold(ctx context.Context, session *mode
 	if deadline.Before(time.Now()) {
 		deadline = time.Now()
 	}
-	heartbeatCtx, stop := context.WithDeadline(ctx, deadline.Add(CodeReviewWorkspaceVerificationTimeout+5*time.Second))
+	heartbeatCtx, stop := context.WithDeadline(ctx, deadline.Add(CodeReviewWorkspaceVerificationTimeout+codeReviewInputCleanupAcknowledgementTimeout))
 	hold := &reviewSetupHold{stop: stop, done: make(chan struct{}), release: releaseHolder}
 	go func() {
 		defer close(hold.done)
@@ -72,7 +85,7 @@ func (o *Orchestrator) acquireReviewSetupHold(ctx context.Context, session *mode
 			select {
 			case <-heartbeatCtx.Done():
 				if ctx.Err() == nil && errors.Is(context.Cause(heartbeatCtx), context.DeadlineExceeded) {
-					cancelRun(context.Cause(heartbeatCtx))
+					hold.cancelWhileActive(cancelRun, context.Cause(heartbeatCtx))
 				}
 				return
 			case <-ticker.C:
@@ -81,13 +94,13 @@ func (o *Orchestrator) acquireReviewSetupHold(ctx context.Context, session *mode
 				cancel()
 				if heartbeatCtx.Err() != nil {
 					if ctx.Err() == nil && errors.Is(context.Cause(heartbeatCtx), context.DeadlineExceeded) {
-						cancelRun(context.Cause(heartbeatCtx))
+						hold.cancelWhileActive(cancelRun, context.Cause(heartbeatCtx))
 					}
 					return
 				}
 				if err != nil || !owned {
 					o.logger.Warn().Err(err).Msg("review setup holder lease was lost")
-					cancelRun(ErrWorkerDrainCause)
+					hold.cancelWhileActive(cancelRun, ErrWorkerDrainCause)
 					return
 				}
 			}

@@ -4,15 +4,90 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/services/agent"
 )
+
+func TestDockerReviewEnvironmentAvailabilityClassification(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name          string
+		inspectionErr error
+		state         *container.State
+		storedToken   bool
+		missingConfig bool
+		cancel        bool
+		transport     bool
+		success       bool
+	}{
+		{name: "missing container", inspectionErr: fmt.Errorf("fake-secret inspection detail: %w", cerrdefs.ErrNotFound), transport: true},
+		{name: "unavailable host", inspectionErr: fmt.Errorf("fake-secret inspection detail: %w", cerrdefs.ErrUnavailable), transport: true},
+		{name: "permission denied", inspectionErr: fmt.Errorf("fake-secret inspection detail: %w", cerrdefs.ErrPermissionDenied)},
+		{name: "unauthenticated host", inspectionErr: fmt.Errorf("fake-secret inspection detail: %w", cerrdefs.ErrUnauthenticated)},
+		{name: "unknown inspection failure", inspectionErr: errors.New("fake-secret unclassified inspection detail")},
+		{name: "canceled missing container", inspectionErr: cerrdefs.ErrNotFound, cancel: true},
+		{name: "stopped container", state: &container.State{}, transport: true},
+		{name: "paused container", state: &container.State{Running: true, Paused: true}, transport: true},
+		{name: "restarting container", state: &container.State{Running: true, Restarting: true}, transport: true},
+		{name: "dead container", state: &container.State{Running: true, Dead: true}, transport: true},
+		{name: "running container", state: &container.State{Running: true}, success: true},
+		{name: "environment only inspection", success: true},
+		{name: "stopped unsafe environment", state: &container.State{}, storedToken: true},
+		{name: "stopped unverifiable environment", state: &container.State{}, missingConfig: true},
+		{name: "running unsafe environment", state: &container.State{Running: true}, storedToken: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var logs bytes.Buffer
+			mock := &mockDockerClient{}
+			mock.containerInspectFn = func(gotCtx context.Context, id string) (container.InspectResponse, error) {
+				require.Equal(t, "review-environment", id, "validation must inspect the selected container")
+				require.Equal(t, ctx, gotCtx, "inspection must use the caller's preparation budget")
+				if test.cancel {
+					cancel()
+				}
+				if test.inspectionErr != nil {
+					return container.InspectResponse{}, test.inspectionErr
+				}
+				config := &container.Config{Env: []string{"GH_TOKEN="}}
+				if test.storedToken {
+					config.Env = []string{"GH_TOKEN=fake-secret"}
+				}
+				if test.missingConfig {
+					config = nil
+				}
+				return container.InspectResponse{Config: config, ContainerJSONBase: &container.ContainerJSONBase{State: test.state}}, nil
+			}
+			err := NewDockerProvider(mock, zerolog.New(&logs)).ValidateReviewPreparationEnvironment(ctx, &agent.Sandbox{ID: "review-environment"})
+			if test.success {
+				require.NoError(t, err, "usable environments without stored credentials must validate")
+			} else {
+				require.Error(t, err, "unusable or unsafe environments must block preparation")
+				if test.transport {
+					require.ErrorIs(t, err, agent.ErrCodeReviewPreparationTransport, "typed infrastructure loss must retain its retryable transport classification")
+					require.EqualError(t, err, "review preparation transport unavailable", "infrastructure failure must expose only its finite classification")
+				} else {
+					require.NotErrorIs(t, err, agent.ErrCodeReviewPreparationTransport, "permission, cancellation and environment security failures must remain terminal")
+				}
+				require.NotContains(t, err.Error(), "fake-secret", "inspection failures must not publish raw provider details or credential values")
+			}
+			if test.cancel {
+				require.ErrorIs(t, err, context.Canceled, "caller cancellation must take precedence over a late not-found response")
+			}
+			require.Empty(t, logs.String(), "environment validation must not log raw inspection diagnostics")
+		})
+	}
+}
 
 func TestDockerProviderValidateReviewPreparationEnvironment(t *testing.T) {
 	t.Parallel()
