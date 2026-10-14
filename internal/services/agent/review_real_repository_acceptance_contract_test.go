@@ -9,9 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/reviewpreparation"
+	"github.com/docker/docker/api/types/container"
 	"github.com/stretchr/testify/require"
 )
 
@@ -491,6 +494,223 @@ func TestRealReviewHostKernelResourceProof(t *testing.T) {
 			require.NoError(t, err, "matching finite per-container kernel bounds must pass without Docker or guest statistics")
 			expected := realReviewKernelResourceProof{ContainerID: containerID, SandboxPID: 70201, CgroupVersion: 2, CgroupPath: "/docker/" + containerID, MemoryMaxBytes: 3221225472, CPUQuotaUS: tt.expectedQuotaUS, CPUPeriodUS: tt.expectedPeriodUS, NanoCPUs: nanoCPUs, PIDMember: true, Verified: true}
 			require.Equal(t, expected, proof, "proof must bind exact inspected PID, owned cgroup membership and declared finite kernel limits")
+		})
+	}
+}
+
+func TestRealReviewOwnedMemoryEvents(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		raw       string
+		expected  map[string]int64
+		wantError bool
+	}{
+		{name: "explicit finite OOM counters", raw: "low 0\nhigh 0\nmax 5\noom 2\noom_kill 1\noom_group_kill 0\n", expected: map[string]int64{"low": 0, "high": 0, "max": 5, "oom": 2, "oom_kill": 1, "oom_group_kill": 0}},
+		{name: "new kernel fields are not retained as arbitrary text", raw: "max 0\noom 0\noom_kill 0\nfuture_counter 1\n", expected: map[string]int64{"max": 0, "oom": 0, "oom_kill": 0}},
+		{name: "missing OOM counter", raw: "max 5\noom_kill 1\n", wantError: true},
+		{name: "conflicting repeated counter", raw: "max 5\noom 2\noom_kill 1\noom 0\n", wantError: true},
+		{name: "negative event", raw: "max 5\noom -1\noom_kill 1\n", wantError: true},
+		{name: "unbounded event value", raw: "max 5\noom 99999999999999999999\noom_kill 1\n", wantError: true},
+		{name: "arbitrary text event", raw: "max 5\noom private-token\noom_kill 1\n", wantError: true},
+		{name: "oversized event file", raw: strings.Repeat("x", 4097), wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual, err := realReviewMemoryEvents([]byte(tt.raw))
+			if tt.wantError {
+				require.Error(t, err, "missing, conflicting or unsafe event evidence must remain unavailable")
+				require.Nil(t, actual, "rejected kernel counter bytes must never become retained evidence")
+				return
+			}
+			require.NoError(t, err, "finite owned-cgroup event observations should parse without OOM inference")
+			require.Equal(t, tt.expected, actual, "only exact whitelisted numeric kernel event counters should survive")
+		})
+	}
+}
+
+func TestRealReviewOwnedMemorySample(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		missing     string
+		peak        string
+		events      string
+		linkedGroup bool
+		invalidID   bool
+		unavailable []string
+	}{
+		{name: "complete sample including zero current memory", unavailable: []string{}},
+		{name: "missing peak retains explicit OOM events", missing: "memory.peak", unavailable: []string{"memory.peak"}},
+		{name: "missing events is unavailable evidence", missing: "memory.events", unavailable: []string{"memory.events"}},
+		{name: "malformed events retain available byte observations", events: "max 3\noom_kill 1\n", unavailable: []string{"memory.events"}},
+		{name: "oversized byte observation", peak: strings.Repeat("3", 129), unavailable: []string{"memory.peak"}},
+		{name: "disappeared cgroup", missing: "group", unavailable: []string{"memory.events", "memory.peak", "memory.current"}},
+		{name: "redirected cgroup", linkedGroup: true, unavailable: []string{"memory.events", "memory.peak", "memory.current"}},
+		{name: "escaping container identity", invalidID: true, unavailable: []string{"memory.events", "memory.peak", "memory.current"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			require.NoError(t, err, "owned memory fixtures must have canonical host roots")
+			containerID := strings.Repeat("a", 64)
+			group := filepath.Join(root, "docker", containerID)
+			require.NoError(t, os.MkdirAll(group, 0o700), "only the exact owned container cgroup may supply telemetry")
+			files := map[string]string{"memory.peak": "300\n", "memory.current": "0\n", "memory.events": "max 3\noom 1\noom_kill 1\n"}
+			if tt.peak != "" {
+				files["memory.peak"] = tt.peak
+			}
+			if tt.events != "" {
+				files["memory.events"] = tt.events
+			}
+			for name, value := range files {
+				if name != tt.missing {
+					require.NoError(t, os.WriteFile(filepath.Join(group, name), []byte(value), 0o600), "fixture should provide finite per-owned-cgroup observations")
+				}
+			}
+			if tt.missing == "group" {
+				require.NoError(t, os.RemoveAll(group), "kernel fixtures may model a cgroup removed immediately after a failure")
+			}
+			if tt.linkedGroup {
+				target := filepath.Join(root, "redirected")
+				require.NoError(t, os.Rename(group, target), "valid-looking counter data may exist outside the owned cgroup")
+				require.NoError(t, os.Symlink(target, group), "telemetry must reject redirected parent paths")
+			}
+			if tt.invalidID {
+				containerID = "../" + containerID
+			}
+			actual := readRealReviewMemorySample(root, containerID)
+			peak, current := int64(300), int64(0)
+			expected := realReviewMemorySample{MemoryPeakBytes: &peak, MemoryCurrentBytes: &current, MemoryEvents: map[string]int64{"max": 3, "oom": 1, "oom_kill": 1}, UnavailableFields: tt.unavailable}
+			for _, unavailable := range tt.unavailable {
+				switch unavailable {
+				case "memory.peak":
+					expected.MemoryPeakBytes = nil
+				case "memory.current":
+					expected.MemoryCurrentBytes = nil
+				case "memory.events":
+					expected.MemoryEvents = nil
+				}
+			}
+			require.Equal(t, expected, actual, "missing fields must be explicit while available exact byte and OOM counters survive independently")
+		})
+	}
+}
+
+func TestRealReviewMemoryMonitorRetainsEvidenceAndJoins(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		vanished        bool
+		expired         bool
+		completeSamples int
+		expectedPeak    int64
+		expectedEvents  map[string]int64
+	}{
+		{name: "final OOM counters remain observable", completeSamples: 2, expectedPeak: 400, expectedEvents: map[string]int64{"max": 8, "oom": 2, "oom_kill": 2}},
+		{name: "removed group retains previously observed OOM", vanished: true, completeSamples: 1, expectedPeak: 300, expectedEvents: map[string]int64{"max": 3, "oom": 1, "oom_kill": 1}},
+		{name: "bounded lifetime ends sampler", expired: true, completeSamples: 2, expectedPeak: 400, expectedEvents: map[string]int64{"max": 8, "oom": 2, "oom_kill": 2}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			initialPeak, finalPeak, initialCurrent, finalCurrent := int64(300), int64(400), int64(200), int64(0)
+			initial := realReviewMemorySample{MemoryPeakBytes: &initialPeak, MemoryCurrentBytes: &initialCurrent, MemoryEvents: map[string]int64{"max": 3, "oom": 1, "oom_kill": 1}, UnavailableFields: []string{}}
+			final := realReviewMemorySample{MemoryPeakBytes: &finalPeak, MemoryCurrentBytes: &finalCurrent, MemoryEvents: map[string]int64{"max": 8, "oom": 2, "oom_kill": 2}, UnavailableFields: []string{}}
+			if tt.vanished {
+				final = realReviewMemorySample{UnavailableFields: []string{"memory.events", "memory.peak", "memory.current"}}
+			}
+			var calls atomic.Int64
+			lifetime := time.Hour
+			if tt.expired {
+				lifetime = 10 * time.Millisecond
+			}
+			monitor := newRealReviewMemoryMonitor(strings.Repeat("a", 64), func() realReviewMemorySample {
+				if calls.Add(1) == 1 {
+					return initial
+				}
+				return final
+			}, time.Hour, lifetime)
+			t.Cleanup(func() { monitor.stop() })
+			if tt.expired {
+				select {
+				case <-monitor.done:
+				case <-time.After(time.Second):
+					t.Fatal("finite monitor lifetime must terminate its goroutine")
+				}
+			}
+			actual := monitor.stop()
+			expectedPeak := tt.expectedPeak
+			expected := realReviewMemoryTelemetry{CgroupPath: "/docker/" + strings.Repeat("a", 64), IntervalMS: time.Hour.Milliseconds(), MaxDurationMS: lifetime.Milliseconds(), ReadLimitsBytes: map[string]int64{"memory.peak": 128, "memory.current": 128, "memory.events": 4096}, Samples: 2, CompleteSamples: tt.completeSamples, Latest: final, MaxObservedPeakBytes: &expectedPeak, MaxObservedCurrentBytes: &initialCurrent, MaxObservedEvents: tt.expectedEvents, LifetimeExpired: tt.expired}
+			require.Equal(t, expected, actual, "bounded telemetry must preserve earlier exact kernel observations even after the cgroup disappears")
+			require.Equal(t, actual, monitor.stop(), "stopping twice must not restart reads or mutate the retained result")
+			require.Equal(t, int64(2), calls.Load(), "joined sampler must perform only its initial and final reads when no interval fires")
+			select {
+			case <-monitor.done:
+			default:
+				t.Fatal("result serialization must follow monitor cancellation and join")
+			}
+		})
+	}
+}
+
+func TestRealReviewMemoryMonitorRetainsPeriodicOOMBeforeRemoval(t *testing.T) {
+	t.Parallel()
+	reading, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int64
+	peak, current := int64(300), int64(200)
+	observedOOM := realReviewMemorySample{MemoryPeakBytes: &peak, MemoryCurrentBytes: &current, MemoryEvents: map[string]int64{"max": 8, "oom": 2, "oom_kill": 1}, UnavailableFields: []string{}}
+	vanished := realReviewMemorySample{UnavailableFields: []string{"memory.events", "memory.peak", "memory.current"}}
+	monitor := newRealReviewMemoryMonitor(strings.Repeat("a", 64), func() realReviewMemorySample {
+		switch calls.Add(1) {
+		case 1:
+			return vanished
+		case 2:
+			close(reading)
+			<-release
+			return observedOOM
+		default:
+			return vanished
+		}
+	}, time.Millisecond, time.Minute)
+	select {
+	case <-reading:
+	case <-time.After(time.Second):
+		monitor.cancel()
+		close(release)
+		monitor.stop()
+		t.Fatal("periodic monitor must read kernel evidence before final destruction")
+	}
+	monitor.cancel()
+	close(release)
+	actual := monitor.stop()
+	expected := realReviewMemoryTelemetry{CgroupPath: "/docker/" + strings.Repeat("a", 64), IntervalMS: 1, MaxDurationMS: time.Minute.Milliseconds(), ReadLimitsBytes: map[string]int64{"memory.peak": 128, "memory.current": 128, "memory.events": 4096}, Samples: 3, CompleteSamples: 1, Latest: vanished, MaxObservedPeakBytes: &peak, MaxObservedCurrentBytes: &current, MaxObservedEvents: map[string]int64{"max": 8, "oom": 2, "oom_kill": 1}}
+	require.Equal(t, expected, actual, "a periodic OOM observation must survive a missing initial and final cgroup without retaining a timeline")
+	require.Equal(t, int64(3), calls.Load(), "cancellation must join the in-flight sample and prevent further ticker reads")
+}
+
+func TestRealReviewDockerFailureStateRedaction(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		state    *container.State
+		expected realReviewDockerState
+	}{
+		{name: "inspection unavailable", expected: realReviewDockerState{Status: "unavailable", ErrorClassification: "inspection_unavailable"}},
+		{name: "running state", state: &container.State{Status: "running", Running: true, Pid: 70201}, expected: realReviewDockerState{Available: true, Running: true, PID: 70201, Status: "running", ErrorClassification: "none"}},
+		{name: "explicit Docker OOM state without raw error", state: &container.State{Status: "exited", OOMKilled: true, ExitCode: 137, Error: "private-token: runtime detail"}, expected: realReviewDockerState{Available: true, OOMKilled: true, ExitCode: 137, Status: "exited", ErrorClassification: "reported_without_details"}},
+		{name: "untrusted status text", state: &container.State{Status: "private-token", ExitCode: 128, Error: "private-token: runtime detail"}, expected: realReviewDockerState{Available: true, ExitCode: 128, Status: "unrecognized", ErrorClassification: "reported_without_details"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual := sanitizeRealReviewDockerState(tt.state)
+			require.Equal(t, tt.expected, actual, "failure evidence must retain exact numeric and Boolean Docker state with fixed classifications")
+			encoded, err := json.Marshal(actual)
+			require.NoError(t, err, "sanitized Docker state should encode as finite private evidence")
+			require.NotContains(t, string(encoded), "private-token", "raw Docker error and unexpected status text must never reach retained artifacts")
 		})
 	}
 }
