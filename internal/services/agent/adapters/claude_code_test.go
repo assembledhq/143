@@ -279,8 +279,8 @@ func TestClaudeCodeAdapter_Execute(t *testing.T) {
 			promptData, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 			require.True(t, exists, "prompt file should have been written")
 			require.Contains(t, string(promptData), "Fix the bug.")
-			require.NotContains(t, provider.ExecCalls[0], ".143-agent.pid", "claude adapter must not embed pidfile scaffolding (provider internal)")
-			require.NotContains(t, provider.ExecCalls[0], "& pid=$!", "claude adapter must not embed shell-shim wrapping (provider internal)")
+			require.NotContains(t, claudeLaunchCommand(t, provider.ExecCalls), ".143-agent.pid", "claude adapter must not embed pidfile scaffolding (provider internal)")
+			require.NotContains(t, claudeLaunchCommand(t, provider.ExecCalls), "& pid=$!", "claude adapter must not embed shell-shim wrapping (provider internal)")
 		})
 	}
 }
@@ -376,8 +376,8 @@ func TestClaudeCodeAdapter_Execute_ContinuationWithSessionIDUsesResumeByID(t *te
 	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
 	require.NoError(t, err, "continuation should succeed")
 	require.NotNil(t, result, "continuation should return a result")
-	require.NotContains(t, provider.ExecCalls[0], "--continue", "continuation must not use --continue, which is non-deterministic")
-	require.Contains(t, provider.ExecCalls[0], "--resume claude-session-abc", "continuation should resume by explicit session ID")
+	require.NotContains(t, claudeLaunchCommand(t, provider.ExecCalls), "--continue", "continuation must not use --continue, which is non-deterministic")
+	require.Contains(t, claudeLaunchCommand(t, provider.ExecCalls), "--resume claude-session-abc", "continuation should resume by explicit session ID")
 	_, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 	require.False(t, exists, "deterministic resume should not write a fresh prompt file")
 }
@@ -528,8 +528,8 @@ func TestClaudeCodeAdapter_Execute_ContinuationWithoutSessionIDFallsBackToFreshE
 	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
 	require.NoError(t, err, "continuation should succeed when falling back to fresh exec")
 	require.NotNil(t, result, "continuation should return a result")
-	require.NotContains(t, provider.ExecCalls[0], "--continue", "continuation must not use --continue, which is non-deterministic")
-	require.NotContains(t, provider.ExecCalls[0], "--resume", "continuation without an id must not pass --resume")
+	require.NotContains(t, claudeLaunchCommand(t, provider.ExecCalls), "--continue", "continuation must not use --continue, which is non-deterministic")
+	require.NotContains(t, claudeLaunchCommand(t, provider.ExecCalls), "--resume", "continuation without an id must not pass --resume")
 	contents, exists := provider.Files["/home/sandbox/.143-prompt.md"]
 	require.True(t, exists, "fresh exec must write the system+user prompt to a file")
 	require.Contains(t, string(contents), "history-embedded user prompt", "prompt file should carry the orchestrator-provided history-embedded user prompt")
@@ -598,9 +598,9 @@ func TestClaudeCodeAdapter_Execute_UsesAutoModeWithoutBypassingAllPermissions(t 
 			require.NoError(t, err, "execute should succeed")
 			require.NotNil(t, result, "execute should return a result")
 			require.NotEmpty(t, provider.ExecCalls, "execute should invoke the Claude CLI")
-			require.Contains(t, provider.ExecCalls[0], "--permission-mode bypassPermissions", "Claude CLI should bypass interactive prompts inside the gVisor sandbox")
-			require.NotContains(t, provider.ExecCalls[0], "--permission-mode acceptEdits", "Claude CLI should not use edit-only approval mode for headless sandbox runs")
-			require.NotContains(t, provider.ExecCalls[0], "--dangerously-skip-permissions", "Claude CLI should not use the bypass-permissions alias while public internet egress is available")
+			require.Contains(t, claudeLaunchCommand(t, provider.ExecCalls), "--permission-mode bypassPermissions", "Claude CLI should bypass interactive prompts inside the gVisor sandbox")
+			require.NotContains(t, claudeLaunchCommand(t, provider.ExecCalls), "--permission-mode acceptEdits", "Claude CLI should not use edit-only approval mode for headless sandbox runs")
+			require.NotContains(t, claudeLaunchCommand(t, provider.ExecCalls), "--dangerously-skip-permissions", "Claude CLI should not use the bypass-permissions alias while public internet egress is available")
 		})
 	}
 }
@@ -637,8 +637,8 @@ func TestClaudeCodeAdapter_Execute_DefaultsToBypassPermissionsMode(t *testing.T)
 	require.NoError(t, err, "execute should succeed")
 	require.NotNil(t, result, "execute should return a result")
 	require.NotEmpty(t, provider.ExecCalls, "execute should invoke the Claude CLI")
-	require.Contains(t, provider.ExecCalls[0], "--permission-mode bypassPermissions", "Claude CLI should default to non-interactive bypass mode in the gVisor sandbox")
-	require.NotContains(t, provider.ExecCalls[0], "--permission-mode acceptEdits", "Claude CLI should not default to edit-only approvals for headless runs")
+	require.Contains(t, claudeLaunchCommand(t, provider.ExecCalls), "--permission-mode bypassPermissions", "Claude CLI should default to non-interactive bypass mode in the gVisor sandbox")
+	require.NotContains(t, claudeLaunchCommand(t, provider.ExecCalls), "--permission-mode acceptEdits", "Claude CLI should not default to edit-only approvals for headless runs")
 }
 
 func TestClaudeCodeAdapter_ResumeMode(t *testing.T) {
@@ -714,7 +714,7 @@ func TestClaudeCodeAdapter_Execute_IncludesReasoningEffortOverride(t *testing.T)
 	result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
 	require.NoError(t, err, "execute should succeed with a reasoning effort override")
 	require.NotNil(t, result, "execute should return a result")
-	require.Contains(t, provider.ExecCalls[0], "--effort high", "claude command should include the requested effort level")
+	require.Contains(t, claudeLaunchCommand(t, provider.ExecCalls), "--effort high", "claude command should include the requested effort level")
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,4 +1103,15 @@ func TestShellEscapeSingle(t *testing.T) {
 			require.Equal(t, tt.expected, shellEscapeSingle(tt.input))
 		})
 	}
+}
+
+func claudeLaunchCommand(t *testing.T, calls []string) string {
+	t.Helper()
+	for _, command := range calls {
+		if strings.Contains(command, "claude --print") {
+			return command
+		}
+	}
+	t.Fatal("Claude adapter should launch the CLI after preparing workspace trust")
+	return ""
 }
