@@ -52,6 +52,8 @@ jobs:
               - 'internal/**'
               - 'go.mod'
               - 'go.sum'
+              - '.143/config.json'
+              - '.143/review-dependencies*'
             frontend:
               - 'frontend/**'
             migrations:
@@ -141,6 +143,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+
+      - name: Test review dependency recipe
+        run: python3 -B .143/review-dependencies_test.py
 
       - name: Download Go modules
         run: go mod download
