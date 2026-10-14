@@ -1,0 +1,2 @@
+ALTER TABLE code_review_requests DROP COLUMN capture_failure_started_at;
+ALTER TABLE code_review_requests DROP COLUMN capture_failure_clock_tracked;

@@ -71,9 +71,13 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"sessions", "where status = 'pending'"}, // ListStalePendingSessions: system-wide cleanup across all orgs
 		{"sessions", "where status = 'running'"}, // ListStaleRunningSessions: system-wide cleanup across all orgs
 		{"sessions", "where status in ('completed', 'failed', 'cancelled', 'pr_created', 'skipped')"}, // ListTerminalEndedBefore: cross-org Redis key cleanup, identifiers only
-		{"sessions", "where sandbox_state"},                           // ListExpiredSnapshots: system-wide snapshot cleanup across all orgs
-		{"sessions", "where pending_snapshot_key is not null"},        // ReapStrandedPendingSnapshots: system-wide cross-org sweep run by leader-elected scheduler; per-org fanout adds no security and would require listing every org each tick
-		{"sessions", "where container_id is not null"},                // ListContainerReferences: worker-local Docker GC must compare host containers against all DB-owned container references
+		{"sessions", "where sandbox_state"},                    // ListExpiredSnapshots: system-wide snapshot cleanup across all orgs
+		{"sessions", "where pending_snapshot_key is not null"}, // ReapStrandedPendingSnapshots: system-wide cross-org sweep run by leader-elected scheduler; per-org fanout adds no security and would require listing every org each tick
+		{"sessions", "where container_id is not null"},         // ListContainerReferences: worker-local Docker GC must compare host containers against all DB-owned container references
+		// ListHostSandboxReferences is the read-only physical inventory across
+		// tenants. Match its entire projection and host-scoped query so this
+		// exception cannot exempt tenant data or a broader future scan.
+		{"sessions", "select distinct s.container_id, s.worker_node_id as owner_node_id\n from sessions s join nodes n on n.id=s.worker_node_id\n where s.container_id is not null and n.metadata->>'sandbox_host_id'=$1\n order by s.container_id,s.worker_node_id`"},
 		{"sessions", "where worker_node_id = @node_id"},               // WorkerDeployStatus: node-scoped deploy drain status
 		{"sessions", "diff_history"},                                  // UpdateResult/UpdateTurnComplete: org_id is in a concatenated string fragment
 		{"sessions", "exists(select 1 from sessions where id = @id)"}, // SessionLogStore.Create: cross-org check to distinguish org mismatch from missing session

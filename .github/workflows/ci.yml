@@ -183,6 +183,14 @@ jobs:
         run: |
           go test ./internal/... -skip '^TestBrowserChromeDP' -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=atomic -race -timeout=180s
 
+      - name: Run server sandbox presence composition tests
+        run: |
+          race=()
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            race=(-race)
+          fi
+          go test ./cmd/server -run '^TestWorker(SandboxPresence|HeartbeatClearsFailedSandboxPresenceEvidence)' -count=1 "${race[@]}" -timeout=120s
+
       # Chrome startup and rendering need CPU that the parallel backend suite
       # can otherwise consume. Keep real browser fixtures in a serial step,
       # with the same race mode and their own coverage contribution.

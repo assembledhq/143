@@ -6030,3 +6030,92 @@ func stringPtr(value string) *string {
 func intPtr(value int) *int {
 	return &value
 }
+
+type capacityLifecycleStub struct {
+	*codeReviewLifecycleStub
+	preflights int
+}
+
+func (s *capacityLifecycleStub) ReviewSandboxAvailable(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	s.preflights++
+	return false, nil
+}
+func TestClassifiedAndDisputedCapacityWaitAvoidsProvider(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name       string
+		classified bool
+	}{{"dispute reassessment", false}, {"classified mention", true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create a store that must remain untouched during capacity waits")
+			defer mock.Close()
+			dispute := uuid.New()
+			input := codereview.ReviewChangedInput{OrgID: uuid.New(), RepositoryID: uuid.New(), PullRequestID: uuid.New(), ExplicitRequest: true}
+			if tt.classified {
+				input.ReviewRequestDisputeID = &dispute
+			} else {
+				input.TriggeringDisputeID = &dispute
+			}
+			payload, err := json.Marshal(input)
+			require.NoError(t, err, "encode the special starter request")
+			lifecycle := &capacityLifecycleStub{codeReviewLifecycleStub: &codeReviewLifecycleStub{}}
+			providerCalls := 0
+			handler := newStartCodeReviewReassessmentHandler(&Stores{PullRequests: db.NewPullRequestStore(mock)}, &Services{CodeReviewLifecycle: lifecycle, PR: &stubPRService{getCodeReviewPRSnapshotFn: func(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+				providerCalls++
+				return ghservice.CodeReviewPullRequestSnapshot{}, nil
+			}}}, zerolog.Nop())
+			for range 3 {
+				err = handler(context.Background(), models.JobTypeStartCodeReviewReassessment, payload)
+				var retry *RetryableError
+				require.ErrorAs(t, err, &retry, "missing capacity must leave a bounded durable retry")
+				require.Equal(t, new(15*time.Second), retry.RetryAfter, "special starters must not poll GitHub every five seconds")
+				require.False(t, retry.ConsumeAttempt, "capacity waits must preserve attempts")
+				require.True(t, retry.BypassMaxRetryDuration, "only capacity waiting must survive the ordinary retry window without fetching the provider")
+			}
+			require.Equal(t, []int{3, 0, 0}, []int{lifecycle.preflights, providerCalls, lifecycle.handleCalls}, "every wait must check headroom before provider hydration or review allocation")
+			require.NoError(t, mock.ExpectationsWereMet(), "capacity wait must not load a PR or allocate a session")
+		})
+	}
+}
+
+func TestCapacityWaitRemainsPendingBeyondWorkerRetryWindow(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name       string
+		classified bool
+	}{{"dispute reassessment", false}, {"classified request", true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w, mock := newTestWorker(t)
+			defer mock.Close()
+			org, pr, repo, dispute, job, token := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			input := codereview.ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr, ExplicitRequest: true}
+			if tt.classified {
+				input.ReviewRequestDisputeID = &dispute
+			} else {
+				input.TriggeringDisputeID = &dispute
+			}
+			payload, err := json.Marshal(input)
+			require.NoError(t, err, "encode durable capacity-wait intake")
+			lifecycle := &capacityLifecycleStub{codeReviewLifecycleStub: &codeReviewLifecycleStub{}}
+			disputes := &codeReviewDisputeServiceRecorder{}
+			providerCalls := 0
+			services := &Services{CodeReviewLifecycle: lifecycle, CodeReviewDisputes: disputes, PR: &stubPRService{getCodeReviewPRSnapshotFn: func(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+				providerCalls++
+				return ghservice.CodeReviewPullRequestSnapshot{}, nil
+			}}}
+			w.Register(models.JobTypeStartCodeReviewReassessment, newStartCodeReviewReassessmentHandler(&Stores{PullRequests: db.NewPullRequestStore(mock)}, services, zerolog.Nop()))
+			// Exercise the real worker's duration policy and terminal hook with intake
+			// older than its ordinary eight-minute failure window, not just the handler.
+			for _, age := range []time.Duration{9 * time.Minute, 12 * time.Hour} {
+				expectClaimWithAttempts(mock, job, org, models.JobTypeStartCodeReviewReassessment, payload, time.Now().Add(-age), token, 9, 8)
+				mock.ExpectExec("UPDATE jobs\\s+SET status = 'pending'").WithArgs("waiting for review sandbox capacity", pgxmock.AnyArg(), job, token).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				w.poll(context.Background())
+			}
+			require.Equal(t, []int{2, 0, 0, 0}, []int{lifecycle.preflights, providerCalls, lifecycle.handleCalls, disputes.failCalls}, "capacity must remain pending past retry limits without provider calls, allocation, or FailTriage")
+			require.NoError(t, mock.ExpectationsWereMet(), "the real worker must requeue both long capacity waits with lease ownership and preserved attempts")
+		})
+	}
+}

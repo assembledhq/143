@@ -100,6 +100,7 @@ func TestCodeReviewSchedulingEnums(t *testing.T) {
 		{"waiting", func() error { return CodeReviewScheduleWaiting.Validate() }, true},
 		{"unknown state", func() error { return CodeReviewScheduleState("other").Validate() }, false},
 		{"quiet", func() error { return CodeReviewWaitQuiet.Validate() }, true},
+		{"capacity", func() error { return CodeReviewWaitCapacity.Validate() }, true},
 		{"unknown reason", func() error { return CodeReviewWaitReason("other").Validate() }, false},
 		{"review now", func() error { return CodeReviewReviewNow.Validate() }, true},
 		{"recheck", func() error { return CodeReviewRecheck.Validate() }, true},
@@ -113,6 +114,24 @@ func TestCodeReviewSchedulingEnums(t *testing.T) {
 				require.NoError(t, tt.err(), "supported enum value validates")
 			} else {
 				require.Error(t, tt.err(), "unsupported enum value is rejected")
+			}
+		})
+	}
+}
+
+func TestCodeReviewAdmissionContractVersionValidate(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		version CodeReviewAdmissionContractVersion
+		valid   bool
+	}{{CodeReviewAdmissionContractV1, true}, {"", false}, {"code-review-sandbox-admission/v2", false}} {
+		t.Run(string(tt.version), func(t *testing.T) {
+			t.Parallel()
+			err := tt.version.Validate()
+			if tt.valid {
+				require.NoError(t, err, "current admission contract must validate")
+			} else {
+				require.Error(t, err, "missing or unsupported contracts cannot prove writer participation")
 			}
 		})
 	}

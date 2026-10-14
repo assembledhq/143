@@ -37,8 +37,9 @@ type RetryableError struct {
 	ConsumeAttempt bool
 	// BypassMaxRetryDuration lets narrowly-scoped self-healing retries run even
 	// when the job row is older than maxRetryableDuration. Use this only when a
-	// successful retry is expected immediately after the current attempt repaired
-	// durable state, not for capacity/backlog gates.
+	// successful retry is expected immediately after repairing durable state, or
+	// for provider-free capacity admission that preserves durable pending intake.
+	// External provider failures must retain their own bounded retry window.
 	BypassMaxRetryDuration bool
 	// ResetRetryWindow clears the previous external-dependency window when
 	// requeueing an agent-progress checkpoint. Only use with non-consuming,

@@ -35,6 +35,30 @@ func (s *Service) SetScheduling(store *db.CodeReviewScheduleStore, snapshots sch
 	s.scheduling = &schedulingDependencies{store: store, snapshots: snapshots, now: func() time.Time { return time.Now().UTC() }}
 }
 
+// SetSandboxAdmission enables fleet admission before a new review clock starts.
+// Call after configuring scheduling; production API and worker share this gate.
+func (s *Service) SetSandboxAdmission() {
+	s.sandboxAdmission = true
+}
+
+// ReviewSandboxAvailable is a cheap preflight for durable dedicated starters.
+// Final reservation still occurs in the transaction that creates the attempt.
+func (s *Service) ReviewSandboxAvailable(ctx context.Context, orgID, repositoryID, prID uuid.UUID) (bool, error) {
+	if !s.sandboxAdmission {
+		return true, nil
+	}
+	if !s.SchedulingEnabled() {
+		return false, fmt.Errorf("review sandbox admission requires scheduling")
+	}
+	var available bool
+	err := s.scheduling.store.WithLockedPR(ctx, orgID, repositoryID, prID, func(tx pgx.Tx, _ *models.CodeReviewPRState) error {
+		var err error
+		available, err = db.CodeReviewSandboxAvailable(ctx, tx, orgID, uuid.Nil)
+		return err
+	})
+	return available, err
+}
+
 // SetAssessmentContinuation enables admission only after compatible capture,
 // assessment readers, the recheck worker, and its handler are deployed.
 func (s *Service) SetAssessmentContinuation(capturer AssessmentInputCapturer, enabled bool) {
@@ -186,6 +210,7 @@ func (s *Service) RequestScheduledReview(ctx context.Context, req ScheduleReques
 func (s *Service) transactionalService(tx pgx.Tx) *Service {
 	scoped := *s
 	scoped.scheduling = nil
+	scoped.admissionTx = tx
 	metadata := db.NewCodeReviewStore(tx)
 	scoped.metadata = metadata
 	scoped.policies = metadata
@@ -649,6 +674,15 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 	if err := s.scheduling.store.ReconcileTerminalReviews(ctx, wake.OrgID, state.RepositoryID, wake.PullRequestID); err != nil {
 		return err
 	}
+	// Repeated capacity waits must not hydrate every pending PR from GitHub.
+	// This is only a preflight; the final start still reserves under the same
+	// fleet lock in its creation transaction after provider freshness checks.
+	if s.sandboxAdmission && state.WaitReason == models.CodeReviewWaitCapacity && state.PendingInput != nil {
+		deferred, err := s.deferCapacitySchedule(ctx, wake, state.RepositoryID)
+		if err != nil || deferred {
+			return err
+		}
+	}
 	if state.PendingInput != nil {
 		var pending scheduledReviewIntent
 		if err := json.Unmarshal(state.PendingInput, &pending); err != nil {
@@ -819,6 +853,10 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 		}
 		if result.Deferred {
 			at := now.Add(15 * time.Second)
+			if result.IgnoredReason == "sandbox_capacity" {
+				current.WaitReason = models.CodeReviewWaitCapacity
+				current.RetryAt = &at
+			}
 			return wait(at)
 		}
 		if result.SessionID == uuid.Nil {
@@ -857,6 +895,57 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 		}
 		return finish()
 	})
+}
+
+func (s *Service) deferCapacitySchedule(ctx context.Context, wake models.CodeReviewScheduleWake, repositoryID uuid.UUID) (bool, error) {
+	deferred := false
+	err := s.scheduling.store.WithLockedPR(ctx, wake.OrgID, repositoryID, wake.PullRequestID, func(tx pgx.Tx, current *models.CodeReviewPRState) error {
+		if current.PendingInput == nil || current.WaitReason != models.CodeReviewWaitCapacity {
+			return nil
+		}
+		jobID, hasJob := jobctx.JobIDFromContext(ctx)
+		token, hasToken := jobctx.LockTokenFromContext(ctx)
+		if !hasJob || !hasToken {
+			return fmt.Errorf("schedule reconciliation requires a worker lease")
+		}
+		var owned bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM jobs WHERE org_id=$1 AND id=$2 AND lock_token=$3 AND status='running' AND lease_expires_at>now())`, wake.OrgID, jobID, token).Scan(&owned); err != nil {
+			return err
+		}
+		if !owned {
+			return fmt.Errorf("schedule wake lease lost")
+		}
+		var pending scheduledReviewIntent
+		if err := json.Unmarshal(current.PendingInput, &pending); err != nil {
+			return err
+		}
+		warm := uuid.Nil
+		if pending.Mode == models.CodeReviewRecheck {
+			baseline, err := db.NewCodeReviewScheduleStore(tx).GetLatestFullBaseline(ctx, wake.OrgID, wake.PullRequestID)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if err == nil {
+				warm = baseline.SessionID
+			}
+		}
+		available, err := db.CodeReviewSandboxAvailable(ctx, tx, wake.OrgID, warm)
+		if err != nil || available {
+			return err
+		}
+		at := s.scheduling.now().Add(15 * time.Second)
+		ok, err := db.NewJobStore(tx).RetryWithoutConsumingAttemptWithLease(ctx, jobID, token, "waiting for review sandbox capacity", at)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("schedule wake lease lost")
+		}
+		current.RetryAt = &at
+		deferred = true
+		return nil
+	})
+	return deferred, err
 }
 
 func (s *Service) PauseSchedule(ctx context.Context, orgID, prID uuid.UUID, paused bool) error {
@@ -950,9 +1039,16 @@ func (s *Service) retryScheduledReview(ctx context.Context, input RetryReviewInp
 // Disputes keep their individual provenance and dedicated starter jobs. They
 // share the PR admission lock without coalescing distinct objections away.
 func (s *Service) handleSerializedReviewChanged(ctx context.Context, input ReviewChangedInput) (ReviewRequestedResult, error) {
+	available, err := s.ReviewSandboxAvailable(ctx, input.OrgID, input.RepositoryID, input.PullRequestID)
+	if err != nil {
+		return ReviewRequestedResult{}, err
+	}
+	if !available {
+		return ReviewRequestedResult{Processed: true, Deferred: true, IgnoredReason: "sandbox_capacity"}, nil
+	}
 	readSnapshot := s.prepareScheduleSnapshot(ctx, input.OrgID, input.RepositoryID)
 	var result ReviewRequestedResult
-	err := s.scheduling.store.WithLockedPR(ctx, input.OrgID, input.RepositoryID, input.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
+	err = s.scheduling.store.WithLockedPR(ctx, input.OrgID, input.RepositoryID, input.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
 		scoped := s.transactionalService(tx)
 		snapshot, err := readSnapshot(ctx, input.GitHubPRNumber)
 		if err != nil {

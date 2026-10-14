@@ -49,7 +49,7 @@ func TestPullRequestCheckSyncBurstPostgres(t *testing.T) {
 			_, err = pool.Exec(ctx, `UPDATE jobs SET status=$3 WHERE org_id=$1 AND id=$2`, orgID, first, tt.predecessorStatus)
 			require.NoError(t, err, "establish predecessor completion state")
 			foreignOrg := uuid.New()
-			_, err = pool.Exec(ctx, `INSERT INTO jobs(org_id,queue,job_type,payload,status,dedupe_key,run_at) VALUES($1,'other','sync_pull_request_state',$2,'pending',$3,$4)`, foreignOrg, fmt.Sprintf(`{"pull_request_id":%q}`, prID.String()), key, deadline)
+			_, err = pool.Exec(ctx, `INSERT INTO jobs(org_id,queue,job_type,payload,status,dedupe_key,run_at) VALUES($1,'default','sync_pull_request_state',$2,'pending',$3,$4)`, foreignOrg, fmt.Sprintf(`{"pull_request_id":%q}`, prID.String()), key+":after:"+uuid.NewString(), deadline)
 			require.NoError(t, err, "seed foreign tenant sentinel")
 			const requests = 32
 			ids, errs := make([]uuid.UUID, requests), make([]error, requests)
@@ -91,7 +91,7 @@ func TestPullRequestCheckSyncBurstPostgres(t *testing.T) {
 				require.Equal(t, first.String(), predecessor, "successor must wait for the exact active predecessor")
 			}
 			var foreignDeadline time.Time
-			require.NoError(t, pool.QueryRow(ctx, `SELECT run_at FROM jobs WHERE org_id=$1 AND dedupe_key=$2`, foreignOrg, key).Scan(&foreignDeadline), "inspect tenant sentinel")
+			require.NoError(t, pool.QueryRow(ctx, `SELECT run_at FROM jobs WHERE org_id=$1`, foreignOrg).Scan(&foreignDeadline), "inspect tenant sentinel")
 			require.Equal(t, deadline, foreignDeadline.UTC(), "coalescing cannot modify another tenant's jobs")
 		})
 	}

@@ -76,6 +76,8 @@ var githubTeamMentionPattern = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])@([a-z0-9
 
 type Service struct {
 	scheduling        *schedulingDependencies
+	sandboxAdmission  bool
+	admissionTx       pgx.Tx
 	policies          PolicyStore
 	metadata          MetadataStore
 	sessions          SessionStore
@@ -198,6 +200,7 @@ const (
 	RetryReviewConflictHeadChanged  RetryReviewConflictCode = "head_changed"
 	RetryReviewConflictPRClosed     RetryReviewConflictCode = "pull_request_closed"
 	RetryReviewConflictPolicyOff    RetryReviewConflictCode = "policy_disabled"
+	RetryReviewConflictCapacity     RetryReviewConflictCode = "capacity_unavailable"
 )
 
 type RetryReviewConflictError struct {
@@ -418,6 +421,9 @@ func (s *Service) retryReview(ctx context.Context, input RetryReviewInput, curre
 		return RetryReviewResult{}, &RetryReviewConflictError{
 			Code: RetryReviewConflictPolicyOff, Message: "Code review is disabled by the current policy.",
 		}
+	}
+	if started.Deferred && started.SessionID == uuid.Nil {
+		return RetryReviewResult{}, &RetryReviewConflictError{Code: RetryReviewConflictCapacity, Message: "Review capacity is temporarily unavailable. Retry when a sandbox is available."}
 	}
 	if !started.Processed || started.SessionID == uuid.Nil {
 		return RetryReviewResult{}, fmt.Errorf("code review retry did not create a replacement attempt")
@@ -1089,6 +1095,18 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		return ReviewRequestedResult{}, fmt.Errorf("lookup latest code review: %w", err)
 	}
 
+	if s.sandboxAdmission {
+		if s.admissionTx == nil {
+			return ReviewRequestedResult{}, fmt.Errorf("review sandbox admission requires a scheduling transaction")
+		}
+		available, err := db.CodeReviewSandboxAvailable(ctx, s.admissionTx, input.OrgID, uuid.Nil)
+		if err != nil {
+			return ReviewRequestedResult{}, err
+		}
+		if !available {
+			return ReviewRequestedResult{Processed: true, Deferred: true, TriggerSource: source, IgnoredReason: "sandbox_capacity"}, nil
+		}
+	}
 	title := fmt.Sprintf("Code review for %s#%d", input.GitHubRepo, input.GitHubPRNumber)
 	modelOverride := resolved.Config.AgentRoster.OrchestratorModel
 	reasoningEffort := resolved.Config.AgentRoster.ReasoningEffort

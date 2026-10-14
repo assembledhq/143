@@ -3917,49 +3917,7 @@ func (s *SessionStore) FinalizeContainerDestroy(ctx context.Context, orgID, sess
 // FinalizeContainerDestroy protect previews, agent turns, and runtime leases;
 // queued/running agent jobs also block cleanup until they finish or retry.
 func (s *SessionStore) FinalizeIdleCodeReviewContainer(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error) {
-	tag, err := s.db.Exec(ctx, `
-		UPDATE sessions
-		SET container_id = NULL,
-		    worker_node_id = NULL,
-		    sandbox_state = CASE
-		        WHEN snapshot_key IS NULL OR snapshot_key = '' THEN 'none'
-		        ELSE 'snapshotted'
-		    END
-		WHERE id = @id AND org_id = @org_id
-		  AND origin = 'code_review'
-		  AND container_id = @expected
-		  AND turn_holding_container = FALSE
-		  AND EXISTS (
-		    SELECT 1 FROM code_review_session_metadata m
-		    WHERE m.org_id = sessions.org_id AND m.session_id = sessions.id
-		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM jobs j
-		    WHERE j.org_id = sessions.org_id
-		      AND j.payload->>'session_id' = sessions.id::text
-		      AND j.job_type IN ('run_agent', 'continue_session')
-		      AND j.status IN ('pending', 'running')
-		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM preview_instances p
-		    WHERE p.session_id = sessions.id AND p.org_id = sessions.org_id
-		      AND p.preview_holding_container = TRUE
-		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM session_sandbox_holders h
-		    WHERE h.session_id = sessions.id AND h.org_id = sessions.org_id
-		      AND h.status IN ('active', 'draining') AND h.expires_at > now()
-		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM thread_runtimes tr
-		    WHERE tr.session_id = sessions.id AND tr.org_id = sessions.org_id
-		      AND tr.status IN ('starting', 'live', 'paused', 'draining')
-		      AND (tr.lease_expires_at IS NULL OR tr.lease_expires_at > now())
-		  )`, pgx.NamedArgs{"id": sessionID, "org_id": orgID, "expected": expectedContainerID})
-	if err != nil {
-		return false, fmt.Errorf("finalize idle code review container: %w", err)
-	}
-	return tag.RowsAffected() == 1, nil
+	return s.finalizeCodeReviewContainer(ctx, orgID, sessionID, expectedContainerID, false)
 }
 
 // ListOrphanedContainers returns sessions whose container_id is set and no

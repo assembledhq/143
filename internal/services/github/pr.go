@@ -6663,12 +6663,8 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 			return err
 		}
 		if !applied {
-			// The upsert rejected this event as out of order, so the projection
-			// did not move and a rebuild would re-read the same row. Note that
-			// check_run events share a provider_sequence (the run ID) across a
-			// run's lifecycle and GitHub's updated_at is second-granular, so a
-			// run that starts and finishes inside one second also lands here;
-			// the reconcile sweep is what repairs that.
+			// Only an obsolete or nonidentical event is rejected. Exact redelivery
+			// is accepted so a prior enqueue failure can repair its durable work.
 			continue
 		}
 		requiresSync, err := s.checkStateRequiresAuthoritativeSync(ctx, pr, state)

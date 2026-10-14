@@ -5626,14 +5626,14 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			name:    "rebuild pull request health passes parsed ids",
 			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`),
 			handler: func(services *Services, logger zerolog.Logger) JobHandler {
-				return newRebuildPullRequestHealthHandler(services, logger)
+				return newRebuildPullRequestHealthHandler(nil, services, logger)
 			},
 		},
 		{
 			name:    "rebuild pull request health rejects invalid payload",
 			payload: json.RawMessage(`{bad json`),
 			handler: func(services *Services, logger zerolog.Logger) JobHandler {
-				return newRebuildPullRequestHealthHandler(services, logger)
+				return newRebuildPullRequestHealthHandler(nil, services, logger)
 			},
 			expectErr: "unmarshal rebuild_pull_request_health payload",
 		},
@@ -5978,7 +5978,7 @@ func TestRebuildPullRequestHealthHandlerSkipsAutoRepairAfterNoOp(t *testing.T) {
 	}}
 	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
 
-	err := newRebuildPullRequestHealthHandler(services, zerolog.Nop())(context.Background(), "rebuild_pull_request_health", payload)
+	err := newRebuildPullRequestHealthHandler(nil, services, zerolog.Nop())(context.Background(), "rebuild_pull_request_health", payload)
 	require.NoError(t, err, "no-op projected rebuild should complete successfully")
 	require.Equal(t, 1, rebuildCalls, "handler should evaluate the durable projection once")
 	require.Equal(t, 0, autoRepairCalls, "handler should not sync or repair when no projected health change committed")

@@ -31,6 +31,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
@@ -835,17 +836,46 @@ func sandboxContainerLabels(cfg agent.SandboxConfig, createdAt time.Time) map[st
 // sandbox bridges. Labels are preferred for newly-created containers; image-name
 // matching keeps existing unlabeled sandboxes visible on the default bridge.
 func (d *DockerProvider) CountLiveSandboxes(ctx context.Context) (int, error) {
+	ids, err := d.LiveSandboxContainerIDs(ctx)
+	return len(ids), err
+}
+
+// LiveSandboxContainerIDs shares CountLiveSandboxes' daemon-wide selection,
+// including legacy sandboxes and every worker generation.
+func (d *DockerProvider) LiveSandboxContainerIDs(ctx context.Context) ([]string, error) {
 	containers, err := d.client.ContainerList(ctx, container.ListOptions{})
 	if err != nil {
-		return 0, fmt.Errorf("list live sandbox containers: %w", err)
+		return nil, fmt.Errorf("list live sandbox containers: %w", err)
 	}
-	count := 0
+	ids := make([]string, 0, len(containers))
 	for _, summary := range containers {
 		if isLiveSandboxContainer(summary, d.network) {
-			count++
+			ids = append(ids, summary.ID)
 		}
 	}
-	return count, nil
+	return ids, nil
+}
+
+// ConfirmSandboxContainerMissing accepts only Docker's definitive NotFound
+// for an immutable full ID. Inspect success includes stopped containers.
+func (d *DockerProvider) ConfirmSandboxContainerMissing(ctx context.Context, containerID string) (bool, error) {
+	if !models.IsFullDockerContainerID(containerID) {
+		return false, fmt.Errorf("physical presence requires a complete Docker container ID")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	_, err := d.client.ContainerInspect(ctx, containerID)
+	if err == nil {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if cerrdefs.IsNotFound(err) {
+		return true, nil
+	}
+	return false, fmt.Errorf("inspect sandbox physical presence: %w", err)
 }
 
 func isLiveSandboxContainer(summary container.Summary, sandboxNetwork string) bool {

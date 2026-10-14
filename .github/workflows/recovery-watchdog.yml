@@ -1,0 +1,45 @@
+name: Recovery Watchdog Linux
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/scripts/recovery-child-watchdog.sh'
+      - 'deploy/scripts/recovery_child_watchdog_test.py'
+      - '.github/scripts/pull-ci-image.sh'
+      - '.github/workflows/recovery-watchdog.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/scripts/recovery-child-watchdog.sh'
+      - 'deploy/scripts/recovery_child_watchdog_test.py'
+      - '.github/scripts/pull-ci-image.sh'
+      - '.github/workflows/recovery-watchdog.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recovery-watchdog-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-postgres-pid1:
+    name: PostgreSQL PID 1 child reaping
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Pull disposable PostgreSQL 18 fixture
+        timeout-minutes: 5
+        run: |
+          bash .github/scripts/pull-ci-image.sh postgres:18 \
+            public.ecr.aws/docker/library/postgres:18 \
+            mirror.gcr.io/library/postgres:18 \
+            postgres:18
+      - name: Require actual Linux Docker and PostgreSQL PID 1 regression
+        timeout-minutes: 5
+        run: python3 -B deploy/scripts/recovery_child_watchdog_test.py
