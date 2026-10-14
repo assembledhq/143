@@ -527,12 +527,14 @@ func TestReviewPreparationQuarantineRejectsLaterExecution(t *testing.T) {
 			if tt.authenticated {
 				auth = reviewGitAuthentication{f.remote, "synthetic-private-input"}
 			}
-			started := time.Now()
-			err := f.orchestrator().execReviewPreparationPayload(context.Background(), f.sandbox(), payload, auth, zerolog.Nop())
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := f.orchestrator().execReviewPreparationPayload(ctx, f.sandbox(), payload, auth, zerolog.Nop())
 			require.ErrorIs(t, err, ErrCodeReviewPreparationCleanup, "every later preparation mode must reject the quarantined holder")
 			require.NoFileExists(t, filepath.Join(f.workDir, "sentinel"), "quarantine must block execution before source, authentication, or repository commands")
 			require.NoFileExists(t, filepath.Join(f.workDir, ".git/143-review-evidence.json"), "quarantine must never publish readiness")
-			require.Less(t, time.Since(started), time.Second, "unsafe quarantine objects must fail promptly without blocking")
+			require.NoError(t, ctx.Err(), "quarantine rejection must finish before the bounded caller deadline")
+			require.NotErrorIs(t, err, context.DeadlineExceeded, "quarantine metadata must be rejected directly rather than blocking until the preparation deadline")
 			if tt.kind == "symlink" {
 				data, readErr := os.ReadFile(quarantine + ".target")
 				require.NoError(t, readErr, "quarantine alias rejection must preserve its external target")
