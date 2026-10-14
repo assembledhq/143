@@ -79,8 +79,9 @@ matching local inode/size/mtime/ctime identity, and a fresh exact S3 key, size,
 ETag, and last-modified match for every local archive. The policy refuses all
 pruning/admission if any archive is unknown, changed, or has invalid evidence,
 or if listing fails. Unknown files consume capacity; they do not count as
-qualified recovery copies. Existing archives are never automatically re-uploaded
-to create evidence. No remote deletion is implemented.
+qualified recovery copies. Unknown archives are never automatically re-uploaded
+to create evidence. A proven interrupted backup can resume as described below.
+No remote deletion is implemented.
 
 A new backup is individually uploaded using the pinned AWS CLI 2.35.11 image and
 explicit `--checksum-algorithm CRC64NVME`. Only successful uploads followed by a
@@ -96,7 +97,7 @@ from the full database size. This is preflight admission, not a hard dump-size
 limit. `BACKUP_RESERVE_BYTES` can increase the reserve but cannot lower it below
 20 GiB. `BACKUP_LOCK_TIMEOUT_SECONDS` defaults to 60 seconds, maximum 3600.
 
-Manual backup, prune, resume-upload and local restore commands require
+Manual backup, prune, resume-verification, resume-upload and local restore commands require
 both `BACKUP_ATTENDED=true` and a nonempty
 `BACKUP_OBSERVER` identifying the operator. They report JSON events and nonzero
 failures to that operator's terminal. Do not set these variables in cron to
@@ -197,7 +198,9 @@ objective plus its allowance.
 
 Scheduled mode uses normal two-copy receipt-qualified retention. It cannot
 bootstrap, act as a canary, run a stop exercise, opt into higher swap limits,
-restore, or retry an ambiguous upload. Standalone prune, upload recovery and
+restore, or retry an ambiguous upload. It can resume a completed dump's
+verification or a failed upload when ownership, cleanup, file identity and
+remote absence are proven, before admitting a fresh dump. Standalone prune, recovery and
 restore remain attended commands. Common locking, strict admission, runtime
 resource guards, owned cleanup, checksum qualification and preservation of
 uncertain archives are unchanged. Expiry limits the start window, not the number
@@ -532,8 +535,9 @@ successful drill must not mask the current incomplete one.
 Before dump/restore work starts, the policy saves `pending.json` with the archive,
 phase and (for a dump) unique `PGAPPNAME`. Failed or interrupted backup work, or
 restore work without proven cleanup, preserves this marker and any
-partial/completed output. The next operation refuses to
-proceed. There is deliberately no age-only partial sweep: a dead Docker client
+partial/completed output. The next backup first attempts guarded recovery for
+completed dumps in verification or upload; all other uncertain markers block
+new work. There is deliberately no age-only partial sweep: a dead Docker client
 does not prove its database backend or upload container is gone.
 
 Do not simply remove the marker or re-upload an uncertain archive. Inspect the
@@ -548,6 +552,17 @@ container and a fresh object listing. A missing exit record, nonzero exit or
 ambiguous command completion requires independent integrity verification before
 receipt import; matching object size alone is insufficient. Automatic uncertain
 upload recovery remains deliberately unavailable.
+
+Completed dump verification can resume automatically on the next backup or
+through the attended `resume-verification` command. Recovery requires the
+original dump's successful cleanup, the failed verification reader's proven
+cleanup, unchanged inode/size/mtime, no live owner or backup reader, the original
+database generation, and current resource admission. It repeats structural and
+SHA-256 verification before publishing an upload marker and starting an upload.
+Both a preserved partial and a file already renamed to its final name are
+supported; an ambiguous pair is refused. Original dump times and the original
+database-size measurement remain attached to the receipt. Recovery does not
+refresh the snapshot's age or prove a full restore.
 
 An attended recovery can use `resume-upload` when
 the archive is complete, unchanged, and its previous runtime has a failed result

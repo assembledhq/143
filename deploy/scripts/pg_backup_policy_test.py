@@ -330,7 +330,7 @@ print('loaded')
             os.environ.pop('BACKUP_ENABLED', None)
             self.assertEqual(policy.main(), 1, 'scheduled mode requires an explicit enable flag')
             factory.assert_not_called()
-        for action in ('backup', 'prune', 'resume-upload', 'restore'):
+        for action in ('backup', 'prune', 'resume-upload', 'resume-verification', 'restore'):
             with self.subTest(action=action), \
                     mock.patch.object(sys, 'argv', ['pg-backup-policy.py', action]), \
                     mock.patch.dict(os.environ, BACKUP_ENABLED='true', RESTORE_TEST_ENABLED='true',
@@ -429,7 +429,7 @@ print('loaded')
         self.assertEqual([p.read_bytes() for p in paths], [b'verified dump'] * 2)
         self.assertFalse((self.p.state / 'pending.json').exists())
 
-    def test_scheduled_failed_upload_is_preserved_and_never_retried(self):
+    def test_scheduled_upload_without_cleanup_evidence_remains_blocked(self):
         self.schedule_profile()
         paths = [self.archive(n) for n in (1, 2)]
         self.canary()
@@ -441,7 +441,7 @@ print('loaded')
         self.assertEqual(len(archives), 3, 'failed upload must preserve the new local archive and both older copies')
         self.assertEqual([p.read_bytes() for p in paths], [b'verified dump'] * 2)
         with mock.patch.object(self.p, 'dump_archive') as dump, mock.patch.object(self.p, 'aws') as aws:
-            self.assertEqual(self.scheduled(), 1, 'pending work requires attended reconciliation')
+            self.assertEqual(self.scheduled(), 1, 'unproven cleanup requires attended reconciliation')
             dump.assert_not_called()
             aws.assert_not_called()
         self.assertEqual({p.name: policy.identity(p) for p in self.root.glob('*.dump')}, archives)
@@ -600,6 +600,35 @@ print('loaded')
                 for f in self.root.glob('.*.partial.*'): f.unlink()
                 (self.p.state / 'pending.json').unlink()
                 setattr(self.p, defect, False)
+
+    def test_verification_marker_keeps_original_database_measurement(self):
+        self.archive(1); self.archive(2); self.canary()
+        with self.simulated_io(), mock.patch.object(self.p, 'transfer_archive', side_effect=policy.Refused('reader stopped')):
+            with self.assertRaisesRegex(policy.Refused, 'reader stopped'):
+                self.p.backup(argparse.Namespace(bootstrap=False, canary=True))
+        pending = policy.read_json(self.p.state / 'pending.json')
+        self.assertEqual((pending['phase'], pending['database_bytes']), ('verification', 100))
+        self.assertTrue(pending['timeline']['dump_completed_at'])
+
+    def test_upload_checkpoint_failure_leaves_final_file_with_upload_marker(self):
+        self.archive(1); self.archive(2); self.canary()
+        def transfer(partial, app, timeline, measured_db, version):
+            def checkpoint(name, **kwargs):
+                if name == 'upload_started': raise policy.Refused('host_io pressure at risk')
+            guard = types.SimpleNamespace(structural_check=self.p.structural_check, checksum=policy.sha256,
+                                          aws=self.p.aws, checkpoint=checkpoint)
+            return self.p.finish_archive(partial, app, timeline, measured_db, version, guard)
+        with self.simulated_io(), mock.patch.object(self.p, 'transfer_archive', side_effect=transfer):
+            with self.assertRaisesRegex(policy.Refused, 'host_io pressure'):
+                self.p.backup(argparse.Namespace(bootstrap=False, canary=True))
+        pending = policy.read_json(self.p.state / 'pending.json')
+        final = self.root / pending['file']
+        self.assertEqual(pending['phase'], 'upload')
+        self.assertEqual(pending['identity'], policy.identity(final))
+        self.assertEqual(pending['sha256'], policy.sha256(final))
+        self.assertEqual(pending['database_bytes'], 100)
+        self.assertEqual(list(self.root.glob('.*.partial.*')), [])
+        self.assertFalse((self.p.state / (final.name + '.json')).exists())
 
     def test_post_upload_pressure_preserves_success_receipt_and_pressure_evidence(self):
         paths = [self.archive(n) for n in (1, 2)]

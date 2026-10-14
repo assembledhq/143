@@ -375,6 +375,15 @@ class Policy:
         return protect_transfer(self, partial, app_name, timeline, measured_db, version)
 
     def backup(self, args):
+        if (self.state / 'pending.json').exists():
+            pending = read_json(self.state / 'pending.json')
+            recovery = argparse.Namespace(original_database_bytes=None, size_evidence=None)
+            if pending.get('runtime') == 'postdump' and pending.get('phase') == 'verification':
+                self.resume_verification(recovery)
+            elif pending.get('runtime') == 'postdump' and pending.get('phase') == 'upload':
+                # Recovery refuses live readers, unproven cleanup or an existing
+                # remote object. Never clear an uncertain upload just to proceed.
+                self.resume_upload(recovery)
         self.no_pending()
         records = self.inventory()
         require(len(records) >= 2 or args.bootstrap, 'two verified archives required; empty installations need explicit --bootstrap')
@@ -401,7 +410,8 @@ class Policy:
         self.dump_archive(partial, app_name, admission['estimated_dump_bytes'], getattr(args, 'exercise_stop_after', None))
         timeline['dump_completed_at'] = now()
         pending = read_json(marker)
-        atomic_json(marker, dict(pending, timeline=timeline, phase='verification', runtime='postdump'))
+        atomic_json(marker, dict(pending, timeline=timeline, phase='verification', runtime='postdump',
+                                database_bytes=measured_db))
         result = self.transfer_archive(partial, app_name, timeline, measured_db, version)
         emit('dump_completed', file=result['file'], bytes=result['bytes'], sha256=result['sha256'])
         if not args.canary:
@@ -430,11 +440,55 @@ class Policy:
         sync_dir(self.root)
         file_id = identity(final)
         timeline['upload_started_at'] = now()
-        guard.checkpoint('upload_started')
+        # Publish the completed-file identity and checksum before an enforcing
+        # checkpoint can stop us. Otherwise a renamed final file is stranded
+        # behind a verification marker without its checksum or size baseline.
         atomic_json(marker, dict(file=name, app_name=app_name, started_at=timeline['dump_started_at'],
                                 phase='upload', runtime='postdump', identity=file_id, sha256=checksum,
                                 timeline=timeline, database_bytes=measured_db))
+        guard.checkpoint('upload_started')
         return self.upload_archive(final, app_name, timeline, measured_db, version, guard)
+
+    def resume_verification(self, args):
+        """Continue a completed dump only with durable, proven reader cleanup."""
+        from pg_backup_runtime import VerificationRecoveryGuard, run_guard
+        require(self.lock_fd is not None, 'verification recovery requires the common lock')
+        pending = read_json(self.state / 'pending.json')
+        name, app = pending.get('file', ''), pending.get('app_name', '')
+        require(re.fullmatch(re.escape(self.database) + r'-\d{8}-\d{6}-[a-f0-9]{32}\.dump', name)
+                and re.fullmatch(r'143-backup-[a-f0-9]{32}', app), 'invalid verification recovery identity')
+        require(pending.get('phase') == 'verification' and pending.get('runtime') == 'postdump',
+                'only completed dump verification can resume')
+        partial_name = pending.get('partial', '')
+        require(re.fullmatch(re.escape('.' + name + '.partial.') + r'[a-f0-9]{32}', partial_name),
+                'invalid preserved partial name')
+        candidates = [p for p in (self.root / partial_name, self.root / name) if p.exists()]
+        require(len(candidates) == 1, 'preserved verification archive is missing or ambiguous')
+        archive = candidates[0]
+        require(not (self.state / (name + '.json')).exists(), 'archive already has a receipt; reconcile instead')
+        require(all(p == archive for p in self.root.glob('.*.dump.partial.*')), 'unrelated partial archive')
+        timeline = pending['timeline']
+        require(timeline.get('recovery_point_basis') == 'pre_dump_lower_bound' and
+                timeline.get('dump_started_at') == pending.get('started_at') and
+                timeline.get('dump_completed_at'), 'original dump completion time is missing')
+        measured = pending.get('database_bytes')
+        if measured is None:
+            measured = getattr(args, 'original_database_bytes', None)
+            evidence = getattr(args, 'size_evidence', None)
+            require(isinstance(evidence, str) and evidence.strip(), 'legacy marker requires original database size evidence')
+            pending = dict(pending, database_size_evidence=evidence)
+        else:
+            require(getattr(args, 'original_database_bytes', None) is None and getattr(args, 'size_evidence', None) is None,
+                    'cannot override the recorded database size')
+        require(type(measured) is int and measured > 0, 'original database size required')
+        new_app = '143-backup-' + uuid.uuid4().hex
+        directory = self.state / new_app
+        directory.mkdir(mode=0o700)
+        atomic_json(directory / 'pending-before.json', read_json(self.state / 'pending.json'))
+        atomic_json(self.state / 'recovery.json', dict(app_name=new_app, source_app=app,
+                    file=name, started_at=now()))
+        result = run_guard(VerificationRecoveryGuard(self, archive, new_app, pending, measured))
+        emit('verification_resumed', file=result['file'], bytes=result['bytes'], sha256=result['sha256'])
 
     def upload_archive(self, final, app_name, timeline, measured_db, version, guard):
         marker = self.state / 'pending.json'
@@ -607,6 +661,9 @@ def main():
     resume = sub.add_parser('resume-upload', help='attended recovery of a preserved failed upload; no dump or prune')
     resume.add_argument('--original-database-bytes', type=int, help='legacy marker only: original admission-log measurement')
     resume.add_argument('--size-evidence', help='legacy marker only: source of the original database-size measurement')
+    verification = sub.add_parser('resume-verification', help='attended recovery of completed dump verification; no dump or prune')
+    verification.add_argument('--original-database-bytes', type=int, help='legacy marker only: original admission-log measurement')
+    verification.add_argument('--size-evidence', help='legacy marker only: source of the original database-size measurement')
     sub.add_parser('prune')
     sub.add_parser('plan')
     sub.add_parser('restore')
@@ -629,9 +686,9 @@ def main():
     try:
         flag = 'RESTORE_TEST_ENABLED' if args.action == 'restore' else 'BACKUP_ENABLED'
         # Receipt/plan commands are permitted while schedules are held.
-        if args.action in ('backup', 'restore', 'prune', 'resume-upload'):
+        if args.action in ('backup', 'restore', 'prune', 'resume-upload', 'resume-verification'):
             require(os.environ.get(flag, 'false' if scheduled else 'true') == 'true', flag + ' is not true; operation held')
-        if args.action in ('backup', 'restore', 'prune', 'resume-upload') and not scheduled:
+        if args.action in ('backup', 'restore', 'prune', 'resume-upload', 'resume-verification') and not scheduled:
             require(os.environ.get('BACKUP_ATTENDED') == 'true', 'BACKUP_ATTENDED=true is required for manual operations')
             require(os.environ.get('BACKUP_OBSERVER', '').strip(), 'BACKUP_OBSERVER must name the attending operator')
             emit('attended_operation', action=args.action, observer=os.environ['BACKUP_OBSERVER'])
@@ -684,12 +741,14 @@ def main():
                      **swap_limits(policy.allow_swap_bursts),
                      admission_swap_usage_limit_bytes=256 * 1024 ** 2,
                      admission_swap_out_limit_bytes_per_second=4 * 1024 ** 2)
-            if args.action in ('backup', 'restore', 'prune', 'resume-upload'):
+            if args.action in ('backup', 'restore', 'prune', 'resume-upload', 'resume-verification'):
                 policy.retire_attempts()
             if args.action == 'backup':
                 policy.backup(args)
             elif args.action == 'resume-upload':
                 policy.resume_upload(args)
+            elif args.action == 'resume-verification':
+                policy.resume_verification(args)
             elif args.action == 'prune':
                 policy.prune()
             elif args.action == 'plan':

@@ -664,6 +664,107 @@ def protect_transfer(policy, partial, app, timeline, measured_db, version):
     return run_guard(TransferGuard(policy, partial, app, timeline, measured_db, version))
 
 
+class VerificationRecoveryGuard(TransferGuard):
+    """Resume pre-upload work without discarding the dump or its recovery point."""
+    def __init__(self, policy, archive, app, pending, measured_db):
+        super().__init__(policy, archive, app, dict(pending['timeline']), measured_db, '')
+        self.pending = pending
+
+    def prepare(self):
+        p, pending = self.policy, self.pending
+        before = read_json(self.run.parent / 'pending-before.json')
+        require(read_json(p.state / 'pending.json') == before, 'pending verification changed before recovery')
+        old_app = pending['app_name']
+        dump_app = pending.get('dump_app', old_app)
+        require(re.fullmatch(r'143-backup-[a-f0-9]{32}', dump_app), 'invalid original dump identity')
+        dump = read_json(p.state / dump_app / 'ownership.json')
+        dump_result = read_json(p.state / dump_app / 'result.json')
+        previous = p.state / old_app / 'postdump'
+        owner, result = read_json(previous / 'ownership.json'), read_json(previous / 'result.json')
+        file_id = identity(self.partial)
+        require(dump['app'] == dump_app and dump_result['status'] == 'completed' and
+                dump_result['cleanup_verified'] is True and
+                all(file_id[k] == dump['partial'][k] for k in ('device', 'inode')),
+                'original dump completion or identity unproven')
+        # Publishing via link/unlink changes ctime. Bytes, mtime and inode must
+        # still match the completed dump; verification and hashing run again.
+        require(owner['app'] == old_app and all(file_id[k] == owner['partial'][k]
+                for k in ('device', 'inode', 'bytes', 'mtime_ns')),
+                'preserved verification archive changed')
+        require(result['status'] == 'failed' and result['cleanup_verified'] is True,
+                'prior verification cleanup unproven')
+        require(not owner.get('creation_started') or owner.get('creation_complete') is True,
+                'prior reader creation outcome ambiguous')
+        require(not (previous / 'upload.json').exists() and
+                owner.get('client_name', '').removeprefix(old_app) in ('', '-structural', '-metadata'),
+                'verification marker conflicts with upload evidence')
+        for record in (dump, owner):
+            try:
+                current = proc_identity(record['owner_pid'])
+            except FileNotFoundError:
+                current = None
+            require(current != record['owner_identity'], 'prior backup owner is still alive')
+        require(os.environ.get('DOCKER_HOST', '') in ('', 'unix:///var/run/docker.sock') and
+                not os.environ.get('DOCKER_CONTEXT'), 'local default Docker endpoint required')
+        endpoint = invoke(['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], timeout=5).strip()
+        require(endpoint == 'unix:///var/run/docker.sock', 'local Linux Docker socket required')
+        listing = invoke(['docker', 'container', 'ls', '-a', '--no-trunc',
+                          '--format', '{{json .ID}}\t{{json (.Label "' + LABEL + '")}}'], timeout=5)
+        for line in listing.splitlines():
+            cid_json, label_json = line.split('\t')
+            cid, label = json.loads(cid_json), json.loads(label_json)
+            require(isinstance(cid, str) and re.fullmatch(r'[a-f0-9]{64}', cid)
+                    and isinstance(label, str), 'invalid reader inventory')
+            require(not label, 'backup reader still exists; reconcile before retry')
+        self.db, generation = self.database(dump['database'])
+        self.owned = dict(app=self.app, database=generation, partial=file_id,
+                          owner_pid=self.owner_pid, owner_identity=self.owner_identity,
+                          creation_started=False, creation_complete=False, resumed_from=old_app)
+        atomic_json(self.record, self.owned)
+        require(not json.loads(self.query(
+            "SELECT coalesce(json_agg(pid), '[]') FROM pg_stat_activity WHERE application_name='" + dump_app + "'",
+            self.owned)), 'original dump backend still exists')
+        first = resources(p.root, generation['pid'])
+        check_resources(first, None, p.reserve, admission=True)
+        self.checkpoint('verification_resumed')
+        require(p.remote(pending['file'], aws=self.aws) is None,
+                'prior object exists; reconcile instead of retrying')
+        self.version = self.aws(['--version']).strip()
+        require(self.version.split()[:1] == [p.aws_cli_version], 'unexpected AWS CLI version')
+        self.structural_check(self.partial)
+        self.timeline['structural_verified_at'] = now()
+        checksum = self.checksum(self.partial)
+        self.timeline['local_sha256_at'] = now()
+        require(identity(self.partial) == file_id and read_json(p.state / 'pending.json') == before,
+                'archive or verification marker changed during recovery')
+        final = p.root / pending['file']
+        if self.partial != final:
+            require(not final.exists(), 'archive publication target changed')
+            os.link(self.partial, final)
+            self.partial.unlink()
+            sync_dir(p.root)
+            self.partial = final
+        self.timeline['verification_resumed_from'] = old_app
+        if pending.get('database_size_evidence'):
+            self.timeline['database_size_evidence'] = pending['database_size_evidence']
+        self.timeline['upload_started_at'] = now()
+        atomic_json(p.state / 'pending.json', dict(file=final.name, app_name=self.app, dump_app=dump_app,
+                    started_at=pending['started_at'], phase='upload', runtime='postdump',
+                    identity=identity(final), sha256=checksum, timeline=self.timeline,
+                    database_bytes=self.measured_db))
+        self.checkpoint('upload_started')
+
+    def supervise(self):
+        try:
+            self.prepare()
+            result = self.policy.upload_archive(self.partial, self.app, self.timeline,
+                                                self.measured_db, self.version, self)
+            self.terminal(dict(status='completed', at=now(), cleanup_verified=True,
+                               phase_resources=self.phase_resources, **result))
+        except (OSError, ValueError, KeyError, TypeError, Refused, subprocess.TimeoutExpired) as exc:
+            self.fail(str(exc))
+
+
 class RecoveryTransferGuard(TransferGuard):
     """Guard an upload retry or independent receipt reconciliation."""
     def __init__(self, policy, archive, app, pending, measured_db, receipt_args=None):
