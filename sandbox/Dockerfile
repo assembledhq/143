@@ -6,7 +6,7 @@
 # See also: docs/design/24-design-resolutions.md (Resolution 15)
 
 # Stage 1: Build 143-tools Go binary.
-FROM golang:1.26 AS go-builder
+FROM golang:1.26.9 AS go-builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
@@ -87,7 +87,7 @@ RUN GH_VERSION=$(jq -r '.gh_cli' /tmp/versions.json) && \
 # agent's own Go source (e.g. `go run ./cmd/server`) compile inside the
 # sandbox at session-start time. Reusing the builder's /usr/local/go
 # guarantees the runtime and builder toolchains cannot drift — the version
-# is pinned in exactly one place (the `FROM golang:X.Y` line above).
+# is pinned in exactly one place (the `FROM golang:X.Y.Z` line above).
 COPY --from=go-builder /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
 
