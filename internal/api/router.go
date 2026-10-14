@@ -1075,7 +1075,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 	if prService != nil && automationActionTokens != nil {
 		visualEvidence := codereviewsvc.NewVisualEvidenceService(prService, codeReviewStore, repoStore, automationActionTokens, uploadStore, logger)
-		inputCapture := codereviewsvc.NewAssessmentInputCaptureService(codeReviewStore, pullRequestStore, repoStore, orgStore, prService, visualEvidence, codereviewsvc.NewGitHubSubmitter(automationActionTokens))
+		codeReviewSubmitter := codereviewsvc.NewGitHubSubmitter(
+			automationActionTokens,
+			codereviewsvc.WithGitHubSubmitterHTTPClient(githubtelemetry.NewControlledHTTPClient(15*time.Second, logger, githubRateLimitController, "code_review")),
+		)
+		inputCapture := codereviewsvc.NewAssessmentInputCaptureService(codeReviewStore, pullRequestStore, repoStore, orgStore, prService, visualEvidence, codeReviewSubmitter)
 		inputCapture.SetExternalContextResolver(agent.CodeReviewExternalContextResolver{Credentials: credentialStore, Orgs: orgStore, GitHubTools: true, SessionTools: cfg.BaseURL != "" && cfg.SessionSecret != ""})
 		if checker, ok := automationActionTokens.(interface {
 			IsActiveTeamMember(context.Context, int64, string, string, string) (bool, error)

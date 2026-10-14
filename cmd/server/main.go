@@ -1870,7 +1870,11 @@ func buildServices(
 		uploadStore,
 		logger,
 	)
-	codeReviewInputCapture := codereviewsvc.NewAssessmentInputCaptureService(codeReviewLifecycleStore, pullRequestStore, repoStore, orgStore, prService, codeReviewVisualEvidence, codereviewsvc.NewGitHubSubmitter(ghSvc))
+	codeReviewSubmitter := codereviewsvc.NewGitHubSubmitter(
+		ghSvc,
+		codereviewsvc.WithGitHubSubmitterHTTPClient(githubtelemetry.NewControlledHTTPClient(15*time.Second, logger, githubRateLimitController, "code_review")),
+	)
+	codeReviewInputCapture := codereviewsvc.NewAssessmentInputCaptureService(codeReviewLifecycleStore, pullRequestStore, repoStore, orgStore, prService, codeReviewVisualEvidence, codeReviewSubmitter)
 	codeReviewInputCapture.SetExternalContextResolver(agent.CodeReviewExternalContextResolver{Credentials: credentialStore, Orgs: orgStore, GitHubTools: ghSvc != nil, SessionTools: cfg.BaseURL != "" && cfg.SessionSecret != "", MemoryInjected: orchestrator.CodeReviewMemoryContextConfigured()})
 	codeReviewInputCapture.SetAuthorTeamMembershipChecker(ghSvc)
 	codeReviewLifecycle.SetAssessmentContinuation(codeReviewInputCapture, cfg.CodeReviewAssessmentsEnabled && cfg.CodeReviewRechecksEnabled)
@@ -1929,10 +1933,8 @@ func buildServices(
 		SlackSummarizer:              slackSummarizer,
 		LLM:                          llmClient,
 		GitHub:                       ghSvc,
-		CodeReviews: codereviewsvc.NewGitHubSubmitter(
-			ghSvc,
-			codereviewsvc.WithGitHubSubmitterHTTPClient(githubtelemetry.NewControlledHTTPClient(15*time.Second, logger, githubRateLimitController, "code_review")),
-		),
+		CodeReviews:                  codeReviewSubmitter,
+
 		CodeReviewLifecycle:        codeReviewLifecycle,
 		CodeReviewDisputes:         codeReviewDisputes,
 		CodeReviewInsights:         codeReviewInsights,
