@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -25,6 +26,7 @@ type reviewWorkspaceProvider struct {
 	commands      []string
 	actualHead    string
 	createdConfig SandboxConfig
+	failEvidence  bool
 }
 
 func (p *reviewWorkspaceProvider) Create(_ context.Context, cfg SandboxConfig) (*Sandbox, error) {
@@ -40,11 +42,36 @@ func (p *reviewWorkspaceProvider) CloneRepo(context.Context, *Sandbox, string, s
 
 func (p *reviewWorkspaceProvider) Exec(_ context.Context, _ *Sandbox, command string, stdout, _ io.Writer) (int, error) {
 	p.commands = append(p.commands, command)
-	if strings.Contains(command, "rev-parse HEAD") {
+	if p.failEvidence && strings.Contains(command, `"receipt":{`) {
+		return 1, nil
+	}
+	if command == "/usr/bin/git -c core.hooksPath=/dev/null rev-parse FETCH_HEAD" || strings.Contains(command, "rev-parse HEAD") {
 		_, err := io.WriteString(stdout, p.actualHead+"\n")
 		return 0, err
 	}
 	return 0, nil
+}
+
+func (p *reviewWorkspaceProvider) ExecWithStdin(ctx context.Context, sandbox *Sandbox, command string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	input, err := io.ReadAll(stdin)
+	if err != nil {
+		return -1, err
+	}
+	var envelope struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(input, &envelope); err != nil {
+		return -1, err
+	}
+	command += " " + string(envelope.Payload)
+	if strings.Contains(command, "clone --template=/dev/null --no-checkout") {
+		p.cloneCount++
+	}
+	return p.Exec(ctx, sandbox, command, stdout, stderr)
+}
+
+func (p *reviewWorkspaceProvider) ReadFile(context.Context, *Sandbox, string) ([]byte, error) {
+	return nil, nil
 }
 
 func (p *reviewWorkspaceProvider) Destroy(context.Context, *Sandbox) error {
@@ -55,18 +82,20 @@ func (p *reviewWorkspaceProvider) Destroy(context.Context, *Sandbox) error {
 func TestPrepareCodeReviewWorkspaceExactHead(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name        string
-		actualHead  string
-		wantErr     bool
-		wantDestroy int
+		name         string
+		actualHead   string
+		wantErr      bool
+		wantDestroy  int
+		failEvidence bool
 	}{
-		{name: "ready after one clone and exact checkout", actualHead: "expected-head"},
+		{name: "ready after one clone and exact checkout", actualHead: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 		{name: "mismatched checkout destroys unpublished container", actualHead: "unexpected-head", wantErr: true, wantDestroy: 1},
+		{name: "incomplete evidence destroys unpublished container", actualHead: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", failEvidence: true, wantErr: true, wantDestroy: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			provider := &reviewWorkspaceProvider{actualHead: tt.actualHead}
+			provider := &reviewWorkspaceProvider{actualHead: tt.actualHead, failEvidence: tt.failEvidence}
 			orchestrator := &Orchestrator{
 				provider: provider,
 				sandboxCapacity: NewSandboxCapacityGate(SandboxCapacityGateConfig{
@@ -84,10 +113,10 @@ func TestPrepareCodeReviewWorkspaceExactHead(t *testing.T) {
 			session := &models.Session{
 				ID: uuid.New(), OrgID: orgID, Origin: models.SessionOriginCodeReview,
 				AgentType: models.AgentTypeCodex, RepositoryID: &repoID, Title: &title,
-				RevisionContext: []byte(`{"kind":"code_review","github_pr_number":42,"head_sha":"expected-head"}`),
+				RevisionContext: []byte(`{"kind":"code_review","github_pr_number":42,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}`),
 			}
 			preparationLeaseToken := uuid.New()
-			sandbox, err := orchestrator.PrepareCodeReviewWorkspace(jobctx.WithLockToken(context.Background(), preparationLeaseToken), session, "expected-head")
+			sandbox, err := orchestrator.PrepareCodeReviewWorkspace(jobctx.WithLockToken(context.Background(), preparationLeaseToken), session, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 			if tt.wantErr {
 				require.Error(t, err, "an unexpected checkout head must reject the prepared workspace")
 				require.Nil(t, sandbox, "a failed checkout must not transfer an unpublished sandbox")

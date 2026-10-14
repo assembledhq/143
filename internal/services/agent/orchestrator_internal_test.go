@@ -647,7 +647,7 @@ func TestWaitForSandboxWorkspaceReady(t *testing.T) {
 				require.NotEmpty(t, provider.execCalls, "workspace readiness timeout should perform at least one git probe")
 			}
 			if len(provider.execCalls) > 0 {
-				require.Contains(t, provider.execCalls[0], "'/workspace/repo'\\''s checkout'", "workspace readiness should shell-quote the sandbox workdir")
+				require.Contains(t, provider.execCalls[0], "\"work_dir\":\"/workspace/repo'\\''s checkout\"", "workspace readiness should transport the quoted workdir as bounded JSON")
 			}
 			require.Equal(t, tt.expectedChecks, cancelCheckCalls, "workspace readiness should check durable cancellation at the expected points")
 		})
@@ -2150,13 +2150,14 @@ func TestSetupFreshSandbox_CodeReviewChecksOutPullRequestHead(t *testing.T) {
 		RevisionContext: json.RawMessage(`{
 			"kind": "code_review",
 			"github_pr_number": 42,
-			"head_sha": "expected-head-sha"
+			"head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 		}`),
 	}
 	provider := &testInternalSandboxProvider{
 		execFn: func(cmd string, stdout, stderr io.Writer) (int, error) {
-			if cmd == "git rev-parse HEAD" {
-				_, _ = io.WriteString(stdout, "expected-head-sha\n")
+			if cmd == "git rev-parse HEAD" || cmd == "/usr/bin/git -c core.hooksPath=/dev/null rev-parse FETCH_HEAD" {
+				_, _ = io.WriteString(stdout, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
 			}
 			return 0, nil
 		},
@@ -2171,28 +2172,31 @@ func TestSetupFreshSandbox_CodeReviewChecksOutPullRequestHead(t *testing.T) {
 	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", WorkDir: "/home/sandbox/backend", HomeDir: "/home/sandbox"}, nil, zerolog.Nop(), nil)
 
 	require.NoError(t, err, "setupFreshSandbox should check out the recorded PR head for code review sessions")
-	require.Contains(t, provider.execCalls, "git fetch --quiet --no-tags 'https://x-access-token:ghp_test123@github.com/assembledhq/143.git' 'pull/42/head'", "code review checkout should fetch the GitHub PR head ref using an authenticated URL, since origin has been scrubbed of its token and the credential helper is not configured yet")
-	require.NotContains(t, provider.execCalls, "git fetch --quiet --no-tags origin 'pull/42/head'", "code review checkout must not fetch from the token-less origin remote")
-	require.Contains(t, provider.execCalls, "git checkout -B '143/88888888/code-review-for-assembledhq-143-42' FETCH_HEAD", "code review checkout should reset the session branch to the PR head")
-	require.Contains(t, provider.execCalls, "git rev-parse HEAD", "code review checkout should verify the checked-out head SHA")
-	require.NotContains(t, provider.execCalls, "git checkout -b '143/88888888/code-review-for-assembledhq-143-42'", "code review checkout should not branch from the cloned target branch tip")
+	commands := strings.Join(provider.execCalls, "\n")
+	require.Contains(t, commands, "pull/42/head", "review checkout should fetch the mutable PR ref to detect a moved head")
+	require.Contains(t, commands, "--filter=blob:none", "review fetches should not download all historical blobs")
+	require.NotContains(t, commands, "ghp_test123", "review fetch must keep installation authentication out of command arguments")
+	require.Contains(t, strings.Join(provider.execInputs, "\n"), `"token":"ghp_test123"`, "review fetch should receive explicit private stdin authentication")
+	require.Contains(t, commands, "GIT_NO_LAZY_FETCH=1 /usr/bin/git -c core.hooksPath=/dev/null -c remote.origin.promisor=false checkout -B", "review checkout should use its already-hydrated local evidence while suppressing undeclared hooks")
+	require.Contains(t, provider.execCalls, "/usr/bin/git -c core.hooksPath=/dev/null rev-parse FETCH_HEAD", "review checkout should verify the fetched PR head before changing its branch")
+	require.NotContains(t, provider.execCalls, "git checkout -b '143/88888888/code-review-for-assembledhq-143-42'", "review checkout should not branch from a moving target tip")
 
 	// Defense-in-depth ordering: the git credential helper must be configured
 	// right after the clone, before any authenticated git operation, so future
 	// git ops added to fresh-sandbox setup can reach GitHub via the auth socket.
-	bootstrapIdx := indexOfExecCall(provider.execCalls, "143-tools git-bootstrap --workdir=/home/sandbox/backend")
-	fetchIdx := indexOfExecCall(provider.execCalls, "git fetch --quiet --no-tags 'https://x-access-token:ghp_test123@github.com/assembledhq/143.git' 'pull/42/head'")
-	require.GreaterOrEqual(t, bootstrapIdx, 0, "code review setup should run git-bootstrap to install the credential helper")
-	require.Less(t, bootstrapIdx, fetchIdx, "git-bootstrap should run before the PR head fetch so the credential helper is configured first")
-}
-
-func indexOfExecCall(calls []string, want string) int {
-	for i, c := range calls {
-		if c == want {
-			return i
+	bootstrapIdx := -1
+	fetchIdx := -1
+	for i, command := range provider.execCalls {
+		if strings.Contains(command, "143-tools git-bootstrap") {
+			bootstrapIdx = i
+		}
+		if strings.Contains(command, "pull/42/head") {
+			fetchIdx = i
+			break
 		}
 	}
-	return -1
+	require.GreaterOrEqual(t, bootstrapIdx, 0, "code review setup should run git-bootstrap to install the credential helper")
+	require.Less(t, bootstrapIdx, fetchIdx, "git-bootstrap should run before the PR head fetch so the credential helper is configured first")
 }
 
 func TestSetupFreshSandbox_WorkingBranchCheckoutFailures(t *testing.T) {
