@@ -81,14 +81,15 @@ func TestWorkspaceReadinessWithRealGitCheckout(t *testing.T) {
 
 func TestWorkspaceReadinessWaitsForPreparedInputs(t *testing.T) {
 	t.Parallel()
-	var probes int
+	var probes, checks int
 	provider := &testInternalSandboxProvider{execFn: func(_ string, stdout, _ io.Writer) (int, error) {
 		probes++
 		_, err := io.WriteString(stdout, "head\nreview\nhead\n")
 		return 0, err
 	}}
 	err := waitForSandboxWorkspaceReady(context.Background(), provider, &Sandbox{WorkDir: "/workspace"}, "review", "head", time.Second, time.Millisecond, 4*time.Millisecond, nil, func(context.Context) (bool, error) {
-		return probes >= 3, nil
+		checks++
+		return checks >= 3, nil
 	})
 	require.NoError(t, err, "workspace readiness should wait until both checkout and prepared inputs are complete")
 	require.Equal(t, 3, probes, "matching HEAD must not skip the input preparation barrier")

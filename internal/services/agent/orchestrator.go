@@ -398,6 +398,14 @@ func waitForSandboxWorkspaceReady(
 			}
 		}
 
+		inputsReady := true
+		for _, check := range additionalReadiness {
+			ready, err := check(waitCtx)
+			if err != nil {
+				return err
+			}
+			inputsReady = inputsReady && ready
+		}
 		var stdout, stderr bytes.Buffer
 		exitCode, execErr := provider.Exec(waitCtx, sandbox, probeCommand, &stdout, &stderr)
 		if errors.Is(execErr, ErrCodeReviewPreparationCleanup) {
@@ -411,16 +419,6 @@ func waitForSandboxWorkspaceReady(
 				headMatches := actualHead != "" && (expectedHead == "" || strings.EqualFold(actualHead, expectedHead))
 				branchMatches := expectedBranch == "" || actualBranch == expectedBranch || actualBranch == ""
 				preparedBranchMatches := expectedBranch == "" || strings.EqualFold(strings.TrimSpace(fields[2]), actualHead)
-				inputsReady := true
-				if headMatches && branchMatches && preparedBranchMatches {
-					for _, check := range additionalReadiness {
-						ready, err := check(waitCtx)
-						if err != nil {
-							return err
-						}
-						inputsReady = inputsReady && ready
-					}
-				}
 				if headMatches && branchMatches && preparedBranchMatches && inputsReady {
 					// Close the race between the last unsuccessful probe and a
 					// cancellation that arrived while this successful probe ran.

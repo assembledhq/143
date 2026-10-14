@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -22,10 +24,31 @@ import (
 
 type reviewInputsProvider struct {
 	SandboxProvider
-	calls atomic.Int64
+	calls    atomic.Int64
+	destroys atomic.Int64
 }
 
 func (p *reviewInputsProvider) IsAlive(context.Context, *Sandbox) (bool, error) { return true, nil }
+
+func (p *reviewInputsProvider) Destroy(context.Context, *Sandbox) error {
+	p.destroys.Add(1)
+	return nil
+}
+
+type reviewInputsRecoverySessions struct {
+	SessionStore
+	recovered bool
+	params    []db.RecoverIncompleteCodeReviewWorkspaceParams
+}
+
+func (s *reviewInputsRecoverySessions) RecoverIncompleteCodeReviewWorkspace(_ context.Context, _ uuid.UUID, params db.RecoverIncompleteCodeReviewWorkspaceParams) (bool, error) {
+	s.params = append(s.params, params)
+	return s.recovered, nil
+}
+
+func reviewPreparationContext(jobID, token uuid.UUID) context.Context {
+	return jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), token)
+}
 
 func (p *reviewInputsProvider) Exec(ctx context.Context, _ *Sandbox, command string, stdout, stderr io.Writer) (int, error) {
 	p.calls.Add(1)
@@ -293,20 +316,22 @@ func TestSharedReviewInputPreparationMarkerLifecycle(t *testing.T) {
 	t.Parallel()
 	directory, base, head, _ := newReviewInputsGitFixture(t)
 	session := reviewInputsSession(t, base, head)
+	session.WorkspaceGeneration = 7
+	ctx := reviewPreparationContext(uuid.New(), uuid.New())
 	sandbox := &Sandbox{ID: "container", WorkDir: directory}
-	orchestrator := &Orchestrator{provider: &reviewInputsProvider{}, repositories: testInternalRepoStore{repo: models.Repository{FullName: "example/repo"}}}
-	require.NoError(t, orchestrator.markCodeReviewInputsPreparing(context.Background(), session, sandbox), "owner should mark preparation before publishing a container")
-	ready, err := orchestrator.codeReviewInputsPreparationFinished(context.Background(), session, sandbox)
+	orchestrator := &Orchestrator{provider: &reviewInputsProvider{}, sessions: &reviewInputsRecoverySessions{}, repositories: testInternalRepoStore{repo: models.Repository{FullName: "example/repo"}}}
+	require.NoError(t, orchestrator.markCodeReviewInputsPreparing(ctx, session, sandbox), "owner should mark preparation before publishing a container")
+	ready, err := orchestrator.codeReviewInputsPreparationFinished(ctx, session, sandbox)
 	require.NoError(t, err, "sibling should inspect preparation state")
 	require.False(t, ready, "checked-out HEAD alone must not bypass unfinished owner preparation")
 	require.Empty(t, reviewInputsGit(t, directory, "ls-files", "--others", "--exclude-standard"), "pre-clone marker must remain outside the repository")
-	orchestrator.clearCodeReviewInputPreparation(context.Background(), session, sandbox)
-	ready, err = orchestrator.codeReviewInputsPreparationFinished(context.Background(), session, sandbox)
+	orchestrator.clearCodeReviewInputPreparation(ctx, session, sandbox)
+	ready, err = orchestrator.codeReviewInputsPreparationFinished(ctx, session, sandbox)
 	require.NoError(t, err, "cancelled owner marker should be removable")
 	require.True(t, ready, "owner cancellation should not leave a permanent readiness wait")
-	require.NoError(t, orchestrator.markCodeReviewInputsPreparing(context.Background(), session, sandbox), "recovery owner should be able to mark a new preparation attempt")
-	require.NoError(t, orchestrator.ensureCodeReviewInputs(context.Background(), session, sandbox), "recovery should publish a complete immutable bundle")
-	ready, err = orchestrator.codeReviewInputsPreparationFinished(context.Background(), session, sandbox)
+	require.NoError(t, orchestrator.markCodeReviewInputsPreparing(ctx, session, sandbox), "recovery owner should be able to mark a new preparation attempt")
+	require.NoError(t, orchestrator.ensureCodeReviewInputs(ctx, session, sandbox), "recovery should publish a complete immutable bundle")
+	ready, err = orchestrator.codeReviewInputsPreparationFinished(ctx, session, sandbox)
 	require.NoError(t, err, "complete bundle should release the readiness barrier")
 	require.True(t, ready, "atomic publication should clear the preparation marker")
 }

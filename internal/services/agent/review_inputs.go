@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 )
@@ -62,6 +64,22 @@ func codeReviewInputPreparationMarker(sandbox *Sandbox, identity codeReviewInput
 	return path.Join(path.Dir(sandbox.WorkDir), ".143-review-preparing-"+path.Base(path.Dir(manifest)))
 }
 
+type codeReviewPreparationOwner struct {
+	Version             int       `json:"version"`
+	OrgID               uuid.UUID `json:"org_id"`
+	SessionID           uuid.UUID `json:"session_id"`
+	ContainerID         string    `json:"container_id"`
+	WorkspaceGeneration int64     `json:"workspace_generation"`
+	JobID               uuid.UUID `json:"job_id"`
+	LockToken           uuid.UUID `json:"lock_token"`
+}
+
+func codeReviewPreparationOwnerFromContext(ctx context.Context, session *models.Session, sandbox *Sandbox) codeReviewPreparationOwner {
+	jobID, _ := jobctx.JobIDFromContext(ctx)
+	lockToken, _ := jobctx.LockTokenFromContext(ctx)
+	return codeReviewPreparationOwner{1, session.OrgID, session.ID, sandbox.ID, session.WorkspaceGeneration, jobID, lockToken}
+}
+
 func (o *Orchestrator) markCodeReviewInputsPreparing(ctx context.Context, session *models.Session, sandbox *Sandbox) error {
 	if session.Origin != models.SessionOriginCodeReview {
 		return nil
@@ -70,14 +88,12 @@ func (o *Orchestrator) markCodeReviewInputsPreparing(ctx context.Context, sessio
 	if err != nil {
 		return err
 	}
-	marker := codeReviewInputPreparationMarker(sandbox, identity)
-	command := fmt.Sprintf("mkdir -p '%s' && : > '%s'", shellEscapeSingleQuote(path.Dir(marker)), shellEscapeSingleQuote(marker))
-	var stderr bytes.Buffer
-	exit, err := o.provider.Exec(ctx, sandbox, command, io.Discard, &stderr)
-	if err != nil || exit != 0 {
-		return fmt.Errorf("mark code review inputs preparing: exit=%d %v %s", exit, err, stderr.String())
-	}
-	return nil
+	_, err = o.updateCodeReviewPreparationMarker(ctx, session, sandbox, identity, "mark")
+	return err
+}
+
+type incompleteCodeReviewWorkspaceRecoverer interface {
+	RecoverIncompleteCodeReviewWorkspace(context.Context, uuid.UUID, db.RecoverIncompleteCodeReviewWorkspaceParams) (bool, error)
 }
 
 func (o *Orchestrator) codeReviewInputsPreparationFinished(ctx context.Context, session *models.Session, sandbox *Sandbox) (bool, error) {
@@ -85,15 +101,61 @@ func (o *Orchestrator) codeReviewInputsPreparationFinished(ctx context.Context, 
 	if err != nil {
 		return false, err
 	}
-	command := fmt.Sprintf("test ! -e '%s'", shellEscapeSingleQuote(codeReviewInputPreparationMarker(sandbox, identity)))
-	exit, err := o.provider.Exec(ctx, sandbox, command, io.Discard, io.Discard)
+	command := fmt.Sprintf("if test -e '%s'; then cat '%s'; else exit 42; fi", shellEscapeSingleQuote(codeReviewInputPreparationMarker(sandbox, identity)), shellEscapeSingleQuote(codeReviewInputPreparationMarker(sandbox, identity)))
+	var stdout, stderr bytes.Buffer
+	exit, err := o.provider.Exec(ctx, sandbox, command, &stdout, &stderr)
 	if err != nil {
 		return false, fmt.Errorf("inspect code review input preparation: %w", err)
 	}
-	if exit != 0 && exit != 1 {
+	if exit == 42 {
+		return true, nil
+	}
+	if exit != 0 {
 		return false, fmt.Errorf("inspect code review input preparation: exit=%d", exit)
 	}
-	return exit == 0, nil
+	var owner codeReviewPreparationOwner
+	if err := json.Unmarshal(stdout.Bytes(), &owner); err != nil || owner.Version != 1 || owner.JobID == uuid.Nil || owner.LockToken == uuid.Nil ||
+		owner.OrgID != session.OrgID || owner.SessionID != session.ID || owner.ContainerID != sandbox.ID || owner.WorkspaceGeneration != session.WorkspaceGeneration {
+		return false, fmt.Errorf("incomplete review workspace has no verifiable preparation owner; restart the review workspace")
+	}
+	waitingJobID, hasJob := jobctx.JobIDFromContext(ctx)
+	waitingToken, hasToken := jobctx.LockTokenFromContext(ctx)
+	recoverer, ok := o.sessions.(incompleteCodeReviewWorkspaceRecoverer)
+	if !hasJob || !hasToken || waitingJobID == uuid.Nil || waitingToken == uuid.Nil || !ok {
+		return false, fmt.Errorf("review preparation lease proof unavailable; restart the review workspace")
+	}
+	cleared, err := recoverer.RecoverIncompleteCodeReviewWorkspace(ctx, session.OrgID, db.RecoverIncompleteCodeReviewWorkspaceParams{
+		SessionID: session.ID, ContainerID: sandbox.ID, WorkspaceGeneration: owner.WorkspaceGeneration,
+		Repository: identity.Repository, BaseSHA: identity.BaseSHA, HeadSHA: identity.HeadSHA,
+		PreparationJobID: owner.JobID, PreparationLockToken: owner.LockToken,
+		WaitingJobID: waitingJobID, WaitingLockToken: waitingToken,
+	})
+	if err != nil {
+		return false, fmt.Errorf("prove incomplete review workspace ownership: %w", err)
+	}
+	if !cleared {
+		return false, nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := o.provider.Destroy(cleanupCtx, sandbox); err != nil {
+		o.logger.Warn().Err(err).Str("container_id", sandbox.ID).Msg("failed to destroy fenced incomplete review workspace")
+	}
+	return false, ErrStaleSandboxIDCleared
+}
+
+func (o *Orchestrator) updateCodeReviewPreparationMarker(ctx context.Context, session *models.Session, sandbox *Sandbox, identity codeReviewInputIdentity, mode string) (int, error) {
+	encoded, err := json.Marshal(codeReviewPreparationOwnerFromContext(ctx, session, sandbox))
+	if err != nil {
+		return -1, fmt.Errorf("encode review preparation owner: %w", err)
+	}
+	command := fmt.Sprintf("python3 -c '%s' '%s' '%s' '%s'", shellEscapeSingleQuote(codeReviewPreparationMarkerScript), shellEscapeSingleQuote(codeReviewInputPreparationMarker(sandbox, identity)), shellEscapeSingleQuote(string(encoded)), mode)
+	var stderr bytes.Buffer
+	exit, err := o.provider.Exec(ctx, sandbox, command, io.Discard, &stderr)
+	if err != nil || (exit != 0 && exit != 1) || (mode == "mark" && exit != 0) {
+		return exit, fmt.Errorf("update review preparation marker: exit=%d %v %s", exit, err, stderr.String())
+	}
+	return exit, nil
 }
 
 func (o *Orchestrator) clearCodeReviewInputPreparation(ctx context.Context, session *models.Session, sandbox *Sandbox) {
@@ -112,13 +174,30 @@ func (o *Orchestrator) clearCodeReviewInputPreparation(ctx context.Context, sess
 	if !alive {
 		return
 	}
-	command := fmt.Sprintf("rm -f '%s'", shellEscapeSingleQuote(codeReviewInputPreparationMarker(sandbox, identity)))
-	var stderr bytes.Buffer
-	exit, err := o.provider.Exec(cleanupCtx, sandbox, command, io.Discard, &stderr)
-	if err != nil || exit != 0 {
-		o.logger.Warn().Err(err).Int("exit_code", exit).Str("stderr", stderr.String()).Msg("failed to clear cancelled review input preparation")
+	if _, err := o.updateCodeReviewPreparationMarker(cleanupCtx, session, sandbox, identity, "clear"); err != nil {
+		o.logger.Warn().Err(err).Msg("failed to clear cancelled review input preparation")
 	}
 }
+
+const codeReviewPreparationMarkerScript = `import fcntl, json, os, pathlib, sys, tempfile
+marker, owner, mode = pathlib.Path(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3]
+marker.parent.mkdir(parents=True, exist_ok=True)
+with pathlib.Path(str(marker) + ".lock").open("a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    if mode == "mark":
+        descriptor, temporary = tempfile.mkstemp(prefix=marker.name + ".", dir=marker.parent)
+        try:
+            with os.fdopen(descriptor, "w") as stream:
+                json.dump(owner, stream)
+            os.replace(temporary, marker)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    elif marker.exists():
+        if json.loads(marker.read_text()) != owner:
+            sys.exit(1)
+        marker.unlink()
+`
 
 func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *models.Session, sandbox *Sandbox) error {
 	if session == nil || session.Origin != models.SessionOriginCodeReview {
@@ -142,7 +221,7 @@ func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *mode
 		if repo.FullName != identity.Repository {
 			return nil, fmt.Errorf("code review input repository does not match session repository")
 		}
-		exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, "", "")
+		exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, session.WorkspaceGeneration, "", "")
 		if err != nil || exit != 42 {
 			return nil, err
 		}
@@ -156,7 +235,7 @@ func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *mode
 		if err != nil {
 			return nil, fmt.Errorf("authenticate shared review input preparation: %w", err)
 		}
-		_, err = o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, token)
+		_, err = o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, session.WorkspaceGeneration, repo.CloneURL, token)
 		return nil, err
 	})
 	select {
@@ -167,7 +246,7 @@ func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *mode
 	}
 }
 
-func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbox *Sandbox, identity codeReviewInputIdentity, remote, token string) (int, error) {
+func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbox *Sandbox, identity codeReviewInputIdentity, generation int64, remote, token string) (int, error) {
 	encoded, err := json.Marshal(identity)
 	if err != nil {
 		return -1, fmt.Errorf("encode shared review input identity: %w", err)
@@ -177,7 +256,11 @@ func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbo
 	if deadline, ok := ctx.Deadline(); ok {
 		budget = min(budget, max(0.1, time.Until(deadline).Seconds()-1))
 	}
-	command := fmt.Sprintf("cd '%s' && python3 -c '%s' '%s' '%s' '%s' '%f' '%s'", shellEscapeSingleQuote(sandbox.WorkDir), shellEscapeSingleQuote(prepareCodeReviewInputsScript), shellEscapeSingleQuote(string(encoded)), shellEscapeSingleQuote(path.Dir(manifestPath)), shellEscapeSingleQuote(remote), budget, shellEscapeSingleQuote(codeReviewInputPreparationMarker(sandbox, identity)))
+	owner, err := json.Marshal(codeReviewPreparationOwnerFromContext(ctx, &models.Session{ID: identity.SessionID, OrgID: identity.OrgID, WorkspaceGeneration: generation}, sandbox))
+	if err != nil {
+		return -1, fmt.Errorf("encode review preparation owner: %w", err)
+	}
+	command := fmt.Sprintf("cd '%s' && python3 -c '%s' '%s' '%s' '%s' '%f' '%s' '%s'", shellEscapeSingleQuote(sandbox.WorkDir), shellEscapeSingleQuote(prepareCodeReviewInputsScript), shellEscapeSingleQuote(string(encoded)), shellEscapeSingleQuote(path.Dir(manifestPath)), shellEscapeSingleQuote(remote), budget, shellEscapeSingleQuote(codeReviewInputPreparationMarker(sandbox, identity)), shellEscapeSingleQuote(string(owner)))
 	var stderr bytes.Buffer
 	exit, execErr := o.provider.Exec(ctx, reviewInputFetchSandbox(sandbox, token), command, io.Discard, &stderr)
 	if execErr != nil {
@@ -350,7 +433,13 @@ try:
             except BlockingIOError:
                 time.sleep(min(0.02, remaining()))
         prepare()
-        pathlib.Path(sys.argv[5]).unlink(missing_ok=True)
+        marker = pathlib.Path(sys.argv[5])
+        with pathlib.Path(str(marker) + ".lock").open("a") as marker_lock:
+            fcntl.flock(marker_lock, fcntl.LOCK_EX)
+            if marker.exists():
+                if json.loads(marker.read_text()) != json.loads(sys.argv[6]):
+                    raise ValueError("review input preparation ownership changed")
+                marker.unlink()
 except subprocess.SubprocessError as error:
     print("captured review input Git operation failed (" + type(error).__name__ + ")", file=sys.stderr)
     sys.exit(1)

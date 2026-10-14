@@ -47,7 +47,10 @@ stalling active reviews, while preserving fresh checks before publication and me
    and merge safety checks, repairs, and manual refreshes must bypass the delay;
    a pending delayed sync must never absorb urgent work. Extend
    `internal/services/github/pr_health_service.go`. Replay bursts to verify fewer
-   remote requests, bounded delay, and no lost final check state.
+   remote requests, bounded delay, and no lost final check state. Keep initial
+   viewer reads shared and detached from browser cancellation. Persist check
+   projection, health summary, and CI status atomically so parallel lanes cannot
+   replace a newer revision with an older completed read.
 
 4. **Prepare review inputs once and protect the remaining quota.** Reuse the
    existing shared checkout and captured assessment inputs. First, resolve exact
@@ -55,8 +58,12 @@ stalling active reviews, while preserving fresh checks before publication and me
    pass that artifact to reviewers instead of URL-driven discovery. Keep immutable
    inputs scoped to tenant, repository, and revisions, with mutable metadata
    freshness tracked separately. Route missing-input fetches through the
-   coordinator and fail explicitly if correct inputs are unavailable. Reviewers
-   analyze the same read-only evidence independently; the coordinator retains final
+   coordinator and fail explicitly if correct inputs are unavailable. Repository
+   preparation must finish before reviewer execution. Recover an interrupted owner
+   only after proving its durable job and executor leases are gone; reclaim the
+   incomplete workspace with existing generation and live-holder guards before
+   retrying preparation. A timeout alone does not establish owner death.
+   Reviewers analyze the same read-only evidence independently; the coordinator retains final
    freshness checks and invalidates stale assessments. Measure reviewer REST calls
    before and after this change; further broker work depends on demonstrated need.
    As quota falls, slow background reconciliation before active reviews and final
@@ -64,6 +71,13 @@ stalling active reviews, while preserving fresh checks before publication and me
    `internal/services/agent/review_workspace.go`,
    `internal/worker/code_review_handler.go`, and
    `internal/prompts/templates/code_review_reviewer.template`.
+
+   Default the background reserve to zero until attributed traffic supports an
+   operator-selected threshold. Positive reserves gate only scoped stale
+   reconciliation sweeps, with shared periodic admission and expiring fair
+   candidates. Ordinary queued refreshes, active/final reviews, database recovery,
+   and publication reconciliation bypass budgeting. Unknown quota or unavailable
+   Redis permits work and exposes the optimization's limits.
 
 ## Validation and delivery
 
@@ -87,7 +101,7 @@ behavior before expanding rollout.
 - [x] Prepare scoped enforcement configuration and validate cooldown/Redis behavior.
 - [x] Implement and locally validate standard sandbox request attribution.
 - [x] Implement and validate coalescing, including concurrent PostgreSQL scheduling.
-- [ ] Implement and validate shared inputs and opt-in background budgeting.
+- [x] Implement and validate shared inputs and opt-in background budgeting.
 - [ ] Complete deployment admission, rollout, and production impact measurements.
 
 ## Surprises & Discoveries
@@ -106,5 +120,7 @@ production configuration in the private infrastructure repository.
 ## Outcomes & Retrospective
 
 Enforcement configuration is prepared with an attended-rollout gate. Attribution
-has local transport/cache/identity tests; deployment and measured savings remain
-pending. Prepared code and configuration do not establish production impact.
+has local transport/cache/identity tests. Shared inputs have real Git and recovery
+tests; budgeting has fair-admission and standalone/Cluster Redis tests. The
+background reserve remains disabled by default. Deployment and measured savings
+remain pending; prepared code and configuration do not establish production impact.
