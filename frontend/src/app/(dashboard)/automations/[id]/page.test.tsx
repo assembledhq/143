@@ -2723,13 +2723,17 @@ describe("AutomationDetailPage", () => {
       http.get("*/api/v1/automations/auto-1/runs*", () =>
         HttpResponse.json({ data: [], meta: {} }),
       ),
+      // Stateful, so the refetch after the save renders what the API stored
+      // rather than replaying the pre-edit agent.
       http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
         updateBody = (await request.json()) as Record<string, unknown>;
-        const { model, reasoning_effort } = updateBody as {
+        const { model, agent_type, reasoning_effort } = updateBody as {
           model?: string;
+          agent_type?: string;
           reasoning_effort?: string;
         };
         if (model !== undefined) stored.model_override = model;
+        if (agent_type !== undefined) stored.agent_type = agent_type;
         if (reasoning_effort !== undefined) {
           stored.reasoning_effort = reasoning_effort;
         }
@@ -2751,6 +2755,10 @@ describe("AutomationDetailPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
+    // Claude Code's scale while the automation still runs on it.
+    await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
+    expect(await screen.findByRole("option", { name: "Max" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
 
     await user.click(screen.getByRole("combobox", { name: "Model" }));
     await user.click(await screen.findByRole("option", { name: "gpt-5.6-sol" }));
@@ -2758,6 +2766,13 @@ describe("AutomationDetailPage", () => {
     await waitFor(() => {
       expect(body()).toEqual({ model: "gpt-5.6-sol", agent_type: "codex" });
     });
+    // The rail now offers Codex's scale. The stored agent is what decides it,
+    // so a save that left agent_type behind would still offer "Max".
+    await user.click(screen.getByRole("combobox", { name: "Reasoning" }));
+    expect(
+      await screen.findByRole("option", { name: "Extra High" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Max" })).not.toBeInTheDocument();
   });
 
   it("clears a reasoning level the incoming agent does not grade", async () => {
