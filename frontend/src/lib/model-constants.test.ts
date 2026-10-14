@@ -37,8 +37,10 @@ describe("model constants", () => {
       "claude-opus-4-8",
       "claude-opus-4-7",
       "claude-opus-4-6",
+      "claude-sonnet-5-5",
       "claude-sonnet-4-6",
       "claude-sonnet-4-5",
+      "claude-haiku-5-5",
       "claude-haiku-4-5",
     ]);
   });
@@ -120,6 +122,8 @@ describe("model constants", () => {
   it("includes latest Codex models", () => {
     expect(AVAILABLE_CODEX_MODELS).toEqual([
       "gpt-6-astra",
+      "gpt-6.1-sol",
+      "gpt-6.1-sol-fast",
       "gpt-6-sol",
       "gpt-6-luna",
       "gpt-5.6-sol",

@@ -11,7 +11,7 @@ func TestClaudeCodeModelConstants(t *testing.T) {
 
 	require.Equal(t, ClaudeCodeModelOpus5, DefaultClaudeCodeModel, "DefaultClaudeCodeModel should use Opus 5")
 	require.Equal(t,
-		[]string{ClaudeCodeModelFable51, ClaudeCodeModelFable5, ClaudeCodeModelOpus55, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45},
+		[]string{ClaudeCodeModelFable51, ClaudeCodeModelFable5, ClaudeCodeModelOpus55, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet55, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku55, ClaudeCodeModelHaiku45},
 		AvailableClaudeCodeModels,
 		"AvailableClaudeCodeModels should be ordered by capability",
 	)
@@ -24,6 +24,8 @@ func TestCodexModelConstants(t *testing.T) {
 	require.Equal(t,
 		[]string{
 			CodexModelGPT6Astra,
+			CodexModelGPT61Sol,
+			CodexModelGPT61SolFast,
 			CodexModelGPT6Sol,
 			CodexModelGPT6Luna,
 			CodexModelGPT56Sol,
@@ -133,6 +135,8 @@ func TestCodexRuntimeModel(t *testing.T) {
 		expected     string
 		priorityTier bool
 	}{
+		{name: "gpt 6.1 sol fast maps to gpt 6.1 sol priority", model: CodexModelGPT61SolFast, expected: "gpt-6.1-sol", priorityTier: true},
+		{name: "regular gpt 6.1 sol stays unchanged", model: CodexModelGPT61Sol, expected: "gpt-6.1-sol"},
 		{name: "gpt 5.6 sol fast maps to gpt 5.6 sol priority", model: CodexModelGPT56SolFast, expected: CodexModelGPT56Sol, priorityTier: true},
 		{name: "gpt 5.6 terra fast maps to gpt 5.6 terra priority", model: CodexModelGPT56TerraFast, expected: CodexModelGPT56Terra, priorityTier: true},
 		{name: "gpt 5.6 luna fast maps to gpt 5.6 luna priority", model: CodexModelGPT56LunaFast, expected: CodexModelGPT56Luna, priorityTier: true},
@@ -223,7 +227,15 @@ func TestValidateModelForAgentType(t *testing.T) {
 		wantErr   bool
 	}{
 		{name: "valid codex model", agentType: AgentTypeCodex, model: CodexModelGPT53Codex},
+		{name: "valid GPT 6.1 Sol", agentType: AgentTypeCodex, model: "gpt-6.1-sol"},
+		{name: "valid GPT 6.1 Sol fast alias", agentType: AgentTypeCodex, model: "gpt-6.1-sol-fast"},
+		{name: "API GPT 5.5 remains valid", agentType: AgentTypeCodex, model: "gpt-5.5"},
+		{name: "API GPT 5.4 remains valid", agentType: AgentTypeCodex, model: "gpt-5.4"},
+		{name: "API GPT 5.4 mini remains valid", agentType: AgentTypeCodex, model: "gpt-5.4-mini"},
+		{name: "saved Spark settings remain valid", agentType: AgentTypeCodex, model: "gpt-5.3-codex-spark"},
 		{name: "valid claude model", agentType: AgentTypeClaudeCode, model: ClaudeCodeModelSonnet45},
+		{name: "valid Sonnet 5.5", agentType: AgentTypeClaudeCode, model: "claude-sonnet-5-5"},
+		{name: "valid Haiku 5.5", agentType: AgentTypeClaudeCode, model: "claude-haiku-5-5"},
 		{name: "valid amp mode", agentType: AgentTypeAmp, model: AmpModeSmart},
 		{name: "valid pi model", agentType: AgentTypePi, model: PiModelClaudeSonnet46},
 		{name: "valid opencode curated model", agentType: AgentTypeOpenCode, model: OpenCodeModelGPT54Mini},
@@ -293,6 +305,11 @@ func TestAgentTypeForModel(t *testing.T) {
 		{"", ""},
 		{CodexModelGPT56Sol, AgentTypeCodex},
 		{"gpt-6-astra", AgentTypeCodex},
+		{"gpt-6.1-sol", AgentTypeCodex},
+		{"gpt-6.1-sol-fast", AgentTypeCodex},
+		{"gpt-5.3-codex-spark", AgentTypeCodex},
+		{"claude-sonnet-5-5", AgentTypeClaudeCode},
+		{"claude-haiku-5-5", AgentTypeClaudeCode},
 		{"claude-fable-5-1", AgentTypeClaudeCode},
 		{"gpt-6-sol", AgentTypeCodex},
 		{"gpt-6-luna", AgentTypeCodex},
@@ -369,6 +386,30 @@ func TestValidateSettingsModels(t *testing.T) {
 				},
 				CodingAgentModelDefaults: map[AgentType]string{
 					AgentTypeCodex: "gpt-6-luna",
+				},
+			},
+		},
+		{
+			name: "accepts GPT-6.1 Sol and Sonnet/Haiku 5.5 in config and defaults",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"codex":       {"OPENAI_MODEL": "gpt-6.1-sol-fast"},
+					"claude_code": {"ANTHROPIC_MODEL": "claude-haiku-5-5"},
+				},
+				CodingAgentModelDefaults: map[AgentType]string{
+					AgentTypeCodex:      "gpt-6.1-sol",
+					AgentTypeClaudeCode: "claude-sonnet-5-5",
+				},
+			},
+		},
+		{
+			name: "retains saved Spark and API GPT-5.5 settings",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"codex": {"OPENAI_MODEL": "gpt-5.5"},
+				},
+				CodingAgentModelDefaults: map[AgentType]string{
+					AgentTypeCodex: "gpt-5.3-codex-spark",
 				},
 			},
 		},
