@@ -77,7 +77,8 @@ type Op string
 
 const (
 	// OpGet asks the host to resolve and return a fresh credential.
-	OpGet Op = "get"
+	OpGet     Op = "get"
+	OpObserve Op = "observe"
 )
 
 // Identity classifies whose credential the host returned. Mirrors
@@ -93,20 +94,26 @@ const (
 
 // Request is the in-sandbox client's call.
 type Request struct {
-	Op     Op     `json:"op"`
-	Action Action `json:"action"`
+	Op              Op                `json:"op"`
+	Action          Action            `json:"action,omitempty"`
+	Observer        string            `json:"observer,omitempty"`
+	WantObservation bool              `json:"want_observation,omitempty"`
+	ObservationID   string            `json:"observation_id,omitempty"`
+	Events          []HTTPObservation `json:"events,omitempty"`
+	Finish          bool              `json:"finish,omitempty"`
 }
 
 // Response is the host handler's reply. On success Token is non-empty and
 // Error is "". On failure Error carries a human-readable message and the
 // caller should treat the response as if no credential were available.
 type Response struct {
-	Token     string    `json:"token,omitempty"`
-	Username  string    `json:"username,omitempty"`
-	Identity  Identity  `json:"identity,omitempty"`
-	Login     string    `json:"login,omitempty"`
-	ExpiresAt time.Time `json:"expires_at,omitempty"`
-	Error     string    `json:"error,omitempty"`
+	Token         string    `json:"token,omitempty"`
+	Username      string    `json:"username,omitempty"`
+	Identity      Identity  `json:"identity,omitempty"`
+	Login         string    `json:"login,omitempty"`
+	ExpiresAt     time.Time `json:"expires_at,omitempty"`
+	Error         string    `json:"error,omitempty"`
+	ObservationID string    `json:"observation_id,omitempty"`
 }
 
 // DefaultUsername is the username git uses when authenticating to GitHub
@@ -230,6 +237,10 @@ func isListenerTransientlyAbsent(err error) bool {
 // action. Returns the response payload (which may carry a non-empty Error
 // field) and any transport error.
 func (c *Client) Get(ctx context.Context, action Action) (*Response, error) {
+	return c.exchange(ctx, Request{Op: OpGet, Action: action})
+}
+
+func (c *Client) exchange(ctx context.Context, req Request) (*Response, error) {
 	if c.SocketPath == "" {
 		return nil, errors.New("sandboxauth: socket path is empty (set " + SocketEnvVar + ")")
 	}
@@ -247,7 +258,6 @@ func (c *Client) Get(ctx context.Context, action Action) (*Response, error) {
 	}
 	_ = conn.SetDeadline(deadline)
 
-	req := Request{Op: OpGet, Action: action}
 	if err := json.NewEncoder(conn).Encode(&req); err != nil {
 		return nil, fmt.Errorf("sandboxauth: write request: %w", err)
 	}
@@ -266,4 +276,32 @@ func (c *Client) Get(ctx context.Context, action Action) (*Response, error) {
 		return nil, fmt.Errorf("sandboxauth: decode response: %w", err)
 	}
 	return &resp, nil
+}
+
+type HTTPObservation struct {
+	UnknownPrincipal bool              `json:"unknown_principal,omitempty"`
+	Method           string            `json:"method"`
+	Route            string            `json:"route"`
+	Status           int               `json:"status"`
+	Header           map[string]string `json:"header,omitempty"`
+	DurationMS       int64             `json:"duration_ms"`
+}
+
+func (c *Client) GetObservedAPIToken(ctx context.Context, callers ...string) (*Response, error) {
+	caller := ""
+	if len(callers) > 0 {
+		caller = callers[0]
+	}
+	return c.exchange(ctx, Request{Op: OpGet, Action: ActionAPI, WantObservation: true, Observer: caller})
+}
+
+func (c *Client) Observe(ctx context.Context, observationID string, events []HTTPObservation, finish bool) error {
+	response, err := c.exchange(ctx, Request{Op: OpObserve, ObservationID: observationID, Events: events, Finish: finish})
+	if err != nil {
+		return err
+	}
+	if response.Error != "" {
+		return errors.New("sandbox GitHub observation rejected")
+	}
+	return nil
 }

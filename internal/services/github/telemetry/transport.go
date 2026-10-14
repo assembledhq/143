@@ -52,6 +52,10 @@ type RequestMetadata struct {
 	SyncReason          string
 	Caller              string
 	PrincipalUnresolved bool
+	SessionID           string
+	OrgID               string
+	Repository          string
+	SandboxObservation  bool
 }
 
 // WithRequestMetadata attaches safe GitHub telemetry dimensions to a request.
@@ -217,6 +221,10 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			SyncReason:     metadata.SyncReason,
 		})
 		if err != nil {
+			var deferral *ratelimit.Deferral
+			if errors.As(err, &deferral) {
+				RecordLocalActivity(req.Context(), t.logger, "deferral", route)
+			}
 			if req.Body != nil {
 				if closeErr := req.Body.Close(); closeErr != nil {
 					return nil, errors.Join(err, fmt.Errorf("close locally deferred GitHub request body: %w", closeErr))
@@ -423,6 +431,7 @@ func (t *transport) logRequest(req *http.Request, resp *http.Response, requestEr
 		}
 	}
 
+	metrics.RecordGitHubActivity(req.Context(), metadata.Caller, header.Get("X-RateLimit-Resource"), result, "remote")
 	event := t.logger.Info()
 	if requestErr != nil || rateLimited || statusCode >= http.StatusInternalServerError {
 		event = t.logger.Warn()
@@ -437,6 +446,13 @@ func (t *transport) logRequest(req *http.Request, resp *http.Response, requestEr
 		Str("github_result", result).
 		Float64("github_duration_ms", float64(finishedAt.Sub(startedAt).Microseconds())/1000).
 		Bool("github_rate_limited", rateLimited)
+	if metadata.Repository != "" {
+		repository = metadata.Repository
+	}
+	event = addScope(event, metadata)
+	if metadata.SandboxObservation {
+		event = event.Bool("github_observation_trusted", false).Str("github_observation_source", "sandbox")
+	}
 	if repository != "" {
 		event = event.Str("github_repository", repository)
 	}
@@ -734,4 +750,55 @@ func isHex(value string) bool {
 		}
 	}
 	return true
+}
+
+func RecordLocalActivity(ctx context.Context, logger zerolog.Logger, kind, route string) {
+	metadata, _ := RequestMetadataFromContext(ctx)
+	outcome := "hit"
+	if kind == "deferral" {
+		outcome = "deferred"
+	}
+	metrics.RecordGitHubActivity(ctx, metadata.Caller, "", outcome, kind)
+	addScope(logger.Debug(), metadata).Str("github_caller", metadata.Caller).Str("github_activity", kind).Str("github_route", route).Int64("github_installation_id", metadata.InstallationID).Msg("github local activity")
+}
+
+func addScope(event *zerolog.Event, metadata RequestMetadata) *zerolog.Event {
+	if metadata.SessionID != "" {
+		event = event.Str("session_id", metadata.SessionID)
+	}
+	if metadata.OrgID != "" {
+		event = event.Str("org_id", metadata.OrgID)
+	}
+	return event
+}
+
+func NormalizeExternalRoute(path string) string {
+	route, _ := normalizeRoute(&url.URL{Path: path})
+	for _, segment := range strings.Split(strings.Trim(route, "/"), "/") {
+		switch segment {
+		case ":owner", ":repo", ":id", ":ref", ":path", ":installation_id", ":org", ":team", ":user":
+			continue
+		}
+		switch segment {
+		case "", "repos", "pulls", "issues", "comments", "reviews", "commits", "branches", "statuses", "contents", "git", "trees", "ref", "refs", "check-runs", "check-suites", "actions", "runs", "jobs", "artifacts", "logs", "releases", "latest", "tags", "assets", "compare", "files", "user", "users", "orgs", "members", "memberships", "teams", "app", "installations", "access_tokens", "graphql", "rate_limit":
+		default:
+			return "/other"
+		}
+	}
+	return route
+}
+
+func RecordExternalRequest(ctx context.Context, logger zerolog.Logger, metadata RequestMetadata, method, route string, status int, header http.Header, duration time.Duration) {
+	metadata.SandboxObservation = true
+	request := &http.Request{Method: method, URL: &url.URL{Path: NormalizeExternalRoute(route)}}
+	request = request.WithContext(WithRequestMetadata(ctx, metadata))
+	var response *http.Response
+	var err error
+	if status > 0 {
+		response = &http.Response{StatusCode: status, Header: header}
+	} else {
+		err = errors.New("sandbox GitHub transport failed")
+	}
+	finished := time.Now()
+	(&transport{logger: logger}).logRequest(request, response, err, nil, nil, false, finished.Add(-duration), finished)
 }

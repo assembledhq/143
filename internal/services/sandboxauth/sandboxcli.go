@@ -66,6 +66,8 @@ func HandleSubcommand(args []string, stdin io.Reader, stdout, stderr io.Writer) 
 	switch args[0] {
 	case "git-credential":
 		return true, runGitCredential(args[1:], stdin, stdout, stderr)
+	case "gh":
+		return true, runGH(args[1:], stdin, stdout, stderr)
 	case "auth-token":
 		return true, runAuthToken(args[1:], stdout, stderr)
 	case "git-bootstrap":
@@ -371,21 +373,9 @@ func installGHWrapper() error {
 		return err
 	}
 	wrapperPath := filepath.Join(binDir, "gh")
-	// We honor a pre-set GH_TOKEN/GITHUB_TOKEN so an agent that explicitly
-	// exports one (e.g. for cross-org work the host socket can't satisfy)
-	// keeps control. The host socket and the legacy GITHUB_TOKEN env path
-	// are mutually exclusive in the orchestrator (see
-	// orchestrator.prepareSandboxGitHubAuth: it sets GITHUB_TOKEN only when
-	// the resolver/socket path is *not* wired), so in normal operation only
-	// one of these branches is ever populated by us.
 	script := `#!/bin/sh
-# Installed by 143-tools git-bootstrap.
 set -eu
-if [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ] && [ -n "${` + SocketEnvVar + `:-}" ]; then
-    GH_TOKEN="$(143-tools auth-token --action=api)"
-    export GH_TOKEN
-fi
-exec ` + ghBinaryPath + ` "$@"
+exec 143-tools gh "$@"
 `
 	return os.WriteFile(wrapperPath, []byte(script), 0o755) // #nosec G306 -- wrapper must be executable
 }
