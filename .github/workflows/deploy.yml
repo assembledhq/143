@@ -173,6 +173,8 @@ jobs:
           WORKER_DEPLOY_DETACH: ""
           WORKER_BLUE_GREEN_PORT_START: "8080"
           WORKER_BLUE_GREEN_PORT_END: "8087"
+          WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB: "16384"
+          WORKER_BLUE_GREEN_PULL_INODE_BUDGET: "1000000"
           # Runner-local diagnostics contain private deployment identities.
           # Keep them out of this public repository's logs and artifacts.
           DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs
