@@ -23,6 +23,7 @@ type recoveryTransactionRecorder struct {
 	precheckArgs   []any
 	candidatesSQL  string
 	candidatesArgs []any
+	waitingPeerIDs []uuid.UUID
 }
 
 func (s *recoveryTransactionRecorder) QueryRow(ctx context.Context, sql string, arguments ...any) pgx.Row {
@@ -42,6 +43,15 @@ func (s *recoveryTransactionRecorder) Begin(ctx context.Context) (pgx.Tx, error)
 type recoveryObservedTransaction struct {
 	pgx.Tx
 	recorder *recoveryTransactionRecorder
+}
+
+func (tx *recoveryObservedTransaction) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	if strings.Contains(sql, "UPDATE sessions s") && strings.Contains(sql, "SET container_id=NULL") && len(arguments) > 8 {
+		if peers, ok := arguments[8].([]uuid.UUID); ok {
+			tx.recorder.waitingPeerIDs = append([]uuid.UUID(nil), peers...)
+		}
+	}
+	return tx.Tx.Exec(ctx, sql, arguments...)
 }
 
 func (tx *recoveryObservedTransaction) Query(ctx context.Context, sql string, arguments ...any) (pgx.Rows, error) {
@@ -438,6 +448,87 @@ func TestIncompleteReviewWorkspaceRecoveryPeerRuntimeRacePostgres(t *testing.T) 
 	require.NoError(t, recoveryErr, "committed peer runtime should protect its workspace without a storage error")
 	require.False(t, recovered, "a peer that started execution must preserve its source container")
 	assertWorkspaceUnchanged("after peer runtime creation commits")
+}
+
+func TestIncompleteReviewWorkspaceRecoveryPeerRuntimeCommitsDuringProofWaitPostgres(t *testing.T) {
+	t.Parallel()
+	f := newIncompleteReviewWorkspaceFixture(t)
+	peer := f.addWaitingPeer(t, uuid.New(), uuid.New())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	recovery, err := f.pool.Acquire(ctx)
+	require.NoError(t, err, "recovery should have an identifiable dedicated PostgreSQL backend")
+	defer recovery.Release()
+	actor, err := f.pool.Acquire(ctx)
+	require.NoError(t, err, "peer runtime creation should have a separate identifiable backend")
+	defer actor.Release()
+	_, err = actor.Exec(ctx, `CREATE FUNCTION pg_temp.commit_review_peer_runtime_on_recovery_wait(
+ peer_runtime_id uuid,tenant_id uuid,source_session_id uuid,peer_thread_id uuid,recovery_backend_pid int)
+ RETURNS void LANGUAGE plpgsql AS $$
+ DECLARE
+  observe_until timestamptz := clock_timestamp()+interval '3 seconds';
+  recovery_query text;
+ BEGIN
+  INSERT INTO thread_runtimes(id,org_id,session_id,thread_id,status,lease_expires_at)
+   VALUES(peer_runtime_id,tenant_id,source_session_id,peer_thread_id,'starting',now()+interval '5 minutes');
+  LOOP
+   IF pg_backend_pid()=ANY(pg_blocking_pids(recovery_backend_pid)) THEN
+    PERFORM pg_stat_clear_snapshot();
+    SELECT query INTO recovery_query FROM pg_stat_activity WHERE pid=recovery_backend_pid;
+    IF recovery_query IS NULL OR strpos(recovery_query,'SELECT job.id FROM jobs job')<>1 THEN
+     RAISE EXCEPTION 'runtime actor observed recovery blocked outside the waiting-peer proof';
+    END IF;
+    RETURN;
+   END IF;
+   IF clock_timestamp()>=observe_until THEN
+    RAISE EXCEPTION 'runtime actor never observed recovery waiting on its peer-thread foreign-key lock';
+   END IF;
+   PERFORM pg_sleep(0.001);
+  END LOOP;
+ END $$`)
+	require.NoError(t, err, "isolated actor should observe recovery's lock wait before committing its runtime")
+	recoveryPID := int32(recovery.Conn().PgConn().PID())
+	actorPID := int32(actor.Conn().PgConn().PID())
+	actorDone := make(chan error, 1)
+	actorFinished := make(chan struct{})
+	go func() {
+		// Returning from this function commits its implicit transaction on the
+		// actor backend, without a Go scheduling gap after observing the lock wait.
+		defer close(actorFinished)
+		_, actorErr := actor.Exec(ctx, `SELECT pg_temp.commit_review_peer_runtime_on_recovery_wait($1,$2,$3,$4,$5)`, uuid.New(), f.org, f.session, peer.thread, recoveryPID)
+		actorDone <- actorErr
+	}()
+	defer func() {
+		cancel()
+		<-actorFinished
+	}()
+	var observationErr error
+	require.Eventually(t, func() bool {
+		var observing bool
+		observationErr = f.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+ WHERE pid=$1 AND state='active' AND wait_event='PgSleep'
+ AND query LIKE 'SELECT pg_temp.commit_review_peer_runtime_on_recovery_wait%')`, actorPID).Scan(&observing)
+		return observationErr != nil || observing
+	}, 2*time.Second, time.Millisecond, "runtime actor must hold its uncommitted peer-thread FK lock before recovery starts")
+	require.NoError(t, observationErr, "test should inspect only the exact runtime actor backend")
+	// The proof statement started before the actor committed. It still counts
+	// the peer, so only the final UPDATE's fresh snapshot can protect the source.
+	recorder := &recoveryTransactionRecorder{TxStarter: recovery}
+	recovered, recoveryErr := NewSessionStore(recorder).RecoverIncompleteCodeReviewWorkspace(ctx, f.org, f.params)
+	select {
+	case actorErr := <-actorDone:
+		require.NoError(t, actorErr, "actor must observe the exact waiting-proof lock and commit its runtime")
+	case <-ctx.Done():
+		t.Fatal("runtime actor did not report its observed-lock commit before the fixture deadline")
+	}
+	require.NoError(t, recoveryErr, "peer runtime committed during the proof wait should resolve without a storage error")
+	require.Equal(t, []uuid.UUID{peer.job}, recorder.waitingPeerIDs, "the proof's pre-commit snapshot must have counted the peer before the final mutation guard")
+	require.False(t, recovered, "the final mutation must observe the runtime committed after the waiting proof snapshot")
+	var container *string
+	var generation int64
+	require.NoError(t, f.pool.QueryRow(ctx, `SELECT container_id,workspace_generation FROM sessions WHERE org_id=$1 AND id=$2`, f.org, f.session).Scan(&container, &generation), "source workspace should remain readable after the mid-wait runtime commit")
+	require.Equal(t, &f.params.ContainerID, container, "a runtime committed during the waiting proof must preserve its source container")
+	require.Equal(t, f.params.WorkspaceGeneration, generation, "a runtime committed during the waiting proof must preserve its source generation")
 }
 
 func TestIncompleteReviewWorkspaceRecoveryHealthyOwnerUsesReadOnlyPrecheckPostgres(t *testing.T) {
