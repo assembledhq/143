@@ -1,0 +1,100 @@
+name: One-off Token Correlation Artifacts
+
+on:
+  push:
+    branches: [codex/build-token-correlation-cbf758af757f]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: token-correlation-artifacts-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  images:
+    if: github.repository == 'assembledhq/143' && github.run_attempt == 1
+    name: Build ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: server
+            dockerfile: Dockerfile
+          - image: sandbox
+            dockerfile: sandbox/Dockerfile
+          - image: frontend
+            dockerfile: Dockerfile.frontend
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
+      DOCKER_BUILD_SUMMARY: "false"
+    steps:
+      - name: Check out the exact workflow commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: workflow-source
+          persist-credentials: false
+
+      - name: Verify the one-shot workflow and accepted source binding
+        id: binding
+        run: python3 -B workflow-source/.github/scripts/token-correlation-build.py bind
+
+      - name: Check out the exact accepted release
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.binding.outputs.release_sha }}
+          path: release
+          persist-credentials: false
+
+      - name: Run offline helper tests
+        run: python3 -B workflow-source/.github/scripts/token-correlation-build_test.py
+
+      - name: Create this job's isolated builder
+        id: builder
+        uses: docker/setup-buildx-action@v4
+        with:
+          cleanup: true
+
+      - name: Log in using only the ephemeral repository token
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          logout: true
+
+      - name: Verify source and require an absent full-SHA tag
+        run: python3 -B workflow-source/.github/scripts/token-correlation-build.py preflight --image '${{ matrix.image }}'
+
+      - name: Build and publish only the full-SHA tag
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          builder: ${{ steps.builder.outputs.name }}
+          context: release
+          file: release/${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/assembledhq/143-${{ matrix.image }}:${{ steps.binding.outputs.release_sha }}
+          build-args: BUILD_SHA=${{ steps.binding.outputs.release_sha }}
+          labels: org.opencontainers.image.revision=${{ steps.binding.outputs.release_sha }}
+          cache-from: type=registry,ref=ghcr.io/assembledhq/143-${{ matrix.image }}:buildcache
+          provenance: false
+          sbom: false
+
+      - name: Verify published digest and emit compact provenance
+        env:
+          PUBLISHED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: python3 -B workflow-source/.github/scripts/token-correlation-build.py verify --image '${{ matrix.image }}'
+
+      - name: Upload only the compact receipt
+        uses: actions/upload-artifact@v7
+        with:
+          name: token-correlation-${{ matrix.image }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/token-correlation-${{ matrix.image }}-${{ github.run_id }}/receipt.json
+          if-no-files-found: error
+          retention-days: 14

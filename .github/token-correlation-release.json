@@ -1,0 +1,9 @@
+{
+  "recipes": {
+    "frontend": "23b130f0d3d2ee8536e3f38d42b5e978244263e21b361ec4a50daacd851dc3ce",
+    "sandbox": "94e144aa15f6818be245555cfd9e2f51bcd295f1daebb1dfd34a6cfac977fc36",
+    "server": "66720f962452d3cc2afe70b1dc52e31b90e5f8fc26476f77fbbb552bf8da4728"
+  },
+  "release_sha": "cbf758af757fe94264e23ccd4ec76560aed8d990",
+  "release_tree": "ea800cd24d9103480204184557efbf948cda29b6"
+}
