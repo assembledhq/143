@@ -231,7 +231,7 @@ func (t ghObservationTransport) RoundTrip(request *http.Request) (*http.Response
 	if response != nil {
 		event.Status = response.StatusCode
 		event.Header = make(map[string]string)
-		for _, key := range []string{"X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Used", "X-RateLimit-Reset", "X-RateLimit-Resource", "Retry-After"} {
+		for _, key := range []string{"X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Used", "X-RateLimit-Reset", "X-RateLimit-Resource", "Retry-After", "Date", "X-GitHub-Request-Id"} {
 			if value := response.Header.Get(key); value != "" {
 				if value := observationHeaders(map[string]string{key: value}).Get(key); value != "" {
 					event.Header[key] = value

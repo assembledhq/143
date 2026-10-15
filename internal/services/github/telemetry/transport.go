@@ -57,6 +57,7 @@ type RequestMetadata struct {
 	OrgID               string
 	Repository          string
 	SandboxObservation  bool
+	CredentialIdentity  CredentialIdentity
 }
 
 // WithRequestMetadata attaches safe GitHub telemetry dimensions to a request.
@@ -179,22 +180,22 @@ func NewControlledHTTPClient(timeout time.Duration, logger zerolog.Logger, contr
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &transport{
-			base: base, logger: logger, now: time.Now,
+			base: base, logger: logger, now: time.Now, credentials: DefaultCredentialRegistry(),
 			controller: controller, caller: boundedDimension(caller, 64),
 		},
 	}
 }
 
 type transport struct {
-	base       http.RoundTripper
-	logger     zerolog.Logger
-	now        func() time.Time
-	controller *ratelimit.Controller
-	caller     string
+	base        http.RoundTripper
+	logger      zerolog.Logger
+	now         func() time.Time
+	controller  *ratelimit.Controller
+	caller      string
+	credentials *CredentialRegistry
 }
 
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	startedAt := t.now()
 	metadata, _ := RequestMetadataFromContext(req.Context())
 	if metadata.Kind == "" {
 		metadata.Kind = requestKindForURL(req.URL)
@@ -234,12 +235,29 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 	}
+	registry := t.credentials
+	if registry == nil {
+		registry = DefaultCredentialRegistry()
+	}
+	identity, _ := registry.credentialFromAuthorization(req.Header)
+	observation := requestObservation{
+		credential: identity, correlationStatus: credentialCorrelationStatus(identity, metadata, req.URL),
+		timingSource: "host_transport",
+	}
+	observation.startedAt = t.now()
 	resp, err := t.base.RoundTrip(req)
+	observation.headersAt = t.now()
+	if resp != nil {
+		if providerDate, parseErr := http.ParseTime(resp.Header.Get("Date")); parseErr == nil {
+			observation.providerDate = providerDate
+		}
+		observation.requestID = boundedDimension(resp.Header.Get("X-GitHub-Request-Id"), 128)
+	}
 	if err != nil || resp == nil || resp.Body == nil {
 		if t.controller != nil && metadata.AuthType == AuthTypeAppInstallation {
 			t.controller.Observe(req.Context(), permit, ratelimit.Observation{RequestErr: err})
 		}
-		t.logRequest(req, resp, err, nil, nil, false, startedAt, t.now())
+		t.logRequest(req, resp, err, nil, nil, false, observation, t.now())
 		return resp, err
 	}
 	controllerObserved := false
@@ -300,7 +318,7 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 					ratelimit.AttachInternalRetryMetadata(resp.Header, result.Deferral)
 				}
 			}
-			t.logRequest(req, resp, nil, body, graphQLErrors, authoritativeGraphQL, startedAt, t.now())
+			t.logRequest(req, resp, nil, body, graphQLErrors, authoritativeGraphQL, observation, t.now())
 		},
 	}
 	resp.Body = observedBody
@@ -405,7 +423,37 @@ func (b *observedResponseBody) observeDecoded(graphQLErrors []ratelimit.GraphQLE
 	})
 }
 
-func (t *transport) logRequest(req *http.Request, resp *http.Response, requestErr error, responseBody []byte, graphQLErrors []ratelimit.GraphQLError, authoritativeGraphQL bool, startedAt, finishedAt time.Time) {
+type requestObservation struct {
+	credential        CredentialIdentity
+	correlationStatus string
+	timingSource      string
+	startedAt         time.Time
+	headersAt         time.Time
+	providerDate      time.Time
+	requestID         string
+}
+
+func credentialCorrelationStatus(identity CredentialIdentity, metadata RequestMetadata, requestURL *url.URL) string {
+	if identity.GenerationID == "" {
+		return "unknown"
+	}
+	if metadata.InstallationID > 0 && metadata.InstallationID != identity.InstallationID {
+		return "installation_mismatch"
+	}
+	if metadata.AuthType != "" && metadata.AuthType != AuthTypeUnknown && metadata.AuthType != AuthTypeAppInstallation {
+		return "auth_type_mismatch"
+	}
+	_, repository := normalizeRoute(requestURL)
+	if metadata.Repository != "" {
+		repository = metadata.Repository
+	}
+	if identity.Repository != "" && repository != "" && !strings.EqualFold(identity.Repository, repository) {
+		return "repository_mismatch"
+	}
+	return "known"
+}
+
+func (t *transport) logRequest(req *http.Request, resp *http.Response, requestErr error, responseBody []byte, graphQLErrors []ratelimit.GraphQLError, authoritativeGraphQL bool, observation requestObservation, finishedAt time.Time) {
 	metadata, _ := req.Context().Value(requestMetadataKey{}).(RequestMetadata)
 	if metadata.Kind == "" {
 		metadata.Kind = requestKindForURL(req.URL)
@@ -445,8 +493,29 @@ func (t *transport) logRequest(req *http.Request, resp *http.Response, requestEr
 		Int("github_status_code", statusCode).
 		Str("github_status_class", statusClass).
 		Str("github_result", result).
-		Float64("github_duration_ms", float64(finishedAt.Sub(startedAt).Microseconds())/1000).
+		Float64("github_duration_ms", float64(finishedAt.Sub(observation.startedAt).Microseconds())/1000).
+		Str("github_request_started_at", observation.startedAt.UTC().Format(time.RFC3339Nano)).
+		Str("github_request_completed_at", finishedAt.UTC().Format(time.RFC3339Nano)).
+		Str("github_timing_source", observation.timingSource).
+		Str("github_token_correlation_status", observation.correlationStatus).
 		Bool("github_rate_limited", rateLimited)
+	if !observation.headersAt.IsZero() && resp != nil {
+		event = event.Str("github_response_headers_at", observation.headersAt.UTC().Format(time.RFC3339Nano))
+	}
+	if !observation.providerDate.IsZero() {
+		event = event.Str("github_provider_date", observation.providerDate.UTC().Format(time.RFC3339Nano))
+	}
+	if identity := observation.credential; identity.GenerationID != "" {
+		event = event.Str("github_token_generation_id", identity.GenerationID).
+			Str("github_token_profile", string(identity.Profile)).
+			Int64("github_token_app_id", identity.AppID).
+			Int64("github_token_installation_id", identity.InstallationID).
+			Str("github_token_issued_at", identity.IssuedAt.UTC().Format(time.RFC3339Nano)).
+			Str("github_token_expires_at", identity.ExpiresAt.UTC().Format(time.RFC3339Nano))
+		if identity.Repository != "" {
+			event = event.Str("github_token_repository", identity.Repository)
+		}
+	}
 	if metadata.Repository != "" {
 		repository = metadata.Repository
 	}
@@ -514,7 +583,7 @@ func (t *transport) logRequest(req *http.Request, resp *http.Response, requestEr
 	if resource := strings.TrimSpace(header.Get("X-RateLimit-Resource")); resource != "" {
 		event = event.Str("github_rate_limit_resource", resource)
 	}
-	if requestID := strings.TrimSpace(header.Get("X-GitHub-Request-Id")); requestID != "" {
+	if requestID := observation.requestID; requestID != "" {
 		event = event.Str("github_request_id", requestID)
 	}
 	if retryAfter, ok := retryAfterSeconds(header.Get("Retry-After"), finishedAt); ok {
@@ -815,5 +884,14 @@ func RecordExternalRequest(ctx context.Context, logger zerolog.Logger, metadata 
 		err = errors.New("sandbox GitHub transport failed")
 	}
 	finished := time.Now()
-	(&transport{logger: logger}).logRequest(request, response, err, nil, nil, false, finished.Add(-duration), finished)
+	observation := requestObservation{
+		credential:        metadata.CredentialIdentity,
+		correlationStatus: credentialCorrelationStatus(metadata.CredentialIdentity, metadata, request.URL),
+		timingSource:      "sandbox_reported_duration", startedAt: finished.Add(-duration),
+		requestID: boundedDimension(header.Get("X-GitHub-Request-Id"), 128),
+	}
+	if providerDate, parseErr := http.ParseTime(header.Get("Date")); parseErr == nil {
+		observation.providerDate = providerDate
+	}
+	(&transport{logger: logger}).logRequest(request, response, err, nil, nil, false, observation, finished)
 }

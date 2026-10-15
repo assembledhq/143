@@ -25,13 +25,14 @@ type observationBinding struct {
 }
 
 type observationScope struct {
-	metadata telemetry.RequestMetadata
-	mu       sync.Mutex
-	bindings map[string]observationBinding
+	metadata           telemetry.RequestMetadata
+	mu                 sync.Mutex
+	bindings           map[string]observationBinding
+	credentialRegistry *telemetry.CredentialRegistry
 }
 
 func newObservationScope(sessionID uuid.UUID, run *models.Session, repo *models.Repository) *observationScope {
-	scope := &observationScope{metadata: telemetry.RequestMetadata{Kind: telemetry.RequestKindAPI, Caller: "sandbox_token", SessionID: sessionID.String()}, bindings: make(map[string]observationBinding)}
+	scope := &observationScope{metadata: telemetry.RequestMetadata{Kind: telemetry.RequestKindAPI, Caller: "sandbox_token", SessionID: sessionID.String()}, bindings: make(map[string]observationBinding), credentialRegistry: telemetry.DefaultCredentialRegistry()}
 	if run != nil {
 		scope.metadata.OrgID = run.OrgID.String()
 	}
@@ -61,6 +62,11 @@ func (s *observationScope) bind(res *identity.Resolution, callers ...string) str
 		metadata.AuthType = telemetry.AuthTypeAppInstallation
 		metadata.InstallationID = res.InstallationID
 	}
+	// The binding is host-owned: sandbox reports cannot choose a credential
+	// generation, and resolving an unregistered credential never invents one.
+	if credential, known := s.credentialRegistry.Resolve(res.Token); known {
+		metadata.CredentialIdentity = credential
+	}
 	expires := now.Add(time.Hour)
 	if !res.ExpiresAt.IsZero() && res.ExpiresAt.Before(expires) {
 		expires = res.ExpiresAt
@@ -89,7 +95,7 @@ func (s *observationScope) record(ctx context.Context, logger zerolog.Logger, re
 	}
 	headers := make([]http.Header, len(req.Events))
 	for i, event := range req.Events {
-		if event.Status != 0 && (event.Status < 100 || event.Status > 599) || event.DurationMS < 0 || event.DurationMS > 3600000 || len(event.Route) > 512 || len(event.Header) > 6 {
+		if event.Status != 0 && (event.Status < 100 || event.Status > 599) || event.DurationMS < 0 || event.DurationMS > 3600000 || len(event.Route) > 512 || len(event.Header) > 8 {
 			return errors.New("invalid GitHub observation")
 		}
 		switch event.Method {
@@ -114,6 +120,7 @@ func (s *observationScope) record(ctx context.Context, logger zerolog.Logger, re
 			metadata.AuthType = telemetry.AuthTypeUnknown
 			metadata.InstallationID = 0
 			metadata.PrincipalUnresolved = true
+			metadata.CredentialIdentity = telemetry.CredentialIdentity{}
 		}
 		telemetry.RecordExternalRequest(ctx, logger, metadata, event.Method, event.Route, event.Status, headers[i], time.Duration(event.DurationMS)*time.Millisecond)
 	}
@@ -139,7 +146,28 @@ func observationHeaders(values map[string]string) http.Header {
 			if err == nil && n >= 0 {
 				headers.Set(key, strconv.FormatInt(n, 10))
 			}
+		case "Date":
+			if parsed, err := http.ParseTime(value); err == nil {
+				headers.Set(key, parsed.UTC().Format(http.TimeFormat))
+			}
+		case "X-GitHub-Request-Id":
+			if validObservationRequestID(value) {
+				headers.Set(key, value)
+			}
 		}
 	}
 	return headers
+}
+
+func validObservationRequestID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == ':' || character == '-' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }

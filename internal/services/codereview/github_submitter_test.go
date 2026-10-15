@@ -179,6 +179,7 @@ func TestGitHubSubmitter_EmitsInstallationTelemetry(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/repos/acme/repo/pulls/42/files", r.URL.Path, "file lookup should use the expected GitHub route")
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Date", "Wed, 14 Oct 2026 20:00:00 GMT")
 		require.NoError(t, json.NewEncoder(w).Encode([]PullRequestFile{}), "test response should encode")
 	}))
 	defer server.Close()
@@ -186,35 +187,57 @@ func TestGitHubSubmitter_EmitsInstallationTelemetry(t *testing.T) {
 	var logs bytes.Buffer
 	client := githubtelemetry.NewHTTPClient(time.Second, zerolog.New(&logs))
 	submitter := NewGitHubSubmitter(
-		&tokenStub{token: "ghs_token"},
+		&tokenStub{token: "fixture-unregistered-review-telemetry"},
 		WithGitHubSubmitterBaseURL(server.URL),
 		WithGitHubSubmitterHTTPClient(client),
 	)
 
+	beforeRequest := time.Now().UTC()
 	files, err := submitter.ListPullRequestFiles(context.Background(), PullRequestFilesRequest{
 		InstallationID: 99,
 		Repository:     "acme/repo",
 		PullNumber:     42,
 	})
 
+	afterRequest := time.Now().UTC()
+
 	require.NoError(t, err, "file lookup should succeed")
 	require.Equal(t, []PullRequestFile{}, files, "file lookup should preserve the empty GitHub response")
 	var event map[string]any
 	require.NoError(t, json.Unmarshal(logs.Bytes(), &event), "GitHub telemetry should be valid JSON")
+	timingKeys := []string{"github_request_started_at", "github_response_headers_at", "github_request_completed_at"}
+	timings := make([]time.Time, len(timingKeys))
+	previous := beforeRequest
+	for i, key := range timingKeys {
+		raw, ok := event[key].(string)
+		require.True(t, ok, "request timing %s should be a precise timestamp", key)
+		parsed, parseErr := time.Parse(time.RFC3339Nano, raw)
+		require.NoError(t, parseErr, "request timing %s should use RFC3339 nanosecond precision", key)
+		require.False(t, parsed.Before(previous), "request timing %s should follow its preceding transport milestone", key)
+		require.False(t, parsed.After(afterRequest), "request timing %s should precede the caller receiving its result", key)
+		timings[i] = parsed
+		previous = parsed
+		delete(event, key)
+	}
+	// Parsed timestamps use wall time; the duration retains Go's monotonic clock.
+	require.InDelta(t, float64(timings[2].Sub(timings[0]).Microseconds())/1000, event["github_duration_ms"], 0.002, "request duration should cover outbound start through completed response observation within two microseconds of clock precision")
 	delete(event, "github_duration_ms")
 	require.Equal(t, map[string]any{
-		"level":                  "info",
-		"message":                "github api request",
-		"github_method":          http.MethodGet,
-		"github_route":           "/repos/:owner/:repo/pulls/:id/files",
-		"github_auth_type":       githubtelemetry.AuthTypeAppInstallation,
-		"github_status_code":     float64(http.StatusOK),
-		"github_status_class":    "2xx",
-		"github_result":          "success",
-		"github_rate_limited":    false,
-		"github_caller":          "code_review",
-		"github_repository":      "acme/repo",
-		"github_installation_id": float64(99),
+		"level":                           "info",
+		"message":                         "github api request",
+		"github_method":                   http.MethodGet,
+		"github_route":                    "/repos/:owner/:repo/pulls/:id/files",
+		"github_auth_type":                githubtelemetry.AuthTypeAppInstallation,
+		"github_status_code":              float64(http.StatusOK),
+		"github_status_class":             "2xx",
+		"github_result":                   "success",
+		"github_rate_limited":             false,
+		"github_caller":                   "code_review",
+		"github_repository":               "acme/repo",
+		"github_installation_id":          float64(99),
+		"github_timing_source":            "host_transport",
+		"github_token_correlation_status": "unknown",
+		"github_provider_date":            "2026-10-14T20:00:00Z",
 	}, event, "submitter requests should emit bounded installation-scoped telemetry")
 }
 
