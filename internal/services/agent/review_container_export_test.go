@@ -11,5 +11,6 @@ import (
 // only to external-package acceptance tests. Production callers use the normal
 // orchestrator lifecycle; this bridge is absent from production binaries.
 func EnsureCodeReviewWorkspaceEvidenceForTest(ctx context.Context, orchestrator *Orchestrator, session *models.Session, sandbox *Sandbox) error {
+	ctx = withReviewPreparationActivation(ctx, true)
 	return orchestrator.ensureCodeReviewWorkspaceEvidence(ctx, session, sandbox, zerolog.Nop())
 }
