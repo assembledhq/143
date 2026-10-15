@@ -21,7 +21,7 @@ func checkpointProgressFixture() realReviewProfileCheckpoint {
 	return realReviewProfileCheckpoint{
 		Sequence: 1, ElapsedUS: 100, InventoryUS: 60, InventoryResidualUS: 20,
 		HashUS: 40, ReceiptUS: 100, ReceiptOutsideInventoryUS: 40,
-		InventoryYielded: 3, HashStarted: 3, HashCompleted: 1,
+		InventoryYielded: 3, HashStarted: 3, HashCompleted: 1, HashCompletedBytes: 1024,
 		ReceiptStarted: 2, ReceiptCompleted: 1,
 		OpenInventory: 2, ActiveInventory: 2, ActiveHash: 2, ActiveReceipt: 1,
 	}
@@ -49,6 +49,19 @@ func TestRealReviewProfileCheckpointRetainsPartialProgress(t *testing.T) {
 		checkpoint func() realReviewProfileCheckpoint
 	}{
 		{name: "operations remain in flight", checkpoint: checkpointProgressFixture},
+		{name: "four workers share one inventory advancement", checkpoint: func() realReviewProfileCheckpoint {
+			checkpoint := checkpointProgressFixture()
+			checkpoint.OpenInventory, checkpoint.ActiveInventory = 1, 1
+			checkpoint.HashStarted, checkpoint.ActiveHash = 5, 4
+			return checkpoint
+		}},
+		{name: "completed prefetched reads may precede yielded receipt records", checkpoint: func() realReviewProfileCheckpoint {
+			checkpoint := checkpointProgressFixture()
+			checkpoint.HashStarted, checkpoint.HashCompleted, checkpoint.HashCompletedBytes = 16, 16, 4096
+			checkpoint.InventoryYielded = 0
+			checkpoint.ActiveHash, checkpoint.ActiveInventory, checkpoint.OpenInventory = 0, 0, 0
+			return checkpoint
+		}},
 		{name: "one microsecond rounding residue is allowed", checkpoint: func() realReviewProfileCheckpoint {
 			checkpoint := checkpointProgressFixture()
 			checkpoint.InventoryUS++
@@ -264,6 +277,18 @@ func TestRealReviewProfileCheckpointRejectsInvalidEvidence(t *testing.T) {
 	}{
 		{name: "unknown numeric field", change: func(f map[string]any) { f["unexpected"] = 1 }, reason: "invalid_record"},
 		{name: "duplicate key", raw: func(raw []byte) []byte { return []byte(strings.TrimSuffix(string(raw), "}") + `,"sequence":1}`) }, reason: "invalid_record"},
+		{name: "missing completed source bytes", change: func(f map[string]any) { delete(f, "hash_completed_bytes") }, reason: "invalid_checkpoint"},
+		{name: "null completed source bytes", change: func(f map[string]any) { f["hash_completed_bytes"] = nil }, reason: "invalid_record"},
+		{name: "fractional completed source bytes", change: func(f map[string]any) { f["hash_completed_bytes"] = 3.5 }, reason: "invalid_record"},
+		{name: "boolean completed source bytes", change: func(f map[string]any) { f["hash_completed_bytes"] = true }, reason: "invalid_record"},
+		{name: "negative completed source bytes", change: func(f map[string]any) { f["hash_completed_bytes"] = -1 }, reason: "invalid_checkpoint"},
+		{name: "completed source byte ceiling", change: func(f map[string]any) { f["hash_completed_bytes"] = int64(1<<40 + 1) }, reason: "invalid_checkpoint"},
+		{name: "overflowing completed source bytes", raw: func(raw []byte) []byte {
+			return bytes.Replace(raw, []byte(`"hash_completed_bytes":1024`), []byte(`"hash_completed_bytes":9223372036854775808`), 1)
+		}, reason: "invalid_record"},
+		{name: "more than one bounded batch cannot be prefetched", change: func(f map[string]any) { f["inventory_yielded"] = 0; f["hash_started"] = 17; f["hash_completed"] = 15 }, reason: "invalid_checkpoint"},
+		{name: "five active hash workers exceed fixed bound", change: func(f map[string]any) { f["hash_started"] = 6; f["active_hash"] = 5 }, reason: "invalid_checkpoint"},
+		{name: "failed reads cannot contribute successful bytes", change: func(f map[string]any) { f["hash_failed"] = 1 }, reason: "invalid_checkpoint"},
 		{name: "null required field", change: func(f map[string]any) { f["hash_us"] = nil }, reason: "invalid_record"},
 		{name: "fractional counter", change: func(f map[string]any) { f["hash_started"] = 3.5 }, reason: "invalid_record"},
 		{name: "quoted numeric counter", change: func(f map[string]any) { f["hash_started"] = "3" }, reason: "invalid_record"},
@@ -288,7 +313,7 @@ func TestRealReviewProfileCheckpointRejectsInvalidEvidence(t *testing.T) {
 		{name: "completions require starts", change: func(f map[string]any) { f["hash_completed"] = 4 }, reason: "invalid_checkpoint"},
 		{name: "failures require completions", change: func(f map[string]any) { f["receipt_failed"] = 2 }, reason: "invalid_checkpoint"},
 		{name: "active hashes require unfinished starts", change: func(f map[string]any) { f["active_hash"] = 1 }, reason: "invalid_checkpoint"},
-		{name: "hashes require active inventory", change: func(f map[string]any) { f["active_inventory"] = 1 }, reason: "invalid_checkpoint"},
+		{name: "hashes require active inventory", change: func(f map[string]any) { f["active_inventory"] = 0 }, reason: "invalid_checkpoint"},
 		{name: "active inventory requires open inventory", change: func(f map[string]any) { f["open_inventory"] = 1 }, reason: "invalid_checkpoint"},
 		{name: "active receipts require unfinished starts", change: func(f map[string]any) { f["active_receipt"] = 0 }, reason: "invalid_checkpoint"},
 	}
@@ -323,6 +348,7 @@ func TestRealReviewProfileCheckpointBoundsAndProgression(t *testing.T) {
 		{name: "all 512 consecutive checkpoints are accepted", count: 512, wantCount: 512},
 		{name: "a sequence gap cannot hide discarded progress", count: 2, changeLast: func(c *realReviewProfileCheckpoint) { c.Sequence = 3 }, wantCount: 1, wantReason: "checkpoint_sequence"},
 		{name: "duplicate non-one sequence cannot reset an invocation", count: 3, changeLast: func(c *realReviewProfileCheckpoint) { c.Sequence = 2 }, wantCount: 2, wantReason: "checkpoint_sequence"},
+		{name: "completed source bytes cannot regress within an invocation", count: 2, changeLast: func(c *realReviewProfileCheckpoint) { c.HashCompletedBytes = 0 }, wantCount: 1, wantReason: "regressing_checkpoint"},
 		{name: "mid invocation non-one cumulative totals cannot fall", count: 2, changeLast: func(c *realReviewProfileCheckpoint) { c.ElapsedUS = 0 }, wantCount: 1, wantReason: "regressing_checkpoint"},
 		{name: "active operations may finish while totals rise", count: 2, changeLast: func(c *realReviewProfileCheckpoint) {
 			c.HashCompleted, c.HashFailed, c.ReceiptCompleted = c.HashStarted, 1, c.ReceiptStarted

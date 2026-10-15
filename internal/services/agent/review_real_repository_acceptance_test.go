@@ -1464,7 +1464,7 @@ func realReviewLogBuffer(token string) *acceptanceLogBuffer {
 	return buffer
 }
 
-const realReviewProfileHelperSHA256 = "f7e372aef2449752093346c499ee5f2b38aa7c1ba92fa8d0221e5c50627dd7fd"
+const realReviewProfileHelperSHA256 = "0b9645cfbb468292dc3d699219f6839f30439b8766c7389a4984e271efef694f"
 const realReviewProfilePrefix = "143_SOURCE_PROFILE_V1 "
 
 //go:embed testdata/review_source_profile.py
@@ -1484,6 +1484,7 @@ type RealReviewProfileCheckpoint struct {
 	HashStarted               int64 `json:"hash_started"`
 	HashCompleted             int64 `json:"hash_completed"`
 	HashFailed                int64 `json:"hash_failed"`
+	HashCompletedBytes        int64 `json:"hash_completed_bytes"`
 	ReceiptStarted            int64 `json:"receipt_started"`
 	ReceiptCompleted          int64 `json:"receipt_completed"`
 	ReceiptFailed             int64 `json:"receipt_failed"`
@@ -1748,7 +1749,7 @@ func realReviewProfileNumericObject(raw []byte) map[string]bool {
 }
 
 func (p *realReviewSourceProfile) consumeCheckpoint(value realReviewProfileRecord, fields map[string]bool, stream *realReviewProfileStream) {
-	keys := []string{"sequence", "elapsed_us", "inventory_us", "inventory_residual_us", "hash_us", "receipt_us", "receipt_outside_inventory_us", "inventory_yielded", "hash_started", "hash_completed", "hash_failed", "receipt_started", "receipt_completed", "receipt_failed", "open_inventory", "active_inventory", "active_hash", "active_receipt"}
+	keys := []string{"sequence", "elapsed_us", "inventory_us", "inventory_residual_us", "hash_us", "receipt_us", "receipt_outside_inventory_us", "inventory_yielded", "hash_started", "hash_completed", "hash_failed", "hash_completed_bytes", "receipt_started", "receipt_completed", "receipt_failed", "open_inventory", "active_inventory", "active_hash", "active_receipt"}
 	if value.Phase != 0 || value.Category != 0 || value.RealReviewProfileCheckpoint == nil || len(fields) != len(keys)+4 {
 		p.invalid = "invalid_checkpoint"
 		return
@@ -1764,9 +1765,9 @@ func (p *realReviewSourceProfile) consumeCheckpoint(value realReviewProfileRecor
 		{checkpoint.Sequence, 512}, {checkpoint.ElapsedUS, 480000000},
 		{checkpoint.InventoryUS, 64 * 480000000}, {checkpoint.InventoryResidualUS, 64 * 480000000},
 		{checkpoint.HashUS, 64 * 480000000}, {checkpoint.ReceiptUS, 64 * 480000000}, {checkpoint.ReceiptOutsideInventoryUS, 64 * 480000000},
-		{checkpoint.InventoryYielded, 1000000}, {checkpoint.HashStarted, 1000000}, {checkpoint.HashCompleted, 1000000}, {checkpoint.HashFailed, 1000000},
+		{checkpoint.InventoryYielded, 1000000}, {checkpoint.HashStarted, 1000000}, {checkpoint.HashCompleted, 1000000}, {checkpoint.HashFailed, 1000000}, {checkpoint.HashCompletedBytes, 1 << 40},
 		{checkpoint.ReceiptStarted, 1000000}, {checkpoint.ReceiptCompleted, 1000000}, {checkpoint.ReceiptFailed, 1000000},
-		{checkpoint.OpenInventory, 64}, {checkpoint.ActiveInventory, 64}, {checkpoint.ActiveHash, 64}, {checkpoint.ActiveReceipt, 64},
+		{checkpoint.OpenInventory, 64}, {checkpoint.ActiveInventory, 64}, {checkpoint.ActiveHash, 4}, {checkpoint.ActiveReceipt, 64},
 	} {
 		if metric.value < 0 || metric.value > metric.limit {
 			p.invalid = "invalid_checkpoint"
@@ -1778,8 +1779,10 @@ func (p *realReviewSourceProfile) consumeCheckpoint(value realReviewProfileRecor
 	residual := checkpoint.InventoryUS - checkpoint.HashUS - checkpoint.InventoryResidualUS
 	if checkpoint.Sequence == 0 || residual < 0 || residual > 1 || checkpoint.ReceiptOutsideInventoryUS > checkpoint.ReceiptUS ||
 		checkpoint.HashCompleted > checkpoint.HashStarted || checkpoint.HashFailed > checkpoint.HashCompleted ||
+		checkpoint.HashStarted > checkpoint.InventoryYielded+16 ||
+		(checkpoint.HashCompleted == checkpoint.HashFailed && checkpoint.HashCompletedBytes != 0) ||
 		checkpoint.ReceiptCompleted > checkpoint.ReceiptStarted || checkpoint.ReceiptFailed > checkpoint.ReceiptCompleted ||
-		checkpoint.ActiveHash > checkpoint.ActiveInventory || checkpoint.ActiveInventory > checkpoint.OpenInventory ||
+		checkpoint.ActiveHash > 4*checkpoint.ActiveInventory || checkpoint.ActiveInventory > checkpoint.OpenInventory ||
 		checkpoint.ActiveHash != checkpoint.HashStarted-checkpoint.HashCompleted || checkpoint.ActiveReceipt != checkpoint.ReceiptStarted-checkpoint.ReceiptCompleted {
 		p.invalid = "invalid_checkpoint"
 		return
@@ -1792,7 +1795,7 @@ func (p *realReviewSourceProfile) consumeCheckpoint(value realReviewProfileRecor
 	previousSequence := int64(0)
 	if stream.last != nil && !newInvocation {
 		previousSequence = stream.last.Sequence
-		previous, current := []int64{stream.last.ElapsedUS, stream.last.InventoryUS, stream.last.InventoryResidualUS, stream.last.HashUS, stream.last.ReceiptUS, stream.last.ReceiptOutsideInventoryUS, stream.last.InventoryYielded, stream.last.HashStarted, stream.last.HashCompleted, stream.last.HashFailed, stream.last.ReceiptStarted, stream.last.ReceiptCompleted, stream.last.ReceiptFailed}, []int64{checkpoint.ElapsedUS, checkpoint.InventoryUS, checkpoint.InventoryResidualUS, checkpoint.HashUS, checkpoint.ReceiptUS, checkpoint.ReceiptOutsideInventoryUS, checkpoint.InventoryYielded, checkpoint.HashStarted, checkpoint.HashCompleted, checkpoint.HashFailed, checkpoint.ReceiptStarted, checkpoint.ReceiptCompleted, checkpoint.ReceiptFailed}
+		previous, current := []int64{stream.last.ElapsedUS, stream.last.InventoryUS, stream.last.InventoryResidualUS, stream.last.HashUS, stream.last.ReceiptUS, stream.last.ReceiptOutsideInventoryUS, stream.last.InventoryYielded, stream.last.HashStarted, stream.last.HashCompleted, stream.last.HashFailed, stream.last.HashCompletedBytes, stream.last.ReceiptStarted, stream.last.ReceiptCompleted, stream.last.ReceiptFailed}, []int64{checkpoint.ElapsedUS, checkpoint.InventoryUS, checkpoint.InventoryResidualUS, checkpoint.HashUS, checkpoint.ReceiptUS, checkpoint.ReceiptOutsideInventoryUS, checkpoint.InventoryYielded, checkpoint.HashStarted, checkpoint.HashCompleted, checkpoint.HashFailed, checkpoint.HashCompletedBytes, checkpoint.ReceiptStarted, checkpoint.ReceiptCompleted, checkpoint.ReceiptFailed}
 		for index := range previous {
 			if current[index] < previous[index] {
 				p.invalid = "regressing_checkpoint"
@@ -1878,7 +1881,7 @@ func (p *realReviewSourceProfile) result() realReviewProfileResult {
 		copy := *p.lastCheckpoint
 		result.LastCheckpoint = &copy
 	}
-	result.CheckpointScope = "latest helper invocation by first-observed sequence-one checkpoint ordinal, including prepare and verify within one command stream; elapsed_us starts at its first inventory/receipt phase; cumulative lower-bound partial progress including in-flight operations at publication; inventory residual includes traversal/stat/control and observer overhead; receipt residual includes serialization/write/deadline/control and observer work outside inventory advancement, not pure JSON or write syscall time; not phase completion or allocation/OOM attribution"
+	result.CheckpointScope = "latest helper invocation by first-observed sequence-one checkpoint ordinal, including prepare and verify within one command stream; elapsed_us starts at its first inventory/receipt phase; cumulative lower-bound partial progress including in-flight operations at publication; hash_us is the wall-clock union of at most four inventory-only hash workers, not their sum; hash_completed_bytes is a successful-read lower bound including prefetched records, not receipt commits or physical disk usage; inventory residual includes traversal/stat/control and observer overhead; receipt residual includes serialization/write/deadline/control and observer work outside inventory advancement, not pure JSON or write syscall time; not phase completion or allocation/OOM attribution"
 	for key, original := range p.cells {
 		value := *original
 		value.MaxMemoryStat, value.SampledEventDelta = maps.Clone(original.MaxMemoryStat), maps.Clone(original.SampledEventDelta)

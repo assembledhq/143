@@ -10,11 +10,14 @@ import threading
 import time
 import types
 
-EXPECTED_SHA256 = "f7e372aef2449752093346c499ee5f2b38aa7c1ba92fa8d0221e5c50627dd7fd"
+EXPECTED_SHA256 = "0b9645cfbb468292dc3d699219f6839f30439b8766c7389a4984e271efef694f"
 PREFIX = "143_SOURCE_PROFILE_V1 "
 MAX_RECORDS = 20000
 MAX_CHECKPOINTS = 512
 MAX_ACTIVE = 64
+MAX_HASH_WORKERS = 4
+MAX_HASH_BATCH = 16
+MAX_COMPLETED_BYTES = 1 << 40
 CHECKPOINT_INTERVAL = 2
 # Cumulative operation sums can overlap across the bounded active workers.
 MAX_SUM_US = MAX_ACTIVE * 480000000
@@ -25,9 +28,10 @@ CHECKPOINT_LIMITS = {
     "receipt_outside_inventory_us": MAX_SUM_US,
     "inventory_yielded": 1000000, "hash_started": 1000000,
     "hash_completed": 1000000, "hash_failed": 1000000,
+    "hash_completed_bytes": MAX_COMPLETED_BYTES,
     "receipt_started": 1000000, "receipt_completed": 1000000,
     "receipt_failed": 1000000, "open_inventory": MAX_ACTIVE,
-    "active_inventory": MAX_ACTIVE, "active_hash": MAX_ACTIVE,
+    "active_inventory": MAX_ACTIVE, "active_hash": MAX_HASH_WORKERS,
     "active_receipt": MAX_ACTIVE,
 }
 _dumps = json.dumps
@@ -50,12 +54,12 @@ def emit(op, phase, category, **metrics):
                 if op == 3:
                     invalid = True
                 elif op == 4:
-                    if phase != 0 or category != 0 or set(metrics) != set(CHECKPOINT_LIMITS):
+                    if type(phase) is not int or type(category) is not int or phase != 0 or category != 0 or set(metrics) != set(CHECKPOINT_LIMITS):
                         raise ValueError
                     for key, value in metrics.items():
                         if type(value) is not int or not 0 <= value <= CHECKPOINT_LIMITS[key]:
                             raise ValueError
-                    if metrics["sequence"] == 0:
+                    if metrics["sequence"] == 0 or metrics["hash_started"] > metrics["inventory_yielded"] + MAX_HASH_BATCH:
                         raise ValueError
                 elif type(phase) is not int or not 1 <= phase <= 10 or type(category) is not int or not 1 <= category <= 4:
                     raise ValueError
@@ -122,6 +126,10 @@ class Progress:
 
     elapsed_us starts at the first inventory/receipt phase, not helper startup;
     it is an observation clock and never a renewed execution deadline.
+    Hash time is the wall-clock union of active inventory-only hash workers,
+    not their summed overlapping durations. Batches join before yielding.
+    Completed bytes count successful reads, including prefetched records not yet
+    yielded; they are not receipt commits or physical disk usage.
     Inventory residual includes traversal/stat/control and observer overhead.
     Receipt residual includes all work outside inventory advancement, including
     serialization, writes, deadline/control calls and observer overhead. Neither
@@ -137,8 +145,10 @@ class Progress:
         self.phases = []
         self.work = []
         self.inventory_ns = self.hash_ns = self.receipt_ns = 0
+        self.hash_active = 0
+        self.hash_union_started = None
         self.receipt_inventory_ns = 0
-        self.counts = {key: 0 for key in ("inventory_yielded", "hash_started", "hash_completed", "hash_failed", "receipt_started", "receipt_completed", "receipt_failed")}
+        self.counts = {key: 0 for key in ("inventory_yielded", "hash_started", "hash_completed", "hash_failed", "hash_completed_bytes", "receipt_started", "receipt_completed", "receipt_failed")}
 
     @diagnostic
     def phase_begin(self, kind):
@@ -166,11 +176,17 @@ class Progress:
             frame = (kind, now, in_receipt)
             self.work.append(frame)
             if kind == "hash":
+                if self.hash_active >= MAX_HASH_WORKERS or not any(value[0] == "inventory" for value in self.work):
+                    self.work.remove(frame)
+                    raise ValueError
+                if self.hash_active == 0:
+                    self.hash_union_started = now
+                self.hash_active += 1
                 self.counts["hash_started"] += 1
             return frame
 
     @diagnostic
-    def work_end(self, frame, failed=False, yielded=False):
+    def work_end(self, frame, failed=False, yielded=False, completed_bytes=0):
         if frame is None:
             return
         with self.lock:
@@ -180,14 +196,20 @@ class Progress:
             if elapsed < 0:
                 raise ValueError
             if frame[0] == "inventory":
+                if self.hash_active:
+                    raise ValueError
                 self.inventory_ns += elapsed
                 if frame[2]:
                     self.receipt_inventory_ns += elapsed
                 self.counts["inventory_yielded"] += int(yielded)
             else:
-                self.hash_ns += elapsed
+                self.hash_active -= 1
+                if self.hash_active == 0:
+                    self.hash_ns += now - self.hash_union_started
+                    self.hash_union_started = None
                 self.counts["hash_completed"] += 1
                 self.counts["hash_failed"] += int(failed)
+                self.counts["hash_completed_bytes"] += completed_bytes
 
     @diagnostic
     def phase_end(self, frame, failed):
@@ -214,6 +236,8 @@ class Progress:
                 raise ValueError
             now = time.monotonic_ns()
             inventory, hashing, receipt = self.inventory_ns, self.hash_ns, self.receipt_ns
+            if self.hash_active:
+                hashing += now - self.hash_union_started
             receipt_inventory = self.receipt_inventory_ns
             active_inventory = active_hash = active_receipt = open_inventory = 0
             for kind, started, in_receipt in self.work:
@@ -227,14 +251,13 @@ class Progress:
                         receipt_inventory += elapsed
                 else:
                     active_hash += 1
-                    hashing += elapsed
             for kind, started in self.phases:
                 if kind == "receipt":
                     active_receipt += 1
                     receipt += now - started
                 else:
                     open_inventory += 1
-            if min(now - self.origin, inventory - hashing, receipt - receipt_inventory) < 0:
+            if active_hash != self.hash_active or min(now - self.origin, inventory - hashing, receipt - receipt_inventory) < 0:
                 raise ValueError
             self.sequence += 1
             # Round once, after accumulation/subtraction in monotonic nanoseconds.
@@ -409,24 +432,29 @@ def install(namespace):
         return measured()
 
     namespace["iter_tree_inventory"] = inventory
-    original_hash = namespace["file_hash"]
+    original_hash = namespace["_inventory_hash"]
 
     @functools.wraps(original_hash)
-    def file_hash(*args, **kwargs):
-        # The TLS marker exists only during generator advancement, never while
-        # its consumer is suspended or while input/Go manifest hashes run.
-        if getattr(local, "inventory", None) is None:
-            return original_hash(*args, **kwargs)
+    def inventory_hash(*args, **kwargs):
+        # Worker threads do not inherit iterator TLS. This dedicated helper
+        # primitive is used only for inventory batches, all joined before yield.
         frame = progress.work_begin("hash")
         failed = True
+        completed_bytes = 0
         try:
             value = original_hash(*args, **kwargs)
             failed = False
+            try:
+                if type(value) is not tuple or len(value) != 2 or type(value[0]) is not str or type(value[1]) is not int or not 0 <= value[1] <= MAX_COMPLETED_BYTES:
+                    raise ValueError
+                completed_bytes = value[1]
+            except BaseException:
+                invalidate()
             return value
         finally:
-            progress.work_end(frame, failed)
+            progress.work_end(frame, failed, completed_bytes=completed_bytes)
 
-    namespace["file_hash"] = file_hash
+    namespace["_inventory_hash"] = inventory_hash
 
     original_additional = namespace["prepare_additional"]
     original_run = namespace["subprocess"].run
