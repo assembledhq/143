@@ -1,0 +1,11 @@
+{
+  "archive_sha256": "54d4a5dab7851b024e2c8e8337048910b0136af84d98c8132d1e382321bc83fd",
+  "recipes": {
+    "Dockerfile": "66720f962452d3cc2afe70b1dc52e31b90e5f8fc26476f77fbbb552bf8da4728",
+    "Dockerfile.frontend": "23b130f0d3d2ee8536e3f38d42b5e978244263e21b361ec4a50daacd851dc3ce",
+    "sandbox/Dockerfile": "94e144aa15f6818be245555cfd9e2f51bcd295f1daebb1dfd34a6cfac977fc36"
+  },
+  "release": "dd54436add7a0697de9ff798926dc6091bd2cfa4",
+  "schema": 1,
+  "tree": "9dca19c2807ace9757c3ff156cf19d3595d00d69"
+}
