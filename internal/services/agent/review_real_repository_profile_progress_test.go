@@ -2,10 +2,14 @@ package agent_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -296,4 +300,21 @@ func TestRealReviewProfileInvalidCheckpointStillDrainsOutput(t *testing.T) {
 			require.NotContains(t, string(raw), "private-command", "raw invalid record contents must not leak into retained diagnostic evidence")
 		})
 	}
+}
+
+// Keep the observer's Python contracts selected by the ordinary Go CI suite.
+func TestRealReviewProfilePythonContracts(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "python3", "-B", "-m", "unittest", "discover", "-s", "testdata", "-p", "test_review_source_profile.py")
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "REVIEW_SOURCE_PROFILE_REAL_HELPER=") {
+			command.Env = append(command.Env, value)
+		}
+	}
+	output, err := command.CombinedOutput()
+	require.NoError(t, err, "the public observer Python contract suite should pass without a private helper fixture: %s", output)
+	require.NotContains(t, string(output), "Ran 0 tests", "ordinary Go CI must select the observer Python contracts")
+	t.Logf("observer Python contracts: %s", output)
 }
