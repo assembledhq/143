@@ -4629,6 +4629,26 @@ type CodeReviewPullRequestSnapshot struct {
 	FromFork    bool
 }
 
+// codeReviewPullRequestSnapshot projects an already-fetched provider response.
+// Reusing the response keeps assessment inputs aligned with the health refresh
+// without adding another GET for the same PR metadata.
+func codeReviewPullRequestSnapshot(details *gitHubPullRequestDetails) CodeReviewPullRequestSnapshot {
+	return CodeReviewPullRequestSnapshot{
+		IsDraft:     details.Draft,
+		BaseRef:     details.Base.Ref,
+		Number:      details.Number,
+		HTMLURL:     details.HTMLURL,
+		Title:       details.Title,
+		Body:        details.Body,
+		State:       details.State,
+		AuthorLogin: details.User.Login,
+		HeadSHA:     details.Head.SHA,
+		HeadRef:     details.Head.Ref,
+		BaseSHA:     details.Base.SHA,
+		FromFork:    details.Head.Repo.Fork,
+	}
+}
+
 // CodeReviewPullRequestSnapshotReader fetches current provider state without
 // database access. Call it inside the PR lock after preparing identity outside
 // the transaction, so saturated pools cannot deadlock on nested acquisitions.
@@ -4671,20 +4691,7 @@ func (s *PRService) PrepareCodeReviewPullRequestSnapshot(ctx context.Context, or
 		if details.Head.SHA == "" {
 			return CodeReviewPullRequestSnapshot{}, fmt.Errorf("pull request head SHA is missing")
 		}
-		return CodeReviewPullRequestSnapshot{
-			IsDraft:     details.Draft,
-			BaseRef:     details.Base.Ref,
-			Number:      details.Number,
-			HTMLURL:     details.HTMLURL,
-			Title:       details.Title,
-			Body:        details.Body,
-			State:       details.State,
-			AuthorLogin: details.User.Login,
-			HeadSHA:     details.Head.SHA,
-			HeadRef:     details.Head.Ref,
-			BaseSHA:     details.Base.SHA,
-			FromFork:    details.Head.Repo.Fork,
-		}, nil
+		return codeReviewPullRequestSnapshot(&details), nil
 	}, nil
 }
 

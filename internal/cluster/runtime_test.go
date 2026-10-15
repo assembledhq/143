@@ -49,6 +49,10 @@ func (m *schedulerRuntimeJobsMock) Enqueue(ctx context.Context, orgID uuid.UUID,
 	return uuid.New(), nil
 }
 
+func (m *schedulerRuntimeJobsMock) EnqueuePullRequestReconciliationOnce(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+	return m.Enqueue(ctx, orgID, opts.Queue, opts.JobType, opts.Payload, opts.Priority, opts.DedupeKey)
+}
+
 func (m *schedulerRuntimeJobsMock) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	return m.Enqueue(ctx, orgID, queue, jobType, payload, priority, dedupeKey)
 }

@@ -60,20 +60,21 @@ func (assessmentFilesFixture) ListPullRequestFiles(context.Context, PullRequestF
 }
 
 type assessmentSnapshotFixture struct {
-	snapshot                 ghservice.CodeReviewPullRequestSnapshot
-	changeDuringCapture      bool
-	calls                    int
-	syncErr                  error
-	textSources              []ghservice.CodeReviewTextSource
-	textCalls, combinedCalls int
-	discoveryErr             error
-	textHead, textBody       *string
-	incompleteText           bool
+	snapshot                          ghservice.CodeReviewPullRequestSnapshot
+	changeDuringCapture               bool
+	calls, snapshotCalls, healthCalls int
+	syncErr                           error
+	textSources                       []ghservice.CodeReviewTextSource
+	textCalls, combinedCalls          int
+	discoveryErr                      error
+	textHead, textBody                *string
+	incompleteText                    bool
 }
 
 func (f *assessmentSnapshotFixture) PrepareCodeReviewPullRequestSnapshot(context.Context, uuid.UUID, uuid.UUID) (ghservice.CodeReviewPullRequestSnapshotReader, error) {
 	return func(context.Context, int) (ghservice.CodeReviewPullRequestSnapshot, error) {
 		f.calls++
+		f.snapshotCalls++
 		snapshot := f.snapshot
 		if f.changeDuringCapture && f.calls > 1 {
 			snapshot.Body += " changed intent"
@@ -81,8 +82,10 @@ func (f *assessmentSnapshotFixture) PrepareCodeReviewPullRequestSnapshot(context
 		return snapshot, nil
 	}, nil
 }
-func (f *assessmentSnapshotFixture) SyncPullRequestState(context.Context, uuid.UUID, uuid.UUID) error {
-	return f.syncErr
+func (f *assessmentSnapshotFixture) SyncCodeReviewPullRequestState(context.Context, uuid.UUID, uuid.UUID) (ghservice.CodeReviewPullRequestSnapshot, error) {
+	f.calls++
+	f.healthCalls++
+	return f.snapshot, f.syncErr
 }
 func (f *assessmentSnapshotFixture) DiscoverCodeReviewTextEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewTextDiscovery, error) {
 	f.textCalls++
@@ -157,6 +160,9 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			result, err := s.CaptureAssessmentInputs(context.Background(), in)
 			if tt.change || tt.staleHealth || tt.incompleteVisual || tt.overflow || tt.closed || tt.syncFailure || tt.invalidSettings || tt.discoveryFailure || tt.incompleteText || tt.textHeadChanged || tt.textBodyChanged {
 				require.Error(t, err, "capture must reject mixed, stale, or unavailable inputs")
+				if tt.closed {
+					require.ErrorIs(t, err, ErrReviewIneligible, "terminal snapshots must remain deterministic ineligibility rather than a retryable capture error")
+				}
 				if tt.overflow {
 					require.ErrorIs(t, err, ErrAssessmentReuseUnavailable, "visual source overflow should permit legacy full review without reuse")
 				}
@@ -180,6 +186,8 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 				require.Equal(t, 0, snapshots.textCalls, "shared inventory must avoid a second standalone text discovery")
 			}
 			require.Equal(t, 2, snapshots.calls, "provider snapshot must bracket files and visual capture")
+			require.Equal(t, 1, snapshots.healthCalls, "assessment must reuse the authoritative snapshot from one fresh health refresh")
+			require.Equal(t, 1, snapshots.snapshotCalls, "assessment must keep one independent final PR read without an initial duplicate")
 			require.True(t, visual.request.Fresh, "publication refresh must bypass immutable visual snapshot restoration")
 			require.Equal(t, in.AssessmentID, *visual.request.AssessmentID, "capture must retain assessment identity")
 			s.SetExternalContextResolver(assessmentExternalFixture{digest: "changed-integration-tools"})

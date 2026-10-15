@@ -671,11 +671,34 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	}
 }
 
+// SyncCodeReviewPullRequestState refreshes authoritative health and returns the
+// PR metadata fetched by that same refresh. It is synchronous and uncoalesced:
+// a review capture still gets fresh provider inputs, checks and commit statuses.
+func (s *PRService) SyncCodeReviewPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) (CodeReviewPullRequestSnapshot, error) {
+	ctx = WithPullRequestSyncReason(ctx, PullRequestSyncReasonCodeReview)
+	var snapshot CodeReviewPullRequestSnapshot
+	err := s.syncResolvedPullRequestStateCapturing(ctx, orgID, pullRequestID, nil, false, func(details *gitHubPullRequestDetails) error {
+		if details.Head.SHA == "" {
+			return errors.New("pull request head SHA is missing")
+		}
+		snapshot = codeReviewPullRequestSnapshot(details)
+		return nil
+	})
+	if err != nil {
+		return CodeReviewPullRequestSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
 func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
 	return s.syncResolvedPullRequestState(ctx, orgID, pullRequestID, nil, false)
 }
 
-func (s *PRService) syncResolvedPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID, resolved *resolvedPullRequestHealthSync, backgroundQuotaAdmitted bool) (resultErr error) {
+func (s *PRService) syncResolvedPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID, resolved *resolvedPullRequestHealthSync, backgroundQuotaAdmitted bool) error {
+	return s.syncResolvedPullRequestStateCapturing(ctx, orgID, pullRequestID, resolved, backgroundQuotaAdmitted, nil)
+}
+
+func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, orgID, pullRequestID uuid.UUID, resolved *resolvedPullRequestHealthSync, backgroundQuotaAdmitted bool, capture func(*gitHubPullRequestDetails) error) (resultErr error) {
 	var resolution *identity.Resolution
 	scope := reconciliationScopeFromContext(ctx)
 	defer func() {
@@ -709,6 +732,11 @@ func (s *PRService) syncResolvedPullRequestState(ctx context.Context, orgID, pul
 	if err != nil {
 		return err
 	}
+	if capture != nil {
+		if err := capture(details); err != nil {
+			return err
+		}
+	}
 
 	// Self-heal: when GitHub reports the PR closed but our DB still has it
 	// open, the pull_request:closed webhook never landed (delivery failure,
@@ -724,6 +752,13 @@ func (s *PRService) syncResolvedPullRequestState(ctx context.Context, orgID, pul
 			Msg("self-healing PR status drift during sync; closed-event webhook was likely dropped")
 		_, err := s.applyClosedPRTransition(ctx, pr, details.Merged, details.MergedAt, details.UpdatedAt, details.MergeCommitSHA, details.Head.SHA)
 		return err
+	}
+
+	// Review capture needs the terminal snapshot for deterministic ineligibility,
+	// including when our mirror is already closed or merged. Preserve the
+	// stale-open self-heal above, but do not fetch checks for a terminal review.
+	if capture != nil && strings.EqualFold(strings.TrimSpace(details.State), "closed") {
+		return nil
 	}
 
 	checkRuns, err := s.listCheckRunsForRef(ctx, token, owner, repoName, details.Head.SHA)
@@ -2124,7 +2159,7 @@ func (s *PRService) fetchPullRequestDetails(ctx context.Context, token, owner, r
 		if err := json.Unmarshal(body, &details); err != nil {
 			return nil, fmt.Errorf("decode GitHub pull request details: %w", err)
 		}
-		if details.Mergeable != nil || isDefinitiveNullMergeabilityState(details.MergeableState) || attempt >= len(delays) {
+		if strings.EqualFold(strings.TrimSpace(details.State), "closed") || details.Mergeable != nil || isDefinitiveNullMergeabilityState(details.MergeableState) || attempt >= len(delays) {
 			return &details, nil
 		}
 		delay := delays[attempt]

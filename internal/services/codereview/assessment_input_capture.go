@@ -52,7 +52,7 @@ type assessmentFileLister interface {
 }
 type assessmentSnapshotter interface {
 	scheduleSnapshotter
-	PullRequestSyncer
+	SyncCodeReviewPullRequestState(context.Context, uuid.UUID, uuid.UUID) (ghservice.CodeReviewPullRequestSnapshot, error)
 	DiscoverCodeReviewTextEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewTextDiscovery, error)
 	DiscoverCodeReviewEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewEvidenceDiscovery, error)
 }
@@ -133,15 +133,12 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	if err != nil {
 		return result, err
 	}
-	snapshot, err := reader(ctx, pr.GitHubPRNumber)
+	snapshot, err := s.snapshots.SyncCodeReviewPullRequestState(ctx, in.OrgID, in.PullRequestID)
 	if err != nil {
 		return result, err
 	}
 	if snapshot.State != "open" {
 		return AssessmentInputCaptureResult{Snapshot: snapshot}, ErrReviewIneligible
-	}
-	if err = s.snapshots.SyncPullRequestState(ctx, in.OrgID, in.PullRequestID); err != nil {
-		return result, err
 	}
 	health, err := s.prs.GetHealthCurrent(ctx, in.OrgID, in.PullRequestID)
 	if err != nil {
