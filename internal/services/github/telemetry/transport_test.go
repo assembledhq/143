@@ -273,6 +273,13 @@ func TestTransportRoundTripLogsStructuredGitHubTelemetry(t *testing.T) {
 			require.Equal(t, tt.requestErr, actualErr, "RoundTrip should preserve the underlying error")
 			var actualLogEvent map[string]any
 			require.NoError(t, json.Unmarshal(logs.Bytes(), &actualLogEvent), "telemetry should be valid JSON")
+			tt.expectedLogEvent["github_request_started_at"] = startedAt.Format(time.RFC3339Nano)
+			tt.expectedLogEvent["github_request_completed_at"] = startedAt.Add(250 * time.Millisecond).Format(time.RFC3339Nano)
+			tt.expectedLogEvent["github_timing_source"] = "host_transport"
+			tt.expectedLogEvent["github_token_correlation_status"] = "unknown"
+			if tt.response != nil {
+				tt.expectedLogEvent["github_response_headers_at"] = startedAt.Add(250 * time.Millisecond).Format(time.RFC3339Nano)
+			}
 			require.Equal(t, tt.expectedLogEvent, actualLogEvent, "telemetry should contain the exact bounded request summary")
 		})
 	}
