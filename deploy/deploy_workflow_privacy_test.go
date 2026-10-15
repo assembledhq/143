@@ -95,6 +95,7 @@ exit "$MOCK_SOPS_EXIT"
 set -euo pipefail
 printf '%s' "${FLEET_HOSTS:?}" > "$MOCK_FLEET_INVENTORY"
 printf '%s\n' "$@" > "$MOCK_FLEET_ARGS"
+printf '%s\n%s\n' "${WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB:?}" "${WORKER_BLUE_GREEN_PULL_INODE_BUDGET:?}" > "$MOCK_FLEET_BUDGETS"
 printf 'synthetic-fleet-stdout: %s\n' "$FLEET_HOSTS"
 printf 'synthetic-fleet-stderr: %s\n' "$FLEET_HOSTS" >&2
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
@@ -108,6 +109,7 @@ exit "$MOCK_FLEET_EXIT"
 			sopsArgs := filepath.Join(directory, "sops-args")
 			fleetInventory := filepath.Join(directory, "fleet-inventory")
 			fleetArgs := filepath.Join(directory, "fleet-args")
+			fleetBudgets := filepath.Join(directory, "fleet-budgets")
 			run := strings.ReplaceAll(deployRun, "${{ github.event.workflow_run.head_sha }}", sha)
 			require.NotContains(t, run, "${{", "fixture must resolve all Actions expressions before executing the real shell")
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -127,6 +129,7 @@ exit "$MOCK_FLEET_EXIT"
 				"MOCK_SOPS_EXIT=" + tt.sopsExit,
 				"MOCK_FLEET_INVENTORY=" + fleetInventory,
 				"MOCK_FLEET_ARGS=" + fleetArgs,
+				"MOCK_FLEET_BUDGETS=" + fleetBudgets,
 				"MOCK_FLEET_EXIT=" + tt.fleetExit,
 			}
 			for name, value := range deployEnv {
@@ -160,6 +163,8 @@ exit "$MOCK_FLEET_EXIT"
 				require.ErrorIs(t, statErr, os.ErrNotExist, "decryption failure or empty inventory must never start fleet deployment")
 				_, statErr = os.Stat(fleetArgs)
 				require.ErrorIs(t, statErr, os.ErrNotExist, "unavailable inventory must not invoke the fleet script")
+				_, statErr = os.Stat(fleetBudgets)
+				require.ErrorIs(t, statErr, os.ErrNotExist, "unavailable inventory must not reach fleet budget evaluation")
 				return
 			}
 			actualInventory, readErr := os.ReadFile(fleetInventory)
@@ -168,6 +173,9 @@ exit "$MOCK_FLEET_EXIT"
 			actualFleetArgs, readErr := os.ReadFile(fleetArgs)
 			require.NoError(t, readErr, "fleet invocation should retain its synthetic argument receipt")
 			require.Equal(t, filepath.Join(home, ".ssh", "deploy-key")+"\n"+sha+"\n", string(actualFleetArgs), "workflow must deploy the exact verified release SHA")
+			actualFleetBudgets, readErr := os.ReadFile(fleetBudgets)
+			require.NoError(t, readErr, "the real workflow step must pass both image-pull budgets to its fleet subprocess")
+			require.Equal(t, "16384\n1000000\n", string(actualFleetBudgets), "fleet must receive the configured disk and inode allowances on successful and failed rollouts")
 			fleetDiagnostic, readErr := os.ReadFile(filepath.Join(runner, "deploy-fleet.log"))
 			require.NoError(t, readErr, "raw fleet diagnostics should remain available only in the runner-local capture")
 			require.Equal(t, rawFleetOut+": "+inventory+"\n"+rawFleetErr+": "+inventory+"\n", string(fleetDiagnostic), "both fleet output streams must be privately captured on success and failure")
