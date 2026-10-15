@@ -9,11 +9,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import tracemalloc
 import types
 import unittest
 from unittest import mock
 
 LAUNCHER = Path(__file__).with_name("review_source_profile.py")
+PROFILES = []
 PIN = "f7e372aef2449752093346c499ee5f2b38aa7c1ba92fa8d0221e5c50627dd7fd"
 
 
@@ -21,14 +24,22 @@ def fresh_profile():
     spec = importlib.util.spec_from_file_location("source_profile_fixture", LAUNCHER)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    original_install = module.install
+    def install(namespace):
+        progress = original_install(namespace)
+        PROFILES.append(progress)
+        return progress
+    module.install = install
     return module
 
 
-def decode_records(output):
+def decode_records(output, checkpoints=False):
     result = []
     for line in output.splitlines():
         if line.startswith("143_SOURCE_PROFILE_V1 "):
-            result.append(json.loads(line.removeprefix("143_SOURCE_PROFILE_V1 ")))
+            value = json.loads(line.removeprefix("143_SOURCE_PROFILE_V1 "))
+            if checkpoints or value["op"] != 4:
+                result.append(value)
     return result
 
 
@@ -56,6 +67,7 @@ def fixture_namespace(overrides=None):
         "selected_artifacts": original("selected_artifacts", [{"url": "synthetic-private-url"}]),
         "read_once": original("read_once", b"source"),
         "extract": original("extract", sentinel),
+        "file_hash": original("file_hash", "hash"),
         "input_hashes": original("input_hashes", {"synthetic-path": "hash"}),
         "check_source_capacity": original("check_source_capacity", {"entries": 4, "path_bytes": 70}),
         "tree_inventory": original("tree_inventory", {"synthetic-path": "hash"}),
@@ -72,6 +84,11 @@ def fixture_namespace(overrides=None):
 
 
 class ReviewSourceProfileTests(unittest.TestCase):
+    def tearDown(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            while PROFILES:
+                PROFILES.pop().close()
+
     def assert_numeric_records(self, records):
         for record in records:
             self.assertTrue(all(type(value) is int for value in record.values()))
@@ -79,6 +96,9 @@ class ReviewSourceProfileTests(unittest.TestCase):
             self.assertLessEqual(len(json.dumps(record)), 1024)
             if record["op"] == 3:
                 self.assertEqual(record, {"version": 1, "op": 3, "phase": 0, "category": 0})
+            elif record["op"] == 4:
+                self.assertEqual(set(record), {"version", "op", "phase", "category", *fresh_profile().CHECKPOINT_LIMITS})
+                self.assertEqual((record["phase"], record["category"]), (0, 0))
             elif record["op"] == 1:
                 self.assertEqual(set(record), {"version", "op", "phase", "category"})
             else:
@@ -555,6 +575,8 @@ read_once = lambda *a, **k: b"source"
 extract = lambda *a, **k: None
 input_hashes = lambda *a, **k: {}
 check_source_capacity = lambda *a, **k: {"entries": 1, "path_bytes": 1}
+def file_hash(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 def tree_inventory(*args, **kwargs):
     raise AssertionError("obsolete inventory path must not be called")
 remove_tree = lambda *a, **k: None
@@ -563,7 +585,7 @@ subprocess = types.SimpleNamespace(run=lambda *a, **k: None)
 def iter_tree_inventory(path):
     for item in sorted(path.rglob("*")):
         if item.is_file():
-            yield item.relative_to(path).as_posix(), hashlib.sha256(item.read_bytes()).hexdigest()
+            yield item.relative_to(path).as_posix(), file_hash(item)
 def write_receipt(path, inputs, sources, deadline):
     count = 0
     with path.open("x", encoding="utf-8") as stream:
@@ -622,6 +644,303 @@ if __name__ == "__main__":
                 self.assertEqual(actual, {"argv": [".143/review-sources.py", *args], "neighbor": 42, "count": 1, "global_path_unchanged": True, "global_json_unchanged": True})
                 self.assertNotIn(str(root), result.stdout)
                 self.assertNotIn("library.py", result.stdout)
+
+
+    def test_checkpoint_uses_active_iterator_and_nested_hash_time_not_consumer_hashes(self):
+        profile = fresh_profile()
+        clock = [1000000]
+        def advance(value):
+            clock[0] += value
+        sentinel, fault = object(), RuntimeError("synthetic-original")
+        def file_hash(path):
+            advance(3001)
+            return sentinel
+        def inventory(path):
+            advance(1001)
+            self.assertIs(namespace["file_hash"](path), sentinel)
+            advance(999)
+            yield sentinel
+            advance(2000)
+        def receipt(*args, **kwargs):
+            advance(5000)
+            for value in namespace["iter_tree_inventory"](Path("sources")):
+                self.assertIs(value, sentinel)
+                advance(4000)
+                # Hashing by the suspended consumer must not become inventory.
+                self.assertIs(namespace["file_hash"](Path("input")), sentinel)
+            advance(6000)
+            return 1
+        namespace, _, _ = fixture_namespace({"iter_tree_inventory": inventory, "file_hash": file_hash, "write_receipt": receipt})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), mock.patch.object(profile.time, "monotonic_ns", side_effect=lambda: clock[0]):
+            progress = profile.install(namespace)
+            self.assertIs(namespace["file_hash"](Path("unrelated")), sentinel)
+            self.assertEqual(namespace["write_receipt"](), 1)
+            progress.close()
+        checkpoints = [r for r in decode_records(output.getvalue(), True) if r["op"] == 4]
+        self.assertEqual({key: checkpoints[-1][key] for key in ("inventory_us", "inventory_residual_us", "hash_us", "receipt_us", "receipt_outside_inventory_us", "inventory_yielded", "hash_started", "hash_completed", "hash_failed", "receipt_started", "receipt_completed", "receipt_failed", "open_inventory", "active_inventory", "active_hash", "active_receipt")},
+                         {"inventory_us": 7, "inventory_residual_us": 4, "hash_us": 3, "receipt_us": 25, "receipt_outside_inventory_us": 18, "inventory_yielded": 1, "hash_started": 1, "hash_completed": 1, "hash_failed": 0, "receipt_started": 1, "receipt_completed": 1, "receipt_failed": 0, "open_inventory": 0, "active_inventory": 0, "active_hash": 0, "active_receipt": 0})
+        self.assert_numeric_records(checkpoints)
+        self.assertFalse(progress.thread.is_alive())
+        self.assertIsNone(profile.local.inventory)
+        self.assertIsNone(profile.local.receipt)
+        self.assertNotIn("input", output.getvalue())
+
+    def test_checkpoint_survives_blocked_hash_and_publisher_stops_after_join(self):
+        profile = fresh_profile()
+        profile.CHECKPOINT_INTERVAL = 0.01
+        entered, release = threading.Event(), threading.Event()
+        output = io.StringIO()
+        results, errors = [], []
+        def file_hash(path):
+            if path.name == "unrelated":
+                return "outside-digest"
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("fixture wait expired")
+            return "digest"
+        def inventory(path):
+            yield "private-path", namespace["file_hash"](path)
+        def receipt():
+            return sum(1 for _ in namespace["iter_tree_inventory"](Path("sources")))
+        namespace, _, _ = fixture_namespace({"iter_tree_inventory": inventory, "file_hash": file_hash, "write_receipt": receipt})
+        def worker():
+            try:
+                results.append(namespace["write_receipt"]())
+            except BaseException as error:
+                errors.append(error)
+        with contextlib.redirect_stdout(output):
+            progress = profile.install(namespace)
+            thread = threading.Thread(target=worker)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                deadline = time.monotonic() + 5
+                while not any(r["op"] == 4 for r in decode_records(output.getvalue(), True)) and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                partial = [r for r in decode_records(output.getvalue(), True) if r["op"] == 4]
+                self.assertTrue(partial)
+                self.assertEqual({key: partial[-1][key] for key in ("active_inventory", "active_hash", "active_receipt", "inventory_yielded", "hash_started", "hash_completed")}, {"active_inventory": 1, "active_hash": 1, "active_receipt": 1, "inventory_yielded": 0, "hash_started": 1, "hash_completed": 0})
+                self.assertGreater(partial[-1]["hash_us"], 0)
+                self.assertFalse(any(r["op"] == 2 for r in decode_records(output.getvalue())))
+                # The original module binding and unrelated thread remain free
+                # of the iterator TLS marker while this hash is blocked.
+                self.assertIsNone(getattr(profile.local, "inventory", None))
+                self.assertEqual(namespace["file_hash"](Path("unrelated")), "outside-digest")
+                with progress.lock:
+                    self.assertEqual(progress.counts["hash_started"], 1)
+            finally:
+                release.set()
+                thread.join(5)
+                progress.close()
+        self.assertEqual(errors, [])
+        self.assertEqual(results, [1])
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(progress.thread.is_alive())
+        self.assertNotIn("private-path", output.getvalue())
+
+    def test_checkpoints_keep_large_lazy_inventory_constant_size_and_record_bounded(self):
+        profile = fresh_profile()
+        profile.CHECKPOINT_INTERVAL = 100
+        yielded = [0]
+        def file_hash(path):
+            return "digest"
+        def inventory(path):
+            for _ in range(275000):
+                yielded[0] += 1
+                yield namespace["file_hash"](path)
+        namespace, _, _ = fixture_namespace({"iter_tree_inventory": inventory, "file_hash": file_hash})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            progress = profile.install(namespace)
+            iterator = namespace["iter_tree_inventory"](Path("sources"))
+            self.assertEqual(yielded, [0])
+            tracemalloc.start()
+            try:
+                for item in iterator:
+                    self.assertEqual(item, "digest")
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            progress.close()
+        records = decode_records(output.getvalue(), True)
+        checkpoints = [r for r in records if r["op"] == 4]
+        self.assertEqual(checkpoints[-1]["inventory_yielded"], 275000)
+        self.assertEqual(checkpoints[-1]["hash_completed"], 275000)
+        self.assertEqual((progress.phases, progress.work), ([], []))
+        self.assertEqual(len(progress.counts), 7)
+        self.assertLess(peak, 2 * 1024 * 1024)
+        self.assertLessEqual(len(records), 6)
+        self.assertLessEqual(len(checkpoints), 512)
+        self.assertTrue(all(len(json.dumps(record)) <= 1024 for record in records))
+        self.assertNotIn("digest", output.getvalue())
+
+    def test_checkpoint_observer_clock_thread_or_stdout_failures_preserve_original_results(self):
+        for mode in ("clock", "thread", "stdout"):
+            with self.subTest(mode=mode):
+                profile = fresh_profile()
+                namespace, _, sentinel = fixture_namespace()
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.ExitStack() as stack:
+                    progress = profile.install(namespace)
+                    if mode == "clock":
+                        stack.enter_context(mock.patch.object(profile.time, "monotonic_ns", side_effect=RuntimeError("private-clock")))
+                    elif mode == "thread":
+                        stack.enter_context(mock.patch.object(profile.threading.Thread, "start", side_effect=RuntimeError("private-thread")))
+                    else:
+                        original_emit = profile.emit
+                        def emit(op, phase, category, **metrics):
+                            if op == 4:
+                                with mock.patch.object(sys, "stdout", mock.Mock(write=mock.Mock(side_effect=OSError("private-stdout")))):
+                                    original_emit(op, phase, category, **metrics)
+                            else:
+                                original_emit(op, phase, category, **metrics)
+                        stack.enter_context(mock.patch.object(profile, "emit", side_effect=emit))
+                    self.assertEqual(list(namespace["iter_tree_inventory"](Path("sources"))), [("synthetic-path", "hash")])
+                    progress.close()
+                self.assertTrue(profile.invalid)
+                records = decode_records(output.getvalue(), True)
+                self.assertTrue(any(r["op"] == 3 for r in records) or profile.invalid)
+                self.assertNotIn("private-", output.getvalue())
+
+    def test_checkpoint_close_and_hash_error_retain_partial_progress_and_original_exception(self):
+        for mode in ("partial close", "hash failure"):
+            with self.subTest(mode=mode):
+                profile = fresh_profile()
+                fault = RuntimeError("private-original-hash")
+                def file_hash(path):
+                    if mode == "hash failure":
+                        raise fault
+                    return "digest"
+                def inventory(path):
+                    yield namespace["file_hash"](path)
+                    yield namespace["file_hash"](path)
+                namespace, _, _ = fixture_namespace({"iter_tree_inventory": inventory, "file_hash": file_hash})
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    progress = profile.install(namespace)
+                    iterator = namespace["iter_tree_inventory"](Path("sources"))
+                    if mode == "hash failure":
+                        with self.assertRaises(RuntimeError) as caught:
+                            next(iterator)
+                        self.assertIs(caught.exception, fault)
+                    else:
+                        self.assertEqual(next(iterator), "digest")
+                        iterator.close()
+                    progress.close()
+                checkpoints = [r for r in decode_records(output.getvalue(), True) if r["op"] == 4]
+                last = checkpoints[-1]
+                self.assertEqual((last["inventory_yielded"], last["hash_started"], last["hash_completed"], last["hash_failed"], last["open_inventory"], last["active_inventory"], last["active_hash"]), (0 if mode == "hash failure" else 1, 1, 1, int(mode == "hash failure"), 0, 0, 0))
+                exits = [r for r in decode_records(output.getvalue()) if r["op"] == 2]
+                self.assertEqual(exits[-1]["failed"], 1)
+                self.assertNotIn("private-original", output.getvalue())
+
+    def test_finalized_timer_cannot_regress_an_inflight_checkpoint_after_lock_contention(self):
+        profile = fresh_profile()
+        clock = [1000000]
+        attempted = threading.Event()
+        class Gate:
+            def __init__(self):
+                self.inner = threading.RLock()
+            def __enter__(self):
+                if threading.current_thread().name == "finalize-fixture":
+                    attempted.set()
+                self.inner.acquire()
+            def __exit__(self, *args):
+                self.inner.release()
+        progress = profile.Progress()
+        PROFILES.append(progress)
+        progress.lock = Gate()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), mock.patch.object(profile.time, "monotonic_ns", side_effect=lambda: clock[0]):
+            phase = progress.phase_begin("inventory")
+            work = progress.work_begin("inventory")
+            with progress.lock:
+                clock[0] += 1000
+                thread = threading.Thread(target=lambda: progress.work_end(work, yielded=True), name="finalize-fixture")
+                thread.start()
+                self.assertTrue(attempted.wait(5))
+                clock[0] += 4000
+                progress.publish()
+                clock[0] += 1000
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+            progress.phase_end(phase, False)
+            progress.close()
+        checkpoints = [r for r in decode_records(output.getvalue(), True) if r["op"] == 4]
+        self.assertEqual([r["inventory_us"] for r in checkpoints], [5, 6, 6])
+        self.assertEqual([r["inventory_yielded"] for r in checkpoints], [0, 1, 1])
+        self.assertFalse(profile.invalid)
+
+    def test_checkpoint_cap_is_independent_of_large_item_count(self):
+        profile = fresh_profile()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            progress = profile.Progress()
+            frame = progress.phase_begin("inventory")
+            PROFILES.append(progress)
+            for _ in range(513):
+                progress.publish()
+            progress.phase_end(frame, False)
+            progress.close()
+        records = decode_records(output.getvalue(), True)
+        self.assertEqual(sum(r["op"] == 4 for r in records), 512)
+        self.assertEqual(sum(r["op"] == 3 for r in records), 1)
+        self.assertTrue(profile.invalid)
+
+    def test_actual_pinned_helper_receipt_bytes_tamper_links_and_fifo_are_preserved(self):
+        helper_path = os.environ.get("REVIEW_SOURCE_PROFILE_REAL_HELPER")
+        if not helper_path:
+            self.skipTest("exact helper supplied separately; synthetic semantics tests still run")
+        helper = Path(helper_path)
+        source = helper.read_bytes()
+        self.assertEqual(hashlib.sha256(source).hexdigest(), PIN)
+        # Use exact helper functions, without its network/main entry point.
+        for mode in ("canonical", "tampered", "link", "fifo"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source_dir = root / "sources"
+                source_dir.mkdir()
+                (source_dir / "a.py").write_bytes(b"source")
+                (source_dir / "directory").mkdir()
+                (source_dir / "directory/z.py").write_bytes(b"nested")
+                baseline = types.ModuleType("unobserved_helper")
+                baseline.__file__ = str(helper)
+                exec(compile(source, str(helper), "exec"), baseline.__dict__)
+                observed = types.ModuleType("observed_helper")
+                observed.__file__ = str(helper)
+                exec(compile(source, str(helper), "exec"), observed.__dict__)
+                deadline = time.monotonic() + 10
+                canonical = root / "canonical.json"
+                self.assertEqual(baseline.write_receipt(canonical, {"fixture": "digest"}, source_dir, deadline), 2)
+                expected = canonical.read_bytes()
+                if mode == "tampered":
+                    (source_dir / "a.py").write_bytes(b"mutated")
+                elif mode == "link":
+                    (source_dir / "linked").symlink_to(source_dir / "a.py")
+                elif mode == "fifo":
+                    os.mkfifo(source_dir / "fifo")
+                profile = fresh_profile()
+                output = io.StringIO()
+                observed_receipt = root / "observed.json"
+                original_run = subprocess.run
+                with contextlib.redirect_stdout(output):
+                    progress = profile.install(observed.__dict__)
+                    self.assertIs(subprocess.run, original_run)
+                    if mode in ("link", "fifo"):
+                        with self.assertRaisesRegex(ValueError, "link or special file"):
+                            observed.write_receipt(observed_receipt, {"fixture": "digest"}, source_dir, deadline)
+                    else:
+                        self.assertEqual(observed.write_receipt(observed_receipt, {"fixture": "digest"}, source_dir, deadline), 2)
+                    progress.close()
+                if mode == "canonical":
+                    self.assertEqual(observed_receipt.read_bytes(), expected)
+                elif mode == "tampered":
+                    self.assertNotEqual(observed_receipt.read_bytes(), expected)
+                    self.assertEqual(json.loads(observed_receipt.read_bytes())["files"]["a.py"], hashlib.sha256(b"mutated").hexdigest())
+                self.assertTrue(any(r["op"] == 4 for r in decode_records(output.getvalue(), True)))
+                self.assertNotIn(str(root), output.getvalue())
+                self.assertNotIn("a.py", output.getvalue())
 
     def test_bad_hash_invocation_and_redirected_or_special_helper_refuse_before_import(self):
         source = b'from pathlib import Path\nPath("executed").touch()\n'

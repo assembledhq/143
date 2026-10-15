@@ -1470,7 +1470,38 @@ const realReviewProfilePrefix = "143_SOURCE_PROFILE_V1 "
 //go:embed testdata/review_source_profile.py
 var realReviewSourceProfileLauncher string
 
+// RealReviewProfileCheckpoint records cumulative lower-bound progress for one helper process. These
+// never complete phases or attribute a particular allocation/OOM to this work.
+type RealReviewProfileCheckpoint struct {
+	Sequence                  int64 `json:"sequence"`
+	ElapsedUS                 int64 `json:"elapsed_us"`
+	InventoryUS               int64 `json:"inventory_us"`
+	InventoryResidualUS       int64 `json:"inventory_residual_us"`
+	HashUS                    int64 `json:"hash_us"`
+	ReceiptUS                 int64 `json:"receipt_us"`
+	ReceiptOutsideInventoryUS int64 `json:"receipt_outside_inventory_us"`
+	InventoryYielded          int64 `json:"inventory_yielded"`
+	HashStarted               int64 `json:"hash_started"`
+	HashCompleted             int64 `json:"hash_completed"`
+	HashFailed                int64 `json:"hash_failed"`
+	ReceiptStarted            int64 `json:"receipt_started"`
+	ReceiptCompleted          int64 `json:"receipt_completed"`
+	ReceiptFailed             int64 `json:"receipt_failed"`
+	OpenInventory             int64 `json:"open_inventory"`
+	ActiveInventory           int64 `json:"active_inventory"`
+	ActiveHash                int64 `json:"active_hash"`
+	ActiveReceipt             int64 `json:"active_receipt"`
+}
+
+type realReviewProfileCheckpoint = RealReviewProfileCheckpoint
+
+type realReviewProfileStream struct {
+	invocation int
+	last       *realReviewProfileCheckpoint
+}
+
 type realReviewProfileRecord struct {
+	*RealReviewProfileCheckpoint
 	Version    int    `json:"version"`
 	Op         int    `json:"op"`
 	Phase      int    `json:"phase"`
@@ -1498,22 +1529,31 @@ type realReviewProfileAggregate struct {
 }
 
 type realReviewProfileResult struct {
-	DiagnosticOnly bool                                  `json:"diagnostic_only"`
-	HelperSHA256   string                                `json:"helper_sha256"`
-	Invalid        bool                                  `json:"invalid"`
-	InvalidReason  string                                `json:"invalid_reason,omitempty"`
-	Records        int                                   `json:"record_count"`
-	Phases         map[string]realReviewProfileAggregate `json:"phases"`
-	MemoryScope    string                                `json:"memory_scope"`
-	TimingScope    string                                `json:"timing_scope"`
+	DiagnosticOnly       bool                                  `json:"diagnostic_only"`
+	HelperSHA256         string                                `json:"helper_sha256"`
+	Invalid              bool                                  `json:"invalid"`
+	InvalidReason        string                                `json:"invalid_reason,omitempty"`
+	Records              int                                   `json:"record_count"`
+	Phases               map[string]realReviewProfileAggregate `json:"phases"`
+	MemoryScope          string                                `json:"memory_scope"`
+	TimingScope          string                                `json:"timing_scope"`
+	CheckpointCount      int                                   `json:"checkpoint_count"`
+	LastCheckpoint       *realReviewProfileCheckpoint          `json:"last_checkpoint,omitempty"`
+	CheckpointInvocation int                                   `json:"checkpoint_invocation,omitempty"`
+	CheckpointScope      string                                `json:"checkpoint_scope"`
 }
 
 type realReviewSourceProfile struct {
-	mu      sync.Mutex
-	invalid string
-	records int
-	active  int
-	cells   map[string]*realReviewProfileAggregate
+	mu                   sync.Mutex
+	invalid              string
+	records              int
+	active               int
+	cells                map[string]*realReviewProfileAggregate
+	checkpointCount      int
+	checkpointInvocation int
+	lastCheckpoint       *realReviewProfileCheckpoint
+	streamCount          int
+	defaultStream        realReviewProfileStream
 }
 
 type realReviewProfileDecoder struct {
@@ -1521,6 +1561,7 @@ type realReviewProfileDecoder struct {
 	profile *realReviewSourceProfile
 	line    []byte
 	drop    bool
+	stream  realReviewProfileStream
 }
 
 // Parsing never interrupts the original writer or credential scanner. Ordinary
@@ -1531,7 +1572,7 @@ func (w *realReviewProfileDecoder) Write(raw []byte) (int, error) {
 	for _, character := range raw {
 		if character == '\n' {
 			if !w.drop && bytes.HasPrefix(w.line, []byte(realReviewProfilePrefix)) {
-				w.profile.consume(w.line[len(realReviewProfilePrefix):])
+				w.profile.consumeStream(w.line[len(realReviewProfilePrefix):], &w.stream)
 			}
 			w.line, w.drop = nil, false
 			continue
@@ -1568,12 +1609,17 @@ func (p *realReviewSourceProfile) invalidate(reason string) {
 }
 
 func (p *realReviewSourceProfile) consume(raw []byte) {
+	p.consumeStream(raw, &p.defaultStream)
+}
+
+func (p *realReviewSourceProfile) consumeStream(raw []byte, stream *realReviewProfileStream) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.invalid != "" {
 		return
 	}
-	if !realReviewProfileNumericObject(raw) {
+	fields := realReviewProfileNumericObject(raw)
+	if fields == nil {
 		p.invalid = "invalid_record"
 		return
 	}
@@ -1584,11 +1630,19 @@ func (p *realReviewSourceProfile) consume(raw []byte) {
 		p.invalid = "invalid_record"
 		return
 	}
-	if value.Version == 1 && value.Op == 3 && value.Phase == 0 && value.Category == 0 && value.DurationUS == nil && value.Failed == nil && value.Items == nil && value.Bytes == nil {
+	if value.Version == 1 && value.Op == 3 && value.Phase == 0 && value.Category == 0 && value.DurationUS == nil && value.Failed == nil && value.Items == nil && value.Bytes == nil && value.RealReviewProfileCheckpoint == nil {
 		p.invalid = "launcher_invalid"
 		return
 	}
-	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) || value.Version != 1 || value.Op < 1 || value.Op > 2 || value.Phase < 1 || value.Phase > 10 || value.Category < 1 || value.Category > 4 {
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) || value.Version != 1 {
+		p.invalid = "invalid_record"
+		return
+	}
+	if value.Op == 4 {
+		p.consumeCheckpoint(value, fields, stream)
+		return
+	}
+	if value.Op < 1 || value.Op > 2 || value.Phase < 1 || value.Phase > 10 || value.Category < 1 || value.Category > 4 || value.RealReviewProfileCheckpoint != nil {
 		p.invalid = "invalid_record"
 		return
 	}
@@ -1661,33 +1715,105 @@ func (p *realReviewSourceProfile) consume(raw []byte) {
 
 // Reject duplicate keys and non-integer JSON values before typed decoding;
 // otherwise JSON nulls or overwritten keys could silently change attribution.
-func realReviewProfileNumericObject(raw []byte) bool {
+func realReviewProfileNumericObject(raw []byte) map[string]bool {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	start, err := decoder.Token()
 	if err != nil || start != json.Delim('{') {
-		return false
+		return nil
 	}
 	seen := map[string]bool{}
 	for decoder.More() {
 		token, err := decoder.Token()
 		key, valid := token.(string)
 		if err != nil || !valid || seen[key] {
-			return false
+			return nil
 		}
 		seen[key] = true
 		var value json.RawMessage
 		if err := decoder.Decode(&value); err != nil {
-			return false
+			return nil
 		}
 		if _, err := strconv.ParseInt(strings.TrimSpace(string(value)), 10, 64); err != nil {
-			return false
+			return nil
 		}
 	}
 	end, err := decoder.Token()
 	if err != nil || end != json.Delim('}') {
-		return false
+		return nil
 	}
-	return errors.Is(decoder.Decode(new(any)), io.EOF) && seen["version"] && seen["op"] && seen["phase"] && seen["category"]
+	if !errors.Is(decoder.Decode(new(any)), io.EOF) || !seen["version"] || !seen["op"] || !seen["phase"] || !seen["category"] {
+		return nil
+	}
+	return seen
+}
+
+func (p *realReviewSourceProfile) consumeCheckpoint(value realReviewProfileRecord, fields map[string]bool, stream *realReviewProfileStream) {
+	keys := []string{"sequence", "elapsed_us", "inventory_us", "inventory_residual_us", "hash_us", "receipt_us", "receipt_outside_inventory_us", "inventory_yielded", "hash_started", "hash_completed", "hash_failed", "receipt_started", "receipt_completed", "receipt_failed", "open_inventory", "active_inventory", "active_hash", "active_receipt"}
+	if value.Phase != 0 || value.Category != 0 || value.RealReviewProfileCheckpoint == nil || len(fields) != len(keys)+4 {
+		p.invalid = "invalid_checkpoint"
+		return
+	}
+	for _, key := range keys {
+		if !fields[key] {
+			p.invalid = "invalid_checkpoint"
+			return
+		}
+	}
+	checkpoint := *value.RealReviewProfileCheckpoint
+	for _, metric := range []struct{ value, limit int64 }{
+		{checkpoint.Sequence, 512}, {checkpoint.ElapsedUS, 480000000},
+		{checkpoint.InventoryUS, 64 * 480000000}, {checkpoint.InventoryResidualUS, 64 * 480000000},
+		{checkpoint.HashUS, 64 * 480000000}, {checkpoint.ReceiptUS, 64 * 480000000}, {checkpoint.ReceiptOutsideInventoryUS, 64 * 480000000},
+		{checkpoint.InventoryYielded, 1000000}, {checkpoint.HashStarted, 1000000}, {checkpoint.HashCompleted, 1000000}, {checkpoint.HashFailed, 1000000},
+		{checkpoint.ReceiptStarted, 1000000}, {checkpoint.ReceiptCompleted, 1000000}, {checkpoint.ReceiptFailed, 1000000},
+		{checkpoint.OpenInventory, 64}, {checkpoint.ActiveInventory, 64}, {checkpoint.ActiveHash, 64}, {checkpoint.ActiveReceipt, 64},
+	} {
+		if metric.value < 0 || metric.value > metric.limit {
+			p.invalid = "invalid_checkpoint"
+			return
+		}
+	}
+	// Each sum was accumulated/subtracted in ns and rounded only once. The
+	// separately rounded inventory/hash/residual sums may differ by one us.
+	residual := checkpoint.InventoryUS - checkpoint.HashUS - checkpoint.InventoryResidualUS
+	if checkpoint.Sequence == 0 || residual < 0 || residual > 1 || checkpoint.ReceiptOutsideInventoryUS > checkpoint.ReceiptUS ||
+		checkpoint.HashCompleted > checkpoint.HashStarted || checkpoint.HashFailed > checkpoint.HashCompleted ||
+		checkpoint.ReceiptCompleted > checkpoint.ReceiptStarted || checkpoint.ReceiptFailed > checkpoint.ReceiptCompleted ||
+		checkpoint.ActiveHash > checkpoint.ActiveInventory || checkpoint.ActiveInventory > checkpoint.OpenInventory ||
+		checkpoint.ActiveHash != checkpoint.HashStarted-checkpoint.HashCompleted || checkpoint.ActiveReceipt != checkpoint.ReceiptStarted-checkpoint.ReceiptCompleted {
+		p.invalid = "invalid_checkpoint"
+		return
+	}
+	previousSequence := int64(0)
+	if stream.last != nil {
+		previousSequence = stream.last.Sequence
+		previous, current := []int64{stream.last.ElapsedUS, stream.last.InventoryUS, stream.last.InventoryResidualUS, stream.last.HashUS, stream.last.ReceiptUS, stream.last.ReceiptOutsideInventoryUS, stream.last.InventoryYielded, stream.last.HashStarted, stream.last.HashCompleted, stream.last.HashFailed, stream.last.ReceiptStarted, stream.last.ReceiptCompleted, stream.last.ReceiptFailed}, []int64{checkpoint.ElapsedUS, checkpoint.InventoryUS, checkpoint.InventoryResidualUS, checkpoint.HashUS, checkpoint.ReceiptUS, checkpoint.ReceiptOutsideInventoryUS, checkpoint.InventoryYielded, checkpoint.HashStarted, checkpoint.HashCompleted, checkpoint.HashFailed, checkpoint.ReceiptStarted, checkpoint.ReceiptCompleted, checkpoint.ReceiptFailed}
+		for index := range previous {
+			if current[index] < previous[index] {
+				p.invalid = "regressing_checkpoint"
+				return
+			}
+		}
+	}
+	if checkpoint.Sequence != previousSequence+1 {
+		p.invalid = "checkpoint_sequence"
+		return
+	}
+	if p.records >= 20000 {
+		p.invalid = "record_count_limit"
+		return
+	}
+	p.records++
+	p.checkpointCount++
+	if stream.invocation == 0 {
+		p.streamCount++
+		stream.invocation = p.streamCount
+	}
+	stream.last = &checkpoint
+	if stream.invocation >= p.checkpointInvocation {
+		copy := checkpoint
+		p.lastCheckpoint, p.checkpointInvocation = &copy, stream.invocation
+	}
 }
 
 func retainRealReviewCounterMaximum(target, sample map[string]int64) {
@@ -1742,6 +1868,12 @@ func (p *realReviewSourceProfile) result() realReviewProfileResult {
 		reason = "incomplete_phase_exits"
 	}
 	result := realReviewProfileResult{DiagnosticOnly: true, HelperSHA256: realReviewProfileHelperSHA256, Invalid: reason != "", InvalidReason: reason, Records: p.records, Phases: map[string]realReviewProfileAggregate{}, MemoryScope: "container samples while phase/category is active; overlapping phases share observations; memory.peak is cumulative lifetime only", TimingScope: "sum of completed operation durations; concurrent operations overlap; not elapsed phase wall time; incomplete phases retain active counts only"}
+	result.CheckpointCount, result.CheckpointInvocation = p.checkpointCount, p.checkpointInvocation
+	if p.lastCheckpoint != nil {
+		copy := *p.lastCheckpoint
+		result.LastCheckpoint = &copy
+	}
+	result.CheckpointScope = "latest checkpoint-bearing helper command stream by first-observed-checkpoint ordinal; elapsed_us starts at its first inventory/receipt phase; cumulative lower-bound partial progress including in-flight operations at publication; inventory residual includes traversal/stat/control and observer overhead; receipt residual includes serialization/write/deadline/control and observer work outside inventory advancement, not pure JSON or write syscall time; not phase completion or allocation/OOM attribution"
 	for key, original := range p.cells {
 		value := *original
 		value.MaxMemoryStat, value.SampledEventDelta = maps.Clone(original.MaxMemoryStat), maps.Clone(original.SampledEventDelta)
