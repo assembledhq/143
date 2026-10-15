@@ -87,6 +87,26 @@ func TestService_IssuedCredentialCorrelation(t *testing.T) {
 			require.True(t, known, "cache replacement must retain still-valid in-flight credential attribution")
 			require.Equal(t, first, retained, "old in-flight requests should retain original generation metadata")
 			require.Equal(t, 2, strings.Count(logs.String(), `"message":"github installation token issued"`), "only successful exchanges should emit issuance events")
+			decoder := json.NewDecoder(bytes.NewReader(logs.Bytes()))
+			issuances := 0
+			for {
+				var issuance map[string]any
+				decodeErr := decoder.Decode(&issuance)
+				if decodeErr == io.EOF {
+					break
+				}
+				require.NoError(t, decodeErr, "issuer events should remain valid JSON")
+				if issuance["message"] != "github installation token issued" {
+					continue
+				}
+				issuances++
+				if tt.repository == "" {
+					require.NotContains(t, issuance, "github_token_repository", "unrestricted installation credentials must not gain a repository restriction")
+				} else {
+					require.Equal(t, tt.repository, issuance["github_token_repository"], "scoped issuance and request events must retain the same repository provenance")
+				}
+			}
+			require.Equal(t, 2, issuances, "both successful exchanges should retain their issuance provenance")
 			for _, token := range tokens {
 				digest := sha256.Sum256([]byte(token))
 				require.NotContains(t, logs.String(), token, "issuance telemetry must never contain a token")

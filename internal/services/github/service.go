@@ -368,6 +368,9 @@ func (s *Service) recordIssuedCredential(ctx context.Context, installationID int
 		event = event.Str("github_token_generation_id", credential.GenerationID).
 			Str("github_token_issued_at", credential.IssuedAt.UTC().Format(time.RFC3339Nano)).
 			Str("github_token_expires_at", credential.ExpiresAt.UTC().Format(time.RFC3339Nano))
+		if credential.Repository != "" {
+			event = event.Str("github_token_repository", credential.Repository)
+		}
 	}
 	event.Msg("github installation token issued")
 }
