@@ -792,10 +792,8 @@ deploy-worker-preflight:
 		bash ./deploy/scripts/deploy-worker-preflight.sh $$h $(SSH_KEY); \
 	done
 
-# Tail the latest detached worker rollover log on each worker host.
-# Useful after a CI deploy (which runs with WORKER_DEPLOY_DETACH=1) to see
-# whether the rollover finished, or after `make deploy-worker WORKER_DEPLOY_DETACH=1`.
-# Pass FOLLOW=1 to `tail -f` the most recent log instead of dumping the tail.
+# Inspect the current durable worker attempt or its latest completed receipt.
+# An unresolved latch is not permission to retry or remove protected resources.
 deploy-worker-status:
 	$(check-ssh-key)
 	@$(read-fleet-hosts); \
@@ -805,11 +803,7 @@ deploy-worker-status:
 	fi; \
 	for h in $$HOSTS; do \
 		echo "=== worker $$h ==="; \
-		if [ -n "$(FOLLOW)" ]; then \
-			ssh -i $(SSH_KEY) -t deploy@$$h 'f=$$(ls -1t /var/log/143/deploy-worker-*.log 2>/dev/null | head -1); [ -n "$$f" ] && { echo "tailing $$f"; exec tail -f "$$f"; } || echo "no detached deploy logs found"'; \
-		else \
-			ssh -i $(SSH_KEY) deploy@$$h 'ls -1t /var/log/143/deploy-worker-*.log 2>/dev/null | head -3 | while read f; do echo "--- $$f ---"; tail -30 "$$f"; done || echo "no detached deploy logs found"'; \
-		fi; \
+		ssh -i $(SSH_KEY) deploy@$$h 'set -eu; d=/opt/143/.worker-rollout; if [ -d "$$d" ]; then echo "Unresolved worker attempt; reconcile before retrying"; for f in attempt build-sha guardian-pid candidate.json failure.json completion.json; do if [ -f "$$d/$$f" ]; then echo "--- $$f ---"; cat "$$d/$$f"; fi; done; else d=$$(ls -1dt /opt/143/.worker-rollout-receipts/* 2>/dev/null | head -1 || true); if [ -n "$$d" ]; then cat "$$d/completion.json"; else echo "No owned worker completion receipt"; fi; fi'; \
 	done
 
 deploy-db:

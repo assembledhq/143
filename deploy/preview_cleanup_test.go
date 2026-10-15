@@ -24,7 +24,6 @@ func TestDeployPrunePreservesManagedPreviewOwnership(t *testing.T) {
 			name: "worker keeps managed infrastructure for reconciliation",
 			role: "worker", enabled: "1",
 			want: []string{
-				"container prune -f --filter until=24h --filter label!=com.143.preview.infrastructure",
 				"image prune -af --filter until=24h",
 				"builder prune -af --filter until=24h",
 			},
@@ -33,7 +32,6 @@ func TestDeployPrunePreservesManagedPreviewOwnership(t *testing.T) {
 			name: "opt-in worker volume prune preserves managed data",
 			role: "worker", enabled: "1", volumePrune: "1",
 			want: []string{
-				"container prune -f --filter until=24h --filter label!=com.143.preview.infrastructure",
 				"image prune -af --filter until=24h",
 				"builder prune -af --filter until=24h",
 				"volume prune -f --filter label!=com.143.preview.infrastructure",
@@ -90,7 +88,7 @@ func TestDeployPrunePreservesManagedPreviewOwnership(t *testing.T) {
 			if text := strings.TrimSpace(string(calls)); text != "" {
 				actual = strings.Split(text, "\n")
 			}
-			require.Equal(t, tt.want, actual, "routine pruning should preserve managed infrastructure and avoid volume pruning")
+			require.Equal(t, tt.want, actual, "pruning should preserve managed preview data and stopped routine worker evidence")
 		})
 	}
 }

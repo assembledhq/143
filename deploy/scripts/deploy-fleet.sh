@@ -91,9 +91,9 @@ fi
 
 echo "Reading fleet from FLEET_HOSTS..."
 echo "Deploying roles: $REQUESTED_ROLES"
-echo "Deploying up to $DEPLOY_JOBS node(s) concurrently. Set DEPLOY_JOBS=1 for serial deploys."
-# DEPLOY_FLEET_LOG_DIR pins per-host logs to a stable path so CI can upload
-# them as a CI archive; ephemeral runners lose /tmp the moment the job ends.
+echo "Workers deploy as one completed canary followed by serial hosts; maintenance fan-out is bounded by $DEPLOY_JOBS."
+# DEPLOY_FLEET_LOG_DIR pins private diagnostics for operator inspection.
+# Public CI must not print or upload raw production logs or host inventories.
 # A pinned dir can outlive a run (local use, non-ephemeral machines), so
 # clear generated state from prior runs: stale .failed markers would dump a
 # previous run's failures, and stale host-*.targets files are appended to,
@@ -160,7 +160,13 @@ deploy_one() {
   local log="$LOG_DIR/$safe_name.log"
 
   echo "--- Deploying $role to $ip (log: $log) ---"
-  if "$SCRIPT_DIR/deploy.sh" "$role" "$ip" "$SSH_KEY" "$TAG" >"$log" 2>&1; then
+  # A fleet success is a completed worker rollover, never a detached launch.
+  # Clear even an inherited detach=1 (or detach=0, historically nonempty).
+  local detach="${WORKER_DEPLOY_DETACH:-}"
+  if [ "$role" = "worker" ]; then
+    detach=""
+  fi
+  if WORKER_DEPLOY_DETACH="$detach" "$SCRIPT_DIR/deploy.sh" "$role" "$ip" "$SSH_KEY" "$TAG" >"$log" 2>&1; then
     echo "--- OK: $role@$ip ---"
   else
     echo "--- FAILED: $role@$ip (log tail printed after all deploys finish) ---" >&2
@@ -239,9 +245,37 @@ if [ "${#APP_TARGETS[@]}" -gt 0 ]; then
   echo "App deployment barrier passed; database migrations and app health checks succeeded."
 fi
 
-if [ "${#POST_APP_GROUP_FILES[@]}" -gt 0 ]; then
-  echo "Deploying ${#POST_APP_GROUP_FILES[@]} post-app node(s), $DEPLOY_JOBS at a time (logs: $LOG_DIR)."
-  if ! printf '%s\n' "${POST_APP_GROUP_FILES[@]}" | xargs -n1 -P "$DEPLOY_JOBS" bash -c 'deploy_group "$1"' deploy-group; then
+WORKER_GROUP_FILES=()
+MAINTENANCE_GROUP_FILES=()
+for group_file in "${POST_APP_GROUP_FILES[@]}"; do
+  if grep -q '^worker:' "$group_file"; then
+    WORKER_GROUP_FILES+=("$group_file")
+  else
+    MAINTENANCE_GROUP_FILES+=("$group_file")
+  fi
+done
+
+# One completed host is the canary. Each subsequent host must finish before
+# another starts. Keep co-located role groups together, as in maintenance.
+for i in "${!WORKER_GROUP_FILES[@]}"; do
+  if [ "$i" -eq 0 ]; then
+    echo "Deploying worker canary; remaining worker hosts are held."
+  else
+    echo "Deploying worker host $((i + 1)) of ${#WORKER_GROUP_FILES[@]} serially."
+  fi
+  if ! deploy_group "${WORKER_GROUP_FILES[$i]}"; then
+    dump_failed_logs
+    echo "FAILED: worker rollout incomplete; remaining worker hosts were not started. See logs in $LOG_DIR." >&2
+    exit 1
+  fi
+  if [ "$i" -eq 0 ]; then
+    echo "Worker canary completed; advancing remaining worker hosts serially."
+  fi
+done
+
+if [ "${#MAINTENANCE_GROUP_FILES[@]}" -gt 0 ]; then
+  echo "Deploying ${#MAINTENANCE_GROUP_FILES[@]} post-app node(s), $DEPLOY_JOBS at a time (logs: $LOG_DIR)."
+  if ! printf '%s\n' "${MAINTENANCE_GROUP_FILES[@]}" | xargs -n1 -P "$DEPLOY_JOBS" bash -c 'deploy_group "$1"' deploy-group; then
     dump_failed_logs
     echo "FAILED: one or more deploys failed; see logs in $LOG_DIR." >&2
     exit 1

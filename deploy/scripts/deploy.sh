@@ -133,6 +133,229 @@ remote_env_assignment() {
   remote_shell_quote "$value"
 }
 
+# A host-side guardian owns the flock across every SSH/configuration phase,
+# not just the final rollover. Its exclusive durable intent survives launcher
+# loss, signals, and unknown outcomes. Only a joined successful attempt clears
+# its own latch; reconciliation is deliberately an operator action.
+worker_rollout_guard() {
+  set -euo pipefail
+  # Transport loss must not terminate receipt writes with SIGPIPE.
+  trap '' PIPE
+  local attempt="$1" build_sha="$2" root="${3:-/opt/143}" log_root="${4:-/var/log/143}" legacy_lock="${5:-/tmp/143-deploy-worker.lock}" command token monitor_lock
+  umask 077
+  exec 9>"$root/.worker-rollout.lock"
+  flock -xn 9 || { echo "ERROR: another worker rollout holds the host lock." >&2; return 1; }
+  # Serialize with older detached launchers, and refuse their still-active
+  # drain monitors rather than racing or terminating them.
+  exec 7>"$legacy_lock"
+  flock -xn 7 || { echo "ERROR: a legacy worker rollout is still active." >&2; return 1; }
+  for monitor_lock in "$log_root"/drain-worker-*.lock; do
+    [ -e "$monitor_lock" ] || continue
+    if ! flock -xn "$monitor_lock" true; then
+      echo "ERROR: a legacy worker drain monitor is still active; preserving it." >&2
+      return 1
+    fi
+  done
+  if ! mkdir "$root/.worker-rollout"; then
+    echo "ERROR: unresolved worker rollout intent; reconcile it before another attempt." >&2
+    return 1
+  fi
+  printf '%s\n' "$attempt" > "$root/.worker-rollout/attempt"
+  printf '%s\n' "$build_sha" > "$root/.worker-rollout/build-sha"
+  printf '%s\n' "$$" > "$root/.worker-rollout/guardian-pid"
+  WORKER_GUARD_ROOT="$root"
+  WORKER_GUARD_ATTEMPT="$attempt"
+  WORKER_GUARD_BUILD_SHA="$build_sha"
+  record_guard_failure() {
+    local phase="$1" record node=unknown cid=unknown
+    local root="$WORKER_GUARD_ROOT" attempt="$WORKER_GUARD_ATTEMPT" build_sha="$WORKER_GUARD_BUILD_SHA"
+    [ -d "$root/.worker-rollout" ] || return 0
+    # A more specific remote failure record takes precedence over launcher loss.
+    [ ! -e "$root/.worker-rollout/failure.json" ] || return 0
+    if [ -f "$root/.worker-rollout/candidate.json" ]; then
+      node="$(jq -er --arg attempt "$attempt" --arg build "$build_sha" 'select(.attempt == $attempt and .build_sha == $build) | .candidate_node' "$root/.worker-rollout/candidate.json")" || node=unknown
+      cid="$(jq -er --arg attempt "$attempt" --arg build "$build_sha" 'select(.attempt == $attempt and .build_sha == $build) | .candidate_container' "$root/.worker-rollout/candidate.json")" || cid=unknown
+    fi
+    record="$(mktemp "$root/.worker-rollout/.failure.XXXXXX")" || return 1
+    jq -n --arg attempt "$attempt" --arg build "$build_sha" --arg phase "$phase" --arg node "$node" --arg cid "$cid" \
+      '{attempt:$attempt, build_sha:$build, phase:$phase, candidate_node:$node, candidate_container:$cid}' > "$record" || return 1
+    mv "$record" "$root/.worker-rollout/failure.json" || return 1
+    sync -f "$root"
+  }
+  guard_exit() {
+    local rc="$?"
+    trap - EXIT HUP INT TERM
+    if [ "$rc" -ne 0 ]; then
+      record_guard_failure guardian_failed || { echo "ERROR: failure receipt could not be persisted; intent remains protected." >&2 || true; }
+    fi
+    exit "$rc"
+  }
+  trap guard_exit EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  sync -f "$root"
+  if [ "${DEPLOY_MODE:-routine}" = routine ]; then
+    WORKER_ROLLOUT_ATTEMPT="$attempt" IMAGE_TAG="$build_sha" \
+      worker_host_disk_capacity_preflight pre-pull "$root/.worker-rollout" || return 1
+  fi
+  printf 'ready:%s\n' "$attempt"
+  while read -r command token; do
+    if [ "$command" = complete ] && [ "$token" = "$attempt" ] &&
+       [ "$(cat "$root/.worker-rollout/attempt")" = "$attempt" ] &&
+       [ "$(cat "$root/.worker-rollout/build-sha")" = "$build_sha" ] &&
+       jq -e -s --arg attempt "$attempt" --arg build "$build_sha" \
+         'length == 1 and (.[0] | .attempt == $attempt and .build_sha == $build and .candidate_verified == true and .old_containers_stopped == true and (.candidate_container | type == "string" and length > 0) and (.candidate_node | type == "string" and length > 0))' \
+         "$root/.worker-rollout/completion.json" >/dev/null; then
+      # Preserve a receipt per attempt. No same-SHA status is ever reused.
+      mkdir -p "$root/.worker-rollout-receipts"
+      [ ! -e "$root/.worker-rollout-receipts/$attempt" ] || { echo "ERROR: completion receipt already exists; preserving intent." >&2; return 1; }
+      mv "$root/.worker-rollout" "$root/.worker-rollout-receipts/$attempt"
+      sync -f "$root"
+      printf 'complete:%s\n' "$attempt"
+      return 0
+    fi
+    record_guard_failure guardian_failed || true
+    echo "ERROR: worker rollout incomplete; durable intent retained." >&2 || true
+    return 1
+  done
+  record_guard_failure guardian_failed || true
+  echo "ERROR: worker rollout launcher disconnected; durable intent retained." >&2 || true
+  return 1
+}
+
+# The floor is reserved for reviews and logs. The separate pre-pull allowance
+# is an operator-verified deployment budget, not evidence that any image fits.
+worker_host_disk_capacity_preflight() {
+  local phase="$1" directory="${2:-/opt/143/.worker-rollout}"
+  local reserve_mb="${WORKER_BLUE_GREEN_MIN_FREE_DISK_MB:-10240}" reserve_inodes="${WORKER_BLUE_GREEN_MIN_FREE_INODES:-100000}"
+  local pull_mb="${WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB:-8192}" pull_inodes="${WORKER_BLUE_GREEN_PULL_INODE_BUDGET:-100000}"
+  local docker_root bytes_output inodes_output available_kb available_inodes required_kb required_inodes started finished
+  disk_capacity_failure() {
+    WORKER_ROLLOUT_PHASE=host_disk_capacity_failed
+    local record node="${ACTIVE_WORKER_CANDIDATE_NODE:-unknown}" cid="${STARTED_WORKER_CID:-unknown}"
+    if [ -n "${WORKER_ROLLOUT_ATTEMPT:-}" ] && [ -n "${IMAGE_TAG:-}" ] &&
+       [ "$(cat "$directory/attempt" 2>/dev/null)" = "$WORKER_ROLLOUT_ATTEMPT" ] &&
+       [ "$(cat "$directory/build-sha" 2>/dev/null)" = "$IMAGE_TAG" ]; then
+      if record="$(mktemp "$directory/.disk-failure.XXXXXX" 2>/dev/null)" &&
+         jq -n --arg attempt "$WORKER_ROLLOUT_ATTEMPT" --arg build "$IMAGE_TAG" --arg node "$node" --arg cid "$cid" \
+           '{attempt:$attempt, build_sha:$build, phase:"host_disk_capacity_failed", candidate_node:$node, candidate_container:$cid}' > "$record" &&
+         mv "$record" "$directory/failure.json"; then
+        sync -f "$directory" || true
+      fi
+    fi
+    # Receipt first: a disconnected error channel must not erase the reason.
+    echo "ERROR: worker disk-capacity evidence is missing, stale, invalid, or below its maintenance floor; resources and intent retained." >&2 || true
+    return 1
+  }
+  if [ -z "${WORKER_ROLLOUT_ATTEMPT:-}" ] || [ -z "${IMAGE_TAG:-}" ] ||
+     [ "$(cat "$directory/attempt" 2>/dev/null)" != "$WORKER_ROLLOUT_ATTEMPT" ] ||
+     [ "$(cat "$directory/build-sha" 2>/dev/null)" != "$IMAGE_TAG" ]; then
+    disk_capacity_failure; return 1
+  fi
+  # Bound decimal widths before Bash arithmetic; neither zero nor overflow can
+  # disable the gate. Fresh observations are collected within one 15s window.
+  if ! [[ "$reserve_mb" =~ ^[1-9][0-9]{0,11}$ && "$reserve_inodes" =~ ^[1-9][0-9]{0,11}$ &&
+          "$pull_mb" =~ ^[1-9][0-9]{0,11}$ && "$pull_inodes" =~ ^[1-9][0-9]{0,11}$ ]]; then
+    disk_capacity_failure; return 1
+  fi
+  required_kb=$((reserve_mb * 1024))
+  required_inodes="$reserve_inodes"
+  case "$phase" in
+    pre-pull) required_kb=$(((reserve_mb + pull_mb) * 1024)); required_inodes=$((reserve_inodes + pull_inodes)) ;;
+    pre-start) ;;
+    *) disk_capacity_failure; return 1 ;;
+  esac
+  if ! started="$(date +%s)" || ! [[ "$started" =~ ^[1-9][0-9]{0,11}$ ]]; then
+    disk_capacity_failure; return 1
+  fi
+  if ! docker_root="$(timeout --foreground 5s docker info --format '{{.DockerRootDir}}' 2>/dev/null)" ||
+     ! [[ "$docker_root" = /* && "$docker_root" != *[[:cntrl:]]* ]] || [ ! -d "$docker_root" ]; then
+    disk_capacity_failure; return 1
+  fi
+  if ! bytes_output="$(LC_ALL=C timeout --foreground 5s df -Pk -- "$docker_root" 2>/dev/null)" ||
+     ! inodes_output="$(LC_ALL=C timeout --foreground 5s df -Pi -- "$docker_root" 2>/dev/null)"; then
+    disk_capacity_failure; return 1
+  fi
+  if ! available_kb="$(printf '%s\n' "$bytes_output" | awk '
+      NR==1 {if ($1!="Filesystem" || $2!="1024-blocks" || $4!="Available") exit 1; next}
+      NR==2 {if (NF<6 || $2!~/^[1-9][0-9]*$/ || $3!~/^[0-9]+$/ || $4!~/^[1-9][0-9]*$/ || length($2)>15 || length($3)>15 || length($4)>15 || ($3+0)+($4+0)>($2+0)) exit 1; value=$4; next}
+      END {if (NR!=2 || value=="") exit 1; print value}')" ||
+     ! available_inodes="$(printf '%s\n' "$inodes_output" | awk '
+      NR==1 {if ($1!="Filesystem" || $2!="Inodes" || $4!="IFree") exit 1; next}
+      NR==2 {if (NF<6 || $2!~/^[1-9][0-9]*$/ || $3!~/^[0-9]+$/ || $4!~/^[1-9][0-9]*$/ || length($2)>15 || length($3)>15 || length($4)>15 || ($3+0)+($4+0)>($2+0)) exit 1; value=$4; next}
+      END {if (NR!=2 || value=="") exit 1; print value}')" ||
+     ! [[ "$available_kb" =~ ^[1-9][0-9]{0,14}$ && "$available_inodes" =~ ^[1-9][0-9]{0,14}$ ]]; then
+    disk_capacity_failure; return 1
+  fi
+  if ! finished="$(date +%s)" || ! [[ "$finished" =~ ^[1-9][0-9]{0,11}$ ]] ||
+     [ "$finished" -lt "$started" ] || [ "$((finished - started))" -gt 15 ] ||
+     [ "$available_kb" -lt "$required_kb" ] || [ "$available_inodes" -lt "$required_inodes" ]; then
+    disk_capacity_failure; return 1
+  fi
+}
+
+finish_worker_rollout_guard() {
+  local rc="$?" guard_rc=0
+  trap - EXIT HUP INT TERM
+  if [ "$rc" -eq 0 ]; then
+    printf 'complete %s\n' "$WORKER_ROLLOUT_ATTEMPT" >&8 || rc=1
+  else
+    printf 'abort %s\n' "$WORKER_ROLLOUT_ATTEMPT" >&8 || true
+  fi
+  exec 8>&-
+  wait "$WORKER_ROLLOUT_GUARD_PID" || guard_rc="$?"
+  if [ "$guard_rc" -ne 0 ]; then
+    cat "$WORKER_ROLLOUT_GUARD_DIR/output" >&2
+    rc=1
+  fi
+  rm -rf "$WORKER_ROLLOUT_GUARD_DIR"
+  exit "$rc"
+}
+
+begin_worker_rollout_guard() {
+  case "${DEPLOY_MODE:-routine}" in
+    routine|maintenance) ;;
+    *) echo "ERROR: worker DEPLOY_MODE must be routine or maintenance." >&2; return 1 ;;
+  esac
+  case "${WORKER_DEPLOY_DETACH:-0}" in
+    ''|0) ;;
+    *) echo "ERROR: detached worker deploys are disabled; retirement must be joined." >&2; return 1 ;;
+  esac
+  if [ "${DEPLOY_MODE:-routine}" = routine ] && ! [[ "$TAG" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: routine worker rollout requires a full immutable build SHA." >&2
+    return 1
+  fi
+  WORKER_ROLLOUT_ATTEMPT="worker-$(date -u +%Y%m%dT%H%M%SZ)-$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  WORKER_ROLLOUT_GUARD_DIR="$(mktemp -d)"
+  mkfifo "$WORKER_ROLLOUT_GUARD_DIR/control"
+  exec 8<>"$WORKER_ROLLOUT_GUARD_DIR/control"
+  local guardian
+  guardian="$(declare -f worker_host_disk_capacity_preflight worker_rollout_guard)"$'\n''worker_rollout_guard "$@"'
+  ssh "${SSH_OPTS[@]}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 deploy@"$HOST" \
+    "$(remote_env_assignment DEPLOY_MODE "${DEPLOY_MODE:-routine}")" \
+    "$(remote_env_assignment WORKER_BLUE_GREEN_MIN_FREE_DISK_MB "${WORKER_BLUE_GREEN_MIN_FREE_DISK_MB:-10240}")" \
+    "$(remote_env_assignment WORKER_BLUE_GREEN_MIN_FREE_INODES "${WORKER_BLUE_GREEN_MIN_FREE_INODES:-100000}")" \
+    "$(remote_env_assignment WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB "${WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB:-8192}")" \
+    "$(remote_env_assignment WORKER_BLUE_GREEN_PULL_INODE_BUDGET "${WORKER_BLUE_GREEN_PULL_INODE_BUDGET:-100000}")" \
+    "bash -c $(remote_shell_quote "$guardian") -- $(remote_shell_quote "$WORKER_ROLLOUT_ATTEMPT") $(remote_shell_quote "$TAG")" \
+    <"$WORKER_ROLLOUT_GUARD_DIR/control" >"$WORKER_ROLLOUT_GUARD_DIR/output" 2>&1 8>&- &
+  WORKER_ROLLOUT_GUARD_PID="$!"
+  trap finish_worker_rollout_guard EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  local waited=0
+  until grep -qx "ready:$WORKER_ROLLOUT_ATTEMPT" "$WORKER_ROLLOUT_GUARD_DIR/output"; do
+    if ! kill -0 "$WORKER_ROLLOUT_GUARD_PID" 2>/dev/null || [ "$waited" -ge 30 ]; then
+      echo "ERROR: could not establish exclusive worker rollout intent." >&2
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
 apply_static_egress_worker_host_map() {
   if [ "$ROLE" != "worker" ] || [ -z "${STATIC_EGRESS_WORKER_HOSTS:-}" ]; then
     return
@@ -166,7 +389,7 @@ apply_static_egress_worker_host_map() {
 }
 
 # Canonical worker fingerprint input lists, shared by the staged fingerprint
-# gate and the blue/green rollover (including the detached rollover script).
+# gate and the synchronous blue/green rollover.
 # Both sides MUST hash the same inputs: the gate repairs the persisted
 # baseline from these lists, and the rollover compares its own computation
 # against that baseline. If they diverge, every routine deploy fails with
@@ -407,6 +630,18 @@ if [ -z "${SOPS_AGE_KEY:-}" ]; then
   fi
 fi
 
+if [ "$ROLE" = worker ]; then
+  # Bind schema admission to this exact candidate source, never a stale or
+  # absent directory on a worker host. The app migration runs first in fleet.
+  WORKER_EXPECTED_SCHEMA_VERSION="$(
+    for migration in "$PROJECT_DIR"/migrations/*.up.sql; do
+      migration="${migration##*/}"
+      printf '%s\n' "${migration%%_*}"
+    done | sort -n | tail -1 | sed -E 's/^0+//'
+  )"
+  [[ "$WORKER_EXPECTED_SCHEMA_VERSION" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: candidate schema version is unknown." >&2; exit 1; }
+fi
+
 # The encrypted bundle lives in the private secrets checkout, not this
 # (public) repo. Resolved worktree-safely; see resolve-secrets-dir.sh.
 SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
@@ -434,6 +669,12 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
 
   apply_worker_bucket_overrides "$ROLE" "$HOST"
   apply_static_egress_worker_host_map
+
+  # Read-only decryption resolves operator thresholds before the guardian's
+  # capacity check; no worker configuration has been sent to the host yet.
+  if [ "$ROLE" = worker ]; then
+    begin_worker_rollout_guard
+  fi
 
   if [ "$ROLE" = "logging" ]; then
     BACKUP_MONITOR_ID="${BACKUP_MONITOR_ID:-disabled}"
@@ -522,6 +763,10 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
   echo "Secrets refreshed."
 else
   echo "Skipping secret refresh (no SOPS key or .env.production.enc not found)."
+fi
+
+if [ "$ROLE" = worker ] && [ -z "${WORKER_ROLLOUT_GUARD_PID:-}" ]; then
+  begin_worker_rollout_guard
 fi
 
 # Sync compose file so the remote always runs the latest version. Worker
@@ -847,12 +1092,23 @@ else
   fi
 fi
 
+worker_disk_preflight_function=""
+if [ "$ROLE" = worker ]; then
+  worker_disk_preflight_function="$(declare -f worker_host_disk_capacity_preflight)"
+fi
+
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment COMPOSE_FILE "$COMPOSE_FILE")" \
   "$(remote_env_assignment HEALTH_SERVICE "$HEALTH_SERVICE")" \
   "$(remote_env_assignment ROLE "$ROLE")" \
   "$(remote_env_assignment IMAGE_TAG "$TAG")" \
-  "$(remote_env_assignment WORKER_DEPLOY_DETACH "${WORKER_DEPLOY_DETACH:-}")" \
+  "$(remote_env_assignment WORKER_ROLLOUT_ATTEMPT "${WORKER_ROLLOUT_ATTEMPT:-}")" \
+  "$(remote_env_assignment WORKER_EXPECTED_SCHEMA_VERSION "${WORKER_EXPECTED_SCHEMA_VERSION:-}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_MIN_FREE_DISK_MB "${WORKER_BLUE_GREEN_MIN_FREE_DISK_MB:-10240}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_MIN_FREE_INODES "${WORKER_BLUE_GREEN_MIN_FREE_INODES:-100000}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB "${WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB:-8192}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_PULL_INODE_BUDGET "${WORKER_BLUE_GREEN_PULL_INODE_BUDGET:-100000}")" \
+  "$(remote_env_assignment WORKER_DISK_PREFLIGHT_FUNCTION "$worker_disk_preflight_function")" \
   "$(remote_env_assignment WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS "${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}")" \
   "$(remote_env_assignment WORKER_BLUE_GREEN_PORT_START "${WORKER_BLUE_GREEN_PORT_START:-}")" \
   "$(remote_env_assignment WORKER_BLUE_GREEN_PORT_END "${WORKER_BLUE_GREEN_PORT_END:-}")" \
@@ -877,12 +1133,50 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES "$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES")" \
   bash << 'REMOTE'
   set -euo pipefail
+  # A disconnected error channel must not suppress durable failure context.
+  trap '' PIPE
   cd /opt/143
+
+  # Keep the execution lock inside the actual remote process, too. If the
+  # launcher or its guard is lost, the durable latch still blocks replacements
+  # and this process retains exclusive ownership until its work exits.
+  if [ "$ROLE" = worker ]; then
+    exec 6>/opt/143/.worker-rollout-execution.lock
+    flock -xn 6 || { echo "ERROR: prior worker execution is still active." >&2; exit 1; }
+    [ "$(cat /opt/143/.worker-rollout/attempt)" = "$WORKER_ROLLOUT_ATTEMPT" ]
+    [ "$(cat /opt/143/.worker-rollout/build-sha)" = "$IMAGE_TAG" ]
+    # The quoted definition comes from this exact local source, like the
+    # guardian helpers; it contains no production values or credentials.
+    eval "${WORKER_DISK_PREFLIGHT_FUNCTION:?missing source-bound disk preflight}"
+  fi
+
+  remote_deploy_exit() {
+    local rc="$?"
+    trap - EXIT HUP INT TERM
+    trap '' PIPE
+    if [ "$rc" -ne 0 ] && [ "$ROLE" = worker ] &&
+       [ -n "${ACTIVE_WORKER_CANDIDATE_NODE:-}" ] && [ "${WORKER_CANDIDATE_FAILURE_HANDLED:-0}" != 1 ]; then
+      if [ "${WORKER_CANDIDATE_VALIDATED:-0}" = 1 ]; then
+        # A rollout failure is not evidence that this serving candidate is
+        # unsafe. Keep its admission open while the latch prevents retries.
+        WORKER_CANDIDATE_FAILURE_HANDLED=1
+        record_worker_rollout_state failure "${WORKER_ROLLOUT_PHASE:-rollout_interrupted_or_failed}" "$ACTIVE_WORKER_CANDIDATE_NODE" "${STARTED_WORKER_CID:-unknown}" || true
+        echo "ERROR: rollout incomplete; verified candidate remains admitting and intent is retained." >&2 || true
+      else
+        preserve_failed_worker_candidate "$ACTIVE_WORKER_CANDIDATE_NODE" "${STARTED_WORKER_CID:-unknown}" "interrupted or failed rollout" || true
+      fi
+    fi
+    rm -f /opt/143/deploy/Caddyfile.new /opt/143/Dockerfile.caddy.new /opt/143/.caddy-env.fingerprint.new /opt/143/.caddy-service.fingerprint.new
+    exit "$rc"
+  }
 
   # Clean up staged Caddy inputs on any exit path.
   # stage_caddy_*_if_changed normally consumes them (mv or rm), but this
   # guards against a failure between the scp and that call leaving it on disk.
-  trap 'rm -f /opt/143/deploy/Caddyfile.new /opt/143/Dockerfile.caddy.new /opt/143/.caddy-env.fingerprint.new /opt/143/.caddy-service.fingerprint.new' EXIT
+  trap remote_deploy_exit EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   # compose_services_except SKIP_SVCS — print every compose service except the
   # space-separated list in SKIP_SVCS.
@@ -1441,8 +1735,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 
   # drain_worker_service SERVICE — legacy blocking worker drain helper. Kept
   # for manual recovery paths; routine worker deploys use blue/green
-  # generations below so the deploy completes after the new generation is
-  # healthy while old preview owners drain in the background.
+  # generations below and join retirement of every previous container.
   drain_worker_service() {
     local service="$1"
     local timeout
@@ -1578,7 +1871,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   }
 
   list_running_worker_containers() {
-    docker ps \
+    docker ps --no-trunc \
       --filter "label=com.docker.compose.service=worker" \
       --format '{{.ID}} {{.Names}} {{.Label "com.docker.compose.project"}}' \
       | awk '$3 ~ /^143-worker-/ || ($3 == "143" && $2 !~ /^143-worker-run-/) {print $1}'
@@ -1694,6 +1987,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   }
 
   worker_host_capacity_preflight() {
+    worker_host_disk_capacity_preflight pre-start || return 1
     local min_mem="${WORKER_BLUE_GREEN_MIN_FREE_MEMORY_MB:-512}"
     local min_cpu="${WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS:-0}"
     local attempts="${WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS:-3}"
@@ -1821,7 +2115,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
 
   # These fingerprints must match the staged fingerprint gate's computation
   # exactly, so both read the shared *_FINGERPRINT_FILES / *_COMPOSE_SERVICES
-  # lists (passed via SSH env here, baked into the detached rollover script).
+  # lists passed through the SSH environment.
   # The lists are space-separated, hence the intentional unquoted expansion.
   worker_support_service_fingerprint() {
     {
@@ -1894,12 +2188,8 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   }
 
   worker_expected_schema_version() {
-    local version
-    version="$(find /opt/143/migrations -maxdepth 1 -name '*.up.sql' -printf '%f\n' 2>/dev/null \
-      | sed -E 's/^([0-9]+).*/\1/' \
-      | sort -n \
-      | tail -1)"
-    echo "${version:-0}"
+    : "${WORKER_EXPECTED_SCHEMA_VERSION:?candidate source schema version is required}"
+    printf '%s\n' "$WORKER_EXPECTED_SCHEMA_VERSION"
   }
 
   protect_active_executor_images() {
@@ -1958,133 +2248,165 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     return 1
   }
 
+  preserve_failed_worker_candidate() {
+    local node_id="$1" cid="${2:-unknown}" reason="$3"
+    WORKER_CANDIDATE_FAILURE_HANDLED=1
+    local phase
+    case "$reason" in
+      'start outcome') phase=candidate_start_outcome_unknown ;;
+      'container identity') phase=candidate_identity_unknown ;;
+      'health readiness') phase=candidate_health_failed ;;
+      'DB heartbeat readiness') phase=candidate_heartbeat_failed ;;
+      'preview RPC auth compatibility') phase=candidate_auth_failed ;;
+      'post-retirement verification') phase=candidate_postflight_failed ;;
+      'interrupted or failed rollout') phase="${WORKER_ROLLOUT_PHASE:-rollout_interrupted_or_failed}" ;;
+      *) phase=candidate_verification_failed ;;
+    esac
+    if ! record_worker_rollout_state failure "$phase" "$node_id" "$cid"; then
+      echo "ERROR: failure receipt could not be persisted; candidate and intent remain protected." >&2 || true
+    fi
+    echo "ERROR: candidate node $node_id container $cid failed $reason; retaining it for reconciliation." >&2 || true
+    if ! run_worker_deployctl mark-draining \
+      --node-id "$node_id" \
+      --intent planned_rollout \
+      --deploy-id "$WORKER_ROLLOUT_ATTEMPT" \
+      --reason "candidate verification failed: $reason" \
+      --requested-by "${DEPLOY_REQUESTED_BY:-deploy-script}" \
+      --build-sha "${IMAGE_TAG:-}" --json; then
+      echo "ERROR: candidate drain outcome unproven; container and rollout intent remain protected." >&2 || true
+    fi
+    return 1
+  }
+
+  record_worker_rollout_state() {
+    local kind="$1" phase="$2" node_id="$3" cid="$4" directory="${5:-/opt/143/.worker-rollout}" record
+    case "$kind" in candidate|failure) ;; *) return 1 ;; esac
+    [[ "$phase" =~ ^[a-z_]+$ ]] || return 1
+    [ "$(cat "$directory/attempt")" = "$WORKER_ROLLOUT_ATTEMPT" ] || return 1
+    [ "$(cat "$directory/build-sha")" = "$IMAGE_TAG" ] || return 1
+    record="$(mktemp "$directory/.${kind}.XXXXXX")" || return 1
+    jq -n --arg attempt "$WORKER_ROLLOUT_ATTEMPT" --arg build "$IMAGE_TAG" --arg phase "$phase" --arg node "$node_id" --arg cid "$cid" \
+      '{attempt:$attempt, build_sha:$build, phase:$phase, candidate_node:$node, candidate_container:$cid}' > "$record" || return 1
+    mv "$record" "$directory/$kind.json" || return 1
+    sync -f "$directory"
+  }
+
   start_worker_generation() {
     local node_id="$1" host_port="$2" base_url="$3" project="$4"
     local cid
-
+    if [ "${DEPLOY_MODE:-routine}" = routine ]; then
+      worker_host_disk_capacity_preflight pre-start || return 1
+    fi
+    ACTIVE_WORKER_CANDIDATE_NODE="$node_id"
+    WORKER_ROLLOUT_PHASE=candidate_starting
+    record_worker_rollout_state candidate candidate_starting "$node_id" unknown || return 1
     echo "Starting worker generation node_id=$node_id port=$host_port project=$project..."
-    NODE_ID="$node_id" \
-      WORKER_HOST_PORT="$host_port" \
-      PREVIEW_INTERNAL_BASE_URL="$base_url" \
-      IMAGE_TAG="$IMAGE_TAG" \
-      docker compose -p "$project" -f "$COMPOSE_FILE" up -d --no-deps "$HEALTH_SERVICE"
-
-    cid="$(NODE_ID="$node_id" WORKER_HOST_PORT="$host_port" PREVIEW_INTERNAL_BASE_URL="$base_url" IMAGE_TAG="$IMAGE_TAG" docker compose -p "$project" -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE" | head -1)"
-    if [ -z "$cid" ]; then
-      echo "ERROR: could not find new worker generation container"
+    if ! NODE_ID="$node_id" WORKER_HOST_PORT="$host_port" PREVIEW_INTERNAL_BASE_URL="$base_url" IMAGE_TAG="$IMAGE_TAG" \
+      docker compose -p "$project" -f "$COMPOSE_FILE" up -d --no-deps "$HEALTH_SERVICE"; then
+      preserve_failed_worker_candidate "$node_id" unknown "start outcome"
       return 1
     fi
-
-    if ! wait_container_healthy "$cid" 180 "$HEALTH_SERVICE"; then
-      echo "Rolling back failed worker generation ${cid:0:12}..."
-      docker stop "$cid" >/dev/null 2>&1 || true
-      docker rm "$cid" >/dev/null 2>&1 || true
+    if ! cid="$(NODE_ID="$node_id" WORKER_HOST_PORT="$host_port" PREVIEW_INTERNAL_BASE_URL="$base_url" IMAGE_TAG="$IMAGE_TAG" docker compose -p "$project" -f "$COMPOSE_FILE" ps -q "$HEALTH_SERVICE")" ||
+       [ -z "$cid" ] || [[ "$cid" = *$'\n'* ]]; then
+      preserve_failed_worker_candidate "$node_id" unknown "container identity"
       return 1
     fi
     STARTED_WORKER_CID="$cid"
+    if ! record_worker_rollout_state candidate candidate_created "$node_id" "$cid"; then
+      preserve_failed_worker_candidate "$node_id" "$cid" "container identity"
+      return 1
+    fi
+    WORKER_ROLLOUT_PHASE=candidate_health
+    if ! wait_container_healthy "$cid" 180 "$HEALTH_SERVICE"; then
+      preserve_failed_worker_candidate "$node_id" "$cid" "health readiness"
+      return 1
+    fi
+  }
+
+  worker_container_state() {
+    local state
+    if ! state="$(docker inspect --format '{{.State.Running}} {{.State.Pid}}' "$1")"; then
+      echo "ERROR: container state is unknown for $1." >&2
+      return 1
+    fi
+    if [ "$state" = 'false 0' ]; then
+      printf '%s\n' stopped
+    elif [[ "$state" =~ ^true\ [1-9][0-9]*$ ]]; then
+      printf '%s\n' running
+    else
+      echo "ERROR: container state is inconsistent for $1." >&2
+      return 1
+    fi
   }
 
   drain_old_worker_containers() {
-    local new_cid="$1"
-    local old_containers="${2:-}"
-    local deploy_id="${3:-worker-rollout-$(date -u +%Y%m%d%H%M%S)}"
-    if [ -z "$old_containers" ]; then
-      echo "No old worker containers to drain."
-      return 0
+    local new_cid="$1" old_containers="${2:-}" deploy_id="$3"
+    local cid node_id state seal seal_rc timeout deadline remaining
+    timeout="$(resolve_worker_drain_timeout_seconds)"
+    if ! [[ "$timeout" =~ ^[1-9][0-9]*$ ]]; then
+      echo "ERROR: worker retirement timeout must be a positive integer." >&2
+      return 1
     fi
-
-    mkdir -p /var/log/143
+    deadline=$((SECONDS + timeout))
     for cid in $old_containers; do
-      local node_id
-      if [ "$cid" = "$new_cid" ]; then
+      [ "$cid" != "$new_cid" ] || { echo "ERROR: candidate overlaps old container roster." >&2; return 1; }
+      state="$(worker_container_state "$cid")" || return 1
+      if [ "$state" = stopped ]; then
         continue
       fi
-      if ! docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true; then
-        continue
-      fi
-      node_id="$(worker_container_node_id "$cid")"
-      if [ -z "$node_id" ]; then
-        echo "WARNING: old worker container ${cid:0:12} has no NODE_ID; leaving it untouched for operator review." >&2
-        continue
-      fi
-      echo "Marking old worker node $node_id (${cid:0:12}) as draining; retirement will wait for owned runtimes."
+      node_id="$(worker_container_node_id "$cid")" || return 1
+      [ -n "$node_id" ] || { echo "ERROR: old worker has no exact node identity; preserving it." >&2; return 1; }
       run_worker_deployctl mark-draining \
-        --node-id "$node_id" \
-        --intent planned_rollout \
-        --deploy-id "$deploy_id" \
+        --node-id "$node_id" --intent planned_rollout --deploy-id "$deploy_id" \
         --reason "${DEPLOY_REASON:-routine worker rollout}" \
         --requested-by "${DEPLOY_REQUESTED_BY:-deploy-script}" \
-        --build-sha "${IMAGE_TAG:-}" \
-        --json
-      local monitor_log monitor_lock
-      monitor_log="/var/log/143/drain-worker-${cid:0:12}.log"
-      monitor_lock="/var/log/143/drain-worker-${cid:0:12}.lock"
-      nohup bash -c '
-        set -euo pipefail
-        monitor_lock="$1"
-        node_id="$2"
-        cid="$3"
-        compose_file="$4"
-        deploy_id="$5"
-        build_sha="$6"
-        requested_by="$7"
-        reason="$8"
-        health_service="$9"
-        exec 9>"$monitor_lock"
-        if ! flock -xn 9; then
-          echo "drain monitor already running for old worker container ${cid:0:12}; skipping duplicate."
-          exit 0
+        --build-sha "${IMAGE_TAG:-}" --json || return 1
+      while true; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+          echo "ERROR: worker retirement deadline reached; all unretired containers and intent retained." >&2
+          return 1
         fi
-        run_ctl() {
-          local db_host db_password pool_max_conns database_url
-          db_host="$(awk -F= "\$1 == \"DB_HOST\" {sub(/^[^=]*=/, \"\"); print; exit}" /opt/143/.env)"
-          db_password="$(awk -F= "\$1 == \"DB_PASSWORD\" {sub(/^[^=]*=/, \"\"); print; exit}" /opt/143/.env)"
-          pool_max_conns="$(awk -F= "\$1 == \"WORKER_DATABASE_POOL_MAX_CONNS\" {sub(/^[^=]*=/, \"\"); print; exit}" /opt/143/.env)"
-          if [ -z "$pool_max_conns" ]; then
-            pool_max_conns=4
-          fi
-          if [ -z "$db_host" ] || [ -z "$db_password" ]; then
-            echo "ERROR: DB_HOST and DB_PASSWORD must be present in /opt/143/.env for deploy-control helpers." >&2
-            return 1
-          fi
-          database_url="postgres://onefortythree:${db_password}@${db_host}:5432/onefortythree?sslmode=disable&pool_max_conns=${pool_max_conns}"
-          docker run --rm -i \
-            --network 143_default \
-            --env-file /opt/143/.env \
-            -e "DATABASE_URL=$database_url" \
-            -e "IMAGE_TAG=$build_sha" \
-            -v /opt/143/.env.production.enc:/app/.env.production.enc:ro \
-            "ghcr.io/assembledhq/143-server:${build_sha:-latest}" \
-            /bin/worker-deployctl "$@" < /dev/null
-        }
-        while true; do
-          if ! docker inspect --format "{{.State.Running}}" "$cid" 2>/dev/null | grep -q true; then
-            echo "old worker container ${cid:0:12} is no longer running; drain monitor exiting."
-            exit 0
-          fi
-          run_ctl expire-budget \
-            --node-id "$node_id" \
-            --deploy-id "$deploy_id" \
-            --reason "$reason" \
-            --requested-by "$requested_by" \
-            --build-sha "$build_sha" \
-            --json || true
-          if run_ctl retire-ready --node-id "$node_id" --json; then
-            echo "Worker node $node_id is retire-ready; stopping container ${cid:0:12}."
-            docker stop -t 60 "$cid"
-            exit 0
-          fi
-          sleep 30
-        done
-      ' _ "$monitor_lock" "$node_id" "$cid" "$COMPOSE_FILE" "$deploy_id" "${IMAGE_TAG:-}" "${DEPLOY_REQUESTED_BY:-deploy-script}" "${DEPLOY_REASON:-routine worker rollout}" "$HEALTH_SERVICE" >"$monitor_log" 2>&1 &
+        seal_rc=0
+        seal="$(run_worker_deployctl seal-retirement --node-id "$node_id" --deploy-id "$deploy_id" --build-sha "$IMAGE_TAG" --json)" || seal_rc="$?"
+        case "$seal_rc" in
+          0)
+            if ! printf '%s\n' "$seal" | jq -e -s --arg node "$node_id" --arg deploy "$deploy_id" --arg build "$IMAGE_TAG" \
+              'length == 1 and (.[0] | .sealed == true and .node_id == $node and .deploy_id == $deploy and .build_sha == $build and (.sealed_at | type == "string" and length > 0))' >/dev/null; then
+              echo "ERROR: retirement seal did not prove this exact generation and attempt." >&2
+              return 1
+            fi
+            break ;;
+          3) sleep 5 ;;
+          *) echo "ERROR: retirement seal outcome unknown; preserving all containers and intent." >&2; return 1 ;;
+        esac
+      done
+      remaining=$((deadline - SECONDS))
+      if [ "$remaining" -le 0 ] || ! timeout --foreground "${remaining}s" docker stop --time -1 "$cid"; then
+        echo "ERROR: sealed worker stop is incomplete; no forced container stop will be attempted." >&2
+        return 1
+      fi
+      state="$(worker_container_state "$cid")" || return 1
+      [ "$state" = stopped ] || { echo "ERROR: old worker stop was not confirmed; rollout remains incomplete." >&2; return 1; }
     done
+    # Re-read the entire exact snapshot before allowing completion.
+    for cid in $old_containers; do
+      state="$(worker_container_state "$cid")" || return 1
+      [ "$state" = stopped ] || { echo "ERROR: an old worker is still running." >&2; return 1; }
+    done
+    echo "All exact old worker containers are positively stopped."
   }
 
   deploy_worker_blue_green() {
     local old_containers base_node_id worker_private_ip generation node_id host_port base_url project new_cid deploy_id preflight_node_id deploy_mode
 
-    old_containers="$(list_running_worker_containers || true)"
-    preflight_node_id="$(first_running_worker_node_id "$old_containers" || true)"
+    WORKER_CANDIDATE_VALIDATED=0
+    WORKER_CANDIDATE_FAILURE_HANDLED=0
+    WORKER_ROLLOUT_PHASE=worker_preflight
+    old_containers="$(list_running_worker_containers)" || return 1
+    preflight_node_id=""
+    if [ -n "$old_containers" ]; then
+      preflight_node_id="$(first_running_worker_node_id "$old_containers")" || return 1
+    fi
     base_node_id="${WORKER_BASE_NODE_ID:-$(read_worker_env_value NODE_ID)}"
     worker_private_ip="$(read_worker_env_value WORKER_PRIVATE_IP)"
     deploy_mode="${DEPLOY_MODE:-routine}"
@@ -2093,9 +2415,9 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       return 1
     fi
     ensure_routine_worker_fingerprints_compatible
-    generation="$(date -u +%Y%m%d%H%M%S)-${IMAGE_TAG:0:12}"
+    generation="${WORKER_ROLLOUT_ATTEMPT#worker-}-${IMAGE_TAG:0:12}"
     node_id="${base_node_id}-g${generation}"
-    deploy_id="worker-${generation}"
+    deploy_id="$WORKER_ROLLOUT_ATTEMPT"
 
     if [ "$deploy_mode" = "maintenance" ]; then
       if [ -n "$old_containers" ]; then
@@ -2150,29 +2472,41 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     fi
 
     STARTED_WORKER_CID=""
-    start_worker_generation "$node_id" "$host_port" "$base_url" "$project"
+    start_worker_generation "$node_id" "$host_port" "$base_url" "$project" || return 1
     new_cid="$STARTED_WORKER_CID"
+    WORKER_ROLLOUT_PHASE=candidate_heartbeat
     if ! wait_worker_db_heartbeat "$node_id" "${WORKER_BLUE_GREEN_DB_HEARTBEAT_TIMEOUT_SECONDS:-120}"; then
-      echo "Rolling back worker generation ${new_cid:0:12} after DB heartbeat readiness failure..."
-      docker stop "$new_cid" >/dev/null 2>&1 || true
-      docker rm "$new_cid" >/dev/null 2>&1 || true
+      preserve_failed_worker_candidate "$node_id" "$new_cid" "DB heartbeat readiness"
       return 1
     fi
+    WORKER_ROLLOUT_PHASE=candidate_auth
     if ! run_worker_deployctl preview-auth-check --node-id "$node_id" --json; then
-      echo "Rolling back worker generation ${new_cid:0:12} after preview RPC auth compatibility failure..."
-      docker stop "$new_cid" >/dev/null 2>&1 || true
-      docker rm "$new_cid" >/dev/null 2>&1 || true
+      preserve_failed_worker_candidate "$node_id" "$new_cid" "preview RPC auth compatibility"
       return 1
     fi
+    WORKER_CANDIDATE_VALIDATED=1
+    record_worker_rollout_state candidate candidate_verified "$node_id" "$new_cid" || return 1
+    WORKER_ROLLOUT_PHASE=image_retention
     if [ -n "$preflight_node_id" ]; then
       protect_active_executor_images "$preflight_node_id" "$deploy_id"
     fi
-    drain_old_worker_containers "$new_cid" "$old_containers" "$deploy_id"
+    WORKER_ROLLOUT_PHASE=old_generation_retirement
+    drain_old_worker_containers "$new_cid" "$old_containers" "$deploy_id" || return 1
+    WORKER_ROLLOUT_PHASE=candidate_postflight
+    if ! wait_container_healthy "$new_cid" 180 "$HEALTH_SERVICE" ||
+       ! wait_worker_db_heartbeat "$node_id" "${WORKER_BLUE_GREEN_DB_HEARTBEAT_TIMEOUT_SECONDS:-120}" ||
+       ! run_worker_deployctl preview-auth-check --node-id "$node_id" --json; then
+      preserve_failed_worker_candidate "$node_id" "$new_cid" "post-retirement verification"
+      return 1
+    fi
     printf '%s\n' "${WORKER_PROCESS_FINGERPRINT:-}" > /opt/143/.worker-process.fingerprint
     printf '%s\n' "${WORKER_SUPPORT_SERVICE_FINGERPRINT:-}" > /opt/143/.worker-support-services.v2.fingerprint
     printf '%s\n' "${WORKER_HOST_RUNTIME_FINGERPRINT:-}" > /opt/143/.worker-host-runtime.fingerprint
     printf '%s\n' "${WORKER_DOCKER_DAEMON_FINGERPRINT:-}" > /opt/143/.worker-docker-daemon.fingerprint
-    echo "Worker generation ${new_cid:0:12} is healthy; old workers are admission-draining until owned runtimes retire."
+    WORKER_ROLLOUT_OLD_CIDS="$old_containers"
+    WORKER_ROLLOUT_NEW_CID="$new_cid"
+    WORKER_ROLLOUT_NEW_NODE_ID="$node_id"
+    echo "Worker generation ${new_cid:0:12} is verified; every exact old container is stopped."
   }
 
   dump_diagnostics() {
@@ -2227,9 +2561,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
 
   # prune_unused_docker_resources ROLE — reclaim Docker cache after a
   # successful rollout. Runs only after the new service is healthy so the
-  # freshly pulled image is protected by a running container. Detached worker
-  # deploys embed and call this helper inside the detached rollover script for
-  # the same reason.
+  # freshly pulled image is protected by a running container.
   prune_unused_docker_resources() {
     local role="${1:-}"
     if [ "${DEPLOY_DOCKER_PRUNE:-1}" = "0" ]; then
@@ -2250,7 +2582,12 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     # The preview reconciler owns these containers and their anonymous data.
     # Preserve ownership metadata until it has checked persisted liveness;
     # generic container prune would strand the volumes without that metadata.
-    docker container prune -f --filter "until=$prune_until" --filter "label!=com.143.preview.infrastructure" || echo "WARNING: docker container prune failed; continuing."
+    if [ "$role" = worker ] && [ "${DEPLOY_MODE:-routine}" = routine ]; then
+      # Stopped generations and their logs are part of the rollout receipt.
+      echo "Preserving stopped worker containers during routine deployment."
+    else
+      docker container prune -f --filter "until=$prune_until" --filter "label!=com.143.preview.infrastructure" || echo "WARNING: docker container prune failed; continuing."
+    fi
     docker image prune -af --filter "until=$prune_until" || echo "WARNING: docker image prune failed; continuing."
     docker builder prune -af --filter "until=$prune_until" || echo "WARNING: docker builder prune failed; continuing."
     if [ "$role" = "worker" ] && [ -n "${IMAGE_TAG:-}" ]; then
@@ -2258,6 +2595,11 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       run_worker_deployctl release-retained-images --json || true
       local sandbox_image="ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
       if ! docker image inspect "$sandbox_image" >/dev/null 2>&1; then
+        # Joined retirement can take hours; earlier disk samples cannot admit
+        # this late fallback pull. Retain the healthy candidate on refusal.
+        if [ "${DEPLOY_MODE:-routine}" = routine ]; then
+          worker_host_disk_capacity_preflight pre-pull || return 1
+        fi
         echo "Re-pulling required sandbox image after prune: $sandbox_image"
         pull_with_retry "sandbox image $sandbox_image" docker pull "$sandbox_image"
       fi
@@ -2377,6 +2719,10 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     done
   }
 
+  if [ "$ROLE" = worker ] && [ "${DEPLOY_MODE:-routine}" = routine ]; then
+    worker_host_disk_capacity_preflight pre-pull
+  fi
+
   # Ensure gVisor runtime is configured with the flags the sandbox depends on:
   #   --ignore-cgroups: Docker handles cgroup management (prevents EOF errors
   #     from cgroup conflicts).
@@ -2487,102 +2833,12 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   elif [ "$ROLE" = "worker" ]; then
     run_worker_session_deploy_guardrail
 
-    # Worker deploys use per-generation node IDs and host ports. The new
-    # generation becomes active first; old generations are marked draining by
-    # their own SIGTERM handlers and keep serving owned previews until they
-    # stop naturally or hit the preview drain timeout.
-    #
-    # Worker drain can take up to the in-process job drain plus preview drain
-    # budget, capped by docker stop_grace_period. Holding an SSH session —
-    # and therefore a CI runner minute — open that long is wasteful, so CI
-    # sets WORKER_DEPLOY_DETACH=1 to spawn the rollover as a backgrounded
-    # host-side process and return immediately. Manual deploys leave it unset
-    # to keep the synchronous "did it work?" feedback loop.
-    if [ -n "${WORKER_DEPLOY_DETACH:-}" ]; then
-      mkdir -p /var/log/143
-      sha_short="${IMAGE_TAG:0:7}"
-      log_file="/var/log/143/deploy-worker-$(date -u +%Y%m%dT%H%M%SZ)-${sha_short}.log"
-      # Predictable status filename (one per SHA) so CI can poll for it
-      # deterministically. "ok" on success, "fail: <reason>" otherwise.
-      # Cleared inside the flocked block below so a same-SHA redeploy
-      # can't wipe a still-running prior deploy's status file.
-      status_file="/var/log/143/deploy-worker-${sha_short}.status"
-      rollover_script="$(mktemp /tmp/143-rollover-worker-XXXXXX.sh)"
-      # Bake the helpers + bound vars into a self-contained script. $(declare
-      # -f ...) and "$VAR" expand at heredoc time (remote bash); \$ inside is
-      # preserved for runtime.
-      cat > "$rollover_script" <<EOS
-#!/bin/bash
-set -euo pipefail
-$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value load_worker_endpoint_check_env sanitize_compose_project list_running_worker_containers worker_container_node_id worker_database_url first_running_worker_node_id run_worker_deployctl wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured worker_host_capacity_preflight fingerprint_files compose_service_fingerprint worker_process_config_fingerprint worker_support_service_fingerprint worker_host_runtime_fingerprint worker_docker_daemon_fingerprint ensure_routine_worker_fingerprints_compatible worker_expected_schema_version protect_active_executor_images find_free_worker_port start_worker_generation pull_with_retry drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_unused_docker_resources)
-COMPOSE_FILE='$COMPOSE_FILE'
-HEALTH_SERVICE='$HEALTH_SERVICE'
-STATUS_FILE='$status_file'
-IMAGE_TAG='$IMAGE_TAG'
-DEPLOY_MODE='${DEPLOY_MODE:-routine}'
-DEPLOY_REQUESTED_BY='${DEPLOY_REQUESTED_BY:-deploy-script}'
-DEPLOY_REASON='${DEPLOY_REASON:-routine worker rollout}'
-DB_HOST=$(printf '%q' "$(read_worker_env_value DB_HOST)")
-DB_PASSWORD=$(printf '%q' "$(read_worker_env_value DB_PASSWORD)")
-DEPLOY_DOCKER_PRUNE='${DEPLOY_DOCKER_PRUNE:-1}'
-DOCKER_PRUNE_UNTIL='${DOCKER_PRUNE_UNTIL:-24h}'
-DEPLOY_DOCKER_VOLUME_PRUNE='${DEPLOY_DOCKER_VOLUME_PRUNE:-0}'
-DEPLOY_DOCKER_PULL_ATTEMPTS='${DEPLOY_DOCKER_PULL_ATTEMPTS:-}'
-DEPLOY_DOCKER_PULL_RETRY_DELAY_SECONDS='${DEPLOY_DOCKER_PULL_RETRY_DELAY_SECONDS:-}'
-WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS='${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}'
-WORKER_BLUE_GREEN_PORT_START='${WORKER_BLUE_GREEN_PORT_START:-}'
-WORKER_BLUE_GREEN_PORT_END='${WORKER_BLUE_GREEN_PORT_END:-}'
-WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS='${WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS:-}'
-WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS='${WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS:-}'
-WORKER_BASE_NODE_ID='${WORKER_BASE_NODE_ID:-}'
-WORKER_DRAIN_TIMEOUT='${WORKER_DRAIN_TIMEOUT:-}'
-WORKER_HOST_RUNTIME_FINGERPRINT_FILES='$WORKER_HOST_RUNTIME_FINGERPRINT_FILES'
-WORKER_DOCKER_DAEMON_FINGERPRINT_FILES='$WORKER_DOCKER_DAEMON_FINGERPRINT_FILES'
-WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES='$WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES'
-WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES='$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES'
-
-# Always write a status file so the verify step has a deterministic signal.
-# If we exit before the success line writes "ok", the trap leaves "fail".
-on_exit() {
-  rc=\$?
-  if [ ! -s "\$STATUS_FILE" ] || ! grep -q '^ok' "\$STATUS_FILE"; then
-    echo "fail: exit \$rc at \$(date -u -Iseconds)" > "\$STATUS_FILE"
-  fi
-}
-trap on_exit EXIT
-
-# Clear any stale status from a previous deploy of this same SHA. Done
-# here (inside the flock) rather than from the parent shell so a
-# concurrent same-SHA redeploy can't wipe an in-flight deploy's status.
-rm -f "\$STATUS_FILE"
-
-cd /opt/143
-echo "[\$(date -u -Iseconds)] starting detached worker blue/green deploy (tag=$IMAGE_TAG)"
-deploy_worker_blue_green
-echo "[\$(date -u -Iseconds)] blue/green deploy succeeded"
-echo "ok" > "\$STATUS_FILE"
-prune_unused_docker_resources worker
-EOS
-      chmod 700 "$rollover_script"
-
-      # setsid: new session, detached from the SSH controlling tty so the
-      #   child survives session end (no SIGHUP).
-      # flock: serialize against any prior detached deploy on this host so
-      #   back-to-back commits can't race on docker.
-      # </dev/null + redirect: nothing tied back to the SSH stdio so SSH can
-      #   close cleanly.
-      setsid bash -c "
-        flock -xo /tmp/143-deploy-worker.lock '$rollover_script' >>'$log_file' 2>&1
-        rm -f '$rollover_script'
-      " </dev/null >/dev/null 2>&1 &
-      disown
-      echo "Detached worker rollover launched."
-      echo "  log:    $log_file"
-      echo "  status: $status_file (poll for 'ok' / 'fail')"
-      echo "  follow: ssh deploy@<host> tail -f $log_file"
-    else
-      deploy_worker_blue_green
-    fi
+    # Synchronous completion is required. The host guardian already holds the
+    # lock from before configuration staging and retains the latch on failure.
+    : "${WORKER_ROLLOUT_ATTEMPT:?missing exclusive worker rollout attempt}"
+    [ "$(cat /opt/143/.worker-rollout/attempt)" = "$WORKER_ROLLOUT_ATTEMPT" ]
+    [ "$(cat /opt/143/.worker-rollout/build-sha)" = "$IMAGE_TAG" ]
+    deploy_worker_blue_green
 
   else
     # Non-rolling roles (db, logging) — just recreate everything.
@@ -2594,6 +2850,7 @@ EOS
     fi
   fi
 
+  WORKER_ROLLOUT_PHASE=support_service_verification
   # Verify Vector is running on app/worker/logging nodes
   if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; then
     echo "Checking Vector log collector..."
@@ -2607,9 +2864,17 @@ EOS
     fi
   fi
 
-  if [ "$ROLE" != "worker" ] || [ -z "${WORKER_DEPLOY_DETACH:-}" ]; then
-    prune_unused_docker_resources "$ROLE"
-  fi
+  WORKER_ROLLOUT_PHASE=post_rollout_prune
+  prune_unused_docker_resources "$ROLE"
 
+  if [ "$ROLE" = worker ]; then
+    WORKER_ROLLOUT_PHASE=completion_receipt
+    # The parent success handshake cannot release a stale or partial attempt.
+    [ "$(cat /opt/143/.worker-rollout/attempt)" = "$WORKER_ROLLOUT_ATTEMPT" ]
+    jq -n --arg attempt "$WORKER_ROLLOUT_ATTEMPT" --arg build "$IMAGE_TAG" \
+      --arg container "$WORKER_ROLLOUT_NEW_CID" --arg node "$WORKER_ROLLOUT_NEW_NODE_ID" --arg old "$WORKER_ROLLOUT_OLD_CIDS" \
+      '{attempt:$attempt, build_sha:$build, candidate_container:$container, candidate_node:$node, old_containers:($old|split("\n")|map(select(length>0))), candidate_verified:true, old_containers_stopped:true}' \
+      > /opt/143/.worker-rollout/completion.json
+  fi
   echo "Deploy complete ($ROLE)."
 REMOTE

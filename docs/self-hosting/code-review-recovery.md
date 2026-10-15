@@ -1,13 +1,13 @@
 # Recovering code reviews after database or deployment failures
 
-Last verified: 2026-09-25. This is an operator runbook; inspect current state before applying it. A deploy failure, a stopped review agent, and a completed review awaiting publication require different recovery actions.
+Last verified: 2026-10-14. This is an operator runbook; inspect current state before applying it. A deploy failure, a stopped review agent, and a completed review awaiting publication require different recovery actions.
 
 ## Establish what failed
 
-1. Inspect the exact deploy run, target SHA, and per-host logs. The app deployment is a barrier before workers start rolling. Worker deployment can return before detached rollover finishes; inspect the host status files and logs as well as GitHub Actions.
+1. Inspect the exact deploy run, target SHA, and per-host logs. The app deployment is a barrier before workers start rolling. Normal fleet deployment waits for a completed worker canary and then rolls the remaining worker hosts serially. Success includes previous-generation retirement; a launcher or healthy candidate alone is insufficient. Inspect the exact host attempt and logs after an incomplete deployment.
 2. Check each worker's running image, heartbeat, and drain state. A healthy container alone does not establish a healthy database connection or successful rollover.
 3. On an affected host, inspect `df -h`, `df -i`, and `docker system df`. On the database host, also inspect `/proc/meminfo`, `vm.overcommit_memory`, `vm.overcommit_ratio`, and swap. Under strict overcommit accounting, `Committed_AS` can approach `CommitLimit` while `MemAvailable` remains positive.
-4. Prefer a targeted retry of a failed host after checking that its detached deployment has finished. A full fleet retry creates extra worker generations and can increase database pressure.
+4. An incomplete worker attempt leaves a durable host latch and preserves its candidate. Do not rerun the same SHA or delete the latch to bypass an unknown outcome. First reconcile the exact attempt, candidate, retirement seal, and live owners. A full fleet retry can create extra generations and database pressure.
 
 Use the repository's documented read-only tools for production diagnosis:
 
@@ -69,6 +69,73 @@ Verify recovery through several signals:
 
 Do not terminate the remaining waiters automatically. They may finish once the root holder releases its lock. Rebuild the graph before selecting another target.
 
+## Worker rollout completion and retained candidates
+
+Fleet worker deployment always waits for completion, including when its caller
+has an inherited detach flag. Direct worker deployment rejects detached launch
+mode; `WORKER_DEPLOY_DETACH=0` is synchronous. Maintenance-only host groups can
+still use bounded parallelism. The first worker is a canary: failure or unknown
+completion holds all remaining worker hosts.
+
+A candidate can own work before all startup checks finish. Failed health,
+heartbeat, or preview-auth checks therefore retain it and attempt admission
+draining; they do not stop or remove it. The host's exclusive attempt latch
+survives failure, interruption, and unknown outcomes. Resolve that exact attempt
+before another rollout. Intake remains enabled while owned work completes.
+
+Routine retirement uses `worker-deployctl seal-retirement` for the exact old
+node generation. The database serializes new job and preview ownership against
+this durable seal, verifies all retirement counters and nonterminal preview
+ownership, and seals only an empty draining generation. Existing owners keep
+running until those checks pass. The seal is permanent for that generation,
+including after node cleanup or restart; use a new generation ID for a
+replacement. Ordinary resume cannot reopen a sealed generation.
+
+Only a positively sealed generation may receive a graceful stop without a
+forced-kill deadline. Unknown admission, stop, or readback outcomes fail the
+rollout and retain its latch. A timeout does not expire review budgets or grant
+permission to stop active work. The candidate must pass final health, fresh
+heartbeat, and preview-auth checks before completion is reported.
+
+Retired worker containers retain their images and logs. Routine deployment does
+not delete this evidence automatically. Before image pulls, deployment checks
+free space and inodes on Docker's actual filesystem, reserving review/log
+headroom plus a declared pull/unpack allowance. It checks the reserve again
+before starting a candidate. Unknown measurements or insufficient capacity halt
+the attempt while existing workers keep serving; reconcile its retained latch
+before another attempt.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `WORKER_BLUE_GREEN_MIN_FREE_DISK_MB` | `10240` | Free MiB reserved for active work and logs |
+| `WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB` | `8192` | Additional pre-pull allowance for new image layers and unpacking |
+| `WORKER_BLUE_GREEN_MIN_FREE_INODES` | `100000` | Inodes reserved for active work and logs |
+| `WORKER_BLUE_GREEN_PULL_INODE_BUDGET` | `100000` | Additional pre-pull allowance for unpacking and workload growth |
+
+The allowance is an operator-supplied capacity budget, not an estimate derived
+from arbitrary image contents. Before canary or automatic-deploy restoration,
+the release owner must verify that the byte and inode allowances cover the next
+verified images' additional pull/unpack footprint and expected workload growth. Keep that budget current
+when image size or workload changes. A capacity refusal is a maintenance alert,
+not permission to remove an active or ambiguous owner.
+
+The deployment operator owns retained-generation cleanup before the gate is
+reached. Coordinate a maintenance hold with no active host rollout or legacy
+monitor, and resolve any outstanding attempt first. Preserve running containers,
+current candidates, uncertain attempts and at least the two newest successfully
+retired generations. Consider older generations only after at least 24 hours
+since confirmed retirement, using exact completed receipts, matching immutable
+node/deploy/build seals and fresh stopped-container readback. The seal's build
+identifies the retiring deployment, not necessarily the old image. Archive the
+receipts, allowlisted identities and needed logs privately and verify their
+hashes. Recheck the exact stopped CID before removal without force or volume
+removal; preserve the receipt and seal. Missing proof means retain it. This is
+an operator procedure; routine deployment performs no such deletion.
+
+Public Actions output contains compact completion/failure messages. Raw
+production diagnostics stay outside public logs and artifacts; reconcile host
+attempt state and collect needed evidence in the private operations repository.
+
 ## Contain old worker generations before retrying reviews
 
 Inspect both `nodes.status` and `nodes.drain_intent`. An old generation with `status = 'active'` and `drain_intent = 'planned_rollout'` needs attention, particularly if it is still claiming jobs. Reapply admission draining through the deployment control path after confirming the affected generation; preserve owned agents and previews until retirement checks pass. Do not force-stop workers solely because a replacement is healthy.
@@ -79,11 +146,11 @@ Publication timeouts and nonblocking job recovery added in [PR #2195](https://gi
 
 ### Resume a deliberately drained generation
 
-Prefer deploying a new generation. If a replacement failed and an existing fixed node ID must be reused, use `worker-deployctl resume --node-id <exact-id> --reason '<rollback reason>' --requested-by '<operator>'` from a configured deploy-control environment. It atomically clears the durable intent and records a `node_drain_cleared` audit event. It **does not resume a live process**: status remains draining/dead until that generation next registers. The drain watcher latches both local worker queues and heartbeat state, so a heartbeat outage after clearing intent cannot advertise capacity while the queues remain stopped.
+Prefer deploying a new generation. If a replacement failed and an existing fixed node ID must be reused, use `worker-deployctl resume --node-id <exact-id> --reason '<rollback reason>' --requested-by '<operator>'` from a configured deploy-control environment. It atomically clears the durable intent and records a `node_drain_cleared` audit event for an unsealed generation. A permanently sealed retirement generation cannot be reopened; deploy a new generation ID instead. It **does not resume a live process**: status remains draining/dead until that generation next registers. The drain watcher latches both local worker queues and heartbeat state, so a heartbeat outage after clearing intent cannot advertise capacity while the queues remain stopped.
 
-Before restarting, pause further deployments, stop the detached drain monitor for this exact container, and verify it exited. It owns `/var/log/143/drain-worker-<first-12-container-id>.lock` and writes the matching `.log`; inspect the lock owner and process command line before stopping that specific monitor. Never kill all deploy processes or delete a held lock file. An old monitor can reapply drain or stop the resumed container even after intent is cleared.
+For legacy detached deployments, pause further deployments, stop the drain monitor for this exact container, and verify it exited. It owns `/var/log/143/drain-worker-<first-12-container-id>.lock` and writes the matching `.log`; inspect the lock owner and process command line before stopping that specific monitor. Never kill all deploy processes or delete a held lock file. An old monitor can reapply drain or stop the resumed container even after intent is cleared.
 
-Use `worker-deployctl status --node-id <exact-id> --json` and `retire-ready --node-id <exact-id>` to verify owned work has finished before stopping/restarting that container. Run `resume` after stopping the generation, then start it with the verified image and configuration. This also supports intentionally drained single-node/local fixed IDs. Verify fresh heartbeats, `status=active`, `drain_intent=none`, and successful job admission afterward. The command never stops agents, restarts containers, or clears executor/runtime ownership itself.
+`worker-deployctl status --node-id <exact-id> --json` and `retire-ready --node-id <exact-id>` are observations, not atomic permission to stop a generation. Routine rollout requires a retirement seal and a new generation ID. Reusing an unsealed fixed ID requires a separately verified maintenance handover. After that handover has stopped the generation, `resume` clears its unsealed drain intent before starting the verified image and configuration. This also supports intentionally drained single-node/local fixed IDs. Verify fresh heartbeats, `status=active`, `drain_intent=none`, and successful job admission afterward. The command never stops agents, restarts containers, or clears executor/runtime ownership itself.
 
 ## Choose which reviews to recover
 

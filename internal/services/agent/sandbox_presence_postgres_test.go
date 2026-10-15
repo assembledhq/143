@@ -30,8 +30,8 @@ func TestSandboxPresenceObserverPreservesProtectedMissingReferencesPostgres(t *t
 			org, session := uuid.New(), uuid.New()
 			a, b, c := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
 			_, err := pool.Exec(ctx, `CREATE TABLE nodes(id text PRIMARY KEY,host text,mode text DEFAULT 'worker',status text DEFAULT 'active',drain_intent text DEFAULT 'none',started_at timestamptz DEFAULT now(),last_heartbeat_at timestamptz DEFAULT now(),metadata jsonb DEFAULT '{}');
-ALTER TABLE code_review_revision_assessments ADD COLUMN id uuid DEFAULT gen_random_uuid(),ADD COLUMN result_origin text;
-ALTER TABLE code_review_recheck_dispatches ADD COLUMN assessment_id uuid,ADD COLUMN job_id uuid;
+ALTER TABLE code_review_revision_assessments ADD COLUMN result_origin text;
+ALTER TABLE code_review_recheck_dispatches ADD COLUMN job_id uuid;
 INSERT INTO nodes(id,status,metadata) VALUES('old-worker','stopped','{"sandbox_host_id":"192.0.2.1"}'),('observer','active','{"sandbox_host_id":"192.0.2.1","max_active_sandboxes":2,"live_sandbox_count":0,"reserved_sandbox_count":0}'),('other-host','stopped','{"sandbox_host_id":"192.0.2.2"}');
 INSERT INTO sessions(id,org_id,status,recovery_state,container_id,worker_node_id,turn_holding_container,snapshot_key) VALUES($1,$2,$3,$4,$5,'old-worker',true,'saved-snapshot'),(gen_random_uuid(),gen_random_uuid(),$3,$4,$6,'old-worker',true,'other-snapshot'),(gen_random_uuid(),gen_random_uuid(),$3,$4,$7,'other-host',true,'foreign-snapshot');
 INSERT INTO code_review_session_metadata(org_id,session_id,pull_request_id,status) SELECT org_id,id,gen_random_uuid(),'completed' FROM sessions;
