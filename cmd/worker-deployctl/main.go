@@ -65,6 +65,13 @@ func main() {
 		if !status.RetireReady {
 			os.Exit(3)
 		}
+	case "seal-retirement":
+		seal, jsonOut, code, err := sealRetirement(ctx, db.NewNodeRetirementStore(pool), os.Args[2:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "worker-deployctl: %v\n", err)
+			os.Exit(code)
+		}
+		writeOutput(seal, jsonOut)
 	case "expire-budget":
 		runExpireBudget(ctx, store, db.NewSessionExecutorStore(pool), os.Args[2:])
 	case "extend-drain":
@@ -782,7 +789,7 @@ func writeOutput(v any, jsonOut bool) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: worker-deployctl preflight|preview-auth-check|mark-draining|resume|status|impact|retire-ready|expire-budget|extend-drain|retain-images|release-retained-images|force-maintenance|wave [flags]")
+	fmt.Fprintln(os.Stderr, "usage: worker-deployctl preflight|preview-auth-check|mark-draining|resume|status|impact|retire-ready|seal-retirement|expire-budget|extend-drain|retain-images|release-retained-images|force-maintenance|wave [flags]")
 }
 
 func exitErr(format string, args ...any) {

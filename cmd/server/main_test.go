@@ -790,31 +790,6 @@ func TestGracefulShutdownUsesShortNodeDrainContext(t *testing.T) {
 	require.Less(t, activeJobLoop, dbOwnedDrain, "DB-owned drain verification should run after in-process active jobs reach zero")
 }
 
-func TestDeployWorkflowWaitsForWorkerRolloverTerminalStatus(t *testing.T) {
-	t.Parallel()
-
-	src, err := os.ReadFile("../../.github/workflows/deploy.yml")
-	require.NoError(t, err, "deploy workflow should be readable for worker rollover regression test")
-
-	body := string(src)
-	require.Contains(t, body, `VERIFY_TIMEOUT_SECONDS: "360"`,
-		"worker rollover verification should fail quickly because routine blue/green deploys do not wait for the old drain")
-	require.Contains(t, body, `POLL_INTERVAL_SECONDS: "10"`,
-		"worker rollover verification should poll often enough for a short deploy budget")
-	require.Contains(t, body, "verify_worker()",
-		"worker rollover verification should put per-host polling in a reusable function")
-	require.Contains(t, body, "verify_worker \"$host\" &",
-		"worker rollover verification should poll worker hosts in parallel")
-	require.Contains(t, body, "for pid in \"${pids[@]}\"; do",
-		"worker rollover verification should wait for all parallel host checks")
-	require.Contains(t, body, `outcome="timeout"`,
-		"worker rollover timeout should be reported as timeout, not successful in_progress")
-	require.Contains(t, body, "overall_rc=1",
-		"worker rollover timeout/failure should fail the deploy job so later deploys do not race host-side rollover")
-	require.NotContains(t, body, `outcome="in_progress"`,
-		"deploy workflow should not pass while detached worker rollover is still running")
-}
-
 // fakeDrainer is a postPRSnapshotDrainer that blocks WaitForPostPRSnapshotUploads
 // on a release channel. Tests use it to drive the success-vs-timeout branches
 // of drainPostPRUploads deterministically.

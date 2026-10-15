@@ -163,9 +163,9 @@ jobs:
 
       - name: Decrypt FLEET_HOSTS
         if: steps.deploy_latest.outputs.should_deploy == 'true'
-        # Decrypt once and propagate to later steps via $GITHUB_ENV so both
-        # `Deploy fleet` (deploy-fleet.sh accepts FLEET_HOSTS from env) and
-        # `Verify worker rollover` skip the SOPS round-trip.
+        # Decrypt once and propagate to later steps via $GITHUB_ENV so
+        # `Deploy fleet` (deploy-fleet.sh accepts FLEET_HOSTS from env)
+        # skips the SOPS round-trip.
         run: |
           set -euo pipefail
           fleet_hosts="$(SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt \
@@ -179,132 +179,29 @@ jobs:
 
       - name: Deploy fleet
         if: steps.deploy_latest.outputs.should_deploy == 'true'
-        # WORKER_DEPLOY_DETACH=1 makes deploy.sh kick off the worker rollover
-        # as a host-side background process and return immediately, so the
-        # SSH session (= a billed CI minute) doesn't sit idle for the up-to-
-        # 45m drain. Rollover progress is logged to /var/log/143/deploy-worker-*.log
-        # on the host; the verify step below polls the status file.
+        # Keep the deploy-fleet concurrency lock until every worker generation
+        # has completed retirement. A detached launch is not deployment success.
         # The worker port range is required for true blue/green deploys: the new
         # generation binds a free port while old worker generations keep serving
-        # previews on their existing endpoints until their preview drain windows
-        # expire. Keep the app-to-worker private network open for this range.
+        # their existing owners until retirement is proven. Keep the app-to-worker
+        # private network open for this range.
         env:
-          WORKER_DEPLOY_DETACH: "1"
+          WORKER_DEPLOY_DETACH: ""
           WORKER_BLUE_GREEN_PORT_START: "8080"
           WORKER_BLUE_GREEN_PORT_END: "8087"
-          # Stable path (instead of mktemp) so the upload step below can
-          # capture every per-host log when any deploy fails.
+          # Runner-local diagnostics contain private deployment identities.
+          # Keep them out of this public repository's logs and artifacts.
           DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs
           SECRETS_DIR: ${{ github.workspace }}/.infra
         run: |
-          chmod +x deploy/scripts/deploy.sh deploy/scripts/deploy-fleet.sh
-          ./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.event.workflow_run.head_sha }}"
-
-      - name: Upload per-host deploy logs
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: deploy-fleet-logs
-          path: /tmp/deploy-fleet-logs/
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Verify worker rollover
-        if: steps.deploy_latest.outputs.should_deploy == 'true'
-        # The detached rollover writes /var/log/143/deploy-worker-<sha>.status
-        # with content "ok" on success or "fail: ..." on failure. Poll each
-        # worker host until we see one of those, or until the budget expires.
-        #
-        # Routine blue/green deploys do not wait for old worker generations
-        # to finish draining; they start green, mark blue draining, then let
-        # host-side retire loops clean up old owners. This timeout only needs
-        # to cover green startup, DB heartbeat, preflight/mark-draining, and
-        # prune overhead. Poll workers in parallel so multiple hosts do not
-        # multiply CI runner time on a stuck rollout.
-        #
-        # Timeout vs host state: a verify timeout fails the workflow run,
-        # but the detached host-side rollover keeps going and may still
-        # succeed afterwards. The next deploy queues on the workflow
-        # concurrency lock either way. After a red verify, check
-        # `make deploy-worker-status` before re-running.
-        env:
-          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
-          VERIFY_TIMEOUT_SECONDS: "360"
-          POLL_INTERVAL_SECONDS: "10"
-        run: |
           set -euo pipefail
-
-          WORKERS="$(echo "$FLEET_HOSTS" | tr ',' '\n' | grep '^worker:' | cut -d: -f2 || true)"
-          if [ -z "$WORKERS" ]; then
-            echo "no worker hosts in fleet — nothing to verify"
-            exit 0
+          chmod +x deploy/scripts/deploy.sh deploy/scripts/deploy-fleet.sh
+          # Do not expose live host inventories or raw production diagnostics in
+          # public Actions logs/artifacts. Host-side outcome latches remain for
+          # positive operator reconciliation after any incomplete deployment.
+          if GITHUB_STEP_SUMMARY= ./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.event.workflow_run.head_sha }}" >"$RUNNER_TEMP/deploy-fleet.log" 2>&1; then
+            echo "Fleet rollout and retirement checks completed."
+          else
+            echo "::error::Fleet rollout incomplete; inspect the private host outcome before retrying."
+            exit 1
           fi
-
-          short_sha="${DEPLOY_SHA:0:7}"
-          status_path="/var/log/143/deploy-worker-${short_sha}.status"
-          ssh_opts=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -i ~/.ssh/deploy-key)
-
-          verify_worker() {
-            local host="$1"
-            local deadline outcome status
-            echo "::group::verify worker $host"
-            deadline=$(( $(date +%s) + VERIFY_TIMEOUT_SECONDS ))
-            outcome=""
-            while :; do
-              status="$(ssh "${ssh_opts[@]}" deploy@"$host" "cat '$status_path' 2>/dev/null || true")"
-              case "$status" in
-                ok)
-                  echo "✓ worker $host: rollover succeeded"
-                  outcome="ok"
-                  break
-                  ;;
-                fail*)
-                  echo "✗ worker $host: rollover FAILED"
-                  echo "--- last 100 log lines ---"
-                  ssh "${ssh_opts[@]}" deploy@"$host" \
-                    "ls -1t /var/log/143/deploy-worker-*-${short_sha}.log 2>/dev/null | head -1 | xargs -r tail -100" || true
-                  echo "--- status file contents ---"
-                  echo "$status"
-                  outcome="fail"
-                  echo "::endgroup::"
-                  echo "worker $host: $outcome"
-                  return 1
-                  ;;
-                "")
-                  if [ "$(date +%s)" -ge "$deadline" ]; then
-                    echo "✗ worker $host: rollover did not finish after ${VERIFY_TIMEOUT_SECONDS}s"
-                    echo "  follow up with: make deploy-worker-status"
-                    outcome="timeout"
-                    echo "::endgroup::"
-                    echo "worker $host: $outcome"
-                    return 1
-                  fi
-                  sleep "$POLL_INTERVAL_SECONDS"
-                  ;;
-                *)
-                  echo "⚠ worker $host: unexpected status: $status"
-                  outcome="unknown"
-                  echo "::endgroup::"
-                  echo "worker $host: $outcome"
-                  return 1
-                  ;;
-              esac
-            done
-            echo "::endgroup::"
-            echo "worker $host: $outcome"
-          }
-
-          pids=()
-          for host in $WORKERS; do
-            verify_worker "$host" &
-            pids+=("$!")
-          done
-
-          overall_rc=0
-          for pid in "${pids[@]}"; do
-            if ! wait "$pid"; then
-              overall_rc=1
-            fi
-          done
-
-          exit $overall_rc
