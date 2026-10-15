@@ -188,6 +188,12 @@ func TestPRServiceEnrichPullRequestHealthReuseAndFallback(t *testing.T) {
 			if tt.fetch {
 				expectEnrichmentReuseRepository(mock, pr)
 				expectEnrichmentReuseWrite(mock, pr, ready, nil)
+			} else if tt.snapshotErr == nil {
+				current := enrichmentReuseCurrent(ready)
+				if tt.newerMirror {
+					current.Version = pr.HealthVersion
+				}
+				expectEnrichmentReuseCurrent(mock, pr, &current, nil)
 			}
 			err := service.EnrichPullRequestHealth(context.Background(), pr.OrgID, pr.ID, 5)
 			if tt.expectedError != nil {
@@ -243,6 +249,8 @@ func TestPRServiceEnrichPullRequestHealthRetryAfterPersistence(t *testing.T) {
 				}
 			}
 			expectEnrichmentReuseLoad(mock, pr, ready, false, nil)
+			current := enrichmentReuseCurrent(ready)
+			expectEnrichmentReuseCurrent(mock, pr, &current, nil)
 			require.NoError(t, service.EnrichPullRequestHealth(context.Background(), pr.OrgID, pr.ID, 5), "a later duplicate should reuse the committed ready payloads")
 			var expectedPaths []string
 			var expectedCredentials []int64
@@ -302,11 +310,73 @@ func TestPRServiceEnrichPullRequestHealthRetriesDegradedReady(t *testing.T) {
 			expectEnrichmentReuseWrite(mock, pr, ready, nil)
 			require.NoError(t, service.EnrichPullRequestHealth(context.Background(), pr.OrgID, pr.ID, 5), "a later same-version call must recover provider evidence after a transient failure")
 			expectEnrichmentReuseLoad(mock, pr, ready, false, nil)
+			current := enrichmentReuseCurrent(ready)
+			expectEnrichmentReuseCurrent(mock, pr, &current, nil)
 			require.NoError(t, service.EnrichPullRequestHealth(context.Background(), pr.OrgID, pr.ID, 5), "the fully successful recovery should make the next duplicate a no-op")
 			expectedPaths := append(append([]string{}, paths...), paths...)
 			require.Equal(t, expectedPaths, requests.paths, "the degraded result must refetch once and then reuse the completed result")
 			require.Equal(t, []int64{123, 123}, tokens.installationIDs, "only the two necessary provider attempts should resolve credentials")
 			require.NoError(t, mock.ExpectationsWereMet(), "degraded evidence and recovered evidence must persist with distinct success markers")
+		})
+	}
+}
+
+func TestPRServiceEnrichPullRequestHealthRestoresCurrentFromReadySnapshot(t *testing.T) {
+	t.Parallel()
+	readErr := errors.New("current health database unavailable")
+	writeErr := errors.New("restore current health unavailable")
+	tests := []struct {
+		name          string
+		status        models.PullRequestHealthEnrichmentStatus
+		version       int64
+		missing       bool
+		readErr       error
+		writeErr      error
+		expectedWrite bool
+	}{
+		{name: "not requested current is restored", status: models.PullRequestHealthEnrichmentStatusNotRequested, version: 5, expectedWrite: true},
+		{name: "pending current is restored", status: models.PullRequestHealthEnrichmentStatusPending, version: 5, expectedWrite: true},
+		{name: "failed current is restored", status: models.PullRequestHealthEnrichmentStatusFailed, version: 5, expectedWrite: true},
+		{name: "stale current is restored", status: models.PullRequestHealthEnrichmentStatusStale, version: 5, expectedWrite: true},
+		{name: "ready current stays unchanged", status: models.PullRequestHealthEnrichmentStatusReady, version: 5},
+		{name: "missing current stays absent", missing: true},
+		{name: "newer current stays unchanged", status: models.PullRequestHealthEnrichmentStatusPending, version: 6},
+		{name: "older current stays unchanged", status: models.PullRequestHealthEnrichmentStatusPending, version: 4},
+		{name: "unexpected current error propagates", readErr: readErr},
+		{name: "failed restore remains recoverable", status: models.PullRequestHealthEnrichmentStatusPending, version: 5, writeErr: writeErr, expectedWrite: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pr, ready := enrichmentReuseFixture(t)
+			mock, service, requests, tokens := newEnrichmentReuseService(t)
+			current := enrichmentReuseCurrent(ready)
+			current.Version, current.EnrichmentStatus = tt.version, tt.status
+			var currentRow *models.PullRequestHealthCurrent
+			if !tt.missing {
+				currentRow = &current
+			}
+			expectEnrichmentReuseLoad(mock, pr, ready, false, nil)
+			expectEnrichmentReuseCurrent(mock, pr, currentRow, tt.readErr)
+			if tt.expectedWrite {
+				expectEnrichmentReuseWrite(mock, pr, ready, tt.writeErr)
+			}
+			err := service.EnrichPullRequestHealth(context.Background(), pr.OrgID, pr.ID, 5)
+			switch {
+			case tt.readErr != nil:
+				require.ErrorIs(t, err, tt.readErr, "unexpected current read errors must remain retryable before provider access")
+			case tt.writeErr != nil:
+				require.ErrorIs(t, err, tt.writeErr, "a failed database-only restore must propagate for later recovery")
+				expectEnrichmentReuseLoad(mock, pr, ready, false, nil)
+				expectEnrichmentReuseCurrent(mock, pr, &current, nil)
+				expectEnrichmentReuseWrite(mock, pr, ready, nil)
+				require.NoError(t, service.EnrichPullRequestHealth(context.Background(), pr.OrgID, pr.ID, 5), "a retry should recover the current status using persisted payloads")
+			default:
+				require.NoError(t, err, "reuse should converge only the same-version nonready current row")
+			}
+			require.Equal(t, []string(nil), requests.paths, "current-row convergence must make no provider requests")
+			require.Equal(t, []int64(nil), tokens.installationIDs, "current-row convergence must not resolve credentials")
+			require.NoError(t, mock.ExpectationsWereMet(), "current reads and restoration writes must keep exact org PR and version bindings")
 		})
 	}
 }
@@ -419,6 +489,28 @@ func expectEnrichmentReuseLoad(mock pgxmock.PgxPoolIface, pr models.PullRequest,
 	rows := pgxmock.NewRows(prHealthSnapshotTestColumns)
 	if !missing {
 		rows.AddRow(snapshot.PullRequestID, snapshot.OrgID, snapshot.Version, snapshot.HeadSHA, snapshot.BaseSHA, []byte(`{}`), snapshot.ConflictPayload, snapshot.FailingTestsPayload, 0, snapshot.EnrichmentStatus, nil, now)
+	}
+	query.WillReturnRows(rows)
+}
+
+func enrichmentReuseCurrent(ready models.PullRequestHealthSnapshot) models.PullRequestHealthCurrent {
+	return models.PullRequestHealthCurrent{
+		PullRequestID: ready.PullRequestID, OrgID: ready.OrgID, Version: ready.Version,
+		HeadSHA: ready.HeadSHA, BaseSHA: ready.BaseSHA, EnrichmentStatus: ready.EnrichmentStatus,
+	}
+}
+
+func expectEnrichmentReuseCurrent(mock pgxmock.PgxPoolIface, pr models.PullRequest, current *models.PullRequestHealthCurrent, readErr error) {
+	query := mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
+		WithArgs(pgx.NamedArgs{"org_id": pr.OrgID, "pull_request_id": pr.ID})
+	if readErr != nil {
+		query.WillReturnError(readErr)
+		return
+	}
+	rows := pgxmock.NewRows(prHealthCurrentTestColumns)
+	if current != nil {
+		now := time.Now().UTC()
+		rows.AddRow(current.PullRequestID, current.OrgID, current.Version, current.HeadSHA, current.BaseSHA, []byte(`{}`), []byte(`{}`), current.EnrichmentStatus, nil, int64(0), now, now)
 	}
 	query.WillReturnRows(rows)
 }

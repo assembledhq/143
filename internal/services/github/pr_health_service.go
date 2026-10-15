@@ -1779,7 +1779,20 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 		return fmt.Errorf("get pull request health snapshot for enrichment: %w", err)
 	}
 	if err == nil && canReusePullRequestHealthEnrichment(pr, snapshot, version) {
-		return nil
+		current, currentErr := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID)
+		if errors.Is(currentErr, pgx.ErrNoRows) {
+			return nil
+		}
+		if currentErr != nil {
+			return fmt.Errorf("get current pull request health for enrichment reuse: %w", currentErr)
+		}
+		if current.Version != version || current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusReady {
+			return nil
+		}
+		// A concurrent summary write can regress the current status after the
+		// snapshot is enriched. Restore it from the persisted payloads; the
+		// version-scoped update cannot change a newer current health row.
+		return s.pullRequests.UpdateHealthEnrichment(ctx, orgID, pullRequestID, version, snapshot.ConflictPayload, snapshot.FailingTestsPayload, models.PullRequestHealthEnrichmentStatusReady)
 	}
 	repo, err := s.repos.GetByFullName(ctx, orgID, pr.GitHubRepo)
 	if err != nil {
