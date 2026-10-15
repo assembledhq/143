@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
@@ -81,7 +82,9 @@ func TestReconcilePullRequestHealthCapacityPreservesRecoveryLimits(t *testing.T)
 				pullRequests: db.NewPullRequestStore(mock), sessions: db.NewSessionStore(mock), repos: db.NewRepositoryStore(mock),
 				publications: db.NewSessionPublicationStore(mock), changesets: db.NewSessionChangesetStore(mock), logger: zerolog.New(&logs),
 			}
-			require.NoError(t, service.ReconcilePullRequestState(context.Background(), orgID, 50), "a count failure alone should not retry completed health and recovery work")
+			jobID := uuid.New()
+			ctx := jobctx.WithJobID(context.Background(), jobID)
+			require.NoError(t, service.ReconcilePullRequestState(ctx, orgID, 50), "a count failure alone should not retry completed health and recovery work")
 			require.NoError(t, mock.ExpectationsWereMet(), "every independent recovery should retain its original limit")
 			var records []map[string]any
 			decoder := json.NewDecoder(&logs)
@@ -91,6 +94,7 @@ func TestReconcilePullRequestHealthCapacityPreservesRecoveryLimits(t *testing.T)
 				records = append(records, record)
 			}
 			last := records[len(records)-1]
+			require.Equal(t, jobID.String(), last["job_id"], "sweep outcomes should join the same current job as its native request logs")
 			require.Equal(t, float64(tt.wantLimit), last["health_candidate_limit"], "telemetry should expose actual health capacity")
 			require.Equal(t, tt.countErr == nil, last["health_population_available"], "telemetry should distinguish fallback from an empty population")
 			require.Equal(t, float64(0), last["health_started"], "empty health candidates should not become attempted requests")

@@ -20,6 +20,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -1244,7 +1245,11 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 			succeeded++
 		}
 	}
-	s.logger.Info().Str("org_id", orgID.String()).
+	event := s.logger.Info().Str("org_id", orgID.String())
+	if jobID, ok := jobctx.JobIDFromContext(ctx); ok && jobID != uuid.Nil {
+		event = event.Str("job_id", jobID.String())
+	}
+	event.
 		Int("health_population", population).Bool("health_population_capped", population == prHealthPopulationCap).
 		Bool("health_population_available", countErr == nil).Int("health_candidate_limit", healthLimit).
 		Bool("health_selection_available", err == nil).
