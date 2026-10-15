@@ -417,27 +417,27 @@ func TestIncompleteReviewWorkspaceRecoveryPeerRuntimeRacePostgres(t *testing.T) 
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	_, err = tx.Exec(ctx, `INSERT INTO thread_runtimes(id,org_id,session_id,thread_id,status,lease_expires_at)
  VALUES($1,$2,$3,$4,'starting',now()+interval '5 minutes')`, uuid.New(), f.org, f.session, peer.thread)
-	require.NoError(t, err, "starting runtime should hold the session foreign-key lock before recovery")
-	done := make(chan struct{})
-	var recovered bool
-	var recoveryErr error
-	go func() {
-		recovered, recoveryErr = NewSessionStore(f.pool).RecoverIncompleteCodeReviewWorkspace(ctx, f.org, f.params)
-		close(done)
-	}()
-	select {
-	case <-done:
-		t.Fatal("source recovery must wait for concurrent runtime creation to commit")
-	case <-time.After(40 * time.Millisecond):
+	require.NoError(t, err, "starting runtime should hold the peer thread foreign-key lock before recovery")
+	assertWorkspaceUnchanged := func(stage string) {
+		t.Helper()
+		var container *string
+		var generation int64
+		require.NoError(t, f.pool.QueryRow(ctx, `SELECT container_id,workspace_generation FROM sessions WHERE org_id=$1 AND id=$2`, f.org, f.session).Scan(&container, &generation), "source workspace should remain readable %s", stage)
+		require.Equal(t, &f.params.ContainerID, container, "source container must remain unchanged %s", stage)
+		require.Equal(t, f.params.WorkspaceGeneration, generation, "source generation must remain unchanged %s", stage)
 	}
-	require.NoError(t, tx.Commit(ctx), "peer runtime creation should win the session lock race")
-	select {
-	case <-done:
-	case <-ctx.Done():
-		t.Fatal("source recovery should finish after peer runtime creation")
-	}
-	require.NoError(t, recoveryErr, "peer runtime race should resolve without a storage error")
+	store := NewSessionStore(f.pool)
+	recovered, recoveryErr := store.RecoverIncompleteCodeReviewWorkspace(ctx, f.org, f.params)
+	require.False(t, recovered, "uncommitted peer runtime creation must never authorize source recovery")
+	var postgresError *pgconn.PgError
+	require.ErrorAs(t, recoveryErr, &postgresError, "peer runtime contention should retain its PostgreSQL waiting classification")
+	require.Equal(t, "55P03", postgresError.Code, "peer runtime contention must enforce the existing bounded lock wait")
+	assertWorkspaceUnchanged("while peer runtime creation remains uncommitted")
+	require.NoError(t, tx.Commit(ctx), "peer runtime creation should commit after the bounded recovery probe")
+	recovered, recoveryErr = store.RecoverIncompleteCodeReviewWorkspace(ctx, f.org, f.params)
+	require.NoError(t, recoveryErr, "committed peer runtime should protect its workspace without a storage error")
 	require.False(t, recovered, "a peer that started execution must preserve its source container")
+	assertWorkspaceUnchanged("after peer runtime creation commits")
 }
 
 func TestIncompleteReviewWorkspaceRecoveryHealthyOwnerUsesReadOnlyPrecheckPostgres(t *testing.T) {
