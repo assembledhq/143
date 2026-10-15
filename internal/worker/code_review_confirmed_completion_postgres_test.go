@@ -65,13 +65,15 @@ func TestConfirmedFullPublicationCompletionAtomicPostgres(t *testing.T) {
 				require.NoError(t, err, "seed isolated completion transaction state")
 			}
 			exec(`UPDATE sessions SET completed_at=now()-interval '1 hour',error='old timeout',failure_category='timeout',failure_next_steps=ARRAY['obsolete retry guidance'],failure_retry_advised=true WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.job.SessionID)
+			exec(`UPDATE sessions SET container_id='retained-review-workspace',snapshot_key='saved-review-snapshot' WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.job.SessionID)
+			exec(`INSERT INTO session_sandbox_holders(org_id,session_id,container_id,holder_kind,holder_id,owner_node_id,lease_token,status,expires_at) VALUES($1,$2,'retained-review-workspace','code_review',$3,'test-node',gen_random_uuid(),'active',now()+interval '1 hour')`, f.job.OrgID, f.job.SessionID, f.job.MetadataID)
 			if tt.reject {
 				exec(`INSERT INTO reject_confirmed_completion_orgs(org_id) VALUES($1)`, f.job.OrgID)
 			}
 			snapshot := func() string {
 				t.Helper()
 				var state string
-				err := pool.QueryRow(ctx, `SELECT jsonb_build_array(to_jsonb(s),to_jsonb(m),to_jsonb(a),to_jsonb(p))::text FROM sessions s JOIN code_review_session_metadata m ON m.org_id=s.org_id AND m.session_id=s.id JOIN code_review_revision_assessments a ON a.org_id=m.org_id AND a.metadata_id=m.id JOIN code_review_pr_state p ON p.org_id=a.org_id AND p.pull_request_id=a.pull_request_id WHERE s.org_id=$1 AND s.id=$2`, f.job.OrgID, f.job.SessionID).Scan(&state)
+				err := pool.QueryRow(ctx, `SELECT jsonb_build_array(to_jsonb(s),to_jsonb(m),to_jsonb(a),to_jsonb(p),(SELECT jsonb_agg(to_jsonb(h)) FROM session_sandbox_holders h WHERE h.org_id=s.org_id AND h.session_id=s.id))::text FROM sessions s JOIN code_review_session_metadata m ON m.org_id=s.org_id AND m.session_id=s.id JOIN code_review_revision_assessments a ON a.org_id=m.org_id AND a.metadata_id=m.id JOIN code_review_pr_state p ON p.org_id=a.org_id AND p.pull_request_id=a.pull_request_id WHERE s.org_id=$1 AND s.id=$2`, f.job.OrgID, f.job.SessionID).Scan(&state)
 				require.NoError(t, err, "snapshot parent, ownership, metadata, assessment and scheduler together")
 				return state
 			}
@@ -108,6 +110,11 @@ func TestConfirmedFullPublicationCompletionAtomicPostgres(t *testing.T) {
 			require.Nil(t, parent.FailureCategory, "successful historical completion clears obsolete category")
 			require.Nil(t, parent.FailureNextSteps, "successful historical completion clears obsolete retry guidance")
 			require.False(t, parent.FailureRetryAdvised, "completed parent should not advise retrying execution")
+			require.Equal(t, new("retained-review-workspace"), parent.ContainerID, "committed completion must retain workspace identity for its cleanup owner")
+			require.Equal(t, new("saved-review-snapshot"), parent.SnapshotKey, "committed completion must preserve saved workspace output")
+			var holderStatus string
+			require.NoError(t, pool.QueryRow(ctx, `SELECT status FROM session_sandbox_holders WHERE org_id=$1 AND session_id=$2`, f.job.OrgID, f.job.SessionID).Scan(&holderStatus), "read committed warm holder release")
+			require.Equal(t, "released", holderStatus, "warm holder release must commit atomically with the saved outcome")
 			var owner *uuid.UUID
 			require.NoError(t, pool.QueryRow(ctx, `SELECT code_review_owner_pr_id FROM sessions WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.job.SessionID).Scan(&owner), "read committed exact ownership")
 			require.Equal(t, &f.job.PullRequestID, owner, "completion retains exact assessment PR ownership")
