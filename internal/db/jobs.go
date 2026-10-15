@@ -198,6 +198,64 @@ func (s *JobStore) EnqueueWithOpts(ctx context.Context, orgID uuid.UUID, opts En
 	return id, nil
 }
 
+// EnqueuePullRequestReconciliationOnce admits one periodic reconciliation per
+// organization and UTC ten-minute bucket, including after its job is terminal.
+// Ordinary Enqueue calls and retries of the admitted job retain their semantics.
+// The existing job row is the admission record for the bucket, so completed-job
+// retention must remain longer than the scheduling period.
+func (s *JobStore) EnqueuePullRequestReconciliationOnce(ctx context.Context, orgID uuid.UUID, opts EnqueueOpts) (uuid.UUID, error) {
+	const jobType = "reconcile_pull_request_state"
+	prefix := jobType + ":" + orgID.String() + ":"
+	if orgID == uuid.Nil || opts.Queue != "default" || opts.JobType != jobType || opts.DedupeKey == nil || !strings.HasPrefix(*opts.DedupeKey, prefix) {
+		return uuid.Nil, fmt.Errorf("reconciliation admission requires its organization-scoped periodic job key")
+	}
+	bucket := strings.TrimPrefix(*opts.DedupeKey, prefix)
+	if len(bucket) != 11 || bucket[10] < '0' || bucket[10] > '5' {
+		return uuid.Nil, fmt.Errorf("reconciliation admission requires a UTC ten-minute bucket")
+	}
+	if _, err := time.Parse("2006010215", bucket[:10]); err != nil {
+		return uuid.Nil, fmt.Errorf("parse reconciliation admission bucket: %w", err)
+	}
+	// BeginTx excludes nested savepoints and makes the post-commit notification
+	// refer to a durable top-level transaction. READ COMMITTED lets a waiter see
+	// the preceding admission after acquiring the transaction advisory lock.
+	starter, ok := s.db.(interface {
+		BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+	})
+	if !ok {
+		return uuid.Nil, fmt.Errorf("job store does not support reconciliation admission transactions")
+	}
+	tx, err := starter.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("begin reconciliation admission: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	lockKey := "periodic-job:" + opts.Queue + ":" + *opts.DedupeKey
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(@lock_key, 0))`, pgx.NamedArgs{"lock_key": lockKey}); err != nil {
+		return uuid.Nil, fmt.Errorf("lock reconciliation admission: %w", err)
+	}
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM jobs
+		WHERE org_id = @org_id AND queue = @queue
+		  AND job_type = @job_type AND dedupe_key = @dedupe_key
+	)`, pgx.NamedArgs{"org_id": orgID, "queue": opts.Queue, "job_type": opts.JobType, "dedupe_key": *opts.DedupeKey}).Scan(&exists); err != nil {
+		return uuid.Nil, fmt.Errorf("read reconciliation admission: %w", err)
+	}
+	id := uuid.Nil
+	if !exists {
+		id, err = enqueueOn(ctx, tx, orgID, opts)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("enqueue periodic reconciliation: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, fmt.Errorf("commit reconciliation admission: %w", err)
+	}
+	s.notify(ctx, id)
+	return id, nil
+}
+
 // EnqueueInTxWithOpts is the in-transaction variant of EnqueueWithOpts. The
 // caller is responsible for calling Notify after commit so the wake-up isn't
 // fired before the row is durable.

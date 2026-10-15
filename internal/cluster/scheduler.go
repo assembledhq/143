@@ -18,6 +18,7 @@ import (
 
 type schedulerJobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+	EnqueuePullRequestReconciliationOnce(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error)
 	EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 	Notify(ctx context.Context, id uuid.UUID)
 	GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error)
@@ -538,7 +539,10 @@ func (s *Scheduler) schedulePullRequestReconciliation(ctx context.Context, orgID
 			"org_id": orgID.String(),
 			"limit":  pullRequestReconcileBatch,
 		}
-		if _, err := s.jobs.Enqueue(ctx, orgID, "default", "reconcile_pull_request_state", payload, 2, &dedupeKey); err != nil {
+		if _, err := s.jobs.EnqueuePullRequestReconciliationOnce(ctx, orgID, db.EnqueueOpts{
+			Queue: "default", JobType: "reconcile_pull_request_state", Payload: payload,
+			Priority: 2, DedupeKey: &dedupeKey,
+		}); err != nil {
 			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to enqueue reconcile_pull_request_state job")
 		}
 	}

@@ -353,7 +353,7 @@ func TestPRHealthBackgroundBudgetCoalescesAdmissionAndOrdinaryReads(t *testing.T
 	require.True(t, result.Shared, "duplicate sweeps should share their outer admission lane")
 	require.False(t, duplicateAdmissionRan.Load(), "duplicate sweeps must not consume another admission")
 	require.Equal(t, int32(1), gate.fetches.Load(), "admitted sweep, duplicate sweep, and ordinary caller should make one remote read")
-	require.Equal(t, "1", redis.HGet("{ghrl:v1:unknown:app:1:inst:123}:quota:core", "sequence"), "the admitted read should consume exactly one distributed quota slot")
+	require.Equal(t, "1", redis.HGet("{ghrl:v1:unknown:app:1:inst:123}:quota:core:admission:v2", "sequence"), "the admitted read should consume exactly one distributed quota slot")
 }
 
 func TestPRHealthBackgroundBudgetAdmittedSweepJoinsExistingOrdinaryRead(t *testing.T) {
@@ -387,7 +387,7 @@ func TestPRHealthBackgroundBudgetAdmittedSweepJoinsExistingOrdinaryRead(t *testi
 	require.NoError(t, <-ordinaryErr, "ordinary leader should complete normally")
 	require.NoError(t, <-sweepErr, "admitted sweep should receive the existing ordinary result")
 	require.Equal(t, int32(1), gate.fetches.Load(), "admitted sweep must not duplicate an already-running ordinary read")
-	require.Equal(t, "1", redis.HGet("{ghrl:v1:unknown:app:1:inst:123}:quota:core", "sequence"), "joining an existing read must not consume a second quota admission")
+	require.Equal(t, "1", redis.HGet("{ghrl:v1:unknown:app:1:inst:123}:quota:core:admission:v2", "sequence"), "joining an existing read must not consume a second quota admission")
 }
 
 func TestPRHealthBackgroundBudgetSkippedSweepDoesNotJoinOrdinaryRead(t *testing.T) {
