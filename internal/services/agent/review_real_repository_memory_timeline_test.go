@@ -13,15 +13,23 @@ import (
 )
 
 const realReviewMemoryTimelineLimit = 64
-const realReviewMemoryTimelineScope = "same sequential kernel sampling pass with the latest fully validated helper checkpoint observed asynchronously by the host; checkpoint age is host receipt age, not helper publication or kernel age; not an atomic snapshot, phase completion, causal allocation attribution, or proof of physical disk traffic"
-const realReviewMemoryTimelineRetention = "whole-lifetime power-of-two sample-ordinal grid; retain first and latest samples; double stride and compact when over 64 points; coarser history can omit brief transitions and must not be treated as continuous coverage"
+const realReviewMemoryTimelineGridLimit = 40
+const realReviewMemoryTimelineRecentLimit = 24
+const realReviewMemoryTimelineScope = "same sequential kernel sampling pass with the latest fully validated helper checkpoint observed asynchronously by the host; checkpoint age is host receipt age, not helper publication or kernel age; not an atomic snapshot, phase completion, causal allocation attribution, or proof of physical disk traffic; memory.stat fields overlap and must not be summed"
+const realReviewMemoryTimelineRetention = "union of at most 40 whole-lifetime power-of-two sample-ordinal grid points and the most recent 24 native-interval samples; double grid stride when its point count exceeds 40; retain first and latest samples once in chronological order; coarser grid history can omit brief transitions and must not be treated as continuous coverage"
 
 type realReviewMemoryTimelinePoint struct {
 	SampleNumber                  int    `json:"sample_number"`
 	HostElapsedUS                 int64  `json:"host_elapsed_us"`
 	MemoryCurrentBytes            *int64 `json:"memory_current_bytes"`
 	AnonBytes                     *int64 `json:"anon_bytes"`
+	FileBytes                     *int64 `json:"file_bytes"`
+	ShmemBytes                    *int64 `json:"shmem_bytes"`
 	FileMappedBytes               *int64 `json:"file_mapped_bytes"`
+	FileDirtyBytes                *int64 `json:"file_dirty_bytes"`
+	FileWritebackBytes            *int64 `json:"file_writeback_bytes"`
+	SlabBytes                     *int64 `json:"slab_bytes"`
+	KernelBytes                   *int64 `json:"kernel_bytes"`
 	CheckpointInvocation          *int   `json:"checkpoint_invocation"`
 	CheckpointSequence            *int64 `json:"checkpoint_sequence"`
 	CheckpointHelperElapsedUS     *int64 `json:"checkpoint_helper_elapsed_us"`
@@ -32,13 +40,16 @@ type realReviewMemoryTimelinePoint struct {
 }
 
 type realReviewMemoryTimeline struct {
-	MaxPoints             int                             `json:"max_points"`
-	SampleStride          int                             `json:"sample_stride"`
-	NominalGridIntervalMS int64                           `json:"nominal_grid_interval_ms"`
-	DiscardedSamples      int                             `json:"discarded_samples"`
-	RetentionPolicy       string                          `json:"retention_policy"`
-	ObservationScope      string                          `json:"observation_scope"`
-	Points                []realReviewMemoryTimelinePoint `json:"points"`
+	MaxPoints               int                             `json:"max_points"`
+	GridPointLimit          int                             `json:"grid_point_limit"`
+	RecentPointLimit        int                             `json:"recent_point_limit"`
+	NominalNativeIntervalMS int64                           `json:"nominal_native_interval_ms"`
+	SampleStride            int                             `json:"sample_stride"`
+	NominalGridIntervalMS   int64                           `json:"nominal_grid_interval_ms"`
+	DiscardedSamples        int                             `json:"discarded_samples"`
+	RetentionPolicy         string                          `json:"retention_policy"`
+	ObservationScope        string                          `json:"observation_scope"`
+	Points                  []realReviewMemoryTimelinePoint `json:"points"`
 }
 
 type realReviewMemoryProgress struct {
@@ -59,7 +70,8 @@ func (m *realReviewMemoryMonitor) recordJointTimeline(sample realReviewMemorySam
 	for _, field := range []struct {
 		name   string
 		target **int64
-	}{{"anon", &point.AnonBytes}, {"file_mapped", &point.FileMappedBytes}} {
+	}{{"anon", &point.AnonBytes}, {"file", &point.FileBytes}, {"shmem", &point.ShmemBytes}, {"file_mapped", &point.FileMappedBytes},
+		{"file_dirty", &point.FileDirtyBytes}, {"file_writeback", &point.FileWritebackBytes}, {"slab", &point.SlabBytes}, {"kernel", &point.KernelBytes}} {
 		if value, present := sample.MemoryStat[field.name]; present {
 			*field.target = &value
 		}
@@ -75,26 +87,31 @@ func (m *realReviewMemoryMonitor) recordJointTimeline(sample realReviewMemorySam
 		}
 	}
 	if m.retained.JointTimeline == nil {
-		m.retained.JointTimeline = &realReviewMemoryTimeline{MaxPoints: realReviewMemoryTimelineLimit, SampleStride: 1,
+		m.retained.JointTimeline = &realReviewMemoryTimeline{MaxPoints: realReviewMemoryTimelineLimit, GridPointLimit: realReviewMemoryTimelineGridLimit, RecentPointLimit: realReviewMemoryTimelineRecentLimit,
+			NominalNativeIntervalMS: m.retained.IntervalMS, SampleStride: 1,
 			RetentionPolicy: realReviewMemoryTimelineRetention, ObservationScope: realReviewMemoryTimelineScope}
 	}
 	timeline := m.retained.JointTimeline
-	// The previous latest sample is expendable only when it is off the grid.
-	if n := len(timeline.Points); n > 0 && (timeline.Points[n-1].SampleNumber-1)%timeline.SampleStride != 0 {
-		timeline.Points = timeline.Points[:n-1]
-	}
+	// Every old grid point survives until a stride doubling; the recent tail
+	// preserves short transitions immediately before completion or failure.
 	timeline.Points = append(timeline.Points, point)
-	if len(timeline.Points) > realReviewMemoryTimelineLimit {
-		timeline.SampleStride *= 2
-		kept := timeline.Points[:0]
-		for _, candidate := range timeline.Points {
-			if (candidate.SampleNumber-1)%timeline.SampleStride == 0 || candidate.SampleNumber == point.SampleNumber {
-				kept = append(kept, candidate)
-			}
+	gridPoints := 0
+	for _, candidate := range timeline.Points {
+		if (candidate.SampleNumber-1)%timeline.SampleStride == 0 {
+			gridPoints++
 		}
-		clear(timeline.Points[len(kept):])
-		timeline.Points = kept
 	}
+	if gridPoints > realReviewMemoryTimelineGridLimit {
+		timeline.SampleStride *= 2
+	}
+	kept := timeline.Points[:0]
+	for _, candidate := range timeline.Points {
+		if (candidate.SampleNumber-1)%timeline.SampleStride == 0 || candidate.SampleNumber > point.SampleNumber-realReviewMemoryTimelineRecentLimit {
+			kept = append(kept, candidate)
+		}
+	}
+	clear(timeline.Points[len(kept):])
+	timeline.Points = kept
 	timeline.NominalGridIntervalMS = m.retained.IntervalMS * int64(timeline.SampleStride)
 	timeline.DiscardedSamples = m.retained.Samples - len(timeline.Points)
 }
@@ -106,7 +123,7 @@ func cloneRealReviewMemoryTimeline(timeline *realReviewMemoryTimeline) *realRevi
 	result := *timeline
 	result.Points = make([]realReviewMemoryTimelinePoint, len(timeline.Points))
 	for index, point := range timeline.Points {
-		for _, field := range []**int64{&point.MemoryCurrentBytes, &point.AnonBytes, &point.FileMappedBytes, &point.CheckpointSequence,
+		for _, field := range []**int64{&point.MemoryCurrentBytes, &point.AnonBytes, &point.FileBytes, &point.ShmemBytes, &point.FileMappedBytes, &point.FileDirtyBytes, &point.FileWritebackBytes, &point.SlabBytes, &point.KernelBytes, &point.CheckpointSequence,
 			&point.CheckpointHelperElapsedUS, &point.CheckpointCompletedHashes, &point.CheckpointSuccessfulReadBytes, &point.CheckpointHostAgeUS} {
 			*field = retainRealReviewMemoryMaximum(nil, *field)
 		}
@@ -131,8 +148,9 @@ func TestRealReviewDiagnosticTimelineExactPointAvailability(t *testing.T) {
 		expected   realReviewMemoryTimelinePoint
 	}{
 		{name: "absent metrics and checkpoint stay null", sample: realReviewMemorySample{UnavailableFields: []string{"memory.current", "memory.stat"}}, expected: realReviewMemoryTimelinePoint{SampleNumber: 1, HostElapsedUS: 3000000}},
-		{name: "available zero metrics are distinct from absence", sample: realReviewMemorySample{MemoryCurrentBytes: realReviewTimelineInt64(0), MemoryStat: map[string]int64{"anon": 0, "file_mapped": 0}}, expected: realReviewMemoryTimelinePoint{SampleNumber: 1, HostElapsedUS: 3000000, MemoryCurrentBytes: realReviewTimelineInt64(0), AnonBytes: realReviewTimelineInt64(0), FileMappedBytes: realReviewTimelineInt64(0)}},
-		{name: "validated checkpoint has host receipt age", sample: realReviewMemorySample{MemoryCurrentBytes: realReviewTimelineInt64(300), MemoryStat: map[string]int64{"anon": 100, "file_mapped": 150}}, checkpoint: true, expected: realReviewMemoryTimelinePoint{SampleNumber: 1, HostElapsedUS: 3000000, MemoryCurrentBytes: realReviewTimelineInt64(300), AnonBytes: realReviewTimelineInt64(100), FileMappedBytes: realReviewTimelineInt64(150), CheckpointInvocation: realReviewTimelineInt(1), CheckpointSequence: realReviewTimelineInt64(1), CheckpointHelperElapsedUS: realReviewTimelineInt64(100), CheckpointCompletedHashes: realReviewTimelineInt64(1), CheckpointSuccessfulReadBytes: realReviewTimelineInt64(1024), CheckpointHostAgeUS: realReviewTimelineInt64(2000000)}},
+		{name: "available zero metrics are distinct from absence", sample: realReviewMemorySample{MemoryCurrentBytes: realReviewTimelineInt64(0), MemoryStat: map[string]int64{"anon": 0, "file": 0, "shmem": 0, "file_mapped": 0, "file_dirty": 0, "file_writeback": 0, "slab": 0, "kernel": 0}}, expected: realReviewMemoryTimelinePoint{SampleNumber: 1, HostElapsedUS: 3000000, MemoryCurrentBytes: realReviewTimelineInt64(0), AnonBytes: realReviewTimelineInt64(0), FileBytes: realReviewTimelineInt64(0), ShmemBytes: realReviewTimelineInt64(0), FileMappedBytes: realReviewTimelineInt64(0), FileDirtyBytes: realReviewTimelineInt64(0), FileWritebackBytes: realReviewTimelineInt64(0), SlabBytes: realReviewTimelineInt64(0), KernelBytes: realReviewTimelineInt64(0)}},
+		{name: "partial metrics do not borrow absent values", sample: realReviewMemorySample{MemoryStat: map[string]int64{"anon": 0, "shmem": 15, "file_writeback": 0}}, expected: realReviewMemoryTimelinePoint{SampleNumber: 1, HostElapsedUS: 3000000, AnonBytes: realReviewTimelineInt64(0), ShmemBytes: realReviewTimelineInt64(15), FileWritebackBytes: realReviewTimelineInt64(0)}},
+		{name: "validated checkpoint has host receipt age", sample: realReviewMemorySample{MemoryCurrentBytes: realReviewTimelineInt64(300), MemoryStat: realReviewContractMemoryStat()}, checkpoint: true, expected: realReviewMemoryTimelinePoint{SampleNumber: 1, HostElapsedUS: 3000000, MemoryCurrentBytes: realReviewTimelineInt64(300), AnonBytes: realReviewTimelineInt64(10), FileBytes: realReviewTimelineInt64(20), ShmemBytes: realReviewTimelineInt64(15), FileMappedBytes: realReviewTimelineInt64(4), FileDirtyBytes: realReviewTimelineInt64(3), FileWritebackBytes: realReviewTimelineInt64(0), SlabBytes: realReviewTimelineInt64(2), KernelBytes: realReviewTimelineInt64(5), CheckpointInvocation: realReviewTimelineInt(1), CheckpointSequence: realReviewTimelineInt64(1), CheckpointHelperElapsedUS: realReviewTimelineInt64(100), CheckpointCompletedHashes: realReviewTimelineInt64(1), CheckpointSuccessfulReadBytes: realReviewTimelineInt64(1024), CheckpointHostAgeUS: realReviewTimelineInt64(2000000)}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -144,7 +162,7 @@ func TestRealReviewDiagnosticTimelineExactPointAvailability(t *testing.T) {
 			}
 			monitor := &realReviewMemoryMonitor{profile: profile, started: start, now: func() time.Time { return start.Add(3 * time.Second) }}
 			monitor.record(tt.sample)
-			expected := &realReviewMemoryTimeline{MaxPoints: 64, SampleStride: 1, RetentionPolicy: realReviewMemoryTimelineRetention, ObservationScope: realReviewMemoryTimelineScope, Points: []realReviewMemoryTimelinePoint{tt.expected}}
+			expected := &realReviewMemoryTimeline{MaxPoints: 64, GridPointLimit: 40, RecentPointLimit: 24, SampleStride: 1, RetentionPolicy: realReviewMemoryTimelineRetention, ObservationScope: realReviewMemoryTimelineScope, Points: []realReviewMemoryTimelinePoint{tt.expected}}
 			require.Equal(t, expected, monitor.retained.JointTimeline, "each diagnostic point must preserve exact nullable metrics and the validated checkpoint's host age")
 			encoded, err := json.Marshal(monitor.retained.JointTimeline)
 			require.NoError(t, err, "fixed allowlisted joint points should serialize")
@@ -160,10 +178,11 @@ func TestRealReviewDiagnosticTimelineWholeLifetimeRetention(t *testing.T) {
 	tests := []struct {
 		samples, stride int
 	}{
-		{samples: 64, stride: 1},
+		{samples: 64, stride: 2},
 		{samples: 65, stride: 2},
 		{samples: 128, stride: 4},
-		{samples: 5402, stride: 128},
+		{samples: 939, stride: 32},
+		{samples: 5402, stride: 256},
 	}
 	for _, tt := range tests {
 		t.Run("samples-"+strconv.Itoa(tt.samples), func(t *testing.T) {
@@ -174,18 +193,44 @@ func TestRealReviewDiagnosticTimelineWholeLifetimeRetention(t *testing.T) {
 			for sample := 1; sample <= tt.samples; sample++ {
 				observed = start.Add(time.Duration(sample-1) * 500 * time.Millisecond)
 				monitor.record(realReviewMemorySample{MemoryCurrentBytes: realReviewTimelineInt64(int64(sample))})
-				require.LessOrEqual(t, len(monitor.retained.JointTimeline.Points), 64, "retained points must never exceed the fixed diagnostic cap")
+				timeline := monitor.retained.JointTimeline
+				require.LessOrEqual(t, len(timeline.Points), 64, "retained points must never exceed the fixed diagnostic cap")
+				ordinals, recent := []int{}, []int{}
+				gridCount := 0
+				for _, point := range timeline.Points {
+					ordinals = append(ordinals, point.SampleNumber)
+					if (point.SampleNumber-1)%timeline.SampleStride == 0 {
+						gridCount++
+					}
+					if point.SampleNumber > sample-24 {
+						recent = append(recent, point.SampleNumber)
+					}
+				}
+				expectedOrdinals, expectedRecent := []int{}, []int{}
+				for ordinal := 1; ordinal <= sample; ordinal++ {
+					if (ordinal-1)%timeline.SampleStride == 0 || ordinal > sample-24 {
+						expectedOrdinals = append(expectedOrdinals, ordinal)
+					}
+					if ordinal > sample-24 {
+						expectedRecent = append(expectedRecent, ordinal)
+					}
+				}
+				require.Equal(t, expectedOrdinals, ordinals, "every retained union must stay sorted, deduplicated, and contain every lifetime grid and recent sample")
+				require.Equal(t, expectedRecent, recent, "the latest 24 available samples must retain native-interval resolution after every observation")
+				require.LessOrEqual(t, gridCount, 40, "the whole-lifetime grid must remain within its reserved point budget")
 			}
 			expected := []realReviewMemoryTimelinePoint{}
-			for sample := 1; sample <= tt.samples; sample += tt.stride {
-				expected = append(expected, realReviewMemoryTimelinePoint{SampleNumber: sample, HostElapsedUS: int64(sample-1) * 500000, MemoryCurrentBytes: realReviewTimelineInt64(int64(sample))})
-			}
-			if expected[len(expected)-1].SampleNumber != tt.samples {
-				expected = append(expected, realReviewMemoryTimelinePoint{SampleNumber: tt.samples, HostElapsedUS: int64(tt.samples-1) * 500000, MemoryCurrentBytes: realReviewTimelineInt64(int64(tt.samples))})
+			for sample := 1; sample <= tt.samples; sample++ {
+				if (sample-1)%tt.stride == 0 || sample > tt.samples-24 {
+					expected = append(expected, realReviewMemoryTimelinePoint{SampleNumber: sample, HostElapsedUS: int64(sample-1) * 500000, MemoryCurrentBytes: realReviewTimelineInt64(int64(sample))})
+				}
 			}
 			timeline := monitor.retained.JointTimeline
-			require.Equal(t, expected, timeline.Points, "deterministic thinning must cover the entire lifetime in order and preserve first and latest")
-			require.Equal(t, tt.stride, timeline.SampleStride, "overflow must double the sample-ordinal stride")
+			require.Equal(t, expected, timeline.Points, "deterministic retention must cover the lifetime grid and full native-resolution recent tail exactly once")
+			require.Equal(t, tt.stride, timeline.SampleStride, "whole-lifetime grid overflow must double its sample-ordinal stride")
+			require.Equal(t, 40, timeline.GridPointLimit, "metadata must state the whole-lifetime grid point budget")
+			require.Equal(t, 24, timeline.RecentPointLimit, "metadata must state the native-resolution recent sample budget")
+			require.Equal(t, int64(500), timeline.NominalNativeIntervalMS, "metadata must retain the native sampling interval independently of the grid")
 			require.Equal(t, int64(tt.stride)*500, timeline.NominalGridIntervalMS, "metadata must disclose the coarser nominal historical grid")
 			require.Equal(t, tt.samples-len(expected), timeline.DiscardedSamples, "metadata must disclose every sample omitted by retention")
 		})
@@ -266,10 +311,13 @@ func TestRealReviewDiagnosticTimelineFinalReadAndIsolation(t *testing.T) {
 	require.Equal(t, int64(300), *original.JointTimeline.Points[0].MemoryCurrentBytes, "the earlier available point must survive cgroup disappearance")
 	require.Nil(t, original.JointTimeline.Points[1].MemoryCurrentBytes, "final unavailable metrics must not borrow earlier kernel values")
 	require.Equal(t, int64(2), calls.Load(), "timeline capture must not add kernel reads to initial and joined final sampling")
-	*initial.MemoryCurrentBytes, initial.MemoryStat["anon"] = 999, 999
+	*initial.MemoryCurrentBytes = 999
+	for name := range initial.MemoryStat {
+		initial.MemoryStat[name] = 999
+	}
 	changed := monitor.stop()
 	for _, point := range changed.JointTimeline.Points {
-		for _, value := range []*int64{point.MemoryCurrentBytes, point.AnonBytes, point.FileMappedBytes, point.CheckpointSequence, point.CheckpointHelperElapsedUS, point.CheckpointCompletedHashes, point.CheckpointSuccessfulReadBytes, point.CheckpointHostAgeUS} {
+		for _, value := range []*int64{point.MemoryCurrentBytes, point.AnonBytes, point.FileBytes, point.ShmemBytes, point.FileMappedBytes, point.FileDirtyBytes, point.FileWritebackBytes, point.SlabBytes, point.KernelBytes, point.CheckpointSequence, point.CheckpointHelperElapsedUS, point.CheckpointCompletedHashes, point.CheckpointSuccessfulReadBytes, point.CheckpointHostAgeUS} {
 			if value != nil {
 				*value = 999
 			}
@@ -355,4 +403,28 @@ func TestRealReviewDiagnosticTimelineSameStreamInvocationReset(t *testing.T) {
 	expected := realReviewMemoryTimelinePoint{SampleNumber: 2, HostElapsedUS: 3000000, CheckpointInvocation: realReviewTimelineInt(2), CheckpointSequence: realReviewTimelineInt64(1), CheckpointHelperElapsedUS: realReviewTimelineInt64(1), CheckpointCompletedHashes: realReviewTimelineInt64(0), CheckpointSuccessfulReadBytes: realReviewTimelineInt64(0), CheckpointHostAgeUS: realReviewTimelineInt64(2000000)}
 	require.Equal(t, expected, monitor.retained.JointTimeline.Points[1], "sequence one in the same launcher stream must reset helper totals and host checkpoint age under a new invocation ordinal")
 	require.False(t, profile.result().Invalid, "a fully validated helper reset must remain a valid profile")
+}
+
+func TestRealReviewDiagnosticTimelineAvailablePointIsolation(t *testing.T) {
+	t.Parallel()
+	start := time.Now()
+	observed := start
+	monitor := &realReviewMemoryMonitor{profile: &realReviewSourceProfile{}, started: start, now: func() time.Time { return observed }}
+	sample := realReviewContractMemorySample(300, realReviewContractMemoryStat())
+	monitor.record(sample)
+	observed = start.Add(500 * time.Millisecond)
+	monitor.record(sample)
+	expectedFirst := realReviewMemoryTimelinePoint{SampleNumber: 1, HostElapsedUS: 0, MemoryCurrentBytes: realReviewTimelineInt64(300),
+		AnonBytes: realReviewTimelineInt64(10), FileBytes: realReviewTimelineInt64(20), ShmemBytes: realReviewTimelineInt64(15), FileMappedBytes: realReviewTimelineInt64(4),
+		FileDirtyBytes: realReviewTimelineInt64(3), FileWritebackBytes: realReviewTimelineInt64(0), SlabBytes: realReviewTimelineInt64(2), KernelBytes: realReviewTimelineInt64(5)}
+	expectedSecond := expectedFirst
+	expectedSecond.SampleNumber, expectedSecond.HostElapsedUS = 2, 500000
+	require.Equal(t, []realReviewMemoryTimelinePoint{expectedFirst, expectedSecond}, monitor.retained.JointTimeline.Points, "every allowlisted metric must retain exact per-sample values")
+	changed := cloneRealReviewMemoryTimeline(monitor.retained.JointTimeline)
+	first := &changed.Points[0]
+	for _, value := range []*int64{first.MemoryCurrentBytes, first.AnonBytes, first.FileBytes, first.ShmemBytes, first.FileMappedBytes, first.FileDirtyBytes, first.FileWritebackBytes, first.SlabBytes, first.KernelBytes} {
+		*value = 999
+	}
+	require.Equal(t, expectedSecond, changed.Points[1], "available points must not share numeric pointers even when both read the same sample map")
+	require.Equal(t, []realReviewMemoryTimelinePoint{expectedFirst, expectedSecond}, monitor.retained.JointTimeline.Points, "cloned point mutation must not alter retained timeline fields")
 }
