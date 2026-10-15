@@ -567,14 +567,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26"
+      - name: Select cached Go
+        run: python3 -B .github/scripts/select-security-go.py
 
       - name: Run gosec
         run: |
+          set -euo pipefail
+          test "$(command -v go)" = "$GOROOT/bin/go"
           go install github.com/securego/gosec/v2/cmd/gosec@v2.22.4
+          test "$(command -v gosec)" = "$GOBIN/gosec"
           gosec ./...
 
   # Config tests read repository-wide inputs; run them for every PR and push.
