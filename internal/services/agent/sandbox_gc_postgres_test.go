@@ -51,8 +51,8 @@ CREATE TABLE session_executors(org_id uuid,session_id uuid,status text);
 CREATE TABLE thread_runtimes(org_id uuid,session_id uuid,status text);
 CREATE TABLE preview_instances(org_id uuid,session_id uuid,preview_holding_container boolean);
 CREATE TABLE session_sandbox_holders(org_id uuid,session_id uuid,status text,expires_at timestamptz);
-CREATE TABLE code_review_revision_assessments(org_id uuid,session_id uuid,status text,publication_state text DEFAULT 'not_started',publication_receipt jsonb);
-CREATE TABLE code_review_recheck_dispatches(org_id uuid,session_id uuid,status text);`)
+CREATE TABLE code_review_revision_assessments(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid,session_id uuid,review_scope text DEFAULT 'full',status text,publication_state text DEFAULT 'not_started',publication_receipt jsonb);
+CREATE TABLE code_review_recheck_dispatches(assessment_id uuid,org_id uuid,session_id uuid,status text);`)
 	require.NoError(t, err, "create every durable GC ownership fence")
 	return pool
 }
@@ -130,8 +130,8 @@ func TestSandboxGCReviewJobFencesPostgres(t *testing.T) {
 		{name: "running assessment", fence: `INSERT INTO code_review_revision_assessments(org_id,session_id,status) SELECT org_id,id,'running' FROM sessions`},
 		{name: "publishing assessment", fence: `INSERT INTO code_review_revision_assessments(org_id,session_id,status) SELECT org_id,id,'publishing' FROM sessions`},
 		{name: "uncertain publication", fence: `INSERT INTO code_review_revision_assessments(org_id,session_id,status,publication_state) SELECT org_id,id,'failed','uncertain' FROM sessions`},
-		{name: "pending recheck dispatch", fence: `INSERT INTO code_review_recheck_dispatches SELECT org_id,id,'pending' FROM sessions`},
-		{name: "running recheck dispatch", fence: `INSERT INTO code_review_recheck_dispatches SELECT org_id,id,'running' FROM sessions`},
+		{name: "pending recheck dispatch", fence: `INSERT INTO code_review_recheck_dispatches(org_id,session_id,status) SELECT org_id,id,'pending' FROM sessions`},
+		{name: "running recheck dispatch", fence: `INSERT INTO code_review_recheck_dispatches(org_id,session_id,status) SELECT org_id,id,'running' FROM sessions`},
 	}
 	statuses := []string{"pending", "running"}
 	for _, path := range paths {
