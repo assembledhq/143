@@ -43,6 +43,7 @@ func (s *PRService) resolvePullRequestHealthSync(ctx context.Context, orgID, pul
 	if err != nil {
 		return nil, err
 	}
+	ctx = withPullRequestHealthMetadata(ctx, orgID, pr.ID)
 	repo, err := s.repos.GetByFullName(ctx, orgID, pr.GitHubRepo)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

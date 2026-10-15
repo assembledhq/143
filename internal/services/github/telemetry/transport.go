@@ -13,8 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/services/github/ratelimit"
 )
@@ -58,6 +60,9 @@ type RequestMetadata struct {
 	Repository          string
 	SandboxObservation  bool
 	CredentialIdentity  CredentialIdentity
+	// These identities are log-only drilldown fields, never metric labels.
+	AssessmentID  uuid.UUID
+	PullRequestID uuid.UUID
 }
 
 // WithRequestMetadata attaches safe GitHub telemetry dimensions to a request.
@@ -519,7 +524,7 @@ func (t *transport) logRequest(req *http.Request, resp *http.Response, requestEr
 	if metadata.Repository != "" {
 		repository = metadata.Repository
 	}
-	event = addScope(event, metadata)
+	event = addScope(req.Context(), event, metadata)
 	if metadata.SandboxObservation {
 		event = event.Bool("github_observation_trusted", false).Str("github_observation_source", "sandbox")
 	}
@@ -843,15 +848,28 @@ func RecordLocalActivity(ctx context.Context, logger zerolog.Logger, kind, route
 		outcome = "deferred"
 	}
 	metrics.RecordGitHubActivity(ctx, metadata.Caller, "", outcome, kind)
-	addScope(logger.Debug(), metadata).Str("github_caller", metadata.Caller).Str("github_activity", kind).Str("github_route", route).Int64("github_installation_id", metadata.InstallationID).Msg("github local activity")
+	addScope(ctx, logger.Debug(), metadata).Str("github_caller", metadata.Caller).Str("github_activity", kind).Str("github_route", route).Int64("github_installation_id", metadata.InstallationID).Msg("github local activity")
 }
 
-func addScope(event *zerolog.Event, metadata RequestMetadata) *zerolog.Event {
+func addScope(ctx context.Context, event *zerolog.Event, metadata RequestMetadata) *zerolog.Event {
 	if metadata.SessionID != "" {
 		event = event.Str("session_id", metadata.SessionID)
 	}
 	if metadata.OrgID != "" {
 		event = event.Str("org_id", metadata.OrgID)
+	}
+	// A sandbox reporting socket can outlive the job that acquired it. Its
+	// session scope must not imply request ownership by that earlier job.
+	if !metadata.SandboxObservation {
+		if jobID, ok := jobctx.JobIDFromContext(ctx); ok && jobID != uuid.Nil {
+			event = event.Str("job_id", jobID.String())
+		}
+		if metadata.AssessmentID != uuid.Nil {
+			event = event.Str("assessment_id", metadata.AssessmentID.String())
+		}
+		if metadata.PullRequestID != uuid.Nil {
+			event = event.Str("pull_request_id", metadata.PullRequestID.String())
+		}
 	}
 	return event
 }

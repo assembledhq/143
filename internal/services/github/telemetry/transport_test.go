@@ -13,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/services/github/ratelimit"
 )
 
@@ -33,18 +35,22 @@ func TestTransportRoundTripLogsStructuredGitHubTelemetry(t *testing.T) {
 	tests := []struct {
 		name             string
 		metadata         RequestMetadata
+		jobID            uuid.UUID
 		requestURL       string
 		response         *http.Response
 		requestErr       error
 		expectedLogEvent map[string]any
 	}{
 		{
-			name: "successful installation request records quota and normalized route",
+			name:  "successful installation request records quota and normalized route",
+			jobID: uuid.MustParse("00000000-0000-0000-0000-000000000001"),
 			metadata: RequestMetadata{
 				Kind:           RequestKindAPI,
 				AuthType:       AuthTypeAppInstallation,
 				InstallationID: 42,
 				SyncReason:     "stale_reconcile",
+				AssessmentID:   uuid.MustParse("00000000-0000-0000-0000-000000000002"),
+				PullRequestID:  uuid.MustParse("00000000-0000-0000-0000-000000000003"),
 			},
 			requestURL: "https://api.github.com/repos/assembledhq/143/pulls/99?ignored=true",
 			response: &http.Response{
@@ -60,6 +66,9 @@ func TestTransportRoundTripLogsStructuredGitHubTelemetry(t *testing.T) {
 				},
 			},
 			expectedLogEvent: map[string]any{
+				"job_id":                          "00000000-0000-0000-0000-000000000001",
+				"assessment_id":                   "00000000-0000-0000-0000-000000000002",
+				"pull_request_id":                 "00000000-0000-0000-0000-000000000003",
 				"level":                           "info",
 				"message":                         "github api request",
 				"github_method":                   http.MethodGet,
@@ -254,8 +263,12 @@ func TestTransportRoundTripLogsStructuredGitHubTelemetry(t *testing.T) {
 					return startedAt.Add(250 * time.Millisecond)
 				},
 			}
+			ctx := WithRequestMetadata(context.Background(), tt.metadata)
+			if tt.jobID != uuid.Nil {
+				ctx = jobctx.WithJobID(ctx, tt.jobID)
+			}
 			request, err := http.NewRequestWithContext(
-				WithRequestMetadata(context.Background(), tt.metadata),
+				ctx,
 				http.MethodGet,
 				tt.requestURL,
 				nil,
@@ -897,11 +910,13 @@ func TestLocalActivityScope(t *testing.T) {
 		t.Run(tt.kind, func(t *testing.T) {
 			t.Parallel()
 			var logs bytes.Buffer
-			ctx := WithRequestMetadata(context.Background(), RequestMetadata{SessionID: "session-fixture", OrgID: "org-fixture", Caller: "sandbox_token", InstallationID: 42})
+			jobID, assessmentID, prID := uuid.New(), uuid.New(), uuid.New()
+			ctx := jobctx.WithJobID(context.Background(), jobID)
+			ctx = WithRequestMetadata(ctx, RequestMetadata{SessionID: "session-fixture", OrgID: "org-fixture", Caller: "sandbox_token", InstallationID: 42, AssessmentID: assessmentID, PullRequestID: prID})
 			RecordLocalActivity(ctx, zerolog.New(&logs), tt.kind, "/app/installations/:installation_id/access_tokens")
 			var actual map[string]any
 			require.NoError(t, json.Unmarshal(logs.Bytes(), &actual), "local events should be structured JSON")
-			require.Equal(t, map[string]any{"level": "debug", "session_id": "session-fixture", "org_id": "org-fixture", "github_caller": "sandbox_token", "github_activity": tt.kind, "github_route": "/app/installations/:installation_id/access_tokens", "github_installation_id": float64(42), "message": "github local activity"}, actual, "local cache hits and deferrals must retain trusted scope without becoming remote request logs")
+			require.Equal(t, map[string]any{"level": "debug", "session_id": "session-fixture", "org_id": "org-fixture", "job_id": jobID.String(), "assessment_id": assessmentID.String(), "pull_request_id": prID.String(), "github_caller": "sandbox_token", "github_activity": tt.kind, "github_route": "/app/installations/:installation_id/access_tokens", "github_installation_id": float64(42), "message": "github local activity"}, actual, "local cache hits and deferrals must retain trusted scope without becoming remote request logs")
 		})
 	}
 }
