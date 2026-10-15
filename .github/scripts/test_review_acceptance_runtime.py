@@ -35,6 +35,8 @@ class ReviewAcceptanceRuntimeTests(unittest.TestCase):
             "REVIEW_ACCEPTANCE_RUNTIME_STATE": str(root / "runtime"),
             "REVIEW_ACCEPTANCE_ARTIFACT_DIR": str(root / "artifacts"),
             "REVIEW_ACCEPTANCE_NETWORK": "review-acceptance-123-2",
+            "REVIEW_ACCEPTANCE_ROOT_OVERLAY": "", "REVIEW_REAL_REPOSITORY_ACCEPTANCE": "",
+            "REVIEW_ACCEPTANCE_RUNTIME": "",
             "PATH": f"{binary}:{os.environ['PATH']}",
         }
 
@@ -181,22 +183,95 @@ class ReviewAcceptanceRuntimeTests(unittest.TestCase):
                 self.assertFalse((root / "privileged-command").exists(),
                                  "resolver failure must not reach a privileged command")
 
-    def test_owned_daemon_keeps_runsc_kernel_resource_enforcement_enabled(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root, env = self.fixture(directory)
-            (root / "runtime").mkdir()
-            result = subprocess.run(
-                ["bash", "-c", 'source "$1"; write_daemon_config', "contract", str(PREPARE)],
-                env=env, capture_output=True, text=True, check=False, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            config = json.loads((root / "runtime/daemon.json").read_text())
-            self.assertEqual(config["exec-opts"], ["native.cgroupdriver=cgroupfs"],
-                             "Docker and runsc must use the same explicit filesystem cgroup driver")
-            self.assertEqual(config["runtimes"]["runsc"],
-                             {"path": "/usr/bin/runsc", "runtimeArgs": ["--host-uds=open"]},
-                             "runsc must preserve the credential socket transport while enforcing kernel cgroups")
-            self.assertFalse((root / "privileged-command").exists(),
-                             "daemon configuration construction should require no privileged operation")
+    def test_root_overlay_selector_rejects_unknown_values_before_creating_resources_or_config(self):
+        for selector in ("self", "root:self", "NONE", "none ", "none\n", "--overlay2=none", "none;touch unsafe"):
+            for operation in ("--validate", "", "write_daemon_config"):
+                with self.subTest(selector=selector, operation=operation), tempfile.TemporaryDirectory() as directory:
+                    root, env = self.fixture(directory)
+                    env["REVIEW_ACCEPTANCE_ROOT_OVERLAY"] = selector
+                    if operation == "write_daemon_config":
+                        (root / "runtime").mkdir()
+                        result = subprocess.run(
+                            ["bash", "-c", 'source "$1"; write_daemon_config', "contract", str(PREPARE)],
+                            env=env, capture_output=True, text=True, check=False, timeout=10)
+                        self.assertFalse((root / "runtime/daemon.json").exists(),
+                                         "an unknown selector must never write daemon configuration")
+                    else:
+                        result = self.invoke(PREPARE, env, *([operation] if operation else []))
+                        self.assertFalse((root / "runtime").exists(),
+                                         "an unknown selector must never allocate runtime state")
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("unsupported root overlay selector", result.stderr)
+                    self.assertFalse((root / "privileged-command").exists(),
+                                     "an unknown selector must fail before any privileged action")
+
+    def test_root_overlay_none_requires_owned_real_repository_runsc_scope_independent_of_profile(self):
+        cases = [
+            ("normal", {"REVIEW_ACCEPTANCE_PROFILE_SOURCE_HELPER": ""}, True),
+            ("explicit normal", {"REVIEW_ACCEPTANCE_PROFILE_SOURCE_HELPER": "0"}, True),
+            ("profile", {"REVIEW_ACCEPTANCE_PROFILE_SOURCE_HELPER": "1"}, True),
+            ("missing real repository opt-in", {"REVIEW_REAL_REPOSITORY_ACCEPTANCE": ""}, False),
+            ("other opt-in", {"REVIEW_REAL_REPOSITORY_ACCEPTANCE": "true"}, False),
+            ("missing runtime", {"REVIEW_ACCEPTANCE_RUNTIME": ""}, False),
+            ("other runtime", {"REVIEW_ACCEPTANCE_RUNTIME": "runc"}, False),
+            ("local", {"GITHUB_ACTIONS": "false"}, False),
+            ("self hosted", {"RUNNER_ENVIRONMENT": "self-hosted"}, False),
+            ("other OS", {"RUNNER_OS": "macOS"}, False),
+            ("missing run", {"GITHUB_RUN_ID": ""}, False),
+            ("unsafe paths", {"REVIEW_ACCEPTANCE_RUNTIME_STATE": "/var/lib/docker"}, False),
+        ]
+        for name, overrides, accepted in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root, env = self.fixture(directory)
+                env.update({"REVIEW_ACCEPTANCE_ROOT_OVERLAY": "none",
+                            "REVIEW_REAL_REPOSITORY_ACCEPTANCE": "1", "REVIEW_ACCEPTANCE_RUNTIME": "runsc",
+                            **overrides})
+                result = self.invoke(PREPARE, env, "--validate")
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                self.assertFalse((root / "runtime").exists(), "selector validation must not allocate state")
+                self.assertFalse((root / "privileged-command").exists(),
+                                 "selector validation must not invoke privileged commands")
+                # Also exercise the public configuration function so sourcing the script
+                # cannot bypass the owned real-repository guard for the candidate.
+                (root / "runtime").mkdir()
+                result = subprocess.run(
+                    ["bash", "-c", 'source "$1"; write_daemon_config', "contract", str(PREPARE)],
+                    env=env, capture_output=True, text=True, check=False, timeout=10)
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                self.assertEqual((root / "runtime/daemon.json").exists(), accepted,
+                                 "only the owned opted-in scope may write the none registration")
+
+    def test_owned_daemon_preserves_exact_default_and_selected_runtime_configuration(self):
+        cases = [("unset", None, "", ["--host-uds=open"]),
+                 ("empty", "", "", ["--host-uds=open"]),
+                 ("none normal", "none", "", ["--host-uds=open", "--overlay2=none"]),
+                 ("none profile", "none", "1", ["--host-uds=open", "--overlay2=none"])]
+        for name, selector, profile, arguments in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root, env = self.fixture(directory)
+                (root / "runtime").mkdir()
+                if selector is None:
+                    env.pop("REVIEW_ACCEPTANCE_ROOT_OVERLAY")
+                else:
+                    env["REVIEW_ACCEPTANCE_ROOT_OVERLAY"] = selector
+                if selector == "none":
+                    env.update({"REVIEW_REAL_REPOSITORY_ACCEPTANCE": "1", "REVIEW_ACCEPTANCE_RUNTIME": "runsc"})
+                env["REVIEW_ACCEPTANCE_PROFILE_SOURCE_HELPER"] = profile
+                result = subprocess.run(
+                    ["bash", "-c", 'source "$1"; write_daemon_config', "contract", str(PREPARE)],
+                    env=env, capture_output=True, text=True, check=False, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                state = root / "runtime"
+                self.assertEqual(json.loads((state / "daemon.json").read_text()), {
+                    "data-root": str(state / "mount/docker"), "exec-root": str(state / "exec"),
+                    "pidfile": str(state / "dockerd.pid"), "hosts": ["unix://" + str(state / "docker.sock")],
+                    "storage-driver": "overlay2", "features": {"containerd-snapshotter": False},
+                    "exec-opts": ["native.cgroupdriver=cgroupfs"],
+                    "runtimes": {"runsc": {"path": "/usr/bin/runsc", "runtimeArgs": arguments}},
+                    "bridge": "none", "iptables": True,
+                }, "only the explicitly selected fixed runtime tuple may change")
+                self.assertFalse((root / "privileged-command").exists(),
+                                 "daemon configuration construction should require no privileged operation")
 
     def test_runsc_defaults_capture_is_bounded_optional_and_not_effective_configuration(self):
         code = PREPARE.read_text().split("<<'PY_FLAGS'\n", 1)[1].split("\nPY_FLAGS", 1)[0]
@@ -231,7 +306,7 @@ class ReviewAcceptanceRuntimeTests(unittest.TestCase):
                         raise error_type("synthetic-private-error")
                     return subprocess.CompletedProcess(args, status)
 
-                with mock.patch("sys.argv", ["flags", str(config), str(artifacts)]), \
+                with mock.patch("sys.argv", ["flags", str(config), str(artifacts), json.dumps(runtime), ""]), \
                         mock.patch.object(subprocess, "run", side_effect=command) as run, \
                         mock.patch.object(resource, "setrlimit") as bound, \
                         contextlib.redirect_stderr(io.StringIO()) as diagnostics:
@@ -245,7 +320,7 @@ class ReviewAcceptanceRuntimeTests(unittest.TestCase):
                     "command": ["/usr/bin/runsc", "flags"], "exit_status": status,
                     "timeout_seconds": 5, "timed_out": timed_out, "execution_error": execution_error,
                     "retained_bytes": len(data), "output_limit_bytes": 65536,
-                    "possibly_truncated": len(data) == 65536, "compiled_defaults_only": True,
+                    "possibly_truncated": len(data) == 65536, "compiled_defaults_only": True, "root_overlay_selector": "",
                     "registered_runtime": runtime, "effective_container_overlay_verified": False,
                 })
                 self.assertNotIn("synthetic-private-error", diagnostics.getvalue(),
@@ -262,7 +337,8 @@ class ReviewAcceptanceRuntimeTests(unittest.TestCase):
                 root = Path(directory)
                 config = root / "daemon.json"
                 config.write_text(json.dumps({"runtimes": {"runsc": runtime}}))
-                with mock.patch("sys.argv", ["flags", str(config), str(root)]), \
+                with mock.patch("sys.argv", ["flags", str(config), str(root),
+                                             json.dumps({"path": "/usr/bin/runsc", "runtimeArgs": ["--host-uds=open"]}), ""]), \
                         mock.patch.object(subprocess, "run") as run, \
                         self.assertRaises(SystemExit):
                     exec(compile(code, str(PREPARE), "exec"), {})
@@ -283,7 +359,8 @@ class ReviewAcceptanceRuntimeTests(unittest.TestCase):
                 root, env = self.fixture(directory)
                 (root / "runtime").mkdir()
                 (root / "artifacts").mkdir()
-                info = {"Driver": "overlay2", "Runtimes": {"runsc": {}},
+                info = {"Driver": "overlay2", "Runtimes": {"runsc": {"path": "/usr/bin/runsc",
+                                                                    "runtimeArgs": ["--host-uds=open"]}},
                         "DriverStatus": [["Backing Filesystem", "xfs"], ["Supports d_type", "true"]],
                         "DockerRootDir": str(root / "runtime/mount/docker")}
                 if version is not None:
@@ -297,6 +374,161 @@ class ReviewAcceptanceRuntimeTests(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, accepted, result.stderr)
                 self.assertFalse((root / "privileged-command").exists(),
                                  "unsupported cgroup configuration must fail through a read-only preflight")
+
+    def test_daemon_preflight_checks_loaded_registration_not_only_the_file(self):
+        default = {"path": "/usr/bin/runsc", "runtimeArgs": ["--host-uds=open"]}
+        none = {"path": "/usr/bin/runsc", "runtimeArgs": ["--host-uds=open", "--overlay2=none"]}
+        cases = [
+            ("default", "", default, True),
+            ("default with Docker feature observations", "", {**default, "status": {"feature": "observed"}}, True),
+            ("none", "none", none, True),
+            ("none with Docker feature observations", "none", {**none, "status": {"feature": "observed"}}, True),
+            ("missing loaded registration", "", None, False),
+            ("empty loaded registration", "", {}, False),
+            ("default requested but none loaded", "", none, False),
+            ("none requested but default loaded", "none", default, False),
+            ("wrong executable", "none", {**none, "path": "/tmp/untrusted-runsc"}, False),
+            ("missing arguments", "none", {"path": "/usr/bin/runsc"}, False),
+            ("wrong argument order", "none", {**none, "runtimeArgs": list(reversed(none["runtimeArgs"]))}, False),
+            ("extra argument", "none", {**none, "runtimeArgs": [*none["runtimeArgs"], "--ignore-cgroups"]}, False),
+            ("unexpected runtime option", "none", {**none, "options": {"arbitrary": "option"}}, False),
+            ("malformed metadata", "none", {**none, "status": "untrusted"}, False),
+        ]
+        for name, selector, loaded, accepted in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root, env = self.fixture(directory)
+                state = root / "runtime"
+                state.mkdir()
+                artifacts = root / "artifacts"
+                artifacts.mkdir()
+                env.update({"REVIEW_ACCEPTANCE_ROOT_OVERLAY": selector,
+                            "REVIEW_REAL_REPOSITORY_ACCEPTANCE": "1", "REVIEW_ACCEPTANCE_RUNTIME": "runsc"})
+                expected = none if selector == "none" else default
+                # A correct file must not excuse a different loaded registration.
+                (state / "daemon.json").write_text(json.dumps({"runtimes": {"runsc": expected}}))
+                info = {"Driver": "overlay2", "Runtimes": {} if loaded is None else {"runsc": loaded},
+                        "CgroupVersion": "2", "CgroupDriver": "cgroupfs",
+                        "DriverStatus": [["Backing Filesystem", "xfs"], ["Supports d_type", "true"]],
+                        "DockerRootDir": str(state / "mount/docker")}
+                (artifacts / "docker-info.json").write_text(json.dumps(info))
+                result = subprocess.run(
+                    ["bash", "-c", 'source "$1"; verify_daemon_configuration', "contract", str(PREPARE)],
+                    env=env, capture_output=True, text=True, check=False, timeout=10)
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                registration = artifacts / "runtime-registration.json"
+                self.assertEqual(registration.exists(), accepted,
+                                 "only a matching loaded registration may produce configuration evidence")
+                if accepted:
+                    self.assertEqual(json.loads(registration.read_text()), {
+                        "root_overlay_selector": selector, "registered_runtime": expected,
+                        "loaded_runtime_registration_verified": True,
+                        "effective_container_overlay_verified": False,
+                    }, "loaded registration evidence must not claim an effective container proof")
+                else:
+                    self.assertIn("loaded runsc registration does not match", result.stderr)
+                self.assertFalse((root / "privileged-command").exists(),
+                                 "loaded registration verification requires no privilege")
+
+    def test_selected_none_defaults_observation_keeps_compiled_defaults_distinct(self):
+        code = PREPARE.read_text().split("<<'PY_FLAGS'\n", 1)[1].split("\nPY_FLAGS", 1)[0]
+        runtime = {"path": "/usr/bin/runsc", "runtimeArgs": ["--host-uds=open", "--overlay2=none"]}
+        for selected, registered, accepted in (("none", runtime, True),
+                                                ("none", {**runtime, "runtimeArgs": ["--host-uds=open"]}, False)):
+            with self.subTest(registered=registered), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = root / "daemon.json"
+                config.write_text(json.dumps({"runtimes": {"runsc": registered}}))
+                def command(args, *, stdout, **kwargs):
+                    self.assertEqual(args, ["/usr/bin/runsc", "flags"])
+                    stdout.write(b"-overlay2 value (default root:self)\n")
+                    return subprocess.CompletedProcess(args, 0)
+                with mock.patch("sys.argv", ["flags", str(config), str(root), json.dumps(runtime), selected]), \
+                        mock.patch.object(subprocess, "run", side_effect=command) as run:
+                    if accepted:
+                        exec(compile(code, str(PREPARE), "exec"), {})
+                    else:
+                        with self.assertRaises(SystemExit):
+                            exec(compile(code, str(PREPARE), "exec"), {})
+                self.assertEqual(run.call_count, int(accepted),
+                                 "a mismatched configured tuple must fail before observing defaults")
+                if accepted:
+                    evidence = json.loads((root / "runsc-flags-observation.json").read_text())
+                    self.assertEqual(evidence["root_overlay_selector"], "none")
+                    self.assertEqual(evidence["registered_runtime"], runtime)
+                    self.assertTrue(evidence["compiled_defaults_only"])
+                    self.assertFalse(evidence["effective_container_overlay_verified"],
+                                     "compiled root:self defaults do not invalidate or prove selected none")
+
+    def test_quota_probe_retains_exact_loaded_mode_without_changing_the_quota_mechanism(self):
+        for selector, loaded_selector, accepted in (("", "", True), ("none", "none", True),
+                                                    ("none", "", False)):
+            with self.subTest(selector=selector, loaded_selector=loaded_selector), tempfile.TemporaryDirectory() as directory:
+                root, env = self.fixture(directory)
+                state = root / "runtime"
+                state.mkdir(mode=0o700)
+                artifacts = root / "artifacts"
+                artifacts.mkdir()
+                record = {"format": 1, "state": str(state), "run_id": "123", "attempt": "2",
+                          "uid": os.getuid(), "network": env["REVIEW_ACCEPTANCE_NETWORK"]}
+                marker = state / "owner.json"
+                marker.write_text(json.dumps(record))
+                marker.chmod(0o600)
+                arguments = ["--host-uds=open"] + (["--overlay2=none"] if loaded_selector == "none" else [])
+                info = {"Driver": "overlay2", "Runtimes": {"runsc": {"path": "/usr/bin/runsc", "runtimeArgs": arguments}},
+                        "CgroupVersion": "2", "CgroupDriver": "cgroupfs",
+                        "DriverStatus": [["Backing Filesystem", "xfs"], ["Supports d_type", "true"]],
+                        "DockerRootDir": str(state / "mount/docker")}
+                binary = root / "bin"
+                (binary / "df").write_text("#!/bin/sh\necho 13958643712\n")
+                (binary / "timeout").write_text('#!/bin/sh\nshift\nexec "$@"\n')
+                (binary / "docker").write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+with Path(os.environ["DOCKER_CALLS"]).open("a") as output:
+    output.write(json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[1:] == ["info", "--format", "{{json .}}"]:
+    print(os.environ["DOCKER_INFO"])
+elif sys.argv[1] == "run":
+    print(json.dumps({"result": "pass", "limit_bytes": 67108864, "written_bytes": 66060288, "errno": 28}))
+else:
+    raise SystemExit(99)
+''')
+                for command in ("df", "timeout", "docker"):
+                    (binary / command).chmod(0o755)
+                calls = root / "docker-calls.jsonl"
+                env.update({"REVIEW_ACCEPTANCE_ROOT_OVERLAY": selector,
+                            "REVIEW_REAL_REPOSITORY_ACCEPTANCE": "1", "REVIEW_ACCEPTANCE_RUNTIME": "runsc",
+                            "REVIEW_ACCEPTANCE_IMAGE": "synthetic-acceptance", "DOCKER_CALLS": str(calls),
+                            "DOCKER_INFO": json.dumps(info)})
+                result = self.invoke(PREPARE, env, "--probe-quota")
+                self.assertEqual(result.returncode == 0, accepted, result.stderr + result.stdout)
+                observed = [json.loads(line) for line in calls.read_text().splitlines()]
+                self.assertEqual(observed[0], ["info", "--format", "{{json .}}"],
+                                 "the quota check must refresh the loaded registration first")
+                self.assertEqual(len(observed), 2 if accepted else 1,
+                                 "a loaded-mode mismatch must stop before creating the quota container")
+                adjacent = artifacts / "quota-probe-runtime-registration.json"
+                self.assertEqual(adjacent.exists(), accepted)
+                if accepted:
+                    self.assertEqual(json.loads(adjacent.read_text()), {
+                        "root_overlay_selector": selector,
+                        "registered_runtime": {"path": "/usr/bin/runsc", "runtimeArgs": arguments},
+                        "loaded_runtime_registration_verified": True,
+                        "effective_container_overlay_verified": False,
+                    })
+                    self.assertEqual(observed[1][:-1], [
+                        "run", "--rm", "--runtime", "runsc", "--network", "none", "--memory", "256m", "--cpus", "1",
+                        "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--storage-opt", "size=64M",
+                        "--label", "io.143.review-acceptance-state=" + str(state),
+                        "--entrypoint", "python3", "synthetic-acceptance", "-c",
+                    ], "the same-runtime ENOSPC probe must retain its original finite resource and quota controls")
+                    self.assertIn("os.fsync(output.fileno())", observed[1][-1])
+                    self.assertIn("0 < written <= 64 * 1024 * 1024", observed[1][-1])
+                    self.assertEqual(json.loads((artifacts / "quota-exhaustion-probe.json").read_text()), {
+                        "result": "pass", "limit_bytes": 67108864, "written_bytes": 66060288, "errno": 28,
+                    })
+                self.assertFalse((root / "privileged-command").exists(),
+                                 "synthetic quota-contract verification must require no privileged operation")
 
     def test_cleanup_and_probe_require_current_private_ownership_record(self):
         cases = [("foreign run", "run_id", "999"), ("foreign state", "state", "/var/lib/docker"),

@@ -6,13 +6,13 @@ fail() { printf 'review acceptance runtime: %s\n' "$*" >&2; return 1; }
 
 guard_host() {
   [[ ${GITHUB_ACTIONS:-} == true && ${RUNNER_ENVIRONMENT:-} == github-hosted && ${RUNNER_OS:-} == Linux ]] ||
-    fail 'requires a disposable GitHub-hosted Linux runner'
-  [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || fail 'requires Linux amd64'
-  [[ ${GITHUB_RUN_ID:-} =~ ^[0-9]+$ && ${GITHUB_RUN_ATTEMPT:-} =~ ^[0-9]+$ ]] || fail 'requires numeric GitHub run identity'
+    { fail 'requires a disposable GitHub-hosted Linux runner'; return 1; }
+  [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { fail 'requires Linux amd64'; return 1; }
+  [[ ${GITHUB_RUN_ID:-} =~ ^[0-9]+$ && ${GITHUB_RUN_ATTEMPT:-} =~ ^[0-9]+$ ]] || { fail 'requires numeric GitHub run identity'; return 1; }
 }
 
 validate_paths() {
-  python3 - <<'PY'
+  python3 - <<'PY' || return 1
 import os
 from pathlib import Path
 root = Path(os.environ['RUNNER_TEMP'])
@@ -35,6 +35,28 @@ if not env.is_absolute() or not env.is_file() or env.resolve() != env or root no
     raise SystemExit('GITHUB_ENV must be an existing canonical file under RUNNER_TEMP')
 PY
   [[ ${REVIEW_ACCEPTANCE_NETWORK:-} =~ ^review-acceptance-[a-zA-Z0-9_.-]+$ ]] || fail 'requires a uniquely named acceptance network'
+}
+
+
+validate_root_overlay() {
+  case ${REVIEW_ACCEPTANCE_ROOT_OVERLAY:-} in
+    '') ;;
+    none)
+      guard_host || return 1
+      validate_paths || return 1
+      [[ ${REVIEW_REAL_REPOSITORY_ACCEPTANCE:-} == 1 ]] || { fail 'root overlay none requires real-repository acceptance opt-in'; return 1; }
+      [[ ${REVIEW_ACCEPTANCE_RUNTIME:-} == runsc ]] || { fail 'root overlay none requires the explicit runsc runtime'; return 1; }
+      ;;
+    *) fail 'unsupported root overlay selector; expected empty or none'; return 1 ;;
+  esac
+}
+
+selected_runsc_registration() {
+  validate_root_overlay || return 1
+  case ${REVIEW_ACCEPTANCE_ROOT_OVERLAY:-} in
+    '') printf '%s\n' '{"path":"/usr/bin/runsc","runtimeArgs":["--host-uds=open"]}' ;;
+    none) printf '%s\n' '{"path":"/usr/bin/runsc","runtimeArgs":["--host-uds=open","--overlay2=none"]}' ;;
+  esac
 }
 
 require_capacity() {
@@ -123,9 +145,15 @@ PY
 }
 
 quota_probe() {
+  validate_root_overlay
   verify_state
   clear_docker_client_environment
   : "${REVIEW_ACCEPTANCE_IMAGE:?build the acceptance image before probing quotas}"
+  # Bind the same-runtime quota check to the registration the daemon loaded,
+  # rather than relying on a matching configuration file on disk.
+  docker info --format '{{json .}}' > "$REVIEW_ACCEPTANCE_ARTIFACT_DIR/docker-info.json"
+  verify_daemon_configuration
+  cp "$REVIEW_ACCEPTANCE_ARTIFACT_DIR/runtime-registration.json" "$REVIEW_ACCEPTANCE_ARTIFACT_DIR/quota-probe-runtime-registration.json"
   # Recheck after image build and builder pruning. A smaller disposable backing
   # must still support the full worker quota, metadata, and outside snapshot.
   local xfs_available_bytes external_available_bytes
@@ -192,15 +220,17 @@ PY_CGROUP
 }
 
 write_daemon_config() {
-  python3 - <<'PY_CONFIG'
-import json, os
+  local runtime
+  runtime=$(selected_runsc_registration)
+  python3 - "$runtime" <<'PY_CONFIG'
+import json, os, sys
 from pathlib import Path
 state = Path(os.environ['REVIEW_ACCEPTANCE_RUNTIME_STATE'])
 config = {'data-root': str(state / 'mount/docker'), 'exec-root': str(state / 'exec'),
           'pidfile': str(state / 'dockerd.pid'), 'hosts': ['unix://' + str(state / 'docker.sock')],
           'storage-driver': 'overlay2', 'features': {'containerd-snapshotter': False},
           'exec-opts': ['native.cgroupdriver=cgroupfs'],
-          'runtimes': {'runsc': {'path': '/usr/bin/runsc', 'runtimeArgs': ['--host-uds=open']}},
+          'runtimes': {'runsc': json.loads(sys.argv[1])},
           'bridge': 'none', 'iptables': True}
 (state / 'daemon.json').write_text(json.dumps(config))
 PY_CONFIG
@@ -210,12 +240,14 @@ PY_CONFIG
 # effective configuration. Keep that distinction and the registered overrides
 # explicit instead of inferring a backing medium from current documentation.
 record_runsc_flags() {
-  python3 - "$REVIEW_ACCEPTANCE_RUNTIME_STATE/daemon.json" "$REVIEW_ACCEPTANCE_ARTIFACT_DIR" <<'PY_FLAGS'
+  local runtime
+  runtime=$(selected_runsc_registration)
+  python3 - "$REVIEW_ACCEPTANCE_RUNTIME_STATE/daemon.json" "$REVIEW_ACCEPTANCE_ARTIFACT_DIR" "$runtime" "${REVIEW_ACCEPTANCE_ROOT_OVERLAY:-}" <<'PY_FLAGS'
 import json, resource, subprocess, sys, tempfile
 from pathlib import Path
 config = json.loads(Path(sys.argv[1]).read_text())
 runtime = config['runtimes']['runsc']
-if runtime != {'path': '/usr/bin/runsc', 'runtimeArgs': ['--host-uds=open']}:
+if runtime != json.loads(sys.argv[3]):
     raise SystemExit('review acceptance runtime: unexpected owned runsc registration')
 limit = 65536
 status, timed_out, execution_error = None, False, False
@@ -242,7 +274,8 @@ artifacts = Path(sys.argv[2])
     'timeout_seconds': 5, 'timed_out': timed_out, 'execution_error': execution_error,
     'retained_bytes': len(retained), 'output_limit_bytes': limit,
     'possibly_truncated': len(retained) == limit,
-    'compiled_defaults_only': True, 'registered_runtime': runtime,
+    'compiled_defaults_only': True, 'root_overlay_selector': sys.argv[4],
+    'registered_runtime': runtime,
     'effective_container_overlay_verified': False,
 }, indent=2) + '\n')
 if status != 0 or timed_out or execution_error or len(retained) == limit:
@@ -251,13 +284,23 @@ PY_FLAGS
 }
 
 verify_daemon_configuration() {
-  python3 - <<'PY_DAEMON'
-import json, os
+  local runtime
+  runtime=$(selected_runsc_registration)
+  python3 - "$runtime" "${REVIEW_ACCEPTANCE_ROOT_OVERLAY:-}" <<'PY_DAEMON'
+import json, os, sys
 from pathlib import Path
 artifacts = Path(os.environ['REVIEW_ACCEPTANCE_ARTIFACT_DIR'])
 info = json.loads((artifacts / 'docker-info.json').read_text())
-if info['Driver'] != 'overlay2' or 'runsc' not in info['Runtimes']:
+if info.get('Driver') != 'overlay2':
     raise SystemExit('owned daemon must expose overlay2 and runsc')
+expected = json.loads(sys.argv[1])
+loaded = info.get('Runtimes', {}).get('runsc')
+# Docker adds OCI feature observations as status metadata. Only that metadata
+# may accompany the exact path and runtimeArgs registration being accepted.
+if (not isinstance(loaded, dict) or set(loaded) - {'path', 'runtimeArgs', 'status'}
+        or {key: loaded.get(key) for key in ('path', 'runtimeArgs')} != expected
+        or ('status' in loaded and not isinstance(loaded['status'], dict))):
+    raise SystemExit('loaded runsc registration does not match the selected root overlay')
 if info.get('CgroupVersion') != '2' or info.get('CgroupDriver') != 'cgroupfs':
     raise SystemExit('owned daemon must expose cgroup v2 with the explicit cgroupfs driver')
 status = dict(info['DriverStatus'])
@@ -266,10 +309,16 @@ if status.get('Backing Filesystem') != 'xfs' or status.get('Supports d_type') !=
 state = Path(os.environ['REVIEW_ACCEPTANCE_RUNTIME_STATE'])
 if info['DockerRootDir'] != str(state / 'mount/docker'):
     raise SystemExit('Docker daemon root does not match owned state')
+(artifacts / 'runtime-registration.json').write_text(json.dumps({
+    'root_overlay_selector': sys.argv[2], 'registered_runtime': expected,
+    'loaded_runtime_registration_verified': True,
+    'effective_container_overlay_verified': False,
+}, indent=2) + '\n')
 PY_DAEMON
 }
 
 prepare_runtime() {
+  validate_root_overlay
   require_kernel_cgroup_v2
   [[ ! -e $REVIEW_ACCEPTANCE_RUNTIME_STATE && ! -L $REVIEW_ACCEPTANCE_RUNTIME_STATE ]] || fail 'runtime state already exists; refusing reuse'
   umask 077
@@ -365,6 +414,7 @@ PY
 main() {
   guard_host
   validate_paths
+  validate_root_overlay
   case ${1:-} in
     --validate) ;;
     --probe-quota) quota_probe ;;

@@ -61,7 +61,7 @@ func (fixture realReviewFilesystemFixture) write(t *testing.T) {
 }
 
 func (fixture realReviewFilesystemFixture) read() (realReviewRuntimeFilesystemProof, error) {
-	return readRealReviewRuntimeFilesystem(fixture.state, fixture.host, realReviewFilesystemRelease, realReviewFilesystemFixtureID, 1234, os.Geteuid(), os.Geteuid())
+	return readRealReviewRuntimeFilesystem(fixture.state, fixture.host, realReviewFilesystemRelease, realReviewFilesystemFixtureID, 1234, os.Geteuid(), os.Geteuid(), realReviewRootOverlayDefault)
 }
 
 func expectedRealReviewFilesystemProof(lower, upper int, size string, count int) realReviewRuntimeFilesystemProof {
@@ -327,7 +327,7 @@ func TestRealReviewRuntimeFilesystemInputsAndProtocol(t *testing.T) {
 			t.Parallel()
 			fixture := newRealReviewFilesystemFixture(t)
 			expected := expectedRealReviewFilesystemProof(1, 2, "default", 1)
-			request := realReviewFilesystemProbeRequest{fixture.state, fixture.host, realReviewFilesystemRelease, realReviewFilesystemFixtureID, 1234, os.Geteuid()}
+			request := realReviewFilesystemProbeRequest{fixture.state, fixture.host, realReviewFilesystemRelease, realReviewFilesystemFixtureID, 1234, os.Geteuid(), realReviewRootOverlayDefault}
 			actual, ok := realReviewFilesystemDecodeProbeOutput(tt.raw(fixture, expected), request)
 			require.Equal(t, tt.valid, ok, "privileged result framing must reject duplicate, secret-bearing, and incomplete output")
 			if tt.valid {
@@ -355,9 +355,9 @@ func TestRealReviewRuntimeFilesystemRejectsInputs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := newRealReviewFilesystemFixture(t)
-			request := realReviewFilesystemProbeRequest{f.state, f.host, realReviewFilesystemRelease, realReviewFilesystemFixtureID, 1234, os.Geteuid()}
+			request := realReviewFilesystemProbeRequest{f.state, f.host, realReviewFilesystemRelease, realReviewFilesystemFixtureID, 1234, os.Geteuid(), realReviewRootOverlayDefault}
 			tt.change(&request)
-			proof, err := readRealReviewRuntimeFilesystem(request.RuntimeState, request.DaemonHost, request.RuntimeVersion, request.ContainerID, request.PID, os.Geteuid(), os.Geteuid())
+			proof, err := readRealReviewRuntimeFilesystem(request.RuntimeState, request.DaemonHost, request.RuntimeVersion, request.ContainerID, request.PID, os.Geteuid(), os.Geteuid(), request.RootOverlay)
 			require.EqualError(t, err, "runtime filesystem proof unavailable: "+tt.reason, "input rejection must not reach privileged metadata reads")
 			encoded, marshalErr := json.Marshal(proof)
 			require.NoError(t, marshalErr, "input rejection must serialize")
@@ -449,7 +449,7 @@ func TestRealReviewRuntimeFilesystemOwnedDaemonAndMetadata(t *testing.T) {
 			t.Parallel()
 			f := newRealReviewFilesystemFixture(t)
 			tt.change(t, f)
-			request := realReviewFilesystemProbeRequest{f.state, f.host, realReviewFilesystemRelease, realReviewFilesystemFixtureID, 1234, os.Geteuid()}
+			request := realReviewFilesystemProbeRequest{f.state, f.host, realReviewFilesystemRelease, realReviewFilesystemFixtureID, 1234, os.Geteuid(), realReviewRootOverlayDefault}
 			require.Equal(t, tt.expected, realReviewFilesystemOwnedDaemon(request), "privileged execution must require a safely owned and exactly bound daemon config before sudo")
 		})
 	}
@@ -466,7 +466,7 @@ func TestRealReviewRuntimeFilesystemRejectsForeignOwner(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := newRealReviewFilesystemFixture(t)
-			proof, err := readRealReviewRuntimeFilesystem(f.state, f.host, realReviewFilesystemRelease, realReviewFilesystemFixtureID, 1234, tt.stateUID, tt.configUID)
+			proof, err := readRealReviewRuntimeFilesystem(f.state, f.host, realReviewFilesystemRelease, realReviewFilesystemFixtureID, 1234, tt.stateUID, tt.configUID, realReviewRootOverlayDefault)
 			require.EqualError(t, err, "runtime filesystem proof unavailable: "+tt.reason, "metadata from an unexpected owner must fail closed")
 			require.False(t, proof.Verified, "foreign ownership cannot establish effective runtime proof")
 		})

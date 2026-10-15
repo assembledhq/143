@@ -27,6 +27,7 @@ const realReviewFilesystemMountLimit = 256
 // command, annotations, or raw parser errors. A live state file contains secrets.
 type realReviewRuntimeFilesystemProof struct {
 	Schema            string                    `json:"schema"`
+	RootOverlay       realReviewRootOverlay     `json:"root_overlay_selector,omitempty"`
 	RuntimeVersion    string                    `json:"runtime_version,omitempty"`
 	ContainerID       string                    `json:"container_id,omitempty"`
 	SandboxPID        int                       `json:"sandbox_pid,omitempty"`
@@ -46,18 +47,19 @@ type realReviewGoferRootProof struct {
 }
 
 type realReviewFilesystemProbeRequest struct {
-	RuntimeState   string `json:"runtime_state"`
-	DaemonHost     string `json:"daemon_host"`
-	RuntimeVersion string `json:"runtime_version"`
-	ContainerID    string `json:"container_id"`
-	PID            int    `json:"pid"`
-	CallerUID      int    `json:"caller_uid"`
+	RuntimeState   string                `json:"runtime_state"`
+	DaemonHost     string                `json:"daemon_host"`
+	RuntimeVersion string                `json:"runtime_version"`
+	ContainerID    string                `json:"container_id"`
+	PID            int                   `json:"pid"`
+	CallerUID      int                   `json:"caller_uid"`
+	RootOverlay    realReviewRootOverlay `json:"root_overlay_selector,omitempty"`
 }
 
 const realReviewFilesystemProbePrefix = "REAL_REVIEW_RUNTIME_FILESYSTEM_V1:"
 
-func observeRealReviewRuntimeFilesystem(ctx context.Context, runtimeState, daemonHost, runtimeVersion, containerID string, pid int) (realReviewRuntimeFilesystemProof, error) {
-	request := realReviewFilesystemProbeRequest{runtimeState, daemonHost, runtimeVersion, containerID, pid, os.Geteuid()}
+func observeRealReviewRuntimeFilesystem(ctx context.Context, runtimeState, daemonHost, runtimeVersion, containerID string, pid int, rootOverlay realReviewRootOverlay) (realReviewRuntimeFilesystemProof, error) {
+	request := realReviewFilesystemProbeRequest{RuntimeState: runtimeState, DaemonHost: daemonHost, RuntimeVersion: runtimeVersion, ContainerID: containerID, PID: pid, CallerUID: os.Geteuid(), RootOverlay: rootOverlay}
 	if runtimeVersion != realReviewFilesystemRelease {
 		return realReviewFilesystemUnavailable("unsupported_runtime_version")
 	}
@@ -68,7 +70,7 @@ func observeRealReviewRuntimeFilesystem(ctx context.Context, runtimeState, daemo
 		return realReviewFilesystemUnavailable("unsafe_owned_daemon")
 	}
 	if os.Geteuid() == 0 {
-		return readRealReviewRuntimeFilesystem(runtimeState, daemonHost, runtimeVersion, containerID, pid, 0, 0)
+		return readRealReviewRuntimeFilesystem(runtimeState, daemonHost, runtimeVersion, containerID, pid, 0, 0, rootOverlay)
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -125,7 +127,7 @@ func (output *realReviewFilesystemBoundedOutput) Write(data []byte) (int, error)
 }
 
 func realReviewFilesystemRequestValid(request realReviewFilesystemProbeRequest) bool {
-	return len(request.RuntimeState) <= 1024 && filepath.IsAbs(request.RuntimeState) && filepath.Clean(request.RuntimeState) == request.RuntimeState && request.RuntimeState != "/" && !strings.ContainsAny(request.RuntimeState, "\x00\r\n") && request.DaemonHost == "unix://"+request.RuntimeState+"/docker.sock" && request.RuntimeVersion == realReviewFilesystemRelease && regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(request.ContainerID) && request.PID > 0 && request.PID <= 2147483647 && request.CallerUID >= 0 && request.CallerUID <= 2147483647
+	return request.RootOverlay.valid() && len(request.RuntimeState) <= 1024 && filepath.IsAbs(request.RuntimeState) && filepath.Clean(request.RuntimeState) == request.RuntimeState && request.RuntimeState != "/" && !strings.ContainsAny(request.RuntimeState, "\x00\r\n") && request.DaemonHost == "unix://"+request.RuntimeState+"/docker.sock" && request.RuntimeVersion == realReviewFilesystemRelease && regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(request.ContainerID) && request.PID > 0 && request.PID <= 2147483647 && request.CallerUID >= 0 && request.CallerUID <= 2147483647
 }
 
 func realReviewFilesystemOwnedDaemon(request realReviewFilesystemProbeRequest) (safe bool) {
@@ -142,7 +144,7 @@ func realReviewFilesystemOwnedDaemon(request realReviewFilesystemProbeRequest) (
 		return false
 	}
 	config, err := realReviewFilesystemReadAt(root, "daemon.json", 65536, request.CallerUID)
-	return err == nil && realReviewFilesystemDaemonBound(config, request.RuntimeState, request.DaemonHost)
+	return err == nil && realReviewFilesystemDaemonBound(config, request.RuntimeState, request.DaemonHost, request.RootOverlay)
 }
 
 func realReviewFilesystemUnavailable(reason string) (realReviewRuntimeFilesystemProof, error) {
@@ -151,7 +153,7 @@ func realReviewFilesystemUnavailable(reason string) (realReviewRuntimeFilesystem
 
 func realReviewFilesystemDecodeProbeOutput(raw []byte, request realReviewFilesystemProbeRequest) (realReviewRuntimeFilesystemProof, bool) {
 	var proof realReviewRuntimeFilesystemProof
-	if len(raw) > 8192 || !bytes.HasPrefix(raw, []byte(realReviewFilesystemProbePrefix)) || !bytes.HasSuffix(raw, []byte("\nPASS\n")) || bytes.Count(raw, []byte(realReviewFilesystemProbePrefix)) != 1 {
+	if !realReviewFilesystemRequestValid(request) || len(raw) > 8192 || !bytes.HasPrefix(raw, []byte(realReviewFilesystemProbePrefix)) || !bytes.HasSuffix(raw, []byte("\nPASS\n")) || bytes.Count(raw, []byte(realReviewFilesystemProbePrefix)) != 1 {
 		return proof, false
 	}
 	data := raw[len(realReviewFilesystemProbePrefix) : len(raw)-len("\nPASS\n")]
@@ -161,11 +163,11 @@ func realReviewFilesystemDecodeProbeOutput(raw []byte, request realReviewFilesys
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&proof) != nil || proof.Schema != "runsc_effective_root_v1" || proof.ContainerID != request.ContainerID || proof.SandboxPID != request.PID || proof.RuntimeVersion != realReviewFilesystemRelease {
+	if decoder.Decode(&proof) != nil || proof.Schema != "runsc_effective_root_v1" || proof.ContainerID != request.ContainerID || proof.SandboxPID != request.PID || proof.RuntimeVersion != realReviewFilesystemRelease || proof.RootOverlay != request.RootOverlay {
 		return realReviewRuntimeFilesystemProof{}, false
 	}
 	if !proof.Verified {
-		allowed := []string{"invalid_container_identity", "unsupported_runtime_version", "unbound_owned_daemon", "unsafe_runtime_directory", "unsafe_runtime_metadata", "unsafe_daemon_configuration", "unbound_daemon_configuration", "unsafe_runsc_directory", "lock_missing_or_unsafe", "lock_unavailable", "state_missing_unsafe_or_oversized", "malformed_state", "state_identity_mismatch", "invalid_gofer_mount_configuration", "invalid_gofer_size_configuration", "directory_close_failed", "lock_close_failed", "lock_release_failed"}
+		allowed := []string{"invalid_container_identity", "unsupported_runtime_version", "unbound_owned_daemon", "unsafe_runtime_directory", "unsafe_runtime_metadata", "unsafe_daemon_configuration", "unbound_daemon_configuration", "unsafe_runsc_directory", "lock_missing_or_unsafe", "lock_unavailable", "state_missing_unsafe_or_oversized", "malformed_state", "state_identity_mismatch", "invalid_gofer_mount_configuration", "invalid_gofer_size_configuration", "directory_close_failed", "lock_close_failed", "lock_release_failed", "invalid_root_overlay_selector", "root_overlay_mismatch"}
 		for _, reason := range allowed {
 			if proof.UnavailableReason == reason && proof.Root == nil && proof.GoferMountCount == 0 {
 				return proof, true
@@ -177,7 +179,22 @@ func realReviewFilesystemDecodeProbeOutput(raw []byte, request realReviewFilesys
 	if root == nil || proof.CleanupFailed || proof.UnavailableReason != "" || proof.GoferMountCount < 1 || proof.GoferMountCount > realReviewFilesystemMountLimit || root.Lower < 0 || root.Lower > 2 || root.Upper < 0 || root.Upper > 3 || root.Lower == 0 && root.Upper == 0 || root.LowerLabel != []string{"none", "lisafs", "erofs"}[root.Lower] || root.UpperLabel != []string{"none", "memory", "self", "anon"}[root.Upper] || root.SizeClassification != "default" && root.SizeClassification != "custom_size_present" {
 		return realReviewRuntimeFilesystemProof{}, false
 	}
+	if realReviewEffectiveRootMatches(request.RootOverlay, proof) != nil {
+		return realReviewRuntimeFilesystemProof{}, false
+	}
 	return proof, true
+}
+
+func realReviewFilesystemDecodeProbeRequest(encoded []byte, callerUID int) (realReviewFilesystemProbeRequest, bool) {
+	var request realReviewFilesystemProbeRequest
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	_, uniqueRequest := realReviewFilesystemDecode(encoded)
+	var trailing any
+	if len(encoded) > 4096 || !uniqueRequest || decoder.Decode(&request) != nil || decoder.Decode(&trailing) != io.EOF || callerUID != request.CallerUID || !realReviewFilesystemRequestValid(request) {
+		return realReviewFilesystemProbeRequest{}, false
+	}
+	return request, true
 }
 
 func TestRealReviewRuntimeFilesystemPrivilegedProbe(t *testing.T) {
@@ -185,17 +202,13 @@ func TestRealReviewRuntimeFilesystemPrivilegedProbe(t *testing.T) {
 	if os.Getenv("REVIEW_REAL_RUNTIME_FILESYSTEM_PROBE") != "1" {
 		t.Skip("private read-only runtime probe requires explicit isolated invocation")
 	}
-	var request realReviewFilesystemProbeRequest
 	encoded, err := io.ReadAll(io.LimitReader(os.Stdin, 4097))
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	decoder.DisallowUnknownFields()
-	_, uniqueRequest := realReviewFilesystemDecode(encoded)
 	uid, uidErr := strconv.Atoi(os.Getenv("SUDO_UID"))
-	var trailing any
-	if runtime.GOOS != "linux" || os.Geteuid() != 0 || err != nil || len(encoded) > 4096 || !uniqueRequest || decoder.Decode(&request) != nil || decoder.Decode(&trailing) != io.EOF || uidErr != nil || uid != request.CallerUID || !realReviewFilesystemRequestValid(request) {
+	request, validRequest := realReviewFilesystemDecodeProbeRequest(encoded, uid)
+	if runtime.GOOS != "linux" || os.Geteuid() != 0 || err != nil || uidErr != nil || !validRequest {
 		t.Fatal("invalid privileged runtime probe request")
 	}
-	proof, proofErr := readRealReviewRuntimeFilesystem(request.RuntimeState, request.DaemonHost, request.RuntimeVersion, request.ContainerID, request.PID, 0, request.CallerUID)
+	proof, proofErr := readRealReviewRuntimeFilesystem(request.RuntimeState, request.DaemonHost, request.RuntimeVersion, request.ContainerID, request.PID, 0, request.CallerUID, request.RootOverlay)
 	if proofErr != nil && proof.UnavailableReason == "" {
 		t.Fatal("runtime proof failure classification missing")
 	}
@@ -210,7 +223,7 @@ func TestRealReviewRuntimeFilesystemPrivilegedProbe(t *testing.T) {
 
 // Fixture ownership is explicit; the live entry point always requires root-owned
 // runsc metadata. No package-level hooks or runtime commands are used.
-func readRealReviewRuntimeFilesystem(runtimeState, daemonHost, runtimeVersion, containerID string, pid, stateUID, configUID int) (proof realReviewRuntimeFilesystemProof, resultErr error) {
+func readRealReviewRuntimeFilesystem(runtimeState, daemonHost, runtimeVersion, containerID string, pid, stateUID, configUID int, rootOverlay realReviewRootOverlay) (proof realReviewRuntimeFilesystemProof, resultErr error) {
 	proof.Schema = "runsc_effective_root_v1"
 	fail := func(reason string) (realReviewRuntimeFilesystemProof, error) {
 		proof.Verified, proof.Root, proof.GoferMountCount = false, nil, 0
@@ -224,6 +237,10 @@ func readRealReviewRuntimeFilesystem(runtimeState, daemonHost, runtimeVersion, c
 		}
 		resultErr = errors.Join(resultErr, errors.New("runtime filesystem metadata cleanup failed: "+reason))
 	}
+	if !rootOverlay.valid() {
+		return fail("invalid_root_overlay_selector")
+	}
+	proof.RootOverlay = rootOverlay
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(containerID) || pid <= 0 || pid > 2147483647 {
 		return fail("invalid_container_identity")
 	}
@@ -252,7 +269,7 @@ func readRealReviewRuntimeFilesystem(runtimeState, daemonHost, runtimeVersion, c
 		return fail("unsafe_daemon_configuration")
 	}
 	rootPath := runtimeState + "/exec/runtime-runc/moby"
-	if !realReviewFilesystemDaemonBound(config, runtimeState, daemonHost) {
+	if !realReviewFilesystemDaemonBound(config, runtimeState, daemonHost, rootOverlay) {
 		return fail("unbound_daemon_configuration")
 	}
 	root, err := realReviewFilesystemOpenDirectories(owned, []string{"exec", "runtime-runc", "moby"}, stateUID)
@@ -328,6 +345,9 @@ func readRealReviewRuntimeFilesystem(runtimeState, daemonHost, runtimeVersion, c
 		}
 	}
 	proof.GoferMountCount, proof.Root, proof.Verified = len(mounts), &rootProof, true
+	if realReviewEffectiveRootMatches(rootOverlay, proof) != nil {
+		return fail("root_overlay_mismatch")
+	}
 	return proof, nil
 }
 
@@ -414,7 +434,10 @@ func realReviewFilesystemReadAt(parent int, name string, limit int64, owner int)
 	return data, nil
 }
 
-func realReviewFilesystemDaemonBound(raw []byte, state, host string) bool {
+func realReviewFilesystemDaemonBound(raw []byte, state, host string, rootOverlay realReviewRootOverlay) bool {
+	if !rootOverlay.valid() {
+		return false
+	}
 	config, ok := realReviewFilesystemDecode(raw)
 	if !ok || config["exec-root"] != state+"/exec" || config["data-root"] != state+"/mount/docker" || config["storage-driver"] != "overlay2" {
 		return false
@@ -423,7 +446,15 @@ func realReviewFilesystemDaemonBound(raw []byte, state, host string) bool {
 	runtimes, runtimesOK := config["runtimes"].(map[string]any)
 	runsc, runscOK := runtimes["runsc"].(map[string]any)
 	args, argsOK := runsc["runtimeArgs"].([]any)
-	return hostsOK && len(hosts) == 1 && hosts[0] == host && runtimesOK && runscOK && len(runsc) == 2 && runsc["path"] == "/usr/bin/runsc" && argsOK && len(args) == 1 && args[0] == "--host-uds=open"
+	if !hostsOK || len(hosts) != 1 || hosts[0] != host || !runtimesOK || !runscOK || len(runsc) != 2 || runsc["path"] != "/usr/bin/runsc" || !argsOK || len(args) != len(rootOverlay.runscArgs()) {
+		return false
+	}
+	for index, expected := range rootOverlay.runscArgs() {
+		if args[index] != expected {
+			return false
+		}
+	}
+	return true
 }
 
 func realReviewFilesystemInteger(value any) (int64, bool) {

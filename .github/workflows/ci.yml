@@ -595,7 +595,9 @@ jobs:
           go test ./deploy -count=1 -timeout=120s
           go vet ./deploy
       - name: Verify acceptance runtime safety contracts
-        run: python3 .github/scripts/test_review_acceptance_runtime.py
+        run: |
+          python3 .github/scripts/test_review_acceptance_runtime.py
+          python3 .github/scripts/test_verify_review_acceptance_results.py
 
   deploy-scripts-test:
     name: Deploy Scripts Test

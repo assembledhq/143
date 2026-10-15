@@ -136,6 +136,8 @@ func readRealReviewToken(name string) (string, error) {
 //nolint:paralleltest // repository cases measure bounded worker resources sequentially without sibling contention
 func TestReviewRealRepositoryAcceptance(t *testing.T) {
 	t.Parallel()
+	rootOverlay, overlayErr := parseRealReviewRootOverlay(os.Getenv("REVIEW_ACCEPTANCE_ROOT_OVERLAY"), os.Getenv("REVIEW_REAL_REPOSITORY_ACCEPTANCE") == "1", os.Getenv("REVIEW_ACCEPTANCE_RUNTIME_STATE"), os.Getenv("REVIEW_ACCEPTANCE_RUNTIME"))
+	require.NoError(t, overlayErr, "root overlay selector must be valid and explicitly isolated before private input is read")
 	if os.Getenv("REVIEW_REAL_REPOSITORY_ACCEPTANCE") != "1" {
 		t.Skip("opt in with make test-review-real-repository-acceptance")
 	}
@@ -178,8 +180,9 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 	defer cancel()
 	info, err := cli.Info(ctx)
 	require.NoError(t, err, "Docker daemon must be reachable")
-	_, registered := info.Runtimes["runsc"]
+	registration, registered := info.Runtimes["runsc"]
 	require.True(t, registered, "gVisor must be registered")
+	require.True(t, realReviewLoadedRuntimeMatches(rootOverlay, registration), "the running daemon must load the exact selected runsc registration")
 	require.Equal(t, "2", info.CgroupVersion, "real-repository resource acceptance requires host cgroup v2")
 	require.Equal(t, "cgroupfs", info.CgroupDriver, "disposable acceptance daemon must explicitly match runsc's filesystem cgroup driver")
 	inspected, err := cli.ImageInspect(ctx, image)
@@ -200,22 +203,28 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 			if profileHelper {
 				require.Equal(t, realReviewProfileHelperSHA256, repo.HelperSHA256[".143/review-sources.py"], "diagnostic profiling supports only its exact hash-bound Assembled helper")
 			}
-			provider := &realReviewProvider{profileSourceHelper: profileHelper, DockerProvider: providers.NewDockerProvider(observed, zerolog.New(logs).Level(zerolog.DebugLevel), providers.WithRuntime("runsc"), providers.WithNetwork(networkName), providers.WithRequireDiskQuota(repo.DiskLimitGB > 0), providers.WithResolvConf(resolvConf)), client: cli, image: image, network: networkName, repo: repo, logs: logs, surfaces: surfaces, containers: map[string]*agent.Sandbox{}}
+			provider := &realReviewProvider{rootOverlay: rootOverlay, profileSourceHelper: profileHelper, DockerProvider: providers.NewDockerProvider(observed, zerolog.New(logs).Level(zerolog.DebugLevel), providers.WithRuntime("runsc"), providers.WithNetwork(networkName), providers.WithRequireDiskQuota(repo.DiskLimitGB > 0), providers.WithResolvConf(resolvConf)), client: cli, image: image, network: networkName, repo: repo, logs: logs, surfaces: surfaces, containers: map[string]*agent.Sandbox{}}
 			tokens := &realReviewTokens{token: token, installationID: repo.InstallationID}
 			preparationPolicy, policyErr := reviewpreparation.NewPolicy(true, []string{repo.FullName})
 			require.NoError(t, policyErr, "acceptance must explicitly enable preparation for its exact private repository identity")
 			orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{Provider: provider, Repositories: realReviewRepoStore{repo}, GitHub: tokens, Env: agent.NewAgentEnv(agent.AgentEnvDeps{}), Logger: zerolog.New(logs), ReviewPreparationPolicy: preparationPolicy, SandboxCapacity: agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{Counter: acceptanceCapacityCounter{}, MaxActive: 1, Logger: zerolog.Nop()})})
-			report := map[string]any{"repository": repo.FullName, "base_sha": repo.BaseSHA, "head_sha": repo.HeadSHA, "config_sha256": repo.ConfigSHA256, "helper_sha256": repo.HelperSHA256, "source_sha": sourceSHA, "image_id": inspected.ID, "image_os": inspected.Os, "image_architecture": inspected.Architecture, "docker_server_version": info.ServerVersion, "docker_storage_driver": info.Driver, "docker_storage_driver_status": info.DriverStatus, "docker_data_root": info.DockerRootDir, "runsc_version": os.Getenv("REVIEW_ACCEPTANCE_RUNSC_VERSION"), "runtime": "runsc", "cpu_limit": repo.CPULimit, "memory_limit_mb": repo.MemoryLimitMB, "disk_limit_gb": repo.DiskLimitGB, "disk_quota_required": repo.DiskLimitGB > 0, "token_kind": repo.TokenKind, "observation": "trusted run/capture observers record fixed labels and process identity; original functions, payload, deadlines, recipe and security guards are preserved", "limits": []string{"no LLM reviewer execution or durable workspace publication", "GitHub Actions job tokens do not establish deployed GitHub App token issuance", "worker network policy and deployed image identity require separate acceptance"}}
+			report := map[string]any{"repository": repo.FullName, "base_sha": repo.BaseSHA, "head_sha": repo.HeadSHA, "config_sha256": repo.ConfigSHA256, "helper_sha256": repo.HelperSHA256, "source_sha": sourceSHA, "image_id": inspected.ID, "image_os": inspected.Os, "image_architecture": inspected.Architecture, "docker_server_version": info.ServerVersion, "docker_storage_driver": info.Driver, "docker_storage_driver_status": info.DriverStatus, "docker_data_root": info.DockerRootDir, "runsc_version": os.Getenv("REVIEW_ACCEPTANCE_RUNSC_VERSION"), "runtime": "runsc", "cpu_limit": repo.CPULimit, "memory_limit_mb": repo.MemoryLimitMB, "disk_limit_gb": repo.DiskLimitGB, "snapshot_limit_bytes": repo.SnapshotLimitBytes, "disk_quota_required": repo.DiskLimitGB > 0, "token_kind": repo.TokenKind, "observation": "trusted run/capture observers record fixed labels and process identity; original functions, payload, deadlines, recipe and security guards are preserved", "limits": []string{"no LLM reviewer execution or durable workspace publication", "GitHub Actions job tokens do not establish deployed GitHub App token issuance", "worker network policy and deployed image identity require separate acceptance"}}
 			if profileHelper {
 				report["result_kind"], report["acceptance_eligible"] = "diagnostic_profile", false
 			}
 			t.Cleanup(func() {
-				succeeded := !t.Failed() && !provider.credentialDetected() && provider.created.Load() == provider.destroyed.Load()
+				runtimeContract := realReviewAcceptedRuntimeContract(rootOverlay, profileHelper, provider.created.Load(), provider.creationResources)
+				succeeded := !t.Failed() && !provider.credentialDetected() && provider.created.Load() == provider.destroyed.Load() && runtimeContract.AllCreationsVerified
+				report["runtime_contract"] = runtimeContract
+				report["acceptance_eligible"] = !profileHelper && runtimeContract.AllCreationsVerified
+				if !profileHelper {
+					report["result_kind"] = "normal_acceptance"
+				}
 				report["passed"] = succeeded && !profileHelper
 				if profileHelper {
 					report["diagnostic_execution_succeeded"] = succeeded
 				}
-				report["disk_quota_accepted"] = !t.Failed() && !provider.credentialDetected() && repo.DiskLimitGB > 0 && provider.created.Load() > 0 && provider.created.Load() == provider.destroyed.Load()
+				report["disk_quota_accepted"] = succeeded && repo.DiskLimitGB > 0
 				report["credential_detected"] = provider.credentialDetected()
 				report["token_requests"] = tokens.calls.Load()
 				report["created_containers"] = provider.created.Load()
@@ -237,6 +246,7 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(artifactRoot, repo.Name+".log"), []byte(retained), 0o600), "bounded private provider logs should persist")
 				require.False(t, provider.credentialDetected(), "independent complete SDK, environment, provider-log, stdout and stderr streams must exclude the host credential")
 				require.Equal(t, provider.created.Load(), provider.destroyed.Load(), "every owned container must be destroyed")
+				require.True(t, runtimeContract.AllCreationsVerified, "every creation must prove the exact selected runtime contract")
 			})
 			t.Cleanup(func() { provider.cleanup(t) })
 			session := realReviewSession(t, repo)
@@ -544,6 +554,7 @@ type realReviewProvider struct {
 	destructionTraces    []realReviewDestroyedTrace
 	destructionResources []realReviewDestructionResources
 	memoryMonitors       map[string]*realReviewMemoryMonitor
+	rootOverlay          realReviewRootOverlay
 	profileSourceHelper  bool
 	sourceProfiles       map[string]*realReviewSourceProfile
 	created, destroyed   atomic.Int64
@@ -578,6 +589,11 @@ func (p *realReviewProvider) credentialDetected() bool {
 }
 
 func (p *realReviewProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+	info, infoErr := p.client.Info(ctx)
+	registration, registered := info.Runtimes["runsc"]
+	if infoErr != nil || !registered || !realReviewLoadedRuntimeMatches(p.rootOverlay, registration) {
+		return nil, errors.New("loaded runtime registration differs from selected acceptance mode")
+	}
 	cfg.Image, cfg.NetworkName, cfg.CPULimit, cfg.MemoryLimitMB, cfg.DiskLimitGB = p.image, p.network, p.repo.CPULimit, p.repo.MemoryLimitMB, p.repo.DiskLimitGB
 	sandbox, err := p.DockerProvider.Create(ctx, cfg)
 	if err != nil {
@@ -603,7 +619,7 @@ func (p *realReviewProvider) Create(ctx context.Context, cfg agent.SandboxConfig
 	if p.repo.DiskLimitGB > 0 && actual.HostConfig.StorageOpt["size"] != fmt.Sprintf("%dG", p.repo.DiskLimitGB) {
 		return nil, errors.New("actual disk quota differs from required private input")
 	}
-	resources := map[string]any{"runtime": actual.HostConfig.Runtime, "memory_bytes": actual.HostConfig.Memory, "nano_cpus": actual.HostConfig.NanoCPUs, "storage_options": actual.HostConfig.StorageOpt, "storage_driver": actual.Driver, "network_mode": actual.HostConfig.NetworkMode}
+	resources := map[string]any{"container_id": sandbox.ID, "runtime": actual.HostConfig.Runtime, "memory_bytes": actual.HostConfig.Memory, "nano_cpus": actual.HostConfig.NanoCPUs, "storage_options": actual.HostConfig.StorageOpt, "storage_driver": actual.Driver, "network_mode": actual.HostConfig.NetworkMode}
 	p.creationResources = append(p.creationResources, resources)
 	// SDK intent and guest statistics cannot prove resource enforcement. Read
 	// the host kernel for this exact running sandbox before any repository work.
@@ -612,36 +628,39 @@ func (p *realReviewProvider) Create(ctx context.Context, cfg agent.SandboxConfig
 	if proofErr != nil {
 		return nil, fmt.Errorf("actual host kernel resource enforcement failed: %w", proofErr)
 	}
-	// Only the explicit profile diagnostic reads sanitized effective runtime
-	// state. Ordinary acceptance keeps its existing observation path.
-	var filesystem *realReviewRuntimeFilesystemProof
-	if p.profileSourceHelper {
-		observed, filesystemErr := observeRealReviewRuntimeFilesystem(ctx, os.Getenv("REVIEW_ACCEPTANCE_RUNTIME_STATE"), p.client.DaemonHost(), os.Getenv("REVIEW_ACCEPTANCE_RUNSC_VERSION"), sandbox.ID, actual.State.Pid)
-		filesystem = &observed
-		resources["effective_runtime_filesystem"] = filesystem
-		if filesystemErr != nil {
-			return nil, fmt.Errorf("effective runtime filesystem observation failed: %w", filesystemErr)
-		}
+	// The explicit candidate always proves its effective mode, including every
+	// restored container. Profiling is an independent reason to observe state.
+	filesystem, filesystemErr := verifyRealReviewCreatedFilesystem(p.rootOverlay, p.profileSourceHelper, func() (realReviewRuntimeFilesystemProof, error) {
+		return observeRealReviewRuntimeFilesystem(ctx, os.Getenv("REVIEW_ACCEPTANCE_RUNTIME_STATE"), p.client.DaemonHost(), os.Getenv("REVIEW_ACCEPTANCE_RUNSC_VERSION"), sandbox.ID, actual.State.Pid, p.rootOverlay)
+	}, func(filesystem *realReviewRuntimeFilesystemProof) error {
 		// Recheck the same live PID/cgroup after the bounded privileged read.
 		proof, proofErr = observeRealReviewKernelResources(sandbox.ID, actual.State.Pid, actual.HostConfig.Memory, actual.HostConfig.NanoCPUs)
 		resources["kernel_cgroup_proof"] = proof
 		if proofErr != nil {
 			filesystem.Verified, filesystem.UnavailableReason = false, "kernel_identity_changed"
-			return nil, fmt.Errorf("runtime filesystem kernel identity confirmation failed: %w", proofErr)
+			return errors.New("runtime filesystem kernel identity confirmation failed")
 		}
-	}
-	confirmed, confirmErr := p.client.ContainerInspect(ctx, sandbox.ID)
-	if filesystem != nil {
+		confirmed, confirmErr := p.client.ContainerInspect(ctx, sandbox.ID)
 		if err := confirmRealReviewRuntimeFilesystem(filesystem, actual, confirmed, confirmErr); err != nil {
 			proof.Verified = false
 			resources["kernel_cgroup_proof"] = proof
-			return nil, err
+			return err
 		}
+		return nil
+	})
+	if filesystem != nil {
+		resources["effective_runtime_filesystem"] = filesystem
 	}
-	if confirmErr != nil || confirmed.ID != sandbox.ID || confirmed.State == nil || !confirmed.State.Running || confirmed.State.Pid != actual.State.Pid {
-		proof.Verified = false
-		resources["kernel_cgroup_proof"] = proof
-		return nil, errors.New("sandbox process identity changed during host kernel resource verification")
+	if filesystemErr != nil {
+		return nil, filesystemErr
+	}
+	if filesystem == nil {
+		confirmed, confirmErr := p.client.ContainerInspect(ctx, sandbox.ID)
+		if confirmErr != nil || confirmed.ID != sandbox.ID || confirmed.State == nil || !confirmed.State.Running || confirmed.State.Pid != actual.State.Pid {
+			proof.Verified = false
+			resources["kernel_cgroup_proof"] = proof
+			return nil, errors.New("sandbox process identity changed during host kernel resource verification")
+		}
 	}
 	var profile *realReviewSourceProfile
 	if p.profileSourceHelper {
