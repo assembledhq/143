@@ -612,7 +612,32 @@ func (p *realReviewProvider) Create(ctx context.Context, cfg agent.SandboxConfig
 	if proofErr != nil {
 		return nil, fmt.Errorf("actual host kernel resource enforcement failed: %w", proofErr)
 	}
+	// Only the explicit profile diagnostic reads sanitized effective runtime
+	// state. Ordinary acceptance keeps its existing observation path.
+	var filesystem *realReviewRuntimeFilesystemProof
+	if p.profileSourceHelper {
+		observed, filesystemErr := observeRealReviewRuntimeFilesystem(ctx, os.Getenv("REVIEW_ACCEPTANCE_RUNTIME_STATE"), p.client.DaemonHost(), os.Getenv("REVIEW_ACCEPTANCE_RUNSC_VERSION"), sandbox.ID, actual.State.Pid)
+		filesystem = &observed
+		resources["effective_runtime_filesystem"] = filesystem
+		if filesystemErr != nil {
+			return nil, fmt.Errorf("effective runtime filesystem observation failed: %w", filesystemErr)
+		}
+		// Recheck the same live PID/cgroup after the bounded privileged read.
+		proof, proofErr = observeRealReviewKernelResources(sandbox.ID, actual.State.Pid, actual.HostConfig.Memory, actual.HostConfig.NanoCPUs)
+		resources["kernel_cgroup_proof"] = proof
+		if proofErr != nil {
+			filesystem.Verified, filesystem.UnavailableReason = false, "kernel_identity_changed"
+			return nil, fmt.Errorf("runtime filesystem kernel identity confirmation failed: %w", proofErr)
+		}
+	}
 	confirmed, confirmErr := p.client.ContainerInspect(ctx, sandbox.ID)
+	if filesystem != nil {
+		if err := confirmRealReviewRuntimeFilesystem(filesystem, actual, confirmed, confirmErr); err != nil {
+			proof.Verified = false
+			resources["kernel_cgroup_proof"] = proof
+			return nil, err
+		}
+	}
 	if confirmErr != nil || confirmed.ID != sandbox.ID || confirmed.State == nil || !confirmed.State.Running || confirmed.State.Pid != actual.State.Pid {
 		proof.Verified = false
 		resources["kernel_cgroup_proof"] = proof
