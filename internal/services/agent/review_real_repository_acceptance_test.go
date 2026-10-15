@@ -810,6 +810,7 @@ type realReviewMemoryTelemetry struct {
 	MaxObservedStat         map[string]int64                   `json:"max_observed_memory_stat,omitempty"`
 	StatSamples             int                                `json:"memory_stat_sample_count"`
 	StatAtMaxCurrent        *realReviewMemoryStatAtCurrentPeak `json:"memory_stat_at_max_observed_memory_current"`
+	JointTimeline           *realReviewMemoryTimeline          `json:"diagnostic_joint_memory_hash_timeline,omitempty"`
 }
 
 type realReviewMemoryMonitor struct {
@@ -819,14 +820,17 @@ type realReviewMemoryMonitor struct {
 	done     chan struct{}
 	read     func() realReviewMemorySample
 	profile  *realReviewSourceProfile
+	started  time.Time
+	now      func() time.Time
 	retained realReviewMemoryTelemetry
 }
 
-// One monitor retains a fixed-size aggregate, never a timeline. Cancellation
-// joins its goroutine before a final read and before private result serialization.
+// Normal monitors retain only fixed-size aggregates. A diagnostic profile also
+// enables a bounded, adaptively thinned joint timeline using the same reads.
+// Cancellation joins its goroutine before a final read and serialization.
 func newRealReviewMemoryMonitor(containerID string, read func() realReviewMemorySample, interval, lifetime time.Duration, profiles ...*realReviewSourceProfile) *realReviewMemoryMonitor {
 	ctx, cancel := context.WithTimeout(context.Background(), lifetime)
-	monitor := &realReviewMemoryMonitor{cancel: cancel, done: make(chan struct{}), read: read,
+	monitor := &realReviewMemoryMonitor{cancel: cancel, done: make(chan struct{}), read: read, started: time.Now(),
 		retained: realReviewMemoryTelemetry{CgroupPath: "/docker/" + containerID, IntervalMS: interval.Milliseconds(), MaxDurationMS: lifetime.Milliseconds(),
 			ReadLimitsBytes: map[string]int64{"memory.peak": 128, "memory.current": 128, "memory.events": 4096, "memory.stat": 8192}}}
 	if len(profiles) > 0 && profiles[0] != nil {
@@ -884,7 +888,8 @@ func (m *realReviewMemoryMonitor) record(sample realReviewMemorySample) {
 		retainRealReviewCounterMaximum(m.retained.MaxObservedStat, sample.MemoryStat)
 	}
 	if m.profile != nil {
-		m.profile.observeMemory(sample)
+		progress, observedAt := m.profile.observeMemoryAndProgress(sample, m.now)
+		m.recordJointTimeline(sample, progress, observedAt)
 	}
 
 	if sample.MemoryEvents != nil {
@@ -918,6 +923,7 @@ func (m *realReviewMemoryMonitor) stop() realReviewMemoryTelemetry {
 	result := m.retained
 	result.ReadLimitsBytes = maps.Clone(result.ReadLimitsBytes)
 	result.Latest = cloneRealReviewMemorySample(result.Latest)
+	result.JointTimeline = cloneRealReviewMemoryTimeline(result.JointTimeline)
 	result.MaxObservedPeakBytes = retainRealReviewMemoryMaximum(nil, result.MaxObservedPeakBytes)
 	result.MaxObservedCurrentBytes = retainRealReviewMemoryMaximum(nil, result.MaxObservedCurrentBytes)
 	result.MaxObservedEvents, result.MaxObservedStat = maps.Clone(result.MaxObservedEvents), maps.Clone(result.MaxObservedStat)
@@ -1553,6 +1559,8 @@ type realReviewSourceProfile struct {
 	checkpointCount      int
 	checkpointInvocation int
 	lastCheckpoint       *realReviewProfileCheckpoint
+	lastCheckpointAt     time.Time
+	now                  func() time.Time
 	streamCount          int
 	defaultStream        realReviewProfileStream
 }
@@ -1821,6 +1829,10 @@ func (p *realReviewSourceProfile) consumeCheckpoint(value realReviewProfileRecor
 	if stream.invocation >= p.checkpointInvocation {
 		copy := checkpoint
 		p.lastCheckpoint, p.checkpointInvocation = &copy, stream.invocation
+		p.lastCheckpointAt = time.Now()
+		if p.now != nil {
+			p.lastCheckpointAt = p.now()
+		}
 	}
 }
 
@@ -1835,35 +1847,52 @@ func retainRealReviewCounterMaximum(target, sample map[string]int64) {
 // Every active phase observes container-wide samples; overlapping phases do not
 // receive exclusive attribution. memory.peak remains a lifetime aggregate only.
 func (p *realReviewSourceProfile) observeMemory(sample realReviewMemorySample) {
+	p.observeMemoryAndProgress(sample, nil)
+}
+
+// The monitor acquires this profile lock under its own lock. Profile methods
+// never acquire the monitor lock, so direct profile observations cannot invert it.
+// Capture the host observation time after acquiring it so a newly validated
+// checkpoint cannot be associated with a negative age during a concurrent read.
+func (p *realReviewSourceProfile) observeMemoryAndProgress(sample realReviewMemorySample, now func() time.Time) (realReviewMemoryProgress, time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.invalid != "" {
-		return
+	observedAt := time.Now()
+	if now != nil {
+		observedAt = now()
 	}
-	for _, cell := range p.cells {
-		if cell.Active == 0 {
-			continue
-		}
-		cell.MemorySamples++
-		cell.MaxCurrentBytes = retainRealReviewMemoryMaximum(cell.MaxCurrentBytes, sample.MemoryCurrentBytes)
-		if sample.MemoryStat != nil {
-			if cell.MaxMemoryStat == nil {
-				cell.MaxMemoryStat = map[string]int64{}
+	if p.invalid == "" {
+		for _, cell := range p.cells {
+			if cell.Active == 0 {
+				continue
 			}
-			retainRealReviewCounterMaximum(cell.MaxMemoryStat, sample.MemoryStat)
-		}
-		if sample.MemoryEvents != nil && cell.lastEvents != nil {
-			if cell.SampledEventDelta == nil {
-				cell.SampledEventDelta = map[string]int64{}
+			cell.MemorySamples++
+			cell.MaxCurrentBytes = retainRealReviewMemoryMaximum(cell.MaxCurrentBytes, sample.MemoryCurrentBytes)
+			if sample.MemoryStat != nil {
+				if cell.MaxMemoryStat == nil {
+					cell.MaxMemoryStat = map[string]int64{}
+				}
+				retainRealReviewCounterMaximum(cell.MaxMemoryStat, sample.MemoryStat)
 			}
-			for key, current := range sample.MemoryEvents {
-				if previous, present := cell.lastEvents[key]; present && current >= previous {
-					cell.SampledEventDelta[key] += current - previous
+			if sample.MemoryEvents != nil && cell.lastEvents != nil {
+				if cell.SampledEventDelta == nil {
+					cell.SampledEventDelta = map[string]int64{}
+				}
+				for key, current := range sample.MemoryEvents {
+					if previous, present := cell.lastEvents[key]; present && current >= previous {
+						cell.SampledEventDelta[key] += current - previous
+					}
 				}
 			}
+			cell.lastEvents = maps.Clone(sample.MemoryEvents)
 		}
-		cell.lastEvents = maps.Clone(sample.MemoryEvents)
 	}
+	progress := realReviewMemoryProgress{invocation: p.checkpointInvocation, observedAt: p.lastCheckpointAt, invalid: p.invalid != ""}
+	if p.lastCheckpoint != nil {
+		checkpoint := *p.lastCheckpoint
+		progress.checkpoint = &checkpoint
+	}
+	return progress, observedAt
 }
 
 func (p *realReviewSourceProfile) result() realReviewProfileResult {
