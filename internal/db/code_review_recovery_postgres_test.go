@@ -45,7 +45,7 @@ func newReviewRecoveryPool(t *testing.T) *pgxpool.Pool {
 CREATE TABLE nodes(id text PRIMARY KEY,host text,mode text DEFAULT 'worker',status text DEFAULT 'active',drain_intent text DEFAULT 'none',started_at timestamptz DEFAULT now(),last_heartbeat_at timestamptz DEFAULT now(),metadata jsonb DEFAULT '{}');
 CREATE TABLE sessions(id uuid PRIMARY KEY,org_id uuid NOT NULL,origin text DEFAULT 'code_review',status text DEFAULT 'idle',container_id text,worker_node_id text,turn_holding_container boolean DEFAULT false,recovery_state text DEFAULT '',recovery_queued_at timestamptz,snapshot_key text,sandbox_state text DEFAULT 'running',created_at timestamptz DEFAULT now()-interval '1 day',last_activity_at timestamptz DEFAULT now()-interval '1 day');
 CREATE TABLE code_review_session_metadata(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL,session_id uuid NOT NULL,review_output_key text DEFAULT 'output',pull_request_id uuid DEFAULT gen_random_uuid(),status text DEFAULT 'queued',created_at timestamptz DEFAULT now()-interval '1 day',completed_at timestamptz,review_output jsonb DEFAULT '{"result":"preserve"}');
-CREATE TABLE code_review_revision_assessments(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),result_origin text,org_id uuid NOT NULL,session_id uuid NOT NULL,status text,publication_state text DEFAULT 'not_started',publication_receipt jsonb);
+CREATE TABLE code_review_revision_assessments(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),result_origin text,org_id uuid NOT NULL,session_id uuid NOT NULL,review_scope text DEFAULT 'full',status text,publication_state text DEFAULT 'not_started',publication_receipt jsonb);
 CREATE TABLE jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL,payload jsonb,status text,job_type text,run_at timestamptz DEFAULT now(),attempts integer DEFAULT 0,max_attempts integer DEFAULT 8,last_error text,updated_at timestamptz DEFAULT now());
 CREATE TABLE session_threads(org_id uuid NOT NULL,session_id uuid NOT NULL,status text);
 CREATE TABLE session_executors(org_id uuid NOT NULL,session_id uuid NOT NULL,status text);
@@ -385,6 +385,93 @@ INSERT INTO code_review_revision_assessments(org_id,session_id,status,publicatio
 			require.NoError(t, err, "wrong-tenant cleanup should fail closed")
 			require.False(t, cleared, "container identity does not permit another tenant to clear ownership")
 		})
+	}
+}
+
+func TestCodeReviewContainerUndispatchedEvidenceFencesPostgres(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		{name: "reserved evidence waits for cleanup", want: true},
+		{name: "running evidence waits for first dispatch", sql: `UPDATE code_review_revision_assessments SET status='running'`, want: true},
+		{name: "full reservation remains protected", sql: `UPDATE code_review_revision_assessments SET review_scope='full'`},
+		{name: "running full assessment remains protected", sql: `UPDATE code_review_revision_assessments SET review_scope='full',status='running'`},
+		{name: "unknown scope remains protected", sql: `UPDATE code_review_revision_assessments SET review_scope=NULL`},
+		{name: "publishing evidence remains protected", sql: `UPDATE code_review_revision_assessments SET status='publishing'`},
+		{name: "uncertain evidence remains protected", sql: `UPDATE code_review_revision_assessments SET publication_state='uncertain'`},
+		{name: "unsent publication reservation remains protected", sql: `UPDATE code_review_revision_assessments SET publication_state='reserved'`},
+		{name: "unknown publication remains protected", sql: `UPDATE code_review_revision_assessments SET publication_state=NULL`},
+		{name: "pending dispatch remains protected", sql: `INSERT INTO code_review_recheck_dispatches(org_id,session_id,assessment_id,status) SELECT org_id,session_id,id,'pending' FROM code_review_revision_assessments`},
+		{name: "running dispatch remains protected", sql: `UPDATE code_review_revision_assessments SET status='running'; INSERT INTO code_review_recheck_dispatches(org_id,session_id,assessment_id,status) SELECT org_id,session_id,id,'running' FROM code_review_revision_assessments`},
+		{name: "completed dispatch still proves prior execution", sql: `INSERT INTO code_review_recheck_dispatches(org_id,session_id,assessment_id,status) SELECT org_id,session_id,id,'completed' FROM code_review_revision_assessments`},
+		{name: "failed dispatch still proves prior execution", sql: `INSERT INTO code_review_recheck_dispatches(org_id,session_id,assessment_id,status) SELECT org_id,session_id,id,'failed' FROM code_review_revision_assessments`},
+		{name: "cancelled dispatch still proves prior execution", sql: `INSERT INTO code_review_recheck_dispatches(org_id,session_id,assessment_id,status) SELECT org_id,session_id,id,'cancelled' FROM code_review_revision_assessments`},
+		{name: "dispatch identity cannot be hidden by a different session", sql: `INSERT INTO code_review_recheck_dispatches(org_id,session_id,assessment_id,status) SELECT org_id,gen_random_uuid(),id,'completed' FROM code_review_revision_assessments`},
+		{name: "another tenant dispatch cannot claim assessment", sql: `INSERT INTO code_review_recheck_dispatches(org_id,session_id,assessment_id,status) SELECT gen_random_uuid(),session_id,id,'running' FROM code_review_revision_assessments`, want: true},
+		{name: "another assessment dispatch does not claim reservation", sql: `INSERT INTO code_review_recheck_dispatches(org_id,session_id,assessment_id,status) SELECT org_id,session_id,gen_random_uuid(),'completed' FROM code_review_revision_assessments`, want: true},
+		{name: "another tenant full assessment cannot claim reservation", sql: `INSERT INTO code_review_revision_assessments(org_id,session_id,review_scope,status) SELECT gen_random_uuid(),id,'full','running' FROM sessions`, want: true},
+		{name: "workspace job remains protected", sql: `INSERT INTO jobs(org_id,payload,status,job_type) SELECT org_id,jsonb_build_object('session_id',id),'pending','prepare_code_review_workspace' FROM sessions`},
+		{name: "active thread remains protected", sql: `INSERT INTO session_threads SELECT org_id,id,'running' FROM sessions`},
+		{name: "executor remains protected", sql: `INSERT INTO session_executors SELECT org_id,id,'draining' FROM sessions`},
+		{name: "runtime remains protected", sql: `INSERT INTO thread_runtimes SELECT org_id,id,'paused' FROM sessions`},
+		{name: "preview remains protected", sql: `INSERT INTO preview_instances SELECT org_id,id,true FROM sessions`},
+		{name: "holder remains protected", sql: `INSERT INTO session_sandbox_holders SELECT org_id,id,'active',now()+interval '1 hour' FROM sessions`},
+	}
+	paths := []struct {
+		name  string
+		stale bool
+	}{{name: "idle"}, {name: "stale terminal", stale: true}}
+	for _, path := range paths {
+		for _, tt := range tests {
+			t.Run(path.name+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				pool := newReviewRecoveryPool(t)
+				ctx := context.Background()
+				org, sessionID := uuid.New(), uuid.New()
+				_, err := pool.Exec(ctx, `INSERT INTO sessions(id,org_id,container_id,worker_node_id,turn_holding_container,recovery_state,snapshot_key) VALUES($1,$2,'retained-container','worker',$3,$4,'saved-snapshot');
+INSERT INTO code_review_session_metadata(org_id,session_id,status,completed_at) VALUES($2,$1,'completed',now()-interval '1 day');
+INSERT INTO code_review_revision_assessments(org_id,session_id,review_scope,status) VALUES($2,$1,'evidence_only','reserved');`, sessionID, org, path.stale, map[bool]string{false: "", true: "queued"}[path.stale])
+				require.NoError(t, err, "seed retained workspace and evidence reservation before its first dispatch")
+				if tt.sql != "" {
+					_, err := pool.Exec(ctx, tt.sql)
+					require.NoError(t, err, "seed exact assessment or live execution protection")
+				}
+				store := NewSessionStore(pool)
+				finalize := store.FinalizeIdleCodeReviewContainer
+				if path.stale {
+					finalize = store.FinalizeStaleTerminalCodeReviewContainer
+				}
+				cleared, err := finalize(ctx, uuid.New(), sessionID, "retained-container")
+				require.NoError(t, err, "another tenant cannot finalize an evidence reservation's workspace")
+				require.False(t, cleared, "tenant mismatch must preserve the retained workspace")
+				read := func() string {
+					t.Helper()
+					var state string
+					err := pool.QueryRow(ctx, `SELECT jsonb_build_object('session',to_jsonb(s),'metadata',(SELECT jsonb_agg(to_jsonb(m)) FROM code_review_session_metadata m),'assessments',(SELECT jsonb_agg(to_jsonb(a)) FROM code_review_revision_assessments a),'dispatches',(SELECT jsonb_agg(to_jsonb(d)) FROM code_review_recheck_dispatches d))::text FROM sessions s WHERE org_id=$1 AND id=$2`, org, sessionID).Scan(&state)
+					require.NoError(t, err, "snapshot exact workspace, assessment and publication ownership")
+					return state
+				}
+				before := read()
+				cleared, err = finalize(ctx, org, sessionID, "retained-container")
+				require.NoError(t, err, "finalize retained workspace under admission's PR lock")
+				require.Equal(t, tt.want, cleared, "only evidence work with no first dispatch may yield workspace cleanup")
+				if !tt.want {
+					require.Equal(t, before, read(), "every protected owner must retain its exact durable state")
+					return
+				}
+				var expected map[string]any
+				require.NoError(t, json.Unmarshal([]byte(before), &expected), "decode exact ownership preservation baseline")
+				session := expected["session"].(map[string]any)
+				session["container_id"], session["worker_node_id"], session["recovery_queued_at"] = nil, nil, nil
+				session["turn_holding_container"], session["recovery_state"], session["sandbox_state"] = false, "", "snapshotted"
+				raw, err := json.Marshal(expected)
+				require.NoError(t, err, "encode exact expected workspace-only cleanup")
+				require.JSONEq(t, string(raw), read(), "cleanup must preserve the admitted assessment, output, snapshot and dispatch history")
+			})
+		}
 	}
 }
 

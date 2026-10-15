@@ -22,7 +22,8 @@ type EndedFullReviewParams struct {
 
 // ReconcileEndedFullReview either permits consumption of validated saved work,
 // or atomically fails an unsent review whose parent ended without that work.
-// It never starts a new agent turn or modifies saved reviewer evidence.
+// It never starts a new agent turn or modifies saved reviewer evidence. An idle
+// workspace reference may remain until this controller settles and GC can run.
 func (s *CodeReviewScheduleStore) ReconcileEndedFullReview(ctx context.Context, orgID uuid.UUID, in EndedFullReviewParams, canResume func([]models.CodeReviewAgentResult) bool) (bool, error) {
 	resumable := false
 	err := s.WithLockedPR(ctx, orgID, in.RepositoryID, in.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
@@ -38,7 +39,7 @@ func (s *CodeReviewScheduleStore) ReconcileEndedFullReview(ctx context.Context, 
    WHERE s.org_id=$1 AND s.id=$2 AND s.origin='code_review' AND s.repository_id=$3
    AND s.status=$4 AND s.current_turn=$5
    AND (s.code_review_owner_pr_id IS NULL OR s.code_review_owner_pr_id=$6)
-   AND (`+codeReviewRecheckSessionDrainedSQL+`)
+   AND (`+codeReviewSessionExecutionDrainedSQL+`)
    AND NOT EXISTS(SELECT 1 FROM session_threads t WHERE t.org_id=s.org_id AND t.session_id=s.id AND t.status IN ('pending','running','awaiting_input'))
    AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.org_id=s.org_id AND j.status IN ('pending','running')
     AND j.payload->>'session_id'=s.id::text AND j.id<>$7

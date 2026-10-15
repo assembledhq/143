@@ -548,6 +548,9 @@ func reconcileCompletedFullAssessment(ctx context.Context, stores *Stores, metad
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	store := db.NewCodeReviewAssessmentStore(tx)
+	if err := db.NewCodeReviewRecheckStore(tx).LockFullAssessmentCompletion(ctx, tx, assessment.OrgID, assessment.PullRequestID); err != nil {
+		return err
+	}
 	if err := store.LinkFullReviewEvidence(ctx, assessment.OrgID, assessment.ID, assessment.SessionID); err != nil {
 		return err
 	}
@@ -750,6 +753,9 @@ func completeFullAssessment(ctx context.Context, txStarter db.TxStarter, assessm
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	assessments := db.NewCodeReviewAssessmentStore(tx)
+	if err := db.NewCodeReviewRecheckStore(tx).LockFullAssessmentCompletion(ctx, tx, assessment.OrgID, assessment.PullRequestID); err != nil {
+		return err
+	}
 	if err := assessments.LinkFullReviewEvidence(ctx, assessment.OrgID, assessment.ID, assessment.SessionID); err != nil {
 		return err
 	}

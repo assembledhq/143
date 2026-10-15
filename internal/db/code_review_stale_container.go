@@ -45,6 +45,11 @@ func (s *SessionStore) finalizeCodeReviewContainer(ctx context.Context, orgID, s
 		// Publication retries carry session_id but do not use its sandbox.
 		// Fence sandbox work only; a controller must still match the review's
 		// output identity. Assessments and dispatches retain publication owners.
+		// A reserved/running evidence assessment without any dispatch cannot yet
+		// use this sandbox: its first dispatch requires a cleared container_id.
+		// Let GC clear the predecessor workspace before that dispatch. The PR
+		// lock serializes this proof with admission and dispatch; any dispatch
+		// history or publication ownership still keeps the assessment fenced.
 		tag, err := tx.Exec(ctx, `UPDATE sessions s
  SET container_id=NULL,worker_node_id=NULL,turn_holding_container=false,
      recovery_state='',recovery_queued_at=NULL,
@@ -68,7 +73,11 @@ func (s *SessionStore) finalizeCodeReviewContainer(ctx context.Context, orgID, s
    AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
    AND NOT EXISTS(SELECT 1 FROM session_sandbox_holders h WHERE h.org_id=s.org_id AND h.session_id=s.id AND h.status IN ('active','draining') AND h.expires_at>clock_timestamp())
    AND NOT EXISTS(SELECT 1 FROM code_review_revision_assessments a WHERE a.org_id=s.org_id AND a.session_id=s.id
-                  AND (a.status IN ('reserved','running','publishing') OR a.publication_state='uncertain'))
+                  AND (a.status='publishing' OR a.publication_state='uncertain'
+                    OR (a.status IN ('reserved','running')
+                      AND (a.review_scope IS DISTINCT FROM 'evidence_only'
+                        OR a.publication_state IS DISTINCT FROM 'not_started'
+                        OR EXISTS(SELECT 1 FROM code_review_recheck_dispatches d WHERE d.org_id=a.org_id AND d.assessment_id=a.id)))))
    AND NOT EXISTS(SELECT 1 FROM code_review_recheck_dispatches d WHERE d.org_id=s.org_id AND d.session_id=s.id AND d.status IN ('pending','running'))`, orgID, sessionID, expectedContainerID, stale)
 		if err != nil {
 			return err
