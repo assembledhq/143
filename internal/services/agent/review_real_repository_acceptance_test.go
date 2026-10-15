@@ -1464,7 +1464,7 @@ func realReviewLogBuffer(token string) *acceptanceLogBuffer {
 	return buffer
 }
 
-const realReviewProfileHelperSHA256 = "0b9645cfbb468292dc3d699219f6839f30439b8766c7389a4984e271efef694f"
+const realReviewProfileHelperSHA256 = "dab54afa0ae04fcc1014150d5b14ed5948dac28a3bdde9752e1a5be79bd2501b"
 const realReviewProfilePrefix = "143_SOURCE_PROFILE_V1 "
 
 //go:embed testdata/review_source_profile.py
