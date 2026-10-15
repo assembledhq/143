@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -94,12 +97,10 @@ func TestRealReviewProfileCheckpointStreams(t *testing.T) {
 		name           string
 		separateWriter bool
 		defaultStream  bool
-		expectedCount  int
-		expectedReason string
 	}{
-		{name: "each helper command resets cumulative counters", separateWriter: true, expectedCount: 2},
-		{name: "one command cannot reset cumulative counters", expectedCount: 1, expectedReason: "regressing_checkpoint"},
-		{name: "default consumption cannot reset cumulative counters", defaultStream: true, expectedCount: 1, expectedReason: "regressing_checkpoint"},
+		{name: "separate execs each start a helper invocation", separateWriter: true},
+		{name: "prepare then verify in one exec starts a new helper invocation"},
+		{name: "default consumption also recognizes a new helper invocation", defaultStream: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -114,26 +115,66 @@ func TestRealReviewProfileCheckpointStreams(t *testing.T) {
 			} else {
 				decoder := &realReviewProfileDecoder{profile: profile}
 				_, err := decoder.Write(append(append([]byte(realReviewProfilePrefix), firstRaw...), '\n'))
-				require.NoError(t, err, "the first helper checkpoint should drain")
+				require.NoError(t, err, "the prepare helper checkpoint should drain")
 				if tt.separateWriter {
 					decoder = &realReviewProfileDecoder{profile: profile}
 				}
 				_, err = decoder.Write(append(append([]byte(realReviewProfilePrefix), secondRaw...), '\n'))
-				require.NoError(t, err, "counter validation must not interrupt the command output writer")
+				require.NoError(t, err, "the verify helper checkpoint should drain in either exec topology")
 				decoder.finish()
 			}
 			result := profile.result()
-			require.Equal(t, tt.expectedReason, result.InvalidReason, "counter resets should be judged within their helper command only")
-			require.Equal(t, tt.expectedCount, result.CheckpointCount, "only valid per-command checkpoints should be retained")
-			require.Equal(t, tt.expectedCount, result.CheckpointInvocation, "the latest valid helper command should own the displayed checkpoint")
-			expected := first
-			if tt.separateWriter {
-				expected = second
-			}
-			require.NotNil(t, result.LastCheckpoint, "the initial valid checkpoint should survive: %s", result.InvalidReason)
-			require.Equal(t, expected, *result.LastCheckpoint, "the latest accepted command should supply its own cumulative totals")
+			require.False(t, result.Invalid, "a fresh helper invocation should reset cumulative counters at its trusted sequence-one boundary")
+			require.Equal(t, 2, result.CheckpointCount, "both helper invocations should retain their valid checkpoints")
+			require.Equal(t, 2, result.CheckpointInvocation, "the verify helper invocation should own the displayed progress")
+			require.NotNil(t, result.LastCheckpoint, "the verify helper checkpoint should survive: %s", result.InvalidReason)
+			require.Equal(t, second, *result.LastCheckpoint, "the verify helper should supply its own cumulative totals rather than inheriting prepare totals")
 		})
 	}
+}
+
+func TestRealReviewProfilePrepareThenVerifyInOneExec(t *testing.T) {
+	t.Parallel()
+	profile := &realReviewSourceProfile{}
+	decoder := &realReviewProfileDecoder{profile: profile}
+	prepare := realReviewProfileCheckpoint{Sequence: 1, ElapsedUS: 100, InventoryUS: 60, InventoryResidualUS: 20, HashUS: 40, ReceiptUS: 100, ReceiptOutsideInventoryUS: 40, InventoryYielded: 3, HashStarted: 3, HashCompleted: 3, ReceiptStarted: 1, ReceiptCompleted: 1}
+	verify := realReviewProfileCheckpoint{Sequence: 1, ElapsedUS: 1, InventoryUS: 1, HashUS: 1, HashStarted: 1, OpenInventory: 1, ActiveInventory: 1, ActiveHash: 1}
+	verified := realReviewProfileCheckpoint{Sequence: 2, ElapsedUS: 70, InventoryUS: 70, InventoryResidualUS: 20, HashUS: 50, InventoryYielded: 3, HashStarted: 3, HashCompleted: 3}
+	records := []string{
+		`{"version":1,"op":1,"phase":6,"category":1}`,
+		`{"version":1,"op":2,"phase":6,"category":1,"duration_us":2,"failed":0}`,
+		`{"version":1,"op":1,"phase":9,"category":1}`,
+		`{"version":1,"op":1,"phase":8,"category":1}`,
+		`{"version":1,"op":2,"phase":8,"category":1,"duration_us":60,"failed":0,"items":3}`,
+		`{"version":1,"op":2,"phase":9,"category":1,"duration_us":100,"failed":0,"items":3}`,
+		string(checkpointProgressJSON(t, prepare, nil)),
+		`{"version":1,"op":1,"phase":6,"category":1}`,
+		`{"version":1,"op":2,"phase":6,"category":1,"duration_us":3,"failed":0}`,
+		`{"version":1,"op":1,"phase":8,"category":1}`,
+		string(checkpointProgressJSON(t, verify, nil)),
+		string(checkpointProgressJSON(t, verified, nil)),
+		`{"version":1,"op":2,"phase":8,"category":1,"duration_us":70,"failed":0,"items":3}`,
+	}
+	for _, record := range records {
+		raw := realReviewProfilePrefix + record + "\n"
+		written, err := io.WriteString(decoder, raw)
+		require.NoError(t, err, "both helper launches should drain through the single cold exec decoder")
+		require.Equal(t, len(raw), written, "all prepare and verify output should remain available to downstream consumers")
+	}
+	decoder.finish()
+	result := profile.result()
+	require.False(t, result.Invalid, "the complete cold prepare and verify lifecycle should keep its diagnostic valid")
+	require.Equal(t, len(records), result.Records, "the sequence-one boundary must neither discard records nor fabricate phase completions")
+	require.Equal(t, 3, result.CheckpointCount, "all prepare and verify checkpoints should contribute to the total")
+	require.Equal(t, 2, result.CheckpointInvocation, "verify should have a distinct first-observed invocation ordinal within the same exec")
+	require.NotNil(t, result.LastCheckpoint, "the completed verify rehash should remain available")
+	require.Equal(t, verified, *result.LastCheckpoint, "verify totals should be scoped to its fresh helper and should not include prepare hashing or receipt work")
+	items := int64(6)
+	require.Equal(t, map[string]realReviewProfileAggregate{
+		"input_binding/all": {Entered: 2, Completed: 2, MaxActive: 1, DurationUS: 5},
+		"inventory/all":     {Entered: 2, Completed: 2, MaxActive: 1, DurationUS: 130, Items: &items},
+		"receipt/all":       {Entered: 1, Completed: 1, MaxActive: 1, DurationUS: 100, Items: &prepare.InventoryYielded},
+	}, result.Phases, "ordinary phase records from both helpers must retain their actual operation counts and durations")
 }
 
 func TestRealReviewProfileCheckpointLatestCommandWins(t *testing.T) {
@@ -144,10 +185,15 @@ func TestRealReviewProfileCheckpointLatestCommandWins(t *testing.T) {
 	latest := realReviewProfileCheckpoint{Sequence: 1, ElapsedUS: 1}
 	olderUpdate := initial
 	olderUpdate.Sequence, olderUpdate.ElapsedUS = 2, 200
+	latestUpdate := latest
+	latestUpdate.Sequence, latestUpdate.ElapsedUS = 2, 2
+	third := realReviewProfileCheckpoint{Sequence: 1, ElapsedUS: 1}
+	thirdUpdate := third
+	thirdUpdate.Sequence, thirdUpdate.ElapsedUS = 2, 3
 	for _, record := range []struct {
 		decoder    *realReviewProfileDecoder
 		checkpoint realReviewProfileCheckpoint
-	}{{first, initial}, {second, latest}, {first, olderUpdate}} {
+	}{{first, initial}, {second, latest}, {first, olderUpdate}, {first, third}, {second, latestUpdate}, {first, thirdUpdate}} {
 		raw := append(append([]byte(realReviewProfilePrefix), checkpointProgressJSON(t, record.checkpoint, nil)...), '\n')
 		written, err := record.decoder.Write(raw)
 		require.NoError(t, err, "interleaved helper output should drain")
@@ -155,10 +201,57 @@ func TestRealReviewProfileCheckpointLatestCommandWins(t *testing.T) {
 	}
 	result := profile.result()
 	require.False(t, result.Invalid, "independent helper streams should preserve their own monotonic sequences")
-	require.Equal(t, 3, result.CheckpointCount, "all three valid checkpoints should contribute to the diagnostic count")
-	require.Equal(t, 2, result.CheckpointInvocation, "a delayed earlier command must not replace the latest command identity")
+	require.Equal(t, 6, result.CheckpointCount, "all valid checkpoints from three helper invocations should contribute to the diagnostic count")
+	require.Equal(t, 3, result.CheckpointInvocation, "a delayed earlier invocation must not replace a new helper within an older exec stream")
 	require.NotNil(t, result.LastCheckpoint, "valid command streams should retain a checkpoint")
-	require.Equal(t, latest, *result.LastCheckpoint, "a delayed earlier command must not replace the latest command totals")
+	require.Equal(t, thirdUpdate, *result.LastCheckpoint, "a delayed earlier invocation must not replace the latest helper totals")
+}
+
+func TestRealReviewProfileInvocationBoundaryRetainsGuards(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		seed         int
+		intermediate func(*testing.T) []byte
+		changeReset  func(map[string]any)
+		wantReason   string
+	}{
+		{name: "reset cannot bypass the shared record cap", seed: 19999, wantReason: "record_count_limit"},
+		{name: "reset must contain every required field", changeReset: func(fields map[string]any) { delete(fields, "hash_completed") }, wantReason: "invalid_checkpoint"},
+		{name: "reset cannot revive a prior regression", intermediate: func(t *testing.T) []byte {
+			checkpoint := checkpointProgressFixture()
+			checkpoint.Sequence, checkpoint.ElapsedUS = 2, 0
+			return checkpointProgressJSON(t, checkpoint, nil)
+		}, wantReason: "regressing_checkpoint"},
+		{name: "reset does not fabricate an unfinished phase exit", intermediate: func(t *testing.T) []byte {
+			return []byte(`{"version":1,"op":1,"phase":8,"category":1}`)
+		}, wantReason: "incomplete_phase_exits"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			profile := &realReviewSourceProfile{records: tt.seed}
+			first := checkpointProgressFixture()
+			profile.consume(checkpointProgressJSON(t, first, nil))
+			if tt.intermediate != nil {
+				profile.consume(tt.intermediate(t))
+			}
+			reset := realReviewProfileCheckpoint{Sequence: 1, ElapsedUS: 1}
+			profile.consume(checkpointProgressJSON(t, reset, tt.changeReset))
+			result := profile.result()
+			require.Equal(t, tt.wantReason, result.InvalidReason, "a helper boundary must retain prior invalidity, record caps and real phase lifecycle requirements")
+			require.NotNil(t, result.LastCheckpoint, "the last accepted checkpoint should survive later rejection")
+			if tt.wantReason == "incomplete_phase_exits" {
+				require.Equal(t, 2, result.CheckpointInvocation, "a valid reset should start a helper without changing the earlier phase state")
+				require.Equal(t, reset, *result.LastCheckpoint, "the new helper may report partial progress while a missing phase exit remains invalid")
+				require.Equal(t, realReviewProfileAggregate{Entered: 1, Active: 1, MaxActive: 1}, result.Phases["inventory/all"], "accepting a helper reset must never close an earlier open phase")
+			} else {
+				require.Equal(t, 1, result.CheckpointCount, "rejected reset evidence must not advance the retained checkpoint count")
+				require.Equal(t, 1, result.CheckpointInvocation, "rejected reset evidence must not allocate a new displayed invocation ordinal")
+				require.Equal(t, first, *result.LastCheckpoint, "rejected reset evidence must preserve the previous exact lower bound")
+			}
+		})
+	}
 }
 
 func TestRealReviewProfileCheckpointRejectsInvalidEvidence(t *testing.T) {
@@ -229,7 +322,8 @@ func TestRealReviewProfileCheckpointBoundsAndProgression(t *testing.T) {
 	}{
 		{name: "all 512 consecutive checkpoints are accepted", count: 512, wantCount: 512},
 		{name: "a sequence gap cannot hide discarded progress", count: 2, changeLast: func(c *realReviewProfileCheckpoint) { c.Sequence = 3 }, wantCount: 1, wantReason: "checkpoint_sequence"},
-		{name: "cumulative totals cannot fall", count: 2, changeLast: func(c *realReviewProfileCheckpoint) { c.ElapsedUS = 0 }, wantCount: 1, wantReason: "regressing_checkpoint"},
+		{name: "duplicate non-one sequence cannot reset an invocation", count: 3, changeLast: func(c *realReviewProfileCheckpoint) { c.Sequence = 2 }, wantCount: 2, wantReason: "checkpoint_sequence"},
+		{name: "mid invocation non-one cumulative totals cannot fall", count: 2, changeLast: func(c *realReviewProfileCheckpoint) { c.ElapsedUS = 0 }, wantCount: 1, wantReason: "regressing_checkpoint"},
 		{name: "active operations may finish while totals rise", count: 2, changeLast: func(c *realReviewProfileCheckpoint) {
 			c.HashCompleted, c.HashFailed, c.ReceiptCompleted = c.HashStarted, 1, c.ReceiptStarted
 			c.ActiveHash, c.ActiveReceipt, c.ActiveInventory, c.OpenInventory = 0, 0, 0, 0
@@ -307,7 +401,7 @@ func TestRealReviewProfilePythonContracts(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, "python3", "-B", "-m", "unittest", "discover", "-s", "testdata", "-p", "test_review_source_profile.py")
+	command := exec.CommandContext(ctx, "python3", "-B", "-m", "unittest", "discover", "-v", "-s", "testdata", "-p", "test_review_source_profile.py")
 	for _, value := range os.Environ() {
 		if !strings.HasPrefix(value, "REVIEW_SOURCE_PROFILE_REAL_HELPER=") {
 			command.Env = append(command.Env, value)
@@ -315,6 +409,76 @@ func TestRealReviewProfilePythonContracts(t *testing.T) {
 	}
 	output, err := command.CombinedOutput()
 	require.NoError(t, err, "the public observer Python contract suite should pass without a private helper fixture: %s", output)
-	require.NotContains(t, string(output), "Ran 0 tests", "ordinary Go CI must select the observer Python contracts")
+	require.NoError(t, validateRealReviewProfilePythonContracts(string(output)), "ordinary Go CI must execute observer contracts and skip only the optional external helper fixture: %s", output)
 	t.Logf("observer Python contracts: %s", output)
+}
+
+// Verbose unittest output identifies the optional external fixture by test ID;
+// the summary alone would also accept a discovered suite whose tests all skip.
+func validateRealReviewProfilePythonContracts(output string) error {
+	runs := regexp.MustCompile(`(?m)^Ran ([0-9]+) tests? in [^\r\n]+$`).FindAllStringSubmatch(output, -1)
+	results := regexp.MustCompile(`(?m)^OK(?: \(skipped=([0-9]+)\))?$`).FindAllStringSubmatch(output, -1)
+	if len(runs) != 1 || len(results) != 1 {
+		return fmt.Errorf("expected one successful unittest run summary")
+	}
+	total, err := strconv.Atoi(runs[0][1])
+	if err != nil {
+		return fmt.Errorf("invalid unittest test count: %w", err)
+	}
+	skipped := 0
+	if results[0][1] != "" {
+		skipped, err = strconv.Atoi(results[0][1])
+		if err != nil {
+			return fmt.Errorf("invalid unittest skip count: %w", err)
+		}
+	}
+	if skipped > 1 || total <= skipped {
+		return fmt.Errorf("expected nonzero executed contracts and at most one optional fixture skip")
+	}
+	observedSkips := 0
+	const optional = "test_actual_pinned_helper_receipt_bytes_tamper_links_and_fifo_are_preserved (test_review_source_profile.ReviewSourceProfileTests.test_actual_pinned_helper_receipt_bytes_tamper_links_and_fifo_are_preserved) ... skipped "
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, " ... skipped ") {
+			if !strings.HasPrefix(line, optional) {
+				return fmt.Errorf("unexpected skipped Python contract")
+			}
+			observedSkips++
+		}
+	}
+	if observedSkips != skipped {
+		return fmt.Errorf("unittest skip summary does not match the optional fixture record")
+	}
+	return nil
+}
+
+func TestRealReviewProfilePythonContractSummary(t *testing.T) {
+	t.Parallel()
+	const optional = "test_actual_pinned_helper_receipt_bytes_tamper_links_and_fifo_are_preserved (test_review_source_profile.ReviewSourceProfileTests.test_actual_pinned_helper_receipt_bytes_tamper_links_and_fifo_are_preserved) ... skipped 'external helper not supplied'\n"
+	tests := []struct {
+		name      string
+		output    string
+		wantError bool
+	}{
+		{name: "all contracts execute", output: "Ran 22 tests in 1.5s\n\nOK\n"},
+		{name: "only the identified optional fixture skips", output: optional + "Ran 22 tests in 1.5s\n\nOK (skipped=1)\n"},
+		{name: "no contracts discovered", output: "Ran 0 tests in 0.0s\n\nOK\n", wantError: true},
+		{name: "only the optional fixture discovered and skipped", output: optional + "Ran 1 test in 0.0s\n\nOK (skipped=1)\n", wantError: true},
+		{name: "all discovered contracts skip", output: "Ran 22 tests in 0.0s\n\nOK (skipped=22)\n", wantError: true},
+		{name: "an unrelated contract skips", output: "test_other (test_review_source_profile.ReviewSourceProfileTests.test_other) ... skipped 'unavailable'\nRan 22 tests in 1.5s\n\nOK (skipped=1)\n", wantError: true},
+		{name: "skip count lacks an identified fixture", output: "Ran 22 tests in 1.5s\n\nOK (skipped=1)\n", wantError: true},
+		{name: "identified skip lacks a matching count", output: optional + "Ran 22 tests in 1.5s\n\nOK\n", wantError: true},
+		{name: "multiple suites cannot obscure selected tests", output: "Ran 22 tests in 1.5s\n\nOK\nRan 0 tests in 0.0s\n\nOK\n", wantError: true},
+		{name: "missing summary", output: "fixture output only\n", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateRealReviewProfilePythonContracts(tt.output)
+			if tt.wantError {
+				require.Error(t, err, "a vacuous or unexpected Python contract result must fail the Go bridge")
+			} else {
+				require.NoError(t, err, "executed Python contracts with only the known optional fixture skip should pass")
+			}
+		})
+	}
 }

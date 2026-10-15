@@ -1784,8 +1784,13 @@ func (p *realReviewSourceProfile) consumeCheckpoint(value realReviewProfileRecor
 		p.invalid = "invalid_checkpoint"
 		return
 	}
+	// One preparation exec launches both prepare and verify helpers. The exact
+	// pinned launcher emits sequence one once per fresh helper process, so it
+	// also marks a new invocation within the same decoder stream. Validate the
+	// complete record before accepting this boundary; never revive invalid state.
+	newInvocation := stream.last != nil && checkpoint.Sequence == 1
 	previousSequence := int64(0)
-	if stream.last != nil {
+	if stream.last != nil && !newInvocation {
 		previousSequence = stream.last.Sequence
 		previous, current := []int64{stream.last.ElapsedUS, stream.last.InventoryUS, stream.last.InventoryResidualUS, stream.last.HashUS, stream.last.ReceiptUS, stream.last.ReceiptOutsideInventoryUS, stream.last.InventoryYielded, stream.last.HashStarted, stream.last.HashCompleted, stream.last.HashFailed, stream.last.ReceiptStarted, stream.last.ReceiptCompleted, stream.last.ReceiptFailed}, []int64{checkpoint.ElapsedUS, checkpoint.InventoryUS, checkpoint.InventoryResidualUS, checkpoint.HashUS, checkpoint.ReceiptUS, checkpoint.ReceiptOutsideInventoryUS, checkpoint.InventoryYielded, checkpoint.HashStarted, checkpoint.HashCompleted, checkpoint.HashFailed, checkpoint.ReceiptStarted, checkpoint.ReceiptCompleted, checkpoint.ReceiptFailed}
 		for index := range previous {
@@ -1805,7 +1810,7 @@ func (p *realReviewSourceProfile) consumeCheckpoint(value realReviewProfileRecor
 	}
 	p.records++
 	p.checkpointCount++
-	if stream.invocation == 0 {
+	if stream.invocation == 0 || newInvocation {
 		p.streamCount++
 		stream.invocation = p.streamCount
 	}
@@ -1873,7 +1878,7 @@ func (p *realReviewSourceProfile) result() realReviewProfileResult {
 		copy := *p.lastCheckpoint
 		result.LastCheckpoint = &copy
 	}
-	result.CheckpointScope = "latest checkpoint-bearing helper command stream by first-observed-checkpoint ordinal; elapsed_us starts at its first inventory/receipt phase; cumulative lower-bound partial progress including in-flight operations at publication; inventory residual includes traversal/stat/control and observer overhead; receipt residual includes serialization/write/deadline/control and observer work outside inventory advancement, not pure JSON or write syscall time; not phase completion or allocation/OOM attribution"
+	result.CheckpointScope = "latest helper invocation by first-observed sequence-one checkpoint ordinal, including prepare and verify within one command stream; elapsed_us starts at its first inventory/receipt phase; cumulative lower-bound partial progress including in-flight operations at publication; inventory residual includes traversal/stat/control and observer overhead; receipt residual includes serialization/write/deadline/control and observer work outside inventory advancement, not pure JSON or write syscall time; not phase completion or allocation/OOM attribution"
 	for key, original := range p.cells {
 		value := *original
 		value.MaxMemoryStat, value.SampledEventDelta = maps.Clone(original.MaxMemoryStat), maps.Clone(original.SampledEventDelta)
