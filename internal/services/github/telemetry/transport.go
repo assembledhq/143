@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
@@ -247,8 +248,13 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	identity, _ := registry.credentialFromAuthorization(req.Header)
 	observation := requestObservation{
 		credential: identity, correlationStatus: credentialCorrelationStatus(identity, metadata, req.URL),
-		timingSource: "host_transport",
+		timingSource: "host_transport", writes: &writeObservation{},
 	}
+	// WithClientTrace composes with existing hooks. Each redirect hop gets its
+	// own transport invocation and observation; admission and retries are unchanged.
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		WroteRequest: observation.writes.wroteRequest,
+	}))
 	observation.startedAt = t.now()
 	resp, err := t.base.RoundTrip(req)
 	observation.headersAt = t.now()
@@ -436,6 +442,7 @@ type requestObservation struct {
 	headersAt         time.Time
 	providerDate      time.Time
 	requestID         string
+	writes            *writeObservation
 }
 
 func credentialCorrelationStatus(identity CredentialIdentity, metadata RequestMetadata, requestURL *url.URL) string {
@@ -504,6 +511,21 @@ func (t *transport) logRequest(req *http.Request, resp *http.Response, requestEr
 		Str("github_timing_source", observation.timingSource).
 		Str("github_token_correlation_status", observation.correlationStatus).
 		Bool("github_rate_limited", rateLimited)
+	if observation.writes != nil {
+		attempts, writeErrors := observation.writes.freeze()
+		status := "callbacks_observed"
+		if attempts == 0 {
+			// Zero does not prove no write: the transport may not support trace
+			// hooks, or its callbacks may arrive after this summary's cutoff.
+			status = "unknown"
+		}
+		event = event.
+			Uint64("github_transport_write_attempts_observed", attempts).
+			Uint64("github_transport_write_errors_observed", writeErrors).
+			Str("github_transport_write_observation_status", status).
+			Str("github_transport_write_observation_cutoff", "request_summary").
+			Str("github_target_host_class", targetHostClass(req.URL))
+	}
 	if !observation.headersAt.IsZero() && resp != nil {
 		event = event.Str("github_response_headers_at", observation.headersAt.UTC().Format(time.RFC3339Nano))
 	}

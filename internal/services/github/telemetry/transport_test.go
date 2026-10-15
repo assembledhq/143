@@ -290,6 +290,11 @@ func TestTransportRoundTripLogsStructuredGitHubTelemetry(t *testing.T) {
 			tt.expectedLogEvent["github_request_completed_at"] = startedAt.Add(250 * time.Millisecond).Format(time.RFC3339Nano)
 			tt.expectedLogEvent["github_timing_source"] = "host_transport"
 			tt.expectedLogEvent["github_token_correlation_status"] = "unknown"
+			tt.expectedLogEvent["github_transport_write_attempts_observed"] = float64(0)
+			tt.expectedLogEvent["github_transport_write_errors_observed"] = float64(0)
+			tt.expectedLogEvent["github_transport_write_observation_status"] = "unknown"
+			tt.expectedLogEvent["github_transport_write_observation_cutoff"] = "request_summary"
+			tt.expectedLogEvent["github_target_host_class"] = targetHostClass(request.URL)
 			if tt.response != nil {
 				tt.expectedLogEvent["github_response_headers_at"] = startedAt.Add(250 * time.Millisecond).Format(time.RFC3339Nano)
 			}

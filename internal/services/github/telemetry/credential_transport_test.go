@@ -75,7 +75,10 @@ func TestTransportCorrelatesActualAuthorizationWithoutChangingPrincipal(t *testi
 				"github_request_started_at": times[0].Format(time.RFC3339Nano), "github_response_headers_at": times[1].Format(time.RFC3339Nano),
 				"github_request_completed_at": times[2].Format(time.RFC3339Nano), "github_timing_source": "host_transport",
 				"github_provider_date": now.Truncate(time.Second).Format(time.RFC3339Nano), "github_request_id": strings.Repeat("r", 128),
-				"github_token_correlation_status": tt.status,
+				"github_token_correlation_status":          tt.status,
+				"github_transport_write_attempts_observed": float64(0), "github_transport_write_errors_observed": float64(0),
+				"github_transport_write_observation_status": "unknown", "github_transport_write_observation_cutoff": "request_summary",
+				"github_target_host_class": "api_github_com",
 			}
 			if tt.metadata.AuthType == "" {
 				expected["github_auth_type"] = AuthTypeUnknown
