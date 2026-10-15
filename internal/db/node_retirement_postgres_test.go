@@ -140,6 +140,7 @@ func TestNodeRetirementRejectsUnknownPostgres(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // rejection subtests share the same sealed rows and must finish before the final cleanup assertions
 func TestNodeRetirementAdmissionAndCleanupPostgres(t *testing.T) {
 	t.Parallel()
 	pool := newRetirementPool(t)
@@ -446,4 +447,39 @@ func TestNodeRetirementRejectsResumeWaitingOnSealPostgres(t *testing.T) {
 	close(paused.release)
 	require.NoError(t, <-sealed, "the stable exact node may seal while resume waits behind it")
 	requireRetirementRefusal(t, <-resumed)
+}
+
+func TestNodeRetirementAllowsPriorAdmissionFKWhileNodeControlWaitsPostgres(t *testing.T) {
+	t.Parallel()
+	pool := newRetirementPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := pool.Exec(ctx, `CREATE TABLE retirement_node_refs(node_id text REFERENCES nodes(id))`)
+	require.NoError(t, err, "create a synthetic FK that takes KEY SHARE on the exact node")
+	writer, err := pool.Begin(ctx)
+	require.NoError(t, err, "begin a durable admission before the retirement attempt")
+	defer func() { _ = writer.Rollback(ctx) }()
+	_, err = writer.Exec(ctx, `INSERT INTO jobs(status,locked_by_node_id) VALUES('running','old')`)
+	require.NoError(t, err, "the admission holds its shared advisory lock through commit")
+	sealed := make(chan error, 1)
+	go func() { _, err := NewNodeRetirementStore(pool).Seal(ctx, retirementParams()); sealed <- err }()
+	waitForRetirementLock(t, pool)
+	// The sealer owns the node row but is waiting on this earlier admission.
+	// Node-control writes must wait, while an FK check by that same admission
+	// must finish: otherwise a row-lock/advisory-lock cycle would deadlock.
+	controlled := make(chan error, 1)
+	go func() {
+		_, err := pool.Exec(ctx, `UPDATE nodes SET drain_intent='none' WHERE id='old'`)
+		controlled <- err
+	}()
+	waitForRetirementNodeLock(t, pool)
+	_, err = writer.Exec(ctx, `SET LOCAL lock_timeout='1s'; INSERT INTO retirement_node_refs(node_id) VALUES('old')`)
+	require.NoError(t, err, "the prior admission's real FK KEY SHARE must proceed while retirement owns NO KEY UPDATE")
+	require.NoError(t, writer.Commit(ctx), "the admitted owner can commit and release shared admission without a lock cycle")
+	require.ErrorIs(t, <-sealed, ErrNodeRetirementBusy, "retirement must observe that owner after the exclusive advisory lock becomes available")
+	require.NoError(t, <-controlled, "node control proceeds only after the retirement observation releases its row lock")
+	var intent string
+	err = pool.QueryRow(ctx, `SELECT drain_intent FROM nodes WHERE id='old'`).Scan(&intent)
+	require.NoError(t, err, "observe the serialized node-control result")
+	require.Equal(t, "none", intent, "the completed control write follows the aborted busy seal attempt")
 }

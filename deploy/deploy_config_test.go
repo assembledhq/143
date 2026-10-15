@@ -361,7 +361,7 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, fleetText, `DEPLOY_JOBS="${DEPLOY_JOBS:-4}"`, "fleet deploy should retain bounded maintenance-role fan-out")
 	require.Contains(t, fleetText, `xargs -n1 -P "$DEPLOY_JOBS"`, "fleet deploy should retain parallel fan-out for independent maintenance groups")
 	require.Contains(t, fleetText, `LOG_DIR="$(mktemp -d /tmp/deploy-fleet.XXXXXX)"`, "parallel fleet deploy should keep per-host logs inspectable after failures")
-	require.Contains(t, fleetText, `LOG_DIR="$DEPLOY_FLEET_LOG_DIR"`, "fleet deploy should honor a stable log dir override so CI can upload per-host logs as a CI archive")
+	require.Contains(t, fleetText, `LOG_DIR="$DEPLOY_FLEET_LOG_DIR"`, "fleet deploy should honor a stable log dir override for private diagnostics")
 	require.Contains(t, fleetText, `dump_failed_logs`, "fleet deploy should print failed hosts' log tails so CI output is introspectable without the runner's /tmp")
 	require.Contains(t, fleetText, `deploy_one()`, "fleet deploy should isolate single-host deploy behavior so parallel fan-out keeps role and host context")
 	require.Contains(t, fleetText, `App deployment barrier passed`, "fleet deploy should require app migrations and health checks to finish before post-app nodes start")
@@ -372,10 +372,10 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	workflow, err := os.ReadFile("../.github/workflows/deploy.yml")
 	require.NoError(t, err, "test should read the deploy workflow")
 	require.Contains(t, string(workflow), `./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.event.workflow_run.head_sha }}"`, "CI should use the successful CI run SHA with deploy-fleet's default app/worker role set")
-	require.Contains(t, string(workflow), `DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs`, "CI should pin the fleet log dir so the CI upload step can find per-host logs")
+	require.Contains(t, string(workflow), `DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs`, "CI should pin the private fleet diagnostic directory")
 	require.NotContains(t, string(workflow), `name: deploy-fleet-logs`, "public CI must not upload raw deployment inventories or production logs")
 	require.Contains(t, string(workflow), `>"$RUNNER_TEMP/deploy-fleet.log" 2>&1`, "public CI should capture private deployment output without printing it")
-	require.Contains(t, string(workflow), `GITHUB_STEP_SUMMARY= ./deploy/scripts/deploy-fleet.sh`, "private failure logs must not leak through the public Actions summary")
+	require.Contains(t, string(workflow), `FLEET_HOSTS="$fleet_hosts" GITHUB_STEP_SUMMARY= ./deploy/scripts/deploy-fleet.sh`, "private failure logs must not leak through the public Actions summary")
 	require.Contains(t, string(workflow), `WORKER_DEPLOY_DETACH: ""`, "automatic fleet deployment should wait for synchronous worker completion")
 	require.NotContains(t, string(workflow), `status_path="/var/log/143/deploy-worker-${short_sha}.status"`, "CI must not treat a stale short-SHA detached status as completion")
 
@@ -1578,7 +1578,26 @@ func TestCIDeployCancelsStaleBuildsButNotActiveDeploys(t *testing.T) {
 	require.NotEqual(t, -1, deployFreshnessIndex, "deploy job should define an in-lock freshness check")
 	require.NotEqual(t, -1, deployCheckoutIndex, "deploy job should checkout before deploying")
 	require.Less(t, deployFreshnessIndex, deployCheckoutIndex, "deploy job should re-check freshness before any deploy setup or SSH work")
-	require.GreaterOrEqual(t, strings.Count(deployJob, "if: steps.deploy_latest.outputs.should_deploy == 'true'"), 6, "all deploy setup, deploy, and verification steps should skip stale SHAs detected after acquiring the deploy lock")
+	var parsed struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				ID   string `yaml:"id"`
+				Name string `yaml:"name"`
+				If   string `yaml:"if"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	require.NoError(t, yaml.Unmarshal(workflow, &parsed), "deploy freshness guards should be checked on the actual workflow steps")
+	pastFreshnessGate := false
+	for _, step := range parsed.Jobs["deploy"].Steps {
+		if step.ID == "deploy_latest" {
+			pastFreshnessGate = true
+			continue
+		}
+		if pastFreshnessGate {
+			require.Equal(t, "steps.deploy_latest.outputs.should_deploy == 'true'", step.If, "each deploy setup or mutation must skip a stale SHA: %s", step.Name)
+		}
+	}
 }
 
 func TestWorkerGVisorPreflightPullsHealthImageOnlyWhenMissing(t *testing.T) {

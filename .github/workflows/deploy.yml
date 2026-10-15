@@ -161,22 +161,6 @@ jobs:
           echo "${{ secrets.SOPS_AGE_KEY }}" > ~/.config/sops/age/keys.txt
           chmod 600 ~/.config/sops/age/keys.txt
 
-      - name: Decrypt FLEET_HOSTS
-        if: steps.deploy_latest.outputs.should_deploy == 'true'
-        # Decrypt once and propagate to later steps via $GITHUB_ENV so
-        # `Deploy fleet` (deploy-fleet.sh accepts FLEET_HOSTS from env)
-        # skips the SOPS round-trip.
-        run: |
-          set -euo pipefail
-          fleet_hosts="$(SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt \
-            sops --decrypt --input-type dotenv --output-type dotenv .infra/.env.production.enc \
-            | grep '^FLEET_HOSTS=' | cut -d= -f2-)"
-          if [ -z "$fleet_hosts" ]; then
-            echo "ERROR: FLEET_HOSTS not present in .infra/.env.production.enc"
-            exit 1
-          fi
-          echo "FLEET_HOSTS=$fleet_hosts" >> "$GITHUB_ENV"
-
       - name: Deploy fleet
         if: steps.deploy_latest.outputs.should_deploy == 'true'
         # Keep the deploy-fleet concurrency lock until every worker generation
@@ -196,10 +180,17 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x deploy/scripts/deploy.sh deploy/scripts/deploy-fleet.sh
+          # Never export decrypted inventory into public Actions step headers.
+          if ! fleet_hosts="$(SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/keys.txt" \
+            sops --decrypt --input-type dotenv --output-type dotenv .infra/.env.production.enc 2>"$RUNNER_TEMP/fleet-hosts-error.log" \
+            | grep '^FLEET_HOSTS=' | cut -d= -f2-)" || [ -z "$fleet_hosts" ]; then
+            echo "::error::Fleet inventory unavailable; deployment was not started."
+            exit 1
+          fi
           # Do not expose live host inventories or raw production diagnostics in
           # public Actions logs/artifacts. Host-side outcome latches remain for
           # positive operator reconciliation after any incomplete deployment.
-          if GITHUB_STEP_SUMMARY= ./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.event.workflow_run.head_sha }}" >"$RUNNER_TEMP/deploy-fleet.log" 2>&1; then
+          if FLEET_HOSTS="$fleet_hosts" GITHUB_STEP_SUMMARY= ./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.event.workflow_run.head_sha }}" >"$RUNNER_TEMP/deploy-fleet.log" 2>&1; then
             echo "Fleet rollout and retirement checks completed."
           else
             echo "::error::Fleet rollout incomplete; inspect the private host outcome before retrying."

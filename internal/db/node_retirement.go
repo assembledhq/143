@@ -57,9 +57,12 @@ func (s *NodeRetirementStore) Seal(ctx context.Context, params SealNodeRetiremen
 	}
 	// Node control writes already acquire this row before their admission
 	// trigger. Follow that order so a concurrent resume/intent change cannot
-	// invalidate the drain proof. Never lock job/preview ownership rows below.
+	// invalidate the drain proof. NO KEY UPDATE also lets admissions already
+	// holding the shared advisory lock finish FK KEY SHARE checks on this row;
+	// FOR UPDATE would invert those locks while we await exclusive admission.
+	// Never lock job/preview ownership rows below.
 	var lockedNodeID string
-	if err := tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=$1 FOR UPDATE`, params.NodeID).Scan(&lockedNodeID); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT id FROM nodes WHERE id=$1 FOR NO KEY UPDATE`, params.NodeID).Scan(&lockedNodeID); err != nil {
 		return NodeRetirementSeal{}, fmt.Errorf("lock exact retirement generation: %w", err)
 	}
 	// Keep this lock in its own statement: a CTE sharing the observation's

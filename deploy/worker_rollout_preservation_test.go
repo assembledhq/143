@@ -418,3 +418,214 @@ func TestWorkerRolloutStructuredReceiptsBindExactAttemptAndBuild(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkerVerifiedCandidateKeepsAdmissionWhenOldRetirementFails(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, mode string }{
+		{name: "retirement deadline", mode: "deadline"},
+		{name: "unknown retirement seal", mode: "seal-unknown"},
+		{name: "unknown stop result", mode: "stop-unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script := workerRolloutScript(t)
+			functions := extractShellFunction(t, script, "preserve_failed_worker_candidate", "dump_diagnostics") +
+				extractShellFunction(t, script, "remote_deploy_exit", "compose_services_except")
+			trace := filepath.Join(t.TempDir(), "trace")
+			output, err := runWorkerShell(t, functions, `
+ROLE=worker
+IMAGE_TAG=0123456789012345678901234567890123456789
+WORKER_ROLLOUT_ATTEMPT=worker-attempt-a
+COMPOSE_FILE=worker.yml
+HEALTH_SERVICE=worker
+trace=`+shellQuote(trace)+`
+mode=`+tt.mode+`
+record_worker_rollout_state() { printf 'record %s\n' "$*" >>"$trace"; }
+list_running_worker_containers() { echo old-container; }
+first_running_worker_node_id() { echo old-node; }
+worker_container_node_id() { echo old-node; }
+read_worker_env_value() { case "$1" in NODE_ID) echo base;; WORKER_PRIVATE_IP) echo 192.0.2.1;; esac; }
+ensure_routine_worker_fingerprints_compatible() { :; }
+load_worker_endpoint_check_env() { :; }
+worker_host_capacity_preflight() { :; }
+find_free_worker_port() { echo 8081; }
+sanitize_compose_project() { echo project; }
+worker_expected_schema_version() { echo 312; }
+protect_active_executor_images() { :; }
+wait_container_healthy() { :; }
+wait_worker_db_heartbeat() { :; }
+resolve_worker_drain_timeout_seconds() { echo 2; }
+sleep() { SECONDS=$((SECONDS + 5)); }
+timeout() { shift 2; "$@"; }
+rm() { :; }
+docker() {
+  printf 'docker %s\n' "$*" >>"$trace"
+  case "$*" in *" ps -q "*) echo new-container;; *" up -d "*) return 0;; inspect*) echo 'true 42';; stop*) return 1;; esac
+}
+run_worker_deployctl() {
+  printf 'ctl %s\n' "$*" >>"$trace"
+  case "$1" in
+    seal-retirement)
+      case "$mode" in deadline) return 3;; seal-unknown) return 1;; esac
+      printf '{"sealed":true,"node_id":"old-node","deploy_id":"worker-attempt-a","build_sha":"%s","sealed_at":"2026-01-01T00:00:00Z"}\n' "$IMAGE_TAG"
+      ;;
+  esac
+}
+deploy_worker_blue_green
+`)
+			require.Error(t, err, "failed or unknown retirement must retain the unresolved deployment")
+			data, readErr := os.ReadFile(trace)
+			require.NoError(t, readErr, "should preserve the exact candidate and retirement trace")
+			actual := string(data)
+			require.Contains(t, actual, "record candidate candidate_verified base-gattempt-a-012345678901 new-container", "candidate validation must precede old retirement")
+			require.Contains(t, actual, "record failure old_generation_retirement base-gattempt-a-012345678901 new-container", "unrelated retirement failure must retain fixed durable failure context")
+			require.NotContains(t, actual, "ctl mark-draining --node-id base-g", "a verified candidate must stay admitting when retirement of an older generation fails")
+			require.Contains(t, output, "verified candidate remains admitting", "failure output should distinguish rollout incompleteness from candidate unsafety")
+		})
+	}
+}
+
+func TestWorkerVerifiedCandidateKeepsAdmissionForUnrelatedFailures(t *testing.T) {
+	t.Parallel()
+	for _, phase := range []string{"support_service_verification", "post_rollout_prune", "completion_receipt"} {
+		t.Run(phase, func(t *testing.T) {
+			t.Parallel()
+			script := workerRolloutScript(t)
+			functions := extractShellFunction(t, script, "preserve_failed_worker_candidate", "start_worker_generation") +
+				extractShellFunction(t, script, "remote_deploy_exit", "compose_services_except")
+			output, err := runWorkerShell(t, functions, `
+ROLE=worker
+ACTIVE_WORKER_CANDIDATE_NODE=candidate-node
+STARTED_WORKER_CID=candidate-container
+WORKER_ROLLOUT_ATTEMPT=attempt-a
+IMAGE_TAG=build-a
+WORKER_CANDIDATE_VALIDATED=1
+WORKER_ROLLOUT_PHASE=`+phase+`
+record_worker_rollout_state() { printf 'record %s\n' "$*"; }
+run_worker_deployctl() { printf 'ctl %s\n' "$*"; }
+rm() { :; }
+false
+`)
+			require.Error(t, err, "unrelated failure must still fail the rollout and preserve its latch")
+			require.Contains(t, output, "record failure "+phase+" candidate-node candidate-container", "exit handling must record the fixed unrelated phase")
+			require.NotContains(t, output, "ctl mark-draining", "support or receipt failures must not remove the healthy admitting generation")
+		})
+	}
+}
+
+func runWorkerShellWithClosedErrorPipe(t *testing.T, source, body string) (string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err, "should create an actual error-channel pipe")
+	require.NoError(t, reader.Close(), "should disconnect the error-channel reader before the failure")
+	t.Cleanup(func() {
+		if err := writer.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Logf("error pipe cleanup: %v", err)
+		}
+	})
+	cmd := exec.CommandContext(ctx, "bash", "-c", "set -euo pipefail\n"+source+"\n"+body)
+	cmd.Dir = t.TempDir()
+	cmd.Stderr = writer
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	err = cmd.Run()
+	require.NoError(t, ctx.Err(), "disconnected-channel preservation must finish within its bound")
+	return output.String(), err
+}
+
+func TestWorkerClosedErrorChannelStillPersistsFailureContext(t *testing.T) {
+	t.Parallel()
+	t.Run("guardian", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		script := workerRolloutScript(t)
+		function := extractTopLevelShellFunction(t, script, "worker_rollout_guard", "finish_worker_rollout_guard")
+		_, err := runWorkerShellWithClosedErrorPipe(t, function, `flock(){ :; }; sync(){ :; }
+worker_rollout_guard attempt-a build-a `+shellQuote(root)+` `+shellQuote(root)+` `+shellQuote(filepath.Join(root, "legacy.lock")))
+		require.Error(t, err, "disconnected guardian control remains an incomplete rollout")
+		data, readErr := os.ReadFile(filepath.Join(root, ".worker-rollout", "failure.json"))
+		require.NoError(t, readErr, "a broken error pipe must not kill the guardian before persisting failure context")
+		var actual map[string]string
+		require.NoError(t, json.Unmarshal(data, &actual), "guardian failure context must remain valid JSON")
+		require.Equal(t, "guardian_failed", actual["phase"], "guardian should persist its fixed failure phase before diagnostics")
+	})
+	for _, verified := range []bool{false, true} {
+		name := "unverified candidate"
+		if verified {
+			name = "verified candidate"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			directory := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(directory, "attempt"), []byte("attempt-a\n"), 0600), "should create exact durable attempt")
+			require.NoError(t, os.WriteFile(filepath.Join(directory, "build-sha"), []byte("build-a\n"), 0600), "should create exact durable build")
+			script := workerRolloutScript(t)
+			functions := extractShellFunction(t, script, "preserve_failed_worker_candidate", "start_worker_generation") +
+				extractShellFunction(t, script, "remote_deploy_exit", "compose_services_except")
+			functions = strings.Replace(functions, "  record_worker_rollout_state() {", "  persisted_worker_rollout_state() {", 1)
+			validated := "0"
+			if verified {
+				validated = "1"
+			}
+			output, err := runWorkerShellWithClosedErrorPipe(t, functions, `
+ROLE=worker
+ACTIVE_WORKER_CANDIDATE_NODE=candidate-node
+STARTED_WORKER_CID=candidate-container
+WORKER_ROLLOUT_ATTEMPT=attempt-a
+IMAGE_TAG=build-a
+WORKER_ROLLOUT_PHASE=old_generation_retirement
+WORKER_CANDIDATE_VALIDATED=`+validated+`
+record_worker_rollout_state() { persisted_worker_rollout_state "$@" `+shellQuote(directory)+`; }
+sync(){ :; }
+run_worker_deployctl(){ printf 'ctl %s\n' "$*"; }
+rm(){ :; }
+false
+`)
+			require.Error(t, err, "broken diagnostics must leave deployment incomplete")
+			data, readErr := os.ReadFile(filepath.Join(directory, "failure.json"))
+			require.NoError(t, readErr, "closed stderr must not prevent atomic failure receipt")
+			var actual map[string]string
+			require.NoError(t, json.Unmarshal(data, &actual), "failure receipt must remain valid structured JSON")
+			require.Equal(t, map[string]string{"attempt": "attempt-a", "build_sha": "build-a", "phase": "old_generation_retirement", "candidate_node": "candidate-node", "candidate_container": "candidate-container"}, actual, "receipt must bind exact failure identity despite stderr loss")
+			if verified {
+				require.NotContains(t, output, "ctl mark-draining", "unrelated channel failure must leave verified candidate admitting")
+			} else {
+				require.Contains(t, output, "ctl mark-draining --node-id candidate-node", "unverified candidate must still be admission-drained after failure even with a broken error channel")
+			}
+		})
+	}
+}
+
+func TestRoutineWorkerPrunePreservesStoppedGenerationContainers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, role, mode   string
+		wantContainerPrune bool
+	}{
+		{name: "routine worker", role: "worker", mode: "routine"},
+		{name: "explicit maintenance", role: "worker", mode: "maintenance", wantContainerPrune: true},
+		{name: "app", role: "app", mode: "routine", wantContainerPrune: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script := workerRolloutScript(t)
+			function := extractShellFunction(t, script, "prune_unused_docker_resources", "run_worker_session_deploy_guardrail")
+			output, err := runWorkerShell(t, function, `IMAGE_TAG=build-a
+DEPLOY_MODE=`+tt.mode+`
+docker(){ printf 'docker %s\n' "$*"; }
+run_worker_deployctl(){ :; }
+prune_unused_docker_resources `+tt.role)
+			require.NoError(t, err, "safe prune mode should complete")
+			if tt.wantContainerPrune {
+				require.Contains(t, output, "docker container prune", "explicit maintenance and app pruning retain their existing policy")
+			} else {
+				require.NotContains(t, output, "docker container prune", "routine deployment must preserve stopped worker logs and exact generation evidence")
+			}
+			require.Contains(t, output, "docker image prune", "safe image cache cleanup should remain available")
+		})
+	}
+}

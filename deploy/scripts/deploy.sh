@@ -139,6 +139,8 @@ remote_env_assignment() {
 # its own latch; reconciliation is deliberately an operator action.
 worker_rollout_guard() {
   set -euo pipefail
+  # Transport loss must not terminate receipt writes with SIGPIPE.
+  trap '' PIPE
   local attempt="$1" build_sha="$2" root="${3:-/opt/143}" log_root="${4:-/var/log/143}" legacy_lock="${5:-/tmp/143-deploy-worker.lock}" command token monitor_lock
   umask 077
   exec 9>"$root/.worker-rollout.lock"
@@ -184,7 +186,7 @@ worker_rollout_guard() {
     local rc="$?"
     trap - EXIT HUP INT TERM
     if [ "$rc" -ne 0 ]; then
-      record_guard_failure guardian_failed || echo "ERROR: failure receipt could not be persisted; intent remains protected." >&2
+      record_guard_failure guardian_failed || { echo "ERROR: failure receipt could not be persisted; intent remains protected." >&2 || true; }
     fi
     exit "$rc"
   }
@@ -209,10 +211,12 @@ worker_rollout_guard() {
       printf 'complete:%s\n' "$attempt"
       return 0
     fi
-    echo "ERROR: worker rollout incomplete; durable intent retained." >&2
+    record_guard_failure guardian_failed || true
+    echo "ERROR: worker rollout incomplete; durable intent retained." >&2 || true
     return 1
   done
-  echo "ERROR: worker rollout launcher disconnected; durable intent retained." >&2
+  record_guard_failure guardian_failed || true
+  echo "ERROR: worker rollout launcher disconnected; durable intent retained." >&2 || true
   return 1
 }
 
@@ -1025,6 +1029,8 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES "$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES")" \
   bash << 'REMOTE'
   set -euo pipefail
+  # A disconnected error channel must not suppress durable failure context.
+  trap '' PIPE
   cd /opt/143
 
   # Keep the execution lock inside the actual remote process, too. If the
@@ -1040,9 +1046,18 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   remote_deploy_exit() {
     local rc="$?"
     trap - EXIT HUP INT TERM
+    trap '' PIPE
     if [ "$rc" -ne 0 ] && [ "$ROLE" = worker ] &&
        [ -n "${ACTIVE_WORKER_CANDIDATE_NODE:-}" ] && [ "${WORKER_CANDIDATE_FAILURE_HANDLED:-0}" != 1 ]; then
-      preserve_failed_worker_candidate "$ACTIVE_WORKER_CANDIDATE_NODE" "${STARTED_WORKER_CID:-unknown}" "interrupted or failed rollout" || true
+      if [ "${WORKER_CANDIDATE_VALIDATED:-0}" = 1 ]; then
+        # A rollout failure is not evidence that this serving candidate is
+        # unsafe. Keep its admission open while the latch prevents retries.
+        WORKER_CANDIDATE_FAILURE_HANDLED=1
+        record_worker_rollout_state failure "${WORKER_ROLLOUT_PHASE:-rollout_interrupted_or_failed}" "$ACTIVE_WORKER_CANDIDATE_NODE" "${STARTED_WORKER_CID:-unknown}" || true
+        echo "ERROR: rollout incomplete; verified candidate remains admitting and intent is retained." >&2 || true
+      else
+        preserve_failed_worker_candidate "$ACTIVE_WORKER_CANDIDATE_NODE" "${STARTED_WORKER_CID:-unknown}" "interrupted or failed rollout" || true
+      fi
     fi
     rm -f /opt/143/deploy/Caddyfile.new /opt/143/Dockerfile.caddy.new /opt/143/.caddy-env.fingerprint.new /opt/143/.caddy-service.fingerprint.new
     exit "$rc"
@@ -2140,9 +2155,9 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       *) phase=candidate_verification_failed ;;
     esac
     if ! record_worker_rollout_state failure "$phase" "$node_id" "$cid"; then
-      echo "ERROR: failure receipt could not be persisted; candidate and intent remain protected." >&2
+      echo "ERROR: failure receipt could not be persisted; candidate and intent remain protected." >&2 || true
     fi
-    echo "ERROR: candidate node $node_id container $cid failed $reason; retaining it for reconciliation." >&2
+    echo "ERROR: candidate node $node_id container $cid failed $reason; retaining it for reconciliation." >&2 || true
     if ! run_worker_deployctl mark-draining \
       --node-id "$node_id" \
       --intent planned_rollout \
@@ -2150,7 +2165,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       --reason "candidate verification failed: $reason" \
       --requested-by "${DEPLOY_REQUESTED_BY:-deploy-script}" \
       --build-sha "${IMAGE_TAG:-}" --json; then
-      echo "ERROR: candidate drain outcome unproven; container and rollout intent remain protected." >&2
+      echo "ERROR: candidate drain outcome unproven; container and rollout intent remain protected." >&2 || true
     fi
     return 1
   }
@@ -2273,6 +2288,8 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   deploy_worker_blue_green() {
     local old_containers base_node_id worker_private_ip generation node_id host_port base_url project new_cid deploy_id preflight_node_id deploy_mode
 
+    WORKER_CANDIDATE_VALIDATED=0
+    WORKER_CANDIDATE_FAILURE_HANDLED=0
     WORKER_ROLLOUT_PHASE=worker_preflight
     old_containers="$(list_running_worker_containers)" || return 1
     preflight_node_id=""
@@ -2356,6 +2373,8 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       preserve_failed_worker_candidate "$node_id" "$new_cid" "preview RPC auth compatibility"
       return 1
     fi
+    WORKER_CANDIDATE_VALIDATED=1
+    record_worker_rollout_state candidate candidate_verified "$node_id" "$new_cid" || return 1
     WORKER_ROLLOUT_PHASE=image_retention
     if [ -n "$preflight_node_id" ]; then
       protect_active_executor_images "$preflight_node_id" "$deploy_id"
@@ -2452,7 +2471,12 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     # The preview reconciler owns these containers and their anonymous data.
     # Preserve ownership metadata until it has checked persisted liveness;
     # generic container prune would strand the volumes without that metadata.
-    docker container prune -f --filter "until=$prune_until" --filter "label!=com.143.preview.infrastructure" || echo "WARNING: docker container prune failed; continuing."
+    if [ "$role" = worker ] && [ "${DEPLOY_MODE:-routine}" = routine ]; then
+      # Stopped generations and their logs are part of the rollout receipt.
+      echo "Preserving stopped worker containers during routine deployment."
+    else
+      docker container prune -f --filter "until=$prune_until" --filter "label!=com.143.preview.infrastructure" || echo "WARNING: docker container prune failed; continuing."
+    fi
     docker image prune -af --filter "until=$prune_until" || echo "WARNING: docker image prune failed; continuing."
     docker builder prune -af --filter "until=$prune_until" || echo "WARNING: docker builder prune failed; continuing."
     if [ "$role" = "worker" ] && [ -n "${IMAGE_TAG:-}" ]; then
@@ -2724,6 +2748,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   prune_unused_docker_resources "$ROLE"
 
   if [ "$ROLE" = worker ]; then
+    WORKER_ROLLOUT_PHASE=completion_receipt
     # The parent success handshake cannot release a stale or partial attempt.
     [ "$(cat /opt/143/.worker-rollout/attempt)" = "$WORKER_ROLLOUT_ATTEMPT" ]
     jq -n --arg attempt "$WORKER_ROLLOUT_ATTEMPT" --arg build "$IMAGE_TAG" \
