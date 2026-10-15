@@ -47,6 +47,20 @@ func expectSweepCheckpointLoad(t *testing.T, mock pgxmock.PgxPoolIface, orgID, j
 	query.WillReturnRows(pgxmock.NewRows([]string{"jsonb_typeof", "present", "checkpoint"}).AddRow("object", checkpoint != nil, raw))
 }
 
+func expectSweepResumeFilter(mock pgxmock.PgxPoolIface, orgID uuid.UUID, saved, remaining []uuid.UUID, filterErr error) {
+	query := mock.ExpectQuery(`SELECT id FROM pull_requests[\s\S]*id = ANY\(@pull_request_ids::uuid\[\]\)`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_ids": saved, "before": pgxmock.AnyArg()})
+	if filterErr != nil {
+		query.WillReturnError(filterErr)
+		return
+	}
+	rows := pgxmock.NewRows([]string{"id"})
+	for _, id := range remaining {
+		rows.AddRow(id)
+	}
+	query.WillReturnRows(rows)
+}
+
 func expectSweepCheckpointSave(t *testing.T, mock pgxmock.PgxPoolIface, orgID, jobID, token uuid.UUID, checkpoint db.PullRequestHealthSweepCheckpoint, saveErr error) {
 	t.Helper()
 	raw, err := json.Marshal(checkpoint)
@@ -150,6 +164,7 @@ func TestReconcilePullRequestHealthSweepRetriesOnlyFrozenRemainder(t *testing.T)
 	// The next stale batch could contain completely different PRs. The retry
 	// must not query it, count population again, or create another job.
 	expectSweepCheckpointLoad(t, mock, orgID, jobID, token, &remainder, nil)
+	expectSweepResumeFilter(mock, orgID, remainder.RemainingPullRequestIDs, remainder.RemainingPullRequestIDs, nil)
 	expectSweepProviderCandidate(mock, orgID, ids[1], names[1], true)
 	complete := checkpoint
 	complete.RemainingPullRequestIDs = []uuid.UUID{}
@@ -295,6 +310,7 @@ func TestReconcilePullRequestHealthSweepRetainsAllSharedThrottleCandidates(t *te
 			ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
 			checkpoint := db.PullRequestHealthSweepCheckpoint{Version: 1, RemainingPullRequestIDs: ids, Population: 3, PopulationAvailable: true, CandidateLimit: 50, SelectedCount: 3}
 			expectSweepCheckpointLoad(t, mock, orgID, jobID, token, &checkpoint, nil)
+			expectSweepResumeFilter(mock, orgID, checkpoint.RemainingPullRequestIDs, checkpoint.RemainingPullRequestIDs, nil)
 			throttle := &ratelimit.Deferral{InstallationID: 42, Kind: ratelimit.KindSecondary, RetryAt: time.Now().Add(time.Minute), Generation: 3}
 			for _, id := range ids {
 				mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").WithArgs(pgx.NamedArgs{"org_id": orgID, "id": id}).WillReturnError(throttle)
@@ -343,7 +359,8 @@ func TestPullRequestHealthSweepSelectionResumesOriginalMetadata(t *testing.T) {
 	orgID, jobID, token, id := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	checkpoint := db.PullRequestHealthSweepCheckpoint{Version: 1, RemainingPullRequestIDs: []uuid.UUID{id}, Population: 681, PopulationAvailable: false, CandidateLimit: 137, SelectedCount: 137}
 	expectSweepCheckpointLoad(t, mock, orgID, jobID, token, &checkpoint, nil)
-	service := &PRService{jobs: db.NewJobStore(mock)}
+	expectSweepResumeFilter(mock, orgID, checkpoint.RemainingPullRequestIDs, checkpoint.RemainingPullRequestIDs, nil)
+	service := &PRService{jobs: db.NewJobStore(mock), pullRequests: db.NewPullRequestStore(mock)}
 	selection, err := service.pullRequestHealthSweepSelection(sweepCheckpointContext(jobID, token), orgID, 50)
 	require.NoError(t, err, "resuming a saved candidate remainder should not require fresh population or stale queries")
 	require.Equal(t, []models.PullRequest{{ID: id}}, selection.candidates, "resumed candidates must come exclusively from the saved PR identities")
@@ -372,4 +389,162 @@ func TestReconcilePullRequestHealthSweepCancellationPreservesCheckpoint(t *testi
 	err = service.ReconcilePullRequestState(ctx, orgID, 50)
 	require.ErrorIs(t, err, context.Canceled, "caller cancellation must remain visible to the worker")
 	require.NoError(t, mock.ExpectationsWereMet(), "canceled unstarted work must not clear or advance its saved checkpoint")
+}
+
+func TestReconcilePullRequestHealthSweepFiltersResumedSelection(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name                     string
+		allFiltered, filterFails bool
+	}{
+		{name: "fresh and closed PRs leave only a stale candidate"},
+		{name: "all refreshed PRs durably complete", allFiltered: true},
+		{name: "filter failure preserves saved work", filterFails: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create isolated resumed freshness fixture")
+			t.Cleanup(mock.Close)
+			mock.MatchExpectationsInOrder(false)
+			orgID, jobID, token := uuid.New(), uuid.New(), uuid.New()
+			ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+			checkpoint := db.PullRequestHealthSweepCheckpoint{Version: 1, RemainingPullRequestIDs: ids, Population: 681, PopulationAvailable: true, CandidateLimit: 137, SelectedCount: 137}
+			expectSweepCheckpointLoad(t, mock, orgID, jobID, token, &checkpoint, nil)
+			remaining := []uuid.UUID{ids[2]}
+			if tt.allFiltered {
+				remaining = []uuid.UUID{}
+			}
+			var filterErr error
+			if tt.filterFails {
+				filterErr = errors.New("resumed freshness filter unavailable")
+			}
+			expectSweepResumeFilter(mock, orgID, ids, remaining, filterErr)
+			if !tt.allFiltered && !tt.filterFails {
+				expectSweepProviderCandidate(mock, orgID, ids[2], "example/still-stale", true)
+			}
+			complete := checkpoint
+			complete.RemainingPullRequestIDs = []uuid.UUID{}
+			if !tt.filterFails {
+				expectSweepCheckpointSave(t, mock, orgID, jobID, token, complete, nil)
+			}
+			expectSweepRecovery(mock, orgID, 50, nil)
+			var providerCalls atomic.Int32
+			var logs bytes.Buffer
+			service := &PRService{jobs: db.NewJobStore(mock), pullRequests: db.NewPullRequestStore(mock), repos: db.NewRepositoryStore(mock), logger: zerolog.New(zerolog.SyncWriter(&logs)),
+				cachedResolver: identity.NewResolver(reconciliationTokenSource{}, zerolog.Nop()), baseURL: "https://api.github.com",
+				httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					providerCalls.Add(1)
+					body := `{"number":42,"state":"open","mergeable":true,"mergeable_state":"clean","head":{"sha":"head"},"base":{"ref":"main","sha":"base"}}`
+					if strings.HasSuffix(r.URL.Path, "/check-runs") {
+						body = `{"check_runs":[{"id":1,"name":"tests","status":"completed","conclusion":"success"}]}`
+					}
+					if strings.HasSuffix(r.URL.Path, "/status") {
+						body = `{"statuses":[]}`
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+				})}}
+			ctx := sweepCheckpointContext(jobID, token)
+			err = service.ReconcilePullRequestState(ctx, orgID, 50)
+			if tt.filterFails {
+				require.EqualError(t, err, "filter resumed pull request health sweep selection: filter selected stale pull requests for health sync: resumed freshness filter unavailable", "filter failure must propagate without attempting to clear or reselect saved work")
+			} else {
+				require.NoError(t, err, "only stale saved candidates should require provider reads")
+			}
+			wantCalls := int32(3)
+			if tt.allFiltered || tt.filterFails {
+				wantCalls = 0
+			}
+			require.Equal(t, wantCalls, providerCalls.Load(), "fresh, closed or unresolved saved identities must never trigger provider requests")
+			require.NoError(t, mock.ExpectationsWereMet(), "resume filtering must not discover another stale batch or skip durable empty completion")
+			if tt.allFiltered {
+				expectSweepCheckpointLoad(t, mock, orgID, jobID, token, &complete, nil)
+				expectSweepRecovery(mock, orgID, 50, nil)
+				require.NoError(t, service.ReconcilePullRequestState(ctx, orgID, 50), "a later recovery retry must use the completed checkpoint without another filter query")
+				require.Equal(t, int32(0), providerCalls.Load(), "completed empty remainder must remain free of provider requests")
+				require.NoError(t, mock.ExpectationsWereMet(), "completed saved work must not be re-filtered or reselected")
+			}
+		})
+	}
+}
+
+type sweepSuccessSignalWriter struct {
+	once      sync.Once
+	completed chan struct{}
+}
+
+func (w *sweepSuccessSignalWriter) Write(record []byte) (int, error) {
+	if bytes.Contains(record, []byte(`"message":"skipping superseded pull request health sync"`)) {
+		w.once.Do(func() { close(w.completed) })
+	}
+	return len(record), nil
+}
+
+func TestReconcilePullRequestHealthSweepMidPassCancellationPreservesCheckpoint(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "create isolated in-flight cancellation fixture")
+	t.Cleanup(mock.Close)
+	mock.MatchExpectationsInOrder(false)
+	orgID, jobID, token := uuid.New(), uuid.New(), uuid.New()
+	ids := []uuid.UUID{uuid.New(), uuid.New()}
+	checkpoint := db.PullRequestHealthSweepCheckpoint{Version: 1, RemainingPullRequestIDs: ids, Population: 2, PopulationAvailable: true, CandidateLimit: 50, SelectedCount: 2}
+	expectSweepCheckpointLoad(t, mock, orgID, jobID, token, &checkpoint, nil)
+	expectSweepResumeFilter(mock, orgID, ids, ids, nil)
+	expectSweepProviderCandidate(mock, orgID, ids[0], "example/completed", true)
+	expectSweepProviderCandidate(mock, orgID, ids[1], "example/in-flight", false)
+	expectSweepRecovery(mock, orgID, 50, context.Canceled)
+	completed, secondStarted, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	releaseSecond := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseSecond()
+	var startedOnce sync.Once
+	service := &PRService{jobs: db.NewJobStore(mock), pullRequests: db.NewPullRequestStore(mock), repos: db.NewRepositoryStore(mock), logger: zerolog.New(&sweepSuccessSignalWriter{completed: completed}),
+		cachedResolver: identity.NewResolver(reconciliationTokenSource{}, zerolog.Nop()), baseURL: "https://api.github.com",
+		httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.Path, "/in-flight/") {
+				startedOnce.Do(func() { close(secondStarted) })
+				<-release
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"message":"temporarily unavailable"}`))}, nil
+			}
+			body := `{"number":42,"state":"open","mergeable":true,"mergeable_state":"clean","head":{"sha":"head"},"base":{"ref":"main","sha":"base"}}`
+			if strings.HasSuffix(r.URL.Path, "/check-runs") {
+				body = `{"check_runs":[{"id":1,"name":"tests","status":"completed","conclusion":"success"}]}`
+			}
+			if strings.HasSuffix(r.URL.Path, "/status") {
+				body = `{"statuses":[]}`
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		})}}
+	ctx, cancel := context.WithCancel(sweepCheckpointContext(jobID, token))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- service.ReconcilePullRequestState(ctx, orgID, 50) }()
+	for _, signal := range []<-chan struct{}{completed, secondStarted} {
+		select {
+		case <-signal:
+		case <-time.After(5 * time.Second):
+			t.Fatal("one candidate must complete while the other remains in flight before cancellation")
+		}
+	}
+	// Join the existing shared sync before releasing it, so the test also
+	// closes the goroutine that deliberately outlives caller cancellation.
+	shared := service.prHealthSyncGroup.DoChan(orgID.String()+":"+ids[1].String(), func() (any, error) {
+		return nil, errors.New("the second health sync should still be in flight")
+	})
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled, "mid-pass cancellation must remain visible after a peer candidate completed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled sweep must stop waiting on the shared in-flight sync")
+	}
+	releaseSecond()
+	select {
+	case result := <-shared:
+		require.True(t, ClassifyRetry(result.Err, time.Now()).Retryable, "the retained shared sync should finish with its synthetic transient provider failure")
+	case <-time.After(5 * time.Second):
+		t.Fatal("released shared health sync must finish before fixture cleanup")
+	}
+	require.NoError(t, mock.ExpectationsWereMet(), "partial canceled progress must not clear or narrow the original durable checkpoint")
 }

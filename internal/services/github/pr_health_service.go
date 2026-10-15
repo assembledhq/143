@@ -1297,8 +1297,8 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 			succeeded++
 		}
 	}
-	checkpointProgressSaved := selection.checkpoint != nil && len(stale) == 0
-	if selection.checkpoint != nil && len(stale) > 0 && ctx.Err() == nil {
+	checkpointProgressSaved := selectionErr == nil && selection.checkpoint != nil && len(selection.checkpoint.RemainingPullRequestIDs) == 0
+	if selectionErr == nil && selection.checkpoint != nil && len(selection.checkpoint.RemainingPullRequestIDs) > 0 && ctx.Err() == nil {
 		checkpoint := *selection.checkpoint
 		checkpoint.RemainingPullRequestIDs = remainingIDs
 		if err := s.jobs.SavePullRequestHealthSweepCheckpointWithLease(ctx, orgID, selection.jobID, selection.lockToken, checkpoint); err != nil {
@@ -1324,6 +1324,7 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 		Bool("health_selection_available", selectionErr == nil).
 		Bool("health_checkpoint_available", selection.checkpoint != nil).Bool("health_checkpoint_progress_saved", checkpointProgressSaved).
 		Bool("health_checkpoint_resumed", selection.resumed).Int("health_initial_selected", selection.initialSelected).
+		Int("health_filtered_since_selection", selection.filteredSinceSelection).
 		Int("health_retry_remaining", len(remainingIDs)).
 		Int("health_selected", len(stale)).Int("health_started", started).Int("health_succeeded", succeeded).
 		Int("health_deferred", deferred).Int("health_mergeability_pending", pending).Int("health_failed", failed).
@@ -1365,16 +1366,17 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 }
 
 type pullRequestHealthSweepSelection struct {
-	candidates          []models.PullRequest
-	population          int
-	populationAvailable bool
-	candidateLimit      int
-	initialSelected     int
-	checkpoint          *db.PullRequestHealthSweepCheckpoint
-	jobID               uuid.UUID
-	lockToken           uuid.UUID
-	resumed             bool
-	ownershipLost       bool
+	candidates             []models.PullRequest
+	population             int
+	populationAvailable    bool
+	candidateLimit         int
+	initialSelected        int
+	checkpoint             *db.PullRequestHealthSweepCheckpoint
+	jobID                  uuid.UUID
+	lockToken              uuid.UUID
+	resumed                bool
+	ownershipLost          bool
+	filteredSinceSelection int
 }
 
 func (s *PRService) pullRequestHealthSweepSelection(ctx context.Context, orgID uuid.UUID, limit int) (pullRequestHealthSweepSelection, error) {
@@ -1396,8 +1398,16 @@ func (s *PRService) pullRequestHealthSweepSelection(ctx context.Context, orgID u
 			selection.checkpoint, selection.resumed = checkpoint, true
 			selection.population, selection.populationAvailable = checkpoint.Population, checkpoint.PopulationAvailable
 			selection.candidateLimit, selection.initialSelected = checkpoint.CandidateLimit, checkpoint.SelectedCount
-			selection.candidates = make([]models.PullRequest, len(checkpoint.RemainingPullRequestIDs))
-			for i, id := range checkpoint.RemainingPullRequestIDs {
+			ids := checkpoint.RemainingPullRequestIDs
+			if len(ids) > 0 {
+				ids, err = s.pullRequests.FilterOpenStaleHealthSyncIDs(ctx, orgID, ids, time.Now().Add(-prHealthStaleAfter))
+				if err != nil {
+					return selection, fmt.Errorf("filter resumed pull request health sweep selection: %w", err)
+				}
+			}
+			selection.filteredSinceSelection = len(checkpoint.RemainingPullRequestIDs) - len(ids)
+			selection.candidates = make([]models.PullRequest, len(ids))
+			for i, id := range ids {
 				selection.candidates[i] = models.PullRequest{ID: id}
 			}
 			return selection, nil

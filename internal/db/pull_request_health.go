@@ -112,6 +112,31 @@ func (s *PullRequestStore) ListOpenStaleForHealthSync(ctx context.Context, orgID
 	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.PullRequest])
 }
 
+// FilterOpenStaleHealthSyncIDs narrows an already bounded sweep selection to
+// PRs that still need a provider read. It preserves the saved order and never
+// discovers additional candidates when another sync or webhook refreshed a PR.
+func (s *PullRequestStore) FilterOpenStaleHealthSyncIDs(ctx context.Context, orgID uuid.UUID, pullRequestIDs []uuid.UUID, before time.Time) ([]uuid.UUID, error) {
+	if len(pullRequestIDs) > 200 {
+		return nil, errors.New("pull request health sync ID selection exceeds its bound")
+	}
+	if len(pullRequestIDs) == 0 {
+		return []uuid.UUID{}, nil
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT id FROM pull_requests
+		WHERE org_id = @org_id
+		  AND id = ANY(@pull_request_ids::uuid[])
+		  AND status = 'open'
+		  AND (github_state_synced_at IS NULL OR github_state_synced_at < @before)
+		ORDER BY array_position(@pull_request_ids::uuid[], id)`, pgx.NamedArgs{
+		"org_id": orgID, "pull_request_ids": pullRequestIDs, "before": before,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("filter selected stale pull requests for health sync: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+}
+
 type ProjectedHealthSummaryOptions struct {
 	ExpectedHealthVersion     int64
 	ExpectedHeadSHA           string
