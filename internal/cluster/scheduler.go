@@ -19,7 +19,6 @@ import (
 type schedulerJobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 	EnqueuePullRequestReconciliationOnce(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error)
-	EnqueueCodeReviewOutcomeReconciliationOnce(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error)
 	EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 	Notify(ctx context.Context, id uuid.UUID)
 	GetLatestFailedByType(ctx context.Context, orgID uuid.UUID, jobType string) (*models.LatestJobError, error)
@@ -494,17 +493,7 @@ func (s *Scheduler) scheduleDailyJobWithPriority(ctx context.Context, queue, job
 	for _, orgID := range orgIDs {
 		dedupeKey := fmt.Sprintf("%s:%s:%s", jobType, orgID.String(), dateKey)
 		payload := map[string]string{"org_id": orgID.String()}
-		var err error
-		if queue == "feedback" && jobType == models.JobTypeReconcileCodeReviewOutcomes {
-			// This provider-reading repair must remain once per day across
-			// scheduler restarts and leadership changes, including completed jobs.
-			_, err = s.jobs.EnqueueCodeReviewOutcomeReconciliationOnce(ctx, orgID, db.EnqueueOpts{
-				Queue: queue, JobType: jobType, Payload: payload, Priority: priority, DedupeKey: &dedupeKey,
-			})
-		} else {
-			_, err = s.jobs.Enqueue(ctx, orgID, queue, jobType, payload, priority, &dedupeKey)
-		}
-		if err != nil {
+		if _, err := s.jobs.Enqueue(ctx, orgID, queue, jobType, payload, priority, &dedupeKey); err != nil {
 			allEnqueued = false
 			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msgf("failed to enqueue %s job", jobType)
 		}
