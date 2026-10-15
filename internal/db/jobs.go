@@ -216,6 +216,31 @@ func (s *JobStore) EnqueuePullRequestReconciliationOnce(ctx context.Context, org
 	if _, err := time.Parse("2006010215", bucket[:10]); err != nil {
 		return uuid.Nil, fmt.Errorf("parse reconciliation admission bucket: %w", err)
 	}
+	return s.enqueuePeriodicReconciliationOnce(ctx, orgID, opts)
+}
+
+// EnqueueCodeReviewOutcomeReconciliationOnce admits one outcome repair per
+// organization and UTC day, including after the admitted job is terminal.
+// The retained job row is the admission record: default completed-job retention
+// is 30 days and must remain longer than one day. Replays after that row has
+// been deleted are not fenced. Ordinary enqueue and admitted-job retries are
+// unchanged.
+func (s *JobStore) EnqueueCodeReviewOutcomeReconciliationOnce(ctx context.Context, orgID uuid.UUID, opts EnqueueOpts) (uuid.UUID, error) {
+	prefix := models.JobTypeReconcileCodeReviewOutcomes + ":" + orgID.String() + ":"
+	if orgID == uuid.Nil || opts.Queue != "feedback" || opts.JobType != models.JobTypeReconcileCodeReviewOutcomes || opts.DedupeKey == nil || !strings.HasPrefix(*opts.DedupeKey, prefix) {
+		return uuid.Nil, fmt.Errorf("outcome reconciliation admission requires its organization-scoped daily job key")
+	}
+	day := strings.TrimPrefix(*opts.DedupeKey, prefix)
+	if len(day) != len(time.DateOnly) {
+		return uuid.Nil, fmt.Errorf("outcome reconciliation admission requires a UTC date")
+	}
+	if _, err := time.Parse(time.DateOnly, day); err != nil {
+		return uuid.Nil, fmt.Errorf("parse outcome reconciliation admission date: %w", err)
+	}
+	return s.enqueuePeriodicReconciliationOnce(ctx, orgID, opts)
+}
+
+func (s *JobStore) enqueuePeriodicReconciliationOnce(ctx context.Context, orgID uuid.UUID, opts EnqueueOpts) (uuid.UUID, error) {
 	// BeginTx excludes nested savepoints and makes the post-commit notification
 	// refer to a durable top-level transaction. READ COMMITTED lets a waiter see
 	// the preceding admission after acquiring the transaction advisory lock.

@@ -32,6 +32,10 @@ func (m *mockJobs) EnqueuePullRequestReconciliationOnce(ctx context.Context, org
 	return m.Enqueue(ctx, orgID, opts.Queue, opts.JobType, opts.Payload, opts.Priority, opts.DedupeKey)
 }
 
+func (m *mockJobs) EnqueueCodeReviewOutcomeReconciliationOnce(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+	return m.Enqueue(ctx, orgID, opts.Queue, opts.JobType, opts.Payload, opts.Priority, opts.DedupeKey)
+}
+
 func (m *mockJobs) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	return uuid.New(), nil
 }
@@ -114,6 +118,10 @@ func (m *trackingJobs) EnqueuePullRequestReconciliationOnce(ctx context.Context,
 		m.reconcileSeen[key] = true
 	}
 	return id, err
+}
+
+func (m *trackingJobs) EnqueueCodeReviewOutcomeReconciliationOnce(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+	return m.Enqueue(ctx, orgID, opts.Queue, opts.JobType, opts.Payload, opts.Priority, opts.DedupeKey)
 }
 
 func (m *trackingJobs) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
