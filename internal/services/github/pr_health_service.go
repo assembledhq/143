@@ -1189,6 +1189,48 @@ func pullRequestHealthCandidateLimit(limit, openPopulation int) int {
 	return min(prHealthCandidateLimit, max(limit, (openPopulation+prHealthCatchupPasses-1)/prHealthCatchupPasses))
 }
 
+// retainReconciliationThrottle keeps the first occurrence of a retained,
+// installation-scoped throttle. Pointer identity preserves distinct controller
+// generations and deadlines even when their error messages are identical.
+// Unknown principals and joined siblings are never collapsed into one bucket.
+func retainReconciliationThrottle(seen map[error]struct{}, err error) bool {
+	for cause := err; cause != nil; {
+		var retained error
+		switch typed := cause.(type) {
+		case *reconciliationInstallationError:
+			if typed != nil && typed.installationID > 0 {
+				retained = typed
+			}
+		case *ratelimit.Deferral:
+			if typed != nil && typed.InstallationID > 0 {
+				retained = typed
+			}
+		case *ratelimit.ControlledError:
+			if typed != nil && typed.Deferral.InstallationID > 0 {
+				retained = typed
+			}
+		}
+		if retained != nil {
+			if _, duplicate := seen[retained]; duplicate {
+				return false
+			}
+			seen[retained] = struct{}{}
+			return true
+		}
+		// A response or transport wrapper can contribute its own retry metadata.
+		// Do not discard that distinct outer evidence based on a shared cause.
+		if classifyRetryCause(cause, time.Now()).Retryable {
+			return true
+		}
+		wrapped, ok := cause.(interface{ Unwrap() error })
+		if !ok {
+			break
+		}
+		cause = wrapped.Unwrap()
+	}
+	return true
+}
+
 func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error {
 	ctx = withReconciliationScope(ctx)
 	scope := reconciliationScopeFromContext(ctx)
@@ -1207,6 +1249,7 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 		return s.SyncPullRequestState(WithPullRequestSyncReason(ctx, PullRequestSyncReasonStaleReconcile), orgID, pullRequestID)
 	})
 	var started, succeeded, deferred, pending, failed, budgetSkipped, cancelledSkipped int
+	retainedThrottles := make(map[error]struct{})
 	for i, outcome := range outcomes {
 		pr := stale[i]
 		if !outcome.started {
@@ -1234,6 +1277,9 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 			retry := ClassifyRetry(err, time.Now())
 			if retry.RateLimited {
 				deferred++
+				if !retainReconciliationThrottle(retainedThrottles, err) {
+					continue
+				}
 			} else {
 				failed++
 			}
