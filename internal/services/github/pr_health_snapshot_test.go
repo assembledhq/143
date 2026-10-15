@@ -30,6 +30,7 @@ func TestSyncCodeReviewPullRequestStateReusesAuthoritativeResponse(t *testing.T)
 	tests := []struct {
 		name             string
 		state            string
+		merged           bool
 		storedStatus     models.PullRequestStatus
 		missingHead      bool
 		failRoute        string
@@ -37,7 +38,8 @@ func TestSyncCodeReviewPullRequestStateReusesAuthoritativeResponse(t *testing.T)
 		expectedError    bool
 	}{
 		{name: "fresh snapshot and complete health share one PR read", state: "open", expectedRequests: map[string]int{"pull": 1, "checks": 1, "statuses": 1}},
-		{name: "closed PR does not retry null mergeability or fetch checks", state: "closed", expectedRequests: map[string]int{"pull": 1}},
+		{name: "closed PR does not retry null mergeability or run lifecycle cleanup", state: "closed", expectedRequests: map[string]int{"pull": 1}},
+		{name: "merged PR with stale-open mirror stays ineligible without lifecycle cleanup", state: "closed", merged: true, expectedRequests: map[string]int{"pull": 1}},
 		{name: "already closed PR stays ineligible without inaccessible checks", state: "closed", storedStatus: models.PullRequestStatusClosed, failRoute: "checks", expectedRequests: map[string]int{"pull": 1}},
 		{name: "already merged PR stays ineligible without inaccessible statuses", state: "closed", storedStatus: models.PullRequestStatusMerged, failRoute: "statuses", expectedRequests: map[string]int{"pull": 1}},
 		{name: "missing head rejects the snapshot before checks", state: "open", missingHead: true, expectedRequests: map[string]int{"pull": 1}, expectedError: true},
@@ -63,12 +65,8 @@ func TestSyncCodeReviewPullRequestStateReusesAuthoritativeResponse(t *testing.T)
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "acme/web"}).
 				WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(uuid.New(), orgID, uuid.New(), int64(1), "acme/web", "main", false, nil, nil, "https://github.com/acme/web.git", int64(123), "active", nil, nil, []byte(`{}`), now, now))
 			expectReserveCheckStateVersion(mock, orgID, prID, 0)
-			if !tt.expectedError {
-				if tt.state == "closed" && tt.storedStatus == "" {
-					mock.ExpectExec("UPDATE pull_requests SET status").WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID, "status": models.PullRequestStatusClosed}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-				} else if tt.state == "open" {
-					expectCodeReviewSnapshotHealthWrite(mock, orgID, prID)
-				}
+			if !tt.expectedError && tt.state == "open" {
+				expectCodeReviewSnapshotHealthWrite(mock, orgID, prID)
 			}
 			expected := CodeReviewPullRequestSnapshot{
 				Number: 42, HTMLURL: "https://github.com/acme/web/pull/42", State: tt.state,
@@ -112,7 +110,7 @@ func TestSyncCodeReviewPullRequestStateReusesAuthoritativeResponse(t *testing.T)
 						mergeable = nil
 						mergeState = "unknown"
 					}
-					payload = map[string]any{"number": expected.Number, "html_url": expected.HTMLURL, "state": expected.State, "draft": expected.IsDraft, "title": expected.Title, "body": expected.Body,
+					payload = map[string]any{"number": expected.Number, "html_url": expected.HTMLURL, "state": expected.State, "draft": expected.IsDraft, "title": expected.Title, "body": expected.Body, "merged": tt.merged,
 						"user": map[string]any{"login": expected.AuthorLogin}, "head": map[string]any{"sha": head, "ref": expected.HeadRef, "repo": map[string]any{"fork": true}},
 						"base": map[string]any{"sha": expected.BaseSHA, "ref": expected.BaseRef}, "mergeable": mergeable, "mergeable_state": mergeState}
 				case "checks":

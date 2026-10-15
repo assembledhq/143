@@ -738,6 +738,13 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 		}
 	}
 
+	// Review capture consumes terminal metadata for deterministic ineligibility.
+	// Avoid adding lifecycle cleanup under the capture's publication lock;
+	// ordinary health reconciliation below still repairs stale-open mirrors.
+	if capture != nil && strings.EqualFold(strings.TrimSpace(details.State), "closed") {
+		return nil
+	}
+
 	// Self-heal: when GitHub reports the PR closed but our DB still has it
 	// open, the pull_request:closed webhook never landed (delivery failure,
 	// signature mismatch, app restart, etc.). Apply the same transition the
@@ -752,13 +759,6 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 			Msg("self-healing PR status drift during sync; closed-event webhook was likely dropped")
 		_, err := s.applyClosedPRTransition(ctx, pr, details.Merged, details.MergedAt, details.UpdatedAt, details.MergeCommitSHA, details.Head.SHA)
 		return err
-	}
-
-	// Review capture needs the terminal snapshot for deterministic ineligibility,
-	// including when our mirror is already closed or merged. Preserve the
-	// stale-open self-heal above, but do not fetch checks for a terminal review.
-	if capture != nil && strings.EqualFold(strings.TrimSpace(details.State), "closed") {
-		return nil
 	}
 
 	checkRuns, err := s.listCheckRunsForRef(ctx, token, owner, repoName, details.Head.SHA)
