@@ -9,6 +9,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -69,10 +70,18 @@ type assessmentSnapshotFixture struct {
 	discoveryErr                      error
 	textHead, textBody                *string
 	incompleteText                    bool
+	metadata                          []telemetry.RequestMetadata
 }
 
-func (f *assessmentSnapshotFixture) PrepareCodeReviewPullRequestSnapshot(context.Context, uuid.UUID, uuid.UUID) (ghservice.CodeReviewPullRequestSnapshotReader, error) {
-	return func(context.Context, int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+func (f *assessmentSnapshotFixture) recordMetadata(ctx context.Context) {
+	metadata, _ := telemetry.RequestMetadataFromContext(ctx)
+	f.metadata = append(f.metadata, metadata)
+}
+
+func (f *assessmentSnapshotFixture) PrepareCodeReviewPullRequestSnapshot(ctx context.Context, _ uuid.UUID, _ uuid.UUID) (ghservice.CodeReviewPullRequestSnapshotReader, error) {
+	f.recordMetadata(ctx)
+	return func(ctx context.Context, _ int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+		f.recordMetadata(ctx)
 		f.calls++
 		f.snapshotCalls++
 		snapshot := f.snapshot
@@ -82,12 +91,14 @@ func (f *assessmentSnapshotFixture) PrepareCodeReviewPullRequestSnapshot(context
 		return snapshot, nil
 	}, nil
 }
-func (f *assessmentSnapshotFixture) SyncCodeReviewPullRequestState(context.Context, uuid.UUID, uuid.UUID) (ghservice.CodeReviewPullRequestSnapshot, error) {
+func (f *assessmentSnapshotFixture) SyncCodeReviewPullRequestState(ctx context.Context, _ uuid.UUID, _ uuid.UUID) (ghservice.CodeReviewPullRequestSnapshot, error) {
+	f.recordMetadata(ctx)
 	f.calls++
 	f.healthCalls++
 	return f.snapshot, f.syncErr
 }
-func (f *assessmentSnapshotFixture) DiscoverCodeReviewTextEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewTextDiscovery, error) {
+func (f *assessmentSnapshotFixture) DiscoverCodeReviewTextEvidence(ctx context.Context, _ uuid.UUID, _ uuid.UUID, _ int) (ghservice.CodeReviewTextDiscovery, error) {
+	f.recordMetadata(ctx)
 	f.textCalls++
 	return f.textDiscovery(), f.discoveryErr
 }
@@ -103,7 +114,8 @@ func (f *assessmentSnapshotFixture) textDiscovery() ghservice.CodeReviewTextDisc
 	return discovery
 }
 
-func (f *assessmentSnapshotFixture) DiscoverCodeReviewEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewEvidenceDiscovery, error) {
+func (f *assessmentSnapshotFixture) DiscoverCodeReviewEvidence(ctx context.Context, _ uuid.UUID, _ uuid.UUID, _ int) (ghservice.CodeReviewEvidenceDiscovery, error) {
+	f.recordMetadata(ctx)
 	f.combinedCalls++
 	return ghservice.CodeReviewEvidenceDiscovery{Text: f.textDiscovery()}, f.discoveryErr
 }
@@ -157,7 +169,17 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			}
 			s := NewAssessmentInputCaptureService(policies, prs, &visualEvidenceRepositoryStoreStub{repository: models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/web", InstallationID: 1}}, assessmentOrgFixture{models.Organization{Settings: orgSettings}}, snapshots, visual, assessmentFilesFixture{})
 			s.SetExternalContextResolver(assessmentExternalFixture{})
-			result, err := s.CaptureAssessmentInputs(context.Background(), in)
+			parentMetadata := telemetry.RequestMetadata{Caller: "review_fixture", SyncReason: "code_review", HealthOrigin: "direct", InstallationID: 1}
+			ctx := telemetry.WithRequestMetadata(context.Background(), parentMetadata)
+			result, err := s.CaptureAssessmentInputs(ctx, in)
+			expectedMetadata := parentMetadata
+			expectedMetadata.OrgID = orgID.String()
+			expectedMetadata.SessionID = in.SessionID.String()
+			expectedMetadata.AssessmentID = in.AssessmentID
+			expectedMetadata.PullRequestID = prID
+			for _, actual := range snapshots.metadata {
+				require.Equal(t, expectedMetadata, actual, "all snapshot preparation, health, discovery and final bracket calls must retain validated ownership and caller metadata")
+			}
 			if tt.change || tt.staleHealth || tt.incompleteVisual || tt.overflow || tt.closed || tt.syncFailure || tt.invalidSettings || tt.discoveryFailure || tt.incompleteText || tt.textHeadChanged || tt.textBodyChanged {
 				require.Error(t, err, "capture must reject mixed, stale, or unavailable inputs")
 				if tt.closed {

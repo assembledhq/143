@@ -4040,6 +4040,7 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 		}
 
 		orgID := uuid.New()
+		expectHealthPopulation(mock, orgID, 0)
 		mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "before": pgxmock.AnyArg(), "limit": 50}).
 			WillReturnError(errors.New("list failed"))
@@ -4051,6 +4052,7 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 
 		now := time.Now().UTC()
 		prID := uuid.New()
+		expectHealthPopulation(mock, orgID, 1)
 		mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "before": pgxmock.AnyArg(), "limit": 10}).
 			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
@@ -4227,6 +4229,7 @@ func TestPRServiceReconcilePullRequestStateRunsDatabaseRecoveryAfterThrottle(t *
 			retryAt := now.Add(10 * time.Minute)
 			throttle := &ratelimit.Deferral{Kind: ratelimit.KindSecondary, InstallationID: 42, RetryAt: retryAt, Generation: 3}
 
+			expectHealthPopulation(mock, orgID, 1)
 			mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "before": pgxmock.AnyArg(), "limit": 10}).
 				WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(

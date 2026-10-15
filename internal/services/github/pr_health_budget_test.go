@@ -124,6 +124,7 @@ func TestPRHealthBackgroundBudgetPreservesIndependentRecovery(t *testing.T) {
 	t.Cleanup(mock.Close)
 	orgID, prID := uuid.New(), uuid.New()
 	row := newPRTestRow(prID, nil, orgID, "example/budgeted", time.Now().UTC(), nil)
+	expectHealthPopulation(mock, orgID, 1)
 	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").WithArgs(pgx.NamedArgs{"org_id": orgID, "before": pgxmock.AnyArg(), "limit": 10}).WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(row...))
 	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(row...))
 	expectReconciliationRepository(mock, orgID, uuid.New(), "example/budgeted", 42, false)

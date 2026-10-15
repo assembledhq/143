@@ -13,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/agent"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/google/uuid"
 )
 
@@ -115,6 +116,12 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	if pr.GitHubRepo != repo.FullName || repo.OrgID != in.OrgID {
 		return result, errors.New("assessment repository does not match pull request")
 	}
+	metadata, _ := telemetry.RequestMetadataFromContext(ctx)
+	metadata.OrgID = in.OrgID.String()
+	metadata.SessionID = in.SessionID.String()
+	metadata.AssessmentID = in.AssessmentID
+	metadata.PullRequestID = in.PullRequestID
+	ctx = telemetry.WithRequestMetadata(ctx, metadata)
 	resolved, err := s.policies.ResolvePolicy(ctx, in.OrgID)
 	if err != nil {
 		return result, err

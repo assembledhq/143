@@ -66,6 +66,27 @@ func (s *PullRequestStore) GetHealthSnapshot(ctx context.Context, orgID, pullReq
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequestHealthSnapshot])
 }
 
+// CountOpenForHealthSync returns the open population up to populationCap. A
+// result equal to the cap is a lower bound, rather than an exact total.
+func (s *PullRequestStore) CountOpenForHealthSync(ctx context.Context, orgID uuid.UUID, populationCap int) (int, error) {
+	if populationCap <= 0 || populationCap > 1000 {
+		populationCap = 1000
+	}
+	query := `
+		SELECT COUNT(*) FROM (
+			SELECT 1 FROM pull_requests
+			WHERE org_id = @org_id AND status = 'open'
+			LIMIT @population_cap
+		) AS open_pull_requests`
+	var count int
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id": orgID, "population_cap": populationCap,
+	}).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count open pull requests for health sync: %w", err)
+	}
+	return count, nil
+}
+
 func (s *PullRequestStore) ListOpenStaleForHealthSync(ctx context.Context, orgID uuid.UUID, before time.Time, limit int) ([]models.PullRequest, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50

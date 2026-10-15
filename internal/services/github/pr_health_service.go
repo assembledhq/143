@@ -25,6 +25,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/github/ratelimit"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 const (
@@ -33,6 +34,17 @@ const (
 	// sweep touches every open PR in the org and is the dominant consumer of the
 	// REST budget.
 	prHealthStaleAfter = 10 * time.Minute
+	// Five periodic passes provide capacity for an ordinary open population
+	// within roughly fifty minutes, before queueing, deferrals, or errors. Keep
+	// the candidate list and its population query bounded for larger tenants.
+	prHealthCatchupPasses    = 5
+	prHealthCandidateLimit   = 200
+	prHealthPopulationCap    = prHealthCatchupPasses * prHealthCandidateLimit
+	prHealthSweepConcurrency = 2
+	// Bound how long a sweep admits new health candidates. An already started
+	// shared sync retains its existing two-minute timeout; credential resolution
+	// and independent recovery work do not acquire a new overall deadline.
+	prHealthSweepStartBudget = 7 * time.Minute
 	// prHealthReadStaleAfter is the tighter budget for interactive reads only —
 	// GetPullRequestHealth serving the HTTP endpoint. Projected check rebuilds
 	// never recompute summary.MergeState (see rebuildProjectedHealthSummary), so
@@ -713,6 +725,7 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 		}
 	}
 	pr, repo := resolved.pullRequest, resolved.repository
+	ctx = withPullRequestHealthMetadata(ctx, orgID, pr.ID)
 	resolution = resolved.resolution
 	if err := scope.deferral(resolution); err != nil {
 		return err
@@ -1158,35 +1171,92 @@ func (s *reconciliationGitHubScope) hasBlockedInstallation() bool {
 	return len(s.blocked) > 0
 }
 
+func withPullRequestHealthMetadata(ctx context.Context, orgID, pullRequestID uuid.UUID) context.Context {
+	metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+	metadata.OrgID = orgID.String()
+	metadata.PullRequestID = pullRequestID
+	return githubtelemetry.WithRequestMetadata(ctx, metadata)
+}
+
+func pullRequestHealthCandidateLimit(limit, openPopulation int) int {
+	if limit <= 0 || limit > prHealthCandidateLimit {
+		limit = 50
+	}
+	if openPopulation > prHealthPopulationCap {
+		openPopulation = prHealthPopulationCap
+	}
+	return min(prHealthCandidateLimit, max(limit, (openPopulation+prHealthCatchupPasses-1)/prHealthCatchupPasses))
+}
+
 func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error {
 	ctx = withReconciliationScope(ctx)
 	scope := reconciliationScopeFromContext(ctx)
-	stale, err := s.pullRequests.ListOpenStaleForHealthSync(ctx, orgID, time.Now().Add(-prHealthStaleAfter), limit)
+	healthStartedAt := time.Now()
+	population, countErr := s.pullRequests.CountOpenForHealthSync(ctx, orgID, prHealthPopulationCap)
+	if countErr != nil {
+		s.logger.Warn().Err(countErr).Str("org_id", orgID.String()).Msg("failed to size pull request health sweep; using requested limit")
+	}
+	healthLimit := pullRequestHealthCandidateLimit(limit, population)
+	stale, err := s.pullRequests.ListOpenStaleForHealthSync(ctx, orgID, time.Now().Add(-prHealthStaleAfter), healthLimit)
 	var reconciliationErrs []error
 	if err != nil {
 		reconciliationErrs = append(reconciliationErrs, fmt.Errorf("list stale pull requests for reconciliation: %w", err))
 	}
-	for _, pr := range stale {
-		syncCtx := WithPullRequestSyncReason(ctx, PullRequestSyncReasonStaleReconcile)
-		if err := s.SyncPullRequestState(syncCtx, orgID, pr.ID); err != nil {
+	outcomes := runPullRequestHealthCandidates(ctx, stale, healthStartedAt.Add(prHealthSweepStartBudget), time.Now, func(ctx context.Context, pullRequestID uuid.UUID) error {
+		return s.SyncPullRequestState(WithPullRequestSyncReason(ctx, PullRequestSyncReasonStaleReconcile), orgID, pullRequestID)
+	})
+	var started, succeeded, deferred, pending, failed, budgetSkipped, cancelledSkipped int
+	for i, outcome := range outcomes {
+		pr := stale[i]
+		if !outcome.started {
+			if outcome.budgetExpired {
+				budgetSkipped++
+			} else {
+				cancelledSkipped++
+			}
+			continue
+		}
+		started++
+		if err := outcome.err; err != nil {
 			if errors.Is(err, errPullRequestBackgroundQuotaDeferred) {
+				deferred++
 				continue
 			}
 			// The shared sync may have originated outside this sweep. Typed
 			// controller deferrals still identify its affected installation.
 			scope.observe(nil, err)
 			if errors.Is(err, ErrPullRequestMergeabilityPending) {
+				pending++
 				s.logger.Debug().Str("pull_request_id", pr.ID.String()).Msg("pull request mergeability is still pending during reconciliation")
 				continue
 			}
+			retry := ClassifyRetry(err, time.Now())
+			if retry.RateLimited {
+				deferred++
+			} else {
+				failed++
+			}
 			s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to reconcile pull request health")
-			if ClassifyRetry(err, time.Now()).Retryable {
+			if retry.Retryable {
 				reconciliationErrs = append(reconciliationErrs, fmt.Errorf("reconcile pull request %s: %w", pr.ID, err))
 			}
+		} else {
+			succeeded++
 		}
 	}
+	s.logger.Info().Str("org_id", orgID.String()).
+		Int("health_population", population).Bool("health_population_capped", population == prHealthPopulationCap).
+		Bool("health_population_available", countErr == nil).Int("health_candidate_limit", healthLimit).
+		Bool("health_selection_available", err == nil).
+		Int("health_selected", len(stale)).Int("health_started", started).Int("health_succeeded", succeeded).
+		Int("health_deferred", deferred).Int("health_mergeability_pending", pending).Int("health_failed", failed).
+		Int("health_budget_skipped", budgetSkipped).Int("health_cancelled_skipped", cancelledSkipped).
+		Dur("health_elapsed", time.Since(healthStartedAt)).Msg("completed periodic pull request health sweep")
+	if ctx.Err() != nil {
+		reconciliationErrs = append(reconciliationErrs, ctx.Err())
+	}
 	// Independent database recovery runs even when GitHub is throttled or a
-	// candidate listing failed. Every candidate list remains bounded by limit.
+	// candidate listing failed. Its candidate lists retain the requested limit.
 	if err := s.reconcileStuckPublishActions(ctx, orgID, limit); err != nil {
 		reconciliationErrs = append(reconciliationErrs, err)
 	}
@@ -1212,6 +1282,41 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 		reconciliationErrs = append(reconciliationErrs, err)
 	}
 	return errors.Join(reconciliationErrs...)
+}
+
+type pullRequestHealthOutcome struct {
+	started       bool
+	budgetExpired bool
+	err           error
+}
+
+// runPullRequestHealthCandidates keeps each PR's operations serial, bounds
+// parallelism, and returns results in candidate order for deterministic retry
+// classification. A start budget does not cancel an already shared sync.
+func runPullRequestHealthCandidates(ctx context.Context, candidates []models.PullRequest, startDeadline time.Time, now func() time.Time, syncCandidate func(context.Context, uuid.UUID) error) []pullRequestHealthOutcome {
+	outcomes := make([]pullRequestHealthOutcome, len(candidates))
+	indices := make(chan int)
+	var workers sync.WaitGroup
+	for range min(prHealthSweepConcurrency, len(candidates)) {
+		workers.Go(func() {
+			for i := range indices {
+				if ctx.Err() != nil {
+					continue
+				}
+				if !now().Before(startDeadline) {
+					outcomes[i].budgetExpired = true
+					continue
+				}
+				outcomes[i] = pullRequestHealthOutcome{started: true, err: syncCandidate(ctx, candidates[i].ID)}
+			}
+		})
+	}
+	for i := range candidates {
+		indices <- i
+	}
+	close(indices)
+	workers.Wait()
+	return outcomes
 }
 
 func (s *PRService) reconciliationRepositoryDeferral(ctx context.Context, orgID uuid.UUID, repo *models.Repository) error {
