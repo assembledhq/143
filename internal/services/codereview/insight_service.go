@@ -8,6 +8,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
@@ -86,7 +87,11 @@ func (s *InsightService) ReconcileAndRank(ctx context.Context, orgID uuid.UUID) 
 				progressed = true
 				pullRequest := pullRequest
 				group.Go(func() error {
-					snapshot, err := s.provider.GetCodeReviewOutcomeSnapshot(groupContext, orgID, pullRequest.RepositoryID, pullRequest.GitHubPRNumber)
+					metadata, _ := githubtelemetry.RequestMetadataFromContext(groupContext)
+					metadata.OrgID = orgID.String()
+					metadata.PullRequestID = pullRequest.PullRequestID
+					requestContext := githubtelemetry.WithRequestMetadata(groupContext, metadata)
+					snapshot, err := s.provider.GetCodeReviewOutcomeSnapshot(requestContext, orgID, pullRequest.RepositoryID, pullRequest.GitHubPRNumber)
 					if err != nil {
 						if attemptErr := s.store.RecordOutcomeReconciliationAttempt(groupContext, orgID, pullRequest.PullRequestID, staleBefore); attemptErr != nil {
 							return attemptErr
