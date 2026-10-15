@@ -174,7 +174,7 @@ jobs:
         if: needs.changes.outputs.demo_seed == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
         run: make demo-seed-check
 
-      - name: Run backend unit tests outside the agent package
+      - name: Run backend unit tests outside the agent and worker packages
         timeout-minutes: 10
         run: |
           mode=count
@@ -188,12 +188,29 @@ jobs:
           packages="$(go list ./internal/...)"
           unit_packages=()
           while IFS= read -r package; do
-            if [[ "$package" != "github.com/assembledhq/143/internal/services/agent" ]]; then
+            if [[ "$package" != "github.com/assembledhq/143/internal/services/agent" && \
+                  "$package" != "github.com/assembledhq/143/internal/worker" ]]; then
               unit_packages+=("$package")
             fi
           done <<< "$packages"
           go test "${unit_packages[@]}" -skip '^TestBrowserChromeDP' -coverpkg=./internal/... \
             -coverprofile=coverage-unit-other.out -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
+
+      # Full-schema Postgres fixtures in worker need their own bounded budget.
+      # Run that package separately from the concurrent general package suite.
+      - name: Run worker unit tests
+        timeout-minutes: 10
+        run: |
+          mode=count
+          race=()
+          package_timeout=300s
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=atomic
+            race=(-race)
+            package_timeout=360s
+          fi
+          go test ./internal/worker -coverpkg=./internal/... -coverprofile=coverage-unit-worker.out \
+            -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
 
       - name: Run agent unit tests
         timeout-minutes: 10
@@ -210,7 +227,7 @@ jobs:
             -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
 
       - name: Combine backend unit coverage
-        run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-agent.out
+        run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-worker.out coverage-unit-agent.out
 
       - name: Run server sandbox presence composition tests
         run: |
@@ -299,6 +316,7 @@ jobs:
             coverage.out
             coverage-unit.out
             coverage-unit-other.out
+            coverage-unit-worker.out
             coverage-unit-agent.out
             coverage-browser.out
             coverage-integration.out

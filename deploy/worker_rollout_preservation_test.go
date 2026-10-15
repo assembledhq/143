@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,6 +75,7 @@ read_worker_env_value() { case "$1" in NODE_ID) echo base;; WORKER_PRIVATE_IP) e
 ensure_routine_worker_fingerprints_compatible() { :; }
 load_worker_endpoint_check_env() { :; }
 worker_host_capacity_preflight() { :; }
+worker_host_disk_capacity_preflight() { :; }
 find_free_worker_port() { echo 8081; }
 sanitize_compose_project() { echo project; }
 worker_expected_schema_version() { echo 312; }
@@ -226,9 +228,9 @@ func TestWorkerRolloutGuardRetainsUnknownAttemptsAndRejectsStaleCompletion(t *te
 			functions := extractTopLevelShellFunction(t, script, "worker_rollout_guard", "finish_worker_rollout_guard")
 			// Mock only flock portability; the actual guard, namespace and receipt
 			// checks execute unchanged. Linux concurrency is covered separately.
-			mockFlock := "flock() { return 0; }\nsync() { return 0; }\n"
+			mockFlock := "flock() { return 0; }\nsync() { return 0; }\nworker_host_disk_capacity_preflight() { :; }\n"
 			if tt.legacyBusy {
-				mockFlock = `flock() { case "$*" in *drain-worker*) return 1;; *) return 0;; esac; }; sync() { return 0; }` + "\n"
+				mockFlock = `flock() { case "$*" in *drain-worker*) return 1;; *) return 0;; esac; }; sync() { return 0; }; worker_host_disk_capacity_preflight() { :; }` + "\n"
 			}
 			body := mockFlock + "root=" + shellQuote(root) + "\nlogs=" + shellQuote(logRoot) + "\n"
 			if tt.completion != "" {
@@ -276,7 +278,9 @@ begin_worker_rollout_guard
 	require.NotContains(t, output, "unexpected-host-access", "rejected detached mode must have no remote effects")
 	require.Contains(t, output, "retirement must be joined", "caller should understand why background acknowledgement is insufficient")
 	require.NotContains(t, script, `if [ -n "${WORKER_DEPLOY_DETACH:-}" ]`, "typed zero must not accidentally enable detachment")
-	require.Less(t, strings.Index(script, "  begin_worker_rollout_guard\n"), strings.Index(script, "Refreshing secrets from .env.production.enc"), "exclusive latch must precede secret/configuration transport")
+	workerRefresh := strings.Index(script, `printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s`)
+	require.Positive(t, workerRefresh, "test should locate the first worker environment transport")
+	require.Less(t, strings.Index(script, "  begin_worker_rollout_guard\n"), workerRefresh, "exclusive latch must precede secret/configuration transport")
 }
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
@@ -284,7 +288,7 @@ func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'
 func TestWorkerRolloutTypedZeroWaitsForGuardianCompletion(t *testing.T) {
 	t.Parallel()
 	script := workerRolloutScript(t)
-	functions := extractTopLevelShellFunction(t, script, "remote_shell_quote", "remote_env_assignment") +
+	functions := extractTopLevelShellFunction(t, script, "remote_shell_quote", "worker_rollout_guard") +
 		extractTopLevelShellFunction(t, script, "worker_rollout_guard", "apply_static_egress_worker_host_map")
 	output, err := runWorkerShell(t, functions, `
 WORKER_DEPLOY_DETACH=0
@@ -338,7 +342,7 @@ func TestWorkerRolloutActualFlockRejectsConcurrentAttempt(t *testing.T) {
 	root, logs := t.TempDir(), t.TempDir()
 	script := workerRolloutScript(t)
 	functions := extractTopLevelShellFunction(t, script, "worker_rollout_guard", "finish_worker_rollout_guard")
-	body := "set -euo pipefail\n" + functions + "\nworker_rollout_guard attempt-a build-a " + shellQuote(root) + " " + shellQuote(logs) + " " + shellQuote(filepath.Join(root, "legacy.lock"))
+	body := "set -euo pipefail\n" + functions + "\nworker_host_disk_capacity_preflight(){ :; }\nworker_rollout_guard attempt-a build-a " + shellQuote(root) + " " + shellQuote(logs) + " " + shellQuote(filepath.Join(root, "legacy.lock"))
 	first := exec.CommandContext(ctx, "bash", "-c", body)
 	in, err := first.StdinPipe()
 	require.NoError(t, err, "should provide a live guardian control channel")
@@ -449,6 +453,7 @@ read_worker_env_value() { case "$1" in NODE_ID) echo base;; WORKER_PRIVATE_IP) e
 ensure_routine_worker_fingerprints_compatible() { :; }
 load_worker_endpoint_check_env() { :; }
 worker_host_capacity_preflight() { :; }
+worker_host_disk_capacity_preflight() { :; }
 find_free_worker_port() { echo 8081; }
 sanitize_compose_project() { echo project; }
 worker_expected_schema_version() { echo 312; }
@@ -543,7 +548,7 @@ func TestWorkerClosedErrorChannelStillPersistsFailureContext(t *testing.T) {
 		root := t.TempDir()
 		script := workerRolloutScript(t)
 		function := extractTopLevelShellFunction(t, script, "worker_rollout_guard", "finish_worker_rollout_guard")
-		_, err := runWorkerShellWithClosedErrorPipe(t, function, `flock(){ :; }; sync(){ :; }
+		_, err := runWorkerShellWithClosedErrorPipe(t, function, `flock(){ :; }; sync(){ :; }; worker_host_disk_capacity_preflight(){ :; }
 worker_rollout_guard attempt-a build-a `+shellQuote(root)+` `+shellQuote(root)+` `+shellQuote(filepath.Join(root, "legacy.lock")))
 		require.Error(t, err, "disconnected guardian control remains an incomplete rollout")
 		data, readErr := os.ReadFile(filepath.Join(root, ".worker-rollout", "failure.json"))
@@ -626,6 +631,266 @@ prune_unused_docker_resources `+tt.role)
 				require.NotContains(t, output, "docker container prune", "routine deployment must preserve stopped worker logs and exact generation evidence")
 			}
 			require.Contains(t, output, "docker image prune", "safe image cache cleanup should remain available")
+		})
+	}
+}
+
+func TestWorkerDiskCapacityMaintenanceGate(t *testing.T) {
+	t.Parallel()
+	const reserveKB = 10240 * 1024
+	const withPullKB = (10240 + 8192) * 1024
+	tests := []struct {
+		name, phase, mode, freeKB, freeInodes, config string
+		wantSuccess                                   bool
+	}{
+		{name: "pre-pull below byte allowance", phase: "pre-pull", freeKB: fmt.Sprint(withPullKB - 1), freeInodes: "200000"},
+		{name: "pre-pull exact reserve plus allowance", phase: "pre-pull", freeKB: fmt.Sprint(withPullKB), freeInodes: "200000", wantSuccess: true},
+		{name: "pre-pull above both floors", phase: "pre-pull", freeKB: fmt.Sprint(withPullKB + 1), freeInodes: "200001", wantSuccess: true},
+		{name: "pre-pull below inode allowance", phase: "pre-pull", freeKB: fmt.Sprint(withPullKB), freeInodes: "199999"},
+		{name: "pre-start below reserve", phase: "pre-start", freeKB: fmt.Sprint(reserveKB - 1), freeInodes: "100000"},
+		{name: "pre-start exact reserves", phase: "pre-start", freeKB: fmt.Sprint(reserveKB), freeInodes: "100000", wantSuccess: true},
+		{name: "pre-start above reserves", phase: "pre-start", freeKB: fmt.Sprint(reserveKB + 1), freeInodes: "100001", wantSuccess: true},
+		{name: "pre-start low inodes", phase: "pre-start", freeKB: fmt.Sprint(reserveKB), freeInodes: "99999"},
+		{name: "docker info error", phase: "pre-pull", mode: "docker-error"},
+		{name: "missing docker root", phase: "pre-pull", mode: "missing-root"},
+		{name: "relative docker root", phase: "pre-pull", mode: "relative-root"},
+		{name: "multiline docker root", phase: "pre-pull", mode: "multiline-root"},
+		{name: "nonexistent docker root", phase: "pre-pull", mode: "nonexistent-root"},
+		{name: "bytes collection error", phase: "pre-pull", mode: "bytes-error"},
+		{name: "missing bytes evidence", phase: "pre-pull", mode: "bytes-missing"},
+		{name: "malformed bytes header", phase: "pre-pull", mode: "bytes-header"},
+		{name: "extra byte row", phase: "pre-pull", mode: "bytes-extra-row"},
+		{name: "nonnumeric byte evidence", phase: "pre-pull", freeKB: "unknown", freeInodes: "200000"},
+		{name: "zero byte evidence", phase: "pre-pull", freeKB: "0", freeInodes: "200000"},
+		{name: "negative byte evidence", phase: "pre-pull", freeKB: "-1", freeInodes: "200000"},
+		{name: "overflow byte evidence", phase: "pre-pull", freeKB: "99999999999999999999999999", freeInodes: "200000"},
+		{name: "inode collection error", phase: "pre-pull", mode: "inodes-error"},
+		{name: "missing inode evidence", phase: "pre-pull", mode: "inodes-missing"},
+		{name: "malformed inode header", phase: "pre-pull", mode: "inodes-header"},
+		{name: "nonnumeric inode evidence", phase: "pre-pull", freeKB: fmt.Sprint(withPullKB), freeInodes: "unknown"},
+		{name: "zero inode evidence", phase: "pre-pull", freeKB: fmt.Sprint(withPullKB), freeInodes: "0"},
+		{name: "invalid byte total", phase: "pre-pull", mode: "bytes-invalid-total"},
+		{name: "zero byte total", phase: "pre-pull", mode: "bytes-zero-total"},
+		{name: "overflow byte total", phase: "pre-pull", mode: "bytes-overflow-total"},
+		{name: "overflow byte used", phase: "pre-pull", mode: "bytes-overflow-used"},
+		{name: "inconsistent byte row", phase: "pre-pull", mode: "bytes-inconsistent"},
+		{name: "invalid inode total", phase: "pre-pull", mode: "inodes-invalid-total"},
+		{name: "zero inode total", phase: "pre-pull", mode: "inodes-zero-total"},
+		{name: "overflow inode total", phase: "pre-pull", mode: "inodes-overflow-total"},
+		{name: "overflow inode used", phase: "pre-pull", mode: "inodes-overflow-used"},
+		{name: "inconsistent inode row", phase: "pre-pull", mode: "inodes-inconsistent"},
+		{name: "stale observation window", phase: "pre-pull", mode: "stale"},
+		{name: "backward observation clock", phase: "pre-pull", mode: "backward-clock"},
+		{name: "zero reserve forbidden", phase: "pre-pull", config: "WORKER_BLUE_GREEN_MIN_FREE_DISK_MB=0"},
+		{name: "invalid inode floor", phase: "pre-pull", config: "WORKER_BLUE_GREEN_MIN_FREE_INODES=invalid"},
+		{name: "overflow pull allowance", phase: "pre-pull", config: "WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB=999999999999999999999999999999"},
+		{name: "zero inode allowance forbidden", phase: "pre-pull", config: "WORKER_BLUE_GREEN_PULL_INODE_BUDGET=0"},
+		{name: "explicit operator thresholds", phase: "pre-pull", freeKB: "3072", freeInodes: "7", config: "WORKER_BLUE_GREEN_MIN_FREE_DISK_MB=1; WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB=2; WORKER_BLUE_GREEN_MIN_FREE_INODES=3; WORKER_BLUE_GREEN_PULL_INODE_BUDGET=4", wantSuccess: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			directory := t.TempDir()
+			dockerRoot := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(directory, "attempt"), []byte("attempt-a\n"), 0600), "should create exact capacity-gate attempt")
+			require.NoError(t, os.WriteFile(filepath.Join(directory, "build-sha"), []byte("build-a\n"), 0600), "should create exact capacity-gate build")
+			freeKB, freeInodes := tt.freeKB, tt.freeInodes
+			if freeKB == "" {
+				freeKB = fmt.Sprint(withPullKB)
+			}
+			if freeInodes == "" {
+				freeInodes = "200000"
+			}
+			script := workerRolloutScript(t)
+			function := extractTopLevelShellFunction(t, script, "worker_host_disk_capacity_preflight", "finish_worker_rollout_guard")
+			output, err := runWorkerShell(t, function, `
+WORKER_ROLLOUT_ATTEMPT=attempt-a
+IMAGE_TAG=build-a
+mode=`+shellQuote(tt.mode)+`
+free_kb=`+shellQuote(freeKB)+`
+free_inodes=`+shellQuote(freeInodes)+`
+fixture_docker_root=`+shellQuote(dockerRoot)+`
+trace="$PWD/trace"
+touch "$trace"
+`+tt.config+`
+timeout(){ shift 2; "$@"; }
+sync(){ :; }
+date(){
+  if [ ! -e time-sampled ]; then touch time-sampled; echo 100;
+  else case "$mode" in stale) echo 116;; backward-clock) echo 99;; *) echo 100;; esac; fi
+}
+docker(){
+  printf 'docker %s\n' "$*" >>"$trace"
+  case "$mode" in docker-error) return 1;; missing-root) return 0;; relative-root) echo relative/path;; multiline-root) printf '%s\nextra\n' "$fixture_docker_root";; nonexistent-root) echo "$fixture_docker_root/absent";; *) echo "$fixture_docker_root";; esac
+}
+df(){
+  printf 'df %s\n' "$*" >>"$trace"
+  if [ "$1" = -Pk ]; then
+    case "$mode" in bytes-error) return 1;; bytes-missing) return 0;; bytes-header) echo 'not a filesystem header'; return;; esac
+    fixture_total=999999999; fixture_used=1
+    case "$mode" in bytes-invalid-total) fixture_total=invalid;; bytes-zero-total) fixture_total=0;; bytes-overflow-total) fixture_total=99999999999999999999999999;; bytes-overflow-used) fixture_used=99999999999999999999999999;; bytes-inconsistent) fixture_total="$free_kb";; esac
+    printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/test %s %s %s 1%% /data\n' "$fixture_total" "$fixture_used" "$free_kb"
+    if [ "$mode" = bytes-extra-row ]; then echo '/dev/extra 999999999 1 999999999 1% /extra'; fi
+  elif [ "$1" = -Pi ]; then
+    case "$mode" in inodes-error) return 1;; inodes-missing) return 0;; inodes-header) echo 'not inode evidence'; return;; esac
+    fixture_total=999999999; fixture_used=1
+    case "$mode" in inodes-invalid-total) fixture_total=invalid;; inodes-zero-total) fixture_total=0;; inodes-overflow-total) fixture_total=99999999999999999999999999;; inodes-overflow-used) fixture_used=99999999999999999999999999;; inodes-inconsistent) fixture_total="$free_inodes";; esac
+    printf 'Filesystem Inodes IUsed IFree IUse%% Mounted on\n/dev/test %s %s %s 1%% /data\n' "$fixture_total" "$fixture_used" "$free_inodes"
+  else return 1; fi
+}
+trap 'cat "$trace"' EXIT
+worker_host_disk_capacity_preflight `+tt.phase+` `+shellQuote(directory)+`
+echo gate-passed
+`)
+			if tt.wantSuccess {
+				require.NoError(t, err, "fresh capacity at or above each exact threshold should pass: %s", output)
+				require.Contains(t, output, "gate-passed", "valid capacity should permit the next rollout phase")
+				_, readErr := os.Stat(filepath.Join(directory, "failure.json"))
+				require.True(t, os.IsNotExist(readErr), "successful observation must not fabricate a failure receipt")
+			} else {
+				require.Error(t, err, "unknown, stale or insufficient capacity must fail before mutation")
+				require.NotContains(t, output, "gate-passed", "failed capacity must halt the caller")
+				data, readErr := os.ReadFile(filepath.Join(directory, "failure.json"))
+				require.NoError(t, readErr, "capacity failure must persist its fixed private failure receipt")
+				var actual map[string]string
+				require.NoError(t, json.Unmarshal(data, &actual), "capacity receipt must be valid structured JSON")
+				require.Equal(t, map[string]string{"attempt": "attempt-a", "build_sha": "build-a", "phase": "host_disk_capacity_failed", "candidate_node": "unknown", "candidate_container": "unknown"}, actual, "capacity failure must bind the exact attempt and explicitly unknown candidate")
+			}
+			require.NotContains(t, output, "docker stop", "disk pressure must not stop any generation")
+			require.NotContains(t, output, "docker rm", "disk pressure must not remove work or evidence")
+			require.NotContains(t, output, "expire-budget", "disk pressure must preserve review retry clocks")
+		})
+	}
+}
+
+func TestWorkerDiskGatePrecedesEveryPullAndCandidateStart(t *testing.T) {
+	t.Parallel()
+	script := workerRolloutScript(t)
+	guardian := extractTopLevelShellFunction(t, script, "worker_rollout_guard", "worker_host_disk_capacity_preflight")
+	require.Less(t, strings.Index(guardian, "worker_host_disk_capacity_preflight pre-pull"), strings.Index(guardian, `printf 'ready:%s`), "guardian must reject disk pressure before acknowledging any worker configuration, reconciliation build or static-egress pull")
+	for _, setting := range []string{"WORKER_BLUE_GREEN_MIN_FREE_DISK_MB", "WORKER_BLUE_GREEN_MIN_FREE_INODES", "WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB", "WORKER_BLUE_GREEN_PULL_INODE_BUDGET"} {
+		require.Equal(t, 2, strings.Count(script, "remote_env_assignment "+setting+" "), "each numeric setting must reach both the guardian and the main remote shell")
+	}
+	start := extractShellFunction(t, script, "start_worker_generation", "worker_container_state")
+	require.Less(t, strings.Index(start, "worker_host_disk_capacity_preflight pre-start"), strings.Index(start, "ACTIVE_WORKER_CANDIDATE_NODE="), "last fresh disk gate must precede candidate identity publication and compose up")
+	mainGate := strings.LastIndex(script, "    worker_host_disk_capacity_preflight pre-pull\n")
+	composePull := strings.Index(script, `pull_with_retry "compose images"`)
+	require.Positive(t, mainGate, "main remote shell should repeat the disk gate after early host reconciliation")
+	require.Less(t, mainGate, composePull, "fresh capacity must precede main image pulls and support builds")
+
+	function := extractShellFunction(t, script, "start_worker_generation", "worker_container_state")
+	output, err := runWorkerShell(t, function, `
+DEPLOY_MODE=routine
+worker_host_disk_capacity_preflight(){ echo rejected-pre-start; return 1; }
+docker(){ echo unexpected-candidate-allocation; }
+start_worker_generation candidate 8081 http://192.0.2.1:8081 project
+`)
+	require.Error(t, err, "last-minute disk pressure must stop candidate allocation")
+	require.Contains(t, output, "rejected-pre-start", "start must positively run the disk prerequisite")
+	require.NotContains(t, output, "unexpected-candidate-allocation", "failed last-minute capacity must not allocate a candidate")
+}
+
+func TestWorkerDiskFailureBlocksGuardianBeforeReady(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dockerRoot := t.TempDir()
+	script := workerRolloutScript(t)
+	functions := extractTopLevelShellFunction(t, script, "worker_rollout_guard", "finish_worker_rollout_guard")
+	output, err := runWorkerShell(t, functions, `
+flock(){ :; }
+sync(){ :; }
+timeout(){ shift 2; "$@"; }
+fixture_root=`+shellQuote(dockerRoot)+`
+docker(){ if [ "$1" = info ]; then echo "$fixture_root"; else echo unexpected-worker-mutation; fi; }
+df(){
+  if [ "$1" = -Pk ]; then printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/test 50000000 1 1 1%% /data\n';
+  else printf 'Filesystem Inodes IUsed IFree IUse%% Mounted on\n/dev/test 50000000 1 1 1%% /data\n'; fi
+}
+worker_rollout_guard attempt-a build-a `+shellQuote(root)+` `+shellQuote(root)+` `+shellQuote(filepath.Join(root, "legacy.lock")))
+	require.Error(t, err, "insufficient disk must reject admission to every host-side deployment operation")
+	require.NotContains(t, output, "ready:attempt-a", "failed pre-pull capacity must never acknowledge readiness to stage or reconcile")
+	require.NotContains(t, output, "unexpected-worker-mutation", "capacity refusal must leave all prior workers and ownership untouched")
+	data, readErr := os.ReadFile(filepath.Join(root, ".worker-rollout", "failure.json"))
+	require.NoError(t, readErr, "pre-ready refusal must preserve its durable capacity reason")
+	var actual map[string]string
+	require.NoError(t, json.Unmarshal(data, &actual), "capacity failure context should remain structured")
+	require.Equal(t, map[string]string{"attempt": "attempt-a", "build_sha": "build-a", "phase": "host_disk_capacity_failed", "candidate_node": "unknown", "candidate_container": "unknown"}, actual, "generic guardian exit must preserve the specific capacity failure without inventing a candidate")
+}
+
+func TestWorkerMainDiskFailurePreventsImagePull(t *testing.T) {
+	t.Parallel()
+	script := workerRolloutScript(t)
+	start := strings.LastIndex(script, "  if [ \"$ROLE\" = worker ] && [ \"${DEPLOY_MODE:-routine}\" = routine ]; then\n    worker_host_disk_capacity_preflight pre-pull\n")
+	pull := strings.Index(script, `  pull_with_retry "compose images" docker compose -f "$COMPOSE_FILE" pull --ignore-buildable`)
+	require.Positive(t, start, "should locate the real remote pre-pull maintenance gate")
+	require.Greater(t, pull, start, "real compose pull must follow the gate")
+	end := strings.Index(script[pull:], "\n") + pull
+	body := `ROLE=worker
+DEPLOY_MODE=routine
+worker_host_disk_capacity_preflight(){ echo disk-refused; return 1; }
+pull_with_retry(){ echo unexpected-image-pull; }
+docker(){ echo unexpected-docker-mutation; }
+` + script[start:end]
+	output, err := runWorkerShell(t, "", body)
+	require.Error(t, err, "main remote capacity refusal must fail the deployment")
+	require.Contains(t, output, "disk-refused", "the actual pre-pull block must perform its fresh observation")
+	require.NotContains(t, output, "unexpected-image-pull", "failed capacity cannot begin compose image pulls")
+	require.NotContains(t, output, "unexpected-docker-mutation", "failed capacity cannot build, start, stop or remove anything")
+}
+
+func TestWorkerDiskFailureCannotSynthesizeUnboundReceipt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, identity   string
+		writeEmptyFields bool
+	}{
+		{name: "unset identity and missing fields", identity: "unset WORKER_ROLLOUT_ATTEMPT IMAGE_TAG"},
+		{name: "empty identity and empty fields", identity: "WORKER_ROLLOUT_ATTEMPT=; IMAGE_TAG=", writeEmptyFields: true},
+		{name: "missing attempt", identity: "WORKER_ROLLOUT_ATTEMPT=; IMAGE_TAG=build-a", writeEmptyFields: true},
+		{name: "missing build", identity: "WORKER_ROLLOUT_ATTEMPT=attempt-a; IMAGE_TAG=", writeEmptyFields: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			directory := t.TempDir()
+			if tt.writeEmptyFields {
+				require.NoError(t, os.WriteFile(filepath.Join(directory, "attempt"), nil, 0600), "should create an empty malformed attempt field")
+				require.NoError(t, os.WriteFile(filepath.Join(directory, "build-sha"), nil, 0600), "should create an empty malformed build field")
+			}
+			script := workerRolloutScript(t)
+			function := extractTopLevelShellFunction(t, script, "worker_host_disk_capacity_preflight", "finish_worker_rollout_guard")
+			output, err := runWorkerShell(t, function, tt.identity+`
+docker(){ echo unexpected-observation; }
+worker_host_disk_capacity_preflight pre-pull `+shellQuote(directory))
+			require.Error(t, err, "missing identity must fail before observation or receipt creation")
+			require.NotContains(t, output, "unexpected-observation", "unbound attempts must not advance to host capacity observations")
+			entries, readErr := os.ReadDir(directory)
+			require.NoError(t, readErr, "should inspect the malformed latch without changing it")
+			expectedCount := 0
+			if tt.writeEmptyFields {
+				expectedCount = 2
+			}
+			require.Equal(t, expectedCount, len(entries), "missing identity must never synthesize a capacity receipt or temporary bound artifact")
+		})
+	}
+}
+
+func TestWorkerRolloutRejectsUnknownModeBeforeHostAccess(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"rountine", "Routine", "0", "maintenance-extra"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			script := workerRolloutScript(t)
+			function := extractTopLevelShellFunction(t, script, "begin_worker_rollout_guard", "apply_static_egress_worker_host_map")
+			output, err := runWorkerShell(t, function, "DEPLOY_MODE="+shellQuote(mode)+`
+ssh(){ echo unexpected-host-contact; }
+mktemp(){ echo unexpected-local-intent; }
+begin_worker_rollout_guard
+`)
+			require.Error(t, err, "unknown rollout modes must be refused before opening an attempt")
+			require.Contains(t, output, "must be routine or maintenance", "the accepted mode boundary should be explicit")
+			require.NotContains(t, output, "unexpected-host-contact", "invalid modes must never contact a worker host")
+			require.NotContains(t, output, "unexpected-local-intent", "invalid modes must not allocate even a local attempt")
 		})
 	}
 }

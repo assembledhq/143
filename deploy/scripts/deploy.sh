@@ -195,6 +195,10 @@ worker_rollout_guard() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   sync -f "$root"
+  if [ "${DEPLOY_MODE:-routine}" = routine ]; then
+    WORKER_ROLLOUT_ATTEMPT="$attempt" IMAGE_TAG="$build_sha" \
+      worker_host_disk_capacity_preflight pre-pull "$root/.worker-rollout" || return 1
+  fi
   printf 'ready:%s\n' "$attempt"
   while read -r command token; do
     if [ "$command" = complete ] && [ "$token" = "$attempt" ] &&
@@ -220,6 +224,77 @@ worker_rollout_guard() {
   return 1
 }
 
+# The floor is reserved for reviews and logs. The separate pre-pull allowance
+# is an operator-verified deployment budget, not evidence that any image fits.
+worker_host_disk_capacity_preflight() {
+  local phase="$1" directory="${2:-/opt/143/.worker-rollout}"
+  local reserve_mb="${WORKER_BLUE_GREEN_MIN_FREE_DISK_MB:-10240}" reserve_inodes="${WORKER_BLUE_GREEN_MIN_FREE_INODES:-100000}"
+  local pull_mb="${WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB:-8192}" pull_inodes="${WORKER_BLUE_GREEN_PULL_INODE_BUDGET:-100000}"
+  local docker_root bytes_output inodes_output available_kb available_inodes required_kb required_inodes started finished
+  disk_capacity_failure() {
+    WORKER_ROLLOUT_PHASE=host_disk_capacity_failed
+    local record node="${ACTIVE_WORKER_CANDIDATE_NODE:-unknown}" cid="${STARTED_WORKER_CID:-unknown}"
+    if [ -n "${WORKER_ROLLOUT_ATTEMPT:-}" ] && [ -n "${IMAGE_TAG:-}" ] &&
+       [ "$(cat "$directory/attempt" 2>/dev/null)" = "$WORKER_ROLLOUT_ATTEMPT" ] &&
+       [ "$(cat "$directory/build-sha" 2>/dev/null)" = "$IMAGE_TAG" ]; then
+      if record="$(mktemp "$directory/.disk-failure.XXXXXX" 2>/dev/null)" &&
+         jq -n --arg attempt "$WORKER_ROLLOUT_ATTEMPT" --arg build "$IMAGE_TAG" --arg node "$node" --arg cid "$cid" \
+           '{attempt:$attempt, build_sha:$build, phase:"host_disk_capacity_failed", candidate_node:$node, candidate_container:$cid}' > "$record" &&
+         mv "$record" "$directory/failure.json"; then
+        sync -f "$directory" || true
+      fi
+    fi
+    # Receipt first: a disconnected error channel must not erase the reason.
+    echo "ERROR: worker disk-capacity evidence is missing, stale, invalid, or below its maintenance floor; resources and intent retained." >&2 || true
+    return 1
+  }
+  if [ -z "${WORKER_ROLLOUT_ATTEMPT:-}" ] || [ -z "${IMAGE_TAG:-}" ] ||
+     [ "$(cat "$directory/attempt" 2>/dev/null)" != "$WORKER_ROLLOUT_ATTEMPT" ] ||
+     [ "$(cat "$directory/build-sha" 2>/dev/null)" != "$IMAGE_TAG" ]; then
+    disk_capacity_failure; return 1
+  fi
+  # Bound decimal widths before Bash arithmetic; neither zero nor overflow can
+  # disable the gate. Fresh observations are collected within one 15s window.
+  if ! [[ "$reserve_mb" =~ ^[1-9][0-9]{0,11}$ && "$reserve_inodes" =~ ^[1-9][0-9]{0,11}$ &&
+          "$pull_mb" =~ ^[1-9][0-9]{0,11}$ && "$pull_inodes" =~ ^[1-9][0-9]{0,11}$ ]]; then
+    disk_capacity_failure; return 1
+  fi
+  required_kb=$((reserve_mb * 1024))
+  required_inodes="$reserve_inodes"
+  case "$phase" in
+    pre-pull) required_kb=$(((reserve_mb + pull_mb) * 1024)); required_inodes=$((reserve_inodes + pull_inodes)) ;;
+    pre-start) ;;
+    *) disk_capacity_failure; return 1 ;;
+  esac
+  if ! started="$(date +%s)" || ! [[ "$started" =~ ^[1-9][0-9]{0,11}$ ]]; then
+    disk_capacity_failure; return 1
+  fi
+  if ! docker_root="$(timeout --foreground 5s docker info --format '{{.DockerRootDir}}' 2>/dev/null)" ||
+     ! [[ "$docker_root" = /* && "$docker_root" != *[[:cntrl:]]* ]] || [ ! -d "$docker_root" ]; then
+    disk_capacity_failure; return 1
+  fi
+  if ! bytes_output="$(LC_ALL=C timeout --foreground 5s df -Pk -- "$docker_root" 2>/dev/null)" ||
+     ! inodes_output="$(LC_ALL=C timeout --foreground 5s df -Pi -- "$docker_root" 2>/dev/null)"; then
+    disk_capacity_failure; return 1
+  fi
+  if ! available_kb="$(printf '%s\n' "$bytes_output" | awk '
+      NR==1 {if ($1!="Filesystem" || $2!="1024-blocks" || $4!="Available") exit 1; next}
+      NR==2 {if (NF<6 || $2!~/^[1-9][0-9]*$/ || $3!~/^[0-9]+$/ || $4!~/^[1-9][0-9]*$/ || length($2)>15 || length($3)>15 || length($4)>15 || ($3+0)+($4+0)>($2+0)) exit 1; value=$4; next}
+      END {if (NR!=2 || value=="") exit 1; print value}')" ||
+     ! available_inodes="$(printf '%s\n' "$inodes_output" | awk '
+      NR==1 {if ($1!="Filesystem" || $2!="Inodes" || $4!="IFree") exit 1; next}
+      NR==2 {if (NF<6 || $2!~/^[1-9][0-9]*$/ || $3!~/^[0-9]+$/ || $4!~/^[1-9][0-9]*$/ || length($2)>15 || length($3)>15 || length($4)>15 || ($3+0)+($4+0)>($2+0)) exit 1; value=$4; next}
+      END {if (NR!=2 || value=="") exit 1; print value}')" ||
+     ! [[ "$available_kb" =~ ^[1-9][0-9]{0,14}$ && "$available_inodes" =~ ^[1-9][0-9]{0,14}$ ]]; then
+    disk_capacity_failure; return 1
+  fi
+  if ! finished="$(date +%s)" || ! [[ "$finished" =~ ^[1-9][0-9]{0,11}$ ]] ||
+     [ "$finished" -lt "$started" ] || [ "$((finished - started))" -gt 15 ] ||
+     [ "$available_kb" -lt "$required_kb" ] || [ "$available_inodes" -lt "$required_inodes" ]; then
+    disk_capacity_failure; return 1
+  fi
+}
+
 finish_worker_rollout_guard() {
   local rc="$?" guard_rc=0
   trap - EXIT HUP INT TERM
@@ -239,6 +314,10 @@ finish_worker_rollout_guard() {
 }
 
 begin_worker_rollout_guard() {
+  case "${DEPLOY_MODE:-routine}" in
+    routine|maintenance) ;;
+    *) echo "ERROR: worker DEPLOY_MODE must be routine or maintenance." >&2; return 1 ;;
+  esac
   case "${WORKER_DEPLOY_DETACH:-0}" in
     ''|0) ;;
     *) echo "ERROR: detached worker deploys are disabled; retirement must be joined." >&2; return 1 ;;
@@ -252,8 +331,14 @@ begin_worker_rollout_guard() {
   mkfifo "$WORKER_ROLLOUT_GUARD_DIR/control"
   exec 8<>"$WORKER_ROLLOUT_GUARD_DIR/control"
   local guardian
-  guardian="$(declare -f worker_rollout_guard)"$'\n''worker_rollout_guard "$@"'
-  ssh "${SSH_OPTS[@]}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 deploy@"$HOST" "bash -c $(remote_shell_quote "$guardian") -- $(remote_shell_quote "$WORKER_ROLLOUT_ATTEMPT") $(remote_shell_quote "$TAG")" \
+  guardian="$(declare -f worker_host_disk_capacity_preflight worker_rollout_guard)"$'\n''worker_rollout_guard "$@"'
+  ssh "${SSH_OPTS[@]}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 deploy@"$HOST" \
+    "$(remote_env_assignment DEPLOY_MODE "${DEPLOY_MODE:-routine}")" \
+    "$(remote_env_assignment WORKER_BLUE_GREEN_MIN_FREE_DISK_MB "${WORKER_BLUE_GREEN_MIN_FREE_DISK_MB:-10240}")" \
+    "$(remote_env_assignment WORKER_BLUE_GREEN_MIN_FREE_INODES "${WORKER_BLUE_GREEN_MIN_FREE_INODES:-100000}")" \
+    "$(remote_env_assignment WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB "${WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB:-8192}")" \
+    "$(remote_env_assignment WORKER_BLUE_GREEN_PULL_INODE_BUDGET "${WORKER_BLUE_GREEN_PULL_INODE_BUDGET:-100000}")" \
+    "bash -c $(remote_shell_quote "$guardian") -- $(remote_shell_quote "$WORKER_ROLLOUT_ATTEMPT") $(remote_shell_quote "$TAG")" \
     <"$WORKER_ROLLOUT_GUARD_DIR/control" >"$WORKER_ROLLOUT_GUARD_DIR/output" 2>&1 8>&- &
   WORKER_ROLLOUT_GUARD_PID="$!"
   trap finish_worker_rollout_guard EXIT
@@ -304,7 +389,7 @@ apply_static_egress_worker_host_map() {
 }
 
 # Canonical worker fingerprint input lists, shared by the staged fingerprint
-# gate and the blue/green rollover (including the detached rollover script).
+# gate and the synchronous blue/green rollover.
 # Both sides MUST hash the same inputs: the gate repairs the persisted
 # baseline from these lists, and the rollover compares its own computation
 # against that baseline. If they diverge, every routine deploy fails with
@@ -555,7 +640,6 @@ if [ "$ROLE" = worker ]; then
     done | sort -n | tail -1 | sed -E 's/^0+//'
   )"
   [[ "$WORKER_EXPECTED_SCHEMA_VERSION" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: candidate schema version is unknown." >&2; exit 1; }
-  begin_worker_rollout_guard
 fi
 
 # The encrypted bundle lives in the private secrets checkout, not this
@@ -585,6 +669,12 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
 
   apply_worker_bucket_overrides "$ROLE" "$HOST"
   apply_static_egress_worker_host_map
+
+  # Read-only decryption resolves operator thresholds before the guardian's
+  # capacity check; no worker configuration has been sent to the host yet.
+  if [ "$ROLE" = worker ]; then
+    begin_worker_rollout_guard
+  fi
 
   if [ "$ROLE" = "logging" ]; then
     BACKUP_MONITOR_ID="${BACKUP_MONITOR_ID:-disabled}"
@@ -673,6 +763,10 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
   echo "Secrets refreshed."
 else
   echo "Skipping secret refresh (no SOPS key or .env.production.enc not found)."
+fi
+
+if [ "$ROLE" = worker ] && [ -z "${WORKER_ROLLOUT_GUARD_PID:-}" ]; then
+  begin_worker_rollout_guard
 fi
 
 # Sync compose file so the remote always runs the latest version. Worker
@@ -998,6 +1092,11 @@ else
   fi
 fi
 
+worker_disk_preflight_function=""
+if [ "$ROLE" = worker ]; then
+  worker_disk_preflight_function="$(declare -f worker_host_disk_capacity_preflight)"
+fi
+
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment COMPOSE_FILE "$COMPOSE_FILE")" \
   "$(remote_env_assignment HEALTH_SERVICE "$HEALTH_SERVICE")" \
@@ -1005,6 +1104,11 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment IMAGE_TAG "$TAG")" \
   "$(remote_env_assignment WORKER_ROLLOUT_ATTEMPT "${WORKER_ROLLOUT_ATTEMPT:-}")" \
   "$(remote_env_assignment WORKER_EXPECTED_SCHEMA_VERSION "${WORKER_EXPECTED_SCHEMA_VERSION:-}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_MIN_FREE_DISK_MB "${WORKER_BLUE_GREEN_MIN_FREE_DISK_MB:-10240}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_MIN_FREE_INODES "${WORKER_BLUE_GREEN_MIN_FREE_INODES:-100000}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB "${WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB:-8192}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_PULL_INODE_BUDGET "${WORKER_BLUE_GREEN_PULL_INODE_BUDGET:-100000}")" \
+  "$(remote_env_assignment WORKER_DISK_PREFLIGHT_FUNCTION "$worker_disk_preflight_function")" \
   "$(remote_env_assignment WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS "${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}")" \
   "$(remote_env_assignment WORKER_BLUE_GREEN_PORT_START "${WORKER_BLUE_GREEN_PORT_START:-}")" \
   "$(remote_env_assignment WORKER_BLUE_GREEN_PORT_END "${WORKER_BLUE_GREEN_PORT_END:-}")" \
@@ -1041,6 +1145,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     flock -xn 6 || { echo "ERROR: prior worker execution is still active." >&2; exit 1; }
     [ "$(cat /opt/143/.worker-rollout/attempt)" = "$WORKER_ROLLOUT_ATTEMPT" ]
     [ "$(cat /opt/143/.worker-rollout/build-sha)" = "$IMAGE_TAG" ]
+    # The quoted definition comes from this exact local source, like the
+    # guardian helpers; it contains no production values or credentials.
+    eval "${WORKER_DISK_PREFLIGHT_FUNCTION:?missing source-bound disk preflight}"
   fi
 
   remote_deploy_exit() {
@@ -1880,6 +1987,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   }
 
   worker_host_capacity_preflight() {
+    worker_host_disk_capacity_preflight pre-start || return 1
     local min_mem="${WORKER_BLUE_GREEN_MIN_FREE_MEMORY_MB:-512}"
     local min_cpu="${WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS:-0}"
     local attempts="${WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS:-3}"
@@ -2007,7 +2115,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
 
   # These fingerprints must match the staged fingerprint gate's computation
   # exactly, so both read the shared *_FINGERPRINT_FILES / *_COMPOSE_SERVICES
-  # lists (passed via SSH env here, baked into the detached rollover script).
+  # lists passed through the SSH environment.
   # The lists are space-separated, hence the intentional unquoted expansion.
   worker_support_service_fingerprint() {
     {
@@ -2186,6 +2294,9 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   start_worker_generation() {
     local node_id="$1" host_port="$2" base_url="$3" project="$4"
     local cid
+    if [ "${DEPLOY_MODE:-routine}" = routine ]; then
+      worker_host_disk_capacity_preflight pre-start || return 1
+    fi
     ACTIVE_WORKER_CANDIDATE_NODE="$node_id"
     WORKER_ROLLOUT_PHASE=candidate_starting
     record_worker_rollout_state candidate candidate_starting "$node_id" unknown || return 1
@@ -2602,6 +2713,10 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       waited=$((waited + 2))
     done
   }
+
+  if [ "$ROLE" = worker ] && [ "${DEPLOY_MODE:-routine}" = routine ]; then
+    worker_host_disk_capacity_preflight pre-pull
+  fi
 
   # Ensure gVisor runtime is configured with the flags the sandbox depends on:
   #   --ignore-cgroups: Docker handles cgroup management (prevents EOF errors

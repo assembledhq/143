@@ -97,6 +97,41 @@ rollout and retain its latch. A timeout does not expire review budgets or grant
 permission to stop active work. The candidate must pass final health, fresh
 heartbeat, and preview-auth checks before completion is reported.
 
+Retired worker containers retain their images and logs. Routine deployment does
+not delete this evidence automatically. Before image pulls, deployment checks
+free space and inodes on Docker's actual filesystem, reserving review/log
+headroom plus a declared pull/unpack allowance. It checks the reserve again
+before starting a candidate. Unknown measurements or insufficient capacity halt
+the attempt while existing workers keep serving; reconcile its retained latch
+before another attempt.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `WORKER_BLUE_GREEN_MIN_FREE_DISK_MB` | `10240` | Free MiB reserved for active work and logs |
+| `WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB` | `8192` | Additional pre-pull allowance for new image layers and unpacking |
+| `WORKER_BLUE_GREEN_MIN_FREE_INODES` | `100000` | Inodes reserved for active work and logs |
+| `WORKER_BLUE_GREEN_PULL_INODE_BUDGET` | `100000` | Additional pre-pull allowance for unpacking and workload growth |
+
+The allowance is an operator-supplied capacity budget, not an estimate derived
+from arbitrary image contents. Before canary or automatic-deploy restoration,
+the release owner must verify that the byte and inode allowances cover the next
+verified images' additional pull/unpack footprint and expected workload growth. Keep that budget current
+when image size or workload changes. A capacity refusal is a maintenance alert,
+not permission to remove an active or ambiguous owner.
+
+The deployment operator owns retained-generation cleanup before the gate is
+reached. Coordinate a maintenance hold with no active host rollout or legacy
+monitor, and resolve any outstanding attempt first. Preserve running containers,
+current candidates, uncertain attempts and at least the two newest successfully
+retired generations. Consider older generations only after at least 24 hours
+since confirmed retirement, using exact completed receipts, matching immutable
+node/deploy/build seals and fresh stopped-container readback. The seal's build
+identifies the retiring deployment, not necessarily the old image. Archive the
+receipts, allowlisted identities and needed logs privately and verify their
+hashes. Recheck the exact stopped CID before removal without force or volume
+removal; preserve the receipt and seal. Missing proof means retain it. This is
+an operator procedure; routine deployment performs no such deletion.
+
 Public Actions output contains compact completion/failure messages. Raw
 production diagnostics stay outside public logs and artifacts; reconcile host
 attempt state and collect needed evidence in the private operations repository.
