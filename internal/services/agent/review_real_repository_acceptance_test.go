@@ -216,7 +216,7 @@ func TestReviewRealRepositoryAcceptance(t *testing.T) {
 				runtimeContract := realReviewAcceptedRuntimeContract(rootOverlay, profileHelper, provider.created.Load(), provider.creationResources)
 				succeeded := !t.Failed() && !provider.credentialDetected() && provider.created.Load() == provider.destroyed.Load() && runtimeContract.AllCreationsVerified
 				report["runtime_contract"] = runtimeContract
-				report["acceptance_eligible"] = !profileHelper && runtimeContract.AllCreationsVerified
+				report["acceptance_eligible"] = !profileHelper && succeeded
 				if !profileHelper {
 					report["result_kind"] = "normal_acceptance"
 				}
