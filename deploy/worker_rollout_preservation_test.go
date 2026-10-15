@@ -894,3 +894,79 @@ begin_worker_rollout_guard
 		})
 	}
 }
+
+func TestWorkerLateSandboxPullRequiresFreshDiskCapacity(t *testing.T) {
+	t.Parallel()
+	directory, dockerRoot, trace := t.TempDir(), t.TempDir(), filepath.Join(t.TempDir(), "trace")
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "attempt"), []byte("attempt-a\n"), 0600), "should retain the exact in-progress deployment latch")
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "build-sha"), []byte("build-a\n"), 0600), "should retain the exact deployment build")
+	script := workerRolloutScript(t)
+	functions := extractTopLevelShellFunction(t, script, "worker_host_disk_capacity_preflight", "finish_worker_rollout_guard") +
+		extractShellFunction(t, script, "preserve_failed_worker_candidate", "start_worker_generation") +
+		extractShellFunction(t, script, "remote_deploy_exit", "compose_services_except") +
+		extractShellFunction(t, script, "prune_unused_docker_resources", "run_worker_session_deploy_guardrail")
+	functions = strings.Replace(functions, "worker_host_disk_capacity_preflight() {", "fresh_worker_disk_capacity_preflight() {", 1)
+	functions = strings.Replace(functions, "  record_worker_rollout_state() {", "  persisted_worker_rollout_state() {", 1)
+	output, err := runWorkerShell(t, functions, `
+ROLE=worker
+DEPLOY_MODE=routine
+WORKER_ROLLOUT_ATTEMPT=attempt-a
+IMAGE_TAG=build-a
+ACTIVE_WORKER_CANDIDATE_NODE=candidate-node
+STARTED_WORKER_CID=candidate-container
+WORKER_CANDIDATE_VALIDATED=1
+WORKER_ROLLOUT_PHASE=post_rollout_prune
+fixture_docker_root=`+shellQuote(dockerRoot)+`
+trace=`+shellQuote(trace)+`
+record_worker_rollout_state(){ persisted_worker_rollout_state "$@" `+shellQuote(directory)+`; }
+worker_host_disk_capacity_preflight(){ fresh_worker_disk_capacity_preflight "$@" `+shellQuote(directory)+`; }
+timeout(){ shift 2; "$@"; }
+sync(){ :; }
+rm(){ :; }
+docker(){
+  printf 'docker %s\n' "$*" >>"$trace"
+  case "$*" in 'image inspect '*) return 1;; 'info --format '*) echo "$fixture_docker_root";; esac
+}
+df(){
+  if [ "$1" = -Pk ]; then printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/test 50000000 1 1 1%% /data\n';
+  else printf 'Filesystem Inodes IUsed IFree IUse%% Mounted on\n/dev/test 50000000 1 200000 1%% /data\n'; fi
+}
+run_worker_deployctl(){ printf 'ctl %s\n' "$*" >>"$trace"; }
+pull_with_retry(){ printf 'pull %s\n' "$*" >>"$trace"; }
+prune_unused_docker_resources worker
+`)
+	require.Error(t, err, "low current capacity must refuse the late fallback pull even after successful retirement")
+	require.Contains(t, output, "verified candidate remains admitting", "unrelated late capacity refusal must preserve the validated admitting generation")
+	data, readErr := os.ReadFile(filepath.Join(directory, "failure.json"))
+	require.NoError(t, readErr, "late capacity refusal must retain its durable failure context")
+	var actual map[string]string
+	require.NoError(t, json.Unmarshal(data, &actual), "late refusal context should remain valid JSON")
+	require.Equal(t, map[string]string{"attempt": "attempt-a", "build_sha": "build-a", "phase": "host_disk_capacity_failed", "candidate_node": "candidate-node", "candidate_container": "candidate-container"}, actual, "failure receipt must preserve exact candidate identity and the specific capacity phase")
+	attempt, readErr := os.ReadFile(filepath.Join(directory, "attempt"))
+	require.NoError(t, readErr, "incomplete late refill must keep the attempt latch")
+	require.Equal(t, "attempt-a\n", string(attempt), "late refill refusal must not clear or reset attempt identity")
+	calls, readErr := os.ReadFile(trace)
+	require.NoError(t, readErr, "should inspect the exact late-path operations")
+	require.Contains(t, string(calls), "docker info --format", "late fallback must collect new filesystem evidence")
+	for _, forbidden := range []string{"pull sandbox image", "docker pull", "docker stop", "docker rm", "ctl mark-draining", "expire-budget"} {
+		require.NotContains(t, string(calls), forbidden, "capacity refusal must not perform %s", forbidden)
+	}
+}
+
+func TestWorkerPresentSandboxImageAvoidsLateDiskProbe(t *testing.T) {
+	t.Parallel()
+	script := workerRolloutScript(t)
+	function := extractShellFunction(t, script, "prune_unused_docker_resources", "run_worker_session_deploy_guardrail")
+	output, err := runWorkerShell(t, function, `
+IMAGE_TAG=build-a
+DEPLOY_MODE=routine
+docker(){ printf 'docker %s\n' "$*"; }
+run_worker_deployctl(){ :; }
+worker_host_disk_capacity_preflight(){ echo unexpected-capacity-probe; return 1; }
+pull_with_retry(){ echo unexpected-pull; }
+prune_unused_docker_resources worker
+`)
+	require.NoError(t, err, "an already present image needs no refill admission")
+	require.NotContains(t, output, "unexpected-capacity-probe", "unused fallback path must not create unnecessary capacity failures")
+	require.NotContains(t, output, "unexpected-pull", "present image must not trigger a fallback pull")
+}

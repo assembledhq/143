@@ -2595,6 +2595,11 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       run_worker_deployctl release-retained-images --json || true
       local sandbox_image="ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
       if ! docker image inspect "$sandbox_image" >/dev/null 2>&1; then
+        # Joined retirement can take hours; earlier disk samples cannot admit
+        # this late fallback pull. Retain the healthy candidate on refusal.
+        if [ "${DEPLOY_MODE:-routine}" = routine ]; then
+          worker_host_disk_capacity_preflight pre-pull || return 1
+        fi
         echo "Re-pulling required sandbox image after prune: $sandbox_image"
         pull_with_retry "sandbox image $sandbox_image" docker pull "$sandbox_image"
       fi
