@@ -50,6 +50,113 @@ func (s *failedSteeringPhaseTransaction) Query(ctx context.Context, query string
 	return s.Tx.Query(ctx, query, args...)
 }
 
+type interruptedSuffixPhaseStore struct {
+	*db.SessionActivityPhaseStore
+	failures    atomic.Int32
+	afterCommit bool
+}
+
+func (s *interruptedSuffixPhaseStore) AcknowledgeInboxBatchAndStartPhase(ctx context.Context, orgID, sessionID, threadID, runtimeID, token uuid.UUID, activePhaseID *uuid.UUID, turn int, end int64, confirmed []int64, at time.Time) (models.SessionActivityPhase, models.ThreadInboxDeliveryBatch, *models.SessionActivityPhase, error) {
+	interrupted := end == 3 && len(confirmed) == 1 && confirmed[0] == 3 && s.failures.Load() > 0
+	if interrupted && !s.afterCommit {
+		s.failures.Add(-1)
+		return models.SessionActivityPhase{}, models.ThreadInboxDeliveryBatch{}, nil, errors.New("suffix acknowledgment interrupted before commit")
+	}
+	phase, batch, completed, err := s.SessionActivityPhaseStore.AcknowledgeInboxBatchAndStartPhase(ctx, orgID, sessionID, threadID, runtimeID, token, activePhaseID, turn, end, confirmed, at)
+	if err == nil && interrupted {
+		s.failures.Add(-1)
+		return models.SessionActivityPhase{}, models.ThreadInboxDeliveryBatch{}, nil, errors.New("suffix acknowledgment response lost after commit")
+	}
+	return phase, batch, completed, err
+}
+
+func TestThreadDeliveryPostgresMixedOldAndNewReceiptsPreserveSteering(t *testing.T) {
+	t.Parallel()
+	pool := newThreadDeliveryPostgresPool(t)
+	for _, tt := range []struct {
+		name                   string
+		interrupt, afterCommit bool
+	}{
+		{name: "same poll acknowledges old retry and starts new steering"},
+		{name: "suffix retry preserves all receipts without provider replay", interrupt: true},
+		{name: "committed suffix response loss retries exact started batch", interrupt: true, afterCommit: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			session := seedThreadDeliverySession(t, pool)
+			threadID := *session.PrimaryThreadID
+			first := appendDeliveryUser(t, pool, session, "old retry")
+			prior := appendDeliveryUser(t, pool, session, "previously handled input")
+			registry := NewThreadCancelRegistry(zerolog.Nop())
+			registry.Register(threadID, func() {})
+			phases := &interruptedSuffixPhaseStore{SessionActivityPhaseStore: db.NewSessionActivityPhaseStore(pool), afterCommit: tt.afterCommit}
+			orch := NewOrchestrator(OrchestratorConfig{ThreadRuntimes: db.NewThreadRuntimeStore(pool), ThreadInbox: db.NewThreadInboxStore(pool), ThreadCancels: registry, NodeID: "test-worker", Logger: zerolog.Nop()})
+			orch.activityPhases = NewActivityPhaseService(phases, zerolog.Nop())
+			control, err := orch.startThreadRuntimeControl(ctx, session, threadID, &Sandbox{ID: "mixed-receipts"}, nil, zerolog.Nop())
+			require.NoError(t, err, "create owner for mixed low and new input")
+			_, err = pool.Exec(ctx, `WITH failed AS (UPDATE thread_inbox_entries SET delivery_state='dead_letter' WHERE org_id=$1 AND id=$2),
+handled AS (UPDATE thread_inbox_entries SET delivery_state='acked',runtime_id=$4,applied_at=now(),acked_at=now() WHERE org_id=$1 AND id=$3)
+UPDATE thread_runtimes SET last_delivered_sequence=2,last_acked_sequence=2 WHERE org_id=$1 AND id=$4`, session.OrgID, first.ID, prior.ID, control.runtime.ID)
+			require.NoError(t, err, "retain terminal history before reopening an older failure")
+			_, err = db.NewThreadInboxStore(pool).RetryRecoverable(ctx, session.OrgID, threadID, first.ID, false)
+			require.NoError(t, err, "reopen old low input without resetting the existing watermark")
+			newInput := appendDeliveryUser(t, pool, session, "new steering")
+			execution, err := newActivityPhaseExecution(ctx, orch.activityPhases, zerolog.Nop(), session.OrgID, session.ID, threadID, 1, &control.runtime.ID, &control.runtime.LeaseToken, models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInitial})
+			require.NoError(t, err, "start original provider phase")
+			originalPhase := *execution.phaseID()
+			orch.activeActivityPhases.Store(threadID, execution)
+			handle := &orderedInboxWriteHandle{threadCancelTestHandle: newThreadCancelTestHandle()}
+			var writes atomic.Int32
+			handle.onWrite = func(writeCtx context.Context, input []byte) error {
+				writes.Add(1)
+				return handle.threadCancelTestHandle.WriteInput(writeCtx, input)
+			}
+			control.Attacher(registry).Attach(handle)
+			if tt.interrupt {
+				phases.failures.Store(2)
+			}
+			err = orch.DeliverThreadInbox(ctx, session.OrgID, session.ID, threadID)
+			if tt.interrupt {
+				require.Error(t, err, "exhausted suffix persistence retains confirmed receipts for another poll")
+				cached, retained := orch.confirmedThreadInput.Load(confirmedThreadInputKeyFor(control.runtime, threadID))
+				require.True(t, retained, "partial acknowledgment must retain exact positive receipts")
+				require.Equal(t, confirmedThreadInputs{sequences: []int64{1, 3}, ackedBeforeDelivery: 2}, cached, "partial acknowledgment must preserve both receipt identities and their original cursor")
+				var currentCursor int64
+				require.NoError(t, pool.QueryRow(ctx, `SELECT last_acked_sequence FROM thread_runtimes WHERE org_id=$1 AND id=$2`, session.OrgID, control.runtime.ID).Scan(&currentCursor), "read cursor before retrying interrupted suffix acknowledgment")
+				expectedCursor := int64(2)
+				if tt.afterCommit {
+					expectedCursor = 3
+				}
+				require.Equal(t, expectedCursor, currentCursor, "lost-response retry must refresh an advanced cursor without changing the original receipt partition")
+				require.NoError(t, orch.DeliverThreadInbox(ctx, session.OrgID, session.ID, threadID), "next poll retries only acknowledgment despite an advanced cursor")
+			} else {
+				require.NoError(t, err, "one poll must acknowledge low retry and retain steering metadata for new input")
+			}
+			require.Equal(t, int32(2), writes.Load(), "both distinct inputs must be written once even after acknowledgment retries")
+			require.Equal(t, []byte("old retry\nnew steering\n"), handle.StdinBuffer(), "acknowledgment must never replay either provider input")
+			var applied []int64
+			rows, err := pool.Query(ctx, `SELECT sequence_no FROM thread_inbox_entries WHERE org_id=$1 AND thread_id=$2 AND id=ANY($3::uuid[]) AND delivery_state='acked' AND applied_at IS NOT NULL ORDER BY sequence_no`, session.OrgID, threadID, []uuid.UUID{first.ID, newInput.ID})
+			require.NoError(t, err, "read exact admitted mixed inputs")
+			applied, err = pgx.CollectRows(rows, pgx.RowTo[int64])
+			require.NoError(t, err, "collect exact mixed-input application proof")
+			require.Equal(t, []int64{1, 3}, applied, "both old and new inputs must be durably applied")
+			var start, end int64
+			var batchState, phaseStatus, boundary string
+			require.NoError(t, pool.QueryRow(ctx, `SELECT sequence_start,sequence_end,status FROM thread_inbox_delivery_batches WHERE org_id=$1 AND thread_id=$2 AND runtime_id=$3`, session.OrgID, threadID, control.runtime.ID).Scan(&start, &end, &batchState), "read the new steering batch")
+			require.Equal(t, []int64{3, 3}, []int64{start, end}, "the new batch must include only the contiguous suffix above the original cursor")
+			require.Equal(t, "started", batchState, "new steering must start its durable batch")
+			require.NoError(t, pool.QueryRow(ctx, `SELECT status,boundary_reason FROM session_activity_phases WHERE org_id=$1 AND id=$2`, session.OrgID, originalPhase).Scan(&phaseStatus, &boundary), "inspect original provider phase boundary")
+			require.Equal(t, []string{"completed", "steered"}, []string{phaseStatus, boundary}, "the old provider phase must close at the new input boundary")
+			require.NotEqual(t, originalPhase, *execution.phaseID(), "the new input must own a replacement activity phase")
+			appendDeliveryUser(t, pool, session, "following steering")
+			require.NoError(t, orch.DeliverThreadInbox(ctx, session.OrgID, session.ID, threadID), "following input must continue from the acknowledged suffix")
+			require.Equal(t, int32(3), writes.Load(), "later progress must add exactly one new provider write")
+			control.Close(ctx, models.ThreadRuntimeStatusClosed, "completed", "")
+		})
+	}
+}
+
 func TestThreadDeliveryPostgresExactLowSequenceReceipts(t *testing.T) {
 	t.Parallel()
 	pool := newThreadDeliveryPostgresPool(t)

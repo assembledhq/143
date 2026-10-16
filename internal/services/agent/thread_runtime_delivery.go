@@ -598,7 +598,7 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 		if err := o.flushConfirmedThreadInput(ctx, runtime, threadID, false); err != nil {
 			return fmt.Errorf("retry confirmed thread input acknowledgment: %w", err)
 		}
-		sequences := receipt.([]int64)
+		sequences := receipt.(confirmedThreadInputs).sequences
 		sequence := sequences[len(sequences)-1]
 		runtime.LastDeliveredSequence = max(runtime.LastDeliveredSequence, sequence)
 		runtime.LastAckedSequence = max(runtime.LastAckedSequence, sequence)
@@ -733,6 +733,11 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 // scopes it independently of the short-lived local delivery lock entry.
 type confirmedThreadInputKey struct{ orgID, threadID, runtimeID, leaseToken uuid.UUID }
 
+type confirmedThreadInputs struct {
+	sequences           []int64
+	ackedBeforeDelivery int64
+}
+
 func confirmedThreadInputKeyFor(runtime models.ThreadRuntime, threadID uuid.UUID) confirmedThreadInputKey {
 	return confirmedThreadInputKey{runtime.OrgID, threadID, runtime.ID, runtime.LeaseToken}
 }
@@ -740,8 +745,11 @@ func confirmedThreadInputKeyFor(runtime models.ThreadRuntime, threadID uuid.UUID
 func (o *Orchestrator) rememberConfirmedThreadInput(runtime models.ThreadRuntime, threadID uuid.UUID, sequence int64) {
 	key := confirmedThreadInputKeyFor(runtime, threadID)
 	sequences := []int64{sequence}
+	ackedBeforeDelivery := runtime.LastAckedSequence
 	if previous, ok := o.confirmedThreadInput.Load(key); ok {
-		for _, value := range previous.([]int64) {
+		receipt := previous.(confirmedThreadInputs)
+		ackedBeforeDelivery = receipt.ackedBeforeDelivery
+		for _, value := range receipt.sequences {
 			if value == sequence {
 				return
 			}
@@ -749,7 +757,7 @@ func (o *Orchestrator) rememberConfirmedThreadInput(runtime models.ThreadRuntime
 		}
 	}
 	sort.Slice(sequences, func(i, j int) bool { return sequences[i] < sequences[j] })
-	o.confirmedThreadInput.Store(key, sequences)
+	o.confirmedThreadInput.Store(key, confirmedThreadInputs{sequences: sequences, ackedBeforeDelivery: ackedBeforeDelivery})
 }
 
 // flushConfirmedThreadInput retries only acknowledgment, never provider input.
@@ -762,8 +770,11 @@ func (o *Orchestrator) flushConfirmedThreadInput(ctx context.Context, runtime mo
 	if !ok {
 		return nil
 	}
-	sequences := value.([]int64)
+	receipt := value.(confirmedThreadInputs)
+	sequences := receipt.sequences
 	sequence := sequences[len(sequences)-1]
+	acknowledgmentRuntime := runtime
+	acknowledgmentRuntime.LastAckedSequence = receipt.ackedBeforeDelivery
 	ackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), threadRuntimeStateUpdateTimeout)
 	defer cancel()
 	var err error
@@ -771,7 +782,7 @@ func (o *Orchestrator) flushConfirmedThreadInput(ctx context.Context, runtime mo
 		if closing {
 			err = o.commitThreadInboxWatermark(ackCtx, runtime, threadID, sequence, sequences...)
 		} else {
-			err = o.acknowledgeConfirmedThreadInboxInputs(ackCtx, runtime, threadID, sequences)
+			err = o.acknowledgeConfirmedThreadInboxInputs(ackCtx, acknowledgmentRuntime, threadID, sequences)
 		}
 		if err == nil {
 			o.confirmedThreadInput.Delete(key)
@@ -787,6 +798,17 @@ func (o *Orchestrator) flushConfirmedThreadInput(ctx context.Context, runtime mo
 // A retried failure may sit below an already advanced watermark. Such a
 // receipt updates exactly that row without inventing a backwards phase batch.
 func (o *Orchestrator) acknowledgeConfirmedThreadInboxInputs(ctx context.Context, runtime models.ThreadRuntime, threadID uuid.UUID, sequences []int64) error {
+	// A mixed poll can accept a retried failure below the old cursor and a
+	// new contiguous suffix above it. Keep that original partition across
+	// retries, including a committed suffix whose response was lost. All-low
+	// sets still get the atomic lookup needed for historical batch repair.
+	split := sort.Search(len(sequences), func(i int) bool { return sequences[i] > runtime.LastAckedSequence })
+	if split > 0 && split < len(sequences) {
+		if err := o.acknowledgeConfirmedThreadInboxInputs(ctx, runtime, threadID, sequences[:split]); err != nil {
+			return err
+		}
+		return o.acknowledgeConfirmedThreadInboxInputs(ctx, runtime, threadID, sequences[split:])
+	}
 	end := sequences[len(sequences)-1]
 	if executionValue, ok := o.activeActivityPhases.Load(threadID); ok && o.activityPhases != nil {
 		execution, valid := executionValue.(*activityPhaseExecution)

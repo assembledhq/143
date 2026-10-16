@@ -16,7 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestCIWorkerUnitPartitionAndCoverage(t *testing.T) {
+func TestCIUnitPartitionsAndCoverage(t *testing.T) {
 	t.Parallel()
 
 	raw, err := os.ReadFile("../.github/workflows/ci.yml")
@@ -47,7 +47,8 @@ func TestCIWorkerUnitPartitionAndCoverage(t *testing.T) {
 		}
 	}
 	unitSteps := []string{
-		"Run backend unit tests outside the agent and worker packages",
+		"Run backend unit tests outside database, agent, and worker packages",
+		"Run database tests",
 		"Run worker unit tests",
 		"Run agent unit tests",
 		"Combine backend unit coverage",
@@ -59,7 +60,7 @@ func TestCIWorkerUnitPartitionAndCoverage(t *testing.T) {
 		require.Less(t, stepIndexes[unitSteps[i-1]], stepIndexes[unitSteps[i]], "unit partitions must finish before their shared coverage merge")
 	}
 	require.Less(t, stepIndexes["Combine backend unit coverage"], stepIndexes["Combine backend coverage"], "final coverage must consume the completed unit merge")
-	for _, profile := range []string{"coverage-unit-other.out", "coverage-unit-worker.out", "coverage-unit-agent.out"} {
+	for _, profile := range []string{"coverage-unit-other.out", "coverage-unit-db.out", "coverage-unit-worker.out", "coverage-unit-agent.out"} {
 		require.Contains(t, strings.Fields(coverageArtifacts), profile, "each unit partition must retain its coverage evidence")
 	}
 	merger, err := os.ReadFile("../.github/scripts/merge_go_coverage.py")
@@ -105,7 +106,7 @@ if args == ["list", "./internal/..."]:
 elif args and args[0] == "test":
     profile = next(a.split("=", 1)[1] for a in args if a.startswith("-coverprofile="))
     mode = next(a.split("=", 1)[1] for a in args if a.startswith("-covermode="))
-    suite = {"coverage-unit-other.out": "other", "coverage-unit-worker.out": "worker", "coverage-unit-agent.out": "agent"}[profile]
+    suite = {"coverage-unit-other.out": "other", "coverage-unit-db.out": "db", "coverage-unit-worker.out": "worker", "coverage-unit-agent.out": "agent"}[profile]
     Path(profile).write_text("mode: " + mode + "\nexample/" + suite + ".go:1.1,2.1 1 1\nexample/shared.go:1.1,2.1 1 1\n")
 elif args == ["tool", "cover", "-func=coverage.out"]:
     assert Path("coverage.out").is_file()
@@ -138,7 +139,7 @@ else:
 			}
 			unitCoverage, err := os.ReadFile(filepath.Join(directory, "coverage-unit.out"))
 			require.NoError(t, err, "unit partition merge must produce coverage")
-			require.Equal(t, fmt.Sprintf("mode: %s\nexample/agent.go:1.1,2.1 1 1\nexample/other.go:1.1,2.1 1 1\nexample/shared.go:1.1,2.1 1 3\nexample/worker.go:1.1,2.1 1 1\n", tt.mode), string(unitCoverage), "unit coverage must include all three suites without duplicating the statement denominator")
+			require.Equal(t, fmt.Sprintf("mode: %s\nexample/agent.go:1.1,2.1 1 1\nexample/db.go:1.1,2.1 1 1\nexample/other.go:1.1,2.1 1 1\nexample/shared.go:1.1,2.1 1 4\nexample/worker.go:1.1,2.1 1 1\n", tt.mode), string(unitCoverage), "unit coverage must include all four suites without duplicating the statement denominator")
 
 			// Exercise the real browser/integration mode branches without
 			// starting Chrome or Postgres, then feed their profiles through the
@@ -155,7 +156,7 @@ else:
 			run(steps["Combine backend coverage"])
 			finalCoverage, err := os.ReadFile(filepath.Join(directory, "coverage.out"))
 			require.NoError(t, err, "final coverage merge must consume the unit partition output")
-			require.Equal(t, fmt.Sprintf("mode: %s\nexample/agent.go:1.1,2.1 1 1\nexample/browser.go:1.1,2.1 1 1\nexample/integration.go:1.1,2.1 1 1\nexample/other.go:1.1,2.1 1 1\nexample/shared.go:1.1,2.1 1 5\nexample/worker.go:1.1,2.1 1 1\n", tt.mode), string(finalCoverage), "final coverage must retain worker evidence and agree with browser and integration modes")
+			require.Equal(t, fmt.Sprintf("mode: %s\nexample/agent.go:1.1,2.1 1 1\nexample/browser.go:1.1,2.1 1 1\nexample/db.go:1.1,2.1 1 1\nexample/integration.go:1.1,2.1 1 1\nexample/other.go:1.1,2.1 1 1\nexample/shared.go:1.1,2.1 1 6\nexample/worker.go:1.1,2.1 1 1\n", tt.mode), string(finalCoverage), "final coverage must retain database and worker evidence and agree with browser and integration modes")
 
 			logged, err := os.ReadFile(logPath)
 			require.NoError(t, err, "fixture must retain every actual Go invocation")
@@ -165,7 +166,7 @@ else:
 				require.NoError(t, json.Unmarshal([]byte(line), &args), "fake Go must record complete argument arrays")
 				calls = append(calls, args)
 			}
-			otherArgs := []string{"test", "github.com/assembledhq/143/internal/config", "github.com/assembledhq/143/internal/db", "github.com/assembledhq/143/internal/services/preview", "-skip", "^TestBrowserChromeDP", "-coverpkg=./internal/...", "-coverprofile=coverage-unit-other.out", "-covermode=" + tt.mode}
+			otherArgs := []string{"test", "github.com/assembledhq/143/internal/config", "github.com/assembledhq/143/internal/services/preview", "-skip", "^TestBrowserChromeDP", "-coverpkg=./internal/...", "-coverprofile=coverage-unit-other.out", "-covermode=" + tt.mode}
 			otherArgs = append(otherArgs, tt.race...)
 			otherArgs = append(otherArgs, "-timeout="+tt.otherTimeout)
 			boundedArgs := func(pkg, profile string) []string {
@@ -176,10 +177,11 @@ else:
 			require.Equal(t, [][]string{
 				{"list", "./internal/..."},
 				otherArgs,
+				boundedArgs("./internal/db", "coverage-unit-db.out"),
 				boundedArgs("./internal/worker", "coverage-unit-worker.out"),
 				boundedArgs("./internal/services/agent", "coverage-unit-agent.out"),
 				{"tool", "cover", "-func=coverage.out"},
-			}, calls, "worker must run exactly once with its bounded budget while ordinary packages, agent coverage, and race settings remain intact")
+			}, calls, "database and worker must each run exactly once with bounded budgets while ordinary packages, agent coverage, and race settings remain intact")
 		})
 	}
 }
