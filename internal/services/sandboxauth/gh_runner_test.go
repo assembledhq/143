@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -226,6 +227,11 @@ func TestObservationProtocol(t *testing.T) {
 	require.NotEmpty(t, response.ObservationID, "host must create an opaque observation binding")
 	require.NoError(t, client.Observe(context.Background(), response.ObservationID, []HTTPObservation{{Method: "GET", Route: "/graphql", Status: 200}}, true), "reporting should use the existing credential socket")
 	require.Error(t, client.Observe(context.Background(), response.ObservationID, nil, true), "completed bindings should reject further observations")
+	// The credential response arrives before its handler writes this diagnostic.
+	// Observation requests use separate connections and do not join that handler.
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), `"message":"sandboxauth: served credential"`)
+	}, time.Second, time.Millisecond, "credential diagnostics should finish before inspecting the log snapshot")
 	requests := 0
 	credentials := 0
 	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {

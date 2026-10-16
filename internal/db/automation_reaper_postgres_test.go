@@ -255,7 +255,7 @@ func TestAutomationRunReaperPostgres(t *testing.T) {
 
 func TestAutomationRunReaperPostgresConcurrentWriter(t *testing.T) {
 	t.Parallel()
-	pool := newFeedbackLifecyclePool(t)
+	database := newFeedbackLifecyclePool(t)
 	tests := []struct {
 		name, status, dispatch, summary string
 		completed                       bool
@@ -264,6 +264,15 @@ func TestAutomationRunReaperPostgresConcurrentWriter(t *testing.T) {
 		{name: "target dispatch wins row lock", status: "running", dispatch: "waiting", summary: "Dispatch changed."},
 		{name: "newer metadata waits for another sweep", status: "running", summary: "Metadata changed."},
 	}
+	// Every parallel case needs a writer, a blocked reaper, and an observer.
+	// The CPU-based pool default can be four on CI, which lets the writers
+	// and reapers consume every connection and starve the lock observers.
+	cfg := database.Config()
+	cfg.MaxConns = int32(3 * len(tests))
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	require.NoError(t, err, "reserve writer, reaper, and observer connections for every parallel case")
+	t.Cleanup(pool.Close)
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
