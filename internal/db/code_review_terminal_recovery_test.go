@@ -182,7 +182,7 @@ func TestTerminalReviewRecoveryErrorClassification(t *testing.T) {
 				recoveryCtx, cancel = context.WithDeadline(callerCtx, time.Unix(1, 0))
 				defer cancel()
 			}
-			var cause error = context.DeadlineExceeded
+			cause := context.DeadlineExceeded
 			if tt.callerCancel {
 				cause = context.Canceled
 			}
