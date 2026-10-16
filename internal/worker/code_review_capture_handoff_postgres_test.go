@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
@@ -120,7 +121,17 @@ func TestFullAssessmentPublicationCaptureHandoffPostgres(t *testing.T) {
 		t.Skip("set TEST_DATABASE_URL for locked publication capture handoff proof")
 	}
 	ctx := context.Background()
-	pool := fullRecoveryPostgresPool(t, ctx)
+	pool := fullRecoveryPostgresPoolWithMaxConns(t, ctx, 4)
+	// Reserve unrelated worker capacity so publication and its independent
+	// observer/read must complete with exactly two available connections.
+	for range 2 {
+		conn, err := pool.Acquire(ctx)
+		require.NoError(t, err, "reserve shared worker pool capacity")
+		t.Cleanup(conn.Release)
+	}
+	// Model one worker's shared publication admission instead of creating an
+	// independent publication slot for every tenant in this shared pool.
+	reviews := db.NewCodeReviewStore(pool)
 	providerFailure := errors.New("fresh provider capture failed")
 	tests := []struct {
 		name     string
@@ -148,6 +159,7 @@ func TestFullAssessmentPublicationCaptureHandoffPostgres(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := seedStrandedReview(t, pool, "idle")
+			f.stores.CodeReviews = reviews
 			f.stores.SessionLogs = nil
 			seedSavedReviewResults(t, pool, f)
 			capture := &captureHandoffProbe{result: codereviewsvc.AssessmentInputCaptureResult{Manifest: f.manifest, Policy: models.CodeReviewPolicyRecord{ID: f.job.PolicyID}, Files: []codereviewsvc.PullRequestFile{}}}
@@ -162,6 +174,8 @@ func TestFullAssessmentPublicationCaptureHandoffPostgres(t *testing.T) {
 				require.NoError(t, err, "stage the immutable original outcome before publication recovery")
 			}
 			capture.onCall = func(lockCtx context.Context) {
+				lockCtx, cancel := context.WithTimeout(lockCtx, 5*time.Second)
+				defer cancel()
 				tx, err := pool.Begin(lockCtx)
 				require.NoError(t, err, "open an independent lock observer")
 				defer func() { _ = tx.Rollback(ctx) }()
@@ -169,6 +183,9 @@ func TestFullAssessmentPublicationCaptureHandoffPostgres(t *testing.T) {
 				key := fmt.Sprintf("code_review_status_comment:%s:%s", f.job.OrgID, f.job.PullRequestID)
 				require.NoError(t, tx.QueryRow(lockCtx, `SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))`, key).Scan(&acquired), "observe the actual per-PR publication advisory lock")
 				require.Equal(t, tt.local, acquired, "only publisher-absent completion may capture outside the publication lock")
+				// The observer has proved lock ownership. Release its connection
+				// before the independently committed state read needs pool headroom.
+				require.NoError(t, tx.Rollback(lockCtx), "release the observer before borrowing another pool connection")
 				before, err := f.stores.CodeReviewAssessments.GetByID(lockCtx, f.job.OrgID, f.assessment)
 				require.NoError(t, err, "read independently committed state while capture runs")
 				require.Equal(t, models.CodeReviewAssessmentRunning, before.Status, "a first capture must precede publication reservation")
@@ -184,7 +201,8 @@ func TestFullAssessmentPublicationCaptureHandoffPostgres(t *testing.T) {
 				require.Equal(t, models.CodeReviewAssessmentPublishing, before.Status, "publication must be reserved before sending")
 				require.Equal(t, models.CodeReviewPublicationUncertain, before.PublicationState, "uncertainty must commit before the external send")
 			}
-			callCtx := f.ctx()
+			callCtx, cancel := context.WithTimeout(f.ctx(), 15*time.Second)
+			defer cancel()
 			switch tt.change {
 			case "provider":
 				capture.cause = providerFailure
