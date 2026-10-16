@@ -2576,17 +2576,6 @@ func latestUserMessageInScope(messages []models.SessionMessage, threadID *uuid.U
 	return &messages[latest]
 }
 
-func messagesInScope(messages []models.SessionMessage, threadID *uuid.UUID) []models.SessionMessage {
-	scoped := make([]models.SessionMessage, 0, len(messages))
-	for _, message := range messages {
-		if !messageMatchesThreadScope(message, threadID) {
-			continue
-		}
-		scoped = append(scoped, message)
-	}
-	return scoped
-}
-
 // unprocessedUserMessages returns the consecutive trailing user messages for
 // a given thread scope — i.e. all user messages after the most recent
 // in-scope assistant message. When threadID is nil the scope is the

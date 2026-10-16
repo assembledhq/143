@@ -102,8 +102,8 @@ func validateContinuationPurpose(session *models.Session, opts *ContinueSessionO
 // input already belongs to an admitted provider phase and must not run again.
 var ErrContinuationInputAlreadyApplied = errors.New("continuation input already applied")
 
-// A final provider response alone cannot acknowledge the job when subsequent
-// checkpoint/session/thread completion has not been durably confirmed.
+// ErrContinuationRecoveryNeedsReconciliation means the provider responded but
+// subsequent checkpoint/session/thread completion is not durably confirmed.
 var ErrContinuationRecoveryNeedsReconciliation = errors.New("provider turn completed but continuation lifecycle requires reconciliation")
 
 // Invalid input uses the existing terminal setup-failure path; dependency
