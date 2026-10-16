@@ -1827,14 +1827,17 @@ func (o *Orchestrator) prepareSandboxGitHubAuth(
 	return authState, nil
 }
 
-func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models.Session, repoID *uuid.UUID, threadID *uuid.UUID, sandboxCfg *SandboxConfig, log zerolog.Logger) {
+func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models.Session, repoID *uuid.UUID, threadID *uuid.UUID, sandboxCfg *SandboxConfig, runtimeCfg runtimeConfig, log zerolog.Logger) {
 	if o.internalAPIURL == "" || o.internalAPISecret == "" || session == nil || repoID == nil || sandboxCfg == nil {
 		return
 	}
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
-	tokenTTL := sandboxCfg.Timeout + 5*time.Minute
+	// Runtime control can extend a turn beyond its soft budget. Keep the
+	// token valid through the resolved hard ceiling and finalization margin,
+	// even when the sandbox still carries its shorter default timeout.
+	tokenTTL := max(sandboxCfg.Timeout, runtimeCfg.AbsoluteRuntimeCeiling) + 5*time.Minute
 	scopes := []string{"preview:read", "preview:interact", "preview:manage"}
 	turnState := automationTurnStateFromContext(ctx)
 	perTargetTurn := turnState != nil
@@ -3405,7 +3408,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	if designatedWorkingBranch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = designatedWorkingBranch
 	}
-	o.injectInternalAPIEnv(ctx, run, resolvedRepoID, primaryThreadID, &sandboxCfg, log)
+	o.injectInternalAPIEnv(ctx, run, resolvedRepoID, primaryThreadID, &sandboxCfg, runtimeCfg, log)
 	if err := o.env.CheckAuth(run.AgentType, sandboxCfg.Env); err != nil {
 		o.failRun(ctx, run, err.Error())
 		return err
@@ -4730,7 +4733,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		threadIDCopy := *opts.ThreadID
 		internalAPIThreadID = &threadIDCopy
 	}
-	o.injectInternalAPIEnv(ctx, session, resolvedRepoID, internalAPIThreadID, &sandboxCfg, log)
+	o.injectInternalAPIEnv(ctx, session, resolvedRepoID, internalAPIThreadID, &sandboxCfg, runtimeCfg, log)
 	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, session.OrgID, o.staticEgress, &sandboxCfg); err != nil {
 		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
 			log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox network failure")

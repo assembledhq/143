@@ -19,6 +19,7 @@ import (
 
 	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/internalapi"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/sandbox"
@@ -65,7 +66,7 @@ func TestOrchestratorInjectInternalAPIEnvUsesCodingSessionID(t *testing.T) {
 		internalAPISecret: secret,
 	}
 
-	orchestrator.injectInternalAPIEnv(context.Background(), session, &repoID, &threadID, cfg, zerolog.Nop())
+	orchestrator.injectInternalAPIEnv(context.Background(), session, &repoID, &threadID, cfg, orchestrator.resolveRuntimeConfig(context.Background(), session.OrgID), zerolog.Nop())
 
 	require.Equal(t, sessionID.String(), cfg.Env[internalapi.CodingSessionIDEnvVar], "sandbox environment should expose the platform-neutral coding session identifier")
 	require.Equal(t, "https://platform.test", cfg.Env["INTERNAL_API_URL"], "sandbox environment should preserve the configured internal API origin")
@@ -76,6 +77,116 @@ func TestOrchestratorInjectInternalAPIEnvUsesCodingSessionID(t *testing.T) {
 	require.NoError(t, err, "injected internal API token should be valid")
 	require.Equal(t, &sessionID, claims.SessionID, "injected internal API token should authorize the same session exposed in the environment")
 	require.Equal(t, &threadID, claims.ThreadID, "injected internal API token should remain scoped to the active thread")
+}
+
+func TestOrchestratorInjectInternalAPIEnvCoversRuntimeCeiling(t *testing.T) {
+	t.Parallel()
+
+	budgets := []struct {
+		name           string
+		settings       json.RawMessage
+		sandboxTimeout time.Duration
+		expectedSoft   time.Duration
+		expectedHard   time.Duration
+		expectedTTL    time.Duration
+	}{
+		{
+			name:         "default runtime with automatic extension",
+			expectedSoft: time.Hour,
+			expectedHard: 90 * time.Minute,
+			expectedTTL:  95 * time.Minute,
+		},
+		{
+			name: "org runtime with automatic extension",
+			settings: json.RawMessage(`{"max_session_duration_seconds":7200,"runtime_budgets":{
+				"automatic_extension_seconds":300,"max_automatic_extension_seconds":900,
+				"absolute_runtime_ceiling_seconds":8100}}`),
+			expectedSoft: 2 * time.Hour,
+			expectedHard: 2*time.Hour + 15*time.Minute,
+			expectedTTL:  2*time.Hour + 20*time.Minute,
+		},
+		{
+			name:           "longer explicit sandbox timeout",
+			sandboxTimeout: 3 * time.Hour,
+			expectedSoft:   time.Hour,
+			expectedHard:   90 * time.Minute,
+			expectedTTL:    3*time.Hour + 5*time.Minute,
+		},
+	}
+	for _, budget := range budgets {
+		t.Run(budget.name, func(t *testing.T) {
+			t.Parallel()
+			modes := []struct {
+				name      string
+				actions   bool
+				perTarget bool
+			}{
+				{name: "ordinary session"},
+				{name: "per-run automation action", actions: true},
+				{name: "per-target automation action", actions: true, perTarget: true},
+			}
+			for _, mode := range modes {
+				t.Run(mode.name, func(t *testing.T) {
+					t.Parallel()
+					const secret = "test-internal-api-secret"
+					session := &models.Session{ID: uuid.New(), OrgID: uuid.New(), Origin: models.SessionOriginManual}
+					repoID, threadID := uuid.New(), uuid.New()
+					orchestrator := &Orchestrator{internalAPIURL: "https://platform.test", internalAPISecret: secret}
+					if budget.settings != nil {
+						orchestrator.orgs = testInternalOrgStore{org: models.Organization{ID: session.OrgID, Settings: budget.settings}}
+					}
+					ctx := context.Background()
+					expectedClaims := auth.InternalTokenClaims{
+						OrgID:             session.OrgID,
+						RepoID:            repoID,
+						SessionID:         &session.ID,
+						ThreadID:          &threadID,
+						AllowedToolScopes: []string{"preview:read", "preview:interact", "preview:manage"},
+						SessionOrigin:     string(session.Origin),
+					}
+					if mode.actions {
+						runID, jobID, attemptID := uuid.New(), uuid.New(), uuid.New()
+						session.Origin = models.SessionOriginAutomation
+						session.AutomationRunID = &runID
+						session.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{{
+							ID:          models.AgentCapabilityAutomationActions,
+							AccessLevel: models.AgentCapabilityAccessWrite,
+							Config:      json.RawMessage(`{"actions":["slack_notification"],"slack_channel_id":"C0123456789"}`),
+						}}
+						ctx = jobctx.WithJobID(jobctx.WithLockToken(ctx, attemptID), jobID)
+						expectedClaims.SessionOrigin = string(session.Origin)
+						expectedClaims.AutomationRunID = &runID
+						expectedClaims.AutomationJobID = &jobID
+						expectedClaims.AutomationAttemptToken = &attemptID
+						expectedClaims.AllowedToolScopes = append(expectedClaims.AllowedToolScopes,
+							models.ToolScope("automation:execute-action"), models.ToolScope("automation:action-status"))
+						if mode.perTarget {
+							ctx = withAutomationTurnState(ctx, &automationTurnState{
+								run:       models.AutomationRun{ID: runID, CapabilitySnapshot: session.CapabilitySnapshot},
+								lockToken: attemptID,
+							})
+							expectedClaims.AllowedToolScopes = models.PerTargetToolScopes(session.CapabilitySnapshot...)
+						}
+					}
+					runtimeCfg := orchestrator.resolveRuntimeConfig(ctx, session.OrgID)
+					require.Equal(t, budget.expectedSoft, runtimeCfg.SoftBudget, "fixture should resolve the configured session runtime")
+					require.Equal(t, budget.expectedHard, runtimeCfg.AbsoluteRuntimeCeiling, "fixture should include the supported automatic extension")
+					cfg := DefaultSandboxConfig()
+					if budget.sandboxTimeout > 0 {
+						cfg.Timeout = budget.sandboxTimeout
+					}
+					issuedBefore := time.Now()
+					orchestrator.injectInternalAPIEnv(ctx, session, &repoID, &threadID, &cfg, runtimeCfg, zerolog.Nop())
+					issuedAfter := time.Now()
+					claims, err := auth.ValidateInternalToken(secret, cfg.Env["INTERNAL_API_TOKEN"])
+					require.NoError(t, err, "sandbox should receive a valid signed internal API token")
+					require.WithinRange(t, claims.ExpiresAt, issuedBefore.Add(budget.expectedTTL), issuedAfter.Add(budget.expectedTTL), "token should cover the longer of the hard runtime ceiling and sandbox timeout, plus the five-minute finalization margin")
+					expectedClaims.ExpiresAt = claims.ExpiresAt
+					require.Equal(t, expectedClaims, *claims, "longer runtime must preserve every actor claim and exactly the existing tool scopes")
+				})
+			}
+		})
+	}
 }
 
 func TestSessionPromptStyleCodeReviewUsesRawTask(t *testing.T) {

@@ -60,7 +60,7 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 	}
 	applyDirectModelOverrideEnv(session.AgentType, session.ModelOverride, cfg.Env)
 	cfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
-	o.injectInternalAPIEnv(ctx, session, session.RepositoryID, nil, &cfg, log)
+	o.injectInternalAPIEnv(ctx, session, session.RepositoryID, nil, &cfg, o.resolveRuntimeConfig(ctx, session.OrgID), log)
 	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, session.OrgID, o.staticEgress, &cfg); err != nil {
 		return nil, fmt.Errorf("apply review sandbox network settings: %w", err)
 	}
