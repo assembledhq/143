@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"math/big"
 	"net/url"
 	"os"
@@ -673,7 +674,7 @@ func (p *realReviewProvider) Create(ctx context.Context, cfg agent.SandboxConfig
 		p.mu.Unlock()
 	}
 	monitor := newRealReviewMemoryMonitor(sandbox.ID, func() realReviewMemorySample {
-		return readRealReviewMemorySample("/sys/fs/cgroup", sandbox.ID)
+		return readRealReviewMemorySample("/sys/fs/cgroup", sandbox.ID, p.profileSourceHelper)
 	}, 500*time.Millisecond, 45*time.Minute, profile)
 	p.mu.Lock()
 	if p.memoryMonitors == nil {
@@ -820,6 +821,7 @@ func realReviewPositiveKernelInteger(raw string) (int64, error) {
 }
 
 type realReviewMemorySample struct {
+	CPUUsageUS         *int64           `json:"cpu_usage_usec,omitempty"`
 	MemoryPeakBytes    *int64           `json:"memory_peak_bytes"`
 	MemoryCurrentBytes *int64           `json:"memory_current_bytes"`
 	MemoryEvents       map[string]int64 `json:"memory_events"`
@@ -839,7 +841,25 @@ type realReviewMemoryStatAtCurrentPeak struct {
 
 const realReviewMemoryStatScope = "same sequential sampling pass as memory.current; not an atomic kernel snapshot; first sample wins ties; overlapping fields must not be summed"
 
+const realReviewCPUScope = "whole-container cumulative cgroup CPU usage from sequential non-atomic reads over the monitor lifetime, not cold-only; phase deltas are nonexclusive container coactivity between adjacent valid observations while the phase key stays active, once per key regardless of operation count; overlapping phase deltas must not be summed and do not establish CPU ownership or cause; missing/decreasing counters break intervals and overflow additions are omitted; retained deltas are lower bounds and first/last subtraction across gaps or resets is invalid; no derived utilization"
+
+type realReviewCPUObservation struct {
+	SampleNumber  int   `json:"sample_number"`
+	HostElapsedUS int64 `json:"host_elapsed_us"`
+	UsageUS       int64 `json:"usage_usec"`
+}
+
+type realReviewCPUObservationTelemetry struct {
+	Samples            int                       `json:"valid_sample_count"`
+	UnavailableSamples int                       `json:"unavailable_sample_count"`
+	CounterDecreases   int                       `json:"counter_decrease_count"`
+	First              *realReviewCPUObservation `json:"first_valid_observation"`
+	Last               *realReviewCPUObservation `json:"last_valid_observation"`
+	Scope              string                    `json:"observation_scope"`
+}
+
 type realReviewMemoryTelemetry struct {
+	DiagnosticCPU           *realReviewCPUObservationTelemetry `json:"diagnostic_cpu_observation,omitempty"`
 	CgroupPath              string                             `json:"source_cgroup_path"`
 	IntervalMS              int64                              `json:"interval_ms"`
 	MaxDurationMS           int64                              `json:"max_duration_ms"`
@@ -879,6 +899,7 @@ func newRealReviewMemoryMonitor(containerID string, read func() realReviewMemory
 			ReadLimitsBytes: map[string]int64{"memory.peak": 128, "memory.current": 128, "memory.events": 4096, "memory.stat": 8192}}}
 	if len(profiles) > 0 && profiles[0] != nil {
 		monitor.profile = profiles[0]
+		monitor.retained.ReadLimitsBytes["cpu.stat"] = 4096
 	}
 	monitor.record(read())
 	go func() {
@@ -908,7 +929,7 @@ func (m *realReviewMemoryMonitor) record(sample realReviewMemorySample) {
 	m.retained.Samples++
 	coreComplete := sample.MemoryPeakBytes != nil && sample.MemoryCurrentBytes != nil && sample.MemoryEvents != nil
 	for _, field := range sample.UnavailableFields {
-		if field != "memory.stat" {
+		if field != "memory.stat" && field != "cpu.stat" {
 			coreComplete = false
 		}
 	}
@@ -933,6 +954,7 @@ func (m *realReviewMemoryMonitor) record(sample realReviewMemorySample) {
 	}
 	if m.profile != nil {
 		progress, observedAt := m.profile.observeMemoryAndProgress(sample, m.now)
+		m.recordCPUObservation(sample, observedAt)
 		m.recordJointTimeline(sample, progress, observedAt)
 	}
 
@@ -946,6 +968,46 @@ func (m *realReviewMemoryMonitor) record(sample realReviewMemorySample) {
 			}
 		}
 	}
+}
+
+func (m *realReviewMemoryMonitor) recordCPUObservation(sample realReviewMemorySample, observedAt time.Time) {
+	if m.started.IsZero() {
+		m.started = observedAt
+	}
+	if m.retained.DiagnosticCPU == nil {
+		m.retained.DiagnosticCPU = &realReviewCPUObservationTelemetry{Scope: realReviewCPUScope}
+	}
+	cpu := m.retained.DiagnosticCPU
+	if sample.CPUUsageUS == nil {
+		cpu.UnavailableSamples++
+		return
+	}
+	point := realReviewCPUObservation{SampleNumber: m.retained.Samples, HostElapsedUS: observedAt.Sub(m.started).Microseconds(), UsageUS: *sample.CPUUsageUS}
+	cpu.Samples++
+	if cpu.First == nil {
+		first := point
+		cpu.First = &first
+	}
+	if cpu.Last != nil && point.UsageUS < cpu.Last.UsageUS {
+		cpu.CounterDecreases++
+	}
+	cpu.Last = &point
+}
+
+func cloneRealReviewCPUObservation(cpu *realReviewCPUObservationTelemetry) *realReviewCPUObservationTelemetry {
+	if cpu == nil {
+		return nil
+	}
+	result := *cpu
+	if cpu.First != nil {
+		first := *cpu.First
+		result.First = &first
+	}
+	if cpu.Last != nil {
+		last := *cpu.Last
+		result.Last = &last
+	}
+	return &result
 }
 
 func retainRealReviewMemoryMaximum(previous, current *int64) *int64 {
@@ -968,6 +1030,7 @@ func (m *realReviewMemoryMonitor) stop() realReviewMemoryTelemetry {
 	result.ReadLimitsBytes = maps.Clone(result.ReadLimitsBytes)
 	result.Latest = cloneRealReviewMemorySample(result.Latest)
 	result.JointTimeline = cloneRealReviewMemoryTimeline(result.JointTimeline)
+	result.DiagnosticCPU = cloneRealReviewCPUObservation(result.DiagnosticCPU)
 	result.MaxObservedPeakBytes = retainRealReviewMemoryMaximum(nil, result.MaxObservedPeakBytes)
 	result.MaxObservedCurrentBytes = retainRealReviewMemoryMaximum(nil, result.MaxObservedCurrentBytes)
 	result.MaxObservedEvents, result.MaxObservedStat = maps.Clone(result.MaxObservedEvents), maps.Clone(result.MaxObservedStat)
@@ -980,6 +1043,7 @@ func (m *realReviewMemoryMonitor) stop() realReviewMemoryTelemetry {
 }
 
 func cloneRealReviewMemorySample(sample realReviewMemorySample) realReviewMemorySample {
+	sample.CPUUsageUS = retainRealReviewMemoryMaximum(nil, sample.CPUUsageUS)
 	sample.MemoryPeakBytes = retainRealReviewMemoryMaximum(nil, sample.MemoryPeakBytes)
 	sample.MemoryCurrentBytes = retainRealReviewMemoryMaximum(nil, sample.MemoryCurrentBytes)
 	sample.MemoryEvents, sample.MemoryStat = maps.Clone(sample.MemoryEvents), maps.Clone(sample.MemoryStat)
@@ -987,10 +1051,14 @@ func cloneRealReviewMemorySample(sample realReviewMemorySample) realReviewMemory
 	return sample
 }
 
-func readRealReviewMemorySample(cgroupRoot, containerID string) realReviewMemorySample {
+func readRealReviewMemorySample(cgroupRoot, containerID string, cpu ...bool) realReviewMemorySample {
+	observeCPU := len(cpu) > 0 && cpu[0]
 	sample := realReviewMemorySample{UnavailableFields: []string{}}
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(containerID) {
 		sample.UnavailableFields = []string{"memory.events", "memory.peak", "memory.current", "memory.stat"}
+		if observeCPU {
+			sample.UnavailableFields = append(sample.UnavailableFields, "cpu.stat")
+		}
 		return sample
 	}
 	base := "docker/" + containerID + "/"
@@ -1027,7 +1095,42 @@ func readRealReviewMemorySample(cgroupRoot, containerID string) realReviewMemory
 	if err != nil {
 		sample.UnavailableFields = append(sample.UnavailableFields, "memory.stat")
 	}
+	if observeCPU {
+		raw, err := readRealReviewKernelFile(cgroupRoot, base+"cpu.stat", 4096)
+		if err == nil {
+			sample.CPUUsageUS, err = realReviewCPUUsage(raw)
+		}
+		if err != nil {
+			sample.UnavailableFields = append(sample.UnavailableFields, "cpu.stat")
+		}
+	}
 	return sample
+}
+
+func realReviewCPUUsage(raw []byte) (*int64, error) {
+	if len(raw) > 4096 {
+		return nil, errors.New("CPU observation exceeded its fixed read bound")
+	}
+	seen := map[string]bool{}
+	var usage *int64
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || seen[fields[0]] {
+			return nil, errors.New("CPU observation requires unique finite keyed values")
+		}
+		value, err := realReviewNonnegativeKernelInteger(fields[1])
+		if err != nil {
+			return nil, errors.New("CPU observation requires unique finite keyed values")
+		}
+		seen[fields[0]] = true
+		if fields[0] == "usage_usec" {
+			usage = &value
+		}
+	}
+	if usage == nil {
+		return nil, errors.New("CPU observation lacks its required usage counter")
+	}
+	return usage, nil
 }
 
 func realReviewMemoryStat(raw []byte) (map[string]int64, error) {
@@ -1564,6 +1667,10 @@ type realReviewProfileRecord struct {
 }
 
 type realReviewProfileAggregate struct {
+	SampledCPUUsageUS *int64 `json:"nonexclusive_sampled_container_cpu_delta_usec,omitempty"`
+	CPUIntervals      int64  `json:"nonexclusive_cpu_interval_count,omitempty"`
+	CPUGaps           int64  `json:"cpu_gap_count,omitempty"`
+	lastCPUUsageUS    *int64
 	Entered           int64            `json:"entered"`
 	Completed         int64            `json:"completed"`
 	Failed            int64            `json:"failed"`
@@ -1580,6 +1687,7 @@ type realReviewProfileAggregate struct {
 }
 
 type realReviewProfileResult struct {
+	CPUScope             string                                `json:"cpu_scope"`
 	DiagnosticOnly       bool                                  `json:"diagnostic_only"`
 	HelperSHA256         string                                `json:"helper_sha256"`
 	Invalid              bool                                  `json:"invalid"`
@@ -1763,6 +1871,7 @@ func (p *realReviewSourceProfile) consumeStream(raw []byte, stream *realReviewPr
 	}
 	if cell.Active == 0 {
 		cell.lastEvents = nil
+		cell.lastCPUUsageUS = nil
 	}
 }
 
@@ -1910,6 +2019,7 @@ func (p *realReviewSourceProfile) observeMemoryAndProgress(sample realReviewMemo
 			if cell.Active == 0 {
 				continue
 			}
+			cell.observeCPU(sample.CPUUsageUS)
 			cell.MemorySamples++
 			cell.MaxCurrentBytes = retainRealReviewMemoryMaximum(cell.MaxCurrentBytes, sample.MemoryCurrentBytes)
 			if sample.MemoryStat != nil {
@@ -1939,6 +2049,37 @@ func (p *realReviewSourceProfile) observeMemoryAndProgress(sample realReviewMemo
 	return progress, observedAt
 }
 
+// CPU deltas are shared whole-container coactivity, never per-phase ownership.
+// First/recovery observations only establish a baseline; gaps are not bridged.
+func (cell *realReviewProfileAggregate) observeCPU(current *int64) {
+	if current == nil {
+		if cell.lastCPUUsageUS != nil {
+			cell.CPUGaps++
+		}
+		cell.lastCPUUsageUS = nil
+		return
+	}
+	if cell.lastCPUUsageUS != nil {
+		if *current < *cell.lastCPUUsageUS {
+			cell.CPUGaps++
+		} else {
+			delta := *current - *cell.lastCPUUsageUS
+			previous := int64(0)
+			if cell.SampledCPUUsageUS != nil {
+				previous = *cell.SampledCPUUsageUS
+			}
+			if delta > math.MaxInt64-previous {
+				cell.CPUGaps++
+			} else {
+				total := previous + delta
+				cell.SampledCPUUsageUS = &total
+				cell.CPUIntervals++
+			}
+		}
+	}
+	cell.lastCPUUsageUS = retainRealReviewMemoryMaximum(nil, current)
+}
+
 func (p *realReviewSourceProfile) result() realReviewProfileResult {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1948,7 +2089,7 @@ func (p *realReviewSourceProfile) result() realReviewProfileResult {
 	} else if reason == "" && p.active > 0 {
 		reason = "incomplete_phase_exits"
 	}
-	result := realReviewProfileResult{DiagnosticOnly: true, HelperSHA256: realReviewProfileHelperSHA256, Invalid: reason != "", InvalidReason: reason, Records: p.records, Phases: map[string]realReviewProfileAggregate{}, MemoryScope: "container samples while phase/category is active; overlapping phases share observations; memory.peak is cumulative lifetime only", TimingScope: "sum of completed operation durations; concurrent operations overlap; go_filter/go is nested within go_processing/go; cleanup operations may also nest within it; overlapping spans are non-additive; not elapsed phase wall time; incomplete phases retain active counts only"}
+	result := realReviewProfileResult{CPUScope: realReviewCPUScope, DiagnosticOnly: true, HelperSHA256: realReviewProfileHelperSHA256, Invalid: reason != "", InvalidReason: reason, Records: p.records, Phases: map[string]realReviewProfileAggregate{}, MemoryScope: "container samples while phase/category is active; overlapping phases share observations; memory.peak is cumulative lifetime only", TimingScope: "sum of completed operation durations; concurrent operations overlap; go_filter/go is nested within go_processing/go; cleanup operations may also nest within it; overlapping spans are non-additive; not elapsed phase wall time; incomplete phases retain active counts only"}
 	result.CheckpointCount, result.CheckpointInvocation = p.checkpointCount, p.checkpointInvocation
 	if p.lastCheckpoint != nil {
 		copy := *p.lastCheckpoint
@@ -1959,6 +2100,8 @@ func (p *realReviewSourceProfile) result() realReviewProfileResult {
 		value := *original
 		value.MaxMemoryStat, value.SampledEventDelta = maps.Clone(original.MaxMemoryStat), maps.Clone(original.SampledEventDelta)
 		value.lastEvents = nil
+		value.lastCPUUsageUS = nil
+		value.SampledCPUUsageUS = retainRealReviewMemoryMaximum(nil, original.SampledCPUUsageUS)
 		result.Phases[key] = value
 	}
 	return result

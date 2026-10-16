@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1258,4 +1259,273 @@ func TestRealReviewIndependentOutputScanBeyondRetention(t *testing.T) {
 	require.NoError(t, err, "stdout suffix must remain observable after interleaving")
 	require.True(t, provider.credentialDetected(), "independent scanner must detect a split credential beyond retention")
 	require.Equal(t, acceptanceProviderLogArtifactLimit, len(provider.outputScanners[0].String()), "each retained output must remain bounded")
+}
+
+func TestRealReviewProfileCPUNonexclusiveObservation(t *testing.T) {
+	t.Parallel()
+	profile := &realReviewSourceProfile{}
+	profile.consume([]byte(`{"version":1,"op":1,"phase":5,"category":4}`))
+	profile.consume([]byte(`{"version":1,"op":1,"phase":11,"category":4}`))
+	for _, raw := range []string{`{"cpu_usage_usec":10}`, `{"cpu_usage_usec":30}`} {
+		var sample realReviewMemorySample
+		require.NoError(t, json.Unmarshal([]byte(raw), &sample), "finite numeric CPU observations should decode into the owned sample")
+		profile.observeMemory(sample)
+	}
+	result := profile.result()
+	require.Equal(t, "incomplete_phase_exits", result.InvalidReason, "failed cold observation must not manufacture helper completion")
+	for _, key := range []string{"go_processing/go", "go_filter/go"} {
+		encoded, err := json.Marshal(result.Phases[key])
+		require.NoError(t, err, "partial CPU coactivity observations should serialize")
+		var fields map[string]any
+		require.NoError(t, json.Unmarshal(encoded, &fields), "fixed CPU evidence should expose only numeric measurements")
+		require.Equal(t, float64(20), fields["nonexclusive_sampled_container_cpu_delta_usec"], "each overlapping active phase must receive the same whole-container adjacent CPU delta")
+	}
+}
+
+func TestRealReviewCPUUsageStrictFiniteWhitelist(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		raw       string
+		expected  int64
+		wantError bool
+	}{
+		{name: "zero is available", raw: "usage_usec 0\n"},
+		{name: "finite usage with unretained counters", raw: "usage_usec 12\nuser_usec 7\nsystem_usec 5\n", expected: 12},
+		{name: "largest finite counter", raw: "usage_usec 9223372036854775807\n", expected: math.MaxInt64},
+		{name: "exact bound", raw: "usage_usec 1\n" + strings.Repeat(" ", 4096-len("usage_usec 1\n")), expected: 1},
+		{name: "over bound", raw: "usage_usec 1\n" + strings.Repeat(" ", 4097-len("usage_usec 1\n")), wantError: true},
+		{name: "empty", wantError: true},
+		{name: "missing required counter", raw: "user_usec 1\n", wantError: true},
+		{name: "duplicate required counter", raw: "usage_usec 1\nusage_usec 1\n", wantError: true},
+		{name: "duplicate unretained counter", raw: "usage_usec 1\nother 2\nother 2\n", wantError: true},
+		{name: "negative", raw: "usage_usec -1\n", wantError: true},
+		{name: "signed", raw: "usage_usec +1\n", wantError: true},
+		{name: "overflow", raw: "usage_usec 9223372036854775808\n", wantError: true},
+		{name: "fraction", raw: "usage_usec 1.5\n", wantError: true},
+		{name: "malformed unretained value", raw: "usage_usec 1\nother private-token\n", wantError: true},
+		{name: "extra columns", raw: "usage_usec 1 2\n", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual, err := realReviewCPUUsage([]byte(tt.raw))
+			if tt.wantError {
+				require.Error(t, err, "unsafe CPU counter bytes must be explicitly unavailable")
+				require.Nil(t, actual, "malformed CPU values must never become a zero or retained raw evidence")
+				require.NotContains(t, err.Error(), "private-token", "fixed parser errors must not disclose untrusted counter text")
+				return
+			}
+			require.NoError(t, err, "one finite usage counter should parse independently of other numeric fields")
+			require.Equal(t, &tt.expected, actual, "only the exact usage_usec value should survive strict parsing")
+		})
+	}
+}
+
+func TestRealReviewOwnedCPUObservation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		raw         string
+		enabled     bool
+		linked      bool
+		expected    *int64
+		unavailable []string
+	}{
+		{name: "profile numeric zero", raw: "usage_usec 0\n", enabled: true, expected: realReviewTimelineInt64(0), unavailable: []string{}},
+		{name: "profile finite usage", raw: "usage_usec 17\nuser_usec 7\n", enabled: true, expected: realReviewTimelineInt64(17), unavailable: []string{}},
+		{name: "missing CPU stays optional", enabled: true, unavailable: []string{"cpu.stat"}},
+		{name: "malformed CPU stays optional", raw: "usage_usec private-token\n", enabled: true, unavailable: []string{"cpu.stat"}},
+		{name: "bounded CPU read", raw: "usage_usec 1\n" + strings.Repeat(" ", 4096), enabled: true, unavailable: []string{"cpu.stat"}},
+		{name: "no redirected CPU read", raw: "usage_usec 17\n", enabled: true, linked: true, unavailable: []string{"cpu.stat"}},
+		{name: "normal does not read CPU", raw: "usage_usec private-token\n", unavailable: []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			require.NoError(t, err, "CPU fixtures must have canonical owned roots")
+			containerID := strings.Repeat("a", 64)
+			group := filepath.Join(root, "docker", containerID)
+			require.NoError(t, os.MkdirAll(group, 0o700), "CPU observations must stay under the verified container cgroup")
+			for name, value := range map[string]string{"memory.events": "max 0\noom 0\noom_kill 0\n", "memory.peak": "100\n", "memory.current": "50\n", "memory.stat": realReviewContractMemoryStatRaw} {
+				require.NoError(t, os.WriteFile(filepath.Join(group, name), []byte(value), 0o600), "memory fixture remains independent of optional CPU evidence")
+			}
+			if tt.raw != "" {
+				target := filepath.Join(group, "cpu.stat")
+				if tt.linked {
+					target = filepath.Join(root, "redirected")
+					require.NoError(t, os.Symlink(target, filepath.Join(group, "cpu.stat")), "valid-looking CPU bytes through a symlink must be rejected")
+				}
+				require.NoError(t, os.WriteFile(target, []byte(tt.raw), 0o600), "optional CPU fixture may contain valid or unsafe values")
+			}
+			actual := readRealReviewMemorySample(root, containerID, tt.enabled)
+			expected := realReviewMemorySample{CPUUsageUS: tt.expected, MemoryPeakBytes: realReviewTimelineInt64(100), MemoryCurrentBytes: realReviewTimelineInt64(50), MemoryEvents: map[string]int64{"max": 0, "oom": 0, "oom_kill": 0}, MemoryStat: realReviewContractMemoryStat(), UnavailableFields: tt.unavailable}
+			require.Equal(t, expected, actual, "CPU failures must retain complete independent memory evidence and an explicit fixed unavailable label")
+			monitor := &realReviewMemoryMonitor{}
+			monitor.record(actual)
+			require.Equal(t, 1, monitor.retained.CompleteSamples, "optional CPU failures must preserve ordinary memory completeness")
+			encoded, err := json.Marshal(actual)
+			require.NoError(t, err, "owned CPU sample should encode finite evidence")
+			require.NotContains(t, string(encoded), "private-token", "raw cpu.stat must never be serialized")
+			if !tt.enabled {
+				require.NotContains(t, string(encoded), "cpu_", "normal sample JSON must remain unchanged")
+			}
+		})
+	}
+}
+
+func TestRealReviewProfileCPUIntervalBoundaries(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		samples  []*int64
+		reenter  bool
+		twice    bool
+		expected realReviewProfileAggregate
+	}{
+		{name: "baseline only", samples: []*int64{realReviewTimelineInt64(10)}, expected: realReviewProfileAggregate{Entered: 1, Active: 1, MaxActive: 1, MemorySamples: 1}},
+		{name: "zero delta available", samples: []*int64{realReviewTimelineInt64(0), realReviewTimelineInt64(0)}, expected: realReviewProfileAggregate{Entered: 1, Active: 1, MaxActive: 1, MemorySamples: 2, SampledCPUUsageUS: realReviewTimelineInt64(0), CPUIntervals: 1}},
+		{name: "adjacent deltas", samples: []*int64{realReviewTimelineInt64(0), realReviewTimelineInt64(10), realReviewTimelineInt64(30)}, expected: realReviewProfileAggregate{Entered: 1, Active: 1, MaxActive: 1, MemorySamples: 3, SampledCPUUsageUS: realReviewTimelineInt64(30), CPUIntervals: 2}},
+		{name: "gap and recovery baseline", samples: []*int64{realReviewTimelineInt64(10), nil, nil, realReviewTimelineInt64(30), realReviewTimelineInt64(50)}, expected: realReviewProfileAggregate{Entered: 1, Active: 1, MaxActive: 1, MemorySamples: 5, SampledCPUUsageUS: realReviewTimelineInt64(20), CPUIntervals: 1, CPUGaps: 1}},
+		{name: "missing initial baseline", samples: []*int64{nil, realReviewTimelineInt64(30), realReviewTimelineInt64(50)}, expected: realReviewProfileAggregate{Entered: 1, Active: 1, MaxActive: 1, MemorySamples: 3, SampledCPUUsageUS: realReviewTimelineInt64(20), CPUIntervals: 1}},
+		{name: "decrease rebaselines", samples: []*int64{realReviewTimelineInt64(100), realReviewTimelineInt64(10), realReviewTimelineInt64(15)}, expected: realReviewProfileAggregate{Entered: 1, Active: 1, MaxActive: 1, MemorySamples: 3, SampledCPUUsageUS: realReviewTimelineInt64(5), CPUIntervals: 1, CPUGaps: 1}},
+		{name: "overflow addition omitted", samples: []*int64{realReviewTimelineInt64(0), realReviewTimelineInt64(math.MaxInt64), realReviewTimelineInt64(0), realReviewTimelineInt64(1)}, expected: realReviewProfileAggregate{Entered: 1, Active: 1, MaxActive: 1, MemorySamples: 4, SampledCPUUsageUS: realReviewTimelineInt64(math.MaxInt64), CPUIntervals: 1, CPUGaps: 2}},
+		{name: "inactive gap is not bridged", samples: []*int64{realReviewTimelineInt64(10), realReviewTimelineInt64(30), realReviewTimelineInt64(100), realReviewTimelineInt64(140)}, reenter: true, expected: realReviewProfileAggregate{Entered: 2, Completed: 1, Active: 1, MaxActive: 1, DurationUS: 10, MemorySamples: 4, SampledCPUUsageUS: realReviewTimelineInt64(60), CPUIntervals: 2}},
+		{name: "one delta per active key", samples: []*int64{realReviewTimelineInt64(10), realReviewTimelineInt64(30)}, twice: true, expected: realReviewProfileAggregate{Entered: 2, Active: 2, MaxActive: 2, MemorySamples: 2, SampledCPUUsageUS: realReviewTimelineInt64(20), CPUIntervals: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			profile := &realReviewSourceProfile{}
+			enter := []byte(`{"version":1,"op":1,"phase":11,"category":4}`)
+			profile.consume(enter)
+			if tt.twice {
+				profile.consume(enter)
+			}
+			for i, usage := range tt.samples {
+				if tt.reenter && i == 2 {
+					profile.consume([]byte(`{"version":1,"op":2,"phase":11,"category":4,"duration_us":10,"failed":0}`))
+					profile.consume(enter)
+				}
+				profile.observeMemory(realReviewMemorySample{CPUUsageUS: usage})
+			}
+			result := profile.result()
+			require.Equal(t, "incomplete_phase_exits", result.InvalidReason, "sampling must never turn an active cold phase into completion")
+			require.Equal(t, tt.expected, result.Phases["go_filter/go"], "CPU baseline, gap, reset and overflow handling must retain exact nonexclusive lower bounds")
+			require.Equal(t, realReviewCPUScope, result.CPUScope, "CPU evidence must retain explicit nonexclusive coactivity and incomplete-window qualifications")
+		})
+	}
+}
+
+func TestRealReviewDiagnosticCPUWindowAndCopies(t *testing.T) {
+	t.Parallel()
+	start := time.Now()
+	observed := start.Add(time.Second)
+	profile := &realReviewSourceProfile{}
+	monitor := &realReviewMemoryMonitor{profile: profile, started: start, now: func() time.Time { return observed }}
+	usage := int64(100)
+	monitor.record(realReviewMemorySample{CPUUsageUS: &usage})
+	usage = 120
+	observed = start.Add(2 * time.Second)
+	monitor.record(realReviewMemorySample{CPUUsageUS: &usage})
+	observed = start.Add(4 * time.Second)
+	monitor.record(realReviewMemorySample{UnavailableFields: []string{"cpu.stat"}})
+	usage = 10
+	observed = start.Add(6 * time.Second)
+	monitor.record(realReviewMemorySample{CPUUsageUS: &usage})
+	expected := &realReviewCPUObservationTelemetry{Samples: 3, UnavailableSamples: 1, CounterDecreases: 1, First: &realReviewCPUObservation{SampleNumber: 1, HostElapsedUS: 1000000, UsageUS: 100}, Last: &realReviewCPUObservation{SampleNumber: 4, HostElapsedUS: 6000000, UsageUS: 10}, Scope: realReviewCPUScope}
+	require.Equal(t, expected, monitor.retained.DiagnosticCPU, "retained CPU window must use actual host times and expose missing samples and counter resets")
+	usage = 999
+	require.Equal(t, int64(10), *monitor.retained.Latest.CPUUsageUS, "latest CPU must own its source pointer")
+	changed := cloneRealReviewCPUObservation(monitor.retained.DiagnosticCPU)
+	changed.First.UsageUS, changed.Last.UsageUS, changed.Samples = 999, 999, 999
+	require.Equal(t, expected, monitor.retained.DiagnosticCPU, "returned CPU windows must own both observation pointers")
+	one := cloneRealReviewCPUObservation(&realReviewCPUObservationTelemetry{First: expected.First, Last: expected.First})
+	one.First.UsageUS = 999
+	require.Equal(t, int64(100), one.Last.UsageUS, "even first and last for a single sample must not alias in returned copies")
+}
+
+func TestRealReviewDiagnosticCPUFinalReadAndNormalCompatibility(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                string
+		profile             bool
+		missing             bool
+		vanished            bool
+		invalidProfile      bool
+		expectedSamples     int
+		expectedUnavailable int
+		expectedLast        int64
+		expectedComplete    int
+	}{
+		{name: "failed cold retains final CPU", profile: true, expectedSamples: 2, expectedLast: 140, expectedComplete: 2},
+		{name: "missing CPU remains optional", profile: true, missing: true, expectedSamples: 1, expectedUnavailable: 1, expectedLast: 100, expectedComplete: 2},
+		{name: "destroyed cgroup retains earlier CPU", profile: true, missing: true, vanished: true, expectedSamples: 1, expectedUnavailable: 1, expectedLast: 100, expectedComplete: 1},
+		{name: "invalid helper profile retains independent CPU", profile: true, invalidProfile: true, expectedSamples: 2, expectedLast: 140, expectedComplete: 2},
+		{name: "normal telemetry unchanged", expectedComplete: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var profile *realReviewSourceProfile
+			if tt.profile {
+				profile = &realReviewSourceProfile{}
+				profile.consume([]byte(`{"version":1,"op":1,"phase":11,"category":4}`))
+			}
+			var calls atomic.Int64
+			monitor := newRealReviewMemoryMonitor(strings.Repeat("a", 64), func() realReviewMemorySample {
+				sample := realReviewContractMemorySample(300, realReviewContractMemoryStat())
+				call := calls.Add(1)
+				if tt.vanished && call > 1 {
+					return realReviewMemorySample{UnavailableFields: []string{"memory.events", "memory.peak", "memory.current", "memory.stat", "cpu.stat"}}
+				}
+				if tt.profile {
+					if call == 1 {
+						sample.CPUUsageUS = realReviewTimelineInt64(100)
+					} else if tt.missing {
+						sample.UnavailableFields = append(sample.UnavailableFields, "cpu.stat")
+					} else {
+						sample.CPUUsageUS = realReviewTimelineInt64(140)
+					}
+				}
+				return sample
+			}, time.Hour, time.Minute, profile)
+			t.Cleanup(func() { monitor.stop() })
+			if tt.invalidProfile {
+				profile.consume([]byte(`{"version":1,"op":0,"phase":0,"category":0}`))
+			}
+			actual := monitor.stop()
+			require.Equal(t, int64(2), calls.Load(), "CPU observation must reuse only existing initial and joined final reads")
+			require.Equal(t, tt.expectedComplete, actual.CompleteSamples, "only unavailable core memory may affect ordinary completeness")
+			if !tt.profile {
+				require.Nil(t, actual.DiagnosticCPU, "normal acceptance must not allocate CPU diagnostic aggregates")
+				require.NotContains(t, actual.ReadLimitsBytes, "cpu.stat", "normal acceptance must keep the existing read limits unchanged")
+				encoded, err := json.Marshal(actual)
+				require.NoError(t, err, "normal telemetry must remain serializable")
+				require.NotContains(t, string(encoded), "cpu_", "normal output must omit optional CPU evidence")
+				return
+			}
+			require.Equal(t, tt.expectedSamples, actual.DiagnosticCPU.Samples, "CPU availability must remain explicit after the final read")
+			require.Equal(t, tt.expectedUnavailable, actual.DiagnosticCPU.UnavailableSamples, "destroyed cgroup evidence must preserve explicit CPU gaps")
+			require.Equal(t, tt.expectedLast, actual.DiagnosticCPU.Last.UsageUS, "earlier last valid CPU evidence must survive failed cold teardown")
+			require.Equal(t, int64(4096), actual.ReadLimitsBytes["cpu.stat"], "diagnostic CPU reads must retain the fixed byte cap")
+			expectedReason := "incomplete_phase_exits"
+			if tt.invalidProfile {
+				expectedReason = "invalid_record"
+			}
+			require.Equal(t, expectedReason, profile.result().InvalidReason, "final CPU read must never revive an invalid or incomplete helper profile")
+			changed := monitor.stop()
+			changed.DiagnosticCPU.First.UsageUS, changed.DiagnosticCPU.Last.UsageUS = 999, 999
+			if changed.Latest.CPUUsageUS != nil {
+				*changed.Latest.CPUUsageUS = 999
+			}
+			require.Equal(t, actual, monitor.stop(), "repeated teardown results must clone latest CPU and first/last observation pointers")
+			cell := profile.result().Phases["go_filter/go"]
+			if !tt.missing && !tt.invalidProfile {
+				*cell.SampledCPUUsageUS = 999
+				require.Equal(t, int64(40), *profile.result().Phases["go_filter/go"].SampledCPUUsageUS, "phase CPU copies must not expose retained mutable pointers")
+			}
+		})
+	}
 }

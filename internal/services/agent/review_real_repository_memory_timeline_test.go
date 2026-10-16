@@ -15,10 +15,11 @@ import (
 const realReviewMemoryTimelineLimit = 64
 const realReviewMemoryTimelineGridLimit = 40
 const realReviewMemoryTimelineRecentLimit = 24
-const realReviewMemoryTimelineScope = "same sequential kernel sampling pass with the latest fully validated helper checkpoint observed asynchronously by the host; checkpoint age is host receipt age, not helper publication or kernel age; not an atomic snapshot, phase completion, causal allocation attribution, or proof of physical disk traffic; memory.stat fields overlap and must not be summed"
+const realReviewMemoryTimelineScope = "same sequential kernel sampling pass with the latest fully validated helper checkpoint observed asynchronously by the host; checkpoint age is host receipt age, not helper publication or kernel age; not an atomic snapshot, phase completion, causal allocation attribution, or proof of physical disk traffic; memory.stat fields overlap and must not be summed; CPU is cumulative whole-container usage, not per-phase ownership or cause"
 const realReviewMemoryTimelineRetention = "union of at most 40 whole-lifetime power-of-two sample-ordinal grid points and the most recent 24 native-interval samples; double grid stride when its point count exceeds 40; retain first and latest samples once in chronological order; coarser grid history can omit brief transitions and must not be treated as continuous coverage"
 
 type realReviewMemoryTimelinePoint struct {
+	CPUUsageUS                    *int64 `json:"cpu_usage_usec"`
 	SampleNumber                  int    `json:"sample_number"`
 	HostElapsedUS                 int64  `json:"host_elapsed_us"`
 	MemoryCurrentBytes            *int64 `json:"memory_current_bytes"`
@@ -66,7 +67,7 @@ func (m *realReviewMemoryMonitor) recordJointTimeline(sample realReviewMemorySam
 		m.started = observedAt
 	}
 	point := realReviewMemoryTimelinePoint{SampleNumber: m.retained.Samples, HostElapsedUS: observedAt.Sub(m.started).Microseconds(),
-		MemoryCurrentBytes: retainRealReviewMemoryMaximum(nil, sample.MemoryCurrentBytes), ProfileInvalid: progress.invalid}
+		MemoryCurrentBytes: retainRealReviewMemoryMaximum(nil, sample.MemoryCurrentBytes), CPUUsageUS: retainRealReviewMemoryMaximum(nil, sample.CPUUsageUS), ProfileInvalid: progress.invalid}
 	for _, field := range []struct {
 		name   string
 		target **int64
@@ -123,7 +124,7 @@ func cloneRealReviewMemoryTimeline(timeline *realReviewMemoryTimeline) *realRevi
 	result := *timeline
 	result.Points = make([]realReviewMemoryTimelinePoint, len(timeline.Points))
 	for index, point := range timeline.Points {
-		for _, field := range []**int64{&point.MemoryCurrentBytes, &point.AnonBytes, &point.FileBytes, &point.ShmemBytes, &point.FileMappedBytes, &point.FileDirtyBytes, &point.FileWritebackBytes, &point.SlabBytes, &point.KernelBytes, &point.CheckpointSequence,
+		for _, field := range []**int64{&point.CPUUsageUS, &point.MemoryCurrentBytes, &point.AnonBytes, &point.FileBytes, &point.ShmemBytes, &point.FileMappedBytes, &point.FileDirtyBytes, &point.FileWritebackBytes, &point.SlabBytes, &point.KernelBytes, &point.CheckpointSequence,
 			&point.CheckpointHelperElapsedUS, &point.CheckpointCompletedHashes, &point.CheckpointSuccessfulReadBytes, &point.CheckpointHostAgeUS} {
 			*field = retainRealReviewMemoryMaximum(nil, *field)
 		}
@@ -317,7 +318,7 @@ func TestRealReviewDiagnosticTimelineFinalReadAndIsolation(t *testing.T) {
 	}
 	changed := monitor.stop()
 	for _, point := range changed.JointTimeline.Points {
-		for _, value := range []*int64{point.MemoryCurrentBytes, point.AnonBytes, point.FileBytes, point.ShmemBytes, point.FileMappedBytes, point.FileDirtyBytes, point.FileWritebackBytes, point.SlabBytes, point.KernelBytes, point.CheckpointSequence, point.CheckpointHelperElapsedUS, point.CheckpointCompletedHashes, point.CheckpointSuccessfulReadBytes, point.CheckpointHostAgeUS} {
+		for _, value := range []*int64{point.CPUUsageUS, point.MemoryCurrentBytes, point.AnonBytes, point.FileBytes, point.ShmemBytes, point.FileMappedBytes, point.FileDirtyBytes, point.FileWritebackBytes, point.SlabBytes, point.KernelBytes, point.CheckpointSequence, point.CheckpointHelperElapsedUS, point.CheckpointCompletedHashes, point.CheckpointSuccessfulReadBytes, point.CheckpointHostAgeUS} {
 			if value != nil {
 				*value = 999
 			}
@@ -427,4 +428,29 @@ func TestRealReviewDiagnosticTimelineAvailablePointIsolation(t *testing.T) {
 	}
 	require.Equal(t, expectedSecond, changed.Points[1], "available points must not share numeric pointers even when both read the same sample map")
 	require.Equal(t, []realReviewMemoryTimelinePoint{expectedFirst, expectedSecond}, monitor.retained.JointTimeline.Points, "cloned point mutation must not alter retained timeline fields")
+}
+
+func TestRealReviewDiagnosticTimelineCPUAvailabilityAndIsolation(t *testing.T) {
+	t.Parallel()
+	start := time.Now()
+	observed := start
+	monitor := &realReviewMemoryMonitor{profile: &realReviewSourceProfile{}, started: start, now: func() time.Time { return observed }}
+	usage := int64(0)
+	monitor.record(realReviewMemorySample{CPUUsageUS: &usage})
+	usage = 40
+	observed = start.Add(500 * time.Millisecond)
+	monitor.record(realReviewMemorySample{CPUUsageUS: &usage})
+	observed = start.Add(time.Second)
+	monitor.record(realReviewMemorySample{UnavailableFields: []string{"cpu.stat"}})
+	expected := []realReviewMemoryTimelinePoint{{SampleNumber: 1, HostElapsedUS: 0, CPUUsageUS: realReviewTimelineInt64(0)}, {SampleNumber: 2, HostElapsedUS: 500000, CPUUsageUS: realReviewTimelineInt64(40)}, {SampleNumber: 3, HostElapsedUS: 1000000}}
+	require.Equal(t, expected, monitor.retained.JointTimeline.Points, "timeline CPU must be nullable, distinguish zero and preserve same-pass host times without borrowing earlier CPU")
+	usage = 999
+	changed := cloneRealReviewMemoryTimeline(monitor.retained.JointTimeline)
+	*changed.Points[0].CPUUsageUS = 999
+	require.Equal(t, expected, monitor.retained.JointTimeline.Points, "CPU timeline values must own source and returned pointers")
+	require.Equal(t, int64(40), *changed.Points[1].CPUUsageUS, "separate CPU timeline points must never alias")
+	encoded, err := json.Marshal(monitor.retained.JointTimeline)
+	require.NoError(t, err, "numeric CPU timeline should serialize without raw cgroup text")
+	require.Contains(t, string(encoded), `"cpu_usage_usec":null`, "unavailable timeline CPU must be explicit null")
+	require.Equal(t, 3, monitor.retained.Samples, "CPU timeline must not add an extra sampling pass")
 }
