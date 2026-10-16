@@ -22,6 +22,7 @@ import (
 
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/storage"
 )
 
@@ -92,7 +93,7 @@ func NewVisualEvidenceService(
 		repos:         repos,
 		tokens:        tokens,
 		uploads:       uploads,
-		downloader:    newVisualEvidenceDownloader(),
+		downloader:    newVisualEvidenceDownloader(logger),
 		logger:        logger,
 		maxImages:     visualEvidenceMaxImages,
 		maxBytes:      visualEvidenceMaxTotalBytes,
@@ -178,6 +179,14 @@ func (s *VisualEvidenceService) Capture(ctx context.Context, input CaptureVisual
 		if err != nil {
 			return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("load GitHub installation token for visual evidence: %w", err)
 		}
+		metadata, _ := telemetry.RequestMetadataFromContext(ctx)
+		metadata.OrgID = input.OrgID.String()
+		metadata.SessionID = input.SessionID.String()
+		metadata.Repository = repository.FullName
+		if input.AssessmentID != nil {
+			metadata.AssessmentID = *input.AssessmentID
+		}
+		ctx = telemetry.WithInstallationRequestMetadata(telemetry.WithRequestMetadata(ctx, metadata), repository.InstallationID, telemetry.CallerVisualAsset)
 	}
 
 	snapshot := s.materialize(ctx, input, discovery, token)

@@ -58,3 +58,43 @@ func TestGitHubActivityEmission(t *testing.T) {
 	}
 	require.Equal(t, expected, actual, "remote calls, cache hits, and deferrals must emit separate bounded activity points")
 }
+
+func TestGitHubVisualAssetActivityEmission(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, resource, expectedResource string }{
+		{name: "missing resource remains unknown", expectedResource: "other"},
+		{name: "actual core header remains core", resource: "core", expectedResource: "core"},
+		{name: "unrecognized resource remains bounded", resource: "asset-specific", expectedResource: "other"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reader := sdkmetric.NewManualReader()
+			provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+			t.Cleanup(func() {
+				require.NoError(t, provider.Shutdown(context.Background()), "asset metric fixture must release its own reader")
+			})
+			counter, err := provider.Meter("github-asset-test").Int64Counter("github.activity")
+			require.NoError(t, err, "the isolated asset activity counter should initialize")
+			recordGitHubActivity(context.Background(), counter, "visual_asset", tt.resource, "success", "remote")
+			var collected metricdata.ResourceMetrics
+			require.NoError(t, reader.Collect(context.Background(), &collected), "the asset activity point should reach the SDK reader")
+			type point struct {
+				count      int64
+				dimensions attribute.Set
+			}
+			var actual []point
+			for _, scope := range collected.ScopeMetrics {
+				for _, metric := range scope.Metrics {
+					sum, ok := metric.Data.(metricdata.Sum[int64])
+					require.True(t, ok, "asset activity must remain an integer counter")
+					for _, value := range sum.DataPoints {
+						actual = append(actual, point{value.Value, value.Attributes})
+					}
+				}
+			}
+			expected := []point{{1, attribute.NewSet(attribute.String("caller", "visual_asset"), attribute.String("resource", tt.expectedResource), attribute.String("outcome", "success"), attribute.String("kind", "remote"))}}
+			require.Equal(t, expected, actual, "asset requests need a fixed caller label while missing resource headers remain other rather than core")
+		})
+	}
+}

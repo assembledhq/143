@@ -753,6 +753,11 @@ func normalizeRoute(requestURL *url.URL) (string, string) {
 	if requestURL == nil {
 		return "/", ""
 	}
+	if strings.HasPrefix(requestURL.EscapedPath(), "/user-attachments/assets/") {
+		// Attachment UUIDs, filenames and signed paths are private, unbounded
+		// identities. Collapse the whole suffix before any request is logged.
+		return "/user-attachments/assets/:asset", ""
+	}
 	segments := strings.Split(strings.Trim(requestURL.Path, "/"), "/")
 	if len(segments) == 1 && segments[0] == "" {
 		return "/", ""

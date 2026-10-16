@@ -189,8 +189,9 @@ groups:
       # Do not alert on a single transient rejection. This requires a sustained
       # burst: at least ten rejected requests in each rolling 10-minute window
       # for five minutes. The dashboard still exposes every individual hit.
+      # Asset exchanges are observed separately; their API quota cost is unproved.
       - alert: GitHubAPIRateLimitSustained
-        expr: '_time:10m _msg:"github api request" AND github_rate_limited:true | stats count() as rate_limits | filter rate_limits:>9'
+        expr: '_time:10m _msg:"github api request" AND github_rate_limited:true AND NOT github_caller:="visual_asset" | stats count() as rate_limits | filter rate_limits:>9'
         for: 5m
         labels:
           service: github
