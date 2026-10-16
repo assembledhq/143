@@ -300,11 +300,21 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				avoidReprepareAfterPreflight = ready.Ready
 			}
 		}
-		if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
-			if errors.Is(syncErr, errCodeReviewSchedulingSuperseded) {
+		assessment, capturedAssessment, err := prepareCodeReviewPreflight(ctx, stores, services, logger, job, metadata)
+		if err != nil {
+			if errors.Is(err, errCodeReviewSchedulingSuperseded) {
 				return nil
 			}
-			return syncErr
+			var changed *fullAssessmentQueuedIdentityChanged
+			if errors.As(err, &changed) && capturedAssessment != nil {
+				// Cancellation can arrive during the network capture. Retain the
+				// parent cancellation gate before admitting any replacement work.
+				if cancelled, cancelErr := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || cancelErr != nil {
+					return cancelErr
+				}
+				return supersedeCodeReviewForCapturedIdentity(ctx, stores, services, logger, job, metadata, *capturedAssessment, changed)
+			}
+			return err
 		}
 		pr, err = stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
 		if err != nil {
@@ -324,19 +334,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		if codeReviewHeadChanged(job.HeadSHA, pr, health) {
 			return supersedeCodeReviewForChangedHead(ctx, stores, services, logger, job, pr, health, "PR head changed after review started")
-		}
-		assessment, capturedAssessment, err := prepareFullAssessment(ctx, stores, services, job, metadata)
-		if err != nil {
-			var changed *fullAssessmentQueuedIdentityChanged
-			if errors.As(err, &changed) && capturedAssessment != nil {
-				// Cancellation can arrive during the network capture. Retain the
-				// parent cancellation gate before admitting any replacement work.
-				if cancelled, cancelErr := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || cancelErr != nil {
-					return cancelErr
-				}
-				return supersedeCodeReviewForCapturedIdentity(ctx, stores, services, logger, job, metadata, *capturedAssessment, changed)
-			}
-			return fmt.Errorf("capture full code review assessment: %w", err)
 		}
 		changedFiles, changedFilesAvailable, err := loadCodeReviewAssessmentChangedFiles(ctx, stores, services, job, pr, capturedAssessment)
 		if err != nil {
@@ -572,7 +569,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				return fmt.Errorf("stage full assessment outcome: %w", err)
 			}
 
-			if err := verifyFullAssessmentFreshness(ctx, services, job, *assessment); err != nil {
+			// A configured publisher verifies fresh inputs under the publication
+			// lock below. Local-only completion still needs its own final check.
+			if err := verifyFullAssessmentWithoutPublisher(ctx, services, job, *assessment); err != nil {
 				if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
 					if recoveryErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); recoveryErr != nil {
 						return recoveryErr
@@ -1023,9 +1022,58 @@ type codeReviewExecutionValidator interface {
 	ValidateScheduledExecution(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error)
 }
 
+// prepareCodeReviewPreflight uses a new assessment's authoritative health
+// refresh as the startup refresh. Existing assessments and legacy or incomplete
+// captures still take the ordinary live-sync path; nothing is cached across
+// controller attempts or carried into the final publication check.
+func prepareCodeReviewPreflight(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata) (assessment *models.CodeReviewAssessment, captured *codereviewsvc.AssessmentInputCaptureResult, returnErr error) {
+	stage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "github_preflight")
+	defer func() { stage.End(codeReviewStageOutcome(ctx, returnErr)) }()
+	if err := validateCodeReviewScheduledExecution(ctx, services, job); err != nil {
+		return nil, nil, err
+	}
+	assessment, captured, err := prepareFullAssessment(ctx, stores, services, job, metadata)
+	if err != nil {
+		if errors.Is(err, codereviewsvc.ErrReviewIneligible) {
+			// Capture deliberately avoids closed-PR lifecycle cleanup because it
+			// also runs under the publication lock. Preserve the ordinary startup
+			// sync's self-healing transition when this capture is ineligible.
+			if syncErr := refreshCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
+				return nil, nil, syncErr
+			}
+		}
+		if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
+			return nil, nil, codeReviewMergeabilityRetry(err)
+		}
+		return assessment, captured, fmt.Errorf("capture full code review assessment: %w", err)
+	}
+	if captured == nil {
+		if err := refreshCodeReviewPullRequestState(ctx, services, logger, job); err != nil {
+			return nil, nil, err
+		}
+		if assessment != nil {
+			// Ordinary sync can reconcile a closed PR or retire its review. Keep
+			// the same post-sync assessment state that the legacy ordering read.
+			current, err := stores.CodeReviewAssessments.GetBySessionID(ctx, job.OrgID, job.SessionID)
+			if err != nil {
+				return nil, nil, err
+			}
+			assessment = &current
+		}
+	}
+	return assessment, captured, nil
+}
+
 func syncCodeReviewPullRequestState(ctx context.Context, services *Services, logger zerolog.Logger, job runCodeReviewPayload) (returnErr error) {
 	stage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "github_preflight")
 	defer func() { stage.End(codeReviewStageOutcome(ctx, returnErr)) }()
+	if err := validateCodeReviewScheduledExecution(ctx, services, job); err != nil {
+		return err
+	}
+	return refreshCodeReviewPullRequestState(ctx, services, logger, job)
+}
+
+func validateCodeReviewScheduledExecution(ctx context.Context, services *Services, job runCodeReviewPayload) error {
 	if services != nil {
 		if validator, ok := services.CodeReviewLifecycle.(codeReviewExecutionValidator); ok {
 			valid, err := validator.ValidateScheduledExecution(ctx, job.OrgID, job.PullRequestID, job.SessionID)
@@ -1038,17 +1086,17 @@ func syncCodeReviewPullRequestState(ctx context.Context, services *Services, log
 		}
 	}
 
+	return nil
+}
+
+func refreshCodeReviewPullRequestState(ctx context.Context, services *Services, logger zerolog.Logger, job runCodeReviewPayload) error {
 	if services == nil || services.PR == nil {
 		return nil
 	}
 	syncCtx := ghservice.WithPullRequestSyncReason(ctx, ghservice.PullRequestSyncReasonCodeReview)
 	if err := services.PR.SyncPullRequestState(syncCtx, job.OrgID, job.PullRequestID); err != nil {
 		if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
-			delay := 5 * time.Second
-			// GitHub can remain indeterminate indefinitely. Bound this external
-			// wait with the same durable recovery window as other GitHub failures.
-			retryWindow := githubRateLimitMaxRetryDuration
-			return &RetryableError{Err: err, RetryAfter: &delay, MaxRetryDuration: &retryWindow}
+			return codeReviewMergeabilityRetry(err)
 		}
 		if errors.Is(err, ghservice.ErrPullRequestRepositoryDisconnected) {
 			logger.Info().
@@ -1061,6 +1109,14 @@ func syncCodeReviewPullRequestState(ctx context.Context, services *Services, log
 		return classifyGitHubJobError(wrapped, job.SessionID.String())
 	}
 	return nil
+}
+
+func codeReviewMergeabilityRetry(err error) error {
+	delay := 5 * time.Second
+	// GitHub can remain indeterminate indefinitely. Bound this external
+	// wait with the same durable recovery window as other GitHub failures.
+	retryWindow := githubRateLimitMaxRetryDuration
+	return &RetryableError{Err: err, RetryAfter: &delay, MaxRetryDuration: &retryWindow}
 }
 
 // supersedeCodeReviewForChangedHead preserves commit-level approval integrity
@@ -3759,7 +3815,7 @@ func completeCodeReviewAfterStableDeterministicFailure(
 		if err := stores.CodeReviewAssessments.StageOutcome(ctx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest, models.CodeReviewAssessmentCompletion{ResultOrigin: models.CodeReviewResultExecuted, CoverageComplete: false, Decision: decision.Decision, Acceptable: decision.Acceptable, RiskReasonDetails: riskJSON, StructuredOutcome: assessmentOutcome, RenderedBody: body}); err != nil {
 			return fmt.Errorf("stage early-stop assessment outcome: %w", err)
 		}
-		if err := verifyFullAssessmentFreshness(ctx, services, job, *assessment); err != nil {
+		if err := verifyFullAssessmentWithoutPublisher(ctx, services, job, *assessment); err != nil {
 			if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
 				if recoveryErr := supersedeUnsentFullPublication(ctx, stores, services, *assessment); recoveryErr != nil {
 					return recoveryErr
