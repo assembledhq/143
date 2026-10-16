@@ -68,15 +68,9 @@ type schedulerSessionStore interface {
 	ReapStrandedPendingSnapshots(ctx context.Context, olderThan time.Time) (int64, error)
 }
 
-// stuckAutomationRunThreshold is how long a pending/running automation_run
-// can sit before the reaper marks it failed. A crashed worker would otherwise
-// leave the row forever and saturate max_concurrent for the parent automation.
-//
-// Tuned conservatively: real automation executions are expected to complete
-// in minutes; anything past an hour is almost certainly a crash, not a long
-// legitimate run. If legitimate long runs start to exist, raise this bound
-// (or make it per-automation) rather than lower it — false-positive reaping
-// is worse than a delayed retry.
+// stuckAutomationRunThreshold is the orphan grace period for legacy runs.
+// Recovery only settles runs with no pending/running job or active executor;
+// healthy work can run longer than this threshold.
 const stuckAutomationRunThreshold = 1 * time.Hour
 
 const pullRequestReconcileBatch = 50
@@ -562,10 +556,10 @@ func (s *Scheduler) schedulePagerDutySync(ctx context.Context, orgIDs []uuid.UUI
 	}
 }
 
-// reapStuckAutomationRuns marks runs in pending/running past the stuck
-// threshold as failed. A crashed worker would otherwise hold max_concurrent
-// slots forever (CountInFlightRuns counts pending+running), blocking all
-// future runs for the automation.
+// reapStuckAutomationRuns settles legacy runs past the orphan grace period
+// only when no recoverable job or executor remains. It preserves terminal
+// session outcomes and fails abandoned runs so crashed workers cannot hold
+// max_concurrent slots forever.
 //
 // Fans out one UPDATE per org: the reaper first lists orgs with any stuck
 // runs, then issues a per-org, org-scoped UPDATE. This keeps every mutating
