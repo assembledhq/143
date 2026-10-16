@@ -4199,15 +4199,22 @@ func (s *PRService) doGitHubRequestWithAccept(ctx context.Context, token, method
 }
 
 // doGitHubGraphQL POSTs a GraphQL query to the GitHub GraphQL endpoint and
-// returns the raw response body. GraphQL returns HTTP 200 even for query-level
-// errors (surfaced in the response's `errors` array), so callers must inspect
-// the decoded body — a nil error here only means the transport succeeded.
+// returns the raw response body. Structured query errors, including HTTP-200
+// failures, return GitHubGraphQLError. Callers still validate their own data
+// shape; a nil error does not establish a complete application result.
 //
 // The endpoint is derived as baseURL+"/graphql", which is correct for
 // github.com (REST base https://api.github.com → https://api.github.com/graphql).
 // GitHub Enterprise Server splits these differently (REST at /api/v3, GraphQL at
 // /api/graphql); revisit this if 143 ever targets a GHES base URL.
 func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, variables map[string]any) ([]byte, error) {
+	return s.doGitHubGraphQLWithResponseLimit(ctx, token, query, variables, 0)
+}
+
+// doGitHubGraphQLWithResponseLimit retains the shared GraphQL transport and
+// observation handoff. A positive limit requires a complete response within
+// that byte bound; zero preserves the existing callers' response semantics.
+func (s *PRService) doGitHubGraphQLWithResponseLimit(ctx context.Context, token, query string, variables map[string]any, responseLimit int64) ([]byte, error) {
 	ctx = githubtelemetry.WithRequestMetadata(ctx, s.githubRequestMetadataForToken(ctx, token))
 	ctx = githubtelemetry.WithGraphQLResponseObservation(ctx)
 	payload, err := json.Marshal(map[string]any{"query": query, "variables": variables})
@@ -4229,12 +4236,25 @@ func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, va
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	var responseReader io.Reader = resp.Body
+	if responseLimit > 0 {
+		responseReader = io.LimitReader(resp.Body, responseLimit+1)
+	}
+	respBody, err := io.ReadAll(responseReader)
+	if err == nil && responseLimit > 0 && int64(len(respBody)) > responseLimit {
+		err = fmt.Errorf("GitHub GraphQL response exceeds %d bytes", responseLimit)
+	}
+	if responseLimit > 0 {
+		err = errors.Join(err, ctx.Err())
+	}
 	if err != nil {
 		githubtelemetry.ObserveGraphQLResponse(ctx, nil, err)
 		return nil, NewGitHubResponseReadError(ctx, http.MethodPost, "/graphql", resp, respBody, err)
 	}
 	graphQLErrors, decodeErr := ratelimit.DecodeGraphQLErrors(respBody)
+	if responseLimit > 0 {
+		decodeErr = errors.Join(decodeErr, ctx.Err())
+	}
 	githubtelemetry.ObserveGraphQLResponse(ctx, graphQLErrors, decodeErr)
 
 	if resp.StatusCode >= 400 {
@@ -4250,6 +4270,9 @@ func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, va
 		return nil, &GitHubGraphQLError{Errors: graphQLErrors, Header: resp.Header.Clone()}
 	}
 
+	if responseLimit > 0 && decodeErr != nil {
+		return nil, fmt.Errorf("decode GitHub GraphQL response: %w", decodeErr)
+	}
 	return respBody, nil
 }
 
@@ -4732,57 +4755,238 @@ func (s *PRService) GetCodeReviewOutcomeSnapshot(ctx context.Context, orgID, rep
 	// This is a read fence, not a completion timestamp. Reconciliation must
 	// yield to webhook projections that land after the provider read begins.
 	observedAt := time.Now().UTC()
-	detailsPath := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number)
-	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, detailsPath, nil)
-	if err != nil {
-		return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("load pull request for code review outcome: %w", err)
-	}
-	var details gitHubPullRequestDetails
-	if err := json.Unmarshal(body, &details); err != nil {
-		return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("decode pull request for code review outcome: %w", err)
-	}
 	snapshot := models.CodeReviewOutcomeSnapshot{
-		AuthorLogin: details.User.Login, State: details.State, Merged: details.Merged,
-		MergedAt: details.MergedAt, ObservedAt: observedAt,
-		Reviews: make([]models.CodeReviewHumanReviewObservation, 0),
+		ObservedAt: observedAt, Reviews: make([]models.CodeReviewHumanReviewObservation, 0),
 	}
-	for page := 1; ; page++ {
-		reviewsPath := fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews?per_page=100&page=%d", owner, repo, number, page)
-		reviewsBody, requestErr := s.doGitHubRequest(ctx, token, http.MethodGet, reviewsPath, nil)
-		if requestErr != nil {
-			return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("list pull request reviews for code review outcome: %w", requestErr)
+	var cursor *string
+	seenCursors := make(map[string]struct{})
+	for {
+		body, err := s.doGitHubGraphQLWithResponseLimit(ctx, token, codeReviewOutcomeQuery, map[string]any{
+			"owner": owner, "name": repo, "number": number, "cursor": cursor,
+		}, codeReviewOutcomeResponseLimit)
+		if err != nil {
+			return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("load code review outcome: %w", err)
 		}
-		var reviews []struct {
-			ID                int64     `json:"id"`
-			State             string    `json:"state"`
-			SubmittedAt       time.Time `json:"submitted_at"`
-			AuthorAssociation string    `json:"author_association"`
-			User              struct {
-				Login string `json:"login"`
-				Type  string `json:"type"`
-			} `json:"user"`
+		var result struct {
+			Data *struct {
+				Repository *struct {
+					PullRequest *codeReviewOutcomeGraphQLPullRequest `json:"pullRequest"`
+				} `json:"repository"`
+			} `json:"data"`
 		}
-		if err := json.Unmarshal(reviewsBody, &reviews); err != nil {
-			return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("decode pull request reviews for code review outcome: %w", err)
+		if err := json.Unmarshal(body, &result); err != nil {
+			return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("decode code review outcome: %w", err)
 		}
-		for _, review := range reviews {
-			state := strings.ToLower(strings.TrimSpace(review.State))
-			if review.ID <= 0 || strings.TrimSpace(review.User.Login) == "" {
-				continue
-			}
-			if state != "approved" && state != "changes_requested" && state != "dismissed" {
-				continue
-			}
-			snapshot.Reviews = append(snapshot.Reviews, models.CodeReviewHumanReviewObservation{
-				GitHubReviewID: review.ID, ReviewerLogin: review.User.Login, ReviewerType: review.User.Type,
-				AuthorAssociation: review.AuthorAssociation, State: state, SubmittedAt: review.SubmittedAt,
-			})
+		if result.Data == nil || result.Data.Repository == nil || result.Data.Repository.PullRequest == nil {
+			return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("code review outcome pull request is missing")
 		}
-		if len(reviews) < 100 {
-			break
+		page, err := result.Data.Repository.PullRequest.snapshotPage()
+		if err != nil {
+			return models.CodeReviewOutcomeSnapshot{}, err
+		}
+		if err := ctx.Err(); err != nil {
+			return models.CodeReviewOutcomeSnapshot{}, err
+		}
+		if cursor == nil {
+			snapshot.AuthorLogin, snapshot.State = page.AuthorLogin, page.State
+			snapshot.Merged, snapshot.MergedAt = page.Merged, page.MergedAt
+		}
+		// This local accumulator is published only after every page succeeds.
+		snapshot.Reviews = append(snapshot.Reviews, page.Reviews...)
+		connection := result.Data.Repository.PullRequest.Reviews
+		if !*connection.PageInfo.HasNextPage {
+			return snapshot, nil
+		}
+		next := connection.PageInfo.EndCursor
+		if next == nil || strings.TrimSpace(*next) == "" {
+			return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("code review outcome next review cursor is missing")
+		}
+		if _, seen := seenCursors[*next]; seen {
+			return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("code review outcome review cursor did not advance")
+		}
+		seenCursors[*next] = struct{}{}
+		cursor = next
+	}
+}
+
+const codeReviewOutcomeResponseLimit int64 = 8 << 20
+
+const codeReviewOutcomeQuery = `query CodeReviewOutcome($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      state
+      mergedAt
+      author {
+        login
+        __typename
+        ... on EnterpriseUserAccount { user { login __typename } }
+      }
+      reviews(first: 100, after: $cursor) {
+        nodes {
+          fullDatabaseId
+          state
+          submittedAt
+          authorAssociation
+          author {
+            login
+            __typename
+            ... on EnterpriseUserAccount { user { login __typename } }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}`
+
+type codeReviewOutcomeGraphQLPullRequest struct {
+	State    string          `json:"state"`
+	MergedAt json.RawMessage `json:"mergedAt"`
+	Author   json.RawMessage `json:"author"`
+	Reviews  *struct {
+		Nodes *[]*struct {
+			ID                *codeReviewOutcomeReviewID `json:"fullDatabaseId"`
+			State             string                     `json:"state"`
+			SubmittedAt       json.RawMessage            `json:"submittedAt"`
+			AuthorAssociation *string                    `json:"authorAssociation"`
+			Author            json.RawMessage            `json:"author"`
+		} `json:"nodes"`
+		PageInfo *struct {
+			HasNextPage *bool   `json:"hasNextPage"`
+			EndCursor   *string `json:"endCursor"`
+		} `json:"pageInfo"`
+	} `json:"reviews"`
+}
+
+// BigInt can be encoded as a JSON integer or decimal string. Decode directly
+// into int64 so review ordering never passes through floating point or the
+// deprecated 32-bit databaseId field.
+type codeReviewOutcomeReviewID int64
+
+func (id *codeReviewOutcomeReviewID) UnmarshalJSON(data []byte) error {
+	value := string(data)
+	if len(data) > 0 && data[0] == '"' {
+		if err := json.Unmarshal(data, &value); err != nil {
+			return fmt.Errorf("decode review fullDatabaseId: %w", err)
 		}
 	}
-	return snapshot, nil
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return fmt.Errorf("review fullDatabaseId must be a positive int64")
+		}
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return fmt.Errorf("review fullDatabaseId must be a positive int64")
+	}
+	*id = codeReviewOutcomeReviewID(parsed)
+	return nil
+}
+
+func (pr *codeReviewOutcomeGraphQLPullRequest) snapshotPage() (models.CodeReviewOutcomeSnapshot, error) {
+	page := models.CodeReviewOutcomeSnapshot{Reviews: make([]models.CodeReviewHumanReviewObservation, 0)}
+	switch pr.State {
+	case "OPEN":
+		page.State = "open"
+	case "CLOSED":
+		page.State = "closed"
+	case "MERGED":
+		page.State, page.Merged = "closed", true
+	default:
+		return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("code review outcome pull request state is invalid")
+	}
+	var err error
+	page.MergedAt, err = codeReviewOutcomeTime(pr.MergedAt)
+	if err != nil {
+		return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("decode code review outcome merge time: %w", err)
+	}
+	page.AuthorLogin, _, err = codeReviewOutcomeActor(pr.Author)
+	if err != nil {
+		return models.CodeReviewOutcomeSnapshot{}, err
+	}
+	if pr.Reviews == nil || pr.Reviews.Nodes == nil || pr.Reviews.PageInfo == nil || pr.Reviews.PageInfo.HasNextPage == nil {
+		return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("code review outcome review connection is incomplete")
+	}
+	for _, review := range *pr.Reviews.Nodes {
+		if review == nil || review.ID == nil || review.AuthorAssociation == nil {
+			return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("code review outcome review is incomplete")
+		}
+		state := strings.ToLower(strings.TrimSpace(review.State))
+		switch state {
+		case "approved", "changes_requested", "dismissed", "commented", "pending":
+		default:
+			return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("code review outcome review state is invalid")
+		}
+		submittedAt, err := codeReviewOutcomeTime(review.SubmittedAt)
+		if err != nil {
+			return models.CodeReviewOutcomeSnapshot{}, fmt.Errorf("decode code review outcome submission time: %w", err)
+		}
+		login, actorType, err := codeReviewOutcomeActor(review.Author)
+		if err != nil {
+			return models.CodeReviewOutcomeSnapshot{}, err
+		}
+		if strings.TrimSpace(login) == "" || state == "commented" || state == "pending" {
+			continue
+		}
+		observation := models.CodeReviewHumanReviewObservation{
+			GitHubReviewID: int64(*review.ID), ReviewerLogin: login, ReviewerType: actorType,
+			AuthorAssociation: *review.AuthorAssociation, State: state,
+		}
+		if submittedAt != nil {
+			observation.SubmittedAt = *submittedAt
+		}
+		page.Reviews = append(page.Reviews, observation)
+	}
+	return page, nil
+}
+
+func codeReviewOutcomeTime(raw json.RawMessage) (*time.Time, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("timestamp field is missing")
+	}
+	var value *time.Time
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func codeReviewOutcomeActor(raw json.RawMessage) (string, string, error) {
+	if len(raw) == 0 {
+		return "", "", fmt.Errorf("code review outcome author field is missing")
+	}
+	var actor *struct {
+		Login *string `json:"login"`
+		Type  *string `json:"__typename"`
+		User  *struct {
+			Login *string `json:"login"`
+			Type  *string `json:"__typename"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(raw, &actor); err != nil {
+		return "", "", fmt.Errorf("decode code review outcome author: %w", err)
+	}
+	if actor == nil {
+		return "", "", nil
+	}
+	if actor.Login == nil || actor.Type == nil {
+		return "", "", fmt.Errorf("code review outcome author is incomplete")
+	}
+	switch *actor.Type {
+	case "User", "Bot", "Organization", "Mannequin":
+		return *actor.Login, *actor.Type, nil
+	case "EnterpriseUserAccount":
+		// Enterprise account login can be an email. The linked User is the
+		// canonical GitHub identity needed for author/self-review comparison.
+		if actor.User == nil || actor.User.Login == nil || strings.TrimSpace(*actor.User.Login) == "" || actor.User.Type == nil || *actor.User.Type != "User" {
+			return "", "", fmt.Errorf("code review outcome enterprise author has no canonical user")
+		}
+		return *actor.User.Login, *actor.User.Type, nil
+	default:
+		// Actor is extensible; silently treating an unknown class as nonhuman
+		// could retire an existing independent-review fact.
+		return "", "", fmt.Errorf("code review outcome author type is unsupported")
+	}
 }
 
 // GetPullRequestHead returns the current head branch/SHA for a pull request.
