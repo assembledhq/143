@@ -61,7 +61,7 @@ def emit(op, phase, category, **metrics):
                             raise ValueError
                     if metrics["sequence"] == 0 or metrics["hash_started"] > metrics["inventory_yielded"] + MAX_HASH_BATCH:
                         raise ValueError
-                elif type(phase) is not int or not 1 <= phase <= 10 or type(category) is not int or not 1 <= category <= 4:
+                elif type(phase) is not int or not 1 <= phase <= 11 or type(category) is not int or not 1 <= category <= 4 or (phase == 11 and category != 4):
                     raise ValueError
                 if op == 1 and metrics:
                     raise ValueError
@@ -291,6 +291,8 @@ def argument(args, kwargs, position, name):
 
 
 def category(args, kwargs, mode):
+    if mode == "go":
+        return 4
     if mode == "download":
         url = argument(args, kwargs, 0, "url")
         if type(url) is not str:
@@ -364,7 +366,7 @@ def install(namespace):
     for name, phase, mode in (("selected_artifacts", 1, None), ("read_once", 2, "download"),
                               ("extract", 3, "extract"), ("input_hashes", 6, None),
                               ("check_source_capacity", 7, None), ("write_receipt", 9, None),
-                              ("remove_tree", 10, "path")):
+                              ("remove_tree", 10, "path"), ("filter_go_sources", 11, "go")):
         wrap(name, phase, mode)
 
     original_inventory = namespace["iter_tree_inventory"]

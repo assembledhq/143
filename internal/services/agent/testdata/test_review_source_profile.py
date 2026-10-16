@@ -76,6 +76,7 @@ def fixture_namespace(overrides=None):
         "iter_tree_inventory": inventory,
         "write_receipt": original("write_receipt", 1),
         "remove_tree": original("remove_tree", sentinel),
+        "filter_go_sources": original("filter_go_sources", sentinel),
         "prepare_additional": original("prepare_additional", sentinel),
         "subprocess": types.SimpleNamespace(run=original("run", sentinel)),
         "Path": FixturePath,
@@ -125,16 +126,18 @@ class ReviewSourceProfileTests(unittest.TestCase):
                 list(namespace["iter_tree_inventory"](path=Path("sources/python"))),
                 namespace["write_receipt"](path=Path("receipt.json"), inputs={}, sources=sentinel, deadline=12),
                 namespace["remove_tree"](path=Path("sources/go")),
+                namespace["filter_go_sources"](Path("sources/go"), deadline=12),
             ]
         self.assertIs(values[2], sentinel)
         self.assertIs(values[-1], sentinel)
         self.assertEqual(calls[1], ("read_once", (), {"url": "https://registry.npmjs.org/source", "deadline": 12, "maximum": 20}))
         self.assertEqual(calls[2], ("extract", (), {"data": sentinel, "destination": Path("sources/npm/archive"), "kind": "tar", "spool_directory": sentinel}))
+        self.assertEqual(calls[-1], ("filter_go_sources", (Path("sources/go"),), {"deadline": 12}))
         records = decode_records(output.getvalue())
         exits = [r for r in records if r["op"] == 2]
-        self.assertEqual([(r["phase"], r["category"]) for r in exits], [(1, 1), (2, 2), (3, 2), (6, 1), (7, 1), (8, 3), (9, 1), (10, 4)])
-        self.assertEqual([r.get("items") for r in exits], [1, None, None, 1, 4, 1, 1, None])
-        self.assertEqual([r.get("bytes") for r in exits], [None, 6, None, None, 70, None, None, None])
+        self.assertEqual([(r["phase"], r["category"]) for r in exits], [(1, 1), (2, 2), (3, 2), (6, 1), (7, 1), (8, 3), (9, 1), (10, 4), (11, 4)])
+        self.assertEqual([r.get("items") for r in exits], [1, None, None, 1, 4, 1, 1, None, None])
+        self.assertEqual([r.get("bytes") for r in exits], [None, 6, None, None, 70, None, None, None, None])
         self.assertNotIn("synthetic-private", output.getvalue())
         self.assertNotIn("registry.npmjs.org", output.getvalue())
         self.assert_numeric_records(records)
@@ -407,6 +410,66 @@ class ReviewSourceProfileTests(unittest.TestCase):
                 self.assertEqual(exits[-1]["failed"], int(bool(failure)))
                 self.assertNotIn("example.invalid", output.getvalue())
 
+    def test_go_filter_nested_span_preserves_deadline_environment_results_and_failures(self):
+        for fault in (None, RuntimeError("synthetic-private-filter"), TimeoutError("synthetic-private-deadline")):
+            with self.subTest(fault=type(fault).__name__):
+                profile = fresh_profile()
+                namespace, _, sentinel = fixture_namespace()
+                root = Path("sources/go")
+                deadline = -1 if isinstance(fault, TimeoutError) else 120.5
+                calls = []
+
+                def original_filter(*args, **kwargs):
+                    calls.append((args, kwargs, dict(os.environ)))
+                    if fault is not None:
+                        raise fault
+                    return sentinel
+
+                def additional(stage, deadline):
+                    return namespace["filter_go_sources"](stage, deadline=deadline)
+
+                namespace["filter_go_sources"] = original_filter
+                namespace["prepare_additional"] = additional
+                output = io.StringIO()
+                with mock.patch.dict(os.environ, {"GOMAXPROCS": "256"}), contextlib.redirect_stdout(output):
+                    parent_environment = dict(os.environ)
+                    profile.install(namespace)
+                    with mock.patch.object(profile.time, "monotonic_ns", side_effect=[1000, 3000, 10000, 16000]):
+                        if fault is None:
+                            self.assertIs(namespace["prepare_additional"](root, deadline=deadline), sentinel)
+                        else:
+                            with self.assertRaises(type(fault)) as caught:
+                                namespace["prepare_additional"](root, deadline=deadline)
+                            self.assertIs(caught.exception, fault)
+                    self.assertEqual(dict(os.environ), parent_environment)
+                self.assertEqual(calls, [((root,), {"deadline": deadline}, parent_environment)])
+                self.assertEqual(profile.local.frames, [])
+                failed = int(fault is not None)
+                self.assertEqual(decode_records(output.getvalue()), [
+                    {"version": 1, "op": 1, "phase": 5, "category": 4},
+                    {"version": 1, "op": 1, "phase": 11, "category": 4},
+                    {"version": 1, "op": 2, "phase": 11, "category": 4, "duration_us": 7, "failed": failed},
+                    {"version": 1, "op": 2, "phase": 5, "category": 4, "duration_us": 15, "failed": failed},
+                ])
+                self.assertFalse(profile.invalid)
+                self.assertNotIn("sources", output.getvalue())
+                self.assertNotIn("synthetic-private", output.getvalue())
+
+    def test_go_filter_phase_accepts_only_fixed_go_category(self):
+        for phase, category, valid in ((11, 4, True), (11, 0, False), (11, 1, False), (11, 2, False), (11, 3, False), (11, 5, False), (12, 4, False)):
+            with self.subTest(phase=phase, category=category):
+                profile = fresh_profile()
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    profile.emit(1, phase, category)
+                    profile.emit(2, phase, category, duration_us=7, failed=0)
+                expected = [
+                    {"version": 1, "op": 1, "phase": 11, "category": 4},
+                    {"version": 1, "op": 2, "phase": 11, "category": 4, "duration_us": 7, "failed": 0},
+                ] if valid else [{"version": 1, "op": 3, "phase": 0, "category": 0}]
+                self.assertEqual(decode_records(output.getvalue()), expected)
+                self.assertEqual(profile.invalid, not valid)
+
     def test_phase_entry_precedes_blocking_work_with_thread_overlap(self):
         profile = fresh_profile()
         output = io.StringIO()
@@ -590,6 +653,7 @@ def tree_inventory(*args, **kwargs):
     raise AssertionError("obsolete inventory path must not be called")
 remove_tree = lambda *a, **k: None
 prepare_additional = lambda *a, **k: None
+filter_go_sources = lambda *a, **k: None
 subprocess = types.SimpleNamespace(run=lambda *a, **k: None)
 def iter_tree_inventory(path):
     for item in sorted(path.rglob("*")):
@@ -1152,6 +1216,55 @@ if __name__ == "__main__":
                     self.assertEqual((checkpoints[-1]["hash_completed"], checkpoints[-1]["hash_failed"], checkpoints[-1]["active_hash"]), (2, 0, 0))
                 self.assertNotIn(str(root), output.getvalue())
                 self.assertNotIn("a.py", output.getvalue())
+
+        self.check_actual_pinned_helper_filter_parity(helper, source)
+
+    def check_actual_pinned_helper_filter_parity(self, helper, source):
+        for mode in ("canonical", "link", "fifo", "expired"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                roots, results = [], []
+                deadline = -1 if mode == "expired" else time.monotonic() + 10
+                profile = fresh_profile()
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    for observed in (False, True):
+                        root = Path(temporary, str(observed))
+                        (root / "nested").mkdir(parents=True)
+                        (root / "empty").mkdir()
+                        (root / "nested/source.go").write_bytes(b"package fixture")
+                        (root / "nested/README").write_bytes(b"license")
+                        (root / "nested/discard.bin").write_bytes(b"excluded")
+                        if mode == "link":
+                            (root / "linked").symlink_to(root / "nested/source.go")
+                        elif mode == "fifo":
+                            os.mkfifo(root / "fifo")
+                        module = types.ModuleType("helper_filter_fixture")
+                        module.__file__ = str(helper)
+                        exec(compile(source, str(helper), "exec"), module.__dict__)
+                        if observed:
+                            profile.install(module.__dict__)
+                        environment = dict(os.environ)
+                        try:
+                            results.append((module.filter_go_sources(root, deadline), None))
+                        except (ValueError, TimeoutError) as error:
+                            results.append((None, (type(error), error.args)))
+                        self.assertEqual(dict(os.environ), environment)
+                        roots.append(root)
+                self.assertEqual(results[0], results[1])
+                if mode == "canonical":
+                    expected = {"nested/README": b"license", "nested/source.go": b"package fixture"}
+                    for root in roots:
+                        self.assertEqual({item.relative_to(root).as_posix(): item.read_bytes() for item in root.rglob("*") if item.is_file()}, expected)
+                        self.assertFalse((root / "empty").exists())
+                else:
+                    self.assertIsNotNone(results[0][1])
+                records = decode_records(output.getvalue())
+                self.assertEqual([(record["op"], record["phase"], record["category"]) for record in records], [(1, 11, 4), (2, 11, 4)])
+                self.assertEqual(records[-1]["failed"], int(mode != "canonical"))
+                self.assertFalse(profile.invalid)
+                self.assert_numeric_records(records)
+                self.assertNotIn(str(roots[0].parent), output.getvalue())
+                self.assertNotIn("source.go", output.getvalue())
 
     def test_bad_hash_invocation_and_redirected_or_special_helper_refuse_before_import(self):
         source = b'from pathlib import Path\nPath("executed").touch()\n'

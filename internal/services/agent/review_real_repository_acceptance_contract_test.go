@@ -807,10 +807,94 @@ func TestRealReviewProfileOverlapUsesSharedContainerSamples(t *testing.T) {
 	result := profile.result()
 	require.False(t, result.Invalid, "matched overlapping operations should provide valid diagnostic attribution")
 	require.Equal(t, expected, result.Phases, "overlapping phases must share container-wide observations rather than claim exclusive resource ownership")
-	require.Equal(t, "sum of completed operation durations; concurrent operations overlap; not elapsed phase wall time; incomplete phases retain active counts only", result.TimingScope, "concurrent durations must be labeled as completed operation time instead of elapsed phase wall time")
+	require.Equal(t, "sum of completed operation durations; concurrent operations overlap; go_filter/go is nested within go_processing/go; cleanup operations may also nest within it; overlapping spans are non-additive; not elapsed phase wall time; incomplete phases retain active counts only", result.TimingScope, "concurrent durations must be labeled as completed operation time instead of elapsed phase wall time")
 	encoded, err := json.Marshal(result)
 	require.NoError(t, err, "overlap aggregates should encode using fixed data only")
 	require.NotContains(t, string(encoded), "9999", "cumulative lifetime memory.peak must never become a per-phase peak")
+}
+
+func TestRealReviewProfileGoFilterFixedCategory(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		phase    int
+		category int
+		valid    bool
+	}{
+		{name: "fixed Go filter", phase: 11, category: 4, valid: true},
+		{name: "zero category", phase: 11, category: 0},
+		{name: "all category", phase: 11, category: 1},
+		{name: "npm category", phase: 11, category: 2},
+		{name: "python category", phase: 11, category: 3},
+		{name: "unknown category", phase: 11, category: 5},
+		{name: "unknown phase", phase: 12, category: 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			profile := &realReviewSourceProfile{}
+			for _, op := range []int{1, 2} {
+				record := map[string]int{"version": 1, "op": op, "phase": tt.phase, "category": tt.category}
+				if op == 2 {
+					record["duration_us"], record["failed"] = 7, 0
+				}
+				raw, err := json.Marshal(record)
+				require.NoError(t, err, "fixed numeric filter records should serialize")
+				profile.consume(raw)
+			}
+			result := profile.result()
+			expectedReason := "invalid_record"
+			expected := map[string]realReviewProfileAggregate{}
+			if tt.valid {
+				expectedReason = ""
+				expected["go_filter/go"] = realReviewProfileAggregate{Entered: 1, Completed: 1, MaxActive: 1, DurationUS: 7}
+			}
+			require.Equal(t, expectedReason, result.InvalidReason, "only the fixed Go filter phase and category may extend the diagnostic whitelist")
+			require.Equal(t, expected, result.Phases, "unsupported filter categories and phase IDs must not create aggregates")
+		})
+	}
+}
+
+func TestRealReviewProfileGoFilterNestedSampling(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		failed int64
+	}{
+		{name: "successful filter"},
+		{name: "original filter failure", failed: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			profile := &realReviewSourceProfile{}
+			profile.consume([]byte(`{"version":1,"op":1,"phase":5,"category":4}`))
+			profile.consume([]byte(`{"version":1,"op":1,"phase":11,"category":4}`))
+			start := time.Now()
+			current := int64(200)
+			monitor := &realReviewMemoryMonitor{profile: profile, started: start, now: func() time.Time { return start.Add(time.Second) }}
+			monitor.record(realReviewMemorySample{MemoryCurrentBytes: &current})
+			for _, operation := range []struct {
+				phase    int
+				duration int64
+			}{{11, 20}, {5, 30}} {
+				raw, err := json.Marshal(map[string]int64{"version": 1, "op": 2, "phase": int64(operation.phase), "category": 4, "duration_us": operation.duration, "failed": tt.failed})
+				require.NoError(t, err, "balanced nested filter exits should serialize")
+				profile.consume(raw)
+			}
+			expected := map[string]realReviewProfileAggregate{
+				"go_processing/go": {Entered: 1, Completed: 1, Failed: tt.failed, MaxActive: 1, DurationUS: 30, MemorySamples: 1, MaxCurrentBytes: &current},
+				"go_filter/go":     {Entered: 1, Completed: 1, Failed: tt.failed, MaxActive: 1, DurationUS: 20, MemorySamples: 1, MaxCurrentBytes: &current},
+			}
+			result := profile.result()
+			require.Equal(t, "", result.InvalidReason, "balanced original failures should preserve valid nested timing observations")
+			require.Equal(t, expected, result.Phases, "filter time must remain inside processing time and share the same existing memory sample")
+			require.Equal(t, 1, monitor.retained.Samples, "filter instrumentation must not add kernel sampling passes")
+			require.Equal(t, []realReviewMemoryTimelinePoint{{SampleNumber: 1, HostElapsedUS: 1000000, MemoryCurrentBytes: &current}}, monitor.retained.JointTimeline.Points, "the fixed filter phase must preserve the exact bounded joint timeline without invalidating or enriching its points")
+			require.Contains(t, result.TimingScope, "go_filter/go is nested within go_processing/go", "filter time must explicitly remain non-additive to its enclosing processing span")
+			require.Contains(t, result.TimingScope, "overlapping spans are non-additive", "timing scope must prohibit summing nested or concurrent observations")
+		})
+	}
 }
 
 func TestRealReviewProfileSamplingAndDecodingAreConcurrent(t *testing.T) {

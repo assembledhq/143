@@ -1695,7 +1695,7 @@ func (p *realReviewSourceProfile) consumeStream(raw []byte, stream *realReviewPr
 		p.consumeCheckpoint(value, fields, stream)
 		return
 	}
-	if value.Op < 1 || value.Op > 2 || value.Phase < 1 || value.Phase > 10 || value.Category < 1 || value.Category > 4 || value.RealReviewProfileCheckpoint != nil {
+	if value.Op < 1 || value.Op > 2 || value.Phase < 1 || value.Phase > 11 || value.Category < 1 || value.Category > 4 || (value.Phase == 11 && value.Category != 4) || value.RealReviewProfileCheckpoint != nil {
 		p.invalid = "invalid_record"
 		return
 	}
@@ -1717,7 +1717,7 @@ func (p *realReviewSourceProfile) consumeStream(raw []byte, stream *realReviewPr
 		p.invalid = "invalid_record"
 		return
 	}
-	phases := [...]string{"", "selection", "download", "extract", "go_download", "go_processing", "input_binding", "capacity", "inventory", "receipt", "cleanup"}
+	phases := [...]string{"", "selection", "download", "extract", "go_download", "go_processing", "input_binding", "capacity", "inventory", "receipt", "cleanup", "go_filter"}
 	categories := [...]string{"", "all", "npm", "python", "go"}
 	key := phases[value.Phase] + "/" + categories[value.Category]
 	if p.cells == nil {
@@ -1948,7 +1948,7 @@ func (p *realReviewSourceProfile) result() realReviewProfileResult {
 	} else if reason == "" && p.active > 0 {
 		reason = "incomplete_phase_exits"
 	}
-	result := realReviewProfileResult{DiagnosticOnly: true, HelperSHA256: realReviewProfileHelperSHA256, Invalid: reason != "", InvalidReason: reason, Records: p.records, Phases: map[string]realReviewProfileAggregate{}, MemoryScope: "container samples while phase/category is active; overlapping phases share observations; memory.peak is cumulative lifetime only", TimingScope: "sum of completed operation durations; concurrent operations overlap; not elapsed phase wall time; incomplete phases retain active counts only"}
+	result := realReviewProfileResult{DiagnosticOnly: true, HelperSHA256: realReviewProfileHelperSHA256, Invalid: reason != "", InvalidReason: reason, Records: p.records, Phases: map[string]realReviewProfileAggregate{}, MemoryScope: "container samples while phase/category is active; overlapping phases share observations; memory.peak is cumulative lifetime only", TimingScope: "sum of completed operation durations; concurrent operations overlap; go_filter/go is nested within go_processing/go; cleanup operations may also nest within it; overlapping spans are non-additive; not elapsed phase wall time; incomplete phases retain active counts only"}
 	result.CheckpointCount, result.CheckpointInvocation = p.checkpointCount, p.checkpointInvocation
 	if p.lastCheckpoint != nil {
 		copy := *p.lastCheckpoint
