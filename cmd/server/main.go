@@ -562,6 +562,7 @@ func main() {
 			Repositories:          repoStore,
 			GitHubInstallations:   db.NewGitHubInstallationStore(pool),
 			SessionMessages:       sessionMessageStore,
+			IssueSnapshots:        db.NewSessionTurnIssueSnapshotStore(pool),
 			SessionThreads:        sessionThreadStore,
 			ThreadInbox:           db.NewThreadInboxStore(pool),
 			ThreadSendTx:          pool,

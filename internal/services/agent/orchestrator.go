@@ -4180,7 +4180,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		return nil
 	}
 
-	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, status, runResult); err != nil {
+	durableAutomaticPublication, err := o.persistRunResult(ctx, run, status, runResult)
+	if err != nil {
 		o.cleanupReviewBundle(ctx, runResult, log)
 		return fmt.Errorf("update run result: %w", err)
 	}
@@ -4216,7 +4217,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 			Str("status", string(status))
 	})
 
-	if o.shouldQueueAutomaticPR(ctx, run, runResult, log) {
+	if !durableAutomaticPublication && o.shouldQueueAutomaticPR(ctx, run, runResult, log) {
 		if o.publicationIntents == nil {
 			log.Error().Msg("automatic publication coordinator is unavailable")
 		} else {
@@ -4636,6 +4637,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if len(recoveryTask) > 0 {
 		promptMessages = recoveryTask
 	}
+	taskMessages := append(append([]models.SessionMessage(nil), input.priorTaskContext...), promptMessages...)
 	var userMessage string
 	if len(promptMessages) <= 1 {
 		userMessage = strings.TrimPrefix(latestMsg.Content, planModePrefix)
@@ -4704,6 +4706,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// slash command, which some agent CLIs only honor at the start of the
 	// prompt.
 	leadsWithSlashCommand := strings.HasPrefix(strings.TrimSpace(userMessage), "/")
+	if len(input.priorTaskContext) > 0 && !leadsWithSlashCommand {
+		prior := make([]string, 0, len(input.priorTaskContext))
+		for _, message := range input.priorTaskContext {
+			prior = append(prior, strings.TrimPrefix(message.Content, planModePrefix))
+		}
+		userMessage = prompts.ContinuationTaskContext(strings.Join(prior, "\n\n---\n\n"), userMessage)
+	}
 	if !planMode && revisionContext == nil && humanInputAnswer == nil &&
 		latestMsg.Source == "" && !threadScopedExecution && !leadsWithSlashCommand {
 		userMessage = FollowUpIntentPreamble + userMessage
@@ -5641,7 +5650,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	var prompt *AgentPrompt
 	var restoredWorkspaceFallbackPrompt func() (*AgentPrompt, error)
 	authBillingMode := TokenBillingModeUnknown
-	attachmentMessages := promptMessages
+	attachmentMessages := taskMessages
 	materializedAttachments := o.materializeAttachmentsForMessages(ctx, session.OrgID, sandbox, messageTurnNumber, attachmentMessages, log)
 	if reusedExisting || hasSnapshot {
 		// Re-inject agent auth (Codex auth.json or Claude Code credentials.json).
@@ -5943,7 +5952,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// Bind ordinary task execution to this job lease before seed admission or
 	// provider execution, so recovery cannot adopt a newer drained turn.
 	if opts == nil || (opts.PRRepair == nil && opts.PRFeedback == nil && opts.AutomationTurn == nil && opts.CodeReviewTurn == nil && opts.HumanInputRequestID == nil && opts.ChangesetID == nil) {
-		if err = o.recordContinuationAttempt(ctx, session, threadRuntimeCtl, latestMsg, promptMessages); err != nil {
+		if err = o.recordContinuationAttempt(ctx, session, threadRuntimeCtl, latestMsg, taskMessages); err != nil {
 			return err
 		}
 	}

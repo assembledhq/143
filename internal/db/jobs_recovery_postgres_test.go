@@ -47,6 +47,7 @@ func TestReclaimLostRunningJobsSkipsLockedPublisher(t *testing.T) {
 		CREATE TABLE thread_inbox_entries (org_id uuid,session_id uuid,thread_id uuid,message_id bigint,runtime_id uuid,delivery_state text,applied_at timestamptz);
 	`)
 	require.NoError(t, err, "create recovery query dependencies")
+	addContinuationRetryFixtureSchema(t, pool)
 	orgID, lockedID, freeID := uuid.New(), uuid.New(), uuid.New()
 	_, err = pool.Exec(ctx, `INSERT INTO nodes VALUES ('dead-worker','dead',now()-interval '10 minutes')`)
 	require.NoError(t, err, "seed dead worker")

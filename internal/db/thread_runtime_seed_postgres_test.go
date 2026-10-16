@@ -587,7 +587,7 @@ func TestThreadInboxStorePostgresUnresolvedAttemptBlocksLaterInput(t *testing.T)
 			require.NoError(t, err, "poll across unresolved acceptance should be a safe no-op")
 			require.Empty(t, blocked, "later poll must not send another input that could acknowledge across an uncertain attempt")
 			if tt.secondDefinitelyUnsent {
-				committed, err := NewThreadRuntimeStore(pool).CommitInboxDeliveryWithLease(ctx, orgID, runtime.ID, runtime.LeaseToken, threadID, "test-worker", 1, 1)
+				committed, err := NewThreadRuntimeStore(pool).CommitInboxDeliveryWithLease(ctx, orgID, runtime.ID, runtime.LeaseToken, threadID, "test-worker", 1, 1, []int64{1})
 				require.NoError(t, err, "known successful first input should flush independently")
 				require.True(t, committed, "flush must acknowledge only the accepted first segment")
 				next, err := store.ClaimDeliverableAfter(ctx, orgID, threadID, runtime.ID, runtime.LeaseToken, "test-worker", 1, 50)

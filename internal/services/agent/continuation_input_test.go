@@ -12,12 +12,32 @@ import (
 
 type appliedLookupInbox struct {
 	ThreadInboxStore
-	ids []int64
-	err error
+	ids        []int64
+	err        error
+	contextErr error
 }
 
 func (s appliedLookupInbox) ListAppliedMessageIDs(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []int64) ([]int64, error) {
 	return s.ids, s.err
+}
+
+func (s appliedLookupInbox) ListUnsettledAppliedMessageIDs(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []int64) ([]int64, error) {
+	return nil, s.contextErr
+}
+
+func TestResolveContinuationInputPreservesContextLookupFailure(t *testing.T) {
+	t.Parallel()
+	thread := uuid.New()
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New(), PrimaryThreadID: &thread}
+	orchestrator := &Orchestrator{
+		sessionMessages: &drainStubMessages{messages: []models.SessionMessage{
+			{ID: 1, ThreadID: &thread, Role: models.MessageRoleUser, Content: "unfinished admitted task"},
+			{ID: 2, ThreadID: &thread, Role: models.MessageRoleUser, Content: "new follow-up"},
+		}},
+		threadInbox: appliedLookupInbox{ids: []int64{1}, contextErr: errors.New("context store unavailable")},
+	}
+	_, err := orchestrator.resolveContinuationInput(context.Background(), session, &ContinueSessionOptions{ThreadID: &thread})
+	require.ErrorContains(t, err, "context store unavailable", "a transient context lookup cannot silently discard the unfinished task")
 }
 
 func TestResolveContinuationInputRequiresPositiveAdmissionEvidence(t *testing.T) {

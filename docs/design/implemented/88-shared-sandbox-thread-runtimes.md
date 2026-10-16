@@ -87,7 +87,10 @@ Implemented:
   again. Duplicate queued messages finish before allocating a runtime.
   Checkpoint retries carry an explicit purpose so they retain task context
   while admitting only new input. Unknown delivery still requires explicit
-  recovery.
+  recovery. Ordinary follow-ups also carry unfinished admitted input from a
+  terminal or expired runtime with no provider outcome as labeled prior task
+  context, including its attachments. A restored checkpoint may predate that
+  input; only the new follow-up enters seed admission.
 - owned retries and lost-job reclamation retain an exact runtime recovery
   marker for unfinished ordinary continuations, recorded with the job lease
   before provider admission. Recovery preserves validated applied input IDs

@@ -62,6 +62,7 @@ func TestBuildSessionExecutorStoresIncludesSlackCompletionDependencies(t *testin
 
 	require.NotNil(t, stores.Jobs, "session executor stores should include jobs so Slack follow-up jobs can be enqueued")
 	require.NotNil(t, stores.SessionMessages, "session executor stores should include session messages for final response extraction")
+	require.NotNil(t, stores.IssueSnapshots, "session executor publication jobs must retain the immutable issue context captured for the completed turn")
 	require.NotNil(t, stores.SlackSessionLinks, "session executor stores should include Slack session links for final response routing")
 	require.NotNil(t, stores.SlackOutbound, "session executor stores should include Slack outbound rows for delivery observability")
 	require.NotNil(t, stores.SlackChannels, "session executor stores should include Slack channel settings")

@@ -528,6 +528,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("cancel_thread_turn", newCancelThreadHandler(stores, services, logger))
 		w.Register("deliver_thread_inbox", newDeliverThreadInboxHandler(services, logger))
 		w.Register("open_pr", newOpenPRHandler(stores, services, logger))
+		w.Register("coordinate_automatic_publication", newAutomaticPublicationHandler(stores, services, logger))
 		w.Register("create_branch", newCreateBranchHandler(stores, services, logger))
 		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
 		w.Register(models.JobTypeMaterializeChangeset, newMaterializeChangesetHandler(stores, services, logger))

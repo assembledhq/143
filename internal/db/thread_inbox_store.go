@@ -495,6 +495,12 @@ func (s *ThreadInboxStore) ClaimDeliverableAfter(ctx context.Context, orgID, thr
 			WHERE org_id = $1 AND thread_id = $2 AND id = $3 AND lease_token = $8
 			  AND status IN ('starting', 'live', 'paused') AND lease_expires_at > clock_timestamp()
 			  AND last_delivered_sequence <= last_acked_sequence
+			  AND NOT EXISTS (
+				SELECT 1 FROM thread_inbox_entries attempted
+				WHERE attempted.org_id = $1 AND attempted.session_id = thread_runtimes.session_id
+				  AND attempted.thread_id = $2 AND attempted.runtime_id = $3
+				  AND attempted.delivery_state IN ('delivered', 'unknown_delivery') AND attempted.applied_at IS NULL
+			  )
 			FOR UPDATE
 		), candidates AS (
 			SELECT id

@@ -85,12 +85,12 @@ type faultingDeliveryRuntimeStore struct {
 	failures atomic.Int32
 }
 
-func (s *faultingDeliveryRuntimeStore) CommitInboxDeliveryWithLease(ctx context.Context, orgID, runtimeID, token, threadID uuid.UUID, node string, delivered, acked int64) (bool, error) {
+func (s *faultingDeliveryRuntimeStore) CommitInboxDeliveryWithLease(ctx context.Context, orgID, runtimeID, token, threadID uuid.UUID, node string, delivered, acked int64, confirmed []int64) (bool, error) {
 	if s.failures.Load() > 0 {
 		s.failures.Add(-1)
 		return false, errors.New("transient acknowledgment failure")
 	}
-	return s.ThreadRuntimeStore.CommitInboxDeliveryWithLease(ctx, orgID, runtimeID, token, threadID, node, delivered, acked)
+	return s.ThreadRuntimeStore.CommitInboxDeliveryWithLease(ctx, orgID, runtimeID, token, threadID, node, delivered, acked, confirmed)
 }
 
 type faultingDeliveryPhaseStore struct {
@@ -98,12 +98,12 @@ type faultingDeliveryPhaseStore struct {
 	failures atomic.Int32
 }
 
-func (s *faultingDeliveryPhaseStore) AcknowledgeInboxBatchWithTransition(ctx context.Context, orgID, sessionID, threadID, runtimeID, token uuid.UUID, phaseID *uuid.UUID, end int64, at time.Time) (models.ThreadInboxDeliveryBatch, *models.SessionActivityPhase, error) {
+func (s *faultingDeliveryPhaseStore) AcknowledgeInboxBatchAndStartPhase(ctx context.Context, orgID, sessionID, threadID, runtimeID, token uuid.UUID, phaseID *uuid.UUID, turn int, end int64, confirmed []int64, at time.Time) (models.SessionActivityPhase, models.ThreadInboxDeliveryBatch, *models.SessionActivityPhase, error) {
 	if s.failures.Load() > 0 {
 		s.failures.Add(-1)
-		return models.ThreadInboxDeliveryBatch{}, nil, errors.New("transient phase acknowledgment failure")
+		return models.SessionActivityPhase{}, models.ThreadInboxDeliveryBatch{}, nil, errors.New("transient phase acknowledgment failure")
 	}
-	return s.SessionActivityPhaseStore.AcknowledgeInboxBatchWithTransition(ctx, orgID, sessionID, threadID, runtimeID, token, phaseID, end, at)
+	return s.SessionActivityPhaseStore.AcknowledgeInboxBatchAndStartPhase(ctx, orgID, sessionID, threadID, runtimeID, token, phaseID, turn, end, confirmed, at)
 }
 
 func TestThreadDeliveryPostgresConfirmedWritesRecoverWithoutReplayingInput(t *testing.T) {

@@ -23,6 +23,8 @@ func addContinuationRetryFixtureSchema(t *testing.T, pool *pgxpool.Pool) {
 			id bigint, org_id uuid, session_id uuid, thread_id uuid, role text, created_at timestamptz);
 		CREATE TABLE IF NOT EXISTS thread_inbox_entries(
 			org_id uuid, session_id uuid, thread_id uuid, message_id bigint, runtime_id uuid,
-			delivery_state text, applied_at timestamptz);`)
+			delivery_state text, applied_at timestamptz);
+		CREATE TABLE IF NOT EXISTS session_activity_phases(
+			org_id uuid, session_id uuid, thread_id uuid, runtime_id uuid);`)
 	require.NoError(t, err, "provide empty continuation dependencies for isolated job retry fixtures")
 }

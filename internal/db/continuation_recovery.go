@@ -12,7 +12,8 @@ import (
 // An outcome must belong to the exact attempt runtime. Thread turn counters
 // alone cannot identify completion: mid-turn queued messages can share the
 // preceding turn's number. Legacy unphased final output is bounded by the
-// attempt's creation time so that preceding responses cannot satisfy it.
+// attempt's creation time and requires no scoped runtime phases, so a startup
+// error note cannot override authoritative provider phase history.
 const continuationRuntimeHasOutcomeSQL = `(
  EXISTS (
   SELECT 1 FROM session_activity_phases p
@@ -25,6 +26,11 @@ const continuationRuntimeHasOutcomeSQL = `(
    AND response.thread_id = r.thread_id AND response.role = 'assistant'
    AND response.activity_phase_id IS NULL AND response.id > m.id
    AND response.created_at >= r.started_at
+   AND NOT EXISTS (
+    SELECT 1 FROM session_activity_phases phase
+    WHERE phase.org_id=r.org_id AND phase.session_id=r.session_id
+     AND phase.thread_id=r.thread_id AND phase.runtime_id=r.id
+   )
  )
 )`
 
@@ -55,7 +61,9 @@ const continuationRecoveryMessageIDsSQL = `(
 // A runtime created during that job lease and an admitted scoped user input
 // establish the original instruction boundary; a later queued user cannot
 // replace it. The marker retains that runtime identity for a fresh outcome
-// check at execution time. Pre-admission retries leave their payload unchanged.
+// check at execution time. Ordinary input must be applied by that runtime.
+// Explicit checkpoint retry may retain historical task input after the current
+// runtime starts a provider phase. Pre-admission retries remain unchanged.
 const continuationRetryPayloadSQL = `CASE
  WHEN (j.job_type = 'continue_session' OR (j.job_type = 'run_agent' AND COALESCE(j.payload->>'continuation_runtime_id','') <> ''))
   AND COALESCE(j.payload->>'execution_purpose','') IN ('','continue','checkpoint_retry','checkpoint_recovery')
@@ -92,8 +100,14 @@ const continuationRetryPayloadSQL = `CASE
     ORDER BY t.created_at,t.id LIMIT 1
    )))
    AND e.delivery_state = 'acked' AND e.applied_at IS NOT NULL
+   AND (COALESCE(j.payload->>'execution_purpose','') NOT IN ('','continue') OR e.runtime_id=r.id)
    AND (m.id::text = NULLIF(j.payload->>'queued_message_id','')
-    OR (COALESCE(j.payload->>'queued_message_id','') = '' AND e.runtime_id = r.id AND m.created_at <= r.started_at))
+    OR (COALESCE(j.payload->>'queued_message_id','') = '' AND e.runtime_id = r.id AND m.created_at <= r.started_at)
+    OR (j.payload->>'execution_purpose'='checkpoint_retry' AND m.id::text=j.payload->>'continuation_message_id' AND EXISTS (
+     SELECT 1 FROM session_activity_phases phase
+     WHERE phase.org_id=r.org_id AND phase.session_id=r.session_id
+      AND phase.thread_id=r.thread_id AND phase.runtime_id=r.id
+    )))
   ORDER BY r.started_at DESC,r.id DESC,m.id DESC LIMIT 1
  ),CASE WHEN COALESCE(j.payload->>'continuation_runtime_id','') = '' AND COALESCE(j.payload->>'queued_message_id','') = '' AND EXISTS (
   SELECT 1 FROM thread_runtimes old
@@ -131,9 +145,12 @@ func (s *ThreadInboxStore) InspectContinuationRecovery(ctx context.Context, orgI
 // RecordContinuationAttemptWithLease binds the original instruction and exact
 // runtime before provider admission. Both ownership generations are checked;
 // a fenced record must stop execution instead of creating an untracked attempt.
+// Explicit checkpoint retry records context rather than newly queued input.
 func (s *JobStore) RecordContinuationAttemptWithLease(ctx context.Context, orgID, jobID, jobToken, sessionID, threadID, runtimeID, runtimeToken uuid.UUID, messageID int64, taskMessageIDs []int64) (bool, error) {
 	tag, err := s.db.Exec(ctx, `UPDATE jobs j
-  SET payload = j.payload || jsonb_build_object('continuation_runtime_id',$6::uuid::text,'continuation_message_id',$8::bigint::text,'queued_message_id',$8::bigint::text,'thread_id',$5::uuid::text,'continuation_task_message_ids',$9::bigint[]),updated_at=now()
+  SET payload = j.payload || jsonb_build_object('continuation_runtime_id',$6::uuid::text,'continuation_message_id',$8::bigint::text,'thread_id',$5::uuid::text,'continuation_task_message_ids',$9::bigint[])
+   || CASE WHEN j.payload->>'execution_purpose'='checkpoint_retry' THEN '{}'::jsonb
+    ELSE jsonb_build_object('queued_message_id',$8::bigint::text) END,updated_at=now()
   WHERE j.org_id=$1 AND j.id=$2 AND j.lock_token=$3 AND j.status='running' AND j.job_type IN ('continue_session','run_agent')
    AND j.payload->>'session_id'=$4::uuid::text AND $8=ANY($9::bigint[])
    AND (COALESCE(j.payload->>'thread_id','')='' OR j.payload->>'thread_id'=$5::uuid::text)

@@ -75,6 +75,10 @@ func (s *initialSeedAdmissionInbox) ListAppliedMessageIDs(context.Context, uuid.
 	return nil, nil
 }
 
+func (s *initialSeedAdmissionInbox) ListUnsettledAppliedMessageIDs(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []int64) ([]int64, error) {
+	return nil, nil
+}
+
 func (s *initialSeedAdmissionInbox) InspectContinuationRecovery(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64) (bool, bool, error) {
 	return false, false, nil
 }

@@ -790,7 +790,7 @@ func (s *fakeThreadRuntimeStore) AdvanceDeliveryWithLease(_ context.Context, _ u
 	return true, nil
 }
 
-func (s *fakeThreadRuntimeStore) CommitInboxDeliveryWithLease(ctx context.Context, _ uuid.UUID, runtimeID, leaseToken, threadID uuid.UUID, _ string, deliveredSequence, ackedSequence int64) (bool, error) {
+func (s *fakeThreadRuntimeStore) CommitInboxDeliveryWithLease(ctx context.Context, _ uuid.UUID, runtimeID, leaseToken, threadID uuid.UUID, _ string, deliveredSequence, ackedSequence int64, _ []int64) (bool, error) {
 	s.commitCalls = append(s.commitCalls, commitDeliveryCall{runtimeID: runtimeID, leaseToken: leaseToken, threadID: threadID, delivered: deliveredSequence, acked: ackedSequence})
 	if ctx.Err() != nil {
 		return false, ctx.Err()
@@ -1151,6 +1151,10 @@ func TestThreadRuntimeAttacherSerializesSeedAcknowledgmentBeforeLiveDelivery(t *
 }
 
 func (s *fakeThreadInboxStore) ListAppliedMessageIDs(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []int64) ([]int64, error) {
+	return nil, nil
+}
+
+func (s *fakeThreadInboxStore) ListUnsettledAppliedMessageIDs(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []int64) ([]int64, error) {
 	return nil, nil
 }
 

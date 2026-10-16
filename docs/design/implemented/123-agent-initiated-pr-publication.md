@@ -95,6 +95,12 @@ configured publication policy and reports that the optional teams were omitted.
 An infrastructure failure resolving readiness retains the metadata and returns
 an error for retry instead of discarding it.
 
+Successful non-interactive automation results with a diff atomically enqueue a
+publication coordination job. That job resolves the frozen run policy and
+retries transient policy, readiness, or metadata-freeze errors without running
+the provider again. Existing publication intents are left to their own
+reconciliation and publication jobs.
+
 Normal automatic publication freezes the staged teams into its durable request
 payload. Team requests run after the PR's draft and review gates are satisfied,
 using the publication's GitHub identity. Completion replay performs any missing

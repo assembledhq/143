@@ -46,11 +46,13 @@ func TestContinueSessionHandlerRejectsForgedRecoveryModes(t *testing.T) {
 func TestContinueSessionHandlerPropagatesExecutionPurposeAndSkipsAppliedInput(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		purpose models.SessionExecutionPurpose
-		applied bool
+		name     string
+		purpose  models.SessionExecutionPurpose
+		applied  bool
+		recorded bool
 	}{
 		{name: "checkpoint task recovery", purpose: models.SessionExecutionPurposeCheckpointRetry},
+		{name: "checkpoint retry after pre-admission attempt recording", purpose: models.SessionExecutionPurposeCheckpointRetry, recorded: true},
 		{name: "duplicate queued input", applied: true},
 	}
 	for _, tt := range tests {
@@ -64,6 +66,9 @@ func TestContinueSessionHandlerPropagatesExecutionPurposeAndSkipsAppliedInput(t 
 			orch := &orchestratorServiceStub{continueSessionFn: func(_ context.Context, _ *models.Session, opts *agent.ContinueSessionOptions) error {
 				require.NotNil(t, opts, "purpose must reach the orchestrator in execution-scoped options")
 				require.Equal(t, tt.purpose, opts.ExecutionPurpose, "worker must preserve the validated purpose exactly")
+				if tt.purpose == models.SessionExecutionPurposeCheckpointRetry {
+					require.Nil(t, opts.QueuedMessageID, "recorded task retry must not become a new queued input request")
+				}
 				if tt.applied {
 					return agent.ErrContinuationInputAlreadyApplied
 				}
@@ -72,6 +77,11 @@ func TestContinueSessionHandlerPropagatesExecutionPurposeAndSkipsAppliedInput(t 
 			payload := map[string]any{"session_id": session.String(), "org_id": org.String(), "thread_id": thread.String(), "execution_purpose": tt.purpose}
 			if tt.applied {
 				payload["queued_message_id"] = "7"
+			}
+			if tt.recorded {
+				payload["continuation_runtime_id"] = uuid.NewString()
+				payload["continuation_message_id"] = "7"
+				payload["continuation_task_message_ids"] = []int64{6, 7}
 			}
 			raw, err := json.Marshal(payload)
 			require.NoError(t, err, "marshal scoped continuation")

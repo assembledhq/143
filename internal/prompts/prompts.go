@@ -596,3 +596,11 @@ func EvalBootstrapPrompt(data EvalBootstrapPromptData) string {
 
 // AutomationActionInstructions describes the shared action protocol for every automation run mode.
 func AutomationActionInstructions() string { return render("automation_actions.template", nil) }
+
+// ContinuationTaskContext restores unfinished task context alongside new input.
+func ContinuationTaskContext(priorTask, currentMessage string) string {
+	return render("continuation_task_context.template", struct {
+		PriorTask      string
+		CurrentMessage string
+	}{PriorTask: priorTask, CurrentMessage: currentMessage})
+}

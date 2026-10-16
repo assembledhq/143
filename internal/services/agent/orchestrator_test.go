@@ -1600,7 +1600,7 @@ func (s *activeRuntimeConflictStore) AdvanceDeliveryWithLease(context.Context, u
 	return true, nil
 }
 
-func (s *activeRuntimeConflictStore) CommitInboxDeliveryWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, int64, int64) (bool, error) {
+func (s *activeRuntimeConflictStore) CommitInboxDeliveryWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, int64, int64, []int64) (bool, error) {
 	return true, nil
 }
 

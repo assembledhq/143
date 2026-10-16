@@ -14,6 +14,7 @@ import (
 )
 
 type ActivityPhaseStore interface {
+	AcknowledgeInboxBatchAndStartPhase(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, *uuid.UUID, int, int64, []int64, time.Time) (models.SessionActivityPhase, models.ThreadInboxDeliveryBatch, *models.SessionActivityPhase, error)
 	StartSeedPhase(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int, uuid.UUID, uuid.UUID, []int64, time.Time) (models.SessionActivityPhase, *models.ThreadInboxDeliveryBatch, error)
 	StartPhase(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int, *uuid.UUID, *uuid.UUID, models.ActivityPhaseTrigger, time.Time) (models.SessionActivityPhase, error)
 	GetInboxDeliveryBatch(context.Context, uuid.UUID, uuid.UUID) (models.ThreadInboxDeliveryBatch, error)
@@ -187,6 +188,25 @@ func (s *ActivityPhaseService) AcknowledgeInboxBatch(ctx context.Context, orgID,
 	}
 	s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryAcknowledged, batch)
 	return batch, nil
+}
+
+// AcknowledgeInboxBatchAndStartPhase publishes only after both the old phase
+// boundary and replacement phase have committed in the same transaction.
+func (s *ActivityPhaseService) AcknowledgeInboxBatchAndStartPhase(ctx context.Context, orgID, sessionID, threadID, runtimeID, leaseToken uuid.UUID, activePhaseID *uuid.UUID, turn int, sequenceEnd int64, confirmed []int64) (models.SessionActivityPhase, models.ThreadInboxDeliveryBatch, error) {
+	phase, batch, completed, err := s.store.AcknowledgeInboxBatchAndStartPhase(ctx, orgID, sessionID, threadID, runtimeID, leaseToken, activePhaseID, turn, sequenceEnd, confirmed, s.now())
+	if err != nil {
+		return models.SessionActivityPhase{}, models.ThreadInboxDeliveryBatch{}, err
+	}
+	if completed != nil {
+		s.recordPersistedTerminal(ctx, *completed)
+	}
+	acknowledged := batch
+	acknowledged.Status, acknowledged.StartedAt = models.InboxDeliveryBatchAcknowledged, nil
+	s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryAcknowledged, acknowledged)
+	metrics.RecordActivityPhaseStarted(ctx, string(phase.TriggerKind))
+	s.publishPhase(ctx, models.SessionStreamEventActivityPhaseStarted, phase)
+	s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryStarted, batch)
+	return phase, batch, nil
 }
 
 func (s *ActivityPhaseService) AbandonInboxBatch(ctx context.Context, orgID, batchID uuid.UUID) (models.ThreadInboxDeliveryBatch, error) {

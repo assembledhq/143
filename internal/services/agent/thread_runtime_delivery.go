@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,11 +29,12 @@ type ThreadRuntimeStore interface {
 	MarkLiveWithLease(ctx context.Context, orgID, runtimeID, leaseToken uuid.UUID, runtimeHandleID string, leaseDuration time.Duration) (bool, error)
 	HeartbeatWithLease(ctx context.Context, orgID, runtimeID, leaseToken uuid.UUID, leaseDuration time.Duration) (bool, error)
 	AdvanceDeliveryWithLease(ctx context.Context, orgID, runtimeID, leaseToken uuid.UUID, deliveredSequence, ackedSequence int64) (bool, error)
-	CommitInboxDeliveryWithLease(ctx context.Context, orgID, runtimeID, leaseToken, threadID uuid.UUID, ownerNodeID string, deliveredSequence, ackedSequence int64) (bool, error)
+	CommitInboxDeliveryWithLease(ctx context.Context, orgID, runtimeID, leaseToken, threadID uuid.UUID, ownerNodeID string, deliveredSequence, ackedSequence int64, confirmedSequences []int64) (bool, error)
 	MarkTerminalWithLease(ctx context.Context, orgID, runtimeID, leaseToken uuid.UUID, status models.ThreadRuntimeStatus, stopReason, lastError string) (bool, error)
 }
 
 type ThreadInboxStore interface {
+	ListUnsettledAppliedMessageIDs(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []int64) ([]int64, error)
 	ListAppliedRecoveryMessageIDs(ctx context.Context, orgID, sessionID, threadID uuid.UUID, messageID int64, requested []int64) ([]int64, error)
 	InspectContinuationRecovery(ctx context.Context, orgID, sessionID, threadID, runtimeID uuid.UUID, messageID int64) (bool, bool, error)
 	ListAppliedMessageIDs(ctx context.Context, orgID, sessionID, threadID uuid.UUID, messageIDs []int64) ([]int64, error)
@@ -372,6 +374,9 @@ func (c *threadRuntimeControl) Close(ctx context.Context, status models.ThreadRu
 				Str("runtime_id", c.runtime.ID.String()).
 				Msg("failed to mark thread runtime terminal")
 		} else if !ok {
+			if c.forgetConfirmed != nil {
+				c.forgetConfirmed()
+			}
 			c.logger.Warn().
 				Str("runtime_id", c.runtime.ID.String()).
 				Msg("thread runtime terminal mark was fenced by lease state")
@@ -593,7 +598,8 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 		if err := o.flushConfirmedThreadInput(ctx, runtime, threadID, false); err != nil {
 			return fmt.Errorf("retry confirmed thread input acknowledgment: %w", err)
 		}
-		sequence := receipt.(int64)
+		sequences := receipt.([]int64)
+		sequence := sequences[len(sequences)-1]
 		runtime.LastDeliveredSequence = max(runtime.LastDeliveredSequence, sequence)
 		runtime.LastAckedSequence = max(runtime.LastAckedSequence, sequence)
 	}
@@ -619,7 +625,7 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 			return err
 		}
 		runtime.LastDeliveredSequence = max(runtime.LastDeliveredSequence, deliveredSequenceEnd)
-		runtime.LastAckedSequence = deliveredSequenceEnd
+		runtime.LastAckedSequence = max(runtime.LastAckedSequence, deliveredSequenceEnd)
 		deliveredSequenceEnd = 0
 		return nil
 	}
@@ -733,10 +739,17 @@ func confirmedThreadInputKeyFor(runtime models.ThreadRuntime, threadID uuid.UUID
 
 func (o *Orchestrator) rememberConfirmedThreadInput(runtime models.ThreadRuntime, threadID uuid.UUID, sequence int64) {
 	key := confirmedThreadInputKeyFor(runtime, threadID)
-	if previous, ok := o.confirmedThreadInput.Load(key); ok && previous.(int64) > sequence {
-		return
+	sequences := []int64{sequence}
+	if previous, ok := o.confirmedThreadInput.Load(key); ok {
+		for _, value := range previous.([]int64) {
+			if value == sequence {
+				return
+			}
+			sequences = append(sequences, value)
+		}
 	}
-	o.confirmedThreadInput.Store(key, sequence)
+	sort.Slice(sequences, func(i, j int) bool { return sequences[i] < sequences[j] })
+	o.confirmedThreadInput.Store(key, sequences)
 }
 
 // flushConfirmedThreadInput retries only acknowledgment, never provider input.
@@ -749,15 +762,16 @@ func (o *Orchestrator) flushConfirmedThreadInput(ctx context.Context, runtime mo
 	if !ok {
 		return nil
 	}
-	sequence := value.(int64)
+	sequences := value.([]int64)
+	sequence := sequences[len(sequences)-1]
 	ackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), threadRuntimeStateUpdateTimeout)
 	defer cancel()
 	var err error
 	for range 2 {
 		if closing {
-			err = o.commitThreadInboxWatermark(ackCtx, runtime, threadID, sequence)
+			err = o.commitThreadInboxWatermark(ackCtx, runtime, threadID, sequence, sequences...)
 		} else {
-			err = o.acknowledgeDeliveredThreadInboxSegment(ackCtx, runtime, threadID, sequence)
+			err = o.acknowledgeConfirmedThreadInboxInputs(ackCtx, runtime, threadID, sequences)
 		}
 		if err == nil {
 			o.confirmedThreadInput.Delete(key)
@@ -770,29 +784,28 @@ func (o *Orchestrator) flushConfirmedThreadInput(ctx context.Context, runtime mo
 	return err
 }
 
-// acknowledgeDeliveredThreadInboxSegment creates one boundary for a
-// contiguous set of provider-accepted instructions. Segments are split at
-// failed/dead-lettered entries so every durable batch range contains only the
-// messages actually applied to the provider.
-func (o *Orchestrator) acknowledgeDeliveredThreadInboxSegment(ctx context.Context, runtime models.ThreadRuntime, threadID uuid.UUID, deliveredSequenceEnd int64) error {
+// A retried failure may sit below an already advanced watermark. Such a
+// receipt updates exactly that row without inventing a backwards phase batch.
+func (o *Orchestrator) acknowledgeConfirmedThreadInboxInputs(ctx context.Context, runtime models.ThreadRuntime, threadID uuid.UUID, sequences []int64) error {
+	end := sequences[len(sequences)-1]
 	if executionValue, ok := o.activeActivityPhases.Load(threadID); ok && o.activityPhases != nil {
 		execution, valid := executionValue.(*activityPhaseExecution)
 		if !valid || execution == nil {
 			return fmt.Errorf("active activity phase registry contained invalid value for thread %s", threadID)
 		}
-		if err := execution.acknowledgeAndResume(ctx, deliveredSequenceEnd); err != nil {
-			return fmt.Errorf("acknowledge and resume steered activity phase at sequence %d: %w", deliveredSequenceEnd, err)
+		if err := execution.acknowledgeAndResume(ctx, end, sequences...); err != nil {
+			if !errors.Is(err, errActivityPhaseDeliveryClosed) {
+				return fmt.Errorf("acknowledge and resume steered activity phase at sequence %d: %w", end, err)
+			}
+			return o.commitThreadInboxWatermark(ctx, runtime, threadID, end, sequences...)
 		}
-	} else {
-		if err := o.commitThreadInboxWatermark(ctx, runtime, threadID, deliveredSequenceEnd); err != nil {
-			return fmt.Errorf("commit thread runtime inbox delivery cursor: %w", err)
-		}
+		return nil
 	}
-	return nil
+	return o.commitThreadInboxWatermark(ctx, runtime, threadID, end, sequences...)
 }
 
-func (o *Orchestrator) commitThreadInboxWatermark(ctx context.Context, runtime models.ThreadRuntime, threadID uuid.UUID, sequence int64) error {
-	ok, err := o.threadRuntimes.CommitInboxDeliveryWithLease(ctx, runtime.OrgID, runtime.ID, runtime.LeaseToken, threadID, runtime.OwnerNodeID, sequence, sequence)
+func (o *Orchestrator) commitThreadInboxWatermark(ctx context.Context, runtime models.ThreadRuntime, threadID uuid.UUID, sequence int64, confirmedSequences ...int64) error {
+	ok, err := o.threadRuntimes.CommitInboxDeliveryWithLease(ctx, runtime.OrgID, runtime.ID, runtime.LeaseToken, threadID, runtime.OwnerNodeID, sequence, sequence, confirmedSequences)
 	if err != nil {
 		return err
 	}

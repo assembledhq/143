@@ -111,13 +111,14 @@ var ErrContinuationRecoveryNeedsReconciliation = errors.New("provider turn compl
 var errInvalidContinuationInput = errors.New("invalid continuation input")
 
 type continuationInput struct {
-	messages       []models.SessionMessage
-	scopedMessages []models.SessionMessage
-	latest         *models.SessionMessage
-	pending        []models.SessionMessage
-	recoveryTask   []models.SessionMessage
-	threadID       *uuid.UUID
-	alreadyApplied bool
+	messages         []models.SessionMessage
+	scopedMessages   []models.SessionMessage
+	latest           *models.SessionMessage
+	pending          []models.SessionMessage
+	recoveryTask     []models.SessionMessage
+	priorTaskContext []models.SessionMessage
+	threadID         *uuid.UUID
+	alreadyApplied   bool
 }
 
 // resolveContinuationInput runs before allocating a runtime. Applied inputs
@@ -206,6 +207,27 @@ func (o *Orchestrator) resolveContinuationInput(ctx context.Context, session *mo
 			}
 			latest := input.pending[len(input.pending)-1]
 			input.latest = &latest
+			var candidates []int64
+			for _, message := range input.scopedMessages {
+				if message.Role == models.MessageRoleUser && message.ID > 0 && message.ID < input.latest.ID {
+					candidates = append(candidates, message.ID)
+				}
+			}
+			if len(candidates) > 0 {
+				ids, contextErr := o.threadInbox.ListUnsettledAppliedMessageIDs(ctx, session.OrgID, session.ID, *input.threadID, candidates)
+				if contextErr != nil {
+					return input, contextErr
+				}
+				wanted := make(map[int64]bool, len(ids))
+				for _, id := range ids {
+					wanted[id] = true
+				}
+				for _, message := range input.scopedMessages {
+					if wanted[message.ID] {
+						input.priorTaskContext = append(input.priorTaskContext, message)
+					}
+				}
+			}
 		}
 	}
 	return input, nil

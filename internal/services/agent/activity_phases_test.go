@@ -196,6 +196,16 @@ func (f *activityPhaseStoreFake) AcknowledgeInboxBatchWithTransition(_ context.C
 	return models.ThreadInboxDeliveryBatch{ID: uuid.New(), SequenceStart: 1, SequenceEnd: 1}, &phase, nil
 }
 
+func (f *activityPhaseStoreFake) AcknowledgeInboxBatchAndStartPhase(ctx context.Context, orgID, sessionID, threadID, runtimeID, token uuid.UUID, activePhaseID *uuid.UUID, turn int, sequenceEnd int64, _ []int64, at time.Time) (models.SessionActivityPhase, models.ThreadInboxDeliveryBatch, *models.SessionActivityPhase, error) {
+	batch, completed, err := f.AcknowledgeInboxBatchWithTransition(ctx, orgID, sessionID, threadID, runtimeID, token, activePhaseID, sequenceEnd, at)
+	if err != nil {
+		return models.SessionActivityPhase{}, batch, completed, err
+	}
+	phase, err := f.StartPhase(ctx, orgID, sessionID, threadID, turn, &runtimeID, &token, models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInboxBatch, BatchID: &batch.ID}, at)
+	batch.Status, batch.StartedAt = models.InboxDeliveryBatchStarted, &at
+	return phase, batch, completed, err
+}
+
 func (f *activityPhaseStoreFake) AbandonInboxBatch(_ context.Context, _, _ uuid.UUID, _ time.Time) (models.ThreadInboxDeliveryBatch, error) {
 	return models.ThreadInboxDeliveryBatch{}, nil
 }

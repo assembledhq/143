@@ -15,11 +15,26 @@ import (
 
 type restartAdmissionInbox struct {
 	*initialSeedAdmissionInbox
-	mu          sync.Mutex
-	applied     map[int64]bool
-	admitted    [][]int64
-	claimed     [][]int64
-	recoveryIDs []int64
+	mu           sync.Mutex
+	applied      map[int64]bool
+	admitted     [][]int64
+	claimed      [][]int64
+	recoveryIDs  []int64
+	unsettledIDs []int64
+}
+
+func (s *restartAdmissionInbox) ListUnsettledAppliedMessageIDs(_ context.Context, _, _, _ uuid.UUID, ids []int64) ([]int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result []int64
+	for _, id := range ids {
+		for _, unfinished := range s.unsettledIDs {
+			if id == unfinished {
+				result = append(result, id)
+			}
+		}
+	}
+	return result, nil
 }
 
 func (s *restartAdmissionInbox) ListAppliedMessageIDs(_ context.Context, _, _, _ uuid.UUID, ids []int64) ([]int64, error) {
@@ -214,7 +229,7 @@ func TestContinueSession_UsesOnlyUnappliedActionableInput(t *testing.T) {
 				require.Equal(t, []string{oldKey}, d.uploads.opened, "explicit task recovery may rematerialize original task attachments as context")
 			} else {
 				require.Contains(t, actionable, "New pending follow-up", "ordinary prompt must contain the new unadmitted instruction")
-				require.NotContains(t, actionable, "Old applied task", "ordinary prompt cannot ask the provider to replay an applied input")
+				require.NotContains(t, actionable, "Old applied task", "an applied task without unfinished-runtime proof must stay in prior conversation history")
 				require.Equal(t, [][]int64{{2}}, inbox.admitted, "only new pending input should enter the next provider phase")
 				require.Equal(t, []string{newKey}, d.uploads.opened, "ordinary continuation may materialize only unadmitted input attachments")
 			}
@@ -294,6 +309,83 @@ func TestContinueSession_NativeRecoveryPreservesAppliedBatchAndAttachments(t *te
 			require.Equal(t, []string{firstKey, secondKey}, d.uploads.opened, "both original task attachments must be rematerialized in message order")
 			require.Empty(t, inbox.admitted, "context recovery cannot admit applied inputs again")
 			require.Empty(t, inbox.claimed, "context recovery cannot reclaim already applied seeds")
+		})
+	}
+}
+
+func TestContinueSession_FollowUpPreservesUnfinishedTaskContext(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                                 string
+		snapshot, freshProvider, startupNote bool
+	}{
+		{name: "native resume in existing sandbox"},
+		{name: "native resume from older snapshot", snapshot: true},
+		{name: "first provider turn from older snapshot", snapshot: true, freshProvider: true},
+		{name: "startup error note does not hide failed task", snapshot: true, startupNote: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			org := testOrg()
+			issue := testIssue(org)
+			session := testRun(org, issue.ID)
+			thread, sibling := uuid.New(), uuid.New()
+			session.PrimaryThreadID = &thread
+			session.Origin = models.SessionOriginManual
+			session.Status = models.SessionStatusIdle
+			session.CurrentTurn = 1
+			session.InteractionMode = models.SessionInteractionModeInteractive
+			session.ValidationPolicy = models.SessionValidationPolicySkip
+			session.AgentSessionID = strPtr("checkpoint-before-failed-task")
+			session.ContainerID = strPtr("synthetic-existing-sandbox")
+			session.SandboxState = models.SandboxStateRunning
+			d := defaultDeps()
+			d.adapter.resumeMode = agent.ResumeBySessionID
+			if tt.snapshot {
+				session.ContainerID = nil
+				session.SandboxState = models.SandboxStateNone
+				session.SnapshotKey = strPtr("snapshots/synthetic/prior-task.tar")
+				d.snapshots.data = map[string][]byte{*session.SnapshotKey: []byte("prior checkpoint")}
+			}
+			if tt.freshProvider {
+				session.AgentSessionID = nil
+			}
+			inbox := newRestartAdmissionInbox(10, 12)
+			inbox.unsettledIDs = []int64{12}
+			d.threadInbox, d.threadRuntimes = inbox, &reviewSetupLifecycleRuntimeStore{}
+			oldKey, newKey := org.String()+"/2026-05/task.png", org.String()+"/2026-05/follow-up.png"
+			d.uploads = &mockUploadStore{files: map[string]mockUploadFile{oldKey: {body: []byte("task"), contentType: "image/png"}, newKey: {body: []byte("follow-up"), contentType: "image/png"}}}
+			d.messages.messages = []models.SessionMessage{
+				{ID: 10, OrgID: org, SessionID: session.ID, ThreadID: &thread, Role: models.MessageRoleUser, TurnNumber: 1, Content: "Unrelated settled task"},
+				{ID: 11, OrgID: org, SessionID: session.ID, ThreadID: &thread, Role: models.MessageRoleAssistant, TurnNumber: 1, Content: "Completed previous task"},
+				{ID: 12, OrgID: org, SessionID: session.ID, ThreadID: &thread, Role: models.MessageRoleUser, TurnNumber: 2, Content: "Unfinished admitted task", Attachments: []string{"/api/v1/uploads/files/" + oldKey}},
+			}
+			if tt.startupNote {
+				d.messages.messages = append(d.messages.messages, models.SessionMessage{ID: 13, OrgID: org, SessionID: session.ID, ThreadID: &thread, Role: models.MessageRoleAssistant, TurnNumber: 2, Content: "Authentication failed before retry execution"})
+			}
+			d.messages.messages = append(d.messages.messages,
+				models.SessionMessage{ID: 14, OrgID: org, SessionID: session.ID, ThreadID: &thread, Role: models.MessageRoleUser, TurnNumber: 2, Content: "New follow-up changes the request", Attachments: []string{"/api/v1/uploads/files/" + newKey}},
+				models.SessionMessage{ID: 15, OrgID: org, SessionID: session.ID, ThreadID: &sibling, Role: models.MessageRoleUser, TurnNumber: 2, Content: "Sibling task stays isolated"})
+			var seen *agent.AgentPrompt
+			d.adapter.executeFn = func(_ context.Context, _ *agent.Sandbox, prompt *agent.AgentPrompt, _ chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				seen = prompt
+				return &agent.AgentResult{Summary: "Finished amended task", ExitCode: 0}, nil
+			}
+			require.NoError(t, buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &thread}), "follow-up must retain unfinished task context across restore paths")
+			require.NotNil(t, seen, "follow-up must execute once")
+			text := seen.UserMessage
+			if text == "" {
+				text = seen.UserPrompt
+			}
+			require.Contains(t, text, "Previous task context from an interrupted attempt:", "old applied input must be labeled as prior context")
+			require.Contains(t, text, "Unfinished admitted task", "provider checkpoint may predate the failed turn")
+			require.Contains(t, text, "Current message:\nNew follow-up changes the request", "new input remains the current instruction")
+			require.NotContains(t, seen.UserMessage, "Unrelated settled task", "native continuation cannot reintroduce settled task instructions")
+			require.NotContains(t, text, "Sibling task stays isolated", "context lookup remains thread scoped")
+			require.Equal(t, []string{oldKey, newKey}, d.uploads.opened, "both unfinished task and current input attachments must survive restore")
+			require.Equal(t, [][]int64{{14}}, inbox.admitted, "only the new follow-up may be admitted again")
+			require.Equal(t, [][]int64{{14}}, inbox.claimed, "prior context cannot be reclaimed as provider input")
 		})
 	}
 }

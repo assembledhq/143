@@ -458,6 +458,7 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 		Repositories:          deps.Repositories,
 		GitHubInstallations:   db.NewGitHubInstallationStore(pool),
 		SessionMessages:       deps.SessionMessages,
+		IssueSnapshots:        db.NewSessionTurnIssueSnapshotStore(pool),
 		SessionThreads:        deps.SessionThreads,
 		ThreadInbox:           db.NewThreadInboxStore(pool),
 		ThreadSendTx:          pool,
