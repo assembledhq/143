@@ -2012,6 +2012,7 @@ func TestGitHubAPIHealthDashboardUsesFocusedStructuredTelemetry(t *testing.T) {
 		"Recent rate-limit responses":                 false,
 		"Locally deferred requests":                   false,
 		"Principal attribution gaps":                  false,
+		"GitHub visual asset outcomes":                false,
 	}
 	nonRowPanels := 0
 	for _, panel := range dashboard.Panels {
@@ -2029,11 +2030,17 @@ func TestGitHubAPIHealthDashboardUsesFocusedStructuredTelemetry(t *testing.T) {
 				require.Contains(t, target.Expr, "github_request_suppressed", "local deferrals should retain the structured suppression signal")
 			} else {
 				require.Contains(t, target.Expr, `_msg:"github api request"`, "panel %q should use the canonical structured telemetry event", panel.Title)
+				if panel.Title == "GitHub visual asset outcomes" {
+					require.Equal(t, `_msg:"github api request" AND github_caller:="visual_asset" | stats by (github_result, github_rate_limit_resource) count() as asset_requests, quantile(0.95, github_duration_ms) as p95_ms | sort by (asset_requests desc) | limit 20`, target.Expr, "asset view should retain bounded outcome and resource visibility separately from API health")
+					require.Contains(t, panel.Description, "do not establish core quota use", "asset view should avoid inferring quota charges from download counts")
+				} else {
+					require.True(t, strings.HasPrefix(target.Expr, `_msg:"github api request" AND NOT github_caller:="visual_asset"`), "API panel %q should exclude attachment exchanges before aggregating API counts, latency, failures, and quota signals", panel.Title)
+				}
 			}
 			require.NotContains(t, target.Expr, "API rate limit exceeded", "panel %q should not scrape unstable GitHub error prose", panel.Title)
 		}
 	}
-	require.Equal(t, 13, nonRowPanels, "dashboard should stay focused instead of accumulating low-value panels")
+	require.Equal(t, 14, nonRowPanels, "dashboard should stay focused instead of accumulating low-value panels")
 	require.Equal(t, map[string]bool{
 		"API requests":                                true,
 		"Rate limits hit":                             true,
@@ -2048,6 +2055,7 @@ func TestGitHubAPIHealthDashboardUsesFocusedStructuredTelemetry(t *testing.T) {
 		"Recent rate-limit responses":                 true,
 		"Locally deferred requests":                   true,
 		"Principal attribution gaps":                  true,
+		"GitHub visual asset outcomes":                true,
 	}, expectedPanels, "dashboard should contain the complete curated panel set")
 }
 
@@ -2263,9 +2271,31 @@ func TestProductionAlertsUseValidLogsQLRangeFilters(t *testing.T) {
 	alertConfig := string(alerts)
 	require.NotContains(t, alertConfig, "status:[", "VictoriaLogs numeric ranges should use field:range[...] syntax so vmalert can parse the rules")
 	require.GreaterOrEqual(t, strings.Count(alertConfig, "status:range[500,599]"), 3, "API 5xx alert rules should filter inclusive 500-599 statuses with valid LogsQL range syntax")
-	require.Contains(t, alertConfig, "GitHubAPIRateLimitSustained", "production alerts should detect sustained GitHub throttling")
-	require.Contains(t, alertConfig, `_msg:"github api request" AND github_rate_limited:true`, "GitHub alert should use the canonical structured rate-limit signal")
-	require.Contains(t, alertConfig, "for: 5m", "GitHub rate-limit alert should require sustained impact to avoid paging on one transient rejection")
+	type rule struct {
+		Alert string `yaml:"alert"`
+		Expr  string `yaml:"expr"`
+		For   string `yaml:"for"`
+	}
+	var config struct {
+		Groups []struct {
+			Name     string `yaml:"name"`
+			Interval string `yaml:"interval"`
+			Rules    []rule `yaml:"rules"`
+		} `yaml:"groups"`
+	}
+	require.NoError(t, yaml.Unmarshal(alerts, &config), "production alert contracts should inspect parsed YAML rules")
+	var githubRules []rule
+	for _, group := range config.Groups {
+		if group.Name == "github-api-health" {
+			require.Equal(t, "1m", group.Interval, "GitHub alert evaluation cadence should remain unchanged")
+			githubRules = append(githubRules, group.Rules...)
+		}
+	}
+	require.Equal(t, []rule{{
+		Alert: "GitHubAPIRateLimitSustained",
+		Expr:  `_time:10m _msg:"github api request" AND github_rate_limited:true AND NOT github_caller:="visual_asset" | stats count() as rate_limits | filter rate_limits:>9`,
+		For:   "5m",
+	}}, githubRules, "GitHub API alert should exclude attachment exchanges while retaining its canonical signal, window, threshold, and sustained-impact requirement")
 }
 
 func TestActivityPhaseReconciliationAlertCoversEveryFailurePath(t *testing.T) {
