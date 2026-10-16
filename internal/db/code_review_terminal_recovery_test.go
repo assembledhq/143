@@ -3,9 +3,11 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -46,6 +48,9 @@ func TestReconcileTerminalReviewsPostgres(t *testing.T) {
 		{name: "live executor protects thread", setup: "UPDATE session_executors SET status='running'", assessment: "superseded", thread: "running", request: "failed"},
 		{name: "starting executor protects thread", setup: "UPDATE session_executors SET status='starting'", assessment: "superseded", thread: "running", request: "failed"},
 		{name: "draining executor protects thread", setup: "UPDATE session_executors SET status='draining'", assessment: "superseded", thread: "running", request: "failed"},
+		{name: "terminal executor from another thread is insufficient", setup: "UPDATE session_executors SET thread_id=gen_random_uuid()", assessment: "superseded", thread: "running", request: "failed"},
+		{name: "terminal executor from another session is insufficient", setup: "UPDATE session_executors SET session_id=gen_random_uuid()", assessment: "superseded", thread: "running", request: "failed"},
+		{name: "terminal executor job from another tenant is insufficient", setup: "UPDATE jobs SET org_id=gen_random_uuid()", assessment: "superseded", thread: "running", request: "failed"},
 		{name: "no terminal executor proof", setup: "DELETE FROM session_executors", assessment: "superseded", thread: "running", request: "failed"},
 		{name: "executor job still running", setup: "UPDATE jobs SET status='running'", assessment: "superseded", thread: "running", request: "failed"},
 		{name: "queued retry protects thread", setup: "UPDATE jobs SET status='pending'", assessment: "superseded", thread: "running", request: "failed"},
@@ -137,6 +142,60 @@ CREATE TABLE code_review_recheck_dispatches(org_id uuid,session_id uuid,status t
 			err = conn.QueryRow(ctx, `SELECT a.status,t.status,r.status,p.status FROM code_review_revision_assessments a CROSS JOIN session_threads t JOIN code_review_requests r ON r.id=$1 JOIN code_review_requests p ON p.id=$2`, request, pendingRequest).Scan(&actual.Assessment, &actual.Thread, &actual.Request, &actual.Pending)
 			require.NoError(t, err, "read recovered state")
 			require.Equal(t, struct{ Assessment, Thread, Request, Pending string }{tt.assessment, tt.thread, tt.request, "pending"}, actual, "only provably terminal review state should be repaired")
+		})
+	}
+}
+
+func TestTerminalReviewRecoveryErrorClassification(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		callerExpired bool
+		callerCancel  bool
+		recoveryOnly  bool
+		noError       bool
+		wantDeferral  bool
+	}{
+		{name: "own deadline is a recovery deferral", recoveryOnly: true, wantDeferral: true},
+		{name: "caller deadline remains caller failure", callerExpired: true},
+		{name: "caller cancellation remains caller failure", callerCancel: true},
+		{name: "unrelated failure remains unchanged"},
+		{name: "successful recovery stays successful", recoveryOnly: true, noError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			callerCtx := context.Background()
+			if tt.callerExpired {
+				var cancel context.CancelFunc
+				callerCtx, cancel = context.WithDeadline(callerCtx, time.Unix(1, 0))
+				defer cancel()
+			}
+			if tt.callerCancel {
+				var cancel context.CancelFunc
+				callerCtx, cancel = context.WithCancel(callerCtx)
+				cancel()
+			}
+			recoveryCtx := callerCtx
+			if tt.recoveryOnly {
+				var cancel context.CancelFunc
+				recoveryCtx, cancel = context.WithDeadline(callerCtx, time.Unix(1, 0))
+				defer cancel()
+			}
+			cause := context.DeadlineExceeded
+			if tt.callerCancel {
+				cause = context.Canceled
+			}
+			if tt.noError {
+				cause = nil
+			}
+			actual := terminalReviewRecoveryError(callerCtx, recoveryCtx, cause)
+			if cause == nil {
+				require.NoError(t, actual, "successful recovery must never create an error from an expired timer")
+			} else {
+				require.ErrorIs(t, actual, cause, "recovery classification must retain the original cause")
+			}
+			require.Equal(t, tt.wantDeferral, errors.Is(actual, ErrCodeReviewTerminalRecoveryTimeout), "only the recovery's own deadline may request a non-consuming retry")
 		})
 	}
 }
