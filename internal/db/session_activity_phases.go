@@ -157,6 +157,30 @@ func startActivityPhaseTx(ctx context.Context, tx pgx.Tx, orgID, sessionID, thre
 			orgID, sessionID, threadID, *runtimeID, *runtimeLeaseToken, startedAt).Scan(&ownedRuntime); err != nil {
 			return models.SessionActivityPhase{}, fmt.Errorf("validate active activity phase runtime lease: %w", err)
 		}
+		// A worker can end after provider admission but before phase cleanup.
+		// The fresh runtime owner may retire only a different, durably terminal
+		// owner in this exact scope. Runtime-less or active history still blocks
+		// admission. Keep interrupted phases and their batches as evidence.
+		if _, err := tx.Exec(ctx, `
+			WITH terminal_owners AS MATERIALIZED (
+				SELECT old.id FROM thread_runtimes old
+				JOIN session_activity_phases p ON p.org_id = old.org_id
+				  AND p.session_id = old.session_id AND p.thread_id = old.thread_id
+				  AND p.runtime_id = old.id
+				WHERE old.org_id = $1 AND old.session_id = $2 AND old.thread_id = $3
+				  AND old.id <> $4 AND old.status IN ('closed', 'failed', 'lost')
+				  AND p.status = 'running'
+				FOR UPDATE OF old
+			)
+			UPDATE session_activity_phases p
+			SET status = 'interrupted', boundary_reason = 'runtime_lost',
+				completed_at = GREATEST(p.started_at, $5), updated_at = now()
+			FROM terminal_owners old
+			WHERE p.org_id = $1 AND p.session_id = $2 AND p.thread_id = $3
+			  AND p.runtime_id = old.id AND p.status = 'running'`,
+			orgID, sessionID, threadID, *runtimeID, startedAt); err != nil {
+			return models.SessionActivityPhase{}, fmt.Errorf("retire terminal runtime activity phase: %w", err)
+		}
 	}
 
 	rows, err := tx.Query(ctx, `

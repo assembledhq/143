@@ -507,15 +507,30 @@ func (c *Coordinator) RequestPullRequest(
 			payload["requested_role"] = req.RequestedRole
 		}
 	}
+	var reviewerReason *string
 	teams := req.TeamReviewers
 	if hasExistingPublication {
 		var frozen struct {
 			TeamReviewers []string `json:"team_reviewers"`
+			Draft         *bool    `json:"draft"`
 		}
 		if decodeErr := json.Unmarshal(existingPublication.RequestPayload, &frozen); decodeErr != nil && len(existingPublication.RequestPayload) > 0 {
 			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("decode frozen reviewer intent: %w", decodeErr)}
 		}
 		teams = frozen.TeamReviewers
+		if len(teams) > 0 {
+			// Reviewer intent includes its accepted readiness and handoff shape.
+			// Reopening or bypassing review must not reinterpret either choice
+			// through settings that changed after the first durable request.
+			handoffMode = existingPublication.HandoffMode
+			if handoffMode == "" {
+				handoffMode = models.PRHandoffModePrePublish
+			}
+			payload["publication_handoff_mode"] = string(handoffMode)
+			if frozen.Draft != nil {
+				payload["draft"] = *frozen.Draft
+			}
+		}
 	} else if automationRequest && c.prIntents != nil {
 		intent, freezeErr := c.prIntents.Freeze(ctx, orgID, sessionID, *session.AutomationRunID, changeset.ID)
 		if freezeErr != nil {
@@ -527,11 +542,24 @@ func (c *Coordinator) RequestPullRequest(
 		if (req.Draft != nil && *req.Draft) || (handoffMode == models.PRHandoffModeDraftFirst && reviewBypassed) {
 			return nil, &Error{Code: ErrorInvalidPublicationOptions, Err: errors.New("frozen team reviewers require a ready pull request; finish draft-first review rather than bypassing publication as a draft")}
 		}
-		payload["team_reviewers"] = teams
-		if !hasExistingPublication && handoffMode != models.PRHandoffModeDraftFirst {
+		if handoffMode != models.PRHandoffModeDraftFirst {
 			if err := c.freezeReviewerDraftPolicy(ctx, orgID, payload); err != nil {
-				return nil, err
+				var intentErr *Error
+				if !automationRequest || !errors.As(err, &intentErr) || intentErr.Code != ErrorInvalidPublicationOptions {
+					return nil, err
+				}
+				// Optional metadata accepted before policy drift must not stop an
+				// automation from publishing according to its known draft policy.
+				// Infrastructure uncertainty leaves the metadata intact for retry.
+				c.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("omitting optional team reviewers while preserving automatic publication policy")
+				reason := "team reviewers were omitted because automatic publication is configured to remain a draft; configured publication policy is unchanged"
+				reviewerReason = &reason
+				teams = nil
+				delete(payload, "team_reviewers")
 			}
+		}
+		if len(teams) > 0 {
+			payload["team_reviewers"] = teams
 		}
 	}
 	encodedPayload, err := json.Marshal(payload)
@@ -607,7 +635,11 @@ func (c *Coordinator) RequestPullRequest(
 		// QueueChangesetPRCreation is generation- and changeset-idempotent. A
 		// concurrent caller already owns the same durable request, so return the
 		// state we just ensured instead of reviving the retired PR_IN_FLIGHT 409.
-		return ExistingPublicationResult(publication), nil
+		existing := ExistingPublicationResult(publication)
+		if reviewerReason != nil {
+			existing.Reason = reviewerReason
+		}
+		return existing, nil
 	}
 	c.logger.Info().
 		Str("org_id", orgID.String()).
@@ -622,7 +654,7 @@ func (c *Coordinator) RequestPullRequest(
 	}
 	return &PublicationIntentResult{
 		Status: status, SessionID: sessionID, PublicationID: &publication.ID,
-		ReviewBypassed: reviewBypassed,
+		ReviewBypassed: reviewBypassed, Reason: reviewerReason,
 	}, nil
 }
 

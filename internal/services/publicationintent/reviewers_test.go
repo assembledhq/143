@@ -117,10 +117,13 @@ func TestAutomaticPublicationFreezesReviewerMetadataAcrossRetries(t *testing.T) 
 	require.NoError(t, err, "completion policy should create the first durable publication")
 	require.Equal(t, []any{"acme/team"}, f.jobs.payload["team_reviewers"], "automatic request must include staged normalized team")
 	intents.intent.TeamReviewers = []string{"acme/changed"}
-	f.publications.captured.State = models.SessionPublicationStateRetryableFailed
+	f.publications.captured.State = models.SessionPublicationStateCompletedNoop
+	f.jobs.payload = nil
 	_, err = f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{Source: models.SessionPublicationSourceAutomation, TriggerKind: models.SessionPublicationTriggerPolicy})
 	require.NoError(t, err, "retryable publication should rejoin its original intent")
+	require.NotNil(t, f.jobs.payload, "terminal reopen should rebuild and queue a payload rather than rejoin early")
 	require.Equal(t, []any{"acme/team"}, f.jobs.payload["team_reviewers"], "retry must retain first durable reviewer choices even if mutable staging changed")
+	require.Equal(t, false, f.jobs.payload["draft"], "terminal reopen must retain the original ready choice with the teams")
 	require.Equal(t, 1, intents.freezes, "only first publication may freeze staged metadata")
 }
 

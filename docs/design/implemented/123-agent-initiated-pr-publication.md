@@ -89,16 +89,25 @@ primary changeset and returns `awaiting_automatic_publication`. It does not
 create a requested publication or enqueue a job while implementation is still
 running. A separate automation prompt explains this metadata handoff without
 changing ordinary agent-readiness rules or per-target publication restrictions.
+Registration rejects a configured handoff that will remain a draft. If a later
+policy change makes staged teams incompatible, completion preserves the
+configured publication policy and reports that the optional teams were omitted.
+An infrastructure failure resolving readiness retains the metadata and returns
+an error for retry instead of discarding it.
 
 Normal automatic publication freezes the staged teams into its durable request
 payload. Team requests run after the PR's draft and review gates are satisfied,
 using the publication's GitHub identity. Completion replay performs any missing
-follow-through before reporting PR creation as successful.
+follow-through. An incomplete team request remains a retryable job outcome
+without undoing the created-PR checkpoint or suppressing PR-opened effects.
+Other teams are still attempted. Automatic merge waits for the requested review
+handoff to complete.
 
 Outside the draft-first workflow, an explicit or inherited draft choice with
 requested teams is rejected before publication. A manual caller can explicitly
 select a ready PR with `--draft false`. A resolved ready choice is frozen with
-the teams so a later default change cannot invalidate the handoff.
+the teams and retained across publication retries or review bypasses so a later
+default change cannot invalidate the handoff.
 
 A per-publication, per-team receipt survives retries and review completion.
 GitHub's current pending-reviewer list alone is insufficient: reviewers can

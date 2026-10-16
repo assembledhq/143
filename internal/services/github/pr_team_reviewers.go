@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -51,10 +52,16 @@ func (s *PRService) RequestPublicationTeamReviews(ctx context.Context, run *mode
 	owner, repoName := splitRepo(pr.GitHubRepo)
 	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/requested_reviewers", owner, repoName, pr.GitHubPRNumber)
 	var token string
+	var failures []error
 	for _, team := range teams {
+		if err := ctx.Err(); err != nil {
+			failures = append(failures, fmt.Errorf("request review from %s: %w", team, err))
+			continue
+		}
 		receipt, claimed, err := s.teamReviewRequests.Begin(ctx, publication.OrgID, publication.ID, team)
 		if err != nil {
-			return fmt.Errorf("reserve team review request: %w", err)
+			failures = append(failures, fmt.Errorf("reserve review request for %s: %w", team, err))
+			continue
 		}
 		if receipt.State == models.TeamReviewRequestRequested {
 			continue
@@ -63,18 +70,30 @@ func (s *PRService) RequestPublicationTeamReviews(ctx context.Context, run *mode
 			resolution, installationID, resolveErr := s.originalPublicationPublisher(ctx, run, pr, publication)
 			if resolveErr != nil {
 				if claimed {
-					resolveErr = errors.Join(resolveErr, s.teamReviewRequests.MarkRetryable(ctx, publication.OrgID, publication.ID, team))
+					resolveErr = errors.Join(resolveErr, s.writeTeamReviewReceipt(ctx, publication.OrgID, publication.ID, team, false))
 				}
-				return resolveErr
+				failures = append(failures, fmt.Errorf("resolve review publisher for %s: %w", team, resolveErr))
+				continue
 			}
 			token = resolution.Token
 			ctx = withGitHubResolutionContext(ctx, resolution, installationID, "pr_team_review_request")
 		}
 		if err := s.requestReservedTeamReview(ctx, token, path, publication.OrgID, publication.ID, team, claimed); err != nil {
-			return err
+			failures = append(failures, fmt.Errorf("request review from %s: %w", team, err))
 		}
 	}
-	return nil
+	return errors.Join(failures...)
+}
+
+// Receipt finalization is cleanup after a known outcome. A canceled job must
+// not turn proven pre-POST failure into a permanently uncertain reservation.
+func (s *PRService) writeTeamReviewReceipt(ctx context.Context, orgID, publicationID uuid.UUID, team string, requested bool) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if requested {
+		return s.teamReviewRequests.MarkRequested(writeCtx, orgID, publicationID, team)
+	}
+	return s.teamReviewRequests.MarkRetryable(writeCtx, orgID, publicationID, team)
 }
 
 func (s *PRService) originalPublicationPublisher(ctx context.Context, run *models.Session, pr *models.PullRequest, publication *models.SessionPublication) (*identity.Resolution, int64, error) {
@@ -114,31 +133,34 @@ func (s *PRService) requestReservedTeamReview(ctx context.Context, token, path s
 	if err != nil {
 		if claimed {
 			// No mutation was attempted, so a later attempt may safely retry.
-			err = errors.Join(err, s.teamReviewRequests.MarkRetryable(ctx, orgID, publicationID, team))
+			err = errors.Join(err, s.writeTeamReviewReceipt(ctx, orgID, publicationID, team, false))
 		}
 		return err
 	}
 	if pending {
-		return s.teamReviewRequests.MarkRequested(ctx, orgID, publicationID, team)
+		return s.writeTeamReviewReceipt(ctx, orgID, publicationID, team, true)
 	}
 	if !claimed {
 		return fmt.Errorf("%w: %s", ErrTeamReviewRequestUncertain, team)
 	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, s.writeTeamReviewReceipt(ctx, orgID, publicationID, team, false))
+	}
 	_, err = s.doGitHubRequest(ctx, token, http.MethodPost, path, map[string]any{"team_reviewers": []string{slug}})
 	if err == nil {
-		return s.teamReviewRequests.MarkRequested(ctx, orgID, publicationID, team)
+		return s.writeTeamReviewReceipt(ctx, orgID, publicationID, team, true)
 	}
 	var apiErr *GitHubAPIError
 	if errors.As(err, &apiErr) && apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 {
 		// An explicit rejection did not request a review. Keep retry eligibility
 		// durable; transport errors and server failures remain uncertain.
-		return errors.Join(fmt.Errorf("request team review: %w", err), s.teamReviewRequests.MarkRetryable(ctx, orgID, publicationID, team))
+		return errors.Join(fmt.Errorf("request team review: %w", err), s.writeTeamReviewReceipt(ctx, orgID, publicationID, team, false))
 	}
 	// A timeout, interrupted response, or server error may follow a successful
 	// write. Absence cannot prove failure: the team might already have reviewed.
 	pending, reconcileErr := s.pendingTeamReview(ctx, token, path, slug)
 	if reconcileErr == nil && pending {
-		return s.teamReviewRequests.MarkRequested(ctx, orgID, publicationID, team)
+		return s.writeTeamReviewReceipt(ctx, orgID, publicationID, team, true)
 	}
 	return errors.Join(fmt.Errorf("%w: %s", ErrTeamReviewRequestUncertain, team), err, reconcileErr)
 }

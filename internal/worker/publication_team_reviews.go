@@ -14,6 +14,8 @@ type publicationTeamReviewRequester interface {
 	RequestPublicationTeamReviews(context.Context, *models.Session, *models.PullRequest, *models.SessionPublication, []string) error
 }
 
+var errPublicationTeamReviewsIncomplete = errors.New("pull request opened but team review requests are incomplete")
+
 func completePublicationTeamReviews(ctx context.Context, stores *Stores, services *Services, run models.Session, input openPRJobInput, changesetID *uuid.UUID, pr *models.PullRequest) error {
 	if len(input.TeamReviewers) == 0 {
 		return nil

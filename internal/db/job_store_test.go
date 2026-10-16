@@ -1001,7 +1001,7 @@ func TestJobStore_LeaseTerminalHelpers(t *testing.T) {
 				return store.RetryWithLease(ctx, jobID, lockToken, "retry", time.Now())
 			},
 			setupMock: func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID) {
-				mock.ExpectExec("UPDATE jobs SET status = 'pending'").
+				mock.ExpectExec("UPDATE jobs j SET status = 'pending'").
 					WithArgs("retry", pgxmock.AnyArg(), jobID, lockToken).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 			},

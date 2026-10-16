@@ -41,21 +41,29 @@ func (c *Coordinator) normalizeTeamReviewers(ctx context.Context, orgID uuid.UUI
 	return teams, nil
 }
 
-func (c *Coordinator) freezeReviewerDraftPolicy(ctx context.Context, orgID uuid.UUID, payload map[string]any) error {
+func (c *Coordinator) reviewerDraftChoice(ctx context.Context, orgID uuid.UUID, payload map[string]any) (bool, error) {
 	draft, explicit := payload["draft"].(bool)
 	if !explicit {
 		if c.organizations == nil {
-			return &Error{Code: ErrorPublicationFailed, Err: errors.New("organization draft policy is unavailable")}
+			return false, &Error{Code: ErrorPublicationFailed, Err: errors.New("organization draft policy is unavailable")}
 		}
 		org, err := c.organizations.GetByID(ctx, orgID)
 		if err != nil {
-			return &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("load reviewer publication draft policy: %w", err)}
+			return false, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("load reviewer publication draft policy: %w", err)}
 		}
 		settings, err := models.ParseOrgSettings(org.Settings)
 		if err != nil {
-			return &Error{Code: ErrorPublicationFailed, Err: err}
+			return false, &Error{Code: ErrorPublicationFailed, Err: err}
 		}
 		draft = settings.PRDraftDefault
+	}
+	return draft, nil
+}
+
+func (c *Coordinator) freezeReviewerDraftPolicy(ctx context.Context, orgID uuid.UUID, payload map[string]any) error {
+	draft, err := c.reviewerDraftChoice(ctx, orgID, payload)
+	if err != nil {
+		return err
 	}
 	if draft {
 		return &Error{Code: ErrorInvalidPublicationOptions, Err: errors.New("team_reviewers requires a ready pull request; the configured draft default requires an explicit draft=false")}
@@ -63,6 +71,28 @@ func (c *Coordinator) freezeReviewerDraftPolicy(ctx context.Context, orgID uuid.
 	// Freeze the resolved default alongside reviewer intent, so later settings
 	// changes cannot turn the accepted ready publication into a draft.
 	payload["draft"] = false
+	return nil
+}
+
+func (c *Coordinator) validateAutomaticReviewerReadiness(ctx context.Context, orgID uuid.UUID, session models.Session) error {
+	repo, err := c.repositories.GetByID(ctx, orgID, *session.RepositoryID)
+	if err != nil {
+		return &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("load automatic reviewer handoff policy: %w", err)}
+	}
+	settings, err := models.ParseRepositorySettings(repo.Settings)
+	if err != nil {
+		// Match the completion coordinator's conservative pre-publish fallback.
+		c.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("falling back to pre-publish policy for automatic reviewer metadata")
+	} else if settings.PRHandoffMode == models.PRHandoffModeDraftFirst {
+		return nil
+	}
+	draft, err := c.reviewerDraftChoice(ctx, orgID, nil)
+	if err != nil {
+		return err
+	}
+	if draft {
+		return &Error{Code: ErrorInvalidPublicationOptions, Err: errors.New("automatic publication is configured to remain a draft; team_reviewers requires a ready pull request or draft_first handoff")}
+	}
 	return nil
 }
 
@@ -128,6 +158,9 @@ func (c *Coordinator) stageAutomationPRIntent(ctx context.Context, orgID uuid.UU
 	if len(req.TeamReviewers) > 0 {
 		teams, err := c.normalizeTeamReviewers(ctx, orgID, session, req.TeamReviewers)
 		if err != nil {
+			return nil, err
+		}
+		if err := c.validateAutomaticReviewerReadiness(ctx, orgID, session); err != nil {
 			return nil, err
 		}
 		if err := c.prIntents.Stage(ctx, orgID, models.SessionPRIntent{

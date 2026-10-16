@@ -389,7 +389,7 @@ func TestWorker_Poll(t *testing.T) {
 				})
 
 				expectClaim(mock, jobID, orgID, "retry_job", json.RawMessage(`{}`), now, lockToken)
-				mock.ExpectExec("UPDATE jobs\\s+SET status = 'pending'").
+				mock.ExpectExec("UPDATE jobs j\\s+SET status = 'pending'").
 					WithArgs(handlerErr.Error(), pgxmock.AnyArg(), jobID, lockToken).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
@@ -859,7 +859,7 @@ func TestWorker_Poll_RunsDeadLetterHooksOnTerminalPaths(t *testing.T) {
 			createdAt:   time.Now(),
 			attempts:    1,
 			maxAttempts: 3,
-			finalSQL:    "UPDATE jobs\\s+SET status = 'pending'",
+			finalSQL:    "UPDATE jobs j\\s+SET status = 'pending'",
 			finalArgs:   4,
 			expectHooks: 0,
 		},

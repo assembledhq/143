@@ -56,6 +56,7 @@ func TestSessionActivityPhaseStoreStartInboxPhaseMarksEntriesApplied(t *testing.
 	mock.ExpectQuery("(?s)SELECT id FROM thread_runtimes.+lease_expires_at > \\$6.+FOR UPDATE").
 		WithArgs(orgID, sessionID, threadID, runtimeID, leaseToken, startedAt).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(runtimeID))
+	mock.ExpectExec("WITH terminal_owners AS MATERIALIZED").WithArgs(orgID, sessionID, threadID, runtimeID, startedAt).WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectQuery("INSERT INTO session_activity_phases").
 		WithArgs(
 			orgID, sessionID, threadID, 2, startedAt, &runtimeID,
@@ -134,6 +135,7 @@ func TestSessionActivityPhaseStoreStartRuntimePhase(t *testing.T) {
 			mock.ExpectQuery("(?s)SELECT id FROM thread_runtimes.+lease_expires_at > \\$6.+FOR UPDATE").
 				WithArgs(orgID, sessionID, threadID, runtimeID, leaseToken, startedAt).
 				WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(runtimeID))
+			mock.ExpectExec("WITH terminal_owners AS MATERIALIZED").WithArgs(orgID, sessionID, threadID, runtimeID, startedAt).WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 			mock.ExpectQuery("INSERT INTO session_activity_phases").
 				WithArgs(orgID, sessionID, threadID, 1, startedAt, &runtimeID, tt.trigger, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows(activityPhaseTestColumns).AddRow(

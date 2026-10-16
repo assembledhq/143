@@ -643,6 +643,9 @@ register its requested teams before the agent finishes. It returns
 publication. The normal completion and review gates still determine when the
 PR becomes ready. This path requires the existing publishing capability and
 does not change the automation's identity or grant new permissions.
+Registration is rejected if the configured publication will remain a draft.
+If draft policy changes after registration, normal publication follows that
+policy and reports that the incompatible team requests were omitted.
 
 Automation metadata calls use only the team option; draft and author choices
 remain controlled by the configured publication policy:
@@ -654,6 +657,9 @@ remain controlled by the configured publication policy:
 Confirmed team requests are recorded durably. Publication retries do not
 request the same team again after it has finished reviewing and removed its
 pending request. An uncertain request outcome is reconciled before any retry.
+Failure to request one team does not prevent requests to the remaining teams
+or undo an opened PR. Incomplete requests remain publication-job errors;
+automatic merge waits for the requested review handoff.
 
 ### `pr update`
 

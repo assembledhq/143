@@ -8297,22 +8297,46 @@ func parseSlackTimestamp(ts string) time.Time {
 // run_agent handler executes an agent run end-to-end via the orchestrator.
 func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			SessionID           string `json:"session_id"`
-			OrgID               string `json:"org_id"`
-			ThreadID            string `json:"thread_id"`
-			HumanInputRequestID string `json:"human_input_request_id"`
-			// Per-target automation turn fields, produced by
-			// automationservice.AutomationTurnJobPayload for a fresh
-			// generation's first turn (design doc 125).
-			AutomationRunID   string `json:"automation_run_id"`
-			TargetGeneration  int    `json:"target_generation"`
-			ContinuationMode  string `json:"continuation_mode"`
-			HeadSHA           string `json:"head_sha"`
-			PullRequestNumber int    `json:"pull_request_number"`
-		}
+		var input continueSessionJobInput
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal run_agent payload: %w", err)
+		}
+		if input.RecoveryUnproven {
+			return &FatalError{Err: agent.ErrContinuationRecoveryNeedsReconciliation}
+		}
+		var recoveryOpts *agent.ContinueSessionOptions
+		var recoverOwnedSession func(context.Context, *models.Session, *agent.ContinueSessionOptions) error
+		if input.ExecutionPurpose != "" {
+			if input.ExecutionPurpose != models.SessionExecutionPurposeCheckpointRecovery {
+				return &FatalError{Err: errors.New("run_agent recovery requires checkpoint recovery purpose")}
+			}
+			runtimeID, runtimeErr := uuid.Parse(input.RecoveryRuntimeID)
+			threadID, threadErr := uuid.Parse(input.ThreadID)
+			messageID, messageErr := strconv.ParseInt(input.QueuedMessageID, 10, 64)
+			if runtimeErr != nil || runtimeID == uuid.Nil || threadErr != nil || threadID == uuid.Nil || messageErr != nil || messageID <= 0 || input.CommandType != "" || input.FeedbackBatchID != "" || input.AutomationRunID != "" || input.CodeReviewAssessmentID != "" || input.HumanInputRequestID != "" || input.ChangesetID != "" || input.PostSuccessAction != "" {
+				return &FatalError{Err: errors.New("job recovery requires an exact ordinary continuation receipt")}
+			}
+			if len(input.RecoveryMessageIDs) > 1000 {
+				return &FatalError{Err: errors.New("recovery task input exceeds preserved identity limit")}
+			}
+			for _, id := range input.RecoveryMessageIDs {
+				if id <= 0 {
+					return &FatalError{Err: errors.New("recovery task input requires positive message identities")}
+				}
+			}
+			recoveryOpts = &agent.ContinueSessionOptions{ExecutionPurpose: input.ExecutionPurpose, RecoveryRuntimeID: &runtimeID, RecoveryMessageIDs: input.RecoveryMessageIDs, ThreadID: &threadID, QueuedMessageID: &messageID}
+			if services == nil {
+				return &FatalError{Err: errors.New("exact checkpoint recovery is unavailable")}
+			}
+			recoverer, ok := services.Orchestrator.(interface {
+				RecoverSessionWithOptions(context.Context, *models.Session, *agent.ContinueSessionOptions) error
+			})
+			if !ok {
+				return &FatalError{Err: errors.New("orchestrator does not support exact checkpoint recovery")}
+			}
+			recoverOwnedSession = recoverer.RecoverSessionWithOptions
+		} else if input.RecoveryRuntimeID != "" || len(input.RecoveryMessageIDs) > 0 {
+			return &FatalError{Err: errors.New("recovery runtime and input identities require job recovery purpose")}
 		}
 		var automationTurn *agent.AutomationTurnContinueOptions
 		if input.AutomationRunID != "" {
@@ -8446,11 +8470,24 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		enqueueSessionPreviewPrewarmOnStart(ctx, stores, services, logger, run)
 
 		var runErr error
-		switch models.SessionStatus(run.Status) {
-		case models.SessionStatusRunning:
-			runErr = services.Orchestrator.RecoverSession(jobCtx, &run)
-		default:
-			runErr = services.Orchestrator.RunAgent(jobCtx, &run)
+		if recoveryOpts != nil {
+			// The recorded attempt, rather than mutable session status, owns
+			// the recovery target after provider or lifecycle writes advance.
+			runErr = recoverOwnedSession(jobCtx, &run, recoveryOpts)
+		} else {
+			switch models.SessionStatus(run.Status) {
+			case models.SessionStatusRunning:
+				runErr = services.Orchestrator.RecoverSession(jobCtx, &run)
+			default:
+				runErr = services.Orchestrator.RunAgent(jobCtx, &run)
+			}
+		}
+		if errors.Is(runErr, agent.ErrContinuationRecoveryNeedsReconciliation) {
+			logger.Error().Err(runErr).Str("session_id", runID.String()).Str("thread_id", input.ThreadID).Msg("provider response retained; checkpoint recovery lifecycle requires reconciliation")
+			return runErr
+		}
+		if errors.Is(runErr, agent.ErrContinuationInputAlreadyApplied) {
+			return nil
 		}
 		if automationTurn != nil {
 			// A result marker means the attempt ended, whatever the
@@ -9730,25 +9767,29 @@ func finalizeThreadCancellationIfRequested(
 // automationservice.AutomationTurnJobPayload; the two must agree on field
 // names and types (see TestAutomationTurnJobPayloadContract).
 type continueSessionJobInput struct {
-	SessionID              string `json:"session_id"`
-	OrgID                  string `json:"org_id"`
-	ThreadID               string `json:"thread_id"`
-	ChangesetID            string `json:"changeset_id"`
-	ChangesetLeaseHolderID string `json:"changeset_lease_holder_id"`
-	PullRequestID          string `json:"pull_request_id"`
-	FeedbackBatchID        string `json:"feedback_batch_id"`
-	StructuredPrompt       string `json:"structured_prompt"`
-	RepairRunID            string `json:"repair_run_id"`
-	CommandType            string `json:"command_type"`
-	HealthVersion          int64  `json:"health_version"`
-	HeadSHA                string `json:"head_sha"`
-	WorkspaceMode          string `json:"workspace_mode"`
-	PullRequestNumber      int    `json:"pull_request_number"`
-	AutoAttempt            bool   `json:"auto_attempt"`
-	HumanInputRequestID    string `json:"human_input_request_id"`
-	QueuedMessageID        string `json:"queued_message_id"`
-	PostSuccessAction      string `json:"post_success_action"`
-	PostSuccessAuthorMode  string `json:"post_success_author_mode"`
+	ExecutionPurpose       models.SessionExecutionPurpose `json:"execution_purpose"`
+	RecoveryRuntimeID      string                         `json:"recovery_runtime_id"`
+	RecoveryMessageIDs     []int64                        `json:"recovery_message_ids"`
+	RecoveryUnproven       bool                           `json:"recovery_unproven"`
+	SessionID              string                         `json:"session_id"`
+	OrgID                  string                         `json:"org_id"`
+	ThreadID               string                         `json:"thread_id"`
+	ChangesetID            string                         `json:"changeset_id"`
+	ChangesetLeaseHolderID string                         `json:"changeset_lease_holder_id"`
+	PullRequestID          string                         `json:"pull_request_id"`
+	FeedbackBatchID        string                         `json:"feedback_batch_id"`
+	StructuredPrompt       string                         `json:"structured_prompt"`
+	RepairRunID            string                         `json:"repair_run_id"`
+	CommandType            string                         `json:"command_type"`
+	HealthVersion          int64                          `json:"health_version"`
+	HeadSHA                string                         `json:"head_sha"`
+	WorkspaceMode          string                         `json:"workspace_mode"`
+	PullRequestNumber      int                            `json:"pull_request_number"`
+	AutoAttempt            bool                           `json:"auto_attempt"`
+	HumanInputRequestID    string                         `json:"human_input_request_id"`
+	QueuedMessageID        string                         `json:"queued_message_id"`
+	PostSuccessAction      string                         `json:"post_success_action"`
+	PostSuccessAuthorMode  string                         `json:"post_success_author_mode"`
 	// Per-target automation turns (design doc 125); the producer is
 	// automationservice.AutomationTurnJobPayload.
 	AutomationRunID        string `json:"automation_run_id"`
@@ -9762,6 +9803,42 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var input continueSessionJobInput
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
+		}
+		if input.ExecutionPurpose != "" {
+			if err := input.ExecutionPurpose.Validate(); err != nil {
+				return &FatalError{Err: err}
+			}
+		}
+		if input.RecoveryUnproven {
+			return &FatalError{Err: agent.ErrContinuationRecoveryNeedsReconciliation}
+		}
+		var recoveryRuntimeID *uuid.UUID
+		if input.ExecutionPurpose == models.SessionExecutionPurposeCheckpointRecovery {
+			runtimeID, runtimeErr := uuid.Parse(input.RecoveryRuntimeID)
+			threadID, threadErr := uuid.Parse(input.ThreadID)
+			messageID, messageErr := strconv.ParseInt(input.QueuedMessageID, 10, 64)
+			if runtimeErr != nil || runtimeID == uuid.Nil || threadErr != nil || threadID == uuid.Nil || messageErr != nil || messageID <= 0 || input.CommandType != "" || input.FeedbackBatchID != "" || input.AutomationRunID != "" || input.CodeReviewAssessmentID != "" || input.HumanInputRequestID != "" || input.ChangesetID != "" || input.PostSuccessAction != "" {
+				return &FatalError{Err: errors.New("job recovery requires an exact ordinary continuation receipt")}
+			}
+			if len(input.RecoveryMessageIDs) > 1000 {
+				return &FatalError{Err: errors.New("recovery task input exceeds preserved identity limit")}
+			}
+			for _, id := range input.RecoveryMessageIDs {
+				if id <= 0 {
+					return &FatalError{Err: errors.New("recovery task input requires positive message identities")}
+				}
+			}
+			recoveryRuntimeID = &runtimeID
+		} else if input.RecoveryRuntimeID != "" {
+			return &FatalError{Err: errors.New("recovery runtime requires job recovery purpose")}
+		}
+		if input.ExecutionPurpose == models.SessionExecutionPurposeCheckpointRetry {
+			if threadID, err := uuid.Parse(input.ThreadID); err != nil || threadID == uuid.Nil {
+				return &FatalError{Err: errors.New("checkpoint retry requires a valid thread ID")}
+			}
+		}
+		if input.ExecutionPurpose == models.SessionExecutionPurposeCheckpointRetry && (input.ThreadID == "" || input.QueuedMessageID != "" || input.HumanInputRequestID != "" || input.CommandType != "" || input.FeedbackBatchID != "" || input.AutomationRunID != "" || input.CodeReviewAssessmentID != "" || input.ChangesetID != "" || input.PostSuccessAction != "") {
+			return &FatalError{Err: errors.New("checkpoint retry cannot combine with new input or another continuation mode")}
 		}
 		if input.PostSuccessAction != "" && input.PostSuccessAction != continuePostSuccessActionPushPRChanges {
 			return fmt.Errorf("unsupported continue_session post_success_action: %s", input.PostSuccessAction)
@@ -10069,6 +10146,14 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			continueOpts.ChangesetID = &changesetID
 		}
 
+		if input.ExecutionPurpose != "" {
+			if continueOpts == nil {
+				continueOpts = &agent.ContinueSessionOptions{}
+			}
+			continueOpts.ExecutionPurpose = input.ExecutionPurpose
+			continueOpts.RecoveryRuntimeID = recoveryRuntimeID
+			continueOpts.RecoveryMessageIDs = input.RecoveryMessageIDs
+		}
 		var stopLeaseHeartbeat context.CancelFunc
 		if targetChangeset != nil {
 			holderID := uuid.New()
@@ -10142,6 +10227,18 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			jobCtx = agent.WithAutomationTurn(jobCtx, continueOpts.AutomationTurn)
 		}
 		continueErr := services.Orchestrator.ContinueSession(jobCtx, &session, continueOpts)
+		if errors.Is(continueErr, agent.ErrContinuationRecoveryNeedsReconciliation) {
+			// Keep the provider's durable response intact. This is an explicit
+			// reconciliation failure, not a failed provider turn or a successful
+			// job: ordinary bounded job retries surface the unresolved lifecycle.
+			logger.Error().Err(continueErr).Str("session_id", sessionID.String()).Str("thread_id", input.ThreadID).Msg("provider response retained; continuation lifecycle requires reconciliation")
+			return continueErr
+		}
+		if errors.Is(continueErr, agent.ErrContinuationInputAlreadyApplied) {
+			// Do not advance the thread turn or run post-success effects for a
+			// duplicate queue job whose input already reached a provider phase.
+			return nil
+		}
 		if automationRunID != nil && continueErr != nil {
 			// The attempt ended even though the orchestrator returned an
 			// error, so its result is the run's terminal record and the job
@@ -11770,6 +11867,9 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			if handlerErr == nil || activePublication == nil || publicationFailureHandled || stores == nil || stores.SessionPublications == nil {
 				return
 			}
+			if errors.Is(handlerErr, errPublicationTeamReviewsIncomplete) {
+				return
+			}
 			terminal := shouldDeadLetterPRError(handlerErr)
 			stateErr := stores.SessionPublications.MarkFailed(
 				ctx,
@@ -12299,10 +12399,16 @@ func completeOpenPRJob(
 			}
 		}
 	}
-	if err := completePublicationTeamReviews(ctx, stores, services, run, input, changesetID, pr); err != nil {
-		return err
+	teamReviewErr := completePublicationTeamReviews(ctx, stores, services, run, input, changesetID, pr)
+	if teamReviewErr != nil {
+		logger.Warn().Err(teamReviewErr).
+			Str("session_id", run.ID.String()).
+			Str("pull_request_id", pr.ID.String()).
+			Msg("pull request opened with incomplete team review requests")
 	}
-	if input.MergeWhenReady {
+	// Requested reviews must be handed off before automatic merge can proceed,
+	// but their failure does not undo the already-created pull request.
+	if input.MergeWhenReady && teamReviewErr == nil {
 		requestedByUserID, err := uuid.Parse(input.RequestedByUserID)
 		if err != nil {
 			queueErr := fmt.Errorf("parse merge_when_ready requesting user id: %w", err)
@@ -12354,6 +12460,9 @@ func completeOpenPRJob(
 	// must retry those effects; once succeeded, later job replays suppress them.
 	if stateErr := updateChangesetPRCreationState(ctx, stores, run.OrgID, run.ID, changesetID, models.PRCreationStateSucceeded, ""); stateErr != nil {
 		return fmt.Errorf("mark PR creation as succeeded: %w", stateErr)
+	}
+	if teamReviewErr != nil {
+		return fmt.Errorf("%w: %w", errPublicationTeamReviewsIncomplete, teamReviewErr)
 	}
 	return nil
 }

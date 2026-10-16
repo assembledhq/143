@@ -70,3 +70,15 @@ func TestRunAgent_InitialSeedAdmissionPrecedesProvider(t *testing.T) {
 		})
 	}
 }
+
+func (s *initialSeedAdmissionInbox) ListAppliedMessageIDs(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []int64) ([]int64, error) {
+	return nil, nil
+}
+
+func (s *initialSeedAdmissionInbox) InspectContinuationRecovery(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64) (bool, bool, error) {
+	return false, false, nil
+}
+
+func (s *initialSeedAdmissionInbox) ListAppliedRecoveryMessageIDs(_ context.Context, _, _, _ uuid.UUID, id int64, _ []int64) ([]int64, error) {
+	return []int64{id}, nil
+}

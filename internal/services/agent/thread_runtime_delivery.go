@@ -33,6 +33,9 @@ type ThreadRuntimeStore interface {
 }
 
 type ThreadInboxStore interface {
+	ListAppliedRecoveryMessageIDs(ctx context.Context, orgID, sessionID, threadID uuid.UUID, messageID int64, requested []int64) ([]int64, error)
+	InspectContinuationRecovery(ctx context.Context, orgID, sessionID, threadID, runtimeID uuid.UUID, messageID int64) (bool, bool, error)
+	ListAppliedMessageIDs(ctx context.Context, orgID, sessionID, threadID uuid.UUID, messageIDs []int64) ([]int64, error)
 	AppendForMessage(ctx context.Context, orgID uuid.UUID, params db.AppendThreadInboxEntryParams) (models.ThreadInboxEntry, error)
 	ClaimDeliverableAfter(ctx context.Context, orgID, threadID, runtimeID, leaseToken uuid.UUID, ownerNodeID string, afterSequence int64, limit int) ([]models.ThreadInboxEntry, error)
 	MarkDeliveredForEntry(ctx context.Context, orgID, threadID, runtimeID, leaseToken uuid.UUID, ownerNodeID string, entryID uuid.UUID, sequenceNo int64) (int64, error)
@@ -94,6 +97,8 @@ type threadRuntimeControl struct {
 	inbox                     ThreadInboxStore
 	seedMessageIDs            []int64
 	lockDelivery              func() func()
+	flushConfirmed            func(context.Context) error
+	forgetConfirmed           func()
 	heartbeatFailureStartedAt time.Time
 	logger                    zerolog.Logger
 }
@@ -140,14 +145,16 @@ func (o *Orchestrator) startThreadRuntimeControl(ctx context.Context, session *m
 		runtime.LeaseToken = leaseToken
 	}
 	control := &threadRuntimeControl{
-		runtime:        runtime,
-		leaseDuration:  threadRuntimeLeaseDuration,
-		runtimes:       o.threadRuntimes,
-		holders:        o.sandboxHolders,
-		inbox:          o.threadInbox,
-		seedMessageIDs: append([]int64(nil), seedMessageIDs...),
-		logger:         log,
-		lockDelivery:   func() func() { return o.acquireThreadDelivery(threadID) },
+		runtime:         runtime,
+		leaseDuration:   threadRuntimeLeaseDuration,
+		runtimes:        o.threadRuntimes,
+		holders:         o.sandboxHolders,
+		inbox:           o.threadInbox,
+		seedMessageIDs:  append([]int64(nil), seedMessageIDs...),
+		logger:          log,
+		lockDelivery:    func() func() { return o.acquireThreadDelivery(threadID) },
+		flushConfirmed:  func(ctx context.Context) error { return o.flushConfirmedThreadInput(ctx, runtime, threadID, true) },
+		forgetConfirmed: func() { o.confirmedThreadInput.Delete(confirmedThreadInputKeyFor(runtime, threadID)) },
 	}
 	if o.sandboxHolders != nil {
 		if _, err := o.sandboxHolders.CreateActive(ctx, session.OrgID, db.CreateSessionSandboxHolderParams{
@@ -347,11 +354,17 @@ func (c *threadRuntimeControl) Close(ctx context.Context, status models.ThreadRu
 		defer unlock()
 	}
 
-	// Waiting for a bounded delivery must not consume the cleanup write budget.
+	if c.flushConfirmed != nil {
+		if err := c.flushConfirmed(ctx); err != nil {
+			c.logger.Warn().Err(err).Str("runtime_id", c.runtime.ID.String()).Msg("confirmed provider input acknowledgment failed before runtime closure; preserving uncertainty")
+		}
+	}
+
+	// Joining delivery and its acknowledgment retry must not consume the
+	// independent terminal/holder cleanup budget.
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), threadRuntimeStateUpdateTimeout)
 	defer cancel()
 	ctx = writeCtx
-
 	if c.runtimes != nil {
 		ok, err := c.runtimes.MarkTerminalWithLease(ctx, c.runtime.OrgID, c.runtime.ID, c.runtime.LeaseToken, status, stopReason, lastError)
 		if err != nil {
@@ -362,6 +375,8 @@ func (c *threadRuntimeControl) Close(ctx context.Context, status models.ThreadRu
 			c.logger.Warn().
 				Str("runtime_id", c.runtime.ID.String()).
 				Msg("thread runtime terminal mark was fenced by lease state")
+		} else if c.forgetConfirmed != nil {
+			c.forgetConfirmed()
 		}
 	}
 	if c.holders != nil {
@@ -574,6 +589,17 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 		runtime.LastAckedSequence = terminalSequence
 	}
 
+	if receipt, ok := o.confirmedThreadInput.Load(confirmedThreadInputKeyFor(runtime, threadID)); ok {
+		if err := o.flushConfirmedThreadInput(ctx, runtime, threadID, false); err != nil {
+			return fmt.Errorf("retry confirmed thread input acknowledgment: %w", err)
+		}
+		sequence := receipt.(int64)
+		runtime.LastDeliveredSequence = max(runtime.LastDeliveredSequence, sequence)
+		runtime.LastAckedSequence = max(runtime.LastAckedSequence, sequence)
+	}
+	if !o.threadCancels.hasHandle(threadID) || runtime.Status != models.ThreadRuntimeStatusLive {
+		return nil
+	}
 	formatter := o.threadRuntimeInputFormatter(runtime.AgentType)
 
 	entries, err := o.threadInbox.ClaimDeliverableAfter(ctx, orgID, threadID, runtime.ID, runtime.LeaseToken, runtime.OwnerNodeID, runtime.LastDeliveredSequence, threadInboxDeliveryBatchSize)
@@ -589,7 +615,7 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 		if deliveredSequenceEnd == 0 {
 			return nil
 		}
-		if err := o.acknowledgeDeliveredThreadInboxSegment(ctx, runtime, threadID, deliveredSequenceEnd); err != nil {
+		if err := o.flushConfirmedThreadInput(ctx, runtime, threadID, false); err != nil {
 			return err
 		}
 		runtime.LastDeliveredSequence = max(runtime.LastDeliveredSequence, deliveredSequenceEnd)
@@ -662,7 +688,9 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 		err = o.threadCancels.DeliverInput(writeCtx, threadID, input)
 		cancel()
 		if errors.Is(err, ErrThreadHandleUnavailable) || errors.Is(err, ErrInputNotOpen) {
-			resetRows, resetErr := o.threadInbox.ResetUnsentDelivery(ctx, orgID, threadID, runtime.ID, runtime.LeaseToken, entry.ID)
+			resetCtx, resetCancel := context.WithTimeout(context.WithoutCancel(ctx), threadRuntimeStateUpdateTimeout)
+			resetRows, resetErr := o.threadInbox.ResetUnsentDelivery(resetCtx, orgID, threadID, runtime.ID, runtime.LeaseToken, entry.ID)
+			resetCancel()
 			if resetErr != nil {
 				return fmt.Errorf("reset unsent inbox write attempt %d: %w", entry.SequenceNo, resetErr)
 			}
@@ -689,9 +717,57 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 			return fmt.Errorf("deliver thread inbox entry %d to runtime handle: %w", entry.SequenceNo, err)
 		}
 
+		o.rememberConfirmedThreadInput(runtime, threadID, entry.SequenceNo)
 		deliveredSequenceEnd = entry.SequenceNo
 	}
 	return flushDelivered()
+}
+
+// A receipt exists only after WriteInput returned nil. The exact runtime lease
+// scopes it independently of the short-lived local delivery lock entry.
+type confirmedThreadInputKey struct{ orgID, threadID, runtimeID, leaseToken uuid.UUID }
+
+func confirmedThreadInputKeyFor(runtime models.ThreadRuntime, threadID uuid.UUID) confirmedThreadInputKey {
+	return confirmedThreadInputKey{runtime.OrgID, threadID, runtime.ID, runtime.LeaseToken}
+}
+
+func (o *Orchestrator) rememberConfirmedThreadInput(runtime models.ThreadRuntime, threadID uuid.UUID, sequence int64) {
+	key := confirmedThreadInputKeyFor(runtime, threadID)
+	if previous, ok := o.confirmedThreadInput.Load(key); ok && previous.(int64) > sequence {
+		return
+	}
+	o.confirmedThreadInput.Store(key, sequence)
+}
+
+// flushConfirmedThreadInput retries only acknowledgment, never provider input.
+// Its bounded detached context lets successful writes survive canceled polls.
+// Failed persistence retains the receipt for the next poll or final closure;
+// process loss still leaves the durable pre-write marker uncertain.
+func (o *Orchestrator) flushConfirmedThreadInput(ctx context.Context, runtime models.ThreadRuntime, threadID uuid.UUID, closing bool) error {
+	key := confirmedThreadInputKeyFor(runtime, threadID)
+	value, ok := o.confirmedThreadInput.Load(key)
+	if !ok {
+		return nil
+	}
+	sequence := value.(int64)
+	ackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), threadRuntimeStateUpdateTimeout)
+	defer cancel()
+	var err error
+	for range 2 {
+		if closing {
+			err = o.commitThreadInboxWatermark(ackCtx, runtime, threadID, sequence)
+		} else {
+			err = o.acknowledgeDeliveredThreadInboxSegment(ackCtx, runtime, threadID, sequence)
+		}
+		if err == nil {
+			o.confirmedThreadInput.Delete(key)
+			return nil
+		}
+		if ackCtx.Err() != nil {
+			break
+		}
+	}
+	return err
 }
 
 // acknowledgeDeliveredThreadInboxSegment creates one boundary for a

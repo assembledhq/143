@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
@@ -22,11 +21,13 @@ func (o *Orchestrator) appendAutomationPublicationIntentPrompt(ctx context.Conte
 		return nil
 	}
 	if o.automationRuns == nil {
-		return fmt.Errorf("automatic publication metadata policy is unavailable")
+		o.logger.Warn().Str("session_id", session.ID.String()).Msg("omitting optional automatic publication metadata guidance because policy is unavailable")
+		return nil
 	}
 	policy, err := o.automationRuns.AutomaticPublishPolicy(ctx, session.OrgID, *session.AutomationRunID)
 	if err != nil {
-		return fmt.Errorf("resolve automatic publication metadata guidance: %w", err)
+		o.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("omitting optional automatic publication metadata guidance because policy lookup failed")
+		return nil
 	}
 	if policy == models.AutomationPublishPolicyPullRequest {
 		input.IntegrationSkills += "\n" + prompts.AutomationPublicationIntent()

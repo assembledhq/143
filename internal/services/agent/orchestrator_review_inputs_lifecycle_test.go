@@ -241,3 +241,7 @@ func TestRunAgentReviewCheckoutFailuresPersistTerminalState(t *testing.T) {
 		})
 	}
 }
+
+func (s *reviewInputGateInboxStore) ListAppliedMessageIDs(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []int64) ([]int64, error) {
+	return nil, nil
+}

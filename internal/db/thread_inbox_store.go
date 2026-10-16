@@ -663,6 +663,28 @@ func (s *ThreadInboxStore) IsMessageAcked(ctx context.Context, orgID, threadID u
 	return acked, nil
 }
 
+// ListAppliedMessageIDs returns only inputs durably admitted to a provider phase.
+// An acknowledgment without applied_at does not prove provider admission.
+func (s *ThreadInboxStore) ListAppliedMessageIDs(ctx context.Context, orgID, sessionID, threadID uuid.UUID, messageIDs []int64) ([]int64, error) {
+	if len(messageIDs) == 0 {
+		return []int64{}, nil
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT message_id FROM thread_inbox_entries
+		WHERE org_id = $1 AND session_id = $2 AND thread_id = $3
+		  AND message_id = ANY($4::bigint[])
+		  AND delivery_state = 'acked' AND applied_at IS NOT NULL
+		ORDER BY message_id`, orgID, sessionID, threadID, messageIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list applied thread inbox messages: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return nil, fmt.Errorf("list applied thread inbox messages: %w", err)
+	}
+	return ids, nil
+}
+
 func (s *ThreadInboxStore) ListDeliverySummariesBySession(ctx context.Context, orgID, sessionID uuid.UUID) (map[uuid.UUID]models.ThreadInboxDeliverySummary, error) {
 	rows, err := s.db.Query(ctx, threadInboxDeliverySummarySelect+`
 		WHERE org_id = $1

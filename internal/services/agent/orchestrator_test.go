@@ -4768,6 +4768,7 @@ func TestContinueSession_SandboxCapacityRejectsFreshResumeBeforeCreate(t *testin
 	session.Status = models.SessionStatusIdle
 
 	d := defaultDeps()
+	d.messages.messages = []models.SessionMessage{{ID: 1, OrgID: orgID, SessionID: session.ID, Role: models.MessageRoleUser, Content: "Continue the task."}}
 	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
 		Counter:   &fakeLiveSandboxCounter{count: 1},
 		MaxActive: 1,
@@ -7191,6 +7192,7 @@ func TestContinueSession_CodeReviewPreExecutionFailureDoesNotPoisonParent(t *tes
 	session.Status = models.SessionStatusRunning
 
 	d := defaultDeps()
+	d.messages.messages = []models.SessionMessage{{ID: 1, OrgID: orgID, SessionID: session.ID, ThreadID: &reviewerThreadID, Role: models.MessageRoleUser, Content: "Review the pull request."}}
 	d.sessionThreads = &mockSessionThreadStore{}
 	d.sessions.getByIDFn = func(uuid.UUID, uuid.UUID) (models.Session, error) {
 		return *session, nil
@@ -7286,6 +7288,42 @@ func TestContinueSession_CodeReviewMessageFetchFailureRemainsRetryable(t *testin
 	require.Empty(t, d.sessions.getResultUpdates(), "a transient dependency outage should not terminalize the parent session")
 }
 
+func TestContinueSession_CodeReviewInvalidInputFailsOnlyReviewerThread(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		queued bool
+	}{
+		{name: "missing task input"},
+		{name: "queued target outside selected thread", queued: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, reviewerThreadID := testOrg(), uuid.New()
+			session := testRun(orgID, testIssue(orgID).ID)
+			session.Origin = models.SessionOriginCodeReview
+			session.Status = models.SessionStatusRunning
+			d := defaultDeps()
+			d.sessionThreads = &mockSessionThreadStore{}
+			d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+				t.Fatal("invalid reviewer input must fail before allocating a sandbox")
+				return nil, nil
+			}
+			opts := &agent.ContinueSessionOptions{ThreadID: &reviewerThreadID}
+			if tt.queued {
+				messageID, siblingID := int64(1), uuid.New()
+				opts.QueuedMessageID = &messageID
+				d.messages.messages = []models.SessionMessage{{ID: messageID, OrgID: orgID, SessionID: session.ID, ThreadID: &siblingID, Role: models.MessageRoleUser, Content: "A sibling review task."}}
+			}
+			err := buildOrchestrator(d).ContinueSession(context.Background(), session, opts)
+			require.ErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "invalid input must persist a terminal result for only its reviewer")
+			require.Equal(t, []models.ThreadStatus{models.ThreadStatusFailed}, d.sessionThreads.statusesForThread(reviewerThreadID), "the selected reviewer must retain its exact setup failure")
+			require.Empty(t, d.sessions.getResultUpdates(), "invalid reviewer input cannot terminalize the shared parent")
+		})
+	}
+}
+
 func TestContinueSession_CodeReviewThreadFailureWriteMustBeDurable(t *testing.T) {
 	t.Parallel()
 
@@ -7298,6 +7336,7 @@ func TestContinueSession_CodeReviewThreadFailureWriteMustBeDurable(t *testing.T)
 	persistErr := errors.New("temporary thread result write failure")
 
 	d := defaultDeps()
+	d.messages.messages = []models.SessionMessage{{ID: 1, OrgID: orgID, SessionID: session.ID, ThreadID: &reviewerThreadID, Role: models.MessageRoleUser, Content: "Review the pull request."}}
 	d.sessionThreads = &mockSessionThreadStore{updateResultErr: persistErr}
 
 	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &reviewerThreadID})

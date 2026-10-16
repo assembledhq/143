@@ -34,7 +34,10 @@ func (s *teamReviewReceiptStore) Begin(_ context.Context, orgID, publicationID u
 	return models.TeamReviewRequestReceipt{OrgID: orgID, PublicationID: publicationID, Team: team, State: s.state}, claimed, nil
 }
 
-func (s *teamReviewReceiptStore) MarkRequested(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (s *teamReviewReceiptStore) MarkRequested(ctx context.Context, _ uuid.UUID, _ uuid.UUID, _ string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if s.confirmErr != nil {
 		return s.confirmErr
 	}
@@ -42,7 +45,10 @@ func (s *teamReviewReceiptStore) MarkRequested(context.Context, uuid.UUID, uuid.
 	return nil
 }
 
-func (s *teamReviewReceiptStore) MarkRetryable(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (s *teamReviewReceiptStore) MarkRetryable(ctx context.Context, _ uuid.UUID, _ uuid.UUID, _ string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.state = models.TeamReviewRequestRetryable
 	return nil
 }
@@ -115,6 +121,76 @@ func TestPublicationTeamReviewReceiptsAndUncertainWrites(t *testing.T) {
 			require.Equal(t, tt.wantReads, reads, "confirmed receipts should avoid querying the ephemeral pending list")
 		})
 	}
+}
+
+func TestPublicationTeamReviewCancellationBeforePostReleasesReservation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &teamReviewReceiptStore{}
+	requests := 0
+	service := &PRService{baseURL: "https://api.github.test", logger: zerolog.Nop(), teamReviewRequests: store, httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		require.Equal(t, http.MethodGet, req.Method, "cancellation during preflight must never reach the mutation")
+		cancel()
+		return nil, context.Canceled
+	})}}
+	err := service.requestPublicationTeamReview(ctx, "publisher-token", "/repos/acme/repo/pulls/42/requested_reviewers", uuid.New(), uuid.New(), "acme/team")
+	require.ErrorIs(t, err, context.Canceled, "caller cancellation must remain visible")
+	require.Equal(t, models.TeamReviewRequestRetryable, store.state, "known pre-POST cancellation must release the reservation using an independent bounded context")
+	require.Equal(t, 1, requests, "canceled preflight must not POST or attempt uncertain-write reconciliation")
+}
+
+type perTeamReviewReceiptStore map[string]*teamReviewReceiptStore
+
+func (s perTeamReviewReceiptStore) Begin(ctx context.Context, orgID, publicationID uuid.UUID, team string) (models.TeamReviewRequestReceipt, bool, error) {
+	if s[team] == nil {
+		s[team] = &teamReviewReceiptStore{}
+	}
+	return s[team].Begin(ctx, orgID, publicationID, team)
+}
+func (s perTeamReviewReceiptStore) MarkRequested(ctx context.Context, orgID, publicationID uuid.UUID, team string) error {
+	return s[team].MarkRequested(ctx, orgID, publicationID, team)
+}
+func (s perTeamReviewReceiptStore) MarkRetryable(ctx context.Context, orgID, publicationID uuid.UUID, team string) error {
+	return s[team].MarkRetryable(ctx, orgID, publicationID, team)
+}
+
+func TestPublicationTeamReviewsContinueAfterOneTeamFails(t *testing.T) {
+	t.Parallel()
+	mock := newMockPool(t)
+	orgID, sessionID, changesetID, repoID, publicationID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id =").WithArgs(orgID, "acme/repo").WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(repoID, orgID, uuid.New(), int64(1001), "acme/repo", "main", false, nil, nil, "https://github.com/acme/repo.git", int64(123), "active", nil, nil, []byte(`{}`), now, now))
+	var posted []string
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body, status := `{"teams":[]}`, http.StatusOK
+		if req.Method == http.MethodPost {
+			var payload struct {
+				Teams []string `json:"team_reviewers"`
+			}
+			require.NoError(t, json.NewDecoder(req.Body).Decode(&payload), "review mutation should encode requested teams")
+			posted = append(posted, payload.Teams...)
+			if payload.Teams[0] == "missing" {
+				status = http.StatusUnprocessableEntity
+			}
+		}
+		return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	resolver := identity.NewResolver(reconciliationTokenSource{}, zerolog.Nop())
+	resolver.SetHTTPClient(client)
+	receipts := perTeamReviewReceiptStore{}
+	service := &PRService{repos: db.NewRepositoryStore(mock), cachedResolver: resolver, baseURL: "https://api.github.test", httpClient: client, logger: zerolog.Nop(), teamReviewRequests: receipts}
+	prNumber := 42
+	run := &models.Session{ID: sessionID, OrgID: orgID}
+	pr := &models.PullRequest{OrgID: orgID, SessionID: &sessionID, ChangesetID: &changesetID, GitHubRepo: "acme/repo", GitHubPRNumber: prNumber, AuthoredBy: models.GitIdentitySourceApp}
+	publication := &models.SessionPublication{ID: publicationID, OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repoID, GitHubPRNumber: &prNumber, State: models.SessionPublicationStateCompleted, ReviewGateState: models.SessionPublicationReviewGatePassed}
+	err := service.RequestPublicationTeamReviews(context.Background(), run, pr, publication, []string{"missing", "valid"})
+	require.Error(t, err, "one rejected team must still report incomplete follow-through")
+	require.Equal(t, []string{"missing", "valid"}, posted, "an invalid first team must not prevent the independent second request")
+	require.Equal(t, models.TeamReviewRequestRetryable, receipts["acme/missing"].state, "definitive rejection must remain distinct from an uncertain POST")
+	require.Equal(t, models.TeamReviewRequestRequested, receipts["acme/valid"].state, "successful later team must retain its confirmed receipt")
+	require.NoError(t, mock.ExpectationsWereMet(), "all teams must use one scoped publisher lookup")
 }
 
 func TestPublicationTeamReviewsUseOriginalPublisher(t *testing.T) {

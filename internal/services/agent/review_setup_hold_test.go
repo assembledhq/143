@@ -401,3 +401,7 @@ func TestReviewSetupPinFailurePathsLeaveRuntimeAndSeedUnclaimed(t *testing.T) {
 		})
 	}
 }
+
+func (s *reviewSetupLifecycleInboxStore) ListAppliedMessageIDs(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []int64) ([]int64, error) {
+	return nil, nil
+}

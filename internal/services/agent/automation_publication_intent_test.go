@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/models"
@@ -32,10 +34,12 @@ func TestAutomationPublicationMetadataPromptGate(t *testing.T) {
 		policyErr             error
 		edit                  func(*models.Session)
 		perTarget, wantPrompt bool
+		missingPolicy         bool
 	}{
 		{name: "configured per-run publishing", policy: models.AutomationPublishPolicyPullRequest, wantPrompt: true},
 		{name: "none policy", policy: models.AutomationPublishPolicyNone},
-		{name: "lookup failure propagates", policyErr: errors.New("lookup failed")},
+		{name: "lookup failure only omits optional guidance", policyErr: errors.New("lookup failed")},
+		{name: "missing lookup only omits optional guidance", missingPolicy: true},
 		{name: "missing grant", edit: func(s *models.Session) { s.CapabilitySnapshot = nil }},
 		{name: "read-only grant", edit: func(s *models.Session) { s.CapabilitySnapshot[0].AccessLevel = models.AgentCapabilityAccessRead }},
 		{name: "per-target turn", perTarget: true},
@@ -55,12 +59,15 @@ func TestAutomationPublicationMetadataPromptGate(t *testing.T) {
 				ctx = withAutomationTurnState(ctx, &automationTurnState{})
 			}
 			input := &AgentInput{IntegrationSkills: "existing skills"}
-			orchestrator := &Orchestrator{automationRuns: publicationPromptRunPolicy{policy: tt.policy, err: tt.policyErr}}
+			var logs bytes.Buffer
+			orchestrator := &Orchestrator{automationRuns: publicationPromptRunPolicy{policy: tt.policy, err: tt.policyErr}, logger: zerolog.New(&logs)}
+			if tt.missingPolicy {
+				orchestrator.automationRuns = nil
+			}
 			err := orchestrator.appendAutomationPublicationIntentPrompt(ctx, input, session)
-			if tt.policyErr != nil {
-				require.ErrorIs(t, err, tt.policyErr, "failed frozen-policy lookup must not silently omit required guidance")
-			} else {
-				require.NoError(t, err, "eligible and ineligible sessions should resolve guidance deterministically")
+			require.NoError(t, err, "optional metadata guidance must not fail the agent turn when its policy lookup fails")
+			if tt.policyErr != nil || tt.missingPolicy {
+				require.Contains(t, logs.String(), `"level":"warn"`, "omitting optional guidance must leave a diagnostic warning")
 			}
 			expected := "existing skills"
 			if tt.wantPrompt {

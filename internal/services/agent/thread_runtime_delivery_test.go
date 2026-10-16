@@ -169,7 +169,8 @@ func TestOrchestrator_DeliverThreadInboxLeavesPendingWhenHandleUnavailable(t *te
 	err = orch.DeliverThreadInbox(context.Background(), orgID, sessionID, threadID)
 
 	require.NoError(t, err, "DeliverThreadInbox should leave input pending when the local handle is not yet attached")
-	require.Equal(t, []deliveryFailedCall{{threadID: threadID, runtimeID: runtimes.active.ID, entryID: inbox.deliverable[0].ID}}, inbox.unsentResets, "typed missing handle must restore the unsent entry for safe continuation")
+	require.Empty(t, inbox.unsentResets, "delivery must wait for handle attachment before writing any attempt marker")
+	require.Empty(t, inbox.deliveredEntries, "an unattached provider must never claim seed delivery")
 	require.Empty(t, runtimes.commitCalls, "DeliverThreadInbox should not advance cursors when nothing was delivered (commit is what advances last_acked_sequence)")
 }
 
@@ -1080,8 +1081,8 @@ func TestOrchestrator_DeliverThreadInboxPersistsAttemptBeforeAcceptance(t *testi
 			registry.AttachHandle(threadID, handle)
 			orch := NewOrchestrator(OrchestratorConfig{Adapters: map[models.AgentType]AgentAdapter{models.AgentTypeClaudeCode: fakeThreadRuntimeInputAdapter{}}, ThreadCancels: registry, ThreadRuntimes: runtimes, ThreadInbox: inbox, NodeID: "worker-a", Logger: zerolog.Nop()})
 			err := orch.DeliverThreadInbox(ctx, orgID, sessionID, threadID)
-			if tt.cancelAfterAcceptance || tt.failAcknowledgment {
-				require.Error(t, err, "post-acceptance acknowledgment failure should remain visible")
+			if tt.failAcknowledgment {
+				require.Error(t, err, "persistent post-acceptance acknowledgment failure should remain visible")
 			} else {
 				require.NoError(t, err, "owned successful write should acknowledge normally")
 			}
@@ -1147,4 +1148,69 @@ func TestThreadRuntimeAttacherSerializesSeedAcknowledgmentBeforeLiveDelivery(t *
 	<-entered
 	require.Equal(t, []ackForMessagesCall{{runtimeID: runtimeID, messageIDs: []int64{11}}}, inbox.ackForMessagesCalls, "initial seed must be applied before another live delivery can use the handle")
 	require.Equal(t, []markLiveCall{{runtimeID: runtimeID, leaseToken: token, handleID: "thread-test-handle"}}, runtimes.liveCalls, "initial handle should become live under the same delivery serialization")
+}
+
+func (s *fakeThreadInboxStore) ListAppliedMessageIDs(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, []int64) ([]int64, error) {
+	return nil, nil
+}
+
+type closeDeadlineRuntimeStore struct {
+	ThreadRuntimeStore
+	terminal func(context.Context) (bool, error)
+}
+
+func (s closeDeadlineRuntimeStore) MarkTerminalWithLease(ctx context.Context, _, _, _ uuid.UUID, _ models.ThreadRuntimeStatus, _, _ string) (bool, error) {
+	return s.terminal(ctx)
+}
+
+func TestThreadRuntimeCloseStartsCleanupBudgetAfterConfirmedFlush(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                 string
+		flushFails, canceled bool
+	}{
+		{name: "slow confirmed input acknowledgment"},
+		{name: "failed acknowledgment with canceled caller", flushFails: true, canceled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tt.canceled {
+				cancel()
+			}
+			var flushedAt time.Time
+			marked := false
+			control := &threadRuntimeControl{runtime: models.ThreadRuntime{ID: uuid.New(), OrgID: uuid.New(), LeaseToken: uuid.New()}, logger: zerolog.Nop()}
+			control.flushConfirmed = func(context.Context) error {
+				// Consume part of the separate flush budget. Compare the following
+				// context's deadline, not an upper bound on scheduler wall-clock latency.
+				time.Sleep(time.Second)
+				flushedAt = time.Now()
+				if tt.flushFails {
+					return errors.New("persistent acknowledgment failure")
+				}
+				return nil
+			}
+			control.runtimes = closeDeadlineRuntimeStore{terminal: func(writeCtx context.Context) (bool, error) {
+				require.NoError(t, writeCtx.Err(), "terminal cleanup must detach from cancellation and a preceding flush")
+				deadline, ok := writeCtx.Deadline()
+				require.True(t, ok, "terminal cleanup must remain bounded")
+				require.True(t, deadline.After(flushedAt.Add(threadRuntimeStateUpdateTimeout-500*time.Millisecond)), "confirmed-input retry must not consume the fresh terminal cleanup budget")
+				marked = true
+				return true, nil
+			}}
+			control.Close(ctx, models.ThreadRuntimeStatusClosed, "test", "")
+			require.True(t, marked, "runtime terminalization must follow both successful and failed confirmed-input reconciliation")
+		})
+	}
+}
+
+func (s *fakeThreadInboxStore) InspectContinuationRecovery(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64) (bool, bool, error) {
+	return false, false, nil
+}
+
+func (s *fakeThreadInboxStore) ListAppliedRecoveryMessageIDs(_ context.Context, _, _, _ uuid.UUID, id int64, _ []int64) ([]int64, error) {
+	return []int64{id}, nil
 }

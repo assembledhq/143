@@ -2330,9 +2330,10 @@ func (h *SessionHandler) retrySessionFromCheckpoint(w http.ResponseWriter, r *ht
 
 	dedupeKey := db.ContinueSessionDedupeKey(claimedThread.ID)
 	payload := map[string]string{
-		"session_id": sessionID.String(),
-		"thread_id":  claimedThread.ID.String(),
-		"org_id":     orgID.String(),
+		"session_id":        sessionID.String(),
+		"thread_id":         claimedThread.ID.String(),
+		"org_id":            orgID.String(),
+		"execution_purpose": string(models.SessionExecutionPurposeCheckpointRetry),
 	}
 	if _, err := h.jobStore.EnqueueWithTarget(r.Context(), orgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(&claimedSession)); err != nil {
 		h.revertCheckpointRetry(r.Context(), orgID, sessionID, claimedThread.ID, targetThread.Status)
