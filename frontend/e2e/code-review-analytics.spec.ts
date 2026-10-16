@@ -1,7 +1,15 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Request } from "@playwright/test";
 import type { CodeReviewAnalytics, CodeReviewAnalyticsTrendBucket } from "../src/lib/types";
 
 test.use({ timezoneId: "America/New_York" });
+
+test.beforeAll(async ({ request }) => {
+  // Next dev compiles this dashboard route on its first request. Warm it
+  // outside the interaction test's budget, like the transcript readiness URL.
+  test.setTimeout(120_000);
+  const response = await request.get("/code-reviews?tab=analytics&range=this_month", { timeout: 120_000 });
+  expect(response.ok()).toBe(true);
+});
 
 function bucket(start: string, end: string, prs: number, approved: number, rounds: number): CodeReviewAnalyticsTrendBucket {
   return {
@@ -45,7 +53,19 @@ function report(): CodeReviewAnalytics {
 test("selects Analytics metrics without another request and exposes comparison data", async ({ context, page }, testInfo) => {
   const pageErrors: string[] = [];
   const analyticsRequests: string[] = [];
+  const pendingFixtureRequests = new Set<Request>();
+  let lastFixtureRequestActivityAt = Date.now();
   page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("request", (request) => {
+    if (!new URL(request.url()).pathname.startsWith("/api/v1/")) return;
+    pendingFixtureRequests.add(request);
+    lastFixtureRequestActivityAt = Date.now();
+  });
+  const onFixtureRequestSettled = (request: Request) => {
+    if (pendingFixtureRequests.delete(request)) lastFixtureRequestActivityAt = Date.now();
+  };
+  page.on("requestfinished", onFixtureRequestSettled);
+  page.on("requestfailed", onFixtureRequestSettled);
   // This fixture represents a healthy, idle review stream. Serving the JSON
   // catch-all below to EventSource causes WebKit errors and enables the 5s
   // polling fallback, which can race the metric-only request assertion.
@@ -153,7 +173,15 @@ test("selects Analytics metrics without another request and exposes comparison d
     await chart.screenshot({ path: testInfo.outputPath(`analytics-${theme}.png`), animations: "disabled" });
     await chart.getByRole("button", { name: "Show trend data" }).click();
   }
-  await page.reload();
+  // The shell polls repository summaries independently of the analytics query.
+  // Finish intercepted requests before replacing their document: WebKit can
+  // report access-control errors when reload cancels a fulfilled response.
+  const drainStartedAt = Date.now();
+  await expect.poll(
+    () => pendingFixtureRequests.size === 0 && Date.now() - Math.max(lastFixtureRequestActivityAt, drainStartedAt) >= 500,
+    { message: "Fixture API requests should finish and remain quiet before reload" },
+  ).toBe(true);
+  await page.reload({ waitUntil: "networkidle" });
   await expect(page.getByRole("button", { name: /^Show P95 rounds to approval trend/ })).toHaveAttribute("aria-pressed", "true");
   expect(pageErrors).toEqual([]);
 });
