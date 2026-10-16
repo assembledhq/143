@@ -6,11 +6,13 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/automationactions"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 	"github.com/rs/zerolog"
 )
 
@@ -86,7 +88,15 @@ func (h *InternalAutomationActionHandler) Status(w http.ResponseWriter, r *http.
 func (h *InternalAutomationActionHandler) respond(w http.ResponseWriter, r *http.Request, result models.AutomationActionResult, err error) {
 	if err != nil {
 		status, code, message := http.StatusBadGateway, "AUTOMATION_ACTION_FAILED", "Could not complete the request; inspect action status before retrying"
+		deferral, deferred := ratelimit.AsDeferral(err)
 		switch {
+		case deferred:
+			status, code, message = http.StatusTooManyRequests, "GITHUB_RATE_LIMITED", "GitHub requests are temporarily deferred; resume the action with the same keys after the cooldown"
+			seconds := int64(time.Until(deferral.RetryAt).Seconds()) + 1
+			if seconds < 1 {
+				seconds = 1
+			}
+			w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
 		case errors.Is(err, db.ErrAutomationActionUnauthorized):
 			status, code, message = http.StatusForbidden, "CAPABILITY_REQUIRED", "The current turn is not authorized for automation actions"
 		case errors.Is(err, automationactions.ErrBudgetExhausted):

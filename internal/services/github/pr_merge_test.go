@@ -476,6 +476,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 	prMock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID, "ci_status": models.PullRequestCIStatusSuccess}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	prMock.ExpectCommit()
 
 	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

@@ -15,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
+	agentsvc "github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/github/ratelimit"
@@ -1541,23 +1542,16 @@ func TestCodeReviewVisualEvidenceSatisfactions(t *testing.T) {
 	}, codeReviewVisualEvidenceSatisfactions(synthesis, snapshot), "satisfaction metrics should preserve the validated visual basis and human GitHub surface")
 }
 
-func TestCodeReviewReviewerMessageUsesNativeReviewCommand(t *testing.T) {
+func TestCodeReviewReviewerMessageUsesLocalInputs(t *testing.T) {
 	t.Parallel()
-
-	prURL := "https://github.com/assembledhq/assembled/pull/53786"
-	prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{GitHubPRURL: prURL}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
-
-	require.True(t, strings.HasPrefix(prompt, "/review "+prURL), "code review reviewer prompt should pass the authoritative pull request URL directly to the native review command")
-	require.Contains(t, prompt, "do not infer the target from recent pull requests", "reviewer prompt should forbid selecting a different pull request from repository activity")
+	prompt := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), nil, models.CodeReviewVisualEvidenceSnapshot{})
+	require.Contains(t, prompt, "prepared local diff", "reviewers should read the coordinator's captured evidence")
 	require.Contains(t, prompt, "Do NOT run test suites", "reviewer prompt should forbid running test suites")
 	require.Contains(t, prompt, "Do NOT modify the workspace", "reviewer prompt should forbid workspace changes")
-	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeCodex, prompt), "Codex reviewer messages should invoke native /review with the review constraints")
-	commands := codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt)
-	require.Len(t, commands, 1, "native reviewer command metadata should be persisted")
-	require.Equal(t, strings.TrimSpace(strings.TrimPrefix(prompt, "/review")), commands[0].Arguments, "native reviewer command should carry the review constraints as arguments")
-	require.True(t, strings.HasPrefix(commands[0].Arguments, prURL), "native reviewer command arguments should begin with the authoritative pull request URL")
-	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "agents without a native /review command should receive the plain prompt")
-	require.Empty(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "agents without a native /review command should not persist command metadata")
+	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeCodex, prompt), "native-capable reviewers should receive the plain local review prompt")
+	require.Nil(t, codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt), "reviewers must not dispatch URL-driven native review commands")
+	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "all reviewers should receive the same evidence contract")
+	require.Nil(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "local reviews should not persist native command metadata")
 }
 
 func TestCodeReviewReviewerPromptIncludesPullRequestTarget(t *testing.T) {
@@ -1570,39 +1564,47 @@ func TestCodeReviewReviewerPromptIncludesPullRequestTarget(t *testing.T) {
 		GitHubPRURL:    "https://github.com/assembledhq/example/pull/53873",
 		BaseSHA:        &baseSHA,
 	}
-	job := runCodeReviewPayload{HeadSHA: "db848bf3c98e34c3c26d842b4e9b2ff1913dc34f"}
+	job := runCodeReviewPayload{OrgID: uuid.New(), SessionID: uuid.New(), RepositoryID: uuid.New(), HeadSHA: "db848bf3c98e34c3c26d842b4e9b2ff1913dc34f"}
 	files := []codereview.PullRequestFile{{Filename: "gocode/timeutils/interval.go"}, {Filename: "gocode/timeutils/interval_test.go"}}
 
-	prompt := codeReviewReviewerPrompt(job, pr, models.DefaultCodeReviewPolicyConfig(), 3, "", files, models.CodeReviewVisualEvidenceSnapshot{})
+	revision, err := json.Marshal(map[string]any{"kind": "code_review", "github_repo": pr.GitHubRepo, "github_pr_number": pr.GitHubPRNumber, "base_sha": baseSHA, "head_sha": job.HeadSHA})
+	require.NoError(t, err, "captured session revision should encode")
+	session := models.Session{ID: job.SessionID, OrgID: job.OrgID, RepositoryID: &job.RepositoryID, Origin: models.SessionOriginCodeReview, RevisionContext: revision, BaseCommitSHA: &job.HeadSHA}
+	target, err := agentsvc.CodeReviewInputTargetFromSession(&session)
+	require.NoError(t, err, "captured session input target should validate")
+	prompt := codeReviewReviewerPrompt(target, pr, models.DefaultCodeReviewPolicyConfig(), files, models.CodeReviewVisualEvidenceSnapshot{})
 
-	require.True(t, strings.HasPrefix(prompt, "/review https://github.com/assembledhq/example/pull/53873"), "native /review invocation should carry the PR URL as its argument")
+	require.False(t, strings.HasPrefix(prompt, "/review"), "local review should not invoke a URL-driven native command")
 	require.Contains(t, prompt, "<review_target>", "reviewer prompt should include the review target block")
 	require.Contains(t, prompt, "Repository: assembledhq/example", "reviewer prompt should identify the repository")
 	require.Contains(t, prompt, "Pull request: #53873", "reviewer prompt should identify the PR number")
 	require.Contains(t, prompt, "Base SHA: "+baseSHA, "reviewer prompt should pin the base SHA")
 	require.Contains(t, prompt, "Head SHA: "+job.HeadSHA, "reviewer prompt should pin the head SHA")
-	require.Contains(t, prompt, "git diff $(git merge-base "+baseSHA+" "+job.HeadSHA+") "+job.HeadSHA, "reviewer prompt should spell out the merge-base diff command")
-	require.Contains(t, prompt, "git fetch origin "+job.HeadSHA, "reviewer prompt should tell the reviewer how to fetch a missing head SHA")
-	require.Contains(t, prompt, "git fetch origin pull/53873/head", "reviewer prompt should offer the PR ref as a fetch fallback")
-	require.Contains(t, prompt, "git checkout --detach "+job.HeadSHA, "reviewer prompt should permit a detached checkout of the head SHA")
-	require.Contains(t, prompt, "substitute `origin/HEAD`", "reviewer prompt should offer a fallback when the base SHA is unreachable")
-	require.Contains(t, prompt, "report the mismatch", "reviewer prompt should require reporting a workspace/head mismatch")
+	manifest, diff := agentsvc.CodeReviewInputPaths(job.OrgID, job.SessionID, job.RepositoryID, pr.GitHubRepo, baseSHA, job.HeadSHA)
+	require.Contains(t, prompt, "Prepared manifest: "+manifest, "reviewers should share the exact identity-keyed manifest")
+	require.Contains(t, prompt, "Prepared diff: "+diff, "reviewers should consume one prepared complete patch")
+	require.Contains(t, prompt, "Do not substitute another base", "missing inputs must never fall back to an unrelated base")
+	require.NotContains(t, prompt, "git fetch", "reviewers must leave network retrieval to the coordinator")
+	require.NotContains(t, prompt, "origin/HEAD", "reviewers must never substitute a mutable diff base")
 	require.Contains(t, prompt, "- gocode/timeutils/interval.go", "reviewer prompt should list changed files")
 
 	explicitBase := "2222222222222222222222222222222222222222"
-	withExplicitBase := codeReviewReviewerPrompt(job, pr, models.DefaultCodeReviewPolicyConfig(), 3, explicitBase, files, models.CodeReviewVisualEvidenceSnapshot{})
-	require.Contains(t, withExplicitBase, "Base SHA: "+explicitBase, "captured metadata base SHA should win over the PR record")
+	pr.BaseSHA = &explicitBase
+	pr.GitHubRepo = "Renamed/Repository"
+	withRenamedRepository := codeReviewReviewerPrompt(target, pr, models.DefaultCodeReviewPolicyConfig(), files, models.CodeReviewVisualEvidenceSnapshot{})
+	require.Contains(t, withRenamedRepository, "Base SHA: "+baseSHA, "captured session base SHA should win over mutable PR data")
+	require.Contains(t, withRenamedRepository, "Repository: assembledhq/example", "captured repository identity should survive rename or casing changes")
+	require.Contains(t, withRenamedRepository, "Prepared manifest: "+manifest, "prompt and coordinator must retain the same captured bundle path")
 
 	commands := codeReviewNativeReviewCommands(models.AgentTypeClaudeCode, prompt)
-	require.Len(t, commands, 1, "native reviewer command metadata should be persisted")
-	require.True(t, strings.HasPrefix(commands[0].Arguments, pr.GitHubPRURL), "native /review arguments should start with the PR URL")
+	require.Nil(t, commands, "Claude reviewers should also use plain local review instructions")
 
-	withoutTarget := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
+	withoutTarget := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), nil, models.CodeReviewVisualEvidenceSnapshot{})
 	require.NotContains(t, withoutTarget, "<review_target>", "prompt without a head SHA should omit the target block")
-	require.True(t, strings.HasPrefix(withoutTarget, "/review"), "prompt without a target should still begin with /review")
+	require.Contains(t, withoutTarget, "report the review as incomplete", "missing input targets must produce an explicit incomplete result")
 }
 
-func TestCodeReviewEveryReviewerAgentPreservesNativeReviewPrefix(t *testing.T) {
+func TestCodeReviewEveryReviewerAgentSharesLocalEvidence(t *testing.T) {
 	t.Parallel()
 	agents := []models.AgentType{models.AgentTypeCodex, models.AgentTypeClaudeCode, models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode}
 	for _, agentType := range agents {
@@ -1610,9 +1612,10 @@ func TestCodeReviewEveryReviewerAgentPreservesNativeReviewPrefix(t *testing.T) {
 			t.Parallel()
 			cfg := models.DefaultCodeReviewPolicyConfig()
 			cfg.ReviewInstructions = "Review organization-specific invariants."
-			prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, cfg, 2, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
+			prompt := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, cfg, nil, models.CodeReviewVisualEvidenceSnapshot{})
 			message := codeReviewReviewerMessage(agentType, prompt)
-			require.Equal(t, "/review", strings.Fields(message)[0], "every configured or fallback reviewer invocation should begin with /review")
+			require.Equal(t, prompt, message, "all reviewers should receive the same local evidence and independent analysis constraints")
+			require.Nil(t, codeReviewNativeReviewCommands(agentType, prompt), "no reviewer should independently retrieve the PR through a native command")
 			require.Contains(t, message, cfg.ReviewInstructions, "every reviewer path should receive captured review instructions")
 		})
 	}
@@ -1623,15 +1626,15 @@ func TestCodeReviewPromptPolicyRouting(t *testing.T) {
 	cfg := models.DefaultCodeReviewPolicyConfig()
 	cfg.ReviewInstructions = "Focus on tenant isolation; {{ .Title }} must remain literal."
 	cfg.AutomatedApprovalPolicy = "Escalate every architectural change."
-	reviewer := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, cfg, 7, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
-	require.True(t, strings.HasPrefix(reviewer, "/review"), "reviewer invocation should preserve /review as its first token")
+	reviewer := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, cfg, nil, models.CodeReviewVisualEvidenceSnapshot{})
+	require.False(t, strings.HasPrefix(reviewer, "/review"), "reviewer invocation should use plain local instructions")
 	require.Contains(t, reviewer, cfg.ReviewInstructions, "reviewer should receive organization review instructions")
 	require.NotContains(t, reviewer, cfg.AutomatedApprovalPolicy, "reviewer should not receive automated approval policy")
 	require.Contains(t, reviewer, "{{ .Title }}", "organization prompt data should not be recursively rendered")
 
 	empty := cfg
 	empty.ReviewInstructions = ""
-	require.NotContains(t, codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, empty, 7, "", nil, models.CodeReviewVisualEvidenceSnapshot{}), "<organization_review_instructions>", "empty instructions should omit the organization section")
+	require.NotContains(t, codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, empty, nil, models.CodeReviewVisualEvidenceSnapshot{}), "<organization_review_instructions>", "empty instructions should omit the organization section")
 }
 
 func TestCodeReviewOrchestratorPromptIncludesMentionContext(t *testing.T) {
@@ -1762,8 +1765,8 @@ func TestCodeReviewCapturedPolicyVersionsRenderDistinctPromptRecords(t *testing.
 	secondRecord := codeReviewPolicyRecordForTest(second)
 	secondRecord.Version = 2
 
-	firstReviewerRecord := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, firstRecord.Config(), firstRecord.Version, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
-	secondReviewerRecord := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, secondRecord.Config(), secondRecord.Version, "", nil, models.CodeReviewVisualEvidenceSnapshot{})
+	firstReviewerRecord := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, firstRecord.Config(), nil, models.CodeReviewVisualEvidenceSnapshot{})
+	secondReviewerRecord := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, secondRecord.Config(), nil, models.CodeReviewVisualEvidenceSnapshot{})
 	require.Contains(t, firstReviewerRecord, first.ReviewInstructions, "captured reviewer record should use its historic policy record")
 	require.NotContains(t, firstReviewerRecord, second.ReviewInstructions, "captured reviewer record should not use the latest active policy")
 	require.NotEqual(t, firstReviewerRecord, secondReviewerRecord, "different captured policy versions should render different reviewer records")
@@ -3413,7 +3416,7 @@ func TestCodeReviewMissingArtifactSynthesisBlocksApproval(t *testing.T) {
 
 	// A frozen reviewer replay reported that a generated role map was required
 	// to assess an authorization change but absent from the review workspace.
-	raw := `{"approval_recommended":false,"description_assessments":[],"findings":[],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":true,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Review authorization capability changed.","review_summary":"The generated role map is unavailable, so the authorization change cannot be assessed.","risk_notes":["Generated role map is missing."]}`
+	raw := `{"approval_recommended":false,"description_assessments":[],"findings":[],"human_review_reasons":[],"scope_mismatch":false,"unresolved_uncertainty":true,"uncertainty_reasons":[{"missing_evidence":"The generated role map is absent.","material_impact":"The new capability may grant viewers write access.","resolution_evidence":"The generated role-to-capability map."}],"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Review authorization capability changed.","review_summary":"The generated role map is unavailable, so the authorization change cannot be assessed.","risk_notes":["Generated role map is missing."]}`
 	synthesis, err := parseCodeReviewOrchestratorSynthesis(raw)
 	require.NoError(t, err, "missing-artifact synthesis should satisfy the structured output contract")
 	require.False(t, synthesis.ApprovalRecommended, "missing-artifact synthesis should not recommend approval")
@@ -3429,8 +3432,9 @@ func TestCodeReviewMissingArtifactSynthesisBlocksApproval(t *testing.T) {
 		DescriptionPassed:     true,
 		UpToDate:              true,
 		UnresolvedUncertainty: synthesis.UnresolvedUncertainty,
+		UncertaintyReasons:    synthesis.UncertaintyReasons,
 	})
-	require.Equal(t, []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonUnresolvedUncertainty}}, risk.ReasonDetails, "backend risk evaluation should withhold approval for incomplete generated evidence")
+	require.Equal(t, []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonUnresolvedUncertainty, Subject: "Missing evidence: The generated role map is absent. Why it matters: The new capability may grant viewers write access. To resolve: The generated role-to-capability map."}}, risk.ReasonDetails, "backend risk evaluation should withhold approval and expose the concrete missing evidence")
 	require.False(t, risk.Acceptable, "unresolved uncertainty should block automated approval")
 }
 
@@ -6028,4 +6032,141 @@ func stringPtr(value string) *string {
 
 func intPtr(value int) *int {
 	return &value
+}
+
+type capacityLifecycleStub struct {
+	*codeReviewLifecycleStub
+	preflights int
+}
+
+func (s *capacityLifecycleStub) ReviewSandboxAvailable(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (bool, error) {
+	s.preflights++
+	return false, nil
+}
+func TestClassifiedAndDisputedCapacityWaitAvoidsProvider(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name       string
+		classified bool
+	}{{"dispute reassessment", false}, {"classified mention", true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create a store that must remain untouched during capacity waits")
+			defer mock.Close()
+			dispute := uuid.New()
+			input := codereview.ReviewChangedInput{OrgID: uuid.New(), RepositoryID: uuid.New(), PullRequestID: uuid.New(), ExplicitRequest: true}
+			if tt.classified {
+				input.ReviewRequestDisputeID = &dispute
+			} else {
+				input.TriggeringDisputeID = &dispute
+			}
+			payload, err := json.Marshal(input)
+			require.NoError(t, err, "encode the special starter request")
+			lifecycle := &capacityLifecycleStub{codeReviewLifecycleStub: &codeReviewLifecycleStub{}}
+			providerCalls := 0
+			handler := newStartCodeReviewReassessmentHandler(&Stores{PullRequests: db.NewPullRequestStore(mock)}, &Services{CodeReviewLifecycle: lifecycle, PR: &stubPRService{getCodeReviewPRSnapshotFn: func(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+				providerCalls++
+				return ghservice.CodeReviewPullRequestSnapshot{}, nil
+			}}}, zerolog.Nop())
+			for range 3 {
+				err = handler(context.Background(), models.JobTypeStartCodeReviewReassessment, payload)
+				var retry *RetryableError
+				require.ErrorAs(t, err, &retry, "missing capacity must leave a bounded durable retry")
+				require.Equal(t, new(15*time.Second), retry.RetryAfter, "special starters must not poll GitHub every five seconds")
+				require.False(t, retry.ConsumeAttempt, "capacity waits must preserve attempts")
+				require.True(t, retry.BypassMaxRetryDuration, "only capacity waiting must survive the ordinary retry window without fetching the provider")
+			}
+			require.Equal(t, []int{3, 0, 0}, []int{lifecycle.preflights, providerCalls, lifecycle.handleCalls}, "every wait must check headroom before provider hydration or review allocation")
+			require.NoError(t, mock.ExpectationsWereMet(), "capacity wait must not load a PR or allocate a session")
+		})
+	}
+}
+
+func TestCapacityWaitRemainsPendingBeyondWorkerRetryWindow(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name       string
+		classified bool
+	}{{"dispute reassessment", false}, {"classified request", true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w, mock := newTestWorker(t)
+			defer mock.Close()
+			org, pr, repo, dispute, job, token := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			input := codereview.ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr, ExplicitRequest: true}
+			if tt.classified {
+				input.ReviewRequestDisputeID = &dispute
+			} else {
+				input.TriggeringDisputeID = &dispute
+			}
+			payload, err := json.Marshal(input)
+			require.NoError(t, err, "encode durable capacity-wait intake")
+			lifecycle := &capacityLifecycleStub{codeReviewLifecycleStub: &codeReviewLifecycleStub{}}
+			disputes := &codeReviewDisputeServiceRecorder{}
+			providerCalls := 0
+			services := &Services{CodeReviewLifecycle: lifecycle, CodeReviewDisputes: disputes, PR: &stubPRService{getCodeReviewPRSnapshotFn: func(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+				providerCalls++
+				return ghservice.CodeReviewPullRequestSnapshot{}, nil
+			}}}
+			w.Register(models.JobTypeStartCodeReviewReassessment, newStartCodeReviewReassessmentHandler(&Stores{PullRequests: db.NewPullRequestStore(mock)}, services, zerolog.Nop()))
+			// Exercise the real worker's duration policy and terminal hook with intake
+			// older than its ordinary eight-minute failure window, not just the handler.
+			for _, age := range []time.Duration{9 * time.Minute, 12 * time.Hour} {
+				expectClaimWithAttempts(mock, job, org, models.JobTypeStartCodeReviewReassessment, payload, time.Now().Add(-age), token, 9, 8)
+				mock.ExpectExec("UPDATE jobs\\s+SET status = 'pending'").WithArgs("waiting for review sandbox capacity", pgxmock.AnyArg(), job, token).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				w.poll(context.Background())
+			}
+			require.Equal(t, []int{2, 0, 0, 0}, []int{lifecycle.preflights, providerCalls, lifecycle.handleCalls, disputes.failCalls}, "capacity must remain pending past retry limits without provider calls, allocation, or FailTriage")
+			require.NoError(t, mock.ExpectationsWereMet(), "the real worker must requeue both long capacity waits with lease ownership and preserved attempts")
+		})
+	}
+}
+
+func TestLoadCodeReviewAssessmentChangedFilesAvoidsDuplicateReads(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		captured      bool
+		files         []codereview.PullRequestFile
+		providerCalls int
+	}{
+		{name: "fresh assessment uses captured revision", captured: true, files: []codereview.PullRequestFile{{Filename: "captured.go", Status: "modified", Patch: "@@ captured @@"}}},
+		{name: "fresh empty diff remains available", captured: true},
+		{name: "resumed or legacy assessment refreshes files", files: []codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}}, providerCalls: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "changed-file test database should initialize")
+			defer mock.Close()
+			orgID, repoID := uuid.New(), uuid.New()
+			job := runCodeReviewPayload{OrgID: orgID, RepositoryID: repoID, SessionID: uuid.New()}
+			pr := models.PullRequest{GitHubRepo: "acme/widget", GitHubPRNumber: 42}
+			provider := &capturingCodeReviewSubmitter{}
+			var captured *codereview.AssessmentInputCaptureResult
+			if tt.captured {
+				captured = &codereview.AssessmentInputCaptureResult{Files: tt.files}
+			}
+			for range tt.providerCalls {
+				now := time.Now().UTC()
+				mock.ExpectQuery("(?s)FROM repositories.*WHERE id = @id AND org_id = @org_id").WithArgs(pgx.NamedArgs{"id": repoID, "org_id": orgID}).WillReturnRows(pgxmock.NewRows(workerRepositoryColumns()).AddRow(repoID, orgID, uuid.New(), int64(143), "acme/widget", "main", false, nil, nil, "https://github.com/acme/widget.git", int64(42), models.RepositoryStatusActive, nil, nil, []byte(`{}`), now, now))
+			}
+			// Initial fanout and final decision both consume this helper. Fresh
+			// captures reuse their fenced diff; resumed attempts read current files.
+			for range 2 {
+				actual, available, err := loadCodeReviewAssessmentChangedFiles(context.Background(), &Stores{Repositories: db.NewRepositoryStore(mock)}, &Services{CodeReviews: provider}, job, pr, captured)
+				require.NoError(t, err, "file selection should succeed for captured and resumed attempts")
+				require.True(t, available, "an empty authoritative capture is still a complete file inventory")
+				require.Equal(t, tt.files, actual, "file selection should preserve the exact captured or live diff")
+			}
+			expected := make([]codereview.PullRequestFilesRequest, 0, tt.providerCalls)
+			for range tt.providerCalls {
+				expected = append(expected, codereview.PullRequestFilesRequest{InstallationID: 42, Repository: "acme/widget", PullNumber: 42})
+			}
+			require.Equal(t, expected, append([]codereview.PullRequestFilesRequest{}, provider.fileListRequests...), "only resumed and legacy attempts should issue the current file inventory requests")
+			require.NoError(t, mock.ExpectationsWereMet(), "file refresh lookups should retain org scoping")
+		})
+	}
 }

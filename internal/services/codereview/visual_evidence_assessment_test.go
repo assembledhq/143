@@ -3,6 +3,7 @@ package codereview
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -81,6 +82,67 @@ func TestRestoreVisualEvidenceRejectsAssessmentIdentityMismatch(t *testing.T) {
 			record := models.CodeReviewPromptRecord{OrgID: input.OrgID, SessionID: input.SessionID, RecordKey: visualEvidenceInputRecordKey(input), Role: visualEvidencePromptRole, Metadata: raw}
 			_, err = restoreVisualEvidenceSnapshot(record, input)
 			require.ErrorContains(t, err, "assessment identity", "a matching record key must not hide a mismatched snapshot identity")
+		})
+	}
+}
+
+func TestVisualEvidenceUsesSharedDiscoveryAfterCheckpointLookup(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                                           string
+		seed, fresh, unavailable, wrongHead, wrongRepo bool
+		callbackCalls, standaloneCalls                 int
+		wantError                                      bool
+	}{
+		{name: "uncached shared inventory", callbackCalls: 1},
+		{name: "checkpoint bypasses shared inventory", seed: true, unavailable: true, standaloneCalls: 1},
+		{name: "fresh capture invokes shared inventory", seed: true, fresh: true, callbackCalls: 1, standaloneCalls: 1},
+		{name: "shared discovery error propagates", unavailable: true, callbackCalls: 1, wantError: true},
+		{name: "shared head fence", wrongHead: true, callbackCalls: 1, wantError: true},
+		{name: "shared repository fence", wrongRepo: true, callbackCalls: 1, wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, sessionID, repoID, assessmentID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			head := strings.Repeat("a", 40)
+			capturedAt := time.Now().UTC()
+			discovery := models.CodeReviewVisualEvidenceDiscovery{Version: 1, RepositoryID: repoID, Repository: "acme/web", PullRequestNumber: 42, HeadSHA: head, CapturedAt: capturedAt}
+			discoverer := &visualEvidenceDiscovererStub{discovery: discovery}
+			prompts := &visualEvidencePromptStoreStub{records: make(map[string]models.CodeReviewPromptRecord)}
+			service := NewVisualEvidenceService(discoverer, prompts, &visualEvidenceRepositoryStoreStub{}, nil, &visualEvidenceUploadStoreStub{saved: make(map[string][]byte)}, zerolog.Nop())
+			input := CaptureVisualEvidenceInput{OrgID: orgID, SessionID: sessionID, AssessmentID: &assessmentID, RepositoryID: repoID, PullRequestNumber: 42, HeadSHA: head}
+			if tt.seed {
+				_, err := service.Capture(context.Background(), input)
+				require.NoError(t, err, "initial standalone capture should seed its immutable checkpoint")
+			}
+			callbackCalls := 0
+			input.Fresh = tt.fresh
+			input.Discover = func(context.Context) (models.CodeReviewVisualEvidenceDiscovery, error) {
+				callbackCalls++
+				if tt.unavailable {
+					return models.CodeReviewVisualEvidenceDiscovery{}, errors.New("shared inventory unavailable")
+				}
+				shared := discovery
+				if tt.wrongHead {
+					shared.HeadSHA = strings.Repeat("b", 40)
+				}
+				if tt.wrongRepo {
+					shared.RepositoryID = uuid.New()
+				}
+				return shared, nil
+			}
+			actual, err := service.Capture(context.Background(), input)
+			if tt.wantError {
+				require.Error(t, err, "shared inventory failures or identity changes must remain fatal")
+				require.Equal(t, 0, len(prompts.records), "failed shared capture must not persist partial evidence")
+			} else {
+				require.NoError(t, err, "valid shared or restored evidence should remain capturable")
+				require.Equal(t, models.CodeReviewVisualEvidenceSnapshot{Version: 1, AssessmentID: &assessmentID, RepositoryID: repoID, Repository: "acme/web", PullRequestNumber: 42, HeadSHA: head, CapturedAt: capturedAt, Complete: true, Evidence: []models.CodeReviewVisualEvidence{}}, actual, "shared evidence should retain the same snapshot contract as standalone discovery")
+				require.Equal(t, 1, len(prompts.records), "freshness checks and checkpoint restoration must not replace or duplicate persisted evidence")
+			}
+			require.Equal(t, tt.callbackCalls, callbackCalls, "shared inventory should run only when discovery is required")
+			require.Equal(t, tt.standaloneCalls, discoverer.callCount(), "shared discovery must bypass the standalone provider path")
 		})
 	}
 }

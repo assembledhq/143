@@ -422,6 +422,7 @@ func TestCodeReviewDisputeStore_CompleteReassessmentOnceReportsTransition(t *tes
 	args := pgx.NamedArgs{
 		"org_id": orgID, "id": disputeID, "session_id": sessionID, "decision": &decision,
 		"reassessment_status": models.CodeReviewDisputeReassessmentCompleted, "detail": "Decision changed.",
+		"session_status": models.CodeReviewSessionStatusCompleted,
 	}
 	mock.ExpectExec("UPDATE code_review_decision_disputes[\\s\\S]+reassessment_status IN \\('queued', 'running'\\)").
 		WithArgs(args).

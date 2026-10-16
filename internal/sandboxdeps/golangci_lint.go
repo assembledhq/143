@@ -20,9 +20,9 @@ type golangciLint struct{}
 
 func (golangciLint) Name() string { return "golangci-lint" }
 
-func (golangciLint) Install(ctx context.Context, exec Executor, version string) error {
+func (golangciLint) PreparationCommands(version string) (string, string, error) {
 	if !golangciLintVersion.MatchString(version) {
-		return fmt.Errorf("golangci-lint: invalid version pin %q", version)
+		return "", "", fmt.Errorf("golangci-lint: invalid version pin %q", version)
 	}
 	// Install into ~/.local/bin because the sandbox user has no sudo;
 	// /usr/local/bin would be read-only at runtime. The orchestrator prepends
@@ -52,6 +52,15 @@ cp "$tmp_dir/golangci-lint-%[1]s-${os}-${arch}/golangci-lint" "$HOME/.local/bin/
 chmod 0755 "$HOME/.local/bin/golangci-lint"`,
 		version,
 	)
+	verify := fmt.Sprintf(`test -x "$HOME/.local/bin/golangci-lint" && "$HOME/.local/bin/golangci-lint" --version | grep -F 'version %s ' >/dev/null`, version)
+	return cmd, verify, nil
+}
+
+func (g golangciLint) Install(ctx context.Context, exec Executor, version string) error {
+	cmd, _, err := g.PreparationCommands(version)
+	if err != nil {
+		return err
+	}
 	var stdout, stderr bytes.Buffer
 	code, err := exec(ctx, cmd, &stdout, &stderr)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1431,6 +1432,7 @@ type testDeps struct {
 	sandboxAuth               agent.SandboxAuthServer
 	sandboxCapacity           *agent.SandboxCapacityGate
 	threadRuntimes            agent.ThreadRuntimeStore
+	threadInbox               agent.ThreadInboxStore
 	staticEgress              agent.StaticEgressRuntimeConfig
 	users                     agent.UserLookup
 	logger                    *zerolog.Logger
@@ -1733,6 +1735,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		SandboxAuth:               d.sandboxAuth,
 		SandboxCapacity:           d.sandboxCapacity,
 		ThreadRuntimes:            d.threadRuntimes,
+		ThreadInbox:               d.threadInbox,
 		StaticEgress:              d.staticEgress,
 		Users:                     d.users,
 		NodeID:                    d.nodeID,
@@ -4240,6 +4243,14 @@ func TestRunAgent_AutomaticPRPublishingGuards(t *testing.T) {
 			d.agentPRPromptEnabled = tt.promptFlag
 			if tt.ineligibleOrigin {
 				run.Origin = models.SessionOriginCodeReview
+				run.RevisionContext = []byte(`{"kind":"code_review","github_repo":"acme/backend","github_pr_number":42,"base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
+				d.provider.ExecFn = func(_ context.Context, _ *agent.Sandbox, command string, stdout, _ io.Writer) (int, error) {
+					if command == "git rev-parse HEAD" {
+						_, err := io.WriteString(stdout, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
+						return 0, err
+					}
+					return 0, nil
+				}
 			}
 			if tt.alreadyPublished {
 				run.PRCreationState = models.PRCreationStateSucceeded
@@ -4396,12 +4407,14 @@ func TestRunAgent_PendingCancelIsDeliveredAfterSetup(t *testing.T) {
 func TestRunAgent_CapturesAndPersistsBaseCommitSHA(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name           string
-		origin         models.SessionOrigin
-		expectedTarget string
+		name              string
+		origin            models.SessionOrigin
+		expectedTarget    string
+		expectedBase      string
+		expectedPersisted []string
 	}{
-		{name: "coding session", origin: models.SessionOriginManual, expectedTarget: "main"},
-		{name: "review session", origin: models.SessionOriginCodeReview},
+		{name: "coding session", origin: models.SessionOriginManual, expectedTarget: "main", expectedBase: "abc123", expectedPersisted: []string{"abc123"}},
+		{name: "review session", origin: models.SessionOriginCodeReview, expectedBase: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", expectedPersisted: []string{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -4410,24 +4423,27 @@ func TestRunAgent_CapturesAndPersistsBaseCommitSHA(t *testing.T) {
 			issue := testIssue(orgID)
 			run := testRun(orgID, issue.ID)
 			run.Origin = tt.origin
+			if tt.origin == models.SessionOriginCodeReview {
+				run.RevisionContext = []byte(`{"kind":"code_review","github_repo":"acme/backend","github_pr_number":42,"base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
+			}
 			d := defaultDeps()
 			d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 				if cmd == "git rev-parse HEAD" {
-					_, err := io.WriteString(stdout, "abc123\n")
+					_, err := io.WriteString(stdout, tt.expectedBase+"\n")
 					return 0, err
 				}
 				return 0, nil
 			}
 			d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-				require.Equal(t, "abc123", sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA], "adapter should receive the captured starting commit")
+				require.Equal(t, tt.expectedBase, sandbox.Metadata[agent.SandboxMetadataBaseCommitSHA], "adapter should receive the captured starting commit")
 				require.Equal(t, tt.expectedTarget, sandbox.Metadata[agent.SandboxMetadataTargetBranch], "review diffs should exclude the target branch")
 				return &agent.AgentResult{Summary: "done"}, nil
 			}
 
 			err := buildOrchestrator(d).RunAgent(context.Background(), run)
 			require.NoError(t, err, "RunAgent should succeed")
-			require.Equal(t, []string{"abc123"}, d.sessions.getBaseCommitSHAs(), "RunAgent should persist the captured base commit sha")
-			require.Equal(t, strPtr("abc123"), run.BaseCommitSHA, "RunAgent should store the captured base commit sha on the session")
+			require.Equal(t, tt.expectedPersisted, d.sessions.getBaseCommitSHAs(), "coding sessions should capture a clone baseline while reviews retain their captured head")
+			require.Equal(t, strPtr(tt.expectedBase), run.BaseCommitSHA, "RunAgent should store the captured base commit sha on the session")
 		})
 	}
 }
@@ -7018,6 +7034,7 @@ func TestContinueSession_CodeReviewResultErrorFailsOnlyReviewerThread(t *testing
 	issue.Source = models.IssueSourceManual
 	session := testRun(orgID, issue.ID)
 	session.Origin = models.SessionOriginCodeReview
+	session.RevisionContext = []byte(`{"kind":"code_review","github_repo":"acme/backend","github_pr_number":42,"base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
 	session.InteractionMode = models.SessionInteractionModeSingleRun
 	session.ValidationPolicy = models.SessionValidationPolicySkip
 	session.Status = models.SessionStatusIdle
@@ -7085,6 +7102,7 @@ func TestContinueSession_CodeReviewAuthFailureIsTerminalOnlyForReviewerThread(t 
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
 	session.Origin = models.SessionOriginCodeReview
+	session.RevisionContext = []byte(`{"kind":"code_review","github_repo":"acme/backend","github_pr_number":42,"base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
 	session.Status = models.SessionStatusIdle
 	session.SnapshotKey = strPtr("snapshots/test/code-review-auth-session.tar")
 	session.PrimaryThreadID = &primaryThreadID
@@ -8070,12 +8088,13 @@ func TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata(t *testing.T) {
 			if tt.origin == models.SessionOriginCodeReview {
 				session.InteractionMode = models.SessionInteractionModeSingleRun
 				session.ValidationPolicy = models.SessionValidationPolicySkip
+				session.RevisionContext = []byte(`{"kind":"code_review","github_repo":"acme/backend","github_pr_number":42,"base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
 			}
 			session.Status = models.SessionStatusIdle
 			session.CurrentTurn = 1
 			session.ContainerID = strPtr("preview-container-base-sha")
 			session.SandboxState = models.SandboxStateRunning
-			session.BaseCommitSHA = strPtr("feedfacecafe1234")
+			session.BaseCommitSHA = strPtr("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 			session.TargetBranch = tt.targetBranch
 
 			d := defaultDeps()
@@ -8112,8 +8131,84 @@ func TestContinueSession_RestoresDiffMetadataOntoSandboxMetadata(t *testing.T) {
 
 			err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
 			require.NoError(t, err, "continuation should complete with restored diff metadata")
-			require.Equal(t, "feedfacecafe1234", observedBaseSHA, "continuation should preserve the pinned session base")
+			require.Equal(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", observedBaseSHA, "continuation should preserve the pinned session base")
 			require.Equal(t, tt.expectedTarget, observedTargetBranch, "only coding sessions should collect the PR diff against the target branch")
+		})
+	}
+}
+
+func TestReviewInputsGateBeforeAgentExecution(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		initial bool
+		reused  bool
+		restore bool
+	}{
+		{name: "initial run", initial: true},
+		{name: "cold continuation"},
+		{name: "reused continuation", reused: true},
+		{name: "restored continuation", restore: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			session := testRun(orgID, issue.ID)
+			session.Origin = models.SessionOriginCodeReview
+			session.InteractionMode = models.SessionInteractionModeSingleRun
+			session.ValidationPolicy = models.SessionValidationPolicySkip
+			session.RevisionContext = []byte(`{"kind":"code_review","github_repo":"acme/backend","github_pr_number":42,"base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
+			session.BaseCommitSHA = strPtr("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			dependencies := defaultDeps()
+			if !tt.initial {
+				session.Status = models.SessionStatusIdle
+				session.CurrentTurn = 1
+				dependencies.messages.messages = []models.SessionMessage{{ID: 1, SessionID: session.ID, OrgID: orgID, Role: models.MessageRoleUser, Content: "Review captured local inputs."}}
+			}
+			if tt.reused {
+				session.ContainerID = strPtr("reused-review-container")
+				session.SandboxState = models.SandboxStateRunning
+			}
+			if tt.restore {
+				session.SnapshotKey = strPtr("review-snapshot")
+				session.SandboxState = models.SandboxStateSnapshotted
+				dependencies.snapshots.data = map[string][]byte{"review-snapshot": []byte("snapshot")}
+				dependencies.provider.RestoreFn = func(_ context.Context, _ *agent.Sandbox, reader io.Reader) error {
+					_, err := io.Copy(io.Discard, reader)
+					return err
+				}
+			}
+			var preparationCalls atomic.Int64
+			dependencies.provider.ExecFn = func(_ context.Context, _ *agent.Sandbox, command string, stdout, stderr io.Writer) (int, error) {
+				if command == "git rev-parse HEAD" {
+					_, err := io.WriteString(stdout, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
+					return 0, err
+				}
+				if strings.Contains(command, "prepared review input identity mismatch") {
+					preparationCalls.Add(1)
+					_, err := io.WriteString(stderr, "required captured base is unavailable")
+					return 1, err
+				}
+				return 0, nil
+			}
+			var executed atomic.Bool
+			dependencies.adapter.executeFn = func(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				executed.Store(true)
+				return &agent.AgentResult{Summary: "unexpected"}, nil
+			}
+			orchestrator := buildOrchestrator(dependencies)
+			var err error
+			if tt.initial {
+				err = orchestrator.RunAgent(context.Background(), session)
+			} else {
+				err = orchestrator.ContinueSession(context.Background(), session, nil)
+			}
+			require.ErrorContains(t, err, "required captured base is unavailable", "all runtime paths should reject the specific shared-input preparation failure")
+			require.NotErrorIs(t, err, agent.ErrSandboxWorkspaceNotReady, "invalid captured evidence must remain fatal after managed dispatch")
+			require.Equal(t, int64(1), preparationCalls.Load(), "runtime setup should reach the shared evidence gate")
+			require.False(t, executed.Load(), "a reviewer must never execute before a complete input bundle exists")
 		})
 	}
 }

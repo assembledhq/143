@@ -80,8 +80,9 @@ func contextFromShutdown(shutdownCh <-chan struct{}) context.Context {
 // RouterSharedDependencies reuses process-scoped state across the API and worker
 // graphs. Omitting it preserves isolated construction for API-only callers.
 type RouterSharedDependencies struct {
-	CodingCredentialStore     *db.CodingCredentialStore
-	GitHubRateLimitController *githubratelimit.Controller
+	CodingCredentialStore       *db.CodingCredentialStore
+	GitHubRateLimitController   *githubratelimit.Controller
+	CodeReviewAdmissionEvidence *codereviewsvc.AdmissionProcessEvidence
 }
 
 // ResolveGitHubRateLimitController returns the process controller when one is
@@ -95,6 +96,8 @@ func ResolveGitHubRateLimitController(cfg *config.Config, redisClient *cache.Cli
 		Environment: cfg.Env, AppID: cfg.GitHubAppID,
 		InstallationAllowlist: cfg.GitHubRateLimitInstallationAllowlist,
 		Cache:                 redisClient, Logger: logger, Owner: cfg.NodeID + ":github",
+		BackgroundQuotaReserve:  cfg.GitHubBackgroundQuotaReserve,
+		BackgroundQuotaInterval: cfg.GitHubBackgroundQuotaInterval,
 	})
 }
 
@@ -242,6 +245,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// Create handlers
 	healthHandler := handlers.NewHealthHandler(pool)
 	healthHandler.SetDrainingSignal(shutdownCh)
+	if shared.CodeReviewAdmissionEvidence != nil {
+		healthHandler.SetAdmissionEvidence(shared.CodeReviewAdmissionEvidence.Evidence)
+	}
 	if redisClient != nil {
 		healthHandler.SetRedisHealthCheck(redisClient.Healthy)
 	}
@@ -413,7 +419,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if prService != nil {
 		codeReviewSvc.SetRetryDependencies(pullRequestStore, prService)
 		codeReviewSvc.SetScheduling(db.NewCodeReviewScheduleStore(pool), prService)
+		codeReviewSvc.SetSandboxAdmission()
 		codeReviewSvc.SetSchedulingStreams(codeReviewStreams)
+	}
+	if shared.CodeReviewAdmissionEvidence != nil {
+		shared.CodeReviewAdmissionEvidence.ConfigureAPI(codeReviewSvc)
 	}
 	codeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
 	codeReviewDisputeStore.SetJobStore(jobStore)
@@ -1075,7 +1085,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 	if prService != nil && automationActionTokens != nil {
 		visualEvidence := codereviewsvc.NewVisualEvidenceService(prService, codeReviewStore, repoStore, automationActionTokens, uploadStore, logger)
-		inputCapture := codereviewsvc.NewAssessmentInputCaptureService(codeReviewStore, pullRequestStore, repoStore, orgStore, prService, visualEvidence, codereviewsvc.NewGitHubSubmitter(automationActionTokens))
+		codeReviewSubmitter := codereviewsvc.NewGitHubSubmitter(
+			automationActionTokens,
+			codereviewsvc.WithGitHubSubmitterHTTPClient(githubtelemetry.NewControlledHTTPClient(15*time.Second, logger, githubRateLimitController, "code_review")),
+		)
+		inputCapture := codereviewsvc.NewAssessmentInputCaptureService(codeReviewStore, pullRequestStore, repoStore, orgStore, prService, visualEvidence, codeReviewSubmitter)
 		inputCapture.SetExternalContextResolver(agent.CodeReviewExternalContextResolver{Credentials: credentialStore, Orgs: orgStore, GitHubTools: true, SessionTools: cfg.BaseURL != "" && cfg.SessionSecret != ""})
 		if checker, ok := automationActionTokens.(interface {
 			IsActiveTeamMember(context.Context, int64, string, string, string) (bool, error)
@@ -1176,7 +1190,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		// Every internal route names its tool so the per-target allowlist
 		// (design doc 125) is enforced server-side on every call.
 		toolGate := handlers.NewInternalToolGate(cfg.SessionSecret)
-		automationActions := automationactions.New(db.NewAutomationActionStore(pool), automationactions.NewProviders(automationActionTokens, credentialStore, ingestion.NewSlackAPIClient(logger)), logger)
+		automationActions := automationactions.New(db.NewAutomationActionStore(pool), automationactions.NewProviders(automationActionTokens, credentialStore, ingestion.NewSlackAPIClient(logger),
+			automationactions.WithGitHubHTTPClient(githubtelemetry.NewControlledHTTPClient(4*time.Second, logger, githubRateLimitController, "automation_action"))), logger)
 		automationActionHandler := handlers.NewInternalAutomationActionHandler(sessionStore, automationActions, cfg.SessionSecret)
 		r.Route("/api/v1/internal", func(r chi.Router) {
 			r.Get("/sessions/{id}/preview", toolGate.Require("preview:status", internalAgentPreviewHandler.Status))

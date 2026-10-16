@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -150,6 +151,46 @@ func TestIsTerminalStatus(t *testing.T) {
 		t.Run(tt.status, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tt.expected, isTerminalStatus(models.SessionStatus(tt.status)), "isTerminalStatus(%q) should return %v", tt.status, tt.expected)
+		})
+	}
+}
+
+func TestHealthzAdmissionEvidenceHealthyAndDraining(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name                 string
+		draining, configured bool
+		status               int
+	}{
+		{"configured healthy writer", false, true, http.StatusOK}, {"configured draining writer", true, true, http.StatusServiceUnavailable}, {"unconfigured healthy writer", false, false, http.StatusOK},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := NewHealthHandler(nil)
+			e := models.CodeReviewAdmissionProcessEvidence{InstanceID: "synthetic-process-instance", BuildSHA: "synthetic-build"}
+			if tt.configured {
+				e.ContractVersion = models.CodeReviewAdmissionContractV1
+			}
+			h.SetAdmissionEvidence(func() models.CodeReviewAdmissionProcessEvidence { return e })
+			signal := make(chan struct{})
+			h.SetDrainingSignal(signal)
+			if tt.draining {
+				close(signal)
+			}
+			response := httptest.NewRecorder()
+			h.Healthz(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+			var actual map[string]any
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &actual), "health evidence must be JSON for direct per-container observation")
+			expected := map[string]any{"status": "ok", "redis": "unavailable", "instance_id": e.InstanceID, "build_sha": e.BuildSHA}
+			if tt.draining {
+				expected["status"] = "draining"
+				delete(expected, "redis")
+			}
+			if tt.configured {
+				expected["code_review_admission_contract_version"] = string(models.CodeReviewAdmissionContractV1)
+			}
+			require.Equal(t, tt.status, response.Code, "drain readiness semantics must remain unchanged")
+			require.Equal(t, expected, actual, "health must expose exact process proof while omitting unconfigured capability")
 		})
 	}
 }

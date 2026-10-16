@@ -5595,14 +5595,14 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			name:    "sync pull request state passes parsed ids",
 			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`),
 			handler: func(services *Services, logger zerolog.Logger) JobHandler {
-				return newSyncPullRequestStateHandler(services, logger)
+				return newSyncPullRequestStateHandler(nil, services, logger)
 			},
 		},
 		{
 			name:    "sync pull request state rejects invalid payload",
 			payload: json.RawMessage(`{bad json`),
 			handler: func(services *Services, logger zerolog.Logger) JobHandler {
-				return newSyncPullRequestStateHandler(services, logger)
+				return newSyncPullRequestStateHandler(nil, services, logger)
 			},
 			expectErr: "unmarshal sync_pull_request_state payload",
 		},
@@ -5610,7 +5610,7 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			name:    "sync pull request state rejects invalid org id",
 			payload: json.RawMessage(`{"org_id":"not-a-uuid","pull_request_id":"` + prID.String() + `"}`),
 			handler: func(services *Services, logger zerolog.Logger) JobHandler {
-				return newSyncPullRequestStateHandler(services, logger)
+				return newSyncPullRequestStateHandler(nil, services, logger)
 			},
 			expectErr: "parse org ID",
 		},
@@ -5618,7 +5618,7 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			name:    "sync pull request state rejects invalid pull request id",
 			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"not-a-uuid"}`),
 			handler: func(services *Services, logger zerolog.Logger) JobHandler {
-				return newSyncPullRequestStateHandler(services, logger)
+				return newSyncPullRequestStateHandler(nil, services, logger)
 			},
 			expectErr: "parse pull request ID",
 		},
@@ -5626,14 +5626,14 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			name:    "rebuild pull request health passes parsed ids",
 			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`),
 			handler: func(services *Services, logger zerolog.Logger) JobHandler {
-				return newRebuildPullRequestHealthHandler(services, logger)
+				return newRebuildPullRequestHealthHandler(nil, services, logger)
 			},
 		},
 		{
 			name:    "rebuild pull request health rejects invalid payload",
 			payload: json.RawMessage(`{bad json`),
 			handler: func(services *Services, logger zerolog.Logger) JobHandler {
-				return newRebuildPullRequestHealthHandler(services, logger)
+				return newRebuildPullRequestHealthHandler(nil, services, logger)
 			},
 			expectErr: "unmarshal rebuild_pull_request_health payload",
 		},
@@ -5978,7 +5978,7 @@ func TestRebuildPullRequestHealthHandlerSkipsAutoRepairAfterNoOp(t *testing.T) {
 	}}
 	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
 
-	err := newRebuildPullRequestHealthHandler(services, zerolog.Nop())(context.Background(), "rebuild_pull_request_health", payload)
+	err := newRebuildPullRequestHealthHandler(nil, services, zerolog.Nop())(context.Background(), "rebuild_pull_request_health", payload)
 	require.NoError(t, err, "no-op projected rebuild should complete successfully")
 	require.Equal(t, 1, rebuildCalls, "handler should evaluate the durable projection once")
 	require.Equal(t, 0, autoRepairCalls, "handler should not sync or repair when no projected health change committed")
@@ -5998,7 +5998,7 @@ func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
 	}
 	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
 
-	err := newSyncPullRequestStateHandler(services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
+	err := newSyncPullRequestStateHandler(nil, services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
 
 	var retryable *RetryableError
 	require.ErrorAs(t, err, &retryable, "pending mergeability should defer the job instead of succeeding")
@@ -6026,7 +6026,7 @@ func TestSyncPullRequestStateHandlerPropagatesSyncReason(t *testing.T) {
 	}
 	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `","sync_reason":"head_changed"}`)
 
-	err := newSyncPullRequestStateHandler(services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
+	err := newSyncPullRequestStateHandler(nil, services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
 
 	require.NoError(t, err, "sync handler should complete when the GitHub refresh succeeds")
 	require.Equal(t, ghservice.PullRequestSyncReasonHeadChanged, actualReason, "sync handler should propagate the durable sync reason to GitHub telemetry")
@@ -6052,7 +6052,7 @@ func TestSyncPullRequestStateHandlerWaitsForGitHubRateLimit(t *testing.T) {
 	}
 	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
 
-	err := newSyncPullRequestStateHandler(services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
+	err := newSyncPullRequestStateHandler(nil, services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
 
 	var retryable *RetryableError
 	require.ErrorAs(t, err, &retryable, "rate-limited PR sync should remain pending until GitHub recovers")
@@ -6080,7 +6080,7 @@ func TestSyncPullRequestStateHandlerTreatsAutoRepairEvaluationFailureAsNonFatal(
 	}
 	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
 
-	err := newSyncPullRequestStateHandler(services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
+	err := newSyncPullRequestStateHandler(nil, services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
 
 	require.NoError(t, err, "persisted GitHub health should remain successful when follow-through evaluation fails")
 }

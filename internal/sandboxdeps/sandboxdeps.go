@@ -24,6 +24,41 @@ type Dependency interface {
 	Install(ctx context.Context, exec Executor, version string) error
 }
 
+// preparationRecipe exposes install and local verification commands so review
+// setup can run all required tooling and repository bootstrap under one shared
+// sandbox lock. Ordinary sessions retain the best-effort Install interface.
+type preparationRecipe interface {
+	PreparationCommands(version string) (install, verify string, err error)
+}
+
+// RequiredCommands fails closed for unknown, unsupported, or invalid declared
+// tools. The returned verification commands check the actual installed pin,
+// allowing a review workspace to reuse healthy tooling without reinstalling it.
+func RequiredCommands(deps map[string]string) (install, verify []string, err error) {
+	names := make([]string, 0, len(deps))
+	for name := range deps {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		dep, ok := DependencyRegistry.deps[name]
+		if !ok {
+			return nil, nil, fmt.Errorf("required sandbox dependency %s: no install recipe registered", name)
+		}
+		recipe, ok := dep.(preparationRecipe)
+		if !ok {
+			return nil, nil, fmt.Errorf("required sandbox dependency %s: review preparation recipe unavailable", name)
+		}
+		command, check, commandErr := recipe.PreparationCommands(deps[name])
+		if commandErr != nil {
+			return nil, nil, commandErr
+		}
+		install = append(install, command)
+		verify = append(verify, check)
+	}
+	return install, verify, nil
+}
+
 // registry holds the install recipes 143 ships built-in. Recipes register
 // themselves from their own init().
 type registry struct {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -40,10 +41,16 @@ func (f assessmentOrgFixture) GetByID(context.Context, uuid.UUID) (models.Organi
 type assessmentVisualFixture struct {
 	snapshot models.CodeReviewVisualEvidenceSnapshot
 	request  CaptureVisualEvidenceInput
+	restored bool
 }
 
-func (f *assessmentVisualFixture) Capture(_ context.Context, in CaptureVisualEvidenceInput) (models.CodeReviewVisualEvidenceSnapshot, error) {
+func (f *assessmentVisualFixture) Capture(ctx context.Context, in CaptureVisualEvidenceInput) (models.CodeReviewVisualEvidenceSnapshot, error) {
 	f.request = in
+	if !f.restored && in.Discover != nil {
+		if _, err := in.Discover(ctx); err != nil {
+			return models.CodeReviewVisualEvidenceSnapshot{}, err
+		}
+	}
 	return f.snapshot, nil
 }
 
@@ -54,16 +61,29 @@ func (assessmentFilesFixture) ListPullRequestFiles(context.Context, PullRequestF
 }
 
 type assessmentSnapshotFixture struct {
-	snapshot            ghservice.CodeReviewPullRequestSnapshot
-	changeDuringCapture bool
-	calls               int
-	syncErr             error
-	textSources         []ghservice.CodeReviewTextSource
+	snapshot                          ghservice.CodeReviewPullRequestSnapshot
+	changeDuringCapture               bool
+	calls, snapshotCalls, healthCalls int
+	syncErr                           error
+	textSources                       []ghservice.CodeReviewTextSource
+	textCalls, combinedCalls          int
+	discoveryErr                      error
+	textHead, textBody                *string
+	incompleteText                    bool
+	metadata                          []telemetry.RequestMetadata
 }
 
-func (f *assessmentSnapshotFixture) PrepareCodeReviewPullRequestSnapshot(context.Context, uuid.UUID, uuid.UUID) (ghservice.CodeReviewPullRequestSnapshotReader, error) {
-	return func(context.Context, int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+func (f *assessmentSnapshotFixture) recordMetadata(ctx context.Context) {
+	metadata, _ := telemetry.RequestMetadataFromContext(ctx)
+	f.metadata = append(f.metadata, metadata)
+}
+
+func (f *assessmentSnapshotFixture) PrepareCodeReviewPullRequestSnapshot(ctx context.Context, _ uuid.UUID, _ uuid.UUID) (ghservice.CodeReviewPullRequestSnapshotReader, error) {
+	f.recordMetadata(ctx)
+	return func(ctx context.Context, _ int) (ghservice.CodeReviewPullRequestSnapshot, error) {
+		f.recordMetadata(ctx)
 		f.calls++
+		f.snapshotCalls++
 		snapshot := f.snapshot
 		if f.changeDuringCapture && f.calls > 1 {
 			snapshot.Body += " changed intent"
@@ -71,11 +91,33 @@ func (f *assessmentSnapshotFixture) PrepareCodeReviewPullRequestSnapshot(context
 		return snapshot, nil
 	}, nil
 }
-func (f *assessmentSnapshotFixture) SyncPullRequestState(context.Context, uuid.UUID, uuid.UUID) error {
-	return f.syncErr
+func (f *assessmentSnapshotFixture) SyncCodeReviewPullRequestState(ctx context.Context, _ uuid.UUID, _ uuid.UUID) (ghservice.CodeReviewPullRequestSnapshot, error) {
+	f.recordMetadata(ctx)
+	f.calls++
+	f.healthCalls++
+	return f.snapshot, f.syncErr
 }
-func (f *assessmentSnapshotFixture) DiscoverCodeReviewTextEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewTextDiscovery, error) {
-	return ghservice.CodeReviewTextDiscovery{HeadSHA: f.snapshot.HeadSHA, Body: f.snapshot.Body, Sources: f.textSources, Complete: true}, nil
+func (f *assessmentSnapshotFixture) DiscoverCodeReviewTextEvidence(ctx context.Context, _ uuid.UUID, _ uuid.UUID, _ int) (ghservice.CodeReviewTextDiscovery, error) {
+	f.recordMetadata(ctx)
+	f.textCalls++
+	return f.textDiscovery(), f.discoveryErr
+}
+
+func (f *assessmentSnapshotFixture) textDiscovery() ghservice.CodeReviewTextDiscovery {
+	discovery := ghservice.CodeReviewTextDiscovery{HeadSHA: f.snapshot.HeadSHA, Body: f.snapshot.Body, Sources: f.textSources, Complete: !f.incompleteText}
+	if f.textHead != nil {
+		discovery.HeadSHA = *f.textHead
+	}
+	if f.textBody != nil {
+		discovery.Body = *f.textBody
+	}
+	return discovery
+}
+
+func (f *assessmentSnapshotFixture) DiscoverCodeReviewEvidence(ctx context.Context, _ uuid.UUID, _ uuid.UUID, _ int) (ghservice.CodeReviewEvidenceDiscovery, error) {
+	f.recordMetadata(ctx)
+	f.combinedCalls++
+	return ghservice.CodeReviewEvidenceDiscovery{Text: f.textDiscovery()}, f.discoveryErr
 }
 
 func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
@@ -83,8 +125,9 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 	tests := []struct {
 		name                                                                                  string
 		change, staleHealth, incompleteVisual, overflow, closed, syncFailure, invalidSettings bool
+		restored, discoveryFailure, incompleteText, textHeadChanged, textBodyChanged          bool
 	}{
-		{name: "complete capture"}, {name: "intent changes during capture", change: true}, {name: "health for old head", staleHealth: true}, {name: "incomplete visual discovery", incompleteVisual: true}, {name: "visual source overflow", overflow: true}, {name: "closed target", closed: true}, {name: "failed gate refresh", syncFailure: true}, {name: "invalid settings JSON", invalidSettings: true},
+		{name: "complete capture"}, {name: "restored visual captures only text", restored: true}, {name: "shared provider failure", discoveryFailure: true}, {name: "shared text over budget", incompleteText: true}, {name: "shared text head changes", textHeadChanged: true}, {name: "shared text body changes", textBodyChanged: true}, {name: "intent changes during capture", change: true}, {name: "health for old head", staleHealth: true}, {name: "incomplete visual discovery", incompleteVisual: true}, {name: "visual source overflow", overflow: true}, {name: "closed target", closed: true}, {name: "failed gate refresh", syncFailure: true}, {name: "invalid settings JSON", invalidSettings: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -96,6 +139,18 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			cfg := policy.Config()
 			policies := &policyStub{resolved: models.CodeReviewResolvedPolicy{Config: cfg, Policy: &policy}}
 			snapshots := &assessmentSnapshotFixture{snapshot: ghservice.CodeReviewPullRequestSnapshot{State: "open", Number: 42, Title: "Update view", Body: "Intent stays unchanged", HeadSHA: head, BaseSHA: base, BaseRef: "main"}, changeDuringCapture: tt.change}
+			if tt.discoveryFailure {
+				snapshots.discoveryErr = errors.New("shared inventory unavailable")
+			}
+			snapshots.incompleteText = tt.incompleteText
+			if tt.textHeadChanged {
+				changed := strings.Repeat("c", 40)
+				snapshots.textHead = &changed
+			}
+			if tt.textBodyChanged {
+				changed := "changed description"
+				snapshots.textBody = &changed
+			}
 			if tt.closed {
 				snapshots.snapshot.State = "closed"
 			}
@@ -107,16 +162,29 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 				health.HeadSHA = "old"
 			}
 			prs := &pullRequestStub{result: models.PullRequest{ID: prID, OrgID: orgID, GitHubRepo: "acme/web", GitHubPRNumber: 42}, health: health}
-			visual := &assessmentVisualFixture{snapshot: models.CodeReviewVisualEvidenceSnapshot{AssessmentID: &in.AssessmentID, Complete: !tt.incompleteVisual, Overflow: tt.overflow}}
+			visual := &assessmentVisualFixture{snapshot: models.CodeReviewVisualEvidenceSnapshot{AssessmentID: &in.AssessmentID, Complete: !tt.incompleteVisual, Overflow: tt.overflow}, restored: tt.restored}
 			orgSettings := json.RawMessage(`{}`)
 			if tt.invalidSettings {
 				orgSettings = json.RawMessage(`{broken`)
 			}
 			s := NewAssessmentInputCaptureService(policies, prs, &visualEvidenceRepositoryStoreStub{repository: models.Repository{ID: repoID, OrgID: orgID, FullName: "acme/web", InstallationID: 1}}, assessmentOrgFixture{models.Organization{Settings: orgSettings}}, snapshots, visual, assessmentFilesFixture{})
 			s.SetExternalContextResolver(assessmentExternalFixture{})
-			result, err := s.CaptureAssessmentInputs(context.Background(), in)
-			if tt.change || tt.staleHealth || tt.incompleteVisual || tt.overflow || tt.closed || tt.syncFailure || tt.invalidSettings {
+			parentMetadata := telemetry.RequestMetadata{Caller: "review_fixture", SyncReason: "code_review", HealthOrigin: "direct", InstallationID: 1}
+			ctx := telemetry.WithRequestMetadata(context.Background(), parentMetadata)
+			result, err := s.CaptureAssessmentInputs(ctx, in)
+			expectedMetadata := parentMetadata
+			expectedMetadata.OrgID = orgID.String()
+			expectedMetadata.SessionID = in.SessionID.String()
+			expectedMetadata.AssessmentID = in.AssessmentID
+			expectedMetadata.PullRequestID = prID
+			for _, actual := range snapshots.metadata {
+				require.Equal(t, expectedMetadata, actual, "all snapshot preparation, health, discovery and final bracket calls must retain validated ownership and caller metadata")
+			}
+			if tt.change || tt.staleHealth || tt.incompleteVisual || tt.overflow || tt.closed || tt.syncFailure || tt.invalidSettings || tt.discoveryFailure || tt.incompleteText || tt.textHeadChanged || tt.textBodyChanged {
 				require.Error(t, err, "capture must reject mixed, stale, or unavailable inputs")
+				if tt.closed {
+					require.ErrorIs(t, err, ErrReviewIneligible, "terminal snapshots must remain deterministic ineligibility rather than a retryable capture error")
+				}
 				if tt.overflow {
 					require.ErrorIs(t, err, ErrAssessmentReuseUnavailable, "visual source overflow should permit legacy full review without reuse")
 				}
@@ -132,7 +200,16 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			require.Equal(t, head, result.Health.HeadSHA, "captured health must describe the exact reviewed head")
 			require.True(t, result.Health.ChecksConfirmed, "captured health should preserve confirmed check provenance")
 			require.Equal(t, []ReviewTextEvidence{newReviewTextEvidence("pull_request_description", "42", "https://github.com/acme/web/pull/42", "", "Intent stays unchanged", "full")}, result.Manifest.TextEvidence.Items, "full PR description should be immutable citable text")
+			if tt.restored {
+				require.Equal(t, 0, snapshots.combinedCalls, "restored visual checkpoint should avoid combined remote discovery")
+				require.Equal(t, 1, snapshots.textCalls, "restored capture should read fresh bounded text once")
+			} else {
+				require.Equal(t, 1, snapshots.combinedCalls, "uncached capture should share one discovery between text and images")
+				require.Equal(t, 0, snapshots.textCalls, "shared inventory must avoid a second standalone text discovery")
+			}
 			require.Equal(t, 2, snapshots.calls, "provider snapshot must bracket files and visual capture")
+			require.Equal(t, 1, snapshots.healthCalls, "assessment must reuse the authoritative snapshot from one fresh health refresh")
+			require.Equal(t, 1, snapshots.snapshotCalls, "assessment must keep one independent final PR read without an initial duplicate")
 			require.True(t, visual.request.Fresh, "publication refresh must bypass immutable visual snapshot restoration")
 			require.Equal(t, in.AssessmentID, *visual.request.AssessmentID, "capture must retain assessment identity")
 			s.SetExternalContextResolver(assessmentExternalFixture{digest: "changed-integration-tools"})

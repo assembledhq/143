@@ -20,11 +20,13 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/github/ratelimit"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 const (
@@ -33,6 +35,17 @@ const (
 	// sweep touches every open PR in the org and is the dominant consumer of the
 	// REST budget.
 	prHealthStaleAfter = 10 * time.Minute
+	// Five periodic passes provide capacity for an ordinary open population
+	// within roughly fifty minutes, before queueing, deferrals, or errors. Keep
+	// the candidate list and its population query bounded for larger tenants.
+	prHealthCatchupPasses    = 5
+	prHealthCandidateLimit   = 200
+	prHealthPopulationCap    = prHealthCatchupPasses * prHealthCandidateLimit
+	prHealthSweepConcurrency = 2
+	// Bound how long a sweep admits new health candidates. An already started
+	// shared sync retains its existing two-minute timeout; credential resolution
+	// and independent recovery work do not acquire a new overall deadline.
+	prHealthSweepStartBudget = 7 * time.Minute
 	// prHealthReadStaleAfter is the tighter budget for interactive reads only —
 	// GetPullRequestHealth serving the HTTP endpoint. Projected check rebuilds
 	// never recompute summary.MergeState (see rebuildProjectedHealthSummary), so
@@ -47,19 +60,19 @@ const (
 	// invoke — letting that path refresh every two minutes would re-request the
 	// readback that checkStateRequiresAuthoritativeSync just avoided. They pass
 	// healthBuildOptions.asyncRefreshAfter instead.
-	prHealthReadStaleAfter   = 2 * time.Minute
-	prHealthSyncQueue        = "default"
-	prHealthSyncJobType      = "sync_pull_request_state"
-	prHealthRebuildJobType   = "rebuild_pull_request_health"
-	prHealthReconcileJobType = "reconcile_pull_request_state"
-	prHealthEnrichJobType    = "enrich_pull_request_health"
-	prMergeWhenReadyJobType  = "merge_pull_request_when_ready"
-	prHealthWebhookDebounce  = 5 * time.Second
-	maxHealthRebuildAttempts = 3
-	maxRebuildEnqueueHops    = 8
-	requiredChecksCacheTTL   = 24 * time.Hour
-	noRequiredChecksCacheTTL = 6 * time.Hour
-	prHealthSyncTimeout      = 2 * time.Minute
+	prHealthReadStaleAfter    = 2 * time.Minute
+	prHealthSyncQueue         = "default"
+	prHealthSyncJobType       = "sync_pull_request_state"
+	prHealthRebuildJobType    = "rebuild_pull_request_health"
+	prHealthReconcileJobType  = "reconcile_pull_request_state"
+	prHealthEnrichJobType     = "enrich_pull_request_health"
+	prMergeWhenReadyJobType   = "merge_pull_request_when_ready"
+	prHealthWebhookDebounce   = 5 * time.Second
+	prHealthCheckSyncDebounce = 15 * time.Second
+	maxHealthRebuildAttempts  = 3
+	requiredChecksCacheTTL    = 24 * time.Hour
+	noRequiredChecksCacheTTL  = 6 * time.Hour
+	prHealthSyncTimeout       = 2 * time.Minute
 )
 
 type PullRequestSyncReason string
@@ -97,13 +110,13 @@ func (r PullRequestSyncReason) Validate() error {
 	}
 }
 
-// coalesces reports whether a sync requested for this reason may be satisfied
-// by an already-running sync for the same PR. Merge safety is the one caller
-// that must not: mergePullRequest documents that its CanMerge gate is only
-// meaningful against GitHub data fetched after the merge was requested, and
-// joining an in-flight sync would hand it a snapshot taken beforehand.
 func (r PullRequestSyncReason) coalesces() bool {
-	return r != PullRequestSyncReasonMergeSafety
+	switch r {
+	case PullRequestSyncReasonInitial, PullRequestSyncReasonStaleReconcile, PullRequestSyncReasonMergeabilityWait:
+		return true
+	default:
+		return false
+	}
 }
 
 type pullRequestSyncReasonContextKey struct{}
@@ -625,16 +638,23 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 			Str("pull_request_id", pullRequestID.String()).
 			Str("sync_reason", string(reason)).
 			Msg("starting uncoalesced github pull request health sync")
-		// Deliberately the caller's context, not a prHealthSyncTimeout copy: a
-		// merge gate has exactly one waiter, so there is nobody to protect from
-		// its deadline and the merge request's own timeout should govern. The
-		// coalesced branch below needs its own budget only because it detaches
-		// from whichever caller happened to lead the flight. Runtime is bounded
-		// regardless by the GitHub client's per-request timeout plus the
-		// mergeability backoff ladder.
 		return s.syncPullRequestState(ctx, orgID, pullRequestID)
 	}
-	key := orgID.String() + ":" + pullRequestID.String()
+	readKey := orgID.String() + ":" + pullRequestID.String()
+	if reason == PullRequestSyncReasonInitial {
+		readKey += ":initial"
+	}
+	key := readKey
+	var resolved *resolvedPullRequestHealthSync
+	if s.backgroundQuotaFlightNeedsResolution(ctx) {
+		var err error
+		resolved, err = s.resolvePullRequestHealthSync(ctx, orgID, pullRequestID)
+		if err != nil {
+			reconciliationScopeFromContext(ctx).observe(nil, err)
+			return err
+		}
+		key = s.backgroundQuotaFlightKey(ctx, key, resolved.resolution)
+	}
 	result := s.prHealthSyncGroup.DoChan(key, func() (any, error) {
 		s.logger.Info().
 			Str("org_id", orgID.String()).
@@ -643,7 +663,10 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 			Msg("starting github pull request health sync")
 		syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), prHealthSyncTimeout)
 		defer cancel()
-		return nil, s.syncPullRequestState(syncCtx, orgID, pullRequestID)
+		if key != readKey {
+			return nil, s.syncBudgetedPullRequestState(syncCtx, readKey, orgID, pullRequestID, resolved)
+		}
+		return nil, s.syncResolvedPullRequestState(syncCtx, orgID, pullRequestID, resolved, false)
 	})
 	select {
 	case <-ctx.Done():
@@ -661,37 +684,55 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	}
 }
 
-func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) (resultErr error) {
+// SyncCodeReviewPullRequestState refreshes authoritative health and returns the
+// PR metadata fetched by that same refresh. It is synchronous and uncoalesced:
+// a review capture still gets fresh provider inputs, checks and commit statuses.
+func (s *PRService) SyncCodeReviewPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) (CodeReviewPullRequestSnapshot, error) {
+	ctx = WithPullRequestSyncReason(ctx, PullRequestSyncReasonCodeReview)
+	var snapshot CodeReviewPullRequestSnapshot
+	err := s.syncResolvedPullRequestStateCapturing(ctx, orgID, pullRequestID, nil, false, func(details *gitHubPullRequestDetails) error {
+		if details.Head.SHA == "" {
+			return errors.New("pull request head SHA is missing")
+		}
+		snapshot = codeReviewPullRequestSnapshot(details)
+		return nil
+	})
+	if err != nil {
+		return CodeReviewPullRequestSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
+	return s.syncResolvedPullRequestState(ctx, orgID, pullRequestID, nil, false)
+}
+
+func (s *PRService) syncResolvedPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID, resolved *resolvedPullRequestHealthSync, backgroundQuotaAdmitted bool) error {
+	return s.syncResolvedPullRequestStateCapturing(ctx, orgID, pullRequestID, resolved, backgroundQuotaAdmitted, nil)
+}
+
+func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, orgID, pullRequestID uuid.UUID, resolved *resolvedPullRequestHealthSync, backgroundQuotaAdmitted bool, capture func(*gitHubPullRequestDetails) error) (resultErr error) {
 	var resolution *identity.Resolution
 	scope := reconciliationScopeFromContext(ctx)
 	defer func() {
 		resultErr = reconciliationInstallationFailure(resolution, resultErr)
 		scope.observe(resolution, resultErr)
 	}()
-	pr, err := s.pullRequests.GetByID(ctx, orgID, pullRequestID)
-	if err != nil {
-		return err
-	}
-
-	repo, err := s.repos.GetByFullName(ctx, orgID, pr.GitHubRepo)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			anyStatusRepo, anyStatusErr := s.repos.GetByFullNameAnyStatus(ctx, orgID, pr.GitHubRepo)
-			if anyStatusErr == nil && repoBlocksPullRequestHealthSync(anyStatusRepo) {
-				return fmt.Errorf("%w: %s", ErrPullRequestRepositoryDisconnected, pr.GitHubRepo)
-			}
-			if anyStatusErr != nil && !errors.Is(anyStatusErr, pgx.ErrNoRows) {
-				return fmt.Errorf("load repository for pull request health sync: %w", anyStatusErr)
-			}
+	if resolved == nil {
+		var err error
+		resolved, err = s.resolvePullRequestHealthSync(ctx, orgID, pullRequestID)
+		if err != nil {
+			return err
 		}
-		return fmt.Errorf("load repository for pull request health sync: %w", err)
 	}
-	resolution, err = s.getInstallationResolutionForRepo(ctx, orgID, &repo)
-	if err != nil {
-		return fmt.Errorf("load installation token for pull request health sync: %w", err)
-	}
+	pr, repo := resolved.pullRequest, resolved.repository
+	ctx = withPullRequestHealthMetadata(ctx, orgID, pr.ID)
+	resolution = resolved.resolution
 	if err := scope.deferral(resolution); err != nil {
 		return err
+	}
+	if !backgroundQuotaAdmitted && !s.admitBackgroundPullRequestSync(ctx, orgID, pullRequestID, resolution) {
+		return errPullRequestBackgroundQuotaDeferred
 	}
 	ctx = withGitHubResolutionContext(ctx, resolution, repo.InstallationID, "pr_health")
 	token := resolution.Token
@@ -704,6 +745,18 @@ func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequest
 	details, err := s.fetchPullRequestDetails(ctx, token, owner, repoName, pr.GitHubPRNumber)
 	if err != nil {
 		return err
+	}
+	if capture != nil {
+		if err := capture(details); err != nil {
+			return err
+		}
+	}
+
+	// Review capture consumes terminal metadata for deterministic ineligibility.
+	// Avoid adding lifecycle cleanup under the capture's publication lock;
+	// ordinary health reconciliation below still repairs stale-open mirrors.
+	if capture != nil && strings.EqualFold(strings.TrimSpace(details.State), "closed") {
+		return nil
 	}
 
 	// Self-heal: when GitHub reports the PR closed but our DB still has it
@@ -850,25 +903,22 @@ func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequest
 			return nil
 		}
 	}
-	// Reconcile the fetched check set before exposing its corresponding health
-	// snapshot. This prevents a projected rebuild from advancing the aggregate
-	// with an older webhook immediately before reconciliation replaces that
-	// webhook row with the newer authoritative state.
-	if err := s.pullRequests.ReconcileCheckStates(ctx, orgID, pullRequestID, details.Head.SHA, checkStateVersion, checkStates); err != nil {
-		s.logger.Warn().Err(err).
-			Str("pull_request_id", pullRequestID.String()).
-			Str("head_sha", details.Head.SHA).
-			Msg("failed to seed pull request check projection during GitHub reconciliation")
-	}
-
-	current, err := s.pullRequests.UpsertHealthSummary(ctx, orgID, pullRequestID, details.Head.SHA, details.Base.SHA, summary, nil, checkStateVersion)
+	current, applied, err := s.pullRequests.ApplyHealthSync(s.logger.WithContext(ctx), orgID, pullRequestID, db.PullRequestHealthSyncSnapshot{
+		ExpectedHeadSHA:   stringValue(pr.HeadSHA),
+		ExpectedBaseSHA:   stringValue(pr.BaseSHA),
+		HeadSHA:           details.Head.SHA,
+		BaseSHA:           details.Base.SHA,
+		CheckStateVersion: checkStateVersion,
+		Checks:            checkStates,
+		Summary:           summary,
+		CIStatus:          models.PullRequestCIStatus(deriveAggregateCIStatus(summary.Checks)),
+	})
 	if err != nil {
 		return err
 	}
-
-	ciStatus := deriveAggregateCIStatus(summary.Checks)
-	if err := s.pullRequests.UpdateCIStatus(ctx, orgID, pullRequestID, models.PullRequestCIStatus(ciStatus)); err != nil {
-		s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to update CI status during pull request health sync")
+	if !applied {
+		s.logger.Info().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Int64("check_state_version", checkStateVersion).Msg("skipping superseded pull request health sync")
+		return nil
 	}
 
 	projectedHealthChanged := false
@@ -1122,32 +1172,142 @@ func (s *reconciliationGitHubScope) hasBlockedInstallation() bool {
 	return len(s.blocked) > 0
 }
 
+func withPullRequestHealthMetadata(ctx context.Context, orgID, pullRequestID uuid.UUID) context.Context {
+	metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+	metadata.OrgID = orgID.String()
+	metadata.PullRequestID = pullRequestID
+	return githubtelemetry.WithRequestMetadata(ctx, metadata)
+}
+
+func pullRequestHealthCandidateLimit(limit, openPopulation int) int {
+	if limit <= 0 || limit > prHealthCandidateLimit {
+		limit = 50
+	}
+	if openPopulation > prHealthPopulationCap {
+		openPopulation = prHealthPopulationCap
+	}
+	return min(prHealthCandidateLimit, max(limit, (openPopulation+prHealthCatchupPasses-1)/prHealthCatchupPasses))
+}
+
+// retainReconciliationThrottle keeps the first occurrence of a retained,
+// installation-scoped throttle. Pointer identity preserves distinct controller
+// generations and deadlines even when their error messages are identical.
+// Unknown principals and joined siblings are never collapsed into one bucket.
+func retainReconciliationThrottle(seen map[error]struct{}, err error) bool {
+	for cause := err; cause != nil; {
+		var retained error
+		switch typed := cause.(type) {
+		case *reconciliationInstallationError:
+			if typed != nil && typed.installationID > 0 {
+				retained = typed
+			}
+		case *ratelimit.Deferral:
+			if typed != nil && typed.InstallationID > 0 {
+				retained = typed
+			}
+		case *ratelimit.ControlledError:
+			if typed != nil && typed.Deferral.InstallationID > 0 {
+				retained = typed
+			}
+		}
+		if retained != nil {
+			if _, duplicate := seen[retained]; duplicate {
+				return false
+			}
+			seen[retained] = struct{}{}
+			return true
+		}
+		// A response or transport wrapper can contribute its own retry metadata.
+		// Do not discard that distinct outer evidence based on a shared cause.
+		if classifyRetryCause(cause, time.Now()).Retryable {
+			return true
+		}
+		wrapped, ok := cause.(interface{ Unwrap() error })
+		if !ok {
+			break
+		}
+		cause = wrapped.Unwrap()
+	}
+	return true
+}
+
 func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error {
 	ctx = withReconciliationScope(ctx)
 	scope := reconciliationScopeFromContext(ctx)
-	stale, err := s.pullRequests.ListOpenStaleForHealthSync(ctx, orgID, time.Now().Add(-prHealthStaleAfter), limit)
+	healthStartedAt := time.Now()
+	population, countErr := s.pullRequests.CountOpenForHealthSync(ctx, orgID, prHealthPopulationCap)
+	if countErr != nil {
+		s.logger.Warn().Err(countErr).Str("org_id", orgID.String()).Msg("failed to size pull request health sweep; using requested limit")
+	}
+	healthLimit := pullRequestHealthCandidateLimit(limit, population)
+	stale, err := s.pullRequests.ListOpenStaleForHealthSync(ctx, orgID, time.Now().Add(-prHealthStaleAfter), healthLimit)
 	var reconciliationErrs []error
 	if err != nil {
 		reconciliationErrs = append(reconciliationErrs, fmt.Errorf("list stale pull requests for reconciliation: %w", err))
 	}
-	for _, pr := range stale {
-		syncCtx := WithPullRequestSyncReason(ctx, PullRequestSyncReasonStaleReconcile)
-		if err := s.SyncPullRequestState(syncCtx, orgID, pr.ID); err != nil {
+	outcomes := runPullRequestHealthCandidates(ctx, stale, healthStartedAt.Add(prHealthSweepStartBudget), time.Now, func(ctx context.Context, pullRequestID uuid.UUID) error {
+		return s.SyncPullRequestState(WithPullRequestSyncReason(ctx, PullRequestSyncReasonStaleReconcile), orgID, pullRequestID)
+	})
+	var started, succeeded, deferred, pending, failed, budgetSkipped, cancelledSkipped int
+	retainedThrottles := make(map[error]struct{})
+	for i, outcome := range outcomes {
+		pr := stale[i]
+		if !outcome.started {
+			if outcome.budgetExpired {
+				budgetSkipped++
+			} else {
+				cancelledSkipped++
+			}
+			continue
+		}
+		started++
+		if err := outcome.err; err != nil {
+			if errors.Is(err, errPullRequestBackgroundQuotaDeferred) {
+				deferred++
+				continue
+			}
 			// The shared sync may have originated outside this sweep. Typed
 			// controller deferrals still identify its affected installation.
 			scope.observe(nil, err)
 			if errors.Is(err, ErrPullRequestMergeabilityPending) {
+				pending++
 				s.logger.Debug().Str("pull_request_id", pr.ID.String()).Msg("pull request mergeability is still pending during reconciliation")
 				continue
 			}
+			retry := ClassifyRetry(err, time.Now())
+			if retry.RateLimited {
+				deferred++
+				if !retainReconciliationThrottle(retainedThrottles, err) {
+					continue
+				}
+			} else {
+				failed++
+			}
 			s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("failed to reconcile pull request health")
-			if ClassifyRetry(err, time.Now()).Retryable {
+			if retry.Retryable {
 				reconciliationErrs = append(reconciliationErrs, fmt.Errorf("reconcile pull request %s: %w", pr.ID, err))
 			}
+		} else {
+			succeeded++
 		}
 	}
+	event := s.logger.Info().Str("org_id", orgID.String())
+	if jobID, ok := jobctx.JobIDFromContext(ctx); ok && jobID != uuid.Nil {
+		event = event.Str("job_id", jobID.String())
+	}
+	event.
+		Int("health_population", population).Bool("health_population_capped", population == prHealthPopulationCap).
+		Bool("health_population_available", countErr == nil).Int("health_candidate_limit", healthLimit).
+		Bool("health_selection_available", err == nil).
+		Int("health_selected", len(stale)).Int("health_started", started).Int("health_succeeded", succeeded).
+		Int("health_deferred", deferred).Int("health_mergeability_pending", pending).Int("health_failed", failed).
+		Int("health_budget_skipped", budgetSkipped).Int("health_cancelled_skipped", cancelledSkipped).
+		Dur("health_elapsed", time.Since(healthStartedAt)).Msg("completed periodic pull request health sweep")
+	if ctx.Err() != nil {
+		reconciliationErrs = append(reconciliationErrs, ctx.Err())
+	}
 	// Independent database recovery runs even when GitHub is throttled or a
-	// candidate listing failed. Every candidate list remains bounded by limit.
+	// candidate listing failed. Its candidate lists retain the requested limit.
 	if err := s.reconcileStuckPublishActions(ctx, orgID, limit); err != nil {
 		reconciliationErrs = append(reconciliationErrs, err)
 	}
@@ -1173,6 +1333,41 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 		reconciliationErrs = append(reconciliationErrs, err)
 	}
 	return errors.Join(reconciliationErrs...)
+}
+
+type pullRequestHealthOutcome struct {
+	started       bool
+	budgetExpired bool
+	err           error
+}
+
+// runPullRequestHealthCandidates keeps each PR's operations serial, bounds
+// parallelism, and returns results in candidate order for deterministic retry
+// classification. A start budget does not cancel an already shared sync.
+func runPullRequestHealthCandidates(ctx context.Context, candidates []models.PullRequest, startDeadline time.Time, now func() time.Time, syncCandidate func(context.Context, uuid.UUID) error) []pullRequestHealthOutcome {
+	outcomes := make([]pullRequestHealthOutcome, len(candidates))
+	indices := make(chan int)
+	var workers sync.WaitGroup
+	for range min(prHealthSweepConcurrency, len(candidates)) {
+		workers.Go(func() {
+			for i := range indices {
+				if ctx.Err() != nil {
+					continue
+				}
+				if !now().Before(startDeadline) {
+					outcomes[i].budgetExpired = true
+					continue
+				}
+				outcomes[i] = pullRequestHealthOutcome{started: true, err: syncCandidate(ctx, candidates[i].ID)}
+			}
+		})
+	}
+	for i := range candidates {
+		indices <- i
+	}
+	close(indices)
+	workers.Wait()
+	return outcomes
 }
 
 func (s *PRService) reconciliationRepositoryDeferral(ctx context.Context, orgID uuid.UUID, repo *models.Repository) error {
@@ -2120,7 +2315,7 @@ func (s *PRService) fetchPullRequestDetails(ctx context.Context, token, owner, r
 		if err := json.Unmarshal(body, &details); err != nil {
 			return nil, fmt.Errorf("decode GitHub pull request details: %w", err)
 		}
-		if details.Mergeable != nil || isDefinitiveNullMergeabilityState(details.MergeableState) || attempt >= len(delays) {
+		if strings.EqualFold(strings.TrimSpace(details.State), "closed") || details.Mergeable != nil || isDefinitiveNullMergeabilityState(details.MergeableState) || attempt >= len(delays) {
 			return &details, nil
 		}
 		delay := delays[attempt]
@@ -2320,25 +2515,21 @@ func (s *PRService) fetchCheckRunAnnotations(ctx context.Context, token, owner, 
 	return lines, nil
 }
 
-// enqueuePullRequestStateSync queues an authoritative GitHub readback. The
-// reason is a required argument rather than an option so that a new trigger
-// cannot silently land in telemetry as "manual".
-//
-// The dedupe key intentionally excludes the reason: a PR only ever needs one
-// pending readback, whatever prompted it. The consequence is that the queued
-// job's payload — and therefore the github_sync_reason dimension on the API
-// calls it makes — keeps whichever reason arrived first. The log event below is
-// emitted for every request, including absorbed ones, so trigger frequency
-// stays measurable even though the per-request attribution is skewed.
 func (s *PRService) enqueuePullRequestStateSync(ctx context.Context, pr models.PullRequest, reason PullRequestSyncReason) {
+	if err := s.queuePullRequestStateSync(ctx, pr, reason); err != nil {
+		s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Str("sync_reason", string(reason)).Msg("failed to enqueue pull request health sync")
+	}
+}
+
+func (s *PRService) queuePullRequestStateSync(ctx context.Context, pr models.PullRequest, reason PullRequestSyncReason) error {
 	if s.jobs == nil {
-		return
+		return nil
 	}
 	if reason.Validate() != nil {
 		reason = PullRequestSyncReasonManual
 	}
-	dedupeKey := pullRequestStateSyncDedupeKey(pr.ID)
-	jobID, err := s.jobs.EnqueueWithOpts(ctx, pr.OrgID, db.EnqueueOpts{
+	dedupeKey := pullRequestStateSyncDedupeKey(pr.ID, reason)
+	opts := db.EnqueueOpts{
 		Queue:   prHealthSyncQueue,
 		JobType: prHealthSyncJobType,
 		Payload: map[string]string{
@@ -2348,15 +2539,23 @@ func (s *PRService) enqueuePullRequestStateSync(ctx context.Context, pr models.P
 		},
 		Priority:  6,
 		DedupeKey: &dedupeKey,
-	})
-	if err != nil {
-		s.logger.Warn().
-			Err(err).
-			Str("pull_request_id", pr.ID.String()).
-			Str("sync_reason", string(reason)).
-			Msg("failed to enqueue pull request health sync")
-		return
 	}
+	var jobID uuid.UUID
+	var err error
+	if reason == PullRequestSyncReasonStaleReconcile || reason == PullRequestSyncReasonMergeabilityWait {
+		jobID, err = s.jobs.EnqueueWithOpts(ctx, pr.OrgID, opts)
+	} else {
+		runAt := time.Now().UTC()
+		if reason == PullRequestSyncReasonIncomplete {
+			runAt = runAt.Add(prHealthCheckSyncDebounce)
+		}
+		opts.RunAt = &runAt
+		jobID, err = s.jobs.EnqueuePullRequestHealthWork(ctx, pr.OrgID, pr.ID, opts)
+	}
+	if err != nil {
+		return fmt.Errorf("enqueue pull request health sync: %w", err)
+	}
+
 	event := s.logger.Info().
 		Str("org_id", pr.OrgID.String()).
 		Str("pull_request_id", pr.ID.String()).
@@ -2366,25 +2565,15 @@ func (s *PRService) enqueuePullRequestStateSync(ctx context.Context, pr models.P
 		event = event.Str("job_id", jobID.String())
 	}
 	event.Msg("github pull request health sync requested")
+	return nil
 }
 
-// enqueuePullRequestCheckProjection schedules the follow-up work for a check
-// webhook that changed the projection.
-//
-// The DB-only rebuild is enqueued unconditionally, including when an
-// authoritative readback is also needed. It is the only thing guaranteed to
-// fold this row into the health summary: enqueuePullRequestStateSync dedupes
-// against pending *and running* jobs, so a sync that is already past its
-// HasCheckStatesAfter race overlay will absorb the request and finish without
-// ever seeing this write. Returning the rebuild's error also keeps an enqueue
-// failure visible to GitHub as a webhook retry, which the fire-and-forget sync
-// enqueue cannot do.
 func (s *PRService) enqueuePullRequestCheckProjection(ctx context.Context, pr models.PullRequest, requiresSync bool) error {
 	if err := s.enqueuePullRequestHealthRebuild(ctx, pr); err != nil {
 		return err
 	}
 	if requiresSync {
-		s.enqueuePullRequestStateSync(ctx, pr, PullRequestSyncReasonIncomplete)
+		return s.queuePullRequestStateSync(ctx, pr, PullRequestSyncReasonIncomplete)
 	}
 	return nil
 }
@@ -2393,55 +2582,24 @@ func (s *PRService) enqueuePullRequestHealthRebuild(ctx context.Context, pr mode
 	if s.jobs == nil {
 		return nil
 	}
-	baseDedupeKey := fmt.Sprintf("%s:%s", prHealthRebuildJobType, pr.ID.String())
-	dedupeKey := baseDedupeKey
+	key := fmt.Sprintf("%s:%s", prHealthRebuildJobType, pr.ID.String())
 	runAt := time.Now().UTC().Add(prHealthWebhookDebounce)
-	for hop := 0; hop < maxRebuildEnqueueHops; hop++ {
-		jobID, err := s.jobs.EnqueueWithOpts(ctx, pr.OrgID, db.EnqueueOpts{
-			Queue:   prHealthSyncQueue,
-			JobType: prHealthRebuildJobType,
-			Payload: map[string]string{
-				"org_id":          pr.OrgID.String(),
-				"pull_request_id": pr.ID.String(),
-			},
-			Priority:  4,
-			DedupeKey: &dedupeKey,
-			RunAt:     &runAt,
-		})
-		if err != nil {
-			return fmt.Errorf("enqueue projected pull request health rebuild: %w", err)
-		}
-		if jobID != uuid.Nil {
-			return nil
-		}
-
-		active, err := s.jobs.GetActiveByDedupeKey(ctx, pr.OrgID, prHealthSyncQueue, dedupeKey)
-		if errors.Is(err, pgx.ErrNoRows) {
-			// The conflicting job completed between INSERT and lookup. Retry the
-			// same slot so this webhook still leaves durable work behind.
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("load active projected health rebuild: %w", err)
-		}
-		if active.Status == models.JobStatusPending {
-			// The event row committed before this lookup, so the pending job is
-			// guaranteed to observe it when it starts.
-			return nil
-		}
-		if active.Status != models.JobStatusRunning {
-			return fmt.Errorf("unexpected active projected health rebuild status %q", active.Status)
-		}
-		// A running job may already have read the projection. Chain one pending
-		// successor behind that exact attempt; all webhooks racing the same
-		// attempt collapse onto the same successor key.
-		dedupeKey = fmt.Sprintf("%s:after:%s", baseDedupeKey, active.ID.String())
-	}
-	return fmt.Errorf("projected health rebuild enqueue exceeded %d active-job hops", maxRebuildEnqueueHops)
+	_, err := s.jobs.EnqueuePullRequestHealthWork(ctx, pr.OrgID, pr.ID, db.EnqueueOpts{
+		Queue: prHealthSyncQueue, JobType: prHealthRebuildJobType,
+		Payload:  map[string]string{"org_id": pr.OrgID.String(), "pull_request_id": pr.ID.String()},
+		Priority: 4, DedupeKey: &key, RunAt: &runAt,
+	})
+	return err
 }
 
-func pullRequestStateSyncDedupeKey(pullRequestID uuid.UUID) string {
-	return fmt.Sprintf("%s:%s", prHealthSyncJobType, pullRequestID.String())
+func pullRequestStateSyncDedupeKey(pullRequestID uuid.UUID, reason PullRequestSyncReason) string {
+	lane := "urgent"
+	if reason == PullRequestSyncReasonIncomplete {
+		lane = "checks"
+	} else if reason == PullRequestSyncReasonStaleReconcile || reason == PullRequestSyncReasonMergeabilityWait {
+		lane = "background"
+	}
+	return fmt.Sprintf("%s:%s:%s", prHealthSyncJobType, pullRequestID.String(), lane)
 }
 
 func (s *PRService) enqueuePullRequestHealthEnrichment(ctx context.Context, pr models.PullRequest, version int64) {

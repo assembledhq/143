@@ -163,6 +163,21 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 		)
 	}
 
+	if err := ensureClaudeWorkspaceTrust(ctx, provider, sandbox); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// Trust setup is optional: Claude retains its existing trust gates and
+		// can recover configuration that this preparation could not update.
+		a.logger.Warn().Err(err).Msg("failed to prepare Claude workspace trust; continuing with existing permissions")
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "warn",
+			Message:   "Could not save Claude workspace trust; continuing with Claude's existing permissions.",
+			Metadata:  map[string]interface{}{"error": err.Error()},
+		}
+	}
+
 	logCh <- agent.LogEntry{
 		Timestamp: time.Now(),
 		Level:     "info",

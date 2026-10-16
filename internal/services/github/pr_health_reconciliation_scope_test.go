@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -96,9 +97,10 @@ func TestReconcilePullRequestStateContinuesHealthyInstallations(t *testing.T) {
 			mock, err := pgxmock.NewPool()
 			require.NoError(t, err, "database mock should initialize")
 			t.Cleanup(mock.Close)
+			mock.MatchExpectationsInOrder(false)
 			orgID := uuid.New()
 			now := time.Now().UTC()
-			names := []string{"example/throttled", "example/same-installation", "example/healthy"}
+			names := []string{"example/throttled", "example/healthy", "example/same-installation"}
 			ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
 			rows := make([][]any, 3)
 			staleRows := pgxmock.NewRows(prTestPullRequestColumns)
@@ -106,18 +108,19 @@ func TestReconcilePullRequestStateContinuesHealthyInstallations(t *testing.T) {
 				rows[i] = newPRTestRow(ids[i], nil, orgID, names[i], now, nil)
 				staleRows.AddRow(rows[i]...)
 			}
+			mock.ExpectQuery(`SELECT COUNT\(\*\) FROM`).WithArgs(pgx.NamedArgs{"org_id": orgID, "population_cap": 1000}).WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
 			mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").WithArgs(pgx.NamedArgs{"org_id": orgID, "before": pgxmock.AnyArg(), "limit": 10}).WillReturnRows(staleRows)
 			for i := range ids {
-				mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(rows[i]...))
+				mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").WithArgs(pgx.NamedArgs{"org_id": orgID, "id": ids[i]}).WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(rows[i]...))
 				installationID := int64(10)
 				if i == 0 {
 					installationID = tt.firstInstallation
 				}
-				if i == 2 {
+				if i == 1 {
 					installationID = 20
 				}
 				expectReconciliationRepository(mock, orgID, uuid.New(), names[i], installationID, false)
-				if i != 1 {
+				if i != 2 {
 					expectReserveCheckStateVersion(mock, orgID, ids[i], 0)
 				}
 			}
@@ -129,14 +132,17 @@ func TestReconcilePullRequestStateContinuesHealthyInstallations(t *testing.T) {
 				mergeRows.AddRow(row...)
 			}
 			mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*merge_when_ready_state = 'queued'[\\s\\S]*merge_when_ready_state = 'merging'").WithArgs(pgx.NamedArgs{"org_id": orgID, "stale_before": pgxmock.AnyArg(), "limit": 10}).WillReturnRows(mergeRows)
-			expectReconciliationRepository(mock, orgID, uuid.New(), names[1], 10, false)
-			expectReconciliationRepository(mock, orgID, uuid.New(), names[2], 20, false)
+			expectReconciliationRepository(mock, orgID, uuid.New(), names[1], 20, false)
+			expectReconciliationRepository(mock, orgID, uuid.New(), names[2], 10, false)
 			mock.ExpectQuery("INSERT INTO jobs").WithArgs(pgx.NamedArgs{"org_id": orgID, "queue": "default", "job_type": "merge_pull_request_when_ready", "payload": pgxmock.AnyArg(), "priority": 7, "dedupe_key": pgxmock.AnyArg()}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 			resolver := identity.NewResolver(reconciliationTokenSource{}, zerolog.Nop())
 			resolver.SetIntegrations(reconciliationIntegrationSource{})
 			var mu sync.Mutex
 			var paths []string
+			ctx, cancel := context.WithTimeout(withReconciliationScope(context.Background()), time.Second)
+			t.Cleanup(cancel)
+			scope := reconciliationScopeFromContext(ctx)
 			service := &PRService{cachedResolver: resolver, pullRequests: db.NewPullRequestStore(mock), repos: db.NewRepositoryStore(mock), sessions: db.NewSessionStore(mock), jobs: db.NewJobStore(mock), logger: zerolog.Nop(), baseURL: "https://api.github.com", httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				mu.Lock()
 				paths = append(paths, r.URL.Path)
@@ -144,16 +150,29 @@ func TestReconcilePullRequestStateContinuesHealthyInstallations(t *testing.T) {
 				code := http.StatusServiceUnavailable
 				if strings.Contains(r.URL.Path, "/throttled/") {
 					code = http.StatusTooManyRequests
+				} else {
+					// Keep the healthy peer in flight until the first worker has
+					// observed its throttle. The next same-installation candidate
+					// then starts after suppression is known, irrespective of which
+					// worker completes first.
+					for !scope.hasBlockedInstallation() {
+						select {
+						case <-ctx.Done():
+							return nil, ctx.Err()
+						case <-time.After(time.Millisecond):
+						}
+					}
 				}
 				return &http.Response{StatusCode: code, Header: http.Header{"Retry-After": []string{"60"}}, Body: io.NopCloser(strings.NewReader(`{"message":"upstream unavailable"}`))}, nil
 			})}}
-			err = service.ReconcilePullRequestState(context.Background(), orgID, 10)
+			err = service.ReconcilePullRequestState(ctx, orgID, 10)
 			require.Error(t, err, "throttle and transient failure should remain available for durable retry")
 			require.True(t, ClassifyRetry(err, now).RateLimited, "joined result should retain the installation throttle")
 			mu.Lock()
 			actual := append([]string(nil), paths...)
 			mu.Unlock()
-			require.Equal(t, []string{"/repos/example/throttled/pulls/42", "/repos/example/healthy/pulls/42"}, actual, "sweep should suppress the same installation and still attempt a healthy installation")
+			slices.Sort(actual)
+			require.Equal(t, []string{"/repos/example/healthy/pulls/42", "/repos/example/throttled/pulls/42"}, actual, "sweep should suppress later same-installation candidates and still attempt a healthy installation")
 			require.NoError(t, mock.ExpectationsWereMet(), "bounded sweep should run local recovery and enqueue only the healthy installation's merge")
 		})
 	}
@@ -250,14 +269,16 @@ func TestReconciliationWaiterRetainsOutsideFlightInstallation(t *testing.T) {
 	}))
 	service := &PRService{cachedResolver: identity.NewResolver(reconciliationTokenSource{}, zerolog.Nop()), pullRequests: db.NewPullRequestStore(mock), repos: db.NewRepositoryStore(mock), logger: zerolog.Nop(), baseURL: "https://api.github.com", httpClient: client}
 	leaderErr := make(chan error, 1)
-	go func() { leaderErr <- service.SyncPullRequestState(context.Background(), orgID, firstID) }()
+	go func() {
+		leaderErr <- service.SyncPullRequestState(WithPullRequestSyncReason(context.Background(), PullRequestSyncReasonStaleReconcile), orgID, firstID)
+	}()
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
 		t.Fatal("outside flight should reach its GitHub request")
 	}
 	waiterCtx := &reconciliationWaiterContext{Context: context.Background(), joined: make(chan struct{})}
-	sweepCtx := withReconciliationScope(waiterCtx)
+	sweepCtx := withReconciliationScope(WithPullRequestSyncReason(waiterCtx, PullRequestSyncReasonStaleReconcile))
 	waiterErr := make(chan error, 1)
 	go func() { waiterErr <- service.SyncPullRequestState(sweepCtx, orgID, firstID) }()
 	select {

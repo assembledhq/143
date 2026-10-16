@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/config"
+	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
@@ -356,10 +358,10 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, fleetText, `Skipping $ROLE@$IP`, "fleet deploy should log skipped maintenance roles so operators can tell they were intentionally left alone")
 	require.Contains(t, fleetText, `if [ "$ROLE" = "egress" ]; then`, "fleet deploy should skip egress inventory entries even when ROLES=all is requested")
 	require.Contains(t, fleetText, "make provision-egress", "fleet deploy should point operators at the dedicated egress gateway provisioning flow")
-	require.Contains(t, fleetText, `DEPLOY_JOBS="${DEPLOY_JOBS:-4}"`, "fleet deploy should default to a bounded four-node deploy fan-out")
-	require.Contains(t, fleetText, `xargs -n1 -P "$DEPLOY_JOBS"`, "fleet deploy should deploy matching nodes concurrently instead of serializing the whole fleet")
+	require.Contains(t, fleetText, `DEPLOY_JOBS="${DEPLOY_JOBS:-4}"`, "fleet deploy should retain bounded maintenance-role fan-out")
+	require.Contains(t, fleetText, `xargs -n1 -P "$DEPLOY_JOBS"`, "fleet deploy should retain parallel fan-out for independent maintenance groups")
 	require.Contains(t, fleetText, `LOG_DIR="$(mktemp -d /tmp/deploy-fleet.XXXXXX)"`, "parallel fleet deploy should keep per-host logs inspectable after failures")
-	require.Contains(t, fleetText, `LOG_DIR="$DEPLOY_FLEET_LOG_DIR"`, "fleet deploy should honor a stable log dir override so CI can upload per-host logs as a CI archive")
+	require.Contains(t, fleetText, `LOG_DIR="$DEPLOY_FLEET_LOG_DIR"`, "fleet deploy should honor a stable log dir override for private diagnostics")
 	require.Contains(t, fleetText, `dump_failed_logs`, "fleet deploy should print failed hosts' log tails so CI output is introspectable without the runner's /tmp")
 	require.Contains(t, fleetText, `deploy_one()`, "fleet deploy should isolate single-host deploy behavior so parallel fan-out keeps role and host context")
 	require.Contains(t, fleetText, `App deployment barrier passed`, "fleet deploy should require app migrations and health checks to finish before post-app nodes start")
@@ -370,8 +372,12 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	workflow, err := os.ReadFile("../.github/workflows/deploy.yml")
 	require.NoError(t, err, "test should read the deploy workflow")
 	require.Contains(t, string(workflow), `./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.event.workflow_run.head_sha }}"`, "CI should use the successful CI run SHA with deploy-fleet's default app/worker role set")
-	require.Contains(t, string(workflow), `DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs`, "CI should pin the fleet log dir so the CI upload step can find per-host logs")
-	require.Contains(t, string(workflow), `uses: actions/upload-artifact@v7`, "CI should upload per-host deploy logs on failure; the runner's /tmp vanishes when the job ends")
+	require.Contains(t, string(workflow), `DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs`, "CI should pin the private fleet diagnostic directory")
+	require.NotContains(t, string(workflow), `name: deploy-fleet-logs`, "public CI must not upload raw deployment inventories or production logs")
+	require.Contains(t, string(workflow), `>"$RUNNER_TEMP/deploy-fleet.log" 2>&1`, "public CI should capture private deployment output without printing it")
+	require.Contains(t, string(workflow), `FLEET_HOSTS="$fleet_hosts" GITHUB_STEP_SUMMARY= ./deploy/scripts/deploy-fleet.sh`, "private failure logs must not leak through the public Actions summary")
+	require.Contains(t, string(workflow), `WORKER_DEPLOY_DETACH: ""`, "automatic fleet deployment should wait for synchronous worker completion")
+	require.NotContains(t, string(workflow), `status_path="/var/log/143/deploy-worker-${short_sha}.status"`, "CI must not treat a stale short-SHA detached status as completion")
 
 	makefile, err := os.ReadFile("../Makefile")
 	require.NoError(t, err, "test should read Makefile")
@@ -394,7 +400,7 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, string(deployScript), `-e "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}"`, "worker deploy guardrail container should receive the force override from the deploy environment")
 }
 
-func TestDeployFleetRunsPostAppHostsConcurrently(t *testing.T) {
+func TestDeployFleetRunsMaintenanceHostsConcurrently(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
@@ -431,17 +437,17 @@ echo "$role@$ip deployed by fake script"
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bash", fleetScriptPath, "fake-key", "test-tag", "worker")
+	cmd := exec.CommandContext(ctx, "bash", fleetScriptPath, "fake-key", "test-tag", "redis")
 	cmd.Env = append(os.Environ(),
 		"DEPLOY_JOBS=2",
 		"FAKE_DEPLOY_STATE="+stateDir,
-		"FLEET_HOSTS=worker:10.0.0.1,worker:10.0.0.2,db:10.0.0.3,egress:10.0.0.4",
+		"FLEET_HOSTS=redis:10.0.0.1,redis:10.0.0.2,db:10.0.0.3,egress:10.0.0.4",
 	)
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "deploy-fleet should complete when two matching hosts can run concurrently: %s", string(output))
 	require.Contains(t, string(output), "Deploying 2 post-app node(s), 2 at a time", "deploy-fleet should report bounded post-app parallel fan-out")
-	require.FileExists(t, filepath.Join(stateDir, "worker-10.0.0.1.started"), "first fake worker deploy should have started")
-	require.FileExists(t, filepath.Join(stateDir, "worker-10.0.0.2.started"), "fake worker deploy should have started")
+	require.FileExists(t, filepath.Join(stateDir, "redis-10.0.0.1.started"), "first fake redis deploy should have started")
+	require.FileExists(t, filepath.Join(stateDir, "redis-10.0.0.2.started"), "fake redis deploy should have started")
 	require.NoFileExists(t, filepath.Join(stateDir, "db-10.0.0.3.started"), "unrequested db deploy should not have started")
 }
 
@@ -924,8 +930,6 @@ func TestWorkerDeployControlHelpersAvoidSandboxNetworks(t *testing.T) {
 	require.Contains(t, runDeployctl, `docker run --rm -i`, "deploy-control helpers should run as plain containers instead of compose service runs")
 	require.Contains(t, runDeployctl, `--network 143_default`, "deploy-control helpers should attach only to the default network")
 	require.NotContains(t, runDeployctl, `docker compose -f "$COMPOSE_FILE" run`, "deploy-control helpers must not inherit the worker service sandbox networks")
-	require.Contains(t, deployText, `docker run --rm -i \
-            --network 143_default`, "detached drain monitors should also keep deploy-control helpers off sandbox networks")
 	require.Contains(t, listWorkers, `Label "com.docker.compose.project"`, "worker generation discovery should inspect compose project labels")
 	require.Contains(t, listWorkers, `{{.Names}}`, "worker discovery should inspect container names to distinguish compose-run helpers from real default-project workers")
 	require.Contains(t, listWorkers, `$3 ~ /^143-worker-/`, "worker generation discovery should include blue/green worker projects")
@@ -947,16 +951,14 @@ func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 
 	require.Contains(t, deploy, "deploy_worker_blue_green", "worker deploy should use a blue/green generation rollout")
 	require.Contains(t, deploy, "start_worker_generation", "worker deploy should start the new generation before draining old containers")
-	require.Contains(t, deploy, `preflight_node_id="$(first_running_worker_node_id "$old_containers" || true)"`, "worker deploy preflight should use the existing worker node id instead of the host's physical hostname")
+	require.Contains(t, deploy, `preflight_node_id="$(first_running_worker_node_id "$old_containers")"`, "worker deploy preflight should use the existing worker node id instead of the host's physical hostname")
 	require.Contains(t, deploy, `--node-id "$preflight_node_id"`, "worker deploy preflight should load status by node id")
 	require.Contains(t, deploy, `wait_worker_db_heartbeat "$node_id"`, "worker deploy should verify the green generation has registered a fresh DB heartbeat before draining blue")
-	require.Contains(t, deploy, "Rolling back worker generation ${new_cid:0:12} after DB heartbeat readiness failure", "worker deploy should clean up green if DB heartbeat readiness fails")
-	require.Contains(t, deploy, "Rolling back worker generation ${new_cid:0:12} after preview RPC auth compatibility failure", "worker deploy should clean up green if preview RPC auth compatibility fails")
+	require.Contains(t, deploy, `preserve_failed_worker_candidate "$node_id" "$new_cid" "DB heartbeat readiness"`, "failed heartbeat verification must retain a potentially active candidate")
+	require.Contains(t, deploy, `preserve_failed_worker_candidate "$node_id" "$new_cid" "preview RPC auth compatibility"`, "failed auth verification must retain a potentially active candidate")
 	require.Contains(t, deploy, "drain_old_worker_containers", "worker deploy should drain old worker containers after the new generation is healthy")
-	require.Contains(t, deploy, "run_ctl expire-budget", "worker deploy should mark over-budget blue executors for deploy-specific checkpoint/requeue")
-	require.Contains(t, deploy, "--reason \"$reason\"", "worker deploy should pass the deploy reason into budget-expiry audit events")
 	require.Contains(t, deploy, `run_worker_deployctl mark-draining`, "post-green drain control should run from a deploy-control helper instead of depending on the green worker container")
-	require.Contains(t, deploy, `run_ctl retire-ready --node-id "$node_id" --json`, "retire polling should use a stable deploy-control helper so later worker generations cannot orphan older drains")
+	require.Contains(t, deploy, `run_worker_deployctl seal-retirement --node-id "$node_id"`, "routine retirement must atomically close generation admission before stopping")
 	require.NotContains(t, deploy, `docker exec -e "IMAGE_TAG=$build_sha" "$ctl_cid" /bin/worker-deployctl retire-ready`, "retire polling must not depend on a worker generation that future deploys may stop")
 	require.Contains(t, deploy, "WORKER_BLUE_GREEN_PORT_START", "worker deploy should allocate worker generation ports from a configurable range")
 	require.Contains(t, deploy, "WORKER_HOST_PORT", "worker deploy should pass the allocated host port into docker compose")
@@ -1113,7 +1115,6 @@ func TestWorkerFingerprintInputListsAreSharedBetweenGateAndRollover(t *testing.T
 		require.Contains(t, gate, "$"+name, "staged fingerprint gate should consume the shared %s list", name)
 		require.Contains(t, rollover, "$"+name, "blue/green rollover fingerprints should consume the shared %s list", name)
 		require.Equal(t, 2, strings.Count(deploy, "remote_env_assignment "+name+" "), "both the gate and the main remote payload should receive %s over SSH", name)
-		require.Contains(t, deploy, name+"='$"+name+"'", "detached rollover script should bake the shared %s list because it runs in a fresh process", name)
 	}
 }
 
@@ -1577,7 +1578,26 @@ func TestCIDeployCancelsStaleBuildsButNotActiveDeploys(t *testing.T) {
 	require.NotEqual(t, -1, deployFreshnessIndex, "deploy job should define an in-lock freshness check")
 	require.NotEqual(t, -1, deployCheckoutIndex, "deploy job should checkout before deploying")
 	require.Less(t, deployFreshnessIndex, deployCheckoutIndex, "deploy job should re-check freshness before any deploy setup or SSH work")
-	require.GreaterOrEqual(t, strings.Count(deployJob, "if: steps.deploy_latest.outputs.should_deploy == 'true'"), 6, "all deploy setup, deploy, and verification steps should skip stale SHAs detected after acquiring the deploy lock")
+	var parsed struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				ID   string `yaml:"id"`
+				Name string `yaml:"name"`
+				If   string `yaml:"if"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	require.NoError(t, yaml.Unmarshal(workflow, &parsed), "deploy freshness guards should be checked on the actual workflow steps")
+	pastFreshnessGate := false
+	for _, step := range parsed.Jobs["deploy"].Steps {
+		if step.ID == "deploy_latest" {
+			pastFreshnessGate = true
+			continue
+		}
+		if pastFreshnessGate {
+			require.Equal(t, "steps.deploy_latest.outputs.should_deploy == 'true'", step.If, "each deploy setup or mutation must skip a stale SHA: %s", step.Name)
+		}
+	}
 }
 
 func TestWorkerGVisorPreflightPullsHealthImageOnlyWhenMissing(t *testing.T) {
@@ -1992,6 +2012,7 @@ func TestGitHubAPIHealthDashboardUsesFocusedStructuredTelemetry(t *testing.T) {
 		"Recent rate-limit responses":                 false,
 		"Locally deferred requests":                   false,
 		"Principal attribution gaps":                  false,
+		"GitHub visual asset outcomes":                false,
 	}
 	nonRowPanels := 0
 	for _, panel := range dashboard.Panels {
@@ -2009,11 +2030,17 @@ func TestGitHubAPIHealthDashboardUsesFocusedStructuredTelemetry(t *testing.T) {
 				require.Contains(t, target.Expr, "github_request_suppressed", "local deferrals should retain the structured suppression signal")
 			} else {
 				require.Contains(t, target.Expr, `_msg:"github api request"`, "panel %q should use the canonical structured telemetry event", panel.Title)
+				if panel.Title == "GitHub visual asset outcomes" {
+					require.Equal(t, `_msg:"github api request" AND github_caller:="visual_asset" | stats by (github_result, github_rate_limit_resource) count() as asset_requests, quantile(0.95, github_duration_ms) as p95_ms | sort by (asset_requests desc) | limit 20`, target.Expr, "asset view should retain bounded outcome and resource visibility separately from API health")
+					require.Contains(t, panel.Description, "do not establish core quota use", "asset view should avoid inferring quota charges from download counts")
+				} else {
+					require.True(t, strings.HasPrefix(target.Expr, `_msg:"github api request" AND NOT github_caller:="visual_asset"`), "API panel %q should exclude attachment exchanges before aggregating API counts, latency, failures, and quota signals", panel.Title)
+				}
 			}
 			require.NotContains(t, target.Expr, "API rate limit exceeded", "panel %q should not scrape unstable GitHub error prose", panel.Title)
 		}
 	}
-	require.Equal(t, 13, nonRowPanels, "dashboard should stay focused instead of accumulating low-value panels")
+	require.Equal(t, 14, nonRowPanels, "dashboard should stay focused instead of accumulating low-value panels")
 	require.Equal(t, map[string]bool{
 		"API requests":                                true,
 		"Rate limits hit":                             true,
@@ -2028,6 +2055,7 @@ func TestGitHubAPIHealthDashboardUsesFocusedStructuredTelemetry(t *testing.T) {
 		"Recent rate-limit responses":                 true,
 		"Locally deferred requests":                   true,
 		"Principal attribution gaps":                  true,
+		"GitHub visual asset outcomes":                true,
 	}, expectedPanels, "dashboard should contain the complete curated panel set")
 }
 
@@ -2243,9 +2271,31 @@ func TestProductionAlertsUseValidLogsQLRangeFilters(t *testing.T) {
 	alertConfig := string(alerts)
 	require.NotContains(t, alertConfig, "status:[", "VictoriaLogs numeric ranges should use field:range[...] syntax so vmalert can parse the rules")
 	require.GreaterOrEqual(t, strings.Count(alertConfig, "status:range[500,599]"), 3, "API 5xx alert rules should filter inclusive 500-599 statuses with valid LogsQL range syntax")
-	require.Contains(t, alertConfig, "GitHubAPIRateLimitSustained", "production alerts should detect sustained GitHub throttling")
-	require.Contains(t, alertConfig, `_msg:"github api request" AND github_rate_limited:true`, "GitHub alert should use the canonical structured rate-limit signal")
-	require.Contains(t, alertConfig, "for: 5m", "GitHub rate-limit alert should require sustained impact to avoid paging on one transient rejection")
+	type rule struct {
+		Alert string `yaml:"alert"`
+		Expr  string `yaml:"expr"`
+		For   string `yaml:"for"`
+	}
+	var config struct {
+		Groups []struct {
+			Name     string `yaml:"name"`
+			Interval string `yaml:"interval"`
+			Rules    []rule `yaml:"rules"`
+		} `yaml:"groups"`
+	}
+	require.NoError(t, yaml.Unmarshal(alerts, &config), "production alert contracts should inspect parsed YAML rules")
+	var githubRules []rule
+	for _, group := range config.Groups {
+		if group.Name == "github-api-health" {
+			require.Equal(t, "1m", group.Interval, "GitHub alert evaluation cadence should remain unchanged")
+			githubRules = append(githubRules, group.Rules...)
+		}
+	}
+	require.Equal(t, []rule{{
+		Alert: "GitHubAPIRateLimitSustained",
+		Expr:  `_time:10m _msg:"github api request" AND github_rate_limited:true AND NOT github_caller:="visual_asset" | stats count() as rate_limits | filter rate_limits:>9`,
+		For:   "5m",
+	}}, githubRules, "GitHub API alert should exclude attachment exchanges while retaining its canonical signal, window, threshold, and sustained-impact requirement")
 }
 
 func TestActivityPhaseReconciliationAlertCoversEveryFailurePath(t *testing.T) {
@@ -2403,11 +2453,7 @@ func TestDeployPrunesUnusedDockerResourcesAfterSuccessfulRollout(t *testing.T) {
 	require.Contains(t, deployText, `$(remote_env_assignment SESSION_EXECUTOR_DOCKER_NETWORK "${SESSION_EXECUTOR_DOCKER_NETWORK:-}")`, "deploy should pass the executor network override through SSH to the remote host")
 	require.Contains(t, deployText, `docker image inspect "$sandbox_image"`, "worker prune should verify the sandbox image survived image pruning")
 	require.Contains(t, deployText, `docker pull "$sandbox_image"`, "worker prune should re-pull the sandbox image when image pruning removes it")
-	require.Contains(t, deployText, `deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_unused_docker_resources)`, "detached worker rollovers should embed the blue/green and prune helpers in the host-side script")
 	require.NotContains(t, deployText, "run_worker_deployctl_in_container", "detached worker rollovers should not embed worker-container-bound deploy control helpers")
-	require.Contains(t, deployText, `IMAGE_TAG='$IMAGE_TAG'`, "detached worker rollovers should bake IMAGE_TAG so the prune helper can protect the sandbox image")
-	require.Contains(t, deployText, `prune_unused_docker_resources worker`, "detached worker rollovers should prune only after the new worker is healthy")
-	require.Contains(t, deployText, `flock -xo /tmp/143-deploy-worker.lock`, "detached worker rollovers should not let background drain watchers inherit the deploy lock")
 	require.Contains(t, deployText, `prune_unused_docker_resources "$ROLE"`, "synchronous deploy paths should prune after the rollout and health checks succeed")
 	require.Contains(t, deployText, `DEPLOY_DOCKER_PRUNE=0`, "operators should have an explicit escape hatch for incident response or rollback-cache preservation")
 }
@@ -2496,53 +2542,37 @@ pull_with_retry "test image" "$FAKE_PULL"
 	}
 }
 
-func TestWorkerDrainMonitorDeduplicatesPerContainer(t *testing.T) {
+func TestWorkerRoutineRetirementRequiresSealedAdmission(t *testing.T) {
 	t.Parallel()
-
-	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
-	require.NoError(t, err, "test should read deploy script")
-	deployText := string(deployScript)
-
-	require.Contains(t, deployText, `monitor_lock="/var/log/143/drain-worker-${cid:0:12}.lock"`, "worker drain should use a stable per-container lock file")
-	require.Contains(t, deployText, `exec 9>"$monitor_lock"`, "worker drain monitor should open the per-container lock file")
-	require.Contains(t, deployText, `flock -xn 9`, "worker drain monitor should refuse to start a duplicate loop for the same old container")
-	require.Contains(t, deployText, `drain monitor already running`, "worker drain should log when a duplicate monitor is skipped")
-	require.Contains(t, deployText, `docker inspect --format '{{.State.Running}}' "$cid"`, "worker drain monitor should check whether the old container still exists")
-	require.Contains(t, deployText, `old worker container ${cid:0:12} is no longer running; drain monitor exiting`, "worker drain monitor should exit once the old container is gone")
+	data, err := os.ReadFile("scripts/deploy.sh")
+	require.NoError(t, err, "test should read the actual worker deployment")
+	routine := extractShellFunction(t, string(data), "drain_old_worker_containers", "deploy_worker_blue_green")
+	require.Contains(t, routine, "seal-retirement", "retirement must serialize zero-owner observation against new admission")
+	require.Contains(t, routine, "docker stop --time -1", "retirement must avoid a forced-kill deadline")
+	require.NotContains(t, routine, "expire-budget", "routine rollout must not expire reviews to manufacture retirement readiness")
+	require.NotContains(t, routine, "nohup", "routine retirement must join the old generation before success")
 }
 
-func TestDetachedWorkerDeployMarksSuccessBeforePrune(t *testing.T) {
+func TestWorkerCandidateVerificationFailureRetainsGeneration(t *testing.T) {
 	t.Parallel()
-
-	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
-	require.NoError(t, err, "test should read deploy script")
-	deployText := string(deployScript)
-
-	detachedIndex := strings.Index(deployText, "starting detached worker blue/green deploy")
-	require.NotEqual(t, -1, detachedIndex, "deploy script should contain the detached worker rollover body")
-	detachedBody := deployText[detachedIndex:]
-
-	rolloutIndex := strings.Index(detachedBody, "deploy_worker_blue_green")
-	okIndex := strings.Index(detachedBody, `echo "ok" > "\$STATUS_FILE"`)
-	pruneIndex := strings.Index(detachedBody, `prune_unused_docker_resources worker`)
-	require.NotEqual(t, -1, rolloutIndex, "detached worker deploy should run blue/green rollout")
-	require.NotEqual(t, -1, okIndex, "detached worker deploy should write a terminal ok status")
-	require.NotEqual(t, -1, pruneIndex, "detached worker deploy should still prune after rollout")
-	require.Less(t, rolloutIndex, okIndex, "detached worker deploy should only mark ok after blue/green succeeds")
-	require.Less(t, okIndex, pruneIndex, "detached worker deploy status should not wait for slow best-effort pruning")
+	data, err := os.ReadFile("scripts/deploy.sh")
+	require.NoError(t, err, "test should read candidate failure handling")
+	body := extractShellFunction(t, string(data), "preserve_failed_worker_candidate", "start_worker_generation")
+	require.Contains(t, body, "mark-draining", "candidate failure should try to stop fresh queue admission")
+	require.NotContains(t, body, "docker stop", "candidate failure cannot stop potentially owned work")
+	require.NotContains(t, body, "docker rm", "candidate failure cannot delete potentially owned work")
+	require.Contains(t, body, "return 1", "retaining a candidate must fail the current rollout")
 }
 
-func TestDetachedWorkerDeployReadsDatabaseEnvFromRemoteEnvFile(t *testing.T) {
+func TestWorkerRolloutRejectsDetachedCompletion(t *testing.T) {
 	t.Parallel()
-
-	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
-	require.NoError(t, err, "test should read deploy script")
-	deployText := string(deployScript)
-
-	require.Contains(t, deployText, `DB_HOST=$(printf '%q' "$(read_worker_env_value DB_HOST)")`, "detached worker deploy should bake DB_HOST from the refreshed remote .env file")
-	require.Contains(t, deployText, `DB_PASSWORD=$(printf '%q' "$(read_worker_env_value DB_PASSWORD)")`, "detached worker deploy should bake DB_PASSWORD from the refreshed remote .env file")
-	require.NotContains(t, deployText, `DB_HOST='$DB_HOST'`, "detached worker deploy must not expand an unset parent-shell DB_HOST under set -u")
-	require.NotContains(t, deployText, `DB_PASSWORD='$DB_PASSWORD'`, "detached worker deploy must not expand an unset parent-shell DB_PASSWORD under set -u")
+	data, err := os.ReadFile("scripts/deploy.sh")
+	require.NoError(t, err, "test should read worker rollout mode")
+	text := string(data)
+	require.Contains(t, text, "worker_rollout_guard", "all worker staging must belong to an exclusive durable attempt")
+	require.NotContains(t, text, "Detached worker rollover launched.", "a launch must not masquerade as a completed rollout")
+	require.Contains(t, text, "candidate_verified", "completion must bind verified candidate state")
+	require.Contains(t, text, "old_containers_stopped", "completion must include previous-generation retirement")
 }
 
 func TestWorkerComposeConfiguresSessionExecutorNetwork(t *testing.T) {
@@ -3125,4 +3155,33 @@ func TestWorkerCanReachSandboxBridge(t *testing.T) {
 	require.Contains(t, worker.Networks, "default", "worker must stay on the default compose network so it can reach chrome and other local services")
 	require.Contains(t, worker.Networks, "sandbox", "worker must join 143-sandbox so preview proxy dials can reach sandbox container IPs")
 	require.Greater(t, worker.Networks["default"].GatewayPriority, worker.Networks["sandbox"].GatewayPriority, "worker default gateway must stay on the compose default network so DB/private-fleet traffic does not route through the sandbox bridge")
+}
+
+func TestStandaloneWorkerIdentitySetupContracts(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, compose, service, example string }{
+		{"local development", "../docker-compose.yml", "server", "../.env.example"},
+		{"single-node production", "../docker-compose.single-node.yml", "api", "../.env.single-node.example"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			raw, err := os.ReadFile(tt.compose)
+			require.NoError(t, err, "read the supported standalone Compose entry point")
+			var parsed struct {
+				Services map[string]struct{ Environment map[string]string }
+			}
+			require.NoError(t, yaml.Unmarshal(raw, &parsed), "supported Compose must remain valid YAML")
+			expression := parsed.Services[tt.service].Environment["WORKER_PRIVATE_IP"]
+			require.True(t, strings.HasPrefix(expression, "${WORKER_PRIVATE_IP:?"), "Compose must reject missing identity before creating a worker that cannot admit reviews")
+			values, err := godotenv.Read(tt.example)
+			require.NoError(t, err, "parse the copied default setup template")
+			value, declared := values["WORKER_PRIVATE_IP"]
+			require.True(t, declared, "default setup must declare the required host identity for the operator to fill")
+			cfg := config.Config{Env: "development", Mode: "all", WorkerPrivateIP: value}
+			require.ErrorContains(t, cfg.ValidateSecrets(), "WORKER_PRIVATE_IP", "blank template identity must produce an actionable startup error rather than a hidden admission stall")
+			cfg.WorkerPrivateIP = "192.0.2.10"
+			require.NoError(t, cfg.ValidateSecrets(), "documented setup must work once the operator supplies a stable synthetic host IP")
+			require.Equal(t, "192.0.2.10", cfg.SandboxHostID(), "setup must advertise the exact configured identity instead of a generic constant fallback")
+		})
+	}
 }

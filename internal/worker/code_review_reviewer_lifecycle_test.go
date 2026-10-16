@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,8 +26,8 @@ func TestCodeReviewReviewerFallbackRecoversAndCompletes(t *testing.T) {
 	stores.SessionMessages = db.NewSessionMessageStore(mock)
 	orgID, sessionID, mainThreadID, threadID, resultID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	now := time.Now().UTC()
-	job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, HeadSHA: "captured-head"}
-	metadata := models.CodeReviewSessionMetadata{CreatedAt: now.Add(-time.Minute), PromptRecordKey: stringPtr("review-prompts")}
+	job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, RepositoryID: uuid.New(), HeadSHA: strings.Repeat("a", 40)}
+	metadata := models.CodeReviewSessionMetadata{CreatedAt: now.Add(-time.Minute), PromptRecordKey: stringPtr("review-prompts"), BaseSHA: strings.Repeat("b", 40)}
 	cfg := codeReviewRankedConfigForTest()
 	policy := codeReviewPolicyRecordForTest(cfg)
 	results, _ := codeReviewRankedResultsForTest(cfg, []codeReviewRankedAttemptForTest{
@@ -39,6 +40,15 @@ func TestCodeReviewReviewerFallbackRecoversAndCompletes(t *testing.T) {
 	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 		WillReturnRows(codeReviewRankedResultRowsForTest(orgID, sessionID, results))
+	sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 0, nil, nil)
+	setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
+	setWorkerSessionColumn(sessionRow, "repository_id", &job.RepositoryID)
+	setWorkerSessionColumn(sessionRow, "base_commit_sha", &job.HeadSHA)
+	revision, err := json.Marshal(map[string]any{"kind": "code_review", "github_repo": "captured/repository", "github_pr_number": 42, "base_sha": metadata.BaseSHA, "head_sha": job.HeadSHA})
+	require.NoError(t, err, "captured reviewer context should encode")
+	setWorkerSessionColumn(sessionRow, "revision_context", revision)
+	mock.ExpectQuery("(?s)SELECT .*FROM sessions").WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
 	recordKey := "review-prompts/reviewer-03-claude_code"
 	var capturedPrompt string
 	mock.ExpectQuery("INSERT INTO code_review_prompt_records").
@@ -48,8 +58,6 @@ func TestCodeReviewReviewerFallbackRecoversAndCompletes(t *testing.T) {
 		}), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "session_id", "record_key", "role", "agent_provider", "content", "metadata", "created_at"}).
 			AddRow(uuid.New(), orgID, sessionID, recordKey, "reviewer", "claude_code", "captured", json.RawMessage(`{}`), now))
-	sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 0, nil, nil)
-	setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
 	// The worker loads the primary identity, and the thread service verifies tenant ownership.
 	mock.ExpectQuery("(?s)SELECT .*FROM sessions").WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
@@ -78,7 +86,7 @@ func TestCodeReviewReviewerFallbackRecoversAndCompletes(t *testing.T) {
 		WillReturnRows(newCodeReviewAgentResultRows().AddRow(resultID, orgID, sessionID, "claude_code", stringPtr(models.DefaultClaudeCodeModel),
 			models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusQueued, nil, json.RawMessage(`{}`), now))
 
-	err := ensureCodeReviewReviewerThreads(context.Background(), stores, nil, zerolog.Nop(), job, models.PullRequest{}, policy, metadata, nil, models.CodeReviewVisualEvidenceSnapshot{})
+	err = ensureCodeReviewReviewerThreads(context.Background(), stores, nil, zerolog.Nop(), job, models.PullRequest{}, policy, metadata, nil, models.CodeReviewVisualEvidenceSnapshot{})
 	require.NoError(t, err, "a fallback already dispatched before result persistence should recover without sending another turn")
 	require.Contains(t, capturedPrompt, job.HeadSHA, "fallback review must use the same captured PR head")
 	require.NoError(t, mock.ExpectationsWereMet(), "recovery should create only the missing attempt and preserve the completed peer")

@@ -24,6 +24,8 @@ This creates the database, copies `.env.example` to `.env`, installs dependencie
 
 **Option A — with ngrok tunnel** (recommended for GitHub OAuth / webhook testing):
 
+Set `WORKER_PRIVATE_IP` in `.env` or `.env.local` to a stable LAN/private IP of your physical Docker host before starting `MODE=all` or `MODE=worker`, including local development. Do not use a container hostname, loopback, unspecified, or multicast address. The default Compose setup requires this value and startup reports a configuration error if it is missing or invalid. Keep the value stable across restarts; machines sharing a database need distinct identities. `MODE=api` needs no worker identity.
+
 ```bash
 make dev-ngrok NGROK_DOMAIN=yourname.ngrok.dev
 ```

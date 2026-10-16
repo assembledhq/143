@@ -1,0 +1,12 @@
+DROP TRIGGER trg_worker_retirement_seal_immutable ON worker_retirement_seals;
+DROP TRIGGER trg_worker_retirement_node ON nodes;
+DROP TRIGGER trg_worker_retirement_preview_runtime ON preview_runtimes;
+DROP TRIGGER trg_worker_retirement_preview ON preview_instances;
+DROP TRIGGER trg_worker_retirement_job ON jobs;
+DROP FUNCTION guard_worker_retirement_seal_immutable();
+DROP FUNCTION guard_worker_retirement_node();
+DROP FUNCTION guard_worker_retirement_preview_runtime();
+DROP FUNCTION guard_worker_retirement_preview();
+DROP FUNCTION guard_worker_retirement_job();
+DROP FUNCTION check_worker_retirement_admission(text);
+DROP TABLE worker_retirement_seals;

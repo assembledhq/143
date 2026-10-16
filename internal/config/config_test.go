@@ -43,6 +43,8 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	t.Setenv("GITHUB_APP_ID", "")
 	t.Setenv("GITHUB_RATE_LIMIT_MODE", "")
 	t.Setenv("GITHUB_RATE_LIMIT_INSTALLATION_ALLOWLIST", "")
+	t.Setenv("GITHUB_BACKGROUND_QUOTA_RESERVE", "")
+	t.Setenv("GITHUB_BACKGROUND_QUOTA_INTERVAL", "")
 	t.Setenv("OPENAI_API_TYPE", "")
 	t.Setenv("OPENROUTER_APP_NAME", "")
 	t.Setenv("CODE_REVIEW_ASSESSMENTS_ENABLED", "")
@@ -62,6 +64,8 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.Equal(t, []string{"http://localhost:8080"}, cfg.CORSAllowedOrigins, "CORS origins should default to FrontendURL")
 	require.Equal(t, int64(0), cfg.GitHubAppID, "Load should default GitHub app ID to zero")
 	require.Equal(t, "observe", cfg.GitHubRateLimitMode, "Load should default GitHub cooldowns to observation mode")
+	require.Equal(t, int64(0), cfg.GitHubBackgroundQuotaReserve, "background quota budgeting should default disabled")
+	require.Equal(t, time.Minute, cfg.GitHubBackgroundQuotaInterval, "enabled budgeting should default to periodic minute admission")
 	require.False(t, cfg.CodeReviewAssessmentsEnabled, "assessment capture should default disabled")
 	require.False(t, cfg.CodeReviewRechecksEnabled, "recheck admission should default disabled")
 	require.Empty(t, cfg.GitHubRateLimitInstallationAllowlist, "Load should default to no installation allowlist")
@@ -158,6 +162,8 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("GITHUB_APP_ID", "12345")
 	t.Setenv("GITHUB_RATE_LIMIT_MODE", "enforce")
 	t.Setenv("GITHUB_RATE_LIMIT_INSTALLATION_ALLOWLIST", "42,99")
+	t.Setenv("GITHUB_BACKGROUND_QUOTA_RESERVE", "100")
+	t.Setenv("GITHUB_BACKGROUND_QUOTA_INTERVAL", "2m")
 	t.Setenv("CODE_REVIEW_APP_REVIEWER_LOGINS", "143-code-reviewer,143-reviewer")
 	t.Setenv("CODE_REVIEW_ALIAS_LOGINS", "ai-reviewer,bot-reviewer")
 	t.Setenv("CODE_REVIEW_TEAM_SLUGS", "ai-reviewers,platform-review")
@@ -183,6 +189,8 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	require.Equal(t, int64(12345), cfg.GitHubAppID, "Load should parse GITHUB_APP_ID from the environment")
 	require.Equal(t, "enforce", cfg.GitHubRateLimitMode, "Load should parse the rollout mode")
 	require.Equal(t, []int64{42, 99}, cfg.GitHubRateLimitInstallationAllowlist, "Load should parse the installation allowlist")
+	require.Equal(t, int64(100), cfg.GitHubBackgroundQuotaReserve, "Load should parse the opt-in reserve")
+	require.Equal(t, 2*time.Minute, cfg.GitHubBackgroundQuotaInterval, "Load should parse periodic background admission")
 	require.Equal(t, "worker", cfg.Mode, "Load should read MODE from the environment")
 	require.Equal(t, 4, cfg.WorkerProcessCount, "Load should parse WORKER_PROCESS_COUNT from the environment")
 	require.Equal(t, 7, cfg.WorkerMaxActiveSandboxes, "Load should parse WORKER_MAX_ACTIVE_SANDBOXES from the environment")
@@ -546,6 +554,7 @@ func TestValidateSecrets_ProductionAllValid(t *testing.T) {
 	cfg := &Config{
 		Env:                  "production",
 		Mode:                 "all",
+		WorkerPrivateIP:      "192.0.2.1",
 		SessionSecret:        strings.Repeat("s", 32),
 		EncryptionMasterKey:  strings.Repeat("k", 32),
 		CSRFSigningKey:       strings.Repeat("c", 32),
@@ -571,6 +580,7 @@ func TestValidateSecrets_ProductionWorkerRequiresSandboxAuthSocket(t *testing.T)
 			cfg := &Config{
 				Env:                 "production",
 				Mode:                tt.mode,
+				WorkerPrivateIP:     "192.0.2.1",
 				SessionSecret:       strings.Repeat("s", 32),
 				EncryptionMasterKey: strings.Repeat("k", 32),
 				CSRFSigningKey:      strings.Repeat("c", 32),
@@ -915,6 +925,37 @@ func TestPreviewOriginHostIsLocal(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tc.want, previewOriginHostIsLocal(tc.template))
+		})
+	}
+}
+
+func TestValidateSecretsWorkerSandboxIdentity(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, mode, ip string
+		wantError      bool
+	}{
+		{"worker missing identity", "worker", "", true},
+		{"combined missing identity", "all", "", true},
+		{"worker hostname is invalid", "worker", "container-name", true},
+		{"combined invalid IP", "all", "999.0.0.1", true},
+		{"unspecified is not physical identity", "all", "0.0.0.0", true},
+		{"loopback is not unique across machines", "worker", "127.0.0.1", true},
+		{"multicast is not physical identity", "all", "ff02::1", true},
+		{"API missing identity is unaffected", "api", "", false},
+		{"API invalid identity is unaffected", "api", "hostname", false},
+		{"worker provisioned identity", "worker", "192.0.2.1", false},
+		{"combined provisioned IPv6", "all", "2001:db8::1", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := (&Config{Env: "development", Mode: tt.mode, WorkerPrivateIP: tt.ip}).ValidateSecrets()
+			if tt.wantError {
+				require.ErrorContains(t, err, "WORKER_PRIVATE_IP must be a stable, unique Docker host IP", "startup must stop with an actionable identity requirement")
+				require.ErrorContains(t, err, ".env or .env.local", "startup message must identify how to configure the worker")
+			} else {
+				require.NoError(t, err, "valid worker identity or API-only mode must start normally")
+			}
 		})
 	}
 }

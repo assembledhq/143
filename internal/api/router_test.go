@@ -21,6 +21,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
+	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	githubratelimit "github.com/assembledhq/143/internal/services/github/ratelimit"
 	"github.com/google/uuid"
@@ -758,4 +759,32 @@ func TestInternalRoutesAreToolGated(t *testing.T) {
 		require.Contains(t, trimmed, `toolGate.Require("`, "internal route is tool-gated: %s", trimmed)
 	}
 	require.Greater(t, registrations, 50, "the internal route group was found and scanned")
+}
+
+func TestRouterReportsOnlyConfiguredAdmissionWriter(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name       string
+		configured bool
+		want       models.CodeReviewAdmissionContractVersion
+	}{{"unconfigured API", false, ""}, {"configured API", true, models.CodeReviewAdmissionContractV1}} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &config.Config{Mode: "api"}
+			if tt.configured {
+				cfg.GitHubAppID = 143
+				cfg.GitHubAppPrivateKey = testRouterPrivateKeyPEM(t)
+			}
+			evidence := codereviewsvc.NewAdmissionProcessEvidence("api", "synthetic-build")
+			codexSvc := codexauth.NewService(nil, zerolog.Nop())
+			claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
+			router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, RouterSharedDependencies{CodeReviewAdmissionEvidence: evidence})
+			require.NoError(t, err, "actual router graph should build with or without configured GitHub snapshots")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+			var actual models.CodeReviewAdmissionProcessEvidence
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &actual), "read process evidence from the actual routed health endpoint")
+			require.Equal(t, models.CodeReviewAdmissionProcessEvidence{InstanceID: evidence.Evidence().InstanceID, BuildSHA: "synthetic-build", ContractVersion: tt.want}, actual, "router must report actual gate wiring rather than a compiled capability flag")
+		})
+	}
 }

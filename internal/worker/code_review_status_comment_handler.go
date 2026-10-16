@@ -48,8 +48,14 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 			}
 		}
 		if job.TriggeringDisputeID != nil && codeReviewMetadataTerminal(metadata.Status) && services.CodeReviewDisputes != nil {
-			if err := services.CodeReviewDisputes.EnqueueReply(ctx, job.OrgID, *job.TriggeringDisputeID, "status_sync_terminal"); err != nil {
-				return fmt.Errorf("enqueue terminal dispute reconciliation: %w", err)
+			deferred, err := codeReviewCapturedDisputeHandoff(ctx, stores, job.OrgID, *job.TriggeringDisputeID, job.SessionID, metadata.Status)
+			if err != nil {
+				return err
+			}
+			if !deferred {
+				if err := services.CodeReviewDisputes.EnqueueReply(ctx, job.OrgID, *job.TriggeringDisputeID, "status_sync_terminal"); err != nil {
+					return fmt.Errorf("enqueue terminal dispute reconciliation: %w", err)
+				}
 			}
 		}
 		latest, err := stores.CodeReviews.GetLatestByPullRequest(ctx, job.OrgID, metadata.PullRequestID)
@@ -250,6 +256,13 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 	return models.WithCodeReviewCommentFooter(strings.Join(paragraphs, "\n\n"), footer)
 }
 
+func codeReviewCapturedDisputeHandoff(ctx context.Context, stores *Stores, orgID, disputeID, sessionID uuid.UUID, status models.CodeReviewSessionStatus) (bool, error) {
+	if (status != models.CodeReviewSessionStatusStale && status != models.CodeReviewSessionStatusFailed) || stores == nil || stores.CodeReviewDisputes == nil {
+		return false, nil
+	}
+	return stores.CodeReviewDisputes.IsCapturedIdentityReassessmentSource(ctx, orgID, disputeID, sessionID)
+}
+
 func codeReviewCommentNeedsNoAction(metadata models.CodeReviewSessionMetadata) bool {
 	return metadata.Decision != nil && *metadata.Decision == models.CodeReviewDecisionApproved || metadata.Acceptable != nil && *metadata.Acceptable
 }
@@ -302,7 +315,10 @@ func enqueueCodeReviewStatusCommentSync(ctx context.Context, stores *Stores, ser
 				Str("session_id", job.SessionID.String()).
 				Str("dispute_id", job.TriggeringDisputeID.String()).
 				Msg("failed to load terminal reassessment for dispute reconciliation")
-		} else {
+		} else if deferred, handoffErr := codeReviewCapturedDisputeHandoff(ctx, stores, job.OrgID, *job.TriggeringDisputeID, job.SessionID, metadata.Status); handoffErr != nil {
+			logger.Warn().Err(handoffErr).Str("session_id", job.SessionID.String()).
+				Msg("failed to check captured-identity reassessment handoff")
+		} else if !deferred {
 			detail := strings.TrimSpace(stringPtrValue(metadata.StatusMessage))
 			transitioned, completeErr := stores.CodeReviewDisputes.CompleteReassessmentOnce(ctx, job.OrgID, *job.TriggeringDisputeID, job.SessionID, metadata.Status, metadata.Decision, detail)
 			if completeErr != nil {

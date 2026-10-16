@@ -13,8 +13,8 @@ mkdir -p /home/deploy/.ssh /opt/143
 chown -R deploy:deploy /home/deploy/.ssh /opt/143
 chmod 700 /home/deploy/.ssh
 
-# Detached worker rollovers (WORKER_DEPLOY_DETACH=1) write progress + status
-# files here. /var/log is root-owned so the deploy user can't mkdir it
+# Worker deployment diagnostics and legacy drain-monitor logs live here.
+# /var/log is root-owned so the deploy user can't mkdir it
 # itself; provision once with deploy ownership.
 mkdir -p /var/log/143
 chown deploy:deploy /var/log/143

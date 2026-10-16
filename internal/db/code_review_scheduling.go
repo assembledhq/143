@@ -189,7 +189,10 @@ func RecordCodeReviewRequest(ctx context.Context, tx pgx.Tx, orgID, repoID, prID
 
 func ResolveCodeReviewRequests(ctx context.Context, tx pgx.Tx, orgID, prID uuid.UUID, generation int64, sessionID *uuid.UUID, status string) error {
 	_, err := tx.Exec(ctx, `UPDATE code_review_requests SET session_id=$4,status=$5 WHERE org_id=$1 AND pull_request_id=$2 AND target_generation<=$3 AND status IN ('pending','joined')`, orgID, prID, generation, sessionID, status)
-	return err
+	if err != nil {
+		return err
+	}
+	return SettleRetiredCapturedIdentityReassessments(ctx, tx, orgID, prID)
 }
 
 func EncodeCodeReviewScheduleInput(input any) (json.RawMessage, error) {
@@ -267,6 +270,8 @@ func (s *CodeReviewScheduleStore) RepairMissingWakes(ctx context.Context) error 
 	// Full-review publication uses its original controller payload. Reuse all
 	// captured provenance, including request/dispute identity and fork context;
 	// never construct a new review or infer that an uncertain send was absent.
+	// Ended parents need execution drain only: their retained idle workspace
+	// cannot be reclaimed while this unstaged full assessment remains active.
 	_, err = s.db.Exec(ctx, `WITH enqueued AS (INSERT INTO jobs(org_id,queue,job_type,payload,priority,dedupe_key,run_at,max_attempts)
  SELECT a.org_id,'agent','run_code_review',original.payload,5,original.dedupe_key,now(),8
  FROM code_review_revision_assessments a
@@ -289,7 +294,7 @@ func (s *CodeReviewScheduleStore) RepairMissingWakes(ctx context.Context) error 
        AND m.pull_request_id=a.pull_request_id AND m.status='running' AND m.github_review_id IS NULL
        AND s.origin='code_review' AND s.status IN ('failed','completed')
        AND st.active_session_id=a.session_id AND (st.active_assessment_id IS NULL OR st.active_assessment_id=a.id)
-       AND (`+codeReviewRecheckSessionDrainedSQL+`)
+       AND (`+codeReviewSessionExecutionDrainedSQL+`)
        AND NOT EXISTS(SELECT 1 FROM session_threads t WHERE t.org_id=s.org_id AND t.session_id=s.id AND t.status IN ('pending','running','awaiting_input'))
        AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.org_id=s.org_id AND j.status IN ('pending','running') AND j.payload->>'session_id'=s.id::text
          AND j.job_type IN ('run_agent','continue_session','fork_session_thread','revert_session_thread','deliver_thread_inbox','prepare_code_review_workspace'))

@@ -26,9 +26,18 @@ func TestRedisIntegrationStandaloneCoordinatesIndependentControllers(t *testing.
 	require.NoError(t, err, "standalone Redis URL should parse")
 	ttlClient := redis.NewClient(options)
 	t.Cleanup(func() { require.NoError(t, ttlClient.Close(), "standalone TTL client should close") })
+	runRedisQuotaFamiliesContract(t, func() *cache.Client {
+		return cache.New(cache.Config{Topology: "standalone", URL: redisURL}, zerolog.Nop(), nil)
+	}, ttlClient, 9001)
+	runRedisQuotaAdmissionLaneContract(t, func() *cache.Client {
+		return cache.New(cache.Config{Topology: "standalone", URL: redisURL}, zerolog.Nop(), nil)
+	}, ttlClient, 9021)
 	runRedisControllerContract(t, func() *cache.Client {
 		return cache.New(cache.Config{Topology: "standalone", URL: redisURL}, zerolog.Nop(), nil)
 	}, ttlClient, 7001)
+	runRedisBackgroundQuotaContract(t, func() *cache.Client {
+		return cache.New(cache.Config{Topology: "standalone", URL: redisURL}, zerolog.Nop(), nil)
+	}, ttlClient, 8001)
 }
 
 func TestRedisIntegrationClusterCoordinatesIndependentControllers(t *testing.T) {
@@ -38,9 +47,71 @@ func TestRedisIntegrationClusterCoordinatesIndependentControllers(t *testing.T) 
 	require.NotEmpty(t, addrs, "GITHUB_RATE_LIMIT_REDIS_CLUSTER_ADDRS is required; skipped infrastructure is not passing evidence")
 	ttlClient := redis.NewClusterClient(&redis.ClusterOptions{Addrs: addrs})
 	t.Cleanup(func() { require.NoError(t, ttlClient.Close(), "cluster TTL client should close") })
+	runRedisQuotaFamiliesContract(t, func() *cache.Client {
+		return cache.New(cache.Config{Topology: "cluster", Addrs: addrs}, zerolog.Nop(), nil)
+	}, ttlClient, 9101)
+	runRedisQuotaAdmissionLaneContract(t, func() *cache.Client {
+		return cache.New(cache.Config{Topology: "cluster", Addrs: addrs}, zerolog.Nop(), nil)
+	}, ttlClient, 9121)
 	runRedisControllerContract(t, func() *cache.Client {
 		return cache.New(cache.Config{Topology: "cluster", Addrs: addrs}, zerolog.Nop(), nil)
 	}, ttlClient, 7002)
+	runRedisBackgroundQuotaContract(t, func() *cache.Client {
+		return cache.New(cache.Config{Topology: "cluster", Addrs: addrs}, zerolog.Nop(), nil)
+	}, ttlClient, 8002)
+}
+
+func runRedisBackgroundQuotaContract(t *testing.T, newClient func() *cache.Client, redisClient redis.UniversalClient, appID int64) {
+	t.Helper()
+	now := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	newController := func() *Controller {
+		t.Helper()
+		client := newClient()
+		require.NotNil(t, client, "independent quota cache should initialize")
+		t.Cleanup(func() { require.NoError(t, client.Close(), "independent quota cache should close") })
+		controller, err := NewController(Config{
+			Mode: ModeEnforce, Environment: "quota-integration", AppID: appID, InstallationAllowlist: []int64{42, 43},
+			Cache: client, Now: func() time.Time { return now }, BackgroundQuotaReserve: 20, BackgroundQuotaInterval: time.Minute, Logger: zerolog.Nop(),
+		})
+		require.NoError(t, err, "independent background controller should initialize")
+		return controller
+	}
+	a, b := newController(), newController()
+	ctx := context.Background()
+	key := a.backgroundQuotaKey(42)
+	requireOwnedQuotaRedisFixture(t, redisClient)
+	require.NoError(t, redisClient.Del(ctx, key, key+":families:v2", key+":admission:v2").Err(), "isolated core quota keys should start empty")
+	t.Cleanup(func() {
+		require.NoError(t, redisClient.Del(context.Background(), key, key+":families:v2", key+":admission:v2").Err(), "isolated core quota keys should be cleaned")
+	})
+	permit := requireAdmission(t, a, Scope{InstallationID: 42}, "trusted installation request should be admitted")
+	header := quotaTestHeaders(now, 10)
+	a.Observe(ctx, permit, Observation{StatusCode: 200, Header: header})
+	require.True(t, a.AdmitBackground(ctx, 42, "tenant-a:pr-a"), "first candidate should obtain the shared periodic slot")
+	require.False(t, b.AdmitBackground(ctx, 42, "tenant-b:pr-b"), "independent process must observe the consumed slot")
+	lateHeader := header.Clone()
+	lateHeader.Set("X-RateLimit-Remaining", "90")
+	b.Observe(ctx, permit, Observation{StatusCode: 200, Header: lateHeader})
+	require.False(t, b.AdmitBackground(ctx, 42, "tenant-b:pr-b"), "per-family Lua must reject a late higher quota response")
+	laterWindow := header.Clone()
+	laterWindow.Set("X-RateLimit-Reset", fmt.Sprintf("%d", now.Add(2*time.Hour).Unix()))
+	laterWindow.Set("X-RateLimit-Remaining", "90")
+	b.Observe(ctx, permit, Observation{StatusCode: http.StatusUnauthorized, Header: laterWindow})
+	require.False(t, b.AdmitBackground(ctx, 42, "tenant-b:pr-b"), "authentication-failure quota must not replace the installation window on real Redis")
+	b.Observe(ctx, permit, Observation{StatusCode: http.StatusOK, Header: laterWindow})
+	require.False(t, b.AdmitBackground(ctx, 42, "tenant-b:pr-b"), "a healthy later family must not hide an active low family on real Redis")
+	require.True(t, b.AdmitBackground(ctx, 43, "tenant-c:pr-c"), "another installation must remain independent")
+	now = now.Add(time.Minute)
+	require.False(t, a.AdmitBackground(ctx, 42, "tenant-a:pr-a"), "returning candidate must not jump the shared queue")
+	require.True(t, b.AdmitBackground(ctx, 42, "tenant-b:pr-b"), "oldest queued candidate should obtain the next distributed slot")
+	ttl, err := redisClient.PTTL(ctx, key+":admission:v2").Result()
+	require.NoError(t, err, "real Redis should expose the quota snapshot lifetime")
+	require.InDelta(t, (2*time.Hour - time.Minute).Milliseconds(), ttl.Milliseconds(), 10000, "shared FIFO retention should cover the latest live provider reset")
+	now = now.Add(time.Hour)
+	require.True(t, b.AdmitBackground(ctx, 42, "tenant-a:pr-a"), "expired evidence must stop restricting admission even before Redis key deletion")
+	b.Observe(ctx, permit, Observation{StatusCode: http.StatusOK, Header: quotaTestHeaders(now, 90)})
+	require.True(t, a.AdmitBackground(ctx, 42, "tenant-d:pr-d"), "a legitimate high-quota rollover should replace expired evidence on real Redis")
+	require.True(t, b.AdmitBackground(ctx, 42, "tenant-e:pr-e"), "a legitimate rollover must restore normal admission across independent controllers")
 }
 
 func runRedisControllerContract(t *testing.T, newClient func() *cache.Client, ttlClient redis.UniversalClient, appID int64) {

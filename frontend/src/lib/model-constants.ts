@@ -5,10 +5,14 @@ export const CLAUDE_CODE_MODEL_OPUS_5 = "claude-opus-5";
 export const CLAUDE_CODE_MODEL_OPUS_48 = "claude-opus-4-8";
 export const CLAUDE_CODE_MODEL_OPUS_47 = "claude-opus-4-7";
 export const CLAUDE_CODE_MODEL_OPUS_46 = "claude-opus-4-6";
+export const CLAUDE_CODE_MODEL_SONNET_55 = "claude-sonnet-5-5";
 export const CLAUDE_CODE_MODEL_SONNET_46 = "claude-sonnet-4-6";
 export const CLAUDE_CODE_MODEL_SONNET_45 = "claude-sonnet-4-5";
+export const CLAUDE_CODE_MODEL_HAIKU_55 = "claude-haiku-5-5";
 export const CLAUDE_CODE_MODEL_HAIKU_45 = "claude-haiku-4-5";
 
+// Explicit IDs for API and subscription auth; access depends on the credential,
+// provider, region and CLI version. Mirror the backend accepted model catalog.
 export const AVAILABLE_CLAUDE_CODE_MODELS = [
   CLAUDE_CODE_MODEL_FABLE_51,
   CLAUDE_CODE_MODEL_FABLE_5,
@@ -17,14 +21,19 @@ export const AVAILABLE_CLAUDE_CODE_MODELS = [
   CLAUDE_CODE_MODEL_OPUS_48,
   CLAUDE_CODE_MODEL_OPUS_47,
   CLAUDE_CODE_MODEL_OPUS_46,
+  CLAUDE_CODE_MODEL_SONNET_55,
   CLAUDE_CODE_MODEL_SONNET_46,
   CLAUDE_CODE_MODEL_SONNET_45,
+  CLAUDE_CODE_MODEL_HAIKU_55,
   CLAUDE_CODE_MODEL_HAIKU_45,
 ] as const;
 
 export const DEFAULT_CLAUDE_CODE_MODEL = CLAUDE_CODE_MODEL_OPUS_5;
 
 export const CODEX_MODEL_GPT_6_ASTRA = "gpt-6-astra";
+export const CODEX_MODEL_GPT_6_1_SOL = "gpt-6.1-sol";
+// Local alias: the adapter sends gpt-6.1-sol with service_tier="priority".
+export const CODEX_MODEL_GPT_6_1_SOL_FAST = "gpt-6.1-sol-fast";
 export const CODEX_MODEL_GPT_6_SOL = "gpt-6-sol";
 export const CODEX_MODEL_GPT_6_LUNA = "gpt-6-luna";
 export const CODEX_MODEL_GPT_5_6_SOL = "gpt-5.6-sol";
@@ -43,8 +52,14 @@ export const CODEX_MODEL_GPT_5_2_CODEX = "gpt-5.2-codex";
 export const CODEX_MODEL_GPT_5_CODEX = "gpt-5-codex";
 export const CODEX_MODEL_GPT_5_3_CODEX_SPARK = "gpt-5.3-codex-spark";
 
+// Historical IDs remain so saved settings keep their agent and model. GPT-5.5
+// and GPT-5.4/mini retired with ChatGPT sign-in but remain API models; Spark
+// retired entirely. This shared list does not establish account access.
+// See https://learn.chatgpt.com/docs/models for current auth-specific availability.
 export const AVAILABLE_CODEX_MODELS = [
   CODEX_MODEL_GPT_6_ASTRA,
+  CODEX_MODEL_GPT_6_1_SOL,
+  CODEX_MODEL_GPT_6_1_SOL_FAST,
   CODEX_MODEL_GPT_6_SOL,
   CODEX_MODEL_GPT_6_LUNA,
   CODEX_MODEL_GPT_5_6_SOL,

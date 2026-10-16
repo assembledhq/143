@@ -2936,9 +2936,14 @@ func TestSessionStore_FinalizeIdleCodeReviewContainer(t *testing.T) {
 			require.NoError(t, err, "pgx mock should be created")
 			defer mock.Close()
 			orgID, sessionID := uuid.New(), uuid.New()
-			mock.ExpectExec(`UPDATE sessions[\s\S]+origin = 'code_review'[\s\S]+code_review_session_metadata[\s\S]+j\.job_type IN \('run_agent', 'continue_session'\)[\s\S]+session_sandbox_holders[\s\S]+thread_runtimes`).
-				WithArgs(sessionID, orgID, "review-container").
-				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+			prID := uuid.New()
+			mock.ExpectBegin()
+			mock.ExpectQuery("SELECT pull_request_id").WithArgs(orgID, sessionID).WillReturnRows(pgxmock.NewRows([]string{"pull_request_id"}).AddRow(prID))
+			mock.ExpectExec("SELECT pg_advisory_xact_lock").WithArgs("code_review_pr:" + orgID.String() + ":" + prID.String()).WillReturnResult(pgxmock.NewResult("SELECT", 1))
+			mock.ExpectQuery("SELECT id FROM sessions.*FOR UPDATE").WithArgs(orgID, sessionID, "review-container").WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(sessionID))
+			mock.ExpectExec(`UPDATE sessions[\s\S]+session_threads[\s\S]+session_executors[\s\S]+thread_runtimes[\s\S]+session_sandbox_holders[\s\S]+code_review_revision_assessments[\s\S]+code_review_recheck_dispatches`).WithArgs(orgID, sessionID, "review-container", false).WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+			mock.ExpectCommit()
+			mock.ExpectRollback().WillReturnError(pgx.ErrTxClosed)
 			store := NewSessionStore(mock)
 			cleared, err := store.FinalizeIdleCodeReviewContainer(context.Background(), orgID, sessionID, "review-container")
 			require.NoError(t, err, "review cleanup should execute its terminal and active-holder guards")

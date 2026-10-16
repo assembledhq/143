@@ -47,17 +47,23 @@ const (
 	ClaudeCodeModelOpus48   = "claude-opus-4-8"
 	ClaudeCodeModelOpus47   = "claude-opus-4-7"
 	ClaudeCodeModelOpus46   = "claude-opus-4-6"
+	ClaudeCodeModelSonnet55 = "claude-sonnet-5-5"
 	ClaudeCodeModelSonnet46 = "claude-sonnet-4-6"
 	ClaudeCodeModelSonnet45 = "claude-sonnet-4-5"
+	ClaudeCodeModelHaiku55  = "claude-haiku-5-5"
 	ClaudeCodeModelHaiku45  = "claude-haiku-4-5"
 )
 
 const DefaultClaudeCodeModel = ClaudeCodeModelOpus5
 
-var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable51, ClaudeCodeModelFable5, ClaudeCodeModelOpus55, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
+// AvailableClaudeCodeModels accepts explicit IDs for API and subscription auth;
+// actual access depends on the credential, provider, region and CLI version.
+var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable51, ClaudeCodeModelFable5, ClaudeCodeModelOpus55, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet55, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku55, ClaudeCodeModelHaiku45}
 
 const (
 	CodexModelGPT6Astra       = "gpt-6-astra"
+	CodexModelGPT61Sol        = "gpt-6.1-sol"
+	CodexModelGPT61SolFast    = "gpt-6.1-sol-fast"
 	CodexModelGPT6Sol         = "gpt-6-sol"
 	CodexModelGPT6Luna        = "gpt-6-luna"
 	CodexModelGPT56Sol        = "gpt-5.6-sol"
@@ -79,8 +85,14 @@ const (
 
 const DefaultCodexModel = CodexModelGPT56Sol
 
+// AvailableCodexModels retains historical IDs so saved settings validate and route to Codex.
+// GPT-5.5 and GPT-5.4/mini retired with ChatGPT sign-in but remain API models;
+// Spark retired entirely. This shared list does not establish account access.
+// See https://learn.chatgpt.com/docs/models for current auth-specific availability.
 var AvailableCodexModels = []string{
 	CodexModelGPT6Astra,
+	CodexModelGPT61Sol,
+	CodexModelGPT61SolFast,
 	CodexModelGPT6Sol,
 	CodexModelGPT6Luna,
 	CodexModelGPT56Sol,
@@ -206,6 +218,8 @@ type CodexRuntimeSpec struct {
 // model ID Codex CLI accepts plus a priority-service-tier flag.
 func CodexRuntimeModel(model string) CodexRuntimeSpec {
 	switch model {
+	case CodexModelGPT61SolFast:
+		return CodexRuntimeSpec{Model: CodexModelGPT61Sol, PriorityTier: true}
 	case CodexModelGPT56SolFast:
 		return CodexRuntimeSpec{Model: CodexModelGPT56Sol, PriorityTier: true}
 	case CodexModelGPT56TerraFast:

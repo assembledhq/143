@@ -14,8 +14,11 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 type InstallationTokens interface {
@@ -34,11 +37,46 @@ type Providers struct {
 	credentials          Credentials
 	slack                SlackPoster
 	client               *http.Client
+	githubClient         *http.Client
 	githubURL, notionURL string
 }
 
-func NewProviders(tokens InstallationTokens, credentials Credentials, slack SlackPoster) *Providers {
-	return &Providers{tokens: tokens, credentials: credentials, slack: slack, client: &http.Client{Timeout: 4 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, githubURL: "https://api.github.com", notionURL: "https://api.notion.com"}
+type ProviderOption func(*Providers)
+
+// WithGitHubHTTPClient retains the action adapter's bounded, non-redirecting
+// requests while sharing production GitHub telemetry and cooldown control.
+func WithGitHubHTTPClient(client *http.Client) ProviderOption {
+	return func(p *Providers) {
+		if client == nil {
+			return
+		}
+		copy := *client
+		copy.Timeout = 4 * time.Second
+		copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		p.githubClient = &copy
+	}
+}
+
+func NewProviders(tokens InstallationTokens, credentials Credentials, slack SlackPoster, options ...ProviderOption) *Providers {
+	client := &http.Client{Timeout: 4 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	p := &Providers{tokens: tokens, credentials: credentials, slack: slack, client: client, githubClient: client, githubURL: "https://api.github.com", notionURL: "https://api.notion.com"}
+	for _, option := range options {
+		option(p)
+	}
+	return p
+}
+
+func githubRequestContext(ctx context.Context, scope models.AutomationActionScope) context.Context {
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, scope.InstallationID, "automation_action")
+	metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+	metadata.OrgID = scope.Actor.OrgID.String()
+	metadata.Repository = scope.RepositoryName
+	metadata.SyncReason = ""
+	metadata.SessionID = ""
+	if scope.Actor.SessionID != uuid.Nil {
+		metadata.SessionID = scope.Actor.SessionID.String()
+	}
+	return githubtelemetry.WithRequestMetadata(ctx, metadata)
 }
 func (p *Providers) githubToken(ctx context.Context, scope models.AutomationActionScope) (string, error) {
 	if p.tokens == nil {
@@ -77,6 +115,7 @@ func (p *Providers) Inspect(ctx context.Context, scope models.AutomationActionSc
 	if err := ValidateRepositoryName(scope.RepositoryName); err != nil {
 		return result, err
 	}
+	ctx = githubRequestContext(ctx, scope)
 	token, err := p.githubToken(ctx, scope)
 	if err != nil {
 		return result, err
@@ -193,8 +232,12 @@ func (p *Providers) Send(ctx context.Context, scope models.AutomationActionScope
 	}
 }
 func (p *Providers) sendGitHub(ctx context.Context, scope models.AutomationActionScope, action models.AutomationAction, payload Payload) (Receipt, error) {
+	ctx = githubRequestContext(ctx, scope)
 	token, err := p.githubToken(ctx, scope)
 	if err != nil {
+		if deferral, ok := ratelimit.AsDeferral(err); ok {
+			return Receipt{}, &SendFailure{Code: "GITHUB_RATE_LIMITED", Definitive: true, Err: deferral}
+		}
 		return Receipt{}, &SendFailure{Code: "GITHUB_NOT_CONNECTED", Definitive: true}
 	}
 	switch action.Kind {
@@ -219,7 +262,7 @@ func (p *Providers) sendGitHub(ctx context.Context, scope models.AutomationActio
 			} `json:"teams"`
 		}
 		if err = p.request(ctx, http.MethodGet, p.githubPath(scope, "pulls")+"/requested_reviewers", token, "", nil, &reviewers); err != nil {
-			return Receipt{}, &SendFailure{Code: "GITHUB_REVIEWERS_UNAVAILABLE", Definitive: true}
+			return Receipt{}, &SendFailure{Code: "GITHUB_REVIEWERS_UNAVAILABLE", Definitive: true, Err: err}
 		}
 		for _, team := range reviewers.Teams {
 			if team.Slug == scope.Config.Team {
@@ -300,6 +343,11 @@ func (p *Providers) request(ctx context.Context, method, endpoint, token, versio
 	if body != nil {
 		reader = bytes.NewReader(raw)
 	}
+	client := p.client
+	if version == "" {
+		client = p.githubClient
+		ctx = githubtelemetry.WithJSONResponseObservation(ctx)
+	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
 		return &SendFailure{Code: "INVALID_PROVIDER_REQUEST", Definitive: true}
@@ -312,9 +360,15 @@ func (p *Providers) request(ctx context.Context, method, endpoint, token, versio
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	}
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
+		if deferral, ok := ratelimit.AsDeferral(err); ok && version == "" {
+			return &SendFailure{Code: "GITHUB_RATE_LIMITED", Definitive: true, Err: deferral}
+		}
 		return &SendFailure{Code: "PROVIDER_TRANSPORT_UNKNOWN"}
+	}
+	if version == "" {
+		return githubResponse(ctx, resp, dest)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -326,6 +380,45 @@ func (p *Providers) request(ctx context.Context, method, endpoint, token, versio
 		return nil
 	}
 	if err = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(dest); err != nil {
+		return &SendFailure{Code: "PROVIDER_RESPONSE_UNKNOWN"}
+	}
+	return nil
+}
+
+func githubResponse(ctx context.Context, resp *http.Response, dest any) error {
+	const maxResponseBytes = 1 << 20
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if len(body) > maxResponseBytes {
+		readErr = errors.Join(readErr, errors.New("GitHub response exceeded action response limit"))
+	}
+	success := resp.StatusCode >= 200 && resp.StatusCode < 300
+	if readErr == nil {
+		if success && dest != nil {
+			readErr = githubtelemetry.ValidateJSONResponse(ctx, body, dest)
+		} else if len(body) > 0 {
+			readErr = githubtelemetry.ValidateJSONResponse(ctx, body, nil)
+		} else {
+			githubtelemetry.ObserveJSONResponse(ctx, nil)
+		}
+	} else {
+		githubtelemetry.ObserveJSONResponse(ctx, readErr)
+	}
+	closeErr := resp.Body.Close()
+	if closeErr != nil {
+		zerolog.Ctx(ctx).Warn().Err(closeErr).Msg("close GitHub automation action response failed")
+	}
+	if !success {
+		// An HTTP rejection establishes no delivery even if its error body was
+		// unavailable. Server/timeout failures remain uncertain and fenced.
+		definitive := resp.StatusCode == 400 || resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 404 || resp.StatusCode == 405 || resp.StatusCode == 410 || resp.StatusCode == 451 || resp.StatusCode == 422 || resp.StatusCode == 429
+		failure := &SendFailure{Code: fmt.Sprintf("PROVIDER_HTTP_%d", resp.StatusCode), Definitive: definitive}
+		metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+		if deferral, ok := ratelimit.InternalRetryMetadata(resp.Header, metadata.InstallationID); ok {
+			return &ratelimit.ControlledError{Err: failure, Deferral: *deferral}
+		}
+		return failure
+	}
+	if readErr != nil || closeErr != nil {
 		return &SendFailure{Code: "PROVIDER_RESPONSE_UNKNOWN"}
 	}
 	return nil

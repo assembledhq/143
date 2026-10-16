@@ -2,13 +2,12 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'codex/review-evidence-*']
   push:
     branches: [main]
   schedule:
-    # Twice daily: the scheduled run is the only place the full frontend
-    # suite executes with coverage, so cap the exposure window for a
-    # cross-cutting break that affected-test runs missed to ~12 hours.
+    # Twice daily backstop for changes that affected-test runs missed.
+    # Shared frontend infrastructure also runs full coverage before merge.
     - cron: "17 10,22 * * *"
   workflow_dispatch:
 
@@ -52,6 +51,8 @@ jobs:
               - 'internal/**'
               - 'go.mod'
               - 'go.sum'
+              - '.143/config.json'
+              - '.143/review-dependencies*'
             frontend:
               - 'frontend/**'
             migrations:
@@ -142,6 +143,9 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
+      - name: Test review dependency recipe
+        run: python3 -B .143/review-dependencies_test.py
+
       - name: Download Go modules
         run: go mod download
 
@@ -169,14 +173,69 @@ jobs:
         if: needs.changes.outputs.demo_seed == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
         run: make demo-seed-check
 
-      - name: Run tests (PR — no race)
-        if: github.event_name == 'pull_request'
-        run: go test ./internal/... -skip '^TestBrowserChromeDP' -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=count -timeout=120s
-
-      - name: Run tests with race + coverage (non-PR)
-        if: github.event_name != 'pull_request'
+      - name: Run backend unit tests outside the agent and worker packages
+        timeout-minutes: 10
         run: |
-          go test ./internal/... -skip '^TestBrowserChromeDP' -coverpkg=./internal/... -coverprofile=coverage-unit.out -covermode=atomic -race -timeout=180s
+          mode=count
+          race=()
+          package_timeout=120s
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=atomic
+            race=(-race)
+            package_timeout=180s
+          fi
+          packages="$(go list ./internal/...)"
+          unit_packages=()
+          while IFS= read -r package; do
+            if [[ "$package" != "github.com/assembledhq/143/internal/services/agent" && \
+                  "$package" != "github.com/assembledhq/143/internal/worker" ]]; then
+              unit_packages+=("$package")
+            fi
+          done <<< "$packages"
+          go test "${unit_packages[@]}" -skip '^TestBrowserChromeDP' -coverpkg=./internal/... \
+            -coverprofile=coverage-unit-other.out -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
+
+      # Full-schema Postgres fixtures in worker need their own bounded budget.
+      # Run that package separately from the concurrent general package suite.
+      - name: Run worker unit tests
+        timeout-minutes: 10
+        run: |
+          mode=count
+          race=()
+          package_timeout=300s
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=atomic
+            race=(-race)
+            package_timeout=360s
+          fi
+          go test ./internal/worker -coverpkg=./internal/... -coverprofile=coverage-unit-worker.out \
+            -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
+
+      - name: Run agent unit tests
+        timeout-minutes: 10
+        run: |
+          mode=count
+          race=()
+          package_timeout=300s
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=atomic
+            race=(-race)
+            package_timeout=360s
+          fi
+          go test ./internal/services/agent -coverpkg=./internal/... -coverprofile=coverage-unit-agent.out \
+            -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
+
+      - name: Combine backend unit coverage
+        run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-worker.out coverage-unit-agent.out
+
+      - name: Run command tests
+        timeout-minutes: 5
+        run: |
+          race=()
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            race=(-race)
+          fi
+          go test ./cmd/... -count=1 "${race[@]}" -timeout=120s
 
       # Chrome startup and rendering need CPU that the parallel backend suite
       # can otherwise consume. Keep real browser fixtures in a serial step,
@@ -186,13 +245,28 @@ jobs:
         env:
           TEST_BROWSER_REQUIRED: "1"
         run: |
+          preview_chrome_path="$(command -v google-chrome)"
+          preview_chrome_binary="$(readlink -f "$preview_chrome_path")"
+          test -x "$preview_chrome_binary"
+          preview_chrome_version="$(timeout 5s "$preview_chrome_binary" --version)"
+          case "$preview_chrome_version" in
+            "Google Chrome "*) ;;
+            *) echo "CI browser must identify as Google Chrome" >&2; exit 1 ;;
+          esac
+          preview_chrome_dir="$(mktemp -d "${RUNNER_TEMP:?}/preview-chrome.XXXXXX")"
+          trap 'rm -rf "$preview_chrome_dir"' EXIT
+          # chromedp discovers headless_shell and Chromium before Google Chrome.
+          # This runner-owned alias selects validated Google Chrome for this fixture step.
+          ln -s "$preview_chrome_binary" "$preview_chrome_dir/headless_shell"
+          test "$(readlink -f "$preview_chrome_dir/headless_shell")" = "$preview_chrome_binary"
+          printf 'Preview test browser: %s (%s)\n' "$preview_chrome_binary" "$preview_chrome_version"
           mode=count
           race=()
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             mode=atomic
             race=(-race)
           fi
-          go test ./internal/services/preview -run '^TestBrowserChromeDP' -parallel=1 -count=1 -v \
+          PATH="$preview_chrome_dir:$PATH" go test ./internal/services/preview -run '^TestBrowserChromeDP' -parallel=1 -count=1 -v \
             -coverpkg=./internal/... -coverprofile=coverage-browser.out -covermode="$mode" \
             "${race[@]}" -timeout=180s
 
@@ -241,6 +315,9 @@ jobs:
           path: |
             coverage.out
             coverage-unit.out
+            coverage-unit-other.out
+            coverage-unit-worker.out
+            coverage-unit-agent.out
             coverage-browser.out
             coverage-integration.out
 
@@ -288,61 +365,30 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Materialize PR base ref (PR only)
-        if: github.event_name == 'pull_request'
+      - name: Select frontend test scope
+        id: scope
         working-directory: ${{ github.workspace }}
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          git rev-parse --verify "${PR_BASE_SHA}^{commit}"
-          git branch -f pr-base "${PR_BASE_SHA}"
-
-      # Main pushes run affected tests against the previous main SHA instead
-      # of the full suite: the merged PR already ran the same affected set,
-      # and the full suite (~10 min on a 2-core runner) was burning that time
-      # on every merge. The twice-daily scheduled run still executes the full
-      # suite with coverage as the backstop. github.event.before is all
-      # zeros on branch creation and unreachable after a force push, so fall
-      # back to the full suite when it can't be resolved.
-      - name: Materialize push base ref (main push only)
-        if: github.event_name == 'push'
-        working-directory: ${{ github.workspace }}
-        env:
           PUSH_BASE_SHA: ${{ github.event.before }}
-        run: |
-          if [ "$PUSH_BASE_SHA" != "0000000000000000000000000000000000000000" ] \
-            && git rev-parse --verify --quiet "${PUSH_BASE_SHA}^{commit}"; then
-            git branch -f push-base "$PUSH_BASE_SHA"
-            echo "FRONTEND_FULL_RUN=false" >> "$GITHUB_ENV"
-          else
-            echo "push base $PUSH_BASE_SHA unavailable; running full suite"
-            echo "FRONTEND_FULL_RUN=true" >> "$GITHUB_ENV"
-          fi
+        run: python3 -B .github/scripts/select_frontend_tests.py
 
       - run: npm ci
 
-      - name: Run affected tests (PR)
-        if: github.event_name == 'pull_request'
+      - name: Run affected tests
+        if: steps.scope.outputs.full == 'false'
         timeout-minutes: 10
-        run: npx vitest run --changed=pr-base --passWithNoTests
+        env:
+          FRONTEND_TEST_BASE: ${{ steps.scope.outputs.base }}
+        run: npx vitest run --changed="$FRONTEND_TEST_BASE" --passWithNoTests --reporter=dot
 
-      - name: Run affected tests (main)
-        if: github.event_name == 'push'
-        timeout-minutes: 10
-        run: |
-          if [ "$FRONTEND_FULL_RUN" = "true" ]; then
-            npx vitest run --reporter=dot
-          else
-            npx vitest run --changed=push-base --passWithNoTests --reporter=dot
-          fi
-
-      - name: Run full tests with coverage (scheduled/manual)
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      - name: Run full tests with coverage
+        if: steps.scope.outputs.full == 'true'
         timeout-minutes: 20
         run: npx vitest run --coverage --coverage.reporter=text --coverage.reporter=json-summary --coverage.reporter=lcov
 
-      - name: Check frontend coverage floor (scheduled/manual)
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      - name: Check frontend coverage floor
+        if: steps.scope.outputs.full == 'true'
         run: |
           COVERAGE=$(cat coverage/coverage-summary.json | node -e "
             const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
@@ -358,7 +404,7 @@ jobs:
           fi
 
       - name: Upload coverage report
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: ${{ !cancelled() && steps.scope.outputs.full == 'true' && hashFiles('frontend/coverage/coverage-summary.json') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: frontend-coverage
@@ -490,14 +536,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.26"
+      - name: Select cached Go
+        run: python3 -B .github/scripts/select-security-go.py
 
       - name: Run gosec
         run: |
+          set -euo pipefail
+          test "$(command -v go)" = "$GOROOT/bin/go"
           go install github.com/securego/gosec/v2/cmd/gosec@v2.22.4
+          test "$(command -v gosec)" = "$GOBIN/gosec"
           gosec ./...
 
   # Config tests read repository-wide inputs; run them for every PR and push.

@@ -863,7 +863,7 @@ func TestInjectInternalAPIEnvForPerTargetTurn(t *testing.T) {
 	cfg := &SandboxConfig{Timeout: time.Minute}
 	o := &Orchestrator{internalAPIURL: "https://platform.test", internalAPISecret: secret}
 	ctx := withAutomationTurnState(context.Background(), &automationTurnState{run: models.AutomationRun{ID: uuid.New()}})
-	o.injectInternalAPIEnv(ctx, session, &repoID, &threadID, cfg, zerolog.Nop())
+	o.injectInternalAPIEnv(ctx, session, &repoID, &threadID, cfg, o.resolveRuntimeConfig(context.Background(), session.OrgID), zerolog.Nop())
 	claims, err := auth.ValidateInternalToken(secret, cfg.Env["INTERNAL_API_TOKEN"])
 	require.NoError(t, err, "token validates")
 	require.Equal(t, models.PerTargetToolScopes(), claims.AllowedToolScopes, "a per-target turn's token carries exactly the allowlist scopes")
@@ -872,7 +872,7 @@ func TestInjectInternalAPIEnvForPerTargetTurn(t *testing.T) {
 	require.Empty(t, cfg.Env["EVAL_BOOTSTRAP_TOOLS_ENABLED"], "no eval tools")
 
 	plain := &SandboxConfig{Timeout: time.Minute}
-	o.injectInternalAPIEnv(context.Background(), session, &repoID, &threadID, plain, zerolog.Nop())
+	o.injectInternalAPIEnv(context.Background(), session, &repoID, &threadID, plain, o.resolveRuntimeConfig(context.Background(), session.OrgID), zerolog.Nop())
 	claims, err = auth.ValidateInternalToken(secret, plain.Env["INTERNAL_API_TOKEN"])
 	require.NoError(t, err, "token validates")
 	require.True(t, models.HasToolScope(claims.AllowedToolScopes, "preview:read"), "an ordinary session keeps its preview scope")
@@ -915,7 +915,7 @@ func TestReviewActionTokenRefreshAcrossContinuedTurns(t *testing.T) {
 		if i == 2 {
 			state.run.CapabilitySnapshot = nil
 		}
-		o.injectInternalAPIEnv(withAutomationTurnState(jobctx.WithJobID(context.Background(), uuid.New()), state), session, &repoID, &threadID, cfg, zerolog.Nop())
+		o.injectInternalAPIEnv(withAutomationTurnState(jobctx.WithJobID(context.Background(), uuid.New()), state), session, &repoID, &threadID, cfg, o.resolveRuntimeConfig(context.Background(), session.OrgID), zerolog.Nop())
 		token := cfg.Env["INTERNAL_API_TOKEN"]
 		claims, err := auth.ValidateInternalToken("secret", token)
 		require.NoError(t, err, "refreshed token validates")
@@ -953,7 +953,7 @@ func TestAutomationActionTokenForPerRunAttempts(t *testing.T) {
 			}
 			o := &Orchestrator{internalAPIURL: "https://platform.test", internalAPISecret: "secret"}
 			cfg := &SandboxConfig{Timeout: time.Minute, Env: map[string]string{"INTERNAL_API_TOKEN": "stale"}}
-			o.injectInternalAPIEnv(ctx, session, &repo, &thread, cfg, zerolog.Nop())
+			o.injectInternalAPIEnv(ctx, session, &repo, &thread, cfg, o.resolveRuntimeConfig(context.Background(), session.OrgID), zerolog.Nop())
 			if tt.grant && !tt.job {
 				require.Empty(t, cfg.Env["INTERNAL_API_TOKEN"], "missing job must discard stale authority")
 				return
@@ -1002,7 +1002,7 @@ func TestAutomationActionTokenThreadIdentity(t *testing.T) {
 			}
 			cfg := &SandboxConfig{Env: map[string]string{"INTERNAL_API_TOKEN": "stale"}, Timeout: time.Minute}
 			o := &Orchestrator{internalAPIURL: "https://platform.test", internalAPISecret: "secret"}
-			o.injectInternalAPIEnv(ctx, session, &repo, supplied, cfg, zerolog.Nop())
+			o.injectInternalAPIEnv(ctx, session, &repo, supplied, cfg, o.resolveRuntimeConfig(context.Background(), session.OrgID), zerolog.Nop())
 			if !tt.primary && !tt.continuous && !tt.explicit {
 				require.Empty(t, cfg.Env["INTERNAL_API_TOKEN"], "missing trusted identity cannot preserve stale token")
 				return

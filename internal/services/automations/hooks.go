@@ -41,10 +41,10 @@ type automationFallbackRunStore interface {
 }
 
 const (
-	// automationRunExecutionBudget mirrors stuckAutomationRunThreshold in
-	// internal/cluster/scheduler.go: how long a pending/running automation_run
-	// may sit before the reaper marks it failed. Every attempt in a fallback
-	// chain shares it, because promotion preserves the run's triggered_at.
+	// automationRunExecutionBudget is the wall-clock budget a logical run's
+	// attempts share; the worker enforces it as each attempt's runtime
+	// deadline. Every attempt in a fallback chain shares it, because promotion
+	// preserves the run's triggered_at.
 	automationRunExecutionBudget = models.AutomationRunExecutionBudget
 	// automationAttemptBudgetReserve is the slice of that budget one more
 	// session needs, matching models.DefaultMaxSessionDurationSeconds.
@@ -280,11 +280,11 @@ func (h *AutomationHooks) promoteToNextModelRank(ctx context.Context, session *m
 		return false, nil
 	}
 	// A promoted run keeps its original triggered_at, so every attempt shares
-	// one reaper budget. Promoting with less than a session's worth of it left
-	// starts work that outlives its own run: the reaper marks the run failed
-	// while that session keeps going, and its completion hook can no longer
-	// update the terminal row — so a diff or a pull request can land with
-	// nothing recording it.
+	// one execution budget. Promoting with less than a session's worth of it
+	// left starts an attempt the worker's runtime deadline cuts off before it
+	// can finish — an extra session that burns its share of the budget and
+	// fails the run anyway, with a less useful summary than the capacity
+	// failure that prompted it.
 	if !automationRunBudgetFitsAnotherAttempt(automationRun.TriggeredAt, time.Now()) {
 		h.logger.Info().
 			Str("automation_run_id", runID.String()).

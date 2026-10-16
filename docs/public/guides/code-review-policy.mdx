@@ -122,6 +122,38 @@ percentages.
 
 When automatic recovery is exhausted, the failed attempt keeps a concise error and recommended action in its row and evidence panel. Organization admins and members can select **Retry review** for failures marked retryable. A retry creates a new session against the pull request's current head and current policy; it never rewrites the failed session or its evidence. The original attempt links to the replacement for audit history.
 
+Repository review recipes, evidence declarations, and a compatible sandbox image may ship before the review lifecycle integration is activated. Complete recipe ownership and acceptance for the entire enabled-repository scope, verify the rebuilt image and representative cold/warm/restored preparation, and apply and verify the required migrations before merging or deploying the lifecycle activation change. On installations that deploy successful `main` changes automatically, that merge is the rollout gate.
+
+Deploying the lifecycle integration activates evidence preparation for fresh, warm, and restored reviewer paths. `CODE_REVIEW_WORKSPACE_PREPARATION_ENABLED` controls only the dedicated cold-preparation job; setting it to `false` does not disable preparation in reviewer startup or reuse. Complete the release prerequisites before lifecycle activation even when that flag is false.
+
+Before agents start inspecting code, 143 prepares the captured base and head files and runs supported dependency tools and repository setup declared in `.143/config.json`. Workspace preparation has one eight-minute budget covering checkout, setup, and verification. A failed or timed-out setup stops the attempt and appears as an operational error in the review details and rolling GitHub comment. Fix the reported repository setup or access problem before retrying; an unsuccessful setup does not automatically restart through another workspace path.
+
+Use the `review` section to prepare dependency source for code inspection:
+
+```json
+{
+  "review": {
+    "commands": ["sh .143/review-dependencies.sh"],
+    "verify_commands": ["sh .143/review-dependencies.sh --verify"],
+    "evidence": [
+      {
+        "path": ".143/cache/review/go/pkg/mod",
+        "description": "Locked Go module source files",
+        "category": "go_dependencies"
+      }
+    ]
+  }
+}
+```
+
+`review.commands` replaces `bootstrap.commands` for reviews. Ordinary coding sessions continue to use bootstrap. If `review` is absent, reviews use bootstrap for compatibility, and that legacy setup reruns for each reviewer within the original preparation budget. Publish an explicit `review` section before rolling out this preparation contract in any review-enabled repository with bootstrap commands. An empty `review` object explicitly selects no repository setup when Git and supported tools supply the required evidence. Preview installs do not prepare a review workspace.
+
+Evidence paths must be relative directories or files inside the repository, with no escaping symlinks or credential directories. Dependency source belongs in an in-repository cache such as `.143/cache/review`; a global Go or Python cache alone cannot establish review readiness. Supported categories are `javascript_dependencies`, `go_dependencies`, `python_dependencies`, `ruby_dependencies`, `generated_artifacts`, `submodules`, `lfs`, and `external_caches`. The description tells reviewers where to inspect the evidence and what it supplies.
+
+Setup must preserve tracked source and lockfiles. Use locked dependency versions and disable package lifecycle scripts when downloading source. Verification commands must check local evidence without downloading, repairing, running tests or builds, or starting services. After preparation, 143 checks the captured Git comparison, clean tracked files, supported tool pins, and declared evidence paths before recording readiness. Warm or restored workspaces reuse that receipt only when it still matches the revision and recipe and local verification succeeds. A legacy recipe without explicit evidence paths and verification cannot reuse dependency readiness. After the preparation deadline, 143 may inspect an existing receipt using platform checks, but cannot run repository commands or repair missing evidence.
+
+Dependency source availability does not prove compilation, generated output, native extensions, test success, or runtime behavior. Declare and verify generated artifacts separately when a review needs them. Reviewers do not run test suites, builds, or linters as part of their inspection. If specific evidence remains unavailable and could materially change approval, the review explains what is missing, why it matters, and what would resolve it.
+
 A retry is rejected if the pull request has moved to another commit, is no longer open, already has a 143 approval, already has a newer replacement, or the current code review policy is disabled.
 
 ## Evaluate approval behavior

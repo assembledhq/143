@@ -10,8 +10,11 @@ import (
 	"github.com/gorhill/cronexpr"
 )
 
-// AutomationRunExecutionBudget is shared by the reaper and all separate-session
-// attempts of a logical automation run, including time spent in job queues.
+// AutomationRunExecutionBudget is the wall-clock budget all separate-session
+// attempts of a logical automation run share, including time spent in job
+// queues. The worker enforces it as each attempt's runtime deadline. It is not
+// the reaper's threshold: the reaper only settles orphaned runs, and its grace
+// period happens to have the same length.
 const AutomationRunExecutionBudget = time.Hour
 
 // Automation is a recurring, team-owned agent process.

@@ -306,8 +306,7 @@ func TestRunGitBootstrap_AppliesConfigAndHook(t *testing.T) {
 
 	ghWrapper, err := os.ReadFile(filepath.Join(homeDir, ".local", "bin", "gh"))
 	require.NoError(t, err)
-	require.Contains(t, string(ghWrapper), "143-tools auth-token --action=api")
-	require.Contains(t, string(ghWrapper), "exec /usr/local/bin/gh \"$@\"")
+	require.Contains(t, string(ghWrapper), "exec 143-tools gh", "gh calls should use the observed runner")
 }
 
 // TestRunGitBootstrap_Idempotent guards the resume path: a session that

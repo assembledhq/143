@@ -47,6 +47,7 @@ const waitLabels: Record<string, string> = {
  draft: "Review queued", manual_pause: "Automatic reviews paused",
  policy_disabled: "Review policy disabled", already_approved: "Automatic review stopped after approval",
  active_review: "Waiting for the active review", context_unavailable: "Waiting for GitHub",
+ sandbox_capacity: "Waiting for review capacity",
 };
 function ScheduleActions({ schedule }: { schedule: CodeReviewSchedule }) {
   const client = useQueryClient();

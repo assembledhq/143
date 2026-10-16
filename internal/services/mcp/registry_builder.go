@@ -155,10 +155,12 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 			reg.RegisterCodeReviewSource(source)
 			fmt.Fprintf(logger, "143-tools: registered github (%s/%s)\n", owner, repo)
 		} else if sockPath := os.Getenv(sandboxauth.SocketEnvVar); sockPath != "" {
+			observer := sandboxauth.NewGitHubHTTPObserver(sockPath, logger)
 			source := integration.NewGitHubCodeReviewSource(integration.GitHubCodeReviewConfig{
-				TokenFunc: sandboxauth.NewClient(sockPath).GetAPIToken,
-				Owner:     owner,
-				Repo:      repo,
+				TokenFunc:  observer.GetAPIToken,
+				HTTPClient: observer.HTTPClient(),
+				Owner:      owner,
+				Repo:       repo,
 			})
 			reg.RegisterCodeReviewSource(source)
 			fmt.Fprintf(logger, "143-tools: registered github (%s/%s) via host auth socket\n", owner, repo)

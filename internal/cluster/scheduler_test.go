@@ -28,6 +28,10 @@ func (m *mockJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType 
 	return uuid.New(), nil
 }
 
+func (m *mockJobs) EnqueuePullRequestReconciliationOnce(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+	return m.Enqueue(ctx, orgID, opts.Queue, opts.JobType, opts.Payload, opts.Priority, opts.DedupeKey)
+}
+
 func (m *mockJobs) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	return uuid.New(), nil
 }
@@ -78,6 +82,8 @@ type trackingJobs struct {
 	dedupeKeys      []string
 	enqueueErr      error
 	enqueueFailures int
+	reconcileCalls  []string
+	reconcileSeen   map[string]bool
 }
 
 func (m *trackingJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
@@ -92,6 +98,22 @@ func (m *trackingJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobT
 		return uuid.Nil, errors.New("enqueue failed")
 	}
 	return uuid.New(), nil
+}
+
+func (m *trackingJobs) EnqueuePullRequestReconciliationOnce(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+	key := *opts.DedupeKey
+	m.reconcileCalls = append(m.reconcileCalls, key)
+	if m.reconcileSeen[key] {
+		return uuid.Nil, nil
+	}
+	id, err := m.Enqueue(ctx, orgID, opts.Queue, opts.JobType, opts.Payload, opts.Priority, opts.DedupeKey)
+	if err == nil && id != uuid.Nil {
+		if m.reconcileSeen == nil {
+			m.reconcileSeen = make(map[string]bool)
+		}
+		m.reconcileSeen[key] = true
+	}
+	return id, err
 }
 
 func (m *trackingJobs) EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
@@ -155,6 +177,24 @@ func TestScheduler_SchedulePullRequestReconciliation(t *testing.T) {
 	require.Equal(t, pullRequestReconcileBatch, firstPayload["limit"], "scheduler should include the configured reconciliation batch size")
 	require.Len(t, jobs.dedupeKeys, 2, "should compute one dedupe key per reconciliation job")
 	require.Contains(t, jobs.dedupeKeys[0], "reconcile_pull_request_state:"+orgIDs[0].String()+":20260423220", "dedupe key should include the org and UTC ten-minute bucket")
+}
+
+func TestScheduler_ReconciliationUsesDurableBucketAdmission(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	jobs := &trackingJobs{}
+	schedulers := []*Scheduler{{jobs: jobs, logger: zerolog.Nop()}, {jobs: jobs, logger: zerolog.Nop()}}
+	at := time.Date(2026, 4, 23, 22, 1, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		scheduler int
+		at        time.Time
+	}{{0, at}, {1, at.Add(5 * time.Minute)}, {0, at.Add(10 * time.Minute)}} {
+		schedulers[tt.scheduler].schedulePullRequestReconciliation(context.Background(), []uuid.UUID{orgID}, tt.at)
+	}
+	first := "reconcile_pull_request_state:" + orgID.String() + ":20260423220"
+	next := "reconcile_pull_request_state:" + orgID.String() + ":20260423221"
+	require.Equal(t, []string{first, first, next}, jobs.reconcileCalls, "every replica must use durable bucket admission")
+	require.Equal(t, []string{first, next}, jobs.dedupeKeys, "a later replica must not re-admit a completed bucket, while the next bucket remains eligible")
 }
 
 func TestScheduler_SchedulePagerDutySync(t *testing.T) {

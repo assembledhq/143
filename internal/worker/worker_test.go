@@ -22,7 +22,8 @@ import (
 )
 
 type wakeTestStore struct {
-	claims atomic.Int32
+	claims  atomic.Int32
+	onClaim func()
 }
 
 type retryWindowLeaseStoreStub struct {
@@ -39,6 +40,9 @@ func (s *retryWindowLeaseStoreStub) EnsureRetryWindowStartedAtWithLease(context.
 
 func (s *wakeTestStore) ClaimNextRunnable(context.Context, string, string, uuid.UUID, time.Duration) (*models.Job, error) {
 	s.claims.Add(1)
+	if s.onClaim != nil {
+		s.onClaim()
+	}
 	return nil, nil
 }
 
@@ -957,8 +961,14 @@ func TestWorker_Poll_LostLeaseSkipsTerminalWrite(t *testing.T) {
 	mock.ExpectQuery("UPDATE jobs SET lease_expires_at = now\\(\\) \\+").
 		WithArgs(int(defaultLeaseDuration.Seconds()), jobID, lockToken).
 		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery("WITH target AS").
+		WithArgs(jobID, lockToken, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(0)))
 
-	w.poll(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	w.poll(ctx)
+	require.NoError(t, ctx.Err(), "lease loss must cancel the handler before the test deadline")
 
 	select {
 	case <-releaseHandler:
@@ -1058,29 +1068,26 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 	w, mock := newTestWorker(t)
 	defer mock.Close()
 
-	w.pollInterval = 10 * time.Millisecond
-	mock.MatchExpectationsInOrder(false)
-	for range 5 {
-		mock.ExpectQuery("WITH unavailable_target_nodes AS").
-			WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
-			WillReturnError(pgx.ErrNoRows)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	store := &wakeTestStore{onClaim: cancel}
+	w.jobs = store
+	w.pollInterval = time.Hour
 
 	done := make(chan struct{})
 	go func() {
 		w.Start(ctx)
 		close(done)
 	}()
+	w.Wake()
 
 	select {
 	case <-done:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("worker should stop when context is cancelled")
 	}
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	require.Equal(t, int32(1), store.claims.Load(), "worker must poll before its context is cancelled")
+	require.Equal(t, context.Canceled, ctx.Err(), "the observed claim must trigger context cancellation before shutdown")
 }
 
 type terminalLeaseStoreStub struct {
@@ -1251,6 +1258,7 @@ func expectClaimWithTarget(mock pgxmock.PgxPoolIface, jobID, orgID uuid.UUID, jo
 }
 
 func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uuid.UUID, jobType string, payload json.RawMessage, createdAt time.Time, lockToken uuid.UUID, attempts, maxAttempts int, targetNodeID *string) {
+	claimedAt := time.Now()
 	var target any
 	if targetNodeID != nil {
 		target = *targetNodeID
@@ -1264,7 +1272,7 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 			"dedupe_key", "target_node_id", "retry_window_started_at", "created_at", "updated_at", "completed_at",
 		}).AddRow(
 			jobID, orgID, "default", jobType, payload, 5, "running",
-			attempts, maxAttempts, createdAt, "test-node", createdAt, createdAt.Add(defaultLeaseDuration),
+			attempts, maxAttempts, createdAt, "test-node", claimedAt, claimedAt.Add(defaultLeaseDuration),
 			lockToken.String(), "test-node", string(models.JobOwnerKindWorker), nil, nil, target, nil, createdAt, createdAt, nil,
 		))
 }

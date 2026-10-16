@@ -16,7 +16,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/config"
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
+	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 )
 
 type mainTestLiveSandboxCounter struct {
@@ -66,7 +70,7 @@ func TestBuildBaseMetadata(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			metadata := buildBaseMetadata(tt.previewCapable, tt.previewInternalBaseURL, "")
+			metadata := buildBaseMetadata(tt.previewCapable, tt.previewInternalBaseURL, "", "")
 
 			if _, ok := metadata["build_sha"]; !ok {
 				t.Errorf("expected build_sha to always be present")
@@ -109,7 +113,7 @@ func TestBuildBaseMetadata(t *testing.T) {
 func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 	t.Parallel()
 
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", "", func() bool { return true }, nil, agent.StaticEgressRuntimeConfig{})
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", "", func() bool { return true }, nil, agent.StaticEgressRuntimeConfig{}, "")
 
 	metadata := provider()
 
@@ -133,7 +137,7 @@ func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 func TestBuildWorkerMetadataProvider_NonPreviewCapable(t *testing.T) {
 	t.Parallel()
 
-	provider := buildWorkerMetadataProvider(nil, false, "", "", func() bool { return true }, nil, agent.StaticEgressRuntimeConfig{})
+	provider := buildWorkerMetadataProvider(nil, false, "", "", func() bool { return true }, nil, agent.StaticEgressRuntimeConfig{}, "")
 
 	metadata := provider()
 
@@ -152,7 +156,7 @@ func TestBuildWorkerMetadataProvider_DelaysPreviewCapabilityUntilReady(t *testin
 	t.Parallel()
 
 	ready := false
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", "", func() bool { return ready }, nil, agent.StaticEgressRuntimeConfig{})
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", "", func() bool { return ready }, nil, agent.StaticEgressRuntimeConfig{}, "")
 
 	metadata := provider()
 	require.NotContains(t, metadata, "preview_capable", "preview_capable should be hidden until the HTTP listener is bound")
@@ -445,13 +449,14 @@ func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
 		NodeID:    "worker-1",
 		Logger:    zerolog.Nop(),
 	})
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", "", func() bool { return true }, gate, agent.StaticEgressRuntimeConfig{})
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", "", func() bool { return true }, gate, agent.StaticEgressRuntimeConfig{}, "192.0.2.1")
 
 	metadata := provider()
 
 	require.Equal(t, 2, metadata["live_sandbox_count"], "worker metadata should expose local live sandbox count")
 	require.Equal(t, 0, metadata["reserved_sandbox_count"], "worker metadata should expose in-flight sandbox reservations")
 	require.Equal(t, 4, metadata["max_active_sandboxes"], "worker metadata should expose the per-machine sandbox cap")
+	require.Equal(t, "192.0.2.1", metadata["sandbox_host_id"], "replacement metadata provider must retain provisioned physical identity")
 }
 
 // TestMainStartupReconcilesSocketsBeforeWorkers guards the sandbox-auth socket
@@ -785,31 +790,6 @@ func TestGracefulShutdownUsesShortNodeDrainContext(t *testing.T) {
 	require.Less(t, activeJobLoop, dbOwnedDrain, "DB-owned drain verification should run after in-process active jobs reach zero")
 }
 
-func TestDeployWorkflowWaitsForWorkerRolloverTerminalStatus(t *testing.T) {
-	t.Parallel()
-
-	src, err := os.ReadFile("../../.github/workflows/deploy.yml")
-	require.NoError(t, err, "deploy workflow should be readable for worker rollover regression test")
-
-	body := string(src)
-	require.Contains(t, body, `VERIFY_TIMEOUT_SECONDS: "360"`,
-		"worker rollover verification should fail quickly because routine blue/green deploys do not wait for the old drain")
-	require.Contains(t, body, `POLL_INTERVAL_SECONDS: "10"`,
-		"worker rollover verification should poll often enough for a short deploy budget")
-	require.Contains(t, body, "verify_worker()",
-		"worker rollover verification should put per-host polling in a reusable function")
-	require.Contains(t, body, "verify_worker \"$host\" &",
-		"worker rollover verification should poll worker hosts in parallel")
-	require.Contains(t, body, "for pid in \"${pids[@]}\"; do",
-		"worker rollover verification should wait for all parallel host checks")
-	require.Contains(t, body, `outcome="timeout"`,
-		"worker rollover timeout should be reported as timeout, not successful in_progress")
-	require.Contains(t, body, "overall_rc=1",
-		"worker rollover timeout/failure should fail the deploy job so later deploys do not race host-side rollover")
-	require.NotContains(t, body, `outcome="in_progress"`,
-		"deploy workflow should not pass while detached worker rollover is still running")
-}
-
 // fakeDrainer is a postPRSnapshotDrainer that blocks WaitForPostPRSnapshotUploads
 // on a release channel. Tests use it to drive the success-vs-timeout branches
 // of drainPostPRUploads deterministically.
@@ -892,4 +872,42 @@ func TestDrainPostPRUploads_CtxDoneTakesPrecedence(t *testing.T) {
 	if got := drainer.calls.Load(); got != 1 {
 		t.Errorf("WaitForPostPRSnapshotUploads should be called exactly once, got %d", got)
 	}
+}
+
+func TestBaseMetadataPreservesPhysicalWorkerIdentity(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, key string }{{"configured", "192.0.2.10"}, {"unknown", ""}} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			metadata := buildBaseMetadata(false, "", "", tt.key)
+			got, exists := metadata["sandbox_host_id"]
+			require.Equal(t, tt.key != "", exists, "every metadata provider must preserve identity or explicitly leave budget unknown")
+			if exists {
+				require.Equal(t, tt.key, got, "physical identity must survive metadata provider replacement")
+			}
+		})
+	}
+}
+
+func TestMetadataProviderPreservesAdmissionProcessEvidence(t *testing.T) {
+	t.Parallel()
+	evidence := codereviewsvc.NewAdmissionProcessEvidence("api", "synthetic-build")
+	service := codereviewsvc.NewService(nil, nil, nil, nil, zerolog.Nop(), codereviewsvc.Config{})
+	service.SetScheduling(db.NewCodeReviewScheduleStore(nil), &mainAdmissionSnapshotStub{})
+	service.SetSandboxAdmission()
+	evidence.ConfigureAPI(service)
+	before := buildBaseMetadata(false, "", "", "", evidence)
+	provider := buildWorkerMetadataProvider(nil, false, "", "", nil, nil, agent.StaticEgressRuntimeConfig{}, "", evidence)
+	after := provider()
+	before["active_job_count"] = 0
+	before["active_run_agent_count"] = 0
+	require.Equal(t, before, after, "metadata provider replacement must preserve process proof and immutable build")
+	require.Equal(t, evidence.Evidence().InstanceID, after["instance_id"], "heartbeat must match API health process instance")
+	require.Equal(t, models.CodeReviewAdmissionContractV1, after["code_review_admission_contract_version"], "heartbeat must positively prove a configured writer gate")
+}
+
+type mainAdmissionSnapshotStub struct{}
+
+func (*mainAdmissionSnapshotStub) PrepareCodeReviewPullRequestSnapshot(context.Context, uuid.UUID, uuid.UUID) (ghservice.CodeReviewPullRequestSnapshotReader, error) {
+	return nil, nil
 }

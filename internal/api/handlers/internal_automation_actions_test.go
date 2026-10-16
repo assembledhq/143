@@ -14,6 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/automationactions"
+	"github.com/assembledhq/143/internal/services/github/ratelimit"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -124,6 +125,46 @@ func TestInternalAutomationActionFailureReceipts(t *testing.T) {
 				require.Equal(t, "delivered", data["status"], "preserve completed action evidence")
 			} else {
 				require.Equal(t, tt.code, body["error"].(map[string]any)["code"], "map admission failure")
+			}
+		})
+	}
+}
+
+func TestInternalAutomationActionGitHubDeferral(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		recorded   bool
+		remote     bool
+		wantStatus int
+	}{
+		{name: "local deferral before reservation", wantStatus: 429},
+		{name: "local deferral with recorded failed attempt", recorded: true, wantStatus: 200},
+		{name: "provider throttle with recorded failed attempt", recorded: true, remote: true, wantStatus: 200},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			deferral := &ratelimit.Deferral{InstallationID: 42, Kind: ratelimit.KindPrimary, RetryAt: time.Now().Add(90*time.Second + 500*time.Millisecond)}
+			var err error = &automationactions.SendFailure{Code: "GITHUB_RATE_LIMITED", Definitive: true, Err: deferral}
+			if tt.remote {
+				err = &ratelimit.ControlledError{Err: &automationactions.SendFailure{Code: "PROVIDER_HTTP_403", Definitive: true}, Deferral: *deferral}
+			}
+			result := models.AutomationActionResult{}
+			if tt.recorded {
+				result = models.AutomationActionResultFor([]models.AutomationAction{{Kind: models.AutomationActionComment, Status: models.AutomationActionFailed}}, time.Now())
+			}
+			rr := httptest.NewRecorder()
+			(&InternalAutomationActionHandler{}).respond(rr, httptest.NewRequest("POST", "/", nil), result, err)
+			require.Equal(t, tt.wantStatus, rr.Code, "preserve recorded action state and expose throttling before any reservation")
+			require.Equal(t, "91", rr.Header().Get("Retry-After"), "round the authoritative cooldown deadline up to seconds")
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body), "deferral response should preserve the existing response envelope")
+			if tt.recorded {
+				require.Equal(t, "GITHUB_RATE_LIMITED", body["data"].(map[string]any)["error_code"], "recorded actions should carry the existing GitHub throttle error code")
+				require.Equal(t, "partial", body["data"].(map[string]any)["status"], "a suppressed action must not claim delivery")
+			} else {
+				require.Equal(t, "GITHUB_RATE_LIMITED", body["error"].(map[string]any)["code"], "unreserved requests should carry the existing GitHub throttle error code")
 			}
 		})
 	}

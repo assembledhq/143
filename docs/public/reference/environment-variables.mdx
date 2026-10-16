@@ -38,6 +38,7 @@ Use these settings as the deployment contract for a self-hosted 143 environment.
 
 <ConfigField name="NODE_ID" type="string" description="Stable node identifier used for worker heartbeats and preview routing." />
 <ConfigField name="WORKER_PROCESS_COUNT" type="integer" description="Worker loops per host." />
+<ConfigField name="WORKER_PRIVATE_IP" type="IP address" description="Stable, unique IP of the physical Docker worker host, preserved across process and deployment generations. Required before worker/all startup; missing or invalid identity stops startup with a configuration error. API-only mode does not require it." />
 <ConfigField name="WORKER_MAX_ACTIVE_SANDBOXES" type="integer" description="Maximum live sandboxes on a worker host." />
 <ConfigField name="SESSION_EXECUTOR_IMAGE" type="string" description="Server image used for durable session-executor containers in production worker-capable modes." />
 <ConfigField name="SESSION_EXECUTOR_DOCKER_NETWORK" type="string" description="Docker network session executors join to reach Postgres and worker APIs." />

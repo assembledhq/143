@@ -179,7 +179,7 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			if errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
 				return failCodeReviewRecheck(ctx, stores, services, a, "assessment inputs cannot establish reusable coverage", false)
 			}
-			return err
+			return classifyGitHubJobError(err, a.SessionID.String())
 		}
 		if capture.Manifest.InputDigest != a.InputDigest {
 			return refreshUnsentCodeReviewEvidence(ctx, services, a, "inputs changed before evidence assessment")
@@ -268,7 +268,7 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			if errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
 				return failCodeReviewRecheck(ctx, stores, services, a, "assessment inputs cannot establish reusable coverage", false)
 			}
-			return err
+			return classifyGitHubJobError(err, a.SessionID.String())
 		}
 		if fresh.Manifest.InputDigest != a.InputDigest {
 			return refreshUnsentCodeReviewEvidence(ctx, services, a, "inputs changed during evidence assessment")
@@ -586,10 +586,7 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 		}
 		return errCodeReviewPublicationSuperseded
 	}
-	if errors.Is(err, db.ErrCodeReviewPublicationLockBusy) || errors.Is(err, codereviewsvc.ErrReviewPublicationRejected) {
-		return classifyGitHubJobError(err, a.SessionID.String())
-	}
-	return err
+	return classifyGitHubJobError(err, a.SessionID.String())
 }
 
 // A reserved publication always consumes its staged result. Mutable evidence

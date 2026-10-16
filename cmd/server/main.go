@@ -56,7 +56,6 @@ import (
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	projectservice "github.com/assembledhq/143/internal/services/projects"
-	"github.com/assembledhq/143/internal/services/publicationintent"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
@@ -104,7 +103,7 @@ func main() {
 	}
 
 	if err := cfg.ValidateSecrets(); err != nil {
-		logger.Fatal().Err(err).Msg("security configuration check failed")
+		logger.Fatal().Err(err).Msg("startup configuration check failed")
 	}
 	if err := validateSessionExecutorStartupConfig(cfg); err != nil {
 		logger.Fatal().Err(err).Msg("worker session executor configuration is invalid")
@@ -139,7 +138,23 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
 	}
-	defer pool.Close()
+	controlPlanePool, err := newWorkerControlPlanePool(ctx, *cfg)
+	if err != nil {
+		pool.Close()
+		logger.Fatal().Err(err).Msg("failed to connect worker control-plane database")
+	}
+	defer func() {
+		// Cancel liveness operations before Close waits for borrowed connections.
+		cancel()
+		if controlPlanePool != nil {
+			controlPlanePool.Close()
+		}
+		pool.Close()
+	}()
+	controlPlaneDB := db.DBTX(pool)
+	if controlPlanePool != nil {
+		controlPlaneDB = controlPlanePool
+	}
 
 	// Recover process-local preview ownership before any preview starts or
 	// lease heartbeats. Use the database clock so creation timestamps and the
@@ -426,16 +441,17 @@ func main() {
 		logger.Fatal().Err(err).Msg("invalid GitHub rate-limit controller configuration")
 	}
 
-	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, threadCancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, sandboxCapacity, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, api.RouterSharedDependencies{CodingCredentialStore: codingCredentialStore, GitHubRateLimitController: githubRateLimitController})
+	reviewAdmissionEvidence := codereviewsvc.NewAdmissionProcessEvidence(cfg.Mode, version.BuildSHA)
+	router, gwSrv, recycleWorker, inspectorCloser, previewManager, err := api.NewRouter(cfg, pool, logger, sentryReporter, codexAuthSvc, claudeCodeAuthSvc, llmClient, fileReader, cancelRegistry, threadCancelRegistry, pvProvider, snapshotExec, apiSandboxProvider, sandboxCapacity, apiSnapshotStore, orgSettingsCache, shutdownCh, redisClient, sessionStreams, api.RouterSharedDependencies{CodingCredentialStore: codingCredentialStore, GitHubRateLimitController: githubRateLimitController, CodeReviewAdmissionEvidence: reviewAdmissionEvidence})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
 
-	nodeManager := cluster.NewNodeManager(pool, logger, cfg.NodeID, cfg.Mode)
+	nodeManager := cluster.NewNodeManager(pool, logger, cfg.NodeID, cfg.Mode, cluster.WithControlPlaneDB(controlPlaneDB))
 	previewCapable := (cfg.Mode == "worker" || cfg.Mode == "all") && pvProvider != nil
 	var previewRoutingReady atomic.Bool
 	nodeManager.SetMetadataProvider(func() map[string]any {
-		return buildBaseMetadata(previewCapable && previewRoutingReady.Load(), cfg.PreviewInternalBaseURL, cfg.NodeRegion)
+		return buildBaseMetadata(previewCapable && previewRoutingReady.Load(), cfg.PreviewInternalBaseURL, cfg.NodeRegion, cfg.SandboxHostID(), reviewAdmissionEvidence)
 	})
 	if err := nodeManager.Register(ctx, hostname); err != nil {
 		logger.Fatal().Err(err).Msg("failed to register cluster node")
@@ -590,26 +606,8 @@ func main() {
 				projectStore, projectTaskStore, integrationStore,
 				sessionMessageStore, automationRunStore, evalBootstrapStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader, githubRateLimitController)
 			if services != nil {
-				workerPublicationCoordinator := publicationintent.NewCoordinator(
-					stores.Sessions,
-					stores.SessionChangesets,
-					stores.PullRequests,
-					stores.Organizations,
-					stores.Users,
-					stores.SessionPublications,
-					stores.Jobs,
-					logger,
-				)
-				workerPublicationCoordinator.SetRepositoryStore(stores.Repositories)
-				workerPublicationCoordinator.SetPublicationEnabled(cfg.AgentPRPublicationEnabled)
-				workerPublicationCoordinator.SetReviewEnabled(cfg.PrePRReviewEnabled)
-				services.PublicationIntents = workerPublicationCoordinator
-				if prSvc, ok := services.PR.(*ghservice.PRService); ok {
-					prSvc.SetPublicationExecutionPolicy(workerPublicationCoordinator)
-				}
-				if concreteOrchestrator, ok := services.Orchestrator.(*agent.Orchestrator); ok {
-					concreteOrchestrator.SetPublicationIntentCoordinator(workerPublicationCoordinator)
-				}
+				reviewAdmissionEvidence.ConfigureWorker(services.CodeReviewLifecycle)
+				wirePublicationCoordinator(cfg, services, stores, logger)
 				wirePublicationReviewEvidenceRefresher(services, stores)
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				registerInternalSandboxAuthRoutes(router, services.SandboxAuthBroker, cfg, logger)
@@ -714,6 +712,7 @@ func main() {
 		if sandboxCapacity != nil && services.SandboxGC != nil {
 			sandboxCapacity.SetPressureCleaner(services.SandboxGC)
 		}
+		installSandboxReferenceObserver(cfg, sandboxCapacity, apiSandboxProvider, sessionStore)
 
 		// Run a Docker-first startup cleanup before workers accept jobs. Any
 		// DB-unreferenced sandbox already present on this host cannot belong to
@@ -812,6 +811,9 @@ func main() {
 			previewRoutingReady.Load,
 			sandboxCapacity,
 			agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
+			cfg.SandboxHostID(),
+			reviewAdmissionEvidence,
+			worker.WithLeaseRenewer(db.NewJobStore(controlPlaneDB)),
 		)
 		if workerPreviewStore != nil && cfg.NodeID != "" {
 			go runPreviewRuntimeHeartbeat(ctx, workerPreviewStore, cfg.NodeID, logger, 30*time.Second, 90*time.Second)
@@ -1080,10 +1082,13 @@ func startProcessWorkers(
 	previewRoutingReady func() bool,
 	sandboxCapacity *agent.SandboxCapacityGate,
 	staticEgress agent.StaticEgressRuntimeConfig,
+	sandboxHostID string,
+	admissionEvidence *codereviewsvc.AdmissionProcessEvidence,
+	workerOptions ...worker.Option,
 ) []*worker.Worker {
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
-		w := worker.New(pool, logger, nodeID)
+		w := worker.New(pool, logger, nodeID, workerOptions...)
 		worker.RegisterHandlers(w, stores, services, retentionCfg, logger)
 		workers = append(workers, w)
 	}
@@ -1096,7 +1101,7 @@ func startProcessWorkers(
 		})
 	}
 
-	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, nodeRegion, previewRoutingReady, sandboxCapacity, staticEgress))
+	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, nodeRegion, previewRoutingReady, sandboxCapacity, staticEgress, sandboxHostID, admissionEvidence))
 
 	for i, w := range workers {
 		go w.Start(ctx)
@@ -1120,9 +1125,17 @@ func resolveWorkerMaxActiveSandboxes(workerProcessCount, configured int) int {
 // any provider installed later (e.g. by startProcessWorkers) must continue to
 // emit these fields or the next heartbeat will wipe preview_capable from the
 // node row and break preview routing.
-func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string, nodeRegion string) map[string]any {
+func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string, nodeRegion string, sandboxHostID string, admissionEvidence ...*codereviewsvc.AdmissionProcessEvidence) map[string]any {
 	metadata := map[string]any{
 		"build_sha": version.BuildSHA,
+	}
+	if len(admissionEvidence) > 0 && admissionEvidence[0] != nil {
+		evidence := admissionEvidence[0].Evidence()
+		metadata["instance_id"] = evidence.InstanceID
+		metadata["build_sha"] = evidence.BuildSHA
+		if evidence.ContractVersion != "" {
+			metadata["code_review_admission_contract_version"] = evidence.ContractVersion
+		}
 	}
 	if nodeRegion != "" {
 		metadata["region"] = nodeRegion
@@ -1133,6 +1146,9 @@ func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string, nodeR
 	}
 	if previewInternalBaseURL != "" {
 		metadata["preview_internal_base_url"] = previewInternalBaseURL
+	}
+	if sandboxHostID != "" {
+		metadata["sandbox_host_id"] = sandboxHostID
 	}
 	return metadata
 }
@@ -1146,13 +1162,22 @@ func buildStaticEgressMetadata(runtime agent.StaticEgressRuntimeConfig) map[stri
 	return metadata
 }
 
-func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, nodeRegion string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate, staticEgress agent.StaticEgressRuntimeConfig) func() map[string]any {
+func installSandboxReferenceObserver(cfg *config.Config, sandboxCapacity *agent.SandboxCapacityGate, sandboxProvider any, referenceStore agent.HostSandboxReferenceStore) {
+	if sandboxCapacity == nil || sandboxProvider == nil {
+		return
+	}
+	if inspector, ok := sandboxProvider.(agent.MissingSandboxContainerInspector); ok {
+		sandboxCapacity.SetReferenceObserver(agent.NewSandboxReferenceObserver(inspector, referenceStore, cfg.SandboxHostID()))
+	}
+}
+
+func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, nodeRegion string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate, staticEgress agent.StaticEgressRuntimeConfig, sandboxHostID string, admissionEvidence ...*codereviewsvc.AdmissionProcessEvidence) func() map[string]any {
 	return func() map[string]any {
 		advertisePreview := previewCapable
 		if previewRoutingReady != nil {
 			advertisePreview = advertisePreview && previewRoutingReady()
 		}
-		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL, nodeRegion)
+		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL, nodeRegion, sandboxHostID, admissionEvidence...)
 		for k, v := range buildStaticEgressMetadata(staticEgress) {
 			metadata[k] = v
 		}
@@ -1165,9 +1190,9 @@ func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, 
 			metadata["live_sandbox_count"] = snapshot.Live
 			metadata["reserved_sandbox_count"] = snapshot.Reserved
 			metadata["max_active_sandboxes"] = snapshot.MaxActive
-			if snapshot.CountError != "" {
-				metadata["live_sandbox_count_error"] = snapshot.CountError
-			}
+			metadata["live_sandbox_count_error"] = snapshot.CountError
+			metadata["missing_sandbox_references"] = snapshot.MissingReferences
+			metadata["missing_sandbox_reference_error"] = snapshot.MissingReferenceError
 		}
 		return metadata
 	}
@@ -1598,6 +1623,7 @@ func buildServices(
 				}
 			}
 			sandboxAuthServer := sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
+			sandboxAuthServer.SetGitHubRateLimitController(githubRateLimitController)
 			sandboxAuthBroker = sandboxauth.NewBroker(sandboxAuthServer, sessionStore, repoStore, orgStore, logger)
 			orchestratorSandboxAuth = sandboxauth.NewLeaseClient(sandboxAuthBroker, "worker-orchestrator", logger)
 			prSandboxAuth = sandboxauth.NewLeaseClient(sandboxAuthBroker, "worker-pr", logger)
@@ -1863,6 +1889,7 @@ func buildServices(
 	)
 	codeReviewLifecycle.SetReviewStatusCommentJobs(jobStore)
 	codeReviewLifecycle.SetScheduling(db.NewCodeReviewScheduleStore(pool), prService)
+	codeReviewLifecycle.SetSandboxAdmission()
 	codeReviewLifecycle.SetSchedulingStreams(cache.NewCodeReviewStreams(redisClient, logger))
 	codeReviewLifecycle.SetThreadCanceller(threadSvc)
 	codeReviewVisualEvidence := codereviewsvc.NewVisualEvidenceService(
@@ -1873,7 +1900,11 @@ func buildServices(
 		uploadStore,
 		logger,
 	)
-	codeReviewInputCapture := codereviewsvc.NewAssessmentInputCaptureService(codeReviewLifecycleStore, pullRequestStore, repoStore, orgStore, prService, codeReviewVisualEvidence, codereviewsvc.NewGitHubSubmitter(ghSvc))
+	codeReviewSubmitter := codereviewsvc.NewGitHubSubmitter(
+		ghSvc,
+		codereviewsvc.WithGitHubSubmitterHTTPClient(githubtelemetry.NewControlledHTTPClient(15*time.Second, logger, githubRateLimitController, "code_review")),
+	)
+	codeReviewInputCapture := codereviewsvc.NewAssessmentInputCaptureService(codeReviewLifecycleStore, pullRequestStore, repoStore, orgStore, prService, codeReviewVisualEvidence, codeReviewSubmitter)
 	codeReviewInputCapture.SetExternalContextResolver(agent.CodeReviewExternalContextResolver{Credentials: credentialStore, Orgs: orgStore, GitHubTools: ghSvc != nil, SessionTools: cfg.BaseURL != "" && cfg.SessionSecret != "", MemoryInjected: orchestrator.CodeReviewMemoryContextConfigured()})
 	codeReviewInputCapture.SetAuthorTeamMembershipChecker(ghSvc)
 	codeReviewLifecycle.SetAssessmentContinuation(codeReviewInputCapture, cfg.CodeReviewAssessmentsEnabled && cfg.CodeReviewRechecksEnabled)
@@ -1932,10 +1963,8 @@ func buildServices(
 		SlackSummarizer:              slackSummarizer,
 		LLM:                          llmClient,
 		GitHub:                       ghSvc,
-		CodeReviews: codereviewsvc.NewGitHubSubmitter(
-			ghSvc,
-			codereviewsvc.WithGitHubSubmitterHTTPClient(githubtelemetry.NewControlledHTTPClient(15*time.Second, logger, githubRateLimitController, "code_review")),
-		),
+		CodeReviews:                  codeReviewSubmitter,
+
 		CodeReviewLifecycle:        codeReviewLifecycle,
 		CodeReviewDisputes:         codeReviewDisputes,
 		CodeReviewInsights:         codeReviewInsights,

@@ -120,9 +120,9 @@ func (s *CodeReviewAssessmentStore) Create(ctx context.Context, c models.CodeRev
 	}
 	rows, err := s.db.Query(ctx, `INSERT INTO code_review_revision_assessments(
  id,org_id,repository_id,repository_full_name,pull_request_id,metadata_id,session_id,policy_id,generation,conversation_id,source_assessment_id,previous_assessment_id,previous_published_assessment_id,
- base_sha,base_ref,head_sha,input_version,code_digest,contract_digest,intent_digest,visual_digest,request_digest,gate_digest,input_digest,input_manifest,review_scope,route_reason,publication_key)
+ base_sha,base_ref,head_sha,input_version,code_digest,contract_digest,intent_digest,visual_digest,request_digest,gate_digest,input_digest,input_manifest,review_scope,route_reason,publication_key,created_at)
  SELECT $1,$2,$3,p.github_repo,$4,m.id,$5,$6,$7,$8,$9,$10,$11,
- $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26
+ $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,clock_timestamp()
  FROM code_review_session_metadata m JOIN pull_requests p ON p.org_id=m.org_id AND p.id=m.pull_request_id
  JOIN repositories r ON r.org_id=m.org_id AND r.id=m.repository_id AND r.full_name=p.github_repo
  JOIN code_review_policies pol ON pol.org_id=m.org_id AND pol.id=m.policy_id AND (pol.repository_id IS NULL OR pol.repository_id=m.repository_id)

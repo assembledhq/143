@@ -96,3 +96,9 @@ At minimum, back up:
 - Caddy data if you want to preserve issued certificates (`caddy_data` volume).
 
 Test restoring onto a fresh box before allowing real repositories or automations to depend on the instance.
+
+## Review worker identity
+
+Set `WORKER_PRIVATE_IP` to a stable LAN/private IP unique to this physical Docker host and preserve it across worker restarts and deployment generations. Worker/all startup rejects missing or invalid values, including container hostnames, loopback, unspecified, and multicast addresses. API-only mode does not require the value. Fill the required field in `.env.single-node` before starting Compose; there is no generic identity shared across machines.
+
+When upgrading, migrate first, drain existing executions, and fully stop every pre-upgrade worker process and its background GC loop. Upgrade and verify the API before starting upgraded worker consumers: the old API rejects the new `sandbox_capacity` state and its explicit retry endpoint bypasses admission. A drain flag alone leaves old cleanup/startup paths active. In `MODE=all`, replace the combined process without overlapping old worker/GC processes. Preserve pending requests through this transition; split API/worker deployments can keep intake active while workers are stopped. Existing baseline containers on legacy worker owners receive no warm exception until normal recovery establishes verified ownership.

@@ -36,6 +36,67 @@ type CodeReviewTextDiscovery struct {
 	Complete bool
 }
 
+// CodeReviewEvidenceDiscovery derives Markdown and rendered-image evidence from
+// one GitHub inventory. It is local to a capture; callers must not reuse it as a
+// freshness check for another capture.
+type CodeReviewEvidenceDiscovery struct {
+	Text   CodeReviewTextDiscovery
+	Visual models.CodeReviewVisualEvidenceDiscovery
+}
+
+// codeReviewTextInventory retains bounded text while visual discovery continues
+// through every page to count images. Each discussion surface owns one inventory.
+type codeReviewTextInventory struct {
+	sources        []CodeReviewTextSource
+	visited, bytes int
+	incomplete     bool
+}
+
+func (i *codeReviewTextInventory) add(surface models.CodeReviewEvidenceSurface, items []githubVisualEvidenceContent) {
+	i.visited += len(items)
+	if i.incomplete || i.visited > codeReviewTextMaxDiscussionItems {
+		i.incomplete = true
+		i.sources = nil
+		return
+	}
+	for _, item := range items {
+		if item.User == nil || !codeReviewEvidenceAuthorType(item.User.Type).IsHuman() || strings.TrimSpace(item.User.Login) == "" {
+			continue
+		}
+		i.bytes += len(item.Body)
+		if i.bytes > codeReviewTextMaxBytes {
+			i.incomplete = true
+			i.sources = nil
+			return
+		}
+		i.sources = append(i.sources, CodeReviewTextSource{Surface: surface, ProviderObjectID: fmt.Sprint(item.ID), SourceURL: item.HTMLURL, AuthorLogin: strings.TrimSpace(item.User.Login), Body: item.Body})
+	}
+}
+
+func codeReviewTextFromInventories(headSHA, body string, inventories ...codeReviewTextInventory) CodeReviewTextDiscovery {
+	result := CodeReviewTextDiscovery{HeadSHA: headSHA, Body: body, Complete: true}
+	visited, totalBytes := 0, len(body)
+	if totalBytes > codeReviewTextMaxBytes {
+		return CodeReviewTextDiscovery{HeadSHA: headSHA, Complete: false}
+	}
+	for _, inventory := range inventories {
+		visited += inventory.visited
+		totalBytes += inventory.bytes
+		if inventory.incomplete || visited > codeReviewTextMaxDiscussionItems || totalBytes > codeReviewTextMaxBytes {
+			return CodeReviewTextDiscovery{HeadSHA: headSHA, Complete: false}
+		}
+		result.Sources = append(result.Sources, inventory.sources...)
+	}
+	sort.Slice(result.Sources, func(i, j int) bool {
+		a, b := result.Sources[i], result.Sources[j]
+		if a.Surface != b.Surface {
+			return a.Surface < b.Surface
+		}
+		return a.ProviderObjectID < b.ProviderObjectID
+	})
+	return result
+}
+
 // DiscoverCodeReviewTextEvidence reads the PR body and all human discussion
 // bodies. Bot/app output is excluded to avoid reacting to our own publication.
 // An over-budget inventory is explicitly incomplete and cannot support reuse.

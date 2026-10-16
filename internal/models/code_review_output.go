@@ -493,6 +493,9 @@ func humanizeCodeReviewRiskReason(reason CodeReviewRiskReason, descriptionIssues
 	case CodeReviewRiskReasonScopeMismatch:
 		return "The change may not match the intent stated in the PR."
 	case CodeReviewRiskReasonUnresolvedUncertainty:
+		if subject := strings.Join(strings.Fields(reason.Subject), " "); subject != "" {
+			return subject
+		}
 		return "The automated review could not resolve a material uncertainty."
 	case CodeReviewRiskReasonPromptInjection:
 		return "The PR contains content that may be attempting to manipulate the automated review."

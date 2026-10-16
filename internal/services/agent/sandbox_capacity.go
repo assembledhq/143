@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/rs/zerolog"
 )
 
@@ -55,22 +56,25 @@ type SandboxCapacityRequest struct {
 
 // SandboxCapacitySnapshot is a best-effort view used in worker heartbeats.
 type SandboxCapacitySnapshot struct {
-	Live       int
-	Reserved   int
-	MaxActive  int
-	CountError string
+	Live                  int
+	Reserved              int
+	MaxActive             int
+	CountError            string
+	MissingReferences     []models.SandboxContainerReference
+	MissingReferenceError string
 }
 
 // SandboxCapacityGate gates new local sandbox creation against the current
 // live Docker count plus in-flight reservations.
 type SandboxCapacityGate struct {
-	counter   LiveSandboxCounter
-	cleaner   SandboxPressureCleaner
-	maxActive int
-	countTTL  time.Duration
-	cleanTTL  time.Duration
-	nodeID    string
-	logger    zerolog.Logger
+	counter           LiveSandboxCounter
+	cleaner           SandboxPressureCleaner
+	referenceObserver MissingSandboxReferenceObserver
+	maxActive         int
+	countTTL          time.Duration
+	cleanTTL          time.Duration
+	nodeID            string
+	logger            zerolog.Logger
 
 	mu       sync.Mutex
 	reserved int
@@ -116,6 +120,15 @@ func (g *SandboxCapacityGate) SetPressureCleaner(cleaner SandboxPressureCleaner)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.cleaner = cleaner
+}
+
+func (g *SandboxCapacityGate) SetReferenceObserver(observer MissingSandboxReferenceObserver) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.referenceObserver = observer
 }
 
 // ReservedCount returns the current in-flight reservation count.
@@ -198,26 +211,64 @@ func (g *SandboxCapacityGate) Snapshot(ctx context.Context) SandboxCapacitySnaps
 	if g == nil {
 		return SandboxCapacitySnapshot{}
 	}
+	ctx, cancelSnapshot := context.WithTimeout(ctx, g.countTTL)
+	defer cancelSnapshot()
 
-	g.mu.Lock()
-	reserved := g.reserved
-	g.mu.Unlock()
-
-	snapshot := SandboxCapacitySnapshot{
-		Reserved:  reserved,
-		MaxActive: g.maxActive,
-	}
-	if g.counter == nil {
-		snapshot.CountError = "live sandbox counter is not configured"
+	for {
+		g.mu.Lock()
+		generation, observer := g.releaseGeneration, g.referenceObserver
+		g.mu.Unlock()
+		snapshot := SandboxCapacitySnapshot{MaxActive: g.maxActive}
+		if g.counter == nil {
+			snapshot.CountError = "live sandbox counter is not configured"
+			snapshot.Reserved = g.ReservedCount()
+			return snapshot
+		}
+		countCtx, cancel := context.WithTimeout(ctx, g.countTTL)
+		var err error
+		if inventory, ok := g.counter.(LiveSandboxInventoryCounter); ok && observer != nil {
+			var ids []string
+			ids, err = inventory.LiveSandboxContainerIDs(countCtx)
+			snapshot.Live = len(ids)
+			if err == nil {
+				err = countCtx.Err()
+			}
+			if err == nil {
+				var observationErr error
+				snapshot.MissingReferences, observationErr = observer.ObserveMissingSandboxReferences(countCtx, ids)
+				if observationErr != nil {
+					snapshot.MissingReferences = nil
+					snapshot.MissingReferenceError = observationErr.Error()
+				}
+			}
+		} else {
+			snapshot.Live, err = g.counter.CountLiveSandboxes(countCtx)
+			if observer != nil {
+				snapshot.MissingReferenceError = "atomic physical inventory is unavailable"
+			}
+		}
+		if err == nil {
+			err = countCtx.Err()
+		}
+		cancel()
+		if err != nil {
+			snapshot.Live = 0
+			snapshot.MissingReferences = nil
+			snapshot.CountError = err.Error()
+		}
+		g.mu.Lock()
+		snapshot.Reserved = g.reserved
+		changed := generation != g.releaseGeneration
+		g.mu.Unlock()
+		if changed && err == nil && ctx.Err() == nil {
+			continue
+		}
+		if changed {
+			snapshot.MissingReferences = nil
+			snapshot.CountError = "sandbox reservations changed during inventory sampling"
+		}
 		return snapshot
 	}
-	live, err := g.countLiveSandboxes(ctx)
-	if err != nil {
-		snapshot.CountError = err.Error()
-		return snapshot
-	}
-	snapshot.Live = live
-	return snapshot
 }
 
 func (g *SandboxCapacityGate) countLiveSandboxes(ctx context.Context) (int, error) {

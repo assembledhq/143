@@ -22,6 +22,7 @@ import (
 
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/storage"
 )
 
@@ -65,6 +66,9 @@ type VisualEvidenceService struct {
 }
 
 type CaptureVisualEvidenceInput struct {
+	// Discover optionally supplies a capture-scoped provider inventory. It runs
+	// synchronously after checkpoint restoration is ruled out, and is never API input.
+	Discover func(context.Context) (models.CodeReviewVisualEvidenceDiscovery, error) `json:"-"`
 	// Fresh bypasses persisted evidence and does not overwrite its checkpoint.
 	Fresh             bool
 	OrgID             uuid.UUID
@@ -89,7 +93,7 @@ func NewVisualEvidenceService(
 		repos:         repos,
 		tokens:        tokens,
 		uploads:       uploads,
-		downloader:    newVisualEvidenceDownloader(),
+		downloader:    newVisualEvidenceDownloader(logger),
 		logger:        logger,
 		maxImages:     visualEvidenceMaxImages,
 		maxBytes:      visualEvidenceMaxTotalBytes,
@@ -147,7 +151,13 @@ func (s *VisualEvidenceService) Capture(ctx context.Context, input CaptureVisual
 
 	}
 
-	discovery, err := s.discoverer.DiscoverCodeReviewVisualEvidence(ctx, input.OrgID, input.RepositoryID, input.PullRequestNumber)
+	var discovery models.CodeReviewVisualEvidenceDiscovery
+	var err error
+	if input.Discover != nil {
+		discovery, err = input.Discover(ctx)
+	} else {
+		discovery, err = s.discoverer.DiscoverCodeReviewVisualEvidence(ctx, input.OrgID, input.RepositoryID, input.PullRequestNumber)
+	}
 	if err != nil {
 		return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("discover code review visual evidence: %w", err)
 	}
@@ -169,6 +179,14 @@ func (s *VisualEvidenceService) Capture(ctx context.Context, input CaptureVisual
 		if err != nil {
 			return models.CodeReviewVisualEvidenceSnapshot{}, fmt.Errorf("load GitHub installation token for visual evidence: %w", err)
 		}
+		metadata, _ := telemetry.RequestMetadataFromContext(ctx)
+		metadata.OrgID = input.OrgID.String()
+		metadata.SessionID = input.SessionID.String()
+		metadata.Repository = repository.FullName
+		if input.AssessmentID != nil {
+			metadata.AssessmentID = *input.AssessmentID
+		}
+		ctx = telemetry.WithInstallationRequestMetadata(telemetry.WithRequestMetadata(ctx, metadata), repository.InstallationID, telemetry.CallerVisualAsset)
 	}
 
 	snapshot := s.materialize(ctx, input, discovery, token)

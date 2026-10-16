@@ -1256,7 +1256,7 @@ func TestAutomationRunStore_ReapStuckRuns(t *testing.T) {
 	// max_concurrent slots; a regression on dispatch_state would terminalize
 	// a per-target run without releasing its session, thread, or ownership
 	// (design doc 125 — the recovery sweep owns those runs).
-	mock.ExpectExec(`UPDATE automation_runs r\s+SET status = 'failed'.*org_id = @org_id.*status IN \('pending', 'running'\).*dispatch_state IS NULL.*triggered_at < @cutoff`).
+	mock.ExpectExec(`WITH abandoned AS MATERIALIZED.*WHERE r.org_id = @org_id.*status IN \('pending', 'running'\).*dispatch_state IS NULL.*triggered_at < @cutoff.*UPDATE automation_runs r`).
 		WithArgs(anyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 4))
 
@@ -1275,7 +1275,7 @@ func TestAutomationRunStore_ReapStuckRuns_Error(t *testing.T) {
 
 	store := NewAutomationRunStore(mock)
 
-	mock.ExpectExec("UPDATE automation_runs").
+	mock.ExpectExec("WITH abandoned AS MATERIALIZED").
 		WithArgs(anyArgs(3)...).
 		WillReturnError(errors.New("boom"))
 
@@ -1295,7 +1295,7 @@ func TestAutomationRunStore_ListOrgsWithStuckRuns(t *testing.T) {
 	orgA := uuid.New()
 	orgB := uuid.New()
 
-	mock.ExpectQuery(`SELECT DISTINCT org_id FROM automation_runs\s+WHERE status IN \('pending', 'running'\) AND triggered_at < @cutoff`).
+	mock.ExpectQuery(`SELECT DISTINCT r.org_id FROM automation_runs r WHERE.*r.status IN \('pending', 'running'\).*r.dispatch_state IS NULL.*r.triggered_at < @cutoff`).
 		WithArgs(anyArgs(1)...).
 		WillReturnRows(pgxmock.NewRows([]string{"org_id"}).AddRow(orgA).AddRow(orgB))
 

@@ -56,6 +56,10 @@ type idleCodeReviewContainerFinalizer interface {
 	FinalizeIdleCodeReviewContainer(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error)
 }
 
+type staleTerminalCodeReviewContainerFinalizer interface {
+	FinalizeStaleTerminalCodeReviewContainer(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (bool, error)
+}
+
 // SandboxUsageCloser lets the GC close billing rows for containers it destroys
 // outside the ordinary orchestrator defer path.
 type SandboxUsageCloser interface {
@@ -232,6 +236,25 @@ func (g *SandboxGC) reapOnce(ctx context.Context, now time.Time, unreferencedGra
 			continue
 		}
 
+		if _, isReview := reviewRefSet[c.ID]; isReview && age >= minimumReviewContainerGCGrace && (maxDestroyAttempts == 0 || destroyAttempts < maxDestroyAttempts) {
+			if finalizer, ok := g.store.(staleTerminalCodeReviewContainerFinalizer); ok {
+				orgID, sessionID, parseErr := parseManagedSandboxIDs(c)
+				if parseErr == nil {
+					cleared, finalizeErr := finalizer.FinalizeStaleTerminalCodeReviewContainer(ctx, orgID, sessionID, c.ID)
+					if finalizeErr != nil {
+						g.logger.Warn().Err(finalizeErr).Str("container_id", c.ID).Msg("sandbox GC: failed to reconcile stale review ownership")
+						continue
+					}
+					if cleared {
+						destroyAttempts++
+						if g.destroyContainer(ctx, c, now, "sandbox_gc_stale_terminal_code_review") {
+							destroyedExpired++
+						}
+						continue
+					}
+				}
+			}
+		}
 		if age < g.cfg.HardMaxAge {
 			_, isReview := reviewRefSet[c.ID]
 			if isReview && age >= minimumReviewContainerGCGrace && (maxDestroyAttempts == 0 || destroyAttempts < maxDestroyAttempts) {
@@ -265,7 +288,14 @@ func (g *SandboxGC) reapOnce(ctx context.Context, now time.Time, unreferencedGra
 				Msg("sandbox GC: hard-expired referenced container is missing valid ownership labels; leaving it alive")
 			continue
 		}
-		cleared, err := g.store.FinalizeContainerDestroy(ctx, orgID, sessionID, c.ID)
+		var cleared bool
+		if _, isReview := reviewRefSet[c.ID]; isReview {
+			if finalizer, ok := g.store.(idleCodeReviewContainerFinalizer); ok {
+				cleared, err = finalizer.FinalizeIdleCodeReviewContainer(ctx, orgID, sessionID, c.ID)
+			}
+		} else {
+			cleared, err = g.store.FinalizeContainerDestroy(ctx, orgID, sessionID, c.ID)
+		}
 		if err != nil {
 			g.logger.Warn().Err(err).
 				Str("container_id", c.ID).

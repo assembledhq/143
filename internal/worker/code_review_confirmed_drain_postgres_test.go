@@ -70,7 +70,8 @@ func TestConfirmedFullPublicationDrainRecoveryPostgres(t *testing.T) {
 		{name: "queued replacement stays protected", parent: "failed", orphan: true, change: "queue"},
 		{name: "terminal executor with pending job stays protected", parent: "failed", orphan: true, change: "pending_job"},
 		{name: "running thread without executor proof stays protected", parent: "failed", orphan: true, change: "no_executor"},
-		{name: "active container stays protected", parent: "failed", change: "container"},
+		{name: "retained idle workspace permits immutable completion", parent: "failed", change: "container", wantComplete: true},
+		{name: "retained workspace with active runtime stays protected", parent: "failed", orphan: true, change: "container_runtime"},
 		{name: "active turn holder stays protected", parent: "failed", change: "turn_holder"},
 		{name: "active sandbox holder stays protected", parent: "failed", change: "holder"},
 		{name: "queued workspace prep stays protected", parent: "failed", change: "prepare"},
@@ -112,8 +113,11 @@ func TestConfirmedFullPublicationDrainRecoveryPostgres(t *testing.T) {
 				exec(`UPDATE session_threads SET cancel_requested_at=now() WHERE org_id=$1 AND id=$2`, f.job.OrgID, thread)
 			case "executor":
 				exec(`UPDATE session_executors SET status='running',lease_expires_at=now()-interval '1 hour' WHERE org_id=$1 AND job_id=$2`, f.job.OrgID, executionJob)
-			case "runtime":
+			case "runtime", "container_runtime":
 				exec(`INSERT INTO thread_runtimes(org_id,session_id,thread_id,agent_type,status,owner_node_id,lease_token,lease_expires_at) VALUES($1,$2,$3,'claude_code','live',$4,gen_random_uuid(),now()-interval '1 hour')`, f.job.OrgID, f.job.SessionID, thread, node)
+				if tt.change == "container_runtime" {
+					exec(`UPDATE sessions SET container_id='test-container' WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.job.SessionID)
+				}
 			case "queue", "prepare":
 				kind := "continue_session"
 				if tt.change == "prepare" {

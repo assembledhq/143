@@ -13,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/agent"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/google/uuid"
 )
 
@@ -52,8 +53,9 @@ type assessmentFileLister interface {
 }
 type assessmentSnapshotter interface {
 	scheduleSnapshotter
-	PullRequestSyncer
+	SyncCodeReviewPullRequestState(context.Context, uuid.UUID, uuid.UUID) (ghservice.CodeReviewPullRequestSnapshot, error)
 	DiscoverCodeReviewTextEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewTextDiscovery, error)
+	DiscoverCodeReviewEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewEvidenceDiscovery, error)
 }
 
 type assessmentExternalContextResolver interface {
@@ -114,6 +116,12 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	if pr.GitHubRepo != repo.FullName || repo.OrgID != in.OrgID {
 		return result, errors.New("assessment repository does not match pull request")
 	}
+	metadata, _ := telemetry.RequestMetadataFromContext(ctx)
+	metadata.OrgID = in.OrgID.String()
+	metadata.SessionID = in.SessionID.String()
+	metadata.AssessmentID = in.AssessmentID
+	metadata.PullRequestID = in.PullRequestID
+	ctx = telemetry.WithRequestMetadata(ctx, metadata)
 	resolved, err := s.policies.ResolvePolicy(ctx, in.OrgID)
 	if err != nil {
 		return result, err
@@ -132,15 +140,12 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	if err != nil {
 		return result, err
 	}
-	snapshot, err := reader(ctx, pr.GitHubPRNumber)
+	snapshot, err := s.snapshots.SyncCodeReviewPullRequestState(ctx, in.OrgID, in.PullRequestID)
 	if err != nil {
 		return result, err
 	}
 	if snapshot.State != "open" {
 		return AssessmentInputCaptureResult{Snapshot: snapshot}, ErrReviewIneligible
-	}
-	if err = s.snapshots.SyncPullRequestState(ctx, in.OrgID, in.PullRequestID); err != nil {
-		return result, err
 	}
 	health, err := s.prs.GetHealthCurrent(ctx, in.OrgID, in.PullRequestID)
 	if err != nil {
@@ -167,13 +172,28 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	if err != nil {
 		return result, err
 	}
-	visual, err := s.visual.Capture(ctx, CaptureVisualEvidenceInput{Fresh: in.Fresh, OrgID: in.OrgID, RepositoryID: in.RepositoryID, SessionID: in.SessionID, AssessmentID: &in.AssessmentID, PullRequestNumber: pr.GitHubPRNumber, HeadSHA: snapshot.HeadSHA})
+	var textDiscovery *ghservice.CodeReviewTextDiscovery
+	visual, err := s.visual.Capture(ctx, CaptureVisualEvidenceInput{Fresh: in.Fresh, OrgID: in.OrgID, RepositoryID: in.RepositoryID, SessionID: in.SessionID, AssessmentID: &in.AssessmentID, PullRequestNumber: pr.GitHubPRNumber, HeadSHA: snapshot.HeadSHA,
+		Discover: func(ctx context.Context) (models.CodeReviewVisualEvidenceDiscovery, error) {
+			discovery, err := s.snapshots.DiscoverCodeReviewEvidence(ctx, in.OrgID, in.RepositoryID, pr.GitHubPRNumber)
+			if err != nil {
+				return models.CodeReviewVisualEvidenceDiscovery{}, err
+			}
+			textDiscovery = &discovery.Text
+			return discovery.Visual, nil
+		},
+	})
 	if err != nil {
 		return result, err
 	}
-	textDiscovery, err := s.snapshots.DiscoverCodeReviewTextEvidence(ctx, in.OrgID, in.RepositoryID, pr.GitHubPRNumber)
-	if err != nil {
-		return result, err
+	if textDiscovery == nil {
+		// A restored immutable visual checkpoint needs only the bounded text
+		// inventory; do not rediscover images or extend its pagination budget.
+		discovery, err := s.snapshots.DiscoverCodeReviewTextEvidence(ctx, in.OrgID, in.RepositoryID, pr.GitHubPRNumber)
+		if err != nil {
+			return result, err
+		}
+		textDiscovery = &discovery
 	}
 	if !textDiscovery.Complete {
 		return result, fmt.Errorf("%w: text evidence exceeds the complete capture budget", ErrAssessmentReuseUnavailable)

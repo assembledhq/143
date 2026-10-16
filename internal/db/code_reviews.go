@@ -41,6 +41,28 @@ func (s *CodeReviewStore) EnsureFreshnessRetryStartedAt(ctx context.Context, org
 	return startedAt, true, nil
 }
 
+// EnsureCaptureIdentityRetryStartedAt records the first attempt to hand off a
+// captured source identity change under the controller's lease. This phase has
+// its own deadline; earlier GitHub waits cannot exhaust its retry budget, and
+// retries or worker restarts cannot extend it.
+func (s *CodeReviewStore) EnsureCaptureIdentityRetryStartedAt(ctx context.Context, orgID, sessionID, jobID, lockToken uuid.UUID) (time.Time, bool, error) {
+	var startedAt time.Time
+	err := s.db.QueryRow(ctx, `UPDATE jobs
+ SET payload=jsonb_set(payload,'{_code_review_capture_identity_retry_started_at}',
+       COALESCE(payload->'_code_review_capture_identity_retry_started_at',to_jsonb(now())),true),updated_at=now()
+ WHERE org_id=$1 AND id=$2 AND lock_token=$3 AND status='running'
+   AND lease_expires_at > now()
+   AND job_type='run_code_review' AND payload->>'session_id'=$4
+ RETURNING (payload->>'_code_review_capture_identity_retry_started_at')::timestamptz`, orgID, jobID, lockToken, sessionID.String()).Scan(&startedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("record capture identity retry start: %w", err)
+	}
+	return startedAt, true, nil
+}
+
 const (
 	codeReviewPublicationLockWaitTimeout = 20 * time.Second
 	codeReviewPublicationLockTimeout     = 5 * time.Minute
@@ -643,13 +665,13 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 			from_fork, trigger_source, status, phase, status_code, status_message, retry_at,
 			last_error_at, retryable_failure, decision, acceptable, stale, superseded_by_session_id,
 			review_output_key, prompt_record_key, github_review_id, github_review_url, final_review_body,
-			failure_reason, completed_at`+triggeringDisputeColumn+`
+			failure_reason, completed_at, created_at`+triggeringDisputeColumn+`
 		) VALUES (
 			@org_id, @session_id, @repository_id, @pull_request_id, @policy_id, @base_sha, @head_sha,
 			@from_fork, @trigger_source, @status, @phase, @status_code, @status_message, @retry_at,
 			@last_error_at, @retryable_failure, @decision, @acceptable, @stale, @superseded_by_session_id,
 			@review_output_key, @prompt_record_key, @github_review_id, @github_review_url, @final_review_body,
-			@failure_reason, @completed_at`+triggeringDisputeValue+`
+			@failure_reason, @completed_at, clock_timestamp()`+triggeringDisputeValue+`
 		)
 		ON CONFLICT (org_id, review_output_key) DO UPDATE
 		SET review_output_key = EXCLUDED.review_output_key`+triggeringDisputeUpdate+`
@@ -1180,6 +1202,16 @@ func (s *CodeReviewStore) MarkStaleForPullRequestExceptHead(ctx context.Context,
 }
 
 func (s *CodeReviewStore) MarkStale(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error) {
+	return s.markStale(ctx, orgID, sessionID, reason, false)
+}
+
+// MarkActiveReviewStale retires obsolete controller work without overwriting a
+// concurrent cancellation or a completed immutable result.
+func (s *CodeReviewStore) MarkActiveReviewStale(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error) {
+	return s.markStale(ctx, orgID, sessionID, reason, true)
+}
+
+func (s *CodeReviewStore) markStale(ctx context.Context, orgID, sessionID uuid.UUID, reason string, activeOnly bool) (models.CodeReviewSessionMetadata, error) {
 	rows, err := s.db.Query(ctx, `
 		UPDATE code_review_session_metadata
 		SET status = 'stale',
@@ -1196,10 +1228,12 @@ func (s *CodeReviewStore) MarkStale(ctx context.Context, orgID, sessionID uuid.U
 		    completed_at = COALESCE(completed_at, now())
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
+		  AND (NOT @active_only OR status IN ('queued', 'running'))
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
 		"org_id":         orgID,
 		"session_id":     sessionID,
 		"failure_reason": reason,
+		"active_only":    activeOnly,
 	})
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("mark code review stale: %w", err)

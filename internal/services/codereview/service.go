@@ -76,6 +76,8 @@ var githubTeamMentionPattern = regexp.MustCompile(`(?i)(?:^|[^a-z0-9_])@([a-z0-9
 
 type Service struct {
 	scheduling        *schedulingDependencies
+	sandboxAdmission  bool
+	admissionTx       pgx.Tx
 	policies          PolicyStore
 	metadata          MetadataStore
 	sessions          SessionStore
@@ -156,6 +158,7 @@ type ReviewChangedInput struct {
 	RequestedTeamSlug      string                         `json:"requested_team_slug,omitempty"`
 	RequestContext         *ReviewRequestContext          `json:"request_context,omitempty"`
 	ExplicitRequest        bool                           `json:"explicit_request,omitempty"`
+	AutomaticRecovery      bool                           `json:"automatic_recovery,omitempty"`
 	TriggerSource          models.CodeReviewTriggerSource `json:"trigger_source,omitempty"`
 	TriggeringDisputeID    *uuid.UUID                     `json:"triggering_dispute_id,omitempty"`
 	// ReviewRequestDisputeID correlates a classified ordinary review request
@@ -198,6 +201,7 @@ const (
 	RetryReviewConflictHeadChanged  RetryReviewConflictCode = "head_changed"
 	RetryReviewConflictPRClosed     RetryReviewConflictCode = "pull_request_closed"
 	RetryReviewConflictPolicyOff    RetryReviewConflictCode = "policy_disabled"
+	RetryReviewConflictCapacity     RetryReviewConflictCode = "capacity_unavailable"
 )
 
 type RetryReviewConflictError struct {
@@ -240,6 +244,7 @@ type SyncReviewStatusCommentJobPayload struct {
 }
 
 type reviewStartOptions struct {
+	automaticRecovery       bool
 	triggerSource           models.CodeReviewTriggerSource
 	forceReassessment       bool
 	changeKey               string
@@ -418,6 +423,9 @@ func (s *Service) retryReview(ctx context.Context, input RetryReviewInput, curre
 		return RetryReviewResult{}, &RetryReviewConflictError{
 			Code: RetryReviewConflictPolicyOff, Message: "Code review is disabled by the current policy.",
 		}
+	}
+	if started.Deferred && started.SessionID == uuid.Nil {
+		return RetryReviewResult{}, &RetryReviewConflictError{Code: RetryReviewConflictCapacity, Message: "Review capacity is temporarily unavailable. Retry when a sandbox is available."}
 	}
 	if !started.Processed || started.SessionID == uuid.Nil {
 		return RetryReviewResult{}, fmt.Errorf("code review retry did not create a replacement attempt")
@@ -760,7 +768,7 @@ func (s *Service) QueueReviewChanged(ctx context.Context, input ReviewChangedInp
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("check prior code review approval before queueing reassessment: %w", err)
 	}
-	if approved && !input.ExplicitRequest {
+	if approved && !reviewAdmissionIsExplicit(input) {
 		return ReviewRequestedResult{IgnoredReason: "already_approved"}, nil
 	}
 	latest, err := s.metadata.GetLatestByPullRequest(ctx, input.OrgID, input.PullRequestID)
@@ -778,7 +786,9 @@ func (s *Service) QueueReviewChanged(ctx context.Context, input ReviewChangedInp
 			return result, nil
 		}
 	}
-	input.PriorSessionID = latest.SessionID
+	if input.ChangeReason != captureIdentityChangeReason {
+		input.PriorSessionID = latest.SessionID
+	}
 	dedupeKey := fmt.Sprintf("code_review_reassessment:%s:%s", input.PullRequestID, strings.TrimSpace(input.ChangeKey))
 	var runAt *time.Time
 	if !input.ExplicitRequest {
@@ -868,11 +878,20 @@ func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedIn
 			return ReviewRequestedResult{}, fmt.Errorf("validate trigger_source: %w", err)
 		}
 	}
+	if input.ChangeReason == captureIdentityChangeReason {
+		parent, err := s.sessions.GetByID(ctx, input.OrgID, input.PriorSessionID)
+		if err != nil {
+			return ReviewRequestedResult{}, fmt.Errorf("load capture replacement parent cancellation: %w", err)
+		}
+		if parent.Status == models.SessionStatusCancelled {
+			return ReviewRequestedResult{Processed: true, IgnoredReason: "cancelled"}, nil
+		}
+	}
 	approved, err := s.metadata.HasApprovedByPullRequest(ctx, input.OrgID, input.PullRequestID)
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("check prior code review approval before reassessment: %w", err)
 	}
-	if approved && !input.ExplicitRequest {
+	if approved && !reviewAdmissionIsExplicit(input) {
 		return ReviewRequestedResult{IgnoredReason: "already_approved"}, nil
 	}
 	latest, err := s.metadata.GetLatestByPullRequest(ctx, input.OrgID, input.PullRequestID)
@@ -931,6 +950,7 @@ func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedIn
 		triggerSource = input.TriggerSource
 	}
 	return s.startReview(ctx, requested, reviewStartOptions{
+		automaticRecovery:       input.AutomaticRecovery,
 		triggerSource:           triggerSource,
 		forceReassessment:       true,
 		changeKey:               input.ChangeKey,
@@ -1089,10 +1109,22 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		return ReviewRequestedResult{}, fmt.Errorf("lookup latest code review: %w", err)
 	}
 
+	if s.sandboxAdmission {
+		if s.admissionTx == nil {
+			return ReviewRequestedResult{}, fmt.Errorf("review sandbox admission requires a scheduling transaction")
+		}
+		available, err := db.CodeReviewSandboxAvailable(ctx, s.admissionTx, input.OrgID, uuid.Nil)
+		if err != nil {
+			return ReviewRequestedResult{}, err
+		}
+		if !available {
+			return ReviewRequestedResult{Processed: true, Deferred: true, TriggerSource: source, IgnoredReason: "sandbox_capacity"}, nil
+		}
+	}
 	title := fmt.Sprintf("Code review for %s#%d", input.GitHubRepo, input.GitHubPRNumber)
 	modelOverride := resolved.Config.AgentRoster.OrchestratorModel
 	reasoningEffort := resolved.Config.AgentRoster.ReasoningEffort
-	revisionContext, err := json.Marshal(map[string]any{
+	revisionValues := map[string]any{
 		"kind":                     "code_review",
 		"github_repo":              input.GitHubRepo,
 		"github_pr_number":         input.GitHubPRNumber,
@@ -1112,7 +1144,11 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		"github_delivery_id":       strings.TrimSpace(input.DeliveryID),
 		"request_context":          normalizeReviewRequestContext(input.RequestContext),
 		"triggering_dispute_id":    opts.triggeringDisputeID,
-	})
+	}
+	if opts.changeReason == captureIdentityChangeReason {
+		revisionValues["capture_identity_automatic"] = opts.automaticRecovery
+	}
+	revisionContext, err := json.Marshal(revisionValues)
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("marshal code review revision context: %w", err)
 	}

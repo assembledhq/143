@@ -307,6 +307,11 @@ func TestConfirmedFullPublicationRecoversBeforeTerminalAndHeadChecksPostgres(t *
 
 func fullRecoveryPostgresPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	t.Helper()
+	return fullRecoveryPostgresPoolWithMaxConns(t, ctx, 0)
+}
+
+func fullRecoveryPostgresPoolWithMaxConns(t *testing.T, ctx context.Context, maxConns int32) *pgxpool.Pool {
+	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	admin, err := pgx.Connect(ctx, dsn)
 	require.NoError(t, err, "connect disposable PostgreSQL")
@@ -324,6 +329,9 @@ func fullRecoveryPostgresPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	require.NoError(t, err, "parse PostgreSQL URL")
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	if maxConns > 0 {
+		cfg.MaxConns = maxConns
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	require.NoError(t, err, "create isolated recovery pool")
 	t.Cleanup(pool.Close)

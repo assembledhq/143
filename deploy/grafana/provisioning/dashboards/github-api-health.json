@@ -12,7 +12,7 @@
       }
     ]
   },
-  "description": "Focused health view for server-owned GitHub HTTP API traffic. Shows exact request volume, throttling, quota headroom, upstream reliability, and latency from structured request summaries. Git protocol traffic and GitHub calls made directly inside sandboxes are intentionally out of scope.",
+  "description": "Focused health view for server-owned GitHub HTTP API traffic. Shows exact request volume, throttling, quota headroom, upstream reliability, and latency from structured request summaries. Authenticated visual asset exchanges have a separate outcomes table and are excluded from API signals. Git protocol traffic and GitHub calls made directly inside sandboxes are intentionally out of scope.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -32,7 +32,7 @@
       "type": "stat",
       "id": 1,
       "title": "API requests",
-      "description": "Completed and transport-failed server-owned GitHub API requests in the selected time range. OAuth token exchange and git protocol traffic are excluded.",
+      "description": "Completed and transport-failed server-owned GitHub API requests in the selected time range. Authenticated visual asset exchanges, OAuth token exchange, and git protocol traffic are excluded.",
       "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
       "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
       "options": {
@@ -55,7 +55,7 @@
         {
           "refId": "A",
           "queryType": "stats",
-          "expr": "_msg:\"github api request\" | stats count() as requests"
+          "expr": "_msg:\"github api request\" AND NOT github_caller:=\"visual_asset\" | stats count() as requests"
         }
       ]
     },
@@ -94,7 +94,7 @@
         {
           "refId": "A",
           "queryType": "stats",
-          "expr": "_msg:\"github api request\" AND github_rate_limited:true | stats count() as rate_limits"
+          "expr": "_msg:\"github api request\" AND NOT github_caller:=\"visual_asset\" AND github_rate_limited:true | stats count() as rate_limits"
         }
       ]
     },
@@ -133,7 +133,7 @@
         {
           "refId": "A",
           "queryType": "stats",
-          "expr": "_msg:\"github api request\" AND (github_result:\"server_error\" OR github_result:\"transport_error\") | stats count() as failures"
+          "expr": "_msg:\"github api request\" AND NOT github_caller:=\"visual_asset\" AND (github_result:\"server_error\" OR github_result:\"transport_error\") | stats count() as failures"
         }
       ]
     },
@@ -174,7 +174,7 @@
         {
           "refId": "A",
           "queryType": "stats",
-          "expr": "_msg:\"github api request\" | stats min(github_rate_limit_remaining_pct) as lowest_remaining_pct"
+          "expr": "_msg:\"github api request\" AND NOT github_caller:=\"visual_asset\" | stats min(github_rate_limit_remaining_pct) as lowest_remaining_pct"
         }
       ]
     },
@@ -205,7 +205,7 @@
         {
           "refId": "A",
           "queryType": "statsRange",
-          "expr": "_msg:\"github api request\" | stats by (github_result) count() as requests",
+          "expr": "_msg:\"github api request\" AND NOT github_caller:=\"visual_asset\" | stats by (github_result) count() as requests",
           "step": "$__interval"
         }
       ]
@@ -229,7 +229,7 @@
         {
           "refId": "A",
           "queryType": "statsRange",
-          "expr": "_msg:\"github api request\" AND github_rate_limited:true | stats by (github_rate_limit_kind) count() as rate_limits",
+          "expr": "_msg:\"github api request\" AND NOT github_caller:=\"visual_asset\" AND github_rate_limited:true | stats by (github_rate_limit_kind) count() as rate_limits",
           "step": "$__interval"
         }
       ]
@@ -266,7 +266,7 @@
         {
           "refId": "A",
           "queryType": "statsRange",
-          "expr": "_msg:\"github api request\" | stats by (github_auth_type, github_installation_id, github_rate_limit_resource) min(github_rate_limit_remaining_pct) as remaining_pct",
+          "expr": "_msg:\"github api request\" AND NOT github_caller:=\"visual_asset\" | stats by (github_auth_type, github_installation_id, github_rate_limit_resource) min(github_rate_limit_remaining_pct) as remaining_pct",
           "step": "$__interval"
         }
       ]
@@ -290,13 +290,13 @@
         {
           "refId": "A",
           "queryType": "statsRange",
-          "expr": "_msg:\"github api request\" | stats quantile(0.50, github_duration_ms) as p50_ms",
+          "expr": "_msg:\"github api request\" AND NOT github_caller:=\"visual_asset\" | stats quantile(0.50, github_duration_ms) as p50_ms",
           "step": "$__interval"
         },
         {
           "refId": "B",
           "queryType": "statsRange",
-          "expr": "_msg:\"github api request\" | stats quantile(0.95, github_duration_ms) as p95_ms",
+          "expr": "_msg:\"github api request\" AND NOT github_caller:=\"visual_asset\" | stats quantile(0.95, github_duration_ms) as p95_ms",
           "step": "$__interval"
         }
       ]
@@ -325,7 +325,7 @@
         {
           "refId": "A",
           "queryType": "stats",
-          "expr": "_msg:\"github api request\" | stats by (github_method, github_route) count() as requests, quantile(0.95, github_duration_ms) as p95_ms | sort by (requests desc) | limit 20"
+          "expr": "_msg:\"github api request\" AND NOT github_caller:=\"visual_asset\" | stats by (github_method, github_route) count() as requests, quantile(0.95, github_duration_ms) as p95_ms | sort by (requests desc) | limit 20"
         }
       ]
     },
@@ -345,7 +345,7 @@
         {
           "refId": "A",
           "queryType": "stats",
-          "expr": "_msg:\"github api request\" AND github_rate_limited:true | stats by (github_installation_id, github_auth_type, github_rate_limit_resource, github_rate_limit_kind, github_route, github_caller, github_sync_reason) count() as rate_limits | sort by (rate_limits desc) | limit 20"
+          "expr": "_msg:\"github api request\" AND NOT github_caller:=\"visual_asset\" AND github_rate_limited:true | stats by (github_installation_id, github_auth_type, github_rate_limit_resource, github_rate_limit_kind, github_route, github_caller, github_sync_reason) count() as rate_limits | sort by (rate_limits desc) | limit 20"
         }
       ]
     },
@@ -370,7 +370,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "_msg:\"github api request\" AND github_rate_limited:true",
+          "expr": "_msg:\"github api request\" AND NOT github_caller:=\"visual_asset\" AND github_rate_limited:true",
           "maxLines": 100
         }
       ]
@@ -411,7 +411,27 @@
         {
           "refId": "A",
           "queryType": "stats",
-          "expr": "_msg:\"github api request\" AND github_principal_unresolved:true | stats by (github_route, github_caller, github_auth_type, github_rate_limit_mode) count() as unresolved_requests | sort by (unresolved_requests desc) | limit 20"
+          "expr": "_msg:\"github api request\" AND NOT github_caller:=\"visual_asset\" AND github_principal_unresolved:true | stats by (github_route, github_caller, github_auth_type, github_rate_limit_mode) count() as unresolved_requests | sort by (unresolved_requests desc) | limit 20"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "id": 14,
+      "title": "GitHub visual asset outcomes",
+      "description": "Authenticated GitHub attachment exchanges, counted separately from API requests. Observed downloads and latency do not establish core quota use; an absent rate-limit resource remains unknown.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 60 },
+      "options": { "showHeader": true },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "displayMode": "auto" } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "stats",
+          "expr": "_msg:\"github api request\" AND github_caller:=\"visual_asset\" | stats by (github_result, github_rate_limit_resource) count() as asset_requests, quantile(0.95, github_duration_ms) as p95_ms | sort by (asset_requests desc) | limit 20"
         }
       ]
     }

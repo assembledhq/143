@@ -26,11 +26,12 @@ type fixedRecheckCapture struct {
 	flipOnCall      int
 	calls           int
 	captureErr      error
+	failOnCall      int
 }
 
 func (f *fixedRecheckCapture) CaptureAssessmentInputs(context.Context, codereviewsvc.AssessmentInputCaptureRequest) (codereviewsvc.AssessmentInputCaptureResult, error) {
 	f.calls++
-	if f.captureErr != nil {
+	if f.captureErr != nil && (f.failOnCall == 0 || f.calls == f.failOnCall) {
 		return codereviewsvc.AssessmentInputCaptureResult{}, f.captureErr
 	}
 	result := f.result
@@ -42,6 +43,7 @@ func (f *fixedRecheckCapture) CaptureAssessmentInputs(context.Context, coderevie
 
 type fakeRecheckPublisher struct {
 	submitErr       error
+	reconcileErr    error
 	requests        []codereviewsvc.SubmitReviewRequest
 	reconciliations []codereviewsvc.SubmitReviewRequest
 }
@@ -100,7 +102,7 @@ func (f *fakeRecheckPublisher) SubmitReview(_ context.Context, req codereviewsvc
 
 func (f *fakeRecheckPublisher) ReconcileAssessmentPublication(_ context.Context, req codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error) {
 	f.reconciliations = append(f.reconciliations, req)
-	return codereviewsvc.SubmitReviewResult{}, false, nil
+	return codereviewsvc.SubmitReviewResult{}, false, f.reconcileErr
 }
 
 // This fixture deliberately uses the complete migration chain. It checks the
@@ -192,6 +194,26 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	supervisorJobID, supervisorLease := uuid.New(), uuid.New()
 	_, err = pool.Exec(ctx, `INSERT INTO jobs(id,org_id,queue,job_type,payload,status,lock_token,dedupe_key) VALUES($1,$2,'agent','run_code_review_recheck',$3,'running',$4,$5)`, supervisorJobID, org, jobJSON, supervisorLease, "code_review_recheck:"+recheck.String())
 	require.NoError(t, err, "seed real claimed supervisor job with admission dedupe")
+	for _, tt := range []struct {
+		name    string
+		status  int
+		body    string
+		consume bool
+	}{
+		{name: "rate limit preserves supervisor attempts", status: 403, body: `{"message":"API rate limit exceeded for installation ID 42"}`},
+		{name: "transient capture consumes supervisor attempts", status: 503, consume: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// These cases exercise the same reserved supervisor before its first dispatch.
+			capture.captureErr = fmt.Errorf("capture recheck inputs: %w", &ghservice.GitHubAPIError{StatusCode: tt.status, Body: []byte(tt.body)})
+			captureErr := handler(jobctx.WithJobID(jobctx.WithLockToken(ctx, supervisorLease), supervisorJobID), "run_code_review_recheck", jobJSON)
+			var retry *RetryableError
+			require.ErrorAs(t, captureErr, &retry, "capture failures must enter the GitHub recovery policy before supervisor dispatch")
+			require.Equal(t, tt.consume, retry.ConsumeAttempt, "GitHub throttling must not consume the supervisor's attempt budget")
+			require.Equal(t, new(githubRateLimitMaxRetryDuration), retry.MaxRetryDuration, "supervisor capture retries must remain bounded by the GitHub recovery window")
+		})
+	}
+	capture.captureErr = nil
 	err = handler(jobctx.WithJobID(jobctx.WithLockToken(ctx, supervisorLease), supervisorJobID), "run_code_review_recheck", jobJSON)
 	require.Error(t, err, "supervisor should wait for its bounded orchestrator turn")
 	dispatch, err := stores.CodeReviewRechecks.Get(ctx, org, recheck)
@@ -344,6 +366,18 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	_, err = pool.Exec(ctx, `INSERT INTO jobs(id,org_id,queue,job_type,payload,status,lock_token) VALUES($1,$2,'agent','run_code_review_recheck','{}','running',$3)`, publicationJobID, org, publicationLease)
 	require.NoError(t, err, "lease separate publication supervisor job")
 	publicationCtx := jobctx.WithJobID(jobctx.WithLockToken(ctx, publicationLease), publicationJobID)
+	capture.captureErr = &ghservice.GitHubAPIError{StatusCode: 403, Body: []byte(`{"message":"API rate limit exceeded for installation ID 42"}`)}
+	capture.failOnCall = capture.calls + 2
+	err = handler(publicationCtx, "run_code_review_recheck", happyJob)
+	var captureRetry *RetryableError
+	require.ErrorAs(t, err, &captureRetry, "capture after the completed continuation must use GitHub recovery")
+	require.False(t, captureRetry.ConsumeAttempt, "completed continuation work must survive rate limiting during its final capture")
+	require.Equal(t, new(githubRateLimitMaxRetryDuration), captureRetry.MaxRetryDuration, "post-continuation capture must retain bounded automatic recovery")
+	require.Empty(t, publisher.requests, "throttled final evidence capture must not publish")
+	retainedTurn, err := stores.CodeReviewRechecks.Get(ctx, org, happyAssessment)
+	require.NoError(t, err, "read the exact completed continuation receipt after throttling")
+	require.Equal(t, models.CodeReviewRecheckDispatchCompleted, retainedTurn.Status, "retry must preserve the completed continuation receipt")
+	capture.captureErr, capture.failOnCall = nil, 0
 	err = handler(publicationCtx, "run_code_review_recheck", happyJob)
 	require.NoError(t, err, "exact current response should finalize through staged publication")
 	approved, err := stores.CodeReviewAssessments.GetByID(ctx, org, happyAssessment)

@@ -60,7 +60,7 @@ func TestPrepareCodeReviewWorkspaceExactHead(t *testing.T) {
 		wantErr     bool
 		wantDestroy int
 	}{
-		{name: "ready after one clone and exact checkout", actualHead: "expected-head"},
+		{name: "ready after one clone and exact checkout", actualHead: strings.Repeat("a", 40)},
 		{name: "mismatched checkout destroys unpublished container", actualHead: "unexpected-head", wantErr: true, wantDestroy: 1},
 	}
 	for _, tt := range tests {
@@ -84,10 +84,10 @@ func TestPrepareCodeReviewWorkspaceExactHead(t *testing.T) {
 			session := &models.Session{
 				ID: uuid.New(), OrgID: orgID, Origin: models.SessionOriginCodeReview,
 				AgentType: models.AgentTypeCodex, RepositoryID: &repoID, Title: &title,
-				RevisionContext: []byte(`{"kind":"code_review","github_pr_number":42,"head_sha":"expected-head"}`),
+				RevisionContext: []byte(`{"kind":"code_review","github_repo":"test/repo","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","github_pr_number":42,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
 			}
 			preparationLeaseToken := uuid.New()
-			sandbox, err := orchestrator.PrepareCodeReviewWorkspace(jobctx.WithLockToken(context.Background(), preparationLeaseToken), session, "expected-head")
+			sandbox, err := orchestrator.PrepareCodeReviewWorkspace(jobctx.WithLockToken(context.Background(), preparationLeaseToken), session, strings.Repeat("a", 40))
 			if tt.wantErr {
 				require.Error(t, err, "an unexpected checkout head must reject the prepared workspace")
 				require.Nil(t, sandbox, "a failed checkout must not transfer an unpublished sandbox")
@@ -99,7 +99,7 @@ func TestPrepareCodeReviewWorkspaceExactHead(t *testing.T) {
 			require.Equal(t, preparationLeaseToken.String(), provider.createdConfig.PreparationLeaseToken, "created sandbox should identify the exact preparation attempt for GC")
 			require.Equal(t, 1, provider.cloneCount, "workspace preparation should clone the repository once")
 			require.Equal(t, tt.wantDestroy, provider.destroyCount, "only failed preparation should destroy its unpublished container")
-			require.Contains(t, strings.Join(provider.commands, "\n"), "pull/42/head", "preparation should fetch the captured pull request head")
+			require.Contains(t, strings.Join(provider.commands, "\n"), strings.Repeat("a", 40), "preparation should check out the exact captured pull request head")
 		})
 	}
 }

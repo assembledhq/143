@@ -13,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/services/github/ratelimit"
 )
 
@@ -33,18 +35,22 @@ func TestTransportRoundTripLogsStructuredGitHubTelemetry(t *testing.T) {
 	tests := []struct {
 		name             string
 		metadata         RequestMetadata
+		jobID            uuid.UUID
 		requestURL       string
 		response         *http.Response
 		requestErr       error
 		expectedLogEvent map[string]any
 	}{
 		{
-			name: "successful installation request records quota and normalized route",
+			name:  "successful installation request records quota and normalized route",
+			jobID: uuid.MustParse("00000000-0000-0000-0000-000000000001"),
 			metadata: RequestMetadata{
 				Kind:           RequestKindAPI,
 				AuthType:       AuthTypeAppInstallation,
 				InstallationID: 42,
 				SyncReason:     "stale_reconcile",
+				AssessmentID:   uuid.MustParse("00000000-0000-0000-0000-000000000002"),
+				PullRequestID:  uuid.MustParse("00000000-0000-0000-0000-000000000003"),
 			},
 			requestURL: "https://api.github.com/repos/assembledhq/143/pulls/99?ignored=true",
 			response: &http.Response{
@@ -60,6 +66,9 @@ func TestTransportRoundTripLogsStructuredGitHubTelemetry(t *testing.T) {
 				},
 			},
 			expectedLogEvent: map[string]any{
+				"job_id":                          "00000000-0000-0000-0000-000000000001",
+				"assessment_id":                   "00000000-0000-0000-0000-000000000002",
+				"pull_request_id":                 "00000000-0000-0000-0000-000000000003",
 				"level":                           "info",
 				"message":                         "github api request",
 				"github_method":                   http.MethodGet,
@@ -254,8 +263,12 @@ func TestTransportRoundTripLogsStructuredGitHubTelemetry(t *testing.T) {
 					return startedAt.Add(250 * time.Millisecond)
 				},
 			}
+			ctx := WithRequestMetadata(context.Background(), tt.metadata)
+			if tt.jobID != uuid.Nil {
+				ctx = jobctx.WithJobID(ctx, tt.jobID)
+			}
 			request, err := http.NewRequestWithContext(
-				WithRequestMetadata(context.Background(), tt.metadata),
+				ctx,
 				http.MethodGet,
 				tt.requestURL,
 				nil,
@@ -273,6 +286,18 @@ func TestTransportRoundTripLogsStructuredGitHubTelemetry(t *testing.T) {
 			require.Equal(t, tt.requestErr, actualErr, "RoundTrip should preserve the underlying error")
 			var actualLogEvent map[string]any
 			require.NoError(t, json.Unmarshal(logs.Bytes(), &actualLogEvent), "telemetry should be valid JSON")
+			tt.expectedLogEvent["github_request_started_at"] = startedAt.Format(time.RFC3339Nano)
+			tt.expectedLogEvent["github_request_completed_at"] = startedAt.Add(250 * time.Millisecond).Format(time.RFC3339Nano)
+			tt.expectedLogEvent["github_timing_source"] = "host_transport"
+			tt.expectedLogEvent["github_token_correlation_status"] = "unknown"
+			tt.expectedLogEvent["github_transport_write_attempts_observed"] = float64(0)
+			tt.expectedLogEvent["github_transport_write_errors_observed"] = float64(0)
+			tt.expectedLogEvent["github_transport_write_observation_status"] = "unknown"
+			tt.expectedLogEvent["github_transport_write_observation_cutoff"] = "request_summary"
+			tt.expectedLogEvent["github_target_host_class"] = targetHostClass(request.URL)
+			if tt.response != nil {
+				tt.expectedLogEvent["github_response_headers_at"] = startedAt.Add(250 * time.Millisecond).Format(time.RFC3339Nano)
+			}
 			require.Equal(t, tt.expectedLogEvent, actualLogEvent, "telemetry should contain the exact bounded request summary")
 		})
 	}
@@ -842,6 +867,9 @@ func TestNormalizeRoute(t *testing.T) {
 		expectedRepository string
 	}{
 		{name: "pull request", rawURL: "https://api.github.com/repos/acme/widget/pulls/42", expectedRoute: "/repos/:owner/:repo/pulls/:id", expectedRepository: "acme/widget"},
+		{name: "check runs", rawURL: "https://api.github.com/repos/acme/widget/commits/feature%2Fprivate-branch/check-runs?per_page=100", expectedRoute: "/repos/:owner/:repo/commits/:ref/check-runs", expectedRepository: "acme/widget"},
+		{name: "combined status", rawURL: "https://api.github.com/repos/acme/widget/commits/feature/private-branch/status", expectedRoute: "/repos/:owner/:repo/commits/:ref/status", expectedRepository: "acme/widget"},
+		{name: "commit metadata", rawURL: "https://api.github.com/repos/acme/widget/commits/private-branch", expectedRoute: "/repos/:owner/:repo/commits/:ref", expectedRepository: "acme/widget"},
 		{name: "issue comment collection", rawURL: "https://api.github.com/repos/acme/widget/issues/42/comments?page=3", expectedRoute: "/repos/:owner/:repo/issues/:id/comments", expectedRepository: "acme/widget"},
 		{name: "issue comment resource", rawURL: "https://api.github.com/repos/acme/widget/issues/comments/123", expectedRoute: "/repos/:owner/:repo/issues/comments/:id", expectedRepository: "acme/widget"},
 		{name: "git ref", rawURL: "https://api.github.com/repos/acme/widget/git/ref/heads/feature/branch", expectedRoute: "/repos/:owner/:repo/git/ref/:ref", expectedRepository: "acme/widget"},
@@ -865,6 +893,35 @@ func TestNormalizeRoute(t *testing.T) {
 			actualRoute, actualRepository := normalizeRoute(parsedURL)
 			require.Equal(t, tt.expectedRoute, actualRoute, "route should use a bounded endpoint template")
 			require.Equal(t, tt.expectedRepository, actualRepository, "repository should remain available as an explicit drilldown dimension")
+		})
+	}
+}
+
+func TestNormalizeExternalRoute(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ path, expected string }{{"/repos/example/fixture/contents/private.txt", "/repos/:owner/:repo/contents/:path"}, {"/graphql", "/graphql"}, {"/secret/private-token", "/other"}, {"/:private-token", "/other"}}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, NormalizeExternalRoute(tt.path), "external routes must discard opaque path contents")
+		})
+	}
+}
+
+func TestLocalActivityScope(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ kind, outcome string }{{"cache_hit", "hit"}, {"deferral", "deferred"}}
+	for _, tt := range tests {
+		t.Run(tt.kind, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			jobID, assessmentID, prID := uuid.New(), uuid.New(), uuid.New()
+			ctx := jobctx.WithJobID(context.Background(), jobID)
+			ctx = WithRequestMetadata(ctx, RequestMetadata{SessionID: "session-fixture", OrgID: "org-fixture", Caller: "sandbox_token", InstallationID: 42, AssessmentID: assessmentID, PullRequestID: prID})
+			RecordLocalActivity(ctx, zerolog.New(&logs), tt.kind, "/app/installations/:installation_id/access_tokens")
+			var actual map[string]any
+			require.NoError(t, json.Unmarshal(logs.Bytes(), &actual), "local events should be structured JSON")
+			require.Equal(t, map[string]any{"level": "debug", "session_id": "session-fixture", "org_id": "org-fixture", "job_id": jobID.String(), "assessment_id": assessmentID.String(), "pull_request_id": prID.String(), "github_caller": "sandbox_token", "github_activity": tt.kind, "github_route": "/app/installations/:installation_id/access_tokens", "github_installation_id": float64(42), "message": "github local activity"}, actual, "local cache hits and deferrals must retain trusted scope without becoming remote request logs")
 		})
 	}
 }

@@ -1342,9 +1342,9 @@ func TestPullRequestStateSyncDedupeKey(t *testing.T) {
 	prID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 
 	require.Equal(t,
-		"sync_pull_request_state:11111111-1111-1111-1111-111111111111",
-		pullRequestStateSyncDedupeKey(prID),
-		"all sync triggers for one pull request should share a dedupe key",
+		"sync_pull_request_state:11111111-1111-1111-1111-111111111111:urgent",
+		pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonManual),
+		"urgent sync triggers should use their own lane for the pull request",
 	)
 }
 
@@ -1357,23 +1357,15 @@ func TestEnqueuePullRequestStateSyncRecordsEveryDeduplicatedReason(t *testing.T)
 
 	orgID := uuid.New()
 	prID := uuid.New()
-	dedupeKey := pullRequestStateSyncDedupeKey(prID)
-	for index := range 2 {
-		rows := pgxmock.NewRows([]string{"id"})
-		if index == 0 {
-			rows.AddRow(uuid.New())
-		}
-		mock.ExpectQuery("INSERT INTO jobs").
-			WithArgs(pgx.NamedArgs{
-				"org_id":     orgID,
-				"queue":      prHealthSyncQueue,
-				"job_type":   prHealthSyncJobType,
-				"payload":    pgxmock.AnyArg(),
-				"priority":   6,
-				"dedupe_key": &dedupeKey,
-			}).
-			WillReturnRows(rows)
-	}
+	dedupeKey := pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonManual)
+	activeID := uuid.New()
+	expectCheckSyncLaneEmpty(t, mock, orgID, prID, dedupeKey)
+	mock.ExpectQuery("INSERT INTO jobs").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(activeID))
+	mock.ExpectCommit()
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id FROM pull_requests").WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
+	mock.ExpectQuery("SELECT j.id, j.status").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id", "status", "awaiting_predecessor"}).AddRow(activeID, models.JobStatusPending, false))
+	mock.ExpectCommit()
 
 	var logs bytes.Buffer
 	service := &PRService{
@@ -1382,7 +1374,7 @@ func TestEnqueuePullRequestStateSyncRecordsEveryDeduplicatedReason(t *testing.T)
 	}
 	pr := models.PullRequest{ID: prID, OrgID: orgID}
 
-	service.enqueuePullRequestStateSync(context.Background(), pr, PullRequestSyncReasonStaleReconcile)
+	service.enqueuePullRequestStateSync(context.Background(), pr, PullRequestSyncReasonManual)
 	service.enqueuePullRequestStateSync(context.Background(), pr, PullRequestSyncReasonHeadChanged)
 
 	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
@@ -1390,7 +1382,7 @@ func TestEnqueuePullRequestStateSyncRecordsEveryDeduplicatedReason(t *testing.T)
 	var first, second map[string]any
 	require.NoError(t, json.Unmarshal([]byte(lines[0]), &first), "first synchronization request log should be valid JSON")
 	require.NoError(t, json.Unmarshal([]byte(lines[1]), &second), "deduplicated synchronization request log should be valid JSON")
-	require.Equal(t, string(PullRequestSyncReasonStaleReconcile), first["sync_reason"], "first event should preserve the initiating reason")
+	require.Equal(t, string(PullRequestSyncReasonManual), first["sync_reason"], "first event should preserve the initiating reason")
 	require.Equal(t, false, first["deduplicated"], "first event should identify the newly queued job")
 	require.Equal(t, string(PullRequestSyncReasonHeadChanged), second["sync_reason"], "deduplicated event should preserve the later trigger reason")
 	require.Equal(t, true, second["deduplicated"], "second event should identify that the active job absorbed it")
@@ -1433,25 +1425,28 @@ func TestPullRequestSyncReasonValidate(t *testing.T) {
 	}
 }
 
-// Every trigger except merge safety may ride along on a sync that is already
-// running. Merge safety has its own dedicated test below.
 func TestPullRequestSyncReasonCoalesces(t *testing.T) {
 	t.Parallel()
-
-	require.False(t, PullRequestSyncReasonMergeSafety.coalesces(), "merge safety must observe GitHub state fetched after its own request began")
-	for _, reason := range []PullRequestSyncReason{
-		PullRequestSyncReasonInitial,
-		PullRequestSyncReasonHeadChanged,
-		PullRequestSyncReasonBaseChanged,
-		PullRequestSyncReasonReadyForReview,
-		PullRequestSyncReasonIncomplete,
-		PullRequestSyncReasonStaleReconcile,
-		PullRequestSyncReasonCodeReview,
-		PullRequestSyncReasonRepair,
-		PullRequestSyncReasonManual,
-		PullRequestSyncReasonMergeabilityWait,
+	for _, tt := range []struct {
+		reason PullRequestSyncReason
+		want   bool
+	}{
+		{PullRequestSyncReasonInitial, true},
+		{PullRequestSyncReasonHeadChanged, false},
+		{PullRequestSyncReasonBaseChanged, false},
+		{PullRequestSyncReasonReadyForReview, false},
+		{PullRequestSyncReasonIncomplete, false},
+		{PullRequestSyncReasonStaleReconcile, true},
+		{PullRequestSyncReasonMergeSafety, false},
+		{PullRequestSyncReasonCodeReview, false},
+		{PullRequestSyncReasonRepair, false},
+		{PullRequestSyncReasonManual, false},
+		{PullRequestSyncReasonMergeabilityWait, true},
 	} {
-		require.True(t, reason.coalesces(), "%s should share an in-flight sync rather than spend a second GitHub round trip", reason)
+		t.Run(string(tt.reason), func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, tt.reason.coalesces(), "initial reads share separately while safety and check reads always fetch")
+		})
 	}
 }
 
@@ -1469,21 +1464,13 @@ func TestEnqueuePullRequestHealthRebuildChainsAfterRunningJob(t *testing.T) {
 	followUpDedupeKey := fmt.Sprintf("%s:after:%s", baseDedupeKey, runningJobID.String())
 	payload := pgxmock.AnyArg()
 
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgx.NamedArgs{
-			"org_id": orgID, "queue": prHealthSyncQueue, "job_type": prHealthRebuildJobType,
-			"payload": payload, "priority": 4, "dedupe_key": &baseDedupeKey, "run_at": pgxmock.AnyArg(),
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}))
-	mock.ExpectQuery("SELECT id, status[\\s\\S]+FROM jobs").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "queue": prHealthSyncQueue, "dedupe_key": baseDedupeKey}).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "status"}).AddRow(runningJobID, models.JobStatusRunning))
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(pgx.NamedArgs{
-			"org_id": orgID, "queue": prHealthSyncQueue, "job_type": prHealthRebuildJobType,
-			"payload": payload, "priority": 4, "dedupe_key": &followUpDedupeKey, "run_at": pgxmock.AnyArg(),
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id FROM pull_requests").WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
+	mock.ExpectQuery("SELECT j.id, j.status").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id", "status", "awaiting_predecessor"}).AddRow(runningJobID, models.JobStatusRunning, false))
+	mock.ExpectQuery("INSERT INTO jobs").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "queue": prHealthSyncQueue, "job_type": prHealthRebuildJobType, "payload": payload, "priority": 4, "dedupe_key": &followUpDedupeKey, "run_at": pgxmock.AnyArg(),
+	}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
 
 	service := &PRService{
 		jobs:   db.NewJobStore(mock),
@@ -1616,8 +1603,11 @@ func TestRebuildProjectedHealthSummary(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			actual := rebuildProjectedHealthSummary(tt.initial, []models.PullRequestCheckState{tt.state})
-			require.Equal(t, tt.expected, actual, "projected rebuild should derive aggregate health entirely from merged check state")
+			initial, expected := tt.initial, tt.expected
+			initial.GitHubSyncVersion = 17
+			expected.GitHubSyncVersion = 17
+			actual := rebuildProjectedHealthSummary(initial, []models.PullRequestCheckState{tt.state})
+			require.Equal(t, expected, actual, "projected rebuild should derive aggregate health entirely from merged check state")
 		})
 	}
 }
@@ -1750,6 +1740,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPend
 	mock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "ci_status": models.PullRequestCIStatusSuccess}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":     orgID,
@@ -1890,6 +1881,7 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 	mock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "ci_status": models.PullRequestCIStatusFailure}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
 
 	service := &PRService{
 		tokenProvider: &Service{cache: map[int64]*cachedToken{}},
@@ -2015,6 +2007,7 @@ func TestPRServiceSyncPullRequestStateIncludesCommitStatuses(t *testing.T) {
 	mock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "ci_status": models.PullRequestCIStatusFailure}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
 
 	service := &PRService{
 		tokenProvider: &Service{cache: map[int64]*cachedToken{}},
@@ -2554,6 +2547,13 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 	repoID := uuid.New()
 	integrationID := uuid.New()
 	now := time.Now().UTC()
+	priorSummary := models.PullRequestHealthSummary{GitHubSyncVersion: 1, MergeState: models.PullRequestMergeStateBlocked, ChecksConfirmed: true, Checks: []models.PullRequestCheckSummary{{Name: "unit tests", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed, Provider: "github-actions"}}}
+	priorJSON, err := json.Marshal(priorSummary)
+	require.NoError(t, err, "encode a projected baseline whose authoritative reservation is older")
+	prior := models.PullRequestHealthCurrent{PullRequestID: pullRequestID, OrgID: orgID, Version: 7, HeadSHA: "head-pending", BaseSHA: "base-pending", SummaryJSON: priorJSON, SummaryPreviewJSON: priorJSON, EnrichmentStatus: models.PullRequestHealthEnrichmentStatusNotRequested, CheckStateVersion: 3, CreatedAt: now, UpdatedAt: now}
+	currentRows := func() *pgxmock.Rows {
+		return pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(pullRequestID, orgID, prior.Version, prior.HeadSHA, prior.BaseSHA, priorJSON, priorJSON, prior.EnrichmentStatus, nil, prior.CheckStateVersion, now, now)
+	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -2571,31 +2571,31 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
-			"Pending mergeability", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
-			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+			"Pending mergeability", (*string)(nil), "open", "pending", "app", "success", new("head-pending"), new("feature"), new("base-pending"),
+			models.PullRequestMergeStateBlocked, false, 0, false, &now, int64(7), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
 			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
 		))
-	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 0)
+	expectReserveCheckStateVersion(mock, orgID, pullRequestID, 2)
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
-		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
-	expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-pending", 1)
+		WillReturnRows(currentRows())
+	expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-pending", 1, prior)
 	mock.ExpectBegin()
 	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
-		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+		WillReturnRows(currentRows())
 	mock.ExpectExec("INSERT INTO pull_request_health_snapshots").
 		WithArgs(pgx.NamedArgs{
 			"pull_request_id":   pullRequestID,
 			"org_id":            orgID,
-			"version":           int64(1),
+			"version":           int64(8),
 			"head_sha":          "head-pending",
 			"base_sha":          "base-pending",
 			"summary_json":      pgxmock.AnyArg(),
@@ -2603,20 +2603,20 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 		}).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE pull_request_repair_runs").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(1), "head_sha": "head-pending"}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(8), "head_sha": "head-pending"}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("INSERT INTO pull_request_health_current").
 		WithArgs(pgx.NamedArgs{
 			"pull_request_id":      pullRequestID,
 			"org_id":               orgID,
-			"version":              int64(1),
+			"version":              int64(8),
 			"head_sha":             "head-pending",
 			"base_sha":             "base-pending",
 			"summary_json":         pgxmock.AnyArg(),
 			"summary_preview_json": pgxmock.AnyArg(),
 			"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
 			"enriched_at":          (*time.Time)(nil),
-			"check_state_version":  int64(0),
+			"check_state_version":  int64(2),
 			"created_at":           pgxmock.AnyArg(),
 			"updated_at":           pgxmock.AnyArg(),
 		}).
@@ -2631,7 +2631,7 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 			"has_conflicts":      false,
 			"failing_test_count": 0,
 			"needs_agent_action": false,
-			"version":            int64(1),
+			"version":            int64(8),
 			"mark_github_synced": true,
 		}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -2639,6 +2639,9 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 	mock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "ci_status": models.PullRequestCIStatusSuccess}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	mock.ExpectQuery("SELECT EXISTS.*FROM pull_request_check_states").WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": "head-pending", "after_version": int64(2)}).WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
 
 	service := &PRService{
 		tokenProvider:           &Service{cache: map[int64]*cachedToken{}},
@@ -2652,7 +2655,7 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 	service.tokenProvider.cache[123] = &cachedToken{Token: "install-token", ExpiresAt: time.Now().Add(time.Hour)}
 
 	err = service.SyncPullRequestState(context.Background(), orgID, pullRequestID)
-	require.ErrorIs(t, err, ErrPullRequestMergeabilityPending, "SyncPullRequestState should persist pending state and request a retry")
+	require.ErrorIs(t, err, ErrPullRequestMergeabilityPending, "a later webhook projection cannot turn pending mergeability into a successful freshness check")
 	require.NoError(t, mock.ExpectationsWereMet(), "all pending mergeability sync expectations should be met")
 }
 
@@ -3911,6 +3914,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 		mock.ExpectExec("UPDATE pull_requests SET ci_status").
 			WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "ci_status": models.PullRequestCIStatusFailure}).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectCommit()
 		mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
@@ -4036,6 +4040,7 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 		}
 
 		orgID := uuid.New()
+		expectHealthPopulation(mock, orgID, 0)
 		mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "before": pgxmock.AnyArg(), "limit": 50}).
 			WillReturnError(errors.New("list failed"))
@@ -4047,6 +4052,7 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 
 		now := time.Now().UTC()
 		prID := uuid.New()
+		expectHealthPopulation(mock, orgID, 1)
 		mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "before": pgxmock.AnyArg(), "limit": 10}).
 			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
@@ -4223,6 +4229,7 @@ func TestPRServiceReconcilePullRequestStateRunsDatabaseRecoveryAfterThrottle(t *
 			retryAt := now.Add(10 * time.Minute)
 			throttle := &ratelimit.Deferral{Kind: ratelimit.KindSecondary, InstallationID: 42, RetryAt: retryAt, Generation: 3}
 
+			expectHealthPopulation(mock, orgID, 1)
 			mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "before": pgxmock.AnyArg(), "limit": 10}).
 				WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
@@ -4372,7 +4379,21 @@ func expectReserveCheckStateVersion(mock pgxmock.PgxPoolIface, orgID, pullReques
 	mock.ExpectCommit()
 }
 
-func expectCheckStateReconciliation(mock pgxmock.PgxPoolIface, orgID, pullRequestID uuid.UUID, headSHA string, stateCount int) {
+func expectCheckStateReconciliation(mock pgxmock.PgxPoolIface, orgID, pullRequestID uuid.UUID, headSHA string, stateCount int, prior ...models.PullRequestHealthCurrent) {
+	currentRows := pgxmock.NewRows(prHealthCurrentTestColumns)
+	baseSHA := ""
+	if len(prior) > 0 {
+		current := prior[0]
+		baseSHA = current.BaseSHA
+		currentRows.AddRow(current.PullRequestID, current.OrgID, current.Version, current.HeadSHA, current.BaseSHA, current.SummaryJSON, current.SummaryPreviewJSON, current.EnrichmentStatus, current.EnrichedAt, current.CheckStateVersion, current.CreatedAt, current.UpdatedAt)
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT COALESCE.*FROM pull_requests.*WHERE org_id = @org_id AND id = @pull_request_id FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows([]string{"head_sha", "base_sha", "status"}).AddRow(headSHA, baseSHA, models.PullRequestStatusOpen))
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(currentRows)
 	mock.ExpectBegin()
 	mock.ExpectExec("DELETE FROM pull_request_check_states").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": headSHA}).
@@ -4501,4 +4522,148 @@ func setPRHealthSessionThreadRowValue(row []any, column string, value any) {
 
 func strPtr(value string) *string {
 	return &value
+}
+
+func expectCheckSyncLaneEmpty(t *testing.T, mock pgxmock.PgxPoolIface, orgID, prID uuid.UUID, key string, jobTypes ...string) {
+	t.Helper()
+	jobType := prHealthSyncJobType
+	if len(jobTypes) > 0 {
+		jobType = jobTypes[0]
+	}
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT id FROM pull_requests.*WHERE org_id = @org_id AND id = @pull_request_id FOR UPDATE").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
+	mock.ExpectQuery("SELECT j.id, j.status,.*j.org_id = @org_id.*FOR UPDATE OF j").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "queue": prHealthSyncQueue, "job_type": jobType, "dedupe_key": key, "successor_prefix": key + ":after:"}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "status", "awaiting_predecessor"}))
+}
+
+func TestPRServiceSyncPullRequestStateRequiresFreshRead(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		reason PullRequestSyncReason
+	}{
+		{name: "initial", reason: PullRequestSyncReasonInitial},
+		{name: "head change", reason: PullRequestSyncReasonHeadChanged},
+		{name: "base change", reason: PullRequestSyncReasonBaseChanged},
+		{name: "ready for review", reason: PullRequestSyncReasonReadyForReview},
+		{name: "code review", reason: PullRequestSyncReasonCodeReview},
+		{name: "repair", reason: PullRequestSyncReasonRepair},
+		{name: "manual", reason: PullRequestSyncReasonManual},
+		{name: "merge safety", reason: PullRequestSyncReasonMergeSafety},
+		{name: "check successor", reason: PullRequestSyncReasonIncomplete},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, prID := uuid.New(), uuid.New()
+			service, gate := newDriftSyncService(t, orgID, prID)
+			blocked := make(chan struct{})
+			service.prHealthSyncGroup.DoChan(orgID.String()+":"+prID.String(), func() (any, error) { <-blocked; return nil, fmt.Errorf("obsolete snapshot") })
+			defer close(blocked)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			ctx = WithPullRequestSyncReason(ctx, tt.reason)
+			done := make(chan error, 1)
+			go func() { done <- service.SyncPullRequestState(ctx, orgID, prID) }()
+			select {
+			case <-gate.started:
+			case <-ctx.Done():
+				t.Fatal("fresh request inherited an older background read")
+			}
+			gate.releaseNow()
+			require.NoError(t, <-done, "fresh request must read GitHub after its own start")
+			require.Equal(t, int32(1), gate.fetches.Load(), "fresh request must perform its own authoritative read")
+		})
+	}
+}
+
+func TestEnqueuePullRequestStateSyncIsolatesImmediateLanes(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		reason PullRequestSyncReason
+		lane   string
+	}{
+		{PullRequestSyncReasonInitial, "urgent"},
+		{PullRequestSyncReasonHeadChanged, "urgent"},
+		{PullRequestSyncReasonBaseChanged, "urgent"},
+		{PullRequestSyncReasonReadyForReview, "urgent"},
+		{PullRequestSyncReasonCodeReview, "urgent"},
+		{PullRequestSyncReasonMergeSafety, "urgent"},
+		{PullRequestSyncReasonRepair, "urgent"},
+		{PullRequestSyncReasonManual, "urgent"},
+		{PullRequestSyncReasonStaleReconcile, "background"},
+		{PullRequestSyncReasonMergeabilityWait, "background"},
+	} {
+		t.Run(string(tt.reason), func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create isolated immediate enqueue fixture")
+			defer mock.Close()
+			pr := models.PullRequest{ID: uuid.New(), OrgID: uuid.New()}
+			key := fmt.Sprintf("sync_pull_request_state:%s:%s", pr.ID, tt.lane)
+			payload, err := json.Marshal(map[string]string{"org_id": pr.OrgID.String(), "pull_request_id": pr.ID.String(), "sync_reason": string(tt.reason)})
+			require.NoError(t, err, "encode full expected immediate payload")
+			args := pgx.NamedArgs{"org_id": pr.OrgID, "queue": prHealthSyncQueue, "job_type": prHealthSyncJobType, "payload": payload, "priority": 6, "dedupe_key": &key}
+			if tt.lane == "urgent" {
+				expectCheckSyncLaneEmpty(t, mock, pr.OrgID, pr.ID, key)
+				args["run_at"] = pgxmock.AnyArg()
+			}
+			mock.ExpectQuery("INSERT INTO jobs").WithArgs(args).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+			if tt.lane == "urgent" {
+				mock.ExpectCommit()
+			}
+
+			service := &PRService{jobs: db.NewJobStore(mock), logger: zerolog.Nop()}
+			require.NoError(t, service.queuePullRequestStateSync(context.Background(), pr, tt.reason), "immediate work cannot be absorbed by check or legacy lane jobs")
+			require.NoError(t, mock.ExpectationsWereMet(), "immediate lanes must enqueue without a delayed deadline or predecessor")
+		})
+	}
+}
+
+func TestPRServiceInitialSyncSharesAndSurvivesViewerCancellation(t *testing.T) {
+	t.Parallel()
+	orgID, prID := uuid.New(), uuid.New()
+	service, gate := newDriftSyncService(t, orgID, prID)
+	transport := service.httpClient.Transport
+	deadline := make(chan time.Time, 1)
+	service.httpClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		limit, ok := r.Context().Deadline()
+		if !ok {
+			return nil, fmt.Errorf("initial read lacks detached deadline")
+		}
+		deadline <- limit
+		return transport.RoundTrip(r)
+	})
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	defer cancelLeader()
+	leader := make(chan error, 1)
+	go func() {
+		leader <- service.SyncPullRequestState(WithPullRequestSyncReason(leaderCtx, PullRequestSyncReasonInitial), orgID, prID)
+	}()
+	gate.awaitInFlight()
+	limit := <-deadline
+	require.WithinDuration(t, time.Now().Add(prHealthSyncTimeout), limit, time.Second, "initial read keeps its own bounded two-minute lifetime")
+	const viewers = 8
+	results := make(chan error, viewers)
+	for range viewers {
+		waiter := &reconciliationWaiterContext{Context: context.Background(), joined: make(chan struct{})}
+		go func() {
+			results <- service.SyncPullRequestState(WithPullRequestSyncReason(waiter, PullRequestSyncReasonInitial), orgID, prID)
+		}()
+		select {
+		case <-waiter.joined:
+		case <-time.After(5 * time.Second):
+			t.Fatal("viewer did not register on initial read")
+		}
+	}
+	cancelLeader()
+	require.ErrorIs(t, <-leader, context.Canceled, "cancelled viewer can leave while shared initialization continues")
+	require.Equal(t, int32(1), gate.fetches.Load(), "simultaneous viewers must make one fresh read")
+	gate.releaseNow()
+	for range viewers {
+		require.NoError(t, <-results, "remaining viewers observe the persisted shared result")
+	}
+	require.Equal(t, int32(1), gate.fetches.Load(), "cancellation must not restart or multiply initialization reads")
 }

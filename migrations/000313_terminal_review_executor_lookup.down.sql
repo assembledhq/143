@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_session_executors_terminal_review_lookup;

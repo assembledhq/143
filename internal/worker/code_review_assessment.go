@@ -21,6 +21,31 @@ import (
 var errFullAssessmentInputsChanged = errors.New("full assessment inputs changed before publication")
 var errFullAssessmentFreshnessInconclusive = errors.New("visual evidence temporarily unavailable during publication verification")
 
+type fullAssessmentQueuedIdentityChanged struct {
+	Fields []string
+}
+
+func (e *fullAssessmentQueuedIdentityChanged) Error() string {
+	return "full review captured source differs from queued review identity: " + strings.Join(e.Fields, ", ")
+}
+
+func fullAssessmentQueuedIdentityChanges(job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, captured codereviewsvc.AssessmentInputCaptureResult) []string {
+	var fields []string
+	if captured.Policy.ID != job.PolicyID {
+		fields = append(fields, "policy_id")
+	}
+	if captured.Policy.Version != job.PolicyVersion {
+		fields = append(fields, "policy_version")
+	}
+	if captured.Snapshot.HeadSHA != job.HeadSHA {
+		fields = append(fields, "head_sha")
+	}
+	if captured.Snapshot.BaseSHA != metadata.BaseSHA {
+		fields = append(fields, "base_sha")
+	}
+	return fields
+}
+
 const fullAssessmentFreshnessRetryDuration = 5 * time.Minute
 
 // Full reviews may finish after CI changes. Their panel still covers the same
@@ -31,7 +56,7 @@ func captureFreshFullAssessment(ctx context.Context, services *Services, job run
 	}
 	fresh, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: job.OrgID, RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, SessionID: job.SessionID, AssessmentID: assessment.ID, RequestContext: job.RequestContext, Fresh: true})
 	if err != nil {
-		return fresh, err
+		return fresh, classifyGitHubJobError(err, job.SessionID.String())
 	}
 	var baseline codereviewsvc.ReviewInputManifest
 	if json.Unmarshal(assessment.InputManifest, &baseline) != nil || baseline.InputDigest != assessment.InputDigest ||
@@ -78,6 +103,16 @@ func fullAssessmentFreshnessRetry(detail string) error {
 func verifyFullAssessmentFreshness(ctx context.Context, services *Services, job runCodeReviewPayload, assessment models.CodeReviewAssessment) error {
 	_, err := captureFreshFullAssessment(ctx, services, job, assessment)
 	return err
+}
+
+// Published reviews always use the locked capture in submitFullReviewWithAssessment.
+// Without a publisher, there is no locked callback, so preserve the final check
+// before a local-only assessment can complete as not_required.
+func verifyFullAssessmentWithoutPublisher(ctx context.Context, services *Services, job runCodeReviewPayload, assessment models.CodeReviewAssessment) error {
+	if services != nil && services.CodeReviews != nil {
+		return nil
+	}
+	return verifyFullAssessmentFreshness(ctx, services, job, assessment)
 }
 
 func fullAssessmentNonVisualAnalysisUnchanged(before, after codereviewsvc.ReviewInputManifest) bool {
@@ -198,13 +233,6 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 		job.PreviousReviewDecision = previous.Decision
 		job.PreviousReviewDecidedAt = previous.CompletedAt
 	}
-	if assessment != nil && services != nil && services.CodeReviews != nil && assessment.PublicationState == models.CodeReviewPublicationNotStarted {
-		if err := reserveFullAssessmentPublication(ctx, stores.ThreadSendTx, *assessment, job.HeadSHA); err != nil {
-			return codeReviewSubmission{}, false, err
-		}
-		assessment.Status = models.CodeReviewAssessmentPublishing
-		assessment.PublicationState = models.CodeReviewPublicationReserved
-	}
 	attemptStartedReserved := false
 	var onSubmitError func(context.Context, error) error
 	var preSubmit func(context.Context, db.DBTX, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, bool, error)
@@ -226,7 +254,9 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 			if err != nil {
 				return codereviewsvc.SubmitReviewResult{}, false, err
 			}
-			if current.Status != models.CodeReviewAssessmentPublishing || current.Generation != assessment.Generation || current.InputDigest != assessment.InputDigest || current.PublicationState != models.CodeReviewPublicationReserved && current.PublicationState != models.CodeReviewPublicationUncertain {
+			unsent := current.Status == models.CodeReviewAssessmentRunning && current.PublicationState == models.CodeReviewPublicationNotStarted
+			publishing := current.Status == models.CodeReviewAssessmentPublishing && (current.PublicationState == models.CodeReviewPublicationReserved || current.PublicationState == models.CodeReviewPublicationUncertain)
+			if !unsent && !publishing || current.Generation != assessment.Generation || current.InputDigest != assessment.InputDigest || current.ResultOrigin == nil || unsent && current.HeadSHA != job.HeadSHA {
 				return codereviewsvc.SubmitReviewResult{}, false, db.ErrCodeReviewAssessmentState
 			}
 			if current.PublicationState == models.CodeReviewPublicationUncertain && metadata.GitHubReviewID != nil {
@@ -261,7 +291,7 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 				if !errors.Is(err, errFullAssessmentInputsChanged) && !errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) && !errors.Is(err, errFullAssessmentFreshnessInconclusive) {
 					return codereviewsvc.SubmitReviewResult{}, false, err
 				}
-				if current.PublicationState == models.CodeReviewPublicationReserved {
+				if current.PublicationState == models.CodeReviewPublicationNotStarted || current.PublicationState == models.CodeReviewPublicationReserved {
 					return codereviewsvc.SubmitReviewResult{}, false, err
 				}
 				reconciler, ok := services.CodeReviews.(interface {
@@ -281,6 +311,18 @@ func submitFullReviewWithAssessment(ctx context.Context, stores *Stores, service
 					return codereviewsvc.SubmitReviewResult{}, false, errors.New("full assessment publication uncertain: review marker not found; pending reconciliation")
 				}
 				return result, true, nil
+			}
+			if current.PublicationState == models.CodeReviewPublicationNotStarted {
+				// Reserve only after the locked capture succeeds. A provider wait
+				// must retain the original running/not_started state so cancellation,
+				// replacement and terminal retry cleanup keep their existing meaning.
+				if err := reserveFullAssessmentPublication(lockCtx, stores.ThreadSendTx, current, job.HeadSHA); err != nil {
+					return codereviewsvc.SubmitReviewResult{}, false, err
+				}
+				current.Status = models.CodeReviewAssessmentPublishing
+				current.PublicationState = models.CodeReviewPublicationReserved
+				assessment.Status = current.Status
+				assessment.PublicationState = current.PublicationState
 			}
 			if current.PublicationState == models.CodeReviewPublicationReserved {
 				// Use the pool-backed store so this state commits before the
@@ -523,6 +565,9 @@ func reconcileCompletedFullAssessment(ctx context.Context, stores *Stores, metad
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	store := db.NewCodeReviewAssessmentStore(tx)
+	if err := db.NewCodeReviewRecheckStore(tx).LockFullAssessmentCompletion(ctx, tx, assessment.OrgID, assessment.PullRequestID); err != nil {
+		return err
+	}
 	if err := store.LinkFullReviewEvidence(ctx, assessment.OrgID, assessment.ID, assessment.SessionID); err != nil {
 		return err
 	}
@@ -581,7 +626,7 @@ func resumeStagedFullAssessment(ctx context.Context, stores *Stores, services *S
 		}
 	}
 	if assessment.PublicationState == models.CodeReviewPublicationNotStarted {
-		if err := verifyFullAssessmentFreshness(ctx, services, job, assessment); err != nil {
+		if err := verifyFullAssessmentWithoutPublisher(ctx, services, job, assessment); err != nil {
 			if errors.Is(err, errFullAssessmentInputsChanged) || errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
 				if recoveryErr := supersedeUnsentFullPublication(ctx, stores, services, assessment); recoveryErr != nil {
 					return recoveryErr
@@ -671,10 +716,10 @@ func prepareFullAssessment(ctx context.Context, stores *Stores, services *Servic
 			// full-review controller can still assess and publish this PR.
 			return nil, nil, nil
 		}
-		return nil, nil, err
+		return nil, nil, classifyGitHubJobError(err, job.SessionID.String())
 	}
-	if captured.Policy.ID != job.PolicyID || captured.Policy.Version != job.PolicyVersion || captured.Snapshot.HeadSHA != job.HeadSHA || captured.Snapshot.BaseSHA != metadata.BaseSHA {
-		return nil, nil, fmt.Errorf("full review captured source differs from queued review identity")
+	if fields := fullAssessmentQueuedIdentityChanges(job, metadata, captured); len(fields) > 0 {
+		return nil, &captured, &fullAssessmentQueuedIdentityChanged{Fields: fields}
 	}
 	generation := int64(1)
 	var previousID, previousPublishedID *uuid.UUID
@@ -725,6 +770,9 @@ func completeFullAssessment(ctx context.Context, txStarter db.TxStarter, assessm
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	assessments := db.NewCodeReviewAssessmentStore(tx)
+	if err := db.NewCodeReviewRecheckStore(tx).LockFullAssessmentCompletion(ctx, tx, assessment.OrgID, assessment.PullRequestID); err != nil {
+		return err
+	}
 	if err := assessments.LinkFullReviewEvidence(ctx, assessment.OrgID, assessment.ID, assessment.SessionID); err != nil {
 		return err
 	}

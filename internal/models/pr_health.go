@@ -231,13 +231,14 @@ func (s PullRequestCheckState) CheckSummary() PullRequestCheckSummary {
 }
 
 type PullRequestHealthSummary struct {
-	MergeState       PullRequestMergeState     `json:"merge_state"`
-	HasConflicts     bool                      `json:"has_conflicts"`
-	FailingTestCount int                       `json:"failing_test_count"`
-	NeedsAgentAction bool                      `json:"needs_agent_action"`
-	ChecksConfirmed  bool                      `json:"checks_confirmed,omitempty"`
-	CheckSetComplete *bool                     `json:"check_set_complete,omitempty"`
-	Checks           []PullRequestCheckSummary `json:"checks,omitempty"`
+	GitHubSyncVersion int64                     `json:"github_sync_version,omitempty"`
+	MergeState        PullRequestMergeState     `json:"merge_state"`
+	HasConflicts      bool                      `json:"has_conflicts"`
+	FailingTestCount  int                       `json:"failing_test_count"`
+	NeedsAgentAction  bool                      `json:"needs_agent_action"`
+	ChecksConfirmed   bool                      `json:"checks_confirmed,omitempty"`
+	CheckSetComplete  *bool                     `json:"check_set_complete,omitempty"`
+	Checks            []PullRequestCheckSummary `json:"checks,omitempty"`
 }
 
 type PullRequestHealthSnapshot struct {

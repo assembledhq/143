@@ -70,6 +70,7 @@ services:
       PORT: "8080"
       ENV: production
       MODE: all
+      WORKER_PRIVATE_IP: ${WORKER_PRIVATE_IP:?set a stable Docker host IP in .env.single-node}
       BASE_URL: ${BASE_URL:?set BASE_URL in .env.single-node}
       FRONTEND_URL: ${FRONTEND_URL:?set FRONTEND_URL in .env.single-node}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?set CORS_ALLOWED_ORIGINS in .env.single-node}

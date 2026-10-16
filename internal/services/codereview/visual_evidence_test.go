@@ -409,7 +409,7 @@ func TestVisualEvidenceDownloaderRetriesTransientResponses(t *testing.T) {
 	t.Parallel()
 
 	roundTripper := &visualEvidenceRoundTripper{requests: make(map[string][]http.Header), counts: make(map[string]int), png: encodeVisualEvidencePNG(t, 4, 3)}
-	downloader := newVisualEvidenceDownloader()
+	downloader := newVisualEvidenceDownloader(zerolog.Nop())
 	downloader.client = &http.Client{Transport: roundTripper, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	downloader.retryWait = func(context.Context, time.Duration) error { return nil }
 
@@ -425,7 +425,7 @@ func TestVisualEvidenceDownloaderRejectsOversizedDimensions(t *testing.T) {
 	t.Parallel()
 
 	webp := visualEvidenceVP8X(10_000, 5_000)
-	downloader := newVisualEvidenceDownloader()
+	downloader := newVisualEvidenceDownloader(zerolog.Nop())
 	downloader.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(webp)), ContentLength: int64(len(webp)), Request: request}, nil
 	}), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -482,7 +482,7 @@ func TestVisualEvidenceDownloaderBoundaries(t *testing.T) {
 			t.Parallel()
 
 			var requests atomic.Int32
-			downloader := newVisualEvidenceDownloader()
+			downloader := newVisualEvidenceDownloader(zerolog.Nop())
 			downloader.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 				count := requests.Add(1)
 				return tt.response(request, count), nil

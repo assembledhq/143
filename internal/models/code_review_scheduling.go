@@ -93,11 +93,12 @@ const (
 	CodeReviewWaitApproved CodeReviewWaitReason = "already_approved"
 	CodeReviewWaitActive   CodeReviewWaitReason = "active_review"
 	CodeReviewWaitContext  CodeReviewWaitReason = "context_unavailable"
+	CodeReviewWaitCapacity CodeReviewWaitReason = "sandbox_capacity"
 )
 
 func (s CodeReviewWaitReason) Validate() error {
 	switch s {
-	case CodeReviewWaitNone, CodeReviewWaitQuiet, CodeReviewWaitInterval, CodeReviewWaitDraft, CodeReviewWaitPaused, CodeReviewWaitPolicy, CodeReviewWaitApproved, CodeReviewWaitActive, CodeReviewWaitContext:
+	case CodeReviewWaitNone, CodeReviewWaitQuiet, CodeReviewWaitInterval, CodeReviewWaitDraft, CodeReviewWaitPaused, CodeReviewWaitPolicy, CodeReviewWaitApproved, CodeReviewWaitActive, CodeReviewWaitContext, CodeReviewWaitCapacity:
 		return nil
 	}
 	return fmt.Errorf("invalid review wait reason %q", s)
@@ -177,4 +178,23 @@ type CodeReviewScheduledTarget struct {
 	GitHubPRURL    string            `db:"github_pr_url" json:"github_pr_url"`
 	GitHubPRNumber int               `db:"github_pr_number" json:"github_pr_number"`
 	GitHubRepo     string            `db:"github_repo" json:"github_repo"`
+}
+
+// CodeReviewAdmissionContractVersion identifies the configured atomic writer
+// protocol, independently of physical sandbox identity or deployment version.
+type CodeReviewAdmissionContractVersion string
+
+const CodeReviewAdmissionContractV1 CodeReviewAdmissionContractVersion = "code-review-sandbox-admission/v1"
+
+func (v CodeReviewAdmissionContractVersion) Validate() error {
+	if v != CodeReviewAdmissionContractV1 {
+		return fmt.Errorf("invalid code review admission contract version: %s", v)
+	}
+	return nil
+}
+
+type CodeReviewAdmissionProcessEvidence struct {
+	InstanceID      string                             `json:"instance_id"`
+	BuildSHA        string                             `json:"build_sha"`
+	ContractVersion CodeReviewAdmissionContractVersion `json:"code_review_admission_contract_version,omitempty"`
 }

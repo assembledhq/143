@@ -66,6 +66,27 @@ func (s *PullRequestStore) GetHealthSnapshot(ctx context.Context, orgID, pullReq
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequestHealthSnapshot])
 }
 
+// CountOpenForHealthSync returns the open population up to populationCap. A
+// result equal to the cap is a lower bound, rather than an exact total.
+func (s *PullRequestStore) CountOpenForHealthSync(ctx context.Context, orgID uuid.UUID, populationCap int) (int, error) {
+	if populationCap <= 0 || populationCap > 1000 {
+		populationCap = 1000
+	}
+	query := `
+		SELECT COUNT(*) FROM (
+			SELECT 1 FROM pull_requests
+			WHERE org_id = @org_id AND status = 'open'
+			LIMIT @population_cap
+		) AS open_pull_requests`
+	var count int
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id": orgID, "population_cap": populationCap,
+	}).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count open pull requests for health sync: %w", err)
+	}
+	return count, nil
+}
+
 func (s *PullRequestStore) ListOpenStaleForHealthSync(ctx context.Context, orgID uuid.UUID, before time.Time, limit int) ([]models.PullRequest, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
@@ -108,6 +129,28 @@ func (s *PullRequestStore) UpsertProjectedHealthSummary(ctx context.Context, org
 		return models.PullRequestHealthCurrent{}, false, false, fmt.Errorf("applied check state version cannot precede expected version")
 	}
 	return s.upsertHealthSummary(ctx, orgID, pullRequestID, headSHA, baseSHA, summary, preview, false, opts.AppliedCheckStateVersion, &opts)
+}
+
+func healthSummaryJSONEqual(first, second []byte) bool {
+	if bytes.Equal(first, second) {
+		return true
+	}
+	normalize := func(raw []byte) ([]byte, error) {
+		var content map[string]any
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		if err := decoder.Decode(&content); err != nil {
+			return nil, err
+		}
+		delete(content, "github_sync_version")
+		return json.Marshal(content)
+	}
+	firstContent, err := normalize(first)
+	if err != nil {
+		return false
+	}
+	secondContent, err := normalize(second)
+	return err == nil && bytes.Equal(firstContent, secondContent)
 }
 
 func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA, baseSHA string, summary models.PullRequestHealthSummary, preview json.RawMessage, markGitHubSynced bool, checkStateVersion int64, expected *ProjectedHealthSummaryOptions) (models.PullRequestHealthCurrent, bool, bool, error) {
@@ -182,7 +225,7 @@ func (s *PullRequestStore) upsertHealthSummary(ctx context.Context, orgID, pullR
 	var enrichedAt *time.Time
 	if hasExisting {
 		version = existing.Version
-		if existing.HeadSHA != headSHA || existing.BaseSHA != baseSHA || !bytes.Equal(existing.SummaryJSON, summaryJSON) || !bytes.Equal(existing.SummaryPreviewJSON, preview) {
+		if existing.HeadSHA != headSHA || existing.BaseSHA != baseSHA || !healthSummaryJSONEqual(existing.SummaryJSON, summaryJSON) || !healthSummaryJSONEqual(existing.SummaryPreviewJSON, preview) {
 			version = existing.Version + 1
 		} else {
 			enrichmentStatus = existing.EnrichmentStatus

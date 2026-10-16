@@ -16,13 +16,18 @@ import (
 var ErrCodeReviewRecheckFence = errors.New("code review recheck turn lost its assessment or job lease")
 var ErrCodeReviewRecheckUserCancelled = errors.New("code review recheck turn was cancelled by the user")
 
-// Every release, claim, and native-resume path must use the same observable
-// drain proof. An expired holder lease is not an active sandbox owner.
-const codeReviewRecheckSessionDrainedSQL = `s.container_id IS NULL AND NOT COALESCE(s.turn_holding_container,false)
+// Completion requires execution to have stopped, but an idle workspace may
+// remain referenced until its controller and assessment stop blocking host GC.
+// An expired holder lease is not an active sandbox owner.
+const codeReviewSessionExecutionDrainedSQL = `NOT COALESCE(s.turn_holding_container,false)
 	AND NOT EXISTS(SELECT 1 FROM preview_instances p WHERE p.org_id=s.org_id AND p.session_id=s.id AND p.preview_holding_container)
 	AND NOT EXISTS(SELECT 1 FROM session_sandbox_holders h WHERE h.org_id=s.org_id AND h.session_id=s.id AND h.status IN ('active','draining') AND h.expires_at > now())
 	AND NOT EXISTS(SELECT 1 FROM thread_runtimes r WHERE r.org_id=s.org_id AND r.session_id=s.id AND r.status IN ('starting','live','paused','draining'))
 	AND NOT EXISTS(SELECT 1 FROM session_executors e WHERE e.org_id=s.org_id AND e.session_id=s.id AND e.status IN ('starting','running','draining'))`
+
+// Recheck dispatch, resume, forced replacement, and owner retirement require physical
+// workspace drain in addition to the shared execution ownership proof.
+const codeReviewRecheckSessionDrainedSQL = `s.container_id IS NULL AND ` + codeReviewSessionExecutionDrainedSQL
 
 // RejectIfCodeReviewOwned blocks ordinary conversation mutations after a
 // review has reserved its orchestrator session. It is deliberately separate
@@ -48,10 +53,24 @@ func NewCodeReviewRecheckStore(conn TxStarter) *CodeReviewRecheckStore {
 	return &CodeReviewRecheckStore{db: conn, jobs: NewJobStore(conn)}
 }
 
+// LockFullAssessmentCompletion serializes completion with host GC and PR
+// scheduling. Call before writing evidence or metadata: their foreign-key
+// checks can lock the session before ClaimFullAssessmentOwner updates it.
+func (s *CodeReviewRecheckStore) LockFullAssessmentCompletion(ctx context.Context, tx pgx.Tx, orgID, pullRequestID uuid.UUID) error {
+	if orgID == uuid.Nil || pullRequestID == uuid.Nil || tx == nil {
+		return fmt.Errorf("invalid full assessment completion lock")
+	}
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "code_review_pr:"+orgID.String()+":"+pullRequestID.String())
+	return err
+}
+
 // ClaimFullAssessmentOwner reserves the completed full review's conversation
 // for the PR before coverage is marked reusable. The caller must invoke this
 // in the same transaction as the assessment completion. A terminal status by
-// itself does not prove that a sandbox, preview, or executor has drained.
+// itself does not prove that agent execution, previews, or executors have drained.
+// Retaining an idle container must not block completion: the active controller
+// and assessment prevent GC from clearing it until this transaction commits.
+// Claiming ownership does not permit recheck dispatch before workspace drain.
 // A failed parent is eligible only for its exact staged, confirmed full outcome;
 // completing that historical review must not authorize fresh execution or resend.
 // Its terminal parent status commits with the owner and assessment so a crash
@@ -59,6 +78,11 @@ func NewCodeReviewRecheckStore(conn TxStarter) *CodeReviewRecheckStore {
 func (s *CodeReviewRecheckStore) ClaimFullAssessmentOwner(ctx context.Context, tx pgx.Tx, orgID, sessionID, pullRequestID uuid.UUID) (bool, error) {
 	if orgID == uuid.Nil || sessionID == uuid.Nil || pullRequestID == uuid.Nil || tx == nil {
 		return false, fmt.Errorf("invalid full assessment conversation owner")
+	}
+	// Match host GC's PR-before-session lock order. Completion retains this
+	// lock through scheduler settlement, which acquires it again in this tx.
+	if err := s.LockFullAssessmentCompletion(ctx, tx, orgID, pullRequestID); err != nil {
+		return false, err
 	}
 	// CompleteReview marked this exact review terminal in the caller's transaction.
 	// Its warm-workspace holder can no longer be renewed, but the outer worker
@@ -100,15 +124,15 @@ func (s *CodeReviewRecheckStore) ClaimFullAssessmentOwner(ctx context.Context, t
 				AND m.status='completed' AND m.assessment_id=a.id
 				AND m.repository_id=a.repository_id AND m.pull_request_id=a.pull_request_id
 				AND m.policy_id=a.policy_id AND m.head_sha=a.head_sha
-				AND m.review_output_key=a.publication_key AND m.github_review_id=a.github_review_id)
-			AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.org_id=s.org_id
-				AND j.status IN ('pending','running') AND j.payload->>'session_id'=s.id::text
-				AND j.job_type IN ('run_agent','continue_session','fork_session_thread','revert_session_thread','deliver_thread_inbox','prepare_code_review_workspace'))
-			AND NOT EXISTS (SELECT 1 FROM code_review_recheck_dispatches d
-				WHERE d.org_id=s.org_id AND d.session_id=s.id AND d.status IN ('pending','running'))))
+				AND m.review_output_key=a.publication_key AND m.github_review_id=a.github_review_id)))
+		AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.org_id=s.org_id
+			AND j.status IN ('pending','running') AND j.payload->>'session_id'=s.id::text
+			AND j.job_type IN ('run_agent','continue_session','fork_session_thread','revert_session_thread','deliver_thread_inbox','prepare_code_review_workspace'))
+		AND NOT EXISTS (SELECT 1 FROM code_review_recheck_dispatches d
+			WHERE d.org_id=s.org_id AND d.session_id=s.id AND d.status IN ('pending','running'))
 		AND EXISTS (SELECT 1 FROM code_review_session_metadata m WHERE m.org_id=s.org_id AND m.session_id=s.id AND m.pull_request_id=$3 AND m.status='completed')
 		AND (s.code_review_owner_pr_id IS NULL OR s.code_review_owner_pr_id=$3)
-		AND (`+codeReviewRecheckSessionDrainedSQL+`)
+		AND (`+codeReviewSessionExecutionDrainedSQL+`)
 		AND NOT EXISTS (SELECT 1 FROM session_threads t WHERE t.org_id=s.org_id AND t.session_id=s.id AND t.status NOT IN ('idle','completed','cancelled','failed'))
 		RETURNING s.id`, orgID, sessionID, pullRequestID).Scan(&claimed)
 	if errors.Is(err, pgx.ErrNoRows) {

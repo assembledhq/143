@@ -1428,17 +1428,46 @@ func (s *AutomationRunStore) MarkCompletedNoop(ctx context.Context, orgID, runID
 	return tag.RowsAffected() > 0, nil
 }
 
-// ListOrgsWithStuckRuns returns the distinct org_ids that have at least one
-// pending/running run older than threshold. The scheduler uses this to fan the
-// reaper out to one UPDATE per org, so every reap query carries an explicit
-// org_id filter — defense-in-depth against a bug elsewhere causing cross-org
-// state mutation, and it lets the reaper log per-org counts for audit clarity.
+// legacyAutomationRunAbandoned is shared by discovery and recovery. Age is an
+// orphan grace period, never an execution deadline: pending/running jobs remain
+// recoverable even after their lease expires, and the job/executor recovery
+// sweeps own their retries. Check every linked session, since an earlier attempt
+// can still be executing after another session was attached to the run.
+// Compare JSON identifiers as text so a malformed job cannot abort the sweep.
+const legacyAutomationRunAbandoned = `
+            r.status IN ('pending', 'running')
+            AND r.dispatch_state IS NULL
+            AND r.triggered_at < @cutoff
+            AND NOT EXISTS (
+                SELECT 1 FROM jobs j
+                WHERE j.org_id = r.org_id
+                  AND j.job_type = 'automation_run'
+                  AND j.status IN ('pending', 'running')
+                  AND j.payload->>'automation_run_id' = r.id::text)
+            AND NOT EXISTS (
+                SELECT 1
+                FROM session_automation_links sal
+                JOIN sessions se ON se.id = sal.session_id AND se.org_id = sal.org_id
+                WHERE sal.org_id = r.org_id AND sal.automation_run_id = r.id
+                  AND (EXISTS (
+                      SELECT 1 FROM jobs j
+                      WHERE j.org_id = sal.org_id
+                        AND j.job_type IN ('run_agent', 'continue_session')
+                        AND j.status IN ('pending', 'running')
+                        AND j.payload->>'session_id' = sal.session_id::text)
+                    OR EXISTS (
+                      SELECT 1 FROM session_executors e
+                      WHERE e.org_id = sal.org_id AND e.session_id = sal.session_id
+                        AND e.status IN ('starting', 'running', 'draining'))))`
+
+// ListOrgsWithStuckRuns returns orgs with abandoned legacy runs. Per-target
+// dispatch and every run with recoverable work are excluded, just as they are
+// from ReapStuckRuns. The scheduler fans recovery out to tenant-scoped updates.
 // lint:allow-no-orgid reason="scheduler reaper enumerates orgs with stuck runs across all tenants"
 func (s *AutomationRunStore) ListOrgsWithStuckRuns(ctx context.Context, threshold time.Duration) ([]uuid.UUID, error) {
 	cutoff := time.Now().Add(-threshold)
 	rows, err := s.db.Query(ctx,
-		`SELECT DISTINCT org_id FROM automation_runs
-			WHERE status IN ('pending', 'running') AND triggered_at < @cutoff`,
+		`SELECT DISTINCT r.org_id FROM automation_runs r WHERE `+legacyAutomationRunAbandoned,
 		pgx.NamedArgs{"cutoff": cutoff},
 	)
 	if err != nil {
@@ -1562,39 +1591,67 @@ func (s *AutomationRunStore) GetStats(ctx context.Context, orgID, automationID u
 	return stats, nil
 }
 
-// ReapStuckRuns marks pending/running runs older than threshold as failed for
-// a single org. Without this, a worker that crashes mid-run would leave a row
-// stuck and permanently saturate max_concurrent for that automation —
-// CountInFlightRuns counts pending+running, so the scheduler would never fire
-// a new run.
-//
-// Scoped by org_id: the scheduler's reaper pass iterates ListOrgsWithStuckRuns
-// and calls this once per org, so no query ever sweeps across tenants. Returns
-// the number of runs reaped for this org.
+// ReapStuckRuns settles abandoned legacy runs for one org, releasing their
+// max_concurrent slots. A completed linked session is authoritative even if its
+// completion hook was lost. Orphans whose latest session is not terminal fail
+// with an abandonment diagnostic. Per-target runs are owned by their marker-based
+// recovery sweep because their session, thread, and ownership must settle together.
 func (s *AutomationRunStore) ReapStuckRuns(ctx context.Context, orgID uuid.UUID, threshold time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-threshold)
-	summary := "run exceeded execution timeout; marked failed by reaper"
-	// Per-target runs (design doc 125) are exempt from this reaper. A
-	// waiting run is not stuck: it is queued behind its target and has its
-	// own two-hour wait timeout. An executing run owns a session, a thread,
-	// and possibly the target's ownership release, so terminalizing the run
-	// row alone would strand all three; the recovery sweep settles those
-	// from the result marker or as retries_exhausted, releasing what the
-	// run holds. This query therefore reaps only runs that never entered
-	// per-target dispatch.
-	query := `UPDATE automation_runs r
-		SET status = 'failed',
-		    completed_at = now(),
-		    result_summary = @summary,
-		    updated_at = now()
-		WHERE r.org_id = @org_id
-		  AND r.status IN ('pending', 'running')
-		  AND r.dispatch_state IS NULL
-		  AND r.triggered_at < @cutoff`
+	summary := "run has no recoverable job or executor; marked failed by reaper"
+	query := `WITH abandoned AS MATERIALIZED (
+        SELECT r.id, r.org_id, r.updated_at AS run_updated_at,
+               se.status AS session_status, se.diff, se.result_summary,
+               se.error, se.failure_explanation, se.completed_at
+        FROM automation_runs r
+        LEFT JOIN LATERAL (
+            SELECT se.status, se.diff, se.result_summary, se.error,
+                   se.failure_explanation, se.completed_at
+            FROM session_automation_links sal
+            JOIN sessions se ON se.id = sal.session_id AND se.org_id = sal.org_id
+            WHERE sal.org_id = r.org_id AND sal.automation_run_id = r.id
+            ORDER BY sal.created_at DESC, sal.session_id DESC
+            LIMIT 1
+        ) se ON true
+        WHERE r.org_id = @org_id AND ` + legacyAutomationRunAbandoned + `
+    )
+    UPDATE automation_runs r
+    SET status = CASE
+            WHEN abandoned.session_status = 'pr_created' THEN 'completed'
+            WHEN abandoned.session_status = 'skipped' THEN 'skipped'
+            WHEN abandoned.session_status = 'completed' THEN
+                CASE WHEN COALESCE(abandoned.diff, '') ~ '[^[:space:]]'
+                     THEN 'completed' ELSE 'completed_noop' END
+            ELSE 'failed' END,
+        completed_at = CASE
+            WHEN abandoned.session_status IN ('completed', 'pr_created', 'failed', 'needs_human_guidance', 'cancelled', 'skipped')
+            THEN COALESCE(abandoned.completed_at, now()) ELSE now() END,
+        result_summary = CASE
+            WHEN abandoned.session_status IN ('completed', 'pr_created', 'failed', 'needs_human_guidance', 'cancelled', 'skipped')
+            THEN COALESCE(NULLIF(abandoned.result_summary, ''),
+                CASE WHEN abandoned.session_status NOT IN ('completed', 'pr_created')
+                     THEN COALESCE(NULLIF(abandoned.error, ''), NULLIF(abandoned.failure_explanation, '')) END,
+                CASE abandoned.session_status
+                    WHEN 'completed' THEN 'Agent session completed.'
+                    WHEN 'pr_created' THEN 'Agent session completed.'
+                    WHEN 'needs_human_guidance' THEN 'Agent run needs human guidance.'
+                    WHEN 'cancelled' THEN 'Agent session was cancelled.'
+                    WHEN 'skipped' THEN 'Agent session was skipped.'
+                    ELSE 'Agent session failed.' END)
+            ELSE @summary END,
+        updated_at = now()
+    FROM abandoned
+    WHERE r.org_id = @org_id AND r.id = abandoned.id AND r.org_id = abandoned.org_id
+      AND r.status IN ('pending', 'running')
+      AND r.dispatch_state IS NULL
+      AND r.triggered_at < @cutoff
+      AND r.updated_at = abandoned.run_updated_at`
+	// The target-row guards are checked again after any concurrent writer's
+	// row lock is released. A completion or dispatch that won that race keeps
+	// its result; a still-active row changed by another writer waits for the
+	// next sweep instead of using stale session metadata.
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"org_id":  orgID,
-		"summary": summary,
-		"cutoff":  cutoff,
+		"org_id": orgID, "summary": summary, "cutoff": cutoff,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("reap stuck automation runs: %w", err)

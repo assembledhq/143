@@ -22,6 +22,7 @@ import (
 )
 
 type Service struct {
+	logger       zerolog.Logger
 	appID        int64
 	privateKey   *rsa.PrivateKey
 	httpClient   *http.Client
@@ -30,6 +31,8 @@ type Service struct {
 	sandboxCache map[sandboxTokenCacheKey]*cachedToken
 	mu           sync.RWMutex
 	tokenGroup   singleflight.Group
+	// Tests can isolate credential correlation without replacing shared state.
+	credentialRegistry *githubtelemetry.CredentialRegistry
 }
 
 // SetRateLimitController wires the shared installation controller into all
@@ -38,6 +41,7 @@ func (s *Service) SetRateLimitController(controller *ratelimit.Controller, logge
 	if s == nil {
 		return
 	}
+	s.logger = logger
 	s.httpClient = githubtelemetry.NewControlledHTTPClient(10*time.Second, logger, controller, "github_service")
 }
 
@@ -112,6 +116,7 @@ func NewService(appID int64, privateKeyPEM string, loggers ...zerolog.Logger) (*
 		logger = loggers[0]
 	}
 	return &Service{
+		logger:       logger,
 		appID:        appID,
 		privateKey:   key,
 		httpClient:   githubtelemetry.NewHTTPClient(10*time.Second, logger),
@@ -136,11 +141,13 @@ func (s *Service) GitHubAppID() int64 {
 
 func (s *Service) GetInstallationToken(ctx context.Context, installationID int64) (string, error) {
 	if token, ok := s.cachedInstallationToken(installationID); ok {
+		s.recordTokenCacheHit(ctx, installationID, "installation_token")
 		return token, nil
 	}
 
 	result := s.tokenGroup.DoChan(fmt.Sprintf("installation:%d", installationID), func() (any, error) {
 		if token, ok := s.cachedInstallationToken(installationID); ok {
+			s.recordTokenCacheHit(ctx, installationID, "installation_token")
 			return token, nil
 		}
 
@@ -213,11 +220,13 @@ func (s *Service) GetSandboxInstallationToken(ctx context.Context, installationI
 
 	key := sandboxTokenCacheKey{InstallationID: installationID, RepositoryID: repositoryID, Action: action}
 	if token, ok := s.cachedSandboxInstallationToken(key); ok {
+		s.recordTokenCacheHit(ctx, installationID, "sandbox_token")
 		return token, nil
 	}
 
 	result := s.tokenGroup.DoChan(fmt.Sprintf("sandbox:%d:%d:%s", installationID, repositoryID, action), func() (any, error) {
 		if token, ok := s.cachedSandboxInstallationToken(key); ok {
+			s.recordTokenCacheHit(ctx, installationID, "sandbox_token")
 			return token, nil
 		}
 
@@ -284,11 +293,11 @@ func (s *Service) exchangeForScopedInstallationToken(ctx context.Context, jwtTok
 }
 
 func (s *Service) exchangeForInstallationTokenRequest(ctx context.Context, jwtToken string, installationID int64, tokenRequest *installationTokenRequest) (string, time.Time, error) {
-	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
-		Kind:           githubtelemetry.RequestKindAPI,
-		AuthType:       githubtelemetry.AuthTypeAppJWT,
-		InstallationID: installationID,
-	})
+	metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+	metadata.Kind = githubtelemetry.RequestKindAPI
+	metadata.AuthType = githubtelemetry.AuthTypeAppJWT
+	metadata.InstallationID = installationID
+	ctx = githubtelemetry.WithRequestMetadata(ctx, metadata)
 	path := fmt.Sprintf("/app/installations/%d/access_tokens", installationID)
 	url := s.apiURL(path)
 	var body io.Reader
@@ -326,16 +335,52 @@ func (s *Service) exchangeForInstallationTokenRequest(ctx context.Context, jwtTo
 	if err := decodeGitHubJSONResponse(req.Context(), http.MethodPost, path, resp, &result); err != nil {
 		return "", time.Time{}, fmt.Errorf("decode response: %w", err)
 	}
+	s.recordIssuedCredential(req.Context(), installationID, tokenRequest, result.Token, result.ExpiresAt)
 
 	return result.Token, result.ExpiresAt, nil
 }
 
-func (s *Service) GetInstallationDetails(ctx context.Context, installationID int64) (InstallationDetails, error) {
-	ctx = githubtelemetry.WithRequestMetadata(ctx, githubtelemetry.RequestMetadata{
-		Kind:           githubtelemetry.RequestKindAPI,
-		AuthType:       githubtelemetry.AuthTypeAppJWT,
-		InstallationID: installationID,
+func (s *Service) recordIssuedCredential(ctx context.Context, installationID int64, tokenRequest *installationTokenRequest, token string, expiresAt time.Time) {
+	profile := githubtelemetry.CredentialProfileInstallation
+	repository := ""
+	if tokenRequest != nil {
+		profile = githubtelemetry.CredentialProfileSandboxAPI
+		if tokenRequest.Permissions["contents"] == "write" {
+			profile = githubtelemetry.CredentialProfileSandboxPush
+		}
+		metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+		repository = metadata.Repository
+	}
+	registry := s.credentialRegistry
+	if registry == nil {
+		registry = githubtelemetry.DefaultCredentialRegistry()
+	}
+	credential, known := registry.Register(token, githubtelemetry.CredentialRegistration{
+		Profile: profile, AppID: s.appID, InstallationID: installationID,
+		Repository: repository, IssuedAt: time.Now().UTC(), ExpiresAt: expiresAt,
 	})
+	event := s.logger.Info().
+		Int64("github_token_app_id", s.appID).
+		Int64("github_token_installation_id", installationID).
+		Str("github_token_profile", string(profile)).
+		Bool("github_token_generation_known", known)
+	if known {
+		event = event.Str("github_token_generation_id", credential.GenerationID).
+			Str("github_token_issued_at", credential.IssuedAt.UTC().Format(time.RFC3339Nano)).
+			Str("github_token_expires_at", credential.ExpiresAt.UTC().Format(time.RFC3339Nano))
+		if credential.Repository != "" {
+			event = event.Str("github_token_repository", credential.Repository)
+		}
+	}
+	event.Msg("github installation token issued")
+}
+
+func (s *Service) GetInstallationDetails(ctx context.Context, installationID int64) (InstallationDetails, error) {
+	metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+	metadata.Kind = githubtelemetry.RequestKindAPI
+	metadata.AuthType = githubtelemetry.AuthTypeAppJWT
+	metadata.InstallationID = installationID
+	ctx = githubtelemetry.WithRequestMetadata(ctx, metadata)
 	jwtToken, err := s.generateJWT()
 	if err != nil {
 		return InstallationDetails{}, err
@@ -551,4 +596,9 @@ func parseNextGitHubPath(link string) string {
 		}
 	}
 	return ""
+}
+
+func (s *Service) recordTokenCacheHit(ctx context.Context, installationID int64, caller string) {
+	ctx = githubtelemetry.WithInstallationRequestMetadata(ctx, installationID, caller)
+	githubtelemetry.RecordLocalActivity(ctx, s.logger, "cache_hit", "/app/installations/:installation_id/access_tokens")
 }

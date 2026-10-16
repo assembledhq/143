@@ -50,6 +50,7 @@ services:
       PORT: "8080"
       LOG_LEVEL: debug
       MODE: all
+      WORKER_PRIVATE_IP: ${WORKER_PRIVATE_IP:?set a stable Docker host IP in .env for worker/all mode}
       BASE_URL: ${BASE_URL:-http://localhost:8080}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:${FRONTEND_PORT:-3000}}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:${FRONTEND_PORT:-3000}}
