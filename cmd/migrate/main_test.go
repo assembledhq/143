@@ -250,6 +250,8 @@ func TestMigrationsRestrictConcurrentIndexes(t *testing.T) {
 		"000306_preview_cache_prewarm_job_fk_index.up.sql":     "CREATE INDEX CONCURRENTLY idx_preview_cache_prewarm_runs_retention_job",
 		"000307_webhook_retention_ordered_index.down.sql":      "DROP INDEX CONCURRENTLY idx_webhook_deliveries_retention_ordered",
 		"000307_webhook_retention_ordered_index.up.sql":        "CREATE INDEX CONCURRENTLY idx_webhook_deliveries_retention_ordered",
+		"000313_terminal_review_executor_lookup.up.sql":        "CREATE INDEX CONCURRENTLY idx_session_executors_terminal_review_lookup",
+		"000313_terminal_review_executor_lookup.down.sql":      "DROP INDEX CONCURRENTLY idx_session_executors_terminal_review_lookup",
 	}
 
 	for _, path := range files {

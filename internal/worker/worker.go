@@ -323,6 +323,13 @@ func (w *Worker) poll(ctx context.Context) {
 		return
 	}
 
+	// Recovery has already rolled back its transaction. Yield this worker slot
+	// without exhausting durable intake or resetting a provider retry window.
+	if errors.Is(err, db.ErrCodeReviewTerminalRecoveryTimeout) {
+		delay := 10 * time.Second
+		err = &RetryableError{Err: err, RetryAfter: &delay, BypassMaxRetryDuration: true}
+	}
+
 	var retryable *RetryableError
 	if errors.As(err, &retryable) {
 		if retryable.ConsumeAttempt && job.Attempts >= job.MaxAttempts {
