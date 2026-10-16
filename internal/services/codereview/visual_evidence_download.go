@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/github/telemetry"
+	"github.com/rs/zerolog"
 	"golang.org/x/image/webp"
 )
 
@@ -72,7 +74,7 @@ type visualEvidenceAttemptResult struct {
 	retryable     bool
 }
 
-func newVisualEvidenceDownloader() *visualEvidenceDownloader {
+func newVisualEvidenceDownloader(logger zerolog.Logger) *visualEvidenceDownloader {
 	dialer := &net.Dialer{
 		Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: visualEvidenceSafeDialControl,
 	}
@@ -82,7 +84,7 @@ func newVisualEvidenceDownloader() *visualEvidenceDownloader {
 	}
 	return &visualEvidenceDownloader{
 		client: &http.Client{
-			Timeout: visualEvidenceFetchTimeout, Transport: transport,
+			Timeout: visualEvidenceFetchTimeout, Transport: telemetry.NewGitHubAssetTransport(transport, logger),
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		retryWait: func(ctx context.Context, delay time.Duration) error {
