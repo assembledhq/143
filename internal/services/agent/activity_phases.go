@@ -14,6 +14,7 @@ import (
 )
 
 type ActivityPhaseStore interface {
+	StartSeedPhase(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int, uuid.UUID, uuid.UUID, []int64, time.Time) (models.SessionActivityPhase, *models.ThreadInboxDeliveryBatch, error)
 	StartPhase(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int, *uuid.UUID, *uuid.UUID, models.ActivityPhaseTrigger, time.Time) (models.SessionActivityPhase, error)
 	GetInboxDeliveryBatch(context.Context, uuid.UUID, uuid.UUID) (models.ThreadInboxDeliveryBatch, error)
 	CompletePhaseWithTransition(context.Context, uuid.UUID, uuid.UUID, models.ActivityPhaseStatus, models.ActivityPhaseBoundaryReason, time.Time) (models.SessionActivityPhase, bool, error)
@@ -68,6 +69,27 @@ func (s *ActivityPhaseService) StartPhase(ctx context.Context, orgID, sessionID,
 		} else {
 			s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryStarted, batch)
 		}
+	}
+	return phase, nil
+}
+
+// StartSeedPhase records seed acknowledgment and provider-phase admission in one
+// durable transaction; lifecycle events are emitted only after it commits.
+func (s *ActivityPhaseService) StartSeedPhase(ctx context.Context, orgID, sessionID, threadID uuid.UUID, turnNumber int, runtimeID, leaseToken uuid.UUID, messageIDs []int64) (models.SessionActivityPhase, error) {
+	phase, batch, err := s.store.StartSeedPhase(ctx, orgID, sessionID, threadID, turnNumber, runtimeID, leaseToken, messageIDs, s.now())
+	if err != nil {
+		return models.SessionActivityPhase{}, fmt.Errorf("start seed activity phase: %w", err)
+	}
+	if batch != nil {
+		acknowledged := *batch
+		acknowledged.Status = models.InboxDeliveryBatchAcknowledged
+		acknowledged.StartedAt = nil
+		s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryAcknowledged, acknowledged)
+	}
+	metrics.RecordActivityPhaseStarted(ctx, string(phase.TriggerKind))
+	s.publishPhase(ctx, models.SessionStreamEventActivityPhaseStarted, phase)
+	if batch != nil {
+		s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryStarted, *batch)
 	}
 	return phase, nil
 }

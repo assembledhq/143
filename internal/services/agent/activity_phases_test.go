@@ -70,6 +70,13 @@ func (f *activityPhaseStoreFake) StartPhase(_ context.Context, orgID, sessionID,
 	return phase, nil
 }
 
+func (f *activityPhaseStoreFake) StartSeedPhase(ctx context.Context, orgID, sessionID, threadID uuid.UUID, turn int, runtimeID, leaseToken uuid.UUID, messageIDs []int64, startedAt time.Time) (models.SessionActivityPhase, *models.ThreadInboxDeliveryBatch, error) {
+	batch := models.ThreadInboxDeliveryBatch{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, RuntimeID: runtimeID, Status: models.InboxDeliveryBatchStarted, StartedAt: &startedAt}
+	f.batches = append(f.batches, batch)
+	phase, err := f.StartPhase(ctx, orgID, sessionID, threadID, turn, &runtimeID, &leaseToken, models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInboxBatch, BatchID: &batch.ID}, startedAt)
+	return phase, &batch, err
+}
+
 func (f *activityPhaseStoreFake) GetInboxDeliveryBatch(_ context.Context, orgID, batchID uuid.UUID) (models.ThreadInboxDeliveryBatch, error) {
 	for _, batch := range f.batches {
 		if batch.ID == batchID && batch.OrgID == orgID {
@@ -362,4 +369,67 @@ func TestActivityPhaseServicePublishesLifecycleEventsAfterTransitions(t *testing
 	}, []models.SessionStreamEventType{publisher.events[0].Type, publisher.events[1].Type}, "the service should publish start and terminal lifecycle events in commit order")
 	require.NotEqual(t, uuid.Nil, publisher.events[0].ID, "the started event should have a stable non-empty event id")
 	require.Equal(t, threadID, publisher.events[1].ThreadID, "the terminal event should retain the owning thread identity")
+}
+
+func TestSeedActivityPhaseExecutionCommitsBeforePublishing(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		fail bool
+	}{{name: "committed seed"}, {name: "rejected seed", fail: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, sessionID, threadID, runtimeID, token := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			now := time.Now().UTC()
+			store := &seedActivityPhaseStoreFake{ActivityPhaseStore: &activityPhaseStoreFake{}, fail: tt.fail}
+			publisher := &activityPhasePublisherFake{}
+			service := NewActivityPhaseService(store, zerolog.Nop(), WithActivityPhaseEventPublisher(publisher))
+			service.now = func() time.Time { return now }
+			execution, err := newSeedActivityPhaseExecution(context.Background(), service, zerolog.Nop(), orgID, sessionID, threadID, 2, runtimeID, token, []int64{11, 12})
+			require.Equal(t, seedActivityPhaseCall{orgID: orgID, sessionID: sessionID, threadID: threadID, runtimeID: runtimeID, token: token, turn: 2, messageIDs: []int64{11, 12}, at: now}, store.call, "atomic admission must receive the exact tenant, seed boundary, and lease")
+			if tt.fail {
+				require.Error(t, err, "failed atomic admission must stop provider setup")
+				require.Nil(t, execution, "failed admission must not create a provider execution")
+				require.Empty(t, publisher.events, "rejected transaction must not emit committed lifecycle events")
+			} else {
+				require.NoError(t, err, "committed seed should create activity execution")
+				require.Equal(t, store.phase.ID, *execution.phaseID(), "provider execution must use the atomically committed phase")
+				var kinds []models.SessionStreamEventType
+				for _, event := range publisher.events {
+					kinds = append(kinds, event.Type)
+				}
+				require.Equal(t, []models.SessionStreamEventType{models.SessionStreamEventInboxDeliveryAcknowledged, models.SessionStreamEventActivityPhaseStarted, models.SessionStreamEventInboxDeliveryStarted}, kinds, "seed lifecycle events must describe the one committed batch and phase in order")
+				acknowledged := publisher.events[0].Data.(models.ThreadInboxDeliveryBatchEvent).Batch
+				started := publisher.events[2].Data.(models.ThreadInboxDeliveryBatchEvent).Batch
+				require.Equal(t, models.InboxDeliveryBatchAcknowledged, acknowledged.Status, "acknowledgment event should describe its transition")
+				require.Nil(t, acknowledged.StartedAt, "acknowledgment transition precedes batch start")
+				require.Equal(t, models.InboxDeliveryBatchStarted, started.Status, "started event should describe the committed batch")
+				require.Equal(t, acknowledged.ID, started.ID, "atomic lifecycle transitions must share the same batch")
+			}
+		})
+	}
+}
+
+type seedActivityPhaseCall struct {
+	orgID, sessionID, threadID, runtimeID, token uuid.UUID
+	turn                                         int
+	messageIDs                                   []int64
+	at                                           time.Time
+}
+
+type seedActivityPhaseStoreFake struct {
+	ActivityPhaseStore
+	call  seedActivityPhaseCall
+	phase models.SessionActivityPhase
+	fail  bool
+}
+
+func (s *seedActivityPhaseStoreFake) StartSeedPhase(_ context.Context, orgID, sessionID, threadID uuid.UUID, turn int, runtimeID, token uuid.UUID, messageIDs []int64, at time.Time) (models.SessionActivityPhase, *models.ThreadInboxDeliveryBatch, error) {
+	s.call = seedActivityPhaseCall{orgID: orgID, sessionID: sessionID, threadID: threadID, runtimeID: runtimeID, token: token, turn: turn, messageIDs: append([]int64(nil), messageIDs...), at: at}
+	if s.fail {
+		return models.SessionActivityPhase{}, nil, errors.New("seed admission rejected")
+	}
+	batch := &models.ThreadInboxDeliveryBatch{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, RuntimeID: runtimeID, Status: models.InboxDeliveryBatchStarted, StartedAt: &at}
+	s.phase = models.SessionActivityPhase{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, TurnNumber: turn, RuntimeID: &runtimeID, TriggerKind: models.ActivityPhaseTriggerInboxBatch, TriggerBatchID: &batch.ID, Status: models.ActivityPhaseStatusRunning, StartedAt: at}
+	return s.phase, batch, nil
 }

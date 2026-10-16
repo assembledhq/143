@@ -75,6 +75,37 @@ The tool returns a typed asynchronous state (`review_started`,
 `manual_publication_required`, or `blocked`). The agent must not claim a PR
 exists when review or publication is only queued.
 
+### Team requests for automatic publication
+
+The `--team-reviewers` option on `143-tools pr create` carries an
+explicit team choice as structured publication metadata. Team names are
+normalized against the session repository owner; teams from another
+organization are rejected. No team is inferred by parsing the goal on the
+server.
+
+For a per-run automation with a frozen `pull_request` policy and an existing
+publishing grant, this call stages metadata against the automation run and
+primary changeset and returns `awaiting_automatic_publication`. It does not
+create a requested publication or enqueue a job while implementation is still
+running. A separate automation prompt explains this metadata handoff without
+changing ordinary agent-readiness rules or per-target publication restrictions.
+
+Normal automatic publication freezes the staged teams into its durable request
+payload. Team requests run after the PR's draft and review gates are satisfied,
+using the publication's GitHub identity. Completion replay performs any missing
+follow-through before reporting PR creation as successful.
+
+Outside the draft-first workflow, an explicit or inherited draft choice with
+requested teams is rejected before publication. A manual caller can explicitly
+select a ready PR with `--draft false`. A resolved ready choice is frozen with
+the teams so a later default change cannot invalidate the handoff.
+
+A per-publication, per-team receipt survives retries and review completion.
+GitHub's current pending-reviewer list alone is insufficient: reviewers can
+remove their team after finishing. Confirmed requests are never repeated just
+because that list is empty. Ambiguous sends retain an unresolved receipt and
+require reconciliation; they do not authorize a blind repeat request.
+
 ### Review before publication
 
 The default order is:

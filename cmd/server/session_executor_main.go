@@ -435,6 +435,8 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 		Sessions:              deps.Sessions,
 		SessionChangesets:     db.NewSessionChangesetStore(pool),
 		SessionPublications:   db.NewSessionPublicationStore(pool),
+		SessionPRIntents:      db.NewSessionPRIntentStore(pool),
+		TeamReviewRequests:    db.NewTeamReviewRequestStore(pool),
 		Jobs:                  deps.Jobs,
 		Integrations:          deps.Integrations,
 		Memberships:           db.NewOrganizationMembershipStore(pool),

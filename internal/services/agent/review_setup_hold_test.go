@@ -148,7 +148,11 @@ func (s *reviewSetupLifecycleInboxStore) LastAcknowledgedSequence(context.Contex
 	return 0, nil
 }
 
-func (s *reviewSetupLifecycleInboxStore) MarkDeliveringForMessages(_ context.Context, _, thread, _ uuid.UUID, _ string, messages []int64) (int64, error) {
+func (s *reviewSetupLifecycleInboxStore) MarkAckedForSeedMessages(_ context.Context, _, _, _, _ uuid.UUID, messages []int64) (int64, error) {
+	return int64(len(messages)), nil
+}
+
+func (s *reviewSetupLifecycleInboxStore) MarkDeliveringForMessages(_ context.Context, _, thread, _, _ uuid.UUID, _ string, messages []int64) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.delivering == nil {

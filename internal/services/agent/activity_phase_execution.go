@@ -60,6 +60,17 @@ func newActivityPhaseExecution(
 	}, nil
 }
 
+func newSeedActivityPhaseExecution(ctx context.Context, service *ActivityPhaseService, logger zerolog.Logger, orgID, sessionID, threadID uuid.UUID, turnNumber int, runtimeID, leaseToken uuid.UUID, messageIDs []int64) (*activityPhaseExecution, error) {
+	phase, err := service.StartSeedPhase(ctx, orgID, sessionID, threadID, turnNumber, runtimeID, leaseToken, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	return &activityPhaseExecution{
+		service: service, logger: logger, orgID: orgID, sessionID: sessionID, threadID: threadID,
+		turnNumber: turnNumber, runtimeID: &runtimeID, leaseToken: &leaseToken, phase: &phase,
+	}, nil
+}
+
 func (e *activityPhaseExecution) phaseID() *uuid.UUID {
 	if e == nil {
 		return nil

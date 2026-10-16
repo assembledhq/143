@@ -238,89 +238,112 @@ func scanThreadInboxDeliverySummaryRow(row pgx.CollectableRow) (models.ThreadInb
 	return summary, nil
 }
 
-func (s *ThreadInboxStore) MarkDeliveredForEntry(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, entryID uuid.UUID, sequenceNo int64) (int64, error) {
+// MarkDeliveredForEntry persists a live-write attempt before touching provider
+// stdin. Until acknowledgment, delivery may be uncertain and must not replay.
+func (s *ThreadInboxStore) MarkDeliveredForEntry(ctx context.Context, orgID, threadID, runtimeID, leaseToken uuid.UUID, ownerNodeID string, entryID uuid.UUID, sequenceNo int64) (int64, error) {
 	tag, err := s.db.Exec(ctx, `
-		UPDATE thread_inbox_entries
-		SET delivery_state = 'delivered',
-			runtime_id = $3,
-			owner_node_id = NULLIF($4, ''),
-			delivered_at = COALESCE(delivered_at, now()),
-			updated_at = now()
-		WHERE org_id = $1
-		  AND thread_id = $2
-		  AND runtime_id = $3
-		  AND id = $5
-		  AND sequence_no = $6
-		  AND delivery_state = 'delivering'`, orgID, threadID, runtimeID, ownerNodeID, entryID, sequenceNo)
+		WITH owned_runtime AS MATERIALIZED (
+			UPDATE thread_runtimes r
+			SET last_delivered_sequence = GREATEST(last_delivered_sequence, $6), updated_at = now()
+			WHERE r.org_id = $1 AND r.thread_id = $2 AND r.id = $3 AND r.lease_token = $7
+			  AND r.status IN ('starting', 'live', 'paused') AND r.lease_expires_at > clock_timestamp()
+			  AND EXISTS (
+				SELECT 1 FROM thread_inbox_entries e
+				WHERE e.org_id = $1 AND e.session_id = r.session_id AND e.thread_id = $2
+				  AND e.runtime_id = r.id AND e.id = $5 AND e.sequence_no = $6
+				  AND e.delivery_state = 'delivering' AND e.applied_at IS NULL
+			  )
+			RETURNING r.id, r.session_id
+		)
+		UPDATE thread_inbox_entries e
+		SET delivery_state = 'delivered', owner_node_id = NULLIF($4, ''),
+			delivered_at = COALESCE(delivered_at, now()), updated_at = now()
+		FROM owned_runtime r
+		WHERE e.org_id = $1 AND e.thread_id = $2 AND e.session_id = r.session_id
+		  AND e.runtime_id = r.id AND e.id = $5 AND e.sequence_no = $6
+		  AND e.delivery_state = 'delivering' AND e.applied_at IS NULL`, orgID, threadID, runtimeID, ownerNodeID, entryID, sequenceNo, leaseToken)
 	if err != nil {
-		return 0, fmt.Errorf("mark thread inbox entry delivered: %w", err)
+		return 0, fmt.Errorf("record thread inbox write attempt: %w", err)
 	}
 	return tag.RowsAffected(), nil
 }
 
-// MarkAckedForSeedMessages acks inbox entries the calling runtime has just
-// pulled in as its seed prompt. Restricted to entries the runtime already
-// owns (runtime_id = $3) or that no runtime has claimed yet (runtime_id IS
-// NULL) so it cannot steal ownership stamped by another runtime.
-//
-// A seed message is applied by definition: the runtime boots executing it, so
-// there is no later batch start to defer applied_at to. Only the inbox-batch
-// branch of StartActivityPhase may leave applied_at unset, because only it has
-// a phase boundary to move the message to; every other path that reaches
-// 'acked' must stamp it or the transcript hides the message forever.
-func (s *ThreadInboxStore) MarkAckedForSeedMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, messageIDs []int64) (int64, error) {
+// ResetUnsentDelivery clears an attempted write only after the provider
+// definitively rejected stdin before accepting any bytes. Ambiguous failures
+// must retain their delivery marker for explicit recovery.
+func (s *ThreadInboxStore) ResetUnsentDelivery(ctx context.Context, orgID, threadID, runtimeID, leaseToken, entryID uuid.UUID) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		WITH owned_runtime AS MATERIALIZED (
+			SELECT id, session_id FROM thread_runtimes
+			WHERE org_id = $1 AND thread_id = $2 AND id = $3 AND lease_token = $4
+			  AND status IN ('starting', 'live', 'paused') AND lease_expires_at > clock_timestamp()
+			FOR UPDATE
+		), reset AS (
+			UPDATE thread_inbox_entries e
+			SET delivery_state = 'delivering', delivered_at = NULL, updated_at = now()
+			FROM owned_runtime r
+			WHERE e.org_id = $1 AND e.thread_id = $2 AND e.session_id = r.session_id
+			  AND e.runtime_id = r.id AND e.id = $5
+			  AND e.delivery_state = 'delivered' AND e.applied_at IS NULL AND e.acked_at IS NULL
+			RETURNING e.id
+		)
+		UPDATE thread_runtimes r
+		SET last_delivered_sequence = GREATEST(r.last_acked_sequence, COALESCE((
+			SELECT max(e.sequence_no) FROM thread_inbox_entries e
+			WHERE e.org_id = $1 AND e.session_id = r.session_id AND e.thread_id = $2
+			  AND e.runtime_id = r.id AND e.id <> $5 AND e.delivery_state = 'delivered'
+		), 0)), updated_at = now()
+		WHERE r.org_id = $1 AND r.thread_id = $2 AND r.id = $3 AND r.lease_token = $4
+		  AND EXISTS (SELECT 1 FROM reset)`, orgID, threadID, runtimeID, leaseToken, entryID)
+	if err != nil {
+		return 0, fmt.Errorf("reset definitively unsent thread inbox delivery: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// MarkAckedForSeedMessages applies the seed of a newly attached runtime. The
+// runtime lock fences a late attacher against closure and replacement owners.
+func (s *ThreadInboxStore) MarkAckedForSeedMessages(ctx context.Context, orgID, threadID, runtimeID, leaseToken uuid.UUID, messageIDs []int64) (int64, error) {
 	if len(messageIDs) == 0 {
 		return 0, nil
 	}
 	tag, err := s.db.Exec(ctx, `
-		UPDATE thread_inbox_entries
-		SET delivery_state = 'acked',
-			runtime_id = $3,
+		WITH owned_runtime AS MATERIALIZED (
+			SELECT id, org_id, session_id, thread_id FROM thread_runtimes
+			WHERE org_id = $1 AND thread_id = $2 AND id = $3 AND lease_token = $5
+			  AND status IN ('starting', 'live', 'paused') AND lease_expires_at > clock_timestamp()
+			FOR UPDATE
+		), selected AS MATERIALIZED (
+			SELECT e.id FROM thread_inbox_entries e JOIN owned_runtime r ON r.session_id = e.session_id
+			WHERE e.org_id = $1 AND e.thread_id = $2 AND e.message_id = ANY($4)
+			  AND e.delivery_state IN ('pending', 'delivering', 'delivered')
+			  AND e.applied_at IS NULL AND (e.runtime_id IS NULL OR e.runtime_id = r.id)
+			FOR UPDATE OF e
+		)
+		UPDATE thread_inbox_entries e
+		SET delivery_state = 'acked', runtime_id = $3,
 			delivered_at = COALESCE(delivered_at, now()),
 			acked_at = COALESCE(acked_at, now()),
-			applied_at = COALESCE(applied_at, now()),
-			updated_at = now()
-		WHERE org_id = $1
-		  AND thread_id = $2
-		  AND message_id = ANY($4)
-		  AND delivery_state IN ('pending', 'delivering', 'delivered')
-		  AND (runtime_id IS NULL OR runtime_id = $3)`, orgID, threadID, runtimeID, messageIDs)
+			applied_at = COALESCE(applied_at, now()), updated_at = now()
+		FROM owned_runtime r
+		WHERE e.org_id = $1 AND e.thread_id = $2 AND e.session_id = r.session_id
+		  AND e.message_id = ANY($4)
+		  AND e.delivery_state IN ('pending', 'delivering', 'delivered')
+		  AND (e.runtime_id IS NULL OR e.runtime_id = r.id)
+		  AND e.id IN (SELECT id FROM selected)
+		  AND (SELECT count(*) FROM selected) = (SELECT count(DISTINCT message_id) FROM unnest($4::bigint[]) ids(message_id))`, orgID, threadID, runtimeID, messageIDs, leaseToken)
 	if err != nil {
 		return 0, fmt.Errorf("mark thread inbox acked for seed messages: %w", err)
 	}
 	return tag.RowsAffected(), nil
 }
 
-// MarkDeliveredForSeedMessages records the provider-bound seed prompt as
-// delivered without acknowledging it. The lifecycle service performs the
-// acknowledgment and batch allocation atomically immediately afterward.
-func (s *ThreadInboxStore) MarkDeliveredForSeedMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, messageIDs []int64) (int64, error) {
-	if len(messageIDs) == 0 {
-		return 0, nil
-	}
-	var sequenceEnd int64
-	err := s.db.QueryRow(ctx, `
-		WITH delivered AS (
-			UPDATE thread_inbox_entries
-			SET delivery_state = 'delivered',
-				delivered_at = COALESCE(delivered_at, now()),
-				updated_at = now()
-			WHERE org_id = $1 AND thread_id = $2 AND runtime_id = $3
-			  AND message_id = ANY($4) AND delivery_state = 'delivering'
-			RETURNING sequence_no
-		)
-		SELECT COALESCE(MAX(sequence_no), 0) FROM delivered`, orgID, threadID, runtimeID, messageIDs).Scan(&sequenceEnd)
-	if err != nil {
-		return 0, fmt.Errorf("mark seed thread inbox messages delivered: %w", err)
-	}
-	return sequenceEnd, nil
-}
-
 func (s *ThreadInboxStore) LastAcknowledgedSequence(ctx context.Context, orgID, threadID uuid.UUID) (int64, error) {
 	var sequence int64
 	err := s.db.QueryRow(ctx, `
 		SELECT COALESCE(
-			MIN(sequence_no) FILTER (WHERE delivery_state NOT IN ('acked', 'dead_letter')) - 1,
+			MIN(sequence_no) FILTER (WHERE delivery_state NOT IN ('acked', 'dead_letter')
+			   OR (delivery_state = 'acked' AND applied_at IS NULL)) - 1,
 			MAX(sequence_no),
 			0
 		)
@@ -332,20 +355,33 @@ func (s *ThreadInboxStore) LastAcknowledgedSequence(ctx context.Context, orgID, 
 	return sequence, nil
 }
 
-func (s *ThreadInboxStore) MarkDeliveringForMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, messageIDs []int64) (int64, error) {
+// MarkDeliveringForMessages claims only unsent seed entries for a current
+// leased runtime. Closed owners cannot strand a seed or reclaim it later.
+func (s *ThreadInboxStore) MarkDeliveringForMessages(ctx context.Context, orgID, threadID, runtimeID, leaseToken uuid.UUID, ownerNodeID string, messageIDs []int64) (int64, error) {
 	if len(messageIDs) == 0 {
 		return 0, nil
 	}
 	tag, err := s.db.Exec(ctx, `
-		UPDATE thread_inbox_entries
-		SET delivery_state = 'delivering',
-			runtime_id = $3,
-			owner_node_id = NULLIF($4, ''),
-			updated_at = now()
-		WHERE org_id = $1
-		  AND thread_id = $2
-		  AND message_id = ANY($5)
-		  AND delivery_state = 'pending'`, orgID, threadID, runtimeID, ownerNodeID, messageIDs)
+		WITH owned_runtime AS MATERIALIZED (
+			SELECT id, org_id, session_id, thread_id FROM thread_runtimes
+			WHERE org_id = $1 AND thread_id = $2 AND id = $3 AND lease_token = $6
+			  AND status IN ('starting', 'live', 'paused') AND lease_expires_at > clock_timestamp()
+			FOR UPDATE
+		)
+		UPDATE thread_inbox_entries e
+		SET delivery_state = 'delivering', runtime_id = r.id,
+			owner_node_id = NULLIF($4, ''), updated_at = now()
+		FROM owned_runtime r
+		WHERE e.org_id = $1 AND e.thread_id = $2 AND e.session_id = r.session_id
+		  AND e.message_id = ANY($5) AND e.applied_at IS NULL
+		  AND (e.delivery_state = 'pending' AND e.runtime_id IS NULL
+			OR e.delivery_state = 'delivering' AND (e.runtime_id = r.id OR EXISTS (
+				SELECT 1 FROM thread_runtimes previous
+				WHERE previous.org_id = $1 AND previous.session_id = r.session_id
+				  AND previous.thread_id = $2 AND previous.id = e.runtime_id
+				  AND previous.status IN ('closed', 'failed', 'lost') AND previous.runtime_handle_id = ''
+				  AND NOT EXISTS (SELECT 1 FROM session_activity_phases p WHERE p.org_id = $1 AND p.runtime_id = previous.id)
+			)))`, orgID, threadID, runtimeID, ownerNodeID, messageIDs, leaseToken)
 	if err != nil {
 		return 0, fmt.Errorf("mark thread inbox delivering for messages: %w", err)
 	}
@@ -449,18 +485,27 @@ func (s *ThreadInboxStore) ListDeliverableAfter(ctx context.Context, orgID, thre
 	return entries, nil
 }
 
-func (s *ThreadInboxStore) ClaimDeliverableAfter(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, afterSequence int64, limit int) ([]models.ThreadInboxEntry, error) {
+func (s *ThreadInboxStore) ClaimDeliverableAfter(ctx context.Context, orgID, threadID, runtimeID, leaseToken uuid.UUID, ownerNodeID string, afterSequence int64, limit int) ([]models.ThreadInboxEntry, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := s.db.Query(ctx, `
-		WITH candidates AS (
+		WITH owned_runtime AS MATERIALIZED (
+			SELECT id, session_id FROM thread_runtimes
+			WHERE org_id = $1 AND thread_id = $2 AND id = $3 AND lease_token = $8
+			  AND status IN ('starting', 'live', 'paused') AND lease_expires_at > clock_timestamp()
+			  AND last_delivered_sequence <= last_acked_sequence
+			FOR UPDATE
+		), candidates AS (
 			SELECT id
 			FROM thread_inbox_entries
 			WHERE org_id = $1
 			  AND thread_id = $2
 			  AND (sequence_no > $5 OR delivery_state = 'pending')
-			  AND delivery_state IN ('pending', 'delivering')
+			  AND applied_at IS NULL
+			  AND EXISTS (SELECT 1 FROM owned_runtime r WHERE r.session_id = thread_inbox_entries.session_id)
+			  AND (delivery_state = 'pending' AND runtime_id IS NULL
+			       OR delivery_state = 'delivering' AND runtime_id = $3)
 			  -- Cooldown: a previously-failed entry is skipped until
 			  -- threadInboxDeliveryRetryCooldownSeconds have passed since
 			  -- its last write, so the attempt counter advances on a
@@ -476,7 +521,7 @@ func (s *ThreadInboxStore) ClaimDeliverableAfter(ctx context.Context, orgID, thr
 				owner_node_id = NULLIF($4, ''),
 				updated_at = now()
 			FROM candidates c
-			WHERE e.id = c.id
+			WHERE e.org_id = $1 AND e.thread_id = $2 AND e.id = c.id
 			  AND e.delivery_state = 'pending'
 			RETURNING `+threadInboxEntryColumnsE+`
 		)
@@ -485,14 +530,14 @@ func (s *ThreadInboxStore) ClaimDeliverableAfter(ctx context.Context, orgID, thr
 		UNION ALL
 		SELECT `+threadInboxEntryColumns+`
 		FROM thread_inbox_entries e
-		WHERE e.id IN (SELECT id FROM candidates)
+		WHERE e.org_id = $1 AND e.thread_id = $2 AND e.id IN (SELECT id FROM candidates)
 		  AND e.delivery_state = 'delivering'
 		  AND e.runtime_id = $3
 		-- ORDER BY binds to the full UNION ALL (Postgres parses this as
 		-- (claimed UNION ALL prior_claims) ORDER BY sequence_no), so the
 		-- caller sees a single sequence-ordered stream regardless of which
 		-- arm produced each row.
-		ORDER BY sequence_no ASC`, orgID, threadID, runtimeID, ownerNodeID, afterSequence, limit, threadInboxDeliveryRetryCooldownSeconds)
+		ORDER BY sequence_no ASC`, orgID, threadID, runtimeID, ownerNodeID, afterSequence, limit, threadInboxDeliveryRetryCooldownSeconds, leaseToken)
 	if err != nil {
 		return nil, fmt.Errorf("claim deliverable thread inbox entries: %w", err)
 	}

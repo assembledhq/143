@@ -89,6 +89,17 @@ func (s *SessionActivityPhaseStore) StartPhase(ctx context.Context, orgID, sessi
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	phase, err := startActivityPhaseTx(ctx, tx, orgID, sessionID, threadID, turnNumber, runtimeID, runtimeLeaseToken, trigger, startedAt)
+	if err != nil {
+		return models.SessionActivityPhase{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return models.SessionActivityPhase{}, fmt.Errorf("commit start activity phase: %w", err)
+	}
+	return phase, nil
+}
+
+func startActivityPhaseTx(ctx context.Context, tx pgx.Tx, orgID, sessionID, threadID uuid.UUID, turnNumber int, runtimeID, runtimeLeaseToken *uuid.UUID, trigger models.ActivityPhaseTrigger, startedAt time.Time) (models.SessionActivityPhase, error) {
 	var lockedThread uuid.UUID
 	if err := tx.QueryRow(ctx, `
 		SELECT id FROM session_threads
@@ -141,6 +152,7 @@ func (s *SessionActivityPhaseStore) StartPhase(ctx context.Context, orgID, sessi
 			WHERE org_id = $1 AND session_id = $2 AND thread_id = $3 AND id = $4
 			  AND lease_token = $5 AND status IN ('starting', 'live', 'paused')
 			  AND lease_expires_at IS NOT NULL AND lease_expires_at > $6
+			  AND lease_expires_at > clock_timestamp()
 			FOR UPDATE`,
 			orgID, sessionID, threadID, *runtimeID, *runtimeLeaseToken, startedAt).Scan(&ownedRuntime); err != nil {
 			return models.SessionActivityPhase{}, fmt.Errorf("validate active activity phase runtime lease: %w", err)
@@ -166,9 +178,6 @@ func (s *SessionActivityPhaseStore) StartPhase(ctx context.Context, orgID, sessi
 	phase, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionActivityPhase])
 	if err != nil {
 		return models.SessionActivityPhase{}, fmt.Errorf("collect inserted activity phase: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return models.SessionActivityPhase{}, fmt.Errorf("commit start activity phase: %w", err)
 	}
 	return phase, nil
 }

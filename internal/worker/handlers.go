@@ -642,6 +642,8 @@ type Stores struct {
 	Sessions              *db.SessionStore
 	SessionChangesets     *db.SessionChangesetStore
 	SessionPublications   *db.SessionPublicationStore
+	SessionPRIntents      *db.SessionPRIntentStore
+	TeamReviewRequests    *db.TeamReviewRequestStore
 	Jobs                  *db.JobStore
 	Integrations          *db.IntegrationStore
 	Users                 *db.UserStore
@@ -11603,23 +11605,24 @@ func newMergePullRequestWhenReadyHandler(services *Services, logger zerolog.Logg
 // pr_creation_state through pushing -> succeeded/failed so the UI can reflect
 // progress without needing to poll PR rows.
 type openPRJobInput struct {
-	SessionID                  string `json:"session_id"`
-	ChangesetID                string `json:"changeset_id,omitempty"`
-	OrgID                      string `json:"org_id"`
-	IssueSnapshotID            string `json:"issue_snapshot_id,omitempty"`
-	Draft                      *bool  `json:"draft,omitempty"`
-	AuthorMode                 string `json:"author_mode,omitempty"`
-	MergeWhenReady             bool   `json:"merge_when_ready,omitempty"`
-	RequestedByUserID          string `json:"requested_by_user_id,omitempty"`
-	RequestedRole              string `json:"requested_role,omitempty"`
-	PublicationSource          string `json:"publication_source,omitempty"`
-	PublicationExecutionSource string `json:"publication_execution_source,omitempty"`
-	PublicationQueue           string `json:"publication_queue,omitempty"`
-	PublicationTriggerKind     string `json:"publication_trigger_kind,omitempty"`
-	PublicationHandoffMode     string `json:"publication_handoff_mode,omitempty"`
-	InitiatedByUserID          string `json:"initiated_by_user_id,omitempty"`
-	AutomaticPolicySource      string `json:"automatic_pr_policy_source,omitempty"`
-	ReviewPolicySource         string `json:"review_policy_source,omitempty"`
+	TeamReviewers              []string `json:"team_reviewers,omitempty"`
+	SessionID                  string   `json:"session_id"`
+	ChangesetID                string   `json:"changeset_id,omitempty"`
+	OrgID                      string   `json:"org_id"`
+	IssueSnapshotID            string   `json:"issue_snapshot_id,omitempty"`
+	Draft                      *bool    `json:"draft,omitempty"`
+	AuthorMode                 string   `json:"author_mode,omitempty"`
+	MergeWhenReady             bool     `json:"merge_when_ready,omitempty"`
+	RequestedByUserID          string   `json:"requested_by_user_id,omitempty"`
+	RequestedRole              string   `json:"requested_role,omitempty"`
+	PublicationSource          string   `json:"publication_source,omitempty"`
+	PublicationExecutionSource string   `json:"publication_execution_source,omitempty"`
+	PublicationQueue           string   `json:"publication_queue,omitempty"`
+	PublicationTriggerKind     string   `json:"publication_trigger_kind,omitempty"`
+	PublicationHandoffMode     string   `json:"publication_handoff_mode,omitempty"`
+	InitiatedByUserID          string   `json:"initiated_by_user_id,omitempty"`
+	AutomaticPolicySource      string   `json:"automatic_pr_policy_source,omitempty"`
+	ReviewPolicySource         string   `json:"review_policy_source,omitempty"`
 }
 
 func publicationExecutionEnabled(services *Services, source models.SessionPublicationSource) bool {
@@ -12295,6 +12298,9 @@ func completeOpenPRJob(
 				return nil
 			}
 		}
+	}
+	if err := completePublicationTeamReviews(ctx, stores, services, run, input, changesetID, pr); err != nil {
+		return err
 	}
 	if input.MergeWhenReady {
 		requestedByUserID, err := uuid.Parse(input.RequestedByUserID)

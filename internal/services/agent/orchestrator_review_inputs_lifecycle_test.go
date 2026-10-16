@@ -46,7 +46,11 @@ func (s *reviewInputGateInboxStore) LastAcknowledgedSequence(context.Context, uu
 	return 0, nil
 }
 
-func (s *reviewInputGateInboxStore) MarkDeliveringForMessages(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, _ string, messages []int64) (int64, error) {
+func (s *reviewInputGateInboxStore) MarkAckedForSeedMessages(_ context.Context, _, _, _, _ uuid.UUID, messages []int64) (int64, error) {
+	return int64(len(messages)), nil
+}
+
+func (s *reviewInputGateInboxStore) MarkDeliveringForMessages(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, _ string, messages []int64) (int64, error) {
 	s.delivering.Add(int64(len(messages)))
 	return int64(len(messages)), nil
 }

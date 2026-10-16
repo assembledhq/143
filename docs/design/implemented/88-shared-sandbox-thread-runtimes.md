@@ -65,6 +65,20 @@ Implemented:
   rows for thread-scoped turns, create/release `thread_runtime` sandbox holders,
   heartbeat both leases while the process runs, publish provider handle IDs when
   adapters attach live command handles, and mark runtimes terminal on unwind.
+- the initial turn drains queued input using its primary thread, preserving
+  thread-specific routing and message-specific continuation deduplication.
+- live delivery records its attempt before writing to the provider. A definite
+  unavailable-handle or closed-input response can release that attempt;
+  other failures retain delivery uncertainty. Later polls cannot acknowledge
+  past an unresolved attempt. Runtime shutdown stops inbox polling and
+  serializes with delivery before releasing unsent claims.
+- initial and resumed seed input is claimed under the current runtime lease. Its
+  acknowledgement, batch application, phase creation, and cursor updates commit
+  together, so a phase-start failure cannot leave input acknowledged without an
+  executable phase. Claims from a terminal runtime are released without
+  replaying input whose provider delivery is uncertain. Legacy seeds must form
+  a contiguous, correctly ordered batch; incompatible mixed history requires
+  reconciliation.
 - the worker has a `deliver_thread_inbox` handler that routes to the runtime
   owner worker, serializes local delivery per thread, writes pending inbox
   entries into the live handle only through an adapter-declared provider-native

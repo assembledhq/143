@@ -378,21 +378,36 @@ func (s *ThreadRuntimeStore) MarkTerminalWithLease(ctx context.Context, orgID, r
 	if status != models.ThreadRuntimeStatusClosed && status != models.ThreadRuntimeStatusFailed && status != models.ThreadRuntimeStatusLost {
 		return false, fmt.Errorf("terminal thread runtime status required: %s", status)
 	}
-	tag, err := s.db.Exec(ctx, `
-		UPDATE thread_runtimes
-		SET status = $4,
-			closed_at = now(),
-			stop_reason = NULLIF($5, ''),
-			last_error = NULLIF($6, ''),
-			updated_at = now()
-		WHERE org_id = $1
-		  AND id = $2
-		  AND lease_token = $3
-		  AND status IN ('starting', 'live', 'paused', 'draining')`, orgID, runtimeID, leaseToken, status, stopReason, lastError)
+	var changed bool
+	err := s.db.QueryRow(ctx, `
+		WITH terminal AS (
+			UPDATE thread_runtimes
+			SET status = $4, closed_at = now(), stop_reason = NULLIF($5, ''),
+				last_error = NULLIF($6, ''), updated_at = now()
+			WHERE org_id = $1 AND id = $2 AND lease_token = $3
+			  AND status IN ('starting', 'live', 'paused', 'draining')
+			RETURNING id, org_id, session_id, thread_id
+		), released AS (
+			UPDATE thread_inbox_entries e
+			SET delivery_state = 'pending', runtime_id = NULL, owner_node_id = NULL, updated_at = now()
+			FROM terminal t
+			WHERE e.org_id = t.org_id AND e.session_id = t.session_id AND e.thread_id = t.thread_id
+			  AND e.runtime_id = t.id AND e.delivery_state = 'delivering' AND e.applied_at IS NULL
+			RETURNING e.id
+		), uncertain AS (
+			UPDATE thread_inbox_entries e
+			SET delivery_state = 'unknown_delivery', updated_at = now(),
+				last_error = COALESCE(e.last_error, 'runtime closed after delivery before acknowledgment')
+			FROM terminal t
+			WHERE e.org_id = t.org_id AND e.session_id = t.session_id AND e.thread_id = t.thread_id
+			  AND e.runtime_id = t.id AND e.delivery_state = 'delivered' AND e.applied_at IS NULL
+			RETURNING e.id
+		)
+		SELECT EXISTS(SELECT 1 FROM terminal)`, orgID, runtimeID, leaseToken, status, stopReason, lastError).Scan(&changed)
 	if err != nil {
 		return false, fmt.Errorf("mark thread runtime terminal: %w", err)
 	}
-	return tag.RowsAffected() == 1, nil
+	return changed, nil
 }
 
 // ReclaimExpiredLeases is the reaper-side recovery path for runtimes whose

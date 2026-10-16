@@ -98,16 +98,17 @@ func TestThreadInboxStore_MarkDeliveredForEntry(t *testing.T) {
 	orgID := uuid.New()
 	threadID := uuid.New()
 	runtimeID := uuid.New()
+	leaseToken := uuid.New()
 	ownerNodeID := "worker-1"
 
 	entryID := uuid.New()
 
 	mock.ExpectExec("UPDATE thread_inbox_entries").
-		WithArgs(orgID, threadID, runtimeID, ownerNodeID, entryID, int64(4)).
+		WithArgs(orgID, threadID, runtimeID, ownerNodeID, entryID, int64(4), leaseToken).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	store := NewThreadInboxStore(mock)
-	updated, err := store.MarkDeliveredForEntry(context.Background(), orgID, threadID, runtimeID, ownerNodeID, entryID, 4)
+	updated, err := store.MarkDeliveredForEntry(context.Background(), orgID, threadID, runtimeID, leaseToken, ownerNodeID, entryID, 4)
 
 	require.NoError(t, err, "MarkDeliveredForEntry should not return an error")
 	require.Equal(t, int64(1), updated, "MarkDeliveredForEntry should return updated row count")
@@ -361,17 +362,18 @@ func TestThreadInboxStore_MarkAckedForSeedMessages(t *testing.T) {
 	orgID := uuid.New()
 	threadID := uuid.New()
 	runtimeID := uuid.New()
+	leaseToken := uuid.New()
 
 	// A seed message is applied the moment the runtime boots on it: there is
 	// no delivery batch and so no later phase start to stamp applied_at. An
 	// entry left 'acked' with a NULL applied_at is hidden from the transcript
 	// permanently and is not reachable through the inbox failure notice.
 	mock.ExpectExec(`(?s)UPDATE thread_inbox_entries.+applied_at = COALESCE\(applied_at, now\(\)\)`).
-		WithArgs(orgID, threadID, runtimeID, []int64{11, 12}).
+		WithArgs(orgID, threadID, runtimeID, []int64{11, 12}, leaseToken).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
 
 	store := NewThreadInboxStore(mock)
-	updated, err := store.MarkAckedForSeedMessages(context.Background(), orgID, threadID, runtimeID, []int64{11, 12})
+	updated, err := store.MarkAckedForSeedMessages(context.Background(), orgID, threadID, runtimeID, leaseToken, []int64{11, 12})
 
 	require.NoError(t, err, "MarkAckedForSeedMessages should not return an error")
 	require.Equal(t, int64(2), updated, "MarkAckedForSeedMessages should return updated row count")
@@ -387,7 +389,7 @@ func TestThreadInboxStore_LastAcknowledgedSequenceUsesContiguousTerminalPrefix(t
 
 	orgID := uuid.New()
 	threadID := uuid.New()
-	mock.ExpectQuery(`MIN\(sequence_no\) FILTER \(WHERE delivery_state NOT IN \('acked', 'dead_letter'\)\) - 1`).
+	mock.ExpectQuery(`MIN\(sequence_no\) FILTER \(WHERE delivery_state NOT IN \('acked', 'dead_letter'\).*applied_at IS NULL.* - 1`).
 		WithArgs(orgID, threadID).
 		WillReturnRows(pgxmock.NewRows([]string{"sequence"}).AddRow(int64(4)))
 

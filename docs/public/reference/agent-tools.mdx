@@ -608,12 +608,24 @@ Queue first-class 143 pull request creation for the current session.
 | `--session_id` | string | No | Compatibility override. Normally omit it: the backend derives the current session from the signed tool token. If supplied, it must match that token. |
 | `--draft` | boolean | No | Whether to create a draft PR. Omit to use the repo default. |
 | `--author_mode` | `auto` \| `app` \| `user` | No | PR author mode. Omit to use the default. |
+| `--team-reviewers` | comma-separated strings | No | GitHub team slugs to request after the PR is ready. Qualified `owner/team` names must match the repository owner. |
 
 Common use: open a PR through the same workflow as the app after tests pass.
 
 ```bash
 143-tools pr create --draft false
 ```
+
+For a manual session, include a team explicitly requested by the task:
+
+```bash
+143-tools pr create --draft false --team-reviewers example-org/code-reviewers
+```
+
+Team requests require a ready PR. An explicit draft request, or an inherited
+draft default without `--draft false`, is rejected before publication. The
+backend's draft-first review workflow still requests teams after marking the
+PR ready.
 
 This command queues the durable 143 publication workflow; it does not call the
 GitHub PR API from the sandbox. Sandbox GitHub API access is read-only for pull
@@ -624,6 +636,24 @@ The command returns the workflow's actual asynchronous status:
 `manual_publication_required`, or `blocked`. A running review or queued
 publication is not a created pull request; report the returned state and wait
 for the session Overview to converge.
+
+For an automation with a frozen `pull_request` publish policy, the command can
+register its requested teams before the agent finishes. It returns
+`awaiting_automatic_publication`; this stores metadata without queuing early
+publication. The normal completion and review gates still determine when the
+PR becomes ready. This path requires the existing publishing capability and
+does not change the automation's identity or grant new permissions.
+
+Automation metadata calls use only the team option; draft and author choices
+remain controlled by the configured publication policy:
+
+```bash
+143-tools pr create --team-reviewers example-org/code-reviewers
+```
+
+Confirmed team requests are recorded durably. Publication retries do not
+request the same team again after it has finished reviewing and removed its
+pending request. An uncertain request outcome is reconciled before any retry.
 
 ### `pr update`
 

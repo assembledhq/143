@@ -929,6 +929,7 @@ type Orchestrator struct {
 	sandboxHolders             SessionSandboxHolderStore
 	reviewInputsGroup          singleflight.Group
 	threadDeliveryLocks        sync.Map
+	threadDeliveryLocksMu      sync.Mutex
 	activeActivityPhases       sync.Map
 	env                        *AgentEnv          // owns env resolution, auth pre-flight, Codex auth injection
 	identityResolver           *identity.Resolver // can be nil — falls back to legacy GITHUB_TOKEN env injection
@@ -3383,6 +3384,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	if models.HasAutomationActions(run.CapabilitySnapshot) {
 		input.IntegrationSkills += "\n" + prompts.AutomationActionInstructions()
 	}
+	if err := o.appendAutomationPublicationIntentPrompt(ctx, input, run); err != nil {
+		o.failRun(ctx, run, err.Error())
+		return err
+	}
 	if revisionContext, revErr := ParseRevisionContext(run.RevisionContext); revErr != nil {
 		log.Warn().Err(revErr).Msg("failed to parse session revision context")
 	} else {
@@ -3514,7 +3519,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		}
 		drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer drainCancel()
-		o.drainQueuedMessagesAfterProcessedID(drainCtx, run, initialProcessedMessageID, nil, log)
+		o.drainQueuedMessagesAfterProcessedID(drainCtx, run, initialProcessedMessageID, primaryThreadID, log)
 	}()
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
@@ -3643,10 +3648,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 					stopReason = "context_cancelled"
 					lastError = ctx.Err().Error()
 				}
+				stopInboxPoller()
 				closeCtx, closeCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
 				threadRuntimeCtl.Close(closeCtx, status, stopReason, lastError)
 				closeCancel()
-				o.forgetThreadDeliveryLock(*primaryThreadID)
 				refreshCtx, refreshCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
 				defer refreshCancel()
 				keepSessionRunningIfSiblingRuntimesActive(refreshCtx, o.sessions, o.sandboxHolders, run.OrgID, run.ID, log)
@@ -3865,11 +3870,22 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 			runtimeID = &threadRuntimeCtl.runtime.ID
 			leaseToken = &threadRuntimeCtl.runtime.LeaseToken
 		}
-		activityExecution, err = newActivityPhaseExecution(
-			ctx, o.activityPhases, log, run.OrgID, run.ID, *primaryThreadID,
-			turnNumber, runtimeID, leaseToken,
-			models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInitial},
-		)
+		if threadRuntimeCtl != nil && len(threadRuntimeCtl.seedMessageIDs) > 0 {
+			if o.activityPhases != nil {
+				activityExecution, err = newSeedActivityPhaseExecution(ctx, o.activityPhases, log,
+					run.OrgID, run.ID, *primaryThreadID, turnNumber,
+					threadRuntimeCtl.runtime.ID, threadRuntimeCtl.runtime.LeaseToken, threadRuntimeCtl.seedMessageIDs)
+				if err == nil {
+					threadRuntimeCtl.seedMessageIDs = nil
+				}
+			} else {
+				err = threadRuntimeCtl.admitSeedWithoutPhase(ctx)
+			}
+		} else {
+			activityExecution, err = newActivityPhaseExecution(ctx, o.activityPhases, log,
+				run.OrgID, run.ID, *primaryThreadID, turnNumber, runtimeID, leaseToken,
+				models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInitial})
+		}
 		if err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("start activity phase: %s", err))
 			return fmt.Errorf("start activity phase: %w", err)
@@ -5078,6 +5094,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if models.HasAutomationActions(session.CapabilitySnapshot) {
 		integrationSkills += "\n" + prompts.AutomationActionInstructions()
 	}
+	integrationInput := &AgentInput{IntegrationSkills: integrationSkills}
+	if err := o.appendAutomationPublicationIntentPrompt(ctx, integrationInput, session); err != nil {
+		return o.failContinueSessionError(ctx, session, opts, err, log)
+	}
+	integrationSkills = integrationInput.IntegrationSkills
 	restrictedPRFeedback := opts != nil && opts.PRFeedback != nil
 	if restrictedPRFeedback {
 		// The control plane owns pushes, comments, and review-thread mutations.
@@ -5580,10 +5601,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			stopReason = "context_cancelled"
 			lastError = ctx.Err().Error()
 		}
+		stopThreadRuntimeInboxPoller()
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
 		threadRuntimeCtl.Close(closeCtx, status, stopReason, lastError)
 		closeCancel()
-		o.forgetThreadDeliveryLock(*opts.ThreadID)
 		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
 		defer refreshCancel()
 		keepSessionRunningIfSiblingRuntimesActive(refreshCtx, o.sessions, o.sandboxHolders, session.OrgID, session.ID, log)
@@ -5911,32 +5932,22 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if threadRuntimeCtl != nil {
 			runtimeID = &threadRuntimeCtl.runtime.ID
 			leaseToken = &threadRuntimeCtl.runtime.LeaseToken
-			if o.activityPhases != nil && o.threadInbox != nil && len(threadRuntimeCtl.seedMessageIDs) > 0 {
-				sequenceEnd, deliveryErr := o.threadInbox.MarkDeliveredForSeedMessages(
-					ctx, session.OrgID, *threadID, threadRuntimeCtl.runtime.ID, threadRuntimeCtl.seedMessageIDs,
-				)
-				if deliveryErr != nil {
-					return fmt.Errorf("mark resumed seed inbox batch delivered: %w", deliveryErr)
-				}
-				if sequenceEnd > 0 {
-					batch, ackErr := o.activityPhases.AcknowledgeInboxBatch(
-						ctx, session.OrgID, session.ID, *threadID,
-						threadRuntimeCtl.runtime.ID, threadRuntimeCtl.runtime.LeaseToken,
-						nil, sequenceEnd,
-					)
-					if ackErr != nil {
-						return fmt.Errorf("acknowledge resumed seed inbox batch: %w", ackErr)
-					}
-					trigger = models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInboxBatch, BatchID: &batch.ID}
+		}
+		if threadRuntimeCtl != nil && len(threadRuntimeCtl.seedMessageIDs) > 0 {
+			if o.activityPhases != nil {
+				activityExecution, err = newSeedActivityPhaseExecution(ctx, o.activityPhases, log,
+					session.OrgID, session.ID, *threadID, messageTurnNumber,
+					threadRuntimeCtl.runtime.ID, threadRuntimeCtl.runtime.LeaseToken, threadRuntimeCtl.seedMessageIDs)
+				if err == nil {
 					threadRuntimeCtl.seedMessageIDs = nil
 				}
+			} else {
+				err = threadRuntimeCtl.admitSeedWithoutPhase(ctx)
 			}
+		} else {
+			activityExecution, err = newActivityPhaseExecution(ctx, o.activityPhases, log,
+				session.OrgID, session.ID, *threadID, messageTurnNumber, runtimeID, leaseToken, trigger)
 		}
-		activityExecution, err = newActivityPhaseExecution(
-			ctx, o.activityPhases, log, session.OrgID, session.ID, *threadID,
-			messageTurnNumber, runtimeID, leaseToken,
-			trigger,
-		)
 		if err != nil {
 			return fmt.Errorf("start activity phase for resume: %w", err)
 		}

@@ -540,6 +540,8 @@ func main() {
 			Sessions:              sessionStore,
 			SessionChangesets:     db.NewSessionChangesetStore(pool),
 			SessionPublications:   db.NewSessionPublicationStore(pool),
+			SessionPRIntents:      db.NewSessionPRIntentStore(pool),
+			TeamReviewRequests:    db.NewTeamReviewRequestStore(pool),
 			Jobs:                  jobStore,
 			Integrations:          integrationStore,
 			Memberships:           db.NewOrganizationMembershipStore(pool),

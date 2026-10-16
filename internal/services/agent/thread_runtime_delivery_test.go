@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -168,7 +169,7 @@ func TestOrchestrator_DeliverThreadInboxLeavesPendingWhenHandleUnavailable(t *te
 	err = orch.DeliverThreadInbox(context.Background(), orgID, sessionID, threadID)
 
 	require.NoError(t, err, "DeliverThreadInbox should leave input pending when the local handle is not yet attached")
-	require.Empty(t, inbox.deliveredEntries, "DeliverThreadInbox should not mark delivered entries without a handle write")
+	require.Equal(t, []deliveryFailedCall{{threadID: threadID, runtimeID: runtimes.active.ID, entryID: inbox.deliverable[0].ID}}, inbox.unsentResets, "typed missing handle must restore the unsent entry for safe continuation")
 	require.Empty(t, runtimes.commitCalls, "DeliverThreadInbox should not advance cursors when nothing was delivered (commit is what advances last_acked_sequence)")
 }
 
@@ -368,7 +369,7 @@ func TestOrchestrator_DeliverThreadInboxSplitsAcknowledgmentBatchesAtDeadLetters
 	}, runtimes.commitCalls, "valid batches and the failed sequence should advance through distinct contiguous watermark transitions")
 }
 
-func TestOrchestrator_DeliverThreadInboxMarksWriteFailureForRetry(t *testing.T) {
+func TestOrchestrator_DeliverThreadInboxPreservesUncertainWrite(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -423,8 +424,9 @@ func TestOrchestrator_DeliverThreadInboxMarksWriteFailureForRetry(t *testing.T) 
 	err = orch.DeliverThreadInbox(context.Background(), orgID, sessionID, threadID)
 
 	require.Error(t, err, "DeliverThreadInbox should surface handle write failures")
-	require.Equal(t, []deliveryFailedCall{{threadID: threadID, runtimeID: runtimeID, entryID: entryID}}, inbox.deliveryFailedCalls, "DeliverThreadInbox should record write failures so the row is not stranded as delivering")
-	require.Empty(t, inbox.deliveredEntries, "failed writes must not be marked delivered")
+	require.Empty(t, inbox.deliveryFailedCalls, "uncertain provider writes must not become automatically retryable")
+	require.Equal(t, []markDeliveredEntryCall{{threadID: threadID, runtimeID: runtimeID, entryID: entryID, sequenceNo: 3}}, inbox.deliveredEntries, "uncertain write must retain its durable attempt boundary")
+	require.Empty(t, inbox.unsentResets, "uncertain writes must retain their attempt marker")
 	require.Empty(t, runtimes.commitCalls, "failed writes must not advance runtime cursors")
 }
 
@@ -712,6 +714,7 @@ type fakeThreadRuntimeStore struct {
 	createCalls    []db.CreateThreadRuntimeParams
 	advanceCalls   []advanceDeliveryCall
 	commitCalls    []commitDeliveryCall
+	commitErr      error
 	liveCalls      []markLiveCall
 	terminalCalls  []terminalCall
 	heartbeatOK    bool
@@ -786,12 +789,21 @@ func (s *fakeThreadRuntimeStore) AdvanceDeliveryWithLease(_ context.Context, _ u
 	return true, nil
 }
 
-func (s *fakeThreadRuntimeStore) CommitInboxDeliveryWithLease(_ context.Context, _ uuid.UUID, runtimeID, leaseToken, threadID uuid.UUID, _ string, deliveredSequence, ackedSequence int64) (bool, error) {
+func (s *fakeThreadRuntimeStore) CommitInboxDeliveryWithLease(ctx context.Context, _ uuid.UUID, runtimeID, leaseToken, threadID uuid.UUID, _ string, deliveredSequence, ackedSequence int64) (bool, error) {
 	s.commitCalls = append(s.commitCalls, commitDeliveryCall{runtimeID: runtimeID, leaseToken: leaseToken, threadID: threadID, delivered: deliveredSequence, acked: ackedSequence})
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if s.commitErr != nil {
+		return false, s.commitErr
+	}
 	return true, nil
 }
 
-func (s *fakeThreadRuntimeStore) MarkTerminalWithLease(_ context.Context, _ uuid.UUID, runtimeID, _ uuid.UUID, status models.ThreadRuntimeStatus, stopReason, lastError string) (bool, error) {
+func (s *fakeThreadRuntimeStore) MarkTerminalWithLease(ctx context.Context, _ uuid.UUID, runtimeID, _ uuid.UUID, status models.ThreadRuntimeStatus, stopReason, lastError string) (bool, error) {
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
 	s.terminalCalls = append(s.terminalCalls, terminalCall{runtimeID: runtimeID, status: status, stopReason: stopReason, lastError: lastError})
 	return true, nil
 }
@@ -803,7 +815,11 @@ type fakeThreadInboxStore struct {
 	deliveringForMessagesCalls []deliveringForMessagesCall
 	deadLetterCalls            []deadLetterCall
 	deliveryFailedCalls        []deliveryFailedCall
+	unsentResets               []deliveryFailedCall
 	listFn                     func()
+	attemptErr                 error
+	attemptRows                *int64
+	ackFn                      func()
 }
 
 type deadLetterCall struct {
@@ -828,7 +844,7 @@ func (s *fakeThreadInboxStore) AppendForMessage(context.Context, uuid.UUID, db.A
 	return models.ThreadInboxEntry{}, nil
 }
 
-func (s *fakeThreadInboxStore) ClaimDeliverableAfter(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, int64, int) ([]models.ThreadInboxEntry, error) {
+func (s *fakeThreadInboxStore) ClaimDeliverableAfter(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, int64, int) ([]models.ThreadInboxEntry, error) {
 	if s.listFn != nil {
 		s.listFn()
 	}
@@ -837,8 +853,19 @@ func (s *fakeThreadInboxStore) ClaimDeliverableAfter(context.Context, uuid.UUID,
 	return out, nil
 }
 
-func (s *fakeThreadInboxStore) MarkDeliveredForEntry(_ context.Context, _ uuid.UUID, threadID, runtimeID uuid.UUID, _ string, entryID uuid.UUID, sequenceNo int64) (int64, error) {
+func (s *fakeThreadInboxStore) MarkDeliveredForEntry(_ context.Context, _ uuid.UUID, threadID, runtimeID, _ uuid.UUID, _ string, entryID uuid.UUID, sequenceNo int64) (int64, error) {
+	if s.attemptErr != nil {
+		return 0, s.attemptErr
+	}
+	if s.attemptRows != nil {
+		return *s.attemptRows, nil
+	}
 	s.deliveredEntries = append(s.deliveredEntries, markDeliveredEntryCall{threadID: threadID, runtimeID: runtimeID, entryID: entryID, sequenceNo: sequenceNo})
+	return 1, nil
+}
+
+func (s *fakeThreadInboxStore) ResetUnsentDelivery(_ context.Context, _, threadID, runtimeID, _, entryID uuid.UUID) (int64, error) {
+	s.unsentResets = append(s.unsentResets, deliveryFailedCall{threadID: threadID, runtimeID: runtimeID, entryID: entryID})
 	return 1, nil
 }
 
@@ -863,14 +890,13 @@ type deliveringForMessagesCall struct {
 	messageIDs  []int64
 }
 
-func (s *fakeThreadInboxStore) MarkAckedForSeedMessages(_ context.Context, _ uuid.UUID, _ uuid.UUID, runtimeID uuid.UUID, messageIDs []int64) (int64, error) {
+func (s *fakeThreadInboxStore) MarkAckedForSeedMessages(_ context.Context, _ uuid.UUID, _ uuid.UUID, runtimeID, _ uuid.UUID, messageIDs []int64) (int64, error) {
+	if s.ackFn != nil {
+		s.ackFn()
+	}
 	copied := make([]int64, len(messageIDs))
 	copy(copied, messageIDs)
 	s.ackForMessagesCalls = append(s.ackForMessagesCalls, ackForMessagesCall{runtimeID: runtimeID, messageIDs: copied})
-	return int64(len(messageIDs)), nil
-}
-
-func (s *fakeThreadInboxStore) MarkDeliveredForSeedMessages(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, messageIDs []int64) (int64, error) {
 	return int64(len(messageIDs)), nil
 }
 
@@ -878,7 +904,7 @@ func (s *fakeThreadInboxStore) LastAcknowledgedSequence(context.Context, uuid.UU
 	return 0, nil
 }
 
-func (s *fakeThreadInboxStore) MarkDeliveringForMessages(_ context.Context, _ uuid.UUID, _ uuid.UUID, runtimeID uuid.UUID, ownerNodeID string, messageIDs []int64) (int64, error) {
+func (s *fakeThreadInboxStore) MarkDeliveringForMessages(_ context.Context, _ uuid.UUID, _ uuid.UUID, runtimeID, _ uuid.UUID, ownerNodeID string, messageIDs []int64) (int64, error) {
 	copied := make([]int64, len(messageIDs))
 	copy(copied, messageIDs)
 	s.deliveringForMessagesCalls = append(s.deliveringForMessagesCalls, deliveringForMessagesCall{runtimeID: runtimeID, ownerNodeID: ownerNodeID, messageIDs: copied})
@@ -984,4 +1010,141 @@ func (a fakeThreadRuntimeInputAdapter) FormatThreadRuntimeInput(entry models.Thr
 		return nil, err
 	}
 	return append([]byte(a.prefix), input...), nil
+}
+
+func TestThreadRuntimeCloseWaitsForLocalDelivery(t *testing.T) {
+	t.Parallel()
+	orgID, sessionID, threadID := uuid.New(), uuid.New(), uuid.New()
+	runtimes := &fakeThreadRuntimeStore{}
+	orch := &Orchestrator{}
+	unlock := orch.acquireThreadDelivery(threadID)
+	waiting := make(chan struct{})
+	control := &threadRuntimeControl{runtime: models.ThreadRuntime{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, LeaseToken: uuid.New()}, runtimes: runtimes, logger: zerolog.Nop(), lockDelivery: func() func() { close(waiting); return orch.acquireThreadDelivery(threadID) }}
+	closeCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	closed := make(chan struct{})
+	go func() {
+		control.Close(closeCtx, models.ThreadRuntimeStatusClosed, "completed", "")
+		close(closed)
+	}()
+	<-waiting
+	cancel()
+	require.Empty(t, runtimes.terminalCalls, "closure must not release inbox ownership while local delivery still owns the lock")
+	unlock()
+	<-closed
+	require.Equal(t, []terminalCall{{runtimeID: control.runtime.ID, status: models.ThreadRuntimeStatusClosed, stopReason: "completed"}}, runtimes.terminalCalls, "closure should terminalize exactly once after in-flight delivery finishes")
+	_, retained := orch.threadDeliveryLocks.Load(threadID)
+	require.False(t, retained, "delivery lock registry must release entries only after all owners and waiters finish")
+}
+
+type orderedInboxWriteHandle struct {
+	*threadCancelTestHandle
+	onWrite func(context.Context, []byte) error
+}
+
+func (h *orderedInboxWriteHandle) WriteInput(ctx context.Context, data []byte) error {
+	return h.onWrite(ctx, data)
+}
+
+func TestOrchestrator_DeliverThreadInboxPersistsAttemptBeforeAcceptance(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name                                      string
+		cancelAfterAcceptance, failAcknowledgment bool
+	}{
+		{name: "success"}, {name: "canceled acknowledgment", cancelAfterAcceptance: true}, {name: "failed acknowledgment", failAcknowledgment: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, sessionID, threadID := uuid.New(), uuid.New(), uuid.New()
+			runtime := models.ThreadRuntime{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, AgentType: models.AgentTypeClaudeCode, Status: models.ThreadRuntimeStatusLive, OwnerNodeID: "worker-a", LeaseToken: uuid.New()}
+			entry := models.ThreadInboxEntry{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, SequenceNo: 1, EntryType: models.ThreadInboxEntryTypeUserMessage, Payload: json.RawMessage(`{"content":"queued instruction"}`)}
+			inbox := &fakeThreadInboxStore{deliverable: []models.ThreadInboxEntry{entry}}
+			runtimes := &fakeThreadRuntimeStore{active: runtime}
+			if tt.failAcknowledgment {
+				runtimes.commitErr = errors.New("database unavailable after provider acceptance")
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			handle := &orderedInboxWriteHandle{threadCancelTestHandle: newThreadCancelTestHandle()}
+			handle.onWrite = func(ctx context.Context, data []byte) error {
+				require.Equal(t, []markDeliveredEntryCall{{threadID: threadID, runtimeID: runtime.ID, entryID: entry.ID, sequenceNo: 1}}, inbox.deliveredEntries, "durable attempt boundary must exist before provider accepts any bytes")
+				err := handle.threadCancelTestHandle.WriteInput(ctx, data)
+				if tt.cancelAfterAcceptance {
+					cancel()
+				}
+				return err
+			}
+			registry := NewThreadCancelRegistry(zerolog.Nop())
+			registry.Register(threadID, func() {})
+			registry.AttachHandle(threadID, handle)
+			orch := NewOrchestrator(OrchestratorConfig{Adapters: map[models.AgentType]AgentAdapter{models.AgentTypeClaudeCode: fakeThreadRuntimeInputAdapter{}}, ThreadCancels: registry, ThreadRuntimes: runtimes, ThreadInbox: inbox, NodeID: "worker-a", Logger: zerolog.Nop()})
+			err := orch.DeliverThreadInbox(ctx, orgID, sessionID, threadID)
+			if tt.cancelAfterAcceptance || tt.failAcknowledgment {
+				require.Error(t, err, "post-acceptance acknowledgment failure should remain visible")
+			} else {
+				require.NoError(t, err, "owned successful write should acknowledge normally")
+			}
+			require.Equal(t, []byte("queued instruction\n"), handle.StdinBuffer(), "provider should receive the exact input once")
+			require.Empty(t, inbox.unsentResets, "accepted input must retain its durable attempt boundary even if acknowledgment fails")
+			require.Empty(t, inbox.deliveryFailedCalls, "accepted or ambiguous input must not be made automatically retryable")
+		})
+	}
+}
+
+func TestOrchestrator_DeliverThreadInboxRequiresDurableAttemptBeforeWrite(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name          string
+		databaseError bool
+	}{{name: "lease fenced"}, {name: "database failed", databaseError: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, sessionID, threadID := uuid.New(), uuid.New(), uuid.New()
+			runtime := models.ThreadRuntime{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, AgentType: models.AgentTypeClaudeCode, Status: models.ThreadRuntimeStatusLive, OwnerNodeID: "worker-a", LeaseToken: uuid.New()}
+			zero := int64(0)
+			inbox := &fakeThreadInboxStore{attemptRows: &zero, deliverable: []models.ThreadInboxEntry{{ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, SequenceNo: 1, EntryType: models.ThreadInboxEntryTypeUserMessage, Payload: json.RawMessage(`{"content":"must not reach provider"}`)}}}
+			if tt.databaseError {
+				inbox.attemptErr = errors.New("database unavailable before provider write")
+			}
+			handle := newThreadCancelTestHandle()
+			registry := NewThreadCancelRegistry(zerolog.Nop())
+			registry.Register(threadID, func() {})
+			registry.AttachHandle(threadID, handle)
+			runtimes := &fakeThreadRuntimeStore{active: runtime}
+			orch := NewOrchestrator(OrchestratorConfig{Adapters: map[models.AgentType]AgentAdapter{models.AgentTypeClaudeCode: fakeThreadRuntimeInputAdapter{}}, ThreadCancels: registry, ThreadRuntimes: runtimes, ThreadInbox: inbox, NodeID: "worker-a", Logger: zerolog.Nop()})
+			err := orch.DeliverThreadInbox(context.Background(), orgID, sessionID, threadID)
+			require.Error(t, err, "failed durable attempt must reject the external write")
+			require.Empty(t, handle.StdinBuffer(), "provider must receive no bytes when attempt persistence fails")
+			require.Empty(t, runtimes.commitCalls, "failed pre-write fence cannot advance acknowledgment")
+		})
+	}
+}
+
+func TestThreadRuntimeAttacherSerializesSeedAcknowledgmentBeforeLiveDelivery(t *testing.T) {
+	t.Parallel()
+	orgID, threadID, runtimeID, token := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	ackStarted, releaseAck := make(chan struct{}), make(chan struct{})
+	inbox := &fakeThreadInboxStore{ackFn: func() { close(ackStarted); <-releaseAck }}
+	runtimes := &fakeThreadRuntimeStore{}
+	registry := NewThreadCancelRegistry(zerolog.Nop())
+	registry.Register(threadID, func() {})
+	orch := &Orchestrator{}
+	attacher := newThreadRuntimeHandleAttacher(threadRuntimeHandleAttacherConfig{Registry: registry, OrgID: orgID, ThreadID: threadID, RuntimeID: runtimeID, LeaseToken: token, RuntimeStore: runtimes, InboxStore: inbox, SeedMessageIDs: []int64{11}, Logger: zerolog.Nop(), LockDelivery: func() func() { return orch.acquireThreadDelivery(threadID) }})
+	attached := make(chan struct{})
+	go func() { attacher.Attach(newThreadCancelTestHandle()); close(attached) }()
+	<-ackStarted
+	waiting, entered := make(chan struct{}), make(chan struct{})
+	go func() { close(waiting); unlock := orch.acquireThreadDelivery(threadID); close(entered); unlock() }()
+	<-waiting
+	select {
+	case <-entered:
+		t.Fatal("live delivery must not acquire serialization before initial seed acknowledgment")
+	default:
+	}
+	close(releaseAck)
+	<-attached
+	<-entered
+	require.Equal(t, []ackForMessagesCall{{runtimeID: runtimeID, messageIDs: []int64{11}}}, inbox.ackForMessagesCalls, "initial seed must be applied before another live delivery can use the handle")
+	require.Equal(t, []markLiveCall{{runtimeID: runtimeID, leaseToken: token, handleID: "thread-test-handle"}}, runtimes.liveCalls, "initial handle should become live under the same delivery serialization")
 }

@@ -34,12 +34,12 @@ type ThreadRuntimeStore interface {
 
 type ThreadInboxStore interface {
 	AppendForMessage(ctx context.Context, orgID uuid.UUID, params db.AppendThreadInboxEntryParams) (models.ThreadInboxEntry, error)
-	ClaimDeliverableAfter(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, afterSequence int64, limit int) ([]models.ThreadInboxEntry, error)
-	MarkDeliveredForEntry(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, entryID uuid.UUID, sequenceNo int64) (int64, error)
-	MarkAckedForSeedMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, messageIDs []int64) (int64, error)
-	MarkDeliveredForSeedMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, messageIDs []int64) (int64, error)
+	ClaimDeliverableAfter(ctx context.Context, orgID, threadID, runtimeID, leaseToken uuid.UUID, ownerNodeID string, afterSequence int64, limit int) ([]models.ThreadInboxEntry, error)
+	MarkDeliveredForEntry(ctx context.Context, orgID, threadID, runtimeID, leaseToken uuid.UUID, ownerNodeID string, entryID uuid.UUID, sequenceNo int64) (int64, error)
+	ResetUnsentDelivery(ctx context.Context, orgID, threadID, runtimeID, leaseToken, entryID uuid.UUID) (int64, error)
+	MarkAckedForSeedMessages(ctx context.Context, orgID, threadID, runtimeID, leaseToken uuid.UUID, messageIDs []int64) (int64, error)
 	LastAcknowledgedSequence(ctx context.Context, orgID, threadID uuid.UUID) (int64, error)
-	MarkDeliveringForMessages(ctx context.Context, orgID, threadID, runtimeID uuid.UUID, ownerNodeID string, messageIDs []int64) (int64, error)
+	MarkDeliveringForMessages(ctx context.Context, orgID, threadID, runtimeID, leaseToken uuid.UUID, ownerNodeID string, messageIDs []int64) (int64, error)
 	MarkDeadLetter(ctx context.Context, orgID, threadID, entryID uuid.UUID, reason string) (models.ThreadInboxEntry, error)
 	MarkDeliveryFailed(ctx context.Context, orgID, threadID, runtimeID, entryID uuid.UUID, reason string, maxAttempts int) (models.ThreadInboxEntry, error)
 	CountPendingByThread(ctx context.Context, orgID, threadID uuid.UUID) (int, error)
@@ -93,6 +93,7 @@ type threadRuntimeControl struct {
 	holders                   SessionSandboxHolderStore
 	inbox                     ThreadInboxStore
 	seedMessageIDs            []int64
+	lockDelivery              func() func()
 	heartbeatFailureStartedAt time.Time
 	logger                    zerolog.Logger
 }
@@ -146,6 +147,7 @@ func (o *Orchestrator) startThreadRuntimeControl(ctx context.Context, session *m
 		inbox:          o.threadInbox,
 		seedMessageIDs: append([]int64(nil), seedMessageIDs...),
 		logger:         log,
+		lockDelivery:   func() func() { return o.acquireThreadDelivery(threadID) },
 	}
 	if o.sandboxHolders != nil {
 		if _, err := o.sandboxHolders.CreateActive(ctx, session.OrgID, db.CreateSessionSandboxHolderParams{
@@ -162,12 +164,36 @@ func (o *Orchestrator) startThreadRuntimeControl(ctx context.Context, session *m
 		}
 	}
 	if o.threadInbox != nil && len(seedMessageIDs) > 0 {
-		if _, err := o.threadInbox.MarkDeliveringForMessages(ctx, session.OrgID, threadID, runtime.ID, o.nodeID, seedMessageIDs); err != nil {
+		if _, err := o.threadInbox.MarkDeliveringForMessages(ctx, session.OrgID, threadID, runtime.ID, runtime.LeaseToken, o.nodeID, seedMessageIDs); err != nil {
 			control.Close(context.Background(), models.ThreadRuntimeStatusFailed, "seed_inbox_delivering_failed", err.Error())
 			return nil, fmt.Errorf("mark seed thread inbox messages delivering: %w", err)
 		}
 	}
 	return control, nil
+}
+
+// admitSeedWithoutPhase preserves durable provider admission for optional
+// wiring without activity phases. Admission failures occur before Execute.
+func (c *threadRuntimeControl) admitSeedWithoutPhase(ctx context.Context) error {
+	if c == nil || len(c.seedMessageIDs) == 0 {
+		return nil
+	}
+	if c.inbox == nil {
+		return fmt.Errorf("seed admission requires durable inbox")
+	}
+	count, err := c.inbox.MarkAckedForSeedMessages(ctx, c.runtime.OrgID, c.runtime.ThreadID, c.runtime.ID, c.runtime.LeaseToken, c.seedMessageIDs)
+	if err != nil {
+		return fmt.Errorf("admit provider seed: %w", err)
+	}
+	unique := make(map[int64]struct{}, len(c.seedMessageIDs))
+	for _, id := range c.seedMessageIDs {
+		unique[id] = struct{}{}
+	}
+	if count != int64(len(unique)) {
+		return fmt.Errorf("admit provider seed: %w", db.ErrInboxBatchConflict)
+	}
+	c.seedMessageIDs = nil
+	return nil
 }
 
 func (c *threadRuntimeControl) Attacher(registry *ThreadCancelRegistry) InteractiveHandleAttacher {
@@ -185,6 +211,7 @@ func (c *threadRuntimeControl) Attacher(registry *ThreadCancelRegistry) Interact
 		InboxStore:     c.inbox,
 		SeedMessageIDs: c.seedMessageIDs,
 		Logger:         c.logger,
+		LockDelivery:   c.lockDelivery,
 	})
 }
 
@@ -315,6 +342,16 @@ func (c *threadRuntimeControl) Close(ctx context.Context, status models.ThreadRu
 	if c == nil {
 		return
 	}
+	if c.lockDelivery != nil {
+		unlock := c.lockDelivery()
+		defer unlock()
+	}
+
+	// Waiting for a bounded delivery must not consume the cleanup write budget.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), threadRuntimeStateUpdateTimeout)
+	defer cancel()
+	ctx = writeCtx
+
 	if c.runtimes != nil {
 		ok, err := c.runtimes.MarkTerminalWithLease(ctx, c.runtime.OrgID, c.runtime.ID, c.runtime.LeaseToken, status, stopReason, lastError)
 		if err != nil {
@@ -398,6 +435,7 @@ type threadRuntimeHandleAttacherConfig struct {
 	LeaseToken     uuid.UUID
 	LeaseDuration  time.Duration
 	SeedMessageIDs []int64
+	LockDelivery   func() func()
 	Logger         zerolog.Logger
 }
 
@@ -416,6 +454,11 @@ func (a *threadRuntimeHandleAttacher) Attach(handle InteractiveCommandHandle) {
 	if a == nil || handle == nil {
 		return
 	}
+	if a.cfg.LockDelivery != nil {
+		unlock := a.cfg.LockDelivery()
+		defer unlock()
+	}
+
 	if a.cfg.Registry != nil {
 		a.cfg.Registry.AttachHandle(a.cfg.ThreadID, handle)
 	}
@@ -448,11 +491,14 @@ func (a *threadRuntimeHandleAttacher) Attach(handle InteractiveCommandHandle) {
 		return
 	}
 	if a.cfg.InboxStore != nil && len(a.cfg.SeedMessageIDs) > 0 {
-		if _, err := a.cfg.InboxStore.MarkAckedForSeedMessages(ctx, a.cfg.OrgID, a.cfg.ThreadID, a.cfg.RuntimeID, a.cfg.SeedMessageIDs); err != nil {
+		if _, err := a.cfg.InboxStore.MarkAckedForSeedMessages(ctx, a.cfg.OrgID, a.cfg.ThreadID, a.cfg.RuntimeID, a.cfg.LeaseToken, a.cfg.SeedMessageIDs); err != nil {
 			a.warn().Err(err).
 				Str("runtime_id", a.cfg.RuntimeID.String()).
 				Str("thread_id", a.cfg.ThreadID.String()).
 				Msg("failed to ack seed thread inbox messages after live handle attach")
+			if a.cfg.Registry != nil {
+				a.cfg.Registry.DetachHandle(a.cfg.ThreadID)
+			}
 		}
 	}
 }
@@ -473,16 +519,9 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 		return nil
 	}
 
-	// Pre-check ownership *before* acquiring the per-thread delivery lock.
-	// The lock exists to serialize delivery attempts on the owning worker;
-	// non-owning workers (stray notifications, mis-routed jobs) must not
-	// populate o.threadDeliveryLocks because they have no Close() path to
-	// clean it up — forgetThreadDeliveryLock only runs from
-	// RunAgent/ContinueSession on the owner, so any lock created here on a
-	// non-owner would leak for the life of the worker process. The fresh
-	// runtime read used to drive delivery happens again below under the
-	// lock so a concurrent commit on this same worker can't leave us
-	// chasing stale delivery cursors.
+	// Reject misrouted delivery before entering the owner's local serialization
+	// path. Re-read the active runtime under that lock before claiming input.
+
 	if runtime, err := o.threadRuntimes.GetActiveByThread(ctx, orgID, threadID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -498,9 +537,8 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 		}
 	}
 
-	lock := o.threadDeliveryLock(threadID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := o.acquireThreadDelivery(threadID)
+	defer unlock()
 
 	runtime, err := o.threadRuntimes.GetActiveByThread(ctx, orgID, threadID)
 	if err != nil {
@@ -538,7 +576,7 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 
 	formatter := o.threadRuntimeInputFormatter(runtime.AgentType)
 
-	entries, err := o.threadInbox.ClaimDeliverableAfter(ctx, orgID, threadID, runtime.ID, runtime.OwnerNodeID, runtime.LastDeliveredSequence, threadInboxDeliveryBatchSize)
+	entries, err := o.threadInbox.ClaimDeliverableAfter(ctx, orgID, threadID, runtime.ID, runtime.LeaseToken, runtime.OwnerNodeID, runtime.LastDeliveredSequence, threadInboxDeliveryBatchSize)
 	if err != nil {
 		return fmt.Errorf("claim deliverable thread inbox entries: %w", err)
 	}
@@ -610,10 +648,28 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 				Msg("dead-lettered poison thread inbox entry")
 			continue
 		}
+		// Persist possible acceptance before the external write. A canceled or
+		// failed write may still have reached the provider; only typed definite
+		// nonacceptance below may reopen this entry automatically.
+		attempted, attemptErr := o.threadInbox.MarkDeliveredForEntry(ctx, orgID, threadID, runtime.ID, runtime.LeaseToken, runtime.OwnerNodeID, entry.ID, entry.SequenceNo)
+		if attemptErr != nil {
+			return fmt.Errorf("record inbox write attempt %d: %w", entry.SequenceNo, attemptErr)
+		}
+		if attempted != 1 {
+			return fmt.Errorf("record inbox write attempt %d: %w", entry.SequenceNo, ErrThreadRuntimeLeaseLost)
+		}
 		writeCtx, cancel := context.WithTimeout(ctx, threadInboxHandleWriteTimeout)
 		err = o.threadCancels.DeliverInput(writeCtx, threadID, input)
 		cancel()
 		if errors.Is(err, ErrThreadHandleUnavailable) || errors.Is(err, ErrInputNotOpen) {
+			resetRows, resetErr := o.threadInbox.ResetUnsentDelivery(ctx, orgID, threadID, runtime.ID, runtime.LeaseToken, entry.ID)
+			if resetErr != nil {
+				return fmt.Errorf("reset unsent inbox write attempt %d: %w", entry.SequenceNo, resetErr)
+			}
+			if resetRows != 1 {
+				return fmt.Errorf("reset unsent inbox write attempt %d: %w", entry.SequenceNo, ErrThreadRuntimeLeaseLost)
+			}
+
 			if flushErr := flushDelivered(); flushErr != nil {
 				return fmt.Errorf("acknowledge delivered inbox segment before unavailable entry %d: %w", entry.SequenceNo, flushErr)
 			}
@@ -629,24 +685,10 @@ func (o *Orchestrator) DeliverThreadInbox(ctx context.Context, orgID, sessionID,
 			if flushErr := flushDelivered(); flushErr != nil {
 				return fmt.Errorf("acknowledge delivered inbox segment before failed entry %d: %w", entry.SequenceNo, flushErr)
 			}
-			failedEntry, markErr := o.threadInbox.MarkDeliveryFailed(ctx, orgID, threadID, runtime.ID, entry.ID, err.Error(), db.DefaultThreadInboxMaxDeliveryAttempts)
-			if markErr != nil {
-				return fmt.Errorf("mark thread inbox entry %d failed after handle write failure: %w", entry.SequenceNo, markErr)
-			}
-			if failedEntry.DeliveryState == models.ThreadInboxDeliveryStateDeadLetter {
-				if advanceErr := advanceDeadLetter(entry.SequenceNo); advanceErr != nil {
-					return fmt.Errorf("advance failed thread inbox entry %d: %w", entry.SequenceNo, advanceErr)
-				}
-			}
+
 			return fmt.Errorf("deliver thread inbox entry %d to runtime handle: %w", entry.SequenceNo, err)
 		}
-		deliveredRows, err := o.threadInbox.MarkDeliveredForEntry(ctx, orgID, threadID, runtime.ID, runtime.OwnerNodeID, entry.ID, entry.SequenceNo)
-		if err != nil {
-			return fmt.Errorf("mark thread inbox entry %d delivered: %w", entry.SequenceNo, err)
-		}
-		if deliveredRows != 1 {
-			return fmt.Errorf("mark thread inbox entry %d delivered: expected 1 row, updated %d", entry.SequenceNo, deliveredRows)
-		}
+
 		deliveredSequenceEnd = entry.SequenceNo
 	}
 	return flushDelivered()
@@ -711,16 +753,29 @@ func (defaultThreadRuntimeInputFormatter) FormatThreadRuntimeInput(entry models.
 	return formatThreadInboxRuntimeInput(entry)
 }
 
-func (o *Orchestrator) threadDeliveryLock(threadID uuid.UUID) *sync.Mutex {
-	val, _ := o.threadDeliveryLocks.LoadOrStore(threadID, &sync.Mutex{})
-	return val.(*sync.Mutex)
+type threadDeliveryLockEntry struct {
+	mu    sync.Mutex
+	users int
 }
 
-func (o *Orchestrator) forgetThreadDeliveryLock(threadID uuid.UUID) {
-	if o == nil || threadID == uuid.Nil {
-		return
+// acquireThreadDelivery keeps waiters on the same lock through runtime closure
+// and replacement. Delete only after the final owner/waiter releases it.
+func (o *Orchestrator) acquireThreadDelivery(threadID uuid.UUID) func() {
+	o.threadDeliveryLocksMu.Lock()
+	value, _ := o.threadDeliveryLocks.LoadOrStore(threadID, &threadDeliveryLockEntry{})
+	entry := value.(*threadDeliveryLockEntry)
+	entry.users++
+	o.threadDeliveryLocksMu.Unlock()
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		o.threadDeliveryLocksMu.Lock()
+		defer o.threadDeliveryLocksMu.Unlock()
+		entry.users--
+		if entry.users == 0 {
+			o.threadDeliveryLocks.Delete(threadID)
+		}
 	}
-	o.threadDeliveryLocks.Delete(threadID)
 }
 
 func formatThreadInboxRuntimeInput(entry models.ThreadInboxEntry) ([]byte, error) {

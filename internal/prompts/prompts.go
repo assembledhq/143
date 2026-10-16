@@ -125,6 +125,10 @@ func AgentPRHandoff(data AgentPRHandoffData) string {
 	return render("agent_pr_handoff.template", data)
 }
 
+func AutomationPublicationIntent() string {
+	return render("automation_publication_intent.template", nil)
+}
+
 // AnswerOnlyPreamble returns the preamble injected into Slack answer-only agent
 // prompts. These runs should answer questions without mutating the repository.
 func AnswerOnlyPreamble() string {
