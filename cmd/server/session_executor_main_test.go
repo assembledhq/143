@@ -11,6 +11,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRuntimesWirePublicationCoordinatorBeforeProcessing(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name, filename, storesBuilt string
+	}{
+		{"worker", "main.go", "stores := &worker.Stores{"},
+		{"session executor", "session_executor_main.go", "stores := buildSessionExecutorStores("},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			source, err := os.ReadFile(tt.filename)
+			require.NoError(t, err, "runtime bootstrap source should be readable")
+			body := string(source)
+			storesBuilt := strings.Index(body, tt.storesBuilt)
+			wired := strings.Index(body, "wirePublicationCoordinator(cfg, services, stores, logger)")
+			evidenceWired := strings.Index(body, "wirePublicationReviewEvidenceRefresher(services, stores)")
+			require.NotEqual(t, -1, storesBuilt, "runtime must construct publication stores")
+			require.NotEqual(t, -1, wired, "every runtime that completes automation turns must inject the publication coordinator")
+			require.NotEqual(t, -1, evidenceWired, "runtime must retain publication review evidence wiring")
+			require.Greater(t, wired, storesBuilt, "coordinator wiring must use the complete runtime stores")
+			require.Less(t, wired, evidenceWired, "coordinator must exist before publication evidence wiring and job processing")
+		})
+	}
+}
+
 func TestSessionExecutorWiresPublicationReviewEvidenceRefresher(t *testing.T) {
 	t.Parallel()
 
