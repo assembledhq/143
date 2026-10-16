@@ -45,7 +45,7 @@ describe("frontend CI guardrails", () => {
     expect(frontendTestJob).toContain("npx vitest run");
   });
 
-  it("keeps hot-path frontend tests fast and reserves coverage for scheduled/manual runs", () => {
+  it("requires full coverage for shared inputs while retaining affected leaf tests", () => {
     const workflow = fs.readFileSync(
       path.join(repoRoot, ".github", "workflows", "ci.yml"),
       "utf8"
@@ -53,40 +53,40 @@ describe("frontend CI guardrails", () => {
     const frontendTestJob = workflow.match(
       /  frontend-test:\n[\s\S]*?(?=\n  [a-z0-9-]+:|\n$)/
     )?.[0];
-
     expect(frontendTestJob).toBeDefined();
     if (!frontendTestJob) {
       throw new Error("frontend-test job should exist in CI workflow");
     }
+    const step = (name: string) => {
+      const content = frontendTestJob.split(`      - name: ${name}\n`)[1]?.split("\n      - name:")[0];
+      expect(content).toBeDefined();
+      return content ?? "";
+    };
 
-    const affectedTestsStep = frontendTestJob.match(
-      /      - name: Run affected tests \(PR\)\n[\s\S]*?(?=\n      - name:|\n  [a-z0-9-]+:|\n$)/
-    )?.[0];
-    const mainTestsStep = frontendTestJob.match(
-      /      - name: Run affected tests \(main\)\n[\s\S]*?(?=\n      - name:|\n  [a-z0-9-]+:|\n$)/
-    )?.[0];
-    const fullCoverageStep = frontendTestJob.match(
-      /      - name: Run full tests with coverage \(scheduled\/manual\)\n[\s\S]*?(?=\n      - name:|\n  [a-z0-9-]+:|\n$)/
-    )?.[0];
+    const scopeStep = step("Select frontend test scope");
+    expect(scopeStep).toContain("id: scope");
+    expect(scopeStep).toContain("python3 -B .github/scripts/select_frontend_tests.py");
+    expect(scopeStep).toContain("github.event.pull_request.base.sha");
+    expect(scopeStep).toContain("github.event.before");
 
-    expect(affectedTestsStep).toBeDefined();
-    expect(affectedTestsStep).toContain("--changed=pr-base");
-    expect(affectedTestsStep).not.toContain("--coverage");
+    const affectedStep = step("Run affected tests");
+    expect(affectedStep).toContain("if: steps.scope.outputs.full == 'false'");
+    expect(affectedStep).toContain("steps.scope.outputs.base");
+    expect(affectedStep).toContain('--changed="$FRONTEND_TEST_BASE"');
+    expect(affectedStep).not.toContain("--coverage");
+
+    const fullCoverageStep = step("Run full tests with coverage");
+    expect(fullCoverageStep).toContain("if: steps.scope.outputs.full == 'true'");
+    expect(fullCoverageStep).toContain("--coverage");
+    expect(fullCoverageStep).not.toContain("--passWithNoTests");
+    expect(fullCoverageStep).not.toContain("--changed");
+    expect(step("Check frontend coverage floor")).toContain("if: steps.scope.outputs.full == 'true'");
+    expect(step("Check frontend coverage floor")).toContain("FRONTEND_COVERAGE_MIN");
+    expect(step("Upload coverage report")).toContain("steps.scope.outputs.full == 'true'");
     expect(frontendTestJob).not.toContain("diff-cover");
 
-    expect(mainTestsStep).toBeDefined();
-    expect(mainTestsStep).toContain("if: github.event_name == 'push'");
-    expect(mainTestsStep).toContain("--changed=push-base");
-    expect(mainTestsStep).not.toContain("--coverage");
-
-    expect(fullCoverageStep).toBeDefined();
-    expect(fullCoverageStep).toContain("github.event_name == 'schedule'");
-    expect(fullCoverageStep).toContain("github.event_name == 'workflow_dispatch'");
-    expect(fullCoverageStep).toContain("--coverage");
-
-    // The scheduled coverage run is the only full-suite execution, so it
-    // must fire at least twice a day to bound the exposure window for
-    // breakage that affected-test runs missed.
+    // Keep the twice-daily backstop even when a leaf's import graph misses a
+    // dependency. The selector's behavior is exercised by Python Git fixtures.
     const cronLines = workflow.match(/- cron: "[^"]+"/g) ?? [];
     expect(cronLines.length).toBeGreaterThan(0);
     for (const line of cronLines) {

@@ -46,6 +46,43 @@ test("selects Analytics metrics without another request and exposes comparison d
   const pageErrors: string[] = [];
   const analyticsRequests: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
+  // This fixture represents a healthy, idle review stream. Serving the JSON
+  // catch-all below to EventSource causes WebKit errors and enables the 5s
+  // polling fallback, which can race the metric-only request assertion.
+  await context.addInitScript(() => {
+    class FixtureEventSource extends EventTarget {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSED = 2;
+      readonly CONNECTING = 0;
+      readonly OPEN = 1;
+      readonly CLOSED = 2;
+      readonly url: string;
+      readonly withCredentials: boolean;
+      readyState = FixtureEventSource.CONNECTING;
+      onopen: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+
+      constructor(url: string | URL, options?: EventSourceInit) {
+        super();
+        this.url = String(url);
+        this.withCredentials = options?.withCredentials ?? false;
+        queueMicrotask(() => {
+          if (this.readyState === FixtureEventSource.CLOSED) return;
+          this.readyState = FixtureEventSource.OPEN;
+          const event = new Event("open");
+          this.onopen?.(event);
+          this.dispatchEvent(event);
+        });
+      }
+
+      close() {
+        this.readyState = FixtureEventSource.CLOSED;
+      }
+    }
+    Object.defineProperty(window, "EventSource", { configurable: true, writable: true, value: FixtureEventSource });
+  });
   await context.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
     let body: unknown = { data: [], meta: {} };
@@ -75,7 +112,10 @@ test("selects Analytics metrics without another request and exposes comparison d
   await expect(chart.getByText(/Current requested range:/)).not.toBeVisible();
   const before = analyticsRequests.length;
   const p95 = page.getByRole("button", { name: /^Show P95 rounds to approval trend/ });
-  await p95.click();
+  // Safari does not focus buttons on pointer clicks. Use keyboard activation
+  // so retaining focus after the chart changes is a browser-independent check.
+  await p95.focus();
+  await p95.press("Enter");
   await expect(p95).toHaveAttribute("aria-pressed", "true");
   await expect(p95).toBeFocused();
   await expect(page).toHaveURL(/analytics_metric=p95_rounds_to_approval/);
