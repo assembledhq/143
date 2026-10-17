@@ -175,6 +175,107 @@ describe("useAutosave", () => {
     expect(mutationFn).toHaveBeenNthCalledWith(2, { settings: { b: 2, c: 3 } });
   });
 
+  it("keeps a save made during the settle refetch queued behind the older pending one", async () => {
+    // The in-flight save settles with a refetch. A save made during that
+    // refetch has to queue behind it — and behind anything already pending —
+    // or it dispatches on its own while the older pending payload waits to
+    // drain, and whichever write commits last wins.
+    let resolveFirst: (() => void) | undefined;
+    const mutationFn = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValue(undefined);
+    let releaseRefetch: (() => void) | undefined;
+    const refetch = new Promise<void>((resolve) => {
+      releaseRefetch = resolve;
+    });
+    const invalidate = vi
+      .spyOn(queryClient, "invalidateQueries")
+      .mockImplementationOnce(() => refetch)
+      .mockResolvedValue(undefined);
+
+    const { result } = renderHook(
+      () =>
+        useAutosave<{ settings: Record<string, unknown> }>({
+          queryKey: ["settings", "test-settle-refetch"],
+          mutationFn,
+          applyOptimistic,
+          coalesce,
+          debounceMs: 0,
+        }),
+      { wrapper: makeWrapper(queryClient) },
+    );
+
+    const outcomes: string[] = [];
+    act(() => {
+      outcomes.push(result.current.save({ settings: { a: 1 } }));
+    });
+    await waitFor(() => expect(mutationFn).toHaveBeenCalledTimes(1));
+    act(() => {
+      outcomes.push(result.current.save({ settings: { b: 1 } }));
+    });
+
+    await act(async () => {
+      resolveFirst?.();
+    });
+    await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(1));
+
+    // The refetch is still running: this save must queue, not dispatch.
+    act(() => {
+      outcomes.push(result.current.save({ settings: { b: 2 } }));
+    });
+    expect(mutationFn).toHaveBeenCalledTimes(1);
+    expect(outcomes).toEqual(["sent", "queued", "queued"]);
+
+    await act(async () => {
+      releaseRefetch?.();
+    });
+    await waitFor(() => expect(mutationFn).toHaveBeenCalledTimes(2));
+    expect(mutationFn).toHaveBeenNthCalledWith(2, { settings: { b: 2 } });
+  });
+
+  it("reports when a save is skipped or debounced", () => {
+    queryClient.setQueryData(["settings", "test-outcomes"], {
+      data: { settings: { a: 1 } },
+    });
+    const mutationFn = vi.fn().mockResolvedValue(undefined);
+    const { result } = renderHook(
+      () =>
+        useAutosave<{ settings: Record<string, unknown> }>({
+          queryKey: ["settings", "test-outcomes"],
+          mutationFn,
+          applyOptimistic,
+          coalesce,
+          debounceMs: 0,
+        }),
+      { wrapper: makeWrapper(queryClient) },
+    );
+    act(() => {
+      expect(result.current.save({ settings: { a: 1 } })).toBe("skipped");
+    });
+
+    const debounced = renderHook(
+      () =>
+        useAutosave<{ settings: Record<string, unknown> }>({
+          queryKey: ["settings", "test-outcomes-debounced"],
+          mutationFn,
+          applyOptimistic,
+          coalesce,
+          debounceMs: 50,
+        }),
+      { wrapper: makeWrapper(queryClient) },
+    );
+    act(() => {
+      expect(debounced.result.current.save({ settings: { a: 2 } })).toBe("debounced");
+    });
+    expect(mutationFn).not.toHaveBeenCalled();
+  });
+
   it("collapses N rapid saves into at most two mutations (rapid toggle)", async () => {
     // Rapid-toggle scenario: a user mashes a switch (or types very fast). The
     // shared queue should collapse everything into one in-flight + one

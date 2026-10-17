@@ -61,6 +61,11 @@ import {
   capabilitySummary,
   normalizeCapabilityGrants,
 } from "@/components/automation-capabilities-editor";
+import {
+  AutomationFallbackModelsEditor,
+  automationFallbackRanks,
+  buildAutomationFallbackModels,
+} from "@/components/automation-fallback-models-editor";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { AutomationScheduleEditor } from "@/components/automation-schedule-editor";
 import { NoReposWarning } from "@/components/no-repos-warning";
@@ -97,6 +102,7 @@ import {
 import type {
   AgentCapabilityDefinition,
   AutomationEventTriggerInput,
+  AutomationFallbackModels,
   AutomationGitHubEventFilters,
   LinearEventTriggerFilter,
   LinearEventType,
@@ -237,6 +243,12 @@ export default function NewAutomationPage() {
   const [scheduleDraft, setScheduleDraftState] =
     useState<ScheduleDraft | null>(initialScheduleDraft);
   const [scheduleValid, setScheduleValid] = useState(false);
+  // Held outside `form` because the saved-draft shape (`AutomationFormState`)
+  // is versioned storage read by already-persisted drafts; the chain is
+  // re-picked if the tab is reloaded rather than restored half-understood.
+  const [fallbackModels, setFallbackModels] = useState<AutomationFallbackModels>(
+    {},
+  );
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [redirecting, setRedirecting] = useState(false);
@@ -638,6 +650,9 @@ export default function NewAutomationPage() {
         pre_pr_review_loops: effectivePrePRReviewLoops,
         ...(showReasoningSelector && reasoningEffort
           ? { reasoning_effort: reasoningEffort }
+          : {}),
+        ...(fallbackModels.models?.length
+          ? { fallback_models: fallbackModels }
           : {}),
         base_branch: selectedBaseBranch.trim() || undefined,
         priority,
@@ -1170,13 +1185,32 @@ export default function NewAutomationPage() {
                           ariaLabel="Model"
                           value={model}
                           agentType={modelAgentType}
-                          onValueChange={(selection) =>
+                          onValueChange={(selection) => {
+                            const nextAgentType = selection
+                              ? (selection.agentType
+                                ?? agentTypeForModel(selection.model)
+                                ?? defaultAgentType)
+                              : defaultAgentType;
+                            // Same reconciliation the detail page does on save
+                            // (see reconcileFallbackModelsPatch there): a rank
+                            // equal to the new primary would retry the model
+                            // that just failed on the very next attempt. Matched
+                            // on agent and model, not effort — the same id under
+                            // Pi and under OpenCode is a different route.
+                            setFallbackModels((current) =>
+                              buildAutomationFallbackModels(
+                                automationFallbackRanks(
+                                  current,
+                                  nextAgentType,
+                                ).filter(
+                                  (rank) =>
+                                    !selection
+                                    || rank.model !== selection.model
+                                    || rank.agentType !== nextAgentType,
+                                ),
+                              ),
+                            );
                             setForm((current) => {
-                              const nextAgentType = selection
-                                ? (selection.agentType
-                                  ?? agentTypeForModel(selection.model)
-                                  ?? defaultAgentType)
-                                : defaultAgentType;
                               // Reasoning levels aren't a shared scale (Claude
                               // Code has "max", Codex stops at "xhigh"), and a
                               // level the new agent can't grade would fail the
@@ -1193,23 +1227,31 @@ export default function NewAutomationPage() {
                                 modelAgentType: selection?.agentType,
                                 ...(keepsReasoning ? {} : { reasoningEffort: "" }),
                               };
-                            })
-                          }
+                            });
+                          }}
                         />
                       </div>
+                      <AutomationFallbackModelsEditor
+                        value={fallbackModels}
+                        primaryModel={model}
+                        primaryAgentType={effectiveAgentType}
+                        primaryReasoningEffort={
+                          showReasoningSelector ? reasoningEffort : ""
+                        }
+                        onChange={setFallbackModels}
+                      />
                       {showReasoningSelector ? (
                         <div className="space-y-1.5">
                           <Label>Reasoning</Label>
                           <Select
                             value={reasoningEffort || "__default__"}
-                            onValueChange={(value) =>
-                              setFormField(
-                                "reasoningEffort",
+                            onValueChange={(value) => {
+                              const nextReasoning =
                                 value === "__default__"
                                   ? ""
-                                  : toCodingAgentReasoningEffort(value),
-                              )
-                            }
+                                  : toCodingAgentReasoningEffort(value);
+                              setFormField("reasoningEffort", nextReasoning);
+                            }}
                           >
                             <SelectTrigger aria-label="Reasoning">
                               <SelectValue placeholder="Default reasoning" />

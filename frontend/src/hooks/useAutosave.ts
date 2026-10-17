@@ -31,8 +31,16 @@ export interface UseAutosaveOptions<TVars> {
   onSuccess?: (vars: TVars) => void;
 }
 
+/**
+ * What `save()` did with a payload. `queued` means it is waiting behind an
+ * in-flight save on the same queryKey: its optimistic value is not in the cache
+ * yet and will be applied when it dispatches. `debounced` means a debounce
+ * window is still open, so the eventual outcome is not known yet.
+ */
+export type AutosaveSaveResult = "sent" | "queued" | "skipped" | "debounced";
+
 export interface UseAutosaveResult<TVars> {
-  save: (vars: TVars) => void;
+  save: (vars: TVars) => AutosaveSaveResult;
   flush: () => void;
   status: AutosaveStatus;
   /**
@@ -203,9 +211,17 @@ async function run(
     // drop edits the user made after the failure. Rollback already reverted
     // the optimistic cache for the failed write, so the pending run starts
     // from the rolled-back baseline and applies only the new intent.
-    entry.inFlight = false;
-    if (invalidateOnSettled) {
-      await queryClient.invalidateQueries({ queryKey });
+    try {
+      if (invalidateOnSettled) {
+        await queryClient.invalidateQueries({ queryKey });
+      }
+    } finally {
+      // Only now. Clearing it before the refetch let a save made during the
+      // refetch dispatch on its own while this queue's older pending payload
+      // was still waiting to drain below — two writes racing, and whichever
+      // committed last won, so a newer edit could be overwritten by an older
+      // one.
+      entry.inFlight = false;
     }
     if (entry.hasPending) {
       const next = entry.pendingVars;
@@ -359,7 +375,7 @@ export function useAutosave<TVars>({
   }, [serializedKey]);
 
   const dispatch = useCallback(
-    (vars: TVars) => {
+    (vars: TVars): AutosaveSaveResult => {
       const current = queryClient.getQueryData(queryKey);
       if (current !== undefined) {
         const next = applyOptimisticRef.current(current, vars);
@@ -368,7 +384,7 @@ export function useAutosave<TVars>({
         // from the server, from our own optimistic write, or from another
         // component sharing the query scope). Skip the network call entirely.
         if (deepEqual(current, next)) {
-          return;
+          return "skipped";
         }
       }
 
@@ -417,9 +433,10 @@ export function useAutosave<TVars>({
           entry.pendingOwnerIds.add(hookIDRef.current!);
         }
         entry.hasPending = true;
-        return;
+        return "queued";
       }
       void run(queryClient, entry, vars, queryKey, new Set([hookIDRef.current!]));
+      return "sent";
     },
     // queryKey identity can change per render; serializedKey is the actual dep.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -427,10 +444,9 @@ export function useAutosave<TVars>({
   );
 
   const save = useCallback(
-    (vars: TVars) => {
+    (vars: TVars): AutosaveSaveResult => {
       if (debounceMsRef.current <= 0) {
-        dispatch(vars);
-        return;
+        return dispatch(vars);
       }
       debouncedVarsRef.current = vars;
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
@@ -440,6 +456,7 @@ export function useAutosave<TVars>({
         debounceTimerRef.current = null;
         if (pending !== undefined) dispatch(pending);
       }, debounceMsRef.current);
+      return "debounced";
     },
     [dispatch],
   );

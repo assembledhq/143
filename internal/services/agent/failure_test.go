@@ -347,3 +347,166 @@ func TestContainsAny(t *testing.T) {
 	require.False(t, containsAny("hello world", "foo", "bar"), "containsAny should return false when no substrings match")
 	require.False(t, containsAny("", "foo"), "containsAny should return false for empty string")
 }
+
+// TestModelUnavailableForRetry pins the narrowing that keeps an infrastructure
+// blip from burning an automation's whole fallback chain.
+//
+// Every case asserts BOTH classifiers. ModelUnavailableForRetry is the rule for
+// callers that answer a positive by spending another agent run; ModelUnavailable
+// is the older, broader rule the code reviewer still uses, and asserting it
+// alongside proves this change left that caller's behavior untouched rather
+// than merely claiming so.
+func TestModelUnavailableForRetry(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// message is the failure text as it reaches the classifier: either a
+		// session's raw Error or its generated FailureExplanation.
+		message string
+		// wantForRetry is whether a DIFFERENT model could plausibly survive
+		// this failure, i.e. whether spending another agent run is justified.
+		wantForRetry bool
+		// wantModelUnavailable is the broader classifier's verdict. It is
+		// stated per case so any drift in ModelUnavailable — which the code
+		// reviewer's fallback depends on — fails here.
+		wantModelUnavailable bool
+		why                  string
+	}{
+		{
+			name:                 "model is at capacity",
+			message:              "API error: the model is at capacity, please try again later",
+			wantForRetry:         true,
+			wantModelUnavailable: true,
+			why:                  "a capacity marker names the model itself, so another rank is a different outcome",
+		},
+		{
+			name:                 "model is overloaded",
+			message:              "Error: model is overloaded",
+			wantForRetry:         true,
+			wantModelUnavailable: true,
+			why:                  "a capacity marker names the model itself, so another rank is a different outcome",
+		},
+		{
+			name:                 "overloaded_error payload",
+			message:              `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+			wantForRetry:         true,
+			wantModelUnavailable: true,
+			why:                  "the provider's structured overload code is the same signal in machine form",
+		},
+		{
+			name:                 "server is overloaded",
+			message:              "API error: server is overloaded, retry shortly",
+			wantForRetry:         true,
+			wantModelUnavailable: true,
+			why:                  "a capacity marker names the model itself, so another rank is a different outcome",
+		},
+		{
+			name:                 "rate limited",
+			message:              "API error: rate limit exceeded for this credential",
+			wantForRetry:         true,
+			wantModelUnavailable: true,
+			why:                  "a rate limit is per-credential and per-model, so a different rank can still serve the work",
+		},
+		{
+			// THE FIX. "service unavailable" is what any dependency's HTTP 503
+			// says — GitHub, the sandbox host, an internal service — so treating
+			// it as model capacity gave every rank in a chain its own session to
+			// fail identically in.
+			name:                 "bare service unavailable from some dependency",
+			message:              "request failed: 503 service unavailable",
+			wantForRetry:         false,
+			wantModelUnavailable: true,
+			why:                  "a bare 503 says nothing about which model was asked, so another rank would hit the same wall",
+		},
+		{
+			// The pre-agent setup steps run BEFORE any model is invoked, so the
+			// capacity marker riding along in the message cannot be about a
+			// model that never got a turn.
+			name:                 "github token failure carrying a 503",
+			message:              "get installation token: github api returned 503 service unavailable",
+			wantForRetry:         false,
+			wantModelUnavailable: true,
+			why:                  "the run died resolving a GitHub token; no model was reached, so no model can do better",
+		},
+		{
+			name:                 "github token failure carrying a rate limit",
+			message:              "get installation token: 429 too many requests from api.github.com",
+			wantForRetry:         false,
+			wantModelUnavailable: true,
+			why:                  "GitHub's own rate limit is not the model's, and every rank would re-hit it",
+		},
+		{
+			name:                 "clone failure carrying a capacity marker",
+			message:              "clone repo: fatal: could not read from remote repository: server is overloaded",
+			wantForRetry:         false,
+			wantModelUnavailable: true,
+			why:                  "cloning happens before the agent starts, so the marker cannot be a verdict on the model",
+		},
+		{
+			// The orchestrator formats these with %s off a wrapped error, so
+			// surrounding whitespace and casing are not guaranteed. The prefix
+			// match has to survive both or the guard silently stops applying.
+			name:                 "clone failure with surrounding whitespace and mixed case",
+			message:              "  Clone Repo: Fatal: Unable To Access Repository: Service Unavailable\n",
+			wantForRetry:         false,
+			wantModelUnavailable: true,
+			why:                  "the prefix guard must not be defeated by a trailing newline or the message's casing",
+		},
+		{
+			name:                 "ordinary task failure",
+			message:              "the unit tests failed: 3 assertions did not hold",
+			wantForRetry:         false,
+			wantModelUnavailable: false,
+			why:                  "a verdict on the work reaches the same place on every model",
+		},
+		{
+			name:                 "empty message",
+			message:              "",
+			wantForRetry:         false,
+			wantModelUnavailable: false,
+			why:                  "an unclassifiable failure must never justify spending another agent run",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.wantForRetry, ModelUnavailableForRetry(tt.message),
+				"ModelUnavailableForRetry decides whether to spend another agent run: %s", tt.why)
+			require.Equal(t, tt.wantModelUnavailable, ModelUnavailable(tt.message),
+				"ModelUnavailable is unchanged by the retry narrowing; the code-review fallback still reads it")
+		})
+	}
+}
+
+// TestModelUnavailableForRetry_IsStrictlyNarrowerThanModelUnavailable states
+// the relationship between the two classifiers as an invariant rather than
+// leaving it to the case table: anything worth another agent run must also be
+// something the broader rule recognizes. A retry-worthy failure the broader
+// rule rejected would mean the two have drifted apart, and the automation chain
+// would be promoting on a signal nothing else in the codebase treats as
+// model-related.
+func TestModelUnavailableForRetry_IsStrictlyNarrowerThanModelUnavailable(t *testing.T) {
+	t.Parallel()
+
+	messages := []string{
+		"API error: the model is at capacity",
+		"Error: model is overloaded",
+		`{"error":{"type":"overloaded_error"}}`,
+		"API error: server is overloaded",
+		"API error: rate limit exceeded",
+		"request failed: 503 service unavailable",
+		"get installation token: github api returned 503 service unavailable",
+		"clone repo: fatal: could not read from remote repository: server is overloaded",
+		"the unit tests failed: 3 assertions did not hold",
+	}
+
+	for _, message := range messages {
+		if ModelUnavailableForRetry(message) {
+			require.True(t, ModelUnavailable(message),
+				"ModelUnavailableForRetry must stay a subset of ModelUnavailable: %q", message)
+		}
+	}
+}

@@ -2,13 +2,13 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import type { ChangeEvent } from "react";
 import { useAutosaveNumericField } from "./useAutosaveNumericField";
-import type { UseAutosaveResult } from "./useAutosave";
+import type { AutosaveSaveResult, UseAutosaveResult } from "./useAutosave";
 
 function makeAutosaveStub<TVars>(): UseAutosaveResult<TVars> & {
-  save: Mock<(vars: TVars) => void>;
+  save: Mock<(vars: TVars) => AutosaveSaveResult>;
 } {
   return {
-    save: vi.fn<(vars: TVars) => void>(),
+    save: vi.fn<(vars: TVars) => AutosaveSaveResult>(() => "sent"),
     flush: vi.fn<() => void>(),
     status: "idle",
     debounceMs: 0,

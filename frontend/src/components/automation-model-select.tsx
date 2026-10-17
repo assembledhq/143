@@ -62,6 +62,18 @@ interface AutomationModelSelectProps {
   /** Restyles the trigger — used by inline property rows to render it ghosted. */
   triggerClassName?: string;
   density?: ControlDensity;
+  /**
+   * Selections another rank already claims. The ranked fallback list passes the
+   * primary and its sibling rows so the same choice cannot be picked twice — a
+   * duplicate rank is accepted by the API but retries a model that just
+   * failed, which is the one thing a fallback chain exists to avoid. Matched
+   * per agent, as the worker compares ranks: the same model id under Pi and
+   * under OpenCode is a different route. An entry without an agent matches the
+   * model in every group. The row's own value is never excluded, so the
+   * trigger stays truthful.
+   */
+  excludeSelections?: readonly AutomationModelSelection[];
+  disabled?: boolean;
 }
 
 export function AutomationModelSelect({
@@ -72,6 +84,8 @@ export function AutomationModelSelect({
   ariaLabel = "Automation model",
   triggerClassName,
   density = "default",
+  excludeSelections,
+  disabled,
 }: AutomationModelSelectProps) {
   const { data: settingsResponse } = useQuery({
     queryKey: ["settings"],
@@ -125,6 +139,23 @@ export function AutomationModelSelect({
   const currentAgentType = value
     ? (agentType ?? agentTypeForModel(value) ?? "")
     : "";
+  const selectableGroups = useMemo(() => {
+    if (!excludeSelections || excludeSelections.length === 0) return modelGroups;
+    const excluded = (groupAgentType: string, model: string) =>
+      !(model === value && groupAgentType === currentAgentType)
+      && excludeSelections.some(
+        (selection) =>
+          selection.model === model
+          && (selection.agentType === undefined
+            || selection.agentType === groupAgentType),
+      );
+    return modelGroups
+      .map((group) => ({
+        ...group,
+        models: group.models.filter((model) => !excluded(group.key, model)),
+      }))
+      .filter((group) => group.models.length > 0);
+  }, [currentAgentType, excludeSelections, modelGroups, value]);
   // Matched against the agent's own group: the same id listed under another
   // agent is a different choice, and selecting it would move the automation.
   const currentValueAvailable = useMemo(
@@ -143,6 +174,7 @@ export function AutomationModelSelect({
   return (
     <Select
       value={value ? selectionValue(currentAgentType, value) : AUTO_MODEL_VALUE}
+      disabled={disabled}
       onValueChange={(nextValue) =>
         onValueChange(
           nextValue === AUTO_MODEL_VALUE
@@ -165,7 +197,7 @@ export function AutomationModelSelect({
           </SelectGroup>
         ) : null}
         <ModelOptionGroups
-          modelGroups={modelGroups}
+          modelGroups={selectableGroups}
           getOptionValue={(group, model) => selectionValue(group.key, model)}
           openCodeAvailability={openCodeAvailability}
           // Only keeps an OpenCode option with no runnable route visible, so

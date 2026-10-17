@@ -226,17 +226,75 @@ func (s *AutomationRunStore) MarkWaiting(ctx context.Context, q DBTX, orgID, run
 // never pending, so genuine reservations keep their fencing. Returns
 // whether this caller won the claim.
 func (s *AutomationRunStore) ClaimPendingForPerRun(ctx context.Context, orgID, runID uuid.UUID) (bool, error) {
-	tag, err := s.db.Exec(ctx, `
+	return s.claimPendingForPerRun(ctx, s.db, orgID, runID, "")
+}
+
+// ClaimPendingForPerRunInTx keeps the claim and its session/link insertion
+// atomic, so completion callbacks can never observe a running successor
+// whose session has not yet been linked. expectedSessionID fences the selection
+// snapshot too: use uuid.Nil when no previous session was linked.
+//
+// dispatchDefaultAgentType is the org default the caller resolved ranks
+// against. The first claim freezes it into config_snapshot, and a later claim
+// only wins when it resolved against that same frozen value, so every attempt
+// in a fallback chain resolves agentless ranks the same way (see
+// models.AutomationRunDispatchDefaultAgentTypeKey).
+func (s *AutomationRunStore) ClaimPendingForPerRunInTx(ctx context.Context, tx pgx.Tx, orgID, runID, expectedSessionID uuid.UUID, dispatchDefaultAgentType models.AgentType) (bool, error) {
+	var status models.AutomationRunStatus
+	if err := tx.QueryRow(ctx, `SELECT status FROM automation_runs WHERE id = @id AND org_id = @org_id FOR UPDATE`, pgx.NamedArgs{"id": runID, "org_id": orgID}).Scan(&status); err != nil {
+		return false, fmt.Errorf("lock automation run for per-run dispatch: %w", err)
+	}
+	if status != models.AutomationRunStatusPending {
+		return false, nil
+	}
+	current, err := automationSessionIsCurrent(ctx, tx, orgID, runID, expectedSessionID)
+	if err != nil || !current {
+		return false, err
+	}
+	return s.claimPendingForPerRun(ctx, tx, orgID, runID, dispatchDefaultAgentType)
+}
+
+func (s *AutomationRunStore) claimPendingForPerRun(ctx context.Context, q DBTX, orgID, runID uuid.UUID, dispatchDefaultAgentType models.AgentType) (bool, error) {
+	tag, err := q.Exec(ctx, `
 		UPDATE automation_runs
 		SET status = 'running',
 		    dispatch_state = NULL,
 		    wait_reason = NULL,
 		    wait_started_at = NULL,
+		    -- Only an object snapshot takes the key. insertRun writes JSON null
+		    -- for a run with no snapshot, and jsonb || on a non-object wraps both
+		    -- sides in an array, which every snapshot reader would reject.
+		    config_snapshot = CASE
+		        WHEN @dispatch_default_agent_type::text = ''
+		          OR jsonb_typeof(config_snapshot) IS DISTINCT FROM 'object'
+		          OR config_snapshot ? @dispatch_default_agent_type_key::text
+		        THEN config_snapshot
+		        ELSE config_snapshot
+		          || jsonb_build_object(@dispatch_default_agent_type_key::text, @dispatch_default_agent_type::text)
+		    END,
 		    updated_at = now()
 		WHERE id = @id AND org_id = @org_id
 		  AND status = 'pending'
-		  AND dispatch_state IS DISTINCT FROM 'executing'`,
-		pgx.NamedArgs{"id": runID, "org_id": orgID})
+		  AND dispatch_state IS DISTINCT FROM 'executing'
+		  -- A caller that resolved ranks against a different default than the
+		  -- one this run already froze read the run before its first claim
+		  -- (a duplicate delivery that stalled through a whole attempt). Its
+		  -- attempt ledger is fresh but its default is not, so the rank it
+		  -- picked is wrong; refuse the claim. The promotion that put the run
+		  -- back to pending enqueued a fresh dispatch, which reads the frozen
+		  -- default and claims correctly.
+		  AND (
+		    @dispatch_default_agent_type::text = ''
+		    OR jsonb_typeof(config_snapshot) IS DISTINCT FROM 'object'
+		    OR NOT (config_snapshot ? @dispatch_default_agent_type_key::text)
+		    OR config_snapshot ->> @dispatch_default_agent_type_key::text = @dispatch_default_agent_type::text
+		  )`,
+		pgx.NamedArgs{
+			"id":                              runID,
+			"org_id":                          orgID,
+			"dispatch_default_agent_type":     string(dispatchDefaultAgentType),
+			"dispatch_default_agent_type_key": models.AutomationRunDispatchDefaultAgentTypeKey,
+		})
 	if err != nil {
 		return false, fmt.Errorf("claim automation run for per-run execution: %w", err)
 	}

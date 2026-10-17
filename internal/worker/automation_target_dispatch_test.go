@@ -86,7 +86,7 @@ func TestAutomationRunHandler_PerTargetDispatch(t *testing.T) {
 				WillReturnRows(automationRows(
 					automationID, orgID, &repoID, "front-end review", "review", nil,
 					models.AutomationIconTypeEmoji, "⚙️",
-					nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyNone, 0,
+					nil, nil, nil, models.AutomationFallbackModels{Models: []string{models.ClaudeCodeModelSonnet46}}, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyNone, 0,
 					models.AutomationScheduleNone, nil, nil, nil, nil, "UTC",
 					[]string{"github.pull_request.updated"}, []byte("{}"),
 					nil, nil, true, nil, nil, nil,
@@ -117,6 +117,7 @@ func TestAutomationRunHandler_PerTargetDispatch(t *testing.T) {
 			require.Equal(t, runID, in.Run.ID, "dispatch receives the run")
 			require.Equal(t, automationID, in.Automation.ID, "dispatch receives the automation")
 			require.NotNil(t, in.SessionTemplate, "dispatch receives the fresh-session template")
+			require.Nil(t, in.SessionTemplate.ModelOverride, "ranked fallbacks must not replace the primary in reusable target sessions")
 			require.Equal(t, &runID, in.SessionTemplate.AutomationRunID, "template links the run")
 			require.Equal(t, &repoID, in.SessionTemplate.RepositoryID, "template carries the repository")
 			require.False(t, in.KillSwitch, "kill switch is off by default")

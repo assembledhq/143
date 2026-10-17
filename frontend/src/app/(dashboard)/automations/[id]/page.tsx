@@ -57,6 +57,12 @@ import {
   normalizeCapabilityGrants,
 } from "@/components/automation-capabilities-editor";
 import { BranchPicker } from "@/components/branch-picker";
+import {
+  AutomationFallbackModelsEditor,
+  AutomationFallbackModelsSummary,
+  automationFallbackRanks,
+  buildAutomationFallbackModels,
+} from "@/components/automation-fallback-models-editor";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { AutomationScheduleEditor } from "@/components/automation-schedule-editor";
 import { ApiError, api } from "@/lib/api";
@@ -74,7 +80,11 @@ import {
   upsertAutomationInListCaches,
 } from "@/lib/automation-list-cache";
 import { queryKeys } from "@/lib/query-keys";
-import { agentTypeForModel } from "@/lib/agents";
+import {
+  agentDisplayLabel,
+  agentTypeForModel,
+  modelOptionLabel,
+} from "@/lib/agents";
 import {
   automationProductTriggerOptions,
   automationProductTriggersToGitHubEvents,
@@ -91,6 +101,7 @@ import type {
   AgentCapabilityDefinition,
   AgentCapabilityGrant,
   Automation,
+  AutomationFallbackModels,
   AutomationGitHubEventFilters,
   AutomationRun,
   AutomationSessionContinuity,
@@ -179,6 +190,51 @@ const applyAutomationPatch = (
 };
 
 type AutomationAutosave = UseAutosaveResult<AutomationPatch>;
+
+/**
+ * Patch fragment that keeps the ranked fallback chain legal under a primary the
+ * same patch is changing.
+ *
+ * `dropped` removes the rank the primary has just become, which would otherwise
+ * retry the model that just failed. It is matched on agent and model: the same
+ * model id under Pi and under OpenCode is a different route, so a fallback on
+ * the other agent stays. Reasoning effort is deliberately ignored even though
+ * the worker counts it as part of a rank's identity — a capacity failure is
+ * per model, so the same model at another effort would almost certainly fail
+ * the same way, and keeping it would break the one-rank-per-agent-and-model
+ * rule the editor's exclusion and row keys rely on.
+ *
+ * It has to travel in the SAME request as the model change: `useAutosave`
+ * coalesces queued patches by shallow key merge, so a follow-up save would
+ * race the model change instead of building on it.
+ *
+ * Returns `{}` when the rebuild is byte-identical to what is stored, so editing
+ * a field that cannot invalidate the chain never re-sends it — the API
+ * re-validates the whole chain whenever the key is present, which would let a
+ * rank nobody touched refuse an unrelated save.
+ */
+function reconcileFallbackModelsPatch(
+  automation: Automation,
+  primaryAgentType: string,
+  dropped?: { model: string; agentType: string },
+): { fallback_models?: AutomationFallbackModels } {
+  const storedRanks = automationFallbackRanks(
+    automation.fallback_models,
+    primaryAgentType,
+  );
+  if (storedRanks.length === 0) return {};
+  const next = buildAutomationFallbackModels(
+    dropped
+      ? storedRanks.filter(
+          (rank) =>
+            rank.model !== dropped.model || rank.agentType !== dropped.agentType,
+        )
+      : storedRanks,
+  );
+  const current = buildAutomationFallbackModels(storedRanks);
+  if (JSON.stringify(next) === JSON.stringify(current)) return {};
+  return { fallback_models: next };
+}
 
 const GENERIC_SAVE_ERROR = "Couldn’t save automation. Your change was reverted.";
 
@@ -1441,6 +1497,26 @@ function AutomationDetailRail({
 }) {
   const autosave = useAutomationAutosave(automation.id);
   const { save } = autosave;
+  const queryClient = useQueryClient();
+  // For patches that rewrite the whole fallback chain. Each one is built from
+  // the chain this render sees, but `useAutosave` only applies a patch's
+  // optimistic value when it dispatches — one queued behind an in-flight save
+  // leaves the cache stale, so the next chain edit would rebuild from the old
+  // chain and the shallow coalesce would let it overwrite the queued one.
+  //
+  // So a queued patch advances the cache as soon as it is handed over. Only a
+  // queued one: a patch that dispatched applies its own optimistic value and
+  // captures its rollback baseline first, and writing it early would make a
+  // failure roll back to the unsaved chain. A queued patch's baseline is set
+  // later anyway — the in-flight save settles with a refetch that replaces
+  // this write with server state before the queued patch dispatches.
+  const saveChainPatch = (patch: AutomationPatch) => {
+    if (save(patch) !== "queued") return;
+    queryClient.setQueryData(
+      queryKeys.automations.detail(automation.id),
+      (previous: unknown) => applyAutomationPatch(previous, patch),
+    );
+  };
   // The desktop aside is `hidden lg:block` rather than unmounted, so opening the
   // mobile properties sheet puts two copies of this rail in the DOM at once.
   // Scope the control ids per instance to keep every label bound to its own
@@ -1679,11 +1755,29 @@ function AutomationDetailRail({
                       ),
                       automation.reasoning_effort ?? "",
                     );
-                  save({
+                  // The chain is reconciled into THIS patch, not a follow-up:
+                  // `useAutosave` coalesces queued patches by shallow key merge,
+                  // so a second save would race the model change rather than
+                  // build on it.
+                  const fallbackPatch = reconcileFallbackModelsPatch(
+                    automation,
+                    effectiveAgentType,
+                    selection
+                      ? {
+                          model: selection.model,
+                          agentType: effectiveAgentTypeFor(
+                            selection.model,
+                            nextAgentType,
+                          ),
+                        }
+                      : undefined,
+                  );
+                  saveChainPatch({
                     body: {
                       model: nextModel,
                       ...(sendsAgentType ? { agent_type: nextAgentType } : {}),
                       ...(clearsReasoning ? { reasoning_effort: "" } : {}),
+                      ...fallbackPatch,
                     },
                     optimistic: {
                       model_override: nextModel,
@@ -1691,6 +1785,7 @@ function AutomationDetailRail({
                       ...(clearsReasoning
                         ? { reasoning_effort: undefined }
                         : {}),
+                      ...fallbackPatch,
                     },
                   });
                 }}
@@ -1715,6 +1810,12 @@ function AutomationDetailRail({
                     value === "__default__"
                       ? ""
                       : toCodingAgentReasoningEffort(value);
+                  // The chain deliberately does not ride along. A rank that
+                  // inherits this level stays valid whatever it changes to:
+                  // the API drops an inherited level the rank's agent cannot
+                  // run rather than rejecting it. Sending the chain anyway
+                  // would re-validate ranks this edit never touched, and would
+                  // pin them to a level nobody chose.
                   save({
                     // The API clears the override with "", but the model types
                     // "no override" as absent — so the cache gets `undefined`.
@@ -1874,6 +1975,36 @@ function AutomationDetailRail({
               supported={supportsNativeReviewLoop}
               canManage={canManage}
             />
+            {canManage && automation.session_continuity !== "per_target" ? (
+              <AutomationFallbackModelsEditor
+                value={automation.fallback_models}
+                primaryModel={model}
+                primaryAgentType={effectiveAgentType}
+                primaryReasoningEffort={automation.reasoning_effort ?? ""}
+                onChange={(fallback_models) =>
+                  // The whole chain every time, never a delta: `useAutosave`
+                  // coalesces queued patches by shallow key merge, so a later
+                  // partial array would replace — not merge into — an earlier
+                  // one, and the intermediate reorder would be lost.
+                  saveChainPatch({
+                    body: { fallback_models },
+                    optimistic: { fallback_models },
+                  })
+                }
+              />
+            ) : (
+              <AutomationFallbackModelsSummary
+                value={automation.fallback_models}
+                primaryModel={model}
+                primaryAgentType={effectiveAgentType}
+              />
+            )}
+            {automation.session_continuity === "per_target" ? (
+              <p className="text-xs text-muted-foreground">
+                Fallback models are inactive while sessions are reused per pull request.
+                Switch session continuity to a new session per run to use them.
+              </p>
+            ) : null}
             <CapabilitiesProperty
               automation={automation}
               canManage={canManage}
@@ -1925,15 +2056,44 @@ function LatestRunSummary({ automationId }: { automationId: string }) {
   );
 }
 
+// Compare separate-session runs against their frozen primary. Reused target
+// sessions follow the live continuity configuration and are not fallback attempts.
 function LatestRunBody({ run }: { run: AutomationRun }) {
   const summary =
     run.result_summary || run.session?.title || statusLabel(run.status);
+  // A run that failed over to a fallback model looks identical to one that ran
+  // on the preferred model — same status, same summary — so this badge is the
+  // only place the substitution is visible. Both sides come from the run
+  // itself: its frozen primary and the model its session actually ran, so
+  // editing the automation later cannot relabel a historical run.
+  const sessionModel = run.session?.model_override;
+  // A rank is an agent and a model, and Pi and OpenCode share model ids, so a
+  // fallback can keep the primary's model and change only the agent. Compare
+  // agents only when both are known: a run from before the primary's agent was
+  // recorded must not read as a fallback just because one side is missing.
+  const sessionAgent = run.session?.agent_type;
+  const ranOnFallbackAgent =
+    Boolean(sessionAgent) && Boolean(run.primary_agent_type) && sessionAgent !== run.primary_agent_type;
+  const ranOnFallback =
+    run.session_id == null &&
+    Boolean(sessionModel) &&
+    (sessionModel !== run.primary_model || ranOnFallbackAgent);
   return (
     <div className="mt-3 space-y-2">
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={run.status === "failed" ? "destructive" : "secondary"}>
           Execution: {statusLabel(run.status)}
         </Badge>
+        {ranOnFallback && sessionModel ? (
+          <Badge variant="outline">
+            Fallback model: {modelOptionLabel(sessionModel)}
+            {/* Same model id, different agent: the name alone would read as
+                the primary, so say which agent it fell back to. */}
+            {sessionModel === run.primary_model && sessionAgent
+              ? ` · ${agentDisplayLabel(sessionAgent)}`
+              : null}
+          </Badge>
+        ) : null}
         <span className="text-xs text-muted-foreground">
           {formatTimeAgo(run.triggered_at)}
           {run.completed_at ? ` · ${formatDateTime(run.completed_at)}` : ""}
