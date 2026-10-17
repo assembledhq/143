@@ -78,8 +78,7 @@ func TestSessionAutomaticPublicationCapturedHeadPostgres(t *testing.T) {
 		differentRemote  bool
 		noRemote         bool
 		interactive      bool
-		goalImprovement  bool
-		manualOrigin     bool
+		origin           models.SessionOrigin
 		noAutomation     bool
 		target           bool
 		child            bool
@@ -89,6 +88,13 @@ func TestSessionAutomaticPublicationCapturedHeadPostgres(t *testing.T) {
 	}{
 		{name: "final snapshot reconciles the imported primary head", want: models.ChangesetStatusPublishedBranch},
 		{name: "historical default policy retains its automatic contract", policy: `{}`, want: models.ChangesetStatusPublishedBranch},
+		{name: "linked legacy issue-trigger origin reconciles the captured primary", origin: models.SessionOriginIssueTrigger, want: models.ChangesetStatusPublishedBranch},
+		{name: "legacy origin still requires the scoped automation link", origin: models.SessionOriginIssueTrigger, noAutomation: true},
+		{name: "legacy origin still requires the PR policy", origin: models.SessionOriginIssueTrigger, policy: `{"publish_policy":"none"}`},
+		{name: "legacy origin still rejects per-target runs", origin: models.SessionOriginIssueTrigger, target: true},
+		{name: "legacy origin still requires the exact remote checkpoint", origin: models.SessionOriginIssueTrigger, differentRemote: true},
+		{name: "legacy origin still requires the final snapshot", origin: models.SessionOriginIssueTrigger, omitSnapshot: true},
+		{name: "legacy origin preserves existing publication ownership", origin: models.SessionOriginIssueTrigger, publicationState: "requested"},
 		{name: "remote mismatch remains blocked", differentRemote: true},
 		{name: "unknown remote head remains blocked", noRemote: true},
 		{name: "missing captured head cannot reconcile", omitHead: true},
@@ -98,8 +104,9 @@ func TestSessionAutomaticPublicationCapturedHeadPostgres(t *testing.T) {
 		{name: "empty diff cannot authorize publication", emptyDiff: true},
 		{name: "failed completion cannot reconcile", status: models.SessionStatusFailed},
 		{name: "interactive completion cannot reconcile", interactive: true},
-		{name: "goal improvement cannot reconcile", goalImprovement: true},
-		{name: "nonautomation origin cannot reconcile despite an automation link", manualOrigin: true},
+		{name: "goal improvement cannot reconcile", origin: models.SessionOriginAutomationGoalImprovement},
+		{name: "manual origin cannot reconcile despite an automation link", origin: models.SessionOriginManual},
+		{name: "revision origin cannot reconcile despite an automation link", origin: models.SessionOriginRevision},
 		{name: "unlinked ordinary completion cannot reconcile", noAutomation: true},
 		{name: "none policy cannot reconcile", policy: `{"publish_policy":"none"}`},
 		{name: "invalid policy cannot reconcile", policy: `{"publish_policy":"unknown"}`},
@@ -138,16 +145,13 @@ func TestSessionAutomaticPublicationCapturedHeadPostgres(t *testing.T) {
 				empty := ""
 				f.result.Diff = &empty
 			}
-			if tt.interactive || tt.goalImprovement || tt.manualOrigin {
+			if tt.interactive || tt.origin != "" {
 				mode, origin := models.SessionInteractionModeSingleRun, models.SessionOriginAutomation
 				if tt.interactive {
 					mode = models.SessionInteractionModeInteractive
 				}
-				if tt.goalImprovement {
-					origin = models.SessionOriginAutomationGoalImprovement
-				}
-				if tt.manualOrigin {
-					origin = models.SessionOriginManual
+				if tt.origin != "" {
+					origin = tt.origin
 				}
 				_, err := pool.Exec(ctx, `UPDATE sessions SET interaction_mode=$3,origin=$4 WHERE org_id=$1 AND id=$2`, f.session.OrgID, f.session.ID, mode, origin)
 				require.NoError(t, err, "persist the completion authority variant")

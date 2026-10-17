@@ -15,28 +15,56 @@ import (
 
 func TestRunAgentIncludesAutomationReviewerMetadataGuidance(t *testing.T) {
 	t.Parallel()
-	orgID := testOrg()
-	issue := testIssue(orgID)
-	run := testRun(orgID, issue.ID)
-	runID := uuid.New()
-	run.Origin = models.SessionOriginAutomation
-	run.AutomationRunID = &runID
-	run.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{{ID: models.AgentCapabilityPublishing, AccessLevel: models.AgentCapabilityAccessWrite}}
-	d := defaultDeps()
-	d.automationRuns = &mockAutomationRunUpdater{policy: models.AutomationPublishPolicyPullRequest}
-	prepared, executed := false, false
-	d.adapter.prepareFn = func(_ context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
-		prepared = true
-		require.Contains(t, input.IntegrationSkills, prompts.AutomationPublicationIntent(), "initial automatic publisher must receive the reviewer metadata handoff despite being excluded from ordinary PR handoff")
-		return &agent.AgentPrompt{SystemPrompt: input.IntegrationSkills}, nil
+	tests := []struct {
+		name            string
+		origin          models.SessionOrigin
+		continueSession bool
+	}{
+		{name: "initial automation", origin: models.SessionOriginAutomation},
+		{name: "initial linked legacy session", origin: models.SessionOriginIssueTrigger},
+		{name: "continued linked legacy session", origin: models.SessionOriginIssueTrigger, continueSession: true},
 	}
-	d.adapter.executeFn = func(_ context.Context, _ *agent.Sandbox, prompt *agent.AgentPrompt, _ chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		executed = true
-		require.Contains(t, prompt.SystemPrompt, "awaiting_automatic_publication", "executed agent prompt must explain staging does not publish early")
-		return &agent.AgentResult{Summary: "Completed", ExitCode: 0}, nil
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			run := testRun(orgID, issue.ID)
+			runID := uuid.New()
+			run.Origin = tt.origin
+			run.AutomationRunID = &runID
+			run.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{{ID: models.AgentCapabilityPublishing, AccessLevel: models.AgentCapabilityAccessWrite}}
+			d := defaultDeps()
+			d.issues.issue = issue
+			d.automationRuns = &mockAutomationRunUpdater{policy: models.AutomationPublishPolicyPullRequest}
+			if tt.continueSession {
+				run.Status = models.SessionStatusIdle
+				run.CurrentTurn = 1
+				run.SnapshotKey = nil
+				d.messages.messages = []models.SessionMessage{{ID: 1, SessionID: run.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "Continue the implementation."}}
+			}
+			prepared, executed := false, false
+			d.adapter.prepareFn = func(_ context.Context, input *agent.AgentInput) (*agent.AgentPrompt, error) {
+				prepared = true
+				require.Contains(t, input.IntegrationSkills, prompts.AutomationPublicationIntent(), "initial automatic publisher must receive the reviewer metadata handoff despite being excluded from ordinary PR handoff")
+				return &agent.AgentPrompt{SystemPrompt: input.IntegrationSkills}, nil
+			}
+			d.adapter.executeFn = func(_ context.Context, _ *agent.Sandbox, prompt *agent.AgentPrompt, _ chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				executed = true
+				require.Contains(t, prompt.SystemPrompt, "awaiting_automatic_publication", "executed agent prompt must explain staging does not publish early")
+				return &agent.AgentResult{Summary: "Completed", ExitCode: 0}, nil
+			}
+			orchestrator := buildOrchestrator(d)
+			var err error
+			if tt.continueSession {
+				err = orchestrator.ContinueSession(context.Background(), run, nil)
+			} else {
+				err = orchestrator.RunAgent(context.Background(), run)
+			}
+			require.NoError(t, err, "linked automatic publication turns should execute with metadata guidance")
+			require.True(t, prepared && executed, "regression should exercise preparation and actual execution paths")
+		})
 	}
-	require.NoError(t, buildOrchestrator(d).RunAgent(context.Background(), run), "ordinary automatic publication run should complete with metadata guidance")
-	require.True(t, prepared && executed, "regression should exercise preparation and actual execution paths")
 }
 
 func TestAgentTurnsTolerateUnavailableAutomationReviewerGuidance(t *testing.T) {

@@ -2453,6 +2453,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 
 		session := &models.Session{
 			OrgID:              orgID,
+			Origin:             models.SessionOriginAutomation,
 			AgentType:          agentType,
 			Status:             "pending",
 			AutonomyLevel:      models.DefaultSessionAutonomy,
