@@ -3,6 +3,7 @@ package automations
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -39,17 +40,22 @@ type githubEventTxStarter interface {
 const PullRequestActionOpened = "opened"
 
 type GitHubEventTriggerRequest struct {
-	OrgID             uuid.UUID
-	RepositoryID      uuid.UUID
-	Event             models.AutomationGitHubEvent
-	Repository        string
-	PullRequestNumber int
-	PullRequestAction string
-	PullRequestURL    string
-	PullRequestTitle  string
-	HeadSHA           string
-	Actor             string
-	ActorType         string
+	OrgID                uuid.UUID
+	RepositoryID         uuid.UUID
+	Event                models.AutomationGitHubEvent
+	Repository           string
+	PullRequestNumber    int
+	PullRequestAction    string
+	PullRequestURL       string
+	PullRequestTitle     string
+	HeadSHA              string
+	CheckName            string
+	CheckAppID           int64
+	CheckRunID           int64
+	CheckConclusion      string
+	firstCheckRunForHead bool
+	Actor                string
+	ActorType            string
 	// OwnAppComment is derived from GitHub app provenance after webhook verification.
 	OwnAppComment   bool
 	CommentID       int64
@@ -82,17 +88,18 @@ type GitHubEventTriggerRequest struct {
 }
 
 type GitHubEventTriggerService struct {
-	automations  githubAutomationStore
-	runs         githubAutomationRunStore
-	jobs         githubAutomationJobStore
-	txStarter    githubEventTxStarter
-	capabilities githubCapabilityResolver
-	labels       githubLabelResolver
-	targets      githubAutomationTargetStore
-	arrivalRuns  githubAutomationArrivalRunStore
-	actions      githubAutomationActionLookup
-	logger       zerolog.Logger
-	now          func() time.Time
+	automations          githubAutomationStore
+	runs                 githubAutomationRunStore
+	jobs                 githubAutomationJobStore
+	txStarter            githubEventTxStarter
+	capabilities         githubCapabilityResolver
+	labels               githubLabelResolver
+	checkRunPullRequests PullRequestHeadResolver
+	targets              githubAutomationTargetStore
+	arrivalRuns          githubAutomationArrivalRunStore
+	actions              githubAutomationActionLookup
+	logger               zerolog.Logger
+	now                  func() time.Time
 
 	labelMemoMu sync.Mutex
 	labelMemo   map[githubLabelMemoKey]githubLabelMemoEntry
@@ -180,10 +187,16 @@ func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req 
 	req = normalizeGitHubEventTriggerRequest(req)
 	automations, err := s.automations.ListEnabledByGitHubEvent(ctx, req.OrgID, req.RepositoryID, req.Event)
 	if err != nil {
+		if req.Event == models.AutomationGitHubEventCheckRunCompleted {
+			return fmt.Errorf("%w: list github event automations: %w", ErrCheckRunTrigger, err)
+		}
 		return fmt.Errorf("list github event automations: %w", err)
 	}
 	s.rememberKnownLabels(req)
 	var resolvedLabelReq *GitHubEventTriggerRequest
+	var resolvedCheckRunReq *GitHubEventTriggerRequest
+	var checkRunResolutionErr error
+	var completedCheckErrors error
 	commentOwners := map[uuid.UUID]bool{}
 	if req.OwnAppComment && req.CommentID > 0 && s.actions != nil {
 		owners, err := s.actions.ListAutomationActionCommentOwners(ctx, req.OrgID, req.RepositoryID, req.PullRequestNumber, req.CommentID, req.Body)
@@ -200,13 +213,33 @@ func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req 
 		}
 		filters, err := decodeGitHubEventFilters(automation)
 		if err != nil {
+			if req.Event == models.AutomationGitHubEventCheckRunCompleted {
+				completedCheckErrors = errors.Join(completedCheckErrors, fmt.Errorf("%w: %w", ErrCheckRunTrigger, err))
+				continue
+			}
 			return err
 		}
 		if req.RequireLabelFilter && (len(filters.Labels) == 0 || !containsFold(filters.Labels, req.ChangedLabel)) {
 			continue
 		}
 		automationReq := req
-		if (len(filters.Labels) > 0 || len(filters.ExcludedLabels) > 0) && !req.LabelsKnown {
+		if filters.CheckRun != nil {
+			if req.Event != models.AutomationGitHubEventCheckRunCompleted || req.CheckName != filters.CheckRun.Name || req.CheckAppID != filters.CheckRun.AppID {
+				continue
+			}
+			if resolvedCheckRunReq == nil && checkRunResolutionErr == nil {
+				resolved, err := s.withCurrentCheckRunPullRequest(ctx, req)
+				if err != nil {
+					checkRunResolutionErr = err
+				} else {
+					resolvedCheckRunReq = &resolved
+				}
+			}
+			if checkRunResolutionErr != nil {
+				continue
+			}
+			automationReq = *resolvedCheckRunReq
+		} else if (len(filters.Labels) > 0 || len(filters.ExcludedLabels) > 0) && !req.LabelsKnown {
 			if resolvedLabelReq == nil {
 				resolved := s.withResolvedLabels(ctx, req)
 				resolvedLabelReq = &resolved
@@ -215,10 +248,17 @@ func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req 
 		}
 		automationReq.TrackLabelFilterLifecycle = len(filters.Labels) > 0 && isPullRequestLifecycleEvent(req.Event)
 		if err := s.triggerAutomation(ctx, automation, automationReq); err != nil {
+			if req.Event == models.AutomationGitHubEventCheckRunCompleted {
+				if filters.CheckRun != nil {
+					err = fmt.Errorf("%w: %w", ErrCheckRunTrigger, err)
+				}
+				completedCheckErrors = errors.Join(completedCheckErrors, err)
+				continue
+			}
 			return err
 		}
 	}
-	return nil
+	return errors.Join(checkRunResolutionErr, completedCheckErrors)
 }
 
 // withResolvedLabels fills in PR labels for one label-filtered automation.
@@ -394,6 +434,9 @@ func (s *GitHubEventTriggerService) triggerAutomation(ctx context.Context, autom
 		ConfigSnapshot:  configSnapshot,
 		Status:          models.AutomationRunStatusPending,
 	}
+	if req.firstCheckRunForHead {
+		run.ProviderEventID = optionalString(githubCheckRunHeadKey(req))
+	}
 	if s.capabilities != nil {
 		snapshot, err := s.capabilities.ResolveForSession(ctx, agentcapabilities.ResolveInput{
 			OrgID:         automation.OrgID,
@@ -483,6 +526,12 @@ func withGitHubEventSnapshot(raw json.RawMessage, req GitHubEventTriggerRequest)
 	}
 	if req.HeadSHA != "" {
 		decoded["github"].(map[string]any)["head_sha"] = req.HeadSHA
+	}
+	if req.CheckName != "" {
+		decoded["github"].(map[string]any)["check_run"] = map[string]any{
+			"name": req.CheckName, "app_id": req.CheckAppID, "id": req.CheckRunID,
+			"head_sha": req.HeadSHA, "conclusion": req.CheckConclusion,
+		}
 	}
 	if req.ActorType != "" {
 		decoded["github"].(map[string]any)["actor_type"] = req.ActorType
@@ -633,6 +682,9 @@ func githubRunTriggerContext(req GitHubEventTriggerRequest) (json.RawMessage, er
 	if req.DedupeGroupID != "" {
 		context["dedupe_group_id"] = req.DedupeGroupID
 	}
+	if req.firstCheckRunForHead {
+		context["first_head_key"] = githubCheckRunHeadKey(req)
+	}
 	out, err := json.Marshal(context)
 	if err != nil {
 		return nil, fmt.Errorf("encode github trigger context: %w", err)
@@ -733,6 +785,9 @@ func decodeGitHubEventFilters(automation models.Automation) (models.AutomationGi
 	if err := json.Unmarshal(automation.GitHubEventFilters, &filters); err != nil {
 		return models.AutomationGitHubEventFilters{}, fmt.Errorf("decode github event filters: %w", err)
 	}
+	if err := filters.Validate(); err != nil {
+		return models.AutomationGitHubEventFilters{}, fmt.Errorf("invalid github event filters: %w", err)
+	}
 	return filters, nil
 }
 
@@ -740,6 +795,9 @@ func automationMatchesGitHubEventFilters(automation models.Automation, req GitHu
 	filters, err := decodeGitHubEventFilters(automation)
 	if err != nil {
 		return false, err
+	}
+	if filters.CheckRun != nil && !req.firstCheckRunForHead {
+		return false, nil
 	}
 	if len(filters.BaseBranches) > 0 && req.BaseBranch != "" && !containsFold(filters.BaseBranches, req.BaseBranch) {
 		return false, nil

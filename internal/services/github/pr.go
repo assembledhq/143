@@ -4588,6 +4588,7 @@ func (s *PRService) CommitExists(ctx context.Context, token, owner, repo, sha st
 // PullRequestHead is the small PR shape branch previews need to resolve a
 // durable PR URL into the current head branch and commit.
 type PullRequestHead struct {
+	Draft      bool
 	Number     int
 	HTMLURL    string
 	State      string
@@ -4629,6 +4630,9 @@ func (s *PRService) ResolvePullRequestHead(ctx context.Context, orgID, repositor
 		return automationevents.PullRequestHeadInfo{}, err
 	}
 	return automationevents.PullRequestHeadInfo{
+		Number:     head.Number,
+		Draft:      head.Draft,
+		Labels:     head.Labels,
 		SHA:        head.SHA,
 		UpdatedAt:  head.UpdatedAt,
 		State:      head.State,
@@ -4998,6 +5002,7 @@ func (s *PRService) GetPullRequestHead(ctx context.Context, token, owner, repo s
 		return PullRequestHead{}, fmt.Errorf("get pull request: %w", err)
 	}
 	var details struct {
+		Draft     bool       `json:"draft"`
 		Number    int        `json:"number"`
 		HTMLURL   string     `json:"html_url"`
 		State     string     `json:"state"`
@@ -5018,6 +5023,7 @@ func (s *PRService) GetPullRequestHead(ctx context.Context, token, owner, repo s
 		return PullRequestHead{}, fmt.Errorf("pull request head missing branch or sha")
 	}
 	return PullRequestHead{
+		Draft:      details.Draft,
 		Number:     details.Number,
 		HTMLURL:    details.HTMLURL,
 		State:      details.State,
@@ -6819,6 +6825,7 @@ type CheckRunEvent struct {
 		CompletedAt *time.Time `json:"completed_at"`
 		UpdatedAt   *time.Time `json:"updated_at"`
 		App         struct {
+			ID   int64  `json:"id"`
 			Slug string `json:"slug"`
 		} `json:"app"`
 		Output struct {
@@ -6844,6 +6851,7 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 		return nil
 	}
 
+	var automationErrors error
 	for _, prRef := range event.CheckRun.PullRequests {
 		if event.Action == "completed" {
 			conclusion := "unknown"
@@ -6854,18 +6862,24 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 			// only. check_run.completed is preserved here so that automations configured
 			// directly with the raw event type (via github_event_triggers) still fire.
 			// In typical usage ListEnabledByGitHubEvent returns empty for this event.
-			s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
+			if err := s.triggerGitHubCheckRunAutomations(ctx, automationevents.GitHubEventTriggerRequest{
 				Event:             models.AutomationGitHubEventCheckRunCompleted,
 				Repository:        event.Repository.FullName,
 				PullRequestNumber: prRef.Number,
 				HeadSHA:           event.CheckRun.HeadSHA,
+				CheckName:         event.CheckRun.Name,
+				CheckAppID:        event.CheckRun.App.ID,
+				CheckRunID:        event.CheckRun.ID,
+				CheckConclusion:   conclusion,
 				BaseBranch:        prRef.Base.Ref,
 				Actor:             "github",
 				ActorType:         "System",
 				Body:              "Check run completed: " + conclusion,
 				ProviderEventID:   event.DeliveryID,
 				EventID:           githubIDEventKey("check_run", event.CheckRun.ID),
-			}, event.OwnerOrgID, event.Repository.ID)
+			}, event.OwnerOrgID, event.Repository.ID); err != nil {
+				automationErrors = errors.Join(automationErrors, err)
+			}
 		}
 
 		pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, prRef.Number)
@@ -6878,7 +6892,7 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 		state := checkRunEventState(pr, event)
 		applied, err := s.pullRequests.UpsertCheckState(ctx, pr.OrgID, state)
 		if err != nil {
-			return err
+			return errors.Join(automationErrors, err)
 		}
 		if !applied {
 			// Only an obsolete or nonidentical event is rejected. Exact redelivery
@@ -6887,14 +6901,14 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 		}
 		requiresSync, err := s.checkStateRequiresAuthoritativeSync(ctx, pr, state)
 		if err != nil {
-			return err
+			return errors.Join(automationErrors, err)
 		}
 		if err := s.enqueuePullRequestCheckProjection(ctx, pr, requiresSync); err != nil {
-			return err
+			return errors.Join(automationErrors, err)
 		}
 	}
 
-	return nil
+	return automationErrors
 }
 
 // StatusEvent represents a GitHub commit status webhook payload.
