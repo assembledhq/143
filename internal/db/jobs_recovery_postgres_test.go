@@ -41,8 +41,13 @@ func TestReclaimLostRunningJobsSkipsLockedPublisher(t *testing.T) {
 		CREATE TABLE nodes (id text PRIMARY KEY, status text NOT NULL, last_heartbeat_at timestamptz NOT NULL);
 		CREATE TABLE sessions (id uuid PRIMARY KEY, org_id uuid NOT NULL, snapshot_key text, recovery_state text, recovery_queued_at timestamptz, recovery_started_at timestamptz, runtime_stop_reason text);
 		CREATE TABLE jobs (id uuid PRIMARY KEY, org_id uuid NOT NULL, job_type text NOT NULL, payload jsonb NOT NULL, status text NOT NULL, locked_by_node_id text, locked_at timestamptz, lease_expires_at timestamptz, last_error text, run_owner_id text, owner_kind text, lock_token uuid, run_at timestamptz, updated_at timestamptz);
+		CREATE TABLE session_threads (id uuid PRIMARY KEY,org_id uuid,session_id uuid,archived_at timestamptz,created_at timestamptz);
+		CREATE TABLE thread_runtimes (id uuid PRIMARY KEY,org_id uuid,session_id uuid,thread_id uuid,started_at timestamptz);
+		CREATE TABLE session_messages (id bigint PRIMARY KEY,org_id uuid,session_id uuid,thread_id uuid,role text,created_at timestamptz);
+		CREATE TABLE thread_inbox_entries (org_id uuid,session_id uuid,thread_id uuid,message_id bigint,runtime_id uuid,delivery_state text,applied_at timestamptz);
 	`)
 	require.NoError(t, err, "create recovery query dependencies")
+	addContinuationRetryFixtureSchema(t, pool)
 	orgID, lockedID, freeID := uuid.New(), uuid.New(), uuid.New()
 	_, err = pool.Exec(ctx, `INSERT INTO nodes VALUES ('dead-worker','dead',now()-interval '10 minutes')`)
 	require.NoError(t, err, "seed dead worker")

@@ -19,17 +19,19 @@ import (
 type ResultStatus string
 
 const (
-	ResultReviewStarted             ResultStatus = "review_started"
-	ResultReviewInProgress          ResultStatus = "review_in_progress"
-	ResultPRQueued                  ResultStatus = "pr_queued"
-	ResultAlreadyPublished          ResultStatus = "already_published"
-	ResultManualPublicationRequired ResultStatus = "manual_publication_required"
-	ResultBlocked                   ResultStatus = "blocked"
+	ResultReviewStarted                ResultStatus = "review_started"
+	ResultReviewInProgress             ResultStatus = "review_in_progress"
+	ResultPRQueued                     ResultStatus = "pr_queued"
+	ResultAlreadyPublished             ResultStatus = "already_published"
+	ResultManualPublicationRequired    ResultStatus = "manual_publication_required"
+	ResultBlocked                      ResultStatus = "blocked"
+	ResultAwaitingAutomaticPublication ResultStatus = "awaiting_automatic_publication"
 )
 
 type RequestPullRequest struct {
-	Draft      *bool
-	AuthorMode string
+	TeamReviewers []string
+	Draft         *bool
+	AuthorMode    string
 	// ChangesetID selects a specific changeset for UI/API stack publication.
 	// Agent and automation requests omit it and therefore target the primary
 	// changeset. The store lookup remains tenant- and session-scoped.
@@ -71,9 +73,11 @@ type PublicationIntentCoordinator interface {
 type ErrorCode string
 
 const (
-	ErrorSessionNotEligible ErrorCode = "SESSION_NOT_PUBLICATION_ELIGIBLE"
-	ErrorWorkspaceNotReady  ErrorCode = "WORKSPACE_NOT_READY"
-	ErrorPublicationFailed  ErrorCode = "PUBLICATION_INTENT_FAILED"
+	ErrorSessionNotEligible        ErrorCode = "SESSION_NOT_PUBLICATION_ELIGIBLE"
+	ErrorWorkspaceNotReady         ErrorCode = "WORKSPACE_NOT_READY"
+	ErrorPublicationFailed         ErrorCode = "PUBLICATION_INTENT_FAILED"
+	ErrorInvalidTeamReviewers      ErrorCode = "INVALID_TEAM_REVIEWERS"
+	ErrorInvalidPublicationOptions ErrorCode = "INVALID_PUBLICATION_OPTIONS"
 )
 
 type Error struct {
@@ -137,6 +141,8 @@ type Coordinator struct {
 	publications       PublicationStore
 	jobs               JobStore
 	repositories       RepositoryStore
+	automationRuns     AutomationRunStore
+	prIntents          SessionPRIntentStore
 	publicationEnabled bool
 	reviewEnabled      bool
 	logger             zerolog.Logger
@@ -248,6 +254,19 @@ func (c *Coordinator) RequestPullRequest(
 	session, err := c.sessions.GetByID(ctx, orgID, sessionID)
 	if err != nil {
 		return nil, err
+	}
+	if req.Source == models.SessionPublicationSourceAgentTool && session.AutomationRunID != nil {
+		return c.stageAutomationPRIntent(ctx, orgID, session, req)
+	}
+	if len(req.TeamReviewers) > 0 {
+		if req.Draft != nil && *req.Draft {
+			return nil, &Error{Code: ErrorInvalidPublicationOptions, Err: errors.New("team_reviewers requires a ready pull request; use draft=false")}
+		}
+		teams, teamErr := c.normalizeTeamReviewers(ctx, orgID, session, req.TeamReviewers)
+		if teamErr != nil {
+			return nil, teamErr
+		}
+		req.TeamReviewers = teams
 	}
 	automationRequest := req.Source == models.SessionPublicationSourceAutomation &&
 		req.TriggerKind == models.SessionPublicationTriggerPolicy && session.AutomationRunID != nil
@@ -488,6 +507,61 @@ func (c *Coordinator) RequestPullRequest(
 			payload["requested_role"] = req.RequestedRole
 		}
 	}
+	var reviewerReason *string
+	teams := req.TeamReviewers
+	if hasExistingPublication {
+		var frozen struct {
+			TeamReviewers []string `json:"team_reviewers"`
+			Draft         *bool    `json:"draft"`
+		}
+		if decodeErr := json.Unmarshal(existingPublication.RequestPayload, &frozen); decodeErr != nil && len(existingPublication.RequestPayload) > 0 {
+			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("decode frozen reviewer intent: %w", decodeErr)}
+		}
+		teams = frozen.TeamReviewers
+		if len(teams) > 0 {
+			// Reviewer intent includes its accepted readiness and handoff shape.
+			// Reopening or bypassing review must not reinterpret either choice
+			// through settings that changed after the first durable request.
+			handoffMode = existingPublication.HandoffMode
+			if handoffMode == "" {
+				handoffMode = models.PRHandoffModePrePublish
+			}
+			payload["publication_handoff_mode"] = string(handoffMode)
+			if frozen.Draft != nil {
+				payload["draft"] = *frozen.Draft
+			}
+		}
+	} else if automationRequest && c.prIntents != nil {
+		intent, freezeErr := c.prIntents.Freeze(ctx, orgID, sessionID, *session.AutomationRunID, changeset.ID)
+		if freezeErr != nil {
+			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("freeze automatic publication metadata: %w", freezeErr)}
+		}
+		teams = intent.TeamReviewers
+	}
+	if len(teams) > 0 {
+		if (req.Draft != nil && *req.Draft) || (handoffMode == models.PRHandoffModeDraftFirst && reviewBypassed) {
+			return nil, &Error{Code: ErrorInvalidPublicationOptions, Err: errors.New("frozen team reviewers require a ready pull request; finish draft-first review rather than bypassing publication as a draft")}
+		}
+		if handoffMode != models.PRHandoffModeDraftFirst {
+			if err := c.freezeReviewerDraftPolicy(ctx, orgID, payload); err != nil {
+				var intentErr *Error
+				if !automationRequest || !errors.As(err, &intentErr) || intentErr.Code != ErrorInvalidPublicationOptions {
+					return nil, err
+				}
+				// Optional metadata accepted before policy drift must not stop an
+				// automation from publishing according to its known draft policy.
+				// Infrastructure uncertainty leaves the metadata intact for retry.
+				c.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("omitting optional team reviewers while preserving automatic publication policy")
+				reason := "team reviewers were omitted because automatic publication is configured to remain a draft; configured publication policy is unchanged"
+				reviewerReason = &reason
+				teams = nil
+				delete(payload, "team_reviewers")
+			}
+		}
+		if len(teams) > 0 {
+			payload["team_reviewers"] = teams
+		}
+	}
 	encodedPayload, err := json.Marshal(payload)
 	if err != nil {
 		return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("encode publication request: %w", err)}
@@ -561,7 +635,11 @@ func (c *Coordinator) RequestPullRequest(
 		// QueueChangesetPRCreation is generation- and changeset-idempotent. A
 		// concurrent caller already owns the same durable request, so return the
 		// state we just ensured instead of reviving the retired PR_IN_FLIGHT 409.
-		return ExistingPublicationResult(publication), nil
+		existing := ExistingPublicationResult(publication)
+		if reviewerReason != nil {
+			existing.Reason = reviewerReason
+		}
+		return existing, nil
 	}
 	c.logger.Info().
 		Str("org_id", orgID.String()).
@@ -576,7 +654,7 @@ func (c *Coordinator) RequestPullRequest(
 	}
 	return &PublicationIntentResult{
 		Status: status, SessionID: sessionID, PublicationID: &publication.ID,
-		ReviewBypassed: reviewBypassed,
+		ReviewBypassed: reviewBypassed, Reason: reviewerReason,
 	}, nil
 }
 

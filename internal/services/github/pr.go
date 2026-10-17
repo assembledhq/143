@@ -160,6 +160,7 @@ type PRService struct {
 	prPreviewSurfacesEnabled bool
 	prHealthSyncGroup        singleflight.Group
 	publicationPolicy        PublicationExecutionPolicy
+	teamReviewRequests       TeamReviewRequestStore
 
 	backgroundQuotaController *ratelimit.Controller
 

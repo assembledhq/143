@@ -1273,9 +1273,10 @@ func (s *JobStore) MarkFailedWithLease(ctx context.Context, jobID, lockToken uui
 // still owns the current fencing token.
 // lint:allow-no-orgid reason="worker queue consumer requeues cross-org jobs by design"
 func (s *JobStore) RetryWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
-	tag, err := s.execLeaseTerminalUpdate(ctx, `
-		UPDATE jobs
+	tag, err := s.execLeaseTerminalUpdate(ctx, continuationRecoveryQuery(`
+		UPDATE jobs j
 		SET status = 'pending',
+			payload = {{continuation_retry_payload}},
 			last_error = $1,
 			run_at = $2,
 			locked_by_node_id = NULL,
@@ -1287,7 +1288,7 @@ func (s *JobStore) RetryWithLease(ctx context.Context, jobID, lockToken uuid.UUI
 			updated_at = now()
 		WHERE id = $3
 		  AND status = 'running'
-		  AND lock_token = $4`, errMsg, runAt, jobID, lockToken)
+		  AND lock_token = $4`), errMsg, runAt, jobID, lockToken)
 	if err != nil {
 		return false, fmt.Errorf("retry job with lease: %w", err)
 	}
@@ -1299,9 +1300,10 @@ func (s *JobStore) RetryWithLease(ctx context.Context, jobID, lockToken uuid.UUI
 // makes the next attempt node-specific.
 // lint:allow-no-orgid reason="worker queue consumer requeues cross-org jobs by design"
 func (s *JobStore) RetryWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error) {
-	tag, err := s.execLeaseTerminalUpdate(ctx, `
-		UPDATE jobs
+	tag, err := s.execLeaseTerminalUpdate(ctx, continuationRecoveryQuery(`
+		UPDATE jobs j
 		SET status = 'pending',
+			payload = {{continuation_retry_payload}},
 			last_error = $1,
 			run_at = $2,
 			locked_by_node_id = NULL,
@@ -1314,7 +1316,7 @@ func (s *JobStore) RetryWithLeaseAndTarget(ctx context.Context, jobID, lockToken
 			updated_at = now()
 		WHERE id = $3
 		  AND status = 'running'
-		  AND lock_token = $4`, errMsg, runAt, jobID, lockToken, targetNodeID)
+		  AND lock_token = $4`), errMsg, runAt, jobID, lockToken, targetNodeID)
 	if err != nil {
 		return false, fmt.Errorf("retry job with lease and target: %w", err)
 	}
@@ -1326,9 +1328,10 @@ func (s *JobStore) RetryWithLeaseAndTarget(ctx context.Context, jobID, lockToken
 // retryable capacity/dependency conditions.
 // lint:allow-no-orgid reason="worker queue consumer requeues cross-org jobs by design"
 func (s *JobStore) RetryWithoutConsumingAttemptWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
-	tag, err := s.execLeaseTerminalUpdate(ctx, `
-		UPDATE jobs
+	tag, err := s.execLeaseTerminalUpdate(ctx, continuationRecoveryQuery(`
+		UPDATE jobs j
 		SET status = 'pending',
+			payload = {{continuation_retry_payload}},
 			last_error = $1,
 			run_at = $2,
 			attempts = GREATEST(attempts - 1, 0),
@@ -1341,7 +1344,7 @@ func (s *JobStore) RetryWithoutConsumingAttemptWithLease(ctx context.Context, jo
 			updated_at = now()
 		WHERE id = $3
 		  AND status = 'running'
-		  AND lock_token = $4`, errMsg, runAt, jobID, lockToken)
+		  AND lock_token = $4`), errMsg, runAt, jobID, lockToken)
 	if err != nil {
 		return false, fmt.Errorf("retry job without consuming attempt with lease: %w", err)
 	}
@@ -1353,9 +1356,10 @@ func (s *JobStore) RetryWithoutConsumingAttemptWithLease(ctx context.Context, jo
 // Ordinary dependency retries must preserve their original deadline instead.
 // lint:allow-no-orgid reason="worker queue consumer requeues cross-org jobs by globally unique fenced job id"
 func (s *JobStore) RetryWithoutConsumingAttemptWithLeaseAndResetWindow(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error) {
-	tag, err := s.execLeaseTerminalUpdate(ctx, `
-		UPDATE jobs
+	tag, err := s.execLeaseTerminalUpdate(ctx, continuationRecoveryQuery(`
+		UPDATE jobs j
 		SET status = 'pending',
+			payload = {{continuation_retry_payload}},
 			last_error = $1,
 			run_at = $2,
 			attempts = GREATEST(attempts - 1, 0),
@@ -1369,7 +1373,7 @@ func (s *JobStore) RetryWithoutConsumingAttemptWithLeaseAndResetWindow(ctx conte
 			updated_at = now()
 		WHERE id = $3
 		  AND status = 'running'
-		  AND lock_token = $4`, errMsg, runAt, jobID, lockToken)
+		  AND lock_token = $4`), errMsg, runAt, jobID, lockToken)
 	if err != nil {
 		return false, fmt.Errorf("retry job and reset retry window with lease: %w", err)
 	}
@@ -1380,9 +1384,10 @@ func (s *JobStore) RetryWithoutConsumingAttemptWithLeaseAndResetWindow(ctx conte
 // undoing the claim-time attempt increment and updating its target worker pin.
 // lint:allow-no-orgid reason="worker queue consumer requeues cross-org jobs by design"
 func (s *JobStore) RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error) {
-	tag, err := s.execLeaseTerminalUpdate(ctx, `
-		UPDATE jobs
+	tag, err := s.execLeaseTerminalUpdate(ctx, continuationRecoveryQuery(`
+		UPDATE jobs j
 		SET status = 'pending',
+			payload = {{continuation_retry_payload}},
 			last_error = $1,
 			run_at = $2,
 			attempts = GREATEST(attempts - 1, 0),
@@ -1396,7 +1401,7 @@ func (s *JobStore) RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx context.Co
 			updated_at = now()
 		WHERE id = $3
 		  AND status = 'running'
-		  AND lock_token = $4`, errMsg, runAt, jobID, lockToken, targetNodeID)
+		  AND lock_token = $4`), errMsg, runAt, jobID, lockToken, targetNodeID)
 	if err != nil {
 		return false, fmt.Errorf("retry job without consuming attempt with lease and target: %w", err)
 	}
@@ -1434,7 +1439,7 @@ func (s *JobStore) DeadLetterWithLease(ctx context.Context, jobID, lockToken uui
 // the executor's own drain handler), so it never needs the node-status path.
 // lint:allow-no-orgid reason="recovery loop scans cross-org jobs by design"
 func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.Time, limit int) (int64, error) {
-	query := `
+	query := continuationRecoveryQuery(`
 		WITH dead_nodes AS (
 			SELECT id
 			FROM nodes
@@ -1495,6 +1500,7 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 		updated_jobs AS (
 			UPDATE jobs j
 			SET status = 'pending',
+				payload = {{continuation_retry_payload}},
 				last_error = 'job ownership lost; queued for bounded recovery',
 				locked_by_node_id = NULL,
 				run_owner_id = NULL,
@@ -1520,7 +1526,7 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 			  AND s.org_id = uj.org_id
 			  AND s.id = uj.session_id::uuid
 		)
-		SELECT (SELECT COUNT(*) FROM updated_jobs), (SELECT COUNT(*) FROM eligible)`
+		SELECT (SELECT COUNT(*) FROM updated_jobs), (SELECT COUNT(*) FROM eligible)`)
 
 	var reclaimed, eligible int64
 	err := s.db.QueryRow(ctx, query, staleBefore, limit).Scan(&reclaimed, &eligible)
@@ -1537,7 +1543,7 @@ func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.
 // ReclaimLostRunningJobs used on user input paths to proactively recover a
 // single leaderless session instead of waiting for the periodic sweep.
 func (s *JobStore) ReclaimLostRunningSessionJobsForSession(ctx context.Context, orgID, sessionID uuid.UUID, staleBefore time.Time, limit int) (int64, error) {
-	query := `
+	query := continuationRecoveryQuery(`
 		WITH dead_nodes AS (
 			SELECT id
 			FROM nodes
@@ -1564,6 +1570,7 @@ func (s *JobStore) ReclaimLostRunningSessionJobsForSession(ctx context.Context, 
 		updated_jobs AS (
 			UPDATE jobs j
 			SET status = 'pending',
+				payload = {{continuation_retry_payload}},
 				last_error = 'job ownership lost; queued for bounded recovery',
 				locked_by_node_id = NULL,
 				run_owner_id = NULL,
@@ -1589,7 +1596,7 @@ func (s *JobStore) ReclaimLostRunningSessionJobsForSession(ctx context.Context, 
 			  AND s.org_id = uj.org_id
 			  AND s.id = uj.session_id::uuid
 		)
-		SELECT COUNT(*) FROM updated_jobs`
+		SELECT COUNT(*) FROM updated_jobs`)
 
 	var reclaimed int64
 	err := s.db.QueryRow(ctx, query, orgID, sessionID, staleBefore, limit).Scan(&reclaimed)

@@ -929,6 +929,8 @@ type Orchestrator struct {
 	sandboxHolders             SessionSandboxHolderStore
 	reviewInputsGroup          singleflight.Group
 	threadDeliveryLocks        sync.Map
+	threadDeliveryLocksMu      sync.Mutex
+	confirmedThreadInput       sync.Map
 	activeActivityPhases       sync.Map
 	env                        *AgentEnv          // owns env resolution, auth pre-flight, Codex auth injection
 	identityResolver           *identity.Resolver // can be nil — falls back to legacy GITHUB_TOKEN env injection
@@ -1355,6 +1357,9 @@ type DurableCheckpoint struct {
 // turn. Threaded sessions use this to run a tab with its selected agent/model
 // while keeping the parent session row as the shared sandbox/session identity.
 type ContinueSessionOptions struct {
+	ExecutionPurpose     models.SessionExecutionPurpose
+	RecoveryRuntimeID    *uuid.UUID
+	RecoveryMessageIDs   []int64
 	AgentType            models.AgentType
 	ModelOverride        *string
 	ReasoningEffort      *models.ReasoningEffort
@@ -2138,6 +2143,21 @@ func runSandboxBootstrapCommands(ctx context.Context, provider SandboxProvider, 
 // checkpoint when one exists. If the session has no durable checkpoint yet,
 // it restarts the run from scratch.
 func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Session) error {
+	return o.RecoverSessionWithOptions(ctx, session, nil)
+}
+
+// RecoverSessionWithOptions preserves the exact durable input/runtime lineage
+// of an owned checkpoint continuation. Initial/no-checkpoint recovery retains
+// the existing bounded scratch restart behavior.
+func (o *Orchestrator) RecoverSessionWithOptions(ctx context.Context, session *models.Session, recoveryOpts *ContinueSessionOptions) error {
+	if recoveryOpts != nil {
+		if recoveryOpts.ExecutionPurpose != models.SessionExecutionPurposeCheckpointRecovery {
+			return fmt.Errorf("owned session recovery requires checkpoint recovery purpose")
+		}
+		if err := validateContinuationPurpose(session, recoveryOpts); err != nil {
+			return err
+		}
+	}
 	log := o.logger.With().
 		Str("session_id", session.ID.String()).
 		Str("org_id", session.OrgID.String()).
@@ -2210,7 +2230,10 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 	}
 	event.Msg("recovering session from latest durable checkpoint")
 
-	return o.ContinueSession(ctx, session, nil)
+	if recoveryOpts != nil {
+		return o.ContinueSession(ctx, session, recoveryOpts)
+	}
+	return o.ContinueSession(ctx, session, &ContinueSessionOptions{ExecutionPurpose: models.SessionExecutionPurposeCheckpointRetry, ThreadID: session.PrimaryThreadID})
 }
 
 func (o *Orchestrator) blockNoCheckpointRecoveryWhenThreadRuntimeActive(ctx context.Context, session *models.Session, log zerolog.Logger) error {
@@ -2551,17 +2574,6 @@ func latestUserMessageInScope(messages []models.SessionMessage, threadID *uuid.U
 		return nil
 	}
 	return &messages[latest]
-}
-
-func messagesInScope(messages []models.SessionMessage, threadID *uuid.UUID) []models.SessionMessage {
-	scoped := make([]models.SessionMessage, 0, len(messages))
-	for _, message := range messages {
-		if !messageMatchesThreadScope(message, threadID) {
-			continue
-		}
-		scoped = append(scoped, message)
-	}
-	return scoped
 }
 
 // unprocessedUserMessages returns the consecutive trailing user messages for
@@ -3202,7 +3214,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 			return fmt.Errorf("fetch session messages: %w", err)
 		}
 	}
-	latestMsg := latestUserMessage(messages)
+	latestMsg := latestUserMessageInScope(executionScopeMessages(messages, primaryThreadID, primaryThreadID), primaryThreadID)
+	var initialSeedMessages []models.SessionMessage
+	if latestMsg != nil {
+		initialSeedMessages = []models.SessionMessage{*latestMsg}
+	}
+	initialSeedMessages, _, err = o.unappliedThreadMessages(ctx, run, primaryThreadID, initialSeedMessages)
+	if err != nil {
+		return fmt.Errorf("resolve initial seed admission: %w", err)
+	}
 	if latestMsg != nil {
 		initialProcessedMessageID = latestMsg.ID
 	}
@@ -3383,6 +3403,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	if models.HasAutomationActions(run.CapabilitySnapshot) {
 		input.IntegrationSkills += "\n" + prompts.AutomationActionInstructions()
 	}
+	if err := o.appendAutomationPublicationIntentPrompt(ctx, input, run); err != nil {
+		o.failRun(ctx, run, err.Error())
+		return err
+	}
 	if revisionContext, revErr := ParseRevisionContext(run.RevisionContext); revErr != nil {
 		log.Warn().Err(revErr).Msg("failed to parse session revision context")
 	} else {
@@ -3514,7 +3538,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		}
 		drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer drainCancel()
-		o.drainQueuedMessagesAfterProcessedID(drainCtx, run, initialProcessedMessageID, nil, log)
+		o.drainQueuedMessagesAfterProcessedID(drainCtx, run, initialProcessedMessageID, primaryThreadID, log)
 	}()
 	defer func() {
 		exitReason := containerExitReason(ctx, err)
@@ -3611,11 +3635,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	}
 	var threadRuntimeCtl *threadRuntimeControl
 	if primaryThreadID != nil {
-		var seedMessages []models.SessionMessage
-		if latestMsg != nil {
-			seedMessages = append(seedMessages, *latestMsg)
-		}
-		threadRuntimeCtl, err = o.startThreadRuntimeControl(ctx, run, *primaryThreadID, sandbox, threadRuntimeSeedMessageIDs(seedMessages), log)
+		threadRuntimeCtl, err = o.startThreadRuntimeControl(ctx, run, *primaryThreadID, sandbox, threadRuntimeSeedMessageIDs(initialSeedMessages), log)
 		if err != nil {
 			if errors.Is(err, ErrThreadRuntimeAlreadyActive) {
 				return fmt.Errorf("start thread runtime: %w", err)
@@ -3643,10 +3663,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 					stopReason = "context_cancelled"
 					lastError = ctx.Err().Error()
 				}
+				stopInboxPoller()
 				closeCtx, closeCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
 				threadRuntimeCtl.Close(closeCtx, status, stopReason, lastError)
 				closeCancel()
-				o.forgetThreadDeliveryLock(*primaryThreadID)
 				refreshCtx, refreshCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
 				defer refreshCancel()
 				keepSessionRunningIfSiblingRuntimesActive(refreshCtx, o.sessions, o.sandboxHolders, run.OrgID, run.ID, log)
@@ -3865,11 +3885,22 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 			runtimeID = &threadRuntimeCtl.runtime.ID
 			leaseToken = &threadRuntimeCtl.runtime.LeaseToken
 		}
-		activityExecution, err = newActivityPhaseExecution(
-			ctx, o.activityPhases, log, run.OrgID, run.ID, *primaryThreadID,
-			turnNumber, runtimeID, leaseToken,
-			models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInitial},
-		)
+		if threadRuntimeCtl != nil && len(threadRuntimeCtl.seedMessageIDs) > 0 {
+			if o.activityPhases != nil {
+				activityExecution, err = newSeedActivityPhaseExecution(ctx, o.activityPhases, log,
+					run.OrgID, run.ID, *primaryThreadID, turnNumber,
+					threadRuntimeCtl.runtime.ID, threadRuntimeCtl.runtime.LeaseToken, threadRuntimeCtl.seedMessageIDs)
+				if err == nil {
+					threadRuntimeCtl.seedMessageIDs = nil
+				}
+			} else {
+				err = threadRuntimeCtl.admitSeedWithoutPhase(ctx)
+			}
+		} else {
+			activityExecution, err = newActivityPhaseExecution(ctx, o.activityPhases, log,
+				run.OrgID, run.ID, *primaryThreadID, turnNumber, runtimeID, leaseToken,
+				models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInitial})
+		}
 		if err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("start activity phase: %s", err))
 			return fmt.Errorf("start activity phase: %w", err)
@@ -4149,7 +4180,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		return nil
 	}
 
-	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, status, runResult); err != nil {
+	durableAutomaticPublication, err := o.persistRunResult(ctx, run, status, runResult)
+	if err != nil {
 		o.cleanupReviewBundle(ctx, runResult, log)
 		return fmt.Errorf("update run result: %w", err)
 	}
@@ -4185,7 +4217,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 			Str("status", string(status))
 	})
 
-	if o.shouldQueueAutomaticPR(ctx, run, runResult, log) {
+	if !durableAutomaticPublication && o.shouldQueueAutomaticPR(ctx, run, runResult, log) {
 		if o.publicationIntents == nil {
 			log.Error().Msg("automatic publication coordinator is unavailable")
 		} else {
@@ -4320,6 +4352,9 @@ func (o *Orchestrator) shouldQueueAutomaticPR(ctx context.Context, run *models.S
 // invoking this method. The SendMessage HTTP handler enforces this via org_id
 // scoping and ClaimIdleForSession atomicity.
 func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Session, opts *ContinueSessionOptions) (returnErr error) {
+	if err := validateContinuationPurpose(session, opts); err != nil {
+		return err
+	}
 	// Create a cancellable context. The cancel registry is populated later
 	// once the sandbox is available, so CancelSession can send SIGINT.
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -4423,6 +4458,34 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if !rebuildWorkspace && session.PendingSnapshotKey != nil && *session.PendingSnapshotKey != "" {
 		log.Info().Str("pending_snapshot_key", *session.PendingSnapshotKey).Msg("continue_session waiting for post-PR snapshot upload to land")
 		return ErrSnapshotPending
+	}
+
+	input, err := o.resolveContinuationInput(ctx, session, opts)
+	if err != nil {
+		if errors.Is(err, errInvalidContinuationInput) {
+			return o.failContinueSessionError(ctx, session, opts, err, log)
+		}
+		return err
+	}
+	if input.alreadyApplied {
+		log.Info().Int64("message_id", input.latest.ID).Msg("continuation input was already admitted; skipping duplicate execution")
+		return ErrContinuationInputAlreadyApplied
+	}
+	scopedMessages := input.scopedMessages
+	latestMsg, pendingMsgs, threadID := input.latest, input.pending, input.threadID
+	recoveryTask := input.recoveryTask
+	if strings.TrimSpace(latestMsg.Content) == "" && len(latestMsg.Attachments) == 0 {
+		return o.failContinueSessionError(ctx, session, opts, errors.New("no user message found for continue_session"), log)
+	}
+
+	if threadID != nil && (opts == nil || opts.ThreadID == nil) {
+		if opts == nil {
+			opts = &ContinueSessionOptions{}
+		} else {
+			copyOpts := *opts
+			opts = &copyOpts
+		}
+		opts.ThreadID = threadID
 	}
 
 	parentAgentSessionID := ""
@@ -4548,40 +4611,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("unknown agent type: %s", session.AgentType), log)
 	}
 
-	// 3. Get the latest user message for this turn.
-	messages, err := o.sessionMessages.ListBySession(ctx, session.OrgID, session.ID)
-	if err != nil {
-		return fmt.Errorf("fetch session messages: %w", err)
-	}
-
-	// Scope the latest-user-message lookup to the thread the worker enqueued
-	// for. ListBySession orders rows by (turn_number, id) and per-thread turn
-	// counters are independent, so the globally-last user row in the slice is
-	// not necessarily the most recently sent message — a sibling thread that's
-	// further along in turns can sit "after" a brand-new user message in the
-	// returned ordering. Without this scoping, ContinueSession would re-run
-	// the wrong (already-answered) thread and orphan the new message.
-	//
-	// When opts is nil (RecoverSession path: worker crash mid-turn rehydrates
-	// without a thread hint) we preserve the legacy global lookup so a
-	// threaded session can still recover its in-flight turn.
-	var latestMsg *models.SessionMessage
-	if opts != nil && opts.QueuedMessageID != nil {
-		latestMsg, err = queuedUserMessageInScope(messages, *opts.QueuedMessageID, opts.ThreadID)
-		if err != nil {
-			log.Warn().Err(err).Int64("queued_message_id", *opts.QueuedMessageID).Msg("continue_session queued message selection failed")
-			return o.failContinueSessionError(ctx, session, opts, fmt.Errorf("select queued user message: %w", err), log)
-		}
-	} else if opts != nil && opts.ThreadID != nil {
-		latestMsg = latestUserMessageInScope(messages, opts.ThreadID)
-	} else {
-		latestMsg = latestUserMessage(messages)
-	}
-	if latestMsg == nil || (strings.TrimSpace(latestMsg.Content) == "" && len(latestMsg.Attachments) == 0) {
-		return o.failContinueSessionError(ctx, session, opts, errors.New("no user message found for continue_session"), log)
-	}
-	threadID := latestMsg.ThreadID
-	scopedMessages := messagesInScope(messages, threadID)
 	var readOnlyReviewThread *models.SessionThread
 	if threadID != nil && *threadID != uuid.Nil && o.sessionThreads != nil {
 		thread, threadErr := o.sessionThreads.GetByID(ctx, session.OrgID, *threadID)
@@ -4602,15 +4631,19 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// plan-mode detection — earlier queued messages contribute only their
 	// text content. When only a single user message is unprocessed, this
 	// reduces to the legacy single-message behavior.
-	pendingMsgs := unprocessedUserMessagesThrough(messages, threadID, latestMsg.ID)
 	preparationMode = reviewTurnPreparationMode(preparationMode, pendingMsgs)
 	planMode := strings.HasPrefix(latestMsg.Content, planModePrefix)
+	promptMessages := pendingMsgs
+	if len(recoveryTask) > 0 {
+		promptMessages = recoveryTask
+	}
+	taskMessages := append(append([]models.SessionMessage(nil), input.priorTaskContext...), promptMessages...)
 	var userMessage string
-	if len(pendingMsgs) <= 1 {
+	if len(promptMessages) <= 1 {
 		userMessage = strings.TrimPrefix(latestMsg.Content, planModePrefix)
 	} else {
 		var sb strings.Builder
-		for i, m := range pendingMsgs {
+		for i, m := range promptMessages {
 			if i > 0 {
 				sb.WriteString("\n\n---\n\n")
 			}
@@ -4673,6 +4706,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// slash command, which some agent CLIs only honor at the start of the
 	// prompt.
 	leadsWithSlashCommand := strings.HasPrefix(strings.TrimSpace(userMessage), "/")
+	if len(input.priorTaskContext) > 0 && !leadsWithSlashCommand {
+		prior := make([]string, 0, len(input.priorTaskContext))
+		for _, message := range input.priorTaskContext {
+			prior = append(prior, strings.TrimPrefix(message.Content, planModePrefix))
+		}
+		userMessage = prompts.ContinuationTaskContext(strings.Join(prior, "\n\n---\n\n"), userMessage)
+	}
 	if !planMode && revisionContext == nil && humanInputAnswer == nil &&
 		latestMsg.Source == "" && !threadScopedExecution && !leadsWithSlashCommand {
 		userMessage = FollowUpIntentPreamble + userMessage
@@ -5078,6 +5118,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if models.HasAutomationActions(session.CapabilitySnapshot) {
 		integrationSkills += "\n" + prompts.AutomationActionInstructions()
 	}
+	integrationInput := &AgentInput{IntegrationSkills: integrationSkills}
+	if err := o.appendAutomationPublicationIntentPrompt(ctx, integrationInput, session); err != nil {
+		return o.failContinueSessionError(ctx, session, opts, err, log)
+	}
+	integrationSkills = integrationInput.IntegrationSkills
 	restrictedPRFeedback := opts != nil && opts.PRFeedback != nil
 	if restrictedPRFeedback {
 		// The control plane owns pushes, comments, and review-thread mutations.
@@ -5580,10 +5625,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			stopReason = "context_cancelled"
 			lastError = ctx.Err().Error()
 		}
+		stopThreadRuntimeInboxPoller()
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
 		threadRuntimeCtl.Close(closeCtx, status, stopReason, lastError)
 		closeCancel()
-		o.forgetThreadDeliveryLock(*opts.ThreadID)
 		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), threadRuntimeStateUpdateTimeout)
 		defer refreshCancel()
 		keepSessionRunningIfSiblingRuntimesActive(refreshCtx, o.sessions, o.sandboxHolders, session.OrgID, session.ID, log)
@@ -5605,7 +5650,8 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	var prompt *AgentPrompt
 	var restoredWorkspaceFallbackPrompt func() (*AgentPrompt, error)
 	authBillingMode := TokenBillingModeUnknown
-	materializedAttachments := o.materializeAttachmentsForMessages(ctx, session.OrgID, sandbox, messageTurnNumber, pendingMsgs, log)
+	attachmentMessages := taskMessages
+	materializedAttachments := o.materializeAttachmentsForMessages(ctx, session.OrgID, sandbox, messageTurnNumber, attachmentMessages, log)
 	if reusedExisting || hasSnapshot {
 		// Re-inject agent auth (Codex auth.json or Claude Code credentials.json).
 		// Cheap, and catches the case where the file was cleared or drifted
@@ -5874,7 +5920,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if automationTurn != nil || codeReviewTurn != nil {
 			basePrompt.UserPrompt = appendAgentAttachmentSection(userMessage, materializedAttachments)
 		} else {
-			basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildResumeContext(session, &issue, messages, userMessage), materializedAttachments)
+			basePrompt.UserPrompt = appendAgentAttachmentSection(o.buildResumeContext(session, &issue, scopedMessages, userMessage), materializedAttachments)
 		}
 		basePrompt.Continuation = false
 		basePrompt.RevisionContext = revisionContext
@@ -5903,6 +5949,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		reviewSetupPin.Release()
 	}
 
+	// Bind ordinary task execution to this job lease before seed admission or
+	// provider execution, so recovery cannot adopt a newer drained turn.
+	if opts == nil || (opts.PRRepair == nil && opts.PRFeedback == nil && opts.AutomationTurn == nil && opts.CodeReviewTurn == nil && opts.HumanInputRequestID == nil && opts.ChangesetID == nil) {
+		if err = o.recordContinuationAttempt(ctx, session, threadRuntimeCtl, latestMsg, taskMessages); err != nil {
+			return err
+		}
+	}
 	// 6. Execute agent with log streaming.
 	var activityExecution *activityPhaseExecution
 	if threadID != nil {
@@ -5911,32 +5964,22 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if threadRuntimeCtl != nil {
 			runtimeID = &threadRuntimeCtl.runtime.ID
 			leaseToken = &threadRuntimeCtl.runtime.LeaseToken
-			if o.activityPhases != nil && o.threadInbox != nil && len(threadRuntimeCtl.seedMessageIDs) > 0 {
-				sequenceEnd, deliveryErr := o.threadInbox.MarkDeliveredForSeedMessages(
-					ctx, session.OrgID, *threadID, threadRuntimeCtl.runtime.ID, threadRuntimeCtl.seedMessageIDs,
-				)
-				if deliveryErr != nil {
-					return fmt.Errorf("mark resumed seed inbox batch delivered: %w", deliveryErr)
-				}
-				if sequenceEnd > 0 {
-					batch, ackErr := o.activityPhases.AcknowledgeInboxBatch(
-						ctx, session.OrgID, session.ID, *threadID,
-						threadRuntimeCtl.runtime.ID, threadRuntimeCtl.runtime.LeaseToken,
-						nil, sequenceEnd,
-					)
-					if ackErr != nil {
-						return fmt.Errorf("acknowledge resumed seed inbox batch: %w", ackErr)
-					}
-					trigger = models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInboxBatch, BatchID: &batch.ID}
+		}
+		if threadRuntimeCtl != nil && len(threadRuntimeCtl.seedMessageIDs) > 0 {
+			if o.activityPhases != nil {
+				activityExecution, err = newSeedActivityPhaseExecution(ctx, o.activityPhases, log,
+					session.OrgID, session.ID, *threadID, messageTurnNumber,
+					threadRuntimeCtl.runtime.ID, threadRuntimeCtl.runtime.LeaseToken, threadRuntimeCtl.seedMessageIDs)
+				if err == nil {
 					threadRuntimeCtl.seedMessageIDs = nil
 				}
+			} else {
+				err = threadRuntimeCtl.admitSeedWithoutPhase(ctx)
 			}
+		} else {
+			activityExecution, err = newActivityPhaseExecution(ctx, o.activityPhases, log,
+				session.OrgID, session.ID, *threadID, messageTurnNumber, runtimeID, leaseToken, trigger)
 		}
-		activityExecution, err = newActivityPhaseExecution(
-			ctx, o.activityPhases, log, session.OrgID, session.ID, *threadID,
-			messageTurnNumber, runtimeID, leaseToken,
-			trigger,
-		)
 		if err != nil {
 			return fmt.Errorf("start activity phase for resume: %w", err)
 		}

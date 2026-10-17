@@ -42,11 +42,17 @@ func wirePublicationCoordinator(cfg *config.Config, services *worker.Services, s
 		logger,
 	)
 	coordinator.SetRepositoryStore(stores.Repositories)
+	coordinator.SetAutomationPRIntentStores(stores.AutomationRuns, stores.SessionPRIntents)
 	coordinator.SetPublicationEnabled(cfg.AgentPRPublicationEnabled)
 	coordinator.SetReviewEnabled(cfg.PrePRReviewEnabled)
 	services.PublicationIntents = coordinator
 	if pr, ok := services.PR.(publicationExecutionPolicySetter); ok {
 		pr.SetPublicationExecutionPolicy(coordinator)
+	}
+	if pr, ok := services.PR.(interface {
+		SetTeamReviewRequestStore(ghservice.TeamReviewRequestStore)
+	}); ok && stores.TeamReviewRequests != nil {
+		pr.SetTeamReviewRequestStore(stores.TeamReviewRequests)
 	}
 	if orchestrator, ok := services.Orchestrator.(publicationIntentCoordinatorSetter); ok {
 		orchestrator.SetPublicationIntentCoordinator(coordinator)

@@ -311,7 +311,14 @@ func (s *ThreadRuntimeStore) AdvanceDeliveryWithLease(ctx context.Context, orgID
 	return tag.RowsAffected() == 1, nil
 }
 
-func (s *ThreadRuntimeStore) CommitInboxDeliveryWithLease(ctx context.Context, orgID, runtimeID, leaseToken, threadID uuid.UUID, ownerNodeID string, deliveredSequence, ackedSequence int64) (bool, error) {
+func (s *ThreadRuntimeStore) CommitInboxDeliveryWithLease(ctx context.Context, orgID, runtimeID, leaseToken, threadID uuid.UUID, ownerNodeID string, deliveredSequence, ackedSequence int64, confirmedSequences []int64) (bool, error) {
+	confirmed := make(map[int64]struct{}, len(confirmedSequences))
+	for _, sequence := range confirmedSequences {
+		if sequence <= 0 || sequence > ackedSequence {
+			return false, fmt.Errorf("confirmed inbox sequence outside acknowledgment boundary")
+		}
+		confirmed[sequence] = struct{}{}
+	}
 	txStarter, ok := s.db.(TxStarter)
 	if !ok {
 		return false, fmt.Errorf("thread runtime store does not support transactions")
@@ -337,7 +344,9 @@ func (s *ThreadRuntimeStore) CommitInboxDeliveryWithLease(ctx context.Context, o
 		WHERE org_id = $1
 		  AND id = $2
 		  AND lease_token = $3
-		  AND status IN ('starting', 'live', 'paused', 'draining')`, orgID, runtimeID, leaseToken, deliveredSequence, ackedSequence)
+		  AND thread_id = $6
+		  AND lease_expires_at > clock_timestamp()
+		  AND status IN ('starting', 'live', 'paused', 'draining')`, orgID, runtimeID, leaseToken, deliveredSequence, ackedSequence, threadID)
 	if err != nil {
 		return false, fmt.Errorf("advance thread runtime delivery: %w", err)
 	}
@@ -345,13 +354,10 @@ func (s *ThreadRuntimeStore) CommitInboxDeliveryWithLease(ctx context.Context, o
 		return false, nil
 	}
 
-	// This is the watermark branch of acknowledgeDeliveredThreadInboxSegment,
-	// taken when no activity phase is registered for the thread. There is no
-	// delivery batch here and so no later phase start to stamp applied_at, so
-	// it must be stamped now: an entry left 'acked' with a NULL applied_at is
-	// hidden from the transcript permanently and is not recoverable through
-	// the inbox failure notice either.
-	if _, err := tx.Exec(ctx, `
+	// A scalar cursor is not a delivery receipt: an older retried failure may
+	// be uncertain below it. Only the exact positively confirmed rows may
+	// become applied, including known writes whose phase transition failed.
+	tag, err = tx.Exec(ctx, `
 		UPDATE thread_inbox_entries
 		SET delivery_state = 'acked',
 			runtime_id = $3,
@@ -362,10 +368,14 @@ func (s *ThreadRuntimeStore) CommitInboxDeliveryWithLease(ctx context.Context, o
 			updated_at = now()
 		WHERE org_id = $1
 		  AND thread_id = $2
-		  AND sequence_no <= $5
+		  AND sequence_no = ANY($5::bigint[])
 		  AND runtime_id = $3
-		  AND delivery_state = 'delivered'`, orgID, threadID, runtimeID, ownerNodeID, ackedSequence); err != nil {
+		  AND delivery_state IN ('delivered', 'acked', 'unknown_delivery')`, orgID, threadID, runtimeID, ownerNodeID, confirmedSequences)
+	if err != nil {
 		return false, fmt.Errorf("mark thread inbox delivery committed: %w", err)
+	}
+	if tag.RowsAffected() != int64(len(confirmed)) {
+		return false, ErrInboxBatchConflict
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit thread inbox delivery transaction: %w", err)
@@ -378,21 +388,36 @@ func (s *ThreadRuntimeStore) MarkTerminalWithLease(ctx context.Context, orgID, r
 	if status != models.ThreadRuntimeStatusClosed && status != models.ThreadRuntimeStatusFailed && status != models.ThreadRuntimeStatusLost {
 		return false, fmt.Errorf("terminal thread runtime status required: %s", status)
 	}
-	tag, err := s.db.Exec(ctx, `
-		UPDATE thread_runtimes
-		SET status = $4,
-			closed_at = now(),
-			stop_reason = NULLIF($5, ''),
-			last_error = NULLIF($6, ''),
-			updated_at = now()
-		WHERE org_id = $1
-		  AND id = $2
-		  AND lease_token = $3
-		  AND status IN ('starting', 'live', 'paused', 'draining')`, orgID, runtimeID, leaseToken, status, stopReason, lastError)
+	var changed bool
+	err := s.db.QueryRow(ctx, `
+		WITH terminal AS (
+			UPDATE thread_runtimes
+			SET status = $4, closed_at = now(), stop_reason = NULLIF($5, ''),
+				last_error = NULLIF($6, ''), updated_at = now()
+			WHERE org_id = $1 AND id = $2 AND lease_token = $3
+			  AND status IN ('starting', 'live', 'paused', 'draining')
+			RETURNING id, org_id, session_id, thread_id
+		), released AS (
+			UPDATE thread_inbox_entries e
+			SET delivery_state = 'pending', runtime_id = NULL, owner_node_id = NULL, updated_at = now()
+			FROM terminal t
+			WHERE e.org_id = t.org_id AND e.session_id = t.session_id AND e.thread_id = t.thread_id
+			  AND e.runtime_id = t.id AND e.delivery_state = 'delivering' AND e.applied_at IS NULL
+			RETURNING e.id
+		), uncertain AS (
+			UPDATE thread_inbox_entries e
+			SET delivery_state = 'unknown_delivery', updated_at = now(),
+				last_error = COALESCE(e.last_error, 'runtime closed after delivery before acknowledgment')
+			FROM terminal t
+			WHERE e.org_id = t.org_id AND e.session_id = t.session_id AND e.thread_id = t.thread_id
+			  AND e.runtime_id = t.id AND e.delivery_state = 'delivered' AND e.applied_at IS NULL
+			RETURNING e.id
+		)
+		SELECT EXISTS(SELECT 1 FROM terminal)`, orgID, runtimeID, leaseToken, status, stopReason, lastError).Scan(&changed)
 	if err != nil {
 		return false, fmt.Errorf("mark thread runtime terminal: %w", err)
 	}
-	return tag.RowsAffected() == 1, nil
+	return changed, nil
 }
 
 // ReclaimExpiredLeases is the reaper-side recovery path for runtimes whose

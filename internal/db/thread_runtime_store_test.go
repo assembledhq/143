@@ -202,15 +202,15 @@ func TestThreadRuntimeStore_CommitInboxDeliveryStampsAppliedAt(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE thread_runtimes").
-		WithArgs(orgID, runtimeID, leaseToken, int64(7), int64(7)).
+		WithArgs(orgID, runtimeID, leaseToken, int64(7), int64(7), threadID).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectExec(`(?s)UPDATE thread_inbox_entries.+applied_at = COALESCE\(applied_at, now\(\)\).+delivery_state = 'delivered'`).
-		WithArgs(orgID, threadID, runtimeID, "node-1", int64(7)).
+	mock.ExpectExec(`(?s)UPDATE thread_inbox_entries.+applied_at = COALESCE\(applied_at, now\(\)\).+sequence_no = ANY`).
+		WithArgs(orgID, threadID, runtimeID, "node-1", []int64{6, 7}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
 	mock.ExpectCommit()
 
 	ok, err := NewThreadRuntimeStore(mock).CommitInboxDeliveryWithLease(
-		context.Background(), orgID, runtimeID, leaseToken, threadID, "node-1", 7, 7,
+		context.Background(), orgID, runtimeID, leaseToken, threadID, "node-1", 7, 7, []int64{6, 7},
 	)
 
 	require.NoError(t, err, "CommitInboxDeliveryWithLease should not return an error")

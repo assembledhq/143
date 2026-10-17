@@ -125,6 +125,10 @@ func AgentPRHandoff(data AgentPRHandoffData) string {
 	return render("agent_pr_handoff.template", data)
 }
 
+func AutomationPublicationIntent() string {
+	return render("automation_publication_intent.template", nil)
+}
+
 // AnswerOnlyPreamble returns the preamble injected into Slack answer-only agent
 // prompts. These runs should answer questions without mutating the repository.
 func AnswerOnlyPreamble() string {
@@ -592,3 +596,11 @@ func EvalBootstrapPrompt(data EvalBootstrapPromptData) string {
 
 // AutomationActionInstructions describes the shared action protocol for every automation run mode.
 func AutomationActionInstructions() string { return render("automation_actions.template", nil) }
+
+// ContinuationTaskContext restores unfinished task context alongside new input.
+func ContinuationTaskContext(priorTask, currentMessage string) string {
+	return render("continuation_task_context.template", struct {
+		PriorTask      string
+		CurrentMessage string
+	}{PriorTask: priorTask, CurrentMessage: currentMessage})
+}

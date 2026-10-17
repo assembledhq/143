@@ -53,6 +53,7 @@ func newSchedulingPostgres(t *testing.T) (*pgxpool.Pool, uuid.UUID, uuid.UUID, u
  CREATE TABLE jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid,queue text,job_type text,payload jsonb,priority int,dedupe_key text,status text DEFAULT 'pending',run_at timestamptz DEFAULT now(),created_at timestamptz DEFAULT now(),updated_at timestamptz DEFAULT now(),attempts int DEFAULT 0,max_attempts int DEFAULT 8,last_error text,locked_by_node_id text,run_owner_id text,owner_kind text,lock_token uuid,locked_at timestamptz,lease_expires_at timestamptz,completed_at timestamptz);
  CREATE UNIQUE INDEX jobs_dedupe ON jobs(queue,dedupe_key) WHERE status IN ('pending','running');`)
 	require.NoError(t, err, "create scheduling dependencies")
+	addContinuationRetryFixtureSchema(t, pool)
 	up, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000289_code_review_scheduling.up.sql"))
 	require.NoError(t, err, "read actual migration")
 	_, err = pool.Exec(ctx, string(up))

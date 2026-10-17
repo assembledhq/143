@@ -348,7 +348,7 @@ func (s *SessionExecutorStore) MarkTerminalWithLease(ctx context.Context, orgID,
 // lint:allow-no-orgid reason="recovery loop scans stale executor leases across orgs by design"
 func (s *SessionExecutorStore) ReclaimLost(ctx context.Context, staleBefore time.Time, limit int) (int64, error) {
 	var reclaimed int64
-	err := s.db.QueryRow(ctx, `
+	err := s.db.QueryRow(ctx, continuationRecoveryQuery(`
 		WITH stale_active AS (
 			SELECT se.id, se.org_id, se.job_id, se.lock_token, j.owner_kind, j.status AS job_status
 			FROM session_executors se
@@ -459,6 +459,7 @@ func (s *SessionExecutorStore) ReclaimLost(ctx context.Context, staleBefore time
 		updated_jobs AS (
 			UPDATE jobs j
 			SET status = 'pending',
+				payload = {{continuation_retry_payload}},
 				last_error = 'session executor ownership lost; queued for bounded recovery',
 				locked_by_node_id = NULL,
 				run_owner_id = NULL,
@@ -487,7 +488,7 @@ func (s *SessionExecutorStore) ReclaimLost(ctx context.Context, staleBefore time
 		)
 		SELECT
 			(SELECT COUNT(*) FROM lost_executors)
-			+ (SELECT COUNT(*) FROM pre_handoff_orphans)`, staleBefore, limit).Scan(&reclaimed)
+			+ (SELECT COUNT(*) FROM pre_handoff_orphans)`), staleBefore, limit).Scan(&reclaimed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}
@@ -501,7 +502,7 @@ func (s *SessionExecutorStore) ReclaimLost(ctx context.Context, staleBefore time
 // input paths to recover one session's stale executor ownership immediately.
 func (s *SessionExecutorStore) ReclaimLostForSession(ctx context.Context, orgID, sessionID uuid.UUID, staleBefore time.Time, limit int) (int64, error) {
 	var reclaimed int64
-	err := s.db.QueryRow(ctx, `
+	err := s.db.QueryRow(ctx, continuationRecoveryQuery(`
 		WITH stale_active AS (
 			SELECT se.id, se.org_id, se.job_id, se.lock_token, j.owner_kind, j.status AS job_status
 			FROM session_executors se
@@ -553,6 +554,7 @@ func (s *SessionExecutorStore) ReclaimLostForSession(ctx context.Context, orgID,
 		updated_jobs AS (
 			UPDATE jobs j
 			SET status = 'pending',
+				payload = {{continuation_retry_payload}},
 				last_error = 'session executor ownership lost; queued for bounded recovery',
 				locked_by_node_id = NULL,
 				run_owner_id = NULL,
@@ -581,7 +583,7 @@ func (s *SessionExecutorStore) ReclaimLostForSession(ctx context.Context, orgID,
 		)
 		SELECT
 			(SELECT COUNT(*) FROM lost_executors)
-			+ (SELECT COUNT(*) FROM pre_handoff_orphans)`, orgID, sessionID, staleBefore, limit).Scan(&reclaimed)
+			+ (SELECT COUNT(*) FROM pre_handoff_orphans)`), orgID, sessionID, staleBefore, limit).Scan(&reclaimed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}

@@ -14,6 +14,8 @@ import (
 )
 
 type ActivityPhaseStore interface {
+	AcknowledgeInboxBatchAndStartPhase(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, *uuid.UUID, int, int64, []int64, time.Time) (models.SessionActivityPhase, models.ThreadInboxDeliveryBatch, *models.SessionActivityPhase, error)
+	StartSeedPhase(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int, uuid.UUID, uuid.UUID, []int64, time.Time) (models.SessionActivityPhase, *models.ThreadInboxDeliveryBatch, error)
 	StartPhase(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int, *uuid.UUID, *uuid.UUID, models.ActivityPhaseTrigger, time.Time) (models.SessionActivityPhase, error)
 	GetInboxDeliveryBatch(context.Context, uuid.UUID, uuid.UUID) (models.ThreadInboxDeliveryBatch, error)
 	CompletePhaseWithTransition(context.Context, uuid.UUID, uuid.UUID, models.ActivityPhaseStatus, models.ActivityPhaseBoundaryReason, time.Time) (models.SessionActivityPhase, bool, error)
@@ -68,6 +70,27 @@ func (s *ActivityPhaseService) StartPhase(ctx context.Context, orgID, sessionID,
 		} else {
 			s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryStarted, batch)
 		}
+	}
+	return phase, nil
+}
+
+// StartSeedPhase records seed acknowledgment and provider-phase admission in one
+// durable transaction; lifecycle events are emitted only after it commits.
+func (s *ActivityPhaseService) StartSeedPhase(ctx context.Context, orgID, sessionID, threadID uuid.UUID, turnNumber int, runtimeID, leaseToken uuid.UUID, messageIDs []int64) (models.SessionActivityPhase, error) {
+	phase, batch, err := s.store.StartSeedPhase(ctx, orgID, sessionID, threadID, turnNumber, runtimeID, leaseToken, messageIDs, s.now())
+	if err != nil {
+		return models.SessionActivityPhase{}, fmt.Errorf("start seed activity phase: %w", err)
+	}
+	if batch != nil {
+		acknowledged := *batch
+		acknowledged.Status = models.InboxDeliveryBatchAcknowledged
+		acknowledged.StartedAt = nil
+		s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryAcknowledged, acknowledged)
+	}
+	metrics.RecordActivityPhaseStarted(ctx, string(phase.TriggerKind))
+	s.publishPhase(ctx, models.SessionStreamEventActivityPhaseStarted, phase)
+	if batch != nil {
+		s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryStarted, *batch)
 	}
 	return phase, nil
 }
@@ -165,6 +188,25 @@ func (s *ActivityPhaseService) AcknowledgeInboxBatch(ctx context.Context, orgID,
 	}
 	s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryAcknowledged, batch)
 	return batch, nil
+}
+
+// AcknowledgeInboxBatchAndStartPhase publishes only after both the old phase
+// boundary and replacement phase have committed in the same transaction.
+func (s *ActivityPhaseService) AcknowledgeInboxBatchAndStartPhase(ctx context.Context, orgID, sessionID, threadID, runtimeID, leaseToken uuid.UUID, activePhaseID *uuid.UUID, turn int, sequenceEnd int64, confirmed []int64) (models.SessionActivityPhase, models.ThreadInboxDeliveryBatch, error) {
+	phase, batch, completed, err := s.store.AcknowledgeInboxBatchAndStartPhase(ctx, orgID, sessionID, threadID, runtimeID, leaseToken, activePhaseID, turn, sequenceEnd, confirmed, s.now())
+	if err != nil {
+		return models.SessionActivityPhase{}, models.ThreadInboxDeliveryBatch{}, err
+	}
+	if completed != nil {
+		s.recordPersistedTerminal(ctx, *completed)
+	}
+	acknowledged := batch
+	acknowledged.Status, acknowledged.StartedAt = models.InboxDeliveryBatchAcknowledged, nil
+	s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryAcknowledged, acknowledged)
+	metrics.RecordActivityPhaseStarted(ctx, string(phase.TriggerKind))
+	s.publishPhase(ctx, models.SessionStreamEventActivityPhaseStarted, phase)
+	s.publishBatch(ctx, models.SessionStreamEventInboxDeliveryStarted, batch)
+	return phase, batch, nil
 }
 
 func (s *ActivityPhaseService) AbandonInboxBatch(ctx context.Context, orgID, batchID uuid.UUID) (models.ThreadInboxDeliveryBatch, error) {
