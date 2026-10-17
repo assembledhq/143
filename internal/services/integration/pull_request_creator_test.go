@@ -27,6 +27,7 @@ func TestInternalPullRequestCreator_CreatePullRequest(t *testing.T) {
 		require.NotNil(t, got.Draft, "request body should include explicit draft setting")
 		require.True(t, *got.Draft, "request body should preserve draft setting")
 		require.Equal(t, "explicit_action", got.TriggerKind, "request body should preserve the publication trigger")
+		require.Equal(t, []string{"acme/team"}, got.TeamReviewers, "request body should preserve explicitly requested teams")
 
 		w.WriteHeader(http.StatusAccepted)
 		_, err := w.Write([]byte(`{"status":"queued","session_id":"session-123"}`))
@@ -37,9 +38,10 @@ func TestInternalPullRequestCreator_CreatePullRequest(t *testing.T) {
 	draft := true
 	creator := NewInternalPullRequestCreator("test-token", server.URL)
 	got, err := creator.CreatePullRequest(context.Background(), CreatePullRequestParams{
-		SessionID:   "session-123",
-		Draft:       &draft,
-		TriggerKind: "explicit_action",
+		SessionID:     "session-123",
+		Draft:         &draft,
+		TriggerKind:   "explicit_action",
+		TeamReviewers: []string{"acme/team"},
 	})
 
 	require.NoError(t, err, "CreatePullRequest should succeed for an accepted response")

@@ -6114,7 +6114,7 @@ func TestCapacityWaitRemainsPendingBeyondWorkerRetryWindow(t *testing.T) {
 			// older than its ordinary eight-minute failure window, not just the handler.
 			for _, age := range []time.Duration{9 * time.Minute, 12 * time.Hour} {
 				expectClaimWithAttempts(mock, job, org, models.JobTypeStartCodeReviewReassessment, payload, time.Now().Add(-age), token, 9, 8)
-				mock.ExpectExec("UPDATE jobs\\s+SET status = 'pending'").WithArgs("waiting for review sandbox capacity", pgxmock.AnyArg(), job, token).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectExec("UPDATE jobs j\\s+SET status = 'pending'").WithArgs("waiting for review sandbox capacity", pgxmock.AnyArg(), job, token).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				w.poll(context.Background())
 			}
 			require.Equal(t, []int{2, 0, 0, 0}, []int{lifecycle.preflights, providerCalls, lifecycle.handleCalls, disputes.failCalls}, "capacity must remain pending past retry limits without provider calls, allocation, or FailTriage")

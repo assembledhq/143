@@ -65,6 +65,43 @@ Implemented:
   rows for thread-scoped turns, create/release `thread_runtime` sandbox holders,
   heartbeat both leases while the process runs, publish provider handle IDs when
   adapters attach live command handles, and mark runtimes terminal on unwind.
+- the initial turn drains queued input using its primary thread, preserving
+  thread-specific routing and message-specific continuation deduplication.
+- live delivery records its attempt before writing to the provider. A definite
+  unavailable-handle or closed-input response can release that attempt;
+  other failures retain delivery uncertainty. Later polls cannot acknowledge
+  past an unresolved attempt. Runtime shutdown stops inbox polling and
+  serializes with delivery before releasing unsent claims.
+- a confirmed provider write retries only its acknowledgment, using a bounded
+  context independent of poll cancellation. Runtime-scoped confirmation is
+  retained for later polls and final closure; process loss still preserves the
+  durable uncertainty boundary. Polling waits for a live attached handle.
+- initial and resumed seed input is claimed under the current runtime lease. Its
+  acknowledgement, batch application, phase creation, and cursor updates commit
+  together, so a phase-start failure cannot leave input acknowledged without an
+  executable phase. Claims from a terminal runtime are released without
+  replaying input whose provider delivery is uncertain. Legacy seeds must form
+  a contiguous, correctly ordered batch; incompatible mixed history requires
+  reconciliation.
+- applied input stays in task history rather than entering seed admission
+  again. Duplicate queued messages finish before allocating a runtime.
+  Checkpoint retries carry an explicit purpose so they retain task context
+  while admitting only new input. Unknown delivery still requires explicit
+  recovery. Ordinary follow-ups also carry unfinished admitted input from a
+  terminal or expired runtime with no provider outcome as labeled prior task
+  context, including its attachments. A restored checkpoint may predate that
+  input; only the new follow-up enters seed admission.
+- owned retries and lost-job reclamation retain an exact runtime recovery
+  marker for unfinished ordinary continuations, recorded with the job lease
+  before provider admission. Recovery preserves validated applied input IDs
+  across attempts as task context, including confirmed live steering. Those
+  IDs are not admitted again as new input. A fully persisted outcome is
+  a duplicate no-op. Provider completion with incomplete session or thread
+  persistence returns a reconciliation error instead of replaying the task or
+  acknowledging successful job completion.
+- phase admission can retire a previous running phase only when its runtime
+  is durably terminal and the current runtime holds the fresh scoped lease.
+  Live or runtime-less owners remain protected and require reconciliation.
 - the worker has a `deliver_thread_inbox` handler that routes to the runtime
   owner worker, serializes local delivery per thread, writes pending inbox
   entries into the live handle only through an adapter-declared provider-native

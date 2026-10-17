@@ -112,6 +112,20 @@ func (a *threadRegistryHandleAttacher) Detach() {
 	a.registry.DetachHandle(a.threadID)
 }
 
+func (r *ThreadCancelRegistry) hasHandle(threadID uuid.UUID) bool {
+	if r == nil {
+		return false
+	}
+	value, ok := r.mu.Load(threadID)
+	if !ok {
+		return false
+	}
+	entry := value.(*threadCancelEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	return entry.handle != nil
+}
+
 func (r *ThreadCancelRegistry) DeliverInput(ctx context.Context, threadID uuid.UUID, data []byte) error {
 	val, ok := r.mu.Load(threadID)
 	if !ok {

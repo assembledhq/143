@@ -9941,6 +9941,7 @@ func TestSessionHandler_RetrySession_DefaultsToCheckpoint(t *testing.T) {
 	require.NoError(t, json.Unmarshal(jobPayload, &payload), "job payload should decode as string map")
 	require.Equal(t, sessionID.String(), payload["session_id"], "continue_session payload should include the session id")
 	require.Equal(t, threadID.String(), payload["thread_id"], "continue_session payload should include the retry thread id")
+	require.Equal(t, string(models.SessionExecutionPurposeCheckpointRetry), payload["execution_purpose"], "only checkpoint retry dispatch explicitly authorizes task context recovery")
 
 	var details map[string]any
 	require.NoError(t, json.Unmarshal(auditDetails, &details), "audit details should decode as an object")

@@ -9195,6 +9195,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 	expectedReasoning := models.ReasoningEffortXHigh
 	createSessionArgs := workerAnyArgs(39)
 	createSessionArgs[10] = &expectedReasoning
+	createSessionArgs[16] = models.SessionOriginAutomation
 	createSessionArgs[19] = &expectedGoal
 	createSessionArgs[23] = &runID
 	mock.ExpectBegin()

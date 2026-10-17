@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
@@ -18,16 +20,19 @@ import (
 type activityPhaseExecution struct {
 	mu sync.RWMutex
 
-	service    *ActivityPhaseService
-	logger     zerolog.Logger
-	orgID      uuid.UUID
-	sessionID  uuid.UUID
-	threadID   uuid.UUID
-	turnNumber int
-	runtimeID  *uuid.UUID
-	leaseToken *uuid.UUID
-	phase      *models.SessionActivityPhase
+	service        *ActivityPhaseService
+	logger         zerolog.Logger
+	orgID          uuid.UUID
+	sessionID      uuid.UUID
+	threadID       uuid.UUID
+	turnNumber     int
+	runtimeID      *uuid.UUID
+	leaseToken     *uuid.UUID
+	phase          *models.SessionActivityPhase
+	deliveryClosed bool
 }
+
+var errActivityPhaseDeliveryClosed = errors.New("activity phase closed for input transitions")
 
 type atomicActivityPhaseSessionStore interface {
 	UpdateResultAndCompleteActivityPhase(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.SessionStatus, *models.SessionResult, models.ActivityPhaseStatus, models.ActivityPhaseBoundaryReason, time.Time) (models.SessionActivityPhase, models.Session, error)
@@ -60,6 +65,17 @@ func newActivityPhaseExecution(
 	}, nil
 }
 
+func newSeedActivityPhaseExecution(ctx context.Context, service *ActivityPhaseService, logger zerolog.Logger, orgID, sessionID, threadID uuid.UUID, turnNumber int, runtimeID, leaseToken uuid.UUID, messageIDs []int64) (*activityPhaseExecution, error) {
+	phase, err := service.StartSeedPhase(ctx, orgID, sessionID, threadID, turnNumber, runtimeID, leaseToken, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	return &activityPhaseExecution{
+		service: service, logger: logger, orgID: orgID, sessionID: sessionID, threadID: threadID,
+		turnNumber: turnNumber, runtimeID: &runtimeID, leaseToken: &leaseToken, phase: &phase,
+	}, nil
+}
+
 func (e *activityPhaseExecution) phaseID() *uuid.UUID {
 	if e == nil {
 		return nil
@@ -87,6 +103,7 @@ func (e *activityPhaseExecution) complete(ctx context.Context, status models.Act
 		return err
 	}
 	e.phase = nil
+	e.deliveryClosed = true
 	e.logger.Info().
 		Str("activity_phase_id", phase.ID.String()).
 		Str("activity_phase_status", string(phase.Status)).
@@ -109,6 +126,7 @@ func (e *activityPhaseExecution) persistAssistantAndComplete(ctx context.Context
 		return err
 	}
 	e.phase = nil
+	e.deliveryClosed = true
 	e.logTerminal(phase)
 	return nil
 }
@@ -127,6 +145,7 @@ func (e *activityPhaseExecution) persistHumanInputAndComplete(ctx context.Contex
 		return err
 	}
 	e.phase = nil
+	e.deliveryClosed = true
 	e.logTerminal(phase)
 	return nil
 }
@@ -153,6 +172,7 @@ func (e *activityPhaseExecution) persistSessionResultAndComplete(ctx context.Con
 			return err
 		}
 		e.phase = nil
+		e.deliveryClosed = true
 		e.logTerminal(phase)
 		return nil
 	}
@@ -161,6 +181,7 @@ func (e *activityPhaseExecution) persistSessionResultAndComplete(ctx context.Con
 		return err
 	}
 	e.phase = nil
+	e.deliveryClosed = true
 	e.service.recordPersistedTerminal(ctx, phase)
 	atomicStore.PublishCommittedSessionStatus(ctx, e.orgID, session)
 	e.logTerminal(phase)
@@ -189,6 +210,7 @@ func (e *activityPhaseExecution) persistSessionStatusAndComplete(ctx context.Con
 			return err
 		}
 		e.phase = nil
+		e.deliveryClosed = true
 		e.logTerminal(phase)
 		return nil
 	}
@@ -197,6 +219,7 @@ func (e *activityPhaseExecution) persistSessionStatusAndComplete(ctx context.Con
 		return err
 	}
 	e.phase = nil
+	e.deliveryClosed = true
 	e.service.recordPersistedTerminal(ctx, phase)
 	atomicStore.PublishCommittedSessionStatus(ctx, e.orgID, session)
 	e.logTerminal(phase)
@@ -225,6 +248,7 @@ func (e *activityPhaseExecution) persistTurnCompleteAndComplete(ctx context.Cont
 			return err
 		}
 		e.phase = nil
+		e.deliveryClosed = true
 		e.logTerminal(phase)
 		return nil
 	}
@@ -233,6 +257,7 @@ func (e *activityPhaseExecution) persistTurnCompleteAndComplete(ctx context.Cont
 		return err
 	}
 	e.phase = nil
+	e.deliveryClosed = true
 	e.service.recordPersistedTerminal(ctx, phase)
 	e.logTerminal(phase)
 	return nil
@@ -246,38 +271,32 @@ func (e *activityPhaseExecution) logTerminal(phase models.SessionActivityPhase) 
 		Msg("activity phase completed")
 }
 
-func (e *activityPhaseExecution) acknowledgeAndResume(ctx context.Context, sequenceEnd int64) error {
+func (e *activityPhaseExecution) acknowledgeAndResume(ctx context.Context, sequenceEnd int64, confirmed ...int64) error {
 	if e == nil || e.service == nil || e.runtimeID == nil || e.leaseToken == nil {
 		return nil
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.deliveryClosed || e.phase == nil {
+		return errActivityPhaseDeliveryClosed
+	}
 	var activePhaseID *uuid.UUID
 	if e.phase != nil {
 		id := e.phase.ID
 		activePhaseID = &id
 	}
-	batch, err := e.service.AcknowledgeInboxBatch(
+	phase, batch, err := e.service.AcknowledgeInboxBatchAndStartPhase(
 		ctx, e.orgID, e.sessionID, e.threadID, *e.runtimeID, *e.leaseToken,
-		activePhaseID, sequenceEnd,
+		activePhaseID, e.turnNumber, sequenceEnd, confirmed,
 	)
 	if err != nil {
+		if errors.Is(err, db.ErrInboxBatchNoPhaseTransition) {
+			return errActivityPhaseDeliveryClosed
+		}
 		return err
 	}
-	phase, err := e.service.StartPhase(
-		ctx, e.orgID, e.sessionID, e.threadID, e.turnNumber,
-		e.runtimeID, e.leaseToken,
-		models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInboxBatch, BatchID: &batch.ID},
-	)
-	if err != nil {
-		if _, abandonErr := e.service.AbandonInboxBatch(ctx, e.orgID, batch.ID); abandonErr != nil {
-			e.logger.Warn().Err(abandonErr).
-				Str("thread_inbox_delivery_batch_id", batch.ID.String()).
-				Msg("failed to abandon acknowledged inbox batch after phase resume failure")
-		}
-		return fmt.Errorf("start steered activity phase: %w", err)
-	}
 	e.phase = &phase
+	e.deliveryClosed = false
 	e.logger.Info().
 		Str("activity_phase_id", phase.ID.String()).
 		Str("thread_inbox_delivery_batch_id", batch.ID.String()).

@@ -118,6 +118,7 @@ func TestAutomationRunHandler_PerTargetDispatch(t *testing.T) {
 			require.Equal(t, automationID, in.Automation.ID, "dispatch receives the automation")
 			require.NotNil(t, in.SessionTemplate, "dispatch receives the fresh-session template")
 			require.Nil(t, in.SessionTemplate.ModelOverride, "ranked fallbacks must not replace the primary in reusable target sessions")
+			require.Equal(t, models.SessionOriginAutomation, in.SessionTemplate.Origin, "automation session templates must carry their provenance before either dispatch path persists them")
 			require.Equal(t, &runID, in.SessionTemplate.AutomationRunID, "template links the run")
 			require.Equal(t, &repoID, in.SessionTemplate.RepositoryID, "template carries the repository")
 			require.False(t, in.KillSwitch, "kill switch is off by default")

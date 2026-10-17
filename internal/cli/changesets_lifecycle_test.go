@@ -39,6 +39,8 @@ func TestChangesetCommandLifecycle(t *testing.T) {
 		{name: "materialize", args: []string{"materialize", "--changeset", "change"}, method: "POST", path: "/sessions/session/changesets/change/materialize", reply: `{"data":{"ready":true}}`, output: `{"data":{"ready":true}}`},
 		{name: "verify", args: []string{"verify"}, method: "POST", path: "/sessions/session/changesets/verify", reply: `{"data":{"valid":true}}`, output: `{"data":{"valid":true}}`},
 		{name: "publish", args: []string{"publish", "--changeset", "change"}, method: "POST", path: "/sessions/session/changesets/change/publish", reply: `{"data":{"published":true}}`, output: `{"data":{"published":true}}`},
+		{name: "internal publish", args: []string{"publish", "--changeset", "change"}, internal: true, method: "POST", path: "/session/pr", body: `{"session_id":"session","changeset_id":"change","trigger_kind":"explicit_action"}`, reply: `{"status":"pr_queued","session_id":"session"}`, output: `{"status":"pr_queued","session_id":"session"}`},
+		{name: "internal publish reviewer metadata", args: []string{"publish", "--changeset", "primary", "--team-reviewers", "Acme/TEAM,other"}, internal: true, method: "POST", path: "/session/pr", body: `{"session_id":"session","changeset_id":"primary","team_reviewers":["Acme/TEAM","other"],"trigger_kind":"explicit_action"}`, reply: `{"status":"awaiting_automatic_publication","session_id":"session"}`, output: `{"status":"awaiting_automatic_publication","session_id":"session"}`},
 		{name: "publish stack", args: []string{"publish-stack"}, method: "POST", path: "/sessions/session/changesets/publish-stack", reply: `{"data":{"published":true}}`, output: `{"data":{"published":true}}`},
 		{name: "restack", args: []string{"restack", "--from", "parent"}, method: "POST", path: "/sessions/session/changesets/parent/restack-descendants", reply: `{"data":{"restacked":true}}`, output: `{"data":{"restacked":true}}`},
 		{name: "explicit session overrides environment", args: []string{"list", "--session-id", "other"}, method: "GET", path: "/sessions/other/changesets", reply: `{"data":[]}`, output: `{"data":[]}`},
@@ -52,6 +54,19 @@ func TestChangesetCommandLifecycle(t *testing.T) {
 		{name: "restack missing parent", args: []string{"restack"}, output: "--from is required"},
 		{name: "missing session", args: []string{"list"}, output: "--session-id is required"},
 		{name: "missing credentials", args: []string{"list"}, output: "credentials are unavailable"},
+		{name: "public publish reviewers unsupported", args: []string{"publish", "--changeset", "change", "--team-reviewers", "acme/team"}, output: "--team-reviewers requires sandbox publication"},
+		{name: "reviewers unsupported for other action", args: []string{"publish-stack", "--team-reviewers", "acme/team"}, internal: true, output: "--team-reviewers is supported only for publish"},
+		{name: "unknown publish flag", args: []string{"publish", "--changeset", "change", "--team-reviewer", "acme/team"}, internal: true, output: `unknown flag "--team-reviewer"`},
+		{name: "unexpected positional argument", args: []string{"list", "extra"}, output: `unknown flag "extra"`},
+		{name: "missing session flag value", args: []string{"list", "--session-id"}, output: "--session-id requires a value"},
+		{name: "missing changeset flag value", args: []string{"publish", "--changeset"}, output: "--changeset requires a value"},
+		{name: "missing title flag value", args: []string{"create", "--title"}, output: "--title requires a value"},
+		{name: "missing parent flag value", args: []string{"create", "--stacked-on"}, output: "--stacked-on requires a value"},
+		{name: "missing from flag value", args: []string{"restack", "--from"}, output: "--from requires a value"},
+		{name: "missing head flag value", args: []string{"import-remote", "--changeset", "change", "--head-sha"}, output: "--head-sha requires a value"},
+		{name: "missing reviewers flag value", args: []string{"publish", "--changeset", "change", "--team-reviewers"}, internal: true, output: "--team-reviewers requires a value"},
+		{name: "empty reviewers flag value", args: []string{"publish", "--changeset", "change", "--team-reviewers", " "}, internal: true, output: "--team-reviewers requires a value"},
+		{name: "flag cannot consume another flag", args: []string{"publish", "--changeset", "--team-reviewers", "acme/team"}, internal: true, output: "--changeset requires a value"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

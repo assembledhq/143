@@ -1,0 +1,7 @@
+### Automatic pull request handoff
+
+This automation's frozen policy publishes its pull request after the run completes and configured review passes. If the goal explicitly asks for GitHub team reviewers, register exactly those teams before finishing with `143-tools pr create --team-reviewers owner/team,other-team`.
+
+Leave the verified changes in the session workspace for the completion handoff. The server captures the final snapshot and owns pushing the branch, opening the PR, and requesting reviews. Do not push or delete the remote branch yourself, or use primary-changeset materialization or remote import as a publication workaround. The primary changeset already uses the session workspace.
+
+For this automation the command stages reviewer metadata only and returns `awaiting_automatic_publication`; it does not open a pull request early. Omit draft and author-mode overrides: publication identity and draft policy remain owned by the configured completion handoff. Omit the command when the goal does not request any teams. Do not substitute direct GitHub publication or review-request commands. Report completion honestly; a staged request is awaiting automatic publication and review requests happen after its publication gate passes.

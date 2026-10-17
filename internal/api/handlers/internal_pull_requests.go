@@ -84,10 +84,12 @@ func NewInternalPullRequestHandler(
 }
 
 type internalCreatePullRequestRequest struct {
-	SessionID   string `json:"session_id,omitempty"`
-	Draft       *bool  `json:"draft,omitempty"`
-	AuthorMode  string `json:"author_mode,omitempty"`
-	TriggerKind string `json:"trigger_kind,omitempty"`
+	SessionID     string   `json:"session_id,omitempty"`
+	ChangesetID   string   `json:"changeset_id,omitempty"`
+	Draft         *bool    `json:"draft,omitempty"`
+	AuthorMode    string   `json:"author_mode,omitempty"`
+	TriggerKind   string   `json:"trigger_kind,omitempty"`
+	TeamReviewers []string `json:"team_reviewers,omitempty"`
 }
 
 type internalCreatePullRequestResponse struct {
@@ -173,6 +175,10 @@ func (h *InternalPullRequestHandler) authenticateSessionScope(
 	}
 	if claims.SessionOrigin == string(models.SessionOriginAutomationGoalImprovement) {
 		writeError(w, r, http.StatusForbidden, "TOOL_NOT_AVAILABLE", "pull request tools are not available to automation goal improvement sessions")
+		return nil, uuid.Nil, false
+	}
+	if models.HasToolScope(claims.AllowedToolScopes, models.PerTargetToolAllowlistScope) {
+		writeError(w, r, http.StatusForbidden, "TOOL_NOT_AVAILABLE", "pull request tools are not available to per-target automation turns")
 		return nil, uuid.Nil, false
 	}
 
@@ -338,6 +344,15 @@ func (h *InternalPullRequestHandler) createWithCoordinator(
 	orgID, sessionID uuid.UUID,
 	req internalCreatePullRequestRequest,
 ) {
+	var changesetID *uuid.UUID
+	if req.ChangesetID != "" {
+		parsed, err := uuid.Parse(req.ChangesetID)
+		if err != nil || parsed == uuid.Nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid changeset ID")
+			return
+		}
+		changesetID = &parsed
+	}
 	if h.coordinator == nil {
 		writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "publication coordinator is unavailable")
 		return
@@ -347,7 +362,8 @@ func (h *InternalPullRequestHandler) createWithCoordinator(
 		triggerKind = models.SessionPublicationTriggerKind(req.TriggerKind)
 	}
 	result, err := h.coordinator.RequestPullRequest(r.Context(), orgID, sessionID, publicationintent.RequestPullRequest{
-		Draft: req.Draft, AuthorMode: req.AuthorMode,
+		Draft: req.Draft, AuthorMode: req.AuthorMode, TeamReviewers: req.TeamReviewers,
+		ChangesetID: changesetID,
 		// This endpoint is only reachable with a sandbox-scoped internal
 		// token, so the channel is the agent tool regardless of whether the
 		// agent is relaying an explicit user instruction via trigger_kind.
@@ -358,6 +374,8 @@ func (h *InternalPullRequestHandler) createWithCoordinator(
 		var intentErr *publicationintent.Error
 		if errors.As(err, &intentErr) {
 			switch intentErr.Code {
+			case publicationintent.ErrorInvalidTeamReviewers, publicationintent.ErrorInvalidPublicationOptions:
+				writeError(w, r, http.StatusBadRequest, string(intentErr.Code), intentErr.Err.Error())
 			case publicationintent.ErrorSessionNotEligible:
 				writeErrorWithDetails(w, r, http.StatusConflict, string(intentErr.Code), "session is not eligible for publication", intentErr.Details, err)
 			case publicationintent.ErrorWorkspaceNotReady:

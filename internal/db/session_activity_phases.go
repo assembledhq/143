@@ -16,6 +16,9 @@ import (
 var (
 	ErrActivityPhaseConflict = errors.New("activity phase lifecycle conflict")
 	ErrInboxBatchConflict    = errors.New("inbox delivery batch lifecycle conflict")
+	// ErrInboxBatchNoPhaseTransition identifies exact receipts that do not
+	// form a new contiguous batch above the runtime acknowledgment cursor.
+	ErrInboxBatchNoPhaseTransition = errors.New("inbox receipt requires no phase transition")
 )
 
 const activityPhaseColumns = `id, org_id, session_id, thread_id, turn_number, phase_number,
@@ -89,6 +92,17 @@ func (s *SessionActivityPhaseStore) StartPhase(ctx context.Context, orgID, sessi
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	phase, err := startActivityPhaseTx(ctx, tx, orgID, sessionID, threadID, turnNumber, runtimeID, runtimeLeaseToken, trigger, startedAt)
+	if err != nil {
+		return models.SessionActivityPhase{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return models.SessionActivityPhase{}, fmt.Errorf("commit start activity phase: %w", err)
+	}
+	return phase, nil
+}
+
+func startActivityPhaseTx(ctx context.Context, tx pgx.Tx, orgID, sessionID, threadID uuid.UUID, turnNumber int, runtimeID, runtimeLeaseToken *uuid.UUID, trigger models.ActivityPhaseTrigger, startedAt time.Time) (models.SessionActivityPhase, error) {
 	var lockedThread uuid.UUID
 	if err := tx.QueryRow(ctx, `
 		SELECT id FROM session_threads
@@ -141,9 +155,34 @@ func (s *SessionActivityPhaseStore) StartPhase(ctx context.Context, orgID, sessi
 			WHERE org_id = $1 AND session_id = $2 AND thread_id = $3 AND id = $4
 			  AND lease_token = $5 AND status IN ('starting', 'live', 'paused')
 			  AND lease_expires_at IS NOT NULL AND lease_expires_at > $6
+			  AND lease_expires_at > clock_timestamp()
 			FOR UPDATE`,
 			orgID, sessionID, threadID, *runtimeID, *runtimeLeaseToken, startedAt).Scan(&ownedRuntime); err != nil {
 			return models.SessionActivityPhase{}, fmt.Errorf("validate active activity phase runtime lease: %w", err)
+		}
+		// A worker can end after provider admission but before phase cleanup.
+		// The fresh runtime owner may retire only a different, durably terminal
+		// owner in this exact scope. Runtime-less or active history still blocks
+		// admission. Keep interrupted phases and their batches as evidence.
+		if _, err := tx.Exec(ctx, `
+			WITH terminal_owners AS MATERIALIZED (
+				SELECT old.id FROM thread_runtimes old
+				JOIN session_activity_phases p ON p.org_id = old.org_id
+				  AND p.session_id = old.session_id AND p.thread_id = old.thread_id
+				  AND p.runtime_id = old.id
+				WHERE old.org_id = $1 AND old.session_id = $2 AND old.thread_id = $3
+				  AND old.id <> $4 AND old.status IN ('closed', 'failed', 'lost')
+				  AND p.status = 'running'
+				FOR UPDATE OF old
+			)
+			UPDATE session_activity_phases p
+			SET status = 'interrupted', boundary_reason = 'runtime_lost',
+				completed_at = GREATEST(p.started_at, $5), updated_at = now()
+			FROM terminal_owners old
+			WHERE p.org_id = $1 AND p.session_id = $2 AND p.thread_id = $3
+			  AND p.runtime_id = old.id AND p.status = 'running'`,
+			orgID, sessionID, threadID, *runtimeID, startedAt); err != nil {
+			return models.SessionActivityPhase{}, fmt.Errorf("retire terminal runtime activity phase: %w", err)
 		}
 	}
 
@@ -166,9 +205,6 @@ func (s *SessionActivityPhaseStore) StartPhase(ctx context.Context, orgID, sessi
 	phase, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionActivityPhase])
 	if err != nil {
 		return models.SessionActivityPhase{}, fmt.Errorf("collect inserted activity phase: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return models.SessionActivityPhase{}, fmt.Errorf("commit start activity phase: %w", err)
 	}
 	return phase, nil
 }
@@ -532,6 +568,113 @@ func (s *SessionActivityPhaseStore) AcknowledgeInboxBatch(ctx context.Context, o
 
 func (s *SessionActivityPhaseStore) AcknowledgeInboxBatchWithTransition(ctx context.Context, orgID, sessionID, threadID, runtimeID, leaseToken uuid.UUID, activePhaseID *uuid.UUID, sequenceEnd int64, acknowledgedAt time.Time) (models.ThreadInboxDeliveryBatch, *models.SessionActivityPhase, error) {
 	return s.acknowledgeInboxBatch(ctx, orgID, sessionID, threadID, runtimeID, leaseToken, activePhaseID, sequenceEnd, acknowledgedAt)
+}
+
+// AcknowledgeInboxBatchAndStartPhase commits the steering boundary and its
+// replacement together. A failed insert leaves the prior phase running and
+// the confirmed inputs replayable for acknowledgment, never provider input.
+func (s *SessionActivityPhaseStore) AcknowledgeInboxBatchAndStartPhase(ctx context.Context, orgID, sessionID, threadID, runtimeID, leaseToken uuid.UUID, activePhaseID *uuid.UUID, turn int, sequenceEnd int64, confirmedSequences []int64, at time.Time) (models.SessionActivityPhase, models.ThreadInboxDeliveryBatch, *models.SessionActivityPhase, error) {
+	var emptyPhase models.SessionActivityPhase
+	var emptyBatch models.ThreadInboxDeliveryBatch
+	at = postgresTimestamp(at)
+	if sequenceEnd <= 0 || at.IsZero() || turn < 0 {
+		return emptyPhase, emptyBatch, nil, fmt.Errorf("invalid steered phase boundary")
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return emptyPhase, emptyBatch, nil, fmt.Errorf("begin atomic steering phase: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var lockedThread uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM session_threads WHERE org_id=$1 AND session_id=$2 AND id=$3 FOR UPDATE`, orgID, sessionID, threadID).Scan(&lockedThread); err != nil {
+		return emptyPhase, emptyBatch, nil, fmt.Errorf("lock atomic steering thread: %w", err)
+	}
+	var previous int64
+	if err := tx.QueryRow(ctx, `SELECT last_acked_sequence FROM thread_runtimes
+		WHERE org_id=$1 AND session_id=$2 AND thread_id=$3 AND id=$4 AND lease_token=$5
+		 AND status IN ('starting','live','paused') AND lease_expires_at > clock_timestamp()
+		FOR UPDATE`, orgID, sessionID, threadID, runtimeID, leaseToken).Scan(&previous); err != nil {
+		return emptyPhase, emptyBatch, nil, fmt.Errorf("lock atomic steering runtime: %w", err)
+	}
+	rows, err := tx.Query(ctx, `SELECT `+inboxBatchColumns+` FROM thread_inbox_delivery_batches
+		WHERE org_id=$1 AND session_id=$2 AND thread_id=$3 AND runtime_id=$4 AND sequence_end=$5 FOR UPDATE`, orgID, sessionID, threadID, runtimeID, sequenceEnd)
+	if err != nil {
+		return emptyPhase, emptyBatch, nil, fmt.Errorf("inspect atomic steering replay: %w", err)
+	}
+	batch, replayErr := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.ThreadInboxDeliveryBatch])
+	var completed *models.SessionActivityPhase
+	if errors.Is(replayErr, pgx.ErrNoRows) {
+		if !exactInboxSequenceRange(confirmedSequences, previous+1, sequenceEnd) {
+			return emptyPhase, emptyBatch, nil, ErrInboxBatchNoPhaseTransition
+		}
+		batch, completed, err = NewSessionActivityPhaseStore(tx).acknowledgeInboxBatch(ctx, orgID, sessionID, threadID, runtimeID, leaseToken, activePhaseID, sequenceEnd, at)
+		if err != nil {
+			return emptyPhase, emptyBatch, nil, err
+		}
+	} else if replayErr != nil {
+		return emptyPhase, emptyBatch, nil, fmt.Errorf("read atomic steering replay: %w", replayErr)
+	} else {
+		if !exactInboxSequenceRange(confirmedSequences, batch.SequenceStart, batch.SequenceEnd) {
+			return emptyPhase, emptyBatch, nil, ErrInboxBatchConflict
+		}
+		if batch.Status == models.InboxDeliveryBatchStarted {
+			phaseRows, queryErr := tx.Query(ctx, `SELECT `+activityPhaseColumns+` FROM session_activity_phases
+				WHERE org_id=$1 AND session_id=$2 AND thread_id=$3 AND runtime_id=$4 AND trigger_batch_id=$5 AND status='running'`, orgID, sessionID, threadID, runtimeID, batch.ID)
+			if queryErr != nil {
+				return emptyPhase, emptyBatch, nil, queryErr
+			}
+			phase, queryErr := pgx.CollectOneRow(phaseRows, pgx.RowToStructByName[models.SessionActivityPhase])
+			if queryErr != nil {
+				return emptyPhase, emptyBatch, nil, ErrActivityPhaseConflict
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return emptyPhase, emptyBatch, nil, err
+			}
+			return phase, batch, nil, nil
+		}
+		if batch.Status == models.InboxDeliveryBatchAbandoned {
+			// Only exact positive receipts held by the same current runtime
+			// may repair a historical metadata failure; this never writes stdin.
+			if _, err := tx.Exec(ctx, `UPDATE thread_inbox_delivery_batches SET status='acknowledged',abandoned_at=NULL,updated_at=now()
+				WHERE org_id=$1 AND session_id=$2 AND thread_id=$3 AND runtime_id=$4 AND id=$5 AND status='abandoned'`, orgID, sessionID, threadID, runtimeID, batch.ID); err != nil {
+				return emptyPhase, emptyBatch, nil, err
+			}
+			tag, err := tx.Exec(ctx, `UPDATE thread_inbox_entries SET delivery_state='acked',updated_at=now()
+				WHERE org_id=$1 AND session_id=$2 AND thread_id=$3 AND runtime_id=$4 AND sequence_no=ANY($5::bigint[])
+				 AND delivery_state IN ('acked','unknown_delivery') AND applied_at IS NULL`, orgID, sessionID, threadID, runtimeID, confirmedSequences)
+			if err != nil {
+				return emptyPhase, emptyBatch, nil, err
+			}
+			if tag.RowsAffected() != batch.SequenceEnd-batch.SequenceStart+1 {
+				return emptyPhase, emptyBatch, nil, ErrInboxBatchConflict
+			}
+		} else if batch.Status != models.InboxDeliveryBatchAcknowledged {
+			return emptyPhase, emptyBatch, nil, ErrInboxBatchConflict
+		}
+	}
+	phase, err := startActivityPhaseTx(ctx, tx, orgID, sessionID, threadID, turn, &runtimeID, &leaseToken, models.ActivityPhaseTrigger{Kind: models.ActivityPhaseTriggerInboxBatch, BatchID: &batch.ID}, at)
+	if err != nil {
+		return emptyPhase, emptyBatch, nil, err
+	}
+	batch.Status, batch.StartedAt, batch.AbandonedAt = models.InboxDeliveryBatchStarted, &at, nil
+	if err := tx.Commit(ctx); err != nil {
+		return emptyPhase, emptyBatch, nil, fmt.Errorf("commit atomic steering phase: %w", err)
+	}
+	return phase, batch, completed, nil
+}
+
+func exactInboxSequenceRange(sequences []int64, start, end int64) bool {
+	if start > end || int64(len(sequences)) != end-start+1 {
+		return false
+	}
+	seen := make(map[int64]bool, len(sequences))
+	for _, sequence := range sequences {
+		if sequence < start || sequence > end || seen[sequence] {
+			return false
+		}
+		seen[sequence] = true
+	}
+	return true
 }
 
 func (s *SessionActivityPhaseStore) acknowledgeInboxBatch(ctx context.Context, orgID, sessionID, threadID, runtimeID, leaseToken uuid.UUID, activePhaseID *uuid.UUID, sequenceEnd int64, acknowledgedAt time.Time) (models.ThreadInboxDeliveryBatch, *models.SessionActivityPhase, error) {

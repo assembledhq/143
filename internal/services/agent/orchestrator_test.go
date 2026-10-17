@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1599,7 +1600,7 @@ func (s *activeRuntimeConflictStore) AdvanceDeliveryWithLease(context.Context, u
 	return true, nil
 }
 
-func (s *activeRuntimeConflictStore) CommitInboxDeliveryWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, int64, int64) (bool, error) {
+func (s *activeRuntimeConflictStore) CommitInboxDeliveryWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, int64, int64, []int64) (bool, error) {
 	return true, nil
 }
 
@@ -4074,42 +4075,67 @@ func TestRunAgent_FailedExecution(t *testing.T) {
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
 }
 
-func TestRunAgent_FailedExecutionDrainsInitialQueuedPrompt(t *testing.T) {
+func TestRunAgent_InitialExecutionDrainsQueuedPrompt(t *testing.T) {
 	t.Parallel()
 
-	orgID := testOrg()
-	issue := testIssue(orgID)
-	run := testRun(orgID, issue.ID)
-
-	d := defaultDeps()
-	d.sessions.getByIDFn = func(orgID, sessionID uuid.UUID) (models.Session, error) {
-		return models.Session{
-			ID:     sessionID,
-			OrgID:  orgID,
-			Status: models.SessionStatusFailed,
-		}, nil
-	}
-	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		err := d.messages.Create(ctx, &models.SessionMessage{
-			SessionID: run.ID,
-			OrgID:     run.OrgID,
-			Role:      models.MessageRoleUser,
-			Content:   "queued while initial run was active",
+	for _, tt := range []struct {
+		name     string
+		threaded bool
+		fails    bool
+	}{
+		{name: "failed legacy session message", fails: true},
+		{name: "failed primary thread message", threaded: true, fails: true},
+		{name: "completed legacy session message"},
+		{name: "completed primary thread message", threaded: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			run := testRun(orgID, issue.ID)
+			if tt.threaded {
+				threadID := uuid.New()
+				run.PrimaryThreadID = &threadID
+			}
+			d := defaultDeps()
+			d.sessions.getByIDFn = func(orgID, sessionID uuid.UUID) (models.Session, error) {
+				status := models.SessionStatusCompleted
+				if tt.fails {
+					status = models.SessionStatusFailed
+				}
+				return models.Session{ID: sessionID, OrgID: orgID, Status: status}, nil
+			}
+			var queuedMessageID int64
+			d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				message := &models.SessionMessage{SessionID: run.ID, OrgID: run.OrgID, ThreadID: run.PrimaryThreadID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "queued while initial run was active"}
+				require.NoError(t, d.messages.Create(ctx, message), "test should append a user message during provider execution")
+				queuedMessageID = message.ID
+				if tt.fails {
+					return nil, errors.New("agent crashed after prompt")
+				}
+				return &agent.AgentResult{ExitCode: 0, Summary: "Initial turn complete"}, nil
+			}
+			err := buildOrchestrator(d).RunAgent(context.Background(), run)
+			if tt.fails {
+				require.ErrorContains(t, err, "execute agent", "initial provider failure should remain visible")
+				require.Contains(t, d.jobs.getEnqueued(), "analyze_failure", "failed run should still enqueue failure analysis")
+			} else {
+				require.NoError(t, err, "completed initial turn must drain queued messages")
+			}
+			var continuations int
+			for _, jobType := range d.jobs.getEnqueued() {
+				if jobType == "continue_session" {
+					continuations++
+				}
+			}
+			require.Equal(t, 1, continuations, "initial turn cleanup should enqueue exactly one continuation")
+			expected := map[string]string{"session_id": run.ID.String(), "org_id": run.OrgID.String(), "queued_message_id": strconv.FormatInt(queuedMessageID, 10)}
+			if run.PrimaryThreadID != nil {
+				expected["thread_id"] = run.PrimaryThreadID.String()
+			}
+			require.Equal(t, expected, d.jobs.getPayload("continue_session"), "continuation should preserve session, tenant, thread, and queued message boundary")
 		})
-		require.NoError(t, err, "test setup should append the prompted user message")
-		return nil, errors.New("agent crashed after prompt")
 	}
-
-	err := buildOrchestrator(d).RunAgent(context.Background(), run)
-	require.Error(t, err, "RunAgent should return the execution error")
-	require.Contains(t, err.Error(), "execute agent", "RunAgent should wrap the adapter execution error")
-
-	enqueued := d.jobs.getEnqueued()
-	require.Contains(t, enqueued, "analyze_failure", "failed run should still enqueue failure analysis")
-	require.Contains(t, enqueued, "continue_session", "failed initial run should drain queued prompted messages")
-	payload, ok := d.jobs.getPayload("continue_session").(map[string]string)
-	require.True(t, ok, "continue_session payload should be string-keyed")
-	require.Equal(t, run.ID.String(), payload["session_id"], "continue_session payload should target the failed initial session")
 }
 
 func TestRunAgent_FailureLogIncludesPlatformHealthFields(t *testing.T) {
@@ -4742,6 +4768,7 @@ func TestContinueSession_SandboxCapacityRejectsFreshResumeBeforeCreate(t *testin
 	session.Status = models.SessionStatusIdle
 
 	d := defaultDeps()
+	d.messages.messages = []models.SessionMessage{{ID: 1, OrgID: orgID, SessionID: session.ID, Role: models.MessageRoleUser, Content: "Continue the task."}}
 	d.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
 		Counter:   &fakeLiveSandboxCounter{count: 1},
 		MaxActive: 1,
@@ -7165,6 +7192,7 @@ func TestContinueSession_CodeReviewPreExecutionFailureDoesNotPoisonParent(t *tes
 	session.Status = models.SessionStatusRunning
 
 	d := defaultDeps()
+	d.messages.messages = []models.SessionMessage{{ID: 1, OrgID: orgID, SessionID: session.ID, ThreadID: &reviewerThreadID, Role: models.MessageRoleUser, Content: "Review the pull request."}}
 	d.sessionThreads = &mockSessionThreadStore{}
 	d.sessions.getByIDFn = func(uuid.UUID, uuid.UUID) (models.Session, error) {
 		return *session, nil
@@ -7260,6 +7288,42 @@ func TestContinueSession_CodeReviewMessageFetchFailureRemainsRetryable(t *testin
 	require.Empty(t, d.sessions.getResultUpdates(), "a transient dependency outage should not terminalize the parent session")
 }
 
+func TestContinueSession_CodeReviewInvalidInputFailsOnlyReviewerThread(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		queued bool
+	}{
+		{name: "missing task input"},
+		{name: "queued target outside selected thread", queued: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, reviewerThreadID := testOrg(), uuid.New()
+			session := testRun(orgID, testIssue(orgID).ID)
+			session.Origin = models.SessionOriginCodeReview
+			session.Status = models.SessionStatusRunning
+			d := defaultDeps()
+			d.sessionThreads = &mockSessionThreadStore{}
+			d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+				t.Fatal("invalid reviewer input must fail before allocating a sandbox")
+				return nil, nil
+			}
+			opts := &agent.ContinueSessionOptions{ThreadID: &reviewerThreadID}
+			if tt.queued {
+				messageID, siblingID := int64(1), uuid.New()
+				opts.QueuedMessageID = &messageID
+				d.messages.messages = []models.SessionMessage{{ID: messageID, OrgID: orgID, SessionID: session.ID, ThreadID: &siblingID, Role: models.MessageRoleUser, Content: "A sibling review task."}}
+			}
+			err := buildOrchestrator(d).ContinueSession(context.Background(), session, opts)
+			require.ErrorIs(t, err, agent.ErrCodeReviewThreadFailed, "invalid input must persist a terminal result for only its reviewer")
+			require.Equal(t, []models.ThreadStatus{models.ThreadStatusFailed}, d.sessionThreads.statusesForThread(reviewerThreadID), "the selected reviewer must retain its exact setup failure")
+			require.Empty(t, d.sessions.getResultUpdates(), "invalid reviewer input cannot terminalize the shared parent")
+		})
+	}
+}
+
 func TestContinueSession_CodeReviewThreadFailureWriteMustBeDurable(t *testing.T) {
 	t.Parallel()
 
@@ -7272,6 +7336,7 @@ func TestContinueSession_CodeReviewThreadFailureWriteMustBeDurable(t *testing.T)
 	persistErr := errors.New("temporary thread result write failure")
 
 	d := defaultDeps()
+	d.messages.messages = []models.SessionMessage{{ID: 1, OrgID: orgID, SessionID: session.ID, ThreadID: &reviewerThreadID, Role: models.MessageRoleUser, Content: "Review the pull request."}}
 	d.sessionThreads = &mockSessionThreadStore{updateResultErr: persistErr}
 
 	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &reviewerThreadID})

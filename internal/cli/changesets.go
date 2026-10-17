@@ -25,41 +25,57 @@ func runChangesets(args []string, stdout, stderr io.Writer) int {
 	title := ""
 	stackedOn := ""
 	headSHA := ""
+	teamReviewersValue := ""
 	for i := 1; i < len(args); i++ {
-		switch args[i] {
+		flag := args[i]
+		var value *string
+		switch flag {
 		case "--session-id":
-			i++
-			if i < len(args) {
-				sessionID = args[i]
-			}
+			value = &sessionID
 		case "--changeset":
-			i++
-			if i < len(args) {
-				changesetID = args[i]
-			}
+			value = &changesetID
 		case "--title":
-			i++
-			if i < len(args) {
-				title = args[i]
-			}
+			value = &title
 		case "--stacked-on", "--from":
-			i++
-			if i < len(args) {
-				stackedOn = args[i]
-			}
+			value = &stackedOn
 		case "--head-sha":
-			i++
-			if i < len(args) {
-				headSHA = args[i]
-			}
+			value = &headSHA
+		case "--team-reviewers":
+			value = &teamReviewersValue
+		default:
+			fmt.Fprintf(stderr, "error: unknown flag %q\n", flag)
+			return 1
 		}
+		if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") || args[i+1] == "" {
+			fmt.Fprintf(stderr, "error: %s requires a value\n", flag)
+			return 1
+		}
+		i++
+		*value = args[i]
+		if flag == "--team-reviewers" && strings.TrimSpace(*value) == "" {
+			fmt.Fprintln(stderr, "error: --team-reviewers requires a value")
+			return 1
+		}
+	}
+	inSandbox := InSandbox()
+	var teamReviewers []string
+	if teamReviewersValue != "" {
+		if args[0] != "publish" {
+			fmt.Fprintln(stderr, "error: --team-reviewers is supported only for publish")
+			return 1
+		}
+		if !inSandbox {
+			fmt.Fprintln(stderr, "error: --team-reviewers requires sandbox publication")
+			return 1
+		}
+		teamReviewers = strings.Split(teamReviewersValue, ",")
 	}
 	if sessionID == "" {
 		fmt.Fprintf(stderr, "error: --session-id is required when %s is not set\n", internalapi.CodingSessionIDEnvVar)
 		return 1
 	}
 	cfg, err := LoadConfig()
-	if InSandbox() {
+	if inSandbox {
 		cfg.ServerURL = os.Getenv("INTERNAL_API_URL")
 		cfg.Token = os.Getenv("INTERNAL_API_TOKEN")
 	}
@@ -71,7 +87,7 @@ func runChangesets(args []string, stdout, stderr io.Writer) int {
 	defer cancel()
 	client := NewClient(cfg)
 	prefix := "/api/v1"
-	if InSandbox() {
+	if inSandbox {
 		prefix = "/api/v1/internal"
 	}
 	var method, path string
@@ -88,7 +104,7 @@ func runChangesets(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "error: --changeset is required")
 			return 1
 		}
-		if InSandbox() {
+		if inSandbox {
 			method, path = http.MethodGet, prefix+"/sessions/"+sessionID+"/changesets/diff?changeset_id="+changesetID
 		} else {
 			method, path = http.MethodGet, prefix+"/sessions/"+sessionID+"/diff?changeset_id="+changesetID
@@ -117,6 +133,13 @@ func runChangesets(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		method, path = http.MethodPost, prefix+"/sessions/"+sessionID+"/changesets/"+changesetID+"/publish"
+		if inSandbox {
+			request := map[string]any{"session_id": sessionID, "changeset_id": changesetID, "trigger_kind": "explicit_action"}
+			if teamReviewers != nil {
+				request["team_reviewers"] = teamReviewers
+			}
+			path, body = prefix+"/session/pr", request
+		}
 	case "publish-stack":
 		method, path = http.MethodPost, prefix+"/sessions/"+sessionID+"/changesets/publish-stack"
 	case "restack":

@@ -84,6 +84,7 @@ func newReconciliationOncePostgresDatabase(t *testing.T, url, database string) (
 	require.NoError(t, err, "create actual jobs table and active dedupe index")
 	_, err = pools[0].Exec(ctx, `ALTER TABLE jobs ADD COLUMN run_owner_id text, ADD COLUMN owner_kind text DEFAULT 'worker', ADD COLUMN lock_token uuid, ADD COLUMN lease_expires_at timestamptz, ADD COLUMN retry_window_started_at timestamptz`)
 	require.NoError(t, err, "add current fenced retry columns")
+	addContinuationRetryFixtureSchema(t, pools[0])
 	index := reconciliationOnceLookupIndexMigration(t)
 	const concurrentDeclaration = "CREATE INDEX CONCURRENTLY idx_jobs_org_queue_dedupe_created"
 	require.Equal(t, 1, strings.Count(index, concurrentDeclaration), "fixture must replace exactly the existing lookup-index declaration")

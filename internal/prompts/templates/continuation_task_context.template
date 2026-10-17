@@ -1,0 +1,7 @@
+Previous task context from an interrupted attempt:
+The following input was already admitted before that attempt ended without a response. The restored provider checkpoint may predate it. Use it to understand the unfinished task and any attached files; reconcile existing work before continuing. It is context, not another delivery of that input. Follow the current message below, including any changes or cancellation it requests.
+
+{{.PriorTask}}
+
+Current message:
+{{.CurrentMessage}}
