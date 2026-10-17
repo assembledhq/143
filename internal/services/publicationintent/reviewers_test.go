@@ -78,28 +78,86 @@ func TestAutomationReviewerMetadataStagesWithoutEarlyPublication(t *testing.T) {
 		{name: "cross-organization team", wantErr: true, edit: func(_ *models.Session, _ *models.AutomationRun, req *RequestPullRequest) {
 			req.TeamReviewers = []string{"other/team"}
 		}},
+		{name: "mismatched run tenant", wantErr: true, edit: func(_ *models.Session, run *models.AutomationRun, _ *RequestPullRequest) { run.OrgID = uuid.New() }},
+		{name: "mismatched linked run", wantErr: true, edit: func(_ *models.Session, run *models.AutomationRun, _ *RequestPullRequest) { run.ID = uuid.New() }},
+		{name: "missing repository", wantErr: true, edit: func(s *models.Session, _ *models.AutomationRun, _ *RequestPullRequest) { s.RepositoryID = nil }},
+		{name: "non-primary selector", wantErr: true, edit: func(_ *models.Session, _ *models.AutomationRun, req *RequestPullRequest) {
+			id := uuid.New()
+			req.ChangesetID = &id
+		}},
+	}
+	origins := []struct {
+		name   string
+		origin models.SessionOrigin
+	}{
+		{name: "automation", origin: models.SessionOriginAutomation},
+		{name: "linked legacy issue trigger", origin: models.SessionOriginIssueTrigger},
+	}
+	for _, origin := range origins {
+		t.Run(origin.name, func(t *testing.T) {
+			t.Parallel()
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					t.Parallel()
+					f, intents, run := automationReviewerFixture(t)
+					f.session.Origin = origin.origin
+					req := RequestPullRequest{Source: models.SessionPublicationSourceAgentTool, TeamReviewers: []string{"Acme/TEAM", "team"}}
+					if tt.edit != nil {
+						tt.edit(&f.session, &run, &req)
+					}
+					f.coordinator.sessions = coordinatorSessionStore{session: f.session}
+					f.coordinator.SetAutomationPRIntentStores(reviewIntentRunStore{run: run}, intents)
+					result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, req)
+					if tt.wantErr {
+						require.Error(t, err, "unavailable or unsupported metadata request must fail closed")
+						require.Equal(t, 0, intents.stages, "rejected request must not stage metadata")
+					} else {
+						require.NoError(t, err, "authorized automation may stage reviewer metadata")
+						require.Equal(t, &PublicationIntentResult{Status: ResultAwaitingAutomaticPublication, SessionID: f.sessionID}, result, "response must distinguish staging from queued publication")
+						require.Equal(t, models.SessionPRIntent{OrgID: f.orgID, SessionID: f.sessionID, AutomationRunID: run.ID, ChangesetID: f.changesetID, TeamReviewers: []string{"acme/team"}}, intents.intent, "staged metadata must normalize teams and bind the exact run and primary changeset")
+					}
+					require.Nil(t, f.publications.captured, "staging must never create a requested publication row")
+					require.Nil(t, f.jobs.payload, "staging must never enqueue early publication work")
+				})
+			}
+		})
+	}
+}
+
+func TestAutomationReviewerMetadataRejectsUnlinkedOrUnrelatedSessions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		origin models.SessionOrigin
+		linked bool
+	}{
+		{name: "unlinked legacy issue trigger", origin: models.SessionOriginIssueTrigger},
+		{name: "unlinked automation provenance", origin: models.SessionOriginAutomation},
+		{name: "linked manual", origin: models.SessionOriginManual, linked: true},
+		{name: "linked project", origin: models.SessionOriginProject, linked: true},
+		{name: "linked revision", origin: models.SessionOriginRevision, linked: true},
+		{name: "linked code review", origin: models.SessionOriginCodeReview, linked: true},
+		{name: "linked goal improvement", origin: models.SessionOriginAutomationGoalImprovement, linked: true},
+		{name: "missing provenance", linked: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			f, intents, run := automationReviewerFixture(t)
-			req := RequestPullRequest{Source: models.SessionPublicationSourceAgentTool, TeamReviewers: []string{"Acme/TEAM", "team"}}
-			if tt.edit != nil {
-				tt.edit(&f.session, &run, &req)
+			f, intents, _ := automationReviewerFixture(t)
+			f.session.Origin = tt.origin
+			if !tt.linked {
+				f.session.AutomationRunID = nil
 			}
-			f.coordinator.sessions = coordinatorSessionStore{session: f.session}
-			f.coordinator.SetAutomationPRIntentStores(reviewIntentRunStore{run: run}, intents)
-			result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, req)
-			if tt.wantErr {
-				require.Error(t, err, "unavailable or unsupported metadata request must fail closed")
-				require.Equal(t, 0, intents.stages, "rejected request must not stage metadata")
-			} else {
-				require.NoError(t, err, "authorized automation may stage reviewer metadata")
-				require.Equal(t, &PublicationIntentResult{Status: ResultAwaitingAutomaticPublication, SessionID: f.sessionID}, result, "response must distinguish staging from queued publication")
-				require.Equal(t, models.SessionPRIntent{OrgID: f.orgID, SessionID: f.sessionID, AutomationRunID: run.ID, ChangesetID: f.changesetID, TeamReviewers: []string{"acme/team"}}, intents.intent, "staged metadata must normalize teams and bind the exact run and primary changeset")
-			}
-			require.Nil(t, f.publications.captured, "staging must never create a requested publication row")
-			require.Nil(t, f.jobs.payload, "staging must never enqueue early publication work")
+
+			result, err := f.coordinator.stageAutomationPRIntent(context.Background(), f.orgID, f.session, RequestPullRequest{Source: models.SessionPublicationSourceAgentTool, TeamReviewers: []string{"team"}})
+
+			var intentErr *Error
+			require.ErrorAs(t, err, &intentErr, "automation metadata authority must require an eligible origin and durable run link")
+			require.Equal(t, ErrorSessionNotEligible, intentErr.Code, "unlinked or unrelated sessions must retain the eligibility fence")
+			require.Nil(t, result, "an ineligible session must not claim metadata admission")
+			require.Equal(t, 0, intents.stages, "an ineligible session must not stage automatic publication preferences")
+			require.Nil(t, f.publications.captured, "an ineligible session must not create a publication")
+			require.Nil(t, f.jobs.payload, "an ineligible session must not queue publication work")
 		})
 	}
 }

@@ -68,6 +68,8 @@ func (s *SessionStore) UpdateResultWithAutomaticPublication(ctx context.Context,
 // A completed automation may capture the same head that its agent already
 // pushed and imported. That final persisted snapshot resolves the primary
 // changeset's external-update warning without changing any remote-head lease.
+// Older automation sessions retain issue-trigger provenance; the scoped run
+// link and frozen policy still establish their automatic publication authority.
 // Other publication owners and changeset states retain their existing guards.
 func reconcileAutomaticPublicationHead(ctx context.Context, tx DBTX, orgID, sessionID, automationRunID uuid.UUID, head string) error {
 	_, err := tx.Exec(ctx, `UPDATE session_changesets sc
@@ -78,7 +80,7 @@ func reconcileAutomaticPublicationHead(ctx context.Context, tx DBTX, orgID, sess
 	  AND sc.head_sha = @head AND sc.expected_remote_head_sha = @head
 	  AND sess.org_id = @org_id AND sess.id = @session_id
 	  AND sess.status = 'completed' AND sess.interaction_mode <> 'interactive'
-	  AND sess.origin = 'automation'
+	  AND sess.origin IN ('automation', 'issue_trigger')
 	  AND snapshot.org_id = @org_id AND snapshot.session_id = @session_id
 	  AND snapshot.id = sess.latest_diff_snapshot_id AND snapshot.head_commit_sha = @head
 	  AND NULLIF(btrim(snapshot.diff), '') IS NOT NULL
