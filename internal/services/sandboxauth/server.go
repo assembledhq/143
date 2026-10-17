@@ -377,13 +377,25 @@ func (s *Server) handleConn(
 			scope.mu.Unlock()
 			reason := "legacy_observation_only"
 			if req.WantRequestControl {
-				reason = "supported_control"
+				reason = "control_capability_declared"
+			} else if req.HelperVersion > 0 {
+				reason = "current_observation_only"
 			}
 			s.logCoverage(metadata, reason)
 		}
 	}
 	if req.Action == ActionAPI && !req.WantObservation && scope != nil {
-		s.logCoverage(scope.metadata, "legacy_unobserved_api")
+		metadata := scope.metadata
+		metadata.AuthType = telemetry.AuthTypeUser
+		if res.Source == identity.SourceApp {
+			metadata.AuthType = telemetry.AuthTypeAppInstallation
+			metadata.InstallationID = res.InstallationID
+		}
+		reason := "legacy_unobserved_api"
+		if req.HelperVersion > 0 {
+			reason = "current_unobserved_api"
+		}
+		s.logCoverage(metadata, reason)
 	}
 	if res.User != nil && res.User.GitHubLogin != nil {
 		resp.Login = *res.User.GitHubLogin
