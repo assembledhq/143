@@ -105,7 +105,7 @@ func (c *Coordinator) stageAutomationPRIntent(ctx context.Context, orgID uuid.UU
 	if session.Origin != models.SessionOriginAutomation || session.RepositoryID == nil || c.automationRuns == nil || c.prIntents == nil {
 		return deny("automatic publication metadata is unavailable for this session")
 	}
-	if req.Draft != nil || (req.AuthorMode != "" && req.AuthorMode != "auto") || req.MergeWhenReady || req.ChangesetID != nil {
+	if req.Draft != nil || (req.AuthorMode != "" && req.AuthorMode != "auto") || req.MergeWhenReady {
 		return nil, &Error{Code: ErrorInvalidPublicationOptions, Err: errors.New("automatic publication metadata accepts team_reviewers only; draft and author policy are owned by the configured completion handoff")}
 	}
 	hasPublishing := false
@@ -142,6 +142,9 @@ func (c *Coordinator) stageAutomationPRIntent(ctx context.Context, orgID uuid.UU
 	changeset, err := c.changesets.GetPrimary(ctx, orgID, session.ID)
 	if err != nil {
 		return nil, &Error{Code: ErrorWorkspaceNotReady, Err: fmt.Errorf("load automatic publication changeset: %w", err)}
+	}
+	if req.ChangesetID != nil && *req.ChangesetID != changeset.ID {
+		return nil, &Error{Code: ErrorInvalidPublicationOptions, Err: errors.New("automatic publication metadata must select the session's primary changeset")}
 	}
 	publication, publicationErr := c.publications.GetByChangeset(ctx, orgID, session.ID, changeset.ID)
 	if publicationErr == nil {
