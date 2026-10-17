@@ -182,7 +182,7 @@ func TestSessionAutomaticPublicationCapturedHeadPostgres(t *testing.T) {
 			if tt.changesetStatus != "" {
 				before = tt.changesetStatus
 			}
-			var remote *string = &f.capturedHead
+			remote := &f.capturedHead
 			if tt.differentRemote {
 				remoteHead := "3333333333333333333333333333333333333333"
 				remote = &remoteHead
