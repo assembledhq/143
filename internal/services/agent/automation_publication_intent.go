@@ -25,7 +25,9 @@ func (o *Orchestrator) persistRunResult(ctx context.Context, run *models.Session
 }
 
 func (o *Orchestrator) appendAutomationPublicationIntentPrompt(ctx context.Context, input *AgentInput, session *models.Session) error {
-	if input == nil || session == nil || session.Origin != models.SessionOriginAutomation || session.AutomationRunID == nil || session.RepositoryID == nil || session.PRCreationState == models.PRCreationStateSucceeded || len(session.RevisionContext) > 0 || sessionPromptStyle(session) == PromptStyleAnswerOnly || automationTurnStateFromContext(ctx) != nil {
+	// Linked legacy automations can retain the creation default issue_trigger.
+	// The run's frozen policy still controls metadata guidance and publication.
+	if input == nil || session == nil || (session.Origin != models.SessionOriginAutomation && session.Origin != models.SessionOriginIssueTrigger) || session.AutomationRunID == nil || session.RepositoryID == nil || session.PRCreationState == models.PRCreationStateSucceeded || len(session.RevisionContext) > 0 || sessionPromptStyle(session) == PromptStyleAnswerOnly || automationTurnStateFromContext(ctx) != nil {
 		return nil
 	}
 	hasPublishing := false

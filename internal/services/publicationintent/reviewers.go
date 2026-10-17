@@ -102,7 +102,10 @@ func (c *Coordinator) stageAutomationPRIntent(ctx context.Context, orgID uuid.UU
 	deny := func(reason string) (*PublicationIntentResult, error) {
 		return nil, &Error{Code: ErrorSessionNotEligible, Err: errors.New(reason)}
 	}
-	if session.Origin != models.SessionOriginAutomation || session.RepositoryID == nil || c.automationRuns == nil || c.prIntents == nil {
+	// Older automation producers left origin unset, so creation persisted the
+	// issue_trigger default. The scoped run link and frozen policy below remain
+	// the authority for those sessions, without accepting other provenance.
+	if (session.Origin != models.SessionOriginAutomation && session.Origin != models.SessionOriginIssueTrigger) || session.AutomationRunID == nil || session.RepositoryID == nil || c.automationRuns == nil || c.prIntents == nil {
 		return deny("automatic publication metadata is unavailable for this session")
 	}
 	if req.Draft != nil || (req.AuthorMode != "" && req.AuthorMode != "auto") || req.MergeWhenReady {
