@@ -85,6 +85,7 @@ func NewInternalPullRequestHandler(
 
 type internalCreatePullRequestRequest struct {
 	SessionID     string   `json:"session_id,omitempty"`
+	ChangesetID   string   `json:"changeset_id,omitempty"`
 	Draft         *bool    `json:"draft,omitempty"`
 	AuthorMode    string   `json:"author_mode,omitempty"`
 	TriggerKind   string   `json:"trigger_kind,omitempty"`
@@ -343,6 +344,15 @@ func (h *InternalPullRequestHandler) createWithCoordinator(
 	orgID, sessionID uuid.UUID,
 	req internalCreatePullRequestRequest,
 ) {
+	var changesetID *uuid.UUID
+	if req.ChangesetID != "" {
+		parsed, err := uuid.Parse(req.ChangesetID)
+		if err != nil || parsed == uuid.Nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid changeset ID")
+			return
+		}
+		changesetID = &parsed
+	}
 	if h.coordinator == nil {
 		writeError(w, r, http.StatusInternalServerError, "PUBLICATION_INTENT_FAILED", "publication coordinator is unavailable")
 		return
@@ -353,6 +363,7 @@ func (h *InternalPullRequestHandler) createWithCoordinator(
 	}
 	result, err := h.coordinator.RequestPullRequest(r.Context(), orgID, sessionID, publicationintent.RequestPullRequest{
 		Draft: req.Draft, AuthorMode: req.AuthorMode, TeamReviewers: req.TeamReviewers,
+		ChangesetID: changesetID,
 		// This endpoint is only reachable with a sandbox-scoped internal
 		// token, so the channel is the agent tool regardless of whether the
 		// agent is relaying an explicit user instruction via trigger_kind.

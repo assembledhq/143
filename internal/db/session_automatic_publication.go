@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/assembledhq/143/internal/models"
 )
@@ -39,6 +40,11 @@ func (s *SessionStore) UpdateResultWithAutomaticPublication(ctx context.Context,
 	if session.AutomationRunID != nil && session.Status == models.SessionStatusCompleted &&
 		!session.IsInteractive() && session.Origin != models.SessionOriginAutomationGoalImprovement &&
 		result.Diff != nil && strings.TrimSpace(*result.Diff) != "" {
+		if persistDiffSnapshot && result.DiffHeadCommitSHA != nil && strings.TrimSpace(*result.DiffHeadCommitSHA) != "" {
+			if err := reconcileAutomaticPublicationHead(ctx, tx, orgID, runID, *session.AutomationRunID, *result.DiffHeadCommitSHA); err != nil {
+				return err
+			}
+		}
 		dedupeKey := "coordinate_automatic_publication:" + runID.String()
 		_, err = enqueueOn(ctx, tx, orgID, EnqueueOpts{
 			Queue: "default", JobType: "coordinate_automatic_publication", Priority: 5,
@@ -55,6 +61,41 @@ func (s *SessionStore) UpdateResultWithAutomaticPublication(ctx context.Context,
 	s.publishStatus(ctx, &session)
 	if persistDiffSnapshot {
 		s.publishWorkspaceGenerationChanged(ctx, orgID, runID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	}
+	return nil
+}
+
+// A completed automation may capture the same head that its agent already
+// pushed and imported. That final persisted snapshot resolves the primary
+// changeset's external-update warning without changing any remote-head lease.
+// Other publication owners and changeset states retain their existing guards.
+func reconcileAutomaticPublicationHead(ctx context.Context, tx DBTX, orgID, sessionID, automationRunID uuid.UUID, head string) error {
+	_, err := tx.Exec(ctx, `UPDATE session_changesets sc
+	 SET status = 'published_branch'
+	 FROM sessions sess, automation_runs ar, session_diff_snapshots snapshot
+	 WHERE sc.org_id = @org_id AND sc.session_id = @session_id AND sc.is_primary
+	  AND sc.status = 'external_update_detected'
+	  AND sc.head_sha = @head AND sc.expected_remote_head_sha = @head
+	  AND sess.org_id = @org_id AND sess.id = @session_id
+	  AND sess.status = 'completed' AND sess.interaction_mode <> 'interactive'
+	  AND sess.origin = 'automation'
+	  AND snapshot.org_id = @org_id AND snapshot.session_id = @session_id
+	  AND snapshot.id = sess.latest_diff_snapshot_id AND snapshot.head_commit_sha = @head
+	  AND NULLIF(btrim(snapshot.diff), '') IS NOT NULL
+	  AND ar.org_id = @org_id AND ar.id = @automation_run_id AND ar.target_id IS NULL
+	  AND (ar.config_snapshot IS NULL OR jsonb_typeof(ar.config_snapshot) IN ('object', 'null'))
+	  AND COALESCE(NULLIF(ar.config_snapshot->>'publish_policy', ''), 'pull_request') = 'pull_request'
+	  AND COALESCE(NULLIF(ar.config_snapshot->>'session_continuity', ''), 'per_run') = 'per_run'
+	  AND EXISTS (SELECT 1 FROM session_automation_links link
+	   WHERE link.org_id = @org_id AND link.session_id = @session_id AND link.automation_run_id = ar.id)
+	  AND NOT EXISTS (SELECT 1 FROM pull_requests pr
+	   WHERE pr.org_id = @org_id AND pr.session_id = @session_id
+	    AND (pr.changeset_id = sc.id OR pr.changeset_id IS NULL))
+	  AND NOT EXISTS (SELECT 1 FROM session_publications publication
+	   WHERE publication.org_id = @org_id AND publication.session_id = @session_id AND publication.changeset_id = sc.id)`,
+		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "automation_run_id": automationRunID, "head": head})
+	if err != nil {
+		return fmt.Errorf("reconcile captured automatic publication head: %w", err)
 	}
 	return nil
 }

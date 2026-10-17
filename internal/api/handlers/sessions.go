@@ -1374,6 +1374,10 @@ func (h *SessionHandler) MaterializeChangeset(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusInternalServerError, "CHANGESET_LOOKUP_FAILED", "failed to load pull request", err)
 		return
 	}
+	if changeset.IsPrimary {
+		writeError(w, r, http.StatusConflict, "PRIMARY_CHANGESET_NOT_MATERIALIZABLE", "the primary changeset already uses the session workspace; only split changesets can be materialized")
+		return
+	}
 	if changeset.WorktreePath != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "materialized", "changeset_id": changeset.ID})
 		return

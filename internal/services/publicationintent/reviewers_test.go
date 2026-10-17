@@ -104,6 +104,116 @@ func TestAutomationReviewerMetadataStagesWithoutEarlyPublication(t *testing.T) {
 	}
 }
 
+func TestAutomationReviewerMetadataSelectsOnlyPrimaryBeforeCompletion(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		selector   string
+		trigger    models.SessionPublicationTriggerKind
+		wantErr    bool
+		wantStages int
+	}{
+		{name: "implicit primary", wantStages: 1},
+		{name: "explicit primary", selector: "primary", wantStages: 1},
+		{name: "explicit action remains metadata only", selector: "primary", trigger: models.SessionPublicationTriggerExplicitAction, wantStages: 1},
+		{name: "child changeset rejected", selector: "child", wantErr: true},
+		{name: "foreign changeset rejected", selector: "foreign", wantErr: true},
+		{name: "zero changeset rejected", selector: "zero", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f, intents, run := automationReviewerFixture(t)
+			f.session.Status = models.SessionStatusRunning
+			f.coordinator.sessions = coordinatorSessionStore{session: f.session}
+			req := RequestPullRequest{Source: models.SessionPublicationSourceAgentTool, TriggerKind: tt.trigger, TeamReviewers: []string{"Acme/TEAM", "team"}}
+			if tt.selector != "" {
+				selectedID := uuid.New()
+				if tt.selector == "primary" {
+					selectedID = f.changesetID
+				} else if tt.selector == "zero" {
+					selectedID = uuid.Nil
+				}
+				req.ChangesetID = &selectedID
+			}
+
+			result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, req)
+
+			if tt.wantErr {
+				var intentErr *Error
+				require.ErrorAs(t, err, &intentErr, "non-primary automation selectors must return a typed rejection")
+				require.Equal(t, ErrorInvalidPublicationOptions, intentErr.Code, "automation metadata cannot select a child or foreign changeset")
+				require.Nil(t, result, "a rejected selector must not claim metadata was staged")
+			} else {
+				require.NoError(t, err, "a running automation may register metadata for its primary changeset")
+				require.Equal(t, &PublicationIntentResult{Status: ResultAwaitingAutomaticPublication, SessionID: f.sessionID}, result, "running-session metadata registration must await the configured completion handoff")
+				require.Equal(t, models.SessionPRIntent{OrgID: f.orgID, SessionID: f.sessionID, AutomationRunID: run.ID, ChangesetID: f.changesetID, TeamReviewers: []string{"acme/team"}}, intents.intent, "explicit selection must preserve scoped primary intent and normalized teams")
+			}
+			require.Equal(t, tt.wantStages, intents.stages, "only primary metadata may reach the durable staging store")
+			require.Nil(t, f.changesets.requestedID, "automatic staging must resolve the authoritative primary rather than trust an arbitrary selector")
+			require.Nil(t, f.publications.captured, "running-session metadata must not create a publication before quiescence")
+			require.Nil(t, f.jobs.payload, "running-session metadata must not enqueue early publication work")
+		})
+	}
+}
+
+func TestInteractiveAgentPublicationRetainsChildChangesetGuards(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		materialized bool
+		disabled     bool
+		automaticOff bool
+		trigger      models.SessionPublicationTriggerKind
+		wantErr      bool
+		wantStatus   ResultStatus
+	}{
+		{name: "materialized child can publish", materialized: true, wantStatus: ResultReviewInProgress},
+		{name: "unmaterialized child remains blocked", wantErr: true},
+		{name: "disabled publication cannot fall back to primary", materialized: true, disabled: true, wantStatus: ResultManualPublicationRequired},
+		{name: "explicit child publication survives automatic preference off", materialized: true, automaticOff: true, trigger: models.SessionPublicationTriggerExplicitAction, wantStatus: ResultReviewInProgress},
+		{name: "agent-ready child obeys automatic preference off", materialized: true, automaticOff: true, trigger: models.SessionPublicationTriggerAgentReady, wantStatus: ResultManualPublicationRequired},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			policy := models.AutomaticFollowThroughOrgSettings{}
+			if tt.automaticOff {
+				automatic := false
+				policy.CreatePRWhenAgentReady = &automatic
+			}
+			f := newCoordinatorFixture(t, policy, nil, func(_ *models.Session, changeset *models.SessionChangeset) {
+				changeset.IsPrimary = false
+				if tt.materialized {
+					worktree := "/workspace/child"
+					changeset.WorktreePath = &worktree
+				}
+			}, true, nil)
+			f.coordinator.SetPublicationEnabled(!tt.disabled)
+
+			result, err := f.coordinator.RequestPullRequest(context.Background(), f.orgID, f.sessionID, RequestPullRequest{Source: models.SessionPublicationSourceAgentTool, TriggerKind: tt.trigger, ChangesetID: &f.changesetID})
+
+			if tt.wantErr {
+				var intentErr *Error
+				require.ErrorAs(t, err, &intentErr, "interactive child publication must preserve its materialization guard")
+				require.Equal(t, ErrorWorkspaceNotReady, intentErr.Code, "unmaterialized children must remain ineligible for publication")
+				require.Nil(t, f.publications.captured, "an unmaterialized child must not create durable publication work")
+				require.Nil(t, f.jobs.payload, "an unmaterialized child must not enqueue a pull request")
+			} else {
+				require.NoError(t, err, "ordinary sandbox publication must still support a materialized child")
+				require.Equal(t, tt.wantStatus, result.Status, "interactive child publication must retain the configured review and execution gates")
+				if tt.wantStatus == ResultManualPublicationRequired {
+					require.Nil(t, f.publications.captured, "a blocked agent handoff must not create a fallback primary publication")
+					require.Nil(t, f.jobs.payload, "a blocked agent handoff must not queue any changeset")
+				} else {
+					require.Equal(t, f.changesetID.String(), f.jobs.payload["changeset_id"], "ordinary publication must preserve the selected child rather than switch to primary")
+				}
+			}
+			require.Equal(t, &f.changesetID, f.changesets.requestedID, "interactive selectors must use the tenant- and session-scoped changeset lookup")
+		})
+	}
+}
+
 func TestAutomaticPublicationFreezesReviewerMetadataAcrossRetries(t *testing.T) {
 	t.Parallel()
 	f, intents, _ := automationReviewerFixture(t)
