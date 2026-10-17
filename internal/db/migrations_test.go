@@ -1853,7 +1853,7 @@ func TestAutomationFallbackModelsMigrationPostgresBehavior(t *testing.T) {
 		existingID, uuid.New())
 	require.NoError(t, err, "test should seed an automation that predates the fallback chain")
 
-	upBody, err := os.ReadFile("../../migrations/000314_automation_fallback_models.up.sql")
+	upBody, err := os.ReadFile("../../migrations/000315_automation_fallback_models.up.sql")
 	require.NoError(t, err, "test should read the automation fallback models up migration")
 	_, err = conn.Exec(ctx, string(upBody))
 	require.NoError(t, err, "fallback models migration should apply to the pre-migration schema")
@@ -1906,8 +1906,8 @@ func TestAutomationFallbackModelsMigrationPostgresBehavior(t *testing.T) {
 		require.Error(t, execErr, "a non-object fallback chain value (%s) should be rejected", nonObject)
 	}
 
-	// 314 adds the guard NOT VALID so it never scans under ACCESS EXCLUSIVE;
-	// 315 validates it under the weaker lock. Both halves have to hold, or the
+	// 315 adds the guard NOT VALID so it never scans under ACCESS EXCLUSIVE;
+	// 316 validates it under the weaker lock. Both halves have to hold, or the
 	// split is either pointless or leaves the guard unvalidated forever.
 	constraintValidated := func() bool {
 		var validated bool
@@ -1921,18 +1921,18 @@ func TestAutomationFallbackModelsMigrationPostgresBehavior(t *testing.T) {
 			  AND c.conname = 'chk_automations_fallback_models'`).Scan(&validated))
 		return validated
 	}
-	require.False(t, constraintValidated(), "314 should add the fallback chain guard NOT VALID")
-	validateBody, err := os.ReadFile("../../migrations/000315_validate_automation_fallback_models.up.sql")
+	require.False(t, constraintValidated(), "315 should add the fallback chain guard NOT VALID")
+	validateBody, err := os.ReadFile("../../migrations/000316_validate_automation_fallback_models.up.sql")
 	require.NoError(t, err, "test should read the fallback chain validation migration")
 	_, err = conn.Exec(ctx, string(validateBody))
-	require.NoError(t, err, "315 should validate the guard over rows 314 backfilled and accepted")
-	require.True(t, constraintValidated(), "315 should leave the fallback chain guard validated")
-	unvalidateBody, err := os.ReadFile("../../migrations/000315_validate_automation_fallback_models.down.sql")
+	require.NoError(t, err, "316 should validate the guard over rows 315 backfilled and accepted")
+	require.True(t, constraintValidated(), "316 should leave the fallback chain guard validated")
+	unvalidateBody, err := os.ReadFile("../../migrations/000316_validate_automation_fallback_models.down.sql")
 	require.NoError(t, err, "test should read the validation migration's down")
 	_, err = conn.Exec(ctx, string(unvalidateBody))
-	require.NoError(t, err, "315 down should be a no-op the 314 down can follow")
+	require.NoError(t, err, "316 down should be a no-op the 315 down can follow")
 
-	downBody, err := os.ReadFile("../../migrations/000314_automation_fallback_models.down.sql")
+	downBody, err := os.ReadFile("../../migrations/000315_automation_fallback_models.down.sql")
 	require.NoError(t, err, "test should read the automation fallback models down migration")
 	_, err = conn.Exec(ctx, string(downBody))
 	require.NoError(t, err, "down migration should roll the fallback chain back")

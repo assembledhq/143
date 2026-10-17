@@ -9,7 +9,7 @@
 -- The constant default needs no table rewrite, but a validated CHECK would
 -- still scan every row while this statement holds ACCESS EXCLUSIVE. Add it
 -- NOT VALID — new and updated rows are checked immediately — and validate in
--- 315 under the weaker SHARE UPDATE EXCLUSIVE lock.
+-- 316 under the weaker SHARE UPDATE EXCLUSIVE lock.
 ALTER TABLE automations
     ADD COLUMN fallback_models jsonb NOT NULL DEFAULT '{}'::jsonb,
     ADD CONSTRAINT chk_automations_fallback_models
