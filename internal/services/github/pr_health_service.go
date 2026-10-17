@@ -1235,21 +1235,21 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 	ctx = withReconciliationScope(ctx)
 	scope := reconciliationScopeFromContext(ctx)
 	healthStartedAt := time.Now()
-	population, countErr := s.pullRequests.CountOpenForHealthSync(ctx, orgID, prHealthPopulationCap)
-	if countErr != nil {
-		s.logger.Warn().Err(countErr).Str("org_id", orgID.String()).Msg("failed to size pull request health sweep; using requested limit")
-	}
-	healthLimit := pullRequestHealthCandidateLimit(limit, population)
-	stale, err := s.pullRequests.ListOpenStaleForHealthSync(ctx, orgID, time.Now().Add(-prHealthStaleAfter), healthLimit)
+	selection, selectionErr := s.pullRequestHealthSweepSelection(ctx, orgID, limit)
+	stale := selection.candidates
 	var reconciliationErrs []error
-	if err != nil {
-		reconciliationErrs = append(reconciliationErrs, fmt.Errorf("list stale pull requests for reconciliation: %w", err))
+	if selectionErr != nil {
+		reconciliationErrs = append(reconciliationErrs, selectionErr)
+		if selection.ownershipLost {
+			return selectionErr
+		}
 	}
 	outcomes := runPullRequestHealthCandidates(ctx, stale, healthStartedAt.Add(prHealthSweepStartBudget), time.Now, func(ctx context.Context, pullRequestID uuid.UUID) error {
 		return s.SyncPullRequestState(WithPullRequestSyncReason(ctx, PullRequestSyncReasonStaleReconcile), orgID, pullRequestID)
 	})
 	var started, succeeded, deferred, pending, failed, budgetSkipped, cancelledSkipped int
 	retainedThrottles := make(map[error]struct{})
+	remainingIDs := make([]uuid.UUID, 0, len(stale))
 	for i, outcome := range outcomes {
 		pr := stale[i]
 		if !outcome.started {
@@ -1257,6 +1257,7 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 				budgetSkipped++
 			} else {
 				cancelledSkipped++
+				remainingIDs = append(remainingIDs, pr.ID)
 			}
 			continue
 		}
@@ -1275,6 +1276,11 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 				continue
 			}
 			retry := ClassifyRetry(err, time.Now())
+			if retry.Retryable {
+				// Keep every affected PR before deduplicating shared throttle
+				// evidence; one suppression error may cover many candidates.
+				remainingIDs = append(remainingIDs, pr.ID)
+			}
 			if retry.RateLimited {
 				deferred++
 				if !retainReconciliationThrottle(retainedThrottles, err) {
@@ -1291,20 +1297,44 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 			succeeded++
 		}
 	}
+	checkpointProgressSaved := selectionErr == nil && selection.checkpoint != nil && len(selection.checkpoint.RemainingPullRequestIDs) == 0
+	if selectionErr == nil && selection.checkpoint != nil && len(selection.checkpoint.RemainingPullRequestIDs) > 0 && ctx.Err() == nil {
+		checkpoint := *selection.checkpoint
+		checkpoint.RemainingPullRequestIDs = remainingIDs
+		if err := s.jobs.SavePullRequestHealthSweepCheckpointWithLease(ctx, orgID, selection.jobID, selection.lockToken, checkpoint); err != nil {
+			// An unacknowledged write may have saved the smaller remainder.
+			// Either checkpoint stays bounded; never discover a fresh batch.
+			reconciliationErrs = append(reconciliationErrs, fmt.Errorf("save remaining pull request health sweep candidates: %w", err))
+			selection.ownershipLost = errors.Is(err, db.ErrPullRequestHealthSweepLeaseLost)
+		} else {
+			selection.checkpoint = &checkpoint
+			checkpointProgressSaved = true
+		}
+	}
 	event := s.logger.Info().Str("org_id", orgID.String())
 	if jobID, ok := jobctx.JobIDFromContext(ctx); ok && jobID != uuid.Nil {
 		event = event.Str("job_id", jobID.String())
 	}
+	if checkpointProgressSaved {
+		event = event.Int("health_checkpoint_remaining", len(selection.checkpoint.RemainingPullRequestIDs))
+	}
 	event.
-		Int("health_population", population).Bool("health_population_capped", population == prHealthPopulationCap).
-		Bool("health_population_available", countErr == nil).Int("health_candidate_limit", healthLimit).
-		Bool("health_selection_available", err == nil).
+		Int("health_population", selection.population).Bool("health_population_capped", selection.population == prHealthPopulationCap).
+		Bool("health_population_available", selection.populationAvailable).Int("health_candidate_limit", selection.candidateLimit).
+		Bool("health_selection_available", selectionErr == nil).
+		Bool("health_checkpoint_available", selection.checkpoint != nil).Bool("health_checkpoint_progress_saved", checkpointProgressSaved).
+		Bool("health_checkpoint_resumed", selection.resumed).Int("health_initial_selected", selection.initialSelected).
+		Int("health_filtered_since_selection", selection.filteredSinceSelection).
+		Int("health_retry_remaining", len(remainingIDs)).
 		Int("health_selected", len(stale)).Int("health_started", started).Int("health_succeeded", succeeded).
 		Int("health_deferred", deferred).Int("health_mergeability_pending", pending).Int("health_failed", failed).
 		Int("health_budget_skipped", budgetSkipped).Int("health_cancelled_skipped", cancelledSkipped).
 		Dur("health_elapsed", time.Since(healthStartedAt)).Msg("completed periodic pull request health sweep")
 	if ctx.Err() != nil {
 		reconciliationErrs = append(reconciliationErrs, ctx.Err())
+	}
+	if selection.ownershipLost {
+		return errors.Join(reconciliationErrs...)
 	}
 	// Independent database recovery runs even when GitHub is throttled or a
 	// candidate listing failed. Its candidate lists retain the requested limit.
@@ -1333,6 +1363,87 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 		reconciliationErrs = append(reconciliationErrs, err)
 	}
 	return errors.Join(reconciliationErrs...)
+}
+
+type pullRequestHealthSweepSelection struct {
+	candidates             []models.PullRequest
+	population             int
+	populationAvailable    bool
+	candidateLimit         int
+	initialSelected        int
+	checkpoint             *db.PullRequestHealthSweepCheckpoint
+	jobID                  uuid.UUID
+	lockToken              uuid.UUID
+	resumed                bool
+	ownershipLost          bool
+	filteredSinceSelection int
+}
+
+func (s *PRService) pullRequestHealthSweepSelection(ctx context.Context, orgID uuid.UUID, limit int) (pullRequestHealthSweepSelection, error) {
+	var selection pullRequestHealthSweepSelection
+	jobID, hasJobID := jobctx.JobIDFromContext(ctx)
+	lockToken, hasLockToken := jobctx.LockTokenFromContext(ctx)
+	if hasJobID || hasLockToken {
+		if !hasJobID || jobID == uuid.Nil || !hasLockToken || lockToken == uuid.Nil || s.jobs == nil {
+			selection.ownershipLost = true
+			return selection, errors.New("pull request health sweep job context requires checkpoint storage and a current ownership token")
+		}
+		selection.jobID, selection.lockToken = jobID, lockToken
+		checkpoint, err := s.jobs.GetPullRequestHealthSweepCheckpointWithLease(ctx, orgID, jobID, lockToken)
+		if err != nil {
+			selection.ownershipLost = errors.Is(err, db.ErrPullRequestHealthSweepLeaseLost)
+			return selection, fmt.Errorf("load pull request health sweep selection: %w", err)
+		}
+		if checkpoint != nil {
+			selection.checkpoint, selection.resumed = checkpoint, true
+			selection.population, selection.populationAvailable = checkpoint.Population, checkpoint.PopulationAvailable
+			selection.candidateLimit, selection.initialSelected = checkpoint.CandidateLimit, checkpoint.SelectedCount
+			ids := checkpoint.RemainingPullRequestIDs
+			if len(ids) > 0 {
+				ids, err = s.pullRequests.FilterOpenStaleHealthSyncIDs(ctx, orgID, ids, time.Now().Add(-prHealthStaleAfter))
+				if err != nil {
+					return selection, fmt.Errorf("filter resumed pull request health sweep selection: %w", err)
+				}
+			}
+			selection.filteredSinceSelection = len(checkpoint.RemainingPullRequestIDs) - len(ids)
+			selection.candidates = make([]models.PullRequest, len(ids))
+			for i, id := range ids {
+				selection.candidates[i] = models.PullRequest{ID: id}
+			}
+			return selection, nil
+		}
+	}
+	population, countErr := s.pullRequests.CountOpenForHealthSync(ctx, orgID, prHealthPopulationCap)
+	if countErr != nil {
+		s.logger.Warn().Err(countErr).Str("org_id", orgID.String()).Msg("failed to size pull request health sweep; using requested limit")
+	}
+	selection.population, selection.populationAvailable = population, countErr == nil
+	selection.candidateLimit = pullRequestHealthCandidateLimit(limit, population)
+	stale, err := s.pullRequests.ListOpenStaleForHealthSync(ctx, orgID, time.Now().Add(-prHealthStaleAfter), selection.candidateLimit)
+	if err != nil {
+		return selection, fmt.Errorf("list stale pull requests for reconciliation: %w", err)
+	}
+	selection.initialSelected = len(stale)
+	if hasJobID {
+		ids := make([]uuid.UUID, len(stale))
+		for i, pr := range stale {
+			ids[i] = pr.ID
+		}
+		checkpoint := db.PullRequestHealthSweepCheckpoint{
+			Version: db.PullRequestHealthSweepCheckpointVersion, RemainingPullRequestIDs: ids,
+			Population: population, PopulationAvailable: countErr == nil,
+			CandidateLimit: selection.candidateLimit, SelectedCount: len(stale),
+		}
+		if err := s.jobs.SavePullRequestHealthSweepCheckpointWithLease(ctx, orgID, jobID, lockToken, checkpoint); err != nil {
+			selection.ownershipLost = errors.Is(err, db.ErrPullRequestHealthSweepLeaseLost)
+			return selection, fmt.Errorf("freeze pull request health sweep selection: %w", err)
+		}
+		selection.checkpoint = &checkpoint
+	}
+	// Publish candidates to the caller only after the job's bounded selection
+	// is durable. Direct service calls have no worker lease and stay stateless.
+	selection.candidates = stale
+	return selection, nil
 }
 
 type pullRequestHealthOutcome struct {
