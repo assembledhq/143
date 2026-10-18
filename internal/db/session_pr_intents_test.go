@@ -17,7 +17,9 @@ import (
 )
 
 func newSessionPRIntentFixture() models.SessionPRIntent {
-	return models.SessionPRIntent{OrgID: uuid.New(), SessionID: uuid.New(), AutomationRunID: uuid.New(), ChangesetID: uuid.New(), TeamReviewers: []string{"example/reviewers"}}
+	title := "docs: Weekly dependency report"
+	body := "## Summary\n\nSource plan: docs/plans/weekly.md"
+	return models.SessionPRIntent{OrgID: uuid.New(), SessionID: uuid.New(), AutomationRunID: uuid.New(), ChangesetID: uuid.New(), TeamReviewers: []string{"example/reviewers"}, Title: &title, Body: &body}
 }
 
 func TestSessionPRIntentStage(t *testing.T) {
@@ -29,23 +31,28 @@ func TestSessionPRIntentStage(t *testing.T) {
 	}{
 		{"scoped metadata persisted", func(mock pgxmock.PgxPoolIface, intent models.SessionPRIntent) {
 			mock.ExpectQuery(`(?s)INSERT INTO session_pr_intents.*ar.org_id = sal.org_id.*repo.org_id = sess.org_id.*sc.is_primary.*sal.org_id = \$1 AND sal.session_id = \$2 AND sal.automation_run_id = \$3 AND sc.id = \$4.*p.org_id = \$1.*frozen_at IS NULL`).
-				WithArgs(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID, intent.TeamReviewers).
+				WithArgs(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID, intent.TeamReviewers, intent.Title, intent.Body).
 				WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(intent.SessionID))
 		}, nil},
 		{"frozen snapshot rejected", func(mock pgxmock.PgxPoolIface, intent models.SessionPRIntent) {
-			mock.ExpectQuery(`INSERT INTO session_pr_intents`).WithArgs(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID, intent.TeamReviewers).
+			mock.ExpectQuery(`INSERT INTO session_pr_intents`).WithArgs(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID, intent.TeamReviewers, intent.Title, intent.Body).
 				WillReturnRows(pgxmock.NewRows([]string{"session_id"}))
 			mock.ExpectQuery(`(?s)SELECT EXISTS.*org_id = \$1 AND session_id = \$2 AND automation_run_id = \$3 AND changeset_id = \$4`).
 				WithArgs(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID).WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 		}, ErrSessionPRIntentFrozen},
 		{"missing scope rejected", func(mock pgxmock.PgxPoolIface, intent models.SessionPRIntent) {
-			mock.ExpectQuery(`INSERT INTO session_pr_intents`).WithArgs(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID, intent.TeamReviewers).
+			mock.ExpectQuery(`INSERT INTO session_pr_intents`).WithArgs(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID, intent.TeamReviewers, intent.Title, intent.Body).
 				WillReturnRows(pgxmock.NewRows([]string{"session_id"}))
 			mock.ExpectQuery(`SELECT EXISTS`).WithArgs(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID).
 				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
 		}, pgx.ErrNoRows},
+		{"staged text merges with earlier fields", func(mock pgxmock.PgxPoolIface, intent models.SessionPRIntent) {
+			mock.ExpectQuery(`(?s)INSERT INTO session_pr_intents.*team_reviewers, title, body.*COALESCE\(\$5::text\[\], '\{\}'\), \$6::text, \$7::text.*team_reviewers = COALESCE\(\$5::text\[\], session_pr_intents.team_reviewers\).*title = COALESCE\(\$6::text, session_pr_intents.title\).*body = COALESCE\(\$7::text, session_pr_intents.body\).*frozen_at IS NULL`).
+				WithArgs(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID, intent.TeamReviewers, intent.Title, intent.Body).
+				WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(intent.SessionID))
+		}, nil},
 		{"write error propagated", func(mock pgxmock.PgxPoolIface, intent models.SessionPRIntent) {
-			mock.ExpectQuery(`INSERT INTO session_pr_intents`).WithArgs(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID, intent.TeamReviewers).WillReturnError(context.Canceled)
+			mock.ExpectQuery(`INSERT INTO session_pr_intents`).WithArgs(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID, intent.TeamReviewers, intent.Title, intent.Body).WillReturnError(context.Canceled)
 		}, context.Canceled},
 	}
 	for _, tt := range tests {
@@ -79,6 +86,22 @@ func TestSessionPRIntentStageValidation(t *testing.T) {
 		{"too many", func(i *models.SessionPRIntent) {
 			i.TeamReviewers = strings.Split(strings.Repeat("example/reviewers,", 10)+"example/last", ",")
 		}},
+		{"untrimmed title", func(i *models.SessionPRIntent) {
+			title := " docs: Weekly report"
+			i.Title = &title
+		}},
+		{"multiline title", func(i *models.SessionPRIntent) {
+			title := "docs: Weekly\nreport"
+			i.Title = &title
+		}},
+		{"blank body", func(i *models.SessionPRIntent) {
+			body := "\n\t"
+			i.Body = &body
+		}},
+		{"oversized body", func(i *models.SessionPRIntent) {
+			body := strings.Repeat("a", models.MaxStagedPRBodyLength+1)
+			i.Body = &body
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -106,7 +129,7 @@ func TestSessionPRIntentFreeze(t *testing.T) {
 	mock.ExpectQuery(`(?s)INSERT INTO session_pr_intents.*ar.org_id = sal.org_id.*sc.is_primary.*sal.org_id = \$1.*COALESCE\(session_pr_intents.frozen_at, EXCLUDED.frozen_at\)`).
 		WithArgs(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID).
 		WillReturnRows(pgxmock.NewRows(strings.Fields(strings.ReplaceAll(sessionPRIntentColumns, ",", ""))).
-			AddRow(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID, intent.TeamReviewers, intent.FrozenAt, now, now))
+			AddRow(intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID, intent.TeamReviewers, intent.Title, intent.Body, intent.FrozenAt, now, now))
 	actual, err := NewSessionPRIntentStore(mock).Freeze(context.Background(), intent.OrgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID)
 	require.NoError(t, err, "freezing scoped metadata should succeed")
 	require.Equal(t, intent, actual, "freezing should return the durable immutable snapshot")

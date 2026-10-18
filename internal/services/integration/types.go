@@ -538,13 +538,18 @@ type PullRequestCreator interface {
 	UpdatePullRequest(ctx context.Context, params UpdatePullRequestParams) (*UpdatePullRequestResult, error)
 }
 
-// CreatePullRequestParams describes a session PR creation request.
+// CreatePullRequestParams describes a session PR creation request. Title and
+// Body stage automatic publication text for per-run automations. BodyFile is
+// resolved locally by 143-tools and is never sent to the server.
 type CreatePullRequestParams struct {
 	SessionID     string   `json:"session_id,omitempty"`
 	Draft         *bool    `json:"draft,omitempty"`
 	AuthorMode    string   `json:"author_mode,omitempty"`
 	TriggerKind   string   `json:"trigger_kind,omitempty"`
 	TeamReviewers []string `json:"team_reviewers,omitempty"`
+	Title         *string  `json:"title,omitempty"`
+	Body          *string  `json:"body,omitempty"`
+	BodyFile      string   `json:"-"`
 }
 
 // CreatePullRequestResult is returned after PR creation has been queued.

@@ -21,11 +21,15 @@ func NewSessionPRIntentStore(db DBTX) *SessionPRIntentStore {
 }
 
 const sessionPRIntentColumns = `org_id, session_id, automation_run_id, changeset_id,
-	team_reviewers, frozen_at, created_at, updated_at`
+	team_reviewers, title, body, frozen_at, created_at, updated_at`
 
 // Stage records metadata without creating publication work. The completion
 // coordinator must Freeze before requesting publication. Both operations lock
 // the same unique row, including when no metadata has yet been staged.
+//
+// Each call replaces only the fields it carries: nil TeamReviewers, Title, or
+// Body leave any previously staged value in place, so separate tool calls for
+// reviewers and text compose instead of clearing each other.
 func (s *SessionPRIntentStore) Stage(ctx context.Context, orgID uuid.UUID, intent models.SessionPRIntent) error {
 	if orgID == uuid.Nil || intent.OrgID != orgID || intent.SessionID == uuid.Nil || intent.AutomationRunID == uuid.Nil || intent.ChangesetID == uuid.Nil {
 		return errors.New("session pull request intent requires matching organization and scope")
@@ -33,15 +37,21 @@ func (s *SessionPRIntentStore) Stage(ctx context.Context, orgID uuid.UUID, inten
 	if err := validateCanonicalTeamReviewers(intent.TeamReviewers); err != nil {
 		return err
 	}
-	teams := intent.TeamReviewers
-	if teams == nil {
-		teams = []string{}
+	if intent.Title != nil {
+		if title, err := models.NormalizeStagedPRTitle(*intent.Title); err != nil || title != *intent.Title {
+			return errors.New("staged pull request title must be normalized")
+		}
+	}
+	if intent.Body != nil {
+		if err := models.ValidateStagedPRBody(*intent.Body); err != nil {
+			return err
+		}
 	}
 	var sessionID uuid.UUID
 	err := s.db.QueryRow(ctx, `INSERT INTO session_pr_intents (
-		org_id, session_id, automation_run_id, changeset_id, team_reviewers
+		org_id, session_id, automation_run_id, changeset_id, team_reviewers, title, body
 	)
-	SELECT sal.org_id, sal.session_id, sal.automation_run_id, sc.id, $5::text[]
+	SELECT sal.org_id, sal.session_id, sal.automation_run_id, sc.id, COALESCE($5::text[], '{}'), $6::text, $7::text
 	FROM session_automation_links sal
 	JOIN automation_runs ar ON ar.id = sal.automation_run_id AND ar.org_id = sal.org_id
 	JOIN sessions sess ON sess.id = sal.session_id AND sess.org_id = sal.org_id
@@ -56,9 +66,12 @@ func (s *SessionPRIntentStore) Stage(ctx context.Context, orgID uuid.UUID, inten
 		SELECT 1 FROM session_publications p WHERE p.org_id = $1 AND p.changeset_id = $4
 	  )
 	ON CONFLICT (org_id, session_id, automation_run_id, changeset_id) DO UPDATE
-	SET team_reviewers = EXCLUDED.team_reviewers, updated_at = now()
+	SET team_reviewers = COALESCE($5::text[], session_pr_intents.team_reviewers),
+		title = COALESCE($6::text, session_pr_intents.title),
+		body = COALESCE($7::text, session_pr_intents.body),
+		updated_at = now()
 	WHERE session_pr_intents.frozen_at IS NULL
-	RETURNING session_id`, orgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID, teams).Scan(&sessionID)
+	RETURNING session_id`, orgID, intent.SessionID, intent.AutomationRunID, intent.ChangesetID, intent.TeamReviewers, intent.Title, intent.Body).Scan(&sessionID)
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}

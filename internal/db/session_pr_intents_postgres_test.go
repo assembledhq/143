@@ -50,10 +50,12 @@ func newSessionPRIntentPostgres(t *testing.T) *pgxpool.Pool {
 		CREATE TABLE session_changesets (id uuid PRIMARY KEY, org_id uuid NOT NULL, session_id uuid NOT NULL, is_primary boolean NOT NULL, UNIQUE(id, org_id, session_id));
 		CREATE TABLE session_publications (id uuid PRIMARY KEY, org_id uuid NOT NULL, session_id uuid NOT NULL, changeset_id uuid NOT NULL);`)
 	require.NoError(t, err, "create the real migration's scoped parent tables")
-	up, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000314_session_pr_review_intent.up.sql"))
-	require.NoError(t, err, "read review intent migration")
-	_, err = pool.Exec(ctx, string(up))
-	require.NoError(t, err, "apply review intent migration")
+	for _, migration := range []string{"000314_session_pr_review_intent.up.sql", "000315_session_pr_intent_content.up.sql"} {
+		up, err := os.ReadFile(filepath.Join("..", "..", "migrations", migration))
+		require.NoError(t, err, "read publication intent migration")
+		_, err = pool.Exec(ctx, "BEGIN; "+string(up)+"; COMMIT;")
+		require.NoError(t, err, "apply publication intent migration")
+	}
 	return pool
 }
 
@@ -119,12 +121,66 @@ func TestSessionPRIntentPostgres(t *testing.T) {
 			require.Equal(t, frozen, replayed, "completion replay must not alter teams or timestamps")
 			require.ErrorIs(t, store.Stage(ctx, f.intent.OrgID, f.intent), ErrSessionPRIntentFrozen, "late staging must not overwrite frozen metadata")
 		}},
+		{"separate staging calls compose reviewers and text", func(t *testing.T, pool *pgxpool.Pool, f sessionPRIntentPostgresFixture) {
+			ctx := context.Background()
+			store := NewSessionPRIntentStore(pool)
+			reviewersOnly := f.intent
+			reviewersOnly.Title, reviewersOnly.Body = nil, nil
+			require.NoError(t, store.Stage(ctx, f.intent.OrgID, reviewersOnly), "reviewers may be staged before text")
+			textOnly := f.intent
+			textOnly.TeamReviewers = nil
+			require.NoError(t, store.Stage(ctx, f.intent.OrgID, textOnly), "text may be staged without repeating reviewers")
+			title := "docs: Final weekly report"
+			titleOnly := f.intent
+			titleOnly.TeamReviewers, titleOnly.Title, titleOnly.Body = nil, &title, nil
+			require.NoError(t, store.Stage(ctx, f.intent.OrgID, titleOnly), "a later title replaces only the title")
+			frozen, err := store.Freeze(ctx, f.intent.OrgID, f.intent.SessionID, f.intent.AutomationRunID, f.intent.ChangesetID)
+			require.NoError(t, err, "completion should freeze composed metadata")
+			require.Equal(t, f.intent.TeamReviewers, frozen.TeamReviewers, "text-only calls must not clear staged reviewers")
+			require.Equal(t, &title, frozen.Title, "the last staged title should win")
+			require.Equal(t, f.intent.Body, frozen.Body, "title-only calls must not clear the staged body")
+			require.ErrorIs(t, store.Stage(ctx, f.intent.OrgID, textOnly), ErrSessionPRIntentFrozen, "late text must not overwrite frozen metadata")
+		}},
+		{"schema rejects malformed staged text", func(t *testing.T, pool *pgxpool.Pool, f sessionPRIntentPostgresFixture) {
+			ctx := context.Background()
+			cases := []struct {
+				name  string
+				title *string
+				body  *string
+			}{
+				{"multiline title", new("docs:\nreport"), nil},
+				{"padded title", new(" docs: report"), nil},
+				{"oversized title", new(strings.Repeat("a", models.MaxStagedPRTitleBytes+1)), nil},
+				{"blank body", nil, new("   ")},
+				{"oversized body", nil, new(strings.Repeat("a", models.MaxStagedPRBodyLength+1))},
+			}
+			for _, tt := range cases {
+				_, err := pool.Exec(ctx, `INSERT INTO session_pr_intents(org_id, session_id, automation_run_id, changeset_id, title, body) VALUES ($1, $2, $3, $4, $5, $6)`,
+					f.intent.OrgID, f.intent.SessionID, f.intent.AutomationRunID, f.intent.ChangesetID, tt.title, tt.body)
+				requireSessionPRSQLState(t, err, "23514")
+			}
+		}},
+		{"content down migration keeps reviewer staging", func(t *testing.T, pool *pgxpool.Pool, f sessionPRIntentPostgresFixture) {
+			ctx := context.Background()
+			down, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000315_session_pr_intent_content.down.sql"))
+			require.NoError(t, err, "read content down migration")
+			_, err = pool.Exec(ctx, "BEGIN; "+string(down)+"; COMMIT;")
+			require.NoError(t, err, "content rollback should apply cleanly")
+			var columns int
+			require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'session_pr_intents' AND column_name IN ('title', 'body')`).Scan(&columns), "inspect content rollback")
+			require.Equal(t, 0, columns, "rollback should remove staged text columns")
+			_, err = pool.Exec(ctx, `INSERT INTO session_pr_intents(org_id, session_id, automation_run_id, changeset_id, team_reviewers) VALUES ($1, $2, $3, $4, $5)`,
+				f.intent.OrgID, f.intent.SessionID, f.intent.AutomationRunID, f.intent.ChangesetID, f.intent.TeamReviewers)
+			require.NoError(t, err, "rollback should keep reviewer staging storage intact")
+		}},
 		{"empty freeze fences later tool calls", func(t *testing.T, pool *pgxpool.Pool, f sessionPRIntentPostgresFixture) {
 			ctx := context.Background()
 			store := NewSessionPRIntentStore(pool)
 			frozen, err := store.Freeze(ctx, f.intent.OrgID, f.intent.SessionID, f.intent.AutomationRunID, f.intent.ChangesetID)
 			require.NoError(t, err, "completion without metadata should still create a fence")
 			require.Equal(t, []string{}, frozen.TeamReviewers, "an unstaged completion should freeze an empty team list")
+			require.Nil(t, frozen.Title, "an unstaged completion keeps the generated title")
+			require.Nil(t, frozen.Body, "an unstaged completion keeps the generated body")
 			require.ErrorIs(t, store.Stage(ctx, f.intent.OrgID, f.intent), ErrSessionPRIntentFrozen, "late tool calls must not add teams after an empty freeze")
 		}},
 		{"all intent scope dimensions are enforced", func(t *testing.T, pool *pgxpool.Pool, f sessionPRIntentPostgresFixture) {

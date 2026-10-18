@@ -72,6 +72,11 @@ func (c *InternalPullRequestCreator) Name() string { return "session" }
 func (c *InternalPullRequestCreator) CreatePullRequest(ctx context.Context, params CreatePullRequestParams) (*CreatePullRequestResult, error) {
 	sessionID := strings.TrimSpace(params.SessionID)
 	params.SessionID = sessionID
+	resolvedBody, err := resolvePullRequestBodyFile(params.Body, params.BodyFile)
+	if err != nil {
+		return nil, err
+	}
+	params.Body = resolvedBody
 
 	body, err := json.Marshal(params)
 	if err != nil {
@@ -136,18 +141,11 @@ func (c *InternalPullRequestCreator) CreatePullRequest(ctx context.Context, para
 func (c *InternalPullRequestCreator) UpdatePullRequest(ctx context.Context, params UpdatePullRequestParams) (*UpdatePullRequestResult, error) {
 	sessionID := strings.TrimSpace(params.SessionID)
 	params.SessionID = sessionID
-	params.BodyFile = strings.TrimSpace(params.BodyFile)
-	if params.Body != nil && params.BodyFile != "" {
-		return nil, fmt.Errorf("body and body_file are mutually exclusive")
+	resolvedBody, err := resolvePullRequestBodyFile(params.Body, params.BodyFile)
+	if err != nil {
+		return nil, err
 	}
-	if params.BodyFile != "" {
-		data, err := os.ReadFile(params.BodyFile)
-		if err != nil {
-			return nil, fmt.Errorf("read body_file: %w", err)
-		}
-		body := string(data)
-		params.Body = &body
-	}
+	params.Body = resolvedBody
 	if params.Title == nil && params.Body == nil {
 		return nil, fmt.Errorf("title or body is required")
 	}
@@ -203,4 +201,23 @@ func (c *InternalPullRequestCreator) UpdatePullRequest(ctx context.Context, para
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return &result, nil
+}
+
+// resolvePullRequestBodyFile reads a sandbox-local Markdown description so
+// agents do not need to squeeze it through shell quoting. The path never
+// leaves the sandbox; only the file contents are sent.
+func resolvePullRequestBodyFile(body *string, bodyFile string) (*string, error) {
+	bodyFile = strings.TrimSpace(bodyFile)
+	if bodyFile == "" {
+		return body, nil
+	}
+	if body != nil {
+		return nil, fmt.Errorf("body and body_file are mutually exclusive")
+	}
+	data, err := os.ReadFile(bodyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read body_file: %w", err)
+	}
+	resolved := string(data)
+	return &resolved, nil
 }
