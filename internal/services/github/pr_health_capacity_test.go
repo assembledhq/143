@@ -71,7 +71,8 @@ func TestReconcilePullRequestHealthCapacityPreservesRecoveryLimits(t *testing.T)
 			mock, err := pgxmock.NewPool()
 			require.NoError(t, err, "capacity mock should initialize")
 			t.Cleanup(mock.Close)
-			orgID := uuid.New()
+			orgID, jobID, token := uuid.New(), uuid.New(), uuid.New()
+			expectSweepCheckpointLoad(t, mock, orgID, jobID, token, nil, nil)
 			count := mock.ExpectQuery(`SELECT COUNT\(\*\) FROM`).WithArgs(pgx.NamedArgs{"org_id": orgID, "population_cap": 1000})
 			if tt.countErr != nil {
 				count.WillReturnError(tt.countErr)
@@ -79,16 +80,19 @@ func TestReconcilePullRequestHealthCapacityPreservesRecoveryLimits(t *testing.T)
 				count.WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(tt.population))
 			}
 			mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").WithArgs(pgx.NamedArgs{"org_id": orgID, "before": pgxmock.AnyArg(), "limit": tt.wantLimit}).WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns))
+			expectSweepCheckpointSave(t, mock, orgID, jobID, token, db.PullRequestHealthSweepCheckpoint{
+				Version: 1, RemainingPullRequestIDs: []uuid.UUID{}, Population: tt.population, PopulationAvailable: tt.countErr == nil,
+				CandidateLimit: tt.wantLimit, SelectedCount: 0,
+			}, nil)
 			mock.ExpectQuery("SELECT s.id[\\s\\S]*FROM session_publish_state").WithArgs(pgx.NamedArgs{"org_id": orgID, "stuck_before": pgxmock.AnyArg(), "limit": 50}).WillReturnRows(pgxmock.NewRows([]string{"id"}))
 			mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*merge_when_ready_state = 'queued'[\\s\\S]*merge_when_ready_state = 'merging'").WithArgs(pgx.NamedArgs{"org_id": orgID, "stale_before": pgxmock.AnyArg(), "limit": 50}).WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns))
 			mock.ExpectQuery("SELECT .+ FROM session_publications").WithArgs(pgx.NamedArgs{"org_id": orgID, "updated_before": pgxmock.AnyArg(), "limit": 50}).WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns))
 			var logs bytes.Buffer
 			service := &PRService{
 				pullRequests: db.NewPullRequestStore(mock), sessions: db.NewSessionStore(mock), repos: db.NewRepositoryStore(mock),
-				publications: db.NewSessionPublicationStore(mock), changesets: db.NewSessionChangesetStore(mock), logger: zerolog.New(&logs),
+				publications: db.NewSessionPublicationStore(mock), changesets: db.NewSessionChangesetStore(mock), jobs: db.NewJobStore(mock), logger: zerolog.New(&logs),
 			}
-			jobID := uuid.New()
-			ctx := jobctx.WithJobID(context.Background(), jobID)
+			ctx := jobctx.WithLockToken(jobctx.WithJobID(context.Background(), jobID), token)
 			require.NoError(t, service.ReconcilePullRequestState(ctx, orgID, 50), "a count failure alone should not retry completed health and recovery work")
 			require.NoError(t, mock.ExpectationsWereMet(), "every independent recovery should retain its original limit")
 			var records []map[string]any
