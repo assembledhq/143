@@ -3177,7 +3177,7 @@ func TestStandaloneWorkerIdentitySetupContracts(t *testing.T) {
 			require.NoError(t, err, "parse the copied default setup template")
 			value, declared := values["WORKER_PRIVATE_IP"]
 			require.True(t, declared, "default setup must declare the required host identity for the operator to fill")
-			cfg := config.Config{Env: "development", Mode: "all", WorkerPrivateIP: value}
+			cfg := config.Config{Env: "development", Mode: "all", WorkerPrivateIP: value, PRHealthSweepStaleAfter: 10 * time.Minute}
 			require.ErrorContains(t, cfg.ValidateSecrets(), "WORKER_PRIVATE_IP", "blank template identity must produce an actionable startup error rather than a hidden admission stall")
 			cfg.WorkerPrivateIP = "192.0.2.10"
 			require.NoError(t, cfg.ValidateSecrets(), "documented setup must work once the operator supplies a stable synthetic host IP")

@@ -45,6 +45,7 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	t.Setenv("GITHUB_RATE_LIMIT_INSTALLATION_ALLOWLIST", "")
 	t.Setenv("GITHUB_BACKGROUND_QUOTA_RESERVE", "")
 	t.Setenv("GITHUB_BACKGROUND_QUOTA_INTERVAL", "")
+	t.Setenv("PR_HEALTH_SWEEP_STALE_AFTER", "")
 	t.Setenv("OPENAI_API_TYPE", "")
 	t.Setenv("OPENROUTER_APP_NAME", "")
 	t.Setenv("CODE_REVIEW_ASSESSMENTS_ENABLED", "")
@@ -66,6 +67,7 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.Equal(t, "observe", cfg.GitHubRateLimitMode, "Load should default GitHub cooldowns to observation mode")
 	require.Equal(t, int64(0), cfg.GitHubBackgroundQuotaReserve, "background quota budgeting should default disabled")
 	require.Equal(t, time.Minute, cfg.GitHubBackgroundQuotaInterval, "enabled budgeting should default to periodic minute admission")
+	require.Equal(t, 10*time.Minute, cfg.PRHealthSweepStaleAfter, "Load should default the background health sweep to the ten-minute stale threshold")
 	require.False(t, cfg.CodeReviewAssessmentsEnabled, "assessment capture should default disabled")
 	require.False(t, cfg.CodeReviewRechecksEnabled, "recheck admission should default disabled")
 	require.Empty(t, cfg.GitHubRateLimitInstallationAllowlist, "Load should default to no installation allowlist")
@@ -164,6 +166,7 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("GITHUB_RATE_LIMIT_INSTALLATION_ALLOWLIST", "42,99")
 	t.Setenv("GITHUB_BACKGROUND_QUOTA_RESERVE", "100")
 	t.Setenv("GITHUB_BACKGROUND_QUOTA_INTERVAL", "2m")
+	t.Setenv("PR_HEALTH_SWEEP_STALE_AFTER", "90m")
 	t.Setenv("CODE_REVIEW_APP_REVIEWER_LOGINS", "143-code-reviewer,143-reviewer")
 	t.Setenv("CODE_REVIEW_ALIAS_LOGINS", "ai-reviewer,bot-reviewer")
 	t.Setenv("CODE_REVIEW_TEAM_SLUGS", "ai-reviewers,platform-review")
@@ -191,6 +194,7 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	require.Equal(t, []int64{42, 99}, cfg.GitHubRateLimitInstallationAllowlist, "Load should parse the installation allowlist")
 	require.Equal(t, int64(100), cfg.GitHubBackgroundQuotaReserve, "Load should parse the opt-in reserve")
 	require.Equal(t, 2*time.Minute, cfg.GitHubBackgroundQuotaInterval, "Load should parse periodic background admission")
+	require.Equal(t, 90*time.Minute, cfg.PRHealthSweepStaleAfter, "Load should parse the background health sweep stale threshold")
 	require.Equal(t, "worker", cfg.Mode, "Load should read MODE from the environment")
 	require.Equal(t, 4, cfg.WorkerProcessCount, "Load should parse WORKER_PROCESS_COUNT from the environment")
 	require.Equal(t, 7, cfg.WorkerMaxActiveSandboxes, "Load should parse WORKER_MAX_ACTIVE_SANDBOXES from the environment")
@@ -419,7 +423,7 @@ func TestSafeLLMEnv_PartialKeys(t *testing.T) {
 func TestValidateSecrets_DevelopmentAllowsMissing(t *testing.T) {
 	t.Parallel()
 
-	cfg := &Config{Env: "development"}
+	cfg := &Config{Env: "development", PRHealthSweepStaleAfter: 10 * time.Minute}
 	require.NoError(t, cfg.ValidateSecrets(), "development env should allow missing secrets")
 }
 
@@ -442,7 +446,7 @@ func TestValidateSecrets_GitHubRateLimitConfiguration(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := (&Config{Env: "development", GitHubRateLimitMode: tt.mode, GitHubRateLimitInstallationAllowlist: tt.allowlist}).ValidateSecrets()
+			err := (&Config{Env: "development", GitHubRateLimitMode: tt.mode, GitHubRateLimitInstallationAllowlist: tt.allowlist, PRHealthSweepStaleAfter: 10 * time.Minute}).ValidateSecrets()
 			if tt.expectErr {
 				require.Error(t, err, "invalid GitHub rate-limit configuration should fail startup validation")
 				return
@@ -456,9 +460,10 @@ func TestValidateSecrets_ProductionMissingSessionSecret(t *testing.T) {
 	t.Parallel()
 
 	cfg := &Config{
-		Env:                 "production",
-		SessionSecret:       "",
-		EncryptionMasterKey: strings.Repeat("k", 32),
+		PRHealthSweepStaleAfter: 10 * time.Minute,
+		Env:                     "production",
+		SessionSecret:           "",
+		EncryptionMasterKey:     strings.Repeat("k", 32),
 	}
 	err := cfg.ValidateSecrets()
 	require.Error(t, err, "missing SessionSecret in production should error")
@@ -469,9 +474,10 @@ func TestValidateSecrets_ProductionWeakSessionSecret(t *testing.T) {
 	t.Parallel()
 
 	cfg := &Config{
-		Env:                 "production",
-		SessionSecret:       "changeme",
-		EncryptionMasterKey: strings.Repeat("k", 32),
+		PRHealthSweepStaleAfter: 10 * time.Minute,
+		Env:                     "production",
+		SessionSecret:           "changeme",
+		EncryptionMasterKey:     strings.Repeat("k", 32),
 	}
 	err := cfg.ValidateSecrets()
 	require.Error(t, err, "weak SessionSecret in production should error")
@@ -482,9 +488,10 @@ func TestValidateSecrets_ProductionShortSessionSecret(t *testing.T) {
 	t.Parallel()
 
 	cfg := &Config{
-		Env:                 "production",
-		SessionSecret:       "short",
-		EncryptionMasterKey: strings.Repeat("k", 32),
+		PRHealthSweepStaleAfter: 10 * time.Minute,
+		Env:                     "production",
+		SessionSecret:           "short",
+		EncryptionMasterKey:     strings.Repeat("k", 32),
 	}
 	err := cfg.ValidateSecrets()
 	require.Error(t, err, "short SessionSecret in production should error")
@@ -524,10 +531,11 @@ func TestValidateSecrets_ProductionMissingEncryptionKey(t *testing.T) {
 	t.Parallel()
 
 	cfg := &Config{
-		Env:                 "production",
-		SessionSecret:       strings.Repeat("s", 32),
-		EncryptionMasterKey: "",
-		CSRFSigningKey:      strings.Repeat("c", 32),
+		PRHealthSweepStaleAfter: 10 * time.Minute,
+		Env:                     "production",
+		SessionSecret:           strings.Repeat("s", 32),
+		EncryptionMasterKey:     "",
+		CSRFSigningKey:          strings.Repeat("c", 32),
 	}
 	err := cfg.ValidateSecrets()
 	require.Error(t, err, "missing EncryptionMasterKey in production should error")
@@ -538,10 +546,11 @@ func TestValidateSecrets_ProductionShortEncryptionKey(t *testing.T) {
 	t.Parallel()
 
 	cfg := &Config{
-		Env:                 "production",
-		SessionSecret:       strings.Repeat("s", 32),
-		EncryptionMasterKey: "short",
-		CSRFSigningKey:      strings.Repeat("c", 32),
+		PRHealthSweepStaleAfter: 10 * time.Minute,
+		Env:                     "production",
+		SessionSecret:           strings.Repeat("s", 32),
+		EncryptionMasterKey:     "short",
+		CSRFSigningKey:          strings.Repeat("c", 32),
 	}
 	err := cfg.ValidateSecrets()
 	require.Error(t, err, "short EncryptionMasterKey in production should error")
@@ -552,14 +561,15 @@ func TestValidateSecrets_ProductionAllValid(t *testing.T) {
 	t.Parallel()
 
 	cfg := &Config{
-		Env:                  "production",
-		Mode:                 "all",
-		WorkerPrivateIP:      "192.0.2.1",
-		SessionSecret:        strings.Repeat("s", 32),
-		EncryptionMasterKey:  strings.Repeat("k", 32),
-		CSRFSigningKey:       strings.Repeat("c", 32),
-		GitHubWebhookSecret:  "github-webhook-secret",
-		SandboxAuthSocketDir: "/var/run/143/sandbox-auth",
+		PRHealthSweepStaleAfter: 10 * time.Minute,
+		Env:                     "production",
+		Mode:                    "all",
+		WorkerPrivateIP:         "192.0.2.1",
+		SessionSecret:           strings.Repeat("s", 32),
+		EncryptionMasterKey:     strings.Repeat("k", 32),
+		CSRFSigningKey:          strings.Repeat("c", 32),
+		GitHubWebhookSecret:     "github-webhook-secret",
+		SandboxAuthSocketDir:    "/var/run/143/sandbox-auth",
 	}
 	require.NoError(t, cfg.ValidateSecrets(), "valid production config should not error")
 }
@@ -578,13 +588,14 @@ func TestValidateSecrets_ProductionWorkerRequiresSandboxAuthSocket(t *testing.T)
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := &Config{
-				Env:                 "production",
-				Mode:                tt.mode,
-				WorkerPrivateIP:     "192.0.2.1",
-				SessionSecret:       strings.Repeat("s", 32),
-				EncryptionMasterKey: strings.Repeat("k", 32),
-				CSRFSigningKey:      strings.Repeat("c", 32),
-				GitHubWebhookSecret: "github-webhook-secret",
+				PRHealthSweepStaleAfter: 10 * time.Minute,
+				Env:                     "production",
+				Mode:                    tt.mode,
+				WorkerPrivateIP:         "192.0.2.1",
+				SessionSecret:           strings.Repeat("s", 32),
+				EncryptionMasterKey:     strings.Repeat("k", 32),
+				CSRFSigningKey:          strings.Repeat("c", 32),
+				GitHubWebhookSecret:     "github-webhook-secret",
 			}
 
 			err := cfg.ValidateSecrets()
@@ -598,6 +609,7 @@ func TestValidateSecrets_NegativeRetentionDays(t *testing.T) {
 	t.Parallel()
 
 	cfg := &Config{
+		PRHealthSweepStaleAfter:  10 * time.Minute,
 		Env:                      "development",
 		DataRetentionWebhookDays: -1,
 	}
@@ -610,10 +622,11 @@ func TestValidateSecrets_ProductionMissingCSRFKey(t *testing.T) {
 	t.Parallel()
 
 	cfg := &Config{
-		Env:                 "production",
-		SessionSecret:       strings.Repeat("s", 32),
-		EncryptionMasterKey: strings.Repeat("k", 32),
-		CSRFSigningKey:      "",
+		PRHealthSweepStaleAfter: 10 * time.Minute,
+		Env:                     "production",
+		SessionSecret:           strings.Repeat("s", 32),
+		EncryptionMasterKey:     strings.Repeat("k", 32),
+		CSRFSigningKey:          "",
 	}
 	err := cfg.ValidateSecrets()
 	require.Error(t, err, "missing CSRF_SIGNING_KEY in production should error")
@@ -624,10 +637,11 @@ func TestValidateSecrets_ProductionMissingGitHubWebhookSecret(t *testing.T) {
 	t.Parallel()
 
 	cfg := &Config{
-		Env:                 "production",
-		SessionSecret:       strings.Repeat("s", 32),
-		EncryptionMasterKey: strings.Repeat("k", 32),
-		CSRFSigningKey:      strings.Repeat("c", 32),
+		PRHealthSweepStaleAfter: 10 * time.Minute,
+		Env:                     "production",
+		SessionSecret:           strings.Repeat("s", 32),
+		EncryptionMasterKey:     strings.Repeat("k", 32),
+		CSRFSigningKey:          strings.Repeat("c", 32),
 	}
 	err := cfg.ValidateSecrets()
 	require.Error(t, err, "missing GITHUB_WEBHOOK_SECRET in production should error")
@@ -949,7 +963,7 @@ func TestValidateSecretsWorkerSandboxIdentity(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := (&Config{Env: "development", Mode: tt.mode, WorkerPrivateIP: tt.ip}).ValidateSecrets()
+			err := (&Config{Env: "development", Mode: tt.mode, WorkerPrivateIP: tt.ip, PRHealthSweepStaleAfter: 10 * time.Minute}).ValidateSecrets()
 			if tt.wantError {
 				require.ErrorContains(t, err, "WORKER_PRIVATE_IP must be a stable, unique Docker host IP", "startup must stop with an actionable identity requirement")
 				require.ErrorContains(t, err, ".env or .env.local", "startup message must identify how to configure the worker")

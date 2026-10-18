@@ -202,6 +202,11 @@ type Config struct {
 
 	GitHubBackgroundQuotaReserve  int64         `env:"GITHUB_BACKGROUND_QUOTA_RESERVE" envDefault:"0"`
 	GitHubBackgroundQuotaInterval time.Duration `env:"GITHUB_BACKGROUND_QUOTA_INTERVAL" envDefault:"1m"`
+	// How old an open pull request's GitHub snapshot must be before the
+	// background health sweep re-reads it. Raising it saves GitHub core quota
+	// but delays recovery from dropped webhooks. Interactive reads and
+	// automatic repair keep their own freshness budgets.
+	PRHealthSweepStaleAfter time.Duration `env:"PR_HEALTH_SWEEP_STALE_AFTER" envDefault:"10m"`
 
 	// Rolling 24h ceilings on dispute intake from untrusted GitHub authors.
 	// Tunable because they are the only brake on third-party LLM and GitHub
@@ -713,6 +718,9 @@ func (c *Config) ValidateSecrets() error {
 	}
 	if (c.GitHubBackgroundQuotaReserve > 0 || c.GitHubBackgroundQuotaInterval != 0) && (c.GitHubBackgroundQuotaInterval < time.Second || c.GitHubBackgroundQuotaInterval > 15*time.Minute) {
 		return errors.New("GITHUB_BACKGROUND_QUOTA_INTERVAL must be between 1s and 15m")
+	}
+	if c.PRHealthSweepStaleAfter < time.Minute || c.PRHealthSweepStaleAfter > 48*time.Hour {
+		return errors.New("PR_HEALTH_SWEEP_STALE_AFTER must be a duration between 1m and 48h")
 	}
 	// Retention day validation applies in all environments.
 	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 || c.DataRetentionSlackInboundPayloadDays < 0 || c.DataRetentionSlackInboundPayloadBatch < 0 || c.PreviewDependencyCacheRetentionDays < 0 || c.PreviewDependencyCacheKeepNewestPerRepo < 0 {

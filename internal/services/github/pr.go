@@ -161,6 +161,7 @@ type PRService struct {
 	prHealthSyncGroup        singleflight.Group
 	publicationPolicy        PublicationExecutionPolicy
 	teamReviewRequests       TeamReviewRequestStore
+	healthSweepStaleAfter    time.Duration
 
 	backgroundQuotaController *ratelimit.Controller
 
@@ -614,6 +615,21 @@ func (s *PRService) SetPreviewOriginTemplate(template string) {
 
 func (s *PRService) SetPRPreviewSurfacesEnabled(enabled bool) {
 	s.prPreviewSurfacesEnabled = enabled
+}
+
+// SetHealthSweepStaleAfter sets the snapshot age at which the background
+// health sweep re-reads an open pull request. It applies only to the sweep's
+// candidate cutoff; interactive reads and automatic repair keep their own
+// budgets. Non-positive values keep prHealthStaleAfter.
+func (s *PRService) SetHealthSweepStaleAfter(staleAfter time.Duration) {
+	s.healthSweepStaleAfter = staleAfter
+}
+
+func (s *PRService) healthSweepCutoffAge() time.Duration {
+	if s.healthSweepStaleAfter > 0 {
+		return s.healthSweepStaleAfter
+	}
+	return prHealthStaleAfter
 }
 
 // SetRateLimitController wires shared cooldowns while preserving the PR
