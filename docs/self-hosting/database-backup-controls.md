@@ -335,6 +335,21 @@ available memory, 1 GiB commitment headroom, 0.5 GiB database cgroup headroom,
 8 MiB/s at runtime while preserving the 256 MiB total limit. Pressure thresholds are explicit in
 `pg_backup_runtime.py`. The default reserve remains 20 GiB and can only increase.
 
+Database cgroup headroom uses a conservative working set: raw `memory.current`
+minus a bounded credit for clean inactive filesystem cache. The credit is capped
+by `inactive_file`, `file - shmem`, and the charge remaining after anonymous,
+shared and kernel memory. Dirty, writeback and unevictable bytes further reduce
+it. Active cache and shared memory are not credited. Invalid or missing required
+counters refuse work. The same accounting applies during admission, dumping and
+post-dump checks; the headroom thresholds above are unchanged.
+
+Resource samples retain `db_current_bytes`, `db_raw_headroom`, the underlying
+counters, `db_cache_credit_bytes`, `db_working_set_bytes` and the adjusted
+`db_headroom`. Cache credit estimates reclaimable memory; it does not guarantee
+instant reclamation. Host memory, commitment, swap, pressure, disk, deadlines
+and ownership checks remain independent stopping conditions. No cache eviction
+or container-limit change is performed by this calculation.
+
 An explicitly attended `backup --canary --host-memory-full-percent 5` permits
 host memory **full PSI avg10 up to 5%** during the dump, verification and upload.
 The default is 1%; admission still requires 1% or less. This invocation-only

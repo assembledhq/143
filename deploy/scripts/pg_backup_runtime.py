@@ -67,6 +67,31 @@ def cgroup_path(pid):
     return cg
 
 
+def database_memory(maximum, current, stats):
+    """Conservative cgroup-v2 working set, retaining raw accounting evidence."""
+    require(type(maximum) is int and maximum > 0 and type(current) is int and current >= 0,
+            'invalid database memory telemetry')
+    fields = ('anon', 'shmem', 'kernel', 'file', 'inactive_file',
+              'file_dirty', 'file_writeback', 'unevictable')
+    require(all(isinstance(stats.get(key), str) and re.fullmatch(r'[0-9]+', stats[key])
+                for key in fields), 'incomplete or invalid database memory telemetry')
+    values = {key: int(stats[key]) for key in fields}
+    # file includes shmem; the inactive LRU and type counters overlap. Credit
+    # only inactive filesystem cache, never anonymous/shared/kernel memory.
+    # Bound against current as well: these kernel counters are not an atomic
+    # snapshot. Dirty, writeback and unevictable bytes conservatively reduce
+    # credit even when they belong to a different LRU or overlap each other.
+    # https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-interface-files
+    candidate = min(values['inactive_file'], max(0, values['file'] - values['shmem']),
+                    max(0, current - values['anon'] - values['shmem'] - values['kernel']))
+    credit = max(0, candidate - values['file_dirty'] - values['file_writeback'] - values['unevictable'])
+    working_set = current - credit
+    return dict({'db_' + key + '_bytes': value for key, value in values.items()},
+                db_limit_bytes=maximum, db_current_bytes=current,
+                db_raw_headroom=maximum - current, db_cache_credit_bytes=credit,
+                db_working_set_bytes=working_set, db_headroom=maximum - working_set)
+
+
 def resources(root, db_pid):
     memory = {k: int(v.split()[0]) * 1024 for k, v in
               (line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())}
@@ -76,14 +101,12 @@ def resources(root, db_pid):
     current = int((cg / 'memory.current').read_text())
     stats = dict(line.split() for line in (cg / 'memory.stat').read_text().splitlines())
     fs = os.statvfs(root)
-    return dict(free_bytes=fs.f_bavail * fs.f_frsize,
+    return dict(database_memory(maximum, current, stats),
+                free_bytes=fs.f_bavail * fs.f_frsize,
                 available_bytes=memory['MemAvailable'],
                 commit_headroom=memory['CommitLimit'] - memory['Committed_AS'],
                 swap_bytes=memory['SwapTotal'] - memory['SwapFree'],
                 swap_out_bytes=int(vm['pswpout']) * os.sysconf('SC_PAGE_SIZE'),
-                db_headroom=maximum - current,
-                db_current_bytes=current, db_anon_bytes=int(stats['anon']),
-                db_shmem_bytes=int(stats['shmem']),
                 db_swap_bytes=int((cg / 'memory.swap.current').read_text()),
                 host_io=pressure(Path('/proc/pressure/io')),
                 host_memory=pressure(Path('/proc/pressure/memory')),

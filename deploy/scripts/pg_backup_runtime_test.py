@@ -29,7 +29,84 @@ def safe_resources():
                 db_io=dict(pressure), db_memory=dict(pressure))
 
 
+def cache_stats(**overrides):
+    # Synthetic cgroup-v2 counters. file includes shmem; LRU and type counters
+    # overlap and must not be added together.
+    values = dict(anon=256, shmem=512, kernel=256, file=3072,
+                  inactive_file=2048, file_dirty=0, file_writeback=0,
+                  unevictable=0)
+    values.update(overrides)
+    return {key: str(value) for key, value in values.items()}
+
+
 class KernelParsingTests(unittest.TestCase):
+    def test_database_memory_credits_only_bounded_clean_inactive_file_cache(self):
+        cases = [
+            ('clean inactive cache', {}, 4096, 2048),
+            ('dirty and writeback remain charged', dict(file_dirty=128, file_writeback=256), 4096, 1664),
+            ('shared memory is not file cache credit', dict(file=1024), 4096, 512),
+            ('active cache remains charged', dict(inactive_file=0), 4096, 0),
+            ('unevictable memory remains charged', dict(unevictable=128), 4096, 1920),
+            ('dirty exceeds candidate cache', dict(file_dirty=4096), 4096, 0),
+            ('inconsistent file and shmem', dict(file=256), 4096, 0),
+            ('type counters exceed current', {}, 768, 0),
+            ('current bounds credit without excluding anon shared or kernel', {}, 1536, 512),
+            ('stale large inactive counter', dict(inactive_file=8192), 4096, 2560),
+            ('kernel memory remains charged', dict(kernel=3072), 4096, 256),
+        ]
+        for name, overrides, current, credit in cases:
+            with self.subTest(name=name):
+                stats = cache_stats(**overrides)
+                self.assertEqual(runtime.database_memory(4096, current, stats), {
+                    **{'db_' + key + '_bytes': int(value) for key, value in stats.items()},
+                    'db_current_bytes': current, 'db_limit_bytes': 4096,
+                    'db_raw_headroom': 4096 - current,
+                    'db_cache_credit_bytes': credit,
+                    'db_working_set_bytes': current - credit,
+                    'db_headroom': 4096 - current + credit,
+                }, 'credit must exclude charged non-cache memory and retain raw evidence')
+
+    def test_database_memory_fails_closed_on_missing_or_invalid_counters(self):
+        for key in cache_stats():
+            for value in (None, '-1', 'nan', '1.5', ''):
+                with self.subTest(key=key, value=value):
+                    stats = cache_stats()
+                    if value is None:
+                        del stats[key]
+                    else:
+                        stats[key] = value
+                    with self.assertRaisesRegex(Refused, 'database memory telemetry'):
+                        runtime.database_memory(4096, 4096, stats)
+        for maximum, current in ((0, 4096), (-1, 4096), ('max', 4096), (4096, -1), (4096, True)):
+            with self.subTest(maximum=maximum, current=current):
+                with self.assertRaisesRegex(Refused, 'database memory telemetry'):
+                    runtime.database_memory(maximum, current, cache_stats())
+
+    def test_resources_uses_cache_accounting_and_preserves_other_resource_measurements(self):
+        cg = Path('/synthetic-cgroup')
+        files = {
+            '/proc/meminfo': 'MemAvailable: 8388608 kB\nCommitLimit: 16777216 kB\n'
+                             'Committed_AS: 4194304 kB\nSwapTotal: 1024 kB\nSwapFree: 512 kB\n',
+            '/proc/vmstat': 'pswpout 7\n',
+            str(cg / 'memory.max'): '4096', str(cg / 'memory.current'): '4096',
+            str(cg / 'memory.stat'): '\n'.join(k + ' ' + v for k, v in cache_stats().items()),
+            str(cg / 'memory.swap.current'): '128',
+        }
+        psi = {'some': 0, 'full': 0, 'some_total_us': 1, 'full_total_us': 1}
+        with mock.patch.object(runtime, 'cgroup_path', return_value=cg), \
+                mock.patch.object(Path, 'read_text', autospec=True, side_effect=lambda path: files[str(path)]), \
+                mock.patch.object(runtime.os, 'statvfs', return_value=types.SimpleNamespace(f_bavail=100, f_frsize=4096)), \
+                mock.patch.object(runtime.os, 'sysconf', return_value=4096), \
+                mock.patch.object(runtime, 'pressure', return_value=psi), \
+                mock.patch.object(runtime.time, 'monotonic', return_value=10):
+            self.assertEqual(runtime.resources(Path('/backups'), 42), dict(
+                runtime.database_memory(4096, 4096, cache_stats()),
+                free_bytes=409600, available_bytes=8 * runtime.GIB,
+                commit_headroom=12 * runtime.GIB, swap_bytes=512 * 1024,
+                swap_out_bytes=7 * 4096, db_swap_bytes=128,
+                host_io=psi, host_memory=psi, db_io=psi, db_memory=psi, monotonic=10),
+                'resource collection must wire cache accounting into all backup phases')
+
     def test_pressure_preserves_raw_microsecond_counters(self):
         cases = [(0, 0), (123456, 98765), (123480, 98780), (2 ** 63, 2 ** 63 - 1)]
         for some, full in cases:
@@ -100,6 +177,63 @@ class RuntimeTests(unittest.TestCase):
         self.owned = dict(app=self.app, partial=identity(self.partial), database=self.db,
                           container_id='c' * 64, creation_started=True, creation_complete=True)
         atomic_json(self.guard.record, self.owned)
+
+    def test_cache_credit_keeps_reserves_and_other_guards(self):
+        mib = 1024 ** 2
+        accounting = runtime.database_memory(4 * runtime.GIB, 4 * runtime.GIB,
+                    {k: str(int(v) * mib) for k, v in cache_stats().items()})
+        cases = [
+            ('cache-full cgroup runtime', False, {}, None),
+            ('cache-full cgroup admission', True, {}, None),
+            ('runtime DB floor boundary', False, {'db_headroom': 512 * mib}, None),
+            ('runtime DB floor exceeded', False, {'db_headroom': 512 * mib - 1}, 'database memory'),
+            ('admission DB floor boundary', True, {'db_headroom': 1536 * mib}, None),
+            ('admission DB floor exceeded', True, {'db_headroom': 1536 * mib - 1}, 'database memory'),
+            ('host RAM', False, {'available_bytes': 1536 * mib - 1}, 'available memory'),
+            ('commit', False, {'commit_headroom': runtime.GIB - 1}, 'commit'),
+            ('disk', False, {'free_bytes': 24 * runtime.GIB - 1}, 'disk'),
+            ('total swap', False, {'swap_bytes': 256 * mib + 1}, 'swap usage'),
+            ('swap rate', False, {'swap_out_bytes': 40 * mib + 1}, 'swap-out'),
+            ('strict admission swap rate', True, {'swap_out_bytes': 20 * mib + 1}, 'swap-out'),
+            ('host pressure', False, {'host_memory': {'some': 6, 'full': 5.01}}, 'host_memory'),
+            ('DB pressure', False, {'db_memory': {'some': 6, 'full': 5.01}}, 'db_memory'),
+            ('strict admission pressure', True, {'db_memory': {'some': 2, 'full': 1.01}}, 'db_memory'),
+            ('IO pressure', False, {'db_io': {'some': 20.01, 'full': 0}}, 'db_io'),
+            ('watchdog delay', False, {'monotonic': 41}, 'monitor delayed'),
+        ]
+        for name, admission, fields, error in cases:
+            with self.subTest(name=name):
+                sample = dict(safe_resources(), **accounting)
+                previous = dict(sample)
+                sample.update(monotonic=15)
+                sample.update(fields)
+                options = dict(admission=admission, estimate=18 * runtime.GIB,
+                               host_memory_full_percent=5, db_memory_full_percent=5,
+                               swap_out_mib_per_second=8)
+                if error:
+                    with self.assertRaisesRegex(Refused, error):
+                        runtime.check_resources(sample, previous, self.p.reserve, **options)
+                else:
+                    runtime.check_resources(sample, previous, self.p.reserve, **options)
+
+    def test_real_memory_growth_stops_owned_dump_and_keeps_raw_cache_evidence(self):
+        mib = 1024 ** 2
+        stats = [cache_stats(), cache_stats(anon=3840, shmem=0, file=0, inactive_file=0)]
+        samples = [dict(safe_resources(), **runtime.database_memory(4 * runtime.GIB, 4 * runtime.GIB,
+                        {k: str(int(v) * mib) for k, v in values.items()})) for values in stats]
+        samples[1]['monotonic'] = 15
+        self.supervise_samples(samples)
+        result = read_json(self.guard.result)
+        self.assertEqual(result['error'], 'database memory limit at risk',
+                         'non-reclaimable growth must still stop the dump at the existing floor')
+        self.assertTrue(result['cleanup_verified'], 'the owned writer must be stopped before cleanup')
+        self.assertEqual(result['violating_sample']['resources'], samples[-1],
+                         'terminal evidence must preserve raw usage, cache credit and working set')
+        self.assertEqual([s['resources'] for s in read_json(self.guard.run / 'samples.json')], samples,
+                         'cache-full admission to work and the real memory violation must both be retained')
+        self.assertFalse(self.partial.exists(), 'failed owned partial must be removed')
+        self.assertFalse((self.state / 'pending.json').exists(), 'proven cleanup must unblock later backups')
+        self.assertEqual(self.completed.read_bytes(), b'previous verified backup', 'prior backup stays intact')
 
     def test_swap_tolerance_boundaries_keep_strict_admission_and_memory_floors(self):
         mib = 1024 ** 2
