@@ -33,7 +33,8 @@ const (
 	// prHealthStaleAfter bounds how far behind GitHub the background reconciler
 	// is allowed to let an open PR drift. It is deliberately loose because that
 	// sweep touches every open PR in the org and is the dominant consumer of the
-	// REST budget.
+	// REST budget. PR_HEALTH_SWEEP_STALE_AFTER can widen the sweep's own
+	// candidate cutoff; background health reads keep this value.
 	prHealthStaleAfter = 10 * time.Minute
 	// Five periodic passes provide capacity for an ordinary open population
 	// within roughly fifty minutes, before queueing, deferrals, or errors. Keep
@@ -257,8 +258,8 @@ type healthBuildOptions struct {
 	// before this read enqueues a background readback. Zero means
 	// prHealthReadStaleAfter, the tight budget appropriate for a human waiting
 	// on the merge button. Background callers pass prHealthStaleAfter so they
-	// track the reconcile sweep instead of re-arming the readback that the
-	// check-webhook heuristic just avoided.
+	// track the default reconcile cadence instead of re-arming the readback
+	// that the check-webhook heuristic just avoided.
 	asyncRefreshAfter time.Duration
 }
 
@@ -1240,7 +1241,7 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 		s.logger.Warn().Err(countErr).Str("org_id", orgID.String()).Msg("failed to size pull request health sweep; using requested limit")
 	}
 	healthLimit := pullRequestHealthCandidateLimit(limit, population)
-	stale, err := s.pullRequests.ListOpenStaleForHealthSync(ctx, orgID, time.Now().Add(-prHealthStaleAfter), healthLimit)
+	stale, err := s.pullRequests.ListOpenStaleForHealthSync(ctx, orgID, time.Now().Add(-s.healthSweepCutoffAge()), healthLimit)
 	var reconciliationErrs []error
 	if err != nil {
 		reconciliationErrs = append(reconciliationErrs, fmt.Errorf("list stale pull requests for reconciliation: %w", err))

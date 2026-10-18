@@ -1705,6 +1705,7 @@ func buildServices(
 	prService.SetPublicationStore(db.NewSessionPublicationStore(pool))
 	prService.SetCodeReviewInsightStore(db.NewCodeReviewInsightStore(pool))
 	prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
+	prService.SetHealthSweepStaleAfter(cfg.PRHealthSweepStaleAfter)
 	wireWorkerPRService(
 		prService,
 		sessionMessageStore,

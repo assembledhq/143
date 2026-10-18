@@ -230,6 +230,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			prService.SetPublicationStore(sessionPublicationStore)
 			prService.SetAppBaseURL(cfg.FrontendURL)
 			prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
+			prService.SetHealthSweepStaleAfter(cfg.PRHealthSweepStaleAfter)
 			prService.SetReviewCommentStore(reviewCommentStore)
 			prService.SetPullRequestFeedbackStore(pullRequestFeedbackStore)
 			prService.SetIntegrationStore(integrationStore)

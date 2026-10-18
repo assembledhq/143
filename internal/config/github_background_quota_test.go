@@ -27,7 +27,7 @@ func TestValidateSecretsGitHubBackgroundQuota(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := (&Config{Env: "development", GitHubBackgroundQuotaReserve: tt.reserve, GitHubBackgroundQuotaInterval: tt.interval}).ValidateSecrets()
+			err := (&Config{Env: "development", GitHubBackgroundQuotaReserve: tt.reserve, GitHubBackgroundQuotaInterval: tt.interval, PRHealthSweepStaleAfter: 10 * time.Minute}).ValidateSecrets()
 			if tt.expectErr {
 				require.Error(t, err, "invalid background budget configuration should fail startup validation")
 				return
