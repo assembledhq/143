@@ -231,7 +231,7 @@ func run(root, manifest string, discover bool, out io.Writer) error {
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(candidates)
 	}
-	data, err := os.ReadFile(filepath.Join(root, manifest))
+	data, err := readRepositoryFile(root, filepath.Join(root, manifest))
 	if err != nil {
 		return fmt.Errorf("read lifecycle inventory: %w", err)
 	}
@@ -271,7 +271,7 @@ func scan(root string) ([]candidate, error) {
 			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
-			src, err := os.ReadFile(path)
+			src, err := readRepositoryFile(root, path)
 			if err != nil {
 				return err
 			}
@@ -317,7 +317,7 @@ func scan(root string) ([]candidate, error) {
 		return nil, err
 	}
 	for _, path := range migrations {
-		src, err := os.ReadFile(path)
+		src, err := readRepositoryFile(root, path)
 		if err != nil {
 			return nil, err
 		}

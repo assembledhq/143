@@ -11,7 +11,6 @@ import (
 	"go/token"
 	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -65,7 +64,7 @@ func runJobStatus(root, manifest string, discover bool, out io.Writer) error {
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(found)
 	}
-	data, err := os.ReadFile(filepath.Join(root, manifest))
+	data, err := readRepositoryFile(root, filepath.Join(root, manifest))
 	if err != nil {
 		return fmt.Errorf("read jobs-status inventory: %w", err)
 	}
@@ -104,7 +103,11 @@ func scanJobStatus(root string) ([]jobStatusCandidate, error) {
 			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
-			file, err := parser.ParseFile(fset, path, nil, 0)
+			src, err := readRepositoryFile(root, path)
+			if err != nil {
+				return err
+			}
+			file, err := parser.ParseFile(fset, path, src, 0)
 			if err != nil {
 				return err
 			}
@@ -213,7 +216,7 @@ func scanJobStatus(root string) ([]jobStatusCandidate, error) {
 		return nil, err
 	}
 	for _, path := range migrations {
-		data, err := os.ReadFile(path)
+		data, err := readRepositoryFile(root, path)
 		if err != nil {
 			return nil, err
 		}
