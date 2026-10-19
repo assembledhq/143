@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { act } from "@testing-library/react";
 import {
   renderWithProviders,
   screen,
@@ -118,9 +119,88 @@ describe("RuntimeSettingsPage", () => {
           max_concurrent_agent_runs: 5,
           active_previews: 3,
           max_previews_per_user: 7,
+          fleet: {
+            telemetry_available: true,
+            workers: 2,
+            max_sandboxes: 8,
+          },
         },
       },
     });
+  });
+
+  it("shows advisory fleet capacity next to the concurrent agent runs range", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    expect(
+      await screen.findByText(
+        "Range 1-100 · Fleet capacity: 8 sandboxes across 2 workers",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Exceeds current fleet capacity/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("warns without clamping when the org quota exceeds fleet capacity", async () => {
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: "org-1",
+        name: "Test Org",
+        settings: { max_concurrent_runs: 12 },
+        created_at: "2026-05-01T12:00:00Z",
+        updated_at: "2026-05-01T12:00:00Z",
+      },
+    });
+
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    const warning = await screen.findByText(
+      "Exceeds current fleet capacity (8 sandboxes, shared with previews and other organizations). Runs above that will queue for a sandbox.",
+    );
+    expect(warning).toHaveAttribute("id", "max-concurrent-runs-warning");
+    const input = screen.getByLabelText("Concurrent agent runs");
+    expect(input).toHaveValue(12);
+    expect(input).toHaveAttribute(
+      "aria-describedby",
+      "max-concurrent-runs-warning",
+    );
+    expect(settingsUpdateMock).not.toHaveBeenCalled();
+  });
+
+  it("omits fleet capacity when no fresh worker reports telemetry", async () => {
+    const runtimeStatus = Promise.resolve({
+      data: {
+        static_egress: { available: true, enabled: true },
+        capacity: {
+          state: "normal",
+          active_agent_runs: 0,
+          max_concurrent_agent_runs: 5,
+          active_previews: 0,
+          max_previews_per_user: 7,
+          fleet: {
+            telemetry_available: false,
+            workers: 0,
+            max_sandboxes: 0,
+          },
+        },
+      },
+    });
+    settingsRuntimeStatusMock.mockReturnValue(runtimeStatus);
+
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    // Wait for the runtime status response to be applied, so the assertions
+    // below cover the resolved state rather than the loading state.
+    await waitFor(() => expect(settingsRuntimeStatusMock).toHaveBeenCalled());
+    await act(async () => {
+      await runtimeStatus;
+    });
+    expect(await screen.findByText("Range 1-100")).toBeInTheDocument();
+    expect(screen.queryByText(/Fleet capacity/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Exceeds current fleet capacity/),
+    ).not.toBeInTheDocument();
   });
 
   it("renders shared sandbox runtime policy sections with existing settings", async () => {
@@ -159,7 +239,9 @@ describe("RuntimeSettingsPage", () => {
       ),
     ).not.toBeInTheDocument();
     expect(screen.queryByText("Runtime diagnostics")).not.toBeInTheDocument();
-    expect(settingsRuntimeStatusMock).not.toHaveBeenCalled();
+    // The Capacity card reads runtime status only for advisory fleet
+    // capacity; there is no diagnostics section to render from it.
+    expect(settingsRuntimeStatusMock).toHaveBeenCalled();
 
     await waitFor(() => {
       expect(screen.getByLabelText("Static egress IP")).toBeChecked();

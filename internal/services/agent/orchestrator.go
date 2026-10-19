@@ -43,6 +43,10 @@ import (
 )
 
 const (
+	// defaultMaxConcurrent is the per-org concurrent-run fallback used only when
+	// the org's max_concurrent_runs setting cannot be read (nil org store, DB
+	// error, malformed settings row). The org setting is authoritative; see
+	// resolveMaxConcurrent.
 	defaultMaxConcurrent = 10
 	// mentionIndexWarmTimeout bounds the proactive mention-index build at
 	// turn-complete. The build walks the whole workspace through a Docker
@@ -3139,10 +3143,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		}()
 	}
 
-	// 1. Concurrency check.
-	if err := o.checkConcurrency(ctx, run.OrgID, models.SessionStatus(run.Status) == models.SessionStatusRunning); err != nil {
-		log.Info().Err(err).Msg("concurrency limit reached, run stays pending")
-		return err
+	// 1. Concurrency check against the org's max_concurrent_runs quota.
+	maxConcurrent, concurrencyErr := o.checkConcurrency(ctx, run.OrgID, models.SessionStatus(run.Status) == models.SessionStatusRunning)
+	if concurrencyErr != nil {
+		log.Info().Err(concurrencyErr).Msg("concurrency limit reached, run stays pending")
+		return concurrencyErr
 	}
 
 	var capacityReservation *SandboxCapacityReservation
@@ -3170,7 +3175,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	runStartedAt := time.Now()
 	runtimeCfg := o.resolveRuntimeConfig(ctx, run.OrgID)
 	runtimeTracker := newRuntimeProgressTracker(runStartedAt)
-	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, run.OrgID, run.ID, o.maxConcurrent, o.isDraining, runtimeTracker)
+	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, run.OrgID, run.ID, maxConcurrent, o.isDraining, runtimeTracker)
 	runtimeController.SetStopFallback(cancel)
 	if err := o.beginRuntimeControl(ctx, runtimeController, run.OrgID, run.ID, models.SessionStatusPending, checkpointCapabilityForAgent(run.AgentType), runStartedAt, log); err != nil {
 		return err
@@ -4566,6 +4571,17 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		session.ContainerID = nil
 		session.WorkerNodeID = nil
 	}
+	// Continuations are deliberately not held at the org's max_concurrent_runs
+	// quota. ClaimIdle/ClaimForResume mark a session running when its message
+	// is accepted, before the continue_session job is picked up, and nothing
+	// durable distinguishes that claimed-but-queued state from an executing
+	// turn (runtime deadlines persist across idle). A CountRunningByOrg gate
+	// here would therefore count sibling queued continuations and, at quota,
+	// hold every one of them until the retry window expires. The quota governs
+	// run starts (CreateManual and RunAgent); continuations are admitted by
+	// the physical sandbox capacity gate below. The resolved quota still feeds
+	// the runtime controller so its extension gate agrees with RunAgent.
+	maxConcurrent := o.resolveMaxConcurrent(ctx, session.OrgID)
 	var capacityReservation *SandboxCapacityReservation
 	if !reusedExisting && o.sandboxCapacity != nil {
 		capacityStage := observability.BeginStage(reviewTiming, log, "capacity_admission")
@@ -4592,7 +4608,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	turnStartedAt := time.Now()
 	runtimeCfg := o.resolveRuntimeConfig(ctx, session.OrgID)
 	runtimeTracker := newRuntimeProgressTracker(turnStartedAt)
-	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, session.OrgID, session.ID, o.maxConcurrent, o.isDraining, runtimeTracker)
+	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, session.OrgID, session.ID, maxConcurrent, o.isDraining, runtimeTracker)
 	runtimeController.SetStopFallback(cancel)
 	fallbackStatus := session.Status
 	if fallbackStatus == "" {
@@ -7216,21 +7232,42 @@ func manualSessionReferences(issue *models.Issue) []models.SessionInputReference
 	return references
 }
 
-// checkConcurrency verifies the org hasn't exceeded its concurrent run limit.
+// resolveMaxConcurrent returns the org's concurrent-run quota. The org's
+// max_concurrent_runs setting is authoritative so this execution gate agrees
+// with the API admission gate in handlers.CreateManual; the process-wide
+// OrchestratorConfig.MaxConcurrent (or defaultMaxConcurrent) is only the
+// fallback when the org store is unavailable or the row cannot be parsed.
+// ParseOrgSettings back-fills a size-derived default for a zero value, so a
+// readable org always yields a positive quota.
+func (o *Orchestrator) resolveMaxConcurrent(ctx context.Context, orgID uuid.UUID) int {
+	if o.orgs != nil {
+		if org, err := o.orgs.GetByID(ctx, orgID); err == nil {
+			if settings, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil && settings.MaxConcurrentRuns > 0 {
+				return settings.MaxConcurrentRuns
+			}
+		}
+	}
+	return o.maxConcurrent
+}
+
+// checkConcurrency verifies the org hasn't exceeded its concurrent run limit
+// and returns the limit that was applied, so callers hand the same value to
+// the runtime controller instead of re-reading org settings.
 // excludeCurrentRunning should be true when re-entering RunAgent for a session
 // that is already marked running, so recovery does not deadlock on its own slot.
-func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID, excludeCurrentRunning bool) error {
+func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID, excludeCurrentRunning bool) (int, error) {
+	maxConcurrent := o.resolveMaxConcurrent(ctx, orgID)
 	count, err := o.sessions.CountRunningByOrg(ctx, orgID)
 	if err != nil {
-		return fmt.Errorf("count running runs: %w", err)
+		return maxConcurrent, fmt.Errorf("count running runs: %w", err)
 	}
 	if excludeCurrentRunning && count > 0 {
 		count--
 	}
-	if count >= o.maxConcurrent {
-		return fmt.Errorf("%w: %d/%d runs active", ErrConcurrencyLimit, count, o.maxConcurrent)
+	if count >= maxConcurrent {
+		return maxConcurrent, fmt.Errorf("%w: %d/%d runs active", ErrConcurrencyLimit, count, maxConcurrent)
 	}
-	return nil
+	return maxConcurrent, nil
 }
 
 // TranscriptWriteContext carries the durable execution identity shared by all

@@ -8615,7 +8615,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 					}
 					_ = stores.Sessions.UpdateFailure(ctx, orgID, runID,
 						"This session was unable to start because all available agent slots were in use for an extended period.",
-						"concurrency_timeout",
+						agent.FailureCategoryConcurrencyTimeout,
 						[]string{
 							"Wait for other running sessions to complete, then retry",
 							"Cancel sessions that are no longer needed to free up capacity",

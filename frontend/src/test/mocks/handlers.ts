@@ -1099,6 +1099,11 @@ export const handlers = [
           max_concurrent_agent_runs: 5,
           active_previews: 0,
           max_previews_per_user: 5,
+          fleet: {
+            telemetry_available: true,
+            workers: 2,
+            max_sandboxes: 8,
+          },
         },
       },
     });

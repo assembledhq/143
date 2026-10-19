@@ -1086,8 +1086,11 @@ handle (typically >3-5 concurrent sandboxes).
 
 #### Step 3b: Add Dedicated Worker Nodes
 
-Workers run agent sandboxes — the most resource-intensive part. Each worker runs
-`MAX_CONCURRENT_RUNS` sandboxes in parallel.
+Workers run agent sandboxes — the most resource-intensive part. Each worker
+admits at most `WORKER_MAX_ACTIVE_SANDBOXES` live sandboxes (derived from
+`WORKER_PROCESS_COUNT` when unset; `deploy/scripts/worker_buckets.sh` sets both
+per machine SKU). The org-wide `max_concurrent_runs` quota is a separate org
+setting enforced at session admission, not a worker env var.
 
 ```
 ┌───────────────┐     ┌───────────────┐
@@ -1116,7 +1119,8 @@ services:
       DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable
       MODE: worker
       NODE_ID: ${HOSTNAME}
-      MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-5}
+      WORKER_PROCESS_COUNT: ${WORKER_PROCESS_COUNT:-2}
+      WORKER_MAX_ACTIVE_SANDBOXES: ${WORKER_MAX_ACTIVE_SANDBOXES:-2}
       SANDBOX_IMAGE: ghcr.io/assembledhq/143-agent:latest
       SANDBOX_RUNTIME: runsc
       REDIS_URL: ${REDIS_URL:-}
@@ -1209,18 +1213,19 @@ make tailscale-enroll ROLE=redis HOST=<redis-public-management-ip>
 
 **Worker VPS sizing:**
 
-| VPS Size | `MAX_CONCURRENT_RUNS` | Good for |
-|----------|----------------------|----------|
-| 4 CPU / 8 GB | 1 | Small / test |
-| 8 CPU / 16 GB | 2-3 | Medium |
-| 16 CPU / 32 GB | 5-6 | Production sweet spot |
-| 32 CPU / 64 GB | 10-12 | Heavy workloads |
+| VPS Size | `WORKER_MAX_ACTIVE_SANDBOXES` | Good for |
+|----------|-------------------------------|----------|
+| 4 vCPU / 8 GB (cpx31) | 2 | Small / test |
+| 8 vCPU / 16 GB (cpx41) | 4 | Medium |
+| 16 vCPU / 32 GB (cpx51) | 9 | Production sweet spot |
+| 16 vCPU / 64 GB (ccx43) | 16 | Production, dedicated CPU |
+| 32 vCPU / 128 GB (ccx53) | 32 | Heavy workloads |
 
 Each sandbox gets `SANDBOX_CPU_LIMIT` (default 2) cores and
-`SANDBOX_MEMORY_LIMIT` (default 4 GB). Rule of thumb: reserve 2 CPU + 2 GB for
-the worker process and OS, then divide the remainder. For example, 16 CPU / 32 GB
-→ 14 CPU / 30 GB available → 6 sandboxes (12 CPU / 24 GB) with comfortable
-headroom.
+`SANDBOX_MEMORY_LIMIT_MB` (default 3072 MB). `deploy/scripts/worker_buckets.sh`
+sizes each SKU as roughly `max(1, min(vCPU, floor((RAM_GB - reserve_GB) / 3)))`
+with `reserve_GB = max(2, 10% of RAM)` for the worker process, Docker/gVisor
+overhead, and page cache; the table above reflects those bucket defaults.
 
 **Move to Step 3c when:** you need API redundancy (uptime SLA), or a single API
 node can't keep up with webhook volume.
