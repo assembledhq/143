@@ -7,8 +7,12 @@ caller, full-schema, concurrency, storage, provider and image proof remains in 0
 No compatibility-floor or new lifecycle runtime behavior has been enabled.
 Milestone 0a has started with passive transaction and grant-persistence
 foundations, independently approved on 2026-10-18 after follow-up review.
-Business callers, writer registration, schema guards and activation remain
-unchanged; this does not complete 0a.
+A subsequent passive slice adds `nodes.lifecycle_writer_version` to existing
+registration and heartbeats, advertising version 0 only. Shared/reused node IDs
+are last-writer-wins; legacy writes may retain stale metadata. This is not
+process-instance provenance or proof of a compatible floor. Business callers,
+executor/instance registration, schema guards and activation remain unchanged;
+this does not complete 0a.
 
 Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
 identify the inspected implementation; the executable inventory rechecks the

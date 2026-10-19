@@ -128,7 +128,7 @@ func NewNodeStore(db DBTX) *NodeStore {
 }
 
 const nodeColumns = `id, mode, host, status, drain_intent, metadata, started_at, last_heartbeat_at,
-	drain_requested_at, drain_budget_expires_at, drain_requested_by, drain_reason`
+	drain_requested_at, drain_budget_expires_at, drain_requested_by, drain_reason, lifecycle_writer_version`
 
 // GetByID returns a node by ID.
 // lint:allow-no-orgid reason="nodes is a cluster-scoped table with no org_id"
