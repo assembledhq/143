@@ -50,6 +50,20 @@ socket handlers are not all joined by that routine, and some cleanup has no hard
 global bound; neither routine completion nor row expiry proves every writer has
 drained. Connection census, business callers, schema guards and activation remain
 unchanged; this expanded but partial inventory does not complete 0a.
+A following passive slice labels normal API, worker and combined-server
+connections, their existing worker control-plane reserve, and standalone executor
+connections with `application_name`. One formatter retains the configured role
+and exact 40-hex binary build (or `dev`); empty build metadata is `unknown`, and
+other values use an explicitly marked 128-bit SHA-256 fingerprint rather than
+raw metadata or implicit server truncation. Labels are printable ASCII and fit
+PostgreSQL's 63-byte limit. Supported runtime roles intentionally override a
+DSN-supplied name; unsupported normal-server modes and callers without attribution
+retain their previous naming. Existing pool budgets, timeout/cancellation policy,
+observer version and transaction semantics do not change. These labels do not
+identify process instances, prove drained transactions or establish a writer
+floor, and transaction-pooling proxies need not preserve backend attribution.
+Connection census, command/operator pool coverage and every activation gate
+remain separate work; no production inventory or rollout is established here.
 
 Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
 identify the inspected implementation; the executable inventory rechecks the
@@ -1432,6 +1446,10 @@ revision; it must not reinterpret new durable records or trigger replay.
   remain. This does not fix or authorize conversion of the legacy writer.
 - [x] Complete final independent review of this passive foundation candidate
   after the cleanup, concurrency-characterization and proof follow-ups.
+- [x] Validate passive runtime connection attribution on PostgreSQL 17, including
+  fresh, reused and reset-pool connections and PID-scoped activity checks. This
+  does not implement transaction census, process-instance correlation,
+  command/operator pool coverage or a writer floor.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
