@@ -949,6 +949,18 @@ export const api = {
         method: 'PATCH',
         body: JSON.stringify({ scope, ordered_ids: orderedIDs }),
       }),
+    getStackSettings: (scope: 'org' | 'personal') =>
+      get<import('./types').SingleResponse<import('./types').CodingCredentialStackSettings>>(
+        `/api/v1/coding-credentials/stack-settings?scope=${scope}`,
+      ),
+    updateStackSettings: (body: { scope: 'org' | 'personal'; distribution: import('./types').CodingCredentialDistribution }) =>
+      request<import('./types').SingleResponse<import('./types').CodingCredentialStackSettings>>(
+        '/api/v1/coding-credentials/stack-settings',
+        {
+          method: 'PATCH',
+          body: JSON.stringify(body),
+        },
+      ),
   },
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),

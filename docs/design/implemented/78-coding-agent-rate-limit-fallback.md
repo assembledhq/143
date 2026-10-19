@@ -22,8 +22,17 @@ Credential pickers filter out active credentials with future `rate_limited_until
 
 1. Same runtime-compatible credential set.
 2. Personal credentials before organization credentials.
-3. Priority order within each scope.
-4. Random selection across currently available credentials with the same priority.
+3. Priority order within each scope, unless that scope's stack is set to `spread`.
+4. Random selection across currently available credentials in the same tier: the same priority in `ordered` mode, or the whole scope in `spread` mode.
+
+### Stack distribution
+
+Each scope (org stack, or one user's personal stack) carries a distribution mode in `coding_credential_stack_settings`, keyed by `(org_id, user_id)` with a missing row meaning `ordered`:
+
+- `ordered` (default) walks priority tiers top to bottom and only moves past a tier once every credential in it is unavailable, so the top credential is drained first.
+- `spread` collapses every runnable credential in the scope into one tier, so each pick is uniformly random across all of them and the scope's per-credential rate-limit windows are consumed together.
+
+Personal still runs before org regardless of mode, and the stored priorities are kept so switching back to `ordered` restores the previous walk. The picker caches the mode for the resolver TTL (30s); writes drop the affected cache entries. `GET`/`PATCH /api/v1/coding-credentials/stack-settings` read and change the mode with the same scope and admin rules as the stack mutations, and the `is_default` hint on credential summaries covers every runnable row of a scope in `spread` mode.
 
 The behavior is generic across coding-agent providers. Codex and Claude Code use twin provider stacks for API-key and subscription auths, while Gemini, Amp, and Pi use their API-key credential stacks. Future coding-agent providers should add compatible provider mappings and inherit the same filtering semantics.
 

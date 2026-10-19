@@ -118,4 +118,112 @@ describe("CodingAuthStack", () => {
     expect(screen.getAllByText("Status").length).toBeGreaterThan(0);
     expect(screen.getAllByText("ChatGPT Plus").length).toBeGreaterThan(0);
   });
+
+  it("omits the spread switch when no distribution is provided", () => {
+    renderWithProviders(
+      <CodingAuthStack
+        rows={rows}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onMove={vi.fn()}
+        onReorder={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  });
+
+  it("turns on load spreading from the stack header", async () => {
+    const user = userEvent.setup();
+    const onDistributionChange = vi.fn();
+
+    renderWithProviders(
+      <CodingAuthStack
+        rows={rows}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onMove={vi.fn()}
+        onReorder={vi.fn()}
+        distribution="ordered"
+        onDistributionChange={onDistributionChange}
+      />,
+    );
+
+    const toggle = screen.getByRole("switch", { name: "Spread load across auths" });
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByText(/Sessions use the top healthy auth until it is rate limited/)).toBeInTheDocument();
+    expect(screen.getAllByText("Default").length).toBeGreaterThan(0);
+
+    await user.click(toggle);
+    expect(onDistributionChange).toHaveBeenCalledWith("spread");
+  });
+
+  it("hides default badges and explains random picks while load is spread", async () => {
+    const user = userEvent.setup();
+    const onDistributionChange = vi.fn();
+
+    renderWithProviders(
+      <CodingAuthStack
+        rows={rows}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onMove={vi.fn()}
+        onReorder={vi.fn()}
+        distribution="spread"
+        onDistributionChange={onDistributionChange}
+      />,
+    );
+
+    const toggle = screen.getByRole("switch", { name: "Spread load across auths" });
+    expect(toggle).toBeChecked();
+    expect(screen.getByText(/picks at random among the healthy auths/)).toBeInTheDocument();
+    expect(screen.queryByText("Default")).not.toBeInTheDocument();
+
+    await user.click(toggle);
+    expect(onDistributionChange).toHaveBeenCalledWith("ordered");
+  });
+
+  it("pauses reordering while load is spread", () => {
+    renderWithProviders(
+      <CodingAuthStack
+        rows={rows}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onMove={vi.fn()}
+        onReorder={vi.fn()}
+        distribution="spread"
+        onDistributionChange={vi.fn()}
+      />,
+    );
+
+    // "Move Pi backup up" is enabled in ordered mode (it is the second row);
+    // spreading disables every move control and drag handle.
+    for (const button of screen.getAllByRole("button", { name: "Move Pi backup up" })) {
+      expect(button).toBeDisabled();
+    }
+    for (const button of screen.getAllByRole("button", { name: "Move Team seat A down" })) {
+      expect(button).toBeDisabled();
+    }
+    const desktopRow = screen.getAllByText("Pi backup").map((node) => node.closest("tr")).find(Boolean);
+    expect(desktopRow, "desktop table row should exist").toBeTruthy();
+    expect(desktopRow).toHaveAttribute("draggable", "false");
+    expect(screen.getByText(/Reordering is paused/)).toBeInTheDocument();
+  });
+
+  it("disables the spread switch while a change is pending", () => {
+    renderWithProviders(
+      <CodingAuthStack
+        rows={rows}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onMove={vi.fn()}
+        onReorder={vi.fn()}
+        distribution="ordered"
+        onDistributionChange={vi.fn()}
+        distributionPending
+      />,
+    );
+
+    expect(screen.getByRole("switch", { name: "Spread load across auths" })).toBeDisabled();
+  });
 });

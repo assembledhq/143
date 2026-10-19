@@ -31,7 +31,7 @@ import {
 import { CODING_AGENT_REASONING_OPTIONS_BY_AGENT, toCodingAgentReasoningEffort } from "@/lib/coding-agent-reasoning";
 import { getOrgDefaultCodingAgentModel, getOrgDefaultCodingAgentReasoning } from "@/lib/org-coding-agent-defaults";
 import { queryKeys } from "@/lib/query-keys";
-import type { AgentCapabilityDefinition, AgentCapabilityGrant, CodingCredentialSummary, ListResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
+import type { AgentCapabilityDefinition, AgentCapabilityGrant, CodingCredentialDistribution, CodingCredentialStackSettings, CodingCredentialSummary, ListResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
 import { CodingAuthStack } from "@/components/coding-auth-stack";
 import { EmptyState } from "@/components/empty-state";
 import { AGENTS_BY_KEY } from "@/lib/agents";
@@ -115,7 +115,7 @@ function defaultLabel(provider: ModalProvider, authType: AddFlowAuthType) {
   }
 }
 
-function OrgAuthsHeader({ showReorderHint }: { showReorderHint?: boolean }) {
+function OrgAuthsHeader({ showReorderHint, spreadLoad }: { showReorderHint?: boolean; spreadLoad?: boolean }) {
   return (
     <div className="space-y-1.5">
       <h2 className="text-xs font-medium text-foreground">Organization-wide auths</h2>
@@ -124,8 +124,14 @@ function OrgAuthsHeader({ showReorderHint }: { showReorderHint?: boolean }) {
         data-testid="org-auths-description-row"
       >
         <p className="text-xs text-muted-foreground">
-          Personal auths run first for each user. When none are available, sessions fall back to this stack, running top to bottom.
-          {showReorderHint && " Move the auth you want to prefer higher in the list."}
+          {spreadLoad ? (
+            "Personal auths run first for each user. When none are available, sessions fall back to this stack and pick at random among its healthy auths."
+          ) : (
+            <>
+              Personal auths run first for each user. When none are available, sessions fall back to this stack, running top to bottom.
+              {showReorderHint && " Move the auth you want to prefer higher in the list."}
+            </>
+          )}
         </p>
         <div className="flex flex-wrap gap-2">
           <Button asChild variant="outline" size="sm">
@@ -180,6 +186,13 @@ export default function AgentPage() {
     queryFn: () => api.codingCredentials.list("org"),
   });
   const rows = useMemo(() => codingCredentialsResponse?.data ?? [], [codingCredentialsResponse?.data]);
+
+  const { data: stackSettingsResponse } = useQuery<SingleResponse<CodingCredentialStackSettings>>({
+    queryKey: queryKeys.codingCredentials.stackSettings("org"),
+    queryFn: () => api.codingCredentials.getStackSettings("org"),
+  });
+  const distribution: CodingCredentialDistribution = stackSettingsResponse?.data.distribution ?? "ordered";
+  const spreadLoad = distribution === "spread";
   const selected = rows.find((row) => row.id === selectedId) ?? null;
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
@@ -245,6 +258,18 @@ export default function AgentPage() {
     ));
     capabilityMutation.mutate(next);
   }
+
+  const distributionMutation = useMutation({
+    mutationFn: (next: CodingCredentialDistribution) =>
+      api.codingCredentials.updateStackSettings({ scope: "org", distribution: next }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
+    },
+    onError: (error) => {
+      captureError(error, { feature: "coding-auth-distribution" });
+      toast.error("Could not update load distribution");
+    },
+  });
 
   const reorderMutation = useMutation({
     mutationFn: async (nextRows: CodingCredentialSummary[]) => {
@@ -338,7 +363,9 @@ export default function AgentPage() {
       ? openCodeCredentialLabel(effectiveOpenCodeBackingProvider)
       : defaultLabel(provider, effectiveAuthType)
   );
-  const showInsertionSelect = selectedProvider.supportsStackOrder;
+  // Insertion point and "Set as default" only reorder stored priorities,
+  // which a spread stack ignores until spreading is turned off again.
+  const showInsertionSelect = selectedProvider.supportsStackOrder && !spreadLoad;
   const showAuthTypeSelector = selectedProvider.supportsSubscription;
   const addBusy = stackCreateMutation.isPending;
 
@@ -410,7 +437,7 @@ export default function AgentPage() {
             Read-only view. Only admins can add, edit, or reorder coding auths.
           </div>
           <section className="space-y-3">
-            <OrgAuthsHeader />
+            <OrgAuthsHeader spreadLoad={spreadLoad} />
             {rows.length === 0 ? (
               <Card>
                 <EmptyState
@@ -497,10 +524,13 @@ export default function AgentPage() {
           )}
         />
         <section className="space-y-4">
-          <OrgAuthsHeader showReorderHint />
+          <OrgAuthsHeader showReorderHint={!spreadLoad} spreadLoad={spreadLoad} />
           <CodingAuthStack
             rows={rows}
             selectedId={selectedId}
+            distribution={distribution}
+            onDistributionChange={(next) => distributionMutation.mutate(next)}
+            distributionPending={distributionMutation.isPending}
             onSelect={(id) => {
               setSelectedId(id);
               setRenameValue(rows.find((row) => row.id === id)?.label ?? "");
@@ -636,7 +666,7 @@ export default function AgentPage() {
                 <SheetHeader>
                   <div className="flex items-center gap-2">
                     <SheetTitle>{selected.label}</SheetTitle>
-                    {selected.is_default ? <Badge>Default</Badge> : null}
+                    {selected.is_default && !spreadLoad ? <Badge>Default</Badge> : null}
                   </div>
                   <SheetDescription>
                     {selected.agent === "codex"
@@ -678,13 +708,15 @@ export default function AgentPage() {
 
                   <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
                     <div className="flex flex-wrap gap-2">
-                      <Button
-                        variant="outline"
-                        onClick={() => void reorderMutation.mutateAsync(moveRowToTop(rows, selected.id))}
-                        disabled={selected.priority === 1}
-                      >
-                        Set as default
-                      </Button>
+                      {!spreadLoad ? (
+                        <Button
+                          variant="outline"
+                          onClick={() => void reorderMutation.mutateAsync(moveRowToTop(rows, selected.id))}
+                          disabled={selected.priority === 1}
+                        >
+                          Set as default
+                        </Button>
+                      ) : null}
                       <Button
                         variant="ghost"
                         className="text-destructive hover:text-destructive"

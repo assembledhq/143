@@ -39,6 +39,8 @@ type codingCredentialStore interface {
 	Disable(ctx context.Context, scope models.Scope, id uuid.UUID) error
 	Move(ctx context.Context, scope models.Scope, id uuid.UUID, pos models.MoveCodingCredentialInput) error
 	Reorder(ctx context.Context, scope models.Scope, orderedIDs []uuid.UUID) error
+	GetStackSettings(ctx context.Context, scope models.Scope) (models.CodingCredentialStackSettings, error)
+	SetStackDistribution(ctx context.Context, scope models.Scope, distribution models.CodingCredentialDistribution) error
 }
 
 // codingAuthOrgStore merges org-scoped agent defaults when a credential
@@ -236,8 +238,83 @@ func (h *CodingCredentialHandler) List(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list credentials", err)
 		return
 	}
-	out := summariesForScope(creds, scope)
+	spread, err := h.stackSpread(r.Context(), scope)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to load stack settings", err)
+		return
+	}
+	out := summariesForScope(creds, scope, spread)
 	writeJSON(w, http.StatusOK, models.ListResponse[models.CodingCredentialSummary]{Data: out})
+}
+
+// stackSpread reports, per scope tag, whether that stack is in spread mode so
+// default markers cover every runnable row instead of only the top one.
+func (h *CodingCredentialHandler) stackSpread(ctx context.Context, scopes ...models.Scope) (map[models.CodingCredentialScope]bool, error) {
+	out := make(map[models.CodingCredentialScope]bool, len(scopes))
+	for _, scope := range scopes {
+		settings, err := h.store.GetStackSettings(ctx, scope)
+		if err != nil {
+			return nil, err
+		}
+		out[scope.Label()] = settings.Distribution == models.CodingCredentialDistributionSpread
+	}
+	return out, nil
+}
+
+// GetStackSettings handles GET /api/v1/coding-credentials/stack-settings?scope=org|personal.
+// Readable by any member for either scope; only the PATCH is admin-gated.
+func (h *CodingCredentialHandler) GetStackSettings(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	scope, scopeParam, err := h.resolveScopeFromQuery(r, orgID, false)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCOPE", err.Error())
+		return
+	}
+	if scopeParam == "resolved" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCOPE", "stack settings are per scope; use scope=org or scope=personal")
+		return
+	}
+	settings, err := h.store.GetStackSettings(r.Context(), scope)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "STACK_SETTINGS_FAILED", "failed to load stack settings", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodingCredentialStackSettings]{Data: settings})
+}
+
+// UpdateStackSettings handles PATCH /api/v1/coding-credentials/stack-settings.
+// Same admin gate as Move/Reorder: org scope needs admin, personal scope is
+// coerced to the caller.
+func (h *CodingCredentialHandler) UpdateStackSettings(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	var input models.UpdateCodingCredentialStackSettingsInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	if err := input.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_INPUT", err.Error())
+		return
+	}
+	scope, err := h.resolveScope(r, orgID, string(input.Scope), true)
+	if err != nil {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+	if err := h.assertScopeMatchesContext(r, scope); err != nil {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+	if err := h.store.SetStackDistribution(r.Context(), scope, input.Distribution); err != nil {
+		h.handleStoreError(w, r, err, "STACK_SETTINGS_FAILED")
+		return
+	}
+	settings, err := h.store.GetStackSettings(r.Context(), scope)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "READ_BACK_FAILED", "stack settings saved but read-back failed", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodingCredentialStackSettings]{Data: settings})
 }
 
 // listResolved walks the personal-then-org resolved list across every coding
@@ -248,6 +325,14 @@ func (h *CodingCredentialHandler) List(w http.ResponseWriter, r *http.Request) {
 // of how many providers are checked.
 func (h *CodingCredentialHandler) listResolved(ctx context.Context, scope models.Scope) ([]models.CodingCredentialSummary, error) {
 	resolved, err := h.store.ListResolvableMulti(ctx, scope.OrgID, scope.UserID, models.CodingAgentProviders)
+	if err != nil {
+		return nil, err
+	}
+	scopes := []models.Scope{{OrgID: scope.OrgID}}
+	if scope.UserID != nil {
+		scopes = append(scopes, models.Scope{OrgID: scope.OrgID, UserID: scope.UserID})
+	}
+	spread, err := h.stackSpread(ctx, scopes...)
 	if err != nil {
 		return nil, err
 	}
@@ -266,9 +351,10 @@ func (h *CodingCredentialHandler) listResolved(ctx context.Context, scope models
 		seen[cred.ID] = struct{}{}
 		out = append(out, summaryFromDecryptedCoding(cred))
 	}
-	// Mark the first runnable in each (scope, agent) tier as default. The
-	// resolver picks tier-by-tier; the API hint mirrors that.
-	markDefaults(out)
+	// Mark the first runnable in each (scope, agent) tier as default, or every
+	// runnable row when that scope spreads load. The resolver picks
+	// tier-by-tier; the API hint mirrors that.
+	markDefaults(out, spread)
 	return out, nil
 }
 
@@ -527,8 +613,9 @@ func (h *CodingCredentialHandler) handleStoreError(w http.ResponseWriter, r *htt
 }
 
 // summariesForScope builds CodingCredentialSummary objects from a scope-bounded
-// list, marking the first runnable per (agent, auth_type) tier as default.
-func summariesForScope(creds []models.DecryptedCodingCredential, scope models.Scope) []models.CodingCredentialSummary {
+// list, marking the first runnable per (scope, agent) tier as default, or every
+// runnable row for a scope flagged in spread.
+func summariesForScope(creds []models.DecryptedCodingCredential, scope models.Scope, spread map[models.CodingCredentialScope]bool) []models.CodingCredentialSummary {
 	out := make([]models.CodingCredentialSummary, 0, len(creds))
 	for _, cred := range creds {
 		if cred.UserID == nil && scope.UserID != nil {
@@ -539,26 +626,29 @@ func summariesForScope(creds []models.DecryptedCodingCredential, scope models.Sc
 		}
 		out = append(out, summaryFromDecryptedCoding(cred))
 	}
-	markDefaults(out)
+	markDefaults(out, spread)
 	return out
 }
 
 // markDefaults flips IsDefault=true on the first runnable row in each
-// (scope, agent) tier. Mirrors the resolver's pick semantics for the UI.
+// (scope, agent) tier, or on every runnable row of a scope whose stack is in
+// spread mode (any of them may be picked first). Mirrors the resolver's pick
+// semantics for the UI.
 //
 // On a scope=resolved response that mixes personal and org rows, both the
 // top personal row and the top org row for the same agent get the badge —
 // that's intentional: the personal row is "the one that runs first," the
 // org row is "the one that would run if the personal rows are exhausted."
 // The /settings/account page shows them in two visually separate cards, so
-// the dual badge reads naturally as "default within each section." Single-
-// scope responses get exactly one default per agent.
-func markDefaults(rows []models.CodingCredentialSummary) {
+// the dual badge reads naturally as "default within each section." In
+// ordered mode a single-scope response gets exactly one default per agent;
+// a spread scope badges every runnable row instead.
+func markDefaults(rows []models.CodingCredentialSummary, spread map[models.CodingCredentialScope]bool) {
 	defaulted := map[string]bool{}
 	for i := range rows {
 		row := &rows[i]
 		key := string(row.Scope) + "|" + string(row.Agent)
-		if defaulted[key] {
+		if defaulted[key] && !spread[row.Scope] {
 			continue
 		}
 		if !isRunnableCodingStatus(row.Status) {

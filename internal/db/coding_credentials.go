@@ -123,6 +123,10 @@ type CodingCredentialStore struct {
 	// PickRunnable to skip a credential without a DB write.
 	health *healthCache
 
+	// distributionCache memoizes each scope half's distribution mode for the
+	// pick path; see stackDistributionFor.
+	distributionCache *distributionCache
+
 	// rng is injectable for deterministic tests of the same-priority
 	// distribution path.
 	rng   *rand.Rand
@@ -136,6 +140,9 @@ type CodingCredentialStore struct {
 //   - resolverCache (30s): caches the per-(scope, provider) candidate list so a
 //     burst of agent picks doesn't hammer the DB. Cap is short because new
 //     credentials and CRUD edits should be visible quickly.
+//   - distributionCache (30s): caches the per-scope distribution mode
+//     (ordered vs spread) read on every multi-row pick. Same freshness
+//     contract as resolverCache so a toggle lands within one window.
 //   - health (75s): caches "do not pick" markers from upstream rate-limit /
 //     auth-rejected signals. Sized to outlast Anthropic's typical 60s rate-
 //     limit recovery window plus a small buffer; shorter values caused the
@@ -151,12 +158,13 @@ type CodingCredentialStore struct {
 // nullifying the shed.
 func NewCodingCredentialStore(dbtx DBTX, cryptoSvc *crypto.Service) *CodingCredentialStore {
 	return &CodingCredentialStore{
-		db:            dbtx,
-		crypto:        cryptoSvc,
-		resolverCache: newResolverCache(30 * time.Second),
-		health:        newHealthCache(75 * time.Second),
-		rng:           rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0)), // #nosec G404,G115 -- non-security load distribution jitter; not used for secrets or authorization
-		clock:         time.Now,
+		db:                dbtx,
+		crypto:            cryptoSvc,
+		resolverCache:     newResolverCache(30 * time.Second),
+		distributionCache: newDistributionCache(30 * time.Second),
+		health:            newHealthCache(75 * time.Second),
+		rng:               rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0)), // #nosec G404,G115 -- non-security load distribution jitter; not used for secrets or authorization
+		clock:             time.Now,
 	}
 }
 
@@ -175,6 +183,7 @@ func (s *CodingCredentialStore) SetRNG(r *rand.Rand) {
 func (s *CodingCredentialStore) SetClock(now func() time.Time) {
 	s.clock = now
 	s.resolverCache.clock = now
+	s.distributionCache.clock = now
 	s.health.clock = now
 }
 
@@ -576,7 +585,9 @@ func (s *CodingCredentialStore) queryResolverHalf(ctx context.Context, orgID uui
 }
 
 // PickRunnable is the runtime selection path. ListResolvable + tier-walking
-// + random-with-shedding within each tier (priority group). Returns
+// + random-with-shedding within each tier. A tier is one priority group, or
+// the whole scope half when that scope's distribution is "spread" (see
+// runnableTiers). Returns
 // ErrCodingCredentialNotFound when the resolver returned zero rows;
 // ErrAllCredentialsShed when rows existed but every tier was filtered out by
 // the in-process shed cache.
@@ -593,7 +604,11 @@ func (s *CodingCredentialStore) PickRunnable(ctx context.Context, scope models.S
 		return nil, ErrCodingCredentialNotFound
 	}
 
-	for _, tier := range groupByPriorityAndScope(creds) {
+	tiers, err := s.runnableTiers(ctx, scope, creds)
+	if err != nil {
+		return nil, err
+	}
+	for _, tier := range tiers {
 		eligible := s.filterAvailable(tier)
 		if len(eligible) == 0 {
 			continue
@@ -645,7 +660,11 @@ func (s *CodingCredentialStore) PickRunnableMulti(ctx context.Context, scope mod
 	}
 	sortResolvedCredentialRows(creds)
 
-	for _, tier := range groupByPriorityAndScope(creds) {
+	tiers, err := s.runnableTiers(ctx, scope, creds)
+	if err != nil {
+		return nil, err
+	}
+	for _, tier := range tiers {
 		eligible := s.filterAvailable(tier)
 		if len(eligible) == 0 {
 			continue
@@ -676,11 +695,47 @@ func sortResolvedCredentialRows(creds []models.DecryptedCodingCredential) {
 	})
 }
 
-// groupByPriorityAndScope walks an already-sorted ListResolvable result and
-// emits contiguous tiers. Two rows belong to the same tier iff they have the
-// same scope (both personal-for-this-user or both org) AND the same priority.
-// Crossing scope is always a new tier so personal #N never blurs into org #N.
+// stackDistribution is the picker's view of each scope half's distribution
+// mode. personalSpread applies to rows with UserID set, orgSpread to the rest.
+type stackDistribution struct {
+	personalSpread bool
+	orgSpread      bool
+}
+
+func (d stackDistribution) spreadFor(personal bool) bool {
+	if personal {
+		return d.personalSpread
+	}
+	return d.orgSpread
+}
+
+// runnableTiers groups resolver rows into the tiers the picker walks. Each
+// scope half's distribution mode decides whether priority still splits tiers
+// ("ordered") or every row in the half shares one ("spread"). Fewer than two
+// rows form exactly one tier either way, so that path skips the settings read.
+func (s *CodingCredentialStore) runnableTiers(ctx context.Context, scope models.Scope, creds []models.DecryptedCodingCredential) ([][]models.DecryptedCodingCredential, error) {
+	if len(creds) < 2 {
+		return groupByPriorityAndScope(creds), nil
+	}
+	dist, err := s.stackDistributionFor(ctx, scope.OrgID, scope.UserID)
+	if err != nil {
+		return nil, err
+	}
+	return groupTiers(creds, dist), nil
+}
+
+// groupByPriorityAndScope is groupTiers with every scope half in the default
+// ordered mode.
 func groupByPriorityAndScope(creds []models.DecryptedCodingCredential) [][]models.DecryptedCodingCredential {
+	return groupTiers(creds, stackDistribution{})
+}
+
+// groupTiers walks an already-sorted ListResolvable result and emits
+// contiguous tiers. Two rows belong to the same tier iff they have the same
+// scope (both personal-for-this-user or both org) AND either the same
+// priority or a scope half in spread mode. Crossing scope is always a new
+// tier so personal #N never blurs into org #N.
+func groupTiers(creds []models.DecryptedCodingCredential, dist stackDistribution) [][]models.DecryptedCodingCredential {
 	if len(creds) == 0 {
 		return nil
 	}
@@ -689,9 +744,10 @@ func groupByPriorityAndScope(creds []models.DecryptedCodingCredential) [][]model
 	for i := 1; i < len(creds); i++ {
 		prev := cur[len(cur)-1]
 		next := creds[i]
-		samePriority := prev.Priority == next.Priority
-		sameScope := (prev.UserID == nil) == (next.UserID == nil)
-		if samePriority && sameScope {
+		personal := next.UserID != nil
+		sameScope := (prev.UserID == nil) == !personal
+		sameTier := prev.Priority == next.Priority || dist.spreadFor(personal)
+		if sameScope && sameTier {
 			cur = append(cur, next)
 			continue
 		}
@@ -930,6 +986,102 @@ func (s *CodingCredentialStore) UpdateStatus(ctx context.Context, scope models.S
 // Disable soft-deletes a credential by flipping status to "disabled".
 func (s *CodingCredentialStore) Disable(ctx context.Context, scope models.Scope, id uuid.UUID) error {
 	return s.UpdateStatus(ctx, scope, id, models.CodingCredentialStatusDisabled)
+}
+
+// GetStackSettings returns the scope's stack configuration. A scope with no
+// stored row is in the default ordered mode.
+func (s *CodingCredentialStore) GetStackSettings(ctx context.Context, scope models.Scope) (models.CodingCredentialStackSettings, error) {
+	settings := models.CodingCredentialStackSettings{Scope: scope.Label(), Distribution: models.CodingCredentialDistributionOrdered}
+	args := pgx.NamedArgs{"org_id": scope.OrgID}
+	query := `SELECT distribution FROM coding_credential_stack_settings
+		WHERE org_id = @org_id AND user_id IS NULL`
+	if scope.IsPersonal() {
+		args["user_id"] = *scope.UserID
+		query = `SELECT distribution FROM coding_credential_stack_settings
+			WHERE org_id = @org_id AND user_id = @user_id`
+	}
+	var distribution string
+	err := s.db.QueryRow(ctx, query, args).Scan(&distribution)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return settings, nil
+	}
+	if err != nil {
+		return models.CodingCredentialStackSettings{}, fmt.Errorf("query stack settings: %w", err)
+	}
+	settings.Distribution = models.CodingCredentialDistribution(distribution)
+	return settings, nil
+}
+
+// SetStackDistribution stores the scope's distribution mode and drops this
+// process's cached picker view, so its next multi-row pick observes the new
+// mode; other processes converge within the cache TTL.
+func (s *CodingCredentialStore) SetStackDistribution(ctx context.Context, scope models.Scope, distribution models.CodingCredentialDistribution) error {
+	if err := distribution.Validate(); err != nil {
+		return err
+	}
+	args := pgx.NamedArgs{"org_id": scope.OrgID, "user_id": scope.UserID, "distribution": string(distribution)}
+	if _, err := s.db.Exec(ctx, `INSERT INTO coding_credential_stack_settings (org_id, user_id, distribution)
+		VALUES (@org_id, @user_id, @distribution)
+		ON CONFLICT (org_id, user_id) DO UPDATE
+		SET distribution = EXCLUDED.distribution, updated_at = now()`, args); err != nil {
+		return fmt.Errorf("upsert stack settings: %w", err)
+	}
+	s.invalidateDistribution(scope)
+	return nil
+}
+
+// stackDistributionFor loads the distribution mode of both scope halves a
+// pick for (orgID, userID) can touch, in one round trip. Cached for the
+// resolver TTL; SetStackDistribution drops the affected entries, and a load
+// that was in flight across that invalidation is not cached (see
+// distributionCache.put). The pick that issued such a load still uses the
+// mode it read; every later pick re-reads.
+func (s *CodingCredentialStore) stackDistributionFor(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID) (stackDistribution, error) {
+	cached, generation, ok := s.distributionCache.lookup(orgID, userID)
+	if ok {
+		return cached, nil
+	}
+	args := pgx.NamedArgs{"org_id": orgID}
+	query := `SELECT user_id, distribution FROM coding_credential_stack_settings
+		WHERE org_id = @org_id AND user_id IS NULL`
+	if userID != nil {
+		args["user_id"] = *userID
+		query = `SELECT user_id, distribution FROM coding_credential_stack_settings
+			WHERE org_id = @org_id AND (user_id IS NULL OR user_id = @user_id)`
+	}
+	rows, err := s.db.Query(ctx, query, args)
+	if err != nil {
+		return stackDistribution{}, fmt.Errorf("query stack distribution: %w", err)
+	}
+	defer rows.Close()
+
+	var dist stackDistribution
+	for rows.Next() {
+		var rowUserID *uuid.UUID
+		var distribution string
+		if err := rows.Scan(&rowUserID, &distribution); err != nil {
+			return stackDistribution{}, fmt.Errorf("scan stack distribution: %w", err)
+		}
+		spread := models.CodingCredentialDistribution(distribution) == models.CodingCredentialDistributionSpread
+		if rowUserID == nil {
+			dist.orgSpread = spread
+		} else {
+			dist.personalSpread = spread
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return stackDistribution{}, fmt.Errorf("iterate stack distribution: %w", err)
+	}
+	s.distributionCache.put(orgID, userID, dist, generation)
+	return dist, nil
+}
+
+func (s *CodingCredentialStore) invalidateDistribution(scope models.Scope) {
+	if scope.IsPersonal() {
+		s.distributionCache.invalidateUser(scope.OrgID, *scope.UserID)
+		return
+	}
+	s.distributionCache.invalidateOrg(scope.OrgID)
 }
 
 // Reorder bulk-rewrites the priority of every row referenced in orderedIDs.
@@ -1686,6 +1838,110 @@ func indexOf(s []uuid.UUID, target uuid.UUID) int {
 }
 
 // ----- resolver cache -----
+
+type distributionCacheKey struct {
+	orgID   uuid.UUID
+	userKey uuid.UUID // zero UUID for org-only picks
+}
+
+type distributionCacheEntry struct {
+	value  stackDistribution
+	expiry time.Time
+}
+
+// distributionCache memoizes stackDistributionFor per (org, user) so the pick
+// hot path does not add a DB read per session start.
+//
+// Fills are fenced by a per-org generation: lookup hands out the generation on
+// a miss, every invalidation for the org bumps it, and put discards a value
+// loaded under an older generation. Without that, a read that started before
+// SetStackDistribution could cache the pre-write mode for a full TTL after
+// the invalidation had already run.
+type distributionCache struct {
+	mu          sync.RWMutex
+	ttl         time.Duration
+	data        map[distributionCacheKey]distributionCacheEntry
+	generations map[uuid.UUID]uint64
+	clock       func() time.Time
+}
+
+func newDistributionCache(ttl time.Duration) *distributionCache {
+	return &distributionCache{
+		ttl:         ttl,
+		data:        make(map[distributionCacheKey]distributionCacheEntry),
+		generations: make(map[uuid.UUID]uint64),
+		clock:       time.Now,
+	}
+}
+
+func (c *distributionCache) keyFor(orgID uuid.UUID, userID *uuid.UUID) distributionCacheKey {
+	key := distributionCacheKey{orgID: orgID}
+	if userID != nil {
+		key.userKey = *userID
+	}
+	return key
+}
+
+// lookup returns the cached value for the key. On a miss it also returns the
+// org's current generation, which the caller passes back to put so a load
+// that raced an invalidation is discarded instead of cached.
+func (c *distributionCache) lookup(orgID uuid.UUID, userID *uuid.UUID) (stackDistribution, uint64, bool) {
+	if c == nil {
+		return stackDistribution{}, 0, false
+	}
+	key := c.keyFor(orgID, userID)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.data[key]
+	if !ok || c.clock().After(entry.expiry) {
+		return stackDistribution{}, c.generations[orgID], false
+	}
+	return entry.value, c.generations[orgID], true
+}
+
+// put caches val unless the org's generation moved since the lookup that
+// produced generation, in which case the load is stale and dropped.
+func (c *distributionCache) put(orgID uuid.UUID, userID *uuid.UUID, val stackDistribution, generation uint64) {
+	if c == nil {
+		return
+	}
+	key := c.keyFor(orgID, userID)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.generations[orgID] != generation {
+		return
+	}
+	c.data[key] = distributionCacheEntry{value: val, expiry: c.clock().Add(c.ttl)}
+}
+
+// invalidateOrg drops every entry for the org: the org half is part of every
+// user's view, so an org-scope toggle must reach all of them.
+func (c *distributionCache) invalidateOrg(orgID uuid.UUID) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.generations[orgID]++
+	for key := range c.data {
+		if key.orgID == orgID {
+			delete(c.data, key)
+		}
+	}
+}
+
+// invalidateUser drops one user's view. The generation is per org, so an
+// in-flight load for any user of the org is also dropped; that costs one
+// extra read on a rare race and keeps the fence simple.
+func (c *distributionCache) invalidateUser(orgID, userID uuid.UUID) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.generations[orgID]++
+	delete(c.data, distributionCacheKey{orgID: orgID, userKey: userID})
+}
 
 type resolverCacheKey struct {
 	orgID    uuid.UUID
