@@ -554,6 +554,7 @@ func main() {
 			AuditLogs:             auditLogStore,
 			Organizations:         orgStore,
 			SessionLogs:           sessionLogStore,
+			LifecycleWriters:      db.NewLifecycleWriterInstanceStore(pool),
 			EvalTasks:             db.NewEvalTaskStore(pool),
 			EvalRuns:              db.NewEvalRunStore(pool),
 			EvalBatches:           db.NewEvalBatchStore(pool),

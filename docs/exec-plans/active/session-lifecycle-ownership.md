@@ -4,7 +4,8 @@ Status: Milestone 0 design and characterization accepted by independent
 adversarial review on 2026-10-18, with no critical or major findings remaining.
 Approval covers the plan, contract, inventories and synthetic probes only; real
 caller, full-schema, concurrency, storage, provider and image proof remains in 0a.
-No compatibility-floor or new lifecycle runtime behavior has been enabled.
+No compatibility-floor enforcement or canonical lifecycle mutation behavior has
+been enabled.
 Milestone 0a has started with passive transaction and grant-persistence
 foundations, independently approved on 2026-10-18 after follow-up review.
 A subsequent passive slice adds `nodes.lifecycle_writer_version` to existing
@@ -14,8 +15,20 @@ process-instance provenance or proof of a compatible floor. The next passive
 slice adds the same version-0 observation to executor allocation, mark-running
 and heartbeat writes. Allocation is dispatcher-owned, not executor process/build
 attestation; legacy executor writes can also retain stale metadata. Neither field
-changes placement or authorization. Business callers, process-instance leases,
-schema guards and activation remain unchanged; this does not complete 0a.
+changes placement or authorization. A following passive slice registers each
+standalone session-executor invocation in `lifecycle_writer_instances` using a
+fresh process UUID, actual binary build and version 0. Its asynchronous observer
+uses the ordinary pool, with a 30-second interval, two-minute observational TTL
+and cooperative five-second attempt budget. It remains alive through runtime
+cleanup and joins before pool closure; fatal exits leave rows to expire. Failed
+observations are logged and retried, never awaited for startup or admission.
+They may still contend for ordinary-pool capacity. Existing daily per-organization
+maintenance jobs each remove at most 1,000 observations expired for more than
+seven days. Seven days is cleanup eligibility, not a deletion deadline; absent
+jobs or a backlog delay removal. No row establishes continuous liveness, drained
+transactions or a deployment compatibility floor. API/worker/all process
+registration, connection census, business callers, schema guards and activation
+remain unchanged; this partial inventory does not complete 0a.
 
 Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
 identify the inspected implementation; the executable inventory rechecks the
