@@ -24,7 +24,7 @@ func TestApplicableDescriptionRequirements(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			requirements := ApplicableDescriptionRequirements(policy, tt.files)
+			requirements := ApplicableDescriptionRequirements(policy, tt.files, nil)
 			keys := make([]string, 0, len(requirements))
 			for _, r := range requirements {
 				keys = append(keys, r.Key)

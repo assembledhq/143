@@ -547,6 +547,17 @@ func (s *CodeReviewRiskTierSignal) Authoritative() bool {
 	return s.Active() && s.Source == CodeReviewRiskTierSourceAuthoritative
 }
 
+func (s *CodeReviewRiskTierSignal) AuthoritativeUIRenderChange() CodeReviewUIRenderChange {
+	switch {
+	case s.Active() && s.UIRenderChange == CodeReviewUIRenderChangeTrue:
+		return CodeReviewUIRenderChangeTrue
+	case s.Authoritative():
+		return s.UIRenderChange
+	default:
+		return ""
+	}
+}
+
 func (s *CodeReviewRiskTierSignal) WaivesSizeSafeguard() bool {
 	return s.Authoritative() && (s.Tier == CodeReviewRiskTierLow || s.Tier == CodeReviewRiskTierMedium)
 }

@@ -336,7 +336,7 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	validated, err := validateCodeReviewRecheckResponse(codeReviewRecheckValidationInput{Raw: string(response), BaselineID: baseline, InputDigest: manifest.InputDigest, Requirements: []models.CodeReviewDescriptionRequirement{visualReq}, BaselineSynthesis: synthesis, BaselineFindings: baselineFindings, BaselineManifest: baselineManifest, CurrentManifest: manifest, VisualEvidence: visual})
 	require.NoError(t, err, "exact response should pass strict validation")
 	require.Empty(t, validated.EscalationReason, "current screenshot should not trigger full review")
-	_, err = codeReviewDescriptionEvaluationFromSynthesis(capture.result.Policy.Config(), nil, validated.Synthesis, visual)
+	_, err = codeReviewDescriptionEvaluationFromSynthesis(capture.result.Policy.Config(), nil, nil, validated.Synthesis, visual)
 	require.NoError(t, err, "merged description evidence should remain valid")
 	_, err = stores.CodeReviewRechecks.Complete(ctx, models.CodeReviewRecheckTurnCompletion{OrgID: org, AssessmentID: happyAssessment, SessionID: session, ThreadID: thread, JobID: happyDispatch.JobID, LockToken: happyLease, ExpectedTurn: happyDispatch.ExpectedTurn, SessionTurn: 2, Summary: string(response), Result: &models.SessionResult{}, ProviderSessionID: "test-provider", SnapshotKey: "test-snapshot-2"})
 	require.NoError(t, err, "persist synthetic exact current assistant turn")

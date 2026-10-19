@@ -377,7 +377,7 @@ func TestCodeReviewRiskTierSignalGatesEverySizeEvaluation(t *testing.T) {
 
 func withApprovingRiskTierSynthesis(input liveCodeReviewOutcomeInput) liveCodeReviewOutcomeInput {
 	assessments := make([]codeReviewDescriptionAssessment, 0)
-	for _, requirement := range codeReviewApplicableDescriptionRequirements(input.Policy, input.ChangedFiles) {
+	for _, requirement := range codeReviewApplicableDescriptionRequirements(input.Policy, input.ChangedFiles, input.Job.RiskTierSignal) {
 		assessments = append(assessments, codeReviewDescriptionAssessment{
 			Key: requirement.Key, Status: codeReviewDescriptionAssessmentSatisfied, EvidenceBasis: models.CodeReviewDescriptionEvidenceBasisPullRequestDescription,
 			EvidenceIDs: []string{}, Reason: "The coding agent found the requirement satisfied.",

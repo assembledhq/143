@@ -162,7 +162,28 @@ func codeReviewRecheckRiskTierSupportsApproval(ctx context.Context, checkpoints 
 	if lookupErr != nil {
 		logger.Warn().Err(lookupErr).Str("assessment_id", a.ID.String()).Msg("live risk-tier lookup failed at publication; treating the live result as non-authoritative")
 	}
+	var outcome struct {
+		RiskTierSignal *models.CodeReviewRiskTierSignal `json:"risk_tier_signal"`
+	}
+	if len(completion.StructuredOutcome) > 0 {
+		if err := json.Unmarshal(completion.StructuredOutcome, &outcome); err != nil {
+			return false, "", fmt.Errorf("decode staged recheck outcome: %w", err)
+		}
+	}
+	if holds, detail := codeReviewRiskTierRenderChangeHolds(outcome.RiskTierSignal, current); !holds {
+		return false, detail, nil
+	}
 	return codeReviewRiskTierApprovalHolds(reasons, current)
+}
+
+func codeReviewRiskTierRenderChangeHolds(staged, current *models.CodeReviewRiskTierSignal) (bool, string) {
+	stagedRender, currentRender := staged.AuthoritativeUIRenderChange(), current.AuthoritativeUIRenderChange()
+	newlyRequired := currentRender == models.CodeReviewUIRenderChangeTrue && stagedRender != models.CodeReviewUIRenderChangeTrue
+	exemptionLost := stagedRender == models.CodeReviewUIRenderChangeFalse && currentRender != models.CodeReviewUIRenderChangeFalse
+	if !newlyRequired && !exemptionLost {
+		return true, ""
+	}
+	return false, fmt.Sprintf("staged ui_render_change %q no longer holds; current risk tier is %s", stagedRender, codeReviewRiskTierDescription(current))
 }
 
 func codeReviewRiskTierApprovalHolds(staged []models.CodeReviewRiskReason, current *models.CodeReviewRiskTierSignal) (bool, string, error) {

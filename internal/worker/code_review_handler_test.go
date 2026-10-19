@@ -1192,7 +1192,7 @@ func TestCodeReviewDescriptionEvaluationFromSynthesis(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			actual, err := codeReviewDescriptionEvaluationFromSynthesis(policy, files, codeReviewOrchestratorSynthesis{
+			actual, err := codeReviewDescriptionEvaluationFromSynthesis(policy, files, nil, codeReviewOrchestratorSynthesis{
 				DescriptionAssessments: tt.assessments,
 			}, tt.evidence)
 			if tt.expectErr {
@@ -1348,7 +1348,7 @@ func TestCodeReviewDescriptionEvaluationUsesExplicitEvidenceKind(t *testing.T) {
 				Key: "custom", Title: "Screenshot evidence", Prompt: "Attach a before-and-after screenshot.",
 				Required: true, EvidenceKind: tt.kind, AppliesWhen: models.CodeReviewDescriptionApplicability{Kind: models.CodeReviewDescriptionApplicabilityAll},
 			}}
-			actual, err := codeReviewDescriptionEvaluationFromSynthesis(policy, nil, codeReviewOrchestratorSynthesis{
+			actual, err := codeReviewDescriptionEvaluationFromSynthesis(policy, nil, nil, codeReviewOrchestratorSynthesis{
 				DescriptionAssessments: []codeReviewDescriptionAssessment{{
 					Key: "custom", Status: codeReviewDescriptionAssessmentSatisfied, EvidenceBasis: tt.basis,
 					EvidenceIDs: tt.evidenceIDs, Reason: "The requested evidence is present.",
@@ -2528,7 +2528,7 @@ func TestHarvestLegacyCodeReviewSynthesisOnReadOnlyMain(t *testing.T) {
 	raw = "```json\n" + raw + "\n```"
 	synthesis, err := parseCodeReviewOrchestratorSynthesis(raw)
 	require.NoError(t, err, "test synthesis should satisfy the output schema")
-	_, err = codeReviewDescriptionEvaluationFromSynthesis(models.DefaultCodeReviewPolicyConfig(), nil, synthesis, models.CodeReviewVisualEvidenceSnapshot{})
+	_, err = codeReviewDescriptionEvaluationFromSynthesis(models.DefaultCodeReviewPolicyConfig(), nil, nil, synthesis, models.CodeReviewVisualEvidenceSnapshot{})
 	require.NoError(t, err, "test synthesis should satisfy the default description policy")
 	initialState := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{ThreadID: mainThreadID.String()})
 
@@ -5064,7 +5064,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 	eslintPRBody := "Removes redundant eslint-disable comments only. No behavior or UI-visible changes.\n\nTesting: npm run lint\n\nScreenshots: not applicable because no rendered output changes."
 	setCodingAgentDecision := func(input *liveCodeReviewOutcomeInput, approvalRecommended bool, statuses map[string]codeReviewDescriptionAssessmentStatus) {
 		assessments := make([]codeReviewDescriptionAssessment, 0)
-		for _, requirement := range codeReviewApplicableDescriptionRequirements(input.Policy, input.ChangedFiles) {
+		for _, requirement := range codeReviewApplicableDescriptionRequirements(input.Policy, input.ChangedFiles, input.Job.RiskTierSignal) {
 			status := codeReviewDescriptionAssessmentSatisfied
 			if configured, ok := statuses[requirement.Key]; ok {
 				status = configured

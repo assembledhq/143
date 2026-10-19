@@ -417,13 +417,18 @@ func fullAssessmentCoverage(policy models.CodeReviewPolicyConfig, results []mode
 	return safeSelectedOrchestrator && completedReviewers >= policy.AgentRoster.EffectiveReviewerCount() && completedReviewers >= policy.AgentRoster.RequireReviewerQuorum
 }
 
-func fullAssessmentOutcome(results []models.CodeReviewAgentResult, reasons []models.CodeReviewRiskReason, coverage bool) (json.RawMessage, error) {
+func fullAssessmentOutcome(results []models.CodeReviewAgentResult, reasons []models.CodeReviewRiskReason, coverage bool, riskTier *models.CodeReviewRiskTierSignal) (json.RawMessage, error) {
 	synthesis := codeReviewOrchestratorSynthesisFromResults(results)
+	var recordedRiskTier *models.CodeReviewRiskTierSignal
+	if riskTier.Active() {
+		recordedRiskTier = riskTier
+	}
 	return json.Marshal(struct {
 		DescriptionAssessments []codeReviewDescriptionAssessment `json:"description_assessments"`
 		RiskReasons            []models.CodeReviewRiskReason     `json:"risk_reasons"`
 		CoverageComplete       bool                              `json:"coverage_complete"`
-	}{append([]codeReviewDescriptionAssessment{}, synthesis.DescriptionAssessments...), reasons, coverage})
+		RiskTierSignal         *models.CodeReviewRiskTierSignal  `json:"risk_tier_signal,omitempty"`
+	}{append([]codeReviewDescriptionAssessment{}, synthesis.DescriptionAssessments...), reasons, coverage, recordedRiskTier})
 }
 
 func failFullAssessmentForSession(ctx context.Context, stores *Stores, job runCodeReviewPayload, detail string) error {

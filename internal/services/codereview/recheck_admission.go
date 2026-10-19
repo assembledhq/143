@@ -202,11 +202,16 @@ func baselineForPlanning(a models.CodeReviewAssessment, policy models.CodeReview
 			Key    string `json:"key"`
 			Status string `json:"status"`
 		} `json:"description_assessments"`
-		RiskReasons      []models.CodeReviewRiskReason `json:"risk_reasons"`
-		CoverageComplete bool                          `json:"coverage_complete"`
+		RiskReasons      []models.CodeReviewRiskReason    `json:"risk_reasons"`
+		CoverageComplete bool                             `json:"coverage_complete"`
+		RiskTierSignal   *models.CodeReviewRiskTierSignal `json:"risk_tier_signal"`
 	}
-	requirements := ApplicableDescriptionRequirements(policy, files)
-	if err := json.Unmarshal(a.StructuredOutcome, &outcome); err != nil || !outcome.CoverageComplete || len(outcome.DescriptionAssessments) != len(requirements) {
+	if err := json.Unmarshal(a.StructuredOutcome, &outcome); err != nil || !outcome.CoverageComplete {
+		b.CoverageComplete = false
+		return b
+	}
+	requirements := ApplicableDescriptionRequirements(policy, files, outcome.RiskTierSignal)
+	if len(outcome.DescriptionAssessments) != len(requirements) {
 		b.CoverageComplete = false
 		return b
 	}
@@ -238,7 +243,11 @@ func baselineForPlanning(a models.CodeReviewAssessment, policy models.CodeReview
 			return b
 		}
 		seen[r.Key] = true
-		switch r.Status {
+		status := r.Status
+		if status == "not_applicable" && DescriptionRequirementRequiredByPublisher(requirement, outcome.RiskTierSignal) {
+			status = "missing"
+		}
+		switch status {
 		case "missing":
 			if requirement.Required {
 				b.MissingRequirements = append(b.MissingRequirements, RecheckMissingRequirement{ID: r.Key, EvidenceKind: string(requirement.EvidenceKind)})
