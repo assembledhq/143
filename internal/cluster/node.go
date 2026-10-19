@@ -11,6 +11,11 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// This binary does not implement the lifecycle compatibility floor. Keep its
+// advertised version zero even though passive transaction helpers exist. This
+// is not the transaction-local writer marker or authority to activate a cohort.
+const lifecycleWriterVersion = 0
+
 type NodeManager struct {
 	pool         db.DBTX
 	controlPlane db.DBTX
@@ -57,8 +62,8 @@ func (n *NodeManager) Register(ctx context.Context, host string) error {
 	// An operator drain belongs to this generation, even after a restart. A
 	// plain process shutdown has no durable intent and may register again.
 	_, err = n.pool.Exec(ctx, `
-		INSERT INTO nodes (id, mode, host, started_at, last_heartbeat_at, status, metadata)
-		VALUES ($1, $2, $3, now(), now(), 'active', $4)
+		INSERT INTO nodes (id, mode, host, started_at, last_heartbeat_at, status, metadata, lifecycle_writer_version)
+		VALUES ($1, $2, $3, now(), now(), 'active', $4, $5)
 		ON CONFLICT (id) DO UPDATE SET
 			mode = EXCLUDED.mode,
 			host = EXCLUDED.host,
@@ -69,8 +74,9 @@ func (n *NodeManager) Register(ctx context.Context, host string) error {
 			drain_budget_expires_at = CASE WHEN nodes.drain_intent <> 'none' THEN nodes.drain_budget_expires_at END,
 			drain_requested_by = CASE WHEN nodes.drain_intent <> 'none' THEN nodes.drain_requested_by ELSE '' END,
 			drain_reason = CASE WHEN nodes.drain_intent <> 'none' THEN nodes.drain_reason ELSE '' END,
-			metadata = EXCLUDED.metadata
-	`, n.nodeID, n.mode, host, metadata)
+			metadata = EXCLUDED.metadata,
+			lifecycle_writer_version = EXCLUDED.lifecycle_writer_version
+	`, n.nodeID, n.mode, host, metadata, lifecycleWriterVersion)
 	return err
 }
 
@@ -108,9 +114,10 @@ func (n *NodeManager) HeartbeatOnce(ctx context.Context) error {
 		UPDATE nodes
 		SET last_heartbeat_at = now(),
 			status = CASE WHEN drain_intent <> 'none' OR status = 'draining' THEN 'draining' ELSE $2 END,
-			metadata = $3
+			metadata = $3,
+			lifecycle_writer_version = $4
 		WHERE id = $1
-	`, n.nodeID, status, metadata)
+	`, n.nodeID, status, metadata, lifecycleWriterVersion)
 	return err
 }
 

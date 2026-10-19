@@ -76,7 +76,7 @@ func TestWorkerControlPlanePoolPostgres(t *testing.T) {
 	})
 	_, err = admin.Exec(ctx, "SET search_path TO "+schema)
 	require.NoError(t, err, "select isolated fixture")
-	_, err = admin.Exec(ctx, `CREATE TABLE nodes(id text PRIMARY KEY,status text,drain_intent text DEFAULT 'none',last_heartbeat_at timestamptz,metadata jsonb,drain_requested_at timestamptz);
+	_, err = admin.Exec(ctx, `CREATE TABLE nodes(id text PRIMARY KEY,status text,drain_intent text DEFAULT 'none',last_heartbeat_at timestamptz,metadata jsonb,drain_requested_at timestamptz,lifecycle_writer_version integer NOT NULL DEFAULT 0);
 CREATE TABLE sessions(id uuid,org_id uuid,status text);
 CREATE TABLE jobs(id uuid PRIMARY KEY,org_id uuid,job_type text,payload jsonb,status text,lock_token uuid,lease_expires_at timestamptz,updated_at timestamptz);`, pgx.QueryExecModeSimpleProtocol)
 	require.NoError(t, err, "create synthetic liveness tables")
@@ -98,7 +98,7 @@ CREATE TABLE jobs(id uuid PRIMARY KEY,org_id uuid,job_type text,payload jsonb,st
 	require.NoError(t, err, "open production bounded control-plane reserve")
 	t.Cleanup(control.Close)
 	jobID, orgID, token := uuid.New(), uuid.New(), uuid.New()
-	_, err = admin.Exec(ctx, `INSERT INTO nodes VALUES('test-worker','active','none',now()-interval '5 minutes','{}',NULL); INSERT INTO jobs VALUES($1,$2,'test','{}','running',$3,now()+interval '10 seconds',now())`, pgx.QueryExecModeSimpleProtocol, jobID, orgID, token)
+	_, err = admin.Exec(ctx, `INSERT INTO nodes(id,status,drain_intent,last_heartbeat_at,metadata,drain_requested_at) VALUES('test-worker','active','none',now()-interval '5 minutes','{}',NULL); INSERT INTO jobs VALUES($1,$2,'test','{}','running',$3,now()+interval '10 seconds',now())`, pgx.QueryExecModeSimpleProtocol, jobID, orgID, token)
 	require.NoError(t, err, "seed stale heartbeat and running fenced job")
 	held, err := ordinary.Acquire(ctx)
 	require.NoError(t, err, "occupy the entire ordinary pool like a long transaction")

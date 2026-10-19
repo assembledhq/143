@@ -54,4 +54,8 @@ type Node struct {
 	DrainBudgetExpiresAt *time.Time      `db:"drain_budget_expires_at" json:"drain_budget_expires_at,omitempty"`
 	DrainRequestedBy     string          `db:"drain_requested_by" json:"drain_requested_by"`
 	DrainReason          string          `db:"drain_reason" json:"drain_reason"`
+
+	// LifecycleWriterVersion is observational binary metadata, not proof of a
+	// compatible floor. Legacy reused-ID writes can leave a stale value behind.
+	LifecycleWriterVersion int `db:"lifecycle_writer_version" json:"lifecycle_writer_version"`
 }
