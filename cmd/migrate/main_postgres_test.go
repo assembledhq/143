@@ -12,10 +12,55 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
 
-func newContentMigrationPostgres(t *testing.T) (*migrate.Migrate, *pgx.Conn) {
+func contentMigrationDatabaseURL(raw, name string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return "", err
+	}
+	// Both drivers must use only the generated database, never an original
+	// database name from a query parameter that overrides the URL path.
+	query.Del("dbname")
+	query.Del("database")
+	parsed.Path, parsed.RawPath, parsed.RawQuery = "/"+name, "", query.Encode()
+	return parsed.String(), nil
+}
+
+func TestContentMigrationDatabaseURL(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "path database", raw: "postgres://tester@localhost/original?sslmode=disable"},
+		{name: "query database", raw: "postgres://tester@localhost/original?dbname=original&sslmode=disable"},
+		{name: "repeated query database", raw: "postgres://tester@localhost/original?dbname=first&dbname=second&sslmode=disable"},
+		{name: "pgx database alias", raw: "postgres://tester@localhost/original?database=original&sslmode=disable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual, err := contentMigrationDatabaseURL(tt.raw, "generated_test")
+			require.NoError(t, err, "canonicalize the isolated test database URL")
+			require.Equal(t, "postgres://tester@localhost/generated_test?sslmode=disable", actual, "only the generated database should survive canonicalization")
+			config, err := pgx.ParseConfig(actual)
+			require.NoError(t, err, "the inspection driver should parse the canonical URL")
+			require.Equal(t, "generated_test", config.Database, "pgx must select only the generated database")
+			pqConfig, err := pq.ParseURL(actual)
+			require.NoError(t, err, "the migration driver should parse the canonical URL")
+			require.Equal(t, "dbname='generated_test' host='localhost' sslmode='disable' user='tester'", pqConfig, "the migration driver must select exactly the same generated database")
+		})
+	}
+}
+
+func newContentMigrationPostgres(t *testing.T, databaseQueryOverride bool) (*migrate.Migrate, *pgx.Conn) {
 	t.Helper()
 	raw := os.Getenv("TEST_DATABASE_URL")
 	if raw == "" {
@@ -43,44 +88,61 @@ func newContentMigrationPostgres(t *testing.T) (*migrate.Migrate, *pgx.Conn) {
 		_, err := admin.Exec(ctx, "DROP DATABASE "+identifier+" WITH (FORCE)")
 		require.NoError(t, err, "remove only the generated migration test database")
 	})
-	parsed, err := url.Parse(raw)
-	require.NoError(t, err, "parse disposable database connection URL")
-	parsed.Path = "/" + name
-	source, err := filepath.Abs("../../migrations")
-	require.NoError(t, err, "resolve the unmodified repository migration chain")
-	migration, err := migrate.New("file://"+source, parsed.String())
-	require.NoError(t, err, "load unique migration versions from the real repository source")
-	t.Cleanup(func() {
-		sourceErr, databaseErr := migration.Close()
-		require.NoError(t, sourceErr, "close the migration source")
-		require.NoError(t, databaseErr, "close the migration database connection")
-	})
-	conn, err := pgx.Connect(ctx, parsed.String())
+	if databaseQueryOverride {
+		parsed, err := url.Parse(raw)
+		require.NoError(t, err, "parse the supplied disposable database URL")
+		query := parsed.Query()
+		query.Set("dbname", admin.Config().Database)
+		parsed.RawQuery = query.Encode()
+		raw = parsed.String()
+	}
+	isolatedURL, err := contentMigrationDatabaseURL(raw, name)
+	require.NoError(t, err, "select only the generated database in both connection drivers")
+	conn, err := pgx.Connect(ctx, isolatedURL)
 	require.NoError(t, err, "open the generated migration database")
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		require.NoError(t, conn.Close(ctx), "close the isolated schema inspection connection")
 	})
+	var actualDatabase string
+	require.NoError(t, conn.QueryRow(ctx, "SELECT current_database()").Scan(&actualDatabase), "verify the connection target before initializing any migration")
+	require.Equal(t, name, actualDatabase, "migration inspection must target only the generated database")
+	source, err := filepath.Abs("../../migrations")
+	require.NoError(t, err, "resolve the unmodified repository migration chain")
+	migration, err := migrate.New("file://"+source, isolatedURL)
+	require.NoError(t, err, "load unique migration versions from the real repository source")
+	t.Cleanup(func() {
+		sourceErr, databaseErr := migration.Close()
+		require.NoError(t, sourceErr, "close the migration source")
+		require.NoError(t, databaseErr, "close the migration database connection")
+	})
+	_, dirty, err := migration.Version()
+	require.ErrorIs(t, err, migrate.ErrNilVersion, "the migration target must have no existing ledger version before applying changes")
+	require.False(t, dirty, "the generated migration target must start clean")
 	return migration, conn
 }
 
 func TestSessionPRIntentContentMigrationPostgres(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		startAt315 bool
+		name                  string
+		startAt315            bool
+		databaseQueryOverride bool
 	}{
 		{name: "fresh migration chain"},
 		{name: "upgrade preserves applied coding settings migration", startAt315: true},
+		{name: "query database override cannot redirect migrations", startAt315: true, databaseQueryOverride: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			migration, conn := newContentMigrationPostgres(t)
+			migration, conn := newContentMigrationPostgres(t, tt.databaseQueryOverride)
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 			orgID := uuid.New()
+			reviewerColumns := []string{"org_id", "session_id", "automation_run_id", "changeset_id", "team_reviewers", "frozen_at", "created_at", "updated_at"}
+			contentColumns := append(append([]string{}, reviewerColumns...), "title", "body")
 			stamp := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 			seedSettings := func() {
 				_, err := conn.Exec(ctx, `INSERT INTO organizations(id, name) VALUES ($1, 'Migration test')`, orgID)
@@ -94,9 +156,15 @@ func TestSessionPRIntentContentMigrationPostgres(t *testing.T) {
 				require.Equal(t, expectedVersion, version, "the ledger should match the selected upgrade or rollback boundary")
 				require.False(t, dirty, "each successful migration boundary should remain clean")
 				var columns []string
-				err = conn.QueryRow(ctx, `SELECT COALESCE(array_agg(column_name::text ORDER BY column_name), ARRAY[]::text[]) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'session_pr_intents' AND column_name IN ('title', 'body')`).Scan(&columns)
-				require.NoError(t, err, "inspect the staged text columns after migration")
-				require.Equal(t, expectedColumns, columns, "only migration 316 should install the staged text columns")
+				err = conn.QueryRow(ctx, `SELECT COALESCE(array_agg(column_name::text ORDER BY ordinal_position), ARRAY[]::text[]) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'session_pr_intents'`).Scan(&columns)
+				require.NoError(t, err, "inspect the entire staging table after migration")
+				require.Equal(t, expectedColumns, columns, "upgrade and rollback must preserve every reviewer column and alter only staged text columns")
+			}
+			assertContentConstraints := func() {
+				var constraints []string
+				err := conn.QueryRow(ctx, `SELECT COALESCE(array_agg(conname::text ORDER BY conname), ARRAY[]::text[]) FROM pg_constraint WHERE conrelid = 'public.session_pr_intents'::regclass AND conname IN ('session_pr_intents_body_shape', 'session_pr_intents_title_shape') AND convalidated`).Scan(&constraints)
+				require.NoError(t, err, "inspect both validated staged-content constraints")
+				require.Equal(t, []string{"session_pr_intents_body_shape", "session_pr_intents_title_shape"}, constraints, "initial application and reapplication should install both content constraints")
 			}
 			assertSettings := func() {
 				type codingSetting struct {
@@ -115,26 +183,24 @@ func TestSessionPRIntentContentMigrationPostgres(t *testing.T) {
 			}
 			if tt.startAt315 {
 				require.NoError(t, migration.Migrate(315), "apply the canonical coding settings migration before upgrading")
-				assertVersionAndColumns(315, []string{})
+				assertVersionAndColumns(315, reviewerColumns)
 				seedSettings()
 			}
 			// Pin this historical boundary so adding later migrations does not
 			// change the upgrade/rollback contract this regression exercises.
 			require.NoError(t, migration.Migrate(316), "apply the full real migration chain through staged PR content")
-			assertVersionAndColumns(316, []string{"body", "title"})
+			assertVersionAndColumns(316, contentColumns)
 			if !tt.startAt315 {
 				seedSettings()
 			}
 			assertSettings()
-			var constraints []string
-			err := conn.QueryRow(ctx, `SELECT COALESCE(array_agg(conname::text ORDER BY conname), ARRAY[]::text[]) FROM pg_constraint WHERE conrelid = 'public.session_pr_intents'::regclass AND conname IN ('session_pr_intents_body_shape', 'session_pr_intents_title_shape') AND convalidated`).Scan(&constraints)
-			require.NoError(t, err, "inspect both validated staged-content constraints")
-			require.Equal(t, []string{"session_pr_intents_body_shape", "session_pr_intents_title_shape"}, constraints, "the renumbered migration should retain both content constraints")
+			assertContentConstraints()
 			require.NoError(t, migration.Steps(-1), "rollback only the staged PR content migration")
-			assertVersionAndColumns(315, []string{})
+			assertVersionAndColumns(315, reviewerColumns)
 			assertSettings()
 			require.NoError(t, migration.Migrate(316), "reapply staged content after its rollback")
-			assertVersionAndColumns(316, []string{"body", "title"})
+			assertVersionAndColumns(316, contentColumns)
+			assertContentConstraints()
 			assertSettings()
 		})
 	}
