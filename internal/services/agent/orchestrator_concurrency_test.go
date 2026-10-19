@@ -143,13 +143,21 @@ func TestContinueSession_OrgConcurrencyQuota(t *testing.T) {
 		holdsSlot    bool
 		containerID  *string
 		threadScoped bool
-		wantHeld     bool
-		wantCreated  bool
+		// origin overrides the session origin; a code-review session is
+		// counted by the quota but never held by it.
+		origin      models.SessionOrigin
+		wantHeld    bool
+		wantCreated bool
 	}{
 		{
 			name:           "cold continuation with no executing turn is admitted at quota 1",
 			countExecuting: 0,
 			wantCreated:    true,
+		},
+		{
+			name:           "code-review session is admitted past a saturated quota without a count",
+			countExecuting: 1,
+			origin:         models.SessionOriginCodeReview,
 		},
 		{
 			name:           "continuation with one executing sibling at quota 1 is held",
@@ -196,6 +204,9 @@ func TestContinueSession_OrgConcurrencyQuota(t *testing.T) {
 				deadline := time.Now().Add(time.Hour)
 				session.RuntimeHardDeadlineAt = &deadline
 			}
+			if tt.origin != "" {
+				session.Origin = tt.origin
+			}
 
 			d := defaultDeps()
 			d.orgs = orgWithConcurrencyQuota(t, orgID, 1)
@@ -215,14 +226,19 @@ func TestContinueSession_OrgConcurrencyQuota(t *testing.T) {
 			}
 
 			err := buildOrchestrator(d).ContinueSession(context.Background(), session, opts)
-			if tt.holdsSlot {
+			switch {
+			case tt.holdsSlot:
 				require.Empty(t, d.sessions.getCountExecutingExcludes(), "a session that already holds a slot is admitted without counting siblings")
-			} else {
+			case tt.origin == models.SessionOriginCodeReview:
+				require.Empty(t, d.sessions.getCountExecutingExcludes(), "a code-review session is never held by the org quota, so the count is not consulted")
+			default:
 				require.Equal(t, []uuid.UUID{session.ID}, d.sessions.getCountExecutingExcludes(), "a continuation excludes its own session from the executing count")
 			}
 			if !tt.wantHeld {
 				require.NotErrorIs(t, err, agent.ErrConcurrencyLimit, "the continuation must be admitted")
-				require.Equal(t, tt.wantCreated, created, "sandbox allocation should match the continuation path")
+				if tt.origin == "" {
+					require.Equal(t, tt.wantCreated, created, "sandbox allocation should match the continuation path")
+				}
 				return
 			}
 			require.ErrorIs(t, err, agent.ErrConcurrencyLimit, "the continuation must be held at the org quota")

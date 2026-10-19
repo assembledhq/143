@@ -4577,10 +4577,23 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// continuation leaves nothing to unwind; the worker retries it. The
 	// resolved quota also feeds the runtime controller so its extension gate
 	// agrees with RunAgent.
-	maxConcurrent, concurrencyErr := o.checkConcurrency(ctx, session)
-	if concurrencyErr != nil {
-		log.Info().Err(concurrencyErr).Msg("concurrency limit reached, continue_session stays queued")
-		return concurrencyErr
+	//
+	// Code-review sessions (reviewer threads, evidence rechecks) are counted
+	// by CountExecutingByOrg, so user runs see their occupancy, but are not
+	// held here: reviews have their own physical admission
+	// (db.CodeReviewSandboxAvailable in the code review service), and holding
+	// them would dead-letter a review with concurrency_timeout after the
+	// retry window whenever an org saturates its own quota.
+	var maxConcurrent int
+	if continuationExemptFromQuota(session) {
+		maxConcurrent = o.resolveMaxConcurrent(ctx, session.OrgID)
+	} else {
+		var concurrencyErr error
+		maxConcurrent, concurrencyErr = o.checkConcurrency(ctx, session)
+		if concurrencyErr != nil {
+			log.Info().Err(concurrencyErr).Msg("concurrency limit reached, continue_session stays queued")
+			return concurrencyErr
+		}
 	}
 
 	// Determine whether we can restore from a snapshot or need a fresh start.
@@ -7265,6 +7278,15 @@ func (o *Orchestrator) resolveMaxConcurrent(ctx context.Context, orgID uuid.UUID
 		}
 	}
 	return o.maxConcurrent
+}
+
+// continuationExemptFromQuota reports whether a continuation on session skips
+// the org's max_concurrent_runs hold. Code-review sessions are exempt: their
+// turns are admitted by the code review service's own sandbox capacity gate,
+// and they stay counted by CountExecutingByOrg so ordinary runs still see the
+// slots reviews occupy.
+func continuationExemptFromQuota(session *models.Session) bool {
+	return session != nil && session.Origin == models.SessionOriginCodeReview
 }
 
 // sessionHoldsExecutingSlot reports whether the session row already carries
