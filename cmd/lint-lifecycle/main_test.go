@@ -127,6 +127,34 @@ func initial() { jobs.Enqueue(ctx, orgID, "agent", "run_agent", payload) }
 	}, ids, "same-receiver and function wrappers should be inventoried without conflating unrelated receiver types")
 }
 
+func TestComposableApprovedGrantRemainsInventoried(t *testing.T) {
+	t.Parallel()
+	root := fixture(t, `
+type GrantStore struct{}
+func (s *GrantStore) AppendApprovedSessionGrantInTx() { exec("UPDATE session_execution_metadata SET capability_snapshot=$2 WHERE org_id=$1") }
+func (s *GrantStore) legacy() { s.AppendApprovedSessionGrantInTx() }
+func (s *GrantStore) adapter() { s.legacy() }
+`)
+	found, err := scan(root)
+	require.NoError(t, err, "composable grant persistence and its legacy wrappers should scan")
+	type observation struct {
+		ID               string
+		RequiresContract bool
+	}
+	var actual []observation
+	for _, item := range found {
+		actual = append(actual, observation{ID: item.ID, RequiresContract: requiresMutationContract(item)})
+	}
+	require.Equal(t, []observation{
+		{ID: "internal/fixture.go:GrantStore.AppendApprovedSessionGrantInTx", RequiresContract: true},
+		{ID: "internal/fixture.go:GrantStore.adapter"},
+		{ID: "internal/fixture.go:GrantStore.legacy", RequiresContract: true},
+	}, actual, "extraction must retain the exact persistence root and wrappers without upgrading indirect syntax to authority proof")
+	reviewed := reviewedFixture(found)
+	reviewed.Entries = reviewed.Entries[1:]
+	require.ErrorContains(t, compare(found, reviewed), "uncovered lifecycle candidate: internal/fixture.go:GrantStore.AppendApprovedSessionGrantInTx", "a newly extracted persistence root must require its own reviewed inventory contract")
+}
+
 func reviewedFixture(candidates []candidate) inventory {
 	result := inventory{Version: 1, Scope: []string{"fixture"}, Limitations: []string{"syntax only"}}
 	for _, item := range candidates {

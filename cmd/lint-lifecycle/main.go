@@ -98,7 +98,7 @@ answerQueuedHumanInputForContinue BeginRuntime beginRuntimeControl
 RunSession RunAgent ContinueSession ContinueSessionWithOptions
 SendMessage AnswerQuestion RetryInboxEntry
 AppendForMessage PublishCheckpoint PublishCheckpointWithProvenance
-AppendApprovedSessionGrant claimAutomationTurnAttempt
+AppendApprovedSessionGrant AppendApprovedSessionGrantInTx claimAutomationTurnAttempt
 InsertGeneration RetireGeneration ReleaseStrandedOwnership
 CreateRepairRun DeactivateRepairRun AnswerPending
 AnswerLatestPendingForSession AnswerLatestPendingForThread
@@ -174,7 +174,7 @@ LaunchPreview ResumeStoppedWarmPreview UpdateRevisionContext
 ConsumeCancelRequest MarkTerminalWithLease UpdateSandboxState
 MarkRunningWithSandboxState ResetForRetry UndoResetForRetry
 ResetAfterLostReuse FailRunningBySession
-CleanupSessionSnapshot
+CleanupSessionSnapshot AppendApprovedSessionGrantInTx
 `)
 
 var lifecycleReceiver = regexp.MustCompile(`(?i)(session|thread|runtime|executor|runstore)`)
