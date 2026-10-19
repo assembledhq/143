@@ -1115,6 +1115,15 @@ export const handlers = [
     });
   }),
 
+  // Default stack settings: every scope starts in the ordered (priority
+  // walk) mode unless a test installs its own handler.
+  http.get('/api/v1/coding-credentials/stack-settings', ({ request }) => {
+    const url = new URL(request.url);
+    return HttpResponse.json({
+      data: { scope: url.searchParams.get('scope') ?? 'personal', distribution: 'ordered' },
+    });
+  }),
+
   http.get('/api/v1/sessions/:id/files/context', () => {
     return HttpResponse.json({
       data: {

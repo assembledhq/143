@@ -84,6 +84,7 @@ export const queryKeys = {
   codingCredentials: {
     all: ["coding-credentials"] as const,
     list: (scope: "org" | "personal" | "resolved") => ["coding-credentials", scope] as const,
+    stackSettings: (scope: "org" | "personal") => ["coding-credentials", "stack-settings", scope] as const,
   },
   codexAuth: {
     status: ["codex-auth-status"] as const,

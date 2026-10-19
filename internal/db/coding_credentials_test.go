@@ -98,6 +98,19 @@ func codingAnyArgs(n int) []any {
 	return out
 }
 
+// expectStackSettings queues the stack-settings read PickRunnable issues once
+// a resolver list holds two or more rows. argCount is 2 for a personal scope
+// (org_id, user_id) and 1 for an org scope. Each row is (user_id, distribution).
+func expectStackSettings(mock pgxmock.PgxPoolIface, argCount int, rows ...[]any) {
+	result := pgxmock.NewRows([]string{"user_id", "distribution"})
+	for _, row := range rows {
+		result = result.AddRow(row...)
+	}
+	mock.ExpectQuery(`FROM coding_credential_stack_settings`).
+		WithArgs(codingAnyArgs(argCount)...).
+		WillReturnRows(result)
+}
+
 func codingCredentialSnapshotRow(t *testing.T, store *CodingCredentialStore, scope models.Scope, id uuid.UUID, provider models.ProviderName, status models.CodingCredentialRowStatus) []any {
 	t.Helper()
 
@@ -484,6 +497,7 @@ func TestCodingCredentialStoreListResolvableAndPickRunnable(t *testing.T) {
 			pgxmock.NewRows(codingCredentialTestColumns),
 			codingCredentialRow(t, store, orgID, nil, orgCredID, provider, models.AnthropicSubscriptionConfig{AccessToken: "tok2", RefreshToken: "refresh2"}, 1, models.CodingCredentialStatusActive),
 		))
+	expectStackSettings(mock, 2)
 
 	resolved, err := store.ListResolvable(context.Background(), orgID, &userID, provider)
 	require.NoError(t, err, "ListResolvable should return resolver rows")
@@ -634,6 +648,7 @@ func TestCodingCredentialStorePickRunnableMulti_MergesProvidersByScopeBeforeOrgF
 	mock.ExpectQuery(`FROM coding_credentials`).
 		WithArgs(codingAnyArgs(2)...).
 		WillReturnRows(orgRows)
+	expectStackSettings(mock, 2)
 
 	picked, err := store.PickRunnableMulti(context.Background(), scope, providers)
 	require.NoError(t, err, "PickRunnableMulti should pick a credential from the merged provider set")
@@ -706,6 +721,7 @@ func TestCodingCredentialStorePickRunnableMulti_SkipsPersistedRateLimitedProvide
 			mock.ExpectQuery(`FROM coding_credentials`).
 				WithArgs(codingAnyArgs(2)...).
 				WillReturnRows(orgRows)
+			expectStackSettings(mock, 2)
 
 			resolved, err := store.ListResolvableMulti(context.Background(), orgID, &userID, tt.providers)
 			require.NoError(t, err, "ListResolvableMulti should return rate-limited rows for visibility")
@@ -753,6 +769,7 @@ func TestCodingCredentialStorePickRunnableMulti_SkipsExpiredSetupTokenProviderTw
 	mock.ExpectQuery(`FROM coding_credentials`).
 		WithArgs(codingAnyArgs(2)...).
 		WillReturnRows(orgRows)
+	expectStackSettings(mock, 2)
 
 	resolved, err := store.ListResolvableMulti(context.Background(), orgID, &userID, providers)
 	require.NoError(t, err, "ListResolvableMulti should return expired setup-token rows for visibility")
@@ -812,6 +829,7 @@ func TestCodingCredentialStorePickRunnable_PersistedRateLimitExpiry(t *testing.T
 			mock.ExpectQuery(`FROM coding_credentials`).
 				WithArgs(codingAnyArgs(2)...).
 				WillReturnRows(rows)
+			expectStackSettings(mock, 1)
 
 			picked, err := store.PickRunnable(context.Background(), scope, models.ProviderGemini)
 			require.NoError(t, err, "PickRunnable should return an available credential")
@@ -1429,4 +1447,227 @@ func TestWithRefreshLockSwallowsCommitError(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err, "commit failure on the lock-only transaction should be swallowed")
+}
+
+func TestGroupTiers(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	personalTop := uuid.New()
+	personalNext := uuid.New()
+	orgTopA := uuid.New()
+	orgTopB := uuid.New()
+	orgNext := uuid.New()
+	row := func(id uuid.UUID, personal bool, priority int) models.DecryptedCodingCredential {
+		cred := models.DecryptedCodingCredential{ID: id, OrgID: orgID, Priority: priority}
+		if personal {
+			cred.UserID = &userID
+		}
+		return cred
+	}
+	creds := []models.DecryptedCodingCredential{
+		row(personalTop, true, 1),
+		row(personalNext, true, 2),
+		row(orgTopA, false, 1),
+		row(orgTopB, false, 1),
+		row(orgNext, false, 2),
+	}
+
+	tests := []struct {
+		name     string
+		dist     stackDistribution
+		expected [][]uuid.UUID
+	}{
+		{
+			name:     "ordered keeps one tier per priority within each scope",
+			dist:     stackDistribution{},
+			expected: [][]uuid.UUID{{personalTop}, {personalNext}, {orgTopA, orgTopB}, {orgNext}},
+		},
+		{
+			name:     "personal spread collapses only the personal half",
+			dist:     stackDistribution{personalSpread: true},
+			expected: [][]uuid.UUID{{personalTop, personalNext}, {orgTopA, orgTopB}, {orgNext}},
+		},
+		{
+			name:     "org spread collapses only the org half",
+			dist:     stackDistribution{orgSpread: true},
+			expected: [][]uuid.UUID{{personalTop}, {personalNext}, {orgTopA, orgTopB, orgNext}},
+		},
+		{
+			name:     "spreading both halves still keeps personal ahead of org",
+			dist:     stackDistribution{personalSpread: true, orgSpread: true},
+			expected: [][]uuid.UUID{{personalTop, personalNext}, {orgTopA, orgTopB, orgNext}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tiers := groupTiers(creds, tt.dist)
+			got := make([][]uuid.UUID, 0, len(tiers))
+			for _, tier := range tiers {
+				ids := make([]uuid.UUID, 0, len(tier))
+				for _, cred := range tier {
+					ids = append(ids, cred.ID)
+				}
+				got = append(got, ids)
+			}
+			require.Equal(t, tt.expected, got, "tiers should follow each scope half's distribution mode")
+		})
+	}
+}
+
+func TestCodingCredentialStorePickRunnable_SpreadDistribution(t *testing.T) {
+	t.Parallel()
+
+	store, mock := newMockCodingCredentialStore(t)
+	defer mock.Close()
+	store.SetRNG(rand.New(rand.NewPCG(7, 11)))
+
+	orgID := uuid.New()
+	firstID := uuid.New()
+	secondID := uuid.New()
+	scope := models.Scope{OrgID: orgID}
+	provider := models.ProviderGemini
+
+	rows := pgxmock.NewRows(codingCredentialTestColumns)
+	rows = addCodingCredentialRow(rows,
+		codingCredentialRow(t, store, orgID, nil, firstID, provider, models.GeminiConfig{APIKey: "gemini-first"}, 1, models.CodingCredentialStatusActive),
+	)
+	rows = addCodingCredentialRow(rows,
+		codingCredentialRow(t, store, orgID, nil, secondID, provider, models.GeminiConfig{APIKey: "gemini-second"}, 2, models.CodingCredentialStatusActive),
+	)
+	mock.ExpectQuery(`FROM coding_credentials`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnRows(rows)
+	expectStackSettings(mock, 1)
+
+	pickedIDs := func() map[uuid.UUID]bool {
+		seen := map[uuid.UUID]bool{}
+		for i := 0; i < 50; i++ {
+			picked, err := store.PickRunnable(context.Background(), scope, provider)
+			require.NoError(t, err, "PickRunnable should return a credential while rows are runnable")
+			seen[picked.ID] = true
+		}
+		return seen
+	}
+
+	require.Equal(t, map[uuid.UUID]bool{firstID: true}, pickedIDs(), "ordered mode should always pick the top-priority credential")
+
+	mock.ExpectExec(`INSERT INTO coding_credential_stack_settings`).
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	require.NoError(t, store.SetStackDistribution(context.Background(), scope, models.CodingCredentialDistributionSpread), "SetStackDistribution should upsert the scope row")
+
+	expectStackSettings(mock, 1, []any{(*uuid.UUID)(nil), "spread"})
+	require.Equal(t, map[uuid.UUID]bool{firstID: true, secondID: true}, pickedIDs(), "spread mode should pick across every runnable credential in the scope after the cached mode is dropped")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodingCredentialStorePickRunnable_SpreadOnlyCollapsesFlaggedScope(t *testing.T) {
+	t.Parallel()
+
+	store, mock := newMockCodingCredentialStore(t)
+	defer mock.Close()
+	store.SetRNG(rand.New(rand.NewPCG(3, 5)))
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	personalTop := uuid.New()
+	personalNext := uuid.New()
+	orgCred := uuid.New()
+	scope := models.Scope{OrgID: orgID, UserID: &userID}
+	provider := models.ProviderGemini
+
+	personalRows := pgxmock.NewRows(codingCredentialTestColumns)
+	personalRows = addCodingCredentialRow(personalRows,
+		codingCredentialRow(t, store, orgID, &userID, personalTop, provider, models.GeminiConfig{APIKey: "personal-top"}, 1, models.CodingCredentialStatusActive),
+	)
+	personalRows = addCodingCredentialRow(personalRows,
+		codingCredentialRow(t, store, orgID, &userID, personalNext, provider, models.GeminiConfig{APIKey: "personal-next"}, 2, models.CodingCredentialStatusActive),
+	)
+	orgRows := pgxmock.NewRows(codingCredentialTestColumns)
+	orgRows = addCodingCredentialRow(orgRows,
+		codingCredentialRow(t, store, orgID, nil, orgCred, provider, models.GeminiConfig{APIKey: "org"}, 1, models.CodingCredentialStatusActive),
+	)
+	mock.ExpectQuery(`FROM coding_credentials`).
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnRows(personalRows)
+	mock.ExpectQuery(`FROM coding_credentials`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnRows(orgRows)
+	// Only the org stack spreads; the personal half must keep its priority walk.
+	expectStackSettings(mock, 2, []any{(*uuid.UUID)(nil), "spread"})
+
+	seen := map[uuid.UUID]bool{}
+	for i := 0; i < 50; i++ {
+		picked, err := store.PickRunnable(context.Background(), scope, provider)
+		require.NoError(t, err, "PickRunnable should return a personal credential")
+		seen[picked.ID] = true
+	}
+	require.Equal(t, map[uuid.UUID]bool{personalTop: true}, seen, "an org-only spread setting must not collapse the personal priority tiers")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodingCredentialStoreStackSettings(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	tests := []struct {
+		name      string
+		scope     models.Scope
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expected  models.CodingCredentialStackSettings
+	}{
+		{
+			name:  "org scope without a row defaults to ordered",
+			scope: models.Scope{OrgID: orgID},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`FROM coding_credential_stack_settings`).
+					WithArgs(codingAnyArgs(1)...).
+					WillReturnRows(pgxmock.NewRows([]string{"distribution"}))
+			},
+			expected: models.CodingCredentialStackSettings{Scope: models.CodingCredentialScopeOrg, Distribution: models.CodingCredentialDistributionOrdered},
+		},
+		{
+			name:  "personal scope reads the stored mode",
+			scope: models.Scope{OrgID: orgID, UserID: &userID},
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`FROM coding_credential_stack_settings`).
+					WithArgs(codingAnyArgs(2)...).
+					WillReturnRows(pgxmock.NewRows([]string{"distribution"}).AddRow("spread"))
+			},
+			expected: models.CodingCredentialStackSettings{Scope: models.CodingCredentialScopePersonal, Distribution: models.CodingCredentialDistributionSpread},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store, mock := newMockCodingCredentialStore(t)
+			defer mock.Close()
+			tt.setupMock(mock)
+
+			got, err := store.GetStackSettings(context.Background(), tt.scope)
+			require.NoError(t, err, "GetStackSettings should read the scope row")
+			require.Equal(t, tt.expected, got, "GetStackSettings should report the stored or default mode")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestCodingCredentialStoreSetStackDistributionRejectsUnknownMode(t *testing.T) {
+	t.Parallel()
+
+	store, mock := newMockCodingCredentialStore(t)
+	defer mock.Close()
+
+	err := store.SetStackDistribution(context.Background(), models.Scope{OrgID: uuid.New()}, models.CodingCredentialDistribution("sometimes"))
+	require.EqualError(t, err, `invalid distribution: "sometimes"`, "an unknown mode should be rejected before any write")
+	require.NoError(t, mock.ExpectationsWereMet(), "no database write should happen for an invalid mode")
 }

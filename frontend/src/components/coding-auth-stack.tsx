@@ -4,12 +4,14 @@ import { useState } from "react";
 import { GripVertical, KeyRound, MoveUp, MoveDown, Pencil } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { EmptyState } from "@/components/empty-state";
 import { CheckAuthRateLimit } from "@/components/check-auth-rate-limit";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AGENTS_BY_KEY } from "@/lib/agents";
 import { cn } from "@/lib/utils";
-import type { CodingCredentialSummary } from "@/lib/types";
+import type { CodingCredentialDistribution, CodingCredentialSummary } from "@/lib/types";
 
 type MoveDirection = "up" | "down";
 export type DropPosition = "before" | "after";
@@ -72,15 +74,23 @@ export function CodingAuthStack({
   onSelect,
   onMove,
   onReorder,
+  distribution,
+  onDistributionChange,
+  distributionPending = false,
 }: {
   rows: CodingCredentialSummary[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   onMove: (id: string, direction: MoveDirection) => void;
   onReorder: (sourceId: string, targetId: string, position: DropPosition) => void;
+  /** Current stack mode. Omit to hide the spread-load switch. */
+  distribution?: CodingCredentialDistribution;
+  onDistributionChange?: (distribution: CodingCredentialDistribution) => void;
+  distributionPending?: boolean;
 }) {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<{ id: string; position: DropPosition } | null>(null);
+  const spread = distribution === "spread";
 
   if (rows.length === 0) {
     return (
@@ -97,6 +107,26 @@ export function CodingAuthStack({
 
   return (
     <div className="overflow-hidden rounded-2xl border border-border bg-card">
+      {distribution ? (
+        <div className="flex items-start justify-between gap-4 border-b border-border px-4 py-3">
+          <div className="min-w-0 space-y-0.5">
+            <Label htmlFor="coding-auth-spread-load" className="text-sm font-medium text-foreground">
+              Spread load across auths
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              {spread
+                ? "Each session picks at random among the healthy auths in this stack. Priority order applies again when this is off."
+                : "Sessions use the top healthy auth until it is rate limited, then fall through in priority order."}
+            </p>
+          </div>
+          <Switch
+            id="coding-auth-spread-load"
+            checked={spread}
+            disabled={!onDistributionChange || distributionPending}
+            onCheckedChange={(checked) => onDistributionChange?.(checked ? "spread" : "ordered")}
+          />
+        </div>
+      ) : null}
       <div className="divide-y divide-border md:hidden">
         {rows.map((row, index) => (
           <div
@@ -119,7 +149,7 @@ export function CodingAuthStack({
                 <Badge variant="outline" className={statusBadgeClass(row.status)}>
                   {statusLabel(row.status)}
                 </Badge>
-                {row.is_default ? <Badge>Default</Badge> : null}
+                {row.is_default && !spread ? <Badge>Default</Badge> : null}
               </div>
             </div>
             <dl className="grid grid-cols-2 gap-3 text-xs">
@@ -275,7 +305,7 @@ export function CodingAuthStack({
                       <Badge variant="outline" className={statusBadgeClass(row.status)}>
                         {statusLabel(row.status)}
                       </Badge>
-                      {row.is_default ? <Badge>Default</Badge> : null}
+                      {row.is_default && !spread ? <Badge>Default</Badge> : null}
                     </div>
                   </TableCell>
                   <TableCell>

@@ -1953,6 +1953,36 @@ describe('api client', () => {
       await api.codingCredentials.reorder('org', ['cc-2', 'cc-1']);
       expect(capturedBody).toEqual({ scope: 'org', ordered_ids: ['cc-2', 'cc-1'] });
     });
+
+    it('reads stack settings for a scope', async () => {
+      let capturedScope: string | null = null;
+
+      server.use(
+        http.get('/api/v1/coding-credentials/stack-settings', ({ request }) => {
+          capturedScope = new URL(request.url).searchParams.get('scope');
+          return HttpResponse.json({ data: { scope: 'org', distribution: 'spread' } });
+        }),
+      );
+
+      const result = await api.codingCredentials.getStackSettings('org');
+      expect(capturedScope).toBe('org');
+      expect(result.data).toEqual({ scope: 'org', distribution: 'spread' });
+    });
+
+    it('updates the stack distribution for a scope', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.patch('/api/v1/coding-credentials/stack-settings', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { scope: 'personal', distribution: 'spread' } });
+        }),
+      );
+
+      const result = await api.codingCredentials.updateStackSettings({ scope: 'personal', distribution: 'spread' });
+      expect(capturedBody).toEqual({ scope: 'personal', distribution: 'spread' });
+      expect(result.data).toEqual({ scope: 'personal', distribution: 'spread' });
+    });
   });
 
   describe('uploads', () => {

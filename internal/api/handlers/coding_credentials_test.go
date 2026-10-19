@@ -47,6 +47,8 @@ type mockCodingCredentialStore struct {
 	disableFn          func(ctx context.Context, scope models.Scope, id uuid.UUID) error
 	moveFn             func(ctx context.Context, scope models.Scope, id uuid.UUID, pos models.MoveCodingCredentialInput) error
 	reorderFn          func(ctx context.Context, scope models.Scope, orderedIDs []uuid.UUID) error
+	stackSettingsFn    func(ctx context.Context, scope models.Scope) (models.CodingCredentialStackSettings, error)
+	setDistributionFn  func(ctx context.Context, scope models.Scope, distribution models.CodingCredentialDistribution) error
 }
 
 type mockCodingCredentialOrgStore struct {
@@ -113,6 +115,20 @@ func (m *mockCodingCredentialStore) ListResolvableMulti(ctx context.Context, org
 		out[p] = creds
 	}
 	return out, nil
+}
+
+func (m *mockCodingCredentialStore) GetStackSettings(ctx context.Context, scope models.Scope) (models.CodingCredentialStackSettings, error) {
+	if m.stackSettingsFn != nil {
+		return m.stackSettingsFn(ctx, scope)
+	}
+	return models.CodingCredentialStackSettings{Scope: scope.Label(), Distribution: models.CodingCredentialDistributionOrdered}, nil
+}
+
+func (m *mockCodingCredentialStore) SetStackDistribution(ctx context.Context, scope models.Scope, distribution models.CodingCredentialDistribution) error {
+	if m.setDistributionFn != nil {
+		return m.setDistributionFn(ctx, scope, distribution)
+	}
+	return nil
 }
 
 func (m *mockCodingCredentialStore) Create(ctx context.Context, scope models.Scope, label string, cfg models.ProviderConfig, opts db.CreateOpts) (*uuid.UUID, error) {
@@ -724,8 +740,8 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAnthropicSubscription, Config: models.AnthropicSubscriptionConfig{AuthMode: models.AnthropicSubscriptionAuthModeSetupToken, OAuthToken: "setup-token", OAuthTokenExpiresAt: setupTokenExpiry}, Priority: 5, Status: models.CodingCredentialStatusActive, CreatedAt: now, UpdatedAt: now},
 	}
 
-	personal := summariesForScope(rows, models.Scope{OrgID: orgID, UserID: &userID})
-	orgRows := summariesForScope(rows, models.Scope{OrgID: orgID})
+	personal := summariesForScope(rows, models.Scope{OrgID: orgID, UserID: &userID}, nil)
+	orgRows := summariesForScope(rows, models.Scope{OrgID: orgID}, nil)
 
 	require.Len(t, personal, 2, "summariesForScope should keep only personal rows for a personal scope")
 	require.True(t, personal[0].IsDefault, "first runnable personal row should be marked default")
@@ -1297,4 +1313,298 @@ func TestOpenCodeBackingProviderFromInput(t *testing.T) {
 			require.Equal(t, tt.want, openCodeBackingProviderFromInput(tt.input), "OpenCode backing provider should normalize input")
 		})
 	}
+}
+
+func TestCodingCredentialHandlerStackSettings(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	tests := []struct {
+		name           string
+		method         string
+		target         string
+		body           string
+		role           string
+		setupStore     func(t *testing.T) *mockCodingCredentialStore
+		expectedStatus int
+		expected       *models.CodingCredentialStackSettings
+	}{
+		{
+			name:   "reads the personal default",
+			method: http.MethodGet,
+			target: "/api/v1/coding-credentials/stack-settings?scope=personal",
+			role:   "member",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					stackSettingsFn: func(_ context.Context, scope models.Scope) (models.CodingCredentialStackSettings, error) {
+						require.Equal(t, orgID, scope.OrgID, "personal read should target the active org")
+						require.NotNil(t, scope.UserID, "personal read should carry the caller's user id")
+						require.Equal(t, userID, *scope.UserID, "personal read should be coerced to the caller")
+						return models.CodingCredentialStackSettings{Scope: scope.Label(), Distribution: models.CodingCredentialDistributionOrdered}, nil
+					},
+				}
+			},
+			expectedStatus: http.StatusOK,
+			expected:       &models.CodingCredentialStackSettings{Scope: models.CodingCredentialScopePersonal, Distribution: models.CodingCredentialDistributionOrdered},
+		},
+		{
+			name:   "members can read the org mode",
+			method: http.MethodGet,
+			target: "/api/v1/coding-credentials/stack-settings?scope=org",
+			role:   "member",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					stackSettingsFn: func(_ context.Context, scope models.Scope) (models.CodingCredentialStackSettings, error) {
+						require.Equal(t, models.Scope{OrgID: orgID}, scope, "org read should use the org scope")
+						return models.CodingCredentialStackSettings{Scope: scope.Label(), Distribution: models.CodingCredentialDistributionSpread}, nil
+					},
+				}
+			},
+			expectedStatus: http.StatusOK,
+			expected:       &models.CodingCredentialStackSettings{Scope: models.CodingCredentialScopeOrg, Distribution: models.CodingCredentialDistributionSpread},
+		},
+		{
+			name:   "rejects the resolved pseudo-scope",
+			method: http.MethodGet,
+			target: "/api/v1/coding-credentials/stack-settings?scope=resolved",
+			role:   "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:   "rejects an unknown scope",
+			method: http.MethodGet,
+			target: "/api/v1/coding-credentials/stack-settings?scope=team",
+			role:   "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:   "propagates read errors",
+			method: http.MethodGet,
+			target: "/api/v1/coding-credentials/stack-settings?scope=personal",
+			role:   "member",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					stackSettingsFn: func(context.Context, models.Scope) (models.CodingCredentialStackSettings, error) {
+						return models.CodingCredentialStackSettings{}, errors.New("db down")
+					},
+				}
+			},
+			expectedStatus: http.StatusInternalServerError,
+		},
+		{
+			name:   "members cannot change the org mode",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/stack-settings",
+			body:   `{"scope":"org","distribution":"spread"}`,
+			role:   "member",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					setDistributionFn: func(context.Context, models.Scope, models.CodingCredentialDistribution) error {
+						t.Fatal("a member must not reach the store for an org-scope write")
+						return nil
+					},
+				}
+			},
+			expectedStatus: http.StatusForbidden,
+		},
+		{
+			name:   "admins spread the org stack",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/stack-settings",
+			body:   `{"scope":"org","distribution":"spread"}`,
+			role:   "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					setDistributionFn: func(_ context.Context, scope models.Scope, distribution models.CodingCredentialDistribution) error {
+						require.Equal(t, models.Scope{OrgID: orgID}, scope, "org write should use the org scope")
+						require.Equal(t, models.CodingCredentialDistributionSpread, distribution, "write should carry the requested mode")
+						return nil
+					},
+					stackSettingsFn: func(_ context.Context, scope models.Scope) (models.CodingCredentialStackSettings, error) {
+						return models.CodingCredentialStackSettings{Scope: scope.Label(), Distribution: models.CodingCredentialDistributionSpread}, nil
+					},
+				}
+			},
+			expectedStatus: http.StatusOK,
+			expected:       &models.CodingCredentialStackSettings{Scope: models.CodingCredentialScopeOrg, Distribution: models.CodingCredentialDistributionSpread},
+		},
+		{
+			name:   "members change their own personal mode",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/stack-settings",
+			body:   `{"scope":"personal","distribution":"ordered"}`,
+			role:   "member",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					setDistributionFn: func(_ context.Context, scope models.Scope, distribution models.CodingCredentialDistribution) error {
+						require.NotNil(t, scope.UserID, "personal write should carry the caller's user id")
+						require.Equal(t, userID, *scope.UserID, "personal write should be coerced to the caller")
+						require.Equal(t, models.CodingCredentialDistributionOrdered, distribution, "write should carry the requested mode")
+						return nil
+					},
+				}
+			},
+			expectedStatus: http.StatusOK,
+			expected:       &models.CodingCredentialStackSettings{Scope: models.CodingCredentialScopePersonal, Distribution: models.CodingCredentialDistributionOrdered},
+		},
+		{
+			name:   "rejects an unknown distribution",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/stack-settings",
+			body:   `{"scope":"org","distribution":"sometimes"}`,
+			role:   "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					setDistributionFn: func(context.Context, models.Scope, models.CodingCredentialDistribution) error {
+						t.Fatal("an invalid mode must not reach the store")
+						return nil
+					},
+				}
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:   "rejects malformed json",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/stack-settings",
+			body:   `{`,
+			role:   "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{}
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:   "propagates write errors",
+			method: http.MethodPatch,
+			target: "/api/v1/coding-credentials/stack-settings",
+			body:   `{"scope":"org","distribution":"spread"}`,
+			role:   "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					setDistributionFn: func(context.Context, models.Scope, models.CodingCredentialDistribution) error {
+						return errors.New("db down")
+					},
+				}
+			},
+			expectedStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := NewCodingCredentialHandler(tt.setupStore(t), nil)
+			var body *strings.Reader
+			if tt.body != "" {
+				body = strings.NewReader(tt.body)
+			} else {
+				body = strings.NewReader("")
+			}
+			req := withUserAndOrg(httptest.NewRequest(tt.method, tt.target, body), userID, orgID, tt.role)
+			rec := httptest.NewRecorder()
+			if tt.method == http.MethodGet {
+				handler.GetStackSettings(rec, req)
+			} else {
+				handler.UpdateStackSettings(rec, req)
+			}
+
+			require.Equal(t, tt.expectedStatus, rec.Code, "unexpected status: %s", rec.Body.String())
+			if tt.expected == nil {
+				return
+			}
+			var resp models.SingleResponse[models.CodingCredentialStackSettings]
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp), "response should decode as a stack settings envelope")
+			require.Equal(t, *tt.expected, resp.Data, "response should echo the stored stack settings")
+		})
+	}
+}
+
+func TestCodingCredentialHandlerListDefaultsFollowDistribution(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	topID := uuid.New()
+	nextID := uuid.New()
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name             string
+		distribution     models.CodingCredentialDistribution
+		expectedDefaults map[uuid.UUID]bool
+	}{
+		{
+			name:             "ordered marks only the top runnable row",
+			distribution:     models.CodingCredentialDistributionOrdered,
+			expectedDefaults: map[uuid.UUID]bool{topID: true, nextID: false},
+		},
+		{
+			name:             "spread marks every runnable row",
+			distribution:     models.CodingCredentialDistributionSpread,
+			expectedDefaults: map[uuid.UUID]bool{topID: true, nextID: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &mockCodingCredentialStore{
+				listByScopeFn: func(context.Context, models.Scope) ([]models.DecryptedCodingCredential, error) {
+					return []models.DecryptedCodingCredential{
+						{ID: topID, OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAI, Label: "Top", Config: models.OpenAIConfig{APIKey: "sk-openai-top-123456"}, Priority: 1, Status: models.CodingCredentialStatusActive, CreatedAt: now, UpdatedAt: now},
+						{ID: nextID, OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAI, Label: "Next", Config: models.OpenAIConfig{APIKey: "sk-openai-next-123456"}, Priority: 2, Status: models.CodingCredentialStatusActive, CreatedAt: now, UpdatedAt: now},
+					}, nil
+				},
+				stackSettingsFn: func(_ context.Context, scope models.Scope) (models.CodingCredentialStackSettings, error) {
+					require.NotNil(t, scope.UserID, "list should read the personal stack's settings")
+					return models.CodingCredentialStackSettings{Scope: scope.Label(), Distribution: tt.distribution}, nil
+				},
+			}
+			handler := NewCodingCredentialHandler(store, nil)
+			req := withUserAndOrg(httptest.NewRequest(http.MethodGet, "/api/v1/coding-credentials?scope=personal", nil), userID, orgID, "member")
+			rec := httptest.NewRecorder()
+			handler.List(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code, "list should succeed: %s", rec.Body.String())
+			var resp models.ListResponse[models.CodingCredentialSummary]
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp), "response should decode as a list envelope")
+			got := map[uuid.UUID]bool{}
+			for _, row := range resp.Data {
+				got[row.ID] = row.IsDefault
+			}
+			require.Equal(t, tt.expectedDefaults, got, "is_default should follow the scope's distribution mode")
+		})
+	}
+}
+
+func TestCodingCredentialHandlerListPropagatesStackSettingsErrors(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	store := &mockCodingCredentialStore{
+		listByScopeFn: func(context.Context, models.Scope) ([]models.DecryptedCodingCredential, error) {
+			return []models.DecryptedCodingCredential{}, nil
+		},
+		stackSettingsFn: func(context.Context, models.Scope) (models.CodingCredentialStackSettings, error) {
+			return models.CodingCredentialStackSettings{}, errors.New("db down")
+		},
+	}
+	handler := NewCodingCredentialHandler(store, nil)
+	req := withUserAndOrg(httptest.NewRequest(http.MethodGet, "/api/v1/coding-credentials?scope=personal", nil), userID, orgID, "member")
+	rec := httptest.NewRecorder()
+	handler.List(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code, "a failed stack settings read should fail the list")
 }

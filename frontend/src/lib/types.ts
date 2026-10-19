@@ -2895,6 +2895,16 @@ export interface CodingCredentialSummary {
   updated_at: string;
 }
 
+// How the runtime picker walks a scope's coding-credential stack. Mirrors
+// models.CodingCredentialDistribution.
+export type CodingCredentialDistribution = "ordered" | "spread";
+
+// Per-scope stack configuration. Mirrors models.CodingCredentialStackSettings.
+export interface CodingCredentialStackSettings {
+  scope: CodingCredentialScope;
+  distribution: CodingCredentialDistribution;
+}
+
 export interface RepoSummary {
   repository_id: string;
   full_name: string;
