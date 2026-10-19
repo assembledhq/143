@@ -76,6 +76,11 @@ type SessionExecutor struct {
 	LastError         *string               `db:"last_error" json:"last_error,omitempty"`
 	CreatedAt         time.Time             `db:"created_at" json:"created_at"`
 	UpdatedAt         time.Time             `db:"updated_at" json:"updated_at"`
+
+	// LifecycleWriterVersion observes the last participating allocation/liveness
+	// writer, not an attested executor process/build or compatible floor. Creation
+	// is dispatcher-owned; legacy writes omitting this field may retain stale data.
+	LifecycleWriterVersion int `db:"lifecycle_writer_version" json:"lifecycle_writer_version"`
 }
 
 type CreateSessionExecutorParams struct {
