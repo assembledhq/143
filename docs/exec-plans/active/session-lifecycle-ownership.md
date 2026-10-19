@@ -4,7 +4,8 @@ Status: Milestone 0 design and characterization accepted by independent
 adversarial review on 2026-10-18, with no critical or major findings remaining.
 Approval covers the plan, contract, inventories and synthetic probes only; real
 caller, full-schema, concurrency, storage, provider and image proof remains in 0a.
-No compatibility-floor or new lifecycle runtime behavior has been enabled.
+No compatibility-floor enforcement or canonical lifecycle mutation behavior has
+been enabled.
 Milestone 0a has started with passive transaction and grant-persistence
 foundations, independently approved on 2026-10-18 after follow-up review.
 A subsequent passive slice adds `nodes.lifecycle_writer_version` to existing
@@ -14,8 +15,28 @@ process-instance provenance or proof of a compatible floor. The next passive
 slice adds the same version-0 observation to executor allocation, mark-running
 and heartbeat writes. Allocation is dispatcher-owned, not executor process/build
 attestation; legacy executor writes can also retain stale metadata. Neither field
-changes placement or authorization. Business callers, process-instance leases,
-schema guards and activation remain unchanged; this does not complete 0a.
+changes placement or authorization. A following passive slice registers each
+standalone session-executor invocation in `lifecycle_writer_instances` using a
+fresh process UUID, actual binary build and version 0. Its asynchronous observer
+uses the ordinary pool, with a 30-second interval, two-minute observational TTL
+and cooperative five-second attempt budget. It remains alive through runtime
+cleanup and joins before pool closure; fatal exits leave rows to expire. Failed
+observations are logged and retried, never awaited for startup or admission.
+They may still contend for ordinary-pool capacity. Existing daily maintenance
+jobs, scheduled for organizations with active integrations, each attempt at most
+ten 1,000-row batches within one shared cooperative five-second budget. Cleanup
+stops on a short batch, the batch cap or budget exhaustion; normal budget exits
+log partial progress, while other database errors and parent cancellation remain
+errors. The SQL still removes only observations expired for more than seven
+days and protects concurrent renewals. Daily capacity is at most 10,000 times
+the number of executed scheduled organization jobs, and can be lower under the
+time budget or failures. No active organizations means no scheduled cleanup.
+Seven days is eligibility, not a deletion deadline or a bounded history size;
+inserts above actual cleanup throughput can grow the backlog indefinitely.
+No row establishes continuous liveness, drained transactions or a deployment
+compatibility floor. API/worker/all process
+registration, connection census, business callers, schema guards and activation
+remain unchanged; this partial inventory does not complete 0a.
 
 Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
 identify the inspected implementation; the executable inventory rechecks the

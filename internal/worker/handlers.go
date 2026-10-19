@@ -756,6 +756,8 @@ type Stores struct {
 	SlackOutbound         *db.SlackOutboundMessageStore
 	SessionAttributions   *db.SessionAttributionStore
 	CodeReviewWorkspaces  *db.CodeReviewWorkspaceStore // nil-safe: durable shared review preparation
+
+	LifecycleWriters *db.LifecycleWriterInstanceStore // nil-safe: global passive observation retention
 }
 
 // newWorkerThreadService keeps worker-owned thread message paths on the same
@@ -13827,6 +13829,20 @@ func newDataRetentionCleanupHandler(stores *Stores, retentionCfg DataRetentionCo
 				errs = append(errs, fmt.Errorf("delete expired completed jobs: %w", err))
 			} else {
 				logger.Info().Int64("deleted", deleted).Int("retention_days", retentionCfg.JobsDays).Msg("completed job cleanup sweep finished")
+			}
+		}
+
+		// Each existing per-org job owns at most ten 1,000-row global batches.
+		// Concurrent jobs skip locked rows; seven days is eligibility, not a
+		// deletion deadline when maintenance is absent or a backlog remains.
+		if stores.LifecycleWriters != nil {
+			deleted, err := sweepExpiredLifecycleWriters(ctx, stores.LifecycleWriters.DeleteExpired, logger)
+			totalDeleted += deleted
+			if err != nil {
+				logger.Warn().Err(err).Int64("deleted", deleted).Msg("failed to delete expired passive lifecycle writer observations")
+				errs = append(errs, fmt.Errorf("delete expired lifecycle writer observations: %w", err))
+			} else {
+				logger.Info().Int64("deleted", deleted).Msg("passive lifecycle writer observation cleanup sweep finished")
 			}
 		}
 
