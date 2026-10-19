@@ -5,6 +5,10 @@ adversarial review on 2026-10-18, with no critical or major findings remaining.
 Approval covers the plan, contract, inventories and synthetic probes only; real
 caller, full-schema, concurrency, storage, provider and image proof remains in 0a.
 No compatibility-floor or new lifecycle runtime behavior has been enabled.
+Milestone 0a has started with passive transaction and grant-persistence
+foundations, independently approved on 2026-10-18 after follow-up review.
+Business callers, writer registration, schema guards and activation remain
+unchanged; this does not complete 0a.
 
 Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
 identify the inspected implementation; the executable inventory rechecks the
@@ -667,6 +671,51 @@ database and rollout proof; these textual policies do not constitute that proof.
 
 ### 0a. Deploy a lock/fence compatibility release
 
+Implementation is split into reviewable slices; none individually establishes a
+deployed compatibility floor. The first slice adds
+`internal/db/session_lifecycle_transaction.go`: a pool-owned top-level runner and
+an explicit caller-owned transaction configurator. Both use READ COMMITTED and
+transaction-local protocol settings. The runner gives acquisition, setup, work,
+retries and commit one cooperative two-second context budget; independent
+rollback cleanup may add up to 250ms afterward. A callback that ignores its
+context cannot be forcibly bounded by this helper. It retries only classified
+contention after confirmed rollback; commit uncertainty is never replayed. A
+live context is not a minimum commit-time reserve, so a late deadline may still
+leave commit uncertain; callers must resolve their command receipt, not resubmit.
+Any commit-reserve policy remains a measured pre-activation decision, not an
+arbitrary new cutoff in this passive slice. This is mechanical plumbing, not
+tenant/domain/epoch authority or evidence that a binary is floor-compatible.
+No existing writer uses it yet. Subsequent slices still need passive schema,
+composable persistence/grants, canonical durable mutations and every caller
+conversion below before any activation.
+
+The next passive slice splits `AgentCapabilityPolicyStore.AppendApprovedSessionGrant`
+into its existing transaction-owning wrapper and
+`AppendApprovedSessionGrantInTx(ctx, orgID, tx, sessionID, item)`. The helper uses
+only the caller's concrete `pgx.Tx`; it never settles or retries the unit. The
+wrapper retains its existing errors, duplicate behavior, SQL and
+session-before-automation lock order. This lower-level persistence seam is not
+the canonical `AppendApprovedGrantInTx` authority operation. No human-input
+caller is rewired, and consent, exact request/readiness, epochs and canonical
+domain prelocking remain unimplemented gates. Existing snapshot representation
+is sufficient for this slice; no speculative schema is added. The syntax guard
+explicitly inventories the extracted root and its direct callers so extraction
+cannot silently remove its review coverage.
+
+The unchanged joined grant query has a pre-existing concurrent lost-update
+hazard: its metadata snapshot is taken before waiting on `FOR UPDATE OF s`.
+Waiting for that lock does not refresh the joined metadata snapshot, whether the
+other writer only locked or also updated the session row. Two unprelocked grants
+can both succeed while the last session/automation snapshot drops an earlier
+grant, or a duplicate is missed. The legacy wrapper deliberately preserves that
+SQL in this candidate.
+The canonical operation must lock the parent in an earlier statement or reread
+metadata after locking; wrapping this seam in the runner alone is insufficient.
+Full-schema concurrent distinct-grant proof of both retained grants is mandatory
+before converting callers, including coexistence with any unconverted legacy
+wrapper. Existing lock-order and consent/readiness gates still apply; the earlier
+lock is not an independent authorization check.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -764,7 +813,12 @@ Every protected write uses an explicit READ COMMITTED transaction that sets
 `SET LOCAL lifecycle143.writer_version='1'` before mutation, including queue
 claimers, heartbeats, maintenance/operator scripts and old compatibility wrappers.
 Protected autocommit pool writes are not a fallback. Connection startup settings
-alone are not safe through transaction-mode pooling. Activation uses bounded
+alone are not safe through transaction-mode pooling. On a pooled connection with
+no startup custom GUC, `current_setting(..., true)` is NULL before first use and
+can be an empty string after a `SET LOCAL` transaction ends. Future guards must
+treat both NULL and empty as unset/version zero, not cast empty text to a valid
+writer version or infer authority from having observed a marker earlier.
+Activation uses bounded
 try-lock/backoff and a visible deferred outcome under sustained shared holders;
 it cannot busy-spin, force-stop work or claim starvation-free activation without
 the 0a mixed-writer/throughput evidence specified in the companion.
@@ -1321,9 +1375,27 @@ revision; it must not reinterpret new durable records or trigger replay.
   checker-path regressions for newly introduced status sites.
 - [x] Complete independent adversarial review of M0 and address all blocking
   design and characterization findings.
+- [x] Start 0a with the passive transaction runner/configurator and focused unit
+  and real PostgreSQL transaction tests. Review-driven regressions prevent a
+  runner from taking ownership of an existing connection's outer transaction.
+- [x] Validate real-SessionStore composition on PostgreSQL 17.10 with the complete
+  unmodified migration chain, including callback-error rollback and outer commit.
+- [x] Expose caller-owned approved-grant persistence, preserving the legacy
+  wrapper and SQL/order. Unit tests and six synthetic actual-SQL PostgreSQL
+  cases cover shared commit/rollback, duplicates, tenant rejection and deleted
+  sessions. Explicitly inventory the new root; it does not yet implement
+  canonical admission authority.
+- [x] Validate the six approved-grant composition cases on PostgreSQL 17.10
+  with the complete unmodified migration chain, plus concurrent characterization
+  of legacy lost updates and prior-statement prelocking; no prerequisite skips
+  remain. This does not fix or authorize conversion of the legacy writer.
+- [x] Complete final independent review of this passive foundation candidate
+  after the cleanup, concurrency-characterization and proof follow-ups.
+- [ ] Add remaining passive versioned schema and composable persistence with
+  their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
   wiring, retained-owner end policy, activation and compatibility with real callers.
-- [ ] In 0a, complete real-caller/full-schema characterization and close remaining
+- [ ] In 0a, complete remaining real-caller/full-schema characterization and close
   lock/receipt implementation proof gates; synthetic M0 probes do not satisfy them.
 - [ ] Complete the compatibility-floor release before changing transaction overlap.
 - [ ] Implement milestones 1–4 for ordinary commands and adapters.
@@ -1373,6 +1445,91 @@ activation or deployment. Those are 0a proof gates. The syntax inventories also
 do not prove dynamic SQL, arbitrary aliases/imported helpers or the correctness
 of the eventual production predicates. Recheck each classified site when
 implementing its migration.
+
+### 0a transaction-foundation validation
+
+Initial race verification passed 295 subtests plus standalone checks, including
+the existing M0 probes, new transaction unit cases and 12 real PostgreSQL cases.
+There were no failures or skips in that selected run. PostgreSQL cases verify
+READ COMMITTED despite different pool defaults, transaction-local settings on a
+reused connection, application-error rollback, confirmed-abort retries for NOWAIT
+and implicit FK contention, and preservation of an existing caller transaction.
+Vet, tenancy checks, both source inventories and formatting also pass.
+
+The earlier PostgreSQL 14 prerequisite gap is now closed for these two passive
+foundations. Both full-schema test roots pass on disposable PostgreSQL 17.10,
+applying the complete unmodified migration chain through migration 000314 in
+separate databases. `TestLifecycleTransactionFullSchemaPostgres` executes real
+SessionStore create/update/read behavior and verifies that only the outer unit
+can commit or roll back the mutation. The test server uses a private Unix socket
+with no TCP listener; no kernel settings, existing database services, production
+data, consumer registration or activation changed. This is not proof of canonical
+caller wiring, mixed-writer coexistence, the deployed floor or production overhead.
+
+The approved-grant persistence slice also passed its focused unit and race
+checks. The original five PostgreSQL 14 synthetic cases execute the actual store
+SQL and verify standalone and linked commits, caller rollback of earlier work
+and both snapshots, unchanged duplicates and foreign-org rejection. PostgreSQL
+17 verification now covers six cases on both synthetic and fully migrated
+schemas, adding exact soft-delete rejection and rollback of earlier caller work.
+Two additional full-schema cases deliberately characterize the legacy concurrent
+lost update and verify that a prior-statement parent lock retains both distinct
+grants in the session and automation snapshots. They observe the server-side
+blocking graph rather than infer ordering from sleep. This is proof of a required
+composition prerequisite, not a repair of the unchanged legacy wrapper or a
+canonical authorization operation. The reviewed source
+inventory now contains 607 lifecycle symbols (one added persistence root) and
+the unchanged 123 job-status sites. This increment is passive extraction, not
+an additional lifecycle authority owner or completion of 0a. The legacy lock
+inversion and independent human-input grant transaction remain until canonical
+admission and all mixed-writer conversions are implemented and proved.
+
+After the review follow-ups, the combined race selection on PostgreSQL 17.10
+passed 334 subtests and 45 test roots, with zero failures or skips (23.429s).
+Both full-schema roots also passed three additional repetitions: 30 root/subtest
+pass events, no failures or skips (51.832s). No fixture databases or lock-probe
+schemas remained afterward. Reproduce
+with an owned disposable PostgreSQL 15+ server in `TEST_DATABASE_URL` and
+`go test -race ./internal/db -run '^(TestLifecycleTransactionFullSchemaPostgres|TestAgentCapabilityApprovedGrantFullSchemaPostgres)$' -count=3`.
+The complete selection also includes the M0 probes and transaction/grant unit
+tests; narrow full-schema success does not replace the remaining 0a gates.
+
+Review regressions cover panic and `runtime.Goexit` cleanup without replacing the
+abnormal exit or replaying work. A one-connection PostgreSQL pool verifies that
+Goexit releases the connection and rolls back its staged write. A real two-row
+deadlock produces SQLSTATE 40P01, proves the aborted write absent at a retry
+barrier, then commits only the fresh attempt; that test also passed ten
+race-enabled repetitions. Both worker goroutines are cancelled and joined before
+fixture cleanup, including assertion failures. The settings matrix verifies
+NULL-before-use and empty-after-transaction custom-GUC behavior on the same
+connection without a startup marker. Unit checks sample the 25–100ms jitter
+bounds and observe the minimum delay after rollback before replacement
+acquisition. The runner still makes no minimum commit-time reservation; live
+context is not proof that a subsequent commit outcome will be certain.
+
+The final permission-aware candidate repeated the combined race selection with
+334 subtests and 45 roots passing, no failures or skips (12.144s). The deadlock
+victim probe requires permission to set `deadlock_timeout`: only SQLSTATE 42501
+from its initial setting statement skips that probe, before starting workers.
+Other setup errors still fail. The owned PostgreSQL 17 run exercises the actual
+deadlock; an environment that skips it does not establish that part of the proof.
+A focused check with a restricted non-superuser role in its own disposable
+database reached that explicit skip; its temporary database and role were removed.
+
+Vet, tenancy, source inventories, formatting and the pinned security scanner
+pass for the touched packages. The linter command has 95.1% statement coverage
+and passes its race suite. Gosec module version v2.22.4 scanned 140 files in
+`internal/db` and `cmd/lint-lifecycle` with zero issues. The only new scanner
+exception is a single-site G404 justification for non-security contention-delay
+jitter; it does not govern identity, authorization or replay permission.
+
+Independent Opus review at xhigh approved this passive foundation slice on
+2026-10-18 with no residual findings under the unchanged acceptance criteria.
+The reviewer verified all ten frozen file hashes before and after review and
+independently repeated the 45-root/334-subtest PostgreSQL race selection without
+failures or skips. The final changes to this plan only record that verdict and
+complete the review checkbox. This is not approval of canonical authority,
+caller conversion, whole 0a, activation, deployment or production acceptance.
 
 ## Surprises & Discoveries
 
