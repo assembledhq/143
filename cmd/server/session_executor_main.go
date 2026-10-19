@@ -21,6 +21,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/logging"
 	"github.com/assembledhq/143/internal/metrics"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/providers"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
@@ -73,6 +74,7 @@ func runSessionExecutorMain() {
 	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{
 		MaxConns:        cfg.DatabaseMaxConns,
 		MaxConnIdleTime: cfg.DatabaseMaxConnIdleTime,
+		ApplicationName: db.LifecycleConnectionApplicationName(models.LifecycleWriterRoleSessionExecutor, version.BuildSHA),
 	})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")

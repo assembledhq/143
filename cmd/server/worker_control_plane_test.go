@@ -11,6 +11,8 @@ import (
 	"github.com/assembledhq/143/internal/cluster"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/version"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -24,15 +26,16 @@ func TestWorkerControlPlanePoolRoleAndConfiguration(t *testing.T) {
 	tests := []struct {
 		mode     string
 		reserved bool
-	}{{"worker", true}, {"all", true}, {"api", false}, {"", false}}
+	}{{"worker", true}, {"all", true}, {"api", false}, {"", false}, {"session_executor", false}, {"API", false}}
 	for _, tt := range tests {
 		t.Run(tt.mode, func(t *testing.T) {
 			t.Parallel()
-			cfg := config.Config{Mode: tt.mode, DatabaseURL: "postgres://test:synthetic@localhost/test?pool_max_conns=17&pool_min_conns=7&pool_min_idle_conns=5&lock_timeout=30s&statement_timeout=60s", DatabaseMaxConns: 4, DatabaseMaxConnIdleTime: time.Minute}
+			cfg := config.Config{Mode: tt.mode, DatabaseURL: "postgres://test:synthetic@localhost/test?pool_max_conns=17&pool_min_conns=7&pool_min_idle_conns=5&lock_timeout=30s&statement_timeout=60s&application_name=synthetic-existing-name", DatabaseMaxConns: 4, DatabaseMaxConnIdleTime: time.Minute}
 			before := cfg
 			reserve, err := workerControlPlanePoolConfig(cfg)
 			require.NoError(t, err, "role-specific pool configuration must parse")
 			if tt.reserved {
+				require.Equal(t, db.LifecycleConnectionApplicationName(models.LifecycleWriterRole(tt.mode), version.BuildSHA), reserve.ConnConfig.RuntimeParams["application_name"], "the actual worker reserve must override a DSN name using this binary's configured role and build")
 				require.Equal(t, [3]int32{2, 0, 0}, [3]int32{reserve.MaxConns, reserve.MinConns, reserve.MinIdleConns}, "only the worker reserve must override URL pool budgets")
 				require.Equal(t, time.Minute, reserve.MaxConnIdleTime, "reserved connections must retain idle cleanup")
 				require.Equal(t, "4s", reserve.ConnConfig.RuntimeParams["lock_timeout"], "server lock waits must end before a normal renewal deadline")
@@ -51,6 +54,7 @@ func TestWorkerControlPlanePoolRoleAndConfiguration(t *testing.T) {
 			require.Equal(t, [3]int32{4, 7, 5}, [3]int32{normal.MaxConns, normal.MinConns, normal.MinIdleConns}, "control-plane settings must not change ordinary or inherited executor budgets")
 			require.Equal(t, "30s", normal.ConnConfig.RuntimeParams["lock_timeout"], "the reserve must not change ordinary or inherited executor lock policy")
 			require.Equal(t, "60s", normal.ConnConfig.RuntimeParams["statement_timeout"], "the reserve must not change ordinary or inherited executor statement policy")
+			require.Equal(t, "synthetic-existing-name", normal.ConnConfig.RuntimeParams["application_name"], "callers that omit attribution must retain their existing DSN application name")
 			require.Equal(t, before, cfg, "creating the reserve must not mutate inherited process configuration")
 		})
 	}
@@ -97,6 +101,9 @@ CREATE TABLE jobs(id uuid PRIMARY KEY,org_id uuid,job_type text,payload jsonb,st
 	control, err := newWorkerControlPlanePool(ctx, config.Config{Mode: "worker", DatabaseURL: controlURL.String()})
 	require.NoError(t, err, "open production bounded control-plane reserve")
 	t.Cleanup(control.Close)
+	var controlName string
+	require.NoError(t, control.QueryRow(ctx, `SELECT current_setting('application_name')`).Scan(&controlName), "read the actual reserve startup name")
+	require.Equal(t, db.LifecycleConnectionApplicationName(models.LifecycleWriterRoleWorker, version.BuildSHA), controlName, "production reserve wiring must override the fixture DSN name with passive role/build attribution")
 	jobID, orgID, token := uuid.New(), uuid.New(), uuid.New()
 	_, err = admin.Exec(ctx, `INSERT INTO nodes(id,status,drain_intent,last_heartbeat_at,metadata,drain_requested_at) VALUES('test-worker','active','none',now()-interval '5 minutes','{}',NULL); INSERT INTO jobs VALUES($1,$2,'test','{}','running',$3,now()+interval '10 seconds',now())`, pgx.QueryExecModeSimpleProtocol, jobID, orgID, token)
 	require.NoError(t, err, "seed stale heartbeat and running fenced job")
@@ -134,6 +141,22 @@ CREATE TABLE jobs(id uuid PRIMARY KEY,org_id uuid,job_type text,payload jsonb,st
 		// These cases intentionally share and sequentially lock one synthetic
 		// row while the only ordinary connection remains occupied.
 		t.Run(tt.name, func(t *testing.T) {
+			// The application label is intentionally shared by every worker
+			// running this binary. Capture both of this fixture's actual backend
+			// PIDs before contention so parallel fixtures cannot satisfy its
+			// cancellation evidence or inflate its connection count.
+			firstControl, err := control.Acquire(ctx)
+			require.NoError(t, err, "acquire this fixture's first reserve backend before row locking")
+			t.Cleanup(firstControl.Release)
+			secondControl, err := control.Acquire(ctx)
+			require.NoError(t, err, "acquire this fixture's second reserve backend before row locking")
+			t.Cleanup(secondControl.Release)
+			controlPIDs := make([]int32, 2)
+			require.NoError(t, firstControl.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&controlPIDs[0]), "read the first reserve backend PID without relying on application-name uniqueness")
+			require.NoError(t, secondControl.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&controlPIDs[1]), "read the second reserve backend PID without relying on application-name uniqueness")
+			require.NotEqual(t, controlPIDs[0], controlPIDs[1], "the bounded reserve must expose two distinct physical backends")
+			firstControl.Release()
+			secondControl.Release()
 			var beforeExpiry time.Time
 			require.NoError(t, admin.QueryRow(ctx, `SELECT lease_expires_at FROM jobs WHERE id=$1`, jobID).Scan(&beforeExpiry), "save the last confirmed lease before contention")
 			locker, err := admin.Begin(ctx)
@@ -153,7 +176,7 @@ CREATE TABLE jobs(id uuid PRIMARY KEY,org_id uuid,job_type text,payload jsonb,st
 			}()
 			require.Eventually(t, func() bool {
 				var waiting int
-				err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock'`, schema).Scan(&waiting)
+				err := admin.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid=ANY($1) AND wait_event_type='Lock'`, controlPIDs).Scan(&waiting)
 				return err == nil && waiting == 1
 			}, time.Second, time.Millisecond, "the actual PostgreSQL backend must be waiting on the locked lease")
 			require.NoError(t, node.HeartbeatOnce(ctx), "one locked renewal must leave room for heartbeat")
@@ -167,7 +190,7 @@ CREATE TABLE jobs(id uuid PRIMARY KEY,org_id uuid,job_type text,payload jsonb,st
 				t.Fatal("locked renewal must not wait indefinitely")
 			}
 			var waiting, connected int
-			require.NoError(t, admin.QueryRow(ctx, `SELECT count(*) FILTER (WHERE wait_event_type='Lock'), count(*) FROM pg_stat_activity WHERE application_name=$1`, schema).Scan(&waiting, &connected), "read all real reserve backends before releasing the fixture lock")
+			require.NoError(t, admin.QueryRow(ctx, `SELECT count(*) FILTER (WHERE wait_event_type='Lock'), count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid=ANY($1)`, controlPIDs).Scan(&waiting, &connected), "read only this fixture's captured reserve backends before releasing the fixture lock")
 			require.Equal(t, 0, waiting, "cancelled renewals must leave no server backend waiting to apply an abandoned write")
 			require.LessOrEqual(t, connected, 2, "cancelled statements must reuse the bounded reserve instead of accumulating abandoned backends")
 			require.NoError(t, locker.Rollback(ctx), "release the fixture lock only after server cancellation is proven")

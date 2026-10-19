@@ -135,6 +135,7 @@ func main() {
 	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{
 		MaxConns:        cfg.DatabaseMaxConns,
 		MaxConnIdleTime: cfg.DatabaseMaxConnIdleTime,
+		ApplicationName: serverLifecycleConnectionApplicationName(cfg.Mode, version.BuildSHA),
 	})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
