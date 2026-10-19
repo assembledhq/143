@@ -1,11 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"os"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -35,12 +36,25 @@ func TestSessionExecutorWriterObservationLifetimeWiring(t *testing.T) {
 	require.Equal(t, 1, strings.Count(body, "lifecyclewriter.StartSessionExecutor("), "one process must start only one passive observer")
 }
 
-func TestWriterObserverPartialCoverageAndMaintenancePool(t *testing.T) {
+func TestWriterObserverServerPoolAndLifetimeWiring(t *testing.T) {
 	t.Parallel()
-	file, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	source, err := os.ReadFile("main.go")
+	require.NoError(t, err, "read normal server bootstrap")
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", source, 0)
 	require.NoError(t, err, "parse normal server bootstrap")
 	var wiredPool string
+	var observerCalls []string
 	ast.Inspect(file, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok {
+			if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if owner, ok := selector.X.(*ast.Ident); ok && owner.Name == "lifecyclewriter" && selector.Sel.Name == "StartServer" {
+					var rendered bytes.Buffer
+					require.NoError(t, format.Node(&rendered, fset, call), "inspect the actual server observer call rather than a comment")
+					observerCalls = append(observerCalls, rendered.String())
+				}
+			}
+		}
 		kv, ok := node.(*ast.KeyValueExpr)
 		if !ok {
 			return true
@@ -59,9 +73,23 @@ func TestWriterObserverPartialCoverageAndMaintenancePool(t *testing.T) {
 		return true
 	})
 	require.Equal(t, "pool", wiredPool, "global maintenance must use the existing ordinary pool, not the two-connection worker reserve")
-	for _, imported := range file.Imports {
-		path, err := strconv.Unquote(imported.Path.Value)
-		require.NoError(t, err, "inspect normal server imports")
-		require.NotEqual(t, "github.com/assembledhq/143/internal/services/lifecyclewriter", path, "normal API and worker process observers must remain deferred in this partial inventory slice")
+	require.Equal(t, []string{"lifecyclewriter.StartServer(db.NewLifecycleWriterInstanceStore(pool), cfg.Mode, version.BuildSHA, logger)"}, observerCalls, "one configured server process must observe the real binary on its ordinary pool exactly once")
+	anchors := []string{
+		"\n\t\tpool.Close()\n\t}()",
+		"db.EnsureAnthropicSplitSentinel(ctx, pool)",
+		"stopWriterObserver := lifecyclewriter.StartServer(",
+		"defer stopWriterObserver()",
+		"shutdownDone := make(chan struct{})",
+		"defer close(shutdownDone)",
+		"if err := srv.Shutdown(shutdownCtx)",
+		"if sandboxAuthShutdown != nil",
+		"serveAndWaitForShutdown(func() error { return srv.Serve(ln) }, shutdownDone)",
+	}
+	previous := -1
+	for _, anchor := range anchors {
+		position := strings.Index(string(source), anchor)
+		require.NotEqual(t, -1, position, "normal server must retain the coordinated observer lifetime seam: %s", anchor)
+		require.Greater(t, position, previous, "normal shutdown completion must precede observer stop and deferred pool closure: %s", anchor)
+		previous = position
 	}
 }

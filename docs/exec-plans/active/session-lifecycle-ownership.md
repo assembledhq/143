@@ -34,9 +34,22 @@ time budget or failures. No active organizations means no scheduled cleanup.
 Seven days is eligibility, not a deletion deadline or a bounded history size;
 inserts above actual cleanup throughput can grow the backlog indefinitely.
 No row establishes continuous liveness, drained transactions or a deployment
-compatibility floor. API/worker/all process
-registration, connection census, business callers, schema guards and activation
-remain unchanged; this partial inventory does not complete 0a.
+compatibility floor. The next passive slice extends the same observer to normal
+`api`, `worker` and `all` server modes. Each invocation has one fresh UUID and
+its configured role; combined `all` mode has one row, not separate API and
+worker rows. Role describes configuration, not successful capability startup.
+Unsupported modes log and skip observation without changing startup admission.
+Normal server observation begins after the existing credentials migration gate
+on the ordinary pool, with the same interval, TTL, version and attempt budget.
+The normal HTTP serving path now joins its existing coordinated shutdown routine
+before returning: listener closure alone precedes HTTP/gateway/socket finalization.
+Observation continues through that routine, then is canceled and joined before
+ordinary-pool closure. Genuine serving failures keep their abrupt fatal exit.
+Existing shutdown policies and timeouts are unchanged. Workers and credential
+socket handlers are not all joined by that routine, and some cleanup has no hard
+global bound; neither routine completion nor row expiry proves every writer has
+drained. Connection census, business callers, schema guards and activation remain
+unchanged; this expanded but partial inventory does not complete 0a.
 
 Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
 identify the inspected implementation; the executable inventory rechecks the

@@ -27,15 +27,35 @@ type Store interface {
 // Call stop after runtime cleanup and before closing the database pool. Neither
 // stopping nor expiry certifies that a process or its transactions have drained.
 func StartSessionExecutor(store Store, buildSHA string, logger zerolog.Logger) func() {
-	ticker := time.NewTicker(observationInterval)
-	return startSessionExecutor(store, buildSHA, logger, ticker.C, ticker.Stop, observationTimeout)
+	return start(store, models.LifecycleWriterRoleSessionExecutor, buildSHA, logger)
 }
 
-func startSessionExecutor(store Store, buildSHA string, logger zerolog.Logger, ticks <-chan time.Time, stopTicks func(), timeout time.Duration) func() {
+// StartServer observes one configured server process, including one combined
+// all-mode process rather than separate API/worker identities. The configured
+// role does not attest that every capability initialized. Unsupported modes
+// retain existing startup behavior: log and skip this optional observation.
+// Stop/join only after coordinated shutdown and before closing the ordinary pool.
+func StartServer(store Store, mode, buildSHA string, logger zerolog.Logger) func() {
+	role := models.LifecycleWriterRole(mode)
+	switch role {
+	case models.LifecycleWriterRoleAPI, models.LifecycleWriterRoleWorker, models.LifecycleWriterRoleAll:
+		return start(store, role, buildSHA, logger)
+	default:
+		logger.Warn().Str("mode", mode).Msg("passive lifecycle writer observation skipped for unsupported server mode")
+		return func() {}
+	}
+}
+
+func start(store Store, role models.LifecycleWriterRole, buildSHA string, logger zerolog.Logger) func() {
+	ticker := time.NewTicker(observationInterval)
+	return startObserver(store, role, buildSHA, logger, ticker.C, ticker.Stop, observationTimeout)
+}
+
+func startObserver(store Store, role models.LifecycleWriterRole, buildSHA string, logger zerolog.Logger, ticks <-chan time.Time, stopTicks func(), timeout time.Duration) func() {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	instanceID := uuid.New()
-	logger = logger.With().Str("writer_instance_id", instanceID.String()).Logger()
+	logger = logger.With().Str("writer_instance_id", instanceID.String()).Str("writer_role", string(role)).Logger()
 	go func() {
 		defer close(done)
 		defer stopTicks()
@@ -44,7 +64,7 @@ func startSessionExecutor(store Store, buildSHA string, logger zerolog.Logger, t
 				return
 			}
 			attemptCtx, attemptCancel := context.WithTimeout(ctx, timeout)
-			err := store.Observe(attemptCtx, instanceID, models.LifecycleWriterRoleSessionExecutor, buildSHA)
+			err := store.Observe(attemptCtx, instanceID, role, buildSHA)
 			attemptCancel()
 			if err != nil && ctx.Err() == nil {
 				logger.Warn().Err(err).Msg("passive lifecycle writer observation failed; next interval will retry")

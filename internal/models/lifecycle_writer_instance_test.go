@@ -14,10 +14,13 @@ func TestLifecycleWriterRole_Validate(t *testing.T) {
 		role    LifecycleWriterRole
 		wantErr string
 	}{
+		{name: "api process", role: LifecycleWriterRoleAPI},
+		{name: "worker process", role: LifecycleWriterRoleWorker},
+		{name: "combined process", role: LifecycleWriterRoleAll},
 		{name: "standalone session executor", role: LifecycleWriterRoleSessionExecutor},
 		{name: "empty is invalid", wantErr: `invalid LifecycleWriterRole: ""`},
 		{name: "unknown is invalid", role: "other", wantErr: `invalid LifecycleWriterRole: "other"`},
-		{name: "unwired api is invalid", role: "api", wantErr: `invalid LifecycleWriterRole: "api"`},
+		{name: "role spelling is exact", role: "API", wantErr: `invalid LifecycleWriterRole: "API"`},
 	}
 
 	for _, tt := range tests {
@@ -29,7 +32,7 @@ func TestLifecycleWriterRole_Validate(t *testing.T) {
 				require.EqualError(t, err, tt.wantErr, "only participating process roles may register observations")
 				return
 			}
-			require.NoError(t, err, "standalone executor observations should use the typed registered role")
+			require.NoError(t, err, "participating process observations should use a typed registered role")
 		})
 	}
 }

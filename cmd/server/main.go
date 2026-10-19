@@ -49,6 +49,7 @@ import (
 	githubratelimit "github.com/assembledhq/143/internal/services/github/ratelimit"
 	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 	"github.com/assembledhq/143/internal/services/ingestion"
+	"github.com/assembledhq/143/internal/services/lifecyclewriter"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/ownerloss"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
@@ -256,6 +257,12 @@ func main() {
 	if err := db.EnsureAnthropicSplitSentinel(ctx, pool); err != nil {
 		logger.Fatal().Err(err).Msg("coding-credentials migration gate failed; server refusing to start")
 	}
+	// Observations describe the configured process, not readiness or drained
+	// writers. Keep their independent lifetime through coordinated shutdown;
+	// defers join the observer before the ordinary pool closes. Fatal exits
+	// skip these defers and leave the last observation to expire.
+	stopWriterObserver := lifecyclewriter.StartServer(db.NewLifecycleWriterInstanceStore(pool), cfg.Mode, version.BuildSHA, logger)
+	defer stopWriterObserver()
 
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
@@ -932,7 +939,9 @@ func main() {
 	//   - Preview gateway:     60s, in parallel with HTTP drain.
 	// On worker-only nodes the HTTP drain is a no-op (no traffic) so the
 	// long worker budget is the only thing the deploy actually waits on.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
@@ -1064,7 +1073,10 @@ func main() {
 	if err := nodeManager.HeartbeatOnce(ctx); err != nil {
 		logger.Warn().Err(err).Msg("failed to publish preview routing readiness; next heartbeat will retry")
 	}
-	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+	// Serve returns as soon as Shutdown closes the listener, before the
+	// coordinated HTTP/gateway/socket finalization above has necessarily ended.
+	// Joining that routine is not proof every worker or socket handler drained.
+	if err := serveAndWaitForShutdown(func() error { return srv.Serve(ln) }, shutdownDone); err != nil {
 		logger.Fatal().Err(err).Msg("server failed")
 	}
 }
