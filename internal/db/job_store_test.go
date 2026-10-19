@@ -1180,6 +1180,47 @@ func TestJobStore_SandboxCapacitySummary(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestJobStore_FleetSandboxCapacity(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT DISTINCT ON \\(host_key\\)").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"workers", "max_sandboxes", "live_sandboxes", "reserved_sandboxes"}).
+			AddRow(2, 8, 3, 1))
+
+	got, err := NewJobStore(mock).FleetSandboxCapacity(context.Background())
+
+	require.NoError(t, err, "FleetSandboxCapacity should scan host-deduplicated node metadata")
+	require.Equal(t, FleetSandboxCapacity{
+		Workers:           2,
+		MaxSandboxes:      8,
+		LiveSandboxes:     3,
+		ReservedSandboxes: 1,
+	}, got, "FleetSandboxCapacity should return the fleet totals")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_FleetSandboxCapacity_WrapsQueryError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectQuery("AS host_key").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(errors.New("nodes unavailable"))
+
+	_, err = NewJobStore(mock).FleetSandboxCapacity(context.Background())
+	require.Error(t, err, "FleetSandboxCapacity should surface query failures")
+	require.Contains(t, err.Error(), "fleet sandbox capacity", "FleetSandboxCapacity should wrap the query error with context")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestJobStore_OldestPendingSessionJobAge_UsesRunnableTime(t *testing.T) {
 	t.Parallel()
 

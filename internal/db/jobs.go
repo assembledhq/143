@@ -115,6 +115,21 @@ type SandboxCapacitySummary struct {
 	MaxSandboxes      int
 }
 
+// FleetSandboxCapacity is an advisory, host-deduplicated view of worker
+// sandbox capacity for admin surfaces. Unlike SandboxCapacitySummary it
+// collapses overlapping worker generations on one physical host (a blue/green
+// deploy heartbeats two node rows for the same Docker daemon) so the total is
+// not double-counted. It is still best-effort telemetry: heartbeats can be up
+// to nodeDeadHeartbeatThreshold old, drains and restarts shrink it abruptly,
+// and preview-held sandboxes consume the same slots as agent runs. Local
+// admission (SandboxCapacityGate) remains authoritative.
+type FleetSandboxCapacity struct {
+	Workers           int
+	MaxSandboxes      int
+	LiveSandboxes     int
+	ReservedSandboxes int
+}
+
 func NewJobStore(db DBTX) *JobStore {
 	return &JobStore{db: db, logger: zerolog.Nop()}
 }
@@ -1760,6 +1775,75 @@ func (s *JobStore) SandboxCapacitySummary(ctx context.Context) (SandboxCapacityS
 		return SandboxCapacitySummary{}, fmt.Errorf("sandbox capacity summary: %w", err)
 	}
 	return summary, nil
+}
+
+// FleetSandboxCapacity returns the host-deduplicated sandbox capacity of the
+// worker fleet. One row per physical host (keyed by sandbox_host_id, falling
+// back to the node id for nodes that predate host identity). The newest fresh
+// generation on each host is selected first and its eligibility judged
+// second, as in CodeReviewSandboxAvailable: a host whose newest generation is
+// draining or failing to count contributes nothing, rather than letting an
+// older generation stand in for it. Live counts are daemon-wide so the max
+// across fresh generations is taken; in-process reservations are summed across
+// them so a draining generation's outstanding admissions still show. Hosts
+// advertising no capacity are excluded so a misconfigured node reads as absent
+// rather than as zero.
+// lint:allow-no-orgid reason="cross-org worker fleet capacity for the admin runtime status surface"
+func (s *JobStore) FleetSandboxCapacity(ctx context.Context) (FleetSandboxCapacity, error) {
+	var capacity FleetSandboxCapacity
+	err := s.db.QueryRow(ctx, `
+		WITH fresh_workers AS (
+			SELECT
+				id,
+				started_at,
+				status,
+				drain_intent,
+				COALESCE(NULLIF(metadata->>'sandbox_host_id', ''), id) AS host_key,
+				COALESCE(metadata->>'live_sandbox_count_error', '') = '' AS counts_ok,
+				CASE WHEN metadata->>'live_sandbox_count' ~ '^[0-9]{1,9}$' THEN (metadata->>'live_sandbox_count')::int ELSE 0 END AS live_sandboxes,
+				CASE WHEN metadata->>'reserved_sandbox_count' ~ '^[0-9]{1,9}$' THEN (metadata->>'reserved_sandbox_count')::int ELSE 0 END AS reserved_sandboxes,
+				CASE WHEN metadata->>'max_active_sandboxes' ~ '^[0-9]{1,9}$' THEN (metadata->>'max_active_sandboxes')::int ELSE 0 END AS max_active_sandboxes
+			FROM nodes
+			WHERE mode IN ('worker', 'all')
+			  AND status IN ('active', 'draining')
+			  AND last_heartbeat_at >= @dead_before
+		),
+		latest AS (
+			SELECT DISTINCT ON (host_key)
+				host_key,
+				status,
+				drain_intent,
+				counts_ok,
+				max_active_sandboxes
+			FROM fresh_workers
+			ORDER BY host_key, started_at DESC, id DESC
+		),
+		occupancy AS (
+			SELECT
+				host_key,
+				MAX(live_sandboxes) AS live_sandboxes,
+				SUM(reserved_sandboxes) AS reserved_sandboxes
+			FROM fresh_workers
+			WHERE counts_ok
+			GROUP BY host_key
+		)
+		SELECT
+			COUNT(*)::int AS workers,
+			COALESCE(SUM(latest.max_active_sandboxes), 0)::int AS max_sandboxes,
+			COALESCE(SUM(occupancy.live_sandboxes), 0)::int AS live_sandboxes,
+			COALESCE(SUM(occupancy.reserved_sandboxes), 0)::int AS reserved_sandboxes
+		FROM latest
+		JOIN occupancy USING (host_key)
+		WHERE latest.status = 'active'
+		  AND latest.drain_intent = 'none'
+		  AND latest.counts_ok
+		  AND latest.max_active_sandboxes > 0`,
+		pgx.NamedArgs{"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold)},
+	).Scan(&capacity.Workers, &capacity.MaxSandboxes, &capacity.LiveSandboxes, &capacity.ReservedSandboxes)
+	if err != nil {
+		return FleetSandboxCapacity{}, fmt.Errorf("fleet sandbox capacity: %w", err)
+	}
+	return capacity, nil
 }
 
 func (s *JobStore) execLeaseTerminalUpdate(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {

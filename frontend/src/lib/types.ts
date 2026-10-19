@@ -2590,6 +2590,16 @@ export interface RuntimeSettingsStatus {
     max_concurrent_agent_runs: number;
     active_previews: number;
     max_previews_per_user: number;
+    /**
+     * Advisory worker-fleet sandbox capacity (host-deduplicated). When
+     * `telemetry_available` is false no fresh worker reported capacity, so
+     * the counts are meaningless and must not be shown as zero.
+     */
+    fleet?: {
+      telemetry_available: boolean;
+      workers: number;
+      max_sandboxes: number;
+    };
   };
 }
 

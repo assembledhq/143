@@ -3,16 +3,17 @@
  * settings pages can't drift apart while editing the same server field.
  *
  * Server-side values live in `internal/models/org_settings.go`:
- * - `DefaultMaxConcurrentRuns` / `OrgSize.MaxConcurrentRuns()` — the UI
- *   max mirrors the Enterprise tier's recommendation; any int is accepted
- *   by the server, so the UI cap is purely for sanity.
+ * - `MinMaxConcurrentRuns` / `MaxMaxConcurrentRuns` bound
+ *   `max_concurrent_runs` and are enforced by `ValidateSettingsModels` on
+ *   save. The ceiling is a sanity bound, not fleet capacity: the Capacity
+ *   card shows the live worker-fleet total as advisory context instead.
  * - `MinMaxSessionDurationSeconds` / `MaxMaxSessionDurationSeconds` are
  *   enforced by `ParseOrgSettings`, which clamps on save. These mirror
  *   those bounds so the number input matches server clamping.
  */
 
 export const MIN_CONCURRENT_RUNS = 1;
-export const MAX_CONCURRENT_RUNS = 25;
+export const MAX_CONCURRENT_RUNS = 100;
 
 export const MIN_SESSION_DURATION_MINUTES = 2;
 export const MAX_SESSION_DURATION_MINUTES = 120;

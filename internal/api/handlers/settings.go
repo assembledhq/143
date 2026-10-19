@@ -42,6 +42,13 @@ type RuntimeStatusPreviewCounter interface {
 	CountActivePreviewsByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
 }
 
+// RuntimeStatusFleetCapacityReader reports advisory worker-fleet sandbox
+// capacity for the runtime status surface. It is cross-org telemetry about
+// shared infrastructure, not tenant data.
+type RuntimeStatusFleetCapacityReader interface {
+	FleetSandboxCapacity(ctx context.Context) (db.FleetSandboxCapacity, error)
+}
+
 type SettingsHandler struct {
 	orgStore     *db.OrganizationStore
 	llmDefaults  map[string]string // provider name → masked key (from server env)
@@ -52,6 +59,7 @@ type SettingsHandler struct {
 	workers      StaticEgressWorkerChecker
 	sessions     RuntimeStatusSessionCounter
 	previews     RuntimeStatusPreviewCounter
+	fleet        RuntimeStatusFleetCapacityReader
 }
 
 // StaticEgressStatus is platform-level availability for the opt-in static
@@ -75,12 +83,27 @@ type runtimeStatusStaticEgressResponse struct {
 	PublicIP  string `json:"public_ip,omitempty"`
 }
 
+// runtimeStatusFleetResponse is advisory context for sizing the org's
+// max_concurrent_runs quota. TelemetryAvailable is false when no fresh worker
+// reports capacity (local dev, a drained fleet, or a failed lookup) so the UI
+// can show "unavailable" instead of a misleading zero. Only the fleet's size
+// is exposed: the route is readable by every org member and the fleet is
+// shared across orgs, so live utilization stays server-side. Preview-held
+// sandboxes consume the same slots, and local per-node admission remains
+// authoritative.
+type runtimeStatusFleetResponse struct {
+	TelemetryAvailable bool `json:"telemetry_available"`
+	Workers            int  `json:"workers"`
+	MaxSandboxes       int  `json:"max_sandboxes"`
+}
+
 type runtimeStatusCapacityResponse struct {
-	State                  string `json:"state"`
-	ActiveAgentRuns        int    `json:"active_agent_runs"`
-	MaxConcurrentAgentRuns int    `json:"max_concurrent_agent_runs"`
-	ActivePreviews         int    `json:"active_previews"`
-	MaxPreviewsPerUser     int    `json:"max_previews_per_user"`
+	State                  string                     `json:"state"`
+	ActiveAgentRuns        int                        `json:"active_agent_runs"`
+	MaxConcurrentAgentRuns int                        `json:"max_concurrent_agent_runs"`
+	ActivePreviews         int                        `json:"active_previews"`
+	MaxPreviewsPerUser     int                        `json:"max_previews_per_user"`
+	Fleet                  runtimeStatusFleetResponse `json:"fleet"`
 }
 
 type runtimeStatusResponse struct {
@@ -120,6 +143,12 @@ func (h *SettingsHandler) SetStaticEgressWorkerChecker(workers StaticEgressWorke
 func (h *SettingsHandler) SetRuntimeStatusCounters(sessions RuntimeStatusSessionCounter, previews RuntimeStatusPreviewCounter) {
 	h.sessions = sessions
 	h.previews = previews
+}
+
+// SetRuntimeStatusFleetCapacity wires the advisory worker-fleet capacity
+// reader into the runtime status endpoint.
+func (h *SettingsHandler) SetRuntimeStatusFleetCapacity(fleet RuntimeStatusFleetCapacityReader) {
+	h.fleet = fleet
 }
 
 func NewSettingsHandler(orgStore *db.OrganizationStore, llmDefaults map[string]string) *SettingsHandler {
@@ -230,6 +259,23 @@ func (h *SettingsHandler) GetRuntimeStatus(w http.ResponseWriter, r *http.Reques
 		capacityState = "limited"
 	}
 
+	// Fleet capacity is advisory: a lookup failure must not take down the
+	// status endpoint, and a fleet reporting no capacity is "unavailable",
+	// not "zero", so the UI never clamps a positive quota against it.
+	fleet := runtimeStatusFleetResponse{}
+	if h.fleet != nil {
+		fleetCapacity, fleetErr := h.fleet.FleetSandboxCapacity(r.Context())
+		if fleetErr != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(fleetErr).Msg("failed to read worker fleet sandbox capacity for runtime status")
+		} else if fleetCapacity.Workers > 0 && fleetCapacity.MaxSandboxes > 0 {
+			fleet = runtimeStatusFleetResponse{
+				TelemetryAvailable: true,
+				Workers:            fleetCapacity.Workers,
+				MaxSandboxes:       fleetCapacity.MaxSandboxes,
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, models.SingleResponse[runtimeStatusResponse]{Data: runtimeStatusResponse{
 		StaticEgress: runtimeStatusStaticEgressResponse{
 			Available: status.Available,
@@ -242,6 +288,7 @@ func (h *SettingsHandler) GetRuntimeStatus(w http.ResponseWriter, r *http.Reques
 			MaxConcurrentAgentRuns: settings.MaxConcurrentRuns,
 			ActivePreviews:         activePreviews,
 			MaxPreviewsPerUser:     settings.PreviewMaxPreviewsPerUser,
+			Fleet:                  fleet,
 		},
 	}})
 }

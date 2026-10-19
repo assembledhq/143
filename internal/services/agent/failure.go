@@ -35,6 +35,9 @@ const (
 	// FailureCategorySandboxCapacity marks a session whose job exhausted its
 	// retry budget while waiting for a sandbox slot.
 	FailureCategorySandboxCapacity = "sandbox_capacity"
+	// FailureCategoryConcurrencyTimeout marks a session whose job exhausted its
+	// retry budget while waiting for one of the org's max_concurrent_runs slots.
+	FailureCategoryConcurrencyTimeout = "concurrency_timeout"
 )
 
 // FailureSummary holds a human-readable explanation of why an agent run failed,

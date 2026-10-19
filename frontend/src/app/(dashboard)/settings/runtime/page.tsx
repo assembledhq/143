@@ -166,12 +166,17 @@ function SettingLabel({
 function HelperText({
   children,
   className,
+  id,
 }: {
   children: string;
   className?: string;
+  id?: string;
 }) {
   return (
-    <p className={cn("text-xs leading-5 text-muted-foreground", className)}>
+    <p
+      id={id}
+      className={cn("text-xs leading-5 text-muted-foreground", className)}
+    >
       {children}
     </p>
   );
@@ -182,6 +187,7 @@ function SettingRow({
   label,
   description,
   helper,
+  warning,
   tooltip,
   children,
   className,
@@ -190,6 +196,7 @@ function SettingRow({
   label: string;
   description: string;
   helper?: string;
+  warning?: string;
   tooltip?: string;
   children: ReactNode;
   className?: string;
@@ -206,6 +213,14 @@ function SettingRow({
         <HelperText>{description}</HelperText>
         {helper ? (
           <HelperText className="text-muted-foreground/80">{helper}</HelperText>
+        ) : null}
+        {warning ? (
+          <HelperText
+            id={`${id}-warning`}
+            className="text-amber-800 dark:text-amber-300"
+          >
+            {warning}
+          </HelperText>
         ) : null}
       </div>
       <div className="min-w-0 sm:w-[15rem]">{children}</div>
@@ -251,6 +266,7 @@ function BoundedNumberInput({
   step,
   unit,
   onStep,
+  describedBy,
 }: {
   id: string;
   label: string;
@@ -263,6 +279,7 @@ function BoundedNumberInput({
   step?: number;
   unit?: string;
   onStep?: (direction: -1 | 1) => void;
+  describedBy?: string;
 }) {
   if (onStep) {
     return (
@@ -300,6 +317,7 @@ function BoundedNumberInput({
             onChange={onChange}
             onBlur={onBlur}
             aria-label={label}
+            aria-describedby={describedBy}
             className="rounded-none border-0 focus-visible:ring-0"
           />
         </UnitInput>
@@ -620,14 +638,43 @@ function SandboxNetworkSection() {
   );
 }
 
+function formatFleetCapacity(fleet: {
+  workers: number;
+  max_sandboxes: number;
+}): string {
+  const workers = `${fleet.workers} ${fleet.workers === 1 ? "worker" : "workers"}`;
+  const sandboxes = `${fleet.max_sandboxes} ${
+    fleet.max_sandboxes === 1 ? "sandbox" : "sandboxes"
+  }`;
+  return `Fleet capacity: ${sandboxes} across ${workers}`;
+}
+
 function CapacityLimitsSection() {
   const { data: settingsResponse } = useOrgSettingsQuery();
+  const { data: runtimeStatusResponse } = useQuery({
+    queryKey: queryKeys.settings.runtimeStatus,
+    queryFn: () => api.settings.getRuntimeStatus(),
+  });
   const autosave = useOrgSettingsAutosave();
 
   const settings = getSettings(settingsResponse);
   const maxConcurrentRuns =
     settings.max_concurrent_runs ??
     DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
+  // Fleet capacity is advisory. The quota stays an org policy bounded by the
+  // server constants; the fleet total only tells admins what the workers can
+  // physically run right now, and it reads as unknown (not zero) when no
+  // fresh worker is reporting.
+  const fleet = runtimeStatusResponse?.data?.capacity?.fleet;
+  const fleetCapacity =
+    fleet?.telemetry_available && fleet.max_sandboxes > 0 ? fleet : undefined;
+  const concurrentRunsHelper = fleetCapacity
+    ? `Range ${MIN_CONCURRENT_RUNS}-${MAX_CONCURRENT_RUNS} · ${formatFleetCapacity(fleetCapacity)}`
+    : `Range ${MIN_CONCURRENT_RUNS}-${MAX_CONCURRENT_RUNS}`;
+  const concurrentRunsWarning =
+    fleetCapacity && maxConcurrentRuns > fleetCapacity.max_sandboxes
+      ? `Exceeds current fleet capacity (${fleetCapacity.max_sandboxes} sandboxes, shared with previews and other organizations). Runs above that will queue for a sandbox.`
+      : undefined;
   const maxPreviewsPerUser =
     settings.preview_max_previews_per_user ??
     DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER;
@@ -662,8 +709,9 @@ function CapacityLimitsSection() {
             id="max-concurrent-runs"
             label="Concurrent agent runs"
             description="Limit simultaneous coding-agent turns across the organization."
-            helper={`Range ${MIN_CONCURRENT_RUNS}-${MAX_CONCURRENT_RUNS}`}
-            tooltip="This protects shared runtime capacity. Users can still queue additional work."
+            helper={concurrentRunsHelper}
+            warning={concurrentRunsWarning}
+            tooltip="This is an org quota enforced when a run starts. Fleet capacity is advisory: workers admit sandboxes per node, and preview sandboxes share those slots. Users can still queue additional work."
           >
             <BoundedNumberInput
               id="max-concurrent-runs"
@@ -673,6 +721,9 @@ function CapacityLimitsSection() {
               value={concurrentRunsField.value}
               onChange={concurrentRunsField.onChange}
               onBlur={concurrentRunsField.onBlur}
+              describedBy={
+                concurrentRunsWarning ? "max-concurrent-runs-warning" : undefined
+              }
               onStep={(direction) => {
                 const current = Number.parseInt(concurrentRunsField.value, 10);
                 const next = clampNumber(

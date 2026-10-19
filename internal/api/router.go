@@ -395,6 +395,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		UnavailableReason: agent.StaticEgressUnavailableReason(cfg.StaticEgressPublicIP),
 	})
 	settingsHandler.SetRuntimeStatusCounters(sessionStore, previewStore)
+	settingsHandler.SetRuntimeStatusFleetCapacity(jobStore)
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
 	sessionThreadStore.SetLogger(logger)
