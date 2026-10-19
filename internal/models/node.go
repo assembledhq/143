@@ -56,6 +56,7 @@ type Node struct {
 	DrainReason          string          `db:"drain_reason" json:"drain_reason"`
 
 	// LifecycleWriterVersion is observational binary metadata, not proof of a
-	// compatible floor. Legacy reused-ID writes can leave a stale value behind.
+	// compatible floor. Shared/reused IDs are last-writer-wins; legacy writes
+	// omitting this field can also retain a stale value.
 	LifecycleWriterVersion int `db:"lifecycle_writer_version" json:"lifecycle_writer_version"`
 }

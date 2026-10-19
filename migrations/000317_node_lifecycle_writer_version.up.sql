@@ -1,5 +1,6 @@
 -- Passive binary metadata only; this does not establish a compatible writer floor.
--- Old binaries omitting this column can retain a stale value on a reused node ID.
+-- Shared/reused node IDs are last-writer-wins. Old binaries omitting this column
+-- can also retain a stale value; registration is not process-instance provenance.
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE nodes

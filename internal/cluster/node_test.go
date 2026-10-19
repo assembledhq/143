@@ -33,6 +33,15 @@ func TestNodeManagerAdvertisesOnlyPassiveLifecycleVersion(t *testing.T) {
 			defer mock.Close()
 			var ordinary db.DBTX = mock
 			var opts []NodeManagerOption
+			if !tt.heartbeat {
+				control, err := pgxmock.NewPool()
+				require.NoError(t, err, "create a separate reserve that registration must not use")
+				defer control.Close()
+				opts = append(opts, WithControlPlaneDB(control))
+				defer func() {
+					require.NoError(t, control.ExpectationsWereMet(), "registration must leave the control-plane reserve unused")
+				}()
+			}
 			if tt.heartbeat && tt.mode != "api" {
 				// Any accidental ordinary-pool use fails instead of hiding a
 				// regression of the reserved heartbeat connection path.
