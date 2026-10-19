@@ -609,6 +609,9 @@ Queue first-class 143 pull request creation for the current session.
 | `--draft` | boolean | No | Whether to create a draft PR. Omit to use the repo default. |
 | `--author_mode` | `auto` \| `app` \| `user` | No | PR author mode. Omit to use the default. |
 | `--team-reviewers` | comma-separated strings | No | GitHub team slugs to request after the PR is ready. Qualified `owner/team` names must match the repository owner. |
+| `--title` | string | No | Automations with a `pull_request` publish policy only: the exact single-line PR title, at most 120 bytes. |
+| `--body` | string | No | Automations with a `pull_request` publish policy only: the exact Markdown description, at most 60,000 characters. Mutually exclusive with `--body-file`. |
+| `--body-file` | path | No | Read the staged Markdown description from a file inside the sandbox. Mutually exclusive with `--body`. |
 
 Common use: open a PR through the same workflow as the app after tests pass.
 
@@ -647,12 +650,28 @@ Registration is rejected if the configured publication will remain a draft.
 If draft policy changes after registration, normal publication follows that
 policy and reports that the incompatible team requests were omitted.
 
-Automation metadata calls use only the team option; draft and author choices
-remain controlled by the configured publication policy:
+Automation metadata calls accept team, title, and description options; draft
+and author choices remain controlled by the configured publication policy:
 
 ```bash
 143-tools pr create --team-reviewers example-org/code-reviewers
 ```
+
+An automation whose goal depends on specific PR text, such as a title prefix or
+a line a later run searches for, can stage that text the same way:
+
+```bash
+143-tools pr create --title "docs: Weekly dependency report" --body-file /tmp/pr-description.md
+```
+
+The automatically opened PR uses the staged title and description instead of
+generated ones. 143 trims surrounding whitespace, inserts linked Linear issue
+keys such as `[ENG-123]` at the start of the title (after a conventional-commit
+type such as `feat:`, shortening a long title to fit), and appends its standard
+footer and hidden publication marker to the description. Each call replaces only the options it passes; the last staged
+value for each option wins until completion freezes the metadata. Other
+sessions reject `--title` and `--body` on `pr create`; use `pr update` once
+their PR exists.
 
 Confirmed team requests are recorded durably. Publication retries do not
 request the same team again after it has finished reviewing and removed its

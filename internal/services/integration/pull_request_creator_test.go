@@ -179,3 +179,65 @@ func TestInternalPullRequestCreator_UpdatePullRequestValidatesBodySources(t *tes
 		})
 	}
 }
+
+func TestInternalPullRequestCreator_CreatePullRequestStagesText(t *testing.T) {
+	t.Parallel()
+
+	bodyPath := filepath.Join(t.TempDir(), "pr-description.md")
+	require.NoError(t, os.WriteFile(bodyPath, []byte("## Summary\n\nSource plan: docs/plans/exports.md\n"), 0o600), "test PR description should be written")
+	tests := []struct {
+		name     string
+		params   CreatePullRequestParams
+		expected map[string]any
+	}{
+		{
+			name:     "body file resolved inside the sandbox",
+			params:   CreatePullRequestParams{Title: new("feature-brief: Plan exports"), BodyFile: bodyPath, TeamReviewers: []string{"acme/team"}},
+			expected: map[string]any{"title": "feature-brief: Plan exports", "body": "## Summary\n\nSource plan: docs/plans/exports.md\n", "team_reviewers": []any{"acme/team"}},
+		},
+		{
+			name:     "inline body forwarded",
+			params:   CreatePullRequestParams{Body: new("Short description")},
+			expected: map[string]any{"body": "Short description"},
+		},
+		{name: "no staged text", params: CreatePullRequestParams{}, expected: map[string]any{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request map[string]any
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&request), "request body should decode as JSON")
+				require.Equal(t, tt.expected, request, "only staged text and options should reach the internal API; the body file path stays local")
+				w.WriteHeader(http.StatusAccepted)
+				_, err := w.Write([]byte(`{"status":"awaiting_automatic_publication","session_id":"session-from-token"}`))
+				require.NoError(t, err, "test response should be written")
+			}))
+			t.Cleanup(server.Close)
+
+			result, err := NewInternalPullRequestCreator("test-token", server.URL).CreatePullRequest(context.Background(), tt.params)
+
+			require.NoError(t, err, "CreatePullRequest should accept staged text")
+			require.Equal(t, "awaiting_automatic_publication", result.Status, "CreatePullRequest should decode the staging status")
+		})
+	}
+}
+
+func TestInternalPullRequestCreator_CreatePullRequestValidatesBodySources(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		params CreatePullRequestParams
+	}{
+		{name: "inline body and file", params: CreatePullRequestParams{Body: new("inline"), BodyFile: "/tmp/pr.md"}},
+		{name: "missing body file", params: CreatePullRequestParams{BodyFile: "/path/that/does/not/exist"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := NewInternalPullRequestCreator("test-token", "http://127.0.0.1").CreatePullRequest(context.Background(), tt.params)
+			require.Error(t, err, "invalid body sources should fail before an API request")
+		})
+	}
+}

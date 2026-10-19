@@ -72,3 +72,63 @@ func TestTeamReviewRequestStateValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeStagedPRTitle(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		value     string
+		expected  string
+		wantError bool
+	}{
+		{name: "verbatim marker prefix", value: "feature-brief: Plan billing exports", expected: "feature-brief: Plan billing exports"},
+		{name: "surrounding whitespace trimmed", value: "  docs: Weekly report \t", expected: "docs: Weekly report"},
+		{name: "exact byte limit", value: strings.Repeat("a", MaxStagedPRTitleBytes), expected: strings.Repeat("a", MaxStagedPRTitleBytes)},
+		{name: "empty", value: "", wantError: true},
+		{name: "blank", value: " \t ", wantError: true},
+		{name: "multiline", value: "first line\nsecond line", wantError: true},
+		{name: "carriage return", value: "first line\rsecond", wantError: true},
+		{name: "over byte limit", value: strings.Repeat("a", MaxStagedPRTitleBytes+1), wantError: true},
+		{name: "multibyte over byte limit", value: strings.Repeat("é", MaxStagedPRTitleBytes/2+1), wantError: true},
+		{name: "embedded NUL", value: "docs:\x00report", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual, err := NormalizeStagedPRTitle(tt.value)
+			if tt.wantError {
+				require.Error(t, err, "titles GitHub, Postgres, or the PR service would alter or refuse must be rejected at staging")
+				return
+			}
+			require.NoError(t, err, "single-line titles within the cap should stage")
+			require.Equal(t, tt.expected, actual, "normalization should only trim surrounding whitespace")
+		})
+	}
+}
+
+func TestValidateStagedPRBody(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		value     string
+		wantError bool
+	}{
+		{name: "markdown with marker line", value: "## Summary\n\nSource plan: docs/plans/billing.md\n"},
+		{name: "exact character limit", value: strings.Repeat("é", MaxStagedPRBodyLength)},
+		{name: "empty", value: "", wantError: true},
+		{name: "blank", value: "\n\t \n", wantError: true},
+		{name: "over character limit", value: strings.Repeat("a", MaxStagedPRBodyLength+1), wantError: true},
+		{name: "embedded NUL", value: "Source plan:\x00 docs/plans/exports.md", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateStagedPRBody(tt.value)
+			if tt.wantError {
+				require.Error(t, err, "blank, oversized, or unstorable descriptions must be rejected at staging")
+				return
+			}
+			require.NoError(t, err, "non-blank descriptions within the limit should stage verbatim")
+		})
+	}
+}

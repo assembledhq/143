@@ -1,15 +1,26 @@
 package models
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
 
 const MaxTeamReviewers = 10
+
+const (
+	// MaxStagedPRTitleBytes matches the PR service's title cap, so a staged
+	// title is never silently truncated before Linear key prefixes apply.
+	MaxStagedPRTitleBytes = 120
+	// MaxStagedPRBodyLength leaves room below GitHub's 65,536-character body
+	// limit for the server-owned footer and publication marker.
+	MaxStagedPRBodyLength = 60000
+)
 
 var (
 	githubTeamOwnerPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$`)
@@ -54,12 +65,52 @@ func NormalizeTeamReviewers(repositoryFullName string, values []string) ([]strin
 	return result, nil
 }
 
+// NormalizeStagedPRTitle trims an agent-staged pull request title and rejects
+// values GitHub would alter or refuse. Linear key prefixes are applied at
+// publication time, not here.
+func NormalizeStagedPRTitle(value string) (string, error) {
+	title := strings.TrimSpace(value)
+	if title == "" {
+		return "", errors.New("title must not be empty")
+	}
+	if strings.ContainsAny(title, "\r\n") {
+		return "", errors.New("title must be a single line")
+	}
+	if strings.ContainsRune(title, 0) {
+		return "", errors.New("title must not contain NUL characters")
+	}
+	if len(title) > MaxStagedPRTitleBytes {
+		return "", fmt.Errorf("title must be at most %d bytes", MaxStagedPRTitleBytes)
+	}
+	return title, nil
+}
+
+// ValidateStagedPRBody checks an agent-staged pull request description. The
+// body is stored verbatim; publication trims surrounding whitespace and
+// appends the server-owned footer and marker.
+func ValidateStagedPRBody(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return errors.New("body must not be empty")
+	}
+	if strings.ContainsRune(value, 0) {
+		return errors.New("body must not contain NUL characters")
+	}
+	if utf8.RuneCountInString(value) > MaxStagedPRBodyLength {
+		return fmt.Errorf("body must be at most %d characters", MaxStagedPRBodyLength)
+	}
+	return nil
+}
+
+// SessionPRIntent is optional automatic publication metadata. Title and Body
+// are nil when the agent did not stage them, so publication generates them.
 type SessionPRIntent struct {
 	OrgID           uuid.UUID  `db:"org_id" json:"org_id"`
 	SessionID       uuid.UUID  `db:"session_id" json:"session_id"`
 	AutomationRunID uuid.UUID  `db:"automation_run_id" json:"automation_run_id"`
 	ChangesetID     uuid.UUID  `db:"changeset_id" json:"changeset_id"`
 	TeamReviewers   []string   `db:"team_reviewers" json:"team_reviewers"`
+	Title           *string    `db:"title" json:"title,omitempty"`
+	Body            *string    `db:"body" json:"body,omitempty"`
 	FrozenAt        *time.Time `db:"frozen_at" json:"frozen_at,omitempty"`
 	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt       time.Time  `db:"updated_at" json:"updated_at"`

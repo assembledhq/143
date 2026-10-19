@@ -75,7 +75,7 @@ The tool returns a typed asynchronous state (`review_started`,
 `manual_publication_required`, or `blocked`). The agent must not claim a PR
 exists when review or publication is only queued.
 
-### Team requests for automatic publication
+### Team requests and PR text for automatic publication
 
 The `--team-reviewers` option on `143-tools pr create` carries an
 explicit team choice as structured publication metadata. Team names are
@@ -101,8 +101,25 @@ retries transient policy, readiness, or metadata-freeze errors without running
 the provider again. Existing publication intents are left to their own
 reconciliation and publication jobs.
 
-Normal automatic publication freezes the staged teams into its durable request
-payload. Team requests run after the PR's draft and review gates are satisfied,
+The same per-run automation call may stage the pull request text with
+`--title` and `--body` (or `--body-file`, read inside the sandbox). Text is
+validated when staged: a single-line title within the PR service's 120-byte
+title cap and a non-blank description within 60,000 characters, leaving room
+for the footer and marker under GitHub's limit. Each call replaces only the
+fields it carries, so teams and text may be staged separately. Other sources
+reject the text options rather than ignore them; existing PRs use the
+server-owned `pr update` path.
+
+Normal automatic publication freezes the staged teams and text into its durable
+request payload. When the payload carries staged text, PR creation uses it in
+place of LLM-generated or static content: a staged title still receives Linear
+key prefixes (so Linear can claim the PR) and overrides the changeset title,
+and a staged body still receives the standard footer and the server-owned
+publication marker. Surrounding whitespace is trimmed, and title truncation
+after prefixing respects UTF-8 boundaries. Without
+staged text, generation is unchanged.
+
+Team requests run after the PR's draft and review gates are satisfied,
 using the publication's GitHub identity. Completion replay performs any missing
 follow-through. An incomplete team request remains a retryable job outcome
 without undoing the created-PR checkpoint or suppressing PR-opened effects.
