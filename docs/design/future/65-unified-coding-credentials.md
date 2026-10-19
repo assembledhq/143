@@ -443,9 +443,11 @@ DELETE /api/v1/coding-credentials/{id}                → disable
 PATCH  /api/v1/coding-credentials/{id}/move           → move one row within its scope's stack (UI drag-drop)
                                                          body: { scope, before_id? | after_id? | to_top | to_bottom }
 PATCH  /api/v1/coding-credentials/reorder             → bulk reorder a scope's stack (recovery / tests)
-GET    /api/v1/coding-credentials/stack-settings      → a scope's distribution mode (ordered | spread)
-PATCH  /api/v1/coding-credentials/stack-settings      → set a scope's distribution mode (admin for scope=org)
                                                          body: { scope, ordered_ids }
+GET    /api/v1/coding-credentials/stack-settings      → a scope's distribution mode (ordered | spread)
+                                                         query: ?scope=org|personal
+PATCH  /api/v1/coding-credentials/stack-settings      → set a scope's distribution mode (admin for scope=org)
+                                                         body: { scope, distribution }
 ```
 
 The per-row `move` endpoint is the default UI path: a drag-drop sends one ID and a position relative to one neighbour, regardless of stack size. The bulk `reorder` shape is kept for "reset to this exact ordering" flows and tests; it is not on the hot edit path.

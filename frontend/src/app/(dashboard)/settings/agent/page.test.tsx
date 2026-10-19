@@ -713,7 +713,10 @@ describe("Agent settings page", () => {
 
     renderWithProviders(<AgentPage />);
 
-    await screen.findByRole("switch", { name: "Spread load across auths" });
+    const toggle = await screen.findByRole("switch", { name: "Spread load across auths" });
+    await waitFor(() => {
+      expect(toggle).toBeChecked();
+    });
     await user.click(screen.getByRole("button", { name: "Add auth" }));
 
     expect(await screen.findByRole("textbox", { name: "Name" })).toBeInTheDocument();

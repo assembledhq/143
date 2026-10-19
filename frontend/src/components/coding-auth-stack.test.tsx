@@ -183,6 +183,33 @@ describe("CodingAuthStack", () => {
     expect(onDistributionChange).toHaveBeenCalledWith("ordered");
   });
 
+  it("pauses reordering while load is spread", () => {
+    renderWithProviders(
+      <CodingAuthStack
+        rows={rows}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onMove={vi.fn()}
+        onReorder={vi.fn()}
+        distribution="spread"
+        onDistributionChange={vi.fn()}
+      />,
+    );
+
+    // "Move Pi backup up" is enabled in ordered mode (it is the second row);
+    // spreading disables every move control and drag handle.
+    for (const button of screen.getAllByRole("button", { name: "Move Pi backup up" })) {
+      expect(button).toBeDisabled();
+    }
+    for (const button of screen.getAllByRole("button", { name: "Move Team seat A down" })) {
+      expect(button).toBeDisabled();
+    }
+    const desktopRow = screen.getAllByText("Pi backup").map((node) => node.closest("tr")).find(Boolean);
+    expect(desktopRow, "desktop table row should exist").toBeTruthy();
+    expect(desktopRow).toHaveAttribute("draggable", "false");
+    expect(screen.getByText(/Reordering is paused/)).toBeInTheDocument();
+  });
+
   it("disables the spread switch while a change is pending", () => {
     renderWithProviders(
       <CodingAuthStack

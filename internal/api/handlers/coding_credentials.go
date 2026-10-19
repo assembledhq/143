@@ -640,8 +640,9 @@ func summariesForScope(creds []models.DecryptedCodingCredential, scope models.Sc
 // that's intentional: the personal row is "the one that runs first," the
 // org row is "the one that would run if the personal rows are exhausted."
 // The /settings/account page shows them in two visually separate cards, so
-// the dual badge reads naturally as "default within each section." Single-
-// scope responses get exactly one default per agent.
+// the dual badge reads naturally as "default within each section." In
+// ordered mode a single-scope response gets exactly one default per agent;
+// a spread scope badges every runnable row instead.
 func markDefaults(rows []models.CodingCredentialSummary, spread map[models.CodingCredentialScope]bool) {
 	defaulted := map[string]bool{}
 	for i := range rows {

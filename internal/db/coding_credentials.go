@@ -1034,7 +1034,8 @@ func (s *CodingCredentialStore) SetStackDistribution(ctx context.Context, scope 
 // pick for (orgID, userID) can touch, in one round trip. Cached for the
 // resolver TTL; SetStackDistribution drops the affected entries, and a load
 // that was in flight across that invalidation is not cached (see
-// distributionCache.put) so a stale mode cannot outlive the write.
+// distributionCache.put). The pick that issued such a load still uses the
+// mode it read; every later pick re-reads.
 func (s *CodingCredentialStore) stackDistributionFor(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID) (stackDistribution, error) {
 	cached, generation, ok := s.distributionCache.lookup(orgID, userID)
 	if ok {

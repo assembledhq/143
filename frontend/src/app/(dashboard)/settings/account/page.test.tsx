@@ -43,6 +43,14 @@ function stackedCodingCredentialsHandler() {
   });
 }
 
+// Counts Default badges inside the card whose title is given, ignoring every
+// other "Default" string on the page.
+function defaultBadgeCount(cardTitle: string) {
+  const card = screen.getByText(cardTitle).closest('[data-slot="card"]');
+  expect(card, `${cardTitle} card should exist`).not.toBeNull();
+  return within(card as HTMLElement).queryAllByText("Default", { selector: '[data-slot="badge"]' }).length;
+}
+
 describe("Account settings page", () => {
   it("shows effective organization values and saves personal PR handoff overrides", async () => {
     const requestBodies: Array<Record<string, unknown>> = [];
@@ -205,7 +213,8 @@ describe("Account settings page", () => {
     expect(screen.getByText(/Sessions use your top healthy auth until it is rate limited/)).toBeInTheDocument();
     // Ordered mode: the top personal row and the org row each carry a badge,
     // rendered once for the mobile card and once for the desktop table.
-    expect(screen.getAllByText("Default", { selector: '[data-slot="badge"]' })).toHaveLength(4);
+    expect(defaultBadgeCount("My coding agents")).toBe(2);
+    expect(defaultBadgeCount("Org fallback")).toBe(2);
 
     await user.click(toggle);
 
@@ -233,7 +242,8 @@ describe("Account settings page", () => {
       screen.getByText("Your personal stack runs ahead of any organization fallback. Each session picks at random among your healthy auths."),
     ).toBeInTheDocument();
     // Only the org row keeps its badge (mobile card + desktop table).
-    expect(screen.getAllByText("Default", { selector: '[data-slot="badge"]' })).toHaveLength(2);
+    expect(defaultBadgeCount("My coding agents")).toBe(0);
+    expect(defaultBadgeCount("Org fallback")).toBe(2);
     expect(screen.getByText("Read-only. Contact an admin to change org auths.")).toBeInTheDocument();
   });
 
@@ -253,8 +263,9 @@ describe("Account settings page", () => {
     ).toBeInTheDocument();
     await waitFor(() => {
       // Only the top personal row keeps its badge (mobile card + desktop table).
-      expect(screen.getAllByText("Default", { selector: '[data-slot="badge"]' })).toHaveLength(2);
+      expect(defaultBadgeCount("Org fallback")).toBe(0);
     });
+    expect(defaultBadgeCount("My coding agents")).toBe(2);
   });
 
   it("renders the org fallback section even when the personal stack is empty", async () => {

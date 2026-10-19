@@ -115,7 +115,7 @@ export function CodingAuthStack({
             </Label>
             <p className="text-xs text-muted-foreground">
               {spread
-                ? "Each session picks at random among the healthy auths in this stack. Priority order applies again when this is off."
+                ? "Each session picks at random among the healthy auths in this stack. Reordering is paused; priority applies again when this is off."
                 : "Sessions use the top healthy auth until it is rate limited, then fall through in priority order."}
             </p>
           </div>
@@ -188,7 +188,7 @@ export function CodingAuthStack({
                 size="icon"
                 aria-label={`Move ${row.label} up`}
                 onClick={() => onMove(row.id, "up")}
-                disabled={index === 0}
+                disabled={spread || index === 0}
               >
                 <MoveUp className="h-4 w-4" />
               </Button>
@@ -198,7 +198,7 @@ export function CodingAuthStack({
                 size="icon"
                 aria-label={`Move ${row.label} down`}
                 onClick={() => onMove(row.id, "down")}
-                disabled={index === rows.length - 1}
+                disabled={spread || index === rows.length - 1}
               >
                 <MoveDown className="h-4 w-4" />
               </Button>
@@ -235,8 +235,9 @@ export function CodingAuthStack({
               return (
                 <TableRow
                   key={row.id}
-                  draggable
+                  draggable={!spread}
                   onDragStart={(event) => {
+                    if (spread) return;
                     setDraggingId(row.id);
                     event.dataTransfer.effectAllowed = "move";
                     event.dataTransfer.setData("text/plain", row.id);
@@ -278,7 +279,12 @@ export function CodingAuthStack({
                   )}
                 >
                   <TableCell>
-                    <div className="flex h-9 cursor-grab items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 text-sm font-medium text-foreground active:cursor-grabbing">
+                    <div
+                      className={cn(
+                        "flex h-9 items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 text-sm font-medium text-foreground",
+                        spread ? "cursor-default" : "cursor-grab active:cursor-grabbing",
+                      )}
+                    >
                       <span>{row.priority}</span>
                       <GripVertical className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
                     </div>
@@ -316,7 +322,7 @@ export function CodingAuthStack({
                         size="icon"
                         aria-label={`Move ${row.label} up`}
                         onClick={() => onMove(row.id, "up")}
-                        disabled={index === 0}
+                        disabled={spread || index === 0}
                       >
                         <MoveUp className="h-4 w-4" />
                       </Button>
@@ -326,7 +332,7 @@ export function CodingAuthStack({
                         size="icon"
                         aria-label={`Move ${row.label} down`}
                         onClick={() => onMove(row.id, "down")}
-                        disabled={index === rows.length - 1}
+                        disabled={spread || index === rows.length - 1}
                       >
                         <MoveDown className="h-4 w-4" />
                       </Button>
