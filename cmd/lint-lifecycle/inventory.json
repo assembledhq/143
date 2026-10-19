@@ -1554,10 +1554,10 @@
     },
     {
       "id": "internal/db/automation_turns.go:AutomationRunStore.EndInterruptedAttempt",
-      "source_sha256": "40b722518ead47eae3b0cd93689a78b17aba17e7e0fd3f91cd260fb89372e426",
+      "source_sha256": "a901d42e895475110001428ac04d04c40ea23908000940d776135341eab69d9a",
       "operation": "automation attempt settlement and shared projection",
       "owner": "AutomationRunStore in internal/db",
-      "predicate": "Atomic owned CTE requires executing automation run, attempt lock token and current running job token; session projection follows exact owned CTE.",
+      "predicate": "Atomic owned CTE requires executing automation run, attempt lock token and current running job token; session projection follows exact owned CTE. Clears the runtime deadline pair (runtime_soft_deadline_at/runtime_hard_deadline_at, the executing-turn marker CountExecutingByOrg reads) together with the restored pre-turn status, so a drained attempt whose continuation fallback status is running stops holding an org quota slot until it restarts and BeginRuntime reinstalls the pair.",
       "lock": "One atomic CTE with FOR UPDATE OF automation run; no supplied transaction seam today.",
       "stale_result": "Domain attempt miss is distinct from stale shared projection. Preserve existing no-row/count handling; 0a must permit only exact-owned receipt settlement and skip stale projection (F2).",
       "classification": "unfenced-needs-conversion",
@@ -1567,10 +1567,10 @@
       "fence_outcome": "F2: AuthorizationRejected aborts. Only independently proven exact immutable own-attempt settlement may return Applied/AlreadyApplied/StaleSharedState; stale shared state skips ALL current status/result/diff/checkpoint/input acknowledgement/owner release and cannot start execution or publish externally.",
       "prerequisite_0a": "0a: keep exact automation marker/attempt and domain updates atomic, add current shared epoch/turn projection fence; split immutable own-attempt settlement from shared projection. EndInterruptedAttempt needs explicit caller pgx.Tx variant instead of nested Begin/CTE isolation.",
       "evidence": [
-        "internal/db/automation_turns.go:79",
+        "internal/db/automation_turns.go:83",
         "Discovered: boundary-definition, status-update",
         "Lock/transaction syntax: FOR UPDATE OF r",
-        "SQL: UPDATE sessions s SET status = @status, last_activity_at = now() FROM owned WHERE s.id = @session_id AND s.org_id = @org_id"
+        "SQL: UPDATE sessions s SET status = @status, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now() FROM owned WHERE s.id = @session_id AND s.org_id = @org_id"
       ]
     },
     {
@@ -1776,10 +1776,10 @@
     },
     {
       "id": "internal/db/code_review_recheck_dispatch.go:CodeReviewRecheckStore.Dispatch",
-      "source_sha256": "5c10a87cc7cffc644e8e497d2e6bb20eed6a7cc160faf543a3ede1c3b0e00ada",
+      "source_sha256": "9fa353282261d7d2ab3fb560a3d07b20d231ac02006d2462a9988399f4298699",
       "operation": "atomically dispatch exact evidence review input and consumer",
       "owner": "CodeReviewRecheckStore in internal/db",
-      "predicate": "PR/assessment/repository/session exact match, evidence_only running assessment; prior dispatch replay requires same thread/expectedTurn/payload digest. New dispatch requires retained owner origin and idle/completed physically drained session; exact idle visible lane/current_turn; no active generic continuation. Receipt/job/message/inbox insert commit together.",
+      "predicate": "PR/assessment/repository/session exact match, evidence_only running assessment; prior dispatch replay requires same thread/expectedTurn/payload digest. New dispatch requires retained owner origin and idle/completed physically drained session; exact idle visible lane/current_turn; no active generic continuation. Receipt/job/message/inbox insert commit together. The session claim clears the runtime deadline pair (runtime_soft_deadline_at/runtime_hard_deadline_at, the executing-turn marker CountExecutingByOrg reads) like ClaimIdle does, so a queued recheck is not counted as executing; the recheck settlement paths return the session to idle without touching the pair.",
       "lock": "Own Begin; PR advisory -> assessment -> session -> thread row locks; job enqueue in same transaction, Notify after commit.",
       "stale_result": "ErrCodeReviewRecheckFence on wrong identities/status/drain; prior exact receipt returns replay. No shared end/admission epoch predicate exists yet.",
       "classification": "fenced-specialist",
@@ -1802,7 +1802,7 @@
         "Lock/transaction syntax: s.db.Begin",
         "Lock/transaction syntax: tx.Commit",
         "SQL: UPDATE session_threads SET status='running',started_at=now(),completed_at=NULL,last_activity_at=now(),cancel_requested_at=NULL WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4 AND status='idle'",
-        "SQL: UPDATE sessions SET code_review_owner_pr_id=$3,status='running',started_at=now(),completed_at=NULL WHERE org_id=$1 AND id=$2 AND (code_review_owner_pr_id IS NULL OR code_review_owner_pr_id=$3)"
+        "SQL: UPDATE sessions SET code_review_owner_pr_id=$3,status='running',started_at=now(),completed_at=NULL,runtime_soft_deadline_at=NULL,runtime_hard_deadline_at=NULL WHERE org_id=$1 AND id=$2 AND (code_review_owner_pr_id IS NULL OR code_review_owner_pr_id=$3)"
       ]
     },
     {
@@ -3325,10 +3325,10 @@
     },
     {
       "id": "internal/db/session_store.go:SessionStore.ClaimIdle",
-      "source_sha256": "1500157adf56bf5ca11512e01024459842eda8139c8e15b75f9eef7a6b65921f",
+      "source_sha256": "548359a27a09ddc0ff072ac7ce4bacea497ce2d122d2c19efec6e096a2d47154",
       "operation": "ordinary session idle admission CAS",
       "owner": "SessionStore in internal/db",
-      "predicate": "id/org_id, status='idle', sandbox_state!='destroyed', code_review_owner_pr_id IS NULL; automation/repair ownership not established here.",
+      "predicate": "id/org_id, status='idle', sandbox_state!='destroyed', code_review_owner_pr_id IS NULL; automation/repair ownership not established here. Clears the runtime deadline pair (runtime_soft_deadline_at/runtime_hard_deadline_at, the executing-turn marker CountExecutingByOrg reads) so the claimed, queued continuation is running but not counted as executing until its job reaches BeginRuntime.",
       "lock": "Single UPDATE/RETURNING row lock.",
       "stale_result": "CAS miss propagates CollectOneRow error; status CAS is not an admission-generation fence.",
       "classification": "unfenced-needs-conversion",
@@ -3338,10 +3338,10 @@
       "fence_outcome": "Strict typed result/error: authorization rejection, stale epoch or mismatched receipt rolls back the entire operation. No terminal stale-settlement carve-out applies.",
       "prerequisite_0a": "0a: parent-first shared admission/owner locks and expected epochs must atomically bind exact input to dispatch. Disable new-input rebinding of EVERY existing job, including attempts=0; exact same-input receipt replay only, otherwise new dispatch-unique job or durable pending receipt.",
       "evidence": [
-        "internal/db/session_store.go:2015",
+        "internal/db/session_store.go:2025",
         "Discovered: boundary-definition, status-update",
-        "SQL: UPDATE sessions SET status = 'running', started_at = now(), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND status = 'idle' AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL RETURNING",
-        "SQL: UPDATE sessions SET status = 'running', started_at = now(), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND status = 'idle' AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL RETURNING id, (SELECT sil.issue_id FROM session_issue_links sil WHERE sil.org_id = sessions.org_id AND sil.session_id = sessions.id AND sil.role = 'primary' LIMIT 1) AS primary_issue_id, org_id, origin, interaction_mode, validation_policy, agent_type, status, autonomy_level, token_mode, complexity_tier, container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usa [excerpt; see symbol source]"
+        "SQL: UPDATE sessions SET status = 'running', started_at = now(), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND status = 'idle' AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL RETURNING",
+        "SQL: UPDATE sessions SET status = 'running', started_at = now(), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND status = 'idle' AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL RETURNING id, (SELECT sil.issue_id FROM session_issue_links sil WHERE sil.org_id = sessions.org_id AND sil.session_id = sessions.id AND sil.role = 'primary' LIMIT 1) AS primary_i [excerpt; see symbol source]"
       ]
     },
     {
@@ -4066,10 +4066,10 @@
     },
     {
       "id": "internal/db/session_store.go:SessionStore.updateResultRow",
-      "source_sha256": "79e0cdfe7516997a72630f85224309bdef1c0dcfe6fb4c04d5d9acc7f5f7cf0e",
+      "source_sha256": "0b7cecaa5db6a31e07fe7d158b899869e72aec7471b34855f301d0a4a7421689",
       "operation": "generic session result/status persistence",
       "owner": "SessionStore in internal/db",
-      "predicate": "id/org_id/deleted_at only; supplied result/status are written without expected runtime/job/admission",
+      "predicate": "id/org_id/deleted_at only; supplied result/status are written without expected runtime/job/admission. Clears the runtime deadline pair (runtime_soft_deadline_at/runtime_hard_deadline_at, the executing-turn marker CountExecutingByOrg reads) when the supplied status leaves running (CASE on @status); a running status keeps the pair.",
       "lock": "Persistence statement through DBTX; public wrappers can Begin/Commit/publish. Explicit pgx.Tx authority/effect seam does not yet exist.",
       "stale_result": "Matching successor can be mutated. Missing-resource/no-row errors are not stale-attempt proof.",
       "classification": "unfenced-needs-conversion",
@@ -4079,19 +4079,19 @@
       "fence_outcome": "AuthorizationRejected aborts; exact immutable own-attempt terminal settlement can return StaleSharedState, but skip ALL shared current status/result/diff/checkpoint/input ack/owner release/new execution/publication.",
       "prerequisite_0a": "0a: replace shared mutation with canonical conditional pgx.Tx primitive under exact attempt/epochs; preserve combined result/diff/activity atomicity and post-commit effects.",
       "evidence": [
-        "internal/db/session_store.go:1888",
+        "internal/db/session_store.go:1892",
         "Discovered: status-update",
         "SQL: UPDATE sessions SET status = @status, last_activity_at = now(), completed_at = CASE WHEN @status IN ('completed', 'failed', 'cancelled', 'needs_human_guidance', 'pr_created', 'skipped') THEN now() ELSE completed_at END, token_usage = @token_usage, model_used = COALESCE(@model_used, model_used), result_summary = @result_summary, diff = COALESCE(@diff, diff), error = @error, failure_explanation = @failure_explanation, failure_category = @failure_category, failure_next_steps = @failure_next_steps, failure_retry_advised = @failure_retry_advised, base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha), diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at), diff_stats = COALESCE(@diff_stats, diff_stats), diff_history =",
-        "SQL: UPDATE sessions SET status = @status, last_activity_at = now(), completed_at = CASE WHEN @status IN ('completed', 'failed', 'cancelled', 'needs_human_guidance', 'pr_created', 'skipped') THEN now() ELSE completed_at END, token_usage = @token_usage, model_used = COALESCE(@model_used, model_used), result_summary = @result_summary, diff = COALESCE(@diff, diff), error = @error, failure_explanation = @failure_explanation, failure_category = @failure_category, failure_next_steps = @failure_next_steps, failure_retry_advised = @failure_retry_advised, base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha), diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at), diff_stats = COALESCE(@diff_stats, diff_stats), diff_history = <dynami [excerpt; see symbol source]",
-        "SQL: UPDATE sessions SET status = @status, last_activity_at = now(), completed_at = CASE WHEN @status IN ('completed', 'failed', 'cancelled', 'needs_human_guidance', 'pr_created', 'skipped') THEN now() ELSE completed_at END, token_usage = @token_usage, model_used = COALESCE(@model_used, model_used), result_summary = @result_summary, diff = COALESCE(@diff, diff), error = @error, failure_explanation = @failure_explanation, failure_category = @failure_category, failure_next_steps = @failure_next_steps, failure_retry_advised = @failure_retry_advised, base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha), diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at), diff_stats = COALESCE(@diff_stats, diff_stats), diff_history = <dynami [excerpt; see symbol source]"
+        "SQL: UPDATE sessions SET status = @status, last_activity_at = now(), completed_at = CASE WHEN @status IN ('completed', 'failed', 'cancelled', 'needs_human_guidance', 'pr_created', 'skipped') THEN now() ELSE completed_at END, token_usage = @token_usage, model_used = COALESCE(@model_used, model_used), result_summary = @result_summary, diff = COALESCE(@diff, diff), error = @error, failure_explanation = @failure_explanation, failure_category = @failure_category, failure_next_steps = @failure_next_steps, failure_retry_advised = @failure_retry_advised, base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha), diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at), diff_stats = COALESCE(@diff_stats, diff_stats), diff_history = <dynamic>",
+        "SQL: UPDATE sessions SET status = @status, last_activity_at = now(), completed_at = CASE WHEN @status IN ('completed', 'failed', 'cancelled', 'needs_human_guidance', 'pr_created', 'skipped') THEN now() ELSE completed_at END, token_usage = @token_usage, model_used = COALESCE(@model_used, model_used), result_summary = @result_summary, diff = COALESCE(@diff, diff), error = @error, failure_explanation = @failure_explanation, failure_category = @failure_category, failure_next_steps = @failure_next_steps, failure_retry_advised = @failure_retry_advised, base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha), diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at), diff_stats = COALESCE(@diff_stats, diff_stats), diff_history = <dynamic>, -- A result that leaves running ends the turn: drop the -- executing-turn marker (see CountExecutingByOrg). runtime_soft_deadline_at = CASE WHEN @ [excerpt; see symbol source]"
       ]
     },
     {
       "id": "internal/db/session_store.go:SessionStore.updateStatusRow",
-      "source_sha256": "8753a646c94ae346b377b2359e350402e4f3b7432c35de7f385594a7e591c174",
+      "source_sha256": "7ff170d5d8671a10b5cc728c2f3c380c1ed1328e108007c9a0f4a3f81ff87e3f",
       "operation": "generic session status persistence",
       "owner": "SessionStore in internal/db",
-      "predicate": "id/org_id/deleted_at only; running/terminal statuses choose timestamp/failure-field resets, not expected admission or attempt",
+      "predicate": "id/org_id/deleted_at only; running/terminal statuses choose timestamp/failure-field resets, not expected admission or attempt. Every non-running branch clears the runtime deadline pair (runtime_soft_deadline_at/runtime_hard_deadline_at, the executing-turn marker CountExecutingByOrg reads), which covers the reaper settle paths and orchestrator cancel/fail transitions; the running branch resets all runtime control fields so a re-stamped running row is not counted until BeginRuntime.",
       "lock": "Persistence statement through DBTX; public wrappers can Begin/Commit/publish. Explicit pgx.Tx authority/effect seam does not yet exist.",
       "stale_result": "Matching successor can be mutated. Missing-resource/no-row errors are not stale-attempt proof.",
       "classification": "unfenced-needs-conversion",
@@ -4103,18 +4103,18 @@
       "evidence": [
         "internal/db/session_store.go:1677",
         "Discovered: status-update",
-        "SQL: UPDATE sessions SET status = @status, completed_at = now(), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL",
-        "SQL: UPDATE sessions SET status = @status, completed_at = now(), last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL",
-        "SQL: UPDATE sessions SET status = @status, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL",
+        "SQL: UPDATE sessions SET status = @status, completed_at = now(), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL",
+        "SQL: UPDATE sessions SET status = @status, completed_at = now(), runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL",
+        "SQL: UPDATE sessions SET status = @status, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL",
         "SQL: UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, runtime_last_progress_at = NULL, runtime_last_progress_type = '', runtime_last_progress_strength = '', runtime_stop_reason = '', runtime_graceful_stop_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL"
       ]
     },
     {
       "id": "internal/db/session_store.go:SessionStore.updateTurnCompleteRow",
-      "source_sha256": "fe838fc1cb18043aae92feecd7e4fd9a0a5ecf0815b2ae42356b1c977ffd26ce",
+      "source_sha256": "df4a04d92732366f761793485632c106ad96d6c2bbe0b97fe9a1ad526b4df06d",
       "operation": "session idle turn/result/checkpoint projection",
       "owner": "SessionStore in internal/db",
-      "predicate": "id/org_id only; GREATEST(current_turn+1,supplied) prevents lost sibling increment, not end/admission overwrite",
+      "predicate": "id/org_id only; GREATEST(current_turn+1,supplied) prevents lost sibling increment, not end/admission overwrite. Clears the runtime deadline pair (runtime_soft_deadline_at/runtime_hard_deadline_at, the executing-turn marker CountExecutingByOrg reads) with the idle transition so the completed session holds no org quota slot.",
       "lock": "Persistence statement through DBTX; public wrappers can Begin/Commit/publish. Explicit pgx.Tx authority/effect seam does not yet exist.",
       "stale_result": "Matching successor can be mutated. Missing-resource/no-row errors are not stale-attempt proof.",
       "classification": "unfenced-needs-conversion",
@@ -4124,11 +4124,11 @@
       "fence_outcome": "AuthorizationRejected aborts; exact immutable own-attempt terminal settlement can return StaleSharedState, but skip ALL shared current status/result/diff/checkpoint/input ack/owner release/new execution/publication.",
       "prerequisite_0a": "0a: replace shared mutation with canonical conditional pgx.Tx primitive under exact attempt/epochs; preserve combined result/diff/activity atomicity and post-commit effects.",
       "evidence": [
-        "internal/db/session_store.go:2476",
+        "internal/db/session_store.go:2534",
         "Discovered: status-update",
-        "SQL: UPDATE sessions SET status = 'idle', -- Multiple sibling tabs can complete from the same in-memory -- session.CurrentTurn. Advance relative to the row so concurrent -- completions are counted instead of last-writer-wins collapsing -- them to the same value. current_turn = GREATEST(current_turn + 1, @current_turn), last_activity_at = now(), -- An empty snapshot key completes the turn's bookkeeping without a -- new checkpoint (the turn succeeded but its snapshot failed): the -- previously published checkpoint is retained as the restore -- source, and the sandbox state is left to the runtime that owns -- it. An automation-owned session's snapshot key is written only -- by PublishCheckpointWithProvenance, so this statement never -- replaces it  [excerpt; see symbol source]",
-        "SQL: UPDATE sessions SET status = 'idle', -- Multiple sibling tabs can complete from the same in-memory -- session.CurrentTurn. Advance relative to the row so concurrent -- completions are counted instead of last-writer-wins collapsing -- them to the same value. current_turn = GREATEST(current_turn + 1, @current_turn), last_activity_at = now(), -- An empty snapshot key completes the turn's bookkeeping without a -- new checkpoint (the turn succeeded but its snapshot failed): the -- previously published checkpoint is retained as the restore -- source, and the sandbox state is left to the runtime that owns -- it. An automation-owned session's snapshot key is written only -- by PublishCheckpointWithProvenance, so this statement never -- replaces it  [excerpt; see symbol source]",
-        "SQL: UPDATE sessions SET status = 'idle', -- Multiple sibling tabs can complete from the same in-memory -- session.CurrentTurn. Advance relative to the row so concurrent -- completions are counted instead of last-writer-wins collapsing -- them to the same value. current_turn = GREATEST(current_turn + 1, @current_turn), last_activity_at = now(), -- An empty snapshot key completes the turn's bookkeeping without a -- new checkpoint (the turn succeeded but its snapshot failed): the -- previously published checkpoint is retained as the restore -- source, and the sandbox state is left to the runtime that owns -- it. An automation-owned session's snapshot key is written only -- by PublishCheckpointWithProvenance, so this statement never -- replaces it  [excerpt; see symbol source]"
+        "SQL: UPDATE sessions SET status = 'idle', -- Multiple sibling tabs can complete from the same in-memory -- session.CurrentTurn. Advance relative to the row so concurrent -- completions are counted instead of last-writer-wins collapsing -- them to the same value. current_turn = GREATEST(current_turn + 1, @current_turn), last_activity_at = now(), -- An empty snapshot key completes the turn's bookkeeping without a -- new checkpoint (the turn succeeded but its snapshot failed): the -- previously published checkpoint is retained as the restore -- source, and the sandbox state is left to the runtime that owns -- it. An automation-owned session's snapshot key is written only -- by PublishCheckpointWithP [excerpt; see symbol source]",
+        "SQL: UPDATE sessions SET status = 'idle', -- Multiple sibling tabs can complete from the same in-memory -- session.CurrentTurn. Advance relative to the row so concurrent -- completions are counted instead of last-writer-wins collapsing -- them to the same value. current_turn = GREATEST(current_turn + 1, @current_turn), last_activity_at = now(), -- An empty snapshot key completes the turn's bookkeeping without a -- new checkpoint (the turn succeeded but its snapshot failed): the -- previously published checkpoint is retained as the restore -- source, and the sandbox state is left to the runtime that owns -- it. An automation-owned session's snapshot key is written only -- by PublishCheckpointWithP [excerpt; see symbol source]",
+        "SQL: UPDATE sessions SET status = 'idle', -- Multiple sibling tabs can complete from the same in-memory -- session.CurrentTurn. Advance relative to the row so concurrent -- completions are counted instead of last-writer-wins collapsing -- them to the same value. current_turn = GREATEST(current_turn + 1, @current_turn), last_activity_at = now(), -- An empty snapshot key completes the turn's bookkeeping without a -- new checkpoint (the turn succeeded but its snapshot failed): the -- previously published checkpoint is retained as the restore -- source, and the sandbox state is left to the runtime that owns -- it. An automation-owned session's snapshot key is written only -- by PublishCheckpointWithP [excerpt; see symbol source]"
       ]
     },
     {
@@ -10608,10 +10608,10 @@
     },
     {
       "id": "internal/worker/handlers.go:newContinueSessionHandler",
-      "source_sha256": "c4f5750fea8a5f611f50c1298d0f98d6302473f4bdfc16a35489cff9a2eb783e",
+      "source_sha256": "a7813dcb6f9a4a78d920ed1f3d88e68719831943d02cf9e4012a1f336de622cd",
       "operation": "continuation execution and failed-turn thread release",
       "owner": "newContinueSessionHandler in internal/worker",
-      "predicate": "Parses exact purpose/recovery/specialist IDs and job tokens; error branches exclude race loser, automation owner and session-cancelled, but generic thread idle reset lacks expected attempt/epoch.",
+      "predicate": "Parses exact purpose/recovery/specialist IDs and job tokens; error branches exclude race loser, automation owner and session-cancelled, but generic thread idle reset lacks expected attempt/epoch. ErrConcurrencyLimit (org max_concurrent_runs quota full of executing turns) is retried every 5s inside the worker retry window with registerConcurrencyLimitDeadLetter registered to settle session and thread as concurrency_timeout; the code-review recheck branch retries it after 2s without a hook. The orchestrator gate runs before any start effect, so a held continuation leaves no state to unwind.",
       "lock": "Worker lease/changeset/domain protocols around execution; detached cleanup is separate generic update and review-loop notification.",
       "stale_result": "Late failed worker can idle successor; losing execution authority must stop new effects, not be inferred from thread status.",
       "classification": "unfenced-needs-conversion",
@@ -10621,7 +10621,7 @@
       "fence_outcome": "AuthorizationRejected aborts. ProjectTurnInTx/SettleLostAttemptInTx may return StaleSharedState only after immutable own-attempt proof: append that attempt's terminal/transcript receipt, skip ALL shared current status/result/diff/checkpoint, input acknowledgement, owner release, new execution and publication. Do not treat a reclaimed live predecessor as current RuntimeAuthority.",
       "prerequisite_0a": "0a: validate admission before all start effects and handoff, persist exact input/request binding, replace generic cleanup with exact-owned stale-aware settlement; no reselect latest request or existing-job rebinding.",
       "evidence": [
-        "internal/worker/handlers.go:9803",
+        "internal/worker/handlers.go:9860",
         "Discovered: boundary-caller, dispatch-reference, indirect-caller",
         "Boundary/call candidate: answerQueuedHumanInputForContinue",
         "Boundary/call candidate: answerQueuedHumanInputForContinue -> internal/worker/handlers.go:answerQueuedHumanInputForContinue",
@@ -10650,7 +10650,8 @@
         "Boundary/call candidate: stores.SessionThreads.UpdateStatus",
         "Boundary/call candidate: stores.SessionThreads.UpdateTurnComplete",
         "Boundary/call candidate: stores.SessionThreads.UpdateTurnComplete -> internal/db/session_store.go:SessionStore.UpdateTurnComplete",
-        "Boundary/call candidate: stores.SessionThreads.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete"
+        "Boundary/call candidate: stores.SessionThreads.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
+        "Boundary/call candidate: registerConcurrencyLimitDeadLetter -> internal/worker/handlers.go:registerConcurrencyLimitDeadLetter"
       ]
     },
     {
@@ -10917,11 +10918,11 @@
       ]
     },
     {
-      "id": "internal/worker/handlers.go:registerSandboxCapacityDeadLetter",
-      "source_sha256": "93a5a7c62b1900a29bcb33992c15939d7f7f4bf0c483569121ab432097d5773f",
-      "operation": "dead-letter terminal projection: capacity wait retry exhausted",
-      "owner": "registerSandboxCapacityDeadLetter in internal/worker",
-      "predicate": "Skips automation-turn context. Captures session/thread snapshot at hook registration; hook later writes generic failed result/detail and linked notifications without fresh attempt/epoch predicate.",
+      "id": "internal/worker/handlers.go:registerConcurrencyLimitDeadLetter",
+      "source_sha256": "da757f52269ca07ab32e33707fde0faa0eb5476521552fb91900466e4f06ce39",
+      "operation": "dead-letter terminal projection: org concurrency quota wait retry exhausted",
+      "owner": "registerConcurrencyLimitDeadLetter in internal/worker",
+      "predicate": "Thin wrapper: delegates to registerSessionCapacityDeadLetter with the concurrency_timeout category, user message and next steps and a static explanation; registered by newContinueSessionHandler when ContinueSession returns ErrConcurrencyLimit. The shared body skips automation-turn context, so an automation-owned continuation is settled by its completer instead.",
       "lock": "Detached 10s callback; parent/thread/detail and integration/domain completion writes are separate, after job dead-letter.",
       "stale_result": "New admission can occur before callback and be failed; dead-letter status alone does not prove current projection authority. Notification errors do not authorize retry/new execution.",
       "classification": "unfenced-needs-conversion",
@@ -10931,7 +10932,47 @@
       "fence_outcome": "Pre-allocation failure is a strict current-admission projection: stale/invalid authority rolls back with no invented transcript or provider result. Allocated attempts alone may use F2 immutable own settlement while skipping ALL stale shared status/result/diff/checkpoint/input ack/owner release/execution/publication. Captured callback state never overrides the authoritative final job outcome.",
       "prerequisite_0a": "0a: bind hook to exact admitted dispatch and authoritative terminal job outcome; use AdmissionAuthority if allocation never happened, allocation-bound settlement otherwise. Atomically recheck current epochs/consumer for shared projection and gate notifications on canonical disposition.",
       "evidence": [
-        "internal/worker/handlers.go:256",
+        "internal/worker/handlers.go:300",
+        "Discovered: indirect-caller",
+        "Boundary/call candidate: registerSessionCapacityDeadLetter -> internal/worker/handlers.go:registerSessionCapacityDeadLetter"
+      ]
+    },
+    {
+      "id": "internal/worker/handlers.go:registerSandboxCapacityDeadLetter",
+      "source_sha256": "ce999a66a3a53a307bf6e870fff0c235d7a1c49b70b33bd4f788cc0ece6e1b80",
+      "operation": "dead-letter terminal projection: capacity wait retry exhausted",
+      "owner": "registerSandboxCapacityDeadLetter in internal/worker",
+      "predicate": "Thin wrapper: delegates to registerSessionCapacityDeadLetter with the sandbox-capacity category, user message, next steps and worker-load explanation; the hook contract (automation-turn stand-down, captured session/thread snapshot, generic failed result/detail and notifications) lives in the shared body.",
+      "lock": "Detached 10s callback; parent/thread/detail and integration/domain completion writes are separate, after job dead-letter.",
+      "stale_result": "New admission can occur before callback and be failed; dead-letter status alone does not prove current projection authority. Notification errors do not authorize retry/new execution.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a: bind hook to exact admission/job token/runtime and atomically test current epoch; stale callback records only own immutable terminal receipt. Gate parent/thread/details and related notifications on canonical disposition.",
+      "canonical_target": "ProjectAdmissionFailureInTx (before allocation) / SettleLostAttemptInTx (allocated attempt)",
+      "authority": "Before allocation: AdmissionAuthority exact durable dispatch/job and current epochs, with authoritative terminal job outcome and no successor consumer; never fabricate a runtime. After allocation: exact immutable own allocation for historical settlement, plus current RuntimeAuthority for shared projection.",
+      "fence_outcome": "Pre-allocation failure is a strict current-admission projection: stale/invalid authority rolls back with no invented transcript or provider result. Allocated attempts alone may use F2 immutable own settlement while skipping ALL stale shared status/result/diff/checkpoint/input ack/owner release/execution/publication. Captured callback state never overrides the authoritative final job outcome.",
+      "prerequisite_0a": "0a: bind hook to exact admitted dispatch and authoritative terminal job outcome; use AdmissionAuthority if allocation never happened, allocation-bound settlement otherwise. Atomically recheck current epochs/consumer for shared projection and gate notifications on canonical disposition.",
+      "evidence": [
+        "internal/worker/handlers.go:282",
+        "Discovered: indirect-caller",
+        "Boundary/call candidate: registerSessionCapacityDeadLetter -> internal/worker/handlers.go:registerSessionCapacityDeadLetter"
+      ]
+    },
+    {
+      "id": "internal/worker/handlers.go:registerSessionCapacityDeadLetter",
+      "source_sha256": "93a5a7c62b1900a29bcb33992c15939d7f7f4bf0c483569121ab432097d5773f",
+      "operation": "dead-letter terminal projection: shared capacity-wait settlement (sandbox capacity, org concurrency quota)",
+      "owner": "registerSessionCapacityDeadLetter in internal/worker",
+      "predicate": "Skips automation-turn context. Captures session/thread snapshot at hook registration; hook later writes the spec's failed result/category/next steps/explanation on session and thread and linked notifications without fresh attempt/epoch predicate. The session's executing-turn marker is cleared by UpdateResult's non-running status write, so a settled session releases its org quota slot.",
+      "lock": "Detached 10s callback; parent/thread/detail and integration/domain completion writes are separate, after job dead-letter.",
+      "stale_result": "New admission can occur before callback and be failed; dead-letter status alone does not prove current projection authority. Notification errors do not authorize retry/new execution.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a: bind hook to exact admission/job token/runtime and atomically test current epoch; stale callback records only own immutable terminal receipt. Gate parent/thread/details and related notifications on canonical disposition.",
+      "canonical_target": "ProjectAdmissionFailureInTx (before allocation) / SettleLostAttemptInTx (allocated attempt)",
+      "authority": "Before allocation: AdmissionAuthority exact durable dispatch/job and current epochs, with authoritative terminal job outcome and no successor consumer; never fabricate a runtime. After allocation: exact immutable own allocation for historical settlement, plus current RuntimeAuthority for shared projection.",
+      "fence_outcome": "Pre-allocation failure is a strict current-admission projection: stale/invalid authority rolls back with no invented transcript or provider result. Allocated attempts alone may use F2 immutable own settlement while skipping ALL stale shared status/result/diff/checkpoint/input ack/owner release/execution/publication. Captured callback state never overrides the authoritative final job outcome.",
+      "prerequisite_0a": "0a: bind hook to exact admitted dispatch and authoritative terminal job outcome; use AdmissionAuthority if allocation never happened, allocation-bound settlement otherwise. Atomically recheck current epochs/consumer for shared projection and gate notifications on canonical disposition.",
+      "evidence": [
+        "internal/worker/handlers.go:316",
         "Discovered: boundary-caller",
         "Boundary/call candidate: stores.SessionThreads.UpdateResult",
         "Boundary/call candidate: stores.Sessions.UpdateResult"
