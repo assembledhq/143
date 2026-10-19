@@ -41,6 +41,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ThemeSelect } from "@/components/theme-select";
 import { useAuth } from "@/hooks/use-auth";
@@ -54,6 +55,8 @@ import {
 import type {
   CodingAuthAgent,
   CodingAuthStatus,
+  CodingCredentialDistribution,
+  CodingCredentialStackSettings,
   CodingCredentialSummary,
   ListResponse,
   Organization,
@@ -107,9 +110,12 @@ function CredentialList({
   rows,
   emptyState,
   readOnly = false,
+  spread = false,
   onDelete,
 }: {
   rows: CodingCredentialSummary[];
+  /** When the stack spreads load, no single row is "the" default. */
+  spread?: boolean;
   emptyState: {
     icon: LucideIcon;
     title: string;
@@ -142,7 +148,7 @@ function CredentialList({
             <div className="min-w-0 space-y-1">
               <div className="text-xs font-medium text-foreground">
                 {agentLabel(row.agent)}
-                {row.is_default ? (
+                {row.is_default && !spread ? (
                   <Badge variant="secondary" className="ml-2">Default</Badge>
                 ) : null}
               </div>
@@ -194,7 +200,7 @@ function CredentialList({
                 <TableCell className="text-muted-foreground">{idx + 1}</TableCell>
                 <TableCell>
                   {agentLabel(row.agent)}
-                  {row.is_default ? (
+                  {row.is_default && !spread ? (
                     <Badge variant="secondary" className="ml-2">Default</Badge>
                   ) : null}
                 </TableCell>
@@ -328,6 +334,29 @@ export default function AccountPage() {
 
   const personalRows = personalResp?.data ?? [];
   const orgRows = orgResp?.data ?? [];
+
+  const { data: personalStackSettings } = useQuery<SingleResponse<CodingCredentialStackSettings>>({
+    queryKey: queryKeys.codingCredentials.stackSettings("personal"),
+    queryFn: () => api.codingCredentials.getStackSettings("personal"),
+  });
+  const { data: orgStackSettings } = useQuery<SingleResponse<CodingCredentialStackSettings>>({
+    queryKey: queryKeys.codingCredentials.stackSettings("org"),
+    queryFn: () => api.codingCredentials.getStackSettings("org"),
+  });
+  const personalSpread = (personalStackSettings?.data.distribution ?? "ordered") === "spread";
+  const orgSpread = (orgStackSettings?.data.distribution ?? "ordered") === "spread";
+
+  const distributionMutation = useMutation({
+    mutationFn: (next: CodingCredentialDistribution) =>
+      api.codingCredentials.updateStackSettings({ scope: "personal", distribution: next }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
+    },
+    onError: (error) => {
+      captureError(error, { feature: "personal-auth-distribution" });
+      toast.error("Could not update load distribution");
+    },
+  });
 
   const storedReasoningDefaults = getCodingAgentReasoningDefaultsFromSettings(user?.settings);
   const effectiveReasoningDefaults = pendingReasoningDefaults ?? storedReasoningDefaults;
@@ -557,12 +586,35 @@ export default function AccountPage() {
           <CardHeader>
             <CardTitle>My coding agents</CardTitle>
             <CardDescription>
-              Your personal stack runs ahead of any organization fallback. Add as many as you need — the resolver picks the highest-priority active row.
+              {personalSpread
+                ? "Your personal stack runs ahead of any organization fallback. Each session picks at random among your healthy auths."
+                : "Your personal stack runs ahead of any organization fallback. Add as many as you need — the resolver picks the highest-priority active row."}
             </CardDescription>
           </CardHeader>
           <CardContent className="px-0 pb-6">
+            {personalRows.length > 0 ? (
+              <div className="flex items-start justify-between gap-4 border-b border-border/60 px-4 pb-4">
+                <div className="min-w-0 space-y-0.5">
+                  <Label htmlFor="personal-spread-load" className="text-sm font-medium text-foreground">
+                    Spread load across auths
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    {personalSpread
+                      ? "Each session picks at random among your healthy auths. Priority order applies again when this is off."
+                      : "Sessions use your top healthy auth until it is rate limited, then fall through in priority order."}
+                  </p>
+                </div>
+                <Switch
+                  id="personal-spread-load"
+                  checked={personalSpread}
+                  disabled={distributionMutation.isPending}
+                  onCheckedChange={(checked) => distributionMutation.mutate(checked ? "spread" : "ordered")}
+                />
+              </div>
+            ) : null}
             <CredentialList
               rows={personalRows}
+              spread={personalSpread}
               emptyState={{
                 icon: KeyRound,
                 title: "No personal auths yet",
@@ -581,12 +633,15 @@ export default function AccountPage() {
           <CardHeader>
             <CardTitle>Org fallback</CardTitle>
             <CardDescription>
-              Read-only. Contact an admin to change org auths.
+              {orgSpread
+                ? "Read-only. Load is spread at random across all healthy org auths. Contact an admin to change org auths."
+                : "Read-only. Contact an admin to change org auths."}
             </CardDescription>
           </CardHeader>
           <CardContent className="px-0 pb-6">
             <CredentialList
               rows={orgRows}
+              spread={orgSpread}
               emptyState={{
                 icon: ShieldCheck,
                 title: "No org fallback yet",

@@ -1671,3 +1671,82 @@ func TestCodingCredentialStoreSetStackDistributionRejectsUnknownMode(t *testing.
 	require.EqualError(t, err, `invalid distribution: "sometimes"`, "an unknown mode should be rejected before any write")
 	require.NoError(t, mock.ExpectationsWereMet(), "no database write should happen for an invalid mode")
 }
+
+func TestDistributionCacheDropsLoadsThatSpanInvalidation(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	otherOrgID := uuid.New()
+	userID := uuid.New()
+	otherUserID := uuid.New()
+	loaded := stackDistribution{orgSpread: true}
+
+	tests := []struct {
+		name       string
+		invalidate func(c *distributionCache)
+		expectHit  bool
+	}{
+		{
+			name:       "no invalidation caches the load",
+			invalidate: func(*distributionCache) {},
+			expectHit:  true,
+		},
+		{
+			name:       "org invalidation during the load drops it",
+			invalidate: func(c *distributionCache) { c.invalidateOrg(orgID) },
+			expectHit:  false,
+		},
+		{
+			name:       "same user invalidation during the load drops it",
+			invalidate: func(c *distributionCache) { c.invalidateUser(orgID, userID) },
+			expectHit:  false,
+		},
+		{
+			name:       "another user in the org invalidating during the load drops it",
+			invalidate: func(c *distributionCache) { c.invalidateUser(orgID, otherUserID) },
+			expectHit:  false,
+		},
+		{
+			name:       "another org invalidating during the load keeps it",
+			invalidate: func(c *distributionCache) { c.invalidateOrg(otherOrgID) },
+			expectHit:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cache := newDistributionCache(time.Minute)
+			_, generation, hit := cache.lookup(orgID, &userID)
+			require.False(t, hit, "a fresh cache should miss")
+
+			tt.invalidate(cache)
+			cache.put(orgID, &userID, loaded, generation)
+
+			got, _, hit := cache.lookup(orgID, &userID)
+			require.Equal(t, tt.expectHit, hit, "a load that spans an invalidation for its org must not be cached")
+			if tt.expectHit {
+				require.Equal(t, loaded, got, "a clean load should be served from the cache")
+			}
+		})
+	}
+}
+
+func TestDistributionCacheExpiresWithClock(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	cache := newDistributionCache(30 * time.Second)
+	cache.clock = func() time.Time { return now }
+
+	_, generation, _ := cache.lookup(orgID, nil)
+	cache.put(orgID, nil, stackDistribution{orgSpread: true}, generation)
+	_, _, hit := cache.lookup(orgID, nil)
+	require.True(t, hit, "a fresh entry should be served within the TTL")
+
+	now = now.Add(31 * time.Second)
+	_, _, hit = cache.lookup(orgID, nil)
+	require.False(t, hit, "an entry past the TTL should miss")
+}

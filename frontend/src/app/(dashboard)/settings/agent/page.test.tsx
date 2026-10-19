@@ -673,6 +673,7 @@ describe("Agent settings page", () => {
   });
 
   it("describes the spread stack without priority hints", async () => {
+    const user = userEvent.setup();
     installHandlers();
     server.use(
       http.get("/api/v1/coding-credentials/stack-settings", () =>
@@ -693,6 +694,30 @@ describe("Agent settings page", () => {
     expect(stack, "switch should live inside the stack card").not.toBeNull();
     expect(within(stack as HTMLElement).getAllByText("Team seat A").length).toBeGreaterThan(0);
     expect(within(stack as HTMLElement).queryByText("Default")).not.toBeInTheDocument();
+
+    // Ordering-only actions disappear while spreading: priority is ignored.
+    await user.click(within(stack as HTMLElement).getAllByRole("button", { name: "Team seat A" })[0]);
+    expect(await screen.findByRole("textbox", { name: "Name" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Set as default" })).not.toBeInTheDocument();
+  });
+
+  it("hides the insertion point choice in the add auth modal while load is spread", async () => {
+    const user = userEvent.setup();
+    installHandlers();
+    server.use(
+      http.get("/api/v1/coding-credentials/stack-settings", () =>
+        HttpResponse.json({ data: { scope: "org", distribution: "spread" } }),
+      ),
+    );
+
+    renderWithProviders(<AgentPage />);
+
+    await screen.findByRole("switch", { name: "Spread load across auths" });
+    await user.click(screen.getByRole("button", { name: "Add auth" }));
+
+    expect(await screen.findByRole("textbox", { name: "Name" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Insertion point")).not.toBeInTheDocument();
   });
 
   it("shows a shared empty state when the org fallback stack has no auths", async () => {

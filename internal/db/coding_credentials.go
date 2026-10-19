@@ -1012,8 +1012,9 @@ func (s *CodingCredentialStore) GetStackSettings(ctx context.Context, scope mode
 	return settings, nil
 }
 
-// SetStackDistribution stores the scope's distribution mode and drops the
-// cached picker view so the next multi-row pick observes it.
+// SetStackDistribution stores the scope's distribution mode and drops this
+// process's cached picker view, so its next multi-row pick observes the new
+// mode; other processes converge within the cache TTL.
 func (s *CodingCredentialStore) SetStackDistribution(ctx context.Context, scope models.Scope, distribution models.CodingCredentialDistribution) error {
 	if err := distribution.Validate(); err != nil {
 		return err
@@ -1031,9 +1032,12 @@ func (s *CodingCredentialStore) SetStackDistribution(ctx context.Context, scope 
 
 // stackDistributionFor loads the distribution mode of both scope halves a
 // pick for (orgID, userID) can touch, in one round trip. Cached for the
-// resolver TTL; SetStackDistribution drops the affected entries.
+// resolver TTL; SetStackDistribution drops the affected entries, and a load
+// that was in flight across that invalidation is not cached (see
+// distributionCache.put) so a stale mode cannot outlive the write.
 func (s *CodingCredentialStore) stackDistributionFor(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID) (stackDistribution, error) {
-	if cached, ok := s.distributionCache.get(orgID, userID); ok {
+	cached, generation, ok := s.distributionCache.lookup(orgID, userID)
+	if ok {
 		return cached, nil
 	}
 	args := pgx.NamedArgs{"org_id": orgID}
@@ -1067,7 +1071,7 @@ func (s *CodingCredentialStore) stackDistributionFor(ctx context.Context, orgID 
 	if err := rows.Err(); err != nil {
 		return stackDistribution{}, fmt.Errorf("iterate stack distribution: %w", err)
 	}
-	s.distributionCache.put(orgID, userID, dist)
+	s.distributionCache.put(orgID, userID, dist, generation)
 	return dist, nil
 }
 
@@ -1846,18 +1850,26 @@ type distributionCacheEntry struct {
 
 // distributionCache memoizes stackDistributionFor per (org, user) so the pick
 // hot path does not add a DB read per session start.
+//
+// Fills are fenced by a per-org generation: lookup hands out the generation on
+// a miss, every invalidation for the org bumps it, and put discards a value
+// loaded under an older generation. Without that, a read that started before
+// SetStackDistribution could cache the pre-write mode for a full TTL after
+// the invalidation had already run.
 type distributionCache struct {
-	mu    sync.RWMutex
-	ttl   time.Duration
-	data  map[distributionCacheKey]distributionCacheEntry
-	clock func() time.Time
+	mu          sync.RWMutex
+	ttl         time.Duration
+	data        map[distributionCacheKey]distributionCacheEntry
+	generations map[uuid.UUID]uint64
+	clock       func() time.Time
 }
 
 func newDistributionCache(ttl time.Duration) *distributionCache {
 	return &distributionCache{
-		ttl:   ttl,
-		data:  make(map[distributionCacheKey]distributionCacheEntry),
-		clock: time.Now,
+		ttl:         ttl,
+		data:        make(map[distributionCacheKey]distributionCacheEntry),
+		generations: make(map[uuid.UUID]uint64),
+		clock:       time.Now,
 	}
 }
 
@@ -1869,27 +1881,35 @@ func (c *distributionCache) keyFor(orgID uuid.UUID, userID *uuid.UUID) distribut
 	return key
 }
 
-func (c *distributionCache) get(orgID uuid.UUID, userID *uuid.UUID) (stackDistribution, bool) {
+// lookup returns the cached value for the key. On a miss it also returns the
+// org's current generation, which the caller passes back to put so a load
+// that raced an invalidation is discarded instead of cached.
+func (c *distributionCache) lookup(orgID uuid.UUID, userID *uuid.UUID) (stackDistribution, uint64, bool) {
 	if c == nil {
-		return stackDistribution{}, false
+		return stackDistribution{}, 0, false
 	}
 	key := c.keyFor(orgID, userID)
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	entry, ok := c.data[key]
 	if !ok || c.clock().After(entry.expiry) {
-		return stackDistribution{}, false
+		return stackDistribution{}, c.generations[orgID], false
 	}
-	return entry.value, true
+	return entry.value, c.generations[orgID], true
 }
 
-func (c *distributionCache) put(orgID uuid.UUID, userID *uuid.UUID, val stackDistribution) {
+// put caches val unless the org's generation moved since the lookup that
+// produced generation, in which case the load is stale and dropped.
+func (c *distributionCache) put(orgID uuid.UUID, userID *uuid.UUID, val stackDistribution, generation uint64) {
 	if c == nil {
 		return
 	}
 	key := c.keyFor(orgID, userID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.generations[orgID] != generation {
+		return
+	}
 	c.data[key] = distributionCacheEntry{value: val, expiry: c.clock().Add(c.ttl)}
 }
 
@@ -1901,6 +1921,7 @@ func (c *distributionCache) invalidateOrg(orgID uuid.UUID) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.generations[orgID]++
 	for key := range c.data {
 		if key.orgID == orgID {
 			delete(c.data, key)
@@ -1908,12 +1929,16 @@ func (c *distributionCache) invalidateOrg(orgID uuid.UUID) {
 	}
 }
 
+// invalidateUser drops one user's view. The generation is per org, so an
+// in-flight load for any user of the org is also dropped; that costs one
+// extra read on a rare race and keeps the fence simple.
 func (c *distributionCache) invalidateUser(orgID, userID uuid.UUID) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.generations[orgID]++
 	delete(c.data, distributionCacheKey{orgID: orgID, userKey: userID})
 }
 

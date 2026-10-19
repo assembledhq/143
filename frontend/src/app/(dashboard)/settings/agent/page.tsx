@@ -363,7 +363,9 @@ export default function AgentPage() {
       ? openCodeCredentialLabel(effectiveOpenCodeBackingProvider)
       : defaultLabel(provider, effectiveAuthType)
   );
-  const showInsertionSelect = selectedProvider.supportsStackOrder;
+  // Insertion point and "Set as default" only reorder stored priorities,
+  // which a spread stack ignores until spreading is turned off again.
+  const showInsertionSelect = selectedProvider.supportsStackOrder && !spreadLoad;
   const showAuthTypeSelector = selectedProvider.supportsSubscription;
   const addBusy = stackCreateMutation.isPending;
 
@@ -706,13 +708,15 @@ export default function AgentPage() {
 
                   <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
                     <div className="flex flex-wrap gap-2">
-                      <Button
-                        variant="outline"
-                        onClick={() => void reorderMutation.mutateAsync(moveRowToTop(rows, selected.id))}
-                        disabled={selected.priority === 1}
-                      >
-                        Set as default
-                      </Button>
+                      {!spreadLoad ? (
+                        <Button
+                          variant="outline"
+                          onClick={() => void reorderMutation.mutateAsync(moveRowToTop(rows, selected.id))}
+                          disabled={selected.priority === 1}
+                        >
+                          Set as default
+                        </Button>
+                      ) : null}
                       <Button
                         variant="ghost"
                         className="text-destructive hover:text-destructive"
