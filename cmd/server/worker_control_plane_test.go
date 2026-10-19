@@ -144,7 +144,9 @@ CREATE TABLE jobs(id uuid PRIMARY KEY,org_id uuid,job_type text,payload jsonb,st
 			// The application label is intentionally shared by every worker
 			// running this binary. Capture both of this fixture's actual backend
 			// PIDs before contention so parallel fixtures cannot satisfy its
-			// cancellation evidence or inflate its connection count.
+			// cancellation evidence. The warmed pool's connection-creation
+			// counter separately detects replacements while PID-scoped activity
+			// proves both original backends remain connected.
 			firstControl, err := control.Acquire(ctx)
 			require.NoError(t, err, "acquire this fixture's first reserve backend before row locking")
 			t.Cleanup(firstControl.Release)
@@ -155,6 +157,7 @@ CREATE TABLE jobs(id uuid PRIMARY KEY,org_id uuid,job_type text,payload jsonb,st
 			require.NoError(t, firstControl.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&controlPIDs[0]), "read the first reserve backend PID without relying on application-name uniqueness")
 			require.NoError(t, secondControl.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&controlPIDs[1]), "read the second reserve backend PID without relying on application-name uniqueness")
 			require.NotEqual(t, controlPIDs[0], controlPIDs[1], "the bounded reserve must expose two distinct physical backends")
+			n0 := control.Stat().NewConnsCount()
 			firstControl.Release()
 			secondControl.Release()
 			var beforeExpiry time.Time
@@ -192,7 +195,8 @@ CREATE TABLE jobs(id uuid PRIMARY KEY,org_id uuid,job_type text,payload jsonb,st
 			var waiting, connected int
 			require.NoError(t, admin.QueryRow(ctx, `SELECT count(*) FILTER (WHERE wait_event_type='Lock'), count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid=ANY($1)`, controlPIDs).Scan(&waiting, &connected), "read only this fixture's captured reserve backends before releasing the fixture lock")
 			require.Equal(t, 0, waiting, "cancelled renewals must leave no server backend waiting to apply an abandoned write")
-			require.LessOrEqual(t, connected, 2, "cancelled statements must reuse the bounded reserve instead of accumulating abandoned backends")
+			require.Equal(t, n0, control.Stat().NewConnsCount(), "heartbeat and cancelled renewal must not create replacement reserve connections")
+			require.Equal(t, 2, connected, "both original reserve backends must remain connected after cancellation rather than being abandoned and replaced")
 			require.NoError(t, locker.Rollback(ctx), "release the fixture lock only after server cancellation is proven")
 			var afterExpiry time.Time
 			require.NoError(t, admin.QueryRow(ctx, `SELECT lease_expires_at FROM jobs WHERE id=$1`, jobID).Scan(&afterExpiry), "read the lease after cancellation and unlock")
