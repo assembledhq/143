@@ -32,8 +32,8 @@ func TestLifecycleWriterInstanceStore_ObserveValidation(t *testing.T) {
 			wantErr: `observe lifecycle writer instance: invalid LifecycleWriterRole: ""`,
 		},
 		{
-			name: "unwired role", instanceID: uuid.New(), role: "api", buildSHA: "test-build",
-			wantErr: `observe lifecycle writer instance: invalid LifecycleWriterRole: "api"`,
+			name: "unknown role", instanceID: uuid.New(), role: "other", buildSHA: "test-build",
+			wantErr: `observe lifecycle writer instance: invalid LifecycleWriterRole: "other"`,
 		},
 		{
 			name: "empty build", instanceID: uuid.New(), role: models.LifecycleWriterRoleSessionExecutor,
@@ -85,17 +85,21 @@ func TestLifecycleWriterInstanceStore_Observe(t *testing.T) {
 	databaseErr := errors.New("database unavailable")
 	tests := []struct {
 		name     string
+		role     models.LifecycleWriterRole
 		buildSHA string
 		rows     int64
 		dbErr    error
 		wantErr  error
 	}{
-		{name: "fresh observation", buildSHA: "test-build", rows: 1},
-		{name: "renew same identity", buildSHA: "same-build", rows: 1},
-		{name: "development build", buildSHA: "dev", rows: 1},
-		{name: "maximum build length", buildSHA: strings.Repeat("b", 128), rows: 1},
-		{name: "immutable identity differs", buildSHA: "different-build", wantErr: ErrLifecycleWriterInstanceIdentityMismatch},
-		{name: "database error", buildSHA: "test-build", dbErr: databaseErr, wantErr: databaseErr},
+		{name: "api process", role: models.LifecycleWriterRoleAPI, buildSHA: "api-build", rows: 1},
+		{name: "worker process", role: models.LifecycleWriterRoleWorker, buildSHA: "worker-build", rows: 1},
+		{name: "one combined process", role: models.LifecycleWriterRoleAll, buildSHA: "all-build", rows: 1},
+		{name: "fresh observation", role: models.LifecycleWriterRoleSessionExecutor, buildSHA: "test-build", rows: 1},
+		{name: "renew same identity", role: models.LifecycleWriterRoleSessionExecutor, buildSHA: "same-build", rows: 1},
+		{name: "development build", role: models.LifecycleWriterRoleSessionExecutor, buildSHA: "dev", rows: 1},
+		{name: "maximum build length", role: models.LifecycleWriterRoleSessionExecutor, buildSHA: strings.Repeat("b", 128), rows: 1},
+		{name: "immutable identity differs", role: models.LifecycleWriterRoleSessionExecutor, buildSHA: "different-build", wantErr: ErrLifecycleWriterInstanceIdentityMismatch},
+		{name: "database error", role: models.LifecycleWriterRoleSessionExecutor, buildSHA: "test-build", dbErr: databaseErr, wantErr: databaseErr},
 	}
 
 	for _, tt := range tests {
@@ -108,14 +112,14 @@ func TestLifecycleWriterInstanceStore_Observe(t *testing.T) {
 
 			instanceID := uuid.New()
 			expectation := mock.ExpectExec(expectedSQL).
-				WithArgs(instanceID, models.LifecycleWriterRoleSessionExecutor, tt.buildSHA, 0)
+				WithArgs(instanceID, tt.role, tt.buildSHA, 0)
 			if tt.dbErr != nil {
 				expectation.WillReturnError(tt.dbErr)
 			} else {
 				expectation.WillReturnResult(pgxmock.NewResult("INSERT", tt.rows))
 			}
 
-			err = NewLifecycleWriterInstanceStore(mock).Observe(context.Background(), instanceID, models.LifecycleWriterRoleSessionExecutor, tt.buildSHA)
+			err = NewLifecycleWriterInstanceStore(mock).Observe(context.Background(), instanceID, tt.role, tt.buildSHA)
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr, "failed observations must preserve the identity or database failure")
 			} else {

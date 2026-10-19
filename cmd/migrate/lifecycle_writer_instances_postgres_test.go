@@ -127,14 +127,21 @@ func TestLifecycleWriterInstanceObserveFullSchemaPostgres(t *testing.T) {
 	config := conn.Config().Copy()
 	tests := []struct {
 		name, build, conflict string
+		role, conflictRole    models.LifecycleWriterRole
 		restart               bool
 	}{
-		{name: "published binary identity", build: "synthetic-build"},
-		{name: "development binary identity", build: "dev"},
-		{name: "distinct process restart identity", build: "synthetic-build", restart: true},
-		{name: "immutable role mismatch", build: "synthetic-build", conflict: "role"},
-		{name: "immutable build mismatch", build: "synthetic-build", conflict: "build_sha"},
-		{name: "future version mismatch", build: "synthetic-build", conflict: "lifecycle_writer_version"},
+		{name: "published binary identity", role: models.LifecycleWriterRoleSessionExecutor, build: "synthetic-build"},
+		{name: "development binary identity", role: models.LifecycleWriterRoleSessionExecutor, build: "dev"},
+		{name: "distinct process restart identity", role: models.LifecycleWriterRoleSessionExecutor, build: "synthetic-build", restart: true},
+		{name: "immutable role mismatch", role: models.LifecycleWriterRoleSessionExecutor, build: "synthetic-build", conflict: "role"},
+		{name: "immutable build mismatch", role: models.LifecycleWriterRoleSessionExecutor, build: "synthetic-build", conflict: "build_sha"},
+		{name: "future version mismatch", role: models.LifecycleWriterRoleSessionExecutor, build: "synthetic-build", conflict: "lifecycle_writer_version"},
+		{name: "api process insert and renewal", role: models.LifecycleWriterRoleAPI, build: "synthetic-api-build"},
+		{name: "worker process insert and renewal", role: models.LifecycleWriterRoleWorker, build: "synthetic-worker-build"},
+		{name: "combined process insert and renewal", role: models.LifecycleWriterRoleAll, build: "synthetic-all-build"},
+		{name: "api process rejects worker role takeover", role: models.LifecycleWriterRoleAPI, conflictRole: models.LifecycleWriterRoleWorker, build: "synthetic-api-build", conflict: "role"},
+		{name: "worker process rejects combined role takeover", role: models.LifecycleWriterRoleWorker, conflictRole: models.LifecycleWriterRoleAll, build: "synthetic-worker-build", conflict: "role"},
+		{name: "combined process rejects api role takeover", role: models.LifecycleWriterRoleAll, conflictRole: models.LifecycleWriterRoleAPI, build: "synthetic-all-build", conflict: "role"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -146,13 +153,18 @@ func TestLifecycleWriterInstanceObserveFullSchemaPostgres(t *testing.T) {
 			id := uuid.New()
 			var beforeClock time.Time
 			require.NoError(t, actor.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&beforeClock), "sample the database clock before this process observation")
-			require.NoError(t, store.Observe(ctx, id, models.LifecycleWriterRoleSessionExecutor, tt.build), "publish a standalone executor's actual process identity at fixed version zero")
-			assertLifecycleWriterInstanceObservation(t, ctx, actor, id, tt.build, beforeClock)
+			require.NoError(t, store.Observe(ctx, id, tt.role, tt.build), "publish the participating binary's actual process identity at fixed version zero")
+			assertLifecycleWriterInstanceObservation(t, ctx, actor, id, tt.role, tt.build, beforeClock)
 			if tt.conflict != "" {
+				attemptRole := tt.role
 				switch tt.conflict {
 				case "role":
-					_, err := actor.Exec(ctx, `UPDATE lifecycle_writer_instances SET role='synthetic_future_role' WHERE instance_id=$1`, id)
-					require.NoError(t, err, "seed a valid future role without interpreting it as a current binary role")
+					if tt.conflictRole != "" {
+						attemptRole = tt.conflictRole
+					} else {
+						_, err := actor.Exec(ctx, `UPDATE lifecycle_writer_instances SET role='synthetic_future_role' WHERE instance_id=$1`, id)
+						require.NoError(t, err, "seed a valid future role without interpreting it as a current binary role")
+					}
 				case "build_sha":
 					_, err := actor.Exec(ctx, `UPDATE lifecycle_writer_instances SET build_sha='synthetic-other-build' WHERE instance_id=$1`, id)
 					require.NoError(t, err, "seed a different immutable process build")
@@ -161,7 +173,7 @@ func TestLifecycleWriterInstanceObserveFullSchemaPostgres(t *testing.T) {
 					require.NoError(t, err, "seed unknown nonnegative metadata without advertising it from this binary")
 				}
 				before := lifecycleWriterInstanceRowJSON(t, ctx, actor, id)
-				err := store.Observe(ctx, id, models.LifecycleWriterRoleSessionExecutor, tt.build)
+				err := store.Observe(ctx, id, attemptRole, tt.build)
 				require.ErrorIs(t, err, db.ErrLifecycleWriterInstanceIdentityMismatch, "a reused process identity must not overwrite a different role, build, or writer version")
 				require.JSONEq(t, string(before), string(lifecycleWriterInstanceRowJSON(t, ctx, actor, id)), "identity mismatch must preserve every field including heartbeat and expiry")
 				return
@@ -169,12 +181,12 @@ func TestLifecycleWriterInstanceObserveFullSchemaPostgres(t *testing.T) {
 			_, err := actor.Exec(ctx, `UPDATE lifecycle_writer_instances SET last_heartbeat=statement_timestamp()-interval '8 days 2 minutes',expires_at=statement_timestamp()-interval '8 days' WHERE instance_id=$1`, id)
 			require.NoError(t, err, "expire the matching process observation without changing immutable identity")
 			require.NoError(t, actor.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&beforeClock), "bound lease renewal by a fresh database-clock sample")
-			require.NoError(t, store.Observe(ctx, id, models.LifecycleWriterRoleSessionExecutor, tt.build), "a matching process may renew an expired observation without an execution-lifecycle gate")
-			assertLifecycleWriterInstanceObservation(t, ctx, actor, id, tt.build, beforeClock)
+			require.NoError(t, store.Observe(ctx, id, tt.role, tt.build), "a matching process may renew an expired observation without an execution-lifecycle gate")
+			assertLifecycleWriterInstanceObservation(t, ctx, actor, id, tt.role, tt.build, beforeClock)
 			ids := []uuid.UUID{id}
 			if tt.restart {
 				restartedID := uuid.New()
-				require.NoError(t, store.Observe(ctx, restartedID, models.LifecycleWriterRoleSessionExecutor, tt.build), "a restarted process must create its own UUID rather than take over the previous process row")
+				require.NoError(t, store.Observe(ctx, restartedID, tt.role, tt.build), "a restarted process must create its own UUID rather than take over the previous process row")
 				ids = append(ids, restartedID)
 			}
 			var count int
@@ -387,7 +399,7 @@ func lifecycleWriterInstanceRowJSON(t *testing.T, ctx context.Context, conn *pgx
 	return value
 }
 
-func assertLifecycleWriterInstanceObservation(t *testing.T, ctx context.Context, conn *pgx.Conn, id uuid.UUID, build string, beforeClock time.Time) {
+func assertLifecycleWriterInstanceObservation(t *testing.T, ctx context.Context, conn *pgx.Conn, id uuid.UUID, wantRole models.LifecycleWriterRole, build string, beforeClock time.Time) {
 	t.Helper()
 	var actualID uuid.UUID
 	var role, actualBuild string
@@ -395,7 +407,7 @@ func assertLifecycleWriterInstanceObservation(t *testing.T, ctx context.Context,
 	var heartbeat, expiry, afterClock time.Time
 	require.NoError(t, conn.QueryRow(ctx, `SELECT instance_id,role,build_sha,lifecycle_writer_version,last_heartbeat,expires_at,clock_timestamp() FROM lifecycle_writer_instances WHERE instance_id=$1`, id).Scan(&actualID, &role, &actualBuild, &version, &heartbeat, &expiry, &afterClock), "inspect every field of the database-written process observation")
 	require.Equal(t, id, actualID, "observation must retain the caller's per-process UUID")
-	require.Equal(t, string(models.LifecycleWriterRoleSessionExecutor), role, "observation must truthfully retain the standalone-executor process role")
+	require.Equal(t, string(wantRole), role, "observation must truthfully retain the participating binary's exact process role")
 	require.Equal(t, build, actualBuild, "observation must retain the actual binary build including the literal development build")
 	require.Equal(t, 0, version, "this binary must advertise only passive writer version zero")
 	require.Equal(t, heartbeat.Add(2*time.Minute), expiry, "the database clock must anchor the exact two-minute observation TTL")
