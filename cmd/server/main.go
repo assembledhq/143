@@ -1938,6 +1938,7 @@ func buildServices(
 		CodeReviewInsights:         codeReviewInsights,
 		CodeReviewDisputePublisher: prService,
 		CodeReviewVisualEvidence:   codeReviewVisualEvidence,
+		CodeReviewRiskTier:         prService,
 		CodingAgents:               agentEnv,
 		GitHubOrgRoster:            ghSvc,
 		Snapshots:                  snapshotStore,

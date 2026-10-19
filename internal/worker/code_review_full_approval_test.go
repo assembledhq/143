@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -79,6 +80,77 @@ func TestVerifyFullAssessmentApprovalUsesFreshGatesAndOriginalFindings(t *testin
 				require.NoError(t, err, "clean original panel should be approvable at publication")
 			}
 			require.NoError(t, mock.ExpectationsWereMet(), "all original result and finding reads should be tenant scoped")
+		})
+	}
+}
+
+func TestVerifyFullAssessmentApprovalRereadsTheRiskTier(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		live      *fakeRiskTierCheckRuns
+		wantError bool
+	}{
+		{name: "unchanged live low keeps the staged waiver", live: &fakeRiskTierCheckRuns{runs: []models.CodeReviewCheckRun{workerRiskTierRun(4, workerRiskTierAppID, workerRiskTierHead, "low", "false")}}},
+		{name: "live rescore to high blocks staged approval", live: &fakeRiskTierCheckRuns{runs: []models.CodeReviewCheckRun{workerRiskTierRun(4, workerRiskTierAppID, workerRiskTierHead, "high", "false")}}, wantError: true},
+		{name: "live lookup failure blocks a staged waiver", live: &fakeRiskTierCheckRuns{err: errors.New("secondary rate limit")}, wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, sessionID := uuid.New(), uuid.New()
+			prBody := "Expands the deployment guide. Testing: docs build."
+			pr := models.PullRequest{OrgID: orgID, Body: &prBody, HeadSHA: stringPtr(workerRiskTierHead), Status: models.PullRequestStatusOpen}
+			visual := models.CodeReviewVisualEvidenceSnapshot{Complete: true}
+			policy := workerRiskTierPolicy(workerRiskTierAppID)
+			policy.ApprovalMode = models.CodeReviewApprovalModeApproveAcceptable
+			policy.AgentRoster.Reviewers = []models.AgentType{models.AgentTypeCodex}
+			policy.AgentRoster.ReviewerCount = 1
+			policy.AgentRoster.RequireReviewerQuorum = 1
+			policy.DescriptionPolicy.Requirements = []models.CodeReviewDescriptionRequirement{{Key: "description", Title: "Description", Required: true, EvidenceKind: models.CodeReviewDescriptionEvidenceKindGeneral, Prompt: "Explain the change"}}
+			synthesis := codeReviewOrchestratorSynthesis{
+				Summary: "Docs are sound", ReviewSummary: "No blocking issues", ApprovalRecommended: true,
+				DescriptionInputHash:   codeReviewDescriptionInputHash(pr, visual),
+				DescriptionAssessments: []codeReviewDescriptionAssessment{{Key: "description", Status: codeReviewDescriptionAssessmentSatisfied, EvidenceBasis: models.CodeReviewDescriptionEvidenceBasisPullRequestDescription, Reason: "The description explains the guide change"}},
+				RiskNotes:              []string{}, Findings: []codeReviewOrchestratorFinding{}, HumanReviewReasons: []codeReviewOrchestratorHumanReviewReason{},
+			}
+			structured := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{DescriptionInputHash: synthesis.DescriptionInputHash, SynthesisValidated: true, Synthesis: synthesis})
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create isolated database mock")
+			defer mock.Close()
+			now := time.Now().UTC()
+			mock.ExpectQuery("FROM code_review_agent_results").WithArgs(orgID, sessionID).WillReturnRows(
+				pgxmock.NewRows([]string{"id", "org_id", "session_id", "agent_provider", "agent_model", "role", "status", "raw_output", "structured_result", "created_at"}).
+					AddRow(uuid.New(), orgID, sessionID, "codex", nil, string(models.CodeReviewAgentRoleReviewer), string(models.CodeReviewAgentResultStatusCompleted), nil, []byte(`{}`), now).
+					AddRow(uuid.New(), orgID, sessionID, "codex", nil, string(models.CodeReviewAgentRoleOrchestrator), string(models.CodeReviewAgentResultStatusCompleted), nil, []byte(structured), now.Add(time.Second)))
+			mock.ExpectQuery("FROM code_review_findings").WithArgs(orgID, sessionID, false).WillReturnRows(
+				pgxmock.NewRows([]string{"id", "org_id", "session_id", "agent_result_id", "dedupe_key", "severity", "confidence", "path", "start_line", "end_line", "summary", "body", "selected_for_inline", "github_comment_id", "created_at"}))
+			key := codeReviewRiskTierRecordKey(sessionID, workerRiskTierHead, *policy.RiskPolicy.RiskTierCheck)
+			checkpoint, err := json.Marshal(workerRiskTierSignal(models.CodeReviewRiskTierLow, models.CodeReviewUIRenderChangeFalse))
+			require.NoError(t, err, "checkpoint fixture should encode")
+			mock.ExpectQuery("FROM code_review_prompt_records").WithArgs(orgID, key).WillReturnRows(
+				pgxmock.NewRows([]string{"id", "org_id", "session_id", "record_key", "role", "agent_provider", "content", "metadata", "created_at"}).
+					AddRow(uuid.New(), orgID, sessionID, key, codeReviewRiskTierPromptRole, "", "checkpoint", checkpoint, now))
+			files := make([]codereviewsvc.PullRequestFile, 0, 6)
+			for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
+				files = append(files, codereviewsvc.PullRequestFile{Filename: "docs/guide/" + name + ".md", Additions: 70, Deletions: 1})
+			}
+			fresh := codereviewsvc.AssessmentInputCaptureResult{
+				Policy:         models.CodeReviewPolicyRecord{Enabled: true, ApprovalMode: policy.ApprovalMode, RiskPolicy: policy.RiskPolicy, AgentRoster: policy.AgentRoster, DescriptionPolicy: policy.DescriptionPolicy},
+				PullRequest:    pr,
+				Health:         &models.PullRequestHealthResponse{HeadSHA: workerRiskTierHead, Status: models.PullRequestStatusOpen, CanMerge: true, ChecksConfirmed: true, MergeState: models.PullRequestMergeStateClean},
+				Files:          files,
+				VisualEvidence: visual,
+			}
+			job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, RepositoryID: uuid.New(), PolicyVersion: 1, HeadSHA: workerRiskTierHead}
+			err = verifyFullAssessmentApproval(context.Background(), db.NewCodeReviewStore(mock), &Stores{}, &Services{CodeReviewRiskTier: tt.live}, job, fresh)
+			if tt.wantError {
+				require.ErrorIs(t, err, errFullAssessmentInputsChanged, "a live rescore or an unreadable live tier must revoke an oversized staged approval")
+			} else {
+				require.NoError(t, err, "an unchanged authoritative low tier should keep the oversized staged approval")
+			}
+			require.Len(t, tt.live.calls, 1, "publication-time approval should re-read the live risk tier once")
+			require.NoError(t, mock.ExpectationsWereMet(), "approval should read the checkpoint through the transaction-bound store")
 		})
 	}
 }

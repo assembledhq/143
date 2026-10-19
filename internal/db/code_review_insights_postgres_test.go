@@ -62,7 +62,7 @@ func TestCodeReviewInsightStore_ProjectRecentDecisionsPostgres(t *testing.T) {
 			var merged, terminal bool
 			require.NoError(t, pool.QueryRow(ctx, `SELECT decision,reason_codes,merged,terminal FROM code_review_decision_outcomes WHERE org_id=$1 AND session_id=$2`, f.org, f.session).Scan(&decision, &reasons, &merged, &terminal), "read repaired outcome")
 			require.Equal(t, "approved", decision, "projection should retain exact completed decision")
-			require.Equal(t, []string{"a", "z"}, reasons, "projection should sort and deduplicate nonempty reason codes")
+			require.Equal(t, []string{"a", "z"}, reasons, "projection should sort and deduplicate nonempty blocking reason codes and omit informational records")
 			if tt.newCompletion || tt.nullCompletion || tt.newLifecycle {
 				require.True(t, merged, "reprojection must preserve newer provider merge facts")
 				require.True(t, terminal, "reprojection must preserve newer provider terminal facts")

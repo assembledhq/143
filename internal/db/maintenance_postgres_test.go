@@ -150,6 +150,6 @@ func seedMaintenanceReview(t *testing.T, pool *pgxpool.Pool, completedAt *time.T
 	maintenanceExec(t, pool, `INSERT INTO code_review_policies VALUES($1,$2)`, f.policy, f.org)
 	maintenanceExec(t, pool, `INSERT INTO sessions VALUES($1,$2)`, f.session, f.org)
 	maintenanceExec(t, pool, `INSERT INTO code_review_session_metadata(id,org_id,session_id,repository_id,pull_request_id,policy_id,base_sha,head_sha,trigger_source,status,decision,review_output_key,completed_at,created_at,risk_reason_details)
-VALUES($1,$2,$3,$4,$5,$6,'base','head','app_reviewer','completed','approved',$3::uuid::text,$7,now()-interval '3 days','[{"code":"z"},{"code":"a"},{"code":"z"},{"code":""},{}]')`, f.metadata, f.org, f.session, f.repository, f.pr, f.policy, completedAt)
+VALUES($1,$2,$3,$4,$5,$6,'base','head','app_reviewer','completed','approved',$3::uuid::text,$7,now()-interval '3 days','[{"code":"z"},{"code":"a"},{"code":"z"},{"code":""},{},{"code":"size_safeguard","size_safeguard":{"outcome":"waived","source":"authoritative","tier":"low","head_sha":"head"}}]')`, f.metadata, f.org, f.session, f.repository, f.pr, f.policy, completedAt)
 	return f
 }

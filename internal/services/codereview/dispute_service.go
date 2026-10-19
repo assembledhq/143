@@ -479,6 +479,7 @@ func assessmentDisputeReasons(raw json.RawMessage) ([]models.CodeReviewRiskReaso
 			return nil, nil, fmt.Errorf("decode assessment risk reasons: %w", err)
 		}
 	}
+	details = models.CodeReviewBlockingRiskReasons(details)
 	codes := make([]models.CodeReviewRiskReasonCode, 0, len(details))
 	for _, detail := range details {
 		if detail.Code.Validate() == nil {

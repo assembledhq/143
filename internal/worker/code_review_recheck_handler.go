@@ -39,6 +39,19 @@ func refreshUnsentCodeReviewEvidence(ctx context.Context, services *Services, a 
 }
 
 var errCodeReviewUnsentInputsChanged = errors.New("assessment inputs changed before publication send")
+
+type codeReviewRiskTierChangedError struct {
+	detail string
+}
+
+func (e *codeReviewRiskTierChangedError) Error() string {
+	return "risk-tier result changed before publication: " + e.detail
+}
+
+func (e *codeReviewRiskTierChangedError) Unwrap() error {
+	return errCodeReviewUnsentInputsChanged
+}
+
 var errCodeReviewPublicationSuperseded = errors.New("assessment publication superseded and full fallback queued")
 
 // This supervisor reuses only immutable full-review evidence. The durable
@@ -282,6 +295,15 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		if err != nil {
 			return err
 		}
+		payload.RiskTierSignal, err = resolveCodeReviewRiskTierSignal(ctx, stores, services, payload, fresh.Policy.Config())
+		if err != nil {
+			return err
+		}
+		var liveErr error
+		payload.RiskTierSignal, liveErr = refreshCodeReviewRiskTierSignal(ctx, services, payload, fresh.Policy.Config())
+		if liveErr != nil {
+			logger.Warn().Err(liveErr).Str("assessment_id", a.ID.String()).Msg("live risk-tier lookup failed before evidence recheck decision; treating the live result as non-authoritative")
+		}
 		if _, err = codeReviewDescriptionEvaluationFromSynthesis(fresh.Policy.Config(), fresh.Files, validated.Synthesis, fresh.VisualEvidence); err != nil {
 			return failCodeReviewRecheck(ctx, stores, services, a, "invalid merged evidence assessment: "+err.Error(), false)
 		}
@@ -519,8 +541,22 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 			// publisher must not preserve permission to send stale inputs.
 			fresh, captureErr := services.CodeReviewInputCapture.CaptureAssessmentInputs(lockCtx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: a.OrgID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, SessionID: a.SessionID, AssessmentID: a.ID, Fresh: true, RequestContext: &codereviewsvc.ReviewRequestContext{Body: manifest.Request.SubstantiveText}})
 			allowWrite = captureErr == nil && fresh.Manifest.InputDigest == a.InputDigest
+			riskTierChange := ""
+			if allowWrite && decision == models.CodeReviewDecisionApproved {
+				holds, detail, gateErr := codeReviewRecheckRiskTierSupportsApproval(lockCtx, db.NewCodeReviewStore(tx), codeReviewRiskTierChecks(services), *zerolog.Ctx(ctx), current, fresh.Policy.Config(), completion)
+				if gateErr != nil {
+					return gateErr
+				}
+				if !holds {
+					allowWrite, riskTierChange = false, detail
+					zerolog.Ctx(ctx).Warn().Str("assessment_id", a.ID.String()).Str("detail", detail).Msg("withholding staged evidence-recheck approval after a risk-tier change")
+				}
+			}
 			inputsChanged = captureErr == nil && !allowWrite || errors.Is(captureErr, codereviewsvc.ErrAssessmentReuseUnavailable)
 			if inputsChanged && current.PublicationState == models.CodeReviewPublicationReserved {
+				if riskTierChange != "" {
+					return &codeReviewRiskTierChangedError{detail: riskTierChange}
+				}
 				return errCodeReviewUnsentInputsChanged
 			}
 		}
@@ -581,6 +617,10 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 	})
 	if errors.Is(err, errCodeReviewUnsentInputsChanged) {
 		reason := "inputs changed before publication"
+		var riskTierChanged *codeReviewRiskTierChangedError
+		if errors.As(err, &riskTierChanged) {
+			reason = riskTierChanged.Error()
+		}
 		if refreshErr := refreshUnsentCodeReviewEvidence(ctx, services, a, reason); refreshErr != nil {
 			return refreshErr
 		}

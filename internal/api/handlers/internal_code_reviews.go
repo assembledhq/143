@@ -388,6 +388,10 @@ func (h *InternalCodeReviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", "config must be a JSON object with at least one policy field")
 		return
 	}
+	if err := models.ValidateCodeReviewPolicyConfigFields(req.Config); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CONFIG", "invalid policy config", err)
+		return
+	}
 	if req.ExpectedVersion == nil || *req.ExpectedVersion < 0 {
 		writeError(w, r, http.StatusBadRequest, "EXPECTED_VERSION_REQUIRED", "expected_version must be the active policy version (0 if the org has never saved a policy)")
 		return

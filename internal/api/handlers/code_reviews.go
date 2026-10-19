@@ -820,13 +820,10 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		reasonCodes = make([]models.CodeReviewRiskReasonCode, 0, len(reasons))
-		for _, reason := range reasons {
-			if err := reason.Code.Validate(); err != nil {
-				writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_EVIDENCE_FAILED", "failed to validate current review reasons", err)
-				return
-			}
-			reasonCodes = append(reasonCodes, reason.Code)
+		reasonCodes, err = codeReviewAssessmentBlockingReasonCodes(reasons)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_EVIDENCE_FAILED", "failed to validate current review reasons", err)
+			return
 		}
 	} else {
 		reasonCodes, err = h.store.GetRiskReasonCodesBySession(r.Context(), orgID, sessionID)
@@ -839,6 +836,19 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 		AgentResults: results, Findings: findings, SourceFindings: sourceFindings, FindingReassessments: findingReassessments, CurrentAssessmentID: currentAssessmentID, PromptRecords: records, RiskReasonCodes: reasonCodes,
 		VisualEvidence: visualEvidence, CitedVisualEvidenceIDs: citedVisualEvidenceIDs,
 	}})
+}
+
+func codeReviewAssessmentBlockingReasonCodes(reasons []models.CodeReviewRiskReason) ([]models.CodeReviewRiskReasonCode, error) {
+	codes := make([]models.CodeReviewRiskReasonCode, 0, len(reasons))
+	for _, reason := range reasons {
+		if err := reason.Code.Validate(); err != nil {
+			return nil, err
+		}
+		if !models.IsCodeReviewInformationalRiskReason(reason.Code) {
+			codes = append(codes, reason.Code)
+		}
+	}
+	return codes, nil
 }
 
 func codeReviewVisualEvidenceForAPI(orgID, sessionID uuid.UUID, records []models.CodeReviewPromptRecord, results []models.CodeReviewAgentResult) (*models.CodeReviewVisualEvidenceSnapshot, []string, error) {
@@ -1149,6 +1159,10 @@ func (h *CodeReviewHandler) PutPolicy(w http.ResponseWriter, r *http.Request) {
 	var config models.CodeReviewPolicyConfig
 	if err := json.Unmarshal(req.Config, &config); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid policy config")
+		return
+	}
+	if err := models.ValidateCodeReviewPolicyConfigFields(req.Config); err != nil {
+		writeErrorWithDetails(w, r, http.StatusBadRequest, "CODE_REVIEW_POLICY_INVALID", "invalid code review policy", map[string]string{"field": models.CodeReviewPolicyFieldRiskPolicy}, err)
 		return
 	}
 	var supplied map[string]json.RawMessage
