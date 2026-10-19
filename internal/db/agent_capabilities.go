@@ -185,6 +185,9 @@ func (s *AgentCapabilityPolicyStore) replacePolicy(ctx context.Context, orgID uu
 	return policyID, nil
 }
 
+// AppendApprovedSessionGrant preserves the legacy transaction boundary and SQL,
+// including the concurrent snapshot lost-update hazard documented on its InTx
+// seam. Canonical admission must establish a fresh snapshot after its parent lock.
 func (s *AgentCapabilityPolicyStore) AppendApprovedSessionGrant(ctx context.Context, orgID, sessionID uuid.UUID, item models.AgentCapabilitySnapshotItem) ([]models.AgentCapabilitySnapshotItem, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -192,6 +195,38 @@ func (s *AgentCapabilityPolicyStore) AppendApprovedSessionGrant(ctx context.Cont
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	snapshot, err := s.AppendApprovedSessionGrantInTx(ctx, orgID, tx, sessionID, item)
+	if err != nil {
+		return snapshot, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit append capability grant tx: %w", err)
+	}
+	return snapshot, nil
+}
+
+// AppendApprovedSessionGrantInTx persists a session capability snapshot and the
+// optional linked automation snapshot in the caller's transaction. It preserves
+// the legacy session-before-automation lock order; it does not establish consent,
+// request readiness, domain ownership, epochs or lifecycle compatibility authority.
+// The caller must validate that authority and compose any required locks before
+// calling. This method never begins, settles or retries a transaction or uses the
+// store pool. On any error the caller owns rollback of the whole unit, including
+// earlier writes. A returned snapshot is valid only after the caller commits;
+// discard/reset captured results on errors or transaction replay.
+//
+// Concurrent composition requires an EARLIER statement to lock the session row,
+// or an explicit fresh snapshot read after locking in the canonical operation.
+// This unchanged legacy joined SELECT reads metadata from its statement snapshot
+// taken before any parent-lock wait. Waiting on FOR UPDATE OF s alone does not
+// refresh that snapshot: concurrent unprelocked grants can both succeed while
+// the later write loses the first grant (and can miss an identical duplicate).
+// A RunLifecycleTransaction wrapper alone does not fix this; no error is raised
+// to trigger a retry. The legacy wrapper retains this hazard until conversion.
+func (s *AgentCapabilityPolicyStore) AppendApprovedSessionGrantInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, sessionID uuid.UUID, item models.AgentCapabilitySnapshotItem) ([]models.AgentCapabilitySnapshotItem, error) {
+	if nilLifecycleDependency(tx) {
+		return nil, errors.New("append approved session grant in tx: nil transaction")
+	}
 	var snapshot []models.AgentCapabilitySnapshotItem
 	var automationRunID *uuid.UUID
 	rows, err := tx.Query(ctx, `
@@ -247,9 +282,6 @@ func (s *AgentCapabilityPolicyStore) AppendApprovedSessionGrant(ctx context.Cont
 		); err != nil {
 			return nil, fmt.Errorf("update automation run capability snapshot: %w", err)
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit append capability grant tx: %w", err)
 	}
 	return snapshot, nil
 }
