@@ -214,6 +214,7 @@ func resolvePullRequestBodyFile(body *string, bodyFile string) (*string, error) 
 	if body != nil {
 		return nil, fmt.Errorf("body and body_file are mutually exclusive")
 	}
+	// #nosec G304 -- The local 143-tools caller explicitly selects this path with --body-file and reads it with its own sandbox privileges; no server-supplied path or privilege boundary. The server validates the contents.
 	data, err := os.ReadFile(bodyFile)
 	if err != nil {
 		return nil, fmt.Errorf("read body_file: %w", err)
