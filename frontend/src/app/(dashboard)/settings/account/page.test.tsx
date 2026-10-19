@@ -209,6 +209,7 @@ describe("Account settings page", () => {
     renderWithProviders(<AccountPage />);
 
     const toggle = await screen.findByRole("switch", { name: "Spread load across auths" });
+    expect(toggle).toHaveAttribute("aria-describedby", "personal-spread-load-description");
     expect(toggle).not.toBeChecked();
     expect(screen.getByText(/Sessions use your top healthy auth until it is rate limited/)).toBeInTheDocument();
     // Ordered mode: the top personal row and the org row each carry a badge,

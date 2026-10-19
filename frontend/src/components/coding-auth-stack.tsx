@@ -113,7 +113,7 @@ export function CodingAuthStack({
             <Label htmlFor="coding-auth-spread-load" className="text-sm font-medium text-foreground">
               Spread load across auths
             </Label>
-            <p className="text-xs text-muted-foreground">
+            <p id="coding-auth-spread-load-description" className="text-xs text-muted-foreground">
               {spread
                 ? "Each session picks at random among the healthy auths in this stack. Reordering is paused; priority applies again when this is off."
                 : "Sessions use the top healthy auth until it is rate limited, then fall through in priority order."}
@@ -121,6 +121,7 @@ export function CodingAuthStack({
           </div>
           <Switch
             id="coding-auth-spread-load"
+            aria-describedby="coding-auth-spread-load-description"
             checked={spread}
             disabled={!onDistributionChange || distributionPending}
             onCheckedChange={(checked) => onDistributionChange?.(checked ? "spread" : "ordered")}

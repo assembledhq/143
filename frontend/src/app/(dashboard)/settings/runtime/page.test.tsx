@@ -159,6 +159,7 @@ describe("RuntimeSettingsPage", () => {
       "Exceeds current fleet capacity (8 sandboxes, shared with previews and other organizations). Runs above that will queue for a sandbox.",
     );
     expect(warning).toHaveAttribute("id", "max-concurrent-runs-warning");
+    expect(warning).toHaveClass("text-warning");
     const input = screen.getByLabelText("Concurrent agent runs");
     expect(input).toHaveValue(12);
     expect(input).toHaveAttribute(

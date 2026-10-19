@@ -217,7 +217,7 @@ function SettingRow({
         {warning ? (
           <HelperText
             id={`${id}-warning`}
-            className="text-amber-800 dark:text-amber-300"
+            className="text-warning"
           >
             {warning}
           </HelperText>

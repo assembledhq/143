@@ -150,6 +150,7 @@ describe("CodingAuthStack", () => {
     );
 
     const toggle = screen.getByRole("switch", { name: "Spread load across auths" });
+    expect(toggle).toHaveAttribute("aria-describedby", "coding-auth-spread-load-description");
     expect(toggle).not.toBeChecked();
     expect(screen.getByText(/Sessions use the top healthy auth until it is rate limited/)).toBeInTheDocument();
     expect(screen.getAllByText("Default").length).toBeGreaterThan(0);

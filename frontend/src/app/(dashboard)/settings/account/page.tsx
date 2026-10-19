@@ -598,7 +598,7 @@ export default function AccountPage() {
                   <Label htmlFor="personal-spread-load" className="text-sm font-medium text-foreground">
                     Spread load across auths
                   </Label>
-                  <p className="text-xs text-muted-foreground">
+                  <p id="personal-spread-load-description" className="text-xs text-muted-foreground">
                     {personalSpread
                       ? "Each session picks at random among your healthy auths. Priority order applies again when this is off."
                       : "Sessions use your top healthy auth until it is rate limited, then fall through in priority order."}
@@ -606,6 +606,7 @@ export default function AccountPage() {
                 </div>
                 <Switch
                   id="personal-spread-load"
+                  aria-describedby="personal-spread-load-description"
                   checked={personalSpread}
                   disabled={distributionMutation.isPending}
                   onCheckedChange={(checked) => distributionMutation.mutate(checked ? "spread" : "ordered")}
