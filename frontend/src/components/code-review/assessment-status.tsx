@@ -18,7 +18,7 @@ import { ErrorNotice } from "@/components/ui/error-notice";
 import { ExternalLink } from "@/components/ui/external-link";
 import { DecisionFeedback } from "./decision-feedback";
 import { RecheckActions } from "./recheck-actions";
-import { codeReviewReasonDescription } from "@/lib/code-review-reasons";
+import { blockingCodeReviewReasons, codeReviewReasonDescription, informationalCodeReviewReasons, sizeSafeguardMeasurements, sizeSafeguardSummary } from "@/lib/code-review-reasons";
 import { activeAssessmentState } from "@/lib/code-review-assessment-state";
 import type { CodeReviewAssessmentSummary, CodeReviewDecision, CodeReviewEvidenceCitation, CodeReviewEvidence, CodeReviewListItem } from "@/lib/types";
 
@@ -177,7 +177,8 @@ function AssessmentDialog({ assessmentID, summary, open, onOpenChange, review, e
   const requirements = assessmentEvidence?.requirement_reassessments ?? [];
   const textSources = assessmentEvidence?.text_evidence?.items ?? [];
   const images = evidenceDetail?.visual_evidence?.evidence ?? [];
-  const reasons = [...new Set(value?.risk_reason_details?.map(codeReviewReasonDescription) ?? [])];
+  const reasons = [...new Set(blockingCodeReviewReasons(value?.risk_reason_details ?? []).map(codeReviewReasonDescription))];
+  const safeguardRecords = informationalCodeReviewReasons(value?.risk_reason_details ?? []).flatMap((reason) => reason.size_safeguard ? [reason.size_safeguard] : []);
   const verdict = !assessmentID && value?.status === "completed" && value.decision === "approved" && !review?.github_review_id
     ? { label: "Approval not posted", tone: "neutral" as const }
     : value ? assessmentVerdict(value) : null;
@@ -233,6 +234,24 @@ function AssessmentDialog({ assessmentID, summary, open, onOpenChange, review, e
                   <ul className="list-disc space-y-2 pl-5 text-muted-foreground">
                     {reasons.map((reason) => <li key={reason}>{reason}</li>)}
                   </ul>
+                </AssessmentSection>
+              ) : null}
+
+              {safeguardRecords.length > 0 ? (
+                <AssessmentSection title="Safeguard audit" count={safeguardRecords.length}>
+                  {safeguardRecords.map((record, index) => {
+                    const measurements = sizeSafeguardMeasurements(record);
+                    return (
+                      <div key={`${record.outcome}-${record.check_run_id ?? index}`} className="space-y-1">
+                        <p className="text-foreground">{sizeSafeguardSummary(record)}</p>
+                        {measurements.length > 0 ? (
+                          <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
+                            {measurements.map((line) => <li key={line}>{line}</li>)}
+                          </ul>
+                        ) : null}
+                      </div>
+                    );
+                  })}
                 </AssessmentSection>
               ) : null}
 
@@ -339,7 +358,7 @@ function AssessmentDialog({ assessmentID, summary, open, onOpenChange, review, e
                 </div>)}
               </AssessmentSection> : null}
               {canManage && sessionReview?.status === "completed" && sessionReview.decision ? <AssessmentSection title="Decision feedback">
-                <DecisionFeedback review={sessionReview} reasonCodes={!assessmentID ? legacyEvidence?.risk_reason_codes ?? [] : value.risk_reason_details?.map(reason => reason.code) ?? []} canManagePolicy={user?.role === "admin"} />
+                <DecisionFeedback review={sessionReview} reasonCodes={!assessmentID ? blockingCodeReviewReasons((legacyEvidence?.risk_reason_codes ?? []).map((code) => ({ code }))).map((reason) => reason.code) : blockingCodeReviewReasons(value.risk_reason_details ?? []).map((reason) => reason.code)} canManagePolicy={user?.role === "admin"} />
               </AssessmentSection> : null}
               <AssessmentSection title="Assessment details">
                 <div className="flex flex-wrap gap-2">

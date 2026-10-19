@@ -74,6 +74,70 @@ export const CODE_REVIEW_REASON_LABELS: Record<CodeReviewReasonCode, string> = {
   policy_requirement: "An approval-policy requirement needed human judgment",
 };
 
+export const INFORMATIONAL_CODE_REVIEW_REASON_CODES = ["size_safeguard"] as const;
+
+export function isInformationalCodeReviewReason(code: string): boolean {
+  return (INFORMATIONAL_CODE_REVIEW_REASON_CODES as readonly string[]).includes(code);
+}
+
+export function blockingCodeReviewReasons<T extends { code: string }>(reasons: readonly T[]): T[] {
+  return reasons.filter((reason) => !isInformationalCodeReviewReason(reason.code));
+}
+
+export function informationalCodeReviewReasons<T extends { code: string }>(reasons: readonly T[]): T[] {
+  return reasons.filter((reason) => isInformationalCodeReviewReason(reason.code));
+}
+
+const RISK_TIER_SOURCE_LABELS: Record<string, string> = {
+  authoritative: "authoritative",
+  missing: "no risk-tier check",
+  untrusted_app: "risk-tier check from another app",
+  stale_head: "risk-tier check for another commit",
+  unparsable: "unreadable risk-tier check",
+  shadow_mode: "shadow-mode risk-tier check",
+  lookup_failed: "risk-tier lookup failed",
+};
+
+export function sizeSafeguardSummary(decision: {
+  outcome: string;
+  source: string;
+  tier?: string;
+  mode?: string;
+  check_run_id?: number;
+}): string {
+  const verb = decision.outcome === "waived" ? "waived" : "applied";
+  const basis = decision.source === "authoritative" && decision.tier
+    ? `risk tier ${decision.tier}`
+    : RISK_TIER_SOURCE_LABELS[decision.source] ?? decision.source.replaceAll("_", " ");
+  const run = decision.check_run_id ? `, check run ${decision.check_run_id}` : "";
+  const mode = decision.mode ? `, ${decision.mode} mode` : "";
+  return `Size limits ${verb}: ${basis}${mode}${run}`;
+}
+
+type SizeSafeguardMeasurement = { actual: number; limit: number; exceeded: boolean };
+
+const SIZE_SAFEGUARD_MEASUREMENTS = [
+  ["files", "Files", "files_limit_exceeded"],
+  ["additions", "Additions", "additions_limit_exceeded"],
+  ["deletions", "Deletions", "deletions_limit_exceeded"],
+] as const;
+
+export function sizeSafeguardMeasurements(decision: {
+  files?: SizeSafeguardMeasurement;
+  additions?: SizeSafeguardMeasurement;
+  deletions?: SizeSafeguardMeasurement;
+  exceeded_limits?: readonly { code: string; actual?: number; limit?: number }[];
+}): string[] {
+  const measured = SIZE_SAFEGUARD_MEASUREMENTS.flatMap(([key, label, code]) => {
+    const measurement = decision[key];
+    if (!measurement) return [];
+    return [{ code, line: `${label}: ${measurement.actual.toLocaleString()} of ${measurement.limit.toLocaleString()}${measurement.exceeded ? " (over limit)" : ""}` }];
+  });
+  const measuredCodes = new Set<string>(measured.map(({ code }) => code));
+  const exceededOnly = (decision.exceeded_limits ?? []).filter((limit) => !measuredCodes.has(limit.code)).map(codeReviewReasonDescription);
+  return [...measured.map(({ line }) => line), ...exceededOnly];
+}
+
 export function codeReviewReasonLabel(code: string): string {
   const known = CODE_REVIEW_REASON_LABELS[code as CodeReviewReasonCode];
   if (known) return known;

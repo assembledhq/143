@@ -147,6 +147,55 @@ it("keeps the verdict concise while preserving all recorded reasons", async () =
   expect(screen.getByText("PR description requirements were not met")).toBeInTheDocument();
 });
 
+it("keeps informational size safeguard records out of the verdict and in an audit section", async () => {
+  const summary: CodeReviewAssessmentSummary = {
+    id: assessmentID, status: "completed", review_scope: "full", route_reason: "initial", head_sha: "123456789abcdef", decision: "approved",
+    risk_reason_details: [{
+      code: "size_safeguard",
+      size_safeguard: {
+        outcome: "waived", source: "authoritative", tier: "medium", mode: "enforce", check_run_id: 91, head_sha: "123456789abcdef",
+        files: { actual: 8, limit: 5, exceeded: true }, additions: { actual: 120, limit: 300, exceeded: false }, deletions: { actual: 4, limit: 300, exceeded: false },
+      },
+    }],
+  };
+  mockAssessment(summary);
+  const user = userEvent.setup();
+  renderWithProviders(<AssessmentFromLink />, { searchParams: { assessment: assessmentID } });
+  expect(await screen.findByRole("heading", { name: "Approved" })).toBeInTheDocument();
+  expect(screen.getByText("No decision reasoning was recorded for this assessment.")).toBeInTheDocument();
+  expect(screen.queryByText(/Size safeguard/)).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Safeguard audit 1" }));
+  expect(screen.getByText("Size limits waived: risk tier medium, enforce mode, check run 91")).toBeInTheDocument();
+  expect(screen.getByText("Files: 8 of 5 (over limit)")).toBeInTheDocument();
+  expect(screen.getByText("Deletions: 4 of 300")).toBeInTheDocument();
+});
+
+it("renders older size safeguard records that carry only exceeded limits", async () => {
+  const summary: CodeReviewAssessmentSummary = {
+    id: assessmentID, status: "completed", review_scope: "full", route_reason: "initial", head_sha: "123456789abcdef", decision: "approved",
+    risk_reason_details: [
+      {
+        code: "size_safeguard",
+        size_safeguard: {
+          outcome: "waived", source: "authoritative", tier: "low", check_run_id: 92, head_sha: "123456789abcdef",
+          exceeded_limits: [{ code: "additions_limit_exceeded", actual: 420, limit: 300 }],
+        },
+      },
+      { code: "size_safeguard", size_safeguard: { outcome: "applied", source: "missing", head_sha: "123456789abcdef" } },
+    ],
+  };
+  mockAssessment(summary);
+  const user = userEvent.setup();
+  renderWithProviders(<AssessmentFromLink />, { searchParams: { assessment: assessmentID } });
+  expect(await screen.findByRole("heading", { name: "Approved" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Safeguard audit 2" }));
+  expect(screen.getByText("Size limits waived: risk tier low, check run 92")).toBeInTheDocument();
+  expect(screen.getByText("Additions limit exceeded (420 of 300)")).toBeInTheDocument();
+  expect(screen.getByText("Size limits applied: no risk-tier check")).toBeInTheDocument();
+  expect(screen.queryByText(/^Files:/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/^Deletions:/)).not.toBeInTheDocument();
+});
+
 it.each(["reserved", "running", "publishing", "failed", "superseded", "cancelled"] as const)("does not present a %s attempt as an approval", async (status) => {
   const summary: CodeReviewAssessmentSummary = {
     id: assessmentID, status, review_scope: "full", route_reason: "initial", head_sha: "123456789abcdef", decision: "approved",

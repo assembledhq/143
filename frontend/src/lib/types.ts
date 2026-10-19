@@ -158,7 +158,8 @@ export type CodeReviewListOutcome = "automatically_approved" | "completed_not_ap
 export type CodeReviewDescriptionApplicabilityKind =
   | "all"
   | "nontrivial"
-  | "paths";
+  | "paths"
+  | "publisher_result";
 export type CodeReviewDescriptionEvidenceKind = "general" | "visual";
 
 export interface CodeReviewDescriptionApplicability {
@@ -166,6 +167,7 @@ export interface CodeReviewDescriptionApplicability {
   min_files_changed?: number;
   min_lines_changed?: number;
   path_patterns?: string[];
+  fallback?: CodeReviewDescriptionApplicability;
 }
 
 export interface CodeReviewDescriptionRequirement {
@@ -204,6 +206,7 @@ export interface CodeReviewPolicyConfig {
     eligible_authors?: string[];
     eligible_author_teams?: string[];
     required_checks?: string[];
+    risk_tier_check?: { enabled: boolean; app_id?: number; app_slug?: string; check_name?: string };
   };
   agent_roster: {
     reviewers: string[];
@@ -478,11 +481,55 @@ export interface CodeReviewRequestResponse {
   source_assessment_id?: string | null;
 }
 
+export interface CodeReviewRiskTierObservation {
+  check_run_id?: number;
+  source: string;
+  tier?: string;
+  ui_render_change?: string;
+  head_sha?: string;
+  index_id?: string | null;
+  policy_hash?: string;
+  mode?: string;
+  published_at?: string;
+  live?: boolean;
+}
+
+export interface CodeReviewSizeMeasurement {
+  actual: number;
+  limit: number;
+  exceeded: boolean;
+}
+
+export interface CodeReviewSizeLimitResult {
+  code: string;
+  actual?: number;
+  limit?: number;
+}
+
+export interface CodeReviewSizeSafeguardDecision {
+  outcome: "applied" | "waived";
+  source: string;
+  tier?: string;
+  head_sha: string;
+  app_id?: number;
+  check_run_id?: number;
+  mode?: string;
+  index_id?: string | null;
+  policy_hash?: string;
+  published_at?: string;
+  files?: CodeReviewSizeMeasurement;
+  additions?: CodeReviewSizeMeasurement;
+  deletions?: CodeReviewSizeMeasurement;
+  exceeded_limits?: CodeReviewSizeLimitResult[];
+  observations?: CodeReviewRiskTierObservation[];
+}
+
 export interface CodeReviewRiskReason {
   code: string;
   actual?: number;
   limit?: number;
   subject?: string;
+  size_safeguard?: CodeReviewSizeSafeguardDecision;
 }
 
 export interface CodeReviewStats {
