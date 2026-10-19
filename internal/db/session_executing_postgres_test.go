@@ -191,44 +191,41 @@ func beginExecutingTurn(t *testing.T, store *SessionStore, orgID, sessionID uuid
 // and has not since completed, settled, been claimed again, or been deleted
 // counts against the org quota, and the caller's own session can be excluded.
 // pgxmock cannot prove this: the marker is the joint effect of several
-// writers on one row.
+// writers on one row. Every case owns a fresh org so the cases run in
+// parallel against one migrated database.
 func TestSessionStore_CountExecutingByOrg_Postgres(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	pool := newFeedbackLifecyclePool(t)
 	store := NewSessionStore(pool)
-	orgID := seedExecutingOrg(t, pool)
-	otherOrgID := seedExecutingOrg(t, pool)
 
-	// Each case leaves one session in a distinct lifecycle state; counted
-	// says whether CountExecutingByOrg must include it afterwards.
+	// Each case leaves one session in a distinct lifecycle state inside its
+	// own org; counted says whether CountExecutingByOrg must include it.
 	tests := []struct {
-		name    string
-		orgID   uuid.UUID
-		arrange func(t *testing.T, sessionID uuid.UUID)
+		name string
+		// arrange drives the case's session (created idle in orgID) into its
+		// lifecycle state; it may use otherOrgID for a second tenant.
+		arrange func(t *testing.T, orgID, otherOrgID, sessionID uuid.UUID)
 		counted bool
 	}{
 		{
-			name:  "a turn past BeginRuntime is executing",
-			orgID: orgID,
-			arrange: func(t *testing.T, sessionID uuid.UUID) {
+			name: "a turn past BeginRuntime is executing",
+			arrange: func(t *testing.T, orgID, _ uuid.UUID, sessionID uuid.UUID) {
 				beginExecutingTurn(t, store, orgID, sessionID)
 			},
 			counted: true,
 		},
 		{
-			name:  "a claimed continuation that has not reached BeginRuntime is queued, not executing",
-			orgID: orgID,
-			arrange: func(t *testing.T, sessionID uuid.UUID) {
+			name: "a claimed continuation that has not reached BeginRuntime is queued, not executing",
+			arrange: func(t *testing.T, orgID, _ uuid.UUID, sessionID uuid.UUID) {
 				_, err := store.ClaimIdle(ctx, orgID, sessionID)
 				require.NoError(t, err, "claim idle session")
 			},
 		},
 		{
-			name:  "ClaimIdle clears deadlines a pre-existing idle row kept from its last turn",
-			orgID: orgID,
-			arrange: func(t *testing.T, sessionID uuid.UUID) {
+			name: "ClaimIdle clears deadlines a pre-existing idle row kept from its last turn",
+			arrange: func(t *testing.T, orgID, _ uuid.UUID, sessionID uuid.UUID) {
 				_, err := pool.Exec(ctx, `UPDATE sessions SET runtime_soft_deadline_at = now(), runtime_hard_deadline_at = now() WHERE id = $1 AND org_id = $2`, sessionID, orgID)
 				require.NoError(t, err, "simulate a row written before deadlines were cleared at turn end")
 				claimed, err := store.ClaimIdle(ctx, orgID, sessionID)
@@ -238,9 +235,8 @@ func TestSessionStore_CountExecutingByOrg_Postgres(t *testing.T) {
 			},
 		},
 		{
-			name:  "a completed turn returns the session to idle without the marker",
-			orgID: orgID,
-			arrange: func(t *testing.T, sessionID uuid.UUID) {
+			name: "a completed turn returns the session to idle without the marker",
+			arrange: func(t *testing.T, orgID, _ uuid.UUID, sessionID uuid.UUID) {
 				beginExecutingTurn(t, store, orgID, sessionID)
 				require.NoError(t, store.UpdateTurnComplete(ctx, orgID, sessionID, 1, &models.SessionResult{}, "agent-session", "snapshot-key"), "complete the turn")
 				session, err := store.GetByID(ctx, orgID, sessionID)
@@ -250,9 +246,8 @@ func TestSessionStore_CountExecutingByOrg_Postgres(t *testing.T) {
 			},
 		},
 		{
-			name:  "a turn settled through UpdateStatus (the reaper's path) stops executing",
-			orgID: orgID,
-			arrange: func(t *testing.T, sessionID uuid.UUID) {
+			name: "a turn settled through UpdateStatus (the reaper's path) stops executing",
+			arrange: func(t *testing.T, orgID, _ uuid.UUID, sessionID uuid.UUID) {
 				beginExecutingTurn(t, store, orgID, sessionID)
 				require.NoError(t, store.UpdateStatus(ctx, orgID, sessionID, models.SessionStatusFailed), "settle the session as failed")
 				session, err := store.GetByID(ctx, orgID, sessionID)
@@ -261,9 +256,8 @@ func TestSessionStore_CountExecutingByOrg_Postgres(t *testing.T) {
 			},
 		},
 		{
-			name:  "a turn settled through UpdateResult stops executing",
-			orgID: orgID,
-			arrange: func(t *testing.T, sessionID uuid.UUID) {
+			name: "a turn settled through UpdateResult stops executing",
+			arrange: func(t *testing.T, orgID, _ uuid.UUID, sessionID uuid.UUID) {
 				beginExecutingTurn(t, store, orgID, sessionID)
 				errMsg := "cancelled by user"
 				require.NoError(t, store.UpdateResult(ctx, orgID, sessionID, models.SessionStatusCancelled, &models.SessionResult{Error: &errMsg}), "settle the session as cancelled")
@@ -273,43 +267,46 @@ func TestSessionStore_CountExecutingByOrg_Postgres(t *testing.T) {
 			},
 		},
 		{
-			name:  "a soft-deleted executing session no longer holds a slot",
-			orgID: orgID,
-			arrange: func(t *testing.T, sessionID uuid.UUID) {
+			name: "a soft-deleted executing session no longer holds a slot",
+			arrange: func(t *testing.T, orgID, _ uuid.UUID, sessionID uuid.UUID) {
 				beginExecutingTurn(t, store, orgID, sessionID)
 				require.NoError(t, store.SoftDelete(ctx, orgID, sessionID), "soft-delete the executing session")
 			},
 		},
 		{
-			name:  "another org's executing turn is not counted",
-			orgID: otherOrgID,
-			arrange: func(t *testing.T, sessionID uuid.UUID) {
-				beginExecutingTurn(t, store, otherOrgID, sessionID)
+			name: "another org's executing turn is not counted",
+			arrange: func(t *testing.T, _, otherOrgID uuid.UUID, _ uuid.UUID) {
+				other := newExecutingSession(t, store, otherOrgID)
+				beginExecutingTurn(t, store, otherOrgID, other.ID)
 			},
 		},
 	}
 
-	var executing []uuid.UUID
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Not parallel: the cases build up one org's state for the
-			// assertions below.
-			session := newExecutingSession(t, store, tt.orgID)
-			tt.arrange(t, session.ID)
+			t.Parallel()
+
+			orgID := seedExecutingOrg(t, pool)
+			otherOrgID := seedExecutingOrg(t, pool)
+			session := newExecutingSession(t, store, orgID)
+			tt.arrange(t, orgID, otherOrgID, session.ID)
+
+			expected := 0
 			if tt.counted {
-				executing = append(executing, session.ID)
+				expected = 1
 			}
 			count, err := store.CountExecutingByOrg(ctx, orgID, uuid.Nil)
 			require.NoError(t, err, "count executing sessions after arranging the case")
-			require.Equal(t, len(executing), count, "only sessions past BeginRuntime and not yet settled, re-claimed, or deleted should count")
+			require.Equal(t, expected, count, "only a session past BeginRuntime and not yet settled, re-claimed, or deleted should count")
+			if !tt.counted {
+				return
+			}
+			count, err = store.CountExecutingByOrg(ctx, orgID, session.ID)
+			require.NoError(t, err, "count executing sessions excluding the executing one")
+			require.Equal(t, 0, count, "excluding the executing session should leave nothing counted, so its own thread turns are not held by its slot")
+			count, err = store.CountExecutingByOrg(ctx, orgID, uuid.New())
+			require.NoError(t, err, "count executing sessions excluding an unrelated id")
+			require.Equal(t, 1, count, "excluding an unrelated session should not change the count")
 		})
 	}
-
-	require.Len(t, executing, 1, "exactly one case should leave an executing turn behind")
-	count, err := store.CountExecutingByOrg(ctx, orgID, executing[0])
-	require.NoError(t, err, "count executing sessions excluding the executing one")
-	require.Equal(t, 0, count, "excluding the executing session should leave nothing counted, so its own thread turns are not held by its slot")
-	count, err = store.CountExecutingByOrg(ctx, orgID, uuid.New())
-	require.NoError(t, err, "count executing sessions excluding an unrelated id")
-	require.Equal(t, 1, count, "excluding an unrelated session should not change the count")
 }
