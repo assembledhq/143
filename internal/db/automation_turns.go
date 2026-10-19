@@ -74,8 +74,12 @@ func (s *AutomationRunStore) RecordTurnDuration(ctx context.Context, q DBTX, org
 // locked and validated in the same statement as the session write, so a
 // paused worker whose job was reclaimed between a check and a write cannot
 // reset the next attempt's session: the lock waits for a concurrent claim
-// and the predicate is re-evaluated after it. Returns whether the session
-// was updated.
+// and the predicate is re-evaluated after it. Execution has stopped, so the
+// runtime deadlines (the executing-turn marker CountExecutingByOrg reads)
+// are cleared with the status: a continuation's pre-turn status is running,
+// and leaving the pair in place would make the drained, queued turn count
+// against the org quota until it restarts. Returns whether the session was
+// updated.
 func (s *AutomationRunStore) EndInterruptedAttempt(ctx context.Context, orgID, runID, sessionID, lockToken uuid.UUID, status models.SessionStatus) (bool, error) {
 	if lockToken == uuid.Nil {
 		return false, errors.New("end interrupted attempt: lock token is required")
@@ -92,7 +96,10 @@ func (s *AutomationRunStore) EndInterruptedAttempt(ctx context.Context, orgID, r
 			FOR UPDATE OF r, j
 		)
 		UPDATE sessions s
-		SET status = @status, last_activity_at = now()
+		SET status = @status,
+		    runtime_soft_deadline_at = NULL,
+		    runtime_hard_deadline_at = NULL,
+		    last_activity_at = now()
 		FROM owned
 		WHERE s.id = @session_id AND s.org_id = @org_id`,
 		pgx.NamedArgs{"id": runID, "org_id": orgID, "session_id": sessionID, "lock_token": lockToken, "status": status})

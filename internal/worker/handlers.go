@@ -47,6 +47,17 @@ import (
 
 const sandboxCapacityRetryDelay = 10 * time.Second
 const sandboxAlternateWorkerRetryDelay = time.Duration(0)
+
+// concurrencyLimitRetryDelay paces continue_session retries while the org's
+// max_concurrent_runs quota is full of executing turns. Slots free up at turn
+// boundaries, so a short fixed delay keeps a queued turn responsive without
+// hammering the count; the worker's retry window bounds the total wait and
+// registerConcurrencyLimitDeadLetter settles the session when it closes.
+const concurrencyLimitRetryDelay = 5 * time.Second
+
+const concurrencyLimitErrorMessage = "Session stopped because all of the organization's agent slots stayed in use until the retry window expired."
+
+const concurrencyLimitFailureExplanation = "This session could not start its turn because all of the organization's concurrent agent runs were in use for an extended period."
 const previewCapacityRetryDelay = 5 * time.Second
 const previewStartupInterruptedRetryDelay = 2 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
@@ -253,7 +264,56 @@ func registerStaleSandboxDeadLetter(ctx context.Context, stores *Stores, logger 
 	})
 }
 
+// sessionCapacityDeadLetter describes how a capacity-wait dead-letter hook
+// settles a session whose job exhausted its retry window while waiting for a
+// slot: the user-facing error, the failure category persisted on the session
+// and its thread, the next steps, and the explanation. kind names the wait in
+// log messages.
+type sessionCapacityDeadLetter struct {
+	kind        string
+	category    string
+	errMsg      string
+	nextSteps   []string
+	explanation func(ctx context.Context, stores *Stores, logger zerolog.Logger, deadLetterErr error) string
+}
+
+// registerSandboxCapacityDeadLetter settles a session whose job dead-letters
+// while the physical sandbox capacity gate stays full.
 func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
+	registerSessionCapacityDeadLetter(ctx, stores, services, logger, session, threadID, jobType, sessionCapacityDeadLetter{
+		kind:     "sandbox capacity",
+		category: agent.FailureCategorySandboxCapacity,
+		errMsg:   "Session stopped because sandbox capacity stayed full until the retry window expired.",
+		nextSteps: []string{
+			"Retry the session when sandbox capacity is available",
+			"Cancel sessions that are no longer needed to free up capacity",
+		},
+		explanation: sandboxCapacityFailureExplanation,
+	})
+}
+
+// registerConcurrencyLimitDeadLetter settles a continuation whose job
+// dead-letters while the org's max_concurrent_runs quota stays full of
+// executing turns. The API claimed the session (status running) when the
+// message was accepted, so without this hook the session and its thread would
+// sit at "running" until the reaper swept them.
+func registerConcurrencyLimitDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
+	registerSessionCapacityDeadLetter(ctx, stores, services, logger, session, threadID, jobType, sessionCapacityDeadLetter{
+		kind:     "concurrency quota",
+		category: agent.FailureCategoryConcurrencyTimeout,
+		errMsg:   concurrencyLimitErrorMessage,
+		nextSteps: []string{
+			"Wait for other running sessions to complete, then retry",
+			"Cancel sessions that are no longer needed to free up capacity",
+			"Raise the concurrent agent runs limit in the runtime settings if the organization needs more capacity",
+		},
+		explanation: func(context.Context, *Stores, zerolog.Logger, error) string {
+			return concurrencyLimitFailureExplanation
+		},
+	})
+}
+
+func registerSessionCapacityDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string, spec sessionCapacityDeadLetter) {
 	if stores == nil || stores.Sessions == nil {
 		return
 	}
@@ -266,13 +326,10 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
 		defer cancel()
 
-		errMsg := "Session stopped because sandbox capacity stayed full until the retry window expired."
-		nextSteps := []string{
-			"Retry the session when sandbox capacity is available",
-			"Cancel sessions that are no longer needed to free up capacity",
-		}
+		errMsg := spec.errMsg
+		nextSteps := spec.nextSteps
 		failedSession := session
-		failureCategory := agent.FailureCategorySandboxCapacity
+		failureCategory := spec.category
 		failedSession.Status = models.SessionStatusFailed
 		failedSession.Error = &errMsg
 		failedSession.FailureCategory = &failureCategory
@@ -283,7 +340,7 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 				Err(deadLetterErr).
 				Str("session_id", session.ID.String()).
 				Str("job_type", jobType).
-				Msg("session job dead-lettered after sandbox capacity retries")
+				Msg("session job dead-lettered after " + spec.kind + " retries")
 		}
 
 		result := &models.SessionResult{Error: &errMsg}
@@ -292,20 +349,20 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 				Err(err).
 				Str("session_id", session.ID.String()).
 				Str("job_type", jobType).
-				Msg("failed to mark session failed after sandbox capacity dead-letter")
+				Msg("failed to mark session failed after " + spec.kind + " dead-letter")
 			return
 		}
-		explanation := sandboxCapacityFailureExplanation(writeCtx, stores, logger, deadLetterErr)
+		explanation := spec.explanation(writeCtx, stores, logger, deadLetterErr)
 		failedSession.FailureExplanation = &explanation
-		if err := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, agent.FailureCategorySandboxCapacity, nextSteps, true); err != nil {
+		if err := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, spec.category, nextSteps, true); err != nil {
 			logger.Error().
 				Err(err).
 				Str("session_id", session.ID.String()).
 				Str("job_type", jobType).
-				Msg("failed to persist sandbox capacity failure details")
+				Msg("failed to persist " + spec.kind + " failure details")
 		}
 		if threadID != nil && *threadID != uuid.Nil && stores.SessionThreads != nil {
-			threadCategory := agent.FailureCategorySandboxCapacity
+			threadCategory := spec.category
 			threadResult := &models.SessionResult{
 				Error:           &errMsg,
 				FailureCategory: &threadCategory,
@@ -316,7 +373,7 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 					Str("session_id", session.ID.String()).
 					Str("thread_id", threadID.String()).
 					Str("job_type", jobType).
-					Msg("failed to mark session thread failed after sandbox capacity dead-letter")
+					Msg("failed to mark session thread failed after " + spec.kind + " dead-letter")
 			}
 		}
 		if services != nil && services.ProjectTasks != nil && failedSession.ProjectTaskID != nil {
@@ -325,7 +382,7 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 					Err(err).
 					Str("session_id", failedSession.ID.String()).
 					Str("job_type", jobType).
-					Msg("failed to update project task after sandbox capacity dead-letter")
+					Msg("failed to update project task after " + spec.kind + " dead-letter")
 			}
 		}
 		if services != nil && services.AutomationRuns != nil && failedSession.AutomationRunID != nil {
@@ -334,7 +391,7 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 					Err(err).
 					Str("session_id", failedSession.ID.String()).
 					Str("job_type", jobType).
-					Msg("failed to update automation run after sandbox capacity dead-letter")
+					Msg("failed to update automation run after " + spec.kind + " dead-letter")
 			}
 		}
 		if stores.Jobs != nil {
@@ -10291,7 +10348,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						return &FatalError{Err: err}
 					}
 				}
-				if errors.Is(err, agent.ErrCodeReviewRecheckLeaseLost) || errors.Is(err, agent.ErrSandboxCapacity) || errors.Is(err, agent.ErrSnapshotPending) || errors.Is(err, agent.ErrSessionInterrupted) || errors.Is(err, agent.ErrSandboxWorkspaceNotReady) || errors.Is(err, agent.ErrStaleSandboxIDCleared) {
+				if errors.Is(err, agent.ErrCodeReviewRecheckLeaseLost) || errors.Is(err, agent.ErrSandboxCapacity) || errors.Is(err, agent.ErrConcurrencyLimit) || errors.Is(err, agent.ErrSnapshotPending) || errors.Is(err, agent.ErrSessionInterrupted) || errors.Is(err, agent.ErrSandboxWorkspaceNotReady) || errors.Is(err, agent.ErrStaleSandboxIDCleared) {
 					retryAfter := 2 * time.Second
 					return &RetryableError{Err: err, RetryAfter: &retryAfter}
 				}
@@ -10339,6 +10396,27 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Err(err).
 					Msg("local sandbox capacity reached; retrying continue_session")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID, ClearTargetNodeID: clearTargetNodeID}
+			}
+			if errors.Is(err, agent.ErrConcurrencyLimit) {
+				// The org's max_concurrent_runs quota is full of executing
+				// turns. The session stays claimed (running) and the job is
+				// retried on a short schedule inside the worker's retry
+				// window; if no slot frees up before the window closes, the
+				// dead-letter hook settles the session and thread with a
+				// user-facing failure instead of leaving them "running" for
+				// the reaper.
+				retryAfter := concurrencyLimitRetryDelay
+				var quotaThreadID *uuid.UUID
+				if hasThread {
+					threadIDLocal := threadID
+					quotaThreadID = &threadIDLocal
+				}
+				registerConcurrencyLimitDeadLetter(ctx, stores, services, logger, session, quotaThreadID, "continue_session")
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Err(err).
+					Msg("org concurrency quota reached; retrying continue_session")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
 			}
 			// A pending post-PR snapshot upload is a transient state — wrap
 			// in RetryableError so the job is requeued without consuming an

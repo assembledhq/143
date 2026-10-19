@@ -306,6 +306,16 @@ func (m *mockCredentialProvider) ListByProvider(ctx context.Context, orgID uuid.
 type mockSessionStore struct {
 	mu                     sync.Mutex
 	countRunning           int
+	countExecuting         int
+	countExecutingErr      error
+	executingSessionID     uuid.UUID
+	countExecutingExcludes []uuid.UUID
+	// trackExecuting switches CountExecutingByOrg from the static
+	// countExecuting/executingSessionID pair to the executing set below,
+	// which BeginRuntime fills and the turn-end writers empty, so a test can
+	// drive several turns through the marker's real lifecycle.
+	trackExecuting         bool
+	executing              map[uuid.UUID]bool
 	statusUpdates          []string
 	statusUpdateContexts   []statusUpdateContext
 	sandboxStateContexts   []sandboxStateUpdateContext
@@ -431,6 +441,7 @@ type turnUpdate struct {
 func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.clearExecuting(runID, status)
 	m.statusUpdates = append(m.statusUpdates, string(status))
 	m.statusUpdateContexts = append(m.statusUpdateContexts, statusUpdateContext{
 		status: status,
@@ -442,6 +453,7 @@ func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.U
 func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.clearExecuting(runID, status)
 	if m.eventHook != nil {
 		m.eventHook("session_result:" + string(status))
 	}
@@ -455,9 +467,60 @@ func (m *mockSessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUI
 	return m.countRunning, m.countRunningErr
 }
 
+// CountExecutingByOrg mirrors the store's exclusion semantics: countExecuting
+// is the org's executing-turn count, and when excludeSessionID names
+// executingSessionID (the one session the test treats as executing) that
+// session is left out, as the real query leaves out the caller's own row.
+func (m *mockSessionStore) CountExecutingByOrg(ctx context.Context, orgID, excludeSessionID uuid.UUID) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.countExecutingExcludes = append(m.countExecutingExcludes, excludeSessionID)
+	if m.trackExecuting {
+		count := len(m.executing)
+		if m.executing[excludeSessionID] {
+			count--
+		}
+		return count, m.countExecutingErr
+	}
+	count := m.countExecuting
+	if excludeSessionID != uuid.Nil && excludeSessionID == m.executingSessionID && count > 0 {
+		count--
+	}
+	return count, m.countExecutingErr
+}
+
+// markExecuting and clearExecuting maintain the tracked executing set the
+// way the store's writers maintain the runtime deadline marker. Callers hold
+// m.mu.
+func (m *mockSessionStore) markExecuting(sessionID uuid.UUID) {
+	if !m.trackExecuting {
+		return
+	}
+	if m.executing == nil {
+		m.executing = map[uuid.UUID]bool{}
+	}
+	m.executing[sessionID] = true
+}
+
+func (m *mockSessionStore) clearExecuting(sessionID uuid.UUID, status models.SessionStatus) {
+	if !m.trackExecuting || status == models.SessionStatusRunning {
+		return
+	}
+	delete(m.executing, sessionID)
+}
+
+func (m *mockSessionStore) getCountExecutingExcludes() []uuid.UUID {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]uuid.UUID, len(m.countExecutingExcludes))
+	copy(out, m.countExecutingExcludes)
+	return out
+}
+
 func (m *mockSessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.clearExecuting(sessionID, models.SessionStatusIdle)
 	m.turnUpdates = append(m.turnUpdates, turnUpdate{
 		turn:           turn,
 		result:         result,
@@ -484,6 +547,9 @@ func (m *mockSessionStore) UpdateWorkspaceSnapshot(ctx context.Context, orgID, s
 func (m *mockSessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uuid.UUID, capability models.CheckpointCapability, softDeadline, hardDeadline, observedAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.beginRuntimeErr == nil {
+		m.markExecuting(sessionID)
+	}
 	m.runtimeBegins = append(m.runtimeBegins, runtimeBegin{
 		capability:   capability,
 		softDeadline: softDeadline,
@@ -2497,7 +2563,10 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 	run.Status = models.SessionStatusRunning
 
 	d := defaultDeps()
-	d.sessions.countRunning = 1
+	// The only executing slot is this run's own (its deadlines survive the
+	// crash); recovery must not be held by it.
+	d.sessions.countExecuting = 1
+	d.sessions.executingSessionID = run.ID
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
 			Summary:  "Recovered by restarting cleanly",
@@ -4317,7 +4386,7 @@ func TestRunAgent_ConcurrencyLimit(t *testing.T) {
 	run := testRun(orgID, issue.ID)
 
 	d := defaultDeps()
-	d.sessions.countRunning = 3 // At the limit.
+	d.sessions.countExecuting = 3 // At the limit.
 
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)

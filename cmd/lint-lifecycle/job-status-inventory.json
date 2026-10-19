@@ -211,12 +211,12 @@
     },
     {
       "id": "internal/db/automation_turns.go:AutomationRunStore.EndInterruptedAttempt:sql:1",
-      "source_sha256": "dae6a6a0486f25ba4df28bca0bb2197a1090de962561e84605b8534cb5cde2fa",
+      "source_sha256": "1d1e5e31b118e16eece103058ff80c3fbe92e78d840cdeeda5bd8d31c2ca30f8",
       "classification": "lease-owned",
       "action_0a": "Retain running plus the exact job/lock-token and required live-lease guard; convert lifecycle mutation to its named authority seam. awaiting_start_control has no execution lease and must never satisfy this predicate.",
-      "reason": "This operation spends current execution/publication authority, not logical input ownership.",
+      "reason": "This operation spends current execution/publication authority, not logical input ownership. The session write now also clears the runtime deadline pair (executing-turn marker) with the restored status; the jobs predicate itself is unchanged.",
       "evidence": [
-        "internal/db/automation_turns.go:83",
+        "internal/db/automation_turns.go:87",
         "j . status = 'running'"
       ]
     },

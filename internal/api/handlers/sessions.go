@@ -5056,8 +5056,10 @@ func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, or
 	// Check concurrency before any Linear linking side effects. The session
 	// row and turn-0 message are already persisted to preserve historical
 	// CreateManual behavior, but we must not link or post to Linear for a run
-	// that will never be enqueued.
-	runningCount, err := h.runStore.CountRunningByOrg(r.Context(), orgID)
+	// that will never be enqueued. The count is of executing turns, the same
+	// count the orchestrator's RunAgent and ContinueSession gates use, so a
+	// session a user has queued a follow-up on does not hold a slot here.
+	runningCount, err := h.runStore.CountExecutingByOrg(r.Context(), orgID, uuid.Nil)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CONCURRENCY_CHECK_FAILED", "failed to check running sessions", err)
 		return

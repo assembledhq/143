@@ -57,6 +57,10 @@ func (s *runtimeTestSessionStore) CountRunningByOrg(context.Context, uuid.UUID) 
 	return s.countRunning, s.countRunningErr
 }
 
+func (s *runtimeTestSessionStore) CountExecutingByOrg(context.Context, uuid.UUID, uuid.UUID) (int, error) {
+	return 0, nil
+}
+
 func (s *runtimeTestSessionStore) UpdateTurnComplete(context.Context, uuid.UUID, uuid.UUID, int, *models.SessionResult, string, string) error {
 	return nil
 }
