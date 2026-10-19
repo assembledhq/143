@@ -739,6 +739,17 @@ const (
 	MinPreviewSessionPrewarmMaxActive     = 0
 	MaxPreviewSessionPrewarmMaxActive     = 25
 
+	// MinMaxConcurrentRuns / MaxMaxConcurrentRuns bound the per-org
+	// max_concurrent_runs quota accepted by the settings API. The ceiling is a
+	// sanity bound and deliberately a constant rather than the live worker
+	// fleet total: fleet telemetry fluctuates with heartbeats, drains, and
+	// deploys and must never make a valid settings save fail. Physical
+	// admission stays with the per-node SandboxCapacityGate; the fleet total
+	// is surfaced to admins as advisory context by the runtime status
+	// endpoint. The frontend mirrors these in settings-constants.ts.
+	MinMaxConcurrentRuns = 1
+	MaxMaxConcurrentRuns = 100
+
 	DefaultPreviewMaxCPUMillis        = 2000
 	MinPreviewMaxCPUMillis            = 250
 	MaxPreviewMaxCPUMillis            = 2000

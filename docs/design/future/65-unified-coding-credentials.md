@@ -444,6 +444,10 @@ PATCH  /api/v1/coding-credentials/{id}/move           → move one row within it
                                                          body: { scope, before_id? | after_id? | to_top | to_bottom }
 PATCH  /api/v1/coding-credentials/reorder             → bulk reorder a scope's stack (recovery / tests)
                                                          body: { scope, ordered_ids }
+GET    /api/v1/coding-credentials/stack-settings      → a scope's distribution mode (ordered | spread)
+                                                         query: ?scope=org|personal
+PATCH  /api/v1/coding-credentials/stack-settings      → set a scope's distribution mode (admin for scope=org)
+                                                         body: { scope, distribution }
 ```
 
 The per-row `move` endpoint is the default UI path: a drag-drop sends one ID and a position relative to one neighbour, regardless of stack size. The bulk `reorder` shape is kept for "reset to this exact ordering" flows and tests; it is not on the hot edit path.
@@ -739,7 +743,7 @@ If timing is so tight that PRs 2–4 must land in one push, that is acceptable, 
 
 - **Per-session credential pinning.** Worth it? "Use this exact auth for sessions in this repo" is a real ask but probably belongs in a separate design once usage data shows the pain. Out of scope here, but the unified row model accommodates it cleanly: add a `coding_credential_pins` table keyed by `(repo_id, credential_id)` later.
 - **Personal subscription quotas.** Should an org admin be able to cap how many personal subscriptions a user can attach? We currently cap nothing. Probably defer until someone asks; the row model trivially supports a per-org policy.
-- **Same-priority distribution UI.** Multiple credentials at the same priority within a stack are spread by random-with-shedding (see Resolver). The data model and runtime support this for both scopes from day one. Open question is purely UI: do we expose "tie at this priority" visually so users intentionally create tiers, or leave it as an emergent behaviour and surface a hint only when a tie exists.
+- **Same-priority distribution UI.** Resolved: rather than exposing priority ties, each scope carries a distribution mode (`coding_credential_stack_settings`, see `docs/design/implemented/78-coding-agent-rate-limit-fallback.md`). `spread` collapses the scope into one tier for the random-with-shedding pick; `ordered` keeps the priority walk. Both stacks expose it as a "Spread load across auths" switch (org on /settings/agent, personal on /settings/account). Per-priority ties remain reachable only through the store.
 - **OpenRouter and other API-router providers.** OpenRouter is in `CodingAgentProviders` today but not surfaced in the settings UI. Migration treats it as a coding provider; UI exposure is a separate decision.
 - **Provider naming convention.** Resolved: every subscription provider is named `<vendor>_subscription` (`openai_subscription`, `anthropic_subscription`, future `amp_subscription`, etc.). The legacy `openai_chatgpt` name is renamed in the same migration that introduces `anthropic_subscription`, so there is never a window where the two providers use inconsistent conventions.
 

@@ -2590,6 +2590,16 @@ export interface RuntimeSettingsStatus {
     max_concurrent_agent_runs: number;
     active_previews: number;
     max_previews_per_user: number;
+    /**
+     * Advisory worker-fleet sandbox capacity (host-deduplicated). When
+     * `telemetry_available` is false no fresh worker reported capacity, so
+     * the counts are meaningless and must not be shown as zero.
+     */
+    fleet?: {
+      telemetry_available: boolean;
+      workers: number;
+      max_sandboxes: number;
+    };
   };
 }
 
@@ -2893,6 +2903,16 @@ export interface CodingCredentialSummary {
   created_by?: string;
   created_at: string;
   updated_at: string;
+}
+
+// How the runtime picker walks a scope's coding-credential stack. Mirrors
+// models.CodingCredentialDistribution.
+export type CodingCredentialDistribution = "ordered" | "spread";
+
+// Per-scope stack configuration. Mirrors models.CodingCredentialStackSettings.
+export interface CodingCredentialStackSettings {
+  scope: CodingCredentialScope;
+  distribution: CodingCredentialDistribution;
 }
 
 export interface RepoSummary {

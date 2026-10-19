@@ -96,8 +96,9 @@ func (c *Coordinator) validateAutomaticReviewerReadiness(ctx context.Context, or
 	return nil
 }
 
-// Automation agents register only publication metadata. Their frozen run policy
-// remains the sole authority to start publication after execution completes.
+// Automation agents register only publication metadata: team reviewers and
+// the pull request title and body. Their frozen run policy remains the sole
+// authority to start publication after execution completes.
 func (c *Coordinator) stageAutomationPRIntent(ctx context.Context, orgID uuid.UUID, session models.Session, req RequestPullRequest) (*PublicationIntentResult, error) {
 	deny := func(reason string) (*PublicationIntentResult, error) {
 		return nil, &Error{Code: ErrorSessionNotEligible, Err: errors.New(reason)}
@@ -109,7 +110,20 @@ func (c *Coordinator) stageAutomationPRIntent(ctx context.Context, orgID uuid.UU
 		return deny("automatic publication metadata is unavailable for this session")
 	}
 	if req.Draft != nil || (req.AuthorMode != "" && req.AuthorMode != "auto") || req.MergeWhenReady {
-		return nil, &Error{Code: ErrorInvalidPublicationOptions, Err: errors.New("automatic publication metadata accepts team_reviewers only; draft and author policy are owned by the configured completion handoff")}
+		return nil, &Error{Code: ErrorInvalidPublicationOptions, Err: errors.New("automatic publication metadata accepts team_reviewers, title, and body only; draft and author policy are owned by the configured completion handoff")}
+	}
+	var title *string
+	if req.Title != nil {
+		normalized, err := models.NormalizeStagedPRTitle(*req.Title)
+		if err != nil {
+			return nil, &Error{Code: ErrorInvalidPublicationOptions, Err: err}
+		}
+		title = &normalized
+	}
+	if req.Body != nil {
+		if err := models.ValidateStagedPRBody(*req.Body); err != nil {
+			return nil, &Error{Code: ErrorInvalidPublicationOptions, Err: err}
+		}
 	}
 	hasPublishing := false
 	for _, capability := range session.CapabilitySnapshot {
@@ -152,8 +166,8 @@ func (c *Coordinator) stageAutomationPRIntent(ctx context.Context, orgID uuid.UU
 	publication, publicationErr := c.publications.GetByChangeset(ctx, orgID, session.ID, changeset.ID)
 	if publicationErr == nil {
 		result := ExistingPublicationResult(publication)
-		if len(req.TeamReviewers) > 0 {
-			reason := "publication metadata is already frozen; the existing publication retains its original team reviewers"
+		if len(req.TeamReviewers) > 0 || req.Title != nil || req.Body != nil {
+			reason := "publication metadata is already frozen; the existing publication retains its original team reviewers, title, and body"
 			result.Reason = &reason
 		}
 		return result, nil
@@ -161,16 +175,22 @@ func (c *Coordinator) stageAutomationPRIntent(ctx context.Context, orgID uuid.UU
 	if !errors.Is(publicationErr, pgx.ErrNoRows) {
 		return nil, &Error{Code: ErrorPublicationFailed, Err: publicationErr}
 	}
+	var teams []string
 	if len(req.TeamReviewers) > 0 {
-		teams, err := c.normalizeTeamReviewers(ctx, orgID, session, req.TeamReviewers)
+		teams, err = c.normalizeTeamReviewers(ctx, orgID, session, req.TeamReviewers)
 		if err != nil {
 			return nil, err
 		}
 		if err := c.validateAutomaticReviewerReadiness(ctx, orgID, session); err != nil {
 			return nil, err
 		}
+	}
+	if teams != nil || title != nil || req.Body != nil {
+		// Omitted fields stay nil so the store keeps any value an earlier call
+		// staged; reviewers and text may be registered separately.
 		if err := c.prIntents.Stage(ctx, orgID, models.SessionPRIntent{
-			OrgID: orgID, SessionID: session.ID, AutomationRunID: run.ID, ChangesetID: changeset.ID, TeamReviewers: teams,
+			OrgID: orgID, SessionID: session.ID, AutomationRunID: run.ID, ChangesetID: changeset.ID,
+			TeamReviewers: teams, Title: title, Body: req.Body,
 		}); err != nil {
 			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("stage automatic publication metadata: %w", err)}
 		}

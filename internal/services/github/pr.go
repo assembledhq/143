@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -1220,6 +1221,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	if targetChangeset != nil {
 		defaultBranch = targetChangeset.BaseBranch
 	}
+	contentPayload := publicationPayload
 	if targetChangeset != nil && s.publications != nil {
 		opts.PublicationSource = publicationSource
 		publication := &models.SessionPublication{
@@ -1238,6 +1240,11 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 		if publicationErr := s.publications.EnsureRequested(ctx, run.OrgID, publication); publicationErr != nil {
 			return nil, fmt.Errorf("ensure publication operation: %w", publicationErr)
+		}
+		// Staged PR text is read from the stored request, never the caller's
+		// copy, so a replay opens the PR with the text frozen at admission.
+		if len(publication.RequestPayload) > 0 {
+			contentPayload = publication.RequestPayload
 		}
 		// The durable publication row is authoritative for branch ownership.
 		// Callers cannot grant this lease through request JSON, and reloading it
@@ -1299,20 +1306,19 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}()
 
-	var title, body string
-	if generated, genErr := s.generatePRContent(ctx, token, owner, repoName, defaultBranch, *run.RepositoryID, run.OrgID, run, issue); genErr == nil {
-		// The LLM prompt does not instruct the model to embed a "[KEY-N]"
-		// Linear key in the title — only formatPRTitle/formatSyncedPRTitle
-		// did, so the LLM-generated path was silently shipping unprefixed
-		// titles whenever the LLM call succeeded. Route the LLM title
-		// through the same prefixer so Linear's GitHub integration can
-		// claim the PR.
-		title = applyLinearKeyPrefixes(run, generated.Title, issue)
-		body = generated.Body
-	} else {
-		s.logger.Warn().Err(genErr).Msg("LLM PR content generation failed, falling back to static")
+	staged, err := stagedPRContentFromPayload(contentPayload)
+	if err != nil {
+		return nil, err
 	}
-	title = resolvePRTitle(run, issue, title, targetChangeset)
+	var generated *generatedPR
+	if !staged.complete() {
+		var genErr error
+		if generated, genErr = s.generatePRContent(ctx, token, owner, repoName, defaultBranch, *run.RepositoryID, run.OrgID, run, issue); genErr != nil {
+			s.logger.Warn().Err(genErr).Msg("LLM PR content generation failed, falling back to static")
+			generated = nil
+		}
+	}
+	title, body := selectPRContent(run, issue, targetChangeset, staged, generated, s.formatPRFooter(ctx, run))
 	if body == "" {
 		body = s.formatPRBody(ctx, run, issue)
 	}
@@ -5728,6 +5734,11 @@ func truncatePRTitle(s string, limit int) string {
 	if len(s) <= limit {
 		return s
 	}
+	// The limit is in bytes; back off to a rune boundary so a multibyte
+	// character is never split into invalid UTF-8.
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
 
 	truncated := strings.TrimSpace(s[:limit])
 	if idx := strings.LastIndex(truncated, " "); idx >= limit/2 {
@@ -6333,6 +6344,74 @@ func (s *PRService) fillRepoTemplate(ctx context.Context, template string, run *
 type generatedPR struct {
 	Title string
 	Body  string
+}
+
+// stagedPRContent is pull request text an automation agent staged before
+// automatic publication. The coordinator freezes it into the durable request
+// payload; nil fields were not staged and stay server-generated.
+type stagedPRContent struct {
+	Title *string `json:"title"`
+	Body  *string `json:"body"`
+}
+
+func (c stagedPRContent) complete() bool {
+	return c.Title != nil && c.Body != nil
+}
+
+func stagedPRContentFromPayload(payload json.RawMessage) (stagedPRContent, error) {
+	var staged stagedPRContent
+	if len(bytes.TrimSpace(payload)) == 0 {
+		return staged, nil
+	}
+	if err := json.Unmarshal(payload, &staged); err != nil {
+		return stagedPRContent{}, fmt.Errorf("decode staged pull request content: %w", err)
+	}
+	// Staging rejects blank text; treat a blank value in an older or
+	// hand-edited payload as unstaged rather than opening an empty PR.
+	if staged.Title != nil && strings.TrimSpace(*staged.Title) == "" {
+		staged.Title = nil
+	}
+	if staged.Body != nil && strings.TrimSpace(*staged.Body) == "" {
+		staged.Body = nil
+	}
+	return staged, nil
+}
+
+// selectPRContent chooses the created PR's title and body. Staged text wins
+// over LLM output, which wins over the static fallbacks. A staged title is
+// the agent's explicit choice, so it also overrides the changeset title, but
+// still receives Linear key prefixes. A staged body receives the same footer
+// as generated bodies. An empty body tells the caller to use formatPRBody.
+func selectPRContent(
+	run *models.Session,
+	issue *models.Issue,
+	changeset *models.SessionChangeset,
+	staged stagedPRContent,
+	generated *generatedPR,
+	footer string,
+) (string, string) {
+	var title, body string
+	if staged.Title != nil {
+		title = applyLinearKeyPrefixes(run, strings.TrimSpace(*staged.Title), issue)
+	} else {
+		if generated != nil {
+			// The LLM prompt does not instruct the model to embed a "[KEY-N]"
+			// Linear key in the title — only formatPRTitle/formatSyncedPRTitle
+			// did, so the LLM-generated path was silently shipping unprefixed
+			// titles whenever the LLM call succeeded. Route the LLM title
+			// through the same prefixer so Linear's GitHub integration can
+			// claim the PR.
+			title = applyLinearKeyPrefixes(run, generated.Title, issue)
+		}
+		title = resolvePRTitle(run, issue, title, changeset)
+	}
+	switch {
+	case staged.Body != nil:
+		body = strings.TrimSpace(*staged.Body) + "\n\n" + footer
+	case generated != nil:
+		body = generated.Body
+	}
+	return title, body
 }
 
 // generatePRContent uses the LLM to produce both a PR title and body in a

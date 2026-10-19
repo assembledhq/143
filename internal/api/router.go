@@ -395,6 +395,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		UnavailableReason: agent.StaticEgressUnavailableReason(cfg.StaticEgressPublicIP),
 	})
 	settingsHandler.SetRuntimeStatusCounters(sessionStore, previewStore)
+	settingsHandler.SetRuntimeStatusFleetCapacity(jobStore)
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
 	sessionThreadStore.SetLogger(logger)
@@ -1426,6 +1427,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// are the same read-only fallback metadata already shown on
 				// settings pages.
 				r.Get("/api/v1/coding-credentials", codingCredentialHandler.List)
+				r.Get("/api/v1/coding-credentials/stack-settings", codingCredentialHandler.GetStackSettings)
 
 				r.Get("/api/v1/repositories", repoHandler.List)
 				r.Get("/api/v1/repositories/summary", repoHandler.Summary)
@@ -1590,6 +1592,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/coding-credentials/{id}", codingCredentialHandler.Delete)
 				r.Patch("/api/v1/coding-credentials/{id}/move", codingCredentialHandler.Move)
 				r.Patch("/api/v1/coding-credentials/reorder", codingCredentialHandler.Reorder)
+				r.Patch("/api/v1/coding-credentials/stack-settings", codingCredentialHandler.UpdateStackSettings)
 
 				// Personal credential management
 				r.Put("/api/v1/settings/credentials/personal/{provider}", handlers.LegacyCredentialsGone)

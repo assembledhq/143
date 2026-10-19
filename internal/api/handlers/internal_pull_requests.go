@@ -90,6 +90,8 @@ type internalCreatePullRequestRequest struct {
 	AuthorMode    string   `json:"author_mode,omitempty"`
 	TriggerKind   string   `json:"trigger_kind,omitempty"`
 	TeamReviewers []string `json:"team_reviewers,omitempty"`
+	Title         *string  `json:"title,omitempty"`
+	Body          *string  `json:"body,omitempty"`
 }
 
 type internalCreatePullRequestResponse struct {
@@ -363,6 +365,7 @@ func (h *InternalPullRequestHandler) createWithCoordinator(
 	}
 	result, err := h.coordinator.RequestPullRequest(r.Context(), orgID, sessionID, publicationintent.RequestPullRequest{
 		Draft: req.Draft, AuthorMode: req.AuthorMode, TeamReviewers: req.TeamReviewers,
+		Title: req.Title, Body: req.Body,
 		ChangesetID: changesetID,
 		// This endpoint is only reachable with a sandbox-scoped internal
 		// token, so the channel is the agent tool regardless of whether the

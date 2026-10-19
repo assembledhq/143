@@ -353,6 +353,24 @@ func TestValidateSettingsModels(t *testing.T) {
 			},
 		},
 		{
+			name:     "accepts max_concurrent_runs at the floor",
+			settings: OrgSettings{MaxConcurrentRuns: MinMaxConcurrentRuns},
+		},
+		{
+			name:     "accepts max_concurrent_runs at the ceiling",
+			settings: OrgSettings{MaxConcurrentRuns: MaxMaxConcurrentRuns},
+		},
+		{
+			name:     "rejects max_concurrent_runs above the ceiling",
+			settings: OrgSettings{MaxConcurrentRuns: MaxMaxConcurrentRuns + 1},
+			wantErr:  true,
+		},
+		{
+			name:     "rejects negative max_concurrent_runs",
+			settings: OrgSettings{MaxConcurrentRuns: -1},
+			wantErr:  true,
+		},
+		{
 			name: "accepts Astra and Fable 5.1 in agent config and defaults",
 			settings: OrgSettings{
 				AgentConfig: AgentEnvConfig{

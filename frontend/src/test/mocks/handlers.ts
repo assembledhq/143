@@ -1099,6 +1099,11 @@ export const handlers = [
           max_concurrent_agent_runs: 5,
           active_previews: 0,
           max_previews_per_user: 5,
+          fleet: {
+            telemetry_available: true,
+            workers: 2,
+            max_sandboxes: 8,
+          },
         },
       },
     });
@@ -1112,6 +1117,15 @@ export const handlers = [
     return HttpResponse.json({
       data: [],
       meta: { scope: url.searchParams.get('scope') },
+    });
+  }),
+
+  // Default stack settings: every scope starts in the ordered (priority
+  // walk) mode unless a test installs its own handler.
+  http.get('/api/v1/coding-credentials/stack-settings', ({ request }) => {
+    const url = new URL(request.url);
+    return HttpResponse.json({
+      data: { scope: url.searchParams.get('scope') ?? 'personal', distribution: 'ordered' },
     });
   }),
 

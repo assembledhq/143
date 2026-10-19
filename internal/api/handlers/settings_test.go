@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -239,9 +240,85 @@ func TestSettingsHandler_GetRuntimeStatus(t *testing.T) {
 	handler.GetRuntimeStatus(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "runtime status should return success")
 	require.Contains(t, w.Body.String(), `"static_egress":{"available":true,"enabled":true,"public_ip":"203.0.113.10"}`, "runtime status should include sanitized static egress state")
-	require.Contains(t, w.Body.String(), `"capacity":{"state":"normal","active_agent_runs":2,"max_concurrent_agent_runs":5,"active_previews":3,"max_previews_per_user":4}`, "runtime status should include sanitized capacity counts")
+	require.Contains(t, w.Body.String(), `"capacity":{"state":"normal","active_agent_runs":2,"max_concurrent_agent_runs":5,"active_previews":3,"max_previews_per_user":4,"fleet":{"telemetry_available":false,"workers":0,"max_sandboxes":0}}`, "runtime status should include sanitized capacity counts and report fleet telemetry as unavailable when no reader is wired")
 	require.NotContains(t, w.Body.String(), "static_egress_unavailable_reason", "runtime status must not expose backend diagnostics")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSettingsHandler_GetRuntimeStatus_FleetCapacity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		fleet     testRuntimeStatusFleetCapacity
+		wantFleet string
+	}{
+		{
+			name:      "reports host-deduplicated fleet capacity when workers are fresh",
+			fleet:     testRuntimeStatusFleetCapacity{capacity: db.FleetSandboxCapacity{Workers: 2, MaxSandboxes: 8, LiveSandboxes: 3, ReservedSandboxes: 1}},
+			wantFleet: `"fleet":{"telemetry_available":true,"workers":2,"max_sandboxes":8}`,
+		},
+		{
+			name:      "reports telemetry unavailable when no worker advertises capacity",
+			fleet:     testRuntimeStatusFleetCapacity{capacity: db.FleetSandboxCapacity{}},
+			wantFleet: `"fleet":{"telemetry_available":false,"workers":0,"max_sandboxes":0}`,
+		},
+		{
+			name:      "reports telemetry unavailable instead of failing when the lookup errors",
+			fleet:     testRuntimeStatusFleetCapacity{err: errors.New("nodes unavailable")},
+			wantFleet: `"fleet":{"telemetry_available":false,"workers":0,"max_sandboxes":0}`,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create pgxmock pool without error")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			now := time.Now()
+			mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+				WithArgs(pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows(orgColumns()).AddRow(
+						orgID,
+						"Test Org",
+						json.RawMessage(`{"max_concurrent_runs":12}`),
+						now,
+						now,
+					),
+				)
+
+			handler := NewSettingsHandler(db.NewOrganizationStore(mock), nil)
+			handler.SetRuntimeStatusCounters(
+				testRuntimeStatusSessionCounter{count: 1},
+				testRuntimeStatusPreviewCounter{count: 0},
+			)
+			handler.SetRuntimeStatusFleetCapacity(testCase.fleet)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/runtime/status", nil)
+			req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+			w := httptest.NewRecorder()
+
+			handler.GetRuntimeStatus(w, req)
+			require.Equal(t, http.StatusOK, w.Code, "runtime status should return success regardless of fleet telemetry state")
+			require.Contains(t, w.Body.String(), `"max_concurrent_agent_runs":12`, "runtime status should keep reporting the org quota alongside fleet telemetry")
+			require.Contains(t, w.Body.String(), testCase.wantFleet, "runtime status should report the expected fleet block")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+type testRuntimeStatusFleetCapacity struct {
+	capacity db.FleetSandboxCapacity
+	err      error
+}
+
+func (f testRuntimeStatusFleetCapacity) FleetSandboxCapacity(context.Context) (db.FleetSandboxCapacity, error) {
+	return f.capacity, f.err
 }
 
 func TestSettingsHandler_GetLLMDefaults(t *testing.T) {

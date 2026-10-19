@@ -460,7 +460,11 @@ FOR UPDATE SKIP LOCKED;
 ```
 
 - Workers poll every 1 second (configurable via `WORKER_POLL_INTERVAL`)
-- Each worker processes up to `MAX_CONCURRENT_RUNS` sandbox jobs concurrently
+- Each worker runs `WORKER_PROCESS_COUNT` job loops and admits at most
+  `WORKER_MAX_ACTIVE_SANDBOXES` live sandboxes (agent runs and preview-held
+  sandboxes share this cap; see `deploy/scripts/worker_buckets.sh` for the
+  per-SKU defaults). The per-org `max_concurrent_runs` quota is an org
+  setting (Settings → Runtime), not a worker env var.
 - Non-sandbox jobs (ingest, prioritize, open_pr) are lightweight and processed immediately
 - Job affinity is not required — any worker can process any job type
 - If a worker dies mid-job, the dead node cleanup process re-queues its locked jobs
@@ -527,7 +531,8 @@ All configuration via environment variables:
 | `SANDBOX_REQUIRE_GVISOR` | No | `true` | If true, server refuses to start without gVisor in production |
 | `SANDBOX_HEALTH_CHECK_IMAGE` | No | `busybox:1.36.1` | Small image used for worker startup runtime probes; lazy-pulled if missing and overrideable for private mirrors |
 | `SANDBOX_IMAGE_DIGEST` | No | - | Expected digest for sandbox image verification |
-| `MAX_CONCURRENT_RUNS` | No | `3` | Max concurrent agent runs per org |
+| `WORKER_PROCESS_COUNT` | No | `2` | Worker job loops per node; deploy scripts set it per machine SKU |
+| `WORKER_MAX_ACTIVE_SANDBOXES` | No | derived from `WORKER_PROCESS_COUNT` | Live sandbox admission cap per worker node (agent runs and preview-held sandboxes) |
 | `E2B_API_KEY` | No | - | E2B API key (required if `SANDBOX_PROVIDER=e2b`) |
 | `E2B_TEMPLATE_ID` | No | - | E2B sandbox template ID (required if `SANDBOX_PROVIDER=e2b`) |
 | **Security** | | | |

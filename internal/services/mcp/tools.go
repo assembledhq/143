@@ -408,6 +408,9 @@ func (tr *ToolRegistry) ListTools() []Tool {
 						"author_mode":    {Type: "string", Description: "PR author mode. Omit to use the default (auto).", Enum: []string{"auto", "app", "user"}},
 						"trigger_kind":   {Type: "string", Description: "Set to explicit_action only when the user directly requested PR creation; otherwise omit.", Enum: []string{"explicit_action"}},
 						"team_reviewers": {Type: "array", Description: "Explicitly requested GitHub team slugs or owner/team names. For automatic per-run automations, registers metadata for the configured completion handoff without publishing early.", Items: &SchemaProperty{Type: "string"}},
+						"title":          {Type: "string", Description: "Automatic per-run automations only: single-line Pull Request title (at most 120 bytes) to use instead of a generated one in the completion handoff. Linked Linear issue key prefixes are still inserted. Rejected for other sessions; use update_pr after the PR exists."},
+						"body":           {Type: "string", Description: "Automatic per-run automations only: Pull Request description in Markdown (at most 60,000 characters) to use instead of a generated one in the completion handoff; the server appends its footer. Mutually exclusive with body_file."},
+						"body_file":      {Type: "string", Description: "Path inside the sandbox containing the Markdown description to stage. Same rules as body; mutually exclusive with body."},
 					},
 				},
 			},
@@ -1341,9 +1344,19 @@ func (tr *ToolRegistry) callPullRequestCreator(ctx context.Context, pc integrati
 			AuthorMode    string          `json:"author_mode"`
 			TriggerKind   string          `json:"trigger_kind"`
 			TeamReviewers []string        `json:"team_reviewers"`
+			Title         *string         `json:"title"`
+			Body          *string         `json:"body"`
+			BodyFile      string          `json:"body_file"`
 		}
 		if err := json.Unmarshal(args, &p); err != nil && len(args) > 0 {
 			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		p.BodyFile = strings.TrimSpace(p.BodyFile)
+		if p.Title != nil && strings.TrimSpace(*p.Title) == "" {
+			return ErrorResult("title must not be empty")
+		}
+		if p.Body != nil && p.BodyFile != "" {
+			return ErrorResult("body and body_file are mutually exclusive")
 		}
 		var draft *bool
 		if len(p.Draft) > 0 && string(p.Draft) != "null" {
@@ -1370,6 +1383,9 @@ func (tr *ToolRegistry) callPullRequestCreator(ctx context.Context, pc integrati
 			AuthorMode:    p.AuthorMode,
 			TriggerKind:   p.TriggerKind,
 			TeamReviewers: p.TeamReviewers,
+			Title:         p.Title,
+			Body:          p.Body,
+			BodyFile:      p.BodyFile,
 		})
 		if err != nil {
 			return ErrorResult(fmt.Sprintf("create pull request failed: %s", err))

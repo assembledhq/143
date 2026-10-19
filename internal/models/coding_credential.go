@@ -48,6 +48,50 @@ func (s CodingCredentialScope) Validate() error {
 	}
 }
 
+// CodingCredentialDistribution selects how the runtime picker walks a scope's
+// stack. "ordered" (the default) walks priority tiers top to bottom and only
+// moves past a tier once every credential in it is unavailable. "spread"
+// treats every runnable credential in the scope as one tier, so work is
+// distributed across all of them instead of draining the top one first.
+type CodingCredentialDistribution string
+
+const (
+	CodingCredentialDistributionOrdered CodingCredentialDistribution = "ordered"
+	CodingCredentialDistributionSpread  CodingCredentialDistribution = "spread"
+)
+
+// Validate rejects values outside the stored enum.
+func (d CodingCredentialDistribution) Validate() error {
+	switch d {
+	case CodingCredentialDistributionOrdered, CodingCredentialDistributionSpread:
+		return nil
+	default:
+		return fmt.Errorf("invalid distribution: %q", d)
+	}
+}
+
+// CodingCredentialStackSettings is the per-scope stack configuration exposed
+// by GET /coding-credentials/stack-settings.
+type CodingCredentialStackSettings struct {
+	Scope        CodingCredentialScope        `json:"scope"`
+	Distribution CodingCredentialDistribution `json:"distribution"`
+}
+
+// UpdateCodingCredentialStackSettingsInput is the body for
+// PATCH /coding-credentials/stack-settings.
+type UpdateCodingCredentialStackSettingsInput struct {
+	Scope        CodingCredentialScope        `json:"scope"`
+	Distribution CodingCredentialDistribution `json:"distribution"`
+}
+
+// Validate checks both enum fields before the request reaches the store.
+func (i UpdateCodingCredentialStackSettingsInput) Validate() error {
+	if err := i.Scope.Validate(); err != nil {
+		return err
+	}
+	return i.Distribution.Validate()
+}
+
 // Label renders a Scope for telemetry and API responses.
 func (s Scope) Label() CodingCredentialScope {
 	if s.IsPersonal() {

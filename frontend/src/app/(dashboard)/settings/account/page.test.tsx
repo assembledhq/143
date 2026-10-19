@@ -16,6 +16,41 @@ function emptyCodingCredentialsHandlers() {
   ];
 }
 
+
+// Two healthy personal rows plus one org row, so default badges and the
+// spread switch have something to render against.
+function stackedCodingCredentialsHandler() {
+  return http.get("/api/v1/coding-credentials", ({ request }) => {
+    const scope = new URL(request.url).searchParams.get("scope");
+    if (scope === "personal") {
+      return HttpResponse.json({
+        data: [
+          { id: "p1", org_id: "org-1", user_id: "user-1", scope: "personal", priority: 1, agent: "claude_code", auth_type: "api_key", provider: "anthropic", label: "Claude Code API key", status: "healthy", is_default: true, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
+          { id: "p2", org_id: "org-1", user_id: "user-1", scope: "personal", priority: 2, agent: "codex", auth_type: "api_key", provider: "openai", label: "Codex API key", status: "healthy", is_default: false, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
+        ],
+        meta: {},
+      });
+    }
+    if (scope === "org") {
+      return HttpResponse.json({
+        data: [
+          { id: "o1", org_id: "org-1", scope: "org", priority: 1, agent: "codex", auth_type: "subscription", provider: "openai_subscription", label: "Team seat A", status: "healthy", is_default: true, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
+        ],
+        meta: {},
+      });
+    }
+    return HttpResponse.json({ data: [], meta: { scope } });
+  });
+}
+
+// Counts Default badges inside the card whose title is given, ignoring every
+// other "Default" string on the page.
+function defaultBadgeCount(cardTitle: string) {
+  const card = screen.getByText(cardTitle).closest('[data-slot="card"]');
+  expect(card, `${cardTitle} card should exist`).not.toBeNull();
+  return within(card as HTMLElement).queryAllByText("Default", { selector: '[data-slot="badge"]' }).length;
+}
+
 describe("Account settings page", () => {
   it("shows effective organization values and saves personal PR handoff overrides", async () => {
     const requestBodies: Array<Record<string, unknown>> = [];
@@ -158,6 +193,79 @@ describe("Account settings page", () => {
     expect((await screen.findAllByText("sk-open...1234")).length).toBeGreaterThan(0);
     expect(await screen.findByText("Org fallback")).toBeInTheDocument();
     expect((await screen.findAllByText("Team seat A")).length).toBeGreaterThan(0);
+  });
+
+  it("spreads load across the personal stack from the switch", async () => {
+    const user = userEvent.setup();
+    let capturedBody: unknown;
+    server.use(
+      stackedCodingCredentialsHandler(),
+      http.patch("/api/v1/coding-credentials/stack-settings", async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json({ data: { scope: "personal", distribution: "spread" } });
+      }),
+    );
+
+    renderWithProviders(<AccountPage />);
+
+    const toggle = await screen.findByRole("switch", { name: "Spread load across auths" });
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByText(/Sessions use your top healthy auth until it is rate limited/)).toBeInTheDocument();
+    // Ordered mode: the top personal row and the org row each carry a badge,
+    // rendered once for the mobile card and once for the desktop table.
+    expect(defaultBadgeCount("My coding agents")).toBe(2);
+    expect(defaultBadgeCount("Org fallback")).toBe(2);
+
+    await user.click(toggle);
+
+    await waitFor(() => {
+      expect(capturedBody).toEqual({ scope: "personal", distribution: "spread" });
+    });
+  });
+
+  it("drops personal default badges and explains random picks when the personal stack is spread", async () => {
+    server.use(
+      stackedCodingCredentialsHandler(),
+      http.get("/api/v1/coding-credentials/stack-settings", ({ request }) => {
+        const scope = new URL(request.url).searchParams.get("scope");
+        return HttpResponse.json({ data: { scope, distribution: scope === "personal" ? "spread" : "ordered" } });
+      }),
+    );
+
+    renderWithProviders(<AccountPage />);
+
+    const toggle = await screen.findByRole("switch", { name: "Spread load across auths" });
+    await waitFor(() => {
+      expect(toggle).toBeChecked();
+    });
+    expect(
+      screen.getByText("Your personal stack runs ahead of any organization fallback. Each session picks at random among your healthy auths."),
+    ).toBeInTheDocument();
+    // Only the org row keeps its badge (mobile card + desktop table).
+    expect(defaultBadgeCount("My coding agents")).toBe(0);
+    expect(defaultBadgeCount("Org fallback")).toBe(2);
+    expect(screen.getByText("Read-only. Contact an admin to change org auths.")).toBeInTheDocument();
+  });
+
+  it("describes a spread org fallback without a single default", async () => {
+    server.use(
+      stackedCodingCredentialsHandler(),
+      http.get("/api/v1/coding-credentials/stack-settings", ({ request }) => {
+        const scope = new URL(request.url).searchParams.get("scope");
+        return HttpResponse.json({ data: { scope, distribution: scope === "org" ? "spread" : "ordered" } });
+      }),
+    );
+
+    renderWithProviders(<AccountPage />);
+
+    expect(
+      await screen.findByText("Read-only. Load is spread at random across all healthy org auths. Contact an admin to change org auths."),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      // Only the top personal row keeps its badge (mobile card + desktop table).
+      expect(defaultBadgeCount("Org fallback")).toBe(0);
+    });
+    expect(defaultBadgeCount("My coding agents")).toBe(2);
   });
 
   it("renders the org fallback section even when the personal stack is empty", async () => {

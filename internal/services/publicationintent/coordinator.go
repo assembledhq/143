@@ -30,8 +30,13 @@ const (
 
 type RequestPullRequest struct {
 	TeamReviewers []string
-	Draft         *bool
-	AuthorMode    string
+	// Title and Body are agent-staged pull request text. They are accepted only
+	// as automatic publication metadata for per-run automations; every other
+	// path keeps generating PR text server-side.
+	Title      *string
+	Body       *string
+	Draft      *bool
+	AuthorMode string
 	// ChangesetID selects a specific changeset for UI/API stack publication.
 	// Agent and automation requests omit it and therefore target the primary
 	// changeset. The store lookup remains tenant- and session-scoped.
@@ -257,6 +262,9 @@ func (c *Coordinator) RequestPullRequest(
 	}
 	if req.Source == models.SessionPublicationSourceAgentTool && session.AutomationRunID != nil {
 		return c.stageAutomationPRIntent(ctx, orgID, session, req)
+	}
+	if req.Title != nil || req.Body != nil {
+		return nil, &Error{Code: ErrorInvalidPublicationOptions, Err: errors.New("title and body are accepted only as automatic publication metadata for per-run automations; omit them and use pr update after the pull request exists")}
 	}
 	if len(req.TeamReviewers) > 0 {
 		if req.Draft != nil && *req.Draft {
@@ -513,11 +521,16 @@ func (c *Coordinator) RequestPullRequest(
 		var frozen struct {
 			TeamReviewers []string `json:"team_reviewers"`
 			Draft         *bool    `json:"draft"`
+			Title         *string  `json:"title"`
+			Body          *string  `json:"body"`
 		}
 		if decodeErr := json.Unmarshal(existingPublication.RequestPayload, &frozen); decodeErr != nil && len(existingPublication.RequestPayload) > 0 {
 			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("decode frozen reviewer intent: %w", decodeErr)}
 		}
 		teams = frozen.TeamReviewers
+		// Staged text is part of the first durable request. A reopened or
+		// bypassed publication must open the PR with that same text.
+		setFrozenPRContent(payload, frozen.Title, frozen.Body)
 		if len(teams) > 0 {
 			// Reviewer intent includes its accepted readiness and handoff shape.
 			// Reopening or bypassing review must not reinterpret either choice
@@ -537,6 +550,7 @@ func (c *Coordinator) RequestPullRequest(
 			return nil, &Error{Code: ErrorPublicationFailed, Err: fmt.Errorf("freeze automatic publication metadata: %w", freezeErr)}
 		}
 		teams = intent.TeamReviewers
+		setFrozenPRContent(payload, intent.Title, intent.Body)
 	}
 	if len(teams) > 0 {
 		if (req.Draft != nil && *req.Draft) || (handoffMode == models.PRHandoffModeDraftFirst && reviewBypassed) {
@@ -656,6 +670,18 @@ func (c *Coordinator) RequestPullRequest(
 		Status: status, SessionID: sessionID, PublicationID: &publication.ID,
 		ReviewBypassed: reviewBypassed, Reason: reviewerReason,
 	}, nil
+}
+
+// setFrozenPRContent copies staged pull request text into the durable request
+// payload. The PR service reads it back from the publication row, so the text
+// survives worker retries and reconciliation exactly like team reviewers.
+func setFrozenPRContent(payload map[string]any, title, body *string) {
+	if title != nil {
+		payload["title"] = *title
+	}
+	if body != nil {
+		payload["body"] = *body
+	}
 }
 
 // reviewBlocksPublication reports whether a durable publication is stopped on a

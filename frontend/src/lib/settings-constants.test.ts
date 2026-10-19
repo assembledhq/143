@@ -16,6 +16,6 @@ describe("clampNumber", () => {
   });
 
   it("lowers values above the maximum", () => {
-    expect(clampNumber(30, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS)).toBe(25);
+    expect(clampNumber(130, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS)).toBe(100);
   });
 });
