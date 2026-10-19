@@ -528,6 +528,56 @@ func TestLifecycleCensusCommandExitFullSchemaPostgres(t *testing.T) {
 	}
 }
 
+func TestLifecycleCensusRoleURL(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, databaseURL, expectedURL, expectedHost string
+		expectedPort                                 uint16
+	}{
+		{
+			name:         "TCP authority port",
+			databaseURL:  "postgres://seed:synthetic@localhost:5432/seed?sslmode=disable",
+			expectedURL:  "postgres://synthetic_observer:synthetic-observer-password@/synthetic_observer?host=localhost&port=5432&sslmode=disable",
+			expectedHost: "localhost", expectedPort: 5432,
+		},
+		{
+			name:         "IPv6 authority port",
+			databaseURL:  "postgresql://seed:synthetic@[::1]:55432/seed?sslmode=disable",
+			expectedURL:  "postgresql://synthetic_observer:synthetic-observer-password@/synthetic_observer?host=%3A%3A1&port=55432&sslmode=disable",
+			expectedHost: "::1", expectedPort: 55432,
+		},
+		{
+			name:         "Unix socket query target",
+			databaseURL:  "postgres:///seed?host=%2Ftmp%2Fsynthetic-census&port=55432&sslmode=disable",
+			expectedURL:  "postgres://synthetic_observer:synthetic-observer-password@/synthetic_observer?host=%2Ftmp%2Fsynthetic-census&port=55432&sslmode=disable",
+			expectedHost: "/tmp/synthetic-census", expectedPort: 55432,
+		},
+		{
+			name:         "query aliases override original authority",
+			databaseURL:  "postgres://seed:synthetic@ignored.example.test:5432/seed?host=database.example.test&port=55432&user=alias&password=synthetic-alias&dbname=alias&database=alias&sslmode=disable",
+			expectedURL:  "postgres://synthetic_observer:synthetic-observer-password@/synthetic_observer?host=database.example.test&port=55432&sslmode=disable",
+			expectedHost: "database.example.test", expectedPort: 55432,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			config, err := pgx.ParseConfig(tt.databaseURL)
+			require.NoError(t, err, "parse the synthetic source configuration without connecting")
+			config.User, config.Password, config.Database = "synthetic_observer", "synthetic-observer-password", "synthetic_observer"
+			actual := lifecycleCensusRoleURL(t, config)
+			require.Equal(t, tt.expectedURL, actual, "the role URI must use exactly one canonical query host and port and the modified role/database")
+			parsed, err := pgx.ParseConfig(actual)
+			require.NoError(t, err, "parse the canonical synthetic observer URI without connecting")
+			type selectedTarget struct {
+				Host, Database, User, Password string
+				Port                           uint16
+			}
+			require.Equal(t, selectedTarget{tt.expectedHost, "synthetic_observer", "synthetic_observer", "synthetic-observer-password", tt.expectedPort}, selectedTarget{parsed.Host, parsed.Database, parsed.User, parsed.Password, parsed.Port}, "canonicalization must preserve the resolved destination and select only the modified observer credentials and database")
+		})
+	}
+}
+
 func lifecycleCensusRoleURL(t *testing.T, config *pgx.ConnConfig) string {
 	t.Helper()
 	target, err := url.Parse(config.ConnString())
@@ -537,6 +587,9 @@ func lifecycleCensusRoleURL(t *testing.T, config *pgx.ConnConfig) string {
 	for _, overridden := range []string{"user", "password", "dbname", "database"} {
 		query.Del(overridden)
 	}
+	// Pin the effective destination in query parameters only; retaining the
+	// original authority port would create a deliberately rejected dual target.
+	target.Host = ""
 	target.User = url.UserPassword(config.User, config.Password)
 	target.Path, target.RawPath = "/"+config.Database, ""
 	query.Set("host", config.Host)
