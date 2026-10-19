@@ -65,7 +65,10 @@ floor, and transaction-pooling proxies need not preserve backend attribution.
 Connection census, command/operator pool coverage and every activation gate
 remain separate work; no production inventory or rollout is established here.
 A subsequent passive slice adds `cmd/lifecycle-census`, a standalone read-only
-command requiring an explicit `DATABASE_URL` URI with a host and database name.
+command requiring a single explicit `DATABASE_URL` URI host and database name.
+It rejects empty/comma-separated hosts and ambiguous database aliases or target
+keys, then normalizes the selected target before pgx parsing. The port is explicit
+or pinned to PostgreSQL's default 5432, never inherited from `PGPORT` or a service.
 It opens one direct connection and one READ COMMITTED, READ ONLY transaction,
 then separately samples unexpired writer leases and current-database client
 activity, excluding its own backend. Masked backend types are retained as unknown;
@@ -78,6 +81,13 @@ process-instance/backend join. Allowlisted role/build/version aggregates omit ra
 identifiers, query text, addresses and arbitrary metadata. Labels remain spoofable.
 Connection, setup and reads share a cooperative five-second context budget;
 rollback and connection closure each have a separate cooperative 250ms budget.
+Closure also awaits pgx's asynchronous cleanup within that same close budget.
+Fixed server-side `statement_timeout` and `lock_timeout` values of five seconds
+bound each statement/wait independently of client survival. They are not a
+five-second total server wall-time guarantee across setup and both reads. If
+client cancellation/cleanup cannot finish before process exit, the server limits
+still bound the abandoned statement. URI/environment `options` and differently
+cased aliases cannot override the fixed session name and timeouts.
 Limits bound returned observations, not all internal database work. Versioned JSON
 on stdout is an observation, not a floor/drain verdict. Failures return nonzero
 with sanitized diagnostics; an output failure can leave a partial JSON prefix.
@@ -1620,16 +1630,24 @@ caller conversion, whole 0a, activation, deployment or production acceptance.
 ### 0a passive-census validation
 
 The census selection passed locally on PostgreSQL 17.10 with the complete
-unmodified migration chain: 33 root tests and 170 subtests, no failures or skips.
+unmodified migration chain: 36 root tests and 210 subtests, no failures or skips.
 Reproduce with an owned disposable PostgreSQL 15+ server in `TEST_DATABASE_URL`
 and `go test -race -p=1 ./internal/db ./internal/services/lifecyclecensus
 ./cmd/lifecycle-census ./cmd/migrate -run
 '^(TestLifecycleCensus.*|TestParseLabel|TestAssemble.*|TestCensusEnumValidation|TestCollect.*|TestRun.*)$'
--count=1 -parallel=3 -timeout=3m`. The seven census full-schema roots include eight
+-count=1 -parallel=3 -timeout=3m`. The eight census full-schema roots include eleven
 table subtests. The activity-source overflow boundary is mock-tested; the writer
 boundary is also exercised against PostgreSQL. No test opens 1,001 connections.
 
-Focused race/coverage runs report 94.3% statement coverage for the census service
+Actual CLI subprocess probes hold an independent table lock across natural
+budget expiry, SIGTERM and SIGKILL, then confirm backend cleanup before unlocking.
+SIGKILL leaves no surviving client cancellation goroutine: server-side timeouts
+must bound that abandoned read. Unit tests also hold pgx cleanup pending and
+verify that closure and its completion wait share one 250ms budget. Explicit
+target tests cover dropped empty hosts, slash-only paths, ambiguous aliases and
+hostile libpq environment/URI overrides.
+
+Focused race/coverage runs report 92.5% statement coverage for the census service
 and 88.9% for the CLI. Vet, the repository-pinned linter, tenancy/lifecycle guards
 and the security scanner pass for the checked scope. This entry records local
 mechanical evidence; each publication candidate still requires independent review.

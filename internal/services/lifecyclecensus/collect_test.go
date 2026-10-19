@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,7 +48,7 @@ func TestCollectDatabaseLifecycle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			const databaseURL = "postgres://synthetic_user:synthetic_password@synthetic.example.test/synthetic_database?application_name=untrusted_name"
+			const databaseURL = "postgres://synthetic_user:synthetic_password@synthetic.example.test/synthetic_database?application_name=untrusted_name&statement_timeout=0&lock_timeout=0&APPLICATION_NAME=untrusted_uppercase&STATEMENT_TIMEOUT=0&LOCK_TIMEOUT=0&options=-c%20statement_timeout%3D0&OPTIONS=-c%20lock_timeout%3D0"
 			privateFailure := errors.New("synthetic driver failure: " + databaseURL + " SELECT synthetic_private_query")
 			mock, err := pgxmock.NewConn()
 			require.NoError(t, err, "create an isolated direct-connection census fixture")
@@ -128,7 +129,13 @@ func TestCollectDatabaseLifecycle(t *testing.T) {
 				observeContext("connect", ctx)
 				require.Equal(t, "synthetic.example.test", config.Host, "the explicit URI must select the supplied synthetic host")
 				require.Equal(t, "synthetic_database", config.Database, "the explicit URI must select the supplied synthetic database")
+				require.Equal(t, uint16(5432), config.Port, "an omitted URI port must use the census's pinned default rather than PGPORT")
 				require.Equal(t, "143:lifecycle_census", config.RuntimeParams["application_name"], "collector connections must replace arbitrary application naming with the fixed passive name")
+				require.Equal(t, "5000", config.RuntimeParams["statement_timeout"], "the server-side statement budget must override an unbounded URI setting before connecting")
+				require.Equal(t, "5000", config.RuntimeParams["lock_timeout"], "the server-side lock budget must override an unbounded URI setting before connecting")
+				for _, key := range []string{"APPLICATION_NAME", "STATEMENT_TIMEOUT", "LOCK_TIMEOUT", "options", "OPTIONS"} {
+					require.NotContains(t, config.RuntimeParams, key, "case variants and startup options must not override the collector's fixed attribution or server timeouts")
+				}
 				if tt.cancelAt == "connect" {
 					cancel()
 				}
@@ -180,6 +187,29 @@ func TestCollectRejectsImplicitOrInvalidDatabaseConfiguration(t *testing.T) {
 		{name: "empty query host must not fall back to URI or environment", databaseURL: "postgres://synthetic.example.test/synthetic?host=", wantErr: "explicit database host and name required"},
 		{name: "empty query dbname must not fall back to URI or environment", databaseURL: "postgres://synthetic.example.test/synthetic?dbname=", wantErr: "explicit database host and name required"},
 		{name: "empty database alias must not fall back to URI or environment", databaseURL: "postgres://synthetic.example.test/synthetic?database=", wantErr: "explicit database host and name required"},
+		{name: "comma only URI host cannot inherit a default host", databaseURL: "postgres://,/synthetic", wantErr: "explicit database host and name required"},
+		{name: "URI host list with empty first target is rejected", databaseURL: "postgres://,synthetic.example.test/synthetic", wantErr: "explicit database host and name required"},
+		{name: "URI host list with empty final target is rejected", databaseURL: "postgres://synthetic.example.test,/synthetic", wantErr: "explicit database host and name required"},
+		{name: "URI host list with only explicit targets remains out of scope", databaseURL: "postgres://synthetic.example.test,other.example.test/synthetic", wantErr: "explicit database host and name required"},
+		{name: "empty query host list component cannot inherit a default host", databaseURL: "postgres:///synthetic?host=synthetic.example.test%2C", wantErr: "explicit database host and name required"},
+		{name: "query host list with explicit targets remains out of scope", databaseURL: "postgres:///synthetic?host=synthetic.example.test%2Cother.example.test", wantErr: "explicit database host and name required"},
+		{name: "slash only database path cannot inherit a database", databaseURL: "postgres://synthetic.example.test//", wantErr: "explicit database host and name required"},
+		{name: "decoded slash only database path cannot inherit a database", databaseURL: "postgres://synthetic.example.test/%2F%2F", wantErr: "explicit database host and name required"},
+		{name: "empty dbname with database alias is ambiguous", databaseURL: "postgres://synthetic.example.test/synthetic?dbname=&database=other", wantErr: "explicit database host and name required"},
+		{name: "empty database alias with dbname is ambiguous", databaseURL: "postgres://synthetic.example.test/synthetic?dbname=other&database=", wantErr: "explicit database host and name required"},
+		{name: "conflicting database aliases are rejected", databaseURL: "postgres://synthetic.example.test/synthetic?dbname=first&database=second", wantErr: "explicit database host and name required"},
+		{name: "equal database aliases are still rejected", databaseURL: "postgres://synthetic.example.test/synthetic?dbname=same&database=same", wantErr: "explicit database host and name required"},
+		{name: "duplicate dbname keys cannot select nondeterministic targets", databaseURL: "postgres://synthetic.example.test/synthetic?dbname=first&dbname=second", wantErr: "explicit database host and name required"},
+		{name: "duplicate database keys cannot select nondeterministic targets", databaseURL: "postgres://synthetic.example.test/synthetic?database=first&database=second", wantErr: "explicit database host and name required"},
+		{name: "duplicate host keys are rejected even when equal", databaseURL: "postgres:///synthetic?host=synthetic.example.test&host=synthetic.example.test", wantErr: "explicit database host and name required"},
+		{name: "empty query port cannot inherit PGPORT", databaseURL: "postgres://synthetic.example.test/synthetic?port=", wantErr: "explicit database host and name required"},
+		{name: "empty URI port cannot inherit PGPORT", databaseURL: "postgres://synthetic.example.test:/synthetic", wantErr: "explicit database host and name required"},
+		{name: "empty bracketed IPv6 URI port cannot inherit PGPORT", databaseURL: "postgres://[2001:db8::1]:/synthetic", wantErr: "explicit database host and name required"},
+		{name: "zero query port is not an implicit default", databaseURL: "postgres://synthetic.example.test/synthetic?port=0", wantErr: "explicit database host and name required"},
+		{name: "query port list is not a supported single target", databaseURL: "postgres://synthetic.example.test/synthetic?port=5432%2C6432", wantErr: "explicit database host and name required"},
+		{name: "duplicate port keys are rejected even when equal", databaseURL: "postgres://synthetic.example.test/synthetic?port=5432&port=5432", wantErr: "explicit database host and name required"},
+		{name: "URI and query ports are rejected even when equal", databaseURL: "postgres://synthetic.example.test:5432/synthetic?port=5432", wantErr: "explicit database host and name required"},
+		{name: "URI and query conflicting ports are rejected", databaseURL: "postgres://synthetic.example.test:5432/synthetic?port=6432", wantErr: "explicit database host and name required"},
 		{name: "pgx configuration failure is sanitized", databaseURL: "postgres://synthetic.example.test/synthetic?connect_timeout=not-a-number", wantErr: "invalid database configuration"},
 	}
 	for _, tt := range tests {
@@ -197,11 +227,172 @@ func TestCollectRejectsImplicitOrInvalidDatabaseConfiguration(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // t.Setenv owns process-wide libpq defaults, so parent and subtests must remain serial.
+func TestCollectPinsExplicitDatabaseTargetsAndServerTimeouts(t *testing.T) {
+	// This test cannot run in parallel: adversarial libpq environment defaults
+	// are process-wide, so keep all of its subtests serial while t.Setenv owns them.
+	t.Setenv("PGHOST", "environment.example.test")
+	t.Setenv("PGDATABASE", "environment_database")
+	t.Setenv("PGPORT", "6543")
+	t.Setenv("PGOPTIONS", "-c statement_timeout=0 -c lock_timeout=0 -c application_name=synthetic_environment_override")
+	tests := []struct {
+		name, databaseURL, wantHost, wantDatabase string
+		wantPort                                  uint16
+	}{
+		{name: "ordinary URI pins the default port", databaseURL: "postgres://synthetic_user@synthetic.example.test/synthetic_database", wantHost: "synthetic.example.test", wantDatabase: "synthetic_database", wantPort: 5432},
+		{name: "postgresql scheme is explicit", databaseURL: "postgresql://synthetic_user@synthetic.example.test/synthetic_database", wantHost: "synthetic.example.test", wantDatabase: "synthetic_database", wantPort: 5432},
+		{name: "explicit URI port is retained", databaseURL: "postgres://synthetic_user@synthetic.example.test:6432/synthetic_database", wantHost: "synthetic.example.test", wantDatabase: "synthetic_database", wantPort: 6432},
+		{name: "bracketed IPv6 URI pins the default port", databaseURL: "postgres://synthetic_user@[2001:db8::1]/synthetic_database", wantHost: "2001:db8::1", wantDatabase: "synthetic_database", wantPort: 5432},
+		{name: "bracketed IPv6 URI explicit port is retained", databaseURL: "postgres://synthetic_user@[2001:db8::1]:6432/synthetic_database", wantHost: "2001:db8::1", wantDatabase: "synthetic_database", wantPort: 6432},
+		{name: "explicit query port is retained", databaseURL: "postgres://synthetic_user@synthetic.example.test/synthetic_database?port=7432", wantHost: "synthetic.example.test", wantDatabase: "synthetic_database", wantPort: 7432},
+		{name: "single dbname alias selects the explicit database", databaseURL: "postgres://synthetic_user@synthetic.example.test/?dbname=synthetic_database", wantHost: "synthetic.example.test", wantDatabase: "synthetic_database", wantPort: 5432},
+		{name: "single database alias selects the explicit database", databaseURL: "postgres://synthetic_user@synthetic.example.test/?database=synthetic_database", wantHost: "synthetic.example.test", wantDatabase: "synthetic_database", wantPort: 5432},
+		{name: "explicit socket path is not replaced by environment host", databaseURL: "postgres://synthetic_user@/synthetic_database?host=%2Fsynthetic%2Fsocket", wantHost: "/synthetic/socket", wantDatabase: "synthetic_database", wantPort: 5432},
+		{name: "explicit query host is not replaced by environment host", databaseURL: "postgres:///synthetic_database?host=synthetic.example.test&user=synthetic_user", wantHost: "synthetic.example.test", wantDatabase: "synthetic_database", wantPort: 5432},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// No t.Parallel while this parent owns process-wide libpq defaults.
+			calls := 0
+			actual, err := collect(context.Background(), tt.databaseURL, func(_ context.Context, config *pgx.ConnConfig) (censusConnection, error) {
+				calls++
+				require.Equal(t, tt.wantHost, config.Host, "the parsed collector must use only its validated explicit host")
+				require.Equal(t, tt.wantDatabase, config.Database, "the parsed collector must use only its validated explicit database")
+				require.Equal(t, tt.wantPort, config.Port, "the parsed collector must use its explicit port or pinned 5432, never PGPORT")
+				for _, fallback := range config.Fallbacks {
+					require.Equal(t, tt.wantHost, fallback.Host, "TLS fallback must never introduce an implicit database host")
+					require.Equal(t, tt.wantPort, fallback.Port, "TLS fallback must never introduce an implicit database port")
+				}
+				require.Equal(t, "5000", config.RuntimeParams["statement_timeout"], "every explicit-target form must install its server-side statement timeout before connecting")
+				require.Equal(t, "5000", config.RuntimeParams["lock_timeout"], "every explicit-target form must install its server-side lock timeout before connecting")
+				require.Equal(t, "143:lifecycle_census", config.RuntimeParams["application_name"], "PGOPTIONS must not override the fixed collector label")
+				require.NotContains(t, config.RuntimeParams, "options", "PGOPTIONS must not override the fixed statement and lock timeouts at server startup")
+				return nil, errors.New("synthetic connection intentionally not established")
+			})
+			require.EqualError(t, err, "database connection failed", "valid target configuration should reach exactly one sanitized connection attempt")
+			require.Equal(t, Report{}, actual, "the target-validation fixture must not fabricate a successful collection")
+			require.Equal(t, 1, calls, "valid explicit configuration must be parsed once and attempted without retries")
+		})
+	}
+}
+
+func TestCollectWaitsForAsynchronousConnectionCleanup(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		neverDone     bool
+		closeDelay    time.Duration
+		cancelQuery   bool
+		wantErrorPart string
+	}{
+		{name: "successful report waits for cleanup completion"},
+		{name: "canceled observation still waits with usable independent cleanup", cancelQuery: true, wantErrorPart: "connection observation failed"},
+		{name: "uncompleted cleanup invalidates successful observations", neverDone: true, wantErrorPart: "database connection cleanup failed"},
+		{name: "close and asynchronous wait share one cleanup deadline", neverDone: true, closeDelay: 200 * time.Millisecond, wantErrorPart: "database connection cleanup failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewConn()
+			require.NoError(t, err, "create an isolated asynchronous cleanup fixture")
+			parent, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			writerClock := time.Date(2026, time.October, 19, 13, 0, 0, 0, time.UTC)
+			activityClock := writerClock.Add(time.Millisecond)
+			mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadOnly})
+			mock.ExpectQuery(`^SELECT statement_timestamp\(\) AS observed_at,`).
+				WillReturnRows(pgxmock.NewRows([]string{"observed_at", "present", "role", "build_sha", "version"}).
+					AddRow(writerClock, false, nil, nil, nil)).RowsWillBeClosed()
+			activity := mock.ExpectQuery(`^WITH observation AS MATERIALIZED \(`)
+			if tt.cancelQuery {
+				activity.WillReturnError(context.Canceled)
+				activity.WillDelayFor(time.Second)
+			} else {
+				fullVisibility := false
+				activity.WillReturnRows(pgxmock.NewRows([]string{"observed_at", "full_visibility", "present", "application_name", "backend_type", "state", "xact_start", "details_visible"}).
+					AddRow(activityClock, &fullVisibility, false, nil, nil, nil, nil, false)).RowsWillBeClosed()
+			}
+			mock.ExpectRollback()
+			mock.ExpectClose().WillDelayFor(tt.closeDelay)
+			cleanupDone := make(chan struct{})
+			release := sync.OnceFunc(func() { close(cleanupDone) })
+			defer release()
+			cleanupAsked := make(chan struct{}, 1)
+			closeContext := make(chan context.Context, 1)
+			connection := &observedCensusTestConnection{
+				mock: mock, observeContext: func(string, context.Context) {}, cancel: cancel,
+				cleanupDone: cleanupDone, cleanupAsked: cleanupAsked, closedContext: closeContext,
+			}
+			if tt.cancelQuery {
+				connection.cancelAt = "connections"
+			}
+			type result struct {
+				report Report
+				err    error
+			}
+			results := make(chan result, 1)
+			go func() {
+				report, err := collect(parent, "postgres://synthetic_user@synthetic.example.test/synthetic_database", func(context.Context, *pgx.ConnConfig) (censusConnection, error) {
+					return connection, nil
+				})
+				results <- result{report: report, err: err}
+			}()
+			var closing context.Context
+			select {
+			case closing = <-closeContext:
+			case <-time.After(2 * time.Second):
+				t.Fatal("collector must reach bounded close after its expected observations and rollback")
+			}
+			require.NoError(t, closing.Err(), "close must receive an independent usable context even if observation was canceled")
+			closeDeadline, ok := closing.Deadline()
+			require.True(t, ok, "close must have a deadline for connection and asynchronous cleanup")
+			require.LessOrEqual(t, time.Until(closeDeadline), 250*time.Millisecond, "close and cleanup confirmation must have at most one 250ms budget")
+			select {
+			case <-cleanupAsked:
+			case <-time.After(2 * time.Second):
+				t.Fatal("collector must request asynchronous cleanup confirmation after closing")
+			}
+			if !tt.neverDone {
+				select {
+				case <-results:
+					t.Fatal("collector returned before the asynchronous cleanup completion channel closed")
+				case <-time.After(15 * time.Millisecond):
+				}
+				release()
+			}
+			var actual result
+			select {
+			case actual = <-results:
+			case <-time.After(2 * time.Second):
+				t.Fatal("asynchronous cleanup must complete or return a bounded sanitized failure")
+			}
+			if tt.wantErrorPart == "" {
+				require.NoError(t, actual.err, "completed asynchronous cleanup should preserve successful observations")
+				require.Equal(t, emptyCensusCollectionReport(writerClock, activityClock), actual.report, "successful observations must not be returned until asynchronous cleanup is confirmed")
+			} else {
+				require.ErrorContains(t, actual.err, tt.wantErrorPart, "observation and asynchronous cleanup failures must remain sanitized and visible")
+				require.Equal(t, Report{}, actual.report, "cancellation or unconfirmed cleanup must discard every observation")
+			}
+			if tt.cancelQuery {
+				require.ErrorIs(t, actual.err, context.Canceled, "waiting for asynchronous cleanup must not erase the observation cancellation cause")
+			}
+			if tt.neverDone {
+				require.ErrorIs(t, closing.Err(), context.DeadlineExceeded, "the same close context must bound the asynchronous cleanup wait")
+				require.Less(t, time.Since(closeDeadline), 150*time.Millisecond, "a slow close must not receive a fresh second 250ms asynchronous-cleanup budget")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "asynchronous cleanup must follow exactly one read-only observation transaction, rollback and close")
+		})
+	}
+}
+
 type observedCensusTestConnection struct {
 	mock           pgxmock.PgxConnIface
 	observeContext func(string, context.Context)
 	cancel         context.CancelFunc
 	cancelAt       string
+	cleanupDone    <-chan struct{}
+	cleanupAsked   chan<- struct{}
+	closedContext  chan<- context.Context
 }
 
 func (c *observedCensusTestConnection) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
@@ -215,7 +406,22 @@ func (c *observedCensusTestConnection) BeginTx(ctx context.Context, options pgx.
 
 func (c *observedCensusTestConnection) Close(ctx context.Context) error {
 	c.observeContext("close", ctx)
+	if c.closedContext != nil {
+		c.closedContext <- ctx
+	}
 	return c.mock.Close(ctx)
+}
+
+func (c *observedCensusTestConnection) CleanupDone() <-chan struct{} {
+	if c.cleanupAsked != nil {
+		c.cleanupAsked <- struct{}{}
+	}
+	if c.cleanupDone != nil {
+		return c.cleanupDone
+	}
+	closed := make(chan struct{})
+	close(closed)
+	return closed
 }
 
 type observedCensusTestTransaction struct {

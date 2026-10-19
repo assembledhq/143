@@ -1,12 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -231,7 +238,7 @@ func TestLifecycleCensusVisibilityFullSchemaPostgres(t *testing.T) {
 			encoded, err := json.Marshal(report)
 			require.NoError(t, err, "serialize only the safe standalone observation summary")
 			for _, excluded := range []string{observerRole, otherRole, observerURL, "synthetic-census-only-password", `"pid"`, `"instance_id"`, `"application_name"`} {
-				require.NotContains(t, string(encoded), excluded, "the end-to-end observation must not disclose role identities, configuration or raw connection identifiers")
+				require.False(t, strings.Contains(string(encoded), excluded), "the end-to-end observation must not disclose role identities, configuration or raw connection identifiers")
 			}
 		})
 	}
@@ -349,7 +356,12 @@ func TestLifecycleCensusCancellationFullSchemaPostgres(t *testing.T) {
 				t.Fatal("a cancelled or expired passive census must return while the independent table lock remains held")
 			}
 			elapsed := time.Since(started)
-			require.ErrorIs(t, actual.err, tt.cause, "the blocked collector must preserve only the standard cancellation or deadline cause")
+			if tt.manual {
+				require.ErrorIs(t, actual.err, tt.cause, "caller cancellation must preserve only the standard cancellation cause")
+			} else {
+				require.Error(t, actual.err, "the blocked collector must fail rather than return a success report when either bounded timeout wins")
+				require.True(t, errors.Is(actual.err, tt.cause) || actual.err.Error() == "writer observation failed", "the client deadline or the sanitized PostgreSQL timeout may win the fixed-budget race")
+			}
 			require.ErrorContains(t, actual.err, "writer observation failed", "the blocked writer read must fail with a sanitized stage diagnostic rather than return success")
 			require.Equal(t, lifecyclecensus.Report{}, actual.report, "a failed read must not return a successful partial observation report")
 			require.Less(t, elapsed, lifecyclecensus.Budget+cooperativeMargin, "a blocked passive census must stop within its fixed budget plus cooperative cleanup margin without releasing the independent lock")
@@ -374,6 +386,144 @@ func TestLifecycleCensusCancellationFullSchemaPostgres(t *testing.T) {
 			recovered, err := lifecyclecensus.Collect(ctx, actor.Config().ConnString())
 			require.NoError(t, err, "a later standalone census must succeed after the cancelled transaction has been cleaned up")
 			require.Equal(t, 1, recovered.SchemaVersion, "the recovered standalone collection must return the exact versioned observation contract")
+		})
+	}
+}
+
+func TestLifecycleCensusCommandExitFullSchemaPostgres(t *testing.T) {
+	t.Parallel()
+	if os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Skip("set TEST_DATABASE_URL to disposable PostgreSQL 15+ for standalone command-exit proofs")
+	}
+	// Build the real command outside the checkout, before measuring its runtime.
+	// In particular, this is not a test-helper process that keeps the caller's
+	// pgx cleanup goroutine alive after the standalone command should have exited.
+	binary := filepath.Join(t.TempDir(), "lifecycle-census")
+	buildCtx, buildCancel := context.WithTimeout(context.Background(), time.Minute)
+	defer buildCancel()
+	build := exec.CommandContext(buildCtx, "go", "build", "-trimpath", "-o", binary, "../lifecycle-census")
+	if err := build.Run(); err != nil {
+		t.Fatal("build the actual standalone census command before starting its runtime proof")
+	}
+	tests := []struct {
+		name   string
+		signal syscall.Signal
+	}{
+		{name: "fixed budget exits with the independent table lock still held"},
+		{name: "SIGTERM joins cancellation before command exit", signal: syscall.SIGTERM},
+		{name: "SIGKILL leaves server timeouts to clear the disconnected backend", signal: syscall.SIGKILL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			migration, actor := newContentMigrationPostgres(t, false)
+			require.NoError(t, migration.Up(), "apply the unchanged full migration chain before the standalone-process lock probe")
+			ctx, cancel := context.WithTimeout(context.Background(), 4*lifecyclecensus.Budget)
+			defer cancel()
+			lockTx, err := actor.Begin(ctx)
+			require.NoError(t, err, "open the independent transaction that will outlive the standalone census command")
+			defer func() { _ = lockTx.Rollback(ctx) }()
+			_, err = lockTx.Exec(ctx, `LOCK TABLE lifecycle_writer_instances IN ACCESS EXCLUSIVE MODE`)
+			require.NoError(t, err, "hold the writer table lock until after child exit and independently verified backend cleanup")
+			observer := newLifecycleWriterInstanceConnection(t, ctx, actor.Config())
+			childCtx, childCancel := context.WithTimeout(ctx, 2*lifecyclecensus.Budget)
+			child := exec.CommandContext(childCtx, binary)
+			for _, value := range os.Environ() {
+				if !strings.HasPrefix(value, "DATABASE_URL=") {
+					child.Env = append(child.Env, value)
+				}
+			}
+			child.Env = append(child.Env, "DATABASE_URL="+actor.Config().ConnString())
+			var stdout, stderr bytes.Buffer
+			child.Stdout, child.Stderr = &stdout, &stderr
+			started := time.Now()
+			if err := child.Start(); err != nil {
+				childCancel()
+				t.Fatal("start only the newly built standalone census command against its generated local database")
+			}
+			completed := make(chan error, 1)
+			joined := make(chan struct{})
+			go func() {
+				defer close(joined)
+				completed <- child.Wait()
+			}()
+			cooperativeMargin := lifecyclecensus.Budget / 2
+			defer func() {
+				childCancel()
+				select {
+				case <-joined:
+				case <-time.After(lifecyclecensus.Budget + cooperativeMargin):
+					t.Error("the standalone child must be joined before database fixture cleanup")
+				}
+			}()
+			blockedCtx, blockedCancel := context.WithTimeout(ctx, cooperativeMargin)
+			defer blockedCancel()
+			for {
+				var blocked bool
+				require.NoError(t, observer.QueryRow(blockedCtx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND application_name='143:lifecycle_census' AND state='active' AND wait_event_type='Lock')`).Scan(&blocked), "confirm that the actual child reached its read-only transaction's table-lock wait")
+				if blocked {
+					break
+				}
+				select {
+				case <-blockedCtx.Done():
+					t.Fatal("the actual standalone command must reach the confirmed table-lock wait before a signal or timeout proof proceeds")
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			if tt.signal != 0 {
+				require.NoError(t, child.Process.Signal(tt.signal), "send only the selected signal to the test-owned standalone command after the confirmed lock wait")
+			}
+			var childErr error
+			select {
+			case childErr = <-completed:
+			case <-time.After(lifecyclecensus.Budget + cooperativeMargin):
+				t.Fatal("the actual standalone command must exit within its cooperative runtime bound while the external lock remains held")
+			}
+			elapsed := time.Since(started)
+			var exitErr *exec.ExitError
+			require.ErrorAs(t, childErr, &exitErr, "the blocked standalone command must not exit successfully or return a success report")
+			require.Zero(t, stdout.Len(), "the blocked or signaled standalone command must emit no report bytes")
+			require.Less(t, elapsed, lifecyclecensus.Budget+cooperativeMargin, "the standalone command must exit within its actual fixed budget plus cooperative margin")
+			if tt.signal == 0 {
+				require.GreaterOrEqual(t, elapsed, lifecyclecensus.Budget, "the natural exit must exercise the real fixed budget without an earlier caller signal")
+			}
+			if tt.signal == syscall.SIGKILL {
+				require.Equal(t, -1, exitErr.ExitCode(), "SIGKILL must terminate the child rather than let it report an application exit status")
+				require.Zero(t, stderr.Len(), "a force-killed blocked child must not invent a completed diagnostic event")
+			} else {
+				require.Equal(t, 1, exitErr.ExitCode(), "normal cancellation or bounded timeout must exit through the command's failure path")
+				var diagnostic map[string]string
+				if err := json.Unmarshal(stderr.Bytes(), &diagnostic); err != nil {
+					t.Fatal("standalone failure diagnostics must be exactly one structured JSON event")
+				}
+				messages := map[string]string{"collection_failed": "could not collect census observations", "collection_timed_out": "census collection exceeded its time budget"}
+				if tt.signal == syscall.SIGTERM {
+					messages = map[string]string{"collection_canceled": "census collection was canceled"}
+				}
+				message, allowed := messages[diagnostic["code"]]
+				require.True(t, allowed, "the child must emit only a static allowlisted cancellation or bounded-timeout code")
+				// Do not print captured diagnostics, URLs or executable paths even
+				// on assertion failure: these tests also run in public CI logs.
+				require.True(t, maps.Equal(map[string]string{"level": "error", "code": diagnostic["code"], "message": message}, diagnostic), "the child diagnostic must contain exactly its static safe fields without driver messages or private configuration")
+			}
+			// This observer is in a different process from the now-exited CLI.
+			// SIGKILL additionally proves cleanup without any surviving client-side
+			// pgx cancellation goroutine; server timeouts must bound its lock wait.
+			cleanupCtx, cleanupCancel := context.WithTimeout(ctx, lifecyclecensus.Budget+cooperativeMargin)
+			defer cleanupCancel()
+			for {
+				var backends int
+				require.NoError(t, observer.QueryRow(cleanupCtx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND application_name='143:lifecycle_census'`).Scan(&backends), "independently verify that the exited standalone child left no backend or open transaction while the lock remains held")
+				if backends == 0 {
+					break
+				}
+				select {
+				case <-cleanupCtx.Done():
+					t.Fatal("the exited standalone child must leave no PostgreSQL backend or transaction before the independent table lock is released")
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			require.NoError(t, lockTx.Rollback(ctx), "release the independent lock only after actual command exit and database-confirmed cleanup")
 		})
 	}
 }
