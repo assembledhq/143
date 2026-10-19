@@ -1255,24 +1255,47 @@
     },
     {
       "id": "internal/db/agent_capabilities.go:AgentCapabilityPolicyStore.AppendApprovedSessionGrant",
-      "source_sha256": "7be8401ddd355ec28949e7ae60dbe0e40bd70deea0e7e8ed763f6a14249f6c19",
+      "source_sha256": "baca4b7ceb275ab6b7632631d3a93157c7f44b27e06509b04045732f0e0ca5ad",
       "operation": "append approved capability to session and automation mirror",
       "owner": "AgentCapabilityPolicyStore in internal/db",
-      "predicate": "org/session/nondeleted row FOR UPDATE; duplicate capability ID rejected. Reads automation_run_id link and updates that run's capability snapshot. Does not accept request ID/decision/readiness/expected epochs.",
-      "lock": "Own Begin, parent FOR UPDATE, session execution metadata UPSERT and linked automation run UPDATE, own Commit.",
-      "stale_result": "Duplicate grant returns ErrCapabilityAlreadyGranted; absent resource errors. No exact request/answer binding, and old approved request may update current mirrored capability snapshot.",
+      "predicate": "Delegates unchanged org/session/nondeleted row and snapshot-local duplicate capability ID checks to AppendApprovedSessionGrantInTx. Linked automation snapshot is still updated in the same legacy unit. Does not accept request ID/decision/readiness/expected epochs or ensure fresh metadata after a parent-lock wait.",
+      "lock": "Own Begin/deferred rollback/Commit around the explicit pgx.Tx persistence helper; helper retains parent FOR UPDATE, session execution metadata UPSERT and linked automation run UPDATE in legacy session-before-automation order.",
+      "stale_result": "Snapshot-local duplicate returns ErrCapabilityAlreadyGranted; absent resource errors. Pre-existing hazard: joined metadata is read from a statement snapshot taken before a session-lock wait, so concurrent unprelocked grants can both succeed while the last snapshot/mirror loses an earlier grant or misses a duplicate. No exact request/answer binding; old approval may update current mirrored snapshot.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: explicit caller pgx.Tx seam locks parent/domain then exact request/readiness; atomically append approved grant with accepted answer/dispatch and mirrors. Duplicate capability remains explicit; session scope alone cannot authorize approval.",
       "canonical_target": "AppendApprovedGrantInTx",
       "authority": "OrdinaryAuthority plus exact authorized human-input capability request/decision and expected session/domain epochs.",
       "fence_outcome": "Strict typed result/error: authorization rejection, stale epoch or mismatched receipt rolls back the entire operation. No terminal stale-settlement carve-out applies.",
-      "prerequisite_0a": "0a: explicit caller pgx.Tx seam locks parent/domain then exact request/readiness; atomically append approved grant with accepted answer/dispatch and mirrors. Duplicate capability remains explicit; session scope alone cannot authorize approval.",
+      "prerequisite_0a": "Canonical admission must lock parent in an earlier statement or freshly reread metadata after locking, then prove concurrent distinct grants both survive on the full schema. Compose domain/request/readiness/epochs and answer/dispatch/mirrors in one transaction; session scope alone never authorizes approval.",
       "evidence": [
-        "internal/db/agent_capabilities.go:188",
+        "internal/db/agent_capabilities.go:191",
+        "Discovered: boundary-definition",
+        "Lock/transaction syntax: s.db.Begin",
+        "Lock/transaction syntax: tx.Commit",
+        "0a passive extraction: delegates SQL and duplicate/error semantics unchanged to AppendApprovedSessionGrantInTx; no caller, lock-order or authority conversion."
+      ]
+    },
+    {
+      "id": "internal/db/agent_capabilities.go:AgentCapabilityPolicyStore.AppendApprovedSessionGrantInTx",
+      "source_sha256": "4ec723818e62e551c74de3950acbdee76a09f32a4f2eaf57ab57e0ed6bacb06b",
+      "operation": "persist approved session capability snapshot and optional automation mirror in caller transaction",
+      "owner": "AgentCapabilityPolicyStore in internal/db; caller owns transaction and authority validation",
+      "predicate": "Explicit concrete pgx.Tx only; org/session/nondeleted row FOR UPDATE; duplicate capability ID checked in the statement snapshot. Metadata and optional linked automation snapshot use org filters. Fresh metadata under concurrency requires an earlier-statement parent lock or a subsequent reread. HumanInputRequestID is item provenance, not validated consent/readiness.",
+      "lock": "Caller-supplied pgx.Tx; parent FOR UPDATE, metadata UPSERT, optional automation run UPDATE in unchanged legacy session-before-automation order. No Begin, Commit, Rollback, retry or pool fallback.",
+      "stale_result": "Snapshot-local duplicate returns unchanged snapshot plus ErrCapabilityAlreadyGranted; absent/foreign session returns pgx.ErrNoRows. Pre-existing joined-read hazard: waiting for the parent lock does not refresh metadata from that statement snapshot, so concurrent unprelocked grants can both succeed and overwrite an earlier grant in both mirrors. Retries cannot repair silent success. Any error requires caller rollback; staged results need outer commit; no stale-authority fence exists.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a: canonical AppendApprovedGrantInTx must prelock/revalidate domain associations in the selected order, validate exact request/decision/readiness and expected epochs, then compose this persistence seam with answer/dispatch in one commit. Do not wire the seam alone into humaninput or treat the legacy lock order as floor-compatible.",
+      "canonical_target": "AppendApprovedGrantInTx",
+      "authority": "OrdinaryAuthority plus exact authorized human-input capability request/decision and expected session/domain epochs; this persistence seam does not establish them.",
+      "fence_outcome": "Canonical authority/readiness/epoch rejection must roll back all composed writes. Persistence-only success is not command acceptance or compatibility-floor proof.",
+      "prerequisite_0a": "Acquire the parent lock in an earlier statement or reread metadata after locking; prove concurrent distinct grants both survive on the full schema. Prelock domain/session/request in canonical order and atomically admit exact authorized answer/grant/dispatch; preserve duplicate behavior and caller-owned settlement.",
+      "evidence": [
+        "internal/db/agent_capabilities.go:226",
         "Discovered: boundary-definition",
         "Lock/transaction syntax: FOR UPDATE OF s",
-        "Lock/transaction syntax: s.db.Begin",
-        "Lock/transaction syntax: tx.Commit"
+        "Lock/transaction syntax: caller-supplied pgx.Tx",
+        "internal/db/agent_capability_grant_transaction_test.go",
+        "internal/db/agent_capability_grant_transaction_postgres_test.go"
       ]
     },
     {
