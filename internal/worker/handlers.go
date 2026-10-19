@@ -13832,19 +13832,17 @@ func newDataRetentionCleanupHandler(stores *Stores, retentionCfg DataRetentionCo
 			}
 		}
 
-		// Each existing per-org maintenance job owns at most one global batch.
+		// Each existing per-org job owns at most ten 1,000-row global batches.
 		// Concurrent jobs skip locked rows; seven days is eligibility, not a
 		// deletion deadline when maintenance is absent or a backlog remains.
 		if stores.LifecycleWriters != nil {
-			cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 5*time.Second)
-			deleted, err := stores.LifecycleWriters.DeleteExpired(cleanupCtx)
-			cleanupCancel()
+			deleted, err := sweepExpiredLifecycleWriters(ctx, stores.LifecycleWriters.DeleteExpired, logger)
+			totalDeleted += deleted
 			if err != nil {
-				logger.Warn().Err(err).Msg("failed to delete expired passive lifecycle writer observations")
+				logger.Warn().Err(err).Int64("deleted", deleted).Msg("failed to delete expired passive lifecycle writer observations")
 				errs = append(errs, fmt.Errorf("delete expired lifecycle writer observations: %w", err))
 			} else {
-				totalDeleted += deleted
-				logger.Info().Int64("deleted", deleted).Msg("passive lifecycle writer observation cleanup batch complete")
+				logger.Info().Int64("deleted", deleted).Msg("passive lifecycle writer observation cleanup sweep finished")
 			}
 		}
 

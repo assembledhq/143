@@ -22,11 +22,19 @@ uses the ordinary pool, with a 30-second interval, two-minute observational TTL
 and cooperative five-second attempt budget. It remains alive through runtime
 cleanup and joins before pool closure; fatal exits leave rows to expire. Failed
 observations are logged and retried, never awaited for startup or admission.
-They may still contend for ordinary-pool capacity. Existing daily per-organization
-maintenance jobs each remove at most 1,000 observations expired for more than
-seven days. Seven days is cleanup eligibility, not a deletion deadline; absent
-jobs or a backlog delay removal. No row establishes continuous liveness, drained
-transactions or a deployment compatibility floor. API/worker/all process
+They may still contend for ordinary-pool capacity. Existing daily maintenance
+jobs, scheduled for organizations with active integrations, each attempt at most
+ten 1,000-row batches within one shared cooperative five-second budget. Cleanup
+stops on a short batch, the batch cap or budget exhaustion; normal budget exits
+log partial progress, while other database errors and parent cancellation remain
+errors. The SQL still removes only observations expired for more than seven
+days and protects concurrent renewals. Daily capacity is at most 10,000 times
+the number of executed scheduled organization jobs, and can be lower under the
+time budget or failures. No active organizations means no scheduled cleanup.
+Seven days is eligibility, not a deletion deadline or a bounded history size;
+inserts above actual cleanup throughput can grow the backlog indefinitely.
+No row establishes continuous liveness, drained transactions or a deployment
+compatibility floor. API/worker/all process
 registration, connection census, business callers, schema guards and activation
 remain unchanged; this partial inventory does not complete 0a.
 
