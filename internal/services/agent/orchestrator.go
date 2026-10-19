@@ -3149,13 +3149,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	}
 
 	// 1. Concurrency check against the org's max_concurrent_runs quota. A
-	// session re-entering RunAgent while already marked running (recovery) is
-	// excluded from the count so it is not held by its own slot.
-	excludeFromQuota := uuid.Nil
-	if models.SessionStatus(run.Status) == models.SessionStatusRunning {
-		excludeFromQuota = run.ID
-	}
-	maxConcurrent, concurrencyErr := o.checkConcurrency(ctx, run.OrgID, excludeFromQuota)
+	// session re-entering RunAgent for recovery already holds its slot when
+	// its previous attempt reached BeginRuntime, and is otherwise excluded
+	// from the count; see checkConcurrency.
+	maxConcurrent, concurrencyErr := o.checkConcurrency(ctx, run)
 	if concurrencyErr != nil {
 		log.Info().Err(concurrencyErr).Msg("concurrency limit reached, run stays pending")
 		return concurrencyErr
@@ -4571,15 +4568,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// installed), not of running sessions: ClaimIdle/ClaimForResume mark a
 	// session running when its message is accepted, before this job runs, so
 	// a running-session count would hold sibling queued continuations against
-	// each other until the retry window expired. This session is excluded so
-	// a thread turn on an already-executing session, or a recovery re-entry,
-	// is not held by its own slot. Warm reuse is gated too: a reused container
-	// still runs a turn. The gate sits before the recorded-sandbox teardown,
-	// the sandbox capacity admission, and any turn hold, so a held
+	// each other until the retry window expired. A session that already holds
+	// an executing slot (a thread turn on a live session, a recovery re-entry
+	// after a worker loss) is admitted without a count, and is otherwise left
+	// out of it; see checkConcurrency. Warm reuse is gated too: a reused
+	// container still runs a turn. The gate sits before the recorded-sandbox
+	// teardown, the sandbox capacity admission, and any turn hold, so a held
 	// continuation leaves nothing to unwind; the worker retries it. The
 	// resolved quota also feeds the runtime controller so its extension gate
 	// agrees with RunAgent.
-	maxConcurrent, concurrencyErr := o.checkConcurrency(ctx, session.OrgID, session.ID)
+	maxConcurrent, concurrencyErr := o.checkConcurrency(ctx, session)
 	if concurrencyErr != nil {
 		log.Info().Err(concurrencyErr).Msg("concurrency limit reached, continue_session stays queued")
 		return concurrencyErr
@@ -7269,18 +7267,31 @@ func (o *Orchestrator) resolveMaxConcurrent(ctx context.Context, orgID uuid.UUID
 	return o.maxConcurrent
 }
 
+// sessionHoldsExecutingSlot reports whether the session row already carries
+// the executing-turn marker (running with BeginRuntime's deadlines installed;
+// see SessionStore.CountExecutingByOrg). Such a session occupies one of the
+// org's quota slots already, so a further turn on it (a thread turn, or a
+// recovery re-entry after a worker loss) adds nothing to the count.
+func sessionHoldsExecutingSlot(session *models.Session) bool {
+	return session != nil && models.SessionStatus(session.Status) == models.SessionStatusRunning && session.RuntimeHardDeadlineAt != nil
+}
+
 // checkConcurrency verifies the org hasn't exceeded its concurrent run limit
-// and returns the limit that was applied, so callers hand the same value to
-// the runtime controller instead of re-reading org settings. The limit is
-// compared against executing turns (SessionStore.CountExecutingByOrg), not
-// running sessions, so a claimed-but-queued continuation never holds a slot.
-// excludeSessionID is left out of the count: pass the session's own ID when
-// it may already be executing (a thread turn on a live session, or RunAgent
-// re-entering for a session already marked running) so it is not held by its
-// own slot; pass uuid.Nil to count every session.
-func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID, excludeSessionID uuid.UUID) (int, error) {
-	maxConcurrent := o.resolveMaxConcurrent(ctx, orgID)
-	count, err := o.sessions.CountExecutingByOrg(ctx, orgID, excludeSessionID)
+// for a turn on session and returns the limit that was applied, so callers
+// hand the same value to the runtime controller instead of re-reading org
+// settings. The limit is compared against executing turns
+// (SessionStore.CountExecutingByOrg), not running sessions, so a
+// claimed-but-queued continuation never holds a slot. A session that already
+// holds an executing slot is admitted without counting: it is the same slot,
+// and counting siblings would let two sessions recovering after a worker
+// loss hold each other at quota. Otherwise the session is left out of the
+// count so a stale read of its own row cannot hold it either.
+func (o *Orchestrator) checkConcurrency(ctx context.Context, session *models.Session) (int, error) {
+	maxConcurrent := o.resolveMaxConcurrent(ctx, session.OrgID)
+	if sessionHoldsExecutingSlot(session) {
+		return maxConcurrent, nil
+	}
+	count, err := o.sessions.CountExecutingByOrg(ctx, session.OrgID, session.ID)
 	if err != nil {
 		return maxConcurrent, fmt.Errorf("count executing runs: %w", err)
 	}

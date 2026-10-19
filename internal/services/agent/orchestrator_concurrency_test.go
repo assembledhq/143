@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -29,8 +30,12 @@ func TestRunAgent_OrgConcurrencyQuota(t *testing.T) {
 		name           string
 		orgs           func(orgID uuid.UUID) *mockOrgStore
 		countExecuting int
-		wantHeld       bool
-		wantLimitMsg   string
+		// holdsSlot re-enters RunAgent for a session whose previous attempt
+		// reached BeginRuntime (running with deadlines installed), as worker
+		// recovery does.
+		holdsSlot    bool
+		wantHeld     bool
+		wantLimitMsg string
 	}{
 		{
 			name:           "org quota above the process fallback admits the run",
@@ -51,6 +56,12 @@ func TestRunAgent_OrgConcurrencyQuota(t *testing.T) {
 			wantHeld:       true,
 			wantLimitMsg:   "3/3 runs active",
 		},
+		{
+			name:           "a recovering run that already holds its slot is admitted past a saturated quota",
+			orgs:           func(orgID uuid.UUID) *mockOrgStore { return orgWithConcurrencyQuota(t, orgID, 1) },
+			countExecuting: 1, // A sibling holds the only other slot; this run's own slot is not counted.
+			holdsSlot:      true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -60,13 +71,22 @@ func TestRunAgent_OrgConcurrencyQuota(t *testing.T) {
 			orgID := testOrg()
 			issue := testIssue(orgID)
 			run := testRun(orgID, issue.ID)
+			if tt.holdsSlot {
+				run.Status = models.SessionStatusRunning
+				deadline := time.Now().Add(time.Hour)
+				run.RuntimeHardDeadlineAt = &deadline
+			}
 
 			d := defaultDeps()
 			d.orgs = tt.orgs(orgID)
 			d.sessions.countExecuting = tt.countExecuting
 
 			err := buildOrchestrator(d).RunAgent(context.Background(), run)
-			require.Equal(t, []uuid.UUID{uuid.Nil}, d.sessions.getCountExecutingExcludes(), "a pending run counts every executing session")
+			if tt.holdsSlot {
+				require.Empty(t, d.sessions.getCountExecutingExcludes(), "a run that already holds a slot is admitted without counting siblings")
+			} else {
+				require.Equal(t, []uuid.UUID{run.ID}, d.sessions.getCountExecutingExcludes(), "a run counts every executing session but itself")
+			}
 			if !tt.wantHeld {
 				require.NoError(t, err, "RunAgent should admit the run under the org quota")
 				require.Contains(t, d.sessions.getStatusUpdates(), "running", "an admitted run should be marked running")
@@ -84,10 +104,13 @@ func TestRunAgent_OrgConcurrencyQuota(t *testing.T) {
 
 // claimedContinuation returns a session the API has already claimed for a
 // follow-up (status running, as ClaimIdle leaves it) together with the queued
-// user message its continue_session job will pick up.
+// user message its continue_session job will pick up. Each call gets its own
+// session ID (testRun's is fixed) so two claimed sessions are distinct
+// siblings to the executing count.
 func claimedContinuation(orgID uuid.UUID, threadID *uuid.UUID) (*models.Session, models.SessionMessage) {
 	issue := testIssue(orgID)
 	session := testRun(orgID, issue.ID)
+	session.ID = uuid.New()
 	session.Status = models.SessionStatusRunning
 	session.CurrentTurn = 1
 	session.SnapshotKey = nil
@@ -114,10 +137,14 @@ func TestContinueSession_OrgConcurrencyQuota(t *testing.T) {
 		name            string
 		countExecuting  int
 		executingIsSelf bool
-		containerID     *string
-		threadScoped    bool
-		wantHeld        bool
-		wantCreated     bool
+		// holdsSlot continues a session whose row already carries the
+		// executing-turn marker (running with deadlines installed): a thread
+		// turn on a live session, or a recovery re-entry after a worker loss.
+		holdsSlot    bool
+		containerID  *string
+		threadScoped bool
+		wantHeld     bool
+		wantCreated  bool
 	}{
 		{
 			name:           "cold continuation with no executing turn is admitted at quota 1",
@@ -142,6 +169,12 @@ func TestContinueSession_OrgConcurrencyQuota(t *testing.T) {
 			threadScoped:    true,
 			wantCreated:     true,
 		},
+		{
+			name:           "a session that already holds its slot is admitted past a saturated quota without a count",
+			countExecuting: 1, // A sibling holds the only other slot; this session's own slot is not counted.
+			holdsSlot:      true,
+			wantCreated:    true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -158,6 +191,10 @@ func TestContinueSession_OrgConcurrencyQuota(t *testing.T) {
 			session.ContainerID = tt.containerID
 			if tt.containerID != nil {
 				session.SandboxState = models.SandboxStateRunning
+			}
+			if tt.holdsSlot {
+				deadline := time.Now().Add(time.Hour)
+				session.RuntimeHardDeadlineAt = &deadline
 			}
 
 			d := defaultDeps()
@@ -178,7 +215,11 @@ func TestContinueSession_OrgConcurrencyQuota(t *testing.T) {
 			}
 
 			err := buildOrchestrator(d).ContinueSession(context.Background(), session, opts)
-			require.Equal(t, []uuid.UUID{session.ID}, d.sessions.getCountExecutingExcludes(), "a continuation excludes its own session from the executing count")
+			if tt.holdsSlot {
+				require.Empty(t, d.sessions.getCountExecutingExcludes(), "a session that already holds a slot is admitted without counting siblings")
+			} else {
+				require.Equal(t, []uuid.UUID{session.ID}, d.sessions.getCountExecutingExcludes(), "a continuation excludes its own session from the executing count")
+			}
 			if !tt.wantHeld {
 				require.NotErrorIs(t, err, agent.ErrConcurrencyLimit, "the continuation must be admitted")
 				require.Equal(t, tt.wantCreated, created, "sandbox allocation should match the continuation path")
@@ -196,9 +237,12 @@ func TestContinueSession_OrgConcurrencyQuota(t *testing.T) {
 
 // TestContinueSession_QueuedContinuationsDoNotHoldEachOther proves the
 // scenario the quota used to deadlock on: two sessions the API has claimed
-// for follow-ups (both running) at quota 1 with no executing turn. Neither
-// claim counts as executing, so each continue_session job proceeds instead
-// of both waiting on the other until the worker's retry window expires.
+// for follow-ups (both running) at quota 1 with no executing turn. The mock
+// tracks the marker's lifecycle (BeginRuntime installs it, turn completion
+// removes it), so the first turn occupies the only slot while it runs and
+// releases it when it completes; the second continuation is then admitted
+// instead of both waiting on each other until the worker's retry window
+// expires.
 func TestContinueSession_QueuedContinuationsDoNotHoldEachOther(t *testing.T) {
 	t.Parallel()
 
@@ -208,7 +252,7 @@ func TestContinueSession_QueuedContinuationsDoNotHoldEachOther(t *testing.T) {
 
 	d := defaultDeps()
 	d.orgs = orgWithConcurrencyQuota(t, orgID, 1)
-	d.sessions.countExecuting = 0 // Both sessions are claimed, neither has begun a turn.
+	d.sessions.trackExecuting = true // Both sessions are claimed, neither has begun a turn.
 	d.messages.messages = []models.SessionMessage{firstMessage, secondMessage}
 	created := 0
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
@@ -218,7 +262,35 @@ func TestContinueSession_QueuedContinuationsDoNotHoldEachOther(t *testing.T) {
 	orch := buildOrchestrator(d)
 
 	require.NoError(t, orch.ContinueSession(context.Background(), first, nil), "the first queued continuation should run")
+	require.Len(t, d.sessions.getTurnUpdates(), 1, "the first turn should complete and release its slot")
 	require.NoError(t, orch.ContinueSession(context.Background(), second, nil), "the second queued continuation should run after the first")
 	require.Equal(t, 2, created, "both continuations should have allocated a sandbox")
 	require.Equal(t, []uuid.UUID{first.ID, second.ID}, d.sessions.getCountExecutingExcludes(), "each continuation should have been gated once, excluding only itself")
+}
+
+// TestContinueSession_HeldWhileSiblingTurnExecutes is the counterpart: with
+// the first turn still executing (BeginRuntime ran, no completion yet), a
+// second session's continuation at quota 1 is held.
+func TestContinueSession_HeldWhileSiblingTurnExecutes(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	first, _ := claimedContinuation(orgID, nil)
+	second, secondMessage := claimedContinuation(orgID, nil)
+
+	d := defaultDeps()
+	d.orgs = orgWithConcurrencyQuota(t, orgID, 1)
+	d.sessions.trackExecuting = true
+	d.sessions.executing = map[uuid.UUID]bool{first.ID: true} // The first turn is mid-execution.
+	d.messages.messages = []models.SessionMessage{secondMessage}
+	created := false
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		created = true
+		return &agent.Sandbox{ID: "cold-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), second, nil)
+	require.ErrorIs(t, err, agent.ErrConcurrencyLimit, "the second continuation must wait for the executing turn")
+	require.False(t, created, "a held continuation must not allocate a sandbox")
+	require.Equal(t, []uuid.UUID{second.ID}, d.sessions.getCountExecutingExcludes(), "the held continuation excluded only itself")
 }

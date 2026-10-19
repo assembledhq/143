@@ -2321,17 +2321,22 @@ func (s *SessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (
 // status = 'running' with the runtime deadline pair BeginRuntime installs
 // still present. Together with status that pair is the durable
 // "executing turn" marker. BeginRuntime is the only writer that installs both
-// deadlines, and every writer that ends a turn (updateTurnCompleteRow,
-// updateResultRow, updateStatusRow) or claims a session for a queued
-// continuation (ClaimIdle, ClaimForResume, UpdateStatus(running),
-// MarkRunningWithSandboxState) clears them, so status = 'running' AND
-// runtime_hard_deadline_at IS NOT NULL means BeginRuntime ran for the current
-// turn. A session a user has claimed for a queued continuation is therefore
-// running with NULL deadlines and is not counted: the org's
-// max_concurrent_runs quota holds executing turns rather than queued ones,
-// and sibling queued continuations never hold each other. The stop-reason
-// columns are left alone by the turn-end writers; they describe why the last
-// turn ended and are read afterwards (session detail, reaper logs).
+// deadlines, and every other writer that sets status = 'running' clears
+// them: ClaimIdle, ClaimForResume, ClaimForAutomationTurn, the code-review
+// recheck claim (code_review_recheck_dispatch.go), UpdateStatus(running),
+// MarkRunningWithSandboxState, and AutomationRunStore.EndInterruptedAttempt
+// when it restores a continuation's pre-turn running status. Any new writer
+// that marks a session running must do the same. The turn-end writers in
+// this store (updateTurnCompleteRow, updateResultRow, updateStatusRow) clear
+// the pair too, so an idle or terminal row normally carries no marker. Hence
+// status = 'running' AND runtime_hard_deadline_at IS NOT NULL means
+// BeginRuntime ran for the current turn. A session a user has claimed for a
+// queued continuation is therefore running with NULL deadlines and is not
+// counted: the org's max_concurrent_runs quota holds executing turns rather
+// than queued ones, and sibling queued continuations never hold each other.
+// The stop-reason columns are left alone by the turn-end writers; they
+// describe why the last turn ended and are read afterwards (session detail,
+// reaper logs).
 //
 // excludeSessionID leaves one session out of the count so a turn on a
 // session that is already executing (a thread turn, a recovery re-entry) is

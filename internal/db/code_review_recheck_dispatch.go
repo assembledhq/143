@@ -265,7 +265,12 @@ func (s *CodeReviewRecheckStore) Dispatch(ctx context.Context, in models.CodeRev
 	if !ownerReady {
 		return models.CodeReviewRecheckDispatch{}, false, ErrCodeReviewRecheckFence
 	}
-	if _, err = tx.Exec(ctx, `UPDATE sessions SET code_review_owner_pr_id=$3,status='running',started_at=now(),completed_at=NULL WHERE org_id=$1 AND id=$2 AND (code_review_owner_pr_id IS NULL OR code_review_owner_pr_id=$3)`, in.OrgID, in.SessionID, in.PullRequestID); err != nil {
+	// The claim marks the session running before its job reaches BeginRuntime,
+	// so the runtime deadlines (the executing-turn marker CountExecutingByOrg
+	// reads) are cleared like ClaimIdle does: the recheck settlement paths
+	// below return the session to idle without touching them, and a stale
+	// pair would make a queued recheck count against the org quota.
+	if _, err = tx.Exec(ctx, `UPDATE sessions SET code_review_owner_pr_id=$3,status='running',started_at=now(),completed_at=NULL,runtime_soft_deadline_at=NULL,runtime_hard_deadline_at=NULL WHERE org_id=$1 AND id=$2 AND (code_review_owner_pr_id IS NULL OR code_review_owner_pr_id=$3)`, in.OrgID, in.SessionID, in.PullRequestID); err != nil {
 		return models.CodeReviewRecheckDispatch{}, false, err
 	}
 	var currentTurn int
