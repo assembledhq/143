@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { SessionReviewComment } from "@/lib/types";
 import { CommentInput } from "./comment-input";
+import { formatRelativeTime } from "./relative-time";
 
 /**
  * Lightweight inline markdown renderer for review comments.
@@ -34,20 +35,6 @@ interface CommentThreadProps {
   onDelete: (commentId: string) => void;
   className?: string;
   onRequestEdit?: (comment: SessionReviewComment) => void;
-}
-
-function formatRelativeTime(dateStr: string): string {
-  const now = Date.now();
-  const then = new Date(dateStr).getTime();
-  const diffMs = now - then;
-  const diffSecs = Math.floor(diffMs / 1000);
-  if (diffSecs < 60) return "just now";
-  const diffMins = Math.floor(diffSecs / 60);
-  if (diffMins < 60) return `${diffMins}m ago`;
-  const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  const diffDays = Math.floor(diffHours / 24);
-  return `${diffDays}d ago`;
 }
 
 const SingleComment = memo(function SingleComment({

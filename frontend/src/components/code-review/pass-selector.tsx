@@ -3,6 +3,7 @@
 import { ChevronDown, GitCompare } from "lucide-react";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { cn } from "@/lib/utils";
+import { formatRelativeTime } from "./relative-time";
 
 export interface DiffPassEntry {
   pass: number;
@@ -26,18 +27,6 @@ function formatPassLabel(range: PassRange | null): string {
   if (!range) return "All changes";
   if (range.from === 0) return `Base → Pass ${range.to}`;
   return `Pass ${range.from} → Pass ${range.to}`;
-}
-
-function formatRelativeTime(dateStr: string): string {
-  const now = Date.now();
-  const then = new Date(dateStr).getTime();
-  const diffMs = now - then;
-  const diffMins = Math.floor(diffMs / 60000);
-  if (diffMins < 1) return "just now";
-  if (diffMins < 60) return `${diffMins}m ago`;
-  const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  return `${Math.floor(diffHours / 24)}d ago`;
 }
 
 export function PassSelector({
