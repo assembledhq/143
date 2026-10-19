@@ -6686,12 +6686,12 @@
     },
     {
       "id": "internal/services/automations/target_dispatch.go:TargetDispatcher.Dispatch",
-      "source_sha256": "ada2f212dc88e833ce7a9507e8e9a8a611b88fa181447de25c71c508eacf2cba",
+      "source_sha256": "a3d0ba5aedd0fbfc64a63aeedd9ca8a74b8cd520a9373b7487d21903341db5c1",
       "operation": "reserve per-target automation generation/run/session/lane/job",
       "owner": "TargetDispatcher in internal/services/automations",
-      "predicate": "Checks Applies/template/repository; external lookup compared to target under lock; rereads automation/config/executing user; locks run and returns AlreadyReserved for existing execution. Lifecycle/head/version/generation decision precedes exact automation session+primary lane claim and automation-turn-key enqueue.",
+      "predicate": "Checks Applies/template/repository; external lookup compared to target under lock; rereads automation/config/executing user; locks run and returns AlreadyReserved for existing execution. Lifecycle/head/version/generation decision precedes exact automation session+primary lane claim and automation-turn-key enqueue. Lifecycle evidence from the lookup is written through SetLifecycleObserved stamped with GitHub's updated_at (a lookup without one keeps the target's existing evidence), so the store's freshness arbitration applies: a lookup close older than the target's open evidence is refused and never terminalizes the run.",
       "lock": "Own Begin; target advisory/row protocol, current automation/run/generation, session then primary lane; generation retire/create/reservation/job commit atomically.",
-      "stale_result": "Changed lookup/config/head waits/retries; domain terminal/noop results distinct. Domain lock/receipt does not yet include shared lifecycle admission/end epochs.",
+      "stale_result": "Changed lookup/config/head waits/retries; domain terminal/noop results distinct. Domain lock/receipt does not yet include shared lifecycle admission/end epochs. A refused lookup close marks the run waiting and returns DispatchRetry on the head-lookup backoff rather than pr_closed; the openness refresh for a fresh generation proceeds whether or not the store applied it.",
       "classification": "fenced-specialist",
       "migration": "0a: insert shared parent/end epoch/retained owner and workspace reservation checks in SAME target/run transaction, preserving all head/config/lifecycle decisions and exact automation_turn:run key/receipt; no generic bypass or existing-job new-input rebinding.",
       "evidence": [
