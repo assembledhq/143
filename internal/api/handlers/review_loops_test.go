@@ -39,7 +39,8 @@ func TestReviewLoopHandler_Start_OwnershipErrors(t *testing.T) {
 		startErr      error
 		expectedCode  int
 		expectedError string
-		checkDetails  func(t *testing.T, details map[string]any)
+		// expectedDetails is compared whole so a dropped field fails the test.
+		expectedDetails map[string]any
 	}{
 		{
 			name: "automation owned session",
@@ -52,11 +53,12 @@ func TestReviewLoopHandler_Start_OwnershipErrors(t *testing.T) {
 			}}),
 			expectedCode:  http.StatusConflict,
 			expectedError: "SESSION_AUTOMATION_OWNED",
-			checkDetails: func(t *testing.T, details map[string]any) {
-				require.Equal(t, automationID.String(), details["automation_id"], "details should name the owning automation")
-				require.Equal(t, targetID.String(), details["target_id"], "details should name the owning target")
-				require.Equal(t, models.SessionAutomationResetURL(automationID, targetID), details["reset_url"], "details should carry the reset link")
-				require.Equal(t, true, details["release_pending"], "details should carry release_pending")
+			expectedDetails: map[string]any{
+				"automation_id":   automationID.String(),
+				"target_id":       targetID.String(),
+				"generation_id":   generationID.String(),
+				"reset_url":       models.SessionAutomationResetURL(automationID, targetID),
+				"release_pending": true,
 			},
 		},
 		{
@@ -64,8 +66,9 @@ func TestReviewLoopHandler_Start_OwnershipErrors(t *testing.T) {
 			startErr:      fmt.Errorf("create review thread: %w", &models.SessionCodeReviewOwnedError{PullRequestID: prID}),
 			expectedCode:  http.StatusConflict,
 			expectedError: "SESSION_CODE_REVIEW_OWNED",
-			checkDetails: func(t *testing.T, details map[string]any) {
-				require.Equal(t, prID.String(), details["pull_request_id"], "details should name the owning pull request")
+			expectedDetails: map[string]any{
+				"pull_request_id": prID.String(),
+				"release_pending": false,
 			},
 		},
 		{
@@ -105,9 +108,8 @@ func TestReviewLoopHandler_Start_OwnershipErrors(t *testing.T) {
 			}
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &errResp), "response body should be valid JSON")
 			require.Equal(t, tt.expectedError, errResp.Error.Code, "Start should return the expected error code")
-			if tt.checkDetails != nil {
-				require.NotNil(t, errResp.Error.Details, "ownership conflict should include details")
-				tt.checkDetails(t, errResp.Error.Details)
+			if tt.expectedDetails != nil {
+				require.Equal(t, tt.expectedDetails, errResp.Error.Details, "ownership conflict should return exactly the owner as details")
 			}
 		})
 	}
