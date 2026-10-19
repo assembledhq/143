@@ -4709,7 +4709,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 
 				// Mock concurrency check
 				mock.ExpectQuery("SELECT count").
-					WithArgs(pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				// Mock job enqueue (6 named args)
@@ -4774,7 +4774,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 
 				// Mock concurrency check
 				mock.ExpectQuery("SELECT count").
-					WithArgs(pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				// Mock job enqueue
@@ -4817,7 +4817,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 				mock.ExpectQuery("SELECT count").
-					WithArgs(pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -4858,7 +4858,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 				mock.ExpectQuery("SELECT count").
-					WithArgs(pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -4895,7 +4895,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 				mock.ExpectQuery("SELECT count").
-					WithArgs(pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -4933,7 +4933,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 				mock.ExpectQuery("SELECT count").
-					WithArgs(pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -4972,7 +4972,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 				mock.ExpectQuery("SELECT count").
-					WithArgs(pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -5017,7 +5017,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 				mock.ExpectQuery("SELECT count").
-					WithArgs(pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -5059,7 +5059,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 				mock.ExpectQuery("SELECT count").
-					WithArgs(pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -5138,7 +5138,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 				mock.ExpectQuery("SELECT count").
-					WithArgs(pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -5173,7 +5173,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 				mock.ExpectQuery("SELECT count").
-					WithArgs(pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -5357,7 +5357,7 @@ func TestSessionHandler_EndSession_DoesNotPublishIssueSession(t *testing.T) {
 				now,
 			),
 		)
-	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id .+ RETURNING").
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id .+ RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -5440,7 +5440,7 @@ func TestSessionHandler_EndSession_ManualDoesNotPublishOnCompletion(t *testing.T
 				now,
 			),
 		)
-	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id .+ RETURNING").
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id .+ RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -7404,7 +7404,7 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 
 	// Mock concurrency check
 	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 	// Mock job enqueue
@@ -7479,7 +7479,7 @@ func TestSessionHandler_CreateManual_LLMError_Returns500(t *testing.T) {
 
 	// Mock concurrency check
 	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 	// Mock job enqueue

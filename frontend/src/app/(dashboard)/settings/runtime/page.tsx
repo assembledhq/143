@@ -711,7 +711,7 @@ function CapacityLimitsSection() {
             description="Limit simultaneous coding-agent turns across the organization."
             helper={concurrentRunsHelper}
             warning={concurrentRunsWarning}
-            tooltip="This is an org quota enforced when a run starts. Fleet capacity is advisory: workers admit sandboxes per node, and preview sandboxes share those slots. Users can still queue additional work."
+            tooltip="This is an org quota enforced whenever a turn starts, for new runs and follow-up messages alike; turns over the quota wait for a slot. Fleet capacity is advisory: workers admit sandboxes per node, and preview sandboxes share those slots. Users can still queue additional work."
           >
             <BoundedNumberInput
               id="max-concurrent-runs"

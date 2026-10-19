@@ -1264,6 +1264,68 @@ func TestSessionStore_CountRunningByOrg(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSessionStore_CountExecutingByOrg(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	selfID := uuid.New()
+
+	tests := []struct {
+		name      string
+		exclude   uuid.UUID
+		rows      int
+		queryErr  error
+		expected  int
+		expectErr bool
+	}{
+		{
+			name:     "counts executing sessions across the org",
+			exclude:  uuid.Nil,
+			rows:     2,
+			expected: 2,
+		},
+		{
+			name:     "passes the excluded session through to the query",
+			exclude:  selfID,
+			rows:     1,
+			expected: 1,
+		},
+		{
+			name:      "propagates query errors",
+			exclude:   uuid.Nil,
+			queryErr:  errors.New("connection reset"),
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			expect := mock.ExpectQuery(`SELECT count\(\*\)[\s\S]+FROM sessions[\s\S]+org_id = @org_id[\s\S]+id <> @exclude_session_id[\s\S]+status = 'running'[\s\S]+runtime_hard_deadline_at IS NOT NULL[\s\S]+deleted_at IS NULL`).
+				WithArgs(orgID, tt.exclude)
+			if tt.queryErr != nil {
+				expect.WillReturnError(tt.queryErr)
+			} else {
+				expect.WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(tt.rows))
+			}
+
+			count, err := NewSessionStore(mock).CountExecutingByOrg(context.Background(), orgID, tt.exclude)
+			if tt.expectErr {
+				require.ErrorIs(t, err, tt.queryErr, "the query error should be wrapped and returned")
+			} else {
+				require.NoError(t, err, "counting executing sessions should succeed")
+				require.Equal(t, tt.expected, count, "the executing count should be scanned from the query")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "the executing count should filter on running status, installed deadlines, live rows, and the excluded session")
+		})
+	}
+}
+
 func TestSessionStore_ListByIDs_Empty(t *testing.T) {
 	t.Parallel()
 
@@ -1524,7 +1586,7 @@ func TestSessionStore_UpdateStatus_PublishesAndQueriesTerminalCleanup(t *testing
 	issueID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
 
@@ -1569,7 +1631,7 @@ func TestSessionStore_UpdateStatusTerminalClearsStaleFailureDetails(t *testing.T
 			issueID := uuid.New()
 			now := time.Now()
 
-			mock.ExpectQuery(`UPDATE sessions SET status = @status, completed_at = now\(\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\(\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING`).
+			mock.ExpectQuery(`UPDATE sessions SET status = @status, completed_at = now\(\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now\(\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING`).
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
 
@@ -1724,7 +1786,7 @@ func TestSessionStore_UpdateStatus_CollectError(t *testing.T) {
 	store.SetLogger(zerolog.Nop())
 	store.SetStreams(nil)
 
-	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
@@ -1774,7 +1836,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 		issueID := uuid.New()
 		orgID := uuid.New()
 
-		mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
+		mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...),

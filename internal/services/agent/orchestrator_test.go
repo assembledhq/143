@@ -306,6 +306,10 @@ func (m *mockCredentialProvider) ListByProvider(ctx context.Context, orgID uuid.
 type mockSessionStore struct {
 	mu                     sync.Mutex
 	countRunning           int
+	countExecuting         int
+	countExecutingErr      error
+	executingSessionID     uuid.UUID
+	countExecutingExcludes []uuid.UUID
 	statusUpdates          []string
 	statusUpdateContexts   []statusUpdateContext
 	sandboxStateContexts   []sandboxStateUpdateContext
@@ -453,6 +457,29 @@ func (m *mockSessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUI
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.countRunning, m.countRunningErr
+}
+
+// CountExecutingByOrg mirrors the store's exclusion semantics: countExecuting
+// is the org's executing-turn count, and when excludeSessionID names
+// executingSessionID (the one session the test treats as executing) that
+// session is left out, as the real query leaves out the caller's own row.
+func (m *mockSessionStore) CountExecutingByOrg(ctx context.Context, orgID, excludeSessionID uuid.UUID) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.countExecutingExcludes = append(m.countExecutingExcludes, excludeSessionID)
+	count := m.countExecuting
+	if excludeSessionID != uuid.Nil && excludeSessionID == m.executingSessionID && count > 0 {
+		count--
+	}
+	return count, m.countExecutingErr
+}
+
+func (m *mockSessionStore) getCountExecutingExcludes() []uuid.UUID {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]uuid.UUID, len(m.countExecutingExcludes))
+	copy(out, m.countExecutingExcludes)
+	return out
 }
 
 func (m *mockSessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error {
@@ -2497,7 +2524,10 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 	run.Status = models.SessionStatusRunning
 
 	d := defaultDeps()
-	d.sessions.countRunning = 1
+	// The only executing slot is this run's own (its deadlines survive the
+	// crash); recovery must not be held by it.
+	d.sessions.countExecuting = 1
+	d.sessions.executingSessionID = run.ID
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
 			Summary:  "Recovered by restarting cleanly",
@@ -4317,7 +4347,7 @@ func TestRunAgent_ConcurrencyLimit(t *testing.T) {
 	run := testRun(orgID, issue.ID)
 
 	d := defaultDeps()
-	d.sessions.countRunning = 3 // At the limit.
+	d.sessions.countExecuting = 3 // At the limit.
 
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)

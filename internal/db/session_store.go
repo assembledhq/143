@@ -1675,16 +1675,20 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 }
 
 func (s *SessionStore) updateStatusRow(ctx context.Context, database DBTX, orgID, runID uuid.UUID, status models.SessionStatus) (models.Session, error) {
-	query := `UPDATE sessions SET status = @status, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+	// Every non-running status ends the turn (if one was executing), so the
+	// runtime deadlines, the executing-turn marker CountExecutingByOrg reads,
+	// are dropped alongside the status; this covers the reaper's settle paths
+	// and the orchestrator's cancel/fail transitions.
+	query := `UPDATE sessions SET status = @status, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	if status == models.SessionStatusRunning {
 		// Clear completed_at so a resumed session doesn't display as "completed"
 		// while actively running. Duration is computed from started_at, so that is
 		// also refreshed to reflect the current run.
 		query = `UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, runtime_last_progress_at = NULL, runtime_last_progress_type = '', runtime_last_progress_strength = '', runtime_stop_reason = '', runtime_graceful_stop_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	} else if status == models.SessionStatusCompleted || status == models.SessionStatusPRCreated || status == models.SessionStatusSkipped {
-		query = `UPDATE sessions SET status = @status, completed_at = now(), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+		query = `UPDATE sessions SET status = @status, completed_at = now(), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	} else if status == models.SessionStatusFailed || status == models.SessionStatusCancelled {
-		query = `UPDATE sessions SET status = @status, completed_at = now(), last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+		query = `UPDATE sessions SET status = @status, completed_at = now(), runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
 	rows, err := database.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
 		"id":     runID,
@@ -1915,7 +1919,11 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
 		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
 		    diff_stats = COALESCE(@diff_stats, diff_stats),
-		    diff_history = ` + diffHistoryAppendSQL("COALESCE(current_turn, 0) + 1") + `
+		    diff_history = ` + diffHistoryAppendSQL("COALESCE(current_turn, 0) + 1") + `,
+		    -- A result that leaves running ends the turn: drop the
+		    -- executing-turn marker (see CountExecutingByOrg).
+		    runtime_soft_deadline_at = CASE WHEN @status = 'running' THEN runtime_soft_deadline_at ELSE NULL END,
+		    runtime_hard_deadline_at = CASE WHEN @status = 'running' THEN runtime_hard_deadline_at ELSE NULL END
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	rows, err := db.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
@@ -2010,7 +2018,9 @@ func (s *SessionStore) ListTerminalEndedBefore(ctx context.Context, before time.
 
 // ClaimIdle atomically transitions an idle session to running and returns the
 // claimed session row. Used when a user sends a follow-up message so only one
-// continuation can be queued at a time.
+// continuation can be queued at a time. The runtime deadlines are cleared so
+// the claimed session is running without being counted as executing until
+// its continue_session job reaches BeginRuntime (see CountExecutingByOrg).
 // Sessions whose sandbox snapshot has been destroyed cannot be claimed.
 func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
@@ -2021,6 +2031,8 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 		    failure_category = NULL,
 		    failure_next_steps = NULL,
 		    failure_retry_advised = false,
+		    runtime_soft_deadline_at = NULL,
+		    runtime_hard_deadline_at = NULL,
 		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = 'idle'
 		  AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL
@@ -2305,6 +2317,47 @@ func (s *SessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (
 	return count, err
 }
 
+// CountExecutingByOrg counts the org's sessions that are executing a turn:
+// status = 'running' with the runtime deadline pair BeginRuntime installs
+// still present. Together with status that pair is the durable
+// "executing turn" marker. BeginRuntime is the only writer that installs both
+// deadlines, and every writer that ends a turn (updateTurnCompleteRow,
+// updateResultRow, updateStatusRow) or claims a session for a queued
+// continuation (ClaimIdle, ClaimForResume, UpdateStatus(running),
+// MarkRunningWithSandboxState) clears them, so status = 'running' AND
+// runtime_hard_deadline_at IS NOT NULL means BeginRuntime ran for the current
+// turn. A session a user has claimed for a queued continuation is therefore
+// running with NULL deadlines and is not counted: the org's
+// max_concurrent_runs quota holds executing turns rather than queued ones,
+// and sibling queued continuations never hold each other. The stop-reason
+// columns are left alone by the turn-end writers; they describe why the last
+// turn ended and are read afterwards (session detail, reaper logs).
+//
+// excludeSessionID leaves one session out of the count so a turn on a
+// session that is already executing (a thread turn, a recovery re-entry) is
+// not held by its own slot; pass uuid.Nil to count every session. Unlike
+// CountRunningByOrg this skips soft-deleted rows: their turn can no longer
+// settle through the deleted_at-guarded result writers, so counting them
+// would leak a quota slot for good.
+func (s *SessionStore) CountExecutingByOrg(ctx context.Context, orgID, excludeSessionID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `
+		SELECT count(*)
+		FROM sessions
+		WHERE org_id = @org_id
+		  AND id <> @exclude_session_id
+		  AND status = 'running'
+		  AND runtime_hard_deadline_at IS NOT NULL
+		  AND deleted_at IS NULL`, pgx.NamedArgs{
+		"org_id":             orgID,
+		"exclude_session_id": excludeSessionID,
+	}).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count executing sessions: %w", err)
+	}
+	return count, nil
+}
+
 func (s *SessionStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID) ([]models.Session, error) {
 	query := `
 		SELECT ` + sessionListColumns + `
@@ -2520,7 +2573,11 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
 		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
 		    diff_stats = COALESCE(@diff_stats, diff_stats),
-		    diff_history = ` + diffHistoryAppendSQL("GREATEST(current_turn + 1, @current_turn)::int") + `
+		    diff_history = ` + diffHistoryAppendSQL("GREATEST(current_turn + 1, @current_turn)::int") + `,
+		    -- The turn is over: drop the executing-turn marker (see
+		    -- CountExecutingByOrg) so the idle session holds no quota slot.
+		    runtime_soft_deadline_at = NULL,
+		    runtime_hard_deadline_at = NULL
 		WHERE id = @id AND org_id = @org_id`
 
 	query += `
