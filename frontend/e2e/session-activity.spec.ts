@@ -81,7 +81,12 @@ test.beforeEach(async ({ context, page }) => {
         this.listeners.set(event, (this.listeners.get(event) ?? []).filter((candidate) => candidate !== handler));
       }
       dispatchEvent() { return true; }
-      close() { this.readyState = FixtureEventSource.CLOSED; }
+      close() {
+        this.readyState = FixtureEventSource.CLOSED;
+        // Dev effects can reopen the stream; closed connections must stop
+        // receiving simulated server events and errors.
+        FixtureEventSource.instances = FixtureEventSource.instances.filter((source) => source !== this);
+      }
       emit(event: string, data: unknown) {
         const message = new MessageEvent(event, { data: JSON.stringify(data) });
         for (const listener of this.listeners.get(event) ?? []) listener(message);

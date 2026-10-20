@@ -1076,6 +1076,10 @@ describe("CodeReviewsPage", () => {
     });
     const cards = await screen.findByLabelText("Approval outcomes");
     await waitFor(() => expect(requests).toHaveLength(1));
+    // Let the mount-time search debounce commit before selecting a metric:
+    // the in-memory URL adapter resets pending writes when it re-renders.
+    await waitFor(() => expect(onUrlUpdate).toHaveBeenCalled());
+    onUrlUpdate.mockClear();
     await user.click(within(cards).getByRole("button", { name: /^Show P95 rounds to approval trend/ }));
     await waitFor(() => {
       const update = onUrlUpdate.mock.calls.at(-1)?.[0];
@@ -3650,7 +3654,7 @@ describe("CodeReviewsPage", () => {
     if (originalWidth) Object.defineProperty(window, "innerWidth", originalWidth);
   });
 
-  it("edits paths, authors, and checks as compact autosaved lists", async () => {
+  it("edits sensitive paths as a compact autosaved list", async () => {
     const user = userEvent.setup();
     const policyUpdates = vi.fn();
     mockCodeReviewBaseHandlers(githubTriggerReady, policyUpdates);
@@ -3706,6 +3710,15 @@ describe("CodeReviewsPage", () => {
       );
     });
     expect(screen.queryByText("*auth*")).not.toBeInTheDocument();
+  });
+
+  it("edits eligible authors and displays required checks as compact lists", async () => {
+    const user = userEvent.setup();
+    const policyUpdates = vi.fn();
+    mockCodeReviewBaseHandlers(githubTriggerReady, policyUpdates);
+
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "policy" } });
+    await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
 
     const requiredChecksEditor = screen.getByText("Required checks").closest("section");
     expect(requiredChecksEditor).not.toBeNull();

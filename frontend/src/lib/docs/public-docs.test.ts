@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import getStartedMeta from "../../../../docs/public/getting-started/meta.json";
 import guidesMeta from "../../../../docs/public/guides/meta.json";
@@ -102,7 +102,7 @@ describe("public docs source", () => {
     for (const filePath of publicMdxFiles()) {
       const page = readPublicMdx(filePath);
 
-      expect(page.status).toBe("stable");
+      expect(page.status, relative(publicDocsPath, filePath)).toBe("stable");
     }
   });
 

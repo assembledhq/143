@@ -94,6 +94,19 @@ const eslintConfig = defineConfig([
       "custom/no-banned-typography": "off",
     },
   },
+  {
+    files: [
+      "src/app/(auth)/login/page.tsx",
+      "src/app/(dashboard)/settings/integrations/github/setup/page.tsx",
+      "src/hooks/use-auth.ts",
+      "src/lib/api.ts",
+    ],
+    rules: {
+      // Auth changes reload the document to discard session-scoped client state;
+      // OAuth redirects navigate to backend endpoints outside the Next.js router.
+      "@next/next/no-location-assign-relative-destination": "off",
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:
