@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
+	"github.com/assembledhq/143/internal/version"
 	"github.com/google/uuid"
 )
 
@@ -31,7 +32,7 @@ func main() {
 	cfg := config.Load()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{MaxConns: 1})
+	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{MaxConns: 1, ApplicationName: db.LifecycleOperatorConnectionApplicationName(version.BuildSHA)})
 	if err != nil {
 		exitErr("connect database: %v", err)
 	}

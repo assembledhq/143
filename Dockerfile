@@ -13,8 +13,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/server ./cmd/server && \
     CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/session-executor ./cmd/server && \
     CGO_ENABLED=0 go build -o /bin/migrate ./cmd/migrate && \
-    CGO_ENABLED=0 go build -o /bin/deploy-guardrail ./cmd/deploy-guardrail && \
-    CGO_ENABLED=0 go build -o /bin/worker-deployctl ./cmd/worker-deployctl
+    CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/deploy-guardrail ./cmd/deploy-guardrail && \
+    CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/worker-deployctl ./cmd/worker-deployctl
 
 # Cross-compile the 143-tools CLI for laptop installs (darwin/linux ×
 # amd64/arm64) and generate the checksums.txt the installer verifies. Served

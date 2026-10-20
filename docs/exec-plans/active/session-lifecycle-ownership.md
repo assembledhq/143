@@ -95,6 +95,24 @@ Operational output belongs outside this public checkout. Runtime/deploy wiring,
 command/operator coverage, independent inventory/drain receipts, canonical callers,
 guards and activation remain separate gates. This command does not complete 0a.
 
+Passive attribution also covers the existing one-connection pools in
+`deploy-guardrail` and `worker-deployctl`, using `143:operator:<safe-build>`.
+The fixed connection-only operator formatter shares the runtime build-label
+policy. Both packaged operator binaries embed the same `BUILD_SHA` argument as
+the server; builds without an injected SHA retain the explicit `dev` label.
+The commands intentionally override a DSN-supplied application name while
+retaining their existing 15-second and 20-second contexts, pool limits and
+operational decisions. They start no writer observer and set no writer-version
+marker. The four lease-writer roles and registry schema remain unchanged.
+The census recognizes operator connection labels but continues to classify a
+supplied operator writer-lease role as unknown. This extends the connection-role
+enum within the existing schema-1 JSON shape; external consumers with a strict
+four-role enum must accept the added value before relying on these reports.
+Labels remain self-reported and do not distinguish these two tools, invocation
+identity or privilege. This is partial command coverage: `backfill-usage`,
+`migrate`, `wait-postgres`, `demo-seed` and manual SQL paths remain unattributed
+by this slice. No command uses a label as deployment, drain or activation proof.
+
 Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
 identify the inspected implementation; the executable inventory rechecks the
 current tree rather than treating line numbers as permanent identities.
@@ -1487,6 +1505,11 @@ revision; it must not reinterpret new durable records or trigger replay.
   real restricted/inherited statistics roles, disabled tracking, expiry clocks,
   overflow boundaries and lock-synchronized cancellation and budget expiry.
   These local checks do not establish deployment, CI or a compatible writer floor.
+- [x] Add connection-only operator attribution to the two packaged lifecycle-aware
+  deployment commands and their census labels, without expanding lease roles or
+  changing pool budgets and operational decisions.
+- [x] Validate operator labels on fresh, reused and reset PostgreSQL connections,
+  full-schema census aggregation, command wiring and packaged build metadata.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1657,6 +1680,34 @@ in `DATABASE_URL`; it accepts no arguments and has no target fallback. Treat the
 JSON and diagnostics as private operational evidence. The command is not wired
 into startup, scheduling, deployment or activation, and a zero exit code means
 only that observation collection and report delivery succeeded.
+
+### 0a operator-attribution validation
+
+The operator slice passed local race checks: 86 root tests and 1,045 subtests
+across the focused runtime/model/store/census selection and the complete
+`cmd/migrate`, `cmd/deploy-guardrail` and `cmd/worker-deployctl` packages, with no
+failures or skips. Real-PostgreSQL checks run on 17.10 over direct TCP; the census
+cases apply the complete unchanged schema. They verify fresh, reused and reset backend labels,
+PID-scoped activity, absent writer-version settings, exact operator transaction
+aggregates and an empty writer registry. Negative tests reject an operator lease
+before SQL and keep synthetic operator writer observations unknown.
+
+Set `TEST_DATABASE_URL` to an owned disposable PostgreSQL 15+ server. Reproduce
+the focused selection with `go test -race -p=1 ./internal/db ./internal/models
+./internal/services/lifecyclecensus ./cmd/lifecycle-census ./cmd/server -run
+'^(TestLifecycle(Connection.*|Operator.*|WriterRole.*|WriterInstanceStore_Observe.*|Census.*)|TestNewPoolConfigApplicationName|TestParseLabel|TestAssemble.*|TestCensusEnumValidation|TestCollect.*|TestRun.*|TestWorkerControlPlanePool.*|TestNewWorkerControlPlanePoolCanceledStartup)$'
+-count=1 -parallel=3 -timeout=3m`. The full migration package uses
+`go test -race -p=1 ./cmd/migrate -count=1 -parallel=3 -timeout=3m`; the two
+operator packages use `go test -race ./cmd/deploy-guardrail
+./cmd/worker-deployctl -count=1`.
+
+Vet and the repository-pinned linter pass for all eight affected packages;
+tenancy and lifecycle syntax inventories also pass. Both operator commands
+compile with the SHA linker flag for the local toolchain and Linux/amd64.
+Source tests verify the actual command pool calls and Docker build invocations.
+These checks do not construct or deploy the Docker image, prove transaction-mode
+proxy attribution, cover every operator path or establish a compatible floor.
+Independent exact-candidate review remains a separate gate.
 
 ## Surprises & Discoveries
 

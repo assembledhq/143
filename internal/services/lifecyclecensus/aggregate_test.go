@@ -23,6 +23,13 @@ func TestParseLabel(t *testing.T) {
 		{name: "worker full mixed-case SHA", label: "143:worker:0123456789aBcDeF0123456789aBcDeF01234567", role: RoleWorker, build: "0123456789aBcDeF0123456789aBcDeF01234567"},
 		{name: "combined unknown build", label: "143:all:unknown", role: RoleAll, build: "unknown"},
 		{name: "executor marked fingerprint", label: "143:session_executor:sha256-0123456789abcdef0123456789abcdef", role: RoleSessionExecutor, build: "sha256-0123456789abcdef0123456789abcdef"},
+		{name: "operator development", label: "143:operator:dev", role: "operator", build: "dev"},
+		{name: "operator exact SHA", label: "143:operator:0123456789aBcDeF0123456789aBcDeF01234567", role: "operator", build: "0123456789aBcDeF0123456789aBcDeF01234567"},
+		{name: "operator unknown build", label: "143:operator:unknown", role: "operator", build: "unknown"},
+		{name: "operator marked fingerprint", label: "143:operator:sha256-0123456789abcdef0123456789abcdef", role: "operator", build: "sha256-0123456789abcdef0123456789abcdef"},
+		{name: "operator malformed build", label: "143:operator:private-build", role: RoleUnknown, build: "unknown"},
+		{name: "operator extra segment", label: "143:operator:dev:private", role: RoleUnknown, build: "unknown"},
+		{name: "operator spelling is exact", label: "143:Operator:dev", role: RoleUnknown, build: "unknown"},
 		{name: "untagged", role: RoleUnknown, build: "unknown"},
 		{name: "arbitrary secret", label: "postgres://synthetic:secret@synthetic-host/private", role: RoleUnknown, build: "unknown"},
 		{name: "unsupported role", label: "143:future:dev", role: RoleUnknown, build: "unknown"},
@@ -39,8 +46,36 @@ func TestParseLabel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			role, build := parseLabel(tt.label)
-			require.Equal(t, tt.role, role, "only the exact runtime role grammar may identify a configured role")
+			require.Equal(t, tt.role, role, "only allowlisted runtime or operator connection labels may identify a configured role")
 			require.Equal(t, tt.build, build, "arbitrary application metadata must collapse to unknown rather than escape into output")
+		})
+	}
+}
+
+func TestAssembleOperatorConnectionsAreNotWriterLeases(t *testing.T) {
+	t.Parallel()
+	stamp := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	tests := []struct {
+		name, label string
+		expected    ConnectionGroup
+	}{
+		{name: "connection-only operator", label: "143:operator:dev", expected: ConnectionGroup{Role: "operator", Build: "dev", State: StateUnknown, Count: 1, UnknownBackendType: 1, UnknownTransactionDetails: 1}},
+		{name: "malformed operator remains unknown", label: "143:operator:private", expected: ConnectionGroup{Role: RoleUnknown, Build: "unknown", State: StateUnknown, Count: 1, UnknownBackendType: 1, UnknownTransactionDetails: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			writers := db.LifecycleCensusWriterSnapshot{ObservedAt: stamp, Rows: []db.LifecycleCensusWriter{{Role: "operator", BuildSHA: "dev", Version: 0}}}
+			connections := db.LifecycleCensusConnectionSnapshot{ObservedAt: stamp.Add(time.Second), Rows: []db.LifecycleCensusConnection{{ApplicationName: tt.label}}}
+			report := assemble(writers, connections)
+			require.Equal(t, WriterSummary{ObservedAt: stamp, CountsScope: CountsObserved, RowsObserved: 1, Groups: []WriterGroup{{Role: RoleUnknown, Build: "dev", Count: 1}}}, report.Writers, "even a supplied operator lease must remain an unknown writer role")
+			require.Equal(t, ConnectionSummary{ObservedAt: stamp.Add(time.Second), Visibility: VisibilityUnknown, CountsScope: CountsObserved, RowsObserved: 1, Groups: []ConnectionGroup{tt.expected}}, report.Connections, "operator connection recognition must retain separate clocks and uncertainty without inventing a lease")
+			encoded, err := json.Marshal(report)
+			require.NoError(t, err, "the additive connection role must retain the versioned JSON shape")
+			require.Equal(t, 1, report.SchemaVersion, "adding a known connection-role value must not change the existing report structure")
+			repeated, err := json.Marshal(assemble(writers, connections))
+			require.NoError(t, err, "the same observations must remain serializable")
+			require.Equal(t, encoded, repeated, "operator summaries must remain deterministic for identical observations")
 		})
 	}
 }
@@ -134,7 +169,7 @@ func TestCensusEnumValidation(t *testing.T) {
 		validate func() error
 		valid    bool
 	}{}
-	for _, value := range []ObservedRole{RoleUnknown, RoleAPI, RoleWorker, RoleAll, RoleSessionExecutor, "", "future"} {
+	for _, value := range []ObservedRole{RoleUnknown, RoleAPI, RoleWorker, RoleAll, RoleSessionExecutor, "operator", "", "future"} {
 		tests = append(tests, struct {
 			name     string
 			validate func() error

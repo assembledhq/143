@@ -7,6 +7,17 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+// LifecycleOperatorConnectionRole is a connection label, not a registry role.
+// It must not be used to register a lifecycle writer instance or claim authority.
+const LifecycleOperatorConnectionRole = "operator"
+
+// LifecycleOperatorConnectionApplicationName labels the fixed operator role and
+// binary build without extending the set of participating lease-writer roles.
+// It has the same observational and proxy limitations as runtime labels.
+func LifecycleOperatorConnectionApplicationName(buildSHA string) string {
+	return "143:" + LifecycleOperatorConnectionRole + ":" + lifecycleConnectionBuildLabel(buildSHA)
+}
+
 // LifecycleConnectionApplicationName labels a configured role and binary build,
 // not a process instance or compatible writer. Startup labels are observational;
 // in particular, transaction-pooling proxies need not preserve backend identity.

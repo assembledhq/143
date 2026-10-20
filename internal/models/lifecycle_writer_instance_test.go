@@ -20,6 +20,7 @@ func TestLifecycleWriterRole_Validate(t *testing.T) {
 		{name: "standalone session executor", role: LifecycleWriterRoleSessionExecutor},
 		{name: "empty is invalid", wantErr: `invalid LifecycleWriterRole: ""`},
 		{name: "unknown is invalid", role: "other", wantErr: `invalid LifecycleWriterRole: "other"`},
+		{name: "operator connection is not a lease writer", role: "operator", wantErr: `invalid LifecycleWriterRole: "operator"`},
 		{name: "role spelling is exact", role: "API", wantErr: `invalid LifecycleWriterRole: "API"`},
 	}
 
