@@ -870,6 +870,17 @@ SQL predicates, legacy returned-row shape and session/phase association behavior
 are unchanged: canonical admission must still establish exact phase ownership,
 current allocation and shared epochs before composing these resource-only writes.
 
+Thread status, no-result turn completion, result and result-bearing turn writes
+also have concrete `pgx.Tx` persistence variants. Each shares unchanged private
+row SQL with its legacy wrapper; only the wrapper retains immediate best-effort
+publication. InTx paths return opaque org/thread reload identity, never publish
+or settle, and reject missing transaction or result before writing. Legacy nil
+result behavior is unchanged. The explicit post-commit adapter reloads current
+visible state, possibly a later write; it does not promise the earlier write's
+snapshot, durable delivery or commit attestation. Archived-row mutation versus
+hidden notification, nil versus empty diff, exact turn and provider-ID behavior
+remain intentional legacy semantics, not new authority checks.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -1578,6 +1589,9 @@ revision; it must not reinterpret new durable records or trigger replay.
   persistence with explicit post-commit workspace effects. Full-schema tests
   prove exact outer commit/rollback and enabled-publisher silence; canonical
   allocation/epoch/phase association checks remain unimplemented.
+- [x] Expose four thread persistence seams with explicit current-state
+  post-commit effects, preserving legacy wrappers and verifying full-schema
+  outer settlement, tenant rejection and notification behavior.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1873,6 +1887,22 @@ Legacy wrapper begin, phase and uncertain-commit failures produce no wakeup.
 No test treats an opaque in-memory effect value as a committed receipt or exact
 once delivery. This proves persistence composition only, not allocation, epoch,
 phase association, deployment or compatibility-floor acceptance.
+
+### 0a thread persistence validation
+
+The focused race selection passed locally on PostgreSQL 17.10: seven root tests,
+86 subtests, no failures or skips. Reproduce with an owned disposable PostgreSQL
+15+ server in `TEST_DATABASE_URL` and `go test -race -p=1 ./internal/db
+-run '^TestThreadPersistence' -count=1 -parallel=1 -timeout=3m`. Legacy/new unit
+regressions and focused vet also pass.
+
+The complete unchanged schema covers one occupied connection, stable transaction
+identity, exact whole-row outer commit/rollback, foreign/nil rejection before
+writes and enabled-publisher silence. Tests retain lower exact turns, empty
+provider-ID differences, nil/empty diff, failure and timestamp fields, archived
+row behavior and publication of a later committed state. Reload/publish failures
+remain best-effort warnings. These are composable persistence prerequisites,
+not canonical allocation/epoch fences, deployment or writer-floor evidence.
 
 ## Surprises & Discoveries
 

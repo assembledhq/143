@@ -4384,13 +4384,189 @@
       ]
     },
     {
+      "id": "internal/db/session_thread_persistence.go:SessionThreadStore.CompleteTurnInTx",
+      "source_sha256": "c6d42a642db5448ad2682767c369acb12a288c0fc3dbcdcd1afc34e0f7fcca65",
+      "operation": "caller-owned CompleteTurn thread persistence",
+      "owner": "SessionThreadStore persistence only; caller retains authority and transaction ownership",
+      "predicate": "Tenant/thread identity only; writes supplied exact turn and idle. Empty provider session preserves the prior provider ID; no monotonic/current-runtime or epoch check.",
+      "lock": "Concrete caller-supplied pgx.Tx only; nil/typed-nil rejected and result variants reject nil result before writes. No Begin, settlement, retry, pool fallback, reload or publication.",
+      "stale_result": "Original missing-row and SQL errors propagate; matching stale resource is not rejected by an epoch fence. Any failed composed unit requires outer rollback. Staged effects do not attest commit or authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a persistence prerequisite only. Canonical projection must validate exact allocation/current shared epochs before writing, retaining operation-specific nil/empty/turn behavior.",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "RuntimeAuthority exact immutable allocation and CURRENT job/attempt/runtime lease, lane/admission/end/workspace epochs; HistoricalAttemptAuthority limited to own immutable terminal/transcript receipt.",
+      "fence_outcome": "AuthorizationRejected aborts; exact immutable own-attempt terminal settlement can return StaleSharedState, but skip ALL shared current status/result/diff/checkpoint/input ack/owner release/new execution/publication.",
+      "prerequisite_0a": "Explicit transaction seam exists; canonical allocation/session/lane/end-epoch validation and mixed-writer conversions remain. Discard effects on error/rollback/uncertain commit and publish only after confirmed commit.",
+      "evidence": [
+        "internal/db/session_thread_persistence.go:40",
+        "Shared SQL for legacy wrapper and concrete InTx; neither establishes lifecycle authority",
+        "PublishCommittedThreadPersistenceEffects returns a current-state wakeup, not exact write snapshot",
+        "internal/db/session_thread_persistence_test.go",
+        "internal/db/session_thread_persistence_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_thread_persistence.go:SessionThreadStore.UpdateResultInTx",
+      "source_sha256": "447847eb8c540e41fdc388229b30c68672a29e9bfe4d201e3a6299de0933d975",
+      "operation": "caller-owned UpdateResult thread persistence",
+      "owner": "SessionThreadStore persistence only; caller retains authority and transaction ownership",
+      "predicate": "Tenant/thread identity only; terminal status stamps completion, nil diff preserves and empty diff clears; failure explanation/category retain original fallback. No runtime/admission or archive predicate.",
+      "lock": "Concrete caller-supplied pgx.Tx only; nil/typed-nil rejected and result variants reject nil result before writes. No Begin, settlement, retry, pool fallback, reload or publication.",
+      "stale_result": "Original missing-row and SQL errors propagate; matching stale resource is not rejected by an epoch fence. Any failed composed unit requires outer rollback. Staged effects do not attest commit or authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a persistence prerequisite only. Canonical projection must validate exact allocation/current shared epochs before writing, retaining operation-specific nil/empty/turn behavior.",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "RuntimeAuthority exact immutable allocation and CURRENT job/attempt/runtime lease, lane/admission/end/workspace epochs; HistoricalAttemptAuthority limited to own immutable terminal/transcript receipt.",
+      "fence_outcome": "AuthorizationRejected aborts; exact immutable own-attempt terminal settlement can return StaleSharedState, but skip ALL shared current status/result/diff/checkpoint/input ack/owner release/new execution/publication.",
+      "prerequisite_0a": "Explicit transaction seam exists; canonical allocation/session/lane/end-epoch validation and mixed-writer conversions remain. Discard effects on error/rollback/uncertain commit and publish only after confirmed commit.",
+      "evidence": [
+        "internal/db/session_thread_persistence.go:54",
+        "Shared SQL for legacy wrapper and concrete InTx; neither establishes lifecycle authority",
+        "PublishCommittedThreadPersistenceEffects returns a current-state wakeup, not exact write snapshot",
+        "internal/db/session_thread_persistence_test.go",
+        "internal/db/session_thread_persistence_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_thread_persistence.go:SessionThreadStore.UpdateStatusInTx",
+      "source_sha256": "4f8515509d552ffd0cae84fa6747dc89c50b6f217bfed3c74147571c1c3a057c",
+      "operation": "caller-owned UpdateStatus thread persistence",
+      "owner": "SessionThreadStore persistence only; caller retains authority and transaction ownership",
+      "predicate": "Tenant/thread identity only; running stamps start and clears cancellation, terminal status stamps completion. No runtime/admission or archive predicate.",
+      "lock": "Concrete caller-supplied pgx.Tx only; nil/typed-nil rejected and result variants reject nil result before writes. No Begin, settlement, retry, pool fallback, reload or publication.",
+      "stale_result": "Original missing-row and SQL errors propagate; matching stale resource is not rejected by an epoch fence. Any failed composed unit requires outer rollback. Staged effects do not attest commit or authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a persistence prerequisite only. Canonical projection must validate exact allocation/current shared epochs before writing, retaining operation-specific nil/empty/turn behavior.",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "RuntimeAuthority exact immutable allocation and CURRENT job/attempt/runtime lease, lane/admission/end/workspace epochs; HistoricalAttemptAuthority limited to own immutable terminal/transcript receipt.",
+      "fence_outcome": "AuthorizationRejected aborts; exact immutable own-attempt terminal settlement can return StaleSharedState, but skip ALL shared current status/result/diff/checkpoint/input ack/owner release/new execution/publication.",
+      "prerequisite_0a": "Explicit transaction seam exists; canonical allocation/session/lane/end-epoch validation and mixed-writer conversions remain. Discard effects on error/rollback/uncertain commit and publish only after confirmed commit.",
+      "evidence": [
+        "internal/db/session_thread_persistence.go:26",
+        "Shared SQL for legacy wrapper and concrete InTx; neither establishes lifecycle authority",
+        "PublishCommittedThreadPersistenceEffects returns a current-state wakeup, not exact write snapshot",
+        "internal/db/session_thread_persistence_test.go",
+        "internal/db/session_thread_persistence_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_thread_persistence.go:SessionThreadStore.UpdateTurnCompleteInTx",
+      "source_sha256": "3e2f8b8f98a2ddecc51a4810728ed727faf430a34f0d9117f20cf15d40957980",
+      "operation": "caller-owned UpdateTurnComplete thread persistence",
+      "owner": "SessionThreadStore persistence only; caller retains authority and transaction ownership",
+      "predicate": "Tenant/thread identity only; idle and exact supplied turn/result, including lower turn, overwrite empty provider ID and clear failure fields. Nil diff preserves and empty diff clears. No runtime/admission or archive predicate.",
+      "lock": "Concrete caller-supplied pgx.Tx only; nil/typed-nil rejected and result variants reject nil result before writes. No Begin, settlement, retry, pool fallback, reload or publication.",
+      "stale_result": "Original missing-row and SQL errors propagate; matching stale resource is not rejected by an epoch fence. Any failed composed unit requires outer rollback. Staged effects do not attest commit or authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a persistence prerequisite only. Canonical projection must validate exact allocation/current shared epochs before writing, retaining operation-specific nil/empty/turn behavior.",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "RuntimeAuthority exact immutable allocation and CURRENT job/attempt/runtime lease, lane/admission/end/workspace epochs; HistoricalAttemptAuthority limited to own immutable terminal/transcript receipt.",
+      "fence_outcome": "AuthorizationRejected aborts; exact immutable own-attempt terminal settlement can return StaleSharedState, but skip ALL shared current status/result/diff/checkpoint/input ack/owner release/new execution/publication.",
+      "prerequisite_0a": "Explicit transaction seam exists; canonical allocation/session/lane/end-epoch validation and mixed-writer conversions remain. Discard effects on error/rollback/uncertain commit and publish only after confirmed commit.",
+      "evidence": [
+        "internal/db/session_thread_persistence.go:71",
+        "Shared SQL for legacy wrapper and concrete InTx; neither establishes lifecycle authority",
+        "PublishCommittedThreadPersistenceEffects returns a current-state wakeup, not exact write snapshot",
+        "internal/db/session_thread_persistence_test.go",
+        "internal/db/session_thread_persistence_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_thread_store.go:SessionThreadStore.completeTurnRow",
+      "source_sha256": "4e23c36e2f9df1da851df617ba36757a1d2132243c9dd95daad2bcdb15e5276c",
+      "operation": "private shared row CompleteTurn thread persistence",
+      "owner": "SessionThreadStore persistence only; caller retains authority and transaction ownership",
+      "predicate": "Tenant/thread identity only; writes supplied exact turn and idle. Empty provider session preserves the prior provider ID; no monotonic/current-runtime or epoch check.",
+      "lock": "One unchanged statement through supplied DBTX; wrapper passes its DB handle, explicit InTx passes concrete pgx.Tx. No Begin, settlement, retry or publication.",
+      "stale_result": "Original missing-row and SQL errors propagate; matching stale resource is not rejected by an epoch fence. Any failed composed unit requires outer rollback. Staged effects do not attest commit or authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a persistence prerequisite only. Canonical projection must validate exact allocation/current shared epochs before writing, retaining operation-specific nil/empty/turn behavior.",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "RuntimeAuthority exact immutable allocation and CURRENT job/attempt/runtime lease, lane/admission/end/workspace epochs; HistoricalAttemptAuthority limited to own immutable terminal/transcript receipt.",
+      "fence_outcome": "AuthorizationRejected aborts; exact immutable own-attempt terminal settlement can return StaleSharedState, but skip ALL shared current status/result/diff/checkpoint/input ack/owner release/new execution/publication.",
+      "prerequisite_0a": "Explicit transaction seam exists; canonical allocation/session/lane/end-epoch validation and mixed-writer conversions remain. Discard effects on error/rollback/uncertain commit and publish only after confirmed commit.",
+      "evidence": [
+        "internal/db/session_thread_store.go:434",
+        "Shared SQL for legacy wrapper and concrete InTx; neither establishes lifecycle authority",
+        "PublishCommittedThreadPersistenceEffects returns a current-state wakeup, not exact write snapshot",
+        "internal/db/session_thread_persistence_test.go",
+        "internal/db/session_thread_persistence_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_thread_store.go:SessionThreadStore.updateResultRow",
+      "source_sha256": "18efc499e17bd69a37d5b88db182f8374eccdd0a6f4f806cf3f0cbf5ea2062d7",
+      "operation": "private shared row UpdateResult thread persistence",
+      "owner": "SessionThreadStore persistence only; caller retains authority and transaction ownership",
+      "predicate": "Tenant/thread identity only; terminal status stamps completion, nil diff preserves and empty diff clears; failure explanation/category retain original fallback. No runtime/admission or archive predicate.",
+      "lock": "One unchanged statement through supplied DBTX; wrapper passes its DB handle, explicit InTx passes concrete pgx.Tx. No Begin, settlement, retry or publication.",
+      "stale_result": "Original missing-row and SQL errors propagate; matching stale resource is not rejected by an epoch fence. Any failed composed unit requires outer rollback. Staged effects do not attest commit or authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a persistence prerequisite only. Canonical projection must validate exact allocation/current shared epochs before writing, retaining operation-specific nil/empty/turn behavior.",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "RuntimeAuthority exact immutable allocation and CURRENT job/attempt/runtime lease, lane/admission/end/workspace epochs; HistoricalAttemptAuthority limited to own immutable terminal/transcript receipt.",
+      "fence_outcome": "AuthorizationRejected aborts; exact immutable own-attempt terminal settlement can return StaleSharedState, but skip ALL shared current status/result/diff/checkpoint/input ack/owner release/new execution/publication.",
+      "prerequisite_0a": "Explicit transaction seam exists; canonical allocation/session/lane/end-epoch validation and mixed-writer conversions remain. Discard effects on error/rollback/uncertain commit and publish only after confirmed commit.",
+      "evidence": [
+        "internal/db/session_thread_store.go:478",
+        "Shared SQL for legacy wrapper and concrete InTx; neither establishes lifecycle authority",
+        "PublishCommittedThreadPersistenceEffects returns a current-state wakeup, not exact write snapshot",
+        "internal/db/session_thread_persistence_test.go",
+        "internal/db/session_thread_persistence_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_thread_store.go:SessionThreadStore.updateStatusRow",
+      "source_sha256": "97621a3ff7a7be08385e1a0e1c41d2b893d0a7fd830bead271fc8cb5f0b5372d",
+      "operation": "private shared row UpdateStatus thread persistence",
+      "owner": "SessionThreadStore persistence only; caller retains authority and transaction ownership",
+      "predicate": "Tenant/thread identity only; running stamps start and clears cancellation, terminal status stamps completion. No runtime/admission or archive predicate.",
+      "lock": "One unchanged statement through supplied DBTX; wrapper passes its DB handle, explicit InTx passes concrete pgx.Tx. No Begin, settlement, retry or publication.",
+      "stale_result": "Original missing-row and SQL errors propagate; matching stale resource is not rejected by an epoch fence. Any failed composed unit requires outer rollback. Staged effects do not attest commit or authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a persistence prerequisite only. Canonical projection must validate exact allocation/current shared epochs before writing, retaining operation-specific nil/empty/turn behavior.",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "RuntimeAuthority exact immutable allocation and CURRENT job/attempt/runtime lease, lane/admission/end/workspace epochs; HistoricalAttemptAuthority limited to own immutable terminal/transcript receipt.",
+      "fence_outcome": "AuthorizationRejected aborts; exact immutable own-attempt terminal settlement can return StaleSharedState, but skip ALL shared current status/result/diff/checkpoint/input ack/owner release/new execution/publication.",
+      "prerequisite_0a": "Explicit transaction seam exists; canonical allocation/session/lane/end-epoch validation and mixed-writer conversions remain. Discard effects on error/rollback/uncertain commit and publish only after confirmed commit.",
+      "evidence": [
+        "internal/db/session_thread_store.go:315",
+        "Shared SQL for legacy wrapper and concrete InTx; neither establishes lifecycle authority",
+        "PublishCommittedThreadPersistenceEffects returns a current-state wakeup, not exact write snapshot",
+        "internal/db/session_thread_persistence_test.go",
+        "internal/db/session_thread_persistence_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_thread_store.go:SessionThreadStore.updateTurnCompleteRow",
+      "source_sha256": "8a93c4a4a31e2d1c44e52374634fd8967f6e297c0130a1d363555869fc8e5def",
+      "operation": "private shared row UpdateTurnComplete thread persistence",
+      "owner": "SessionThreadStore persistence only; caller retains authority and transaction ownership",
+      "predicate": "Tenant/thread identity only; idle and exact supplied turn/result, including lower turn, overwrite empty provider ID and clear failure fields. Nil diff preserves and empty diff clears. No runtime/admission or archive predicate.",
+      "lock": "One unchanged statement through supplied DBTX; wrapper passes its DB handle, explicit InTx passes concrete pgx.Tx. No Begin, settlement, retry or publication.",
+      "stale_result": "Original missing-row and SQL errors propagate; matching stale resource is not rejected by an epoch fence. Any failed composed unit requires outer rollback. Staged effects do not attest commit or authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a persistence prerequisite only. Canonical projection must validate exact allocation/current shared epochs before writing, retaining operation-specific nil/empty/turn behavior.",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "RuntimeAuthority exact immutable allocation and CURRENT job/attempt/runtime lease, lane/admission/end/workspace epochs; HistoricalAttemptAuthority limited to own immutable terminal/transcript receipt.",
+      "fence_outcome": "AuthorizationRejected aborts; exact immutable own-attempt terminal settlement can return StaleSharedState, but skip ALL shared current status/result/diff/checkpoint/input ack/owner release/new execution/publication.",
+      "prerequisite_0a": "Explicit transaction seam exists; canonical allocation/session/lane/end-epoch validation and mixed-writer conversions remain. Discard effects on error/rollback/uncertain commit and publish only after confirmed commit.",
+      "evidence": [
+        "internal/db/session_thread_store.go:1002",
+        "Shared SQL for legacy wrapper and concrete InTx; neither establishes lifecycle authority",
+        "PublishCommittedThreadPersistenceEffects returns a current-state wakeup, not exact write snapshot",
+        "internal/db/session_thread_persistence_test.go",
+        "internal/db/session_thread_persistence_postgres_test.go"
+      ]
+    },
+    {
       "id": "internal/db/session_thread_store.go:SessionThreadStore.CompleteTurn",
-      "source_sha256": "91afc597b6e3bdcc785f406534ffa80a51b860467eea79bea4d4ef11b3ca514f",
+      "source_sha256": "25b7420f307d6fca3e6955fd820def2586b8f3bf582bffb4537c2d01e9307b06",
       "operation": "legacy thread idle completion",
       "owner": "SessionThreadStore in internal/db",
-      "predicate": "org/id only; writes supplied current_turn/agent session and idle without expected runtime/admission",
-      "lock": "Persistence statement through DBTX; public wrappers can Begin/Commit/publish. Explicit pgx.Tx authority/effect seam does not yet exist.",
-      "stale_result": "Matching successor can be mutated. Missing-resource/no-row errors are not stale-attempt proof.",
+      "predicate": "Tenant/thread identity only; writes supplied exact turn and idle. Empty provider session preserves the prior provider ID; no monotonic/current-runtime or epoch check.",
+      "lock": "Legacy wrapper delegates to a shared DBTX row helper, then immediately performs the original best-effort current-state reload/publication. No owned transaction; not an in-transaction publication boundary.",
+      "stale_result": "Original missing-row and SQL errors retained; matching stale resource can still overwrite successor. Legacy result wrappers still panic on nil result before writing. Transaction owners must use the explicit InTx seam and defer its effects.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: replace shared mutation with canonical conditional pgx.Tx primitive under exact attempt/epochs; preserve combined result/diff/activity atomicity and post-commit effects.",
       "canonical_target": "ProjectTurnInTx",
@@ -4398,9 +4574,10 @@
       "fence_outcome": "AuthorizationRejected aborts; exact immutable own-attempt terminal settlement can return StaleSharedState, but skip ALL shared current status/result/diff/checkpoint/input ack/owner release/new execution/publication.",
       "prerequisite_0a": "0a: replace shared mutation with canonical conditional pgx.Tx primitive under exact attempt/epochs; preserve combined result/diff/activity atomicity and post-commit effects.",
       "evidence": [
-        "internal/db/session_thread_store.go:419",
-        "Discovered: boundary-definition, status-update",
-        "SQL: UPDATE session_threads SET status = 'idle', current_turn = @current_turn, last_activity_at = now(), agent_session_id = COALESCE(@agent_session_id, agent_session_id) WHERE id = @id AND org_id = @org_id"
+        "internal/db/session_thread_store.go:426",
+        "Shared row helper SessionThreadStore.completeTurnRow; explicit CompleteTurnInTx variant omits publication",
+        "internal/db/session_thread_persistence_test.go",
+        "internal/db/session_thread_persistence_postgres_test.go"
       ]
     },
     {
@@ -4546,12 +4723,12 @@
     },
     {
       "id": "internal/db/session_thread_store.go:SessionThreadStore.UpdateResult",
-      "source_sha256": "18efc499e17bd69a37d5b88db182f8374eccdd0a6f4f806cf3f0cbf5ea2062d7",
+      "source_sha256": "64a21f418aad21fdd0254af6156080ada72de6588b585c85531176dae4d14561",
       "operation": "generic thread result/status persistence",
       "owner": "SessionThreadStore in internal/db",
-      "predicate": "org/id only; result and terminal fields not conditional on runtime/turn/admission",
-      "lock": "Persistence statement through DBTX; public wrappers can Begin/Commit/publish. Explicit pgx.Tx authority/effect seam does not yet exist.",
-      "stale_result": "Matching successor can be mutated. Missing-resource/no-row errors are not stale-attempt proof.",
+      "predicate": "Tenant/thread identity only; terminal status stamps completion, nil diff preserves and empty diff clears; failure explanation/category retain original fallback. No runtime/admission or archive predicate.",
+      "lock": "Legacy wrapper delegates to a shared DBTX row helper, then immediately performs the original best-effort current-state reload/publication. No owned transaction; not an in-transaction publication boundary.",
+      "stale_result": "Original missing-row and SQL errors retained; matching stale resource can still overwrite successor. Legacy result wrappers still panic on nil result before writing. Transaction owners must use the explicit InTx seam and defer its effects.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: replace shared mutation with canonical conditional pgx.Tx primitive under exact attempt/epochs; preserve combined result/diff/activity atomicity and post-commit effects.",
       "canonical_target": "ProjectTurnInTx",
@@ -4559,19 +4736,20 @@
       "fence_outcome": "AuthorizationRejected aborts; exact immutable own-attempt terminal settlement can return StaleSharedState, but skip ALL shared current status/result/diff/checkpoint/input ack/owner release/new execution/publication.",
       "prerequisite_0a": "0a: replace shared mutation with canonical conditional pgx.Tx primitive under exact attempt/epochs; preserve combined result/diff/activity atomicity and post-commit effects.",
       "evidence": [
-        "internal/db/session_thread_store.go:456",
-        "Discovered: status-update",
-        "SQL: UPDATE session_threads SET status = @status, completed_at = CASE WHEN @status IN ('completed', 'failed', 'cancelled') THEN now() ELSE completed_at END, result_summary = @result_summary, diff = COALESCE(@diff, diff), failure_explanation = @failure_explanation, failure_category = @failure_category WHERE id = @id AND org_id = @org_id"
+        "internal/db/session_thread_store.go:470",
+        "Shared row helper SessionThreadStore.updateResultRow; explicit UpdateResultInTx variant omits publication",
+        "internal/db/session_thread_persistence_test.go",
+        "internal/db/session_thread_persistence_postgres_test.go"
       ]
     },
     {
       "id": "internal/db/session_thread_store.go:SessionThreadStore.UpdateStatus",
-      "source_sha256": "97621a3ff7a7be08385e1a0e1c41d2b893d0a7fd830bead271fc8cb5f0b5372d",
+      "source_sha256": "e820cdf63af27f7850c1029f14e30bc420542f042c2ebc0aa1a83029df0c4a42",
       "operation": "generic thread status persistence",
       "owner": "SessionThreadStore in internal/db",
-      "predicate": "org/id only; running clears cancel intent, terminal stamps completed_at",
-      "lock": "Persistence statement through DBTX; public wrappers can Begin/Commit/publish. Explicit pgx.Tx authority/effect seam does not yet exist.",
-      "stale_result": "Matching successor can be mutated. Missing-resource/no-row errors are not stale-attempt proof.",
+      "predicate": "Tenant/thread identity only; running stamps start and clears cancellation, terminal status stamps completion. No runtime/admission or archive predicate.",
+      "lock": "Legacy wrapper delegates to a shared DBTX row helper, then immediately performs the original best-effort current-state reload/publication. No owned transaction; not an in-transaction publication boundary.",
+      "stale_result": "Original missing-row and SQL errors retained; matching stale resource can still overwrite successor. Legacy result wrappers still panic on nil result before writing. Transaction owners must use the explicit InTx seam and defer its effects.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: replace shared mutation with canonical conditional pgx.Tx primitive under exact attempt/epochs; preserve combined result/diff/activity atomicity and post-commit effects.",
       "canonical_target": "ProjectTurnInTx",
@@ -4580,20 +4758,19 @@
       "prerequisite_0a": "0a: replace shared mutation with canonical conditional pgx.Tx primitive under exact attempt/epochs; preserve combined result/diff/activity atomicity and post-commit effects.",
       "evidence": [
         "internal/db/session_thread_store.go:307",
-        "Discovered: status-update",
-        "SQL: UPDATE session_threads SET status = @status WHERE id = @id AND org_id = @org_id",
-        "SQL: UPDATE session_threads SET status = @status, completed_at = now() WHERE id = @id AND org_id = @org_id",
-        "SQL: UPDATE session_threads SET status = @status, started_at = now(), cancel_requested_at = NULL WHERE id = @id AND org_id = @org_id"
+        "Shared row helper SessionThreadStore.updateStatusRow; explicit UpdateStatusInTx variant omits publication",
+        "internal/db/session_thread_persistence_test.go",
+        "internal/db/session_thread_persistence_postgres_test.go"
       ]
     },
     {
       "id": "internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
-      "source_sha256": "a9e78e9011a9679cef2f189d8512c081a543308e30e9d4d4532e9c8f6dcb261a",
+      "source_sha256": "e4252bde3eb4fa91c5fdb83803bbf5fcd8fee4d6b0de8d895a7affdbd031074d",
       "operation": "thread idle turn/result projection",
       "owner": "SessionThreadStore in internal/db",
-      "predicate": "org/id only; supplied current_turn/results installed without expected runtime/admission",
-      "lock": "Persistence statement through DBTX; public wrappers can Begin/Commit/publish. Explicit pgx.Tx authority/effect seam does not yet exist.",
-      "stale_result": "Matching successor can be mutated. Missing-resource/no-row errors are not stale-attempt proof.",
+      "predicate": "Tenant/thread identity only; idle and exact supplied turn/result, including lower turn, overwrite empty provider ID and clear failure fields. Nil diff preserves and empty diff clears. No runtime/admission or archive predicate.",
+      "lock": "Legacy wrapper delegates to a shared DBTX row helper, then immediately performs the original best-effort current-state reload/publication. No owned transaction; not an in-transaction publication boundary.",
+      "stale_result": "Original missing-row and SQL errors retained; matching stale resource can still overwrite successor. Legacy result wrappers still panic on nil result before writing. Transaction owners must use the explicit InTx seam and defer its effects.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: replace shared mutation with canonical conditional pgx.Tx primitive under exact attempt/epochs; preserve combined result/diff/activity atomicity and post-commit effects.",
       "canonical_target": "ProjectTurnInTx",
@@ -4601,9 +4778,10 @@
       "fence_outcome": "AuthorizationRejected aborts; exact immutable own-attempt terminal settlement can return StaleSharedState, but skip ALL shared current status/result/diff/checkpoint/input ack/owner release/new execution/publication.",
       "prerequisite_0a": "0a: replace shared mutation with canonical conditional pgx.Tx primitive under exact attempt/epochs; preserve combined result/diff/activity atomicity and post-commit effects.",
       "evidence": [
-        "internal/db/session_thread_store.go:973",
-        "Discovered: boundary-definition, status-update",
-        "SQL: UPDATE session_threads SET status = 'idle', current_turn = @current_turn, last_activity_at = now(), agent_session_id = @agent_session_id, result_summary = @result_summary, diff = COALESCE(@diff, diff), failure_explanation = NULL, failure_category = NULL WHERE id = @id AND org_id = @org_id"
+        "internal/db/session_thread_store.go:994",
+        "Shared row helper SessionThreadStore.updateTurnCompleteRow; explicit UpdateTurnCompleteInTx variant omits publication",
+        "internal/db/session_thread_persistence_test.go",
+        "internal/db/session_thread_persistence_postgres_test.go"
       ]
     },
     {
