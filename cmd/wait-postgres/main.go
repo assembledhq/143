@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/version"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -68,7 +71,7 @@ func waitForPostgres(ctx context.Context, dbURL string, timeout time.Duration) e
 	var lastErr error
 	for {
 		attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		conn, err := pgx.Connect(attemptCtx, dbURL)
+		conn, err := connectLifecycleWaiter(attemptCtx, dbURL, version.BuildSHA)
 		if err == nil {
 			err = conn.Ping(attemptCtx)
 			closeErr := conn.Close(context.Background())
@@ -90,4 +93,18 @@ func waitForPostgres(ctx context.Context, dbURL string, timeout time.Duration) e
 		case <-time.After(pollInterval):
 		}
 	}
+}
+
+func connectLifecycleWaiter(ctx context.Context, databaseURL, buildSHA string) (*pgx.Conn, error) {
+	config, err := pgx.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	for key := range config.RuntimeParams {
+		if strings.EqualFold(key, "application_name") {
+			delete(config.RuntimeParams, key)
+		}
+	}
+	config.RuntimeParams["application_name"] = db.LifecycleOperatorConnectionApplicationName(buildSHA)
+	return pgx.ConnectConfig(ctx, config)
 }

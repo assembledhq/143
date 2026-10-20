@@ -64,6 +64,14 @@ func TestLifecycleConnectionApplicationNamePostgres(t *testing.T) {
 			if tt.operator {
 				applicationName = LifecycleOperatorConnectionApplicationName(buildSHA)
 			}
+			if applicationName != "" {
+				// Every opted-in caller shares the same alias hardening, while
+				// callers without attribution retain their original startup inputs.
+				query.Set("APPLICATION_NAME", "synthetic-uppercase-override")
+				query.Set("Application_Name", "synthetic-mixed-override")
+				query.Set("options", "-c application_name=synthetic-options-override -c idle_in_transaction_session_timeout=25000")
+				isolatedURL.RawQuery = query.Encode()
+			}
 
 			// Holding both acquisitions at once forces two distinct physical
 			// connections, without relying on background pool maintenance.
@@ -118,6 +126,11 @@ func requireLifecycleConnectionState(t *testing.T, ctx context.Context, admin *p
 	require.NoError(t, err, "read startup name and writer-version state on the actual acquired connection")
 	require.Equal(t, expectedName, applicationName, "the connection must advertise exactly the selected passive or inherited name")
 	require.Nil(t, writerVersion, "passive connection attribution must not inject a transaction writer-version setting")
+	if expectedName != "synthetic-existing-name" {
+		var idleTimeout string
+		require.NoError(t, connection.QueryRow(ctx, "SHOW idle_in_transaction_session_timeout").Scan(&idleTimeout), "read the unrelated startup option on the attributed physical connection")
+		require.Equal(t, "25s", idleTimeout, "removing application-name aliases must preserve unrelated options on fresh, reused and replacement backends")
+	}
 	var observedName string
 	err = admin.QueryRow(ctx, `SELECT application_name FROM pg_stat_activity WHERE datname=current_database() AND pid=$1`, pid).Scan(&observedName)
 	require.NoError(t, err, "inspect only this acquired backend rather than every process sharing its role and build")

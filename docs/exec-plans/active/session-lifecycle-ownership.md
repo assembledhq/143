@@ -134,6 +134,15 @@ source database verifies that its original rows and catalog remain unchanged and
 that the temporary sibling is removed. This target-isolation repair adds no
 writer attribution, observer or lifecycle authority.
 
+The auxiliary attribution slice labels `backfill-usage` and `wait-postgres` with
+the same operator/build policy. Backfill retains its pool defaults and rollup
+behavior. The waiter parses and labels each existing retry attempt, preserving
+native URI/keyword/environment handling, Ping/Close and timeout behavior. The
+shared pool builder now removes case-insensitive application-name aliases only
+when a caller explicitly supplies attribution; empty options retain all previous
+naming inputs. Unrelated startup options remain untouched. Neither command starts
+an observer or sets a writer-version marker; uninjected builds retain `dev`.
+
 Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
 identify the inspected implementation; the executable inventory rechecks the
 current tree rather than treating line numbers as permanent identities.
@@ -1535,6 +1544,9 @@ revision; it must not reinterpret new durable records or trigger replay.
   and PostgreSQL driver, including target/options, up/down and packaging behavior.
 - [x] Isolate demo-seed check-mode writes from database-name query overrides,
   with both native-driver target checks and a full-schema source-preservation test.
+- [x] Validate backfill/waiter attribution through real PostgreSQL factories,
+  binary startup frames and native environment/keyword targets, including the
+  shared opt-in pool's case-alias handling without writer authority.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1758,6 +1770,26 @@ pass for the checked scope. Docker/Make wiring tests and local/Linux-amd64 build
 verify SHA injection without constructing an image. These are local checks,
 not deployment, proxy attribution, floor/drain proof or completion of 0a.
 Independent exact-candidate review remains a separate gate.
+
+### 0a auxiliary-command attribution validation
+
+The complete `cmd/backfill-usage` and `cmd/wait-postgres` race suites passed
+locally on PostgreSQL 17.10: 11 root tests and 22 subtests, with no failures or
+skips. Reproduce with an owned disposable PostgreSQL 15+ server in
+`TEST_DATABASE_URL` and `go test -race -p=1 ./cmd/backfill-usage
+./cmd/wait-postgres -count=1 -parallel=3 -timeout=3m`.
+
+Full-schema factory probes run in separate processes to exercise native
+URI/keyword/environment precedence without mutating shared test environment.
+They verify the exact target, safe name, unrelated startup settings, absent
+writer-version marker and empty writer registry. Separate startup-only protocol
+peers reject authentication before SQL; these prove actual stamped/dev command
+metadata and the documented single-file backfill entrypoint, not database
+behavior. The real waiter also proves successful Ping and connection closure.
+Parse-error, cancellation, retry-wait and actual-loop wiring checks retain the
+existing retry policy. Shared pool tests exercise opted-in runtime/operator
+aliases and unrelated options on fresh, reused and reset backends. These remain
+local attribution checks, not deployment, floor/drain proof or completion of 0a.
 
 ## Surprises & Discoveries
 

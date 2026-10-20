@@ -13,9 +13,11 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 
 	internaldb "github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/version"
 )
 
 func main() {
@@ -30,7 +32,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	pool, err := internaldb.NewPool(ctx, dbURL)
+	pool, err := newBackfillUsagePool(ctx, dbURL, version.BuildSHA)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
 	}
@@ -74,4 +76,10 @@ func main() {
 	}
 
 	fmt.Fprintf(os.Stderr, "Backfill complete: %d orgs, %d hours each\n", processed, totalHours)
+}
+
+func newBackfillUsagePool(ctx context.Context, databaseURL, buildSHA string) (*pgxpool.Pool, error) {
+	return internaldb.NewPoolWithOptions(ctx, databaseURL, internaldb.PoolOptions{
+		ApplicationName: internaldb.LifecycleOperatorConnectionApplicationName(buildSHA),
+	})
 }
