@@ -21,6 +21,11 @@ type approvedGrantPostgresCase struct {
 	deleted               bool
 }
 
+type approvedGrantConcurrentCase struct {
+	name                                                     string
+	historical, prelock, wrapper, duplicate, missingMetadata bool
+}
+
 func approvedGrantPostgresCases() []approvedGrantPostgresCase {
 	return []approvedGrantPostgresCase{
 		{name: "standalone commit", commit: true},
@@ -91,16 +96,36 @@ func TestAgentCapabilityApprovedGrantFullSchemaPostgres(t *testing.T) {
 			runApprovedGrantPostgresCase(t, pool, fixture.orgID, sessionID, fixture.runID, tt)
 		})
 	}
-	for _, tt := range []struct {
-		name    string
-		prelock bool
-	}{
-		{name: "legacy joined snapshot before lock wait loses the earlier grant"},
-		{name: "prior statement session prelock preserves both committed grants", prelock: true},
+	for _, tt := range []approvedGrantConcurrentCase{
+		{name: "historical pre-fix joined SQL loses the earlier grant", historical: true},
+		{name: "historical joined SQL with external prelock preserves both grants", historical: true, prelock: true},
+		{name: "current InTx retains concurrent distinct grants"},
+		{name: "current wrapper retains concurrent distinct grants", wrapper: true},
+		{name: "current InTx detects the concurrently committed duplicate", duplicate: true},
+		{name: "current wrapper detects the concurrently committed duplicate", wrapper: true, duplicate: true},
+		{name: "current InTx retains both first grants without existing metadata", missingMetadata: true},
+		{name: "current wrapper retains both first grants without existing metadata", wrapper: true, missingMetadata: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			runApprovedGrantConcurrentFullSchemaCase(t, pool, tt.prelock)
+			runApprovedGrantConcurrentFullSchemaCase(t, pool, tt)
+		})
+	}
+	for _, tt := range []struct {
+		name      string
+		isolation pgx.TxIsoLevel
+		wrapper   bool
+	}{
+		{name: "caller repeatable read rejected before writes", isolation: pgx.RepeatableRead},
+		{name: "caller serializable rejected before writes", isolation: pgx.Serializable},
+		{name: "caller read uncommitted rejected before writes", isolation: pgx.ReadUncommitted},
+		{name: "wrapper repeatable read default rejected before writes", isolation: pgx.RepeatableRead, wrapper: true},
+		{name: "wrapper serializable default rejected before writes", isolation: pgx.Serializable, wrapper: true},
+		{name: "wrapper read uncommitted default rejected before writes", isolation: pgx.ReadUncommitted, wrapper: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			runApprovedGrantUnsupportedIsolationPostgresCase(t, pool, tt.isolation, tt.wrapper)
 		})
 	}
 }
@@ -191,11 +216,10 @@ func runApprovedGrantPostgresCase(t *testing.T, pool *pgxpool.Pool, orgID, sessi
 	requireApprovedGrantJSON(t, expectedRun, persistedRun, "only a linked committed run may mirror the full approved snapshot")
 }
 
-// The unprelocked case records an unchanged legacy lost-update hazard, not a
-// desired lifecycle contract. The joined SELECT takes its metadata snapshot
-// before waiting for the session row. Canonical callers must first acquire the
-// session lock in a separate statement, then read the grant snapshot afresh.
-func runApprovedGrantConcurrentFullSchemaCase(t *testing.T, database *pgxpool.Pool, prelock bool) {
+// Historical cases execute explicitly retained pre-fix SQL, not the repaired
+// production method. They record why old deployed writers remain a floor/drain
+// gate even when current wrappers and InTx callers preserve fresh snapshots.
+func runApprovedGrantConcurrentFullSchemaCase(t *testing.T, database *pgxpool.Pool, tt approvedGrantConcurrentCase) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -207,11 +231,18 @@ func runApprovedGrantConcurrentFullSchemaCase(t *testing.T, database *pgxpool.Po
 	owned := newAutomationReaperFixture(t, pool)
 	sessionID := owned.session(t, string(models.SessionStatusIdle), nil, nil, nil)
 	fixture := newApprovedGrantTestFixture()
+	if tt.missingMetadata {
+		fixture.existing = []models.AgentCapabilitySnapshotItem{}
+	}
 	before, err := json.Marshal(fixture.existing)
 	require.NoError(t, err, "encode the complete original concurrent grant snapshot")
 	_, err = pool.Exec(ctx, `INSERT INTO session_execution_metadata(session_id,org_id,capability_snapshot)
 		VALUES($1,$2,$3::jsonb) ON CONFLICT(session_id) DO UPDATE SET capability_snapshot=EXCLUDED.capability_snapshot`, sessionID, owned.orgID, string(before))
 	require.NoError(t, err, "seed the isolated session snapshot before either concurrent grant")
+	if tt.missingMetadata {
+		_, err = pool.Exec(ctx, "DELETE FROM session_execution_metadata WHERE org_id=$1 AND session_id=$2", owned.orgID, sessionID)
+		require.NoError(t, err, "exercise concurrent first grants without an existing execution metadata row")
+	}
 	_, err = pool.Exec(ctx, "UPDATE automation_runs SET capability_snapshot=$3::jsonb WHERE org_id=$1 AND id=$2", owned.orgID, owned.runID, string(before))
 	require.NoError(t, err, "seed the isolated linked automation snapshot before either concurrent grant")
 	owner, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
@@ -227,14 +258,31 @@ func runApprovedGrantConcurrentFullSchemaCase(t *testing.T, database *pgxpool.Po
 	stagedA, err := NewAgentCapabilityPolicyStore(nil).AppendApprovedSessionGrantInTx(ctx, owned.orgID, owner, sessionID, grantA)
 	require.NoError(t, err, "stage grant A while retaining the caller's session lock")
 	requireApprovedGrantJSON(t, wantA, stagedA, "grant A should stage the complete first snapshot")
-	contender, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	require.NoError(t, err, "begin grant B in a separate read-committed transaction")
-	contenderPID := contender.Conn().PgConn().PID()
+	contenderConfig := database.Config()
+	contenderConfig.MaxConns, contenderConfig.MinConns, contenderConfig.MinIdleConns = 1, 0, 0
+	contenderPool, err := pgxpool.NewWithConfig(ctx, contenderConfig)
+	require.NoError(t, err, "reserve a separate one-connection pool for either the actual wrapper or the supplied transaction")
+	defer contenderPool.Close()
+	contenderConn, err := contenderPool.Acquire(ctx)
+	require.NoError(t, err, "identify the contender's sole backend before its call begins")
+	contenderPID := contenderConn.Conn().PgConn().PID()
+	contenderConn.Release()
 	grantB := fixture.item
-	grantB.ID = models.AgentCapabilityPRHistory
-	grantB.DisplayName = "Pull request history"
-	requestB := uuid.New()
-	grantB.HumanInputRequestID = &requestB
+	if !tt.duplicate {
+		grantB.ID = models.AgentCapabilityPRHistory
+		grantB.DisplayName = "Pull request history"
+		requestB := uuid.New()
+		grantB.HumanInputRequestID = &requestB
+	}
+	var beforeCommitSession, beforeCommitRun []models.AgentCapabilitySnapshotItem
+	if !tt.missingMetadata {
+		err = pool.QueryRow(ctx, `SELECT sem.capability_snapshot, ar.capability_snapshot
+			FROM session_execution_metadata sem JOIN automation_runs ar ON ar.org_id=sem.org_id AND ar.id=$3
+			WHERE sem.org_id=$1 AND sem.session_id=$2`, owned.orgID, sessionID, owned.runID).Scan(&beforeCommitSession, &beforeCommitRun)
+		require.NoError(t, err, "inspect both snapshots from a separate connection before the owner commits")
+		requireApprovedGrantJSON(t, fixture.existing, beforeCommitSession, "staged grant A must not publish its session snapshot before caller commit")
+		requireApprovedGrantJSON(t, fixture.existing, beforeCommitRun, "staged grant A must not publish its automation snapshot before caller commit")
+	}
 	type result struct {
 		snapshot []models.AgentCapabilitySnapshotItem
 		err      error
@@ -244,16 +292,31 @@ func runApprovedGrantConcurrentFullSchemaCase(t *testing.T, database *pgxpool.Po
 	contenderDone := make(chan struct{})
 	go func() {
 		defer close(contenderDone)
-		defer func() { _ = contender.Rollback(context.Background()) }()
 		close(started)
-		if prelock {
+		if tt.wrapper {
+			snapshot, err := NewAgentCapabilityPolicyStore(contenderPool).AppendApprovedSessionGrant(ctx, owned.orgID, sessionID, grantB)
+			finished <- result{snapshot: snapshot, err: err}
+			return
+		}
+		contender, err := contenderPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+		if err != nil {
+			finished <- result{err: err}
+			return
+		}
+		defer func() { _ = contender.Rollback(context.Background()) }()
+		if tt.prelock {
 			var id uuid.UUID
 			if err := contender.QueryRow(ctx, "SELECT id FROM sessions WHERE org_id=$1 AND id=$2 FOR UPDATE", owned.orgID, sessionID).Scan(&id); err != nil {
 				finished <- result{err: err}
 				return
 			}
 		}
-		snapshot, err := NewAgentCapabilityPolicyStore(nil).AppendApprovedSessionGrantInTx(ctx, owned.orgID, contender, sessionID, grantB)
+		var snapshot []models.AgentCapabilitySnapshotItem
+		if tt.historical {
+			snapshot, err = appendApprovedGrantHistoricalJoinedInTx(ctx, contender, owned.orgID, sessionID, grantB)
+		} else {
+			snapshot, err = NewAgentCapabilityPolicyStore(nil).AppendApprovedSessionGrantInTx(ctx, owned.orgID, contender, sessionID, grantB)
+		}
 		if err == nil {
 			err = contender.Commit(ctx)
 		}
@@ -278,9 +341,15 @@ func runApprovedGrantConcurrentFullSchemaCase(t *testing.T, database *pgxpool.Po
 	case <-ctx.Done():
 		t.Fatal("concurrent grant B must finish after grant A releases the session")
 	}
-	require.NoError(t, actual.err, "grant B should settle its own transaction after the observed wait")
-	want := append(append([]models.AgentCapabilitySnapshotItem{}, fixture.existing...), grantB)
-	if prelock {
+	if tt.duplicate {
+		require.ErrorIs(t, actual.err, ErrCapabilityAlreadyGranted, "the contender must see grant A's committed duplicate after its parent-lock wait")
+	} else {
+		require.NoError(t, actual.err, "grant B should settle its own transaction after the observed wait")
+	}
+	want := wantA
+	if tt.historical && !tt.prelock {
+		want = append(append([]models.AgentCapabilitySnapshotItem{}, fixture.existing...), grantB)
+	} else if !tt.duplicate {
 		want = append(append([]models.AgentCapabilitySnapshotItem{}, wantA...), grantB)
 	}
 	requireApprovedGrantJSON(t, want, actual.snapshot, "the returned snapshot must match the exact characterized statement-order outcome")
@@ -291,7 +360,7 @@ func runApprovedGrantConcurrentFullSchemaCase(t *testing.T, database *pgxpool.Po
 		JOIN automation_runs ar ON ar.org_id=sal.org_id AND ar.id=sal.automation_run_id
 		WHERE sem.org_id=$1 AND sem.session_id=$2`, owned.orgID, sessionID).Scan(&persistedSession, &persistedRun)
 	require.NoError(t, err, "inspect both full-schema durable snapshots after both callers commit")
-	requireApprovedGrantJSON(t, want, persistedSession, "separate prelock must preserve both grants while the unchanged joined statement characterizes loss of grant A")
+	requireApprovedGrantJSON(t, want, persistedSession, "current persistence must retain every committed grant; only explicitly historical SQL may reproduce pre-fix loss")
 	requireApprovedGrantJSON(t, want, persistedRun, "the linked automation snapshot must exactly mirror the characterized committed session snapshot")
 }
 

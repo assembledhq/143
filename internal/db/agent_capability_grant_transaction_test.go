@@ -15,14 +15,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const approvedGrantLockSQL = `SELECT COALESCE(sem.capability_snapshot, '[]'::jsonb), sal.automation_run_id
+const approvedGrantLockSQL = `SELECT id FROM sessions
+	WHERE org_id = @org_id AND id = @session_id AND deleted_at IS NULL
+	FOR UPDATE`
+
+const approvedGrantReadSQL = `SELECT COALESCE(sem.capability_snapshot, '[]'::jsonb), sal.automation_run_id
 	FROM sessions s
 	LEFT JOIN session_execution_metadata sem
 	  ON sem.org_id = s.org_id AND sem.session_id = s.id
 	LEFT JOIN session_automation_links sal
 	  ON sal.org_id = s.org_id AND sal.session_id = s.id
-	WHERE s.org_id = @org_id AND s.id = @session_id AND s.deleted_at IS NULL
-	FOR UPDATE OF s`
+	WHERE s.org_id = @org_id AND s.id = @session_id AND s.deleted_at IS NULL`
 
 const approvedGrantSessionSQL = `INSERT INTO session_execution_metadata (session_id, org_id, capability_snapshot)
 	VALUES (@session_id, @org_id, @snapshot::jsonb)
@@ -70,6 +73,8 @@ func approvedGrantPersistenceCases() []approvedGrantTestCase {
 		{name: "duplicate returns unchanged snapshot", failure: "duplicate", cause: ErrCapabilityAlreadyGranted},
 		{name: "foreign org or missing session returns no rows", failure: "missing", cause: pgx.ErrNoRows},
 		{name: "session lock query error", failure: "lock", cause: io.EOF, wantText: "lock session capability snapshot"},
+		{name: "isolation inspection error", failure: "isolation", cause: io.ErrNoProgress, wantText: "read append capability grant transaction isolation"},
+		{name: "fresh snapshot query error", failure: "read", cause: io.EOF, wantText: "lock session capability snapshot"},
 		{name: "invalid snapshot scan error", failure: "scan", wantText: "not supported"},
 		{name: "new snapshot marshal error", failure: "marshal", wantText: "marshal capability snapshot"},
 		{name: "session snapshot write error", failure: "session", cause: io.ErrUnexpectedEOF, wantText: "update session capability snapshot"},
@@ -85,17 +90,30 @@ func expectApprovedGrantPersistence(t *testing.T, mock pgxmock.PgxPoolIface, fix
 	if tt.failure == "duplicate" {
 		fixture.item = fixture.existing[0]
 	}
-	query := mock.ExpectQuery(regexp.QuoteMeta(approvedGrantLockSQL)).
+	isolation := mock.ExpectQuery("^SHOW transaction_isolation$")
+	if tt.failure == "isolation" {
+		isolation.WillReturnError(tt.cause)
+		return nil
+	}
+	isolation.WillReturnRows(pgxmock.NewRows([]string{"transaction_isolation"}).AddRow("read committed"))
+	parent := mock.ExpectQuery(regexp.QuoteMeta(approvedGrantLockSQL)).
 		WithArgs(pgx.NamedArgs{"org_id": fixture.orgID, "session_id": fixture.sessionID})
 	if tt.failure == "lock" {
+		parent.WillReturnError(tt.cause)
+		return nil
+	}
+	if tt.failure == "missing" {
+		parent.WillReturnRows(pgxmock.NewRows([]string{"id"}))
+		return nil
+	}
+	parent.WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(fixture.sessionID))
+	query := mock.ExpectQuery(regexp.QuoteMeta(approvedGrantReadSQL)).
+		WithArgs(pgx.NamedArgs{"org_id": fixture.orgID, "session_id": fixture.sessionID})
+	if tt.failure == "read" {
 		query.WillReturnError(tt.cause)
 		return nil
 	}
 	rows := pgxmock.NewRows([]string{"capability_snapshot", "automation_run_id"})
-	if tt.failure == "missing" {
-		query.WillReturnRows(rows)
-		return nil
-	}
 	// pgxmock assigns Go values; real JSONB decoding is covered by PostgreSQL
 	// tests rather than pretending this mock implements the JSONB codec.
 	var snapshotValue any = fixture.existing
@@ -236,6 +254,51 @@ func TestAgentCapabilityApprovedGrantInTxRejectsNilTransaction(t *testing.T) {
 			actual, err := NewAgentCapabilityPolicyStore(nil).AppendApprovedSessionGrantInTx(context.Background(), fixture.orgID, tt.tx, fixture.sessionID, fixture.item)
 			require.Nil(t, actual, "invalid transaction cannot produce a capability snapshot")
 			require.ErrorContains(t, err, "nil transaction", "invalid transaction must return an error without falling back to the store pool")
+		})
+	}
+}
+
+func TestAgentCapabilityApprovedGrantRejectsUnsupportedIsolation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, isolation string
+		callerOwned     bool
+	}{
+		{name: "wrapper repeatable read", isolation: string(pgx.RepeatableRead)},
+		{name: "wrapper serializable", isolation: string(pgx.Serializable)},
+		{name: "wrapper read uncommitted", isolation: string(pgx.ReadUncommitted)},
+		{name: "caller repeatable read", isolation: string(pgx.RepeatableRead), callerOwned: true},
+		{name: "caller serializable", isolation: string(pgx.Serializable), callerOwned: true},
+		{name: "caller read uncommitted", isolation: string(pgx.ReadUncommitted), callerOwned: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newApprovedGrantTestFixture()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create an isolated unsupported-isolation fixture")
+			defer mock.Close()
+			mock.ExpectBegin()
+			mock.ExpectQuery("^SHOW transaction_isolation$").WillReturnRows(pgxmock.NewRows([]string{"transaction_isolation"}).AddRow(tt.isolation))
+			var actual []models.AgentCapabilitySnapshotItem
+			if tt.callerOwned {
+				tx, beginErr := mock.Begin(context.Background())
+				require.NoError(t, beginErr, "the caller must retain ownership of its unsupported transaction")
+				actual, err = NewAgentCapabilityPolicyStore(nil).AppendApprovedSessionGrantInTx(context.Background(), fixture.orgID, tx, fixture.sessionID, fixture.item)
+				mock.ExpectQuery("^SELECT 42$").WillReturnRows(pgxmock.NewRows([]string{"value"}).AddRow(42))
+				var value int
+				require.NoError(t, tx.QueryRow(context.Background(), "SELECT 42").Scan(&value), "isolation rejection must not abort or settle the caller's transaction")
+				require.Equal(t, 42, value, "only the caller may decide what to do after the nonmutating rejection")
+				mock.ExpectRollback()
+				require.NoError(t, tx.Rollback(context.Background()), "the caller must settle its own rejected transaction")
+			} else {
+				mock.ExpectRollback()
+				actual, err = NewAgentCapabilityPolicyStore(mock).AppendApprovedSessionGrant(context.Background(), fixture.orgID, fixture.sessionID, fixture.item)
+			}
+			require.EqualError(t, err, ErrCapabilityGrantRequiresReadCommitted.Error(), "unsupported isolation must fail explicitly without silent downgrade")
+			require.ErrorIs(t, err, ErrCapabilityGrantRequiresReadCommitted, "callers must be able to distinguish the isolation precondition from lock or duplicate errors")
+			require.Nil(t, actual, "unsupported isolation must not return a staged capability snapshot")
+			require.NoError(t, mock.ExpectationsWereMet(), "isolation rejection must happen before parent locks, metadata reads, writes, commits or retries")
 		})
 	}
 }
