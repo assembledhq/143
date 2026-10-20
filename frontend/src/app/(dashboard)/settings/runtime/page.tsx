@@ -708,10 +708,10 @@ function CapacityLimitsSection() {
           <SettingRow
             id="max-concurrent-runs"
             label="Concurrent agent runs"
-            description="Limit simultaneous coding-agent turns across the organization."
+            description="Limit simultaneous coding-agent turns across the organization. New runs and follow-up messages wait when the quota is full."
             helper={concurrentRunsHelper}
             warning={concurrentRunsWarning}
-            tooltip="This is an org quota enforced whenever a turn starts, for new runs and follow-up messages alike; turns over the quota wait for a slot. Code review sessions count toward it but are never held by it. Fleet capacity is advisory: workers admit sandboxes per node, and preview sandboxes share those slots. Users can still queue additional work."
+            tooltip="Code reviews consume quota but are not held by it. Sandbox availability also depends on per-node fleet capacity shared with previews."
           >
             <BoundedNumberInput
               id="max-concurrent-runs"

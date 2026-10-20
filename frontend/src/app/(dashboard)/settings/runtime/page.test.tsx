@@ -312,7 +312,7 @@ describe("RuntimeSettingsPage", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Limit simultaneous coding-agent turns across the organization.",
+        "Limit simultaneous coding-agent turns across the organization. New runs and follow-up messages wait when the quota is full.",
       ),
     ).toBeInTheDocument();
     expect(
