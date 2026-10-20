@@ -1815,38 +1815,20 @@ func (s *SessionStore) UpdateResultAndCompleteActivityPhase(
 	reason models.ActivityPhaseBoundaryReason,
 	completedAt time.Time,
 ) (models.SessionActivityPhase, models.Session, error) {
-	if result == nil {
-		result = &models.SessionResult{}
-	}
-	diffStats := computeDiffStatsForResult(result)
-	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
 	tx, err := s.Begin(ctx)
 	if err != nil {
 		return models.SessionActivityPhase{}, models.Session{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	session, err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats)
-	if err != nil {
-		return models.SessionActivityPhase{}, models.Session{}, err
-	}
-	var updated workspaceRevisionUpdate
-	if persistDiffSnapshot {
-		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats)
-		if err != nil {
-			return models.SessionActivityPhase{}, models.Session{}, err
-		}
-	}
-	phase, err := completeActivityPhaseInTransaction(ctx, tx, orgID, phaseID, phaseStatus, reason, completedAt)
+	phase, session, effects, err := s.UpdateResultAndCompleteActivityPhaseInTx(ctx, orgID, tx, runID, phaseID, status, result, phaseStatus, reason, completedAt)
 	if err != nil {
 		return models.SessionActivityPhase{}, models.Session{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return models.SessionActivityPhase{}, models.Session{}, err
 	}
-	if persistDiffSnapshot {
-		s.publishWorkspaceGenerationChanged(ctx, orgID, runID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
-	}
+	s.PublishCommittedSessionPersistenceEffects(ctx, orgID, effects)
 	return phase, session, nil
 }
 
@@ -1865,11 +1847,7 @@ func (s *SessionStore) UpdateStatusAndCompleteActivityPhase(
 		return models.SessionActivityPhase{}, models.Session{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	session, err := s.updateStatusRow(ctx, tx, orgID, runID, status)
-	if err != nil {
-		return models.SessionActivityPhase{}, models.Session{}, err
-	}
-	phase, err := completeActivityPhaseInTransaction(ctx, tx, orgID, phaseID, phaseStatus, reason, completedAt)
+	phase, session, err := s.UpdateStatusAndCompleteActivityPhaseInTx(ctx, orgID, tx, runID, phaseID, status, phaseStatus, reason, completedAt)
 	if err != nil {
 		return models.SessionActivityPhase{}, models.Session{}, err
 	}
@@ -2498,36 +2476,19 @@ func (s *SessionStore) UpdateTurnCompleteAndCompleteActivityPhase(
 	reason models.ActivityPhaseBoundaryReason,
 	completedAt time.Time,
 ) (models.SessionActivityPhase, error) {
-	if result == nil {
-		result = &models.SessionResult{}
-	}
-	diffStats := computeDiffStatsForResult(result)
-	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
 	tx, err := s.Begin(ctx)
 	if err != nil {
 		return models.SessionActivityPhase{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := s.updateTurnCompleteRow(ctx, tx, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats); err != nil {
-		return models.SessionActivityPhase{}, err
-	}
-	var updated workspaceRevisionUpdate
-	if persistDiffSnapshot {
-		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats)
-		if err != nil {
-			return models.SessionActivityPhase{}, err
-		}
-	}
-	phase, err := completeActivityPhaseInTransaction(ctx, tx, orgID, phaseID, phaseStatus, reason, completedAt)
+	phase, effects, err := s.UpdateTurnCompleteAndCompleteActivityPhaseInTx(ctx, orgID, tx, sessionID, phaseID, turn, result, agentSessionID, snapshotKey, phaseStatus, reason, completedAt)
 	if err != nil {
 		return models.SessionActivityPhase{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return models.SessionActivityPhase{}, err
 	}
-	if persistDiffSnapshot {
-		s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
-	}
+	s.PublishCommittedSessionPersistenceEffects(ctx, orgID, effects)
 	return phase, nil
 }
 

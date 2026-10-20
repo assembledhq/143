@@ -858,6 +858,18 @@ contract. This repair does not establish a drained floor, canonical lock order,
 exact consent/readiness or epoch authority. The session-before-automation order
 and independent human-input grant transaction still require conversion.
 
+The result/phase persistence slice exposes concrete `pgx.Tx` variants of the
+three existing combined result, status and turn-completion boundaries. Existing
+wrappers remain transaction owners and call the same persistence implementation.
+No InTx path begins, settles, retries or publishes, including its row/head/diff
+helpers. Opaque `SessionPersistenceEffects` returns workspace notification data;
+the owner discards it after error, rollback or uncertain commit and publishes
+only after confirmed commit. It is not a commit receipt, durable outbox or
+lifecycle authority. Status and phase publication remain service responsibilities.
+SQL predicates, legacy returned-row shape and session/phase association behavior
+are unchanged: canonical admission must still establish exact phase ownership,
+current allocation and shared epochs before composing these resource-only writes.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -1562,6 +1574,10 @@ revision; it must not reinterpret new durable records or trigger replay.
   caller-owned paths, proving retained concurrent grants, duplicate detection and
   pre-lock isolation rejection on the full schema. Historical-writer drain and
   canonical consent/lock-order conversion remain open.
+- [x] Expose transaction-composable result/status/turn plus activity-phase
+  persistence with explicit post-commit workspace effects. Full-schema tests
+  prove exact outer commit/rollback and enabled-publisher silence; canonical
+  allocation/epoch/phase association checks remain unimplemented.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1837,6 +1853,26 @@ An additional linked-SHA test run covers those real pool/driver paths; it does
 not claim an actual demo command invocation. The unchanged complete migration
 command suite separately exercises the promoted shared URI helper. These checks
 add no observer or lifecycle authority and do not establish a deployed floor.
+
+### 0a result/phase persistence validation
+
+Focused unit and full-schema race tests passed locally on PostgreSQL 17.10:
+four root tests and 63 subtests, no failures or skips. Reproduce with an owned
+disposable PostgreSQL 15+ server in `TEST_DATABASE_URL` and
+`go test -race ./internal/db -run '^TestSessionPersistence' -count=1 -parallel=3
+-timeout=3m`. Existing result/status/turn regressions and focused vet also pass.
+
+An occupied one-connection pool and transaction wrapper reject nested settlement;
+an independent reader sees the exact original row set until outer commit.
+Whole-row comparisons cover session, phase, publish state, primary changeset and
+diff snapshots. A missing phase demonstrably leaves earlier status/snapshot
+writes staged until outer rollback; a foreign tenant stages none. Configured
+Redis publishers remain silent before commit and after rejection or rollback;
+explicit org-checked workspace publication retains the existing event fields.
+Legacy wrapper begin, phase and uncertain-commit failures produce no wakeup.
+No test treats an opaque in-memory effect value as a committed receipt or exact
+once delivery. This proves persistence composition only, not allocation, epoch,
+phase association, deployment or compatibility-floor acceptance.
 
 ## Surprises & Discoveries
 
