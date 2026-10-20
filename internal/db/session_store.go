@@ -1765,10 +1765,9 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 	if result == nil {
 		result = &models.SessionResult{}
 	}
-	diffStats := computeDiffStatsForResult(result)
 	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
 	if !persistDiffSnapshot && !shouldPersistChangesetHead(result) {
-		session, err := s.updateResultRow(ctx, s.db, orgID, runID, status, result, diffStats)
+		session, err := s.updateResultRow(ctx, s.db, orgID, runID, status, result, computeDiffStatsForResult(result))
 		if err != nil {
 			return err
 		}
@@ -1782,24 +1781,15 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	session, err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats)
+	session, effects, err := s.UpdateResultInTx(ctx, orgID, tx, runID, status, result)
 	if err != nil {
 		return err
-	}
-	var updated workspaceRevisionUpdate
-	if persistDiffSnapshot {
-		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats)
-		if err != nil {
-			return err
-		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
 	s.publishStatus(ctx, &session)
-	if persistDiffSnapshot {
-		s.publishWorkspaceGenerationChanged(ctx, orgID, runID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
-	}
+	s.PublishCommittedSessionPersistenceEffects(ctx, orgID, effects)
 	return nil
 }
 
