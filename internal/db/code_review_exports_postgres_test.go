@@ -512,9 +512,9 @@ func TestCodeReviewExportPostgresFullSchema(t *testing.T) {
 	_, err = pool.Exec(ctx, `INSERT INTO repositories(id,org_id,integration_id,github_id,full_name,clone_url,installation_id)
  VALUES($1,$2,$3,123,'example/app','https://example.test/app.git',1)`, repo, org, integration)
 	require.NoError(t, err, "create repository with the real constraints")
-	_, err = pool.Exec(ctx, `INSERT INTO code_review_policies(id,org_id,version,approval_mode,description_policy,risk_policy,agent_roster)
- VALUES($1,$2,1,'comment_only','{}','{"max_additions":750}','{}')`, policy, org)
-	require.NoError(t, err, "retain a real versioned policy including schema-added defaults")
+	_, err = pool.Exec(ctx, `INSERT INTO code_review_policies(id,org_id,version,approval_mode,review_instructions,automated_approval_policy,description_policy,risk_policy,agent_roster)
+ VALUES($1,$2,1,'comment_only','Synthetic review instructions','Synthetic approval policy','{}','{"max_additions":750}','{}')`, policy, org)
+	require.NoError(t, err, "retain a real versioned policy with explicit prompts and schema defaults")
 	_, err = pool.Exec(ctx, `INSERT INTO code_review_session_metadata(id,org_id,session_id,repository_id,pull_request_id,policy_id,base_sha,head_sha,trigger_source,status,review_output_key,github_review_id,created_at,completed_at)
  VALUES($1,$3,$4,$5,$6,$7,'base','old-head','slash_command','completed','old-output',101,'2026-08-01','2026-08-01'),
  ($2,$3,$4,$5,$6,$7,'base','head','slash_command','completed','current-output',101,'2026-08-02','2026-08-02')`, oldMetadata, currentMetadata, org, session, repo, pr, policy)
