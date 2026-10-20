@@ -440,7 +440,9 @@ func newTurnAttemptPostgresPool(t *testing.T) *pgxpool.Pool {
 	_, err = admin.Exec(ctx, "CREATE DATABASE "+identifier)
 	require.NoError(t, err, "create the independently generated test database")
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Concurrent full-schema suites can make database-drop checkpoints slow.
+		// Allow bounded cleanup without weakening connection closure or using FORCE.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_, err := admin.Exec(ctx, "DROP DATABASE "+identifier)
 		require.NoError(t, err, "drop only the exact generated database after its connections close, without force")
