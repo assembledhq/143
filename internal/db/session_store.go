@@ -2432,10 +2432,9 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 	if result == nil {
 		result = &models.SessionResult{}
 	}
-	diffStats := computeDiffStatsForResult(result)
 	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
 	if !persistDiffSnapshot && !shouldPersistChangesetHead(result) {
-		return s.updateTurnCompleteRow(ctx, s.db, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats)
+		return s.updateTurnCompleteRow(ctx, s.db, orgID, sessionID, turn, result, agentSessionID, snapshotKey, computeDiffStatsForResult(result))
 	}
 
 	tx, err := s.Begin(ctx)
@@ -2444,22 +2443,14 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := s.updateTurnCompleteRow(ctx, tx, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats); err != nil {
+	effects, err := s.UpdateTurnCompleteInTx(ctx, orgID, tx, sessionID, turn, result, agentSessionID, snapshotKey)
+	if err != nil {
 		return err
-	}
-	var updated workspaceRevisionUpdate
-	if persistDiffSnapshot {
-		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats)
-		if err != nil {
-			return err
-		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	if persistDiffSnapshot {
-		s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
-	}
+	s.PublishCommittedSessionPersistenceEffects(ctx, orgID, effects)
 	return nil
 }
 

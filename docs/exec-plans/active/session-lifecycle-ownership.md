@@ -892,6 +892,16 @@ Empty-SQL lexical fixtures prove discovery and contract enforcement for all eigh
 named result/phase, thread and seed seams. This is syntax coverage, not runtime
 transaction ownership, semantic call resolution or authority enforcement.
 
+Standalone session turn persistence now owns the row/head/snapshot sequence used
+by its legacy transactional branch, combined phase boundary and actual evidence
+recheck completion. Recheck uses explicit session and thread InTx methods in its
+existing receipt transaction, including head-only and authoritative empty-diff
+results; it no longer enters a nested savepoint for those cases. Its read-only
+nonempty-diff rejection, root usage, domain receipt checks and legacy lock order
+are unchanged. Temporary stores still have no publishers and returned passive
+effects are deliberately discarded, so this conversion adds no notification.
+It does not add canonical shared allocation or admission/end epoch fencing.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -1609,6 +1619,9 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Register composable persistence boundaries and direct generic callers in
   the syntax guard, with concrete-contract regressions. Review-driven vocabulary
   coverage does not promote these persistence seams to lifecycle authority.
+- [x] Compose actual recheck completion with standalone session/thread turn
+  persistence, proving head-only and empty-diff results plus late receipt failure
+  roll back atomically without nested settlement or new notifications.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1928,6 +1941,26 @@ replacement writers or historical binaries. Attribution observations now poll
 server-side backend disappearance and complete their query before connection
 cleanup, including timeout paths. These are test and documentation refinements;
 they do not broaden writer authority or establish a deployment floor.
+
+### 0a recheck persistence validation
+
+Focused race and full-schema tests passed locally on PostgreSQL 17.10: five new
+root tests and 23 subtests, no failures or skips. The selection also retains the
+existing combined result/phase regressions. Reproduce with an owned PostgreSQL
+15+ server in `TEST_DATABASE_URL` and `go test -race -p=1 ./internal/db
+-run '^(TestSessionTurnPersistence|TestSessionTurnAndRecheckPersistenceFullSchemaPostgres|TestRecheckCompleteExplicitPersistenceWiring|TestSessionPersistence)' -count=1
+-parallel=1 -timeout=3m`. Focused vet and whitespace checks also pass.
+
+The real `Complete` method runs against the complete unchanged schema, with
+synthetic exact review/receipt/lease rows rather than a claim of Dispatch or
+admission proof. A one-connection outer owner rejects nested Begin and captures
+the exact staged graph. A fixture-only final-receipt trigger first verifies that
+assistant, phase, session/thread, head and optional snapshot writes occurred,
+then suppresses the receipt update. The application-level rejection leaves the
+transaction inspectable until its owner rolls back every touched row. Successful
+completion preserves root historical usage, exact receipt provenance and the
+existing lack of publication. This is atomic persistence proof, not a new fence,
+deployed compatibility floor or production acceptance.
 
 ## Surprises & Discoveries
 

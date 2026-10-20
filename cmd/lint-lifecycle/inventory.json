@@ -1772,31 +1772,24 @@
     },
     {
       "id": "internal/db/code_review_recheck_dispatch.go:CodeReviewRecheckStore.Complete",
-      "source_sha256": "2c73f92680e5e1aa5110dd88c2d00be8397acfdc52d200ecdfd7e042c3c28884",
+      "source_sha256": "88d317364ea288e9aa0df2c6b73b4e64cbd7c4c0b283bbdccb77742872563ebf",
       "operation": "complete exact read-only evidence turn and assistant/phase/dispatch receipt",
       "owner": "CodeReviewRecheckStore in internal/db",
-      "predicate": "Requires nonempty exact IDs/current job token, no result diff; LockAttempt exact running job/dispatch/assessment. Rechecks dispatch session/thread/expectedTurn + exact user message; running thread turn-1 and retained PR owner root lock. Root token usage preserved; per-recheck usage remains message/receipt.",
-      "lock": "Own Begin; job/dispatch/assessment lock -> thread FOR UPDATE -> retained root session FOR UPDATE; generic tx-bound turn writers plus assistant/phase and dispatch receipt commit together.",
+      "predicate": "Requires exact nonzero IDs/current job token and rejects nonempty result diff. Rechecks running job/dispatch/assessment, exact dispatch/session/thread/expected turn/user message, running thread turn-1 and retained PR owner parent. Explicit InTx preserves head-only and authoritative empty-diff results plus original root/per-recheck usage.",
+      "lock": "Unchanged owned Begin; job/dispatch/assessment then thread FOR UPDATE then retained parent FOR UPDATE. Explicit session/thread InTx persistence, assistant/phase and final receipt share this one commit; no savepoint or new publication.",
       "stale_result": "Invalid/foreign attempt returns ErrCodeReviewRecheckFence and rolls back. Generic turn projection after locks has no new shared admission/end epochs; cannot inherit current authority after reclaim.",
       "classification": "fenced-specialist",
-      "migration": "0a: expose CompleteInTx; preserve read-only no-diff, exact input/turn and root-usage accounting, add shared epoch projection fence and separate exact immutable own receipt settlement. Generic transaction-bound wrappers cannot publish effects or open nested diff transaction.",
+      "migration": "0a persistence prerequisite: explicit session/thread turn seams now compose without nested settlement. CompleteInTx, canonical shared admission/end epoch projection and exact immutable own-attempt settlement remain future work; no new lock order or authority is established.",
       "evidence": [
-        "internal/db/code_review_recheck_dispatch.go:463",
-        "Discovered: boundary-caller, indirect-caller",
-        "Boundary/call candidate: NewSessionStore",
-        "Boundary/call candidate: NewSessionStore -> internal/db/session_store.go:SessionStore.UpdateTurnComplete",
-        "Boundary/call candidate: NewSessionStore -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
-        "Boundary/call candidate: NewSessionThreadStore",
-        "Boundary/call candidate: NewSessionThreadStore -> internal/db/session_store.go:SessionStore.UpdateTurnComplete",
-        "Boundary/call candidate: NewSessionThreadStore -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
-        "Lock/transaction syntax: FOR UPDATE",
-        "Lock/transaction syntax: s.db.Begin",
-        "Lock/transaction syntax: tx.Commit"
+        "internal/db/code_review_recheck_dispatch.go:468",
+        "Explicit SessionStore.UpdateTurnCompleteInTx and SessionThreadStore.UpdateTurnCompleteInTx with exact supplied outer pgx.Tx",
+        "Unchanged LockAttempt/domain/input/turn predicates and thread-before-parent order; shared admission/end epochs still absent",
+        "internal/db/code_review_recheck_persistence_postgres_test.go"
       ],
       "canonical_target": "ProjectTurnInTx; SettleLostAttemptInTx",
       "authority": "ReviewAuthority: exact PR/assessment/generation/dispatch/message/turn and current attempt proof, under retained PR/session ownership.",
       "fence_outcome": "F2: AuthorizationRejected aborts. Only independently proven exact immutable own-attempt settlement may return Applied/AlreadyApplied/StaleSharedState; stale shared state skips ALL current status/result/diff/checkpoint/input acknowledgement/owner release and cannot start execution or publish externally.",
-      "prerequisite_0a": "0a: expose CompleteInTx; preserve read-only no-diff, exact input/turn and root-usage accounting, add shared epoch projection fence and separate exact immutable own receipt settlement. Generic transaction-bound wrappers cannot publish effects or open nested diff transaction."
+      "prerequisite_0a": "Expose CompleteInTx where needed and compose current shared epoch/phase/allocation authority under compatible lock order before projection. Preserve existing domain receipt, root usage and read-only contract; no generic wrapper or resource-only authority fallback."
     },
     {
       "id": "internal/db/code_review_recheck_dispatch.go:CodeReviewRecheckStore.Dispatch",
@@ -3943,12 +3936,34 @@
       ]
     },
     {
-      "id": "internal/db/session_result_persistence.go:SessionStore.UpdateTurnCompleteAndCompleteActivityPhaseInTx",
+      "id": "internal/db/session_result_persistence.go:SessionStore.UpdateTurnCompleteInTx",
       "source_sha256": "fddd265398a3a2ab5709d86db8260b735c1bfed44285ca84f6056fe96e929ee6",
+      "operation": "caller-owned session turn/result/head/diff persistence",
+      "owner": "SessionStore persistence only; outer caller validates authority and owns settlement/effects",
+      "predicate": "Normalizes nil result and retains exact org/session turn/result and publish-state reset, optional changeset head and authoritative diff snapshot. No expected current turn/allocation/admission/end/phase authority; legacy row helper does not require affected rows for a diff-free missing session.",
+      "lock": "Concrete caller-supplied pgx.Tx exclusively; same private row/head/snapshot sequence. No Begin/savepoint, Commit/Rollback, retry, pool fallback or direct/transitive publication.",
+      "stale_result": "Any error returns zero effects and requires whole outer rollback. Success/effects are staged until confirmed commit; opaque workspace data proves no commit or authority. Resource-only identity can still project onto successor shared state.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a composable persistence prerequisite used by legacy turn wrappers, combined phase persistence and actual recheck Complete. Canonical projection must still validate exact allocation/current shared epochs and retained domain authority before calling it.",
+      "canonical_target": "ProjectTurnInTx; SettleLostAttemptInTx",
+      "authority": "RuntimeAuthority: immutable allocation receipt plus CURRENT org/session/lane admission and end epochs, job/attempt lock token, runtime ID and unexpired lease; a reclaimed old lease is not current authority.",
+      "fence_outcome": "F2: AuthorizationRejected aborts. Only independently proven exact immutable own-attempt settlement may return Applied/AlreadyApplied/StaleSharedState; stale shared state skips ALL current status/result/diff/checkpoint/input acknowledgement/owner release and cannot start execution or publish externally.",
+      "prerequisite_0a": "Validate current allocation and parent/lane/end epochs in the owning canonical operation, preserve exact own-attempt settlement distinction, then compose this seam. Convert competing writers and prove floor/drain before claiming compatibility.",
+      "evidence": [
+        "internal/db/session_result_persistence.go:101",
+        "Single shared turn/head/snapshot implementation; combined turn/phase delegates",
+        "Actual CodeReviewRecheckStore.Complete uses supplied outer pgx.Tx and deliberately discards passive effects to retain no-publisher behavior",
+        "internal/db/session_turn_persistence_test.go",
+        "internal/db/code_review_recheck_persistence_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_result_persistence.go:SessionStore.UpdateTurnCompleteAndCompleteActivityPhaseInTx",
+      "source_sha256": "8056b4721290d9aada96119c79342a8606a23a012337dd4e6fb5e72a1ef4ccb4",
       "operation": "caller-owned turn/result/diff and terminal phase persistence",
       "owner": "SessionStore persistence only; caller owns transaction, authority checks and post-commit publication",
       "predicate": "Unchanged org/session turn/result and publish-state reset, optional changeset head and authoritative diff snapshot, plus org/exact phase completion; nil result normalized. No admitted allocation, phase-to-session binding or epochs are added.",
-      "lock": "Concrete caller-supplied pgx.Tx exclusively; existing row/head/snapshot/phase SQL order. No Begin, Commit, Rollback, retry, pool fallback or publication, including transitive helpers.",
+      "lock": "Concrete caller pgx.Tx only; delegates row/head/snapshot sequence to UpdateTurnCompleteInTx, then exact phase completion. No Begin, settlement, retry, pool fallback or publication.",
       "stale_result": "Any error returns zero records/effects; caller must roll back the entire unit, including earlier writes. Successful records/effects are staged until outer commit. Opaque workspace effects are not commit proof or authority; discard on rollback or uncertain commit. Resource-only success can still overwrite successor shared state.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a persistence prerequisite implemented with existing wrappers as consumers. Canonical projection must validate exact allocation/current shared epochs and exact phase association before using the seam; never treat explicit transaction composition as authorization.",
@@ -3957,11 +3972,10 @@
       "fence_outcome": "F2 applies only after independent exact own-attempt authority proof. Stale shared state must skip current result/status/diff/checkpoint/phase/ack/owner writes and external effects. The persistence seam itself has no stale-authority fence.",
       "prerequisite_0a": "Compose canonical authority and phase/session association in the same transaction before persistence. Preserve outer-only settlement, exact legacy row values and explicit post-confirmed-commit effects; drain/convert all legacy competitors before claiming the floor.",
       "evidence": [
-        "internal/db/session_result_persistence.go:100",
-        "Concrete pgx.Tx persistence seam; unchanged SQL lives in existing private row/snapshot/phase helpers",
+        "internal/db/session_result_persistence.go:135",
+        "Delegates to SessionStore.UpdateTurnCompleteInTx then unchanged completeActivityPhaseInTransaction",
         "internal/db/session_result_persistence_test.go",
-        "internal/db/session_result_persistence_postgres_test.go",
-        "SessionStore.PublishCommittedSessionPersistenceEffects: opaque org-checked workspace wakeup only; no status/phase publication"
+        "internal/db/session_result_persistence_postgres_test.go"
       ]
     },
     {
@@ -4085,22 +4099,18 @@
     },
     {
       "id": "internal/db/session_store.go:SessionStore.UpdateTurnComplete",
-      "source_sha256": "41fe9b127efb9fef1febd84890dbaf1ae8e9ed3013388701ac07b5eb48ca0360",
+      "source_sha256": "4cdaaa053dac6d3a996af0d4accf47ec2100b544ce7c96dacc06aa3ed15f3625",
       "operation": "generic resumable idle turn/result writer",
       "owner": "SessionStore in internal/db",
       "predicate": "Defaults nil result; delegates resource-only updateTurnCompleteRow. Starts transaction only when persisting diff or changeset head; no expected current attempt/end epoch.",
-      "lock": "Direct DBTX helper for no-diff result; otherwise own Begin/Commit wraps turn+diff and publishes revision after commit.",
+      "lock": "Unchanged direct DBTX row helper when no authoritative diff or head; otherwise own Begin/Commit around UpdateTurnCompleteInTx and explicit post-confirmed-commit workspace effects. Existing transaction owners must use InTx.",
       "stale_result": "SQL/phase error rolls back owned transaction; matching successor resource is not rejected by a generation fence. Tx-bound caller cannot safely reuse a Begin wrapper.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: explicit caller pgx.Tx persistence-only projection; validate exact allocation/current shared epochs, retain result/diff/phase atomicity and return effects after commit. Historical own settlement never changes current result/diff/checkpoint/phase.",
       "evidence": [
-        "internal/db/session_store.go:2395",
-        "Discovered: boundary-caller, boundary-definition, indirect-caller",
-        "Boundary/call candidate: s.updateTurnCompleteRow -> internal/db/session_store.go:SessionStore.updateTurnCompleteRow",
-        "Boundary/call candidate: s.writeDiffSnapshot",
-        "Boundary/call candidate: s.writeDiffSnapshot -> internal/db/session_store.go:SessionStore.writeDiffSnapshot",
-        "Lock/transaction syntax: s.Begin",
-        "Lock/transaction syntax: tx.Commit"
+        "internal/db/session_store.go:2431",
+        "Legacy no-head/no-snapshot direct DBTX path retained; transactional branch delegates to UpdateTurnCompleteInTx",
+        "internal/db/session_turn_persistence_test.go"
       ],
       "canonical_target": "ProjectTurnInTx; SettleLostAttemptInTx",
       "authority": "RuntimeAuthority: immutable allocation receipt plus CURRENT org/session/lane admission and end epochs, job/attempt lock token, runtime ID and unexpired lease; a reclaimed old lease is not current authority.",
