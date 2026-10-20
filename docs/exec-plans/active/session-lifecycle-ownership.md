@@ -2300,8 +2300,8 @@ approved mutation authority.
 
 ### 0a automation attempt post-commit effects validation
 
-The focused automation race selection passes on PostgreSQL 17.10: four roots
-and 25 subtests, no failures or skips. Full package verification passes 74 roots
+The original slice's focused race selection passed on PostgreSQL 17.10: four
+roots and 25 subtests, no failures or skips. Full package verification passes 74 roots
 and 186 subtests. Reproduce with an owned PostgreSQL 15+ `TEST_DATABASE_URL` and
 `go test -race -p=1 ./internal/services/automations
 -run '^TestTurnAttemptPersistence' -count=1 -timeout=3m`. Repeated
@@ -2356,8 +2356,8 @@ methods; the current root is explicitly inventoried, not lifecycle authority.
 
 ### 0a automation checkpoint post-commit effects validation
 
-Repeated race verification passes on PostgreSQL 17.10 using an owned PostgreSQL
-15+ `TEST_DATABASE_URL`. With `GOMAXPROCS=4`, run `go test -race -p=1
+The original slice's repeated race verification passed on PostgreSQL 17.10 using
+an owned PostgreSQL 15+ `TEST_DATABASE_URL`. With `GOMAXPROCS=4`, run `go test -race -p=1
 ./internal/db ./internal/services/automations
 -run '^TestCheckpointPersistence|^TestTurnAttemptPersistence' -count=3 -timeout=3m`:
 30 root executions and 255 subtest executions pass, with no failures or skips.
@@ -2370,8 +2370,9 @@ transaction modes. Nil/typed-nil, invalid key/generation, no row, collection
 failure, tenant refusal and optional notification failure remain explicit.
 Blank private effect reasons preserve all previous diff-snapshot notifications.
 
-Seventeen full-schema cases exercise the real automation owner, direct seam and
-standalone wrapper with an occupied one-connection owner and nested-Begin trap.
+The original seventeen full-schema cases exercise the real automation owner,
+direct seam and standalone wrapper with an occupied one-connection owner and
+nested-Begin trap.
 A pre-opened physical observer verifies exact session/generation/run/target/thread/
 job invisibility and settlement. Genuine late provenance SQL and deferred-commit
 errors first validate earlier writes, then reject the complete owner without an
@@ -2414,6 +2415,32 @@ before physical commit is not unknown network-commit recovery proof. Earlier
 separate reservation/send-intent work and external receipt handling are unchanged;
 future shared lifecycle projection still needs exact canonical review authority,
 allocation/current epochs, compatible locks and a deployed floor.
+
+### 0a final proof follow-ups
+
+The automation proof selection now includes five attempt-persistence roots and
+33 subtests, plus three checkpoint roots and 30 subtests. With an owned
+PostgreSQL 15+ `TEST_DATABASE_URL` and `GOMAXPROCS=4`, reproduce using
+`go test -race -p=1 ./internal/services/automations
+-run '^TestTurnAttemptPersistence|^TestCheckpointPersistence' -count=1 -timeout=3m`.
+On PostgreSQL 17.10, all eight roots and 63 subtests pass; repeating with
+`-parallel=8 -count=3` passes 24 root executions and 189 subtest executions,
+with no failures or skips. Focused vet and lifecycle inventory guards pass.
+
+Rollback inequalities now require a typed, nonnil staged graph rather than
+allowing a missing observation to pass. The real failed and successful
+automation callbacks preserve a nonnil cleared result's model, summary and
+usage; cancellation separately retains nil-result normalization. A bounded AST
+test pins the calls and selectors of both inherited row-only session methods,
+with direct, indirect, stream-reference and alias regression fixtures. It is
+not whole-program effect analysis or a new mutation-authority classification.
+
+The eighteenth checkpoint full-schema case calls the supplied-transaction seam
+with a revoked job token without first invoking the owner's attempt lock. Its
+original SQL fence returns false, no effects and an exactly unchanged staged
+graph; the caller explicitly rolls back. The standalone checkpoint comment now
+states the already-characterized missing-provenance false-with-mutation edge.
+These are proof and documentation changes only, not runtime-policy changes.
 
 ## Surprises & Discoveries
 

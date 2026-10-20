@@ -97,6 +97,7 @@ func TestCheckpointPersistenceFullSchemaPostgres(t *testing.T) {
 		{name: "real deferred commit failure discards captured event", variant: "commit"},
 		{name: "optional notification failure keeps committed checkpoint", variant: "notification"},
 		{name: "caller transaction retains commit and event ownership", mode: "transaction"},
+		{name: "caller SQL rejects revoked job token without owner lock", mode: "transaction", variant: "job token"},
 		{name: "caller rollback discards genuine checkpoint and provenance", mode: "transaction", variant: "rollback"},
 		{name: "caller missing provenance false requires whole rollback", mode: "transaction", variant: "missing"},
 		{name: "standalone DBTX retains immediate notification", mode: "standalone"},
@@ -190,9 +191,18 @@ func TestCheckpointPersistenceFullSchemaPostgres(t *testing.T) {
 				defer func() { _ = tx.Rollback(context.Background()) }()
 				var effects db.SessionPersistenceEffects
 				published, effects, publishErr = sessions.PublishCheckpointWithProvenanceInTx(ctx, f.orgID, tx, f.sessionID, f.token, agentID, "synthetic-checkpoint", kind, models.CheckpointCapabilityFullResume, 1234, f.at, models.RuntimeStopReasonSoftBudget, provenance)
-				require.NoError(t, publishErr, "the supplied transaction must remain usable after success or missing provenance false")
+				require.NoError(t, publishErr, "the supplied transaction must remain usable after success or an original SQL fence rejection")
 				starter.observe(tx)
-				require.NotEqual(t, before, staged.Load(), "success and the legacy missing-provenance false edge must both contain actual staged session writes")
+				if tt.variant == "job token" {
+					require.False(t, published, "the seam's real job-token SQL predicate must reject even without the owner's earlier LockAttempt check")
+					require.Equal(t, db.SessionPersistenceEffects{}, effects, "a direct job-token rejection cannot return a publishable workspace effect")
+					captured, ok := staged.Load().(json.RawMessage)
+					require.True(t, ok, "direct SQL token rejection must capture the real still-usable caller transaction")
+					require.NotNil(t, captured, "a missing capture cannot prove that the direct SQL fence preserved all rows")
+					require.Equal(t, before, captured, "the direct revoked-token SQL branch must stage no session, generation, lease or target mutation")
+				} else {
+					require.NotEqual(t, before, staged.Load(), "success and the legacy missing-provenance false edge must both contain actual staged session writes")
+				}
 				if tt.variant == "missing" {
 					require.False(t, published, "missing provenance must preserve the legacy joined-result false return")
 					require.Equal(t, db.SessionPersistenceEffects{}, effects, "a false checkpoint must not return a publishable effect even after staged session mutation")
@@ -200,8 +210,11 @@ func TestCheckpointPersistenceFullSchemaPostgres(t *testing.T) {
 				var later int
 				require.NoError(t, tx.QueryRow(ctx, "SELECT 42").Scan(&later), "the seam must leave its caller's concrete transaction usable for later work")
 				require.Equal(t, 42, later, "later caller work must run on the same occupied owner connection")
-				if tt.variant == "rollback" || tt.variant == "missing" {
+				if tt.variant == "rollback" || tt.variant == "missing" || tt.variant == "job token" {
 					require.NoError(t, tx.Rollback(ctx), "the caller alone rolls back the entire checkpoint and generation unit")
+					if tt.variant == "job token" {
+						require.Zero(t, starter.tx.commits, "a direct false result must be explicitly rolled back rather than committed or retried")
+					}
 				} else {
 					require.NoError(t, tx.Commit(ctx), "the caller alone physically commits checkpoint and provenance")
 					require.Empty(t, redis.Keys(), "physical commit itself must not implicitly publish the captured checkpoint effect")

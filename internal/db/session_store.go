@@ -1552,15 +1552,15 @@ func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID u
 	return true, nil
 }
 
-// PublishCheckpointWithProvenance is the only writer of an automation-owned
-// session's snapshot key (design doc 125, "Checkpoint coherence"). In one
-// statement it installs the checkpoint on the session, exactly as
-// PublishCheckpoint does, and records on the owning generation the key it
-// applies to, the head the workspace was at, the dependency input
-// fingerprint, and whether the producing turn completed its review. A
-// failure leaves the previous key and provenance installed together.
-// Returns false when the session is not owned by provenance.GenerationID
-// or the lock fence rejects the write.
+// PublishCheckpointWithProvenance retains the legacy DBTX wrapper for an
+// automation-owned checkpoint and its generation provenance (design doc 125,
+// "Checkpoint coherence"). It shares the row statement with the explicit InTx
+// seam, recording the key, head, dependency fingerprint and review completion.
+// Statement errors retain the previous key and provenance together. A false
+// result can still update the session if its matching provenance row is absent;
+// it does not prove no writes. Transaction owners must use the InTx seam and
+// roll back the whole unit on false or error, then publish returned effects
+// only after confirmed commit.
 func (s *SessionStore) PublishCheckpointWithProvenance(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, stopReason models.RuntimeStopReason, provenance models.CheckpointProvenance) (bool, error) {
 	published, effects, err := s.publishCheckpointWithProvenanceRow(ctx, s.db, orgID, sessionID, lockToken, agentSessionID, snapshotKey, kind, capability, sizeBytes, checkpointedAt, stopReason, provenance)
 	if err != nil {

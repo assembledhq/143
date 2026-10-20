@@ -87,6 +87,7 @@ func TestTurnAttemptPersistenceFullSchemaPostgres(t *testing.T) {
 		{name: "actual failed-result status waits for outer commit", kind: "result"},
 		{name: "actual awaiting-input status and row-only snapshot wait for commit", kind: "pause"},
 		{name: "actual successful diff-free turn adds no event", kind: "turn"},
+		{name: "actual cancelled turn retains nil-result normalization", kind: "cancel"},
 		{name: "latent full-diff turn defers workspace wake", kind: "full diff"},
 		{name: "latent authoritative empty-diff turn defers workspace wake", kind: "empty diff"},
 		{name: "latent head-only turn retains its head without a savepoint", kind: "head only"},
@@ -148,9 +149,19 @@ func TestTurnAttemptPersistenceFullSchemaPostgres(t *testing.T) {
 			})
 			store := NewTurnStore(starter, sessions, db.NewAutomationRunStore(starter), nil, db.NewAutomationRunResultStore(starter), nil)
 			failure := errors.New("synthetic late callback failure")
+			model, summary := "synthetic-model", "Synthetic cleared automation result"
+			clearedResult := &models.SessionResult{TokenUsage: json.RawMessage(`{"input_tokens":7,"output_tokens":3}`), ModelUsed: &model, ResultSummary: &summary}
 			var expectedStatuses []models.Session
 			err = store.EndAttempt(ctx, func(ctx context.Context, tx pgx.Tx, bound agent.SessionStore) error {
 				marker := &models.AutomationRunResult{RunID: f.runID, OrgID: f.orgID, Attempt: 1, AttemptLockToken: f.token, ThreadID: f.threadID, TurnNumber: 1, Outcome: models.AutomationRunResultTurnCompleted, ReviewComplete: true}
+				switch tt.kind {
+				case "result":
+					marker.Outcome, marker.ReviewComplete = models.AutomationRunResultAgentFailed, false
+				case "pause":
+					marker.Outcome, marker.ReviewComplete = models.AutomationRunResultAwaitingInput, false
+				case "cancel":
+					marker.Outcome, marker.ReviewComplete = models.AutomationRunResultCancelled, false
+				}
 				written, err := store.WriteResult(ctx, tx, f.orgID, f.jobID, marker)
 				if err != nil {
 					return err
@@ -161,7 +172,7 @@ func TestTurnAttemptPersistenceFullSchemaPostgres(t *testing.T) {
 				// Match the real owner: marker/run/job locks first, parent
 				// persistence second, and duration last. Latent diff cases test
 				// the adapter without changing real automation diff policy.
-				result := &models.SessionResult{}
+				result := clearedResult
 				if tt.kind == "full diff" || tt.kind == "empty diff" || tt.kind == "ordered" || tt.kind == "head only" {
 					diff, base, head := "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -0,0 +1 @@\n+synthetic\n", "synthetic-base", "synthetic-head"
 					at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -175,7 +186,7 @@ func TestTurnAttemptPersistenceFullSchemaPostgres(t *testing.T) {
 				}
 				switch tt.kind {
 				case "result":
-					err = bound.UpdateResult(ctx, f.orgID, f.sessionID, models.SessionStatusFailed, nil)
+					err = bound.UpdateResult(ctx, f.orgID, f.sessionID, models.SessionStatusFailed, result)
 				case "pause":
 					if err = bound.UpdateSnapshotInfo(ctx, f.orgID, f.sessionID, "synthetic-agent", "synthetic-checkpoint"); err == nil {
 						err = bound.UpdateStatus(ctx, f.orgID, f.sessionID, models.SessionStatusAwaitingInput)
@@ -185,7 +196,7 @@ func TestTurnAttemptPersistenceFullSchemaPostgres(t *testing.T) {
 						err = bound.UpdateStatus(ctx, f.orgID, f.sessionID, models.SessionStatusAwaitingInput)
 					}
 				default:
-					if tt.kind == "turn" {
+					if tt.kind == "cancel" {
 						result = nil
 					}
 					err = bound.UpdateTurnComplete(ctx, f.orgID, f.sessionID, 1, result, "synthetic-agent", "synthetic-checkpoint")
@@ -241,8 +252,14 @@ func TestTurnAttemptPersistenceFullSchemaPostgres(t *testing.T) {
 				require.Equal(t, before, after, "all session, publish-state, changeset, snapshot, marker and duration rows must return exactly to baseline")
 				require.Empty(t, redis.Keys(), "failed or uncertain owner settlement must discard every collected status and workspace effect")
 				if tt.failure != "duration" {
-					require.NotEqual(t, before, staged.Load(), "the outer rollback proof must contain genuine earlier staged writes rather than no-op success")
+					captured, ok := staged.Load().(json.RawMessage)
+					require.True(t, ok, "marker, callback and commit failures must capture the actual staged row graph before outer rollback")
+					require.NotNil(t, captured, "a missing staged capture must not satisfy the rollback inequality")
+					require.NotEqual(t, before, captured, "the outer rollback proof must contain genuine earlier staged writes rather than no-op success")
 				}
+				// The duration SQL trigger aborts PostgreSQL's transaction before
+				// a rollback observer can query it; its server-side checks above
+				// independently require the earlier marker/head/snapshot writes.
 				return
 			}
 			require.NoError(t, err, "the real callback must commit through the unchanged pool-backed owner")
@@ -303,6 +320,14 @@ func TestTurnAttemptPersistenceFullSchemaPostgres(t *testing.T) {
 			require.Equal(t, 1234, duration, "duration must remain the final mutation in the same committed owner unit")
 			require.Equal(t, expectedHead, head, "explicit persistence must retain head-only and authoritative changeset behavior")
 			require.Equal(t, expectedSnapshots, snapshots, "authoritative empty diffs must retain their real snapshot without adding one for actual diff-free automation")
+			if tt.kind == "result" || tt.kind == "turn" {
+				var persisted models.SessionResult
+				require.NoError(t, pool.QueryRow(ctx, `SELECT token_usage,model_used,result_summary,error FROM sessions WHERE org_id=$1 AND id=$2`, f.orgID, f.sessionID).Scan(&persisted.TokenUsage, &persisted.ModelUsed, &persisted.ResultSummary, &persisted.Error), "reload the actual nonnil cleared result projection after the real owner commits")
+				require.JSONEq(t, string(clearedResult.TokenUsage), string(persisted.TokenUsage), "diff-free automation must retain every synthetic token-usage value rather than normalize a real result to nil")
+				expected := *clearedResult
+				expected.TokenUsage, persisted.TokenUsage = nil, nil
+				require.Equal(t, expected, persisted, "actual failed and successful callbacks must preserve the nonnil cleared model and summary without adding diff fields")
+			}
 		})
 	}
 }

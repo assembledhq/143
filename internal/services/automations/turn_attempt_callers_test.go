@@ -1,11 +1,14 @@
 package automations
 
 import (
+	"bytes"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -123,4 +126,85 @@ func TestTurnAttemptPersistenceActualCallbackShape(t *testing.T) {
 	})
 	require.Equal(t, 1, constructors, "the production turn owner constructor must remain explicitly covered")
 	require.Positive(t, poolSessions, "the production original session store must be constructed over the pool rather than an outer transaction")
+}
+
+// The silent facade inherits these two reviewed methods. Pin their bounded
+// source shape too: a future notification/helper must not be silently dropped
+// just because the actual callback still calls the same method name. This is
+// deliberately not whole-program publisher or SQL analysis.
+func TestTurnAttemptPersistenceInheritedMethodsRemainRowOnly(t *testing.T) {
+	t.Parallel()
+	actual, err := os.ReadFile("../../db/session_store.go")
+	require.NoError(t, err, "inspect only the actual inherited session store methods")
+	snapshotBody := "_, err := s.db.Exec(ctx, query, pgx.NamedArgs{}); "
+	tests := []struct {
+		name, method, body string
+		allowed            bool
+	}{
+		{name: "actual snapshot method", method: "UpdateSnapshotInfo", allowed: true},
+		{name: "actual container CAS", method: "ClearContainerID", allowed: true},
+		{name: "reviewed row-only fixture", method: "UpdateSnapshotInfo", body: snapshotBody + "return err", allowed: true},
+		{name: "new direct publisher requires review", method: "UpdateSnapshotInfo", body: snapshotBody + "s.PublishCommittedSessionStatus(ctx); return err"},
+		{name: "new indirect helper requires review", method: "UpdateSnapshotInfo", body: snapshotBody + "publishWorkspace(s); return err"},
+		{name: "new stream access requires review", method: "UpdateSnapshotInfo", body: snapshotBody + "_ = s.streams; return err"},
+		{name: "aliased publisher requires review", method: "UpdateSnapshotInfo", body: snapshotBody + "publish := s.publishWorkspaceGenerationChanged; publish(ctx); return err"},
+	}
+	reviewed := map[string]turnAttemptRowOnlyMethodSyntax{
+		"UpdateSnapshotInfo": {
+			calls:     []string{"s.db.Exec"},
+			selectors: []string{"s.db.Exec", "s.db", "pgx.NamedArgs"},
+		},
+		"ClearContainerID": {
+			calls:     []string{"s.db.Exec", "fmt.Errorf", "tag.RowsAffected"},
+			selectors: []string{"s.db.Exec", "s.db", "pgx.NamedArgs", "fmt.Errorf", "tag.RowsAffected"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			source := actual
+			if tt.body != "" {
+				source = []byte("package db\nfunc (s *SessionStore) " + tt.method + "(ctx context.Context) error { " + tt.body + " }")
+			}
+			files := token.NewFileSet()
+			file, err := parser.ParseFile(files, "session_store.go", source, 0)
+			require.NoError(t, err, "parse the actual method or synthetic publisher-regression fixture")
+			var methods []*ast.FuncDecl
+			for _, declaration := range file.Decls {
+				method, ok := declaration.(*ast.FuncDecl)
+				if ok && method.Name.Name == tt.method && method.Recv != nil {
+					methods = append(methods, method)
+				}
+			}
+			require.Len(t, methods, 1, "the exact inherited method must remain explicitly visible to the row-only guard")
+			shape := turnAttemptInheritedMethodSyntax(t, files, methods[0])
+			want := reviewed[tt.method]
+			allowed := slices.Equal(want.calls, shape.calls) && slices.Equal(want.selectors, shape.selectors)
+			require.Equal(t, tt.allowed, allowed, "any new direct/indirect publisher, stream reference or unreviewed helper in the inherited method requires explicit effect classification; observed calls=%v selectors=%v", shape.calls, shape.selectors)
+		})
+	}
+}
+
+type turnAttemptRowOnlyMethodSyntax struct{ calls, selectors []string }
+
+func turnAttemptInheritedMethodSyntax(t *testing.T, files *token.FileSet, method *ast.FuncDecl) turnAttemptRowOnlyMethodSyntax {
+	t.Helper()
+	text := func(node ast.Node) string {
+		var formatted bytes.Buffer
+		require.NoError(t, format.Node(&formatted, files, node), "format only the reviewed method receiver, call or selector")
+		return formatted.String()
+	}
+	require.Len(t, method.Recv.List, 1, "the row-only guard must inspect the concrete SessionStore receiver")
+	require.Equal(t, "*SessionStore", text(method.Recv.List[0].Type), "a new receiver implementation needs explicit callback-surface review")
+	var shape turnAttemptRowOnlyMethodSyntax
+	ast.Inspect(method.Body, func(node ast.Node) bool {
+		switch value := node.(type) {
+		case *ast.CallExpr:
+			shape.calls = append(shape.calls, text(value.Fun))
+		case *ast.SelectorExpr:
+			shape.selectors = append(shape.selectors, text(value))
+		}
+		return true
+	})
+	return shape
 }
