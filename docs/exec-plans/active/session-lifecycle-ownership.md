@@ -883,6 +883,15 @@ snapshot, durable delivery or commit attestation. Archived-row mutation versus
 hidden notification, nil versus empty diff, exact turn and provider-ID behavior
 remain intentional legacy semantics, not new authority checks.
 
+The inventory guard registers the explicit composable seam names as both
+boundaries and contract-required direct calls. A cross-package `p.store` receiver
+cannot bypass review merely because its name lacks session/thread vocabulary.
+The two generic InTx name collisions require an explicit reviewed non-lifecycle
+classification; ordinary generic status/result discovery remains unchanged.
+Empty-SQL lexical fixtures prove discovery and contract enforcement for all eight
+named result/phase, thread and seed seams. This is syntax coverage, not runtime
+transaction ownership, semantic call resolution or authority enforcement.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -1597,6 +1606,9 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Strengthen grant proof for concurrent duplicate first grants and absent
   metadata visibility, and make attribution test observation/cleanup synchronous
   so server-side connection exit timing does not create a false failure.
+- [x] Register composable persistence boundaries and direct generic callers in
+  the syntax guard, with concrete-contract regressions. Review-driven vocabulary
+  coverage does not promote these persistence seams to lifecycle authority.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence

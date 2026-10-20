@@ -91,7 +91,10 @@ type call struct {
 // Unambiguous lifecycle names cover non-status admission, start, seed, delivery,
 // and cleanup seams. Generic names (Create, UpdateStatus, UpdateResult) are
 // selected separately using receiver/argument evidence; matching them globally
-// would classify every unrelated store as a lifecycle caller.
+// would classify every unrelated store as a lifecycle caller. The explicit InTx
+// seams below are deliberately conservative global name candidates, including
+// generic UpdateStatusInTx/UpdateResultInTx collisions: inventory review must
+// classify unrelated uses rather than silently exclude generic receivers.
 var boundaryNames = strings.Fields(`
 SubmitSessionMessage SubmitThreadMessage AnswerQueuedHumanInputForContinue
 answerQueuedHumanInputForContinue BeginRuntime beginRuntimeControl
@@ -120,12 +123,15 @@ ResetAfterLostReuse ResetForRuntime ReclaimLost ReclaimLostForSession
 MarkAckedForSeedMessages MarkDeliveringForMessages MarkDeliveredForEntry
 ResetUnsentDelivery CommitInboxDeliveryWithLease ReclaimExpiredLeases
 RetryRecoverable ListDeliverableAfter ListAppliedMessageIDs
-StartSeedPhase InspectContinuationRecovery RecordContinuationAttemptWithLease
+StartSeedPhase StartSeedPhaseInTx InspectContinuationRecovery RecordContinuationAttemptWithLease
 ListAppliedRecoveryMessageIDs continuationRecoveryQuery
 MarkCancelRequestedForTurn ReconcileTerminalReviews reconcileTerminalReviews
 RetireOwnerForCompletedReplacement
 UpdateTurnComplete UpdateTurnCompleteAndCompleteActivityPhase
 UpdateResultAndCompleteActivityPhase UpdateStatusAndCompleteActivityPhase
+UpdateResultAndCompleteActivityPhaseInTx UpdateStatusAndCompleteActivityPhaseInTx
+UpdateTurnCompleteAndCompleteActivityPhaseInTx
+UpdateStatusInTx CompleteTurnInTx UpdateResultInTx UpdateTurnCompleteInTx
 MarkRunningWithSandboxState FailRunningBySession CompleteTurn
 FailWorkspaceWaitForDeadLetter RecoverIncompleteCodeReviewWorkspace
 ReconcileDrainedTerminalTurn EndInterruptedAttempt CompleteExecutingPreflight
@@ -166,6 +172,9 @@ var contractBoundaryNames = strings.Fields(`
 BeginRuntime UpdateTurnComplete CompleteTurn
 UpdateTurnCompleteAndCompleteActivityPhase UpdateResultAndCompleteActivityPhase
 UpdateStatusAndCompleteActivityPhase
+UpdateResultAndCompleteActivityPhaseInTx UpdateStatusAndCompleteActivityPhaseInTx
+UpdateTurnCompleteAndCompleteActivityPhaseInTx
+UpdateStatusInTx CompleteTurnInTx UpdateResultInTx UpdateTurnCompleteInTx StartSeedPhaseInTx
 ClaimIdle ClaimForResume ClaimIdleForSession ClaimForResumeInSession
 ClaimNextQueuedForSession ClaimForAutomationTurn ClaimPrimaryForAutomationTurn
 CreateStarting CreateActive ReleaseWithLease AcquireLease BeginMaterialization

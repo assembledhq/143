@@ -3901,7 +3901,7 @@
     },
     {
       "id": "internal/db/session_result_persistence.go:SessionStore.UpdateResultAndCompleteActivityPhaseInTx",
-      "source_sha256": "5ca8577be929f9a72ef6774e37411f1c1e33d24c6e79ae4cde0c1259fb7de3d2",
+      "source_sha256": "792a1fd7c887e4164954d5f8794d9a11eac987568b8427f306886eb67b450091",
       "operation": "caller-owned result/diff and terminal phase persistence",
       "owner": "SessionStore persistence only; caller owns transaction, authority checks and post-commit publication",
       "predicate": "Unchanged org/session result update, optional primary changeset head and authoritative diff snapshot, plus org/exact phase completion; nil result normalized. Returned session retains legacy pre-later-snapshot/AFTER-trigger shape. No admitted allocation, phase-to-session binding or epochs are added.",
@@ -3923,12 +3923,12 @@
     },
     {
       "id": "internal/db/session_result_persistence.go:SessionStore.UpdateStatusAndCompleteActivityPhaseInTx",
-      "source_sha256": "3042167d3629320784fee2359d150d1209b9021c45208f0e5fddd07899af9888",
+      "source_sha256": "6c76514512ca0e3eb5d5699f26d0407ee1d9ba458c89d5375a6abc2bce358b20",
       "operation": "caller-owned generic status and terminal phase persistence",
       "owner": "SessionStore persistence only; caller owns transaction, authority checks and post-commit publication",
       "predicate": "Unchanged org/session status update and org/exact phase completion. Returns original session/phase records; no admitted allocation, phase-to-session binding or epochs are added.",
-      "lock": "Concrete caller-supplied pgx.Tx exclusively; existing row/head/snapshot/phase SQL order. No Begin, Commit, Rollback, retry, pool fallback or publication, including transitive helpers.",
-      "stale_result": "Any error returns zero records/effects; caller must roll back the entire unit, including earlier writes. Successful records/effects are staged until outer commit. Opaque workspace effects are not commit proof or authority; discard on rollback or uncertain commit. Resource-only success can still overwrite successor shared state.",
+      "lock": "Concrete caller-supplied pgx.Tx exclusively; unchanged status-row update then exact phase completion. No Begin, Commit, Rollback, retry, pool fallback or publication.",
+      "stale_result": "Any error returns zero session/phase records; caller must roll back the entire unit, including earlier writes. Returned records are staged until outer commit. No workspace effects are produced by this status-only seam. Resource identity is not a stale-authority fence.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a persistence prerequisite implemented with existing wrappers as consumers. Canonical projection must validate exact allocation/current shared epochs and exact phase association before using the seam; never treat explicit transaction composition as authorization.",
       "canonical_target": "ProjectTurnInTx; SettleLostAttemptInTx",
@@ -3937,15 +3937,14 @@
       "prerequisite_0a": "Compose canonical authority and phase/session association in the same transaction before persistence. Preserve outer-only settlement, exact legacy row values and explicit post-confirmed-commit effects; drain/convert all legacy competitors before claiming the floor.",
       "evidence": [
         "internal/db/session_result_persistence.go:71",
-        "Concrete pgx.Tx persistence seam; unchanged SQL lives in existing private row/snapshot/phase helpers",
+        "Concrete pgx.Tx status-row and phase persistence; no workspace snapshot or workspace notification",
         "internal/db/session_result_persistence_test.go",
-        "internal/db/session_result_persistence_postgres_test.go",
-        "SessionStore.PublishCommittedSessionPersistenceEffects: opaque org-checked workspace wakeup only; no status/phase publication"
+        "internal/db/session_result_persistence_postgres_test.go"
       ]
     },
     {
       "id": "internal/db/session_result_persistence.go:SessionStore.UpdateTurnCompleteAndCompleteActivityPhaseInTx",
-      "source_sha256": "359b283883ea49476fd2296856452a517719f62b7712f716e8d1bf3fbc8d1bd5",
+      "source_sha256": "fddd265398a3a2ab5709d86db8260b735c1bfed44285ca84f6056fe96e929ee6",
       "operation": "caller-owned turn/result/diff and terminal phase persistence",
       "owner": "SessionStore persistence only; caller owns transaction, authority checks and post-commit publication",
       "predicate": "Unchanged org/session turn/result and publish-state reset, optional changeset head and authoritative diff snapshot, plus org/exact phase completion; nil result normalized. No admitted allocation, phase-to-session binding or epochs are added.",
@@ -3967,7 +3966,7 @@
     },
     {
       "id": "internal/db/session_store.go:SessionStore.UpdateResultAndCompleteActivityPhase",
-      "source_sha256": "8b0b3edb88e2b83f713d3db12c74d65c2bdf6cfa0c3277afa7fa9d22575eccfa",
+      "source_sha256": "a1ed95dc34a90df6c3ccb60dba2888674c3fbc989cf5b66830f3718e78cf173a",
       "operation": "atomic result/status/diff and terminal phase writer",
       "owner": "SessionStore in internal/db",
       "predicate": "Delegates unchanged resource-only result/diff and exact phase predicates to UpdateResultAndCompleteActivityPhaseInTx; nil result normalized there. No expected current allocation/epochs.",
@@ -4064,7 +4063,7 @@
     },
     {
       "id": "internal/db/session_store.go:SessionStore.UpdateStatusAndCompleteActivityPhase",
-      "source_sha256": "b0b71e08eb5e7b8db646970610007512ecf3fff899d95e5636465cccb5d5610c",
+      "source_sha256": "2b20fc26a3989331350bc2c8520be74468c99497447c5e423fb6f823a2767745",
       "operation": "atomic generic status and terminal phase writer",
       "owner": "SessionStore in internal/db",
       "predicate": "Delegates unchanged resource-only status and exact phase predicates to UpdateStatusAndCompleteActivityPhaseInTx; no expected admitted attempt/turn/epochs.",
@@ -4110,7 +4109,7 @@
     },
     {
       "id": "internal/db/session_store.go:SessionStore.UpdateTurnCompleteAndCompleteActivityPhase",
-      "source_sha256": "3f9967811991bf709425ec1b51db689f2d0fd4eb7631b8d52306b9527ee74645",
+      "source_sha256": "b5f9a966b1c3dba66022861b85ae4ce5468e16a37f51d4b8280163e631d2c304",
       "operation": "atomic turn/result and terminal phase writer",
       "owner": "SessionStore in internal/db",
       "predicate": "Delegates nil normalization and unchanged org/session turn/result/diff plus exact phase predicates to UpdateTurnCompleteAndCompleteActivityPhaseInTx. No admitted allocation/epoch validation.",
@@ -4385,7 +4384,7 @@
     },
     {
       "id": "internal/db/session_thread_persistence.go:SessionThreadStore.CompleteTurnInTx",
-      "source_sha256": "c6d42a642db5448ad2682767c369acb12a288c0fc3dbcdcd1afc34e0f7fcca65",
+      "source_sha256": "b3797d3e00d0c190095d293a70842ce7c1bd9aefb02e51b3e1ce7e947d9a9ecc",
       "operation": "caller-owned CompleteTurn thread persistence",
       "owner": "SessionThreadStore persistence only; caller retains authority and transaction ownership",
       "predicate": "Tenant/thread identity only; writes supplied exact turn and idle. Empty provider session preserves the prior provider ID; no monotonic/current-runtime or epoch check.",
@@ -4407,7 +4406,7 @@
     },
     {
       "id": "internal/db/session_thread_persistence.go:SessionThreadStore.UpdateResultInTx",
-      "source_sha256": "447847eb8c540e41fdc388229b30c68672a29e9bfe4d201e3a6299de0933d975",
+      "source_sha256": "615918de3c6205ead782d882f8ad27547a75e2e856991e3100630c03a055742b",
       "operation": "caller-owned UpdateResult thread persistence",
       "owner": "SessionThreadStore persistence only; caller retains authority and transaction ownership",
       "predicate": "Tenant/thread identity only; terminal status stamps completion, nil diff preserves and empty diff clears; failure explanation/category retain original fallback. No runtime/admission or archive predicate.",
@@ -4429,7 +4428,7 @@
     },
     {
       "id": "internal/db/session_thread_persistence.go:SessionThreadStore.UpdateStatusInTx",
-      "source_sha256": "4f8515509d552ffd0cae84fa6747dc89c50b6f217bfed3c74147571c1c3a057c",
+      "source_sha256": "cf3736fd1908221223511138645967d5720cca2813a16949b09371ea13672cbe",
       "operation": "caller-owned UpdateStatus thread persistence",
       "owner": "SessionThreadStore persistence only; caller retains authority and transaction ownership",
       "predicate": "Tenant/thread identity only; running stamps start and clears cancellation, terminal status stamps completion. No runtime/admission or archive predicate.",
@@ -4451,7 +4450,7 @@
     },
     {
       "id": "internal/db/session_thread_persistence.go:SessionThreadStore.UpdateTurnCompleteInTx",
-      "source_sha256": "3e2f8b8f98a2ddecc51a4810728ed727faf430a34f0d9117f20cf15d40957980",
+      "source_sha256": "a8a3c025e3896ad6d6d9a1154635620831e39c575e3bfa043fc810147a7b5502",
       "operation": "caller-owned UpdateTurnComplete thread persistence",
       "owner": "SessionThreadStore persistence only; caller retains authority and transaction ownership",
       "predicate": "Tenant/thread identity only; idle and exact supplied turn/result, including lower turn, overwrite empty provider ID and clear failure fields. Nil diff preserves and empty diff clears. No runtime/admission or archive predicate.",
@@ -4566,7 +4565,7 @@
       "owner": "SessionThreadStore in internal/db",
       "predicate": "Tenant/thread identity only; writes supplied exact turn and idle. Empty provider session preserves the prior provider ID; no monotonic/current-runtime or epoch check.",
       "lock": "Legacy wrapper delegates to a shared DBTX row helper, then immediately performs the original best-effort current-state reload/publication. No owned transaction; not an in-transaction publication boundary.",
-      "stale_result": "Original missing-row and SQL errors retained; matching stale resource can still overwrite successor. Legacy result wrappers still panic on nil result before writing. Transaction owners must use the explicit InTx seam and defer its effects.",
+      "stale_result": "Original missing-row and SQL errors retained; matching stale resource can still overwrite successor. Transaction owners must use the explicit InTx seam and defer current-state notification effects.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: replace shared mutation with canonical conditional pgx.Tx primitive under exact attempt/epochs; preserve combined result/diff/activity atomicity and post-commit effects.",
       "canonical_target": "ProjectTurnInTx",
@@ -4749,7 +4748,7 @@
       "owner": "SessionThreadStore in internal/db",
       "predicate": "Tenant/thread identity only; running stamps start and clears cancellation, terminal status stamps completion. No runtime/admission or archive predicate.",
       "lock": "Legacy wrapper delegates to a shared DBTX row helper, then immediately performs the original best-effort current-state reload/publication. No owned transaction; not an in-transaction publication boundary.",
-      "stale_result": "Original missing-row and SQL errors retained; matching stale resource can still overwrite successor. Legacy result wrappers still panic on nil result before writing. Transaction owners must use the explicit InTx seam and defer its effects.",
+      "stale_result": "Original missing-row and SQL errors retained; matching stale resource can still overwrite successor. Transaction owners must use the explicit InTx seam and defer current-state notification effects.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: replace shared mutation with canonical conditional pgx.Tx primitive under exact attempt/epochs; preserve combined result/diff/activity atomicity and post-commit effects.",
       "canonical_target": "ProjectTurnInTx",
