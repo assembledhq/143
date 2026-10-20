@@ -56,7 +56,7 @@ import { ApiError, api } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
 import { getActiveOrgId } from "@/lib/active-org";
-import { ALL_CODE_REVIEW_REASONS, CODE_REVIEW_REASON_CODES, codeReviewReasonDescription, type CodeReviewReasonCode } from "@/lib/code-review-reasons";
+import { ALL_CODE_REVIEW_REASONS, CODE_REVIEW_REASON_CODES, blockingCodeReviewReasons, codeReviewReasonDescription, type CodeReviewReasonCode } from "@/lib/code-review-reasons";
 import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
 import { useResourceSSE } from "@/lib/use-resource-sse";
 import { pollMs } from "@/lib/poll-intervals";
@@ -179,11 +179,12 @@ Require human review when:
 - the intended behavior cannot be determined from the pull request and repository context
 
 Evaluate the pull request independently based on the code itself. Disregard GitHub checks, CI results, build statuses, and other external validation signals, whether passing, failing, or pending; they must not count for or against approval. Also disregard existing human review comments, review decisions, and review threads, whether open or resolved. Unresolved human review threads must not count against approval.`;
-const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, string> = {
+const APPLICABILITY_KIND_LABELS: Record<Exclude<CodeReviewDescriptionApplicabilityKind, "publisher_result">, string> = {
   all: "All PRs",
   nontrivial: "Nontrivial",
   paths: "Paths",
 };
+const PUBLISHER_RESULT_APPLICABILITY_LABEL = "Risk-tier render change";
 const DESCRIPTION_EVIDENCE_KIND_LABELS: Record<CodeReviewDescriptionEvidenceKind, string> = {
   general: "General evidence",
   visual: "Visual evidence",
@@ -296,7 +297,7 @@ const WHY_NOT_APPROVED_REASON_LIMIT = 10;
 function whyNotApprovedReasons(review: CodeReviewListItem): string[] {
   if (isSupersededReview(review) || review.status !== "completed" || wasAutomaticallyApproved(review)) return [];
 
-  const structuredReasons = (review.risk_reason_details ?? []).map(codeReviewReasonDescription);
+  const structuredReasons = blockingCodeReviewReasons(review.risk_reason_details ?? []).map(codeReviewReasonDescription);
   if (structuredReasons.length > 0) return structuredReasons;
 
   if (review.decision === "comment_only") return ["Configured for comment-only reviews"];
@@ -3019,6 +3020,8 @@ function formatRequirementApplicability(requirement: DescriptionRequirement): st
     }
     case "paths":
       return `Paths: ${summarizeItems(appliesWhen?.path_patterns, "no paths set")}`;
+    case "publisher_result":
+      return `${PUBLISHER_RESULT_APPLICABILITY_LABEL}, fallback paths: ${summarizeItems(appliesWhen?.fallback?.path_patterns, "no paths set")}`;
     default:
       return "Every PR";
   }
@@ -3204,6 +3207,25 @@ function DescriptionRequirementSheet({
               </Select>
             </div>
 
+            {kind === "publisher_result" ? (
+              <div className="space-y-2">
+                <SettingLabel
+                  label="Applies to"
+                  info="Decided by the trusted risk-tier check for the assessed commit: true requires this check, false skips it, and unknown or unavailable results use the fallback paths."
+                />
+                <div className="rounded-md border border-border px-3 py-2">
+                  <div className="text-sm text-foreground">{PUBLISHER_RESULT_APPLICABILITY_LABEL}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">Fallback paths</div>
+                  {requirement.applies_when?.fallback?.path_patterns?.length ? (
+                    <ul aria-label="Fallback path patterns" className="mt-1 space-y-0.5 font-mono text-xs text-muted-foreground">
+                      {requirement.applies_when.fallback.path_patterns.map((pattern) => <li key={pattern}>{pattern}</li>)}
+                    </ul>
+                  ) : (
+                    <div className="mt-1 text-xs text-muted-foreground">No paths set</div>
+                  )}
+                </div>
+              </div>
+            ) : (
             <div className="space-y-2">
               <SettingLabel label="Applies to" info="Controls which pull requests receive this structured description check. The default applies it to every pull request." />
               <Select
@@ -3229,6 +3251,7 @@ function DescriptionRequirementSheet({
                 </SelectContent>
               </Select>
             </div>
+            )}
 
             {kind === "nontrivial" ? (
               <div className="grid gap-3 sm:grid-cols-2">

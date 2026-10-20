@@ -1716,6 +1716,52 @@ describe("CodeReviewsPage", () => {
     expect(within(evidenceSheet).getByText("Pending")).toBeInTheDocument();
   });
 
+  it("omits informational safeguard records from non-approval reasons and feedback choices", async () => {
+    const user = userEvent.setup();
+    const safeguard = {
+      code: "size_safeguard",
+      size_safeguard: {
+        outcome: "applied" as const, source: "missing", head_sha: review.head_sha,
+        files: { actual: 34, limit: 25, exceeded: true }, additions: { actual: 10, limit: 300, exceeded: false }, deletions: { actual: 1, limit: 300, exceeded: false },
+      },
+    };
+    const needsReview: CodeReviewListItem = {
+      ...review,
+      decision: "needs_human_review",
+      acceptable: false,
+      github_review_id: undefined,
+      github_review_url: undefined,
+      risk_reason_details: [{ code: "blocking_findings" }, safeguard],
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", () =>
+        HttpResponse.json({ data: [needsReview], meta: { total_count: 1 } } satisfies ListResponse<CodeReviewListItem>),
+      ),
+      http.get("/api/v1/code-reviews/session-1", () => HttpResponse.json({ data: needsReview })),
+      http.get("/api/v1/code-reviews/session-1/evidence", () =>
+        HttpResponse.json({ data: { ...evidence, risk_reason_codes: ["blocking_findings", "size_safeguard"] } } satisfies SingleResponse<CodeReviewEvidence>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    const reviewTable = await screen.findByRole("table", { name: "Code reviews" });
+    const row = within(reviewTable).getByRole("row", { name: /#428 Fix invoice rounding/i });
+    const cells = within(row).getAllByRole("cell");
+    expect(within(cells[2]).getByText("Reviewers found a blocking issue")).toBeInTheDocument();
+    expect(within(cells[2]).queryByText("+1 more")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Size safeguard/)).not.toBeInTheDocument();
+
+    await user.click(screen.getAllByRole("button", { name: /View review/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Review for #428/i });
+    await user.click(within(evidenceSheet).getByRole("button", { name: "Decision feedback" }));
+    await user.click(await within(evidenceSheet).findByRole("button", { name: "Ask for reconsideration" }));
+    const feedbackDialog = await screen.findByRole("dialog", { name: "Ask for reconsideration" });
+    expect(within(feedbackDialog).getByLabelText(/blocking findings/i)).toBeInTheDocument();
+    expect(within(feedbackDialog).queryByLabelText(/size safeguard/i)).not.toBeInTheDocument();
+  });
+
   it("labels a classified bare mention as an ordinary review request", async () => {
     const user = userEvent.setup();
     const reviewRequest: CodeReviewDispute = {
@@ -3097,6 +3143,41 @@ describe("CodeReviewsPage", () => {
       expect(screen.getByRole("textbox", { name: "Search code reviews" })).toHaveValue("");
       expect(screen.getByRole("combobox", { name: "Outcome" })).toHaveTextContent("All outcomes");
     });
+  });
+
+  it("shows publisher_result applicability with its fallback paths read-only", async () => {
+    const user = userEvent.setup();
+    const config: CodeReviewPolicyConfig = {
+      ...policy.config,
+      description_policy: {
+        requirements: [
+          ...policy.config.description_policy.requirements,
+          {
+            key: "ui_evidence",
+            title: "Screenshots or preview link",
+            prompt: "Include screenshots.",
+            required: true,
+            evidence_kind: "visual",
+            applicability: "paths",
+            applies_when: { kind: "publisher_result", fallback: { kind: "paths", path_patterns: ["frontend/**", "**/*.tsx"] } },
+          },
+        ],
+      },
+    };
+    mockCodeReviewBaseHandlers(githubTriggerReady, undefined, config);
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(await screen.findByRole("button", { name: /Structured PR-description checks/i }));
+    expect(await screen.findByText("Risk-tier render change, fallback paths: frontend/**, **/*.tsx")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Edit Screenshots or preview link" }));
+    const sheet = await screen.findByRole("dialog", { name: "Edit structured PR-description check" });
+    expect(within(sheet).queryByRole("combobox", { name: "Requirement applicability" })).not.toBeInTheDocument();
+    expect(within(sheet).getByText("Risk-tier render change")).toBeInTheDocument();
+    const fallback = within(sheet).getByRole("list", { name: "Fallback path patterns" });
+    expect(within(fallback).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["frontend/**", "**/*.tsx"]);
+    expect(within(sheet).queryByText("Every PR")).not.toBeInTheDocument();
   });
 
   it("edits description requirements in a focused side sheet", async () => {
