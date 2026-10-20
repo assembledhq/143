@@ -1076,6 +1076,10 @@ describe("CodeReviewsPage", () => {
     });
     const cards = await screen.findByLabelText("Approval outcomes");
     await waitFor(() => expect(requests).toHaveLength(1));
+    // Let the mount-time search debounce commit before selecting a metric:
+    // the in-memory URL adapter resets pending writes when it re-renders.
+    await waitFor(() => expect(onUrlUpdate).toHaveBeenCalled());
+    onUrlUpdate.mockClear();
     await user.click(within(cards).getByRole("button", { name: /^Show P95 rounds to approval trend/ }));
     await waitFor(() => {
       const update = onUrlUpdate.mock.calls.at(-1)?.[0];
