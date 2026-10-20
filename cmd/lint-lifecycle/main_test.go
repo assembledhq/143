@@ -40,6 +40,10 @@ func TestScanSQLShapes(t *testing.T) {
 		source string
 		kinds  []string
 	}{
+		{name: "unresolved identifiers", source: "func write() { consume(ctx, unknown, missing) }"},
+		{name: "empty literal", source: `func write() { consume("") }`},
+		{name: "unresolved parent retains nested SQL", source: "func write() { consume(unknown * len(`UPDATE sessions SET status='idle' WHERE org_id=$1`)) }", kinds: []string{"status-update"}},
+		{name: "unresolved parent retains nested boundary", source: "func write() { consume(unknown * sessions.UpdateStatus(ctx, orgID, sessionID, state)) }", kinds: []string{"boundary-caller"}},
 		{name: "raw update", source: "func write() { exec(`UPDATE sessions SET status='idle' WHERE org_id=$1`) }", kinds: []string{"status-update"}},
 		{name: "aliased CTE", source: "func write() { exec(`WITH selected AS (SELECT id FROM sessions) UPDATE session_threads AS t SET status='failed' FROM selected s WHERE t.id=s.id`) }", kinds: []string{"status-update"}},
 		{name: "schema and quoted identifiers", source: "func write() { exec(`UPDATE public.\"session_threads\" AS t SET \"status\"='failed' WHERE t.org_id=$1`) }", kinds: []string{"status-update"}},

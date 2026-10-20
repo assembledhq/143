@@ -456,6 +456,12 @@ func collectFacts(fn *function, constants map[string]string) {
 		case *ast.BasicLit, *ast.BinaryExpr, *ast.Ident:
 			expr := node.(ast.Expr)
 			value := constantString(expr, constants)
+			// Ordinary identifiers and non-string expressions resolve to this
+			// marker and cannot contain SQL or a dispatch type. Keep walking
+			// their children; partially resolved SQL still needs inspection.
+			if value == "" || value == "<dynamic>" {
+				break
+			}
 			normalized := whitespaceRE.ReplaceAllString(strings.TrimSpace(value), " ")
 			if relevantSQL(value) {
 				fn.trace = append(fn.trace, "SQL:"+normalized)
