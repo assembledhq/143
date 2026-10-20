@@ -198,7 +198,7 @@ CleanupSessionSnapshot AppendApprovedSessionGrantInTx AppendApprovedCapabilityGr
 `)
 
 var lifecycleReceiver = regexp.MustCompile(`(?i)(session|thread|runtime|executor|runstore)`)
-var lifecycleCreationReceiver = regexp.MustCompile(`(?i)(?:^|\.)[a-z_]*(?:sessions|threads|runstore|threadstore)\.`)
+var lifecycleCreationReceiver = regexp.MustCompile(`(?i)(?:^|\.)[a-z_]*(?:sessions|threads|sessionstore|runstore|threadstore)\.`)
 var mutationRE = regexp.MustCompile(`(?i)\b(UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+(?:(?:"?[a-z_][a-z0-9_]*"?)\s*\.\s*)?"?(sessions|session_threads)"?\b`)
 var statusAssignmentRE = regexp.MustCompile(`(?i)\bstatus"?\s*=`)
 

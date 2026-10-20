@@ -979,6 +979,14 @@ event; arbitrary diff-bearing callbacks are separately covered as a latent case.
 This owner-local adapter is not a supported way to nest an already tx-bound
 `TurnStore` or a replacement for canonical turn authority.
 
+Scheduled review creation now uses a private session-store adapter whose only
+override calls the existing `CreateInTx` with the PR owner's transaction.
+Standalone creation, the service interface and inherited read/status/failure
+methods remain unchanged. The scoped store is still fresh and publisherless.
+The real scheduler therefore persists its session, primary thread/changeset,
+review metadata, request, controller job and PR state without a creation savepoint.
+This removes nested settlement; it does not add canonical review admission.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -1720,6 +1728,9 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Defer automation attempt result/status/turn effects until its actual
   pool-backed owner commits, preserving diff-free success and proving late
   marker/callback/duration/commit rejection discards every staged notification.
+- [x] Compose actual scheduled review creation with its existing PR owner via
+  `CreateInTx`, retaining standalone/inherited behavior and proving whole-admission
+  rollback after a genuine late scheduling-write failure.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2283,6 +2294,34 @@ remain inherited. A bounded syntax test pins the real callback method set and
 pool-backed constructor; a new publishing or escaped callback method requires
 explicit review. This guard does not resolve arbitrary interfaces or prove
 canonical authority. Other automation checkpoint owners remain separate work.
+
+### 0a scheduled review creation composition validation
+
+Focused race verification on PostgreSQL 17.10 passes six roots and 23 subtests,
+including the retained scheduled-generation root. The five new roots contain
+13 subtests. Reproduce with an owned PostgreSQL 15+ `TEST_DATABASE_URL` and
+`go test -race -p=1 ./internal/services/codereview -run '^TestScheduledSession'
+-count=1 -timeout=3m`. With `GOMAXPROCS=4`, repeated default parallelism
+(`-count=3`) passes 18 roots/69 case executions; `-parallel=8 -count=5`
+passes 30 roots/115 cases, with no failures or skips. Twelve retained standalone
+service roots and 47 subtests also pass using `-run '^TestService_'`.
+Focused vet, pinned lint and whitespace checks pass.
+
+The actual `ReconcileSchedule` callback runs with its owner's only connection
+occupied and rejects nested Begin. A dedicated physical observer is opened
+before the owner, avoiding setup-pool acquisition inside transaction hooks.
+Twelve-table snapshots prove independent invisibility, exact staged-graph commit
+and complete rollback. A fixture-only final scheduler trigger first validates
+the genuinely inserted session, read-only primary thread, primary changeset,
+review metadata, controller job and satisfied request, then raises an error.
+The injected pre-commit error is not network-unknown-commit recovery proof.
+
+Unit tests preserve every session default and returned model field, creation
+errors, tenant arguments, nil/typed-nil rejection and inherited nil-publisher
+behavior. Source tests pin the private adapter's single override and exact
+transaction-scoped binding. The syntax scanner now recognizes explicit embedded
+`SessionStore` creation receivers without globally selecting unrelated `Create`
+methods; the current root is explicitly inventoried, not lifecycle authority.
 
 ## Surprises & Discoveries
 

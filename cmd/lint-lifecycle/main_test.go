@@ -259,6 +259,37 @@ func TestPlainGenericStoreMethodsRemainUnselected(t *testing.T) {
 	}
 }
 
+func TestEmbeddedSessionStoreCreationRemainsInventoried(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, receiver, method string
+		selected               bool
+	}{
+		{name: "embedded create", receiver: "s.SessionStore", method: "Create", selected: true},
+		{name: "embedded caller transaction", receiver: "s.SessionStore", method: "CreateInTx", selected: true},
+		{name: "embedded provenance", receiver: "s.SessionStore", method: "CreateWithProvenance", selected: true},
+		{name: "unrelated generic create", receiver: "s.store", method: "Create"},
+		{name: "unrelated generic transaction", receiver: "s.store", method: "CreateInTx"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := fixture(t, "type Adapter struct{}\nfunc (s *Adapter) persist() { "+tt.receiver+"."+tt.method+"(ctx, tx, session) }")
+			found, err := scan(root)
+			require.NoError(t, err, "scan the embedded session-store creation boundary without Go type-resolution claims")
+			var ids []string
+			for _, item := range found {
+				ids = append(ids, item.ID)
+			}
+			var expected []string
+			if tt.selected {
+				expected = []string{"internal/fixture.go:Adapter.persist"}
+			}
+			require.Equal(t, expected, ids, "select explicit session-store receivers without globally assigning lifecycle meaning to generic Create names")
+		})
+	}
+}
+
 func reviewedFixture(candidates []candidate) inventory {
 	result := inventory{Version: 1, Scope: []string{"fixture"}, Limitations: []string{"syntax only"}}
 	for _, item := range candidates {
@@ -609,6 +640,7 @@ func TestInventoryMatchesRepository(t *testing.T) {
 		"internal/services/agent/activity_phases.go:ActivityPhaseService.AcknowledgeInboxBatch",
 		"internal/services/agent/activity_phases.go:ActivityPhaseService.AcknowledgeInboxBatchAndStartPhase",
 		"internal/services/agent/activity_phase_execution.go:activityPhaseExecution.acknowledgeAndResume",
+		"internal/services/codereview/scheduling.go:scheduledSessionStore.Create",
 		"internal/db/session_result_persistence.go:SessionStore.UpdateResultInTx",
 		"internal/db/session_result_persistence.go:SessionStore.UpdateStatusInTx",
 		"internal/db/session_result_persistence.go:SessionStore.UpdateTurnCompleteInTx",
