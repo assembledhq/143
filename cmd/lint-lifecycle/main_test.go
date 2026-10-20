@@ -173,6 +173,7 @@ func TestComposablePersistenceBoundariesRemainInventoried(t *testing.T) {
 		{name: "UpdateResultInTx", genericCollision: true},
 		{name: "UpdateTurnCompleteInTx"},
 		{name: "StartSeedPhaseInTx"},
+		{name: "ReconcileDrainedTerminalTurnInTx"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -582,6 +583,18 @@ func TestInventoryMatchesRepository(t *testing.T) {
 		"internal/db/automation_dispatch.go:SessionThreadStore.ClaimPrimaryForAutomationTurn",
 		"internal/db/continuation_recovery.go:JobStore.RecordContinuationAttemptWithLease",
 		"internal/db/session_activity_seed.go:SessionActivityPhaseStore.StartSeedPhase",
+		"internal/db/session_activity_seed.go:SessionActivityPhaseStore.StartSeedPhaseInTx",
+		"internal/db/session_result_persistence.go:SessionStore.UpdateResultInTx",
+		"internal/db/session_result_persistence.go:SessionStore.UpdateStatusInTx",
+		"internal/db/session_result_persistence.go:SessionStore.UpdateTurnCompleteInTx",
+		"internal/db/session_result_persistence.go:SessionStore.UpdateResultAndCompleteActivityPhaseInTx",
+		"internal/db/session_result_persistence.go:SessionStore.UpdateStatusAndCompleteActivityPhaseInTx",
+		"internal/db/session_result_persistence.go:SessionStore.UpdateTurnCompleteAndCompleteActivityPhaseInTx",
+		"internal/db/session_thread_persistence.go:SessionThreadStore.UpdateStatusInTx",
+		"internal/db/session_thread_persistence.go:SessionThreadStore.UpdateResultInTx",
+		"internal/db/session_thread_persistence.go:SessionThreadStore.CompleteTurnInTx",
+		"internal/db/session_thread_persistence.go:SessionThreadStore.UpdateTurnCompleteInTx",
+		"internal/db/code_review_recheck_dispatch.go:CodeReviewRecheckStore.ReconcileDrainedTerminalTurnInTx",
 		"internal/services/codereview/recheck_admission.go:Service.cancelForcedEvidenceAssessment",
 		"internal/services/agent/reaper.go:SessionReaper.reap",
 		"internal/worker/handlers.go:answerQueuedHumanInputForContinue",

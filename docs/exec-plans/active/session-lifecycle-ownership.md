@@ -923,6 +923,13 @@ publish after savepoint release before the true outer commit; converting those
 callers and carrying effects to the outer owner remains required. No new
 allocation, current-turn or epoch authority is implied.
 
+Force-fresh review cancellation now passes its existing PR-locked transaction to
+`ReconcileDrainedTerminalTurnInTx`, rather than entering a nested savepoint via a
+tx-bound wrapper. The same terminal receipt, retained PR owner, physical drain
+and exact thread-turn predicates are shared with the standalone wrapper. The PR
+owner still updates scheduling state, commits and then emits its existing event.
+This is caller-transaction composition, not shared epoch or allocation fencing.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -1649,6 +1656,9 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Share standalone result/status transaction persistence with existing
   combined boundaries and the legacy transactional result path, preserving
   direct-write fast paths, original returned records and notification order.
+- [x] Remove the nested terminal-reconciliation savepoint in the actual
+  force-fresh PR callback, preserving standalone outcomes and proving whole-owner
+  rollback plus scheduling publication only after visible outer commit.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2051,6 +2061,36 @@ PostgreSQL 15+ `TEST_DATABASE_URL` and `go test -race -p=1 ./internal/db
 recheck regressions also pass at the preceding scalar-persistence snapshot:
 27 roots and 42 subtests, no failures or skips. Neither result proves all legacy
 tx-bound wrappers defer effects until their real outer transaction commits.
+
+### 0a force-fresh reconciliation composition validation
+
+The new concrete-transaction reconciliation preserves the original SQL sequence
+and raw errors. The standalone wrapper retains early false/no-commit outcomes
+and the original successful boolean when its commit returns an error; callers
+must still inspect that error. Nil and typed-nil transactions are rejected.
+Future generic callers require a concrete inventory contract, and repository
+root assertions pin all newly extracted persistence boundaries.
+
+Focused race tests passed locally on PostgreSQL 17.10: seven roots and 97
+subtests, no failures or skips, including existing force-fresh service modes.
+Reproduce using an owned PostgreSQL 15+ `TEST_DATABASE_URL` with two selections:
+`go test -race -p=1 ./internal/db
+-run '^Test(CodeReviewRecheckStoreReconcileDrainedTerminalTurn|RecheckReconciliation)'
+-count=1 -parallel=1 -timeout=3m`, then `go test -race -p=1
+./internal/services/codereview
+-run '^(TestForcedEvidenceReconciliationUsesSuppliedTransaction|TestCodeReviewSchedulingLifecyclePostgres)$/force_fresh'
+-count=1 -parallel=1 -timeout=3m`. Focused vet and pinned lint pass.
+
+Full-schema tests run both direct caller-owned reconciliation and the real
+`WithLockedPR` owner with a one-connection pool and nested-Begin rejection.
+Exact whole-graph snapshots prove tenant/successor isolation and outer settlement.
+A fixture-only final scheduling-write trigger first observes genuine staged
+parent and thread reconciliation, then raises a controlled failure; outer rollback
+restores those rows and scheduling state together and emits no event. Successful
+publication uses an independent reader to observe the already committed graph.
+The actual force-fresh callback's supplied-tx call is separately pinned in source;
+existing service modes cover its retained behavior. This does not implement a
+canonical current-allocation/epoch fence or prove a deployed compatibility floor.
 
 ## Surprises & Discoveries
 

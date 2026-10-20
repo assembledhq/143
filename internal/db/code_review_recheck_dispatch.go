@@ -761,9 +761,23 @@ func (s *CodeReviewRecheckStore) ReconcileDrainedTerminalTurn(ctx context.Contex
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	reconciled, err := s.ReconcileDrainedTerminalTurnInTx(ctx, orgID, tx, assessmentID)
+	if err != nil || !reconciled {
+		return reconciled, err
+	}
+	return true, tx.Commit(ctx)
+}
+
+// ReconcileDrainedTerminalTurnInTx stages the same exact-turn reconciliation in
+// the caller's transaction. It never begins, settles or publishes; the caller
+// owns rollback of any staged thread changes after an error.
+func (s *CodeReviewRecheckStore) ReconcileDrainedTerminalTurnInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, assessmentID uuid.UUID) (bool, error) {
+	if nilLifecycleDependency(tx) {
+		return false, errors.New("reconcile drained terminal turn in tx: nil transaction")
+	}
 	var sessionID, threadID, pullRequestID uuid.UUID
 	var expectedTurn int
-	err = tx.QueryRow(ctx, `SELECT session_id,thread_id,pull_request_id,expected_turn FROM code_review_recheck_dispatches WHERE org_id=$1 AND assessment_id=$2 AND status IN ('failed','cancelled') FOR UPDATE`, orgID, assessmentID).Scan(&sessionID, &threadID, &pullRequestID, &expectedTurn)
+	err := tx.QueryRow(ctx, `SELECT session_id,thread_id,pull_request_id,expected_turn FROM code_review_recheck_dispatches WHERE org_id=$1 AND assessment_id=$2 AND status IN ('failed','cancelled') FOR UPDATE`, orgID, assessmentID).Scan(&sessionID, &threadID, &pullRequestID, &expectedTurn)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -800,5 +814,5 @@ func (s *CodeReviewRecheckStore) ReconcileDrainedTerminalTurn(ctx context.Contex
 	if err != nil {
 		return false, err
 	}
-	return true, tx.Commit(ctx)
+	return true, nil
 }

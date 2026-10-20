@@ -763,7 +763,7 @@ func (s *Service) cancelForcedEvidenceAssessment(ctx context.Context, orgID, prI
 		}
 	}
 	if err := s.scheduling.store.WithLockedPR(ctx, orgID, state.RepositoryID, prID, func(tx pgx.Tx, _ *models.CodeReviewPRState) error {
-		_, err := db.NewCodeReviewRecheckStore(tx).ReconcileDrainedTerminalTurn(ctx, orgID, assessmentID)
+		_, err := db.NewCodeReviewRecheckStore(tx).ReconcileDrainedTerminalTurnInTx(ctx, orgID, tx, assessmentID)
 		return err
 	}); err != nil {
 		return err

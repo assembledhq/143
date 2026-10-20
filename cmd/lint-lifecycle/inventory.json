@@ -1873,26 +1873,46 @@
     },
     {
       "id": "internal/db/code_review_recheck_dispatch.go:CodeReviewRecheckStore.ReconcileDrainedTerminalTurn",
-      "source_sha256": "807258ef80d94e7630ecf96b7c2bea28206708ef4b5fa8e9a2c5e3a877ce1ea0",
+      "source_sha256": "1b852e4e1ae7e5330122af13142a0955e43d60b81a1313bde30b28ad4e2278c8",
       "operation": "release exact failed/cancelled evidence turn after physical drain",
       "owner": "CodeReviewRecheckStore in internal/db",
       "predicate": "Locks exact failed/cancelled dispatch, then session with matching retained PR owner and physical drain. Thread turn-1 CAS; if no row, requires same expectedTurn already idle before parent idle projection.",
-      "lock": "Own Begin; dispatch FOR UPDATE -> retained session FOR UPDATE -> thread CAS/read lock; nested caller cannot use this wrapper.",
+      "lock": "Own Begin and deferred rollback; delegates unchanged dispatch -> retained session -> exact thread reconciliation to InTx. Early false returns without Commit; successful true retains original bool even if Commit fails. No publication.",
       "stale_result": "Missing/wrong owner/undrained/later thread returns false; matching old domain turn still lacks explicit shared epoch fence.",
       "classification": "fenced-specialist",
-      "migration": "0a: add explicit caller pgx.Tx variant; retain exact domain receipt/attempt and physical drain proof; fence current session/lane projection by shared admission/end epochs, distinguishing rejected authority from permitted immutable own receipt settlement.",
+      "migration": "0a explicit concrete-transaction persistence prerequisite is consumed by the force-fresh PR callback. Preserve domain drain/expected-turn predicates; canonical shared admission/end epoch projection remains required.",
       "canonical_target": "ProjectTurnInTx; SettleLostAttemptInTx",
       "authority": "ReviewAuthority: exact PR/assessment/generation/dispatch/message/turn and current attempt proof, under retained PR/session ownership.",
       "fence_outcome": "F2: AuthorizationRejected aborts. Only independently proven exact immutable own-attempt settlement may return Applied/AlreadyApplied/StaleSharedState; stale shared state skips ALL current status/result/diff/checkpoint/input acknowledgement/owner release and cannot start execution or publish externally.",
-      "prerequisite_0a": "0a: add explicit caller pgx.Tx variant; retain exact domain receipt/attempt and physical drain proof; fence current session/lane projection by shared admission/end epochs, distinguishing rejected authority from permitted immutable own receipt settlement.",
+      "prerequisite_0a": "Use the explicit InTx seam in existing transaction owners; canonical shared epochs/allocation validation, converted competing writers and deployed floor/drain proof remain open.",
       "evidence": [
-        "internal/db/code_review_recheck_dispatch.go:750",
+        "internal/db/code_review_recheck_dispatch.go:758",
+        "Discovered: boundary-caller, boundary-definition, indirect-caller",
+        "Delegates to ReconcileDrainedTerminalTurnInTx; retains original early no-commit and true-plus-commit-error outcomes",
+        "internal/db/code_review_recheck_reconciliation_test.go",
+        "internal/db/code_review_recheck_reconciliation_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/code_review_recheck_dispatch.go:CodeReviewRecheckStore.ReconcileDrainedTerminalTurnInTx",
+      "source_sha256": "f314392cd70eb38aa1ee379e77142e859a93a10817a0315428af67b2acc61ca2",
+      "operation": "caller-owned exact terminal review turn drain reconciliation",
+      "owner": "CodeReviewRecheckStore persistence/domain checks; caller owns transaction and canonical shared authority",
+      "predicate": "Locks exact failed/cancelled dispatch, then session with matching retained PR owner and physical drain. Thread turn-1 CAS; if no row, requires same expectedTurn already idle before parent idle projection.",
+      "lock": "Concrete caller pgx.Tx only: exact terminal dispatch FOR UPDATE -> retained-owner session/drain FOR UPDATE -> thread CAS or exact idle-turn locked read -> parent projection. No Begin/savepoint, settlement, retry, receiver pool fallback or publication.",
+      "stale_result": "Missing receipt/owner, not drained or successor thread returns false without writes. Query/scan/root error returns false/error; any earlier staged thread mutation requires whole-owner rollback. True is staged reconciliation, not commit proof; an already-idle parent may produce true with zero parent rows.",
+      "classification": "fenced-specialist",
+      "migration": "0a explicit concrete-transaction persistence prerequisite is consumed by the force-fresh PR callback. Preserve domain drain/expected-turn predicates; canonical shared admission/end epoch projection remains required.",
+      "canonical_target": "ProjectTurnInTx; SettleLostAttemptInTx",
+      "authority": "Existing org/PR/assessment/terminal dispatch/expected-turn association and physical drain. This seam proves no immutable runtime allocation or current shared admission/end epochs.",
+      "fence_outcome": "F2: AuthorizationRejected aborts. Only independently proven exact immutable own-attempt settlement may return Applied/AlreadyApplied/StaleSharedState; stale shared state skips ALL current status/result/diff/checkpoint/input acknowledgement/owner release and cannot start execution or publish externally.",
+      "prerequisite_0a": "Use the explicit InTx seam in existing transaction owners; canonical shared epochs/allocation validation, converted competing writers and deployed floor/drain proof remain open.",
+      "evidence": [
+        "internal/db/code_review_recheck_dispatch.go:774",
         "Discovered: boundary-definition, status-update",
-        "Lock/transaction syntax: FOR UPDATE",
-        "Lock/transaction syntax: s.db.Begin",
-        "Lock/transaction syntax: tx.Commit",
-        "SQL: UPDATE session_threads SET status='idle',current_turn=$4,completed_at=now(),last_activity_at=now() WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4-1 AND status IN ('running','cancelled')",
-        "SQL: UPDATE sessions SET status='idle',last_activity_at=now() WHERE org_id=$1 AND id=$2 AND code_review_owner_pr_id=$3 AND status IN ('running','cancelled')"
+        "internal/services/codereview/recheck_admission.go: cancelForcedEvidenceAssessment passes the existing WithLockedPR transaction",
+        "internal/db/code_review_recheck_reconciliation_test.go",
+        "internal/db/code_review_recheck_reconciliation_postgres_test.go"
       ]
     },
     {
@@ -7333,26 +7353,27 @@
     },
     {
       "id": "internal/services/codereview/recheck_admission.go:Service.cancelForcedEvidenceAssessment",
-      "source_sha256": "99993f601a2075974cd502350eb24a68a4ae18647ffac87adb5dbae7e006fa54",
+      "source_sha256": "1f0e11c56f8dbe52bdd14d7c6890ac30a034caeb4d6dc8d104c39502846eaacb",
       "operation": "force-fresh cancellation of exact pending evidence assessment/turn",
       "owner": "Service in internal/services/codereview",
       "predicate": "Locked scheduling PendingRequest must be forced full mode; active or prior force-cancelled evidence assessment; no confirmed/uncertain external publication; exact dispatch/thread/current_turn=expected-1 status guards for cancellation.",
-      "lock": "WithLockedPR callback locks job+dispatch before assessment mutation and exact-turn cancel intent; process cancellation happens after callback commits.",
+      "lock": "Original durable force-cancellation PR/job/dispatch callback and process cancellation unchanged; later PR-locked reconciliation now supplies its exact outer transaction to ReconcileDrainedTerminalTurnInTx without a nested savepoint. Scheduler retains its state update, outer commit and existing post-commit event.",
       "stale_result": "Zero rows can recover original force request marker; no dispatch cancels only assessment. Existing exact-turn proof lacks shared admission/end epochs.",
       "classification": "fenced-specialist",
-      "migration": "0a: keep existing PR/job/dispatch lock transaction and publication guards; compose exact canonical turn+epoch cancellation there. Follow-up terminal/drain reconciliation must call InTx variant when already locked, never nested Begin.",
+      "migration": "0a caller-transaction prerequisite implemented for the follow-up terminal/drain reconciliation. Retain PR/job/dispatch and publication guards; shared canonical turn/epoch cancellation and projection still require conversion.",
       "canonical_target": "RecordCancelIntentInTx; ProjectTurnInTx",
       "authority": "ReviewAuthority exact PR/pending force request/assessment/dispatch, then CancelAuthority for exact current turn.",
       "fence_outcome": "Strict typed result/error: authorization rejection, stale epoch or mismatched receipt rolls back the entire operation. No terminal stale-settlement carve-out applies.",
-      "prerequisite_0a": "0a: keep existing PR/job/dispatch lock transaction and publication guards; compose exact canonical turn+epoch cancellation there. Follow-up terminal/drain reconciliation must call InTx variant when already locked, never nested Begin.",
+      "prerequisite_0a": "Keep the explicit supplied transaction and owner-only settlement/effects while wiring canonical turn/epoch cancellation and projection; do not treat current domain checks as shared floor proof.",
       "evidence": [
         "internal/services/codereview/recheck_admission.go:669",
         "Discovered: boundary-caller, indirect-caller, lifecycle-gate-update",
         "Boundary/call candidate: canceller.CancelThreadTurn -> internal/services/thread/actions.go:Service.CancelThreadTurn",
-        "Boundary/call candidate: db.NewCodeReviewRecheckStore",
         "Lock/transaction syntax: FOR UPDATE OF j",
         "Lock/transaction syntax: s.scheduling.store.WithLockedPR",
-        "SQL: UPDATE session_threads SET cancel_requested_at=COALESCE(cancel_requested_at,now()) WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4-1 AND status IN ('pending','running','awaiting_input')"
+        "SQL: UPDATE session_threads SET cancel_requested_at=COALESCE(cancel_requested_at,now()) WHERE org_id=$1 AND id=$2 AND session_id=$3 AND current_turn=$4-1 AND status IN ('pending','running','awaiting_input')",
+        "Boundary/call candidate: db.NewCodeReviewRecheckStore(tx).ReconcileDrainedTerminalTurnInTx(ctx, orgID, tx, assessmentID)",
+        "internal/services/codereview/recheck_reconciliation_wiring_test.go"
       ]
     },
     {
