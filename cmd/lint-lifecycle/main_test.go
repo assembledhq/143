@@ -164,6 +164,7 @@ func TestComposablePersistenceBoundariesRemainInventoried(t *testing.T) {
 	tests := []struct {
 		name             string
 		genericCollision bool
+		lifecycleLink    bool
 	}{
 		{name: "UpdateResultAndCompleteActivityPhaseInTx"},
 		{name: "UpdateStatusAndCompleteActivityPhaseInTx"},
@@ -182,6 +183,8 @@ func TestComposablePersistenceBoundariesRemainInventoried(t *testing.T) {
 		{name: "SettleAssessmentInTx"},
 		{name: "withLockedPRInTx"},
 		{name: "settleAssessmentLockedPR"},
+		{name: "EndAttempt"},
+		{name: "newTurnAttemptSessions", lifecycleLink: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -206,8 +209,15 @@ func TestComposablePersistenceBoundariesRemainInventoried(t *testing.T) {
 				actual = append(actual, observation{ID: item.ID, Kinds: item.Kinds, Calls: item.Calls, RequiresContract: requiresMutationContract(item)})
 			}
 			rootID := "internal/fixture.go:OpaqueStore." + tt.name
+			expectedCaller := observation{ID: "internal/consumer/adapter.go:Pipeline.write", Kinds: []string{"boundary-caller"}, Calls: []string{"p.store." + tt.name, "p.store." + tt.name + "(ctx, orgID, tx)"}, RequiresContract: true}
+			if tt.lifecycleLink {
+				// This constructor name itself contains "Sessions", so the
+				// conservative name-based cross-package edge is also recorded.
+				expectedCaller.Kinds = []string{"boundary-caller", "indirect-caller"}
+				expectedCaller.Calls = []string{"p.store." + tt.name, "p.store." + tt.name + " -> " + rootID, "p.store." + tt.name + "(ctx, orgID, tx)", "p.store." + tt.name + "(ctx, orgID, tx) -> " + rootID}
+			}
 			require.Equal(t, []observation{
-				{ID: "internal/consumer/adapter.go:Pipeline.write", Kinds: []string{"boundary-caller"}, Calls: []string{"p.store." + tt.name, "p.store." + tt.name + "(ctx, orgID, tx)"}, RequiresContract: true},
+				expectedCaller,
 				{ID: rootID, Kinds: []string{"boundary-definition"}, RequiresContract: true},
 			}, actual, "every explicit transaction seam and its direct caller must require review even without SQL or a lifecycle-named receiver")
 			reviewed := reviewedFixture(found)
@@ -613,6 +623,11 @@ func TestInventoryMatchesRepository(t *testing.T) {
 		"internal/db/code_review_schedule_assessment.go:CodeReviewScheduleStore.SettleAssessmentInTx",
 		"internal/db/code_review_scheduling.go:CodeReviewScheduleStore.withLockedPRInTx",
 		"internal/db/code_review_schedule_assessment.go:settleAssessmentLockedPR",
+		"internal/services/automations/turn_store.go:TurnStore.EndAttempt",
+		"internal/services/automations/turn_attempt_persistence.go:newTurnAttemptSessions",
+		"internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateStatus",
+		"internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateResult",
+		"internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateTurnComplete",
 		"internal/services/codereview/recheck_admission.go:Service.cancelForcedEvidenceAssessment",
 		"internal/services/agent/reaper.go:SessionReaper.reap",
 		"internal/worker/handlers.go:answerQueuedHumanInputForContinue",
