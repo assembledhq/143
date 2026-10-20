@@ -689,6 +689,7 @@ func TestAutomationDispatch_PushPriority(t *testing.T) {
 // evidence and no lookup the run waits with backoff, and a successful
 // lookup refreshes the evidence before the generation is created.
 func TestAutomationDispatch_StaleLifecycleNeedsEvidence(t *testing.T) {
+	// This suite resets a shared integration database, so tests run serially.
 	h := newDispatchHarness(t)
 	ctx := context.Background()
 	t0 := recentDeliveryTime()
@@ -709,9 +710,11 @@ func TestAutomationDispatch_StaleLifecycleNeedsEvidence(t *testing.T) {
 	h.dispatcher.SetHeadResolver(&fakeHeadResolver{info: automations.PullRequestHeadInfo{SHA: h1, UpdatedAt: &updated, State: "open", BaseBranch: "main"}})
 	reserved := h.dispatch(t, run, models.AgentTypeCodex)
 	require.Equal(t, automations.DispatchReserved, reserved.Kind, "a successful lookup lets the fresh generation start")
-	var age time.Duration
-	require.NoError(t, h.pool.QueryRow(ctx, `SELECT now() - lifecycle_updated_at FROM automation_targets WHERE id = $1`, *run.TargetID).Scan(&age), "read the refreshed evidence")
-	require.Less(t, age, time.Minute, "the lookup refreshed the openness evidence")
+	var lifecycleUpdatedAt time.Time
+	require.NoError(t, h.pool.QueryRow(ctx, `SELECT lifecycle_updated_at FROM automation_targets WHERE org_id = $1 AND id = $2`, h.orgID, *run.TargetID).Scan(&lifecycleUpdatedAt), "read the refreshed evidence")
+	// The resolver supplies the evidence timestamp. Comparing its exact value
+	// avoids a wall-clock boundary as the minute-old fixture ages during dispatch.
+	require.Equal(t, updated, lifecycleUpdatedAt.UTC(), "the lookup retains its exact openness evidence timestamp")
 }
 
 // TestAutomationDispatch_StaleLookupDoesNotSupersede proves a lookup taken
