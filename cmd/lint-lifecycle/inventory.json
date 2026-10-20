@@ -8008,18 +8008,21 @@
     },
     {
       "id": "internal/services/github/pr_health_service.go:PRService.syncResolvedPullRequestStateCapturing",
-      "source_sha256": "9cd6fea9ae86bd10b24c462e34acb8d90d7e0a2b9aacba3c384f8532adc2f46c",
-      "operation": "PRService.syncResolvedPullRequestStateCapturing: indirect lifecycle caller",
+      "source_sha256": "a72e3726d996dc1158d3fdc3540d0d6bb9016a5ea5687e8ce99272abba2df48a",
+      "operation": "PRService.syncResolvedPullRequestStateCapturing: indirect terminal-lifecycle caller and conditional PR-mirror repair before health refresh",
       "owner": "PRService in internal/services/github",
-      "predicate": "AST-observed guard expressions: category == models.PullRequestCheckCategoryTest && checkStatus == models.PullRequestCheckStatusFailed | category == models.PullRequestCheckCategoryTest && status == models.PullRequestCheckStatusFailed | checkStatus := (normalizeCommitStatus(status)) | len(checkRuns) == 0 && len(commitStatuses) == 0 | status := (normalizeCheckRunStatus(check)) | strings.EqualFold(strings.TrimSpace(details.State), \"closed\") && pr.Status == models.PullRequestStatusOpen",
-      "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: s.applyClosedPRTransition -> internal/services/github/pr.go:PRService.applyClosedPRTransition; s.applyClosedPRTransition(ctx, pr, details.Merged, details.MergedAt, details.UpdatedAt, details.MergeCommitSHA, details.Head.SHA) -> internal/services/github/pr.go:PRService.applyClosedPRTransition",
-      "stale_result": "Observed guard/error branches: category == models.PullRequestCheckCategoryTest && checkStatus == models.PullRequestCheckStatusFailed; category == models.PullRequestCheckCategoryTest && status == models.PullRequestCheckStatusFailed; checkStatus := (normalizeCommitStatus(status)); len(checkRuns) == 0 && len(commitStatuses) == 0; status := (normalizeCheckRunStatus(check)); strings.EqualFold(strings.TrimSpace(details.State), \"closed\") && pr.Status == models.PullRequestStatusOpen. These are syntax observations, not a proven stale-result contract.",
+      "predicate": "A closed provider snapshot remains ineligible for review capture. Ordinary sync delegates a GitHub-closed/local-open mirror to applyClosedPRTransition. GitHub-open/local-closed repair requires the unchanged local updated_at watermark, closed status, tenant ownership, and ordered provider lifecycle observation before health refresh.",
+      "lock": "Terminal cleanup retains the delegated applyClosedPRTransition contract. ReopenIfUnchanged atomically updates the provider lifecycle observation, conditionally reopens the tenant-scoped PR mirror, and projects outcomes in one transaction; a lost CAS or projection error rolls the repair back. This PR-mirror transaction is not session-lifecycle fencing.",
+      "stale_result": "A rejected reopen or unapplied health write returns ErrPullRequestHealthSyncSuperseded to review capture, whose caller re-resolves up to three times; ordinary background sync keeps its no-op skip. A newer closed/merged mirror cannot be overwritten by an in-flight repair. Existing terminal-session cleanup behavior remains delegated to applyClosedPRTransition.",
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/services/github/pr_health_service.go:714",
+        "internal/services/github/pr_health_service.go:725",
         "Discovered: indirect-caller",
-        "Boundary/call candidate: s.applyClosedPRTransition -> internal/services/github/pr.go:PRService.applyClosedPRTransition"
+        "Boundary/call candidate: s.applyClosedPRTransition -> internal/services/github/pr.go:PRService.applyClosedPRTransition",
+        "internal/db/pull_requests.go:PullRequestStore.ReopenIfUnchanged",
+        "internal/db/pull_request_reopen_postgres_test.go:TestReopenIfUnchangedPreservesMidStatementClosePostgres",
+        "internal/services/github/pr_health_snapshot_test.go:TestSyncCodeReviewPullRequestStateRetriesSupersededHealth"
       ]
     },
     {
