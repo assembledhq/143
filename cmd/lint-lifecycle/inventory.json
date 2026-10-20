@@ -7232,7 +7232,7 @@
       "lock": "Existing approved-grant appender owns its transaction. BuildApprovedGrant performs no policy/request/session reads or writes. Transaction-owning answer callers instead persist through their repository Tx.",
       "stale_result": "Existing validation, appender and duplicate errors are unchanged. The standalone wrapper supplies no request readiness or canonical consent/epoch proof.",
       "classification": "unfenced-needs-conversion",
-      "migration": "0a actual structured answers now use pure construction plus same-transaction grant persistence. Remaining standalone consumers still need operation-specific canonical consent and current shared authority.",
+      "migration": "0a actual structured answers now use pure construction plus same-transaction grant persistence. This standalone method currently has no production callers and is retained for compatibility/tests; canonical consent and current shared authority remain required for any future consumer.",
       "evidence": [
         "internal/services/agentcapabilities/service.go:201",
         "Discovered: boundary-caller, indirect-caller",
@@ -8835,7 +8835,7 @@
       "operation": "structured input CancelRequest transaction adapter",
       "owner": "dbTx in internal/services/humaninput",
       "predicate": "Delegates exact org/session/request to CancelPending on tx-bound request store; GetRequestForUpdate currently occurs before session/thread resume claims; adapter adds no readiness/dispatch predicate.",
-      "lock": "Caller dbRepository.WithTx owns Begin/Commit; request lock -> session -> thread baseline inversion; approver can open another tx today.",
+      "lock": "Caller dbRepository.WithTx owns Begin/Commit; cancellation retains request lock -> session -> thread baseline inversion and never approves a capability. Approved Answer grants now use their caller transaction rather than a separate appender.",
       "stale_result": "Store no-row propagates; outer service translates conflict. Existing caller transaction is useful but does not establish an exact bound consumer.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: reuse outer transaction with parent-first compatible no-effect DB operations; no nested grant tx or latest-request selection. No existing-job payload rebinding; failed binding rolls answer/grant/claim back.",
@@ -8844,7 +8844,7 @@
       "fence_outcome": "Strict typed result: invalid/stale authority rolls back the whole mutation transaction; no partial answer/grant/owner/snapshot/ack/wake. This operation does NOT have terminal-settlement F2 permission.",
       "prerequisite_0a": "0a: reuse outer transaction with parent-first compatible no-effect DB operations; no nested grant tx or latest-request selection. No existing-job payload rebinding; failed binding rolls answer/grant/claim back.",
       "evidence": [
-        "internal/services/humaninput/db_repository.go:95",
+        "internal/services/humaninput/db_repository.go:101",
         "Discovered: boundary-caller, boundary-definition",
         "Boundary/call candidate: t.requests.CancelPending"
       ]
@@ -8860,7 +8860,7 @@
       "classification": "unfenced-needs-conversion",
       "migration": "0a: preserve fallback eligibility deliberately, but move exact request/readiness/answer digest and expected epochs into parent-first domain/lane/request transaction. Claim, answer, grant and dispatch binding commit together; no late latest-request selection.",
       "evidence": [
-        "internal/services/humaninput/db_repository.go:108",
+        "internal/services/humaninput/db_repository.go:114",
         "Discovered: boundary-caller, indirect-caller",
         "Boundary/call candidate: t.sessions.ClaimForResume",
         "Boundary/call candidate: t.sessions.ClaimForResume -> internal/db/session_store.go:SessionStore.ClaimForResume",
@@ -8884,7 +8884,7 @@
       "classification": "unfenced-needs-conversion",
       "migration": "0a: preserve fallback eligibility deliberately, but move exact request/readiness/answer digest and expected epochs into parent-first domain/lane/request transaction. Claim, answer, grant and dispatch binding commit together; no late latest-request selection.",
       "evidence": [
-        "internal/services/humaninput/db_repository.go:116",
+        "internal/services/humaninput/db_repository.go:122",
         "Discovered: boundary-caller, indirect-caller",
         "Boundary/call candidate: t.threads.ClaimForResumeInSession",
         "Boundary/call candidate: t.threads.ClaimForResumeInSession -> internal/db/session_thread_store.go:SessionThreadStore.ClaimForResumeInSession",
@@ -8907,7 +8907,7 @@
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/services/humaninput/db_repository.go:131",
+        "internal/services/humaninput/db_repository.go:137",
         "Discovered: boundary-caller, dispatch-reference, indirect-caller",
         "Boundary/call candidate: db.ContinueSessionDedupeKey",
         "Boundary/call candidate: db.ContinueSessionDedupeKey -> internal/db/jobs.go:ContinueSessionDedupeKey",
@@ -8921,7 +8921,7 @@
       "operation": "structured answer, approved capability and provider-resume transaction",
       "owner": "Service in internal/services/humaninput",
       "predicate": "Existing locked org/session pending request, ValidateAnswer and legacy checkpoint checks. Explicit approval of capability-request metadata builds one validated grant and persists it through the SAME Tx before existing claims/message/job. Denial, malformed/unrelated payload, nil approver and duplicate-grant retry semantics remain unchanged.",
-      "lock": "One repository-owned transaction: existing request lock -> answer -> approved grant READ COMMITTED parent prelock/fresh snapshot and linked automation mirror -> legacy claims -> message -> continuation job. No new lock ordering or independent grant transaction; notify only after owner commit.",
+      "lock": "One repository-owned transaction: request lock -> answer -> approved-grant READ COMMITTED session FOR UPDATE/fresh metadata and linked automation mirror -> legacy claims -> message -> job -> owner commit, then notification. Acquisition order is unchanged; stronger session/metadata/automation locks now last through outer commit and the parent FOR UPDATE can block implicit FK KEY SHARE child inserts. No separate grant transaction; compatible competing-writer order remains open.",
       "stale_result": "Validation/grant/claim/message/enqueue/commit error returns no accepted Result and aborts answer, snapshots, claims, message and job together. Existing duplicate grant is safe retry, not a new grant; current snapshot-ready and claims remain legacy resource checks, not immutable readiness.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a real caller atomicity prerequisite implemented. Shared grant construction is pure and persistence is explicitly transaction-bound; canonical readiness, consent, admission and epoch enforcement remain open.",
@@ -8970,7 +8970,7 @@
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/services/humaninput/service.go:225",
+        "internal/services/humaninput/service.go:232",
         "Discovered: boundary-caller, indirect-caller",
         "Boundary/call candidate: claimForProviderResume -> internal/services/humaninput/service.go:claimForProviderResume",
         "Boundary/call candidate: tx.CancelRequest",
@@ -8988,7 +8988,7 @@
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/services/humaninput/service.go:326",
+        "internal/services/humaninput/service.go:333",
         "Discovered: indirect-caller",
         "Boundary/call candidate: tx.ClaimSessionForResume -> internal/services/humaninput/db_repository.go:dbTx.ClaimSessionForResume",
         "Boundary/call candidate: tx.ClaimThreadForResume -> internal/services/humaninput/db_repository.go:dbTx.ClaimThreadForResume"

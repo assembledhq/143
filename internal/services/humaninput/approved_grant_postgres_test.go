@@ -15,6 +15,8 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/golang-migrate/migrate/v4"
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -132,11 +134,23 @@ func TestHumanInputApprovedGrantFullSchemaPostgres(t *testing.T) {
 			ownerPool, err := pgxpool.NewWithConfig(ctx, config)
 			require.True(t, err == nil, "open only the generated fixture with a single owner connection without printing private connection data")
 			t.Cleanup(ownerPool.Close)
+			// DDL in another parallel case may occupy every setup-pool
+			// connection while waiting for Answer's table locks. The observer
+			// must already own an independent connection before Answer starts,
+			// rather than wait for that pool outside PostgreSQL's lock graph.
+			observer, err := pgx.ConnectConfig(ctx, pool.Config().ConnConfig.Copy())
+			require.True(t, err == nil, "open a dedicated observer on the copied generated fixture configuration without exposing connection data")
+			t.Cleanup(func() {
+				closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				require.NoError(t, observer.Close(closeCtx), "close the dedicated observer with an independent bounded cleanup context")
+			})
 			starter := &answerGrantStarter{Pool: ownerPool}
 			var staged json.RawMessage
 			observe := func(tx pgx.Tx) {
 				staged = answerGrantPostgresRows(t, ctx, tx, fixture)
-				require.Equal(t, before, answerGrantPostgresRows(t, ctx, pool, fixture), "independent observers must see no answer, grant, automation snapshot, claim, message or job before outer commit")
+				require.NotEqual(t, tx.Conn().PgConn().PID(), observer.PgConn().PID(), "the visibility observer must own a different physical connection from the answer transaction")
+				require.Equal(t, before, answerGrantPostgresRows(t, ctx, observer, fixture), "the dedicated observer must see no answer, grant, automation snapshot, claim, message or job before outer commit without borrowing the setup or DDL pool")
 			}
 			starter.beforeCommit, starter.beforeAbort = observe, observe
 			svc := NewDBService(db.NewSessionStore(starter), db.NewSessionHumanInputRequestStore(starter), db.NewSessionQuestionStore(starter), db.NewSessionMessageStore(starter), db.NewSessionThreadStore(starter), db.NewJobStore(starter))

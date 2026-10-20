@@ -937,10 +937,17 @@ A later claim, message, job enqueue or commit failure therefore rolls back both
 the answer and capability snapshots, including the linked automation mirror.
 The handler adapter only constructs the item; it cannot independently commit a
 grant. The standalone grant service retains its configuration error and duplicate
-behavior. This version-0 atomicity prerequisite preserves existing pending-request,
+behavior and currently has no production callers; it remains for compatibility
+and tests. Answer's pure construction does not require that standalone appender;
+production wiring still configures it. This version-0 atomicity prerequisite preserves existing pending-request,
 approval parsing, checkpoint and resume policy, including the request-before-parent
 lock order. It is not the canonical `AdmitAnswerInTx`/`AppendApprovedGrantInTx`
 authority operation, and cannot activate readiness enforcement or a writer floor.
+Acquisition order is unchanged, but the session `FOR UPDATE`, metadata and
+automation-row locks now remain held through the outer claim/message/job commit.
+The stronger parent lock can block implicit FK `KEY SHARE` child inserts for
+that window; this does not establish compatibility with competing run-first
+automation writers or the chosen future lock protocol.
 
 Atomic steering now calls a private concrete-transaction acknowledgement core,
 instead of entering the standalone acknowledgement owner's nested savepoint.
@@ -2144,8 +2151,9 @@ no failures or skips. Reproduce using an owned PostgreSQL 15+
 passes: 1,490 roots and 1,890 subtests, with one existing external image-tool
 fixture skip. Focused vet and whitespace checks pass.
 
-Pure construction shares all prior catalog/access/config checks and exact item
-fields with standalone approval. Real `Answer` runs on the full unchanged schema
+Pure construction shares the prior catalog/access checks and exact item fields
+with standalone approval; only the retained standalone method checks appender
+configuration first. Real `Answer` runs on the full unchanged schema
 with a one-connection owner and nested-Begin rejection. Whole-row snapshots prove
 independent invisibility and atomic settlement of the request, capability metadata,
 automation mirror, claims, message and continuation job. Tenant mismatch and a
@@ -2156,6 +2164,16 @@ answer/grant staging; enqueue and deferred-commit triggers first validate earlie
 writes, then raise genuine PostgreSQL errors. All rejected units return no accepted
 result and restore the exact prior row set. This intermediate version-0 repair is
 not consent/readiness/epoch fencing or evidence of a deployed compatibility floor.
+
+The visibility observer owns a dedicated physical connection opened before
+`Answer`, independently of the shared fixture setup/DDL pool. This avoids a
+parallel-test pool-acquisition cycle that PostgreSQL cannot detect while another
+case's trigger DDL waits on the open answer's table locks. Explicit migration
+driver registrations keep the fixture independent of sibling test files.
+Repeated race verification with `GOMAXPROCS=4` passes at default parallelism
+(`-count=3`: three roots, 36 case executions) and at `-parallel=8 -count=5`
+(five roots, 60 case executions), with no failures or skips. Serial proof alone
+did not exercise this harness hazard.
 
 ### 0a atomic steering acknowledgement composition validation
 
