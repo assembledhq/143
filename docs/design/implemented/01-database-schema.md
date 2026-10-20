@@ -24,6 +24,28 @@ therefore only removes the expansion it added — it never renames a fresh
 installation's objects — and the 219/225/226 rollbacks drop whichever of the
 two naming shapes the database carries.
 
+## Historical code-review acquisition cache
+
+Migration 320 adds `code_review_exports`: `id uuid` PK, tenant `org_id uuid NOT
+NULL REFERENCES organizations(id)`, `repository_id uuid NOT NULL`, `slot smallint`
+(1–3), `schema_version integer` (1), `filters jsonb`, `acquired_at timestamptz`,
+`expires_at timestamptz`, and `counts jsonb`, all non-null. Unique `(org_id,id)` and
+`(org_id,slot)` keys enforce ownership and bounded acquisition concurrency; a
+composite repository FK enforces tenant ownership. Parent repository and organization
+deletion cascades only into the disposable export cache. Index `(org_id,expires_at)`
+supports expiry reclamation.
+
+`code_review_export_rows` stores `org_id uuid NOT NULL REFERENCES organizations(id)`,
+`export_id uuid NOT NULL`, positive `position bigint NOT NULL`, and `payload jsonb
+NOT NULL`. Its PK is `(org_id,export_id,position)` and the composite export FK
+cascades cache deletion. There are no triggers or changes to historical sources.
+The 24-hour cache expires logically on reads and is physically reclaimed on that
+organization's next acquisition. Identical-filter retries reuse the existing
+unexpired acquisition and its original boundary without consuming another slot.
+Source payloads and counts are materialized in a
+single repeatable-read transaction. Rollback drops only the two cache tables.
+See the [versioned export contract](../../public/reference/code-review-export.mdx).
+
 ## Core Tables
 
 ### `organizations`

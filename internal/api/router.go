@@ -464,6 +464,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		pullRequestHandler.SetFeedbackService(prService)
 	}
 	codeReviewHandler := handlers.NewCodeReviewHandler(codeReviewStore, repoStore)
+	codeReviewExportHandler := handlers.NewCodeReviewExportHandler(codereviewsvc.NewHistoricalExportService(db.NewCodeReviewExportStore(pool)))
 	codeReviewHandler.SetContinuationCapabilities(cfg.CodeReviewAssessmentsEnabled, cfg.CodeReviewRechecksEnabled)
 	codeReviewHandler.SetAssessments(db.NewCodeReviewAssessmentStore(pool), db.NewCodeReviewRecheckStore(pool), pullRequestStore)
 	codeReviewHandler.SetRetryService(codeReviewSvc)
@@ -1400,6 +1401,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 				r.Get("/api/v1/version", healthHandler.Version)
 				r.Get("/api/v1/code-reviews", codeReviewHandler.List)
+				r.Get("/api/v1/code-reviews/export", codeReviewExportHandler.Export)
 				r.Get("/api/v1/code-reviews/stats", codeReviewHandler.Stats)
 				r.Get("/api/v1/code-reviews/analytics", codeReviewHandler.Analytics)
 				r.Get("/api/v1/code-reviews/stream", codeReviewHandler.StreamUpdates)
