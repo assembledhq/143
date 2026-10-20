@@ -1601,13 +1601,13 @@
       ]
     },
     {
-      "id": "internal/db/session_store.go:SessionStore.PublishCheckpointWithProvenance:sql:1",
+      "id": "internal/db/session_checkpoint_persistence.go:SessionStore.publishCheckpointWithProvenanceRow:sql:1",
       "source_sha256": "13d8e35c90d3630c71144231026638b99f68be9f6885b2acd78b4b3f11d93e4b",
       "classification": "lease-owned",
       "action_0a": "Retain running plus the exact job/lock-token and required live-lease guard; convert lifecycle mutation to its named authority seam. awaiting_start_control has no execution lease and must never satisfy this predicate.",
       "reason": "This operation spends current execution/publication authority, not logical input ownership.",
       "evidence": [
-        "internal/db/session_store.go:1609",
+        "internal/db/session_checkpoint_persistence.go:75",
         "j . status = 'running'"
       ]
     },

@@ -20,6 +20,7 @@ type SessionPersistenceEffects struct {
 	sessionID         uuid.UUID
 	workspaceRevision workspaceRevisionUpdate
 	workspaceChanged  bool
+	workspaceReason   string
 }
 
 // UpdateResultInTx persists the existing status/result, primary changeset head
@@ -198,5 +199,9 @@ func (s *SessionStore) PublishCommittedSessionPersistenceEffects(ctx context.Con
 		s.logger.Error().Str("org_id", orgID.String()).Str("effects_org_id", effects.orgID.String()).Msg("refusing to publish session persistence effects for another organization")
 		return
 	}
-	s.publishWorkspaceGenerationChanged(ctx, orgID, effects.sessionID, effects.workspaceRevision.Revision, effects.workspaceRevision.UpdatedAt, "diff_snapshot")
+	reason := effects.workspaceReason
+	if reason == "" {
+		reason = "diff_snapshot"
+	}
+	s.publishWorkspaceGenerationChanged(ctx, orgID, effects.sessionID, effects.workspaceRevision.Revision, effects.workspaceRevision.UpdatedAt, reason)
 }

@@ -185,6 +185,8 @@ func TestComposablePersistenceBoundariesRemainInventoried(t *testing.T) {
 		{name: "settleAssessmentLockedPR"},
 		{name: "EndAttempt"},
 		{name: "newTurnAttemptSessions", lifecycleLink: true},
+		{name: "PublishCheckpointWithProvenanceInTx"},
+		{name: "publishCheckpointWithProvenanceRow"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -685,6 +687,9 @@ func TestInventoryMatchesRepository(t *testing.T) {
 		"internal/db/session_store.go:SessionStore.ClearPendingSnapshot",
 		"internal/db/session_store.go:SessionStore.ClearSnapshotKey",
 		"internal/db/session_store.go:SessionStore.PublishCheckpointWithProvenance",
+		"internal/db/session_checkpoint_persistence.go:SessionStore.PublishCheckpointWithProvenanceInTx",
+		"internal/db/session_checkpoint_persistence.go:SessionStore.publishCheckpointWithProvenanceRow",
+		"internal/services/automations/turn_store.go:TurnStore.PublishCheckpointWithProvenance",
 		"internal/db/session_changesets.go:SessionChangesetStore.AcceptSplit",
 		"internal/db/code_review_workspace.go:CodeReviewWorkspaceStore.PublishPrepared",
 		"internal/db/session_thread_store.go:SessionThreadStore.SetBaseSnapshot",
