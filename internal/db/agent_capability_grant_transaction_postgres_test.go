@@ -103,6 +103,8 @@ func TestAgentCapabilityApprovedGrantFullSchemaPostgres(t *testing.T) {
 		{name: "current wrapper retains concurrent distinct grants", wrapper: true},
 		{name: "current InTx detects the concurrently committed duplicate", duplicate: true},
 		{name: "current wrapper detects the concurrently committed duplicate", wrapper: true, duplicate: true},
+		{name: "current InTx detects the concurrently committed first duplicate", duplicate: true, missingMetadata: true},
+		{name: "current wrapper detects the concurrently committed first duplicate", wrapper: true, duplicate: true, missingMetadata: true},
 		{name: "current InTx retains both first grants without existing metadata", missingMetadata: true},
 		{name: "current wrapper retains both first grants without existing metadata", wrapper: true, missingMetadata: true},
 	} {
@@ -282,6 +284,13 @@ func runApprovedGrantConcurrentFullSchemaCase(t *testing.T, database *pgxpool.Po
 		require.NoError(t, err, "inspect both snapshots from a separate connection before the owner commits")
 		requireApprovedGrantJSON(t, fixture.existing, beforeCommitSession, "staged grant A must not publish its session snapshot before caller commit")
 		requireApprovedGrantJSON(t, fixture.existing, beforeCommitRun, "staged grant A must not publish its automation snapshot before caller commit")
+	} else {
+		var metadataExists bool
+		err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM session_execution_metadata WHERE org_id=$1 AND session_id=$2),
+			(SELECT capability_snapshot FROM automation_runs WHERE org_id=$1 AND id=$3)`, owned.orgID, sessionID, owned.runID).Scan(&metadataExists, &beforeCommitRun)
+		require.NoError(t, err, "inspect the absent metadata and unchanged automation mirror independently before the first grant commits")
+		require.False(t, metadataExists, "a staged first grant must not expose its new metadata row before caller commit")
+		requireApprovedGrantJSON(t, fixture.existing, beforeCommitRun, "a staged first grant must not expose its automation mirror before caller commit")
 	}
 	type result struct {
 		snapshot []models.AgentCapabilitySnapshotItem

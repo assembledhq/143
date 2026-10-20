@@ -100,7 +100,7 @@ func ReplaceDatabaseName(databaseURL, dbName string) (string, error) {
 	}
 	// Both pgx and the migration driver's lib/pq parser must select the
 	// generated sibling, not a database override retained from the source URL.
-	// Keep unsupported case variants for the drivers' normal rejection.
+	// Keep unsupported case variants for PostgreSQL's normal rejection.
 	query.Del("dbname")
 	query.Del("database")
 	parsed.Path = "/" + dbName

@@ -112,6 +112,7 @@ Labels remain self-reported and do not distinguish these two tools, invocation
 identity or privilege. This is partial command coverage: `backfill-usage`,
 `migrate`, `wait-postgres`, `demo-seed` and manual SQL paths remain unattributed
 by this slice. No command uses a label as deployment, drain or activation proof.
+The subsequent command slices below supersede that partial coverage list.
 
 A following migration-only slice labels connections opened by `cmd/migrate`
 with the same `143:operator:<safe-build>` policy. It retains golang-migrate's
@@ -125,11 +126,12 @@ single-file `go run` builds retain `dev`. There is no observer, lease or
 writer-version marker. This does not label `demo-seed`'s separate embedded
 migrator, `backfill-usage`, `wait-postgres` or manual SQL. Schema behavior,
 writer authority and every deployment/activation gate remain unchanged.
+The subsequent demo attribution slice below covers its embedded migrator.
 
 Demo-seed check mode now removes native `dbname`/`database` query overrides when
 selecting its generated temporary database, for both pgx and lib/pq. Malformed
 query parameters fail before it opens a connection. Unsupported case variants
-retain the drivers' rejection behavior. A full-schema check against a disposable
+retain PostgreSQL's rejection behavior. A full-schema check against a disposable
 source database verifies that its original rows and catalog remain unchanged and
 that the temporary sibling is removed. This target-isolation repair adds no
 writer attribution, observer or lifecycle authority.
@@ -1592,6 +1594,9 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Expose four thread persistence seams with explicit current-state
   post-commit effects, preserving legacy wrappers and verifying full-schema
   outer settlement, tenant rejection and notification behavior.
+- [x] Strengthen grant proof for concurrent duplicate first grants and absent
+  metadata visibility, and make attribution test observation/cleanup synchronous
+  so server-side connection exit timing does not create a false failure.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1903,6 +1908,14 @@ provider-ID differences, nil/empty diff, failure and timestamp fields, archived
 row behavior and publication of a later committed state. Reload/publish failures
 remain best-effort warnings. These are composable persistence prerequisites,
 not canonical allocation/epoch fences, deployment or writer-floor evidence.
+
+Review follow-ups add wrapper and InTx concurrent duplicate-first-grant cases,
+independent pre-commit absence checks and an anchored metadata-read mock query.
+Grant freshness remains scoped to conforming grants, not unrelated snapshot
+replacement writers or historical binaries. Attribution observations now poll
+server-side backend disappearance and complete their query before connection
+cleanup, including timeout paths. These are test and documentation refinements;
+they do not broaden writer authority or establish a deployment floor.
 
 ## Surprises & Discoveries
 

@@ -107,7 +107,7 @@ func expectApprovedGrantPersistence(t *testing.T, mock pgxmock.PgxPoolIface, fix
 		return nil
 	}
 	parent.WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(fixture.sessionID))
-	query := mock.ExpectQuery(regexp.QuoteMeta(approvedGrantReadSQL)).
+	query := mock.ExpectQuery("^" + regexp.QuoteMeta(approvedGrantReadSQL) + "$").
 		WithArgs(pgx.NamedArgs{"org_id": fixture.orgID, "session_id": fixture.sessionID})
 	if tt.failure == "read" {
 		query.WillReturnError(tt.cause)
