@@ -64,6 +64,36 @@ identify process instances, prove drained transactions or establish a writer
 floor, and transaction-pooling proxies need not preserve backend attribution.
 Connection census, command/operator pool coverage and every activation gate
 remain separate work; no production inventory or rollout is established here.
+A subsequent passive slice adds `cmd/lifecycle-census`, a standalone read-only
+command requiring a single explicit `DATABASE_URL` URI host and database name.
+It rejects empty/comma-separated hosts and ambiguous database aliases or target
+keys, then normalizes the selected target before pgx parsing. The port is explicit
+or pinned to PostgreSQL's default 5432, never inherited from `PGPORT` or a service.
+It opens one direct connection and one READ COMMITTED, READ ONLY transaction,
+then separately samples unexpired writer leases and current-database client
+activity, excluding its own backend. Masked backend types are retained as unknown;
+effective statistics privileges, null fields and disabled tracking remain explicit.
+Each source transfers at most 1,001 rows, retains 1,000 and uses the extra row
+only to detect overflow before aggregation. Truncated counts describe the
+retained sample, never source totals.
+The database statement clocks are separate; this is not an atomic snapshot or a
+process-instance/backend join. Allowlisted role/build/version aggregates omit raw
+identifiers, query text, addresses and arbitrary metadata. Labels remain spoofable.
+Connection, setup and reads share a cooperative five-second context budget;
+rollback and connection closure each have a separate cooperative 250ms budget.
+Closure also awaits pgx's asynchronous cleanup within that same close budget.
+Fixed server-side `statement_timeout` and `lock_timeout` values of five seconds
+bound each statement/wait independently of client survival. They are not a
+five-second total server wall-time guarantee across setup and both reads. If
+client cancellation/cleanup cannot finish before process exit, the server limits
+still bound the abandoned statement. URI/environment `options` and differently
+cased aliases cannot override the fixed session name and timeouts.
+Limits bound returned observations, not all internal database work. Versioned JSON
+on stdout is an observation, not a floor/drain verdict. Failures return nonzero
+with sanitized diagnostics; an output failure can leave a partial JSON prefix.
+Operational output belongs outside this public checkout. Runtime/deploy wiring,
+command/operator coverage, independent inventory/drain receipts, canonical callers,
+guards and activation remain separate gates. This command does not complete 0a.
 
 Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
 identify the inspected implementation; the executable inventory rechecks the
@@ -1450,6 +1480,13 @@ revision; it must not reinterpret new durable records or trigger replay.
   fresh, reused and reset-pool connections and PID-scoped activity checks. This
   does not implement transaction census, process-instance correlation,
   command/operator pool coverage or a writer floor.
+- [x] Add a standalone passive census consumer for bounded, separate lease and
+  connection observations, with explicit privilege/unknown/truncation semantics.
+  No runtime/deploy gate consumes this report and no compatible floor is proved.
+- [x] Validate the passive census on the full PostgreSQL 17 schema, including
+  real restricted/inherited statistics roles, disabled tracking, expiry clocks,
+  overflow boundaries and lock-synchronized cancellation and budget expiry.
+  These local checks do not establish deployment, CI or a compatible writer floor.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1589,6 +1626,37 @@ independently repeated the 45-root/334-subtest PostgreSQL race selection without
 failures or skips. The final changes to this plan only record that verdict and
 complete the review checkbox. This is not approval of canonical authority,
 caller conversion, whole 0a, activation, deployment or production acceptance.
+
+### 0a passive-census validation
+
+The census selection passed locally on PostgreSQL 17.10 with the complete
+unmodified migration chain: 36 root tests and 210 subtests, no failures or skips.
+Reproduce with an owned disposable PostgreSQL 15+ server in `TEST_DATABASE_URL`
+and `go test -race -p=1 ./internal/db ./internal/services/lifecyclecensus
+./cmd/lifecycle-census ./cmd/migrate -run
+'^(TestLifecycleCensus.*|TestParseLabel|TestAssemble.*|TestCensusEnumValidation|TestCollect.*|TestRun.*)$'
+-count=1 -parallel=3 -timeout=3m`. The eight census full-schema roots include eleven
+table subtests. The activity-source overflow boundary is mock-tested; the writer
+boundary is also exercised against PostgreSQL. No test opens 1,001 connections.
+
+Actual CLI subprocess probes hold an independent table lock across natural
+budget expiry, SIGTERM and SIGKILL, then confirm backend cleanup before unlocking.
+SIGKILL leaves no surviving client cancellation goroutine: server-side timeouts
+must bound that abandoned read. Unit tests also hold pgx cleanup pending and
+verify that closure and its completion wait share one 250ms budget. Explicit
+target tests cover dropped empty hosts, slash-only paths, ambiguous aliases and
+hostile libpq environment/URI overrides.
+
+Focused race/coverage runs report 92.5% statement coverage for the census service
+and 88.9% for the CLI. Vet, the repository-pinned linter, tenancy/lifecycle guards
+and the security scanner pass for the checked scope. This entry records local
+mechanical evidence; each publication candidate still requires independent review.
+
+Run `go run ./cmd/lifecycle-census` with an explicitly configured PostgreSQL URI
+in `DATABASE_URL`; it accepts no arguments and has no target fallback. Treat the
+JSON and diagnostics as private operational evidence. The command is not wired
+into startup, scheduling, deployment or activation, and a zero exit code means
+only that observation collection and report delivery succeeded.
 
 ## Surprises & Discoveries
 
