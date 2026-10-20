@@ -175,6 +175,10 @@ func TestComposablePersistenceBoundariesRemainInventoried(t *testing.T) {
 		{name: "StartSeedPhaseInTx"},
 		{name: "ReconcileDrainedTerminalTurnInTx"},
 		{name: "AppendApprovedCapabilityGrant"},
+		{name: "acknowledgeInboxBatchInTx"},
+		{name: "AcknowledgeInboxBatch"},
+		{name: "AcknowledgeInboxBatchWithTransition"},
+		{name: "AcknowledgeInboxBatchAndStartPhase"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -585,6 +589,13 @@ func TestInventoryMatchesRepository(t *testing.T) {
 		"internal/db/continuation_recovery.go:JobStore.RecordContinuationAttemptWithLease",
 		"internal/db/session_activity_seed.go:SessionActivityPhaseStore.StartSeedPhase",
 		"internal/db/session_activity_seed.go:SessionActivityPhaseStore.StartSeedPhaseInTx",
+		"internal/db/session_activity_phases.go:SessionActivityPhaseStore.acknowledgeInboxBatchInTx",
+		"internal/db/session_activity_phases.go:SessionActivityPhaseStore.AcknowledgeInboxBatch",
+		"internal/db/session_activity_phases.go:SessionActivityPhaseStore.AcknowledgeInboxBatchWithTransition",
+		"internal/db/session_activity_phases.go:SessionActivityPhaseStore.AcknowledgeInboxBatchAndStartPhase",
+		"internal/services/agent/activity_phases.go:ActivityPhaseService.AcknowledgeInboxBatch",
+		"internal/services/agent/activity_phases.go:ActivityPhaseService.AcknowledgeInboxBatchAndStartPhase",
+		"internal/services/agent/activity_phase_execution.go:activityPhaseExecution.acknowledgeAndResume",
 		"internal/db/session_result_persistence.go:SessionStore.UpdateResultInTx",
 		"internal/db/session_result_persistence.go:SessionStore.UpdateStatusInTx",
 		"internal/db/session_result_persistence.go:SessionStore.UpdateTurnCompleteInTx",

@@ -942,6 +942,15 @@ approval parsing, checkpoint and resume policy, including the request-before-par
 lock order. It is not the canonical `AdmitAnswerInTx`/`AppendApprovedGrantInTx`
 authority operation, and cannot activate readiness enforcement or a writer floor.
 
+Atomic steering now calls a private concrete-transaction acknowledgement core,
+instead of entering the standalone acknowledgement owner's nested savepoint.
+One SQL sequence retains old-phase closure, exact delivered-input acknowledgement,
+batch creation and watermark CAS before the existing replacement-phase operation.
+The standalone path keeps input validation and initial replay before Begin, plus
+its distinct ordinary and concurrent-replay commit errors. The public service
+still publishes only after the store reports success; no new provider authority,
+epoch check, lock order or event policy is introduced.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -1674,6 +1683,9 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Keep version-0 structured-answer grant construction pure and persist its
   request-keyed item through the same answer/claim/message/job transaction, with
   full-schema late-failure rollback of session and linked automation snapshots.
+- [x] Remove atomic steering's nested acknowledgement savepoint with one shared
+  private SQL core; preserve standalone replay/error behavior and inventory the
+  current public acknowledgement chain through its real service callers.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2132,6 +2144,41 @@ answer/grant staging; enqueue and deferred-commit triggers first validate earlie
 writes, then raise genuine PostgreSQL errors. All rejected units return no accepted
 result and restore the exact prior row set. This intermediate version-0 repair is
 not consent/readiness/epoch fencing or evidence of a deployed compatibility floor.
+
+### 0a atomic steering acknowledgement composition validation
+
+The expanded database race selection passes locally on PostgreSQL 17.10:
+11 roots and 62 subtests, no failures or skips. Reproduce with an owned
+PostgreSQL 15+ `TEST_DATABASE_URL` and `go test -race -p=1 ./internal/db
+-run '^TestInboxAck|^TestSessionActivityPhaseStoreAcknowledgeInboxBatch|^TestSessionActivityPhaseStorePostgresConcurrentBatchRetriesCreateOnePhase$'
+-count=1 -parallel=1 -timeout=3m`. Two retained agent delivery-receipt roots
+and nine subtests also pass: `go test -race -p=1 ./internal/services/agent
+-run '^TestThreadDeliveryPostgres(LateReceiptDoesNotResurrectPhase|AtomicSteeringRejectsForeignOrStaleReceipt)$'
+-count=1 -parallel=1 -timeout=3m`. Focused vet and formatting pass.
+
+The real atomic owner runs with one occupied connection and rejects nested Begin.
+Independent whole-row observations remain unchanged until the outer commit;
+successful commit exposes exact staged old/new phases, acknowledged/applied inputs,
+batch receipts and runtime watermarks. A scoped replacement-phase trigger first
+checks genuine earlier mutations, then raises a real PostgreSQL error; whole-owner
+rollback restores the entire prior graph. Injected outer commit error, started
+replay, abandoned repair, missing/duplicate confirmations, uncertain input and
+foreign lease retain original outcomes. Unit tests cover every retained SQL/count
+failure, initial replay before Begin, nil/typed-nil inputs and commit error prefixes.
+
+The syntax inventory now covers the previously unregistered acknowledgement chain:
+five DB symbols and three actual agent/service callers. New exact names require
+concrete root/direct-caller contracts even for generic receivers. These are
+conservative syntax candidates, not semantic runtime authority. Standalone legacy
+lease checks use acknowledgement time and allow draining, while initial replay
+does not revalidate live ownership; the atomic path additionally checks the actual
+clock and exact positive receipts. Canonical allocation/epoch fencing remains open.
+
+A separate caller trace qualifies earlier wrapper risk notes: the two current
+automation success callbacks clear diff/base/head before `UpdateTurnComplete`, so
+they do not produce the hypothesized workspace wakeup. A diff-bearing tx-bound
+wrapper remains a latent hazard; reachable failed-result and awaiting-input status
+publication are separate owner-local follow-up work, not evidence of that wakeup.
 
 ## Surprises & Discoveries
 
