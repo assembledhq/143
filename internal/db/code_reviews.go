@@ -757,11 +757,15 @@ func (s *CodeReviewStore) GetRiskReasonCodesBySession(ctx context.Context, orgID
 	codes := make([]models.CodeReviewRiskReasonCode, 0, len(values))
 	for _, value := range values {
 		code := models.CodeReviewRiskReasonCode(value)
-		if code.Validate() == nil {
+		if code.Validate() == nil && !models.IsCodeReviewInformationalRiskReason(code) {
 			codes = append(codes, code)
 		}
 	}
 	return codes, nil
+}
+
+func codeReviewBlockingReasonCodeSQL(expression string) string {
+	return expression + " <> ALL('{" + strings.Join(models.CodeReviewInformationalRiskReasonStrings(), ",") + "}'::text[])"
 }
 
 func (s *CodeReviewStore) GetRiskReasonsBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.CodeReviewRiskReason, error) {
@@ -882,6 +886,7 @@ func (s *CodeReviewStore) HasPriorDeterministicEarlyStop(ctx context.Context, or
 				SELECT 1
 				FROM jsonb_array_elements(COALESCE(prior.risk_reason_details, '[]'::jsonb)) reason
 				WHERE NOT (reason->>'code' = ANY(@stable_reason_codes))
+				  AND `+codeReviewBlockingReasonCodeSQL("reason->>'code'")+`
 			  )
 			  AND NOT EXISTS (
 				SELECT 1 FROM code_review_agent_results result
@@ -2318,6 +2323,7 @@ func (s *CodeReviewStore) GetReviewAnalytics(ctx context.Context, orgID uuid.UUI
 		WHERE (approval.round_number IS NULL OR h.round_number <= approval.round_number)
 		  AND (h.decision IS DISTINCT FROM 'approved' OR h.github_review_id IS NULL)
 		  AND NULLIF(reason->>'code', '') IS NOT NULL
+		  AND ` + codeReviewBlockingReasonCodeSQL("reason->>'code'") + `
 		GROUP BY reason->>'code'
 	),
 	approval_rounds AS (

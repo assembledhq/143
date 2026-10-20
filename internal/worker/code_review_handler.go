@@ -39,6 +39,7 @@ type runCodeReviewPayload struct {
 	FromFork                bool                                `json:"from_fork"`
 	PullRequestAuthor       string                              `json:"pull_request_author,omitempty"`
 	PullRequestAuthorTeams  []string                            `json:"-"`
+	RiskTierSignal          *models.CodeReviewRiskTierSignal    `json:"-"`
 	OutputKey               string                              `json:"review_output_key"`
 	RequestedReviewerLogin  string                              `json:"requested_reviewer_login,omitempty"`
 	RequestedTeamSlug       string                              `json:"requested_team_slug,omitempty"`
@@ -320,6 +321,10 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("load code review changed files: %w", err)
 		}
+		job.RiskTierSignal, err = resolveCodeReviewRiskTierSignal(ctx, stores, services, job, policy.Config())
+		if err != nil {
+			return fmt.Errorf("resolve code review risk-tier signal: %w", err)
+		}
 		assessment, capturedAssessment, err := prepareFullAssessment(ctx, stores, services, job, metadata)
 		if err != nil {
 			return fmt.Errorf("capture full code review assessment: %w", err)
@@ -525,6 +530,10 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			var manifest codereviewsvc.ReviewInputManifest
 			assessmentCoverage = json.Unmarshal(assessment.InputManifest, &manifest) == nil && fullAssessmentCoverage(policy.Config(), agentResults, manifest)
 			evidenceRecheckURL = codeReviewEvidenceRecheckURL(services, policy.Config(), assessment.ID, assessmentCoverage)
+		}
+		job.RiskTierSignal, err = refreshCodeReviewRiskTierSignalForDecision(ctx, stores, services, reviewLog, job, policy.Config())
+		if err != nil {
+			return fmt.Errorf("refresh code review risk-tier signal before decision: %w", err)
 		}
 		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
 			Policy:                policy.Config(),
@@ -1931,6 +1940,7 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		BlockingFindings:     codeReviewBlockingFindings(findings),
 		ReviewerDisagreement: false,
 		PromptInjectionFound: codeReviewPromptInjectionLikely(stringPtrValue(pr.Body), job.RequestContext) || codeReviewVisualEvidencePromptInjectionLikely(visualEvidence),
+		RiskTier:             job.RiskTierSignal,
 	})
 	requiredReviewerQuorum := codeReviewRequiredReviewerQuorum(cfg, agentResults)
 	if reviewerQuorum < requiredReviewerQuorum {
@@ -3609,9 +3619,14 @@ func codeReviewStableDeterministicRisk(policy models.CodeReviewPolicyConfig, job
 		AuthorClass:           codeReviewAuthorClass(pr),
 		AuthorTeams:           job.PullRequestAuthorTeams,
 		FromFork:              job.FromFork,
+		RiskTier:              job.RiskTierSignal,
 	})
 	stable := models.CodeReviewRiskEvaluation{Acceptable: true}
 	for _, reason := range evaluated.ReasonDetails {
+		if models.IsCodeReviewInformationalRiskReason(reason.Code) {
+			stable.RecordSafeguard(reason)
+			continue
+		}
 		// Explicit usernames are stable for the captured policy, but GitHub team
 		// membership is live provider state and is rechecked before approval.
 		if reason.Code == models.CodeReviewRiskReasonAuthorIneligible && len(policy.RiskPolicy.EligibleAuthorTeams) > 0 {
@@ -3775,6 +3790,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ScopeMismatch:         input.OrchestratorSynthesis.ScopeMismatch,
 		UnresolvedUncertainty: input.OrchestratorSynthesis.UnresolvedUncertainty,
 		PromptInjectionFound:  codeReviewPromptInjectionLikely(stringPtrValue(input.PullRequest.Body), input.Job.RequestContext) || codeReviewVisualEvidencePromptInjectionLikely(input.VisualEvidence) || input.OrchestratorSynthesis.PromptInjectionDetected,
+		RiskTier:              input.Job.RiskTierSignal,
 	})
 	if reviewerQuorum < requiredReviewerQuorum {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: requiredReviewerQuorum})

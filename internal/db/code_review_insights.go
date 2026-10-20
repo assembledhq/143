@@ -46,6 +46,7 @@ func (s *CodeReviewInsightStore) projectDecisions(ctx context.Context, q DBTX, o
 			SELECT DISTINCT reason->>'code'
 			FROM jsonb_array_elements(COALESCE(m.risk_reason_details, '[]'::jsonb)) reason
 			WHERE NULLIF(reason->>'code', '') IS NOT NULL
+			  AND `+codeReviewBlockingReasonCodeSQL("reason->>'code'")+`
 			ORDER BY reason->>'code'
 		), '{}'),
 		COALESCE(lifecycle.merged, pr.status = 'merged'),

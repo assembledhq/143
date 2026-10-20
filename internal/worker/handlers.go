@@ -890,6 +890,7 @@ type Services struct {
 	CodeReviewInputCapture       codereviewsvc.AssessmentInputCapturer
 	CodeReviewAssessmentsEnabled bool
 	CodeReviewRechecksEnabled    bool
+	CodeReviewRiskTier           codeReviewRiskTierCheckRunLister
 	Orchestrator                 orchestratorService
 	PR                           prCreator
 	Failure                      *agent.FailureService

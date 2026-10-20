@@ -12,6 +12,9 @@ func ApplyCodeReviewPolicyMergePatch(current CodeReviewPolicyConfig, patch json.
 	if err := json.Unmarshal(patch, &changes); err != nil || changes == nil {
 		return CodeReviewPolicyConfig{}, codeReviewPolicyFieldError("config", "policy patch must be an object")
 	}
+	if err := ValidateCodeReviewPolicyConfigFields(patch); err != nil {
+		return CodeReviewPolicyConfig{}, err
+	}
 	var shape CodeReviewPolicyConfig
 	strict := json.NewDecoder(bytes.NewReader(patch))
 	strict.DisallowUnknownFields()

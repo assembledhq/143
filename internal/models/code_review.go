@@ -492,21 +492,22 @@ type CodeReviewDescriptionPolicy struct {
 }
 
 type CodeReviewRiskPolicy struct {
-	MaxFilesChanged               int      `json:"max_files_changed"`
-	MaxAdditions                  int      `json:"max_additions"`
-	MaxDeletions                  int      `json:"max_deletions"`
-	SemanticDedupeCooldownSeconds int      `json:"semantic_dedupe_cooldown_seconds"`
-	StopAfterDeterministicFailure bool     `json:"stop_after_deterministic_failure"`
-	RequirePassingChecks          bool     `json:"require_passing_checks"`
-	ExcludeSensitivePaths         bool     `json:"exclude_sensitive_paths"`
-	SensitivePaths                []string `json:"sensitive_paths,omitempty"`
-	AllowedPathPatterns           []string `json:"allowed_path_patterns,omitempty"`
-	BlockedPathPatterns           []string `json:"blocked_path_patterns,omitempty"`
-	RequireUpToDate               bool     `json:"require_up_to_date"`
-	AllowForks                    bool     `json:"allow_forks"`
-	EligibleAuthors               []string `json:"eligible_authors,omitempty"`
-	EligibleAuthorTeams           []string `json:"eligible_author_teams,omitempty"`
-	RequiredChecks                []string `json:"required_checks,omitempty"`
+	MaxFilesChanged               int                            `json:"max_files_changed"`
+	MaxAdditions                  int                            `json:"max_additions"`
+	MaxDeletions                  int                            `json:"max_deletions"`
+	SemanticDedupeCooldownSeconds int                            `json:"semantic_dedupe_cooldown_seconds"`
+	StopAfterDeterministicFailure bool                           `json:"stop_after_deterministic_failure"`
+	RequirePassingChecks          bool                           `json:"require_passing_checks"`
+	ExcludeSensitivePaths         bool                           `json:"exclude_sensitive_paths"`
+	SensitivePaths                []string                       `json:"sensitive_paths,omitempty"`
+	AllowedPathPatterns           []string                       `json:"allowed_path_patterns,omitempty"`
+	BlockedPathPatterns           []string                       `json:"blocked_path_patterns,omitempty"`
+	RequireUpToDate               bool                           `json:"require_up_to_date"`
+	AllowForks                    bool                           `json:"allow_forks"`
+	EligibleAuthors               []string                       `json:"eligible_authors,omitempty"`
+	EligibleAuthorTeams           []string                       `json:"eligible_author_teams,omitempty"`
+	RequiredChecks                []string                       `json:"required_checks,omitempty"`
+	RiskTierCheck                 *CodeReviewRiskTierCheckPolicy `json:"risk_tier_check,omitempty"`
 }
 
 // MarshalJSON retains a conservative combined budget for old workers during
@@ -768,6 +769,10 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	if len(config.RiskPolicy.RequiredChecks) > 0 {
 		defaults.RiskPolicy.RequiredChecks = config.RiskPolicy.RequiredChecks
 	}
+	if config.RiskPolicy.RiskTierCheck != nil {
+		riskTierCheck := *config.RiskPolicy.RiskTierCheck
+		defaults.RiskPolicy.RiskTierCheck = &riskTierCheck
+	}
 	if len(config.AgentRoster.Reviewers) > 0 {
 		defaults.AgentRoster = config.AgentRoster
 		defaults.AgentRoster.ReviewerCount = config.AgentRoster.EffectiveReviewerCount()
@@ -870,6 +875,9 @@ func (c CodeReviewPolicyConfig) Validate() error {
 		if !validCodeReviewGitHubTeam(team) {
 			return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "eligible_author_teams entries must use organization/team-slug")
 		}
+	}
+	if err := c.RiskPolicy.RiskTierCheck.Validate(); err != nil {
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, err.Error())
 	}
 	if len(c.AgentRoster.Reviewers) == 0 {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "at least one reviewer agent is required")
@@ -1389,6 +1397,7 @@ type CodeReviewRiskInput struct {
 	PromptInjectionFound  bool
 	ContextFetchFailed    bool
 	HeadSHAChanged        bool
+	RiskTier              *CodeReviewRiskTierSignal
 }
 
 type CodeReviewRiskReasonCode string
@@ -1437,6 +1446,7 @@ const (
 	CodeReviewRiskReasonOperationalRisk          CodeReviewRiskReasonCode = "operational_risk"
 	CodeReviewRiskReasonSensitiveChange          CodeReviewRiskReasonCode = "sensitive_change"
 	CodeReviewRiskReasonPolicyRequirement        CodeReviewRiskReasonCode = "policy_requirement"
+	CodeReviewRiskReasonSizeSafeguard            CodeReviewRiskReasonCode = "size_safeguard"
 )
 
 func (c CodeReviewRiskReasonCode) Validate() error {
@@ -1473,7 +1483,8 @@ func (c CodeReviewRiskReasonCode) Validate() error {
 		CodeReviewRiskReasonOwnership,
 		CodeReviewRiskReasonOperationalRisk,
 		CodeReviewRiskReasonSensitiveChange,
-		CodeReviewRiskReasonPolicyRequirement:
+		CodeReviewRiskReasonPolicyRequirement,
+		CodeReviewRiskReasonSizeSafeguard:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewRiskReasonCode: %q", c)
@@ -1522,10 +1533,53 @@ func CodeReviewStableDeterministicRiskReasonStrings() []string {
 }
 
 type CodeReviewRiskReason struct {
-	Code    CodeReviewRiskReasonCode `json:"code"`
-	Actual  int                      `json:"actual,omitempty"`
-	Limit   int                      `json:"limit,omitempty"`
-	Subject string                   `json:"subject,omitempty"`
+	Code          CodeReviewRiskReasonCode         `json:"code"`
+	Actual        int                              `json:"actual,omitempty"`
+	Limit         int                              `json:"limit,omitempty"`
+	Subject       string                           `json:"subject,omitempty"`
+	SizeSafeguard *CodeReviewSizeSafeguardDecision `json:"size_safeguard,omitempty"`
+}
+
+var codeReviewInformationalRiskReasonCodes = []CodeReviewRiskReasonCode{
+	CodeReviewRiskReasonSizeSafeguard,
+}
+
+func IsCodeReviewInformationalRiskReason(code CodeReviewRiskReasonCode) bool {
+	for _, informational := range codeReviewInformationalRiskReasonCodes {
+		if informational == code {
+			return true
+		}
+	}
+	return false
+}
+
+func CodeReviewInformationalRiskReasonStrings() []string {
+	codes := make([]string, 0, len(codeReviewInformationalRiskReasonCodes))
+	for _, code := range codeReviewInformationalRiskReasonCodes {
+		codes = append(codes, string(code))
+	}
+	return codes
+}
+
+func CodeReviewBlockingRiskReasons(reasons []CodeReviewRiskReason) []CodeReviewRiskReason {
+	return filterCodeReviewRiskReasons(reasons, false)
+}
+
+func CodeReviewInformationalRiskReasons(reasons []CodeReviewRiskReason) []CodeReviewRiskReason {
+	return filterCodeReviewRiskReasons(reasons, true)
+}
+
+func filterCodeReviewRiskReasons(reasons []CodeReviewRiskReason, informational bool) []CodeReviewRiskReason {
+	if reasons == nil {
+		return nil
+	}
+	filtered := make([]CodeReviewRiskReason, 0, len(reasons))
+	for _, reason := range reasons {
+		if IsCodeReviewInformationalRiskReason(reason.Code) == informational {
+			filtered = append(filtered, reason)
+		}
+	}
+	return filtered
 }
 
 func (r CodeReviewRiskReason) Message() string {
@@ -1596,6 +1650,8 @@ func (r CodeReviewRiskReason) Message() string {
 		return codeReviewHumanReviewReasonMessage("sensitive-change judgment", r.Subject)
 	case CodeReviewRiskReasonPolicyRequirement:
 		return codeReviewHumanReviewReasonMessage("an automated approval policy requirement", r.Subject)
+	case CodeReviewRiskReasonSizeSafeguard:
+		return ""
 	default:
 		return string(r.Code)
 	}
@@ -1631,6 +1687,10 @@ func (e *CodeReviewRiskEvaluation) AddReason(reason CodeReviewRiskReason) {
 	e.ReasonDetails = append(e.ReasonDetails, reason)
 }
 
+func (e *CodeReviewRiskEvaluation) RecordSafeguard(reason CodeReviewRiskReason) {
+	e.ReasonDetails = append(e.ReasonDetails, reason)
+}
+
 type CodeReviewDecisionEvaluation struct {
 	Decision          CodeReviewDecision     `json:"decision"`
 	Acceptable        bool                   `json:"acceptable"`
@@ -1647,10 +1707,14 @@ func EvaluateCodeReviewDecision(policy CodeReviewPolicyConfig, risk CodeReviewRi
 			RiskReasonDetails: append([]CodeReviewRiskReason(nil), risk.ReasonDetails...),
 		}
 	}
-	if policy.ApprovalMode == CodeReviewApprovalModeApproveAcceptable {
-		return CodeReviewDecisionEvaluation{Decision: CodeReviewDecisionApproved, Acceptable: true}
+	var informational []CodeReviewRiskReason
+	if recorded := CodeReviewInformationalRiskReasons(risk.ReasonDetails); len(recorded) > 0 {
+		informational = recorded
 	}
-	return CodeReviewDecisionEvaluation{Decision: CodeReviewDecisionCommentOnly, Acceptable: true}
+	if policy.ApprovalMode == CodeReviewApprovalModeApproveAcceptable {
+		return CodeReviewDecisionEvaluation{Decision: CodeReviewDecisionApproved, Acceptable: true, RiskReasonDetails: informational}
+	}
+	return CodeReviewDecisionEvaluation{Decision: CodeReviewDecisionCommentOnly, Acceptable: true, RiskReasonDetails: informational}
 }
 
 func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskInput) CodeReviewRiskEvaluation {
@@ -1665,14 +1729,19 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	if input.HeadSHAChanged {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonHeadChanged})
 	}
-	if input.FilesChanged > policy.RiskPolicy.MaxFilesChanged {
-		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: input.FilesChanged, Limit: policy.RiskPolicy.MaxFilesChanged})
+	sizeReasons := codeReviewSizeLimitReasons(policy.RiskPolicy, input)
+	if !input.RiskTier.WaivesSizeSafeguard() {
+		for _, reason := range sizeReasons {
+			risk.AddReason(reason)
+		}
 	}
-	if input.Additions > policy.RiskPolicy.MaxAdditions {
-		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: input.Additions, Limit: policy.RiskPolicy.MaxAdditions})
-	}
-	if input.Deletions > policy.RiskPolicy.MaxDeletions {
-		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonDeletionsLimitExceeded, Actual: input.Deletions, Limit: policy.RiskPolicy.MaxDeletions})
+	if input.RiskTier.Active() {
+		decision := input.RiskTier.SizeSafeguardDecision(
+			CodeReviewSizeMeasurement{Actual: input.FilesChanged, Limit: policy.RiskPolicy.MaxFilesChanged, Exceeded: input.FilesChanged > policy.RiskPolicy.MaxFilesChanged},
+			CodeReviewSizeMeasurement{Actual: input.Additions, Limit: policy.RiskPolicy.MaxAdditions, Exceeded: input.Additions > policy.RiskPolicy.MaxAdditions},
+			CodeReviewSizeMeasurement{Actual: input.Deletions, Limit: policy.RiskPolicy.MaxDeletions, Exceeded: input.Deletions > policy.RiskPolicy.MaxDeletions},
+		)
+		risk.RecordSafeguard(CodeReviewRiskReason{Code: CodeReviewRiskReasonSizeSafeguard, SizeSafeguard: &decision})
 	}
 	if policy.RiskPolicy.RequirePassingChecks && !input.ChecksPassing {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonChecksFailing})
@@ -1731,6 +1800,20 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 		}
 	}
 	return risk
+}
+
+func codeReviewSizeLimitReasons(policy CodeReviewRiskPolicy, input CodeReviewRiskInput) []CodeReviewRiskReason {
+	var reasons []CodeReviewRiskReason
+	if input.FilesChanged > policy.MaxFilesChanged {
+		reasons = append(reasons, CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: input.FilesChanged, Limit: policy.MaxFilesChanged})
+	}
+	if input.Additions > policy.MaxAdditions {
+		reasons = append(reasons, CodeReviewRiskReason{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: input.Additions, Limit: policy.MaxAdditions})
+	}
+	if input.Deletions > policy.MaxDeletions {
+		reasons = append(reasons, CodeReviewRiskReason{Code: CodeReviewRiskReasonDeletionsLimitExceeded, Actual: input.Deletions, Limit: policy.MaxDeletions})
+	}
+	return reasons
 }
 
 // CodeReviewAuthorAllowed reports whether a PR author matches an explicit

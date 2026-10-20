@@ -34,12 +34,14 @@ type CodeReviewFinalReviewInput struct {
 }
 
 func BuildCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
+	input.RiskReasons = CodeReviewBlockingRiskReasons(input.RiskReasons)
 	return buildDefaultCodeReviewFinalReviewBody(input)
 }
 
 const CodeReviewProvisionalReviewHeading = "⚠️ **143 Code Reviewer found stable policy blockers**"
 
 func BuildCodeReviewProvisionalBody(input CodeReviewFinalReviewInput) string {
+	input.RiskReasons = CodeReviewBlockingRiskReasons(input.RiskReasons)
 	paragraphs := []string{CodeReviewProvisionalReviewHeading}
 	paragraphs = append(paragraphs, codeReviewBlockerSections(input)...)
 	paragraphs = append(paragraphs, "These blockers are stable for this commit. The substantive code review is still running and may identify additional findings.")

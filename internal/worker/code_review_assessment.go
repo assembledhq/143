@@ -165,6 +165,15 @@ func verifyFullAssessmentApproval(ctx context.Context, reviews *db.CodeReviewSto
 	if err != nil {
 		return err
 	}
+	job.RiskTierSignal, err = resolveCodeReviewRiskTierSignalWith(ctx, reviews, codeReviewRiskTierChecks(services), job, fresh.Policy.Config())
+	if err != nil {
+		return err
+	}
+	var liveErr error
+	job.RiskTierSignal, liveErr = refreshCodeReviewRiskTierSignal(ctx, services, job, fresh.Policy.Config())
+	if liveErr != nil {
+		zerolog.Ctx(ctx).Warn().Err(liveErr).Str("session_id", job.SessionID.String()).Msg("live risk-tier lookup failed before approval; treating the live result as non-authoritative")
+	}
 	decision, _ := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
 		Policy: fresh.Policy.Config(), Job: job, PullRequest: fresh.PullRequest, Health: fresh.Health,
 		AgentResults: results, Findings: findings, ChangedFiles: fresh.Files, ChangedFilesAvailable: true,

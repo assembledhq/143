@@ -357,7 +357,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPRJourneys(t *testing.T) {
 	value := func(number int) *int { return &number }
 	facts := []reviewFact{
 		// Same-head reruns count separately through the earliest posted approval.
-		{orgID, uuid.New(), repositoryID, rerunPRID, "alice", "completed", "a1", "needs_human_review", nil, value(20), value(10), `[{"code":"blocking_findings"}]`, baseTime, baseTime.Add(time.Minute)},
+		{orgID, uuid.New(), repositoryID, rerunPRID, "alice", "completed", "a1", "needs_human_review", nil, value(20), value(10), `[{"code":"blocking_findings"},{"code":"size_safeguard","size_safeguard":{"outcome":"applied","source":"missing","head_sha":"a1"}}]`, baseTime, baseTime.Add(time.Minute)},
 		{orgID, uuid.New(), repositoryID, rerunPRID, "alice", "completed", "a1", "approved", &postedReviewID, value(30), value(10), `[]`, baseTime.Add(time.Minute), baseTime.Add(2 * time.Minute)},
 		{orgID, uuid.New(), repositoryID, rerunPRID, "alice", "completed", "a1", "approved", &postedReviewID, value(70), value(20), `[]`, baseTime.Add(2 * time.Minute), baseTime.Add(3 * time.Minute)},
 		// The first attempt has no author. Later attribution must supply octocat.
@@ -471,7 +471,7 @@ func TestCodeReviewStore_GetReviewAnalyticsPRJourneys(t *testing.T) {
 		{Code: models.CodeReviewRiskReasonBlockingFindings, PRs: 2},
 		{Code: models.CodeReviewRiskReasonChecksFailing, PRs: 1},
 		{Code: models.CodeReviewRiskReasonLinesLimitExceeded, PRs: 1},
-	}, analytics.NonApprovalReasons, "reasons should deduplicate per PR and exclude post-approval rounds")
+	}, analytics.NonApprovalReasons, "reasons should deduplicate per PR, exclude post-approval rounds, and omit informational safeguard records")
 	require.Equal(t, map[string]int64{"Unknown": 1, "alice": 1, "carol": 1, "octocat": 1}, func() map[string]int64 {
 		authors := make(map[string]int64, len(analytics.Authors))
 		for _, author := range analytics.Authors {

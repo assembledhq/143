@@ -465,6 +465,7 @@ func TestInternalCodeReviewHandler_UpdatePolicyValidatesArguments(t *testing.T) 
 		{name: "expected_version is required", body: `{"config":{"enabled":true},"reason":"r"}`, code: "EXPECTED_VERSION_REQUIRED"},
 		{name: "reason is required", body: `{"config":{"enabled":true},"expected_version":0,"reason":"  "}`, code: "REASON_REQUIRED"},
 		{name: "reason is bounded", body: `{"config":{"enabled":true},"expected_version":0,"reason":"` + strings.Repeat("y", internalCodeReviewReasonLimit+1) + `"}`, code: "REASON_TOO_LONG"},
+		{name: "risk tier setting rejects misspelled fields", body: `{"config":{"risk_policy":{"risk_tier_check":{"enabled":true,"app_id":101,"check_nam":"risk-tier"}}},"expected_version":0,"reason":"r"}`, code: "INVALID_CONFIG"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
