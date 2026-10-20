@@ -839,8 +839,9 @@ into its existing transaction-owning wrapper and
 only the caller's concrete `pgx.Tx`; it never settles or retries the unit. The
 wrapper retains its existing errors, duplicate behavior, SQL and
 session-before-automation lock order. This lower-level persistence seam is not
-the canonical `AppendApprovedGrantInTx` authority operation. No human-input
-caller is rewired, and consent, exact request/readiness, epochs and canonical
+the canonical `AppendApprovedGrantInTx` authority operation. The initial extraction
+did not rewire human-input callers; the later version-0 answer atomicity step
+below does. Canonical consent, exact request/readiness, epochs and domain
 domain prelocking remain unimplemented gates. Existing snapshot representation
 is sufficient for this slice; no speculative schema is added. The syntax guard
 explicitly inventories the extracted root and its direct callers so extraction
@@ -929,6 +930,17 @@ tx-bound wrapper. The same terminal receipt, retained PR owner, physical drain
 and exact thread-turn predicates are shared with the standalone wrapper. The PR
 owner still updates scheduling state, commits and then emits its existing event.
 This is caller-transaction composition, not shared epoch or allocation fencing.
+
+The structured-answer path now constructs its approved capability through one
+shared validation method and persists it through the existing answer transaction.
+A later claim, message, job enqueue or commit failure therefore rolls back both
+the answer and capability snapshots, including the linked automation mirror.
+The handler adapter only constructs the item; it cannot independently commit a
+grant. The standalone grant service retains its configuration error and duplicate
+behavior. This version-0 atomicity prerequisite preserves existing pending-request,
+approval parsing, checkpoint and resume policy, including the request-before-parent
+lock order. It is not the canonical `AdmitAnswerInTx`/`AppendApprovedGrantInTx`
+authority operation, and cannot activate readiness enforcement or a writer floor.
 
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
@@ -1659,6 +1671,9 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Remove the nested terminal-reconciliation savepoint in the actual
   force-fresh PR callback, preserving standalone outcomes and proving whole-owner
   rollback plus scheduling publication only after visible outer commit.
+- [x] Keep version-0 structured-answer grant construction pure and persist its
+  request-keyed item through the same answer/claim/message/job transaction, with
+  full-schema late-failure rollback of session and linked automation snapshots.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1749,8 +1764,10 @@ canonical authorization operation. The reviewed source
 inventory now contains 607 lifecycle symbols (one added persistence root) and
 the unchanged 123 job-status sites. This increment is passive extraction, not
 an additional lifecycle authority owner or completion of 0a. The legacy lock
-inversion and independent human-input grant transaction remain until canonical
-admission and all mixed-writer conversions are implemented and proved.
+inversion remains until canonical admission and mixed-writer conversions are
+implemented and proved. The independent human-input grant transaction recorded
+at this initial extraction is removed by the later version-0 atomicity step;
+that does not implement the canonical authority or readiness contract.
 
 A subsequent grant-freshness slice changes the current persistence seam: it
 checks READ COMMITTED, locks the parent in a separate statement and reads joined
@@ -2091,6 +2108,30 @@ publication uses an independent reader to observe the already committed graph.
 The actual force-fresh callback's supplied-tx call is separately pinned in source;
 existing service modes cover its retained behavior. This does not implement a
 canonical current-allocation/epoch fence or prove a deployed compatibility floor.
+
+### 0a structured-answer capability grant atomicity validation
+
+Eight focused race roots and 40 subtests pass locally on PostgreSQL 17.10, with
+no failures or skips. Reproduce using an owned PostgreSQL 15+
+`TEST_DATABASE_URL` and `go test -race -p=1
+./internal/services/agentcapabilities ./internal/services/humaninput ./internal/api/handlers
+-run '^(TestServiceBuildApprovedGrant|TestServiceApplyApprovedGrant.*|TestHumanInputApprovedGrant.*|TestHumanInputDBGrantRejectsNilTransaction|TestHumanInputCapabilityApprovalRecovery|TestSessionCapabilityApproverBuildsWithoutAppender)$'
+-count=1 -parallel=1 -timeout=3m`. Full touched-package race verification also
+passes: 1,490 roots and 1,890 subtests, with one existing external image-tool
+fixture skip. Focused vet and whitespace checks pass.
+
+Pure construction shares all prior catalog/access/config checks and exact item
+fields with standalone approval. Real `Answer` runs on the full unchanged schema
+with a one-connection owner and nested-Begin rejection. Whole-row snapshots prove
+independent invisibility and atomic settlement of the request, capability metadata,
+automation mirror, claims, message and continuation job. Tenant mismatch and a
+same-tenant request from another session cannot bind a grant. Denial, nil service,
+invalid catalog data, existing grant retries and duplicate answers retain their
+previous semantics. Fixture-only late claim/message errors observe genuine prior
+answer/grant staging; enqueue and deferred-commit triggers first validate earlier
+writes, then raise genuine PostgreSQL errors. All rejected units return no accepted
+result and restore the exact prior row set. This intermediate version-0 repair is
+not consent/readiness/epoch fencing or evidence of a deployed compatibility floor.
 
 ## Surprises & Discoveries
 

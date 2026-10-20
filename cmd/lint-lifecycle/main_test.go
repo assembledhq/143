@@ -174,6 +174,7 @@ func TestComposablePersistenceBoundariesRemainInventoried(t *testing.T) {
 		{name: "UpdateTurnCompleteInTx"},
 		{name: "StartSeedPhaseInTx"},
 		{name: "ReconcileDrainedTerminalTurnInTx"},
+		{name: "AppendApprovedCapabilityGrant"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -608,6 +609,8 @@ func TestInventoryMatchesRepository(t *testing.T) {
 		"internal/db/session_human_input_requests.go:SessionHumanInputRequestStore.AnswerLatestPendingFreeTextBySession",
 		"internal/db/session_human_input_requests.go:SessionHumanInputRequestStore.AnswerLatestPendingFreeTextByThread",
 		"internal/services/humaninput/db_repository.go:dbTx.AnswerRequest",
+		"internal/services/humaninput/db_repository.go:dbTx.AppendApprovedCapabilityGrant",
+		"internal/services/humaninput/service.go:Service.applyApprovedCapabilityGrant",
 		"internal/db/session_thread_store.go:SessionThreadStore.Archive",
 		"internal/db/pull_request_feedback.go:PullRequestFeedbackStore.QueueContinuation",
 		"internal/db/code_review_loop_guard.go:stopFullReviewFallbackLoop",

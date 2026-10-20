@@ -1284,7 +1284,7 @@
       "lock": "Caller-supplied pgx.Tx; isolation check, parent FOR UPDATE in an earlier statement, fresh metadata read, metadata UPSERT, optional automation run UPDATE in unchanged legacy session-before-automation order. No Begin, Commit, Rollback, retry or pool fallback.",
       "stale_result": "Fresh-snapshot duplicate returns unchanged snapshot plus ErrCapabilityAlreadyGranted; absent/foreign session returns pgx.ErrNoRows. Unsupported isolation returns ErrCapabilityGrantRequiresReadCommitted before parent access and leaves caller settlement unchanged. Conforming concurrent grants retain both snapshots; historical joined-read writers remain a mixed-writer lost-update risk. Any error requires caller rollback; staged results need outer commit; no stale-authority fence exists.",
       "classification": "unfenced-needs-conversion",
-      "migration": "0a: canonical AppendApprovedGrantInTx must prelock/revalidate domain associations in the selected order, validate exact request/decision/readiness and expected epochs, then compose this persistence seam with answer/dispatch in one commit. Do not wire the seam alone into humaninput or treat the legacy lock order as floor-compatible.",
+      "migration": "0a: canonical AppendApprovedGrantInTx must prelock/revalidate domain associations in the selected order, validate exact request/decision/readiness and expected epochs, then compose persistence with answer/dispatch. A version-0 answer atomicity prerequisite now shares this seam with the existing locked request and validated decision; it does not establish canonical authority, activate readiness or make the retained legacy lock order floor-compatible.",
       "canonical_target": "AppendApprovedGrantInTx",
       "authority": "OrdinaryAuthority plus exact authorized human-input capability request/decision and expected session/domain epochs; this persistence seam does not establish them.",
       "fence_outcome": "Canonical authority/readiness/epoch rejection must roll back all composed writes. Persistence-only success is not command acceptance or compatibility-floor proof.",
@@ -6896,20 +6896,25 @@
     },
     {
       "id": "internal/services/agentcapabilities/service.go:Service.ApplyApprovedGrant",
-      "source_sha256": "25f11025970daec5021aab7462758150a091b3e48c9dbc416a360197f3ad633b",
-      "operation": "Service.ApplyApprovedGrant: indirect lifecycle caller",
+      "source_sha256": "9fb40281dccbb9889c67e27d8ad8cfad8149b0fa7ccebe9cdacd3b7bea505080",
+      "operation": "legacy standalone approved-grant validation and persistence wrapper",
       "owner": "Service in internal/services/agentcapabilities",
-      "predicate": "Syntactic boundary/callee candidates: s.approvedGrants.AppendApprovedSessionGrant; s.approvedGrants.AppendApprovedSessionGrant -> internal/db/agent_capabilities.go:AgentCapabilityPolicyStore.AppendApprovedSessionGrant; s.approvedGrants.AppendApprovedSessionGrant(ctx, in.OrgID, in.SessionID, models.AgentCapabilitySnapshotItem{ID: in.Capability, DisplayName: def.DisplayName, AccessLevel: in.AccessLevel, Risk: def.Risk, Scope: def.Scope, Config: json.RawMessage(`{}`), Source: models.AgentCapabilityGrantSourceUserApproved, GrantedAt: time.Now().UTC(), HumanInputRequestID: &in.HumanInputRequestID}); s.approvedGrants.AppendApprovedSessionGrant(ctx, in.OrgID, in.SessionID, models.AgentCapabilitySnapshotItem{ID: in.Capability, DisplayNa [excerpt; see symbol source]; no independent authorization proof inferred.",
-      "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: s.approvedGrants.AppendApprovedSessionGrant; s.approvedGrants.AppendApprovedSessionGrant -> internal/db/agent_capabilities.go:AgentCapabilityPolicyStore.AppendApprovedSessionGrant; s.approvedGrants.AppendApprovedSessionGrant(ctx, in.OrgID, in.SessionID, models.AgentCapabilitySnapshotItem{ID: in.Capability, DisplayName: def.DisplayName, AccessLevel: in.AccessLevel, Risk: def.Risk, Scope: def.Scope, Config: json.RawMessage(`{}`), Source: models.AgentCapabilityGrantSourceUserApproved, GrantedAt: time.Now().UTC(), HumanInputRequestID: &in.HumanInputRequestID}); s.approvedGrants.AppendApprovedSessi [excerpt; see symbol source]",
-      "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
+      "predicate": "Preserves configured-appender check before validation, shares pure BuildApprovedGrant catalog/access/config construction, then appends the exact user-approved item with original request ID and UTC time. This standalone method is no longer the human-input answer callback.",
+      "lock": "Existing approved-grant appender owns its transaction. BuildApprovedGrant performs no policy/request/session reads or writes. Transaction-owning answer callers instead persist through their repository Tx.",
+      "stale_result": "Existing validation, appender and duplicate errors are unchanged. The standalone wrapper supplies no request readiness or canonical consent/epoch proof.",
       "classification": "unfenced-needs-conversion",
-      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "migration": "0a actual structured answers now use pure construction plus same-transaction grant persistence. Remaining standalone consumers still need operation-specific canonical consent and current shared authority.",
       "evidence": [
         "internal/services/agentcapabilities/service.go:201",
         "Discovered: boundary-caller, indirect-caller",
+        "BuildApprovedGrant shares existing construction validation without persistence",
         "Boundary/call candidate: s.approvedGrants.AppendApprovedSessionGrant",
-        "Boundary/call candidate: s.approvedGrants.AppendApprovedSessionGrant -> internal/db/agent_capabilities.go:AgentCapabilityPolicyStore.AppendApprovedSessionGrant"
-      ]
+        "internal/services/agentcapabilities/approved_grant_test.go"
+      ],
+      "canonical_target": "AppendApprovedGrantInTx",
+      "authority": "OrdinaryAuthority: authenticated org/user and exact pending request/consent, request readiness certificate and current session/lane admission/end epochs. Current v0 resource/request checks and a constructed grant item do not establish the proposed canonical readiness or runtime authority.",
+      "fence_outcome": "AuthorizationRejected, stale/mismatched request/readiness/epoch or persistence failure must abort the whole answer/grant/claim/message/job transaction. No own-attempt stale-settlement carve-out authorizes a new grant or provider resume.",
+      "prerequisite_0a": "Preserve one concrete owner transaction and exact user-approved item while replacing legacy checkpoint/claim checks with canonical request readiness, consent and admission/end fencing; characterize and then convert legacy lock order and all competing writers before floor acceptance."
     },
     {
       "id": "internal/services/automations/goal_improvement.go:GoalImprovementService.Cancel",
@@ -8454,12 +8459,34 @@
       ]
     },
     {
+      "id": "internal/services/humaninput/db_repository.go:dbTx.AppendApprovedCapabilityGrant",
+      "source_sha256": "456ede8681c1b57d89e961e3be4308a818f8d097b3d07dcd2cbd97b829b415b8",
+      "operation": "answer-transaction capability snapshot persistence",
+      "owner": "humaninput.dbTx owning the existing concrete answer pgx.Tx",
+      "predicate": "Exact org/session and constructed grant passed unchanged to AppendApprovedSessionGrantInTx. That shared seam validates supplied transaction/isolation, locks parent in a prior statement and updates session plus linked automation snapshot atomically; it does not itself validate pending request consent.",
+      "lock": "Uses only t.tx; nil receiver database makes fallback unusable. Retains request-before-parent caller order and grant seam's parent-before-automation order; no Begin/savepoint, settlement, retry or publication.",
+      "stale_result": "Nil/typednil or unsupported isolation rejected, duplicate sentinel preserved. Any other error requires whole answer rollback, including previously staged request and snapshot work.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a real answer repository consumer of existing composable grant persistence; no separate appender or hidden context transaction.",
+      "canonical_target": "AppendApprovedGrantInTx",
+      "authority": "OrdinaryAuthority: authenticated org/user and exact pending request/consent, request readiness certificate and current session/lane admission/end epochs. Current v0 resource/request checks and a constructed grant item do not establish the proposed canonical readiness or runtime authority.",
+      "fence_outcome": "AuthorizationRejected, stale/mismatched request/readiness/epoch or persistence failure must abort the whole answer/grant/claim/message/job transaction. No own-attempt stale-settlement carve-out authorizes a new grant or provider resume.",
+      "prerequisite_0a": "Preserve one concrete owner transaction and exact user-approved item while replacing legacy checkpoint/claim checks with canonical request readiness, consent and admission/end fencing; characterize and then convert legacy lock order and all competing writers before floor acceptance.",
+      "evidence": [
+        "internal/services/humaninput/db_repository.go:97",
+        "Discovered: boundary-caller, boundary-definition, indirect-caller",
+        "Boundary/call candidate: db.NewAgentCapabilityPolicyStore(nil).AppendApprovedSessionGrantInTx(ctx, orgID, t.tx, sessionID, item)",
+        "internal/services/humaninput/approved_grant_test.go",
+        "internal/services/humaninput/approved_grant_postgres_test.go"
+      ]
+    },
+    {
       "id": "internal/services/humaninput/db_repository.go:dbTx.AnswerRequest",
       "source_sha256": "ae7bad559da541b86f1ff1e77186ab43f3b4fea0eb36eeeb7d03f5fe4b75e63e",
       "operation": "structured input AnswerRequest transaction adapter",
       "owner": "dbTx in internal/services/humaninput",
       "predicate": "Delegates exact org/session/request to AnswerPending on tx-bound request store; GetRequestForUpdate currently occurs before session/thread resume claims; adapter adds no readiness/dispatch predicate.",
-      "lock": "Caller dbRepository.WithTx owns Begin/Commit; request lock -> session -> thread baseline inversion; approver can open another tx today.",
+      "lock": "Caller dbRepository.WithTx owns Begin/Commit; existing request -> parent grant -> session/thread claim order remains. Capability approval now persists in that same concrete transaction, with no independent appender or savepoint; compatible global lock-order conversion is still open.",
       "stale_result": "Store no-row propagates; outer service translates conflict. Existing caller transaction is useful but does not establish an exact bound consumer.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: reuse outer transaction with parent-first compatible no-effect DB operations; no nested grant tx or latest-request selection. No existing-job payload rebinding; failed binding rolls answer/grant/claim back.",
@@ -8561,20 +8588,46 @@
     },
     {
       "id": "internal/services/humaninput/service.go:Service.Answer",
-      "source_sha256": "8fc2e56812fa23c229c4d348d51ede9fdac7043b487bdd223bfe38f484ddc807",
-      "operation": "Service.Answer: indirect lifecycle caller",
+      "source_sha256": "78bb6004010723f191ac3ed86c13d4fb8bc36a503e3c2fc3b19998843f658ec0",
+      "operation": "structured answer, approved capability and provider-resume transaction",
       "owner": "Service in internal/services/humaninput",
-      "predicate": "AST-observed guard expressions: err != nil && !errors.Is(err, pgx.ErrNoRows) | errors.Is(err, pgx.ErrNoRows) | messageTurn = (session.CurrentTurn + 1)",
-      "lock": "Observed transaction/lock syntax: s.repo.WithTx. This does not establish caller ownership or lock order.",
-      "stale_result": "Observed guard/error branches: err != nil && !errors.Is(err, pgx.ErrNoRows); errors.Is(err, pgx.ErrNoRows); messageTurn = (session.CurrentTurn + 1). These are syntax observations, not a proven stale-result contract.",
+      "predicate": "Existing locked org/session pending request, ValidateAnswer and legacy checkpoint checks. Explicit approval of capability-request metadata builds one validated grant and persists it through the SAME Tx before existing claims/message/job. Denial, malformed/unrelated payload, nil approver and duplicate-grant retry semantics remain unchanged.",
+      "lock": "One repository-owned transaction: existing request lock -> answer -> approved grant READ COMMITTED parent prelock/fresh snapshot and linked automation mirror -> legacy claims -> message -> continuation job. No new lock ordering or independent grant transaction; notify only after owner commit.",
+      "stale_result": "Validation/grant/claim/message/enqueue/commit error returns no accepted Result and aborts answer, snapshots, claims, message and job together. Existing duplicate grant is safe retry, not a new grant; current snapshot-ready and claims remain legacy resource checks, not immutable readiness.",
       "classification": "unfenced-needs-conversion",
-      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "migration": "0a real caller atomicity prerequisite implemented. Shared grant construction is pure and persistence is explicitly transaction-bound; canonical readiness, consent, admission and epoch enforcement remain open.",
       "evidence": [
-        "internal/services/humaninput/service.go:114",
+        "internal/services/humaninput/service.go:117",
         "Discovered: boundary-caller, indirect-caller",
-        "Boundary/call candidate: claimForProviderResume -> internal/services/humaninput/service.go:claimForProviderResume",
-        "Boundary/call candidate: tx.AnswerRequest",
-        "Lock/transaction syntax: s.repo.WithTx"
+        "Actual Answer consumes applyApprovedCapabilityGrant with the same callback Tx",
+        "internal/services/humaninput/approved_grant_test.go",
+        "internal/services/humaninput/approved_grant_postgres_test.go",
+        "Real one-connection Answer plus genuine late claim/message/enqueue/deferred-commit rollback; no claim of new readiness or floor"
+      ],
+      "canonical_target": "AdmitAnswerInTx; AppendApprovedGrantInTx",
+      "authority": "OrdinaryAuthority: authenticated org/user and exact pending request/consent, request readiness certificate and current session/lane admission/end epochs. Current v0 resource/request checks and a constructed grant item do not establish the proposed canonical readiness or runtime authority.",
+      "fence_outcome": "AuthorizationRejected, stale/mismatched request/readiness/epoch or persistence failure must abort the whole answer/grant/claim/message/job transaction. No own-attempt stale-settlement carve-out authorizes a new grant or provider resume.",
+      "prerequisite_0a": "Preserve one concrete owner transaction and exact user-approved item while replacing legacy checkpoint/claim checks with canonical request readiness, consent and admission/end fencing; characterize and then convert legacy lock order and all competing writers before floor acceptance."
+    },
+    {
+      "id": "internal/services/humaninput/service.go:Service.applyApprovedCapabilityGrant",
+      "source_sha256": "bebc115706ea6c882b587a20d04f0f0ba9cdbcb4f4f531bb0e447064b5e61ea9",
+      "operation": "validated structured-answer capability grant composition",
+      "owner": "humaninput.Service inside its Answer repository transaction",
+      "predicate": "Retains legacy approval parsing and exact capability-request payload discrimination, pure catalog construction and request/user-grant fields. Only persistence ErrCapabilityAlreadyGranted is accepted as safe retry.",
+      "lock": "Uses the existing supplied humaninput.Tx only; calls AppendApprovedCapabilityGrant, never standalone ApplyApprovedGrant or independent appender. No transaction settlement or publication.",
+      "stale_result": "Invalid construction or nonduplicate persistence error aborts the whole owner unit. Earlier answered request must roll back with all staged grant and later resume work.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a actual answer atomicity prerequisite implemented without new authorization/readiness/epoch semantics.",
+      "canonical_target": "AdmitAnswerInTx; AppendApprovedGrantInTx",
+      "authority": "OrdinaryAuthority: authenticated org/user and exact pending request/consent, request readiness certificate and current session/lane admission/end epochs. Current v0 resource/request checks and a constructed grant item do not establish the proposed canonical readiness or runtime authority.",
+      "fence_outcome": "AuthorizationRejected, stale/mismatched request/readiness/epoch or persistence failure must abort the whole answer/grant/claim/message/job transaction. No own-attempt stale-settlement carve-out authorizes a new grant or provider resume.",
+      "prerequisite_0a": "Preserve one concrete owner transaction and exact user-approved item while replacing legacy checkpoint/claim checks with canonical request readiness, consent and admission/end fencing; characterize and then convert legacy lock order and all competing writers before floor acceptance.",
+      "evidence": [
+        "internal/services/humaninput/service.go:185",
+        "Discovered: boundary-caller",
+        "Boundary/call candidate: tx.AppendApprovedCapabilityGrant",
+        "internal/services/humaninput/approved_grant_postgres_test.go"
       ]
     },
     {
