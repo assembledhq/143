@@ -109,7 +109,8 @@ type ReviewExportSafeguard struct {
 	Provenance    string                `json:"provenance"`
 }
 
-// Raw evidence is frozen in the acquisition; it never joins live state on paging.
+// CodeReviewExportSource contains raw evidence frozen for one acquisition.
+// Paging never joins this payload to live state.
 type CodeReviewExportSource struct {
 	Kind                      ReviewExportSourceKind `json:"kind"`
 	ID                        uuid.UUID              `json:"id"`
