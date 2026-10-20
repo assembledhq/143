@@ -1,0 +1,355 @@
+---
+title: Historical code-review export
+description: Acquire versioned historical evidence with stable pagination and explicit uncertainty.
+section: Reference
+order: 56
+status: draft
+audience: engineer
+llm_summary: Export historical code-review assessments and legacy records with immutable acquisition pagination, source provenance, retained safeguard evidence, and explicit unknowns.
+---
+
+Use `GET /api/v1/code-reviews/export` to acquire historical assessment and legacy
+review evidence. This endpoint is separate from the session-oriented review list.
+It exports retained evidence without computing replay eligibility, a denominator,
+a hypothetical approval, an opportunity score, or a gate verdict.
+
+## Authorization and filters
+
+Use an authenticated user session or personal CLI bearer token with an active
+organization membership (`admin`, `builder`, `member`, or `viewer`). General API
+client tokens do not have access to this user route. `repository_id` must belong
+to that organization. Every continuation checks the acquisition's organization
+and repository ownership again. There is no client-controlled organization selector.
+
+| Query parameter | Contract |
+| --- | --- |
+| `repository_id` | Required repository UUID in the authenticated organization. |
+| `from` | Required RFC3339 timestamp, inclusive. Offsets normalize to UTC. |
+| `until` | Required RFC3339 timestamp, exclusive; after `from`, at most 366 days later. |
+| `time_basis` | `created_or_completed` (default), `created`, `completed`, or `published`. |
+| `limit` | 1–100 records, default 50. May change between pages. |
+| `cursor` | Opaque continuation. Without it, acquire or reuse the matching unexpired acquisition. |
+
+Duplicate, unknown, or empty parameters are rejected. Keep every filter unchanged
+between pages. A cursor is a position in authorized server-side storage, not an
+authorization grant. It cannot read another organization's acquisition.
+
+Creation and completion refer to each **source record**, not PR creation or merge.
+`created_or_completed` selects their union. An unfinished source can qualify by
+creation. A completed source with unknown completion cannot qualify by completion
+alone. Every status, unmerged PR, and superseded head is preserved if it matches.
+
+`published` is a separate acquisition mode. It selects bound provider submission
+timestamps in `[from, until)` **and** sources with unresolved publication
+timing whose creation precedes `until`. A source cannot have submitted its output
+before that source was created, so `created_at >= until` is excluded before
+candidate limits. There is no creation lower bound: unresolved sources created
+before `from` remain included. Returned filters explicitly declare
+`include_unresolved_publication_time: true`; there is no option to discard these
+records. Unresolved timing does not establish membership in the intended
+publication window.
+
+Assessment and legacy rows do not retain provider submission times themselves.
+When retained GitHub webhook events are available, the exporter binds a primary
+review submission only if repository provider ID, PR number, review ID, head SHA,
+publication-output marker, and source creation/acquisition interval match. Equal
+redeliveries agree; conflicting timestamps stay unresolved. An existing provider
+object's earlier submission time cannot date a later assessment that updated it.
+Actual events and receipt-linked formal-approval events remain in
+`raw.provider_observations`, including observations that cannot bind the primary
+source's publication clock. No completion, receipt-acquisition, or webhook receipt
+time is used as provider submission time.
+
+This evidence is systematically incomplete. The feedback ingestion path stores
+submitted review webhooks only for open PRs linked to a 143 session and with a
+nonempty review body. Reviews on PRs without that session link, and empty-body
+submissions, do not enter this path. `DATA_RETENTION_WEBHOOK_DAYS` defaults to 30;
+retention cleanup can remove the only retained submission clock for older reviews.
+Availability for a historical cohort depends on actual capture and retention, not
+just its date range. No deployment dates, live retention values, or production
+coverage are assumed by this export.
+
+## Acquisition and consistency
+
+A cursor-less request reuses an unexpired acquisition with identical canonical
+filters and schema version. This includes its original boundary, counts, and expiry;
+retrying a lost first-page response does not consume another slot. When no matching
+acquisition exists, the request materializes **complete raw payloads** in a PostgreSQL
+`REPEATABLE READ` transaction. Its first snapshot-bearing statement establishes
+visibility; `acquired_at` is that transaction's start time and is also the upper
+bound on source `created_at`. Committed rows visible to that MVCC snapshot qualify;
+transactions still in progress do not. Backdated inserts committed afterward are
+excluded. Assessment inputs, outcomes, aliases, retained policy versions, legacy
+rows, PR synchronization observations, agent-result observations, and provider submission observations all come from
+the same database snapshot. No network/provider calls are made.
+
+Subsequent requests page frozen payloads ordered by source creation time, source
+UUID, then source kind. Updates, deletes, new assessments, late receipts, and PR
+merges after acquisition cannot change payloads, order, counts, or membership.
+Derived evidence annotations use the serving binary's schema-v1 projection of those
+frozen payloads. Derived annotations can change across a server deployment even
+when raw payloads remain identical. Preserve raw evidence and the declared schema
+version. The guarantee is **retained evidence as observed at acquisition**; it
+cannot recover facts overwritten or never persisted before acquisition. Source
+rows marked immutable by the application retain their assessment-time meaning;
+mutable observations are labeled separately.
+
+Acquisitions expire after 24 hours. Each organization has at most three retained
+acquisitions with distinct filter sets, enforced by three unique database slots.
+Identical-filter retries share one slot; a different filter set can still encounter
+the quota until another acquisition expires. Fresh evidence for the same filters
+requires expiry; omitting the cursor does not refresh a retained snapshot.
+New acquisitions reclaim that organization's expired headers and payloads. Expiry immediately prevents
+reads; physical reclamation is lazy on the next acquisition, so expiry is not a
+guaranteed physical-erasure deadline. Removing the parent repository or organization
+also removes these disposable cache copies; it does not delete source reviews through
+the export tables. Materialization is capped at 20,000 source candidates (including overlapping legacy representations)
+and 64 MiB of serialized raw JSON candidates per acquisition; database statements have a
+30-second timeout. Oversized acquisitions fail atomically, without partial counts
+or a success response. Narrow a creation/completion interval if necessary and keep
+each acquisition separately identified; published-mode unknowns cannot be narrowed
+by a fictional timestamp. Candidate bounds are checked before overlap removal and
+publication-time admission; a bound failure never implies all candidates were read. Pagination never truncates a successful acquisition.
+
+The endpoint returns `Cache-Control: no-store`. Acquisition storage is a disposable
+cache; it does not edit historical reviews, policies, findings, or provider state.
+
+## Schema version 1
+
+Each response is `{ data, acquisition, meta }`.
+
+| Field | Meaning |
+| --- | --- |
+| `acquisition.id` | UUID identifying this frozen acquisition. |
+| `acquisition.schema_version` | Integer `1`. Persist and check it before consuming data. |
+| `acquisition.filters` | Canonical repository, UTC interval, time basis, and explicit unresolved-publication inclusion. |
+| `acquisition.acquired_at`, `expires_at` | Fixed acquisition boundary and read-expiry timestamps. |
+| `acquisition.consistency` | `frozen_payloads_repeatable_read`. |
+| `acquisition.counts` | Counts for the full acquisition, repeated unchanged on every page. |
+| `meta.next_cursor` | Continuation string, or `null` at the end. |
+| `meta.returned`, `position` | Number on this page and cumulative source position after it. |
+| `meta.complete` | True only when `position == acquisition.counts.records`. |
+
+Counts include `records`, `assessments`, unmatched `legacy`, distinct
+`represented_legacy` IDs retained in aliases, `unresolved_publication_time`,
+`incomplete_substantive_evidence`, `missing_head_sha`, `missing_base_sha`,
+`missing_base_ref`, and `missing_policy_snapshot`. The substantive-evidence count
+conservatively counts everything without a direct **full-scope**
+`coverage_complete=true` assessment, including evidence-only assessments. It is a
+missing-evidence count, not a replay exclusion or approval count. The source total
+is `assessments + legacy`; represented legacy aliases are not extra source records.
+An alias repeated on several assessments is counted once.
+
+Each `data[]` record contains:
+
+- `source_identity`: `assessment:<UUID>` or `legacy:<UUID>`; never session/PR/head.
+- `raw`: `kind`, `id`, exact `source` row JSON, retained `policy` version, selected
+  `pull_request` synchronization observations, `agent_results`, `legacy_aliases`,
+  `provider_observations`, nullable bound `publication_time`, and its
+  `publication_time_provenance`.
+- `evidence`: named `{ value, availability, provenance }` objects. Availability is
+  `recorded`, `reconstructed`, or `unavailable`; unavailable values are `null`.
+- `safeguards`: `{ id, result, inputs, threshold, applicability, provenance }`.
+  Results are `passed`, `failed`, `not_evaluated`, or `unknown`. Inputs, threshold,
+  and applicability use the same evidence envelope.
+
+`raw.source` and retained JSON objects permit additive fields; consumers must
+retain unknown fields and use the declared schema version. Provider IDs retain
+integer precision in the export. Do not parse large IDs through a floating-point
+representation. Raw JSON is preserved even when a legacy reason has an unexpected
+shape. Top-level tenant fields and policy activation/user-edit metadata are omitted;
+tenancy still scopes every source and evidence join.
+
+All assessments survive independently, including multiple assessments with one
+session, head, PR, provider object, or publication key. A legacy row is represented
+by a selected assessment only when repository/PR match and a nonempty publication
+key matches without conflicting provider IDs, or an explicit assessment link
+represents unkeyed metadata without a positive provider review ID. A provider ID
+alone never establishes overlap: the same provider object can be edited for
+multiple publications. Uncertain overlaps remain separate sources.
+Its complete metadata payload remains in `legacy_aliases`. Session/head equality
+alone never suppresses a row. If a matching assessment falls outside the selected
+cohort (including publication-time admission), the legacy row remains a source. This is representation overlap handling;
+normalizing publications and resolving conflicting evidence belong to consumers.
+
+### Evidence availability by field
+
+“Recorded” identifies a retained source field, not proof that a provider fact was
+verified or that a mutable row has never changed. `raw.source` for a legacy record
+is the retained session metadata observation at acquisition; legacy history before
+an overwrite is unavailable.
+
+| Export evidence field(s) | Directly retained | Reconstruction or unavailable boundary |
+| --- | --- | --- |
+| `repository_id`, `pull_request_id`, `session_id`, `metadata_id` | Assessment/legacy source identities; legacy ID is `raw.id`. | Missing fields stay unavailable. |
+| `repository_full_name`, `pr_number` | Assessment-time repository name; PR number from stored PR identity. | Legacy repository name is reconstructed from the acquisition-time PR mirror; rename history is unavailable. |
+| `generation`, `source_assessment_id`, `previous_assessment_id`, `previous_published_assessment_id`, `superseded_by_assessment_id`, `superseded_by_session_id` | Retained lineage references, where present. | No generation or assessment lineage is invented for legacy sources. References may point outside this cohort. |
+| `publication_key`, `github_review_id`, `github_review_url` | Assessment publication key or legacy `review_output_key`; retained provider object identity. | Same provider object may represent several assessment updates. Receipt JSON may retain additional formal-approval IDs; preserve them separately. |
+| `head_sha`, `base_sha`, `base_ref` | Assessment capture SHAs/ref; legacy metadata SHAs. | Legacy base ref is unavailable. Never use the current PR head/base as historical substitutes. |
+| `decision`, `acceptable`, `status`, `review_scope`, `result_origin`, `coverage_complete` | Exact source values, including false and null. | Legacy scope/origin/coverage generally unavailable; completed status does not prove coverage or publication. |
+| `substantive_review_completion` | Assessment coverage flag, scope, origin, status, and baseline reference together. | Evidence-only coverage is not substantive review. Legacy completion lacks immutable coverage proof. An incomplete/unknown substantive review cannot establish a hypothetical approval. |
+| `historical_blocking_findings` | Explicit blocking-finding reason when retained. | Its absence cannot prove zero blockers. No mutable current finding rows/counts are substituted. |
+| `risk_reason_details`, `failure_detail`, `failure_reason`, `from_fork`, `stale` | Retained disqualifiers/source lifecycle observations. | Absent reasons never imply safeguards passed or were evaluated. Exact zero measurements omitted by historical serialization cannot be recovered. |
+| `structured_outcome`, `description_assessments`, `requirement_reassessments`, `finding_reassessments` | Immutable assessment outcome and requirement/finding reassessment evidence when retained. | Full-review outcomes do not contain a complete immutable finding snapshot. Recheck statuses alone do not recreate source findings. Nested synthesis remains in `raw.source.structured_outcome`. |
+| `input_manifest` | Captured code paths/patch digests, base/head/ref, text/visual/request provenance, completeness flags, policy/execution digests, and gate fingerprints. | Gate fingerprints are not the original measured counts/check results. No current provider fetches reconstruct missing inputs. |
+| `policy_id`, `policy_version`, `policy_snapshot` | Source policy ID and retained row version selected by that ID. | The snapshot/configuration is marked reconstructed: later schema migrations can add or backfill defaults into old policy rows (including approval prompts, scheduling, and continuation settings). Its exact assessment-time contents may be unavailable. No active-policy fallback or exporter-added defaults; lost versions remain unavailable. |
+| `captured_policy_version`, `captured_policy_digest` | Assessment manifest's policy version/digest, independently of the retained policy row. | Consumers can detect disagreement; exporter does not silently reconcile it. |
+| `agent_results` | Raw assessment-scoped results, or unassigned legacy-session results. | Marked reconstructed: mutable result status/output is observed at acquisition. This is supporting evidence, not an immutable historical count or synthesized outcome. |
+| `publication_state`, `publication_receipt`, `submitted_commit_sha` | Exact assessment state, receipt, and recorded submitted commit. | Legacy provider ID/key are identity evidence, not an invented confirmed state/receipt or submitted SHA. Preserve additional receipt IDs and casing. |
+| `provider_submitted_at` | Provider-supplied `submitted_at` when retained in a matching GitHub webhook. | Reconstructed binding to the source requires exact review/head/output marker and lifecycle interval. Missing, conflicting, old-object, and unbound timestamps remain unavailable. No completion-time substitution or network hydration. |
+| `provider_observations` | Receipt-ID-matched primary and formal-approval webhook projections: delivery ID, received time, signature-valid observation, review ID, commit SHA, review body, and actual submitted time. | Scoped by tenant, immutable repository provider ID, and PR number. A retained null signature flag is not invented verification. Unmatched heads/output markers remain raw audit evidence and cannot date this source. |
+| `created_at`, `completed_at`, `superseded_at` | Source lifecycle timestamps. | They do not establish actual provider submission time. |
+| `pr_merged_at`, `pr_state` | Stored provider-synchronized merge timestamp and current mirrored state with explicit acquisition provenance. | State is marked reconstructed; these are not assessment-time observations. Null merge time does not distinguish unmerged from missing synchronization. |
+| `pr_closed_at` | No provider close timestamp is retained. | Unavailable; PR `updated_at` is not substituted. |
+
+### Safeguard evidence
+
+The export includes every retained risk-reason identifier plus the known reason
+vocabulary, even when results are unknown: reviewer enabled; context/head freshness;
+files/combined lines/additions/deletions limits; checks and named required checks;
+description; branch freshness; fork/author eligibility; historical human-review
+threads; blocking findings; reviewer disagreement; scope mismatch; uncertainty;
+prompt injection; sensitive/allowed/blocked/policy paths and excluded categories;
+reviewer quorum; synthesis validity/escalation/context freshness; architectural,
+ownership, operational, sensitive-change, and policy requirements; and screenshot.
+Identifiers use the risk-reason codes retained by the product (for example
+`additions_limit_exceeded`). Unknown future reason codes are preserved too.
+
+An explicit failure reason produces `failed` with the exact retained reason objects
+as inputs, including `actual`, `limit`, and `subject` only when present. Thresholds
+also expose retained policy settings for size, checks, branch, fork, author,
+and path gates. Policy-derived thresholds and applicability are marked reconstructed
+because a retained versioned row can contain schema defaults added after assessment;
+explicit assessment reason objects and their measured `actual`/`limit` remain
+recorded. `screenshot` exposes retained description-policy requirements and
+applicability configuration but remains `unknown` without a dedicated aggregate
+screenshot result. No safeguard is reevaluated using today's implementation.
+
+Each retained description requirement additionally has `description:<key>`. An
+explicit immutable assessment status maps `satisfied` to `passed`, `missing` to
+`failed`, and `not_applicable` to `not_evaluated`, preserving citations and
+applicability. Absent, conflicting, or unrecognized statuses remain `unknown`.
+A requirement pass is not proof of complete substantive review or approval.
+
+## Acquire the explicit July–October cohort
+
+The requested UTC interval is **July 15, 2026 inclusive through October 19, 2026
+exclusive** (through October 18). It spans **96 days**. Do not replace these dates
+with a rolling 90-day window. This command acquires a creation/completion union,
+not a publication-time denominator. To acquire unresolved publication evidence
+separately, use `time_basis=published` and heed its broader inclusion semantics.
+Large published acquisitions can exceed the bound because old unresolved sources
+remain candidates; reducing only `from` does not remove those unknowns. Creation-based
+acquisitions can be partitioned and retain the raw publication evidence for the replay
+workflow to interpret; do not label those partitions a complete publication cohort
+without that separate audit.
+
+Set `API_BASE`, `REPOSITORY_ID`, `AUTH_HEADER_FILE`, and `EXPORT_DIR` first.
+`AUTH_HEADER_FILE` is an existing private file containing the user-session/personal
+CLI Authorization header. For a production acquisition, put `EXPORT_DIR` in the
+private infrastructure repository under `docs/operations`, outside the public
+checkout. Keep credentials, raw pages, and checksums private. This example does
+not run reviews or calculate replay results.
+
+```bash
+set -euo pipefail
+umask 077
+: "${API_BASE:?Set the server origin}"
+: "${REPOSITORY_ID:?Set the authorized repository UUID}"
+: "${AUTH_HEADER_FILE:?Set a private curl header file}"
+: "${EXPORT_DIR:?Set a new private output directory}"
+mkdir "$EXPORT_DIR"  # Fails if an earlier acquisition already exists here.
+cursor=''
+page=0
+while :; do
+  output="$EXPORT_DIR/page-$page.json"
+  args=(--fail-with-body --silent --show-error --get
+    --header "@$AUTH_HEADER_FILE"
+    --data-urlencode "repository_id=$REPOSITORY_ID"
+    --data-urlencode 'from=2026-07-15T00:00:00Z'
+    --data-urlencode 'until=2026-10-19T00:00:00Z'
+    --data-urlencode 'time_basis=created_or_completed'
+    --data-urlencode 'limit=100')
+  if [ -n "$cursor" ]; then
+    args+=(--data-urlencode "cursor=$cursor")
+  fi
+  curl "${args[@]}" "${API_BASE%/}/api/v1/code-reviews/export" -o "$output"
+  jq -e '.acquisition.schema_version == 1 and
+    .acquisition.filters.include_unresolved_publication_time == true and
+    (.meta.returned == (.data | length))' "$output" >/dev/null
+  jq -S '.acquisition' "$output" > "$EXPORT_DIR/acquisition-current.json"
+  if [ "$page" -eq 0 ]; then
+    cp "$EXPORT_DIR/acquisition-current.json" "$EXPORT_DIR/acquisition.json"
+  else
+    cmp "$EXPORT_DIR/acquisition.json" "$EXPORT_DIR/acquisition-current.json"
+  fi
+  if jq -e '.meta.complete == true and .meta.next_cursor == null and
+    .meta.position == .acquisition.counts.records' "$output" >/dev/null; then
+    break
+  fi
+  cursor=$(jq -er '.meta.next_cursor | select(type == "string" and length > 0)' "$output")
+  page=$((page + 1))
+done
+jq -s -e '(map(.meta.returned) | add) == .[0].acquisition.counts.records and
+  ([.[].data[].source_identity] | length == (unique | length))' "$EXPORT_DIR"/page-*.json >/dev/null
+(cd "$EXPORT_DIR" && shasum -a 256 page-*.json acquisition.json > SHA256SUMS)
+```
+
+Run in Bash or Zsh (the command uses arrays). Follow `meta.next_cursor` verbatim;
+do not construct cursors, increment timestamps, or deduplicate by session/PR/head.
+Keep every response, including acquisition metadata. If interrupted, resume using
+the last nonterminal page's cursor and the same filters before expiry. On expiry,
+start a new output directory and acquisition; never splice different acquisitions.
+A retry from the beginning with the same filters reuses the unexpired acquisition,
+including after the first response was lost. Keep that retry in its own directory;
+it does not include changes after the original boundary.
+`complete` means the selected retained-source acquisition is fully paged, not that
+all historical provider evidence exists or that replay inclusion is established.
+Normalization, partitioning, checksums for normalized partitions, protocol freezing,
+and holdout access decisions belong to the replay workflow.
+
+## Synthetic examples
+
+These are **excerpts**, not complete responses. UUIDs, measurements, and review IDs
+are synthetic. Two same-session/same-head assessments remain distinct:
+
+```json
+[
+  {"source_identity":"assessment:10000000-0000-0000-0000-000000000001","raw":{"kind":"assessment","source":{"session_id":"20000000-0000-0000-0000-000000000001","head_sha":"synthetic-head","generation":1,"publication_key":"synthetic-publication-1","github_review_id":101,"review_scope":"full"}}},
+  {"source_identity":"assessment:10000000-0000-0000-0000-000000000002","raw":{"kind":"assessment","source":{"session_id":"20000000-0000-0000-0000-000000000001","head_sha":"synthetic-head","generation":2,"source_assessment_id":"10000000-0000-0000-0000-000000000001","publication_key":"synthetic-publication-2","github_review_id":102,"review_scope":"evidence_only"}}}
+]
+```
+
+A retained size failure supplies evidence; missing publication timing stays null:
+
+```json
+{
+  "evidence": {
+    "provider_submitted_at": {"value":null,"availability":"unavailable","provenance":"no unambiguous retained provider submission bound to this source's review ID, head, output marker, and lifecycle interval"},
+    "coverage_complete": {"value":false,"availability":"recorded","provenance":"raw.source.coverage_complete"}
+  },
+  "safeguards": [{
+    "id":"additions_limit_exceeded",
+    "result":"failed",
+    "inputs":{"value":[{"code":"additions_limit_exceeded","actual":900,"limit":750}],"availability":"recorded","provenance":"raw.source.risk_reason_details; exact retained reason objects including actual/limit/subject when present"},
+    "threshold":{"value":750,"availability":"reconstructed","provenance":"raw.policy.risk_policy.max_additions; retained setting, not proof of evaluation; retained policy row observed at acquisition; migrations may have added defaults after assessment; historical evaluation not established"},
+    "applicability":{"value":null,"availability":"unavailable","provenance":"evaluation/applicability not retained"},
+    "provenance":"explicit retained failure reason; missing numeric keys remain unknown, including omitted zero values"
+  }]
+}
+```
+
+An empty reason list still exports `unknown` for the size safeguard, with missing
+inputs. An explicit `not_applicable` screenshot description requirement exports
+`description:<key>` as `not_evaluated`; it does not imply the aggregate screenshot
+safeguard passed. Legacy records without a represented publication retain their
+own `legacy:<UUID>` identities even on that same head and session.
+
+## Errors
+
+Errors use `{ error: { code, message } }`. Authentication failures are 401/403;
+invalid filters/cursors are 400 (`INVALID_EXPORT_FILTER`, `INVALID_EXPORT_CURSOR`);
+an unauthorized/missing repository is 404 (`REPOSITORY_NOT_FOUND`); an expired,
+missing, or foreign acquisition is 410 (`EXPORT_EXPIRED`); busy/quota/size limits
+are 429 (`EXPORT_LIMIT`); database/timeouts are 500 (`EXPORT_FAILED`). No partial
+successful export is returned on acquisition failure.
