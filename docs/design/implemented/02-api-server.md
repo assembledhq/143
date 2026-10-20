@@ -405,6 +405,18 @@ Returns `meta.next_cursor` in the response for the next page.
 `2026-03-02T05:12:34.123456789Z|c0a8012e-7e6d-4f2e-9bbd-9a6b0b2f0e9a`). Clients
 should still treat the cursor as opaque and pass it back as-is.
 
+### Historical code-review export
+
+`GET /api/v1/code-reviews/export` is an organization- and repository-authorized
+user read route for admin/builder/member/viewer roles. Required `repository_id`,
+`from`, and `until` filters define a bounded source window; `time_basis` separates
+creation/completion from unresolved publication timing. First requests acquire a
+frozen payload cache; opaque cursors page at most 100 sources until expiry. The
+existing session list route retains its behavior. Responses include schema version,
+canonical filters, acquisition boundary, completeness counts, provenance envelopes,
+and explicit unknown safeguard evidence. No SSE events or provider writes are
+introduced. See the [full API/schema/acquisition reference](../../public/reference/code-review-export.mdx).
+
 ## Middleware Stack
 
 Applied in order:
