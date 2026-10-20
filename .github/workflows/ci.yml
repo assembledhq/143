@@ -53,6 +53,8 @@ jobs:
               - 'go.sum'
               - '.143/config.json'
               - '.143/review-dependencies*'
+              - 'scripts/verify_code_review_export.py'
+              - 'scripts/test_verify_code_review_export.py'
             frontend:
               - 'frontend/**'
             migrations:
@@ -244,6 +246,9 @@ jobs:
 
       - name: Combine backend unit coverage
         run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-db.out coverage-unit-worker.out coverage-unit-agent.out
+
+      - name: Test offline review export archive verification
+        run: python3 -B -m unittest discover -s scripts -p 'test_verify_code_review_export.py'
 
       - name: Run command tests
         timeout-minutes: 5

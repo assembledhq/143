@@ -5,16 +5,20 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
 	"strings"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 )
 
 type HistoricalExportStore interface {
+	Status(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.CodeReviewExportStatus, error)
+	Release(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.CodeReviewExportArchiveProof) (models.CodeReviewExportStatus, error)
 	Acquire(context.Context, uuid.UUID, models.CodeReviewExportFilters) (models.CodeReviewExportAcquisition, error)
 	Page(context.Context, uuid.UUID, models.CodeReviewExportCursor, int) (models.CodeReviewExportAcquisition, []models.CodeReviewExportSource, error)
 }
@@ -54,6 +58,11 @@ func (s *HistoricalExportService) Export(ctx context.Context, orgID uuid.UUID, f
 	}
 	a, rows, err := s.store.Page(ctx, orgID, c, limit)
 	if err != nil {
+		// A concurrent release/expiry can land after Acquire returns but before
+		// the first page locks the header. Explicit old cursors still fail gone.
+		if cursor == "" && (errors.Is(err, db.ErrReviewExportReleased) || errors.Is(err, db.ErrReviewExportExpired)) {
+			return models.CodeReviewExportPage{}, db.ErrReviewExportBusy
+		}
 		return models.CodeReviewExportPage{}, err
 	}
 	if !reflect.DeepEqual(a.Filters, filters) {
@@ -75,6 +84,14 @@ func (s *HistoricalExportService) Export(ctx context.Context, orgID uuid.UUID, f
 		page.Meta.NextCursor = &encoded
 	}
 	return page, nil
+}
+
+func (s *HistoricalExportService) Status(ctx context.Context, orgID, repositoryID, id uuid.UUID) (models.CodeReviewExportStatus, error) {
+	return s.store.Status(ctx, orgID, repositoryID, id)
+}
+
+func (s *HistoricalExportService) Release(ctx context.Context, orgID, repositoryID, id uuid.UUID, proof models.CodeReviewExportArchiveProof) (models.CodeReviewExportStatus, error) {
+	return s.store.Release(ctx, orgID, repositoryID, id, proof)
 }
 
 func exportObject(raw json.RawMessage) map[string]any {

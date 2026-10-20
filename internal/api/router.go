@@ -1402,6 +1402,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/version", healthHandler.Version)
 				r.Get("/api/v1/code-reviews", codeReviewHandler.List)
 				r.Get("/api/v1/code-reviews/export", codeReviewExportHandler.Export)
+				r.Get("/api/v1/code-reviews/export/{id}", codeReviewExportHandler.Status)
 				r.Get("/api/v1/code-reviews/stats", codeReviewHandler.Stats)
 				r.Get("/api/v1/code-reviews/analytics", codeReviewHandler.Analytics)
 				r.Get("/api/v1/code-reviews/stream", codeReviewHandler.StreamUpdates)
@@ -1546,6 +1547,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.OrgContext)
 				r.Use(middleware.RequireRole("admin", "builder", "member"))
+				r.Post("/api/v1/code-reviews/export/{id}/release", codeReviewExportHandler.Release)
 
 				// Local agent gateway: tool list + server-proxied execution for
 				// `143-tools mcp serve` and local CLI tool calls. Builder-tier

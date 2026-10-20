@@ -14,6 +14,13 @@ import (
 )
 
 var ErrReviewExportLimit = errors.New("review export acquisition limit exceeded")
+var ErrReviewExportBusy = fmt.Errorf("%w: busy lock", ErrReviewExportLimit)
+var ErrReviewExportSlots = fmt.Errorf("%w: active slot limit", ErrReviewExportLimit)
+var ErrReviewExportRows = fmt.Errorf("%w: row limit", ErrReviewExportLimit)
+var ErrReviewExportBytes = fmt.Errorf("%w: payload byte limit", ErrReviewExportLimit)
+var ErrReviewExportReleased = errors.New("review export released")
+var ErrReviewExportArchive = errors.New("archive attestation does not match acquisition")
+var ErrReviewExportReleaseConflict = errors.New("acquisition already released with a different archive attestation")
 var ErrReviewExportPosition = errors.New("invalid export cursor position")
 var ErrReviewExportExpired = errors.New("review export unavailable or expired")
 
@@ -59,7 +66,7 @@ const reviewExportSources = `WITH review_event_groups AS MATERIALIZED (
  SELECT 'legacy',m.id,m.created_at,m.completed_at,to_jsonb(m)-'org_id','[]'::jsonb
  FROM code_review_session_metadata m WHERE m.org_id=@org_id AND m.repository_id=@repository_id
 
-)
+), candidates AS MATERIALIZED (
 SELECT jsonb_build_object('kind',s.kind,'id',s.id,'source',s.source,'legacy_aliases',s.legacy_aliases,
  'policy',(SELECT to_jsonb(pol)-'org_id'-'active'-'created_by_user_id' FROM code_review_policies pol
    WHERE pol.org_id=@org_id AND pol.id=(s.source->>'policy_id')::uuid
@@ -71,7 +78,8 @@ SELECT jsonb_build_object('kind',s.kind,'id',s.id,'source',s.source,'legacy_alia
  'agent_results',COALESCE((SELECT jsonb_agg(to_jsonb(ar)-'org_id'-'raw_output' ORDER BY ar.created_at,ar.id)
    FROM code_review_agent_results ar WHERE ar.org_id=@org_id
      AND ar.session_id=(s.source->>'session_id')::uuid
-     AND ((s.kind='assessment' AND ar.assessment_id=s.id) OR (s.kind='legacy' AND ar.assessment_id IS NULL))),'[]'::jsonb))
+     AND ((s.kind='assessment' AND ar.assessment_id=s.id) OR (s.kind='legacy' AND ar.assessment_id IS NULL))),'[]'::jsonb)) AS payload,
+ s.created_at,s.id,s.kind
 FROM sources s
 LEFT JOIN pull_requests pr ON pr.org_id=@org_id AND pr.id=(s.source->>'pull_request_id')::uuid
 LEFT JOIN review_event_groups events ON events.pr_number=pr.github_pr_number::text AND events.review_id=s.source->>'github_review_id'
@@ -85,7 +93,12 @@ WHERE s.created_at <= @boundary AND (
  -- Unknown timing remains included; completion is never a surrogate.
  OR (@time_basis='published' AND s.created_at<@until)
 )
-ORDER BY s.created_at,s.id,s.kind LIMIT @max_records`
+ORDER BY s.created_at,s.id,s.kind LIMIT @max_records
+)
+-- Refuse an oversized individual payload before the PostgreSQL protocol sends
+-- it. NULL is an internal limit sentinel, never an exported or skipped record.
+SELECT CASE WHEN octet_length(payload::text)>@max_payload_bytes THEN NULL::jsonb ELSE payload END
+FROM candidates ORDER BY created_at,id,kind`
 
 type CodeReviewExportStore struct{ db TxStarter }
 
@@ -94,6 +107,19 @@ func NewCodeReviewExportStore(database TxStarter) *CodeReviewExportStore {
 }
 
 func (s *CodeReviewExportStore) Acquire(ctx context.Context, orgID uuid.UUID, f models.CodeReviewExportFilters) (models.CodeReviewExportAcquisition, error) {
+	a, err := s.acquire(ctx, orgID, f)
+	// Release does not hold the acquisition advisory lock. Its header update
+	// can invalidate a REPEATABLE READ snapshot or a just-reused acquisition.
+	// Report these races as retryable contention, never a gone first request.
+	var pgErr *pgconn.PgError
+	if errors.Is(err, ErrReviewExportReleased) || errors.Is(err, ErrReviewExportExpired) ||
+		(errors.As(err, &pgErr) && (pgErr.Code == "40001" || pgErr.Code == "40P01")) {
+		return models.CodeReviewExportAcquisition{}, ErrReviewExportBusy
+	}
+	return a, err
+}
+
+func (s *CodeReviewExportStore) acquire(ctx context.Context, orgID uuid.UUID, f models.CodeReviewExportFilters) (models.CodeReviewExportAcquisition, error) {
 	if orgID == uuid.Nil {
 		return models.CodeReviewExportAcquisition{}, pgx.ErrNoRows
 	}
@@ -122,9 +148,11 @@ func (s *CodeReviewExportStore) Acquire(ctx context.Context, orgID uuid.UUID, f 
 		return models.CodeReviewExportAcquisition{}, pgx.ErrNoRows
 	}
 	if !locked {
-		return models.CodeReviewExportAcquisition{}, ErrReviewExportLimit
+		return models.CodeReviewExportAcquisition{}, ErrReviewExportBusy
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM code_review_exports WHERE org_id=$1 AND expires_at<=now()`, orgID); err != nil {
+	if _, err = tx.Exec(ctx, `WITH expired AS (
+ UPDATE code_review_exports SET slot=NULL WHERE org_id=$1 AND expires_at<=now() AND slot IS NOT NULL RETURNING id
+) DELETE FROM code_review_export_rows r USING expired e WHERE r.org_id=$1 AND r.export_id=e.id`, orgID); err != nil {
 		return models.CodeReviewExportAcquisition{}, err
 	}
 	filters, err := json.Marshal(f)
@@ -134,7 +162,7 @@ func (s *CodeReviewExportStore) Acquire(ctx context.Context, orgID uuid.UUID, f 
 	// Retry a lost first-page response without consuming another organization slot.
 	var existingID uuid.UUID
 	err = tx.QueryRow(ctx, `SELECT id FROM code_review_exports
- WHERE org_id=$1 AND repository_id=$2 AND schema_version=$3 AND filters=$4
+ WHERE org_id=$1 AND repository_id=$2 AND schema_version=$3 AND filters=$4 AND released_at IS NULL AND expires_at>now()
  ORDER BY acquired_at DESC,id LIMIT 1`, orgID, f.RepositoryID, models.CodeReviewExportSchemaVersion, filters).Scan(&existingID)
 	if err == nil {
 		if err = tx.Commit(ctx); err != nil {
@@ -151,10 +179,10 @@ func (s *CodeReviewExportStore) Acquire(ctx context.Context, orgID uuid.UUID, f 
 		return models.CodeReviewExportAcquisition{}, err
 	}
 	if slot == 0 {
-		return models.CodeReviewExportAcquisition{}, ErrReviewExportLimit
+		return models.CodeReviewExportAcquisition{}, ErrReviewExportSlots
 	}
 
-	rows, err := tx.Query(ctx, reviewExportSources, pgx.NamedArgs{"org_id": orgID, "repository_id": f.RepositoryID, "boundary": boundary, "from": f.From, "until": f.Until, "time_basis": string(f.TimeBasis), "max_records": reviewExportMaxRecords + 1})
+	rows, err := tx.Query(ctx, reviewExportSources, pgx.NamedArgs{"org_id": orgID, "repository_id": f.RepositoryID, "boundary": boundary, "from": f.From, "until": f.Until, "time_basis": string(f.TimeBasis), "max_records": reviewExportMaxRecords + 1, "max_payload_bytes": reviewExportMaxBytes})
 	if err != nil {
 		return models.CodeReviewExportAcquisition{}, err
 	}
@@ -172,11 +200,19 @@ func (s *CodeReviewExportStore) Acquire(ctx context.Context, orgID uuid.UUID, f 
 			rows.Close()
 			return models.CodeReviewExportAcquisition{}, err
 		}
+		if raw == nil {
+			rows.Close()
+			return models.CodeReviewExportAcquisition{}, ErrReviewExportBytes
+		}
 		scanned++
 		bytes += len(raw)
-		if scanned > reviewExportMaxRecords || bytes > reviewExportMaxBytes {
+		if scanned > reviewExportMaxRecords {
 			rows.Close()
-			return models.CodeReviewExportAcquisition{}, ErrReviewExportLimit
+			return models.CodeReviewExportAcquisition{}, ErrReviewExportRows
+		}
+		if bytes > reviewExportMaxBytes {
+			rows.Close()
+			return models.CodeReviewExportAcquisition{}, ErrReviewExportBytes
 		}
 		var source models.CodeReviewExportSource
 		if err = json.Unmarshal(raw, &source); err != nil {
@@ -195,7 +231,7 @@ func (s *CodeReviewExportStore) Acquire(ctx context.Context, orgID uuid.UUID, f 
 		bytes += max(0, len(frozen)-len(raw))
 		if bytes > reviewExportMaxBytes {
 			rows.Close()
-			return models.CodeReviewExportAcquisition{}, ErrReviewExportLimit
+			return models.CodeReviewExportAcquisition{}, ErrReviewExportBytes
 		}
 		if source.Kind == models.ReviewExportAssessment {
 			var aliases []struct {
@@ -239,7 +275,7 @@ func (s *CodeReviewExportStore) Acquire(ctx context.Context, orgID uuid.UUID, f 
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return models.CodeReviewExportAcquisition{}, ErrReviewExportLimit
+			return models.CodeReviewExportAcquisition{}, ErrReviewExportSlots
 		}
 		return models.CodeReviewExportAcquisition{}, err
 	}
@@ -272,38 +308,37 @@ func (s *CodeReviewExportStore) Acquire(ctx context.Context, orgID uuid.UUID, f 
 }
 
 func (s *CodeReviewExportStore) acquisition(ctx context.Context, orgID, id uuid.UUID) (models.CodeReviewExportAcquisition, error) {
-	var a models.CodeReviewExportAcquisition
-	var filters, counts []byte
-	err := s.db.QueryRow(ctx, `SELECT e.id,e.schema_version,e.filters,e.acquired_at,e.expires_at,e.counts
- FROM code_review_exports e JOIN repositories r ON r.org_id=e.org_id AND r.id=e.repository_id
- WHERE e.org_id=$1 AND e.id=$2 AND e.expires_at>now()`, orgID, id).Scan(&a.ID, &a.SchemaVersion, &filters, &a.AcquiredAt, &a.ExpiresAt, &counts)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return a, ErrReviewExportExpired
-	}
+	status, err := exportStatus(ctx, s.db, orgID, uuid.Nil, id, "")
 	if err != nil {
-		return a, err
+		return status.Acquisition, err
 	}
-	if err = json.Unmarshal(filters, &a.Filters); err != nil {
-		return a, fmt.Errorf("decode export filters: %w", err)
-	}
-	if err = json.Unmarshal(counts, &a.Counts); err != nil {
-		return a, fmt.Errorf("decode export counts: %w", err)
-	}
-	a.Consistency = models.ReviewExportFrozenPayloads
-	return a, nil
+	return status.Acquisition, exportReadable(status)
 }
+
 func (s *CodeReviewExportStore) Page(ctx context.Context, orgID uuid.UUID, c models.CodeReviewExportCursor, limit int) (models.CodeReviewExportAcquisition, []models.CodeReviewExportSource, error) {
-	a, err := s.acquisition(ctx, orgID, c.AcquisitionID)
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
+		return models.CodeReviewExportAcquisition{}, nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err = tx.Exec(ctx, `SET LOCAL statement_timeout = '30s'`); err != nil {
+		return models.CodeReviewExportAcquisition{}, nil, err
+	}
+	// Hold a shared header lock through the payload read. Release and lazy expiry
+	// cleanup cannot turn a page into an apparently successful short/empty page.
+	status, err := exportStatus(ctx, tx, orgID, uuid.Nil, c.AcquisitionID, " FOR SHARE OF e")
+	a := status.Acquisition
+	if err != nil {
+		return a, nil, err
+	}
+	if err = exportReadable(status); err != nil {
 		return a, nil, err
 	}
 	if limit < 1 || limit > 100 || c.Position < 0 || c.Position > a.Counts.Records {
 		return a, nil, ErrReviewExportPosition
 	}
-	rows, err := s.db.Query(ctx, `SELECT r.payload FROM code_review_export_rows r
- JOIN code_review_exports e ON e.org_id=r.org_id AND e.id=r.export_id
- WHERE r.org_id=$1 AND r.export_id=$2 AND r.position>$3 AND e.expires_at>now()
- ORDER BY r.position LIMIT $4`, orgID, c.AcquisitionID, c.Position, limit)
+	rows, err := tx.Query(ctx, `SELECT r.payload FROM code_review_export_rows r
+ WHERE r.org_id=$1 AND r.export_id=$2 AND r.position>$3 ORDER BY r.position LIMIT $4`, orgID, c.AcquisitionID, c.Position, limit)
 	if err != nil {
 		return a, nil, err
 	}
@@ -319,9 +354,11 @@ func (s *CodeReviewExportStore) Page(ctx context.Context, orgID uuid.UUID, c mod
 		}
 		out = append(out, source)
 	}
-	// Expiry/cleanup between metadata and row reads must not masquerade as EOF.
 	if int64(len(out)) != min(int64(limit), a.Counts.Records-c.Position) {
 		return a, nil, ErrReviewExportExpired
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return a, nil, err
 	}
 	return a, out, nil
 }
