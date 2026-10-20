@@ -216,7 +216,7 @@ LDFLAGS := -X github.com/assembledhq/143/internal/version.BuildSHA=$(BUILD_SHA)
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/server ./cmd/server
-	go build -o bin/migrate ./cmd/migrate
+	go build -ldflags "$(LDFLAGS)" -o bin/migrate ./cmd/migrate
 
 # Cross-compile the 143-tools CLI for laptop installs. Outputs to dist/cli/
 # plus a checksums.txt the installer script verifies against. The server

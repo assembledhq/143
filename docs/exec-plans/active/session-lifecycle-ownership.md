@@ -113,6 +113,19 @@ identity or privilege. This is partial command coverage: `backfill-usage`,
 `migrate`, `wait-postgres`, `demo-seed` and manual SQL paths remain unattributed
 by this slice. No command uses a label as deployment, drain or activation proof.
 
+A following migration-only slice labels connections opened by `cmd/migrate`
+with the same `143:operator:<safe-build>` policy. It retains golang-migrate's
+PostgreSQL/libpq driver, migration source, database selection and defaults,
+custom `x-*` options, migration locking and narrow dirty-repair allowlists.
+Only case-insensitive application-name parameters are replaced in recognized
+PostgreSQL URIs; other input retains the existing driver's handling. Its query
+parsing behavior is preserved. Docker and `make build` embed
+the existing binary build SHA in the migration command, while uninjected
+single-file `go run` builds retain `dev`. There is no observer, lease or
+writer-version marker. This does not label `demo-seed`'s separate embedded
+migrator, `backfill-usage`, `wait-postgres` or manual SQL. Schema behavior,
+writer authority and every deployment/activation gate remain unchanged.
+
 Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
 identify the inspected implementation; the executable inventory rechecks the
 current tree rather than treating line numbers as permanent identities.
@@ -1510,6 +1523,8 @@ revision; it must not reinterpret new durable records or trigger replay.
   changing pool budgets and operational decisions.
 - [x] Validate operator labels on fresh, reused and reset PostgreSQL connections,
   full-schema census aggregation, command wiring and packaged build metadata.
+- [x] Validate migration-only operator attribution through the actual command
+  and PostgreSQL driver, including target/options, up/down and packaging behavior.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1707,6 +1722,31 @@ compile with the SHA linker flag for the local toolchain and Linux/amd64.
 Source tests verify the actual command pool calls and Docker build invocations.
 These checks do not construct or deploy the Docker image, prove transaction-mode
 proxy attribution, cover every operator path or establish a compatible floor.
+Independent exact-candidate review remains a separate gate.
+
+### 0a migration-attribution validation
+
+The complete `cmd/migrate` race suite passed locally on PostgreSQL 17.10:
+41 root tests and 782 subtests, with no failures or skips. Reproduce with an
+owned disposable PostgreSQL 15+ server in `TEST_DATABASE_URL` and
+`go test -race -p=1 ./cmd/migrate -count=1 -parallel=3 -timeout=3m`.
+Fixtures apply the complete unchanged migration chain before exercising the
+actual stamped migration executable and the retained golang-migrate/libpq driver.
+
+The command tests observe its exact backend label at a database-lock barrier
+before allowing synthetic up/down migrations to proceed. They verify path and
+query database targets, custom migration-table options, URI/environment option
+precedence, unrelated startup settings, absent writer-version markers and an
+empty writer registry. Separate actual-driver cases verify `dev` and marked
+fingerprint labels. Unit tests compare the pinned driver's parsed options,
+preserve malformed/non-URI handling and check the real single-file entrypoint.
+Output checks retain the existing timing log and success framing, normalizing
+only the variable duration.
+
+Vet, repository-pinned lint, tenancy/lifecycle guards and the security scanner
+pass for the checked scope. Docker/Make wiring tests and local/Linux-amd64 builds
+verify SHA injection without constructing an image. These are local checks,
+not deployment, proxy attribution, floor/drain proof or completion of 0a.
 Independent exact-candidate review remains a separate gate.
 
 ## Surprises & Discoveries

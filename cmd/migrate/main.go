@@ -3,9 +3,13 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/version"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
@@ -48,6 +52,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	dbURL = lifecycleMigrationDatabaseURL(dbURL, version.BuildSHA)
 	m, err := migrate.New(migrationSource, dbURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create migrator: %v\n", err)
@@ -96,6 +101,38 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1]) // #nosec G705 -- writing to stderr, not HTTP response
 		os.Exit(1)
 	}
+}
+
+// lifecycleMigrationDatabaseURL overrides only passive connection attribution.
+// Keep golang-migrate's original driver selection and URL.Query semantics: its
+// postgres driver already drops malformed query pairs through FilterCustomQuery
+// while preserving valid, repeated and x-* options. This is not validation of a
+// database target, a participating writer registration or a compatibility gate.
+func lifecycleMigrationDatabaseURL(raw, build string) string {
+	if !strings.HasPrefix(raw, "postgres://") && !strings.HasPrefix(raw, "postgresql://") {
+		return raw
+	}
+	target, err := url.Parse(raw)
+	if err != nil {
+		// Let the existing migration constructor and driver retain their source
+		// ordering, rejection and diagnostics for an unparseable URL.
+		return raw
+	}
+	if rendered := target.String(); !strings.HasPrefix(rendered, "postgres://") && !strings.HasPrefix(rendered, "postgresql://") {
+		// Empty authority/path/userinfo loses URI framing in the driver's
+		// existing filter. Do not turn its legacy non-URI parsing into a new
+		// default-target connection attempt by adding a query assignment.
+		return raw
+	}
+	query := target.Query()
+	for key := range query {
+		if strings.EqualFold(key, "application_name") {
+			delete(query, key)
+		}
+	}
+	query.Set("application_name", db.LifecycleOperatorConnectionApplicationName(build))
+	target.RawQuery = query.Encode()
+	return target.String()
 }
 
 // repairKnownDirtyMigration clears only dirty markers whose production failure
