@@ -902,6 +902,15 @@ are unchanged. Temporary stores still have no publishers and returned passive
 effects are deliberately discarded, so this conversion adds no notification.
 It does not add canonical shared allocation or admission/end epoch fencing.
 
+Seed materialization, inbox claim/ack/application, phase insertion and runtime
+watermarks now have one caller-owned `StartSeedPhaseInTx` persistence sequence.
+The legacy wrapper still validates before Begin and retains its original commit
+and error behavior. The explicit seam does not settle or publish, including
+through phase-start helpers; successful phase/batch records remain staged until
+the outer owner commits. Existing runtime lease, exact message/range, historical
+never-started batch and primary-tab rules are unchanged. They are not immutable
+allocation, shared admission/end epoch or new provider-launch authority.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -1622,6 +1631,9 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Compose actual recheck completion with standalone session/thread turn
   persistence, proving head-only and empty-diff results plus late receipt failure
   roll back atomically without nested settlement or new notifications.
+- [x] Expose caller-owned seed/ack/activity persistence with one shared SQL
+  sequence, preserving legacy wrapper behavior and proving exact outer settlement,
+  late failure rollback, scope rejection and committed-seed replay protection.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1961,6 +1973,27 @@ transaction inspectable until its owner rolls back every touched row. Successful
 completion preserves root historical usage, exact receipt provenance and the
 existing lack of publication. This is atomic persistence proof, not a new fence,
 deployed compatibility floor or production acceptance.
+
+### 0a seed/ack persistence validation
+
+The new focused race/full-schema selection passed locally on PostgreSQL 17.10:
+five roots and 87 subtests, no failures or skips. Reproduce with an owned
+PostgreSQL 15+ server in `TEST_DATABASE_URL` and `go test -race -p=1 ./internal/db
+-run '^TestSeedActivityTransaction' -count=1 -parallel=1 -timeout=3m`. Five existing
+legacy PostgreSQL seed-wrapper roots and 27 subtests also pass, including
+concurrent starts, historical ranges and backfill. Focused vet and gofmt pass.
+
+Tests cover every retained SQL/collect/count failure stage, exact wrapper errors,
+and a complete unchanged schema with one occupied connection. Whole-row
+message/inbox/batch/runtime/phase snapshots prove independent invisibility and
+exact outer commit/rollback. A real late phase uniqueness failure verifies that
+materialize, claim, ack and apply writes occurred before rollback; a later caller
+SQL failure removes a successful complete seed unit too. Foreign relationships,
+wrong/expired lease and invalid input stage no writes. Rolled-back seeds remain
+replayable; already committed/applied seeds remain rejected after their original
+phase completes. Returned batch timestamp representation retains the legacy
+input shape while its durable instant is checked independently. These are
+persistence proofs, not canonical admission/start fencing or floor acceptance.
 
 ## Surprises & Discoveries
 
