@@ -462,10 +462,12 @@ func TestLifecycleCensusCommandExitFullSchemaPostgres(t *testing.T) {
 	// Build the real command outside the checkout, before measuring its runtime.
 	// In particular, this is not a test-helper process that keeps the caller's
 	// pgx cleanup goroutine alive after the standalone command should have exited.
+	// Default build flags reuse the dependencies already built by go test;
+	// -trimpath would create a separate cold cache variant under the same deadline.
 	binary := filepath.Join(t.TempDir(), "lifecycle-census")
 	buildCtx, buildCancel := context.WithTimeout(context.Background(), time.Minute)
 	defer buildCancel()
-	build := exec.CommandContext(buildCtx, "go", "build", "-trimpath", "-o", binary, "../lifecycle-census")
+	build := exec.CommandContext(buildCtx, "go", "build", "-o", binary, "../lifecycle-census")
 	if err := build.Run(); err != nil {
 		t.Fatal("build the actual standalone census command before starting its runtime proof")
 	}

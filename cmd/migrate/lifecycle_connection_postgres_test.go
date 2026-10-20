@@ -23,10 +23,12 @@ func TestLifecycleMigrationConnectionCommandPostgres(t *testing.T) {
 	if os.Getenv("TEST_DATABASE_URL") == "" {
 		t.Skip("set TEST_DATABASE_URL to disposable PostgreSQL 15+ for real migration command attribution proofs")
 	}
+	// Reuse go test's default dependency build cache; the synthetic SHA only
+	// changes linking and does not require a cold -trimpath compilation.
 	binary := filepath.Join(t.TempDir(), "migrate")
 	buildCtx, buildCancel := context.WithTimeout(context.Background(), time.Minute)
 	defer buildCancel()
-	build := exec.CommandContext(buildCtx, "go", "build", "-trimpath", "-ldflags", "-X github.com/assembledhq/143/internal/version.BuildSHA="+lifecycleMigrationProbeBuild, "-o", binary, ".")
+	build := exec.CommandContext(buildCtx, "go", "build", "-ldflags", "-X github.com/assembledhq/143/internal/version.BuildSHA="+lifecycleMigrationProbeBuild, "-o", binary, ".")
 	if err := build.Run(); err != nil {
 		t.Fatal("build the actual migration command with a synthetic binary SHA before starting its database proof")
 	}
