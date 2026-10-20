@@ -57,6 +57,10 @@ func newExportFixture(t *testing.T) exportFixture {
 	require.NoError(t, err, "read real export migration")
 	_, err = conn.Exec(ctx, string(up))
 	require.NoError(t, err, "apply real migration with tenant FKs")
+	release, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000321_code_review_export_release.up.sql"))
+	require.NoError(t, err, "read durable acquisition release migration")
+	_, err = conn.Exec(ctx, string(release))
+	require.NoError(t, err, "apply durable acquisition release migration")
 	f := exportFixture{conn: conn, ctx: ctx, url: url, schema: schema, org: uuid.New(), repo: uuid.New(), pr: uuid.New(), session: uuid.New(), policy: uuid.New()}
 	f.exec(t, `INSERT INTO organizations VALUES($1)`, f.org)
 	f.exec(t, `INSERT INTO repositories(id,org_id,full_name) VALUES($1,$2,'synthetic/repo')`, f.repo, f.org)
@@ -200,6 +204,8 @@ func TestCodeReviewExportPostgresConcurrentAcquisitionAndPaging(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("acquisition did not reach repeatable-read barrier")
 	}
+	_, err = NewCodeReviewExportStore(writer).Acquire(f.ctx, f.org, f.filters(models.ReviewExportCreated))
+	require.ErrorIs(t, err, ErrReviewExportBusy, "simultaneous acquisition reports only busy lock and preserves leader snapshot")
 	// Commit changes after MVCC boundary but before source materialization.
 	_, err = writer.Exec(f.ctx, `UPDATE code_review_session_metadata SET risk_reason_details='[]',decision='approved' WHERE org_id=$1`, f.org)
 	require.NoError(t, err, "commit concurrent legacy update")
@@ -257,7 +263,7 @@ func TestCodeReviewExportPostgresBoundsAndMigration(t *testing.T) {
 	var retained int
 	err = f.conn.QueryRow(f.ctx, `SELECT count(*) FROM code_review_exports WHERE org_id=$1`, f.org).Scan(&retained)
 	require.NoError(t, err, "count retained acquisitions")
-	require.Equal(t, 1, retained, "expired headers and cascading payloads are reclaimed")
+	require.Equal(t, 4, retained, "expired metadata is durable while its slots and payloads are reclaimed")
 	down, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000320_code_review_exports.down.sql"))
 	require.NoError(t, err, "read rollback migration")
 	_, err = f.conn.Exec(f.ctx, string(down))

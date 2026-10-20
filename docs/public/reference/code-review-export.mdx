@@ -35,8 +35,13 @@ between pages. A cursor is a position in authorized server-side storage, not an
 authorization grant. It cannot read another organization's acquisition.
 
 Creation and completion refer to each **source record**, not PR creation or merge.
-`created_or_completed` selects their union. An unfinished source can qualify by
-creation. A completed source with unknown completion cannot qualify by completion
+`created_or_completed` selects their union. **Adjacent windows can overlap by
+source identity**: a source created in one window and completed in the next appears
+in both. For example, a source created August 1 and completed September 1 qualifies
+for both `[July 15, August 16)` and `[August 16, October 19)`. These are distinct
+acquisitions with independent snapshots; summing counts does not count unique
+reviews. Preserve `source_identity` and acquisition identity for later reconciliation.
+An unfinished source can qualify by creation. A completed source with unknown completion cannot qualify by completion
 alone. Every status, unmerged PR, and superseded head is preserved if it matches.
 
 `published` is a separate acquisition mode. It selects bound provider submission
@@ -94,22 +99,43 @@ cannot recover facts overwritten or never persisted before acquisition. Source
 rows marked immutable by the application retain their assessment-time meaning;
 mutable observations are labeled separately.
 
-Acquisitions expire after 24 hours. Each organization has at most three retained
-acquisitions with distinct filter sets, enforced by three unique database slots.
-Identical-filter retries share one slot; a different filter set can still encounter
-the quota until another acquisition expires. Fresh evidence for the same filters
-requires expiry; omitting the cursor does not refresh a retained snapshot.
-New acquisitions reclaim that organization's expired headers and payloads. Expiry immediately prevents
-reads; physical reclamation is lazy on the next acquisition, so expiry is not a
-guaranteed physical-erasure deadline. Removing the parent repository or organization
-also removes these disposable cache copies; it does not delete source reviews through
-the export tables. Materialization is capped at 20,000 source candidates (including overlapping legacy representations)
-and 64 MiB of serialized raw JSON candidates per acquisition; database statements have a
-30-second timeout. Oversized acquisitions fail atomically, without partial counts
-or a success response. Narrow a creation/completion interval if necessary and keep
-each acquisition separately identified; published-mode unknowns cannot be narrowed
-by a fictional timestamp. Candidate bounds are checked before overlap removal and
-publication-time admission; a bound failure never implies all candidates were read. Pagination never truncates a successful acquisition.
+Acquisition payloads expire after 24 hours. Each organization has at most three
+active acquisitions, enforced by three unique database slots. Identical-filter
+retries reuse a live acquisition and do not refresh its boundary or expiry.
+After explicit release or expiry, the same filters create a **new acquisition ID
+and independent snapshot**. Acquisitions cannot be joined into one shared snapshot.
+No live acquisition is implicitly evicted to make room.
+
+Expiry immediately prevents cursor reads. The next acquisition lazily deletes only
+that organization's expired payloads and clears their slots, retaining acquisition
+headers. Explicit release likewise deletes only the named acquisition's temporary
+payload rows and clears its slot atomically. Metadata remains: ID, schema, filters,
+acquisition/expiry boundary, consistency, completeness counts, and any release
+receipt. There is no automatic expiry of this small metadata. Deleting the parent
+repository or organization still cascades through export cache/metadata; this API
+does not provide an independent backup of deleted tenant identities. Source
+reviews, policies, findings, receipts, and provider state are never children of
+export storage and are never deleted by release/expiry.
+
+Materialization remains capped at 20,000 source candidates (including overlapping
+legacy representations) and 64 MiB of serialized raw JSON candidates per
+acquisition; database statements have a 30-second timeout. Individual oversized
+records fail the whole acquisition; they are never truncated, omitted, or emitted
+as a partial success. Candidate bounds apply before overlap removal and
+publication-time admission. A bound failure does not establish candidate counts
+or completeness. Narrow creation/completion windows when necessary and archive,
+verify, then explicitly release one acquisition before starting another. Moving a
+`published` lower bound later **does not eliminate unknown publication times**;
+unknowns created before `until` remain candidates regardless of `from`. If an
+individual record exceeds the byte bound, narrower time filters cannot make that
+record fit; stop and report the failed acquisition without silently skipping it.
+
+A page takes a shared acquisition-header lock through its payload read; release
+and expiry cleanup serialize behind it. A page that starts before release can
+finish completely; later cursors fail with `EXPORT_RELEASED`. Expired cursors fail
+with `EXPORT_EXPIRED`, including a previously terminal cursor. A short or missing
+page never masquerades as successful EOF. Concurrent first acquisitions may fail
+with a retryable lock/slot code; retry with backoff, not an unbounded request loop.
 
 The endpoint returns `Cache-Control: no-store`. Acquisition storage is a disposable
 cache; it does not edit historical reviews, policies, findings, or provider state.
@@ -240,73 +266,171 @@ not a publication-time denominator. To acquire unresolved publication evidence
 separately, use `time_basis=published` and heed its broader inclusion semantics.
 Large published acquisitions can exceed the bound because old unresolved sources
 remain candidates; reducing only `from` does not remove those unknowns. Creation-based
-acquisitions can be partitioned and retain the raw publication evidence for the replay
+acquisitions can use narrower time windows and retain the raw publication evidence for the replay
 workflow to interpret; do not label those partitions a complete publication cohort
 without that separate audit.
 
-Set `API_BASE`, `REPOSITORY_ID`, `AUTH_HEADER_FILE`, and `EXPORT_DIR` first.
-`AUTH_HEADER_FILE` is an existing private file containing the user-session/personal
-CLI Authorization header. For a production acquisition, put `EXPORT_DIR` in the
-private infrastructure repository under `docs/operations`, outside the public
-checkout. Keep credentials, raw pages, and checksums private. This example does
-not run reviews or calculate replay results.
+Set `API_BASE`, `REPOSITORY_ID`, `AUTH_HEADER_FILE`, `EXPORT_DIR`, `FROM`, and
+`UNTIL` first. The full interval is `FROM=2026-07-15T00:00:00Z` and
+`UNTIL=2026-10-19T00:00:00Z`; choose smaller intervals within those explicit dates
+if an acquisition exceeds bounds. Each successful interval remains a separate
+snapshot. `AUTH_HEADER_FILE` is an existing private file containing the personal
+CLI/user Authorization header. Use only the trusted server origin. Put `EXPORT_DIR`
+in private infrastructure storage outside this public checkout. Keep credentials,
+raw pages, manifests, checksums, and release receipts private.
+
+This Bash/Zsh command acquires one interval and records every requested cursor.
+It does not release anything. A failed HTTP request leaves a private error receipt
+and stops before archive verification.
 
 ```bash
 set -euo pipefail
 umask 077
-: "${API_BASE:?Set the server origin}"
+: "${API_BASE:?Set the trusted server origin}"
 : "${REPOSITORY_ID:?Set the authorized repository UUID}"
 : "${AUTH_HEADER_FILE:?Set a private curl header file}"
 : "${EXPORT_DIR:?Set a new private output directory}"
-mkdir "$EXPORT_DIR"  # Fails if an earlier acquisition already exists here.
+: "${FROM:?Set the inclusive UTC boundary}"
+: "${UNTIL:?Set the exclusive UTC boundary}"
+mkdir "$EXPORT_DIR"
 cursor=''
 page=0
 while :; do
-  output="$EXPORT_DIR/page-$page.json"
+  name="page-$page.json"
+  output="$EXPORT_DIR/$name"
   args=(--fail-with-body --silent --show-error --get
     --header "@$AUTH_HEADER_FILE"
     --data-urlencode "repository_id=$REPOSITORY_ID"
-    --data-urlencode 'from=2026-07-15T00:00:00Z'
-    --data-urlencode 'until=2026-10-19T00:00:00Z'
+    --data-urlencode "from=$FROM"
+    --data-urlencode "until=$UNTIL"
     --data-urlencode 'time_basis=created_or_completed'
     --data-urlencode 'limit=100')
-  if [ -n "$cursor" ]; then
-    args+=(--data-urlencode "cursor=$cursor")
-  fi
+  if [ -n "$cursor" ]; then args+=(--data-urlencode "cursor=$cursor"); fi
   curl "${args[@]}" "${API_BASE%/}/api/v1/code-reviews/export" -o "$output"
   jq -e '.acquisition.schema_version == 1 and
     .acquisition.filters.include_unresolved_publication_time == true and
     (.meta.returned == (.data | length))' "$output" >/dev/null
-  jq -S '.acquisition' "$output" > "$EXPORT_DIR/acquisition-current.json"
   if [ "$page" -eq 0 ]; then
-    cp "$EXPORT_DIR/acquisition-current.json" "$EXPORT_DIR/acquisition.json"
-  else
-    cmp "$EXPORT_DIR/acquisition.json" "$EXPORT_DIR/acquisition-current.json"
+    jq '{version:1, acquisition:.acquisition, pages:[]}' "$output" > "$EXPORT_DIR/archive-manifest.json"
   fi
+  digest=$(shasum -a 256 "$output")
+  digest=${digest%% *}
+  jq --arg file "$name" --arg sha256 "$digest" --arg cursor "$cursor" \
+    '.pages += [{file:$file,sha256:$sha256,request_cursor:(if $cursor == "" then null else $cursor end)}]' \
+    "$EXPORT_DIR/archive-manifest.json" > "$EXPORT_DIR/manifest-next.json"
+  mv "$EXPORT_DIR/manifest-next.json" "$EXPORT_DIR/archive-manifest.json"
   if jq -e '.meta.complete == true and .meta.next_cursor == null and
-    .meta.position == .acquisition.counts.records' "$output" >/dev/null; then
-    break
-  fi
+    .meta.position == .acquisition.counts.records' "$output" >/dev/null; then break; fi
   cursor=$(jq -er '.meta.next_cursor | select(type == "string" and length > 0)' "$output")
   page=$((page + 1))
+  [ "$page" -lt 20000 ]  # A corrupt/nonadvancing chain cannot loop forever.
 done
-jq -s -e '(map(.meta.returned) | add) == .[0].acquisition.counts.records and
-  ([.[].data[].source_identity] | length == (unique | length))' "$EXPORT_DIR"/page-*.json >/dev/null
-(cd "$EXPORT_DIR" && shasum -a 256 page-*.json acquisition.json > SHA256SUMS)
+(cd "$EXPORT_DIR" && shasum -a 256 page-*.json archive-manifest.json > SHA256SUMS)
+(cd "$EXPORT_DIR" && shasum -a 256 -c SHA256SUMS)
+python3 scripts/verify_code_review_export.py \
+  --manifest "$EXPORT_DIR/archive-manifest.json" \
+  --checksums "$EXPORT_DIR/SHA256SUMS" \
+  --request "$EXPORT_DIR/release-request.json"
 ```
 
-Run in Bash or Zsh (the command uses arrays). Follow `meta.next_cursor` verbatim;
-do not construct cursors, increment timestamps, or deduplicate by session/PR/head.
-Keep every response, including acquisition metadata. If interrupted, resume using
-the last nonterminal page's cursor and the same filters before expiry. On expiry,
-start a new output directory and acquisition; never splice different acquisitions.
-A retry from the beginning with the same filters reuses the unexpired acquisition,
-including after the first response was lost. Keep that retry in its own directory;
-it does not include changes after the original boundary.
-`complete` means the selected retained-source acquisition is fully paged, not that
-all historical provider evidence exists or that replay inclusion is established.
-Normalization, partitioning, checksums for normalized partitions, protocol freezing,
-and holdout access decisions belong to the replay workflow.
+The offline verifier reads one page at a time, supports schema/manifest version 1,
+and bounds its manifest to 8 MiB, each wire page to 512 MiB, and identities to
+20,000. Its local wire-page bound is distinct from the API's raw-payload bound;
+a larger response fails verification without release. It checks checksums for the
+manifest and every listed page; identical full acquisition metadata on each page;
+request/response cursor linkage, acquisition ID and position; page counts and
+positions; unique source identities within this acquisition; and terminal
+completeness. It writes a new mode-0600 release request only after success and
+never accesses the network. It does not inspect decisions or produce replay
+results. Re-run verification if any archive bytes change. Existing acquisition
+helpers may implement these same checks and send the contract below without
+adopting this manifest format.
+
+Follow `meta.next_cursor` verbatim; do not construct cursors, advance timestamps,
+or deduplicate by session/PR/head. Resume an interrupted download with its last
+nonterminal cursor and unchanged filters before expiry, retaining its original
+manifest chain. After expiry, use a new directory and acquisition; never splice
+snapshots. `complete` establishes complete pagination of selected retained sources,
+not a publication denominator or complete historical evidence.
+
+## Explicit release and durable status
+
+Release requires a user session/personal CLI bearer token with an active
+`admin`, `builder`, or `member` role. Viewers may acquire/read metadata but cannot
+release. General API client tokens cannot access these routes. The organization
+comes only from authentication. Both lifecycle routes require an explicit
+repository UUID owned by that organization; a foreign/missing acquisition or
+repository scope returns `410 EXPORT_EXPIRED` without disclosing metadata.
+
+`GET /api/v1/code-reviews/export/{acquisition_id}?repository_id={repository_id}`
+returns `{acquisition, state, release_receipt}` with no payloads. `state` is
+`active`, `expired`, or `released`. `acquisition` is the original schema-v1 object;
+`release_receipt` is null until explicit release. Status works after expiry/cleanup
+and release; expiry alone does not invent a release receipt.
+
+**Only after complete archive verification**, explicitly submit:
+
+```http
+POST /api/v1/code-reviews/export/{acquisition_id}/release
+Content-Type: application/json
+
+{
+  "repository_id": "20000000-0000-0000-0000-000000000001",
+  "archive": {
+    "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "archived_records": 2,
+    "final_position": 2,
+    "verified": true
+  }
+}
+```
+
+The digest above and all UUIDs/counts in this example are synthetic. The actual
+`manifest_sha256` is lowercase SHA-256 hex of the exact archived manifest bytes.
+Both count fields must be explicitly present (including zero), equal each other,
+and equal `acquisition.counts.records`. `verified` must be true. Body size is at
+most 4096 bytes; unknown fields, trailing JSON, and query parameters are rejected.
+This is an **operator attestation**: the server checks shape, scope, and full
+counts but cannot prove local bytes were stored or independently verify local
+checksums. The operator/helper owns verification and preservation of the archive.
+
+```bash
+# Separate, explicit operator action; never part of the download/verify loop.
+ACQUISITION_ID=$(jq -er '.acquisition.id' "$EXPORT_DIR/archive-manifest.json")
+curl --fail-with-body --silent --show-error \
+  --header "@$AUTH_HEADER_FILE" --header 'Content-Type: application/json' \
+  --data-binary "@$EXPORT_DIR/release-request.json" \
+  "${API_BASE%/}/api/v1/code-reviews/export/$ACQUISITION_ID/release" \
+  -o "$EXPORT_DIR/release-receipt.json"
+shasum -a 256 "$EXPORT_DIR/release-receipt.json" > "$EXPORT_DIR/RELEASE_SHA256"
+```
+
+A successful release returns HTTP 200:
+
+```json
+{
+  "acquisition": {"id":"10000000-0000-0000-0000-000000000001","schema_version":1,"filters":{"repository_id":"20000000-0000-0000-0000-000000000001","from":"2026-08-01T00:00:00Z","until":"2026-08-02T00:00:00Z","time_basis":"created_or_completed","include_unresolved_publication_time":true},"acquired_at":"2026-10-20T12:00:00Z","expires_at":"2026-10-21T12:00:00Z","counts":{"records":2,"assessments":2,"legacy":0,"represented_legacy":0,"unresolved_publication_time":2,"incomplete_substantive_evidence":0,"missing_head_sha":0,"missing_base_sha":0,"missing_base_ref":0,"missing_policy_snapshot":0},"consistency":"frozen_payloads_repeatable_read"},
+  "state":"released",
+  "release_receipt":{"acquisition_id":"10000000-0000-0000-0000-000000000001","released_at":"2026-10-20T12:05:00Z","payload_rows_deleted":2,"archive":{"manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","archived_records":2,"final_position":2,"verified":true}}
+}
+```
+
+Retry an interrupted release with the **same acquisition, repository, and archive
+object**. It returns the exact original receipt, timestamp, deletion count, and
+metadata; it never deletes rows from another acquisition. A different archive
+attestation for an already released acquisition returns `409 EXPORT_RELEASE_CONFLICT`.
+A verified archive can be receipted after expiry; if lazy cleanup already reclaimed
+payloads, `payload_rows_deleted` is zero, while original acquisition counts remain.
+No bulk/wildcard release, implicit release, or source deletion exists.
+
+Before enabling release in a rolling upgrade, update every serving API instance
+and verify its revision; older binaries do not understand retained released
+headers. Do not roll back to a binary that deletes expired acquisition headers.
+The down migration refuses to discard released or reclaimed metadata; rollback
+requires a separately reviewed preservation plan once this lifecycle is used.
+No automatic rollout or release of existing acquisitions is performed by this API
+change. Normalization, cross-acquisition identity reconciliation, partitioning,
+scoring, protocol freezing, and holdout access remain separate replay work.
 
 ## Synthetic examples
 
@@ -347,9 +471,25 @@ own `legacy:<UUID>` identities even on that same head and session.
 
 ## Errors
 
-Errors use `{ error: { code, message } }`. Authentication failures are 401/403;
-invalid filters/cursors are 400 (`INVALID_EXPORT_FILTER`, `INVALID_EXPORT_CURSOR`);
-an unauthorized/missing repository is 404 (`REPOSITORY_NOT_FOUND`); an expired,
-missing, or foreign acquisition is 410 (`EXPORT_EXPIRED`); busy/quota/size limits
-are 429 (`EXPORT_LIMIT`); database/timeouts are 500 (`EXPORT_FAILED`). No partial
-successful export is returned on acquisition failure.
+Errors use `{ "error": { "code": "...", "message": "..." } }`. All limit codes
+are static and contain no organization, acquisition, repository, counts, SQL, or
+payload detail. These specific codes replace the former ambiguous `EXPORT_LIMIT`:
+
+| HTTP | `error.code` | Client action |
+| --- | --- | --- |
+| 429 | `EXPORT_BUSY` | Retry acquisition with bounded backoff; another acquisition holds the organization lock. |
+| 429 | `EXPORT_ACTIVE_SLOT_LIMIT` | Finish/verify and explicitly release an exact acquisition, or wait for expiry. Live acquisitions are never evicted. |
+| 422 | `EXPORT_ROW_LIMIT` | Narrow creation/completion filters; no partial acquisition exists. |
+| 422 | `EXPORT_PAYLOAD_BYTE_LIMIT` | Narrow filters; an individual oversized record still fails in full. Never skip/truncate it. |
+| 410 | `EXPORT_RELEASED` | Cursor payloads were explicitly released; preserve receipt and use a new acquisition if needed. |
+| 410 | `EXPORT_EXPIRED` | Cursor expired, or acquisition/scope is unavailable; acquire a new snapshot. Authorized metadata/receipt lookup still works after expiry. |
+| 409 | `EXPORT_ARCHIVE_MISMATCH` | Attested total does not match full acquisition; do not release a partial archive. |
+| 409 | `EXPORT_RELEASE_CONFLICT` | Retry with original attestation or retrieve the existing receipt; never overwrite it. |
+| 400 | `INVALID_EXPORT_FILTER`, `INVALID_EXPORT_CURSOR`, `INVALID_EXPORT_RELEASE` | Correct bounds, filters, cursor, or release body. |
+| 404 | `REPOSITORY_NOT_FOUND` | Acquisition repository is missing or unauthorized. |
+| 401/403 | Authentication/permission code | Authenticate with an active permitted membership. |
+| 500 | `EXPORT_FAILED` | Database/timeout or dependency failure; retain private error receipt, retry cautiously. |
+
+A failed acquisition/release never returns partial success. Cursor errors do not
+implicitly start a new snapshot. All export/lifecycle responses use
+`Cache-Control: no-store`.

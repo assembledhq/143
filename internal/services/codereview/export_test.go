@@ -78,6 +78,12 @@ type exportServiceStub struct {
 	acquires int
 }
 
+func (s *exportServiceStub) Status(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.CodeReviewExportStatus, error) {
+	return models.CodeReviewExportStatus{Acquisition: s.a}, nil
+}
+func (s *exportServiceStub) Release(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.CodeReviewExportArchiveProof) (models.CodeReviewExportStatus, error) {
+	return models.CodeReviewExportStatus{Acquisition: s.a}, nil
+}
 func (s *exportServiceStub) Acquire(context.Context, uuid.UUID, models.CodeReviewExportFilters) (models.CodeReviewExportAcquisition, error) {
 	s.acquires++
 	return s.a, nil
