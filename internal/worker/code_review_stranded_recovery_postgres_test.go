@@ -92,6 +92,9 @@ func TestStrandedLegacyReceiptRecoveryPostgres(t *testing.T) {
 		t.Skip("set TEST_DATABASE_URL for recovery proof")
 	}
 	pool := fullRecoveryPostgresPool(t, context.Background())
+	// Share publication admission like production, preserving pool headroom for
+	// the independently committed uncertainty marker in parallel recovery cases.
+	reviews := db.NewCodeReviewStore(pool)
 	tests := []struct {
 		name                                                                           string
 		missing, wrongID, wrongHead, lookupError, noLegacy, updatedSummary, noApproval bool
@@ -102,6 +105,7 @@ func TestStrandedLegacyReceiptRecoveryPostgres(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := seedStrandedReview(t, pool, "completed")
+			f.stores.CodeReviews = reviews
 			ctx := f.ctx()
 			_, err := pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status='publishing',publication_state='uncertain',result_origin='executed',decision='approved',acceptable=true,risk_reason_details='[]',structured_outcome='{}',rendered_body='immutable saved review',created_at=now()-interval '3 hours',failure_detail=$3 WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.assessment, db.CodeReviewPublicationOperatorRequired)
 			require.NoError(t, err, "seed expired staged publication")
