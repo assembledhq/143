@@ -1003,6 +1003,14 @@ autocommit's historical false-with-mutation behavior is explicitly characterized
 not silently repaired here. No active-generation predicate, final-pause/readiness
 proof, upload obligation, new authority or compatibility floor is added.
 
+The recheck publication callback now also uses `SettleAssessmentInTx` with the
+existing publication owner's concrete transaction. Assessment completion,
+request/scheduler settlement and optional status-comment job insertion keep
+their original order and commit together without a scheduling savepoint.
+Earlier publication preparation and the bounded external receipt protocol remain
+separate; this does not make GitHub publication atomic with the database or add
+new scheduling notifications, review policy or canonical execution authority.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -1750,6 +1758,10 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Defer automation checkpoint events until the attempt-locked owner commits,
   sharing unchanged provenance SQL with the standalone wrapper and documenting
   its historical false-with-mutation edge and required caller rollback.
+- [x] Compose the actual recheck publication callback's scheduler settlement
+  with its existing publication owner, preserving exact receipts and optional
+  status synchronization while proving final enqueue rejection rolls back all
+  earlier callback writes.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2373,6 +2385,35 @@ error injection does not establish whether a lost network acknowledgement left
 durable writes. Resolving such uncertainty still needs the later receipt protocol.
 Legacy wrappers invoked through arbitrary tx-bound stores remain outside this
 owner-specific physical-commit guarantee.
+
+### 0a recheck publication settlement composition validation
+
+The two new worker race roots contain ten subtests. With an owned PostgreSQL
+15+ `TEST_DATABASE_URL` and `GOMAXPROCS=4`, run `go test -race -p=1
+./internal/worker -run '^TestRecheckPublicationSettlement' -count=3 -timeout=3m`:
+six root executions and 30 subtest executions pass. Repeating with
+`-parallel=8 -count=5` passes ten roots/50 cases, with no failures or skips.
+Focused worker vet, pinned lint and whitespace pass.
+
+The real `RunWithGitHubPublicationLock` owner occupies its pool's only connection
+and rejects nested Begin. A pre-opened independent physical observer compares
+all columns across the session, thread, review metadata/results, assessment,
+request, scheduler and job graph before commit and after rollback/settlement.
+A final status-comment enqueue trigger first validates genuinely staged receipt,
+assessment completion, request resolution and scheduler pointers, then raises a
+real PostgreSQL error. The entire callback rolls back without losing the prior
+receipt. Confirmed and locally reconciled receipts, lost supervisor lease,
+absence of a status-comment updater and exact committed replay are covered.
+Local fakes prove these cases submit no external review or comment.
+
+The original unavailable-transaction error remains, now requiring a concrete
+`pgx.Tx` rather than another transaction starter. Source tests pin the exact same
+transaction and complete/settle/optional-enqueue order, and reject legacy owners,
+replacement transactions and known wrapper-helper fallbacks. An injected error
+before physical commit is not unknown network-commit recovery proof. Earlier
+separate reservation/send-intent work and external receipt handling are unchanged;
+future shared lifecycle projection still needs exact canonical review authority,
+allocation/current epochs, compatible locks and a deployed floor.
 
 ## Surprises & Discoveries
 

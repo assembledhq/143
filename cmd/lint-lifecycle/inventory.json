@@ -11195,10 +11195,10 @@
     },
     {
       "id": "internal/worker/code_review_recheck_handler.go:newRunCodeReviewRecheckHandler",
-      "source_sha256": "28314c0b4a22fc185ab40b8d6f1c91d210711adbb055c7a06105e5b239b5821e",
+      "source_sha256": "3d8a5ecdc9db004848000a805d6a55c385bb485935e10648679740fe1b758f22",
       "operation": "newRunCodeReviewRecheckHandler: indirect lifecycle caller",
       "owner": "newRunCodeReviewRecheckHandler in internal/worker",
-      "predicate": "Syntactic boundary/callee candidates: internal/worker/code_review_recheck_handler.go:failCodeReviewRecheck; internal/worker/code_review_recheck_handler.go:registerCodeReviewRecheckDeadLetterReconciliation; internal/worker/code_review_recheck_handler.go:settleCodeReviewAssessment; stores.CodeReviewRechecks.FailTerminalJob; no independent authorization proof inferred.",
+      "predicate": "Syntactic boundary/callee candidates: internal/worker/code_review_recheck_handler.go:failCodeReviewRecheck; internal/worker/code_review_recheck_handler.go:publishCodeReviewRecheck; internal/worker/code_review_recheck_handler.go:registerCodeReviewRecheckDeadLetterReconciliation; internal/worker/code_review_recheck_handler.go:resumeCodeReviewRecheckPublication; internal/worker/code_review_recheck_handler.go:settleCodeReviewAssessment; stores.CodeReviewRechecks.FailTerminalJob; no independent authorization proof inferred.",
       "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: stores.CodeReviewRechecks.FailTerminalJob; stores.CodeReviewRechecks.FailTerminalJob(ctx, a.OrgID, a.ID, \"bound continuation job ended without an exact turn receipt\")",
       "stale_result": "Observed guard/error branches: (a.Status == models.CodeReviewAssessmentSuperseded || a.Status == models.CodeReviewAssessmentFailed) && a.FailureDetail != nil && (strings.HasPrefix(*a.FailureDetail, \"full_review:\") || strings.HasPrefix(*a.FailureDetail, \"full_review_queued:\")); a.Status = (models.CodeReviewAssessmentRunning); a.Status == models.CodeReviewAssessmentCompleted || a.Status == models.CodeReviewAssessmentCancelled || a.Status == models.CodeReviewAssessmentSuperseded; a.Status == models.CodeReviewAssessmentFailed; a.Status == models.CodeReviewAssessmentPublishing || a.ResultOrigin != nil; a.Status == models.CodeRev [excerpt; see symbol source]. These are syntax observations, not a proven stale-result contract.",
       "classification": "unfenced-needs-conversion",
@@ -11207,9 +11207,34 @@
         "internal/worker/code_review_recheck_handler.go:47",
         "Discovered: boundary-caller, indirect-caller",
         "Boundary/call candidate: internal/worker/code_review_recheck_handler.go:failCodeReviewRecheck",
+        "Boundary/call candidate: internal/worker/code_review_recheck_handler.go:publishCodeReviewRecheck",
         "Boundary/call candidate: internal/worker/code_review_recheck_handler.go:registerCodeReviewRecheckDeadLetterReconciliation",
+        "Boundary/call candidate: internal/worker/code_review_recheck_handler.go:resumeCodeReviewRecheckPublication",
         "Boundary/call candidate: internal/worker/code_review_recheck_handler.go:settleCodeReviewAssessment",
         "Boundary/call candidate: stores.CodeReviewRechecks.FailTerminalJob"
+      ]
+    },
+    {
+      "id": "internal/worker/code_review_recheck_handler.go:publishCodeReviewRecheck",
+      "source_sha256": "816e99e74c1fd2216db62e4b28c59182af6a622239d7cc185d21b8059a1148de",
+      "operation": "compose recheck assessment/request/scheduler/status-job settlement inside actual publication-lock owner",
+      "owner": "publishCodeReviewRecheck callback; CodeReviewStore.RunWithGitHubPublicationLock owns the existing physical transaction",
+      "predicate": "Preserves exact current assessment status/input/generation, saved outcome/publication receipt, worker job/token lock and bounded GitHub freshness/reconciliation protocol. Completion still updates assessment first, asserts callback DBTX is concrete pgx.Tx with the same unavailable-transaction error, then calls SettleAssessmentInTx on that exact tx and conditionally enqueues the existing status-comment job.",
+      "lock": "Existing bounded publication slot -> outer Begin/timeouts -> publication PR advisory -> actual job row lock -> receipt update when applicable/assessment completion -> same-tx PR scheduler advisory/ownership/row lock/shared terminal policy -> optional final status job -> outer Commit. Temporary scheduler store has nil streams; no nested settlement savepoint, replacement owner, pool fallback or new scheduling event.",
+      "stale_result": "Existing completed replay remains no-op; wrong supervisor lease/current state/input or completion/settlement/final-job failure aborts the actual owner unit, including earlier staged receipt, assessment, request and scheduler writes. Owner commit errors propagate without a new retry or notification; unknown commit is not proof of rollback. Existing retry/error classification and optional-status-updater branch are retained.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a actual callback composition only: the two-line change uses the publication owner's concrete tx rather than entering the top-level settlement wrapper. Pre-Begin StageOutcome/ReservePublication and independently committed send-intent/receipt reconciliation boundaries remain distinct; external GitHub publication is not made atomically transactional with PostgreSQL.",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future typed ReviewAuthority only where current shared lifecycle projection is performed: exact PR/assessment/generation/input/domain receipt plus immutable current allocation and current org/session/lane admission/end epochs. Existing publication, job, assessment and scheduler domain predicates do not establish that complete authority.",
+      "fence_outcome": "This 0a same-owner composition adds no canonical stale-authority fence or permission to publish stale external results. Future AuthorizationRejected must abort shared projection; stale own-attempt handling skips current status/result/checkpoint/phase/ack/owner projection and publication. Exact domain receipt/current allocation/epochs and compatible locks/floor remain prerequisites.",
+      "prerequisite_0a": "Compose ReviewAuthority with immutable allocation/current epochs/domain receipt and chosen compatible locks/floor before canonical shared projection. Preserve existing bounded external receipt protocol and pre-Begin boundaries, completion ordering, whole-owner error handling, optional status job and nil-streams temporary scheduler; do not infer external atomicity or rollback from uncertain commit.",
+      "evidence": [
+        "internal/worker/code_review_recheck_handler.go:434",
+        "Discovered: boundary-caller",
+        "internal/worker/code_review_recheck_settlement_wiring_test.go",
+        "internal/worker/code_review_recheck_settlement_postgres_test.go",
+        "Actual publication-lock owner full-schema tests use known confirmed or locally reconciled receipts, not live GitHub; final status-job SQL failure validates genuine earlier receipt/assessment/request/scheduler writes before aborting.",
+        "Replay, wrong lease, no-status-updater and owner commit-error cases preserve existing domain behavior; no new retry or replacement transaction."
       ]
     },
     {
@@ -11226,6 +11251,22 @@
         "internal/worker/code_review_recheck_handler.go:371",
         "Discovered: indirect-caller",
         "Boundary/call candidate: internal/worker/code_review_recheck_handler.go:settleCodeReviewAssessment"
+      ]
+    },
+    {
+      "id": "internal/worker/code_review_recheck_handler.go:resumeCodeReviewRecheckPublication",
+      "source_sha256": "b603b0914e4eee01b6eb033308b5d4f56f464e8e27f1ea2e8dc57a9fba6180a5",
+      "operation": "resumeCodeReviewRecheckPublication: indirect lifecycle caller (syntax observation only)",
+      "owner": "resumeCodeReviewRecheckPublication in internal/worker",
+      "predicate": "Syntactic boundary/callee candidates: internal/worker/code_review_recheck_handler.go:publishCodeReviewRecheck; no independent authorization proof inferred.",
+      "lock": "No separately proven transaction/lock contract for this indirect adapter; inspect its listed callee and actual publication-lock owner.",
+      "stale_result": "No separately proven stale-result or mutation-authority contract for this indirect adapter. Existing saved-outcome, error handling and notification policy must be traced through its callee; resource/status identity alone is not authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "evidence": [
+        "internal/worker/code_review_recheck_handler.go:594",
+        "Discovered: indirect-caller",
+        "Boundary/call candidate: internal/worker/code_review_recheck_handler.go:publishCodeReviewRecheck"
       ]
     },
     {
