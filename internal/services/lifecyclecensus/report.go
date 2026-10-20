@@ -6,9 +6,13 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
+// ObservedRole is report vocabulary, not registry eligibility or authorization.
+// Operator is recognized for connection labels only; writer leases retain the
+// four-role LifecycleWriterRole allowlist.
 type ObservedRole string
 
 const (
@@ -17,10 +21,11 @@ const (
 	RoleWorker          ObservedRole = ObservedRole(models.LifecycleWriterRoleWorker)
 	RoleAll             ObservedRole = ObservedRole(models.LifecycleWriterRoleAll)
 	RoleSessionExecutor ObservedRole = ObservedRole(models.LifecycleWriterRoleSessionExecutor)
+	RoleOperator        ObservedRole = db.LifecycleOperatorConnectionRole
 )
 
 func (r ObservedRole) Validate() error {
-	if r == RoleUnknown {
+	if r == RoleUnknown || r == RoleOperator {
 		return nil
 	}
 	return models.LifecycleWriterRole(r).Validate()

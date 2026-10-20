@@ -25,12 +25,14 @@ func TestLifecycleConnectionApplicationNamePostgres(t *testing.T) {
 	tests := []struct {
 		name     string
 		role     models.LifecycleWriterRole
+		operator bool
 		expected string
 	}{
 		{name: "api", role: models.LifecycleWriterRoleAPI, expected: "143:api:" + buildSHA},
 		{name: "worker", role: models.LifecycleWriterRoleWorker, expected: "143:worker:" + buildSHA},
 		{name: "all", role: models.LifecycleWriterRoleAll, expected: "143:all:" + buildSHA},
 		{name: "session_executor", role: models.LifecycleWriterRoleSessionExecutor, expected: "143:session_executor:" + buildSHA},
+		{name: "connection-only operator", operator: true, expected: "143:operator:" + buildSHA},
 		{name: "unattributed caller preserves DSN name", expected: "synthetic-existing-name"},
 		{name: "unsupported role preserves DSN name", role: models.LifecycleWriterRole("unsupported"), expected: "synthetic-existing-name"},
 	}
@@ -59,6 +61,9 @@ func TestLifecycleConnectionApplicationNamePostgres(t *testing.T) {
 			query.Set("pool_min_idle_conns", "0")
 			isolatedURL.RawQuery = query.Encode()
 			applicationName := LifecycleConnectionApplicationName(tt.role, buildSHA)
+			if tt.operator {
+				applicationName = LifecycleOperatorConnectionApplicationName(buildSHA)
+			}
 
 			// Holding both acquisitions at once forces two distinct physical
 			// connections, without relying on background pool maintenance.

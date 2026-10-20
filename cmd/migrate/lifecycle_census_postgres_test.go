@@ -160,6 +160,70 @@ func TestLifecycleCensusConnectionsFullSchemaPostgres(t *testing.T) {
 	require.Equal(t, db.LifecycleCensusConnection{ApplicationName: apiName, BackendType: ptrLifecycleCensus("client backend"), State: ptrLifecycleCensus("idle"), DetailsVisible: true}, idle[0], "a spoofable matching label is an idle observation, not an identity assertion")
 }
 
+func TestLifecycleCensusOperatorConnectionFullSchemaPostgres(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, build, expectedBuild string
+	}{
+		{name: "exact binary build", build: "0123456789aBcDeF0123456789aBcDeF01234567", expectedBuild: "0123456789aBcDeF0123456789aBcDeF01234567"},
+		{name: "non-SHA metadata is only a marked fingerprint", build: "build-a", expectedBuild: "sha256-5e616f6135eb478ecd04b3d3df35b56e"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			migration, actor := newContentMigrationPostgres(t, false)
+			require.NoError(t, migration.Up(), "apply the unchanged full schema before observing a connection-only operator")
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			poolURL, err := url.Parse(actor.Config().ConnString())
+			require.NoError(t, err, "select only the generated full-schema test database for the operator pool")
+			query := poolURL.Query()
+			query.Set("application_name", "synthetic-existing-name")
+			query.Set("pool_min_conns", "0")
+			query.Set("pool_min_idle_conns", "0")
+			poolURL.RawQuery = query.Encode()
+			pool, err := db.NewPoolWithOptions(ctx, poolURL.String(), db.PoolOptions{MaxConns: 1, ApplicationName: db.LifecycleOperatorConnectionApplicationName(tt.build)})
+			require.NoError(t, err, "open the shared production pool with only passive operator connection attribution")
+			defer pool.Close()
+			connection, err := pool.Acquire(ctx)
+			require.NoError(t, err, "retain the operator pool's sole physical client throughout independent census collection")
+			defer connection.Release()
+			tx, err := connection.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+			require.NoError(t, err, "open a read-only operator transaction without adding observer or lease writes")
+			defer func() { _ = tx.Rollback(ctx) }()
+			var pid int32
+			var name string
+			var writerVersion *string
+			var transactionStarted time.Time
+			err = tx.QueryRow(ctx, `SELECT pg_backend_pid(),current_setting('application_name'),current_setting('lifecycle143.writer_version',true),transaction_timestamp()`).Scan(&pid, &name, &writerVersion, &transactionStarted)
+			require.NoError(t, err, "inspect the actual operator backend and independently record its transaction start")
+			expectedName := "143:operator:" + tt.expectedBuild
+			require.Equal(t, expectedName, name, "operator startup attribution must override the prior DSN name without changing its safe build representation")
+			require.Nil(t, writerVersion, "a connection-only operator label must not install a lifecycle writer-version marker")
+			var observedName string
+			err = actor.QueryRow(ctx, `SELECT application_name FROM pg_stat_activity WHERE datname=current_database() AND pid=$1`, pid).Scan(&observedName)
+			require.NoError(t, err, "independently inspect only the physical operator backend rather than every matching role/build")
+			require.Equal(t, expectedName, observedName, "PostgreSQL activity must expose the exact safe operator label for this backend")
+			report, err := lifecyclecensus.Collect(ctx, actor.Config().ConnString())
+			require.NoError(t, err, "collect a real operator transaction through the standalone read-only census consumer")
+			groups := []lifecyclecensus.ConnectionGroup{}
+			for _, group := range report.Connections.Groups {
+				if group.Role == lifecyclecensus.ObservedRole(db.LifecycleOperatorConnectionRole) {
+					groups = append(groups, group)
+				}
+			}
+			require.Equal(t, []lifecyclecensus.ConnectionGroup{{Role: lifecyclecensus.ObservedRole("operator"), Build: tt.expectedBuild, State: lifecyclecensus.StateIdleInTransaction, Count: 1, ObservedOpenTransactions: 1, OldestObservedTransactionAt: ptrLifecycleCensus(transactionStarted.UTC())}}, groups, "the operator connection must appear as one safe connection aggregate with its exact independently observed transaction start")
+			require.Equal(t, lifecyclecensus.VisibilityFull, report.Connections.Visibility, "the disposable migration administrator must expose full statistics visibility for the operator proof")
+			require.False(t, report.Connections.Truncated, "the isolated operator sample must not invent an overflow")
+			require.Equal(t, 0, report.Writers.RowsObserved, "operator pool attribution must not create a passive writer lease")
+			require.Equal(t, []lifecyclecensus.WriterGroup{}, report.Writers.Groups, "operator connection recognition must leave the writer-lease observation empty")
+			var leases int
+			require.NoError(t, actor.QueryRow(ctx, `SELECT count(*) FROM lifecycle_writer_instances`).Scan(&leases), "inspect the passive registry independently after operator connection attribution and collection")
+			require.Equal(t, 0, leases, "neither the operator pool nor its census consumer may insert an observer row")
+		})
+	}
+}
+
 func TestLifecycleCensusVisibilityFullSchemaPostgres(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

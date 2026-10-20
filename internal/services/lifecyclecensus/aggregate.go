@@ -99,6 +99,8 @@ func assemble(writers db.LifecycleCensusWriterSnapshot, connections db.Lifecycle
 	return report
 }
 
+// safeRole is intentionally writer-only: report connection roles must not widen
+// the registry's independent four-role eligibility contract.
 func safeRole(role string) ObservedRole {
 	if models.LifecycleWriterRole(role).Validate() != nil {
 		return "unknown"
@@ -108,7 +110,7 @@ func safeRole(role string) ObservedRole {
 
 func parseLabel(label string) (role ObservedRole, build string) {
 	parts := strings.Split(label, ":")
-	if len(parts) != 3 || parts[0] != "143" || safeRole(parts[1]) == "unknown" {
+	if len(parts) != 3 || parts[0] != "143" || (parts[1] != string(RoleOperator) && safeRole(parts[1]) == RoleUnknown) {
 		return "unknown", "unknown"
 	}
 	build = parts[2]

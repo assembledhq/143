@@ -36,6 +36,10 @@ func TestLifecycleWriterInstanceStore_ObserveValidation(t *testing.T) {
 			wantErr: `observe lifecycle writer instance: invalid LifecycleWriterRole: "other"`,
 		},
 		{
+			name: "operator connection is not a writer lease", instanceID: uuid.New(), role: "operator", buildSHA: "test-build",
+			wantErr: `observe lifecycle writer instance: invalid LifecycleWriterRole: "operator"`,
+		},
+		{
 			name: "empty build", instanceID: uuid.New(), role: models.LifecycleWriterRoleSessionExecutor,
 			wantErr: "observe lifecycle writer instance: build SHA must contain non-whitespace text and be at most 128 bytes",
 		},

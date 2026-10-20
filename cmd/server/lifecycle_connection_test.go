@@ -23,6 +23,7 @@ func TestLifecycleConnectionServerModes(t *testing.T) {
 		{mode: "worker", expected: "143:worker:" + build},
 		{mode: "all", expected: "143:all:" + build},
 		{mode: "session_executor"},
+		{mode: "operator"},
 		{mode: "API"},
 		{mode: "unsupported"},
 		{mode: ""},

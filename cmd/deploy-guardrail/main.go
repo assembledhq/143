@@ -10,6 +10,7 @@ import (
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/deployguardrail"
+	"github.com/assembledhq/143/internal/version"
 )
 
 func main() {
@@ -22,7 +23,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{MaxConns: 1})
+	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{MaxConns: 1, ApplicationName: db.LifecycleOperatorConnectionApplicationName(version.BuildSHA)})
 	if err != nil {
 		if deployguardrail.IsDatabaseConnectionSaturated(err) {
 			fmt.Fprintf(os.Stderr, "deploy guardrail: warning: database connection slots are exhausted; skipping active-session check so deploy can roll forward with bounded pools: %v\n", err)

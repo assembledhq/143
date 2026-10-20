@@ -36,6 +36,7 @@ func TestLifecycleConnectionApplicationName(t *testing.T) {
 		{name: "whitespace is not a build", role: models.LifecycleWriterRoleAPI, build: " ", expected: "143:api:sha256-36a9e7f1c95b82ffb99743e0c5c4ce95"},
 		{name: "missing role preserves connection naming", build: build},
 		{name: "unknown role preserves connection naming", role: "scheduler", build: build},
+		{name: "operator is not a lease-writer role", role: "operator", build: build},
 		{name: "case-sensitive role", role: "API", build: build},
 	}
 	for _, tt := range tests {
@@ -51,6 +52,35 @@ func TestLifecycleConnectionApplicationName(t *testing.T) {
 	}
 }
 
+func TestLifecycleOperatorConnectionApplicationName(t *testing.T) {
+	t.Parallel()
+	const build = "0123456789aBcDeF0123456789aBcDeF01234567"
+	tests := []struct {
+		name, build, expected string
+	}{
+		{name: "exact SHA", build: build, expected: "143:operator:" + build},
+		{name: "development binary", build: "dev", expected: "143:operator:dev"},
+		{name: "missing build", expected: "143:operator:unknown"},
+		{name: "arbitrary build fingerprint", build: "build-a", expected: "143:operator:sha256-5e616f6135eb478ecd04b3d3df35b56e"},
+		{name: "invalid SHA fingerprint", build: strings.Repeat("g", 40), expected: "143:operator:sha256-1d5f913d4591f2de124be0d31d4cebf2"},
+		{name: "long hex is not truncated", build: strings.Repeat("a", 64), expected: "143:operator:sha256-ffe054fe7ae0cb6dc65c3af9b61d5209"},
+		{name: "path remains private", build: "/synthetic/worktree/build", expected: "143:operator:sha256-f576cedc36e4de5d3dd76e2962e84db1"},
+		{name: "controls remain private", build: "build\x00name\n", expected: "143:operator:sha256-0dd64d92fecb8fea6d2b3e708b377326"},
+		{name: "non-ASCII remains private", build: "commit-é\n", expected: "143:operator:sha256-7e2818b6398c4bedafd9f572832bea31"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual := LifecycleOperatorConnectionApplicationName(tt.build)
+			require.Equal(t, tt.expected, actual, "operator labels must share the runtime build privacy policy without adopting a lease-writer role")
+			require.LessOrEqual(t, len(actual), 63, "operator labels must fit PostgreSQL application_name without truncation")
+			for _, character := range actual {
+				require.True(t, character >= 32 && character < 127, "operator labels must be printable ASCII for every build input")
+			}
+		})
+	}
+}
+
 func TestNewPoolConfigApplicationName(t *testing.T) {
 	t.Parallel()
 
@@ -60,6 +90,7 @@ func TestNewPoolConfigApplicationName(t *testing.T) {
 		expected    string
 	}{
 		{name: "opt-in overrides DSN naming", application: "143:api:dev", expected: "143:api:dev"},
+		{name: "operator opt-in overrides DSN naming", application: "143:operator:dev", expected: "143:operator:dev"},
 		{name: "empty option preserves DSN naming", expected: "synthetic-existing"},
 	}
 	for _, tt := range tests {
